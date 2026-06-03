@@ -67,6 +67,10 @@ class WorkerConnectorConfig(TZAwareBaseModel):
     locale: str | None = None
     slack: dict[str, Any]
     kmc: dict[str, Any]
+    # #895: resource-ingest credentials for worker #91 Option A. NULL on legacy
+    # connectors provisioned before the resource-token-encrypted column existed —
+    # the worker falls back to the kmc/remember write path when absent.
+    resource: dict[str, Any] | None = None
     llm: dict[str, Any] | None = None
     pii_guardrail_config: dict[str, Any] | None = None
 
@@ -111,6 +115,25 @@ async def get_worker_config(
         "installing_admin_user_id": oauth.get("installing_admin_user_id"),
         "channel_ids": connector.channel_ids or [],
     }
+
+    # #895: resource-ingest credentials for worker #91 Option A. Only emitted
+    # when the connector has a stored resource token (legacy rows lack it →
+    # worker uses the kmc/remember fallback). Resolve the resource slug from
+    # resource_pk for the POST /api/v1/resources/{resource_id}/events path.
+    resource_block = None
+    resource_token = connector.get_resource_token()
+    if resource_token:
+        from sqlalchemy import select
+
+        from models.resource import Resource
+
+        slug_result = await db.execute(
+            select(Resource.resource_id).where(Resource.id == connector.resource_pk)
+        )
+        resource_slug = slug_result.scalar_one_or_none()
+        if resource_slug:
+            resource_block = {"id": resource_slug, "api_key": resource_token}
+
     return WorkerConnectorConfig(
         connector_id=connector.id,
         workspace_id=connector.workspace_id,
@@ -119,6 +142,7 @@ async def get_worker_config(
         locale=connector.locale,
         slack=slack,
         kmc={"mcp_url": get_settings().kmc_mcp_url, "api_key": kmc_api_key},
+        resource=resource_block,
         llm=connector.get_llm_config(),
         pii_guardrail_config=connector.pii_guardrail_config,
     )

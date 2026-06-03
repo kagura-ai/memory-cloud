@@ -59,6 +59,9 @@ async def test_get_worker_config_returns_secrets_for_ready_connector():
     conn.get_kmc_api_key.return_value = "kagura_writekey"
     # #892: expiry check reads this; None = non-expiring (avoids MagicMock < datetime)
     conn.kmc_api_key_expires_at = None
+    # #895: no stored resource token → resource block skipped (avoids awaiting a
+    # MagicMock db.execute for the slug lookup). Covered separately below.
+    conn.get_resource_token.return_value = None
     conn.get_llm_config.return_value = {"provider": "anthropic", "model": "m", "api_key": "sk"}
 
     with (
@@ -77,6 +80,43 @@ async def test_get_worker_config_returns_secrets_for_ready_connector():
     svc.return_value.get_connector_for_dispatch.assert_awaited_once_with(
         connector_type="slack", external_team_id="T01"
     )
+    # #895: legacy connector (no stored resource token) → resource omitted.
+    assert result.resource is None
+
+
+@pytest.mark.asyncio
+async def test_get_worker_config_includes_resource_block_when_token_present():
+    # #895: a connector with a stored resource token returns the resource block
+    # {id, api_key} for the resource-ingest write path.
+    db = MagicMock()
+    slug_result = MagicMock()
+    slug_result.scalar_one_or_none.return_value = "slack_general"
+    db.execute = AsyncMock(return_value=slug_result)
+
+    conn = MagicMock()
+    conn.id = uuid4()
+    conn.workspace_id = uuid4()
+    conn.context_id = uuid4()
+    conn.connector_type = "slack"
+    conn.locale = "ja"
+    conn.external_team_id = "T01"
+    conn.channel_ids = ["C01"]
+    conn.pii_guardrail_config = None
+    conn.resource_pk = uuid4()
+    conn.get_oauth_tokens.return_value = {"bot_token": "xoxb-x"}
+    conn.get_kmc_api_key.return_value = "kagura_writekey"
+    conn.kmc_api_key_expires_at = None
+    conn.get_resource_token.return_value = "kgr_resource_token"
+    conn.get_llm_config.return_value = None
+
+    with (
+        patch("api.routes.workers.get_settings", return_value=_settings()),
+        patch("api.routes.workers.ConnectorProvisioningService") as svc,
+    ):
+        svc.return_value.get_connector_for_dispatch = AsyncMock(return_value=conn)
+        result = await get_worker_config(platform="slack", team_id="T01", _=None, db=db)
+
+    assert result.resource == {"id": "slack_general", "api_key": "kgr_resource_token"}
 
 
 @pytest.mark.asyncio
