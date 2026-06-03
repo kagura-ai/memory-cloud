@@ -274,9 +274,24 @@ class MemoryRepository(BaseRepository[Memory]):
         )
         return result.scalars().first()
 
+    # Issue #886: the always-load read returns L1 (summary) + L2
+    # (context_summary) + a few metadata fields only — never L3 (content /
+    # details). Selecting just these columns keeps the every-turn load_pinned
+    # path from fetching the potentially large content/details TEXT+JSONB it
+    # would only discard. Order matches PinnedMemoryItem field access.
+    _PINNED_COLUMNS = (
+        Memory.id,
+        Memory.summary,
+        Memory.context_summary,
+        Memory.type,
+        Memory.importance,
+        Memory.delivery_mode,
+        Memory.created_at,
+    )
+
     async def list_pinned(
         self, workspace_id: UUID, context_id: UUID, limit: int
-    ) -> tuple[list[Memory], int]:
+    ) -> tuple[list, int]:
         """Deterministic always-load set for a context (Issue #886).
 
         Returns up to ``limit`` always-delivery memories ordered by
@@ -284,6 +299,10 @@ class MemoryRepository(BaseRepository[Memory]):
         to the ``id`` tie-break, so the same context yields the same ordered set
         every call. Also returns the total count of matching rows so the caller
         can report ``truncated`` / ``total_available`` without silent loss.
+
+        Rows are partial (L1 + L2 + metadata only — see ``_PINNED_COLUMNS``); the
+        L3 ``content`` / ``details`` are intentionally not loaded. Each row
+        exposes the selected columns by name (``row.summary`` etc.).
 
         This is the deterministic counterpart to ``recall()``: no embedding, no
         Qdrant, no rerank — a plain indexed SQL scan (backed by the partial
@@ -295,7 +314,7 @@ class MemoryRepository(BaseRepository[Memory]):
             limit: Hard cap on returned rows (bound; total may exceed it).
 
         Returns:
-            ``(rows, total)`` — the bounded ordered rows and the full count.
+            ``(rows, total)`` — the bounded ordered partial rows and full count.
         """
         conditions = (
             Memory.workspace_id == workspace_id,
@@ -309,12 +328,12 @@ class MemoryRepository(BaseRepository[Memory]):
         # the true total_available. load_pinned runs every agent turn, so saving
         # the COUNT on the hot path matters.
         result = await self.db.execute(
-            select(Memory)
+            select(*self._PINNED_COLUMNS)
             .where(*conditions)
             .order_by(desc(Memory.importance), Memory.created_at.asc(), Memory.id.asc())
             .limit(limit + 1)
         )
-        rows = list(result.scalars().all())
+        rows = list(result.all())
         if len(rows) <= limit:
             return rows, len(rows)
 
