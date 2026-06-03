@@ -3,7 +3,7 @@ description: Run comprehensive smoke test of all MCP tools via live MCP connecti
 ---
 
 Verify MCP tools work correctly by executing them in sequence against temporary test contexts.
-Exercises 35 non-resource test rows covering the core memory/edge/context/tag/analysis/sleep tools.
+Exercises 36 non-resource test rows covering the core memory/edge/context/tag/analysis/sleep tools.
 Optionally exercises 6 PRO-only rows for resource tools (setup_resource, ingest_events, get_resource_impact, get_resource_schema, list_resource_tokens, plus delete_context cleanup) if the workspace has a PRO plan.
 
 Excluded by design:
@@ -59,6 +59,18 @@ remember(
 -> Verify: returns a success response containing memory_id (UUID format)
 -> Save returned memory_id
 -> Note: source_uri/source_type are persisted but not in the remember response; validated via recall filters in step 4
+
+remember(
+  context_id=...,
+  summary="MCP smoke test — time memory for recall_upcoming",
+  content="Scheduled event seeded by smoke-test to verify recall_upcoming.",
+  type="time",
+  importance=0.5,
+  tags=["smoke-test", "automated"],
+  details={"trigger": {"year": 2099, "month": 1}}
+)
+-> Verify: returns a success response containing memory_id (UUID format)
+-> Save returned time_memory_id
 ```
 
 ### 4. Memory read tools
@@ -84,6 +96,11 @@ reference(memory_id=..., context_id=...)
 
 explore(memory_id=..., context_id=..., depth=2, min_weight=0.0)
 -> Verify: returns response (total_activated >= 0, no error)
+
+recall_upcoming(context_id=..., from="now")
+-> Verify: status=success
+-> Verify: results array contains the time memory seeded in step 3 (time_memory_id present)
+-> Verify: all returned results have type="time"
 ```
 
 ### 5. Memory update tools
