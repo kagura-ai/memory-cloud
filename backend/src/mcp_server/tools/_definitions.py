@@ -1828,6 +1828,44 @@ Requires action recording (reports created before this feature have no actions t
             "readOnly": True,
         },
         {
+            "name": "feedback",
+            "description": """Record whether a recalled memory was useful for a query (Issue #888).
+
+An append-only signal — "this recall result was helpful / not helpful". It is
+SEPARATE from memories: feedback is NOT embedded and is structurally excluded
+from recall(), so rating a result never pollutes the knowledge search space.
+
+Use this after recall() to teach the substrate which results were on-target.
+Each call appends a new event (repeated/contradicting signals are kept as a time
+series). Anyone who can read the context may record feedback.""",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "context_id": {
+                        "type": "string",
+                        "description": "Target context UUID (the recalled memory's context).",
+                    },
+                    "memory_id": {
+                        "type": "string",
+                        "description": "UUID of the recalled memory being rated.",
+                    },
+                    "helpful": {
+                        "type": "boolean",
+                        "description": "True if the memory was useful for the query, False if not.",
+                    },
+                    "query": {
+                        "type": "string",
+                        "description": "Optional recall query this feedback is about (max 1024 chars).",
+                    },
+                    "note": {
+                        "type": "string",
+                        "description": "Optional free-text note (e.g. why the result was wrong).",
+                    },
+                },
+                "required": ["context_id", "memory_id", "helpful"],
+            },
+        },
+        {
             "name": "set_state",
             "description": """Set ephemeral agent run-state at (context_id, key) (Issue #889).
 

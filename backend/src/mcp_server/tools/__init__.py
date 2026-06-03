@@ -116,6 +116,7 @@ def _build_registry() -> dict[str, Any]:
         handle_list_edges,
         handle_update_edge,
     )
+    from mcp_server.tools.feedback import handle_feedback
     from mcp_server.tools.files import (
         handle_complete_file_upload,
         handle_delete_file,
@@ -155,6 +156,8 @@ def _build_registry() -> dict[str, Any]:
         # Issue #889: agent session-state lane (TTL, recall-excluded)
         "set_state": handle_set_state,
         "get_state": handle_get_state,
+        # Issue #888: retrieval feedback signal (append-only, recall-excluded)
+        "feedback": handle_feedback,
         "get_context_info": handle_get_context_info,
         "create_context": handle_create_context,
         "update_context": handle_update_context,
