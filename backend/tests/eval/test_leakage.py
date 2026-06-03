@@ -9,10 +9,9 @@ leakage-free.
 
 from __future__ import annotations
 
-from tests.eval.tools.corpus import Corpus, Document, Query, compute_token_stats
+from tests.eval.tools.corpus import Corpus, Document, Query
 from tests.eval.tools.leakage_check import (
     MIN_DOCS_FOR_RARE_TERM,
-    check_query,
     run_leakage_check,
 )
 
@@ -40,19 +39,22 @@ def _synthetic_corpus(n_docs: int, *, planted_unique: str) -> Corpus:
 
 
 def test_rare_term_rule_fires_at_scale():
-    """At >= MIN_DOCS_FOR_RARE_TERM docs, a planted unique-term leak IS flagged
-    (the rule is genuinely active, not silently dead)."""
+    """At >= MIN_DOCS_FOR_RARE_TERM docs, run_leakage_check (which derives the
+    gate from len(documents)) flags a planted unique-term leak — the rule is
+    genuinely active end-to-end, not silently dead."""
     corpus = _synthetic_corpus(MIN_DOCS_FOR_RARE_TERM, planted_unique="zzphylactery")
-    stats = compute_token_stats(corpus.documents)
-    flags = check_query(corpus.queries[0], corpus, stats.df, stats.idf, apply_rare_term=True)
+    flags = run_leakage_check(corpus)
     rare = [f for f in flags if f.rule == "rare_term"]
     assert rare, "rare-term rule should flag the planted unique-term leak at scale"
     assert any("zzphylactery" in f.detail for f in rare)
 
 
 def test_rare_term_rule_gated_off_below_scale():
-    """Below the document threshold the rule does not fire (hapax is the norm)."""
-    corpus = _synthetic_corpus(MIN_DOCS_FOR_RARE_TERM, planted_unique="zzphylactery")
-    stats = compute_token_stats(corpus.documents)
-    flags = check_query(corpus.queries[0], corpus, stats.df, stats.idf, apply_rare_term=False)
-    assert not [f for f in flags if f.rule == "rare_term"]
+    """Below MIN_DOCS_FOR_RARE_TERM docs, run_leakage_check itself gates the rule
+    OFF (len(documents) < threshold) — this exercises the real scale-gating in
+    run_leakage_check, not a manual apply_rare_term=False override."""
+    corpus = _synthetic_corpus(MIN_DOCS_FOR_RARE_TERM - 1, planted_unique="zzphylactery")
+    flags = run_leakage_check(corpus)
+    assert not [f for f in flags if f.rule == "rare_term"], (
+        "below the doc threshold the rare-term rule must be gated off by run_leakage_check"
+    )

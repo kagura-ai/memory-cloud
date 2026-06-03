@@ -69,17 +69,24 @@ class Corpus:
 
 
 def load_corpus(path: Path | None = None) -> Corpus:
-    """Parse the golden corpus YAML into a :class:`Corpus` (no validation here).
+    """Parse the golden corpus YAML into a :class:`Corpus`.
 
-    Structural validation (bucket membership, label references, counts) lives in
-    ``test_corpus_schema.py`` so a malformed corpus fails as a test, not an
-    import-time crash.
+    Performs a minimal source-kind check (every document ``source`` must be a
+    known kind) so a typo'd source fails fast at load. Deeper structural
+    validation (bucket membership, label references, counts) lives in
+    ``test_corpus_schema.py``.
     """
     p = path or _CORPUS_PATH
     raw = yaml.safe_load(p.read_text(encoding="utf-8"))
     documents = tuple(
         Document(id=d["id"], source=d["source"], text=d["text"]) for d in raw.get("documents", [])
     )
+    bad_sources = sorted({d.source for d in documents if d.source not in _VALID_SOURCES})
+    if bad_sources:
+        raise ValueError(
+            f"golden corpus has document(s) with unknown source(s) {bad_sources}; "
+            f"valid sources are {sorted(_VALID_SOURCES)}"
+        )
     queries = tuple(
         Query(
             id=q["id"],

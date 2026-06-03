@@ -71,6 +71,9 @@ dependencies = [
     # Logging
     "structlog>=24.0.0",
 
+    # YAML (golden retrieval eval corpus — Issue #344)
+    "pyyaml>=6.0",
+
     # Encryption
     "cryptography>=42.0.0",
 

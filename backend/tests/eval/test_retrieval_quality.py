@@ -33,10 +33,8 @@ pytestmark = pytest.mark.skipif(
     reason="live retrieval eval requires the full stack; set KAGURA_EVAL_LIVE=1 (make eval-retrieval)",
 )
 
-# k values reported per the issue.
-_P_AT = (5, 10)
-_MRR_AT = 10
-_RECALL_AT = 10
+# The reported k values (P@5/P@10, MRR@10, recall@10) live in tests.eval.runner,
+# which computes the metrics; this thin wrapper only asserts the result shape.
 
 
 @pytest.mark.asyncio
