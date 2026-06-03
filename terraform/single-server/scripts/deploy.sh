@@ -309,7 +309,8 @@ verify_workers_blocked() {
     http_status=$(curl -sk -o /dev/null -w "%{http_code}" \
         --max-time 5 \
         -H "Host: memory.kagura-ai.com" \
-        "https://127.0.0.1:443/api/v1/workers/config" 2>/dev/null) || http_status="000"
+        "https://127.0.0.1:443/api/v1/workers/config" 2>/dev/null)
+    http_status=${http_status:-000}
     if [ "$http_status" = "404" ]; then
         log "  /api/v1/workers/* is correctly blocked (HTTP 404)"
     else
