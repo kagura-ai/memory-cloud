@@ -128,7 +128,13 @@ async def get_worker_config(
         from models.resource import Resource
 
         slug_result = await db.execute(
-            select(Resource.resource_id).where(Resource.id == connector.resource_pk)
+            select(Resource.resource_id).where(
+                Resource.id == connector.resource_pk,
+                # Defense-in-depth: workspace_id is denormalized and must match
+                # the connector's; the predicate prevents returning a slug from
+                # another workspace if the FK ever drifts.
+                Resource.workspace_id == connector.workspace_id,
+            )
         )
         resource_slug = slug_result.scalar_one_or_none()
         if resource_slug:
