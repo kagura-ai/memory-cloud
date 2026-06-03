@@ -27,7 +27,7 @@ Note: chained after ``e30_877_time_trigger_cols`` (#877/#880), not its original
 (#880) branched from ``e29_619`` and merged to main independently, forking the
 revision graph into two heads. Re-pointing this migration linearises the graph
 (single head) without a merge node — safe because neither chain had been
-deployed yet (#881).
+deployed yet (#882).
 """
 
 import sqlalchemy as sa
