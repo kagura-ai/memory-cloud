@@ -73,8 +73,10 @@ def upgrade() -> None:
     # INVALID-leftover pattern). Column + CHECK are metadata-only on PG11+
     # (constant DEFAULT, no table rewrite).
     op.execute(
-        "ALTER TABLE memories "
-        "ADD COLUMN IF NOT EXISTS delivery_mode VARCHAR(20) NOT NULL DEFAULT 'on_recall'"
+        sa.text(
+            "ALTER TABLE memories "
+            "ADD COLUMN IF NOT EXISTS delivery_mode VARCHAR(20) NOT NULL DEFAULT 'on_recall'"
+        )
     )
     if not _constraint_exists("valid_delivery_mode"):
         op.create_check_constraint(
