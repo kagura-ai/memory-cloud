@@ -50,8 +50,9 @@ import {
 const CONNECTOR_NAME_MAX = 100;
 
 // #890: Presidio recognizer names offered in the PII config UI. Kept in sync
-// with the worker's recognizer set; the backend validates only that detectors
-// is a non-empty list of non-blank strings (PiiGuardrailConfig).
+// with the worker's recognizer set; the backend validates the full
+// PiiGuardrailConfig shape (extra keys forbidden, redaction enum, non-blank locale,
+// and requires detectors when enabled).
 const PII_DETECTORS = [
   "EMAIL_ADDRESS",
   "PHONE_NUMBER",
