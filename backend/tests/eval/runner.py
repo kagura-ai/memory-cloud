@@ -97,8 +97,12 @@ async def _await_indexed(
     ``_ingest_corpus`` can return before the Qdrant upsert finishes when
     ``remember()``'s background task wins the claim. We poll ``embedding_status``
     (a column-only SELECT, so it reads committed state past the session identity
-    map under READ COMMITTED) until ``success``/``failed``. Raises on timeout
-    rather than letting a half-indexed corpus silently produce flaky metrics.
+    map under READ COMMITTED) until it is terminal.
+
+    A ``failed`` status is an ERROR, not a stop condition: the failed memory was
+    never upserted to Qdrant, so it is unsearchable and recalls against it would
+    silently understate metrics. Both ``failed`` and timeout raise, so the eval
+    never runs against a half-indexed corpus.
     """
     import asyncio
 
@@ -107,11 +111,21 @@ async def _await_indexed(
     from models.memory import Memory
 
     for _ in range(attempts):
-        status = (
-            await svc.db.execute(select(Memory.embedding_status).where(Memory.id == memory_id))
-        ).scalar_one_or_none()
-        if status in ("success", "failed"):
+        row = (
+            await svc.db.execute(
+                select(Memory.embedding_status, Memory.embedding_error).where(
+                    Memory.id == memory_id
+                )
+            )
+        ).first()
+        status = row[0] if row else None
+        if status == "success":
             return
+        if status == "failed":
+            raise RuntimeError(
+                f"embedding FAILED for memory {memory_id}: {row[1]} — that doc is "
+                "not in Qdrant, so eval would run against a half-indexed corpus"
+            )
         await asyncio.sleep(interval_s)
     raise RuntimeError(
         f"embedding for memory {memory_id} never reached a terminal state "
@@ -199,7 +213,10 @@ async def _teardown(
             # by the Context DELETE via ON DELETE CASCADE.
             await svc.forget(ForgetRequest(memory_id=UUID(mid)), owner, ctx_id)
         except Exception:  # noqa: BLE001 — best-effort cleanup
-            pass
+            # forget() shares this session; a mid-op failure can leave it needing
+            # a rollback, which would poison the Workspace/Context DELETEs below.
+            # Roll back so the rest of teardown still runs.
+            await db.rollback()
     try:
         await db.execute(_delete(WorkspaceMember).where(WorkspaceMember.workspace_id == ws_id))
         await db.execute(_delete(Context).where(Context.id == ctx_id))
