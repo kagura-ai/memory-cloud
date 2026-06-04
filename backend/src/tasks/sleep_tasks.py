@@ -12,6 +12,7 @@ from apscheduler.triggers.cron import CronTrigger
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from db.base import get_db
+from tasks.single_flight import single_flight
 from utils.logger import get_logger
 
 logger = get_logger(__name__)
@@ -187,6 +188,28 @@ async def sleep_maintenance_task():
         logger.info("sleep_maintenance_task_skipped", reason="sleep_disabled")
         return
 
+    # Issue #933: cross-process single-flight guard. Both the blue and green API
+    # containers run APScheduler in-process, so without this guard each process
+    # fires the nightly cron independently and every context is swept twice
+    # (``max_instances=1`` only dedupes within one process). The first process to
+    # acquire the Postgres advisory lock runs the sweep; the others no-op.
+    async with single_flight("sleep_maintenance") as acquired:
+        if not acquired:
+            logger.info(
+                "sleep_maintenance_task_skipped",
+                reason="lock_held_by_other_process",
+            )
+            return
+        await _sleep_maintenance_run()
+
+
+async def _sleep_maintenance_run() -> None:
+    """Run the Sleep Maintenance sweep across all active (user, workspace, context) tuples.
+
+    Extracted from ``sleep_maintenance_task`` (Issue #933) so the cross-process
+    advisory lock wraps the entire multi-commit run — the per-context loop below
+    commits repeatedly, so a transaction-scoped lock would not span it.
+    """
     try:
         async for db in get_db():
             from sqlalchemy import select
