@@ -175,7 +175,7 @@ recall(context_id=..., query="smoke test UPDATED", k=5)
 
 ### 6. Edge CRUD tools
 
-First, create a second test memory for edge testing (self-loops are not allowed). Use `linked_memory_ids` to create a `declared_link` edge at creation time:
+First, create a second test memory for edge testing (self-loops are not allowed). Use `linked_memory_ids` to create a declared link at creation time (post-#741 this is stored as `origin="declared"`, **not** a `declared_link` edge_type — see the note on the verify step below):
 
 ```
 remember(
@@ -189,7 +189,16 @@ remember(
   linked_source_uris=["file:///smoke-test/test-memory.md"]
 )
 -> Save returned memory_id as memory_id_2
--> Verify: list_edges(context_id=..., memory_id=<memory_id_2>) returns at least one edge with edge_type="declared_link"
+-> Verify: list_edges(context_id=..., memory_id=<memory_id_2>) returns an outgoing edge whose
+   target_id == <memory_id> (the linked memory), with weight=1.0 and confidence=1.0
+-> Note (#741/#925): the linked_memory_ids declared link is stored as origin="declared" with
+   edge_type="neural_association" — NOT a "declared_link" edge_type (that discriminator was removed
+   in #741, which pivoted to the relation/origin two-axis model). MCP list_edges does not expose the
+   origin axis, so the post-#741 verifiable signal is the edge to the linked target carrying the fixed
+   declared weight/confidence of 1.0/1.0. A freshly created memory has had no recall co-activation, so
+   this declared edge is the only edge present on memory_id_2 at this point. (The full declared-link
+   reference surface — outgoing_links/incoming_links from #440 — is REST-only and not carried by the
+   MCP reference() tool, so it cannot be asserted from this runbook.)
 ```
 
 ```
@@ -446,7 +455,7 @@ Print a summary table (numbers are illustrative; the executed order follows the 
 | 21 | update_memory | Update memory | PASS/FAIL |
 | 22 | recall (verify) | Verify update | PASS/FAIL |
 | 23 | remember | Create 2nd memory (linked_memory_ids, linked_source_uris) | PASS/FAIL |
-| 24 | list_edges (verify) | Verify declared_link edge created | PASS/FAIL |
+| 24 | list_edges (verify) | Verify declared link (linked_memory_ids → target, weight/confidence 1.0) | PASS/FAIL |
 | 25 | create_edge | Create test edge | PASS/FAIL |
 | 26 | list_edges | List edges | PASS/FAIL |
 | 27 | update_edge | Update edge weight | PASS/FAIL |
