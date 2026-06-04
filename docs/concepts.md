@@ -165,21 +165,71 @@ Each context has a `sleep_mode` setting (`full`, `edges_only`, or `skip`) that c
 
 See [Sleep Maintenance](sleep-maintenance.md) for the complete reference.
 
+## Agent Memory Substrate
+
+Kagura is a **knowledge store** for humans *and* an **agent memory substrate** for autonomous LLM loops. The substrate (epic #885, shipped v0.24.0 / v0.25.0) adds four primitives an agent loop needs that a pure knowledge base lacks — **delivery**, **trust**, **state**, and **feedback** — without inflating the memory taxonomy.
+
+> **Design decision — primitives, not types.** A memory is classified by its `type` (`code`, `note`, `decision`, …) *and*, orthogonally, by **how it is delivered**. We deliberately did **not** add agent-loop memory types (Goal / Skill / Eval / Guardrail / …); the same effect is achieved with `delivery_mode` + dedicated lanes. See the rationale in [`docs/eval/retrieval-feedback-and-eval-gate.md`](eval/retrieval-feedback-and-eval-gate.md).
+
+### 1. Delivery mode — *when* a memory surfaces
+
+`delivery_mode` is orthogonal to `type`. It controls **when** a memory reaches the agent:
+
+| `delivery_mode` | Surfaced | Read with | Use for |
+|---|---|---|---|
+| `on_recall` (default) | Probabilistically, via Hybrid Search | `recall()` | Ordinary knowledge |
+| `always` | **Deterministically, every turn** | `load_pinned()` | An agent's Goal / Guardrail / critical policy |
+| `on_trigger` | Inside a scheduled time window | `recall_upcoming()` | Deadlines, dated follow-ups (Time Memories, `type="time"`) |
+
+- **`always` (pinned)** — `load_pinned()` returns the *complete, unranked* always-load set every call — the deterministic counterpart to probabilistic `recall()`. Pin with `remember(delivery_mode="always")` (or `update_memory(...)`); pinning also forces `scope="persistent"` so there is no sleep-consolidation wait. Unpin with `update_memory(delivery_mode="on_recall")`.
+- **`on_trigger` (time)** — a Time Memory (`type="time"`, `details.trigger={year, month, day?}`) surfaces via `recall_upcoming()` when its window is upcoming. This is a deterministic time query, not semantic search.
+
+### 2. Trust tier — provenance & behaviour-influencing reads
+
+Not all memories are equally trustworthy as *instructions*. Connector-ingested content (Slack/Discord/etc.) is data, not commands — treating it as instructions is an indirect prompt-injection vector ([OWASP LLM01 / LLM03](https://owasp.org/www-project-top-10-for-large-language-model-applications/)).
+
+- **`Memory.source_type`** — server-stamped provenance, never client-trusted: one of `manual`, `file`, `url`, `vault`, `api`, `connector` (NOT NULL + CHECK).
+- **`Context.trust_tier`** — `trusted` (default) or `external`. Connector-fed contexts are marked `external`.
+- **Trust filter** — pass `recall(filters={"trust_tier": "trusted"})` for any **behaviour-influencing read** (one whose results are fed back to the model as context/instructions). It excludes memories from `external`-tier contexts **and** any `source_type="connector"` memory (defence-in-depth). Default recall returns everything; the filter is opt-in and protective on connector-mixed workspaces, a no-op on manual-only ones.
+
+The session-start bootstrap recalls use `trust_tier: "trusted"` for exactly this reason.
+
+### 3. Agent state lane — scratchpad, never recalled
+
+An agent loop needs durable, *exact-match* scratch state (current task, plan step, cursor) that must **never** pollute semantic search. This lives in a **dedicated `agent_states` table**, structurally excluded from `recall()`:
+
+- `set_state(context_id, key, value)` — upsert a JSON value under a key (optional `ttl_seconds`, clamped to 30 days).
+- `get_state(context_id, key)` — read one key, or omit `key` to list all live state for the context.
+- Expired entries are reaped lazily on read. REST equivalents live under `/api/v1/contexts/{id}/state`.
+
+### 4. Retrieval feedback signal — explicit, gated
+
+`access_count` / `last_used` are weak implicit proxies for "was this recall useful". The **feedback signal** makes that judgment explicit and attributable:
+
+- `feedback(context_id, memory_id, helpful, query?, note?)` — recording is **read-adjacent** (a `Viewer` who consumes recall may rate it).
+- Stored **append-only** in a dedicated `retrieval_feedback` table — a time series (contradicting signals are kept), embedded nowhere, structurally excluded from `recall()`.
+
+> **Eval-gate policy (HARD RULE).** Feedback is *collected* now; it is **not acted on automatically**. No self-update / auto-promotion loop ships before the golden retrieval eval gate (#344) is green — otherwise the substrate degrades into noisy implicit RL that optimizes for confident-but-wrong results. The golden eval harness lives in [`backend/tests/eval/`](../backend/tests/eval/README.md); the full policy is in [Retrieval Feedback & Eval Gate](eval/retrieval-feedback-and-eval-gate.md).
+
+See [Architecture › Agent Memory Substrate](architecture.md#agent-memory-substrate-lanes) for the table-level design and how these lanes sit beside `memories`.
+
 ## MCP Tools
 
-Kagura Memory Cloud exposes 37 tools via the [Model Context Protocol (MCP)](https://modelcontextprotocol.io/), grouped into 9 categories:
+Kagura Memory Cloud exposes 45 tools via the [Model Context Protocol (MCP)](https://modelcontextprotocol.io/), grouped into 11 categories:
 
 | Category | Tools | Purpose |
 |----------|-------|---------|
 | Memory | 6 | `remember`, `recall`, `reference`, `update_memory`, `forget`, `explore` — store / search / discover memories |
+| Agent Substrate | 5 | `load_pinned`, `recall_upcoming`, `set_state`, `get_state`, `feedback` — delivery-mode-aware retrieval, agent state lane, feedback signal (see [Agent Memory Substrate](#agent-memory-substrate)) |
 | Neural Edges | 4 | `list_edges`, `create_edge`, `update_edge`, `delete_edge` — manage the Hebbian graph manually |
 | Contexts | 7 | `get_context_info`, `list_contexts`, `create_context`, `update_context`, `delete_context`, `merge_contexts`, `update_search_config` |
 | Tags | 1 | `list_tags` — tag vocabulary discovery for alignment before `remember`/`recall` |
 | Files / R2 | 5 | `init_file_upload`, `complete_file_upload`, `list_files`, `get_file_download_url`, `delete_file` — binary attachments via R2 |
 | Analyses (Broadlistening) | 5 | `analyze_context`, `list_analyses`, `get_analysis`, `get_active_analysis`, `get_cluster` — large-scale qualitative clustering (Owner + Pro plan) |
-| Resources | 5 | `setup_resource`, `list_resource_tokens`, `ingest_events`, `get_resource_impact`, `get_resource_schema` — external data ingestion |
+| Resources | 6 | `setup_resource`, `setup_connector`, `list_resource_tokens`, `ingest_events`, `get_resource_impact`, `get_resource_schema` — external data ingestion + connector provisioning |
 | Sleep Maintenance | 3 | `get_sleep_history`, `get_sleep_report`, `rollback_sleep_run` — background consolidation observability |
 | Usage | 1 | `get_usage` — workspace quota and usage queries |
+| API-Key Bindings | 2 | `list_my_bindings`, `describe_binding` — introspect public-bound API keys (read-only, owner-scoped) |
 
 See [README › MCP Tools](../README.md#mcp-tools) for the full per-tool table with descriptions and required roles.
 

@@ -31,11 +31,12 @@ Karpathy's pattern describes any "living knowledge base" as 5 layers. Kagura's i
                               ↓
 ┌──────────────────────┬──────────────────────────────────────┐
 │   MCP Server (HTTP)  │          REST API (FastAPI)          │
-│  - 37 MCP Tools      │  - Memory CRUD                       │
-│    (memory / edges / │  - OAuth2 endpoints                  │
-│     contexts / tags /│  - API Key management                │
-│     files / analyses │  - Resource Ingest API               │
-│     resources /      │  - Admin: sleep-reports, neural cfg  │
+│  - 45 MCP Tools      │  - Memory CRUD                       │
+│    (memory / agent   │  - OAuth2 endpoints                  │
+│     substrate / edges│  - API Key management                │
+│     / contexts / tags│  - Agent state + feedback lanes      │
+│     / files /analyses│  - Resource Ingest API               │
+│     / resources /    │  - Admin: sleep-reports, neural cfg  │
 │     sleep / usage)   │                                      │
 │  - Session Mgmt      │                                      │
 │  - JSON-RPC          │                                      │
@@ -242,6 +243,36 @@ score = (
 )
 ```
 
+## Agent Memory Substrate Lanes
+
+Beyond the human-facing knowledge base, Kagura is an **agent memory substrate** (epic #885, v0.24.0 / v0.25.0). An autonomous agent loop needs three things a semantic memory store must *not* provide directly: durable exact-match scratch state, an explicit usefulness signal, and a provenance/trust boundary on what may influence behaviour. These ship as **dedicated lanes that sit beside `memories`** — deliberately separate tables so they are **structurally excluded from `recall()`** rather than filtered out at query time. For the reader-facing concept model (the four primitives — delivery / trust / state / feedback — and the "primitives, not new types" decision), see [Concepts › Agent Memory Substrate](concepts.md#agent-memory-substrate).
+
+### Lane separation
+
+| Lane | Table | In `recall()`? | Why a separate lane |
+|---|---|---|---|
+| Knowledge | `memories` | Yes (Hybrid Search) | The searchable corpus |
+| Agent state | `agent_states` | **No** | Exact-match key→value scratch (task, plan step, cursor); semantic search over it is meaningless and would poison results |
+| Feedback | `retrieval_feedback` | **No** | Append-only signal *about* recall quality; embedding it would create a feedback-of-feedback loop |
+
+`agent_states` is read by `set_state` / `get_state` (MCP) and `/api/v1/contexts/{id}/state*` (REST); `retrieval_feedback` by `feedback` (MCP) and `POST /api/v1/contexts/{id}/feedback` (REST). Both FK to `contexts` with `ON DELETE CASCADE`, so an agent's state and feedback are erased with their context (GDPR/APPI erasure follows automatically).
+
+### Trust boundary (provenance & behaviour-influencing reads)
+
+The substrate adds a server-enforced trust boundary so that **untrusted external content cannot be silently treated as instructions** (indirect prompt injection — [OWASP LLM01 / LLM03](https://owasp.org/www-project-top-10-for-large-language-model-applications/)):
+
+- **`memories.source_type`** (`VARCHAR(20)`, NOT NULL, CHECK) — **server-stamped** provenance, never client-supplied: `manual` / `file` / `url` / `vault` / `api` / `connector`. Backfilled to `manual` for pre-existing rows by migration `e35_887`.
+- **`contexts.trust_tier`** (`VARCHAR(20)`, NOT NULL, default `trusted`, CHECK) — `trusted` or `external`. Connector-fed contexts are `external`.
+- **Trust filter** — `recall(filters={"trust_tier": "trusted"})` excludes memories whose context is `external`-tier **and** any `source_type="connector"` memory (defence-in-depth). Applied inside `MemoryService` recall (`backend/src/services/memory_service.py`). Opt-in; intended for any read whose results are fed back to the model as context.
+
+### Feedback eval gate — no self-update loop
+
+The feedback signal is the prerequisite for a future Eval→Skill self-update loop, but **closing that loop is gated**: no mechanism that promotes, demotes, re-ranks, or rewrites memories from feedback ships before the golden retrieval eval gate (#344) is green. The deterministic layer of the eval harness ([`backend/tests/eval/`](../backend/tests/eval/README.md) — leakage check, corpus-schema, stratification, metrics) runs in normal CI; the live P@5 / MRR measurement (`make eval-retrieval`) is the numeric regression gate, not yet wired into CI (#336). Full policy: [Retrieval Feedback & Eval Gate](eval/retrieval-feedback-and-eval-gate.md).
+
+### Connector canonical chat schema
+
+Connectors provisioned via `setup_connector` (#910 / #911) seed a canonical chat **resource schema** at registration: a single `text` field (fulltext+vector indexed) holding the ai-worker's per-message LLM summary. Lineage (`source_uri` / memory details) stays in `event_metadata`, not the payload. Defined in `ConnectorProvisioningService` (`backend/src/services/connector_provisioning.py`).
+
 ## Database Design
 
 ### PostgreSQL Tables
@@ -265,10 +296,15 @@ Tables are grouped by domain. The authoritative list lives in `backend/src/model
 - **context_search_configs** — Per-context hybrid search weights and reranker tuning
 
 **Memories & graph**
-- **memories** — 3-layer memory storage
+- **memories** — 3-layer memory storage. Carries server-stamped `source_type` (provenance) and `delivery_mode` (`on_recall` / `always` / `on_trigger`)
 - **attachments** — File attachments linked to memories
 - **neural_memory_edges** — Primary Hebbian edge storage (workspace + context scoped)
 - **graph_memory** — Legacy NetworkX JSON (read paths still reference it; new writes go to `neural_memory_edges`)
+
+**Agent memory substrate** (epic #885, v0.24.0 / v0.25.0 — see [Agent Memory Substrate Lanes](#agent-memory-substrate-lanes))
+- **agent_states** — Per-context key→value JSON scratch state with optional TTL (`expires_at`); unique on `(context_id, key)`. Structurally excluded from `recall()`
+- **retrieval_feedback** — Append-only `helpful` signal per `(context_id, memory_id)`, attributed to `user_id`. Structurally excluded from `recall()`
+- (`contexts.trust_tier` + `memories.source_type` add the provenance/trust boundary — see column notes above)
 
 **Resource ingest** (v0.12.0 Resource Foundation)
 - **resources** — Normalized Resource entity (UUID PK); satellite tables FK via `resource_pk`

@@ -9,9 +9,9 @@
 </p>
 
 <p align="center">
-  <strong>チーム向けセルフホスト LLM Knowledge Base</strong> — RAG を超えて。<br>
-  MCP-as-compile-API + Hebbian 学習 + Sleep Maintenance。<br>
-  <a href="https://gist.github.com/karpathy/442a6bf555914893e9891c11519de94f">Karpathy の LLM Wiki パターン</a> をチーム規模 + 永続化対応に拡張。
+  <strong>AI エージェントとチームのための適応的メモリ</strong> — セルフホスト、RAG を超えて。<br>
+  検索するたびに賢くなる MCP サーバー:<br>
+  ハイブリッド検索 + どのメモリ同士が関連するかを学習する neural memory graph。
 </p>
 
 <p align="center">
@@ -49,7 +49,8 @@
 | **Hybrid Search** | Semantic (OpenAI/Ollama) + BM25 キーワード — top-1 精度 96% |
 | **AI Reranking** | Ollama (ローカル・無料)、Voyage AI、Cohere — cross-encoder reranker で精度向上 |
 | **Neural Memory Graph** | Hebbian 学習がバックグラウンドで知識グラフを構築。`explore()` がそれを辿り偶発的発見を提供 |
-| **37 の MCP ツール** | Memory、Neural edges、Contexts、Tags、Files (R2)、Analyses (broadlistening)、Resources、Sleep Maintenance、Usage |
+| **Agent Memory Substrate** | 単なる知識ストアを超えて — delivery mode (pin / 時刻トリガ)、サーバー署名の trust boundary、agent state レーン、retrieval feedback シグナル。自律エージェントのループに必要なプリミティブ群 |
+| **45 の MCP ツール** | Memory、Agent Substrate、Neural edges、Contexts、Tags、Files (R2)、Analyses (broadlistening)、Resources、Sleep Maintenance、Usage、API-Key Bindings |
 | **マルチプロバイダ** | 埋め込みに OpenAI か Ollama (ローカル・非公開・コストゼロ) |
 | **チーム対応** | Workspace、RBAC、context 分離、共有メモリ |
 | **Web UI** | Next.js ダッシュボード — context、検索設定、メンバー管理 |
@@ -281,18 +282,30 @@ curl -X POST -H "Authorization: Bearer kagura_{your_key}" \
 
 ## MCP ツール
 
-9 カテゴリ・全 37 ツール。Workspace ロール: **Owner** > Admin > Member > **Viewer** (read-only)。Context ロール: **Owner** > Editor > Viewer。Private context は作成者のみ閲覧可。Member を特定 context に allowlist で制限可能。
+11 カテゴリ・全 45 ツール。Workspace ロール: **Owner** > Admin > Member > **Viewer** (read-only)。Context ロール: **Owner** > Editor > Viewer。Private context は作成者のみ閲覧可。Member を特定 context に allowlist で制限可能。
 
 ### Memory (6)
 
 | ツール | 説明 | 必要ロール |
 |--------|------|------------|
-| `remember` | 新規メモリ保存 (summary + content + type) | Member+ |
-| `recall` | Hybrid Search でメモリ検索 | Viewer+ |
+| `remember` | 新規メモリ保存 (summary + content + type、任意で `delivery_mode`) | Member+ |
+| `recall` | Hybrid Search でメモリ検索 (`trust_tier` フィルタ対応) | Viewer+ |
 | `reference` | メモリの 3 層詳細取得 | Viewer+ |
 | `update_memory` | メモリ更新 / 外部 ID で upsert | Member+ |
 | `forget` | ソフト削除 (30 日保持) | Member+ |
 | `explore` | Neural Memory graph で関連メモリ発見 | Viewer+ |
+
+### Agent Substrate (5)
+
+自律エージェントのループに必要なプリミティブ群 — 詳細は [Concepts › Agent Memory Substrate](docs/concepts.md#agent-memory-substrate)。
+
+| ツール | 説明 | 必要ロール |
+|--------|------|------------|
+| `load_pinned` | always-load メモリ (`delivery_mode="always"`) を決定的にロード — Goal / Guardrail / ポリシー用 | Viewer+ |
+| `recall_upcoming` | 近日の Time Memory (`type="time"`、`delivery_mode="on_trigger"`) を列挙 | Viewer+ |
+| `set_state` | エージェントの scratch state を upsert (key→value、任意 TTL、recall から除外) | Editor+ |
+| `get_state` | state を 1 件取得、または context の全 live state を列挙 | Viewer+ |
+| `feedback` | recall したメモリが有用だったかを記録 (append-only シグナル) | Viewer+ |
 
 ### Neural Edges (4)
 
@@ -343,11 +356,12 @@ curl -X POST -H "Authorization: Bearer kagura_{your_key}" \
 | `get_active_analysis` | 実行中分析の取得 (あれば) | Owner |
 | `get_cluster` | 単一クラスタの所属メモリを drilldown | Owner |
 
-### Resources — 外部データ取り込み (5)
+### Resources — 外部データ取り込み (6)
 
 | ツール | 説明 | 必要ロール |
 |--------|------|------------|
 | `setup_resource` | public context 作成 + resource token 発行 | Owner/Admin + Pro プラン |
+| `setup_connector` | ai-worker チャットコネクタを provision (resource + connector 行 + token) | Owner/Admin + connector seats |
 | `list_resource_tokens` | workspace の有効 resource token 一覧 | Owner/Admin |
 | `ingest_events` | resource に batch upsert/delete events (最大 100 events、session-auth MCP 経路) | Member+ |
 | `get_resource_impact` | resource 統計 (token 数、memory 数、schema version) | Viewer+ |
@@ -368,6 +382,13 @@ curl -X POST -H "Authorization: Bearer kagura_{your_key}" \
 | ツール | 説明 | 必要ロール |
 |--------|------|------------|
 | `get_usage` | workspace の現在使用量 (memory / context / member / MCP 呼出/日) | Viewer+ |
+
+### API-Key Bindings (2)
+
+| ツール | 説明 | 必要ロール |
+|--------|------|------------|
+| `list_my_bindings` | public-bound API キー一覧 (read-only、owner スコープ) | Viewer+ |
+| `describe_binding` | `key_id` か `context_id` の一方で binding を 1 件記述 (read-only、owner スコープ) | Viewer+ |
 
 ## REST API
 
@@ -473,6 +494,7 @@ STRIPE_PRICE_PRO=price_yyy
 - [Resource Tokens Guide](docs/resource-tokens-guide.md) — resource token 経由の外部データ取込
 - [Neural Memory Evaluation](docs/neural-memory-evaluation.md) — ベンチマーク結果、設計判断
 - [Search Quality Benchmark](docs/search-quality-benchmark.md) — 精度テスト、reranking、ベストプラクティス
+- [Retrieval Feedback & Eval Gate](docs/eval/retrieval-feedback-and-eval-gate.md) — feedback シグナル + 自己更新ループ禁止ポリシー (Agent Memory Substrate)
 - [Deployment](docs/deployment.md) — Caddy リバースプロキシを用いた production 配備
 - [Contributing](CONTRIBUTING.md) — 開発セットアップ、コードスタイル、PR ワークフロー
 - [Security](SECURITY.md) — 脆弱性報告、セキュリティ設計
