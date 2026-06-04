@@ -9,9 +9,9 @@
 </p>
 
 <p align="center">
-  <strong>Self-hosted LLM Knowledge Base for teams</strong> — beyond RAG.<br>
-  MCP-as-compile-API + Hebbian learning + Sleep Maintenance.<br>
-  <a href="https://gist.github.com/karpathy/442a6bf555914893e9891c11519de94f">Karpathy's LLM Wiki pattern</a>, scaled for teams and persistence.
+  <strong>Adaptive memory for AI agents and teams</strong> — self-hosted, beyond RAG.<br>
+  An MCP server that gets smarter every time you search:<br>
+  hybrid search + a neural memory graph that learns which memories belong together.
 </p>
 
 <p align="center">
@@ -49,7 +49,8 @@ Most AI memory tools are just vector databases with a chat wrapper. Kagura is di
 | **Hybrid Search** | Semantic (OpenAI/Ollama) + BM25 keyword — 96% top-1 accuracy |
 | **AI Reranking** | Ollama (local, free), Voyage AI, or Cohere — cross-encoder reranking for precision |
 | **Neural Memory Graph** | Hebbian learning builds a knowledge graph in the background. `explore()` traverses it for serendipitous discovery. |
-| **39 MCP Tools** | Memory, Neural edges, Contexts, Tags, Files (R2), Analyses (broadlistening), Resources, Sleep Maintenance, Usage |
+| **Agent Memory Substrate** | Beyond a knowledge store: delivery modes (pinned / time-triggered), a server-stamped trust boundary, an agent state lane, and a retrieval-feedback signal — the primitives an autonomous agent loop needs. |
+| **45 MCP Tools** | Memory, Agent Substrate, Neural edges, Contexts, Tags, Files (R2), Analyses (broadlistening), Resources, Sleep Maintenance, Usage, API-Key Bindings |
 | **Multi-Provider** | OpenAI or Ollama (local, private, zero cost) for embeddings |
 | **Team Ready** | Workspaces, RBAC, context isolation, shared memory |
 | **Web UI** | Next.js dashboard — contexts, search settings, member management |
@@ -404,18 +405,30 @@ curl -X POST -H "Authorization: Bearer kagura_{your_key}" \
 
 ## MCP Tools
 
-39 tools across 10 categories. Workspace roles: **Owner** > Admin > Member > **Viewer** (read-only). Context roles: **Owner** > Editor > Viewer. Private contexts are visible only to the creator. Members may be restricted to specific contexts via allowlist.
+45 tools across 11 categories. Workspace roles: **Owner** > Admin > Member > **Viewer** (read-only). Context roles: **Owner** > Editor > Viewer. Private contexts are visible only to the creator. Members may be restricted to specific contexts via allowlist.
 
 ### Memory (6)
 
 | Tool | Description | Required Role |
 |------|------------|---------------|
-| `remember` | Store a new memory (summary + content + type) | Member+ |
-| `recall` | Search memories with Hybrid Search | Viewer+ |
+| `remember` | Store a new memory (summary + content + type; optional `delivery_mode`) | Member+ |
+| `recall` | Search memories with Hybrid Search (supports `trust_tier` filter) | Viewer+ |
 | `reference` | Get full 3-layer details of a memory | Viewer+ |
 | `update_memory` | Update an existing memory in-place or upsert by external ID | Member+ |
 | `forget` | Soft-delete a memory (30-day retention) | Member+ |
 | `explore` | Discover related memories via Neural Memory graph | Viewer+ |
+
+### Agent Substrate (5)
+
+The primitives an autonomous agent loop needs beyond a knowledge store — see [Concepts › Agent Memory Substrate](docs/concepts.md#agent-memory-substrate).
+
+| Tool | Description | Required Role |
+|------|------------|---------------|
+| `load_pinned` | Deterministically load always-load memories (`delivery_mode="always"`) — Goal / Guardrail / policy | Viewer+ |
+| `recall_upcoming` | List upcoming Time Memories (`type="time"`, `delivery_mode="on_trigger"`) | Viewer+ |
+| `set_state` | Upsert agent scratch state (key→value, optional TTL; excluded from recall) | Editor+ |
+| `get_state` | Read one state key, or list all live state for a context | Viewer+ |
+| `feedback` | Record whether a recalled memory was helpful (append-only signal) | Viewer+ |
 
 ### Neural Edges (4)
 
@@ -466,11 +479,12 @@ Cluster memories into themes (kouchou-ai-style UMAP + KMeans + LLM labeling) for
 | `get_active_analysis` | Get the in-flight analysis for a context (if any) | Owner |
 | `get_cluster` | Drill into a single cluster's member memories | Owner |
 
-### Resources — External Data Ingestion (5)
+### Resources — External Data Ingestion (6)
 
 | Tool | Description | Required Role |
 |------|------------|---------------|
 | `setup_resource` | Create public context + issue resource token | Owner/Admin + Pro plan |
+| `setup_connector` | Provision an ai-worker chat connector (resource + connector row + token) | Owner/Admin + connector seats |
 | `list_resource_tokens` | List active resource tokens for your workspace | Owner/Admin |
 | `ingest_events` | Batch upsert/delete events into a resource (max 100 events; session-auth MCP variant) | Member+ |
 | `get_resource_impact` | Resource stats (tokens, memories, schema version) | Viewer+ |
@@ -620,6 +634,7 @@ This project is designed to be developed **with** Claude Code and Kagura Memory 
 - [Resource Tokens Guide](docs/resource-tokens-guide.md) — External data ingestion via resource tokens
 - [Neural Memory Evaluation](docs/neural-memory-evaluation.md) — Benchmark results, architecture decisions
 - [Search Quality Benchmark](docs/search-quality-benchmark.md) — Accuracy tests, reranking, best practices
+- [Retrieval Feedback & Eval Gate](docs/eval/retrieval-feedback-and-eval-gate.md) — Feedback signal + the no-self-update-loop policy (Agent Memory Substrate)
 - [Deployment](docs/deployment.md) — Production deployment with Caddy reverse proxy
 - [Contributing](CONTRIBUTING.md) — Development setup, code style, PR workflow
 - [Security](SECURITY.md) — Vulnerability reporting, security design

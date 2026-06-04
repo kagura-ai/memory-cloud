@@ -172,6 +172,23 @@ openapi_tags = [
         ),
     },
     {"name": "graph", "description": "Neural Memory graph operations"},
+    {
+        "name": "agent-state",
+        "description": (
+            "Agent Memory Substrate (epic #885): per-context key→value scratch "
+            "state lane with optional TTL. Structurally excluded from recall(). "
+            "REST companion to the set_state / get_state MCP tools."
+        ),
+    },
+    {
+        "name": "retrieval-feedback",
+        "description": (
+            "Agent Memory Substrate (epic #885): append-only retrieval-helpful "
+            "signal per (context, memory). Read-adjacent (Viewer+); collected but "
+            "not auto-acted-on until the golden eval gate (#344) is green. REST "
+            "companion to the feedback MCP tool."
+        ),
+    },
     # Integrations
     {"name": "api-keys", "description": "MCP API key management"},
     {"name": "oauth2-server", "description": "OAuth2 client management"},

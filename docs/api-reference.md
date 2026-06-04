@@ -269,7 +269,7 @@ Search memories using Hybrid Search (60% semantic + 40% BM25) with optional Neur
 |-------|------|----------|-------------|
 | `query` | string | Yes | Natural language search query |
 | `k` | integer | No | Number of results (default: 5, max: 100) |
-| `filters` | object | No | Filter by type, tags, importance, date ranges. `tags_match: "all"` for AND logic. Date: `created_after`, `created_before`, `updated_after`, `updated_before` (ISO 8601) |
+| `filters` | object | No | Filter by type, tags, importance, date ranges. `tags_match: "all"` for AND logic. Date: `created_after`, `created_before`, `updated_after`, `updated_before` (ISO 8601). **Trust:** `trust_tier: "trusted"` excludes `external`-tier contexts and `connector`-sourced memories — pass it for behaviour-influencing reads (see [Trust tier](concepts.md#agent-memory-substrate)) |
 | `use_rerank` | boolean | No | Request reranking (default: false). Only effective if reranking is also enabled in the context's search config and a provider (Voyage/Cohere) is configured. |
 
 **Response:**
@@ -561,6 +561,78 @@ Update a context. All fields are optional.
 Soft-delete a context. The context row is marked deleted (sets `deleted_at`) so it stops appearing in listings, but the record and its memories are retained for recovery / audit purposes.
 
 **Response:** `204 No Content` (no response body)
+
+---
+
+## Agent State APIs
+
+A per-context key→value scratch lane for autonomous agent loops (current task, plan step, cursor). Stored in a dedicated `agent_states` table — **structurally excluded from `recall()`** so it never pollutes semantic search. Part of the [Agent Memory Substrate](concepts.md#agent-memory-substrate). Reads require `Viewer`; writes require `Editor`.
+
+### PUT /api/v1/contexts/{context_id}/state/{key}
+
+Set (upsert) a state value under a key.
+
+**Request Body:**
+
+```json
+{
+  "value": {"step": 3, "plan": "refactor auth"},
+  "ttl_seconds": 3600
+}
+```
+
+| Field | Type | Required | Description |
+|-------|------|----------|-------------|
+| `value` | any (JSON) | Yes | Arbitrary JSON value to store |
+| `ttl_seconds` | integer | No | Time-to-live; clamped server-side to a 30-day max. Omit for no expiry |
+
+**Response:** `{ "key": "<key>" }`
+
+### GET /api/v1/contexts/{context_id}/state/{key}
+
+Get one key's live value. Expired entries are reaped lazily and reported as not found.
+
+**Response:** `{ "key": "<key>", "value": <json> }`
+
+### GET /api/v1/contexts/{context_id}/state
+
+List all live state entries for the context.
+
+**Response:** `{ "states": { "<key>": <json>, ... }, "count": 2 }`
+
+### DELETE /api/v1/contexts/{context_id}/state/{key}
+
+Delete one entry.
+
+**Response:** `{ "key": "<key>" }`
+
+---
+
+## Retrieval Feedback API
+
+Record an explicit, attributable signal on whether a recalled memory was helpful. Stored **append-only** in a dedicated `retrieval_feedback` table (a time series — contradicting signals are kept), embedded nowhere and excluded from `recall()`. Recording is **read-adjacent**: any `Viewer` who consumes recall may rate it. See the [eval-gate policy](eval/retrieval-feedback-and-eval-gate.md) — feedback is collected now but **not acted on automatically** until the golden eval gate (#344) is green.
+
+### POST /api/v1/contexts/{context_id}/feedback
+
+**Request Body:**
+
+```json
+{
+  "memory_id": "550e8400-e29b-41d4-a716-446655440000",
+  "helpful": true,
+  "query": "how do I rotate JWT refresh tokens?",
+  "note": "exact match, used verbatim"
+}
+```
+
+| Field | Type | Required | Description |
+|-------|------|----------|-------------|
+| `memory_id` | string (UUID) | Yes | The recalled memory being rated (must belong to the context) |
+| `helpful` | boolean | Yes | Whether the memory was useful for the query |
+| `query` | string | No | The originating query (max 1024 chars) |
+| `note` | string | No | Free-text rationale (max 2000 chars) |
+
+**Response:** `201 Created` — `{ "feedback_id": "<uuid>", "memory_id": "<uuid>", "helpful": true }`
 
 ---
 
@@ -870,7 +942,7 @@ Sleep and Neural Memory tuning knobs (LLM provider, budgets, per-phase toggles, 
 
 ## MCP Tools
 
-Kagura Memory Cloud provides 39 MCP tools for AI assistants across 10 categories (Memory, Neural Edges, Contexts, Tags, Files / R2, Analyses, Resources, Sleep Maintenance, Usage, API-Key Bindings). See [README › MCP Tools](../README.md#mcp-tools) for the full table with required roles. The examples below illustrate the most commonly used tools; every other tool shares the same JSON-RPC call shape.
+Kagura Memory Cloud provides 45 MCP tools for AI assistants across 11 categories (Memory, Agent Substrate, Neural Edges, Contexts, Tags, Files / R2, Analyses, Resources, Sleep Maintenance, Usage, API-Key Bindings). See [README › MCP Tools](../README.md#mcp-tools) for the full table with required roles. The examples below illustrate the most commonly used tools; every other tool shares the same JSON-RPC call shape.
 
 ### 1. remember
 
@@ -975,6 +1047,75 @@ Describe one of your bindings by **exactly one** of `key_id` (integer) or `conte
 ```
 
 > **Read-only boundary:** minting and revoking bindings stay on the SDK / CLI / HTTP API / dashboard (design decision from #626). Public-bound API keys cannot call any MCP tool — they are rejected at MCP authentication — so these introspection tools are only reachable by the binding's **owner** via a session or workspace-scoped key.
+
+### Agent Substrate tools
+
+These tools back the [Agent Memory Substrate](concepts.md#agent-memory-substrate). `load_pinned` and `recall_upcoming` are delivery-mode-aware reads; `set_state` / `get_state` drive the agent state lane; `feedback` records the retrieval signal.
+
+#### 8. load_pinned
+
+Deterministically load a context's always-load memories (`delivery_mode="always"`) — the complete, unranked set, every call. The deterministic counterpart to probabilistic `recall()`; use it for an agent's Goal / Guardrail / critical policy.
+
+```python
+{
+  "name": "load_pinned",
+  "arguments": { "context_id": "550e8400-..." }
+}
+```
+
+#### 9. recall_upcoming
+
+List forward-looking Time Memories (`type="time"`, `delivery_mode="on_trigger"`) whose scheduled window is upcoming — deadlines, dated follow-ups. A deterministic time query, not semantic search.
+
+```python
+{
+  "name": "recall_upcoming",
+  "arguments": { "context_id": "550e8400-...", "from": "now" }
+}
+```
+
+#### 10. set_state
+
+Upsert agent scratch state (excluded from `recall()`). Requires `Editor`.
+
+```python
+{
+  "name": "set_state",
+  "arguments": {
+    "context_id": "550e8400-...",
+    "key": "current_task",
+    "value": {"step": 3, "plan": "refactor auth"},
+    "ttl_seconds": 3600
+  }
+}
+```
+
+#### 11. get_state
+
+Read one key, or omit `key` to list all live state for the context.
+
+```python
+{
+  "name": "get_state",
+  "arguments": { "context_id": "550e8400-...", "key": "current_task" }
+}
+```
+
+#### 12. feedback
+
+Record whether a recalled memory was helpful (read-adjacent; any `Viewer` may call). Append-only; **collected but not auto-acted-on** (see [eval gate](eval/retrieval-feedback-and-eval-gate.md)).
+
+```python
+{
+  "name": "feedback",
+  "arguments": {
+    "context_id": "550e8400-...",
+    "memory_id": "660e8400-...",
+    "helpful": true,
+    "query": "how do I rotate JWT refresh tokens?"
+  }
+}
+```
 
 ---
 
