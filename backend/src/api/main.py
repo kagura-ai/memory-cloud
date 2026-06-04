@@ -389,6 +389,7 @@ from api.routes import (  # noqa: E402
     admin_plans,
     admin_signup_gate,  # Issue #358: admin-configurable signup gate
     admin_sleep,  # Issue #247: Manual Sleep Maintenance trigger
+    agent_state,  # Issue #906: REST surface for the agent session-state lane
     analyses,  # Issue #496: Memory Broadlistening API endpoints
     api_keys,
     attachments,  # Issue #330 → deprecated by #555 (returns HTTP 410 Gone)
@@ -509,6 +510,9 @@ app.include_router(contexts.router, prefix="/api/v1")
 
 # Context Search Config routes (Issue #130 → #160 - Context-scoped search settings, renamed from project)
 app.include_router(context_search_config.router)
+
+# Agent session-state lane REST routes (Issue #906, follow-up to #889 — router carries its own prefix)
+app.include_router(agent_state.router)
 
 # Retrieval feedback signal route (Issue #888 — router carries its own /api/v1/contexts prefix)
 app.include_router(feedback.router)
