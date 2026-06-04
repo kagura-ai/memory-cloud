@@ -38,8 +38,15 @@ def _sudachi_version() -> str:
         return "unknown"
 
 
-async def _ingest_corpus(svc: Any, corpus: Corpus, user_id: str, ctx_id, ws_id) -> dict[str, str]:
-    """Ingest every corpus doc as a memory; return memory_id → corpus_doc_id.
+async def _ingest_corpus(
+    svc: Any, corpus: Corpus, user_id: str, ctx_id, ws_id, id_map: dict[str, str]
+) -> None:
+    """Ingest every corpus doc as a memory, populating ``id_map`` (memory_id →
+    corpus_doc_id) INCREMENTALLY as each doc lands.
+
+    The caller owns ``id_map`` so that if this raises partway (a remember /
+    indexing failure), teardown still sees the memories created so far and can
+    clean them up — no leaked rows on a partial ingest.
 
     ``remember()`` schedules embedding + Qdrant upsert as a fire-and-forget
     ``asyncio.create_task`` and returns before indexing completes. For a
@@ -50,7 +57,6 @@ async def _ingest_corpus(svc: Any, corpus: Corpus, user_id: str, ctx_id, ws_id) 
     from models.schemas import RememberRequest
     from services.memory_service import process_pending_embedding
 
-    id_map: dict[str, str] = {}
     for doc in corpus.documents:
         # summary must be >= 10 chars; corpus docs comfortably exceed that.
         req = RememberRequest(
@@ -66,11 +72,13 @@ async def _ingest_corpus(svc: Any, corpus: Corpus, user_id: str, ctx_id, ws_id) 
             current_context_id=ctx_id,
             current_workspace_id=ws_id,
         )
+        # Record BEFORE awaiting indexing so a failure in
+        # process_pending_embedding still leaves the id in the caller's map for
+        # teardown (the PG/Qdrant write from remember() already happened).
+        id_map[str(resp.memory_id)] = doc.id
         # Deterministically drive the embedding/upsert to completion before any
         # recall runs (idempotent with the background task remember() fired).
         await process_pending_embedding(resp.memory_id)
-        id_map[str(resp.memory_id)] = doc.id
-    return id_map
 
 
 async def run_retrieval_eval(write: bool = True, run_date: str | None = None) -> dict[str, Any]:
@@ -120,8 +128,12 @@ async def run_retrieval_eval(write: bool = True, run_date: str | None = None) ->
         await db.commit()
 
         svc = MemoryService(db)
-        id_map = await _ingest_corpus(svc, corpus, owner, ctx.id, ws.id)
+        # id_map is owned here and populated incrementally by _ingest_corpus, so
+        # the finally below ALWAYS cleans up whatever was created — even if
+        # ingest itself raises partway through (no leaked workspace/context/rows).
+        id_map: dict[str, str] = {}
         try:
+            await _ingest_corpus(svc, corpus, owner, ctx.id, ws.id, id_map)
             return await _run_queries_and_score(
                 svc, corpus, docs_by_id, id_map, owner, ctx.id, ws.id, run_date, write
             )
