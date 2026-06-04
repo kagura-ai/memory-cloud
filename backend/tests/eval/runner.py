@@ -72,12 +72,14 @@ async def _ingest_corpus(
             current_context_id=ctx_id,
             current_workspace_id=ws_id,
         )
-        # Record BEFORE awaiting indexing so a failure in
-        # process_pending_embedding still leaves the id in the caller's map for
-        # teardown (the PG/Qdrant write from remember() already happened).
+        # remember() has already COMMITTED the Postgres memory row; the embedding
+        # + Qdrant upsert is what process_pending_embedding does below (remember
+        # also schedules it as a background task). Record the id BEFORE awaiting
+        # that step, so if it raises, teardown's forget() can still clean up the
+        # committed PG row (and any partial Qdrant points).
         id_map[str(resp.memory_id)] = doc.id
-        # Deterministically drive the embedding/upsert to completion before any
-        # recall runs (idempotent with the background task remember() fired).
+        # Deterministically drive the embedding/Qdrant upsert to completion before
+        # any recall runs (idempotent with the background task remember() fired).
         await process_pending_embedding(resp.memory_id)
 
 
