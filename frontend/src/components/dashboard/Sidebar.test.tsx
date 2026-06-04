@@ -1,6 +1,10 @@
 import { render, screen } from "@testing-library/react";
 import { describe, it, expect, vi, beforeEach } from "vitest";
-import packageJson from "../../../package.json";
+
+// Hoisted so the vi.mock factory below can reference it (vi.mock is hoisted).
+const mockSystemInfoGet = vi.hoisted(() =>
+  vi.fn().mockResolvedValue({ version: "9.9.9" }),
+);
 
 // Mock next-intl to return the translation key (matches KpiCards.test.tsx pattern)
 vi.mock("next-intl", () => ({
@@ -58,14 +62,7 @@ vi.mock("@/lib/api/external-keys", () => ({
 }));
 
 vi.mock("@/lib/api/base", () => ({
-  updateUserProfile: vi.fn().mockResolvedValue({}),
-}));
-
-vi.mock("sonner", () => ({
-  toast: Object.assign(vi.fn(), {
-    success: vi.fn(),
-    error: vi.fn(),
-  }),
+  apiClient: { get: mockSystemInfoGet },
 }));
 
 vi.mock("@/components/workspaces/WorkspaceSwitcher", () => ({
@@ -76,18 +73,6 @@ vi.mock("@/components/icons/KaguraLogo", () => ({
   KaguraLogo: ({ className }: { className?: string }) => (
     <svg data-testid="kagura-logo" className={className} />
   ),
-}));
-
-vi.mock("@/lib/version", () => ({
-  APP_VERSION: packageJson.version,
-}));
-
-// Mock i18n module to expose locale data without provider
-vi.mock("@/i18n", () => ({
-  useLocale: () => ({ locale: "en" as const, setLocale: vi.fn() }),
-  locales: ["en", "ja"] as const,
-  localeNames: { en: "English", ja: "日本語" } as const,
-  localeFlags: { en: "🇺🇸", ja: "🇯🇵" } as const,
 }));
 
 import { Sidebar } from "./Sidebar";
@@ -119,5 +104,13 @@ describe("Sidebar", () => {
     expect(triggers).toHaveLength(1);
     // Email is NOT rendered anywhere by default (the old DropdownMenuLabel block was removed)
     expect(screen.queryByText("test@example.com")).not.toBeInTheDocument();
+  });
+
+  it("does not fetch the system version on initial render (lazy until the user menu opens)", () => {
+    render(<Sidebar />);
+    // Issue #921: the version comes from GET /api/v1/system/info, fetched at most
+    // once per session and only when the user menu opens (onOpenChange) — never
+    // eagerly on mount.
+    expect(mockSystemInfoGet).not.toHaveBeenCalled();
   });
 });

@@ -8,7 +8,7 @@
  * Issue #31: Frontend Redesign Phase 5
  */
 
-import { useState, useEffect, Fragment } from "react";
+import { useState, useEffect, useRef, Fragment } from "react";
 import Link from "next/link";
 import { useRouter, usePathname, useSearchParams } from "next/navigation";
 import { useTranslations } from "next-intl";
@@ -64,21 +64,10 @@ import {
   ShieldCheck,
   DollarSign,
   Info,
-  Globe,
   ExternalLink,
-  Check,
   Plug,
 } from "lucide-react";
-import {
-  useLocale,
-  locales,
-  localeNames,
-  localeFlags,
-  type Locale,
-} from "@/i18n";
-import { updateUserProfile } from "@/lib/api/base";
-import { toast } from "sonner";
-import { APP_VERSION } from "@/lib/version";
+import { apiClient } from "@/lib/api/base";
 // Issue #246: ContextSelector removed - use /contexts link instead
 import { WorkspaceSwitcher } from "@/components/workspaces/WorkspaceSwitcher";
 
@@ -293,7 +282,7 @@ export function Sidebar() {
   const searchParams = useSearchParams();
   const currentTab = searchParams.get("tab");
   const router = useRouter();
-  const { user, logout, isAuthenticated } = useAuth();
+  const { user, logout } = useAuth();
 
   // Load context count on mount / workspace switch.
   // Reset to null on each run so the warning icon does not show a stale
@@ -415,37 +404,24 @@ export function Sidebar() {
     return user.name.substring(0, 2).toUpperCase();
   };
 
-  // Locale switching (inlined from LanguageSelector for cohesive submenu UI).
-  // Uses plain useState (not useTransition) because the async profile update +
-  // page reload must keep `isLocaleSwitching` true for the full duration to
-  // prevent double-clicks; React useTransition only tracks the synchronous
-  // portion of a callback (Copilot review on PR #742).
-  const { locale, setLocale } = useLocale();
-  const [isLocaleSwitching, setIsLocaleSwitching] = useState(false);
+  // App version is fetched from the backend (GET /api/v1/system/info) the first
+  // time the user menu opens, then cached for the session. The backend
+  // `constants.py` APP_VERSION is the single source of truth — no hardcoded
+  // frontend version (which drifts from the backend during blue/green deploys).
+  // `—` placeholder is shown before load and on failure (non-blocking).
+  // (Language switching lives on the profile page — see profile/page.tsx.)
+  const [systemVersion, setSystemVersion] = useState<string | null>(null);
+  const versionFetchedRef = useRef(false);
 
-  const handleLocaleChange = async (newLocale: Locale) => {
-    if (newLocale === locale) return;
-    setIsLocaleSwitching(true);
-    try {
-      setLocale(newLocale);
-      if (isAuthenticated && user) {
-        try {
-          await updateUserProfile({ locale: newLocale });
-        } catch (error) {
-          if (process.env.NODE_ENV === "development") {
-            console.error("Failed to update user locale:", error);
-          }
-        }
-      }
-      toast.success(t("languageChanged"));
-      window.location.reload();
-    } catch (error) {
-      if (process.env.NODE_ENV === "development") {
-        console.error("Failed to change locale:", error);
-      }
-      toast.error(t("languageChangeError"));
-      setIsLocaleSwitching(false);
-    }
+  const handleUserMenuOpenChange = (open: boolean) => {
+    if (!open || versionFetchedRef.current) return;
+    versionFetchedRef.current = true; // fetch at most once per session
+    apiClient
+      .get<{ version: string }>("/api/v1/system/info")
+      .then((info) => setSystemVersion(info.version))
+      .catch(() => {
+        // Leave systemVersion null → "v—" placeholder. Non-blocking by design.
+      });
   };
 
   const handleLogout = async () => {
@@ -769,7 +745,7 @@ export function Sidebar() {
       {/* User Menu at Bottom */}
       <div className={cn("px-4 py-3", "border-t", colors.border.default)}>
         {user && (
-          <DropdownMenu>
+          <DropdownMenu onOpenChange={handleUserMenuOpenChange}>
             <DropdownMenuTrigger asChild>
               <button
                 className={cn(
@@ -817,32 +793,6 @@ export function Sidebar() {
                 <UserCircle className="mr-2 h-4 w-4" />
                 <span>{t("profileSettings")}</span>
               </DropdownMenuItem>
-
-              {/* Language submenu */}
-              <DropdownMenuSub>
-                <DropdownMenuSubTrigger>
-                  <Globe className="mr-2 h-4 w-4" />
-                  <span>{t("language")}</span>
-                </DropdownMenuSubTrigger>
-                <DropdownMenuSubContent className="w-40">
-                  {locales.map((loc) => (
-                    <DropdownMenuItem
-                      key={loc}
-                      onClick={() => handleLocaleChange(loc)}
-                      className="flex items-center justify-between cursor-pointer"
-                      disabled={isLocaleSwitching}
-                    >
-                      <span className="flex items-center gap-2">
-                        <span>{localeFlags[loc]}</span>
-                        <span>{localeNames[loc]}</span>
-                      </span>
-                      {locale === loc && (
-                        <Check className="h-4 w-4 text-emerald-600" />
-                      )}
-                    </DropdownMenuItem>
-                  ))}
-                </DropdownMenuSubContent>
-              </DropdownMenuSub>
 
               <DropdownMenuSeparator />
 
@@ -901,7 +851,7 @@ export function Sidebar() {
                   <DropdownMenuLabel className="text-[10px] font-normal text-slate-500 dark:text-slate-400">
                     {t("copyright", { year: new Date().getFullYear() })}
                     {" · "}
-                    {t("version", { version: APP_VERSION })}
+                    {t("version", { version: systemVersion ?? "—" })}
                   </DropdownMenuLabel>
                 </DropdownMenuSubContent>
               </DropdownMenuSub>

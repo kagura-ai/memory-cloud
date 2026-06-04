@@ -72,7 +72,6 @@
     "logOut": "ログアウト",
     "toggleMenu": "メニュー切替",
     "signupGate": "サインアップゲート",
-    "language": "言語",
     "viewDetails": "詳細を見る",
     "termsOfService": "利用規約",
     "privacyPolicy": "プライバシーポリシー",
@@ -81,8 +80,6 @@
     "copyright": "© 2024〜{year} Kagura AI 株式会社",
     "version": "v{version}",
     "kaguraLogoAria": "Kagura Memory Cloud",
-    "languageChanged": "言語を変更しました",
-    "languageChangeError": "言語の変更中にエラーが発生しました",
     "connectors": "コネクタ"
   },
   "auth": {
