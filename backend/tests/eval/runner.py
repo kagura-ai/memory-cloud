@@ -13,7 +13,7 @@ from __future__ import annotations
 import json
 from pathlib import Path
 from typing import Any
-from uuid import uuid4
+from uuid import UUID, uuid4
 
 from tests.eval.metrics import (
     mean_precision_at_k,
@@ -85,7 +85,6 @@ async def run_retrieval_eval(write: bool = True, run_date: str | None = None) ->
     from auth.workspace_roles import WorkspaceRole
     from db.base import get_db
     from models.auth import Context, Workspace, WorkspaceMember
-    from models.schemas import RecallRequest
     from services.memory_service import MemoryService
     from utils.datetime import utcnow
 
@@ -122,64 +121,108 @@ async def run_retrieval_eval(write: bool = True, run_date: str | None = None) ->
 
         svc = MemoryService(db)
         id_map = await _ingest_corpus(svc, corpus, owner, ctx.id, ws.id)
-
-        # Per-query rankings, grouped by bucket.
-        per_bucket_rankings: dict[str, list[tuple[list[str], set[str]]]] = {b: [] for b in BUCKETS}
-        all_rankings: list[tuple[list[str], set[str]]] = []
-        # Source label of every retrieved top-k result across ALL queries — the
-        # overall memory-vs-resource share is computed over this whole pool (NOT
-        # sliced to a single k window, which would reflect only one query).
-        all_retrieved_sources: list[str] = []
-
-        for q in corpus.queries:
-            resp = await svc.recall(
-                request=RecallRequest(query=q.text, k=_RECALL_K, search_mode="hybrid"),
-                user_id=owner,
-                current_context_id=ctx.id,
-                current_workspace_id=ws.id,
+        try:
+            return await _run_queries_and_score(
+                svc, corpus, docs_by_id, id_map, owner, ctx.id, ws.id, run_date, write
             )
-            ranked_docs = [id_map.get(str(r.memory_id), "?") for r in resp.results]
-            relevant = set(q.relevant)
-            per_bucket_rankings[q.bucket].append((ranked_docs, relevant))
-            all_rankings.append((ranked_docs, relevant))
-            all_retrieved_sources.extend(
-                docs_by_id[d].source for d in ranked_docs[:_RECALL_K] if d in docs_by_id
-            )
-
-        def _bucket_metrics(rankings: list[tuple[list[str], set[str]]]) -> dict[str, Any]:
-            return {
-                "n": len(rankings),
-                **{f"p@{k}": round(mean_precision_at_k(rankings, k), 4) for k in _P_AT},
-                f"mrr@{_MRR_AT}": round(mrr_at_k(rankings, _MRR_AT), 4),
-            }
-
-        results: dict[str, Any] = {
-            "run_date": run_date,
-            "sudachi_version": _sudachi_version(),
-            "corpus_version": corpus.meta.get("version"),
-            "query_count": len(corpus.queries),
-            "doc_count": len(corpus.documents),
-            "recall_k": _RECALL_K,
-            "overall": _bucket_metrics(all_rankings),
-            "per_bucket": {b: _bucket_metrics(per_bucket_rankings[b]) for b in BUCKETS},
-            "source_recall@10": {
-                k: round(v, 4)
-                for k, v in source_recall_share(
-                    all_retrieved_sources, len(all_retrieved_sources)
-                ).items()
-            },
-        }
-
-        if write:
-            _RESULTS_DIR.mkdir(parents=True, exist_ok=True)
-            out = _RESULTS_DIR / f"{run_date}.json"
-            out.write_text(
-                json.dumps(results, indent=2, ensure_ascii=False) + "\n", encoding="utf-8"
-            )
-            print(f"eval-retrieval: wrote {out}")
-        return results
+        finally:
+            await _teardown(svc, db, owner, ctx.id, ws.id, list(id_map.keys()))
 
     raise RuntimeError("database session unavailable — is the stack up?")
+
+
+async def _teardown(
+    svc: Any, db: Any, owner: str, ctx_id: Any, ws_id: Any, memory_ids: list[str]
+) -> None:
+    """Remove the throwaway eval data so repeated runs don't accumulate
+    workspaces / Qdrant points / DB rows (best-effort, never raises)."""
+    from sqlalchemy import delete as _delete
+
+    from models.auth import Context, Workspace, WorkspaceMember
+    from models.schemas import ForgetRequest
+
+    for mid in memory_ids:
+        try:
+            # forget() deletes from BOTH Postgres and Qdrant.
+            await svc.forget(ForgetRequest(memory_id=UUID(mid)), owner, ctx_id)
+        except Exception:  # noqa: BLE001 — best-effort cleanup
+            pass
+    try:
+        await db.execute(_delete(WorkspaceMember).where(WorkspaceMember.workspace_id == ws_id))
+        await db.execute(_delete(Context).where(Context.id == ctx_id))
+        await db.execute(_delete(Workspace).where(Workspace.id == ws_id))
+        await db.commit()
+    except Exception:  # noqa: BLE001 — best-effort cleanup
+        await db.rollback()
+
+
+async def _run_queries_and_score(
+    svc: Any,
+    corpus: Corpus,
+    docs_by_id: dict[str, Any],
+    id_map: dict[str, str],
+    owner: str,
+    ctx_id: Any,
+    ws_id: Any,
+    run_date: str,
+    write: bool,
+) -> dict[str, Any]:
+    """Recall every query, compute metrics, optionally write results JSON."""
+    from models.schemas import RecallRequest
+
+    # Per-query rankings, grouped by bucket.
+    per_bucket_rankings: dict[str, list[tuple[list[str], set[str]]]] = {b: [] for b in BUCKETS}
+    all_rankings: list[tuple[list[str], set[str]]] = []
+    # Source label of every retrieved top-k result across ALL queries — the
+    # overall memory-vs-resource share is computed over this whole pool (NOT
+    # sliced to a single k window, which would reflect only one query).
+    all_retrieved_sources: list[str] = []
+
+    for q in corpus.queries:
+        resp = await svc.recall(
+            request=RecallRequest(query=q.text, k=_RECALL_K, search_mode="hybrid"),
+            user_id=owner,
+            current_context_id=ctx_id,
+            current_workspace_id=ws_id,
+        )
+        ranked_docs = [id_map.get(str(r.memory_id), "?") for r in resp.results]
+        relevant = set(q.relevant)
+        per_bucket_rankings[q.bucket].append((ranked_docs, relevant))
+        all_rankings.append((ranked_docs, relevant))
+        all_retrieved_sources.extend(
+            docs_by_id[d].source for d in ranked_docs[:_RECALL_K] if d in docs_by_id
+        )
+
+    def _bucket_metrics(rankings: list[tuple[list[str], set[str]]]) -> dict[str, Any]:
+        return {
+            "n": len(rankings),
+            **{f"p@{k}": round(mean_precision_at_k(rankings, k), 4) for k in _P_AT},
+            f"mrr@{_MRR_AT}": round(mrr_at_k(rankings, _MRR_AT), 4),
+        }
+
+    results: dict[str, Any] = {
+        "run_date": run_date,
+        "sudachi_version": _sudachi_version(),
+        "corpus_version": corpus.meta.get("version"),
+        "query_count": len(corpus.queries),
+        "doc_count": len(corpus.documents),
+        "recall_k": _RECALL_K,
+        "overall": _bucket_metrics(all_rankings),
+        "per_bucket": {b: _bucket_metrics(per_bucket_rankings[b]) for b in BUCKETS},
+        "source_recall@10": {
+            k: round(v, 4)
+            for k, v in source_recall_share(
+                all_retrieved_sources, len(all_retrieved_sources)
+            ).items()
+        },
+    }
+
+    if write:
+        _RESULTS_DIR.mkdir(parents=True, exist_ok=True)
+        out = _RESULTS_DIR / f"{run_date}.json"
+        out.write_text(json.dumps(results, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
+        print(f"eval-retrieval: wrote {out}")
+    return results
 
 
 def _main() -> int:
