@@ -401,6 +401,7 @@ from api.routes import (  # noqa: E402
     contexts,
     cost_aggregation,  # Issue #472: cost aggregation API (admin + workspace-scoped)
     external_keys,
+    feedback,  # Issue #888: retrieval feedback signal
     files,  # Issue #485: platform-managed R2 file storage
     graph,
     invitations,
@@ -512,6 +513,9 @@ app.include_router(context_search_config.router)
 
 # Agent session-state lane REST routes (Issue #906, follow-up to #889 — router carries its own prefix)
 app.include_router(agent_state.router)
+
+# Retrieval feedback signal route (Issue #888 — router carries its own /api/v1/contexts prefix)
+app.include_router(feedback.router)
 
 # MCP API routes (Issue #45 - MCP tools list and status)
 app.include_router(mcp.router, prefix="/api/v1")
