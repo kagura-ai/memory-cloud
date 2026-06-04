@@ -297,7 +297,7 @@ Tables are grouped by domain. The authoritative list lives in `backend/src/model
 
 **Memories & graph**
 - **memories** — 3-layer memory storage. Carries server-stamped `source_type` (provenance) and `delivery_mode` (`on_recall` / `always` / `on_trigger`)
-- **attachments** — File attachments linked to memories
+- **attachments** — Small files (≤5 MB) stored **inline as PostgreSQL `BYTEA`**, linked to a memory (Issue #330). Distinct from R2 object storage — see *File storage* below and the [Object Storage (R2)](#object-storage-r2) section
 - **neural_memory_edges** — Primary Hebbian edge storage (workspace + context scoped)
 - **graph_memory** — Legacy NetworkX JSON (read paths still reference it; new writes go to `neural_memory_edges`)
 
@@ -312,6 +312,10 @@ Tables are grouped by domain. The authoritative list lives in `backend/src/model
 - **resource_schemas** — Versioned schemas declared per Resource
 - **indexer_state** — Per-(resource, context) indexer cursor + error metrics
 - **resource_tokens** — Per-Resource ingest tokens (workspace-scoped)
+
+**File storage (R2 object storage)** (Issue #485 — see [Object Storage (R2)](#object-storage-r2))
+- **file_objects** — One row per uploaded file held in Cloudflare R2. `status` ∈ `reserved | uploaded | failed` (`CHECK`); `storage_backend` is `r2`-only (`CHECK valid_file_storage_backend`); `storage_key` = `{workspace_id}/{sha256[:2]}/{sha256}`. A partial-unique index dedups *active* files per `(workspace_id, lower(sha256))` (excludes soft-deleted and `failed` rows). **This — not `attachments` — is the R2-backed path**; `attachments` is inline Postgres BYTEA.
+- **workspace_storage_usage** — Denormalized per-workspace `(used_bytes, file_count)` counter, maintained atomically with `file_objects` inserts/soft-deletes so the quota path reads one row instead of an online `SUM`.
 
 **Plans, quotas & sleep**
 - **user_plans** / **plan_changes** — Plan state and history
@@ -348,6 +352,46 @@ Prior "1 user = 1 collection" design (`kagura_user_{user_id}`) was replaced by t
 1. **Sessions**: Session-based authentication (7 days TTL)
 2. **Cache**: Embedding cache, search results
 3. **Rate Limiting**: Per-key request counters
+
+### Object Storage (R2)
+
+Binary file uploads are stored in **Cloudflare R2**, not in Postgres. R2 is the
+**only** object-storage backend — there is no `STORAGE_BACKEND` switch, and the
+`file_objects.storage_backend` column is pinned to `r2` by a `CHECK`. R2 access is
+configured via the `R2_*` environment variables. The canonical schema lives in
+`backend/src/models/file_objects.py` + alembic `e03_485_file_objects`; this section
+is the conceptual overview (Issue #485). Bucket keys are
+`{workspace_id}/{sha256[:2]}/{sha256}` — the `sha256[:2]` sub-prefix spreads objects
+to avoid an R2 hot partition.
+
+**Three-step presigned upload** (`backend/src/services/file_storage_service.py`,
+route `backend/src/api/routes/files.py`). The server never streams the bytes — the
+client PUTs directly to R2, so this flow is **not** usable from the MCP protocol alone:
+
+1. **reserve** — `reserve_upload` validates size / sha256 / content_type, reserves
+   workspace quota, inserts a row with `status='reserved'`, and returns a short-lived
+   **presigned PUT URL**. `storage_key` may be `NULL` in flight (the
+   `valid_file_storage_shape` CHECK exempts `reserved` rows).
+2. **PUT** — the client uploads the bytes directly to R2 via the presigned URL.
+3. **confirm** — `confirm_upload` verifies the object with `head_object`, then
+   transitions `reserved → uploaded`. Idempotent on retry (re-confirming an already
+   `uploaded` row with a matching sha256 is a no-op).
+
+**Integrity** — when `R2_CHECKSUM_BINDING_ENABLED` is on (Issues #556 / #574), the
+presigned URL is bound to the expected sha256 storage-side so R2 itself rejects a
+mismatched body; the caller's claimed-sha256 check is defense-in-depth.
+
+**Lifecycle sweepers** (`backend/src/tasks/file_tasks.py`):
+- **Orphan sweeper** (`sweep_orphan_files`, 15-minute interval) — `reserved` rows past
+  `expires_at + 1h` are marked `status='failed'` (which frees the active-dedup index),
+  their reserved quota is released, and any dangling R2 object is best-effort deleted.
+- **Soft-delete GC** (`sweep_soft_deleted_files`, nightly, Issue #552) — hard-deletes
+  rows that are `status='uploaded' AND deleted_at IS NOT NULL` and older than the 7-day
+  retention window (`_GC_RETENTION_SECONDS`), along with their R2 binaries. Each sweep
+  loads candidates against a dedicated partial index.
+
+**Quota** — `backend/src/services/storage_quota_service.py` enforces the per-workspace
+byte quota by reading the single `workspace_storage_usage` row (no online `SUM`).
 
 ## Security Architecture
 
