@@ -51,8 +51,9 @@ async def _ingest_corpus(
     ``remember()`` schedules embedding + Qdrant upsert as a fire-and-forget
     ``asyncio.create_task`` and returns before indexing completes. For a
     deterministic eval we must NOT recall before the docs are searchable, so we
-    AWAIT ``process_pending_embedding`` for each memory here — turning the async
-    write into a synchronous "ingested AND indexed" barrier.
+    drive ``process_pending_embedding`` and then poll ``embedding_status`` to a
+    terminal state for each memory here — turning the async write into a
+    synchronous "ingested AND indexed" barrier.
     """
     from models.schemas import RememberRequest
     from services.memory_service import process_pending_embedding
@@ -78,9 +79,45 @@ async def _ingest_corpus(
         # that step, so if it raises, teardown's forget() can still clean up the
         # committed PG row (and any partial Qdrant points).
         id_map[str(resp.memory_id)] = doc.id
-        # Deterministically drive the embedding/Qdrant upsert to completion before
-        # any recall runs (idempotent with the background task remember() fired).
+        # Drive the embedding/Qdrant upsert before any recall runs. This call is
+        # claim-based: if the background task remember() fired wins the claim, our
+        # call returns immediately WITHOUT the upsert being done. So we then poll
+        # embedding_status to a terminal state — only that guarantees the doc is
+        # searchable, regardless of which task did the work.
         await process_pending_embedding(resp.memory_id)
+        await _await_indexed(svc, resp.memory_id)
+
+
+async def _await_indexed(
+    svc: Any, memory_id: UUID, *, attempts: int = 300, interval_s: float = 0.1
+) -> None:
+    """Block until ``memory_id``'s embedding reaches a terminal state.
+
+    ``process_pending_embedding`` is claim-based, so the explicit call in
+    ``_ingest_corpus`` can return before the Qdrant upsert finishes when
+    ``remember()``'s background task wins the claim. We poll ``embedding_status``
+    (a column-only SELECT, so it reads committed state past the session identity
+    map under READ COMMITTED) until ``success``/``failed``. Raises on timeout
+    rather than letting a half-indexed corpus silently produce flaky metrics.
+    """
+    import asyncio
+
+    from sqlalchemy import select
+
+    from models.memory import Memory
+
+    for _ in range(attempts):
+        status = (
+            await svc.db.execute(select(Memory.embedding_status).where(Memory.id == memory_id))
+        ).scalar_one_or_none()
+        if status in ("success", "failed"):
+            return
+        await asyncio.sleep(interval_s)
+    raise RuntimeError(
+        f"embedding for memory {memory_id} never reached a terminal state "
+        f"within {attempts * interval_s:.0f}s — eval would run against a "
+        "half-indexed corpus"
+    )
 
 
 async def run_retrieval_eval(write: bool = True, run_date: str | None = None) -> dict[str, Any]:
