@@ -32,7 +32,11 @@ from models.memory import Memory
 from repositories.memory import MemoryRepository
 from services.graph_service import GraphService
 from services.llm_service import LLMService
-from services.sleep.prompts import CONSOLIDATION_JUDGE_SYSTEM, CONSOLIDATION_JUDGE_USER
+from services.sleep.prompts import (
+    CONSOLIDATION_JUDGE_SYSTEM,
+    CONSOLIDATION_JUDGE_USER,
+    wrap_untrusted_content,
+)
 from services.sleep.reporter import (
     LLMCallBreakdown,
     PhaseResult,
@@ -311,13 +315,15 @@ class ConsolidationPhase:
         items = list(zip(labels, batch, strict=True))
         random.shuffle(items)
 
+        # The summary is untrusted (issue #919) — wrap it so an embedded
+        # instruction cannot steer the consolidation (promote/keep/archive) judgment.
         memory_lines = []
         for label, mem in items:
             age_days = (utcnow() - mem.created_at).days
             memory_lines.append(
                 f"[{label}] type={mem.type}, importance={mem.importance:.2f}, "
                 f"access_count={mem.access_count}, age_days={age_days}, scope={mem.scope}\n"
-                f"    summary: {mem.summary[:300]}"
+                f"    summary:\n{wrap_untrusted_content(mem.summary)}"
             )
 
         prompt = CONSOLIDATION_JUDGE_USER.format(memories="\n".join(memory_lines))

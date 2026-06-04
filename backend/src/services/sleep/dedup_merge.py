@@ -36,7 +36,11 @@ from models.memory import Memory
 from repositories.neural_edge import NeuralEdgeRepository
 from services.embedding_service import EmbeddingService
 from services.llm_service import LLMService
-from services.sleep.prompts import DEDUP_JUDGE_SYSTEM, DEDUP_JUDGE_USER
+from services.sleep.prompts import (
+    DEDUP_JUDGE_SYSTEM,
+    DEDUP_JUDGE_USER,
+    wrap_untrusted_content,
+)
 from services.sleep.reporter import (
     LLMCallBreakdown,
     PhaseResult,
@@ -407,12 +411,13 @@ class DedupMergePhase:
         labels_shuffled = [s[0] for s in shuffled]
         mems_shuffled = [s[1] for s in shuffled]
 
-        # Format memories
+        # Format memories. The summary is untrusted (issue #919) — wrap it so an
+        # embedded instruction cannot steer the merge judgment.
         memory_lines = []
         for label, mem in zip(labels_shuffled, mems_shuffled, strict=True):
             memory_lines.append(
                 f"[{label}] type={mem.type}, importance={mem.importance:.2f}\n"
-                f"    summary: {mem.summary[:300]}"
+                f"    summary:\n{wrap_untrusted_content(mem.summary)}"
             )
 
         # Format pairs

@@ -31,7 +31,11 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from db.qdrant import update_memory_payload_in_qdrant
 from models.memory import Memory
 from services.llm_service import LLMService
-from services.sleep.prompts import IMPORTANCE_REEVAL_SYSTEM, IMPORTANCE_REEVAL_USER
+from services.sleep.prompts import (
+    IMPORTANCE_REEVAL_SYSTEM,
+    IMPORTANCE_REEVAL_USER,
+    wrap_untrusted_content,
+)
 from services.sleep.reporter import (
     LLMCallBreakdown,
     PhaseResult,
@@ -217,12 +221,14 @@ class ImportanceReevalPhase:
         items = list(zip(labels, batch, strict=True))
         random.shuffle(items)
 
+        # The summary is untrusted (issue #919) — wrap it so an embedded
+        # instruction cannot steer the importance re-evaluation.
         memory_lines = []
         for label, mem in items:
             memory_lines.append(
                 f"[{label}] type={mem.type}, importance={mem.importance:.2f}, "
                 f"access_count={mem.access_count}, scope={mem.scope}\n"
-                f"    summary: {mem.summary[:300]}"
+                f"    summary:\n{wrap_untrusted_content(mem.summary)}"
             )
 
         prompt = IMPORTANCE_REEVAL_USER.format(memories="\n".join(memory_lines))

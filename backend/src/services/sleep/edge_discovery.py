@@ -43,6 +43,7 @@ from services.sleep.prompts import (
     EDGE_DISCOVERY_PROMPT_REVISION,
     EDGE_DISCOVERY_SYSTEM,
     EDGE_DISCOVERY_USER,
+    wrap_untrusted_content,
 )
 from services.sleep.reporter import (
     LLMCallBreakdown,
@@ -811,13 +812,15 @@ class EdgeDiscoveryPhase:
         shuffled_items = list(zip(id_list, labels, strict=True))
         random.shuffle(shuffled_items)
 
+        # The summary is untrusted (issue #919) — wrap it so an embedded
+        # instruction cannot steer the edge-discovery judgment.
         memory_lines = []
         for mid, label in shuffled_items:
             mem = memory_map.get(mid)
             if mem:
                 memory_lines.append(
                     f"[{label}] type={mem.type}, importance={mem.importance:.2f}\n"
-                    f"    summary: {mem.summary[:300]}"
+                    f"    summary:\n{wrap_untrusted_content(mem.summary)}"
                 )
 
         # Build pair_lines, skipping pairs where either end is not in
