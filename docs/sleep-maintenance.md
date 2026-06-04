@@ -135,6 +135,15 @@ Phases 1–4 call the LLM through `LLMService`, which supports:
 - **Interface**: `complete_json()` returns `(parsed_json, tokens_used)`; each phase aggregates tokens into its `PhaseResult`, and the reporter rolls them up into the `SleepReport`.
 - **Budget enforcement**: every phase checks `SleepBudget.can_afford()` before issuing an LLM batch. When the budget is exhausted, later phases are skipped with `skip_reason="budget_exhausted"`. Defaults: `max_llm_calls=50`, `max_memories=200` per run (override via Neural Config).
 
+### Trust boundary for memory content (prompt-injection hardening)
+
+A memory `summary` can be **untrusted** — it may originate from external text ingested via connectors. Phases 1–4 interpolate that summary into the LLM judgment prompt, so a crafted payload in a memory body could otherwise try to steer the nightly batch's judgments (graph pollution, false merges, false archival) in an unattended job. Two input-side defenses neutralize this (issue #919):
+
+- **Structural isolation**: every summary is wrapped via `wrap_untrusted_content()` (`services/sleep/prompts.py`) between the explicit markers `[BEGIN UNTRUSTED MEMORY CONTENT]` … `[END UNTRUSTED MEMORY CONTENT]`. The helper also defangs any verbatim copy of those markers found *inside* the content, so a payload cannot forge the closing marker to "break out" of the wrapper. Truncation to 300 chars is applied to the raw content first.
+- **Injection-resistance directive**: every phase system prompt carries `INJECTION_RESISTANCE_DIRECTIVE`, instructing the model to treat everything between the markers strictly as data and to ignore any embedded directive that tries to change its task, rules, scoring, verdicts, or output format.
+
+**What is and isn't wrapped**: only the `summary` is untrusted and wrapped. System-controlled fields (the short label, `type`, `importance`, `scope`, `access_count`, `age_days`) are not an injection vector and are passed as-is. The non-LLM signals — tag co-occurrence and Hebbian co-activation — are deterministic and never reach an LLM prompt, so they are outside this boundary. Editing the Edge Discovery prompt requires bumping `EDGE_DISCOVERY_PROMPT_REVISION` so `sleep_reports.details` can distinguish runs. Regression coverage: `tests/services/sleep/test_sleep_prompt_injection.py`.
+
 ## Scheduling
 
 Sleep runs as a cron-triggered APScheduler job registered in `schedule_sleep_tasks()`.
