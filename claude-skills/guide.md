@@ -35,10 +35,9 @@ Create or update `.mcp.json`:
 {
   "mcpServers": {
     "kagura-memory": {
-      "type": "streamable-http",
-      "url": "{server_url}/mcp",
+      "type": "http",
+      "url": "{server_url}/mcp/w/{workspace_id}",
       "headers": {
-        "X-Workspace-ID": "{workspace_id}",
         "Authorization": "Bearer {api_key}"
       }
     }
