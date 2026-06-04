@@ -18,7 +18,7 @@ An **offline harness** for detecting hybrid-search (dense + BM25) retrieval-qual
 | `metrics.py` | Pure P@k / MRR@k / source-recall functions | ✅ (`test_metrics.py`) |
 | `tools/corpus.py` | Corpus loader + BM25-aligned tokenization + IDF stats | ✅ |
 | `tools/leakage_check.py` | Leakage detector (3 rules) | ✅ (`test_leakage.py`) |
-| `tools/stratify.py` | Difficulty stratification (IDF-spec, BM25-rank, corpus-Jaccard) | ✅ (`test_stratification.py`) |
+| `tools/stratify.py` | Difficulty stratification (IDF-spec, BM25-rank, corpus-overlap) | ✅ (`test_stratification.py`) |
 | `test_corpus_schema.py` | Structural contract (buckets, labels, sources) | ✅ |
 | `test_retrieval_quality.py` + `runner.py` | **Live** P@5/MRR measurement → `results/<date>.json` | ❌ skip-guarded |
 
@@ -87,7 +87,9 @@ Descriptive difficulty signals — **coverage characterization, not pass/fail ga
 - **spec(q)** = avg corpus IDF of query terms (high = specific vocabulary).
 - **bm25_rank** = rank of the first relevant doc under BM25-only → `easy` (1) /
   `medium` (2–3) / `hard` (>3 or unranked). The lexical-difficulty pseudo-label.
-- **corpus_jaccard** = overlap with the top-1000 most-frequent corpus tokens.
+- **corpus_overlap** = overlap coefficient (|q ∩ top| / |q|) with the top-1000
+  most-frequent corpus tokens. (Overlap coefficient, not true Jaccard — see
+  `tools/stratify.py`.)
 
 `test_stratification.py` only asserts the set spans ≥2 regimes and has ≥1 `hard`
 query (hiragana-only is BM25-hard by construction), so an all-easy corpus — which
