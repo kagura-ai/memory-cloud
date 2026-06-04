@@ -157,7 +157,9 @@ async def _teardown(
 
     for mid in memory_ids:
         try:
-            # forget() deletes from BOTH Postgres and Qdrant.
+            # forget() soft-deletes in Postgres (sets deleted_at/deleted_by) and
+            # hard-deletes the Qdrant point. The PG row is physically removed below
+            # by the Context DELETE via ON DELETE CASCADE.
             await svc.forget(ForgetRequest(memory_id=UUID(mid)), owner, ctx_id)
         except Exception:  # noqa: BLE001 — best-effort cleanup
             pass
