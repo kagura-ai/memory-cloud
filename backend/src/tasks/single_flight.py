@@ -84,9 +84,17 @@ async def single_flight(lock_key: str) -> AsyncIterator[bool]:
         try:
             yield True
         finally:
-            released = bool(await conn.scalar(_UNLOCK_SQL, {"key": lock_key}))
-            if not released:
-                # The lock was not held by this session — indicates the lock
-                # was released out from under us (connection drift). Surface it
-                # rather than swallowing, since it points at a pooling bug.
-                logger.warning("single_flight_unlock_unexpected", lock_key=lock_key)
+            # The unlock must never mask the body's exception. If the connection
+            # died, the unlock call raises here — but a dead connection means
+            # Postgres has already dropped this session's advisory lock on close,
+            # so there is nothing to leak; we just log and let the body's
+            # exception (if any) propagate.
+            try:
+                released = bool(await conn.scalar(_UNLOCK_SQL, {"key": lock_key}))
+                if not released:
+                    # The lock was not held by this session — indicates it was
+                    # released out from under us (connection drift). Surface it
+                    # rather than swallowing, since it points at a pooling bug.
+                    logger.warning("single_flight_unlock_unexpected", lock_key=lock_key)
+            except Exception:
+                logger.warning("single_flight_unlock_failed", lock_key=lock_key, exc_info=True)

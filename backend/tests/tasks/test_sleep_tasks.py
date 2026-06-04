@@ -125,3 +125,34 @@ async def test_single_flight_yields_false_when_lock_held():
 
     # Only the try call — never held the lock, so never unlocked.
     assert conn.scalar.await_count == 1
+
+
+@pytest.mark.asyncio
+async def test_single_flight_unlock_failure_does_not_mask_body_error():
+    """A failing unlock in the finally must NOT shadow the body's exception.
+
+    If the connection dies, the unlock ``scalar`` call raises — but Postgres has
+    already dropped the session lock on connection close, so there is nothing to
+    leak. The body's original exception must still be the one that propagates.
+    """
+    from tasks.single_flight import single_flight
+
+    conn = MagicMock()
+    # 1st scalar = try_advisory_lock → True; 2nd = unlock → raises (dead conn).
+    conn.scalar = AsyncMock(side_effect=[True, ConnectionError("db gone")])
+
+    @asynccontextmanager
+    async def _fake_connect():
+        yield conn
+
+    engine = MagicMock()
+    engine.connect = lambda: _fake_connect()
+
+    with patch("tasks.single_flight._get_engine", return_value=engine):
+        # The body's RuntimeError must win over the unlock's ConnectionError.
+        with pytest.raises(RuntimeError, match="boom"):
+            async with single_flight("sleep_maintenance") as acquired:
+                assert acquired is True
+                raise RuntimeError("boom")
+
+    assert conn.scalar.await_count == 2  # try + (failing) unlock both attempted
