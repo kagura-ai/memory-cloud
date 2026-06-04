@@ -48,6 +48,8 @@ Pick the context whose `name`, `summary`, or recent usage matches the current re
 
 After choosing a context, call `get_context_info(context_id=..., include_details=true)` once per session or after switching contexts. Follow the context-specific `usage_guide` over generic defaults.
 
+<!-- SYNC: keep "Start Session" in step with claude-skills/session-start.md (trust_tier default, load_pinned, recall_upcoming, empty-section suppression). When one changes, change both. -->
+
 ## Start Session
 
 When the user asks to start, restore, or resume a Kagura Memory session:
@@ -58,12 +60,15 @@ When the user asks to start, restore, or resume a Kagura Memory session:
    - `git status --short`
    - `git diff --stat HEAD~3` if available
 2. Resolve the target context and load `get_context_info`.
-3. Recall recent and actionable memory (compute a real ISO-8601 timestamp for `created_after` — never pass the literal placeholder):
-   - `recall(context_id=..., query="session summary progress decision", k=5, filters={"created_after": "<ISO-8601 timestamp for 7 days ago>"})`
-   - `recall(context_id=..., query="blocker issue TODO pending", k=5, filters={"created_after": "<ISO-8601 timestamp for 7 days ago>"})`
-   - `recall(context_id=..., query="dev environment troubleshooting workaround", k=3, filters={"type": "troubleshooting"})`
-4. If the branch, commits, or memories mention issue numbers and `gh` is available, inspect relevant issues.
-5. Report concise restored context: branch, uncommitted changes, chosen memory context, recent work, memory highlights, open issues, and suggested next steps.
+3. Recall recent and actionable memory (compute a real ISO-8601 timestamp for `created_after` — never pass the literal placeholder). Pass `trust_tier: "trusted"` on these bootstrap recalls — they influence what you do next, so exclude external/connector-ingested memories (OWASP LLM01/LLM03; no-op on manual-only contexts):
+   - `recall(context_id=..., query="session summary progress decision", k=5, filters={"created_after": "<7 days ago>", "trust_tier": "trusted"})`
+   - `recall(context_id=..., query="blocker issue TODO pending", k=5, filters={"created_after": "<7 days ago>", "trust_tier": "trusted"})`
+   - `recall(context_id=..., query="dev environment troubleshooting workaround", k=3, filters={"type": "troubleshooting", "tags": ["dev-environment"], "trust_tier": "trusted"})`
+4. Load the deterministic always-on layer (not probabilistic — run regardless of the 7-day window):
+   - `load_pinned(context_id=...)` → the complete pinned `delivery_mode="always"` set (standing guardrails/goals). **If empty, omit the "📌 Standing guardrails" section entirely** (no placeholder). Otherwise show each with its `memory_id` + an unpin hint (`update_memory(memory_id=..., delivery_mode="on_recall")`); if >7 pinned, warn to prune.
+   - `recall_upcoming(context_id=..., from="now")` → forward-looking Time Memories (`type="time"`). **If empty, omit the "⏰ Upcoming" section entirely.**
+5. If the branch, commits, or memories mention issue numbers and `gh` is available, inspect relevant issues.
+6. Report concise restored context: branch, uncommitted changes, chosen memory context, recent work, memory highlights, standing guardrails (if any), upcoming (if any), open issues, and suggested next steps.
 
 Keep memory highlights selective. Do not dump long histories.
 
@@ -89,6 +94,7 @@ When saving new knowledge, decisions, bug fixes, troubleshooting notes, or sessi
 
 1. Resolve the context. Ask before writing if the context is ambiguous.
 2. Store reusable conclusions, not process narration.
+<!-- SYNC: keep the type vocabulary + pin guidance in step with claude-skills/session-summary.md (type="time", delivery_mode="always" budget ≤7/prune-at-10, supersede=unpin+pin). When one changes, change both. -->
 3. Use this type vocabulary unless the context guide says otherwise:
    - `decision`: architecture choices, rejected alternatives, rationale.
    - `pattern`: reusable implementation approaches.
@@ -96,6 +102,7 @@ When saving new knowledge, decisions, bug fixes, troubleshooting notes, or sessi
    - `troubleshooting`: environment gotchas and workarounds.
    - `learning`: benchmarks, tool limits, evaluation findings.
    - `note`: roadmap, status, milestone relationships.
+   - `time`: forward-looking / dated follow-up (deadline, "re-check on date X"). Set `details={"trigger": {...}}` so `recall_upcoming` surfaces it on time.
 4. Set importance by reuse value:
    - `1.0`: core principle or critical decision.
    - `0.8-0.9`: reusable decision, bug fix, or pattern.
@@ -103,8 +110,9 @@ When saving new knowledge, decisions, bug fixes, troubleshooting notes, or sessi
 5. Include tags for category, entities, features, and related issues, for example `category:auth` or `issue:#802`.
 6. When the knowledge comes from a specific file, URL, or vault, set the first-class `source_uri` and `source_type` (`"file"` | `"url"` | `"vault"` | `"api"` | `"manual"`) fields so it stays retrievable via `recall(filters={"source_uri_prefix": ...})` and `{"source_type": ...}`. Use `linked_source_uris` to connect related memories at creation time.
 7. Include `Related issues: #N` in `content` when applicable.
+8. Pin a memory with `delivery_mode="always"` ONLY for a true standing guardrail/goal that must load every session (it is then surfaced deterministically by `load_pinned`). Pin sparingly — keep a context at ≤7 pinned (prune at 10; the `pinned_load_cap` of 100 is a safety net, not the budget). Decisions/patterns/status are NOT pin material. Before pinning, call `load_pinned` to check the count; when an invariant supersedes an old one, unpin the old in the same step (`update_memory(memory_id=<old>, delivery_mode="on_recall")`) so two competing invariants are never both pinned.
 
-Use `remember(context_id=..., summary=..., content=..., type=..., importance=..., tags=..., context_summary=..., source_uri=..., source_type=..., linked_source_uris=...)`.
+Use `remember(context_id=..., summary=..., content=..., type=..., importance=..., tags=..., context_summary=..., source_uri=..., source_type=..., linked_source_uris=..., delivery_mode=...)`.
 
 Never store passwords, API keys, bearer tokens, private customer data, or unnecessary PII.
 

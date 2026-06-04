@@ -16,7 +16,7 @@ Review the conversation and collect all GitHub issue numbers that were worked on
 
 ### 2. Identify what to remember
 
-Review the conversation and categorize knowledge into one of the six canonical types (see `remember` skill for the full vocabulary):
+Review the conversation and categorize knowledge into one of the canonical types (see `remember` skill for the full vocabulary):
 
 | Type | What to capture | Importance |
 |------|----------------|------------|
@@ -26,6 +26,7 @@ Review the conversation and categorize knowledge into one of the six canonical t
 | `troubleshooting` | Error solutions, workarounds, environment-specific fixes | 0.5-0.7 |
 | `learning` | SDK benchmark results, performance findings, tool limitations | 0.6-0.8 |
 | `note` | Milestone status, roadmap changes, issue relationships | 0.6-0.8 |
+| `time` | Forward-looking / dated follow-ups (a deadline, "re-check on date X", a scheduled flag flip). Set `details={"trigger": {...}}` so `recall_upcoming` surfaces it at the right time instead of letting it decay into the backlog. | 0.6-0.8 |
 
 ### 3. Get the target context
 
@@ -46,6 +47,22 @@ For each item, use `remember` with:
 - **tags**: `category:{domain}` + entity tags + writing variations for Japanese + `issue:#N` for each related issue
 - **context_summary**: Why this matters, when to recall it. Include a `Related issues: #N, #M` line at the end of **content** linking to relevant GitHub issues.
 - **linked_source_uris** (optional): If the knowledge relates to a specific file or document already in memory, link it by source_uri (e.g. `["vault://my-vault/related-note.md"]`). Unresolved URIs are silently skipped.
+
+### 4a. Pinning standing guardrails (`delivery_mode="always"`) — sparingly
+
+A pinned memory is loaded **deterministically every session** via `load_pinned` (see `session-start`). That makes it the right home for a true standing invariant — an active prod color, a non-negotiable policy, a release gate — but it also means every pinned memory costs context budget on every future session. Over-pinning degrades the signal of every session that follows.
+
+Pin only when the knowledge must be seen *every* session, not merely recalled when relevant. Concretely:
+
+- **Budget: keep a context at ≤7 pinned memories; treat 10 as a hard "stop and prune" line.** The server hard cap (`pinned_load_cap`, default 100) is a truncation safety net, **not** the editorial budget — do not let it stand in for judgment. Decisions, patterns, and status notes are NOT pin material; they belong in normal `recall`.
+- **Pre-pin count check**: before pinning, call `load_pinned(context_id=...)`. If the context already has ≥7 pinned, unpin a stale one first.
+- **Supersede = unpin old + pin new** (atomic). When a new invariant replaces an old one (e.g. active color `green` → `blue`), unpin the old one in the same step — never leave two competing invariants pinned:
+  ```
+  update_memory(memory_id=<old>, context_id=..., delivery_mode="on_recall")
+  ```
+  Then `remember(..., delivery_mode="always")` (or `update_memory(... delivery_mode="always")`) the new one.
+
+To pin at save time: `remember(..., delivery_mode="always")`.
 
 ### 5. Guidelines
 
