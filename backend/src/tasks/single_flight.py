@@ -32,7 +32,10 @@ Design notes (see issue #933 gate1 review):
   opens (e.g. via ``get_db()``) — they are separate pool checkouts. So the
   caller committing repeatedly on its own session does NOT release this
   session-level lock; only this module's explicit unlock (or process death)
-  does.
+  does. Consequence: a guarded task holds **two** pool slots for the run's
+  duration (the lock connection here plus the caller's work session). That is
+  fine for an off-peak nightly cron, but weigh it before applying the guard to
+  high-frequency tasks — consider a dedicated/NullPool engine for the lock there.
 - **Lock keys must be globally unique** across all single-flight consumers in
   the deployment, since they all share the one advisory-lock keyspace. Existing
   callers scope theirs (``workspace_create:<id>``, ``connector_seat:<id>``); a
@@ -45,6 +48,7 @@ from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 
 from sqlalchemy import text
+from sqlalchemy.ext.asyncio import AsyncConnection
 
 from db.base import _get_engine
 from utils.logger import get_logger
@@ -53,6 +57,38 @@ logger = get_logger(__name__)
 
 _TRY_LOCK_SQL = text("SELECT pg_try_advisory_lock(hashtextextended(:key, 0))")
 _UNLOCK_SQL = text("SELECT pg_advisory_unlock(hashtextextended(:key, 0))")
+
+
+async def _release(conn: AsyncConnection, lock_key: str) -> None:
+    """Release the advisory lock; safe to call from a ``finally`` (never raises).
+
+    Critical invariant: the connection must NOT return to the pool while still
+    holding the session-level lock. A pooled connection is reset with ROLLBACK
+    (SQLAlchemy's default ``reset_on_return``), which does NOT release session
+    advisory locks — and a later checkout that re-runs ``pg_try_advisory_lock`` on
+    that same backend gets ``True`` (re-entrant), silently defeating the
+    cross-process guard. So whenever the unlock does not *provably* succeed we
+    ``invalidate()`` the connection: the physical backend is closed and Postgres
+    drops the lock on session end.
+    """
+    try:
+        released = bool(await conn.scalar(_UNLOCK_SQL, {"key": lock_key}))
+        if released:
+            return
+        # Unlock returned False — this backend did not hold the lock (e.g. pre-ping
+        # swapped the underlying connection). Discard it so a stale lock can't ride
+        # a pooled connection into the next caller.
+        logger.warning("single_flight_unlock_unexpected", lock_key=lock_key)
+    except Exception:
+        # Unlock failed for a reason other than provable success (statement
+        # timeout, InterfaceError, transient OSError, ...). The connection may
+        # still be alive AND still holding the lock — fall through to invalidate.
+        logger.warning("single_flight_unlock_failed", lock_key=lock_key, exc_info=True)
+
+    try:
+        await conn.invalidate()
+    except Exception:
+        logger.warning("single_flight_invalidate_failed", lock_key=lock_key, exc_info=True)
 
 
 @asynccontextmanager
@@ -78,23 +114,16 @@ async def single_flight(lock_key: str) -> AsyncIterator[bool]:
     async with engine.connect() as conn:
         acquired = bool(await conn.scalar(_TRY_LOCK_SQL, {"key": lock_key}))
         if not acquired:
-            logger.info("single_flight_skipped", lock_key=lock_key)
+            # debug, not info: the sole caller already logs a domain-level skip
+            # (e.g. sleep_maintenance_task_skipped), so an info line here just
+            # doubles it on every contended tick.
+            logger.debug("single_flight_skipped", lock_key=lock_key)
             yield False
             return
         try:
             yield True
         finally:
-            # The unlock must never mask the body's exception. If the connection
-            # died, the unlock call raises here — but a dead connection means
-            # Postgres has already dropped this session's advisory lock on close,
-            # so there is nothing to leak; we just log and let the body's
-            # exception (if any) propagate.
-            try:
-                released = bool(await conn.scalar(_UNLOCK_SQL, {"key": lock_key}))
-                if not released:
-                    # The lock was not held by this session — indicates it was
-                    # released out from under us (connection drift). Surface it
-                    # rather than swallowing, since it points at a pooling bug.
-                    logger.warning("single_flight_unlock_unexpected", lock_key=lock_key)
-            except Exception:
-                logger.warning("single_flight_unlock_failed", lock_key=lock_key, exc_info=True)
+            # ``_release`` never raises, so the body's exception (if any) still
+            # propagates, and it guarantees the lock is dropped (unlock or, on any
+            # non-success, connection invalidation) rather than leaked to the pool.
+            await _release(conn, lock_key)

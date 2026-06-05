@@ -204,10 +204,12 @@ async def sleep_maintenance_task():
             await _sleep_maintenance_run()
     except Exception as e:
         # Lock-acquisition / infra failures (e.g. Postgres unreachable when the
-        # cron fires) occur outside _sleep_maintenance_run's own handler; log them
-        # through the same structured event so they are not silently demoted to
-        # APScheduler's generic job-error log.
-        logger.error("sleep_maintenance_task_failed", error=str(e), exc_info=True)
+        # cron fires) occur outside _sleep_maintenance_run's own handler. Use a
+        # DISTINCT event name from the body-failure event (sleep_maintenance_task_failed)
+        # so alerting can route the two correctly: this one means "could not even
+        # start the sweep" (DB connectivity — wide blast radius), the inner one
+        # means "the sweep itself failed".
+        logger.error("sleep_maintenance_lock_acquire_failed", error=str(e), exc_info=True)
 
 
 async def _sleep_maintenance_run() -> None:
