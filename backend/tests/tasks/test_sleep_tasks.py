@@ -85,6 +85,7 @@ async def test_single_flight_releases_lock_on_exit():
     # 1st scalar = pg_try_advisory_lock → True, 2nd = pg_advisory_unlock → True
     conn.scalar = AsyncMock(side_effect=[True, True])
     conn.invalidate = AsyncMock()
+    conn.commit = AsyncMock()
 
     @asynccontextmanager
     async def _fake_connect():
@@ -111,6 +112,9 @@ async def test_single_flight_releases_lock_on_exit():
     assert conn.scalar.await_count == 2
     # Unlock succeeded → the connection is clean, so it is NOT invalidated.
     conn.invalidate.assert_not_awaited()
+    # The try-lock's autobegun transaction is committed (the session lock survives
+    # COMMIT), so no idle-in-transaction is pinned for the run's duration.
+    conn.commit.assert_awaited_once()
 
 
 @pytest.mark.asyncio
@@ -150,6 +154,7 @@ async def test_single_flight_unlock_failure_does_not_mask_body_error():
     # 1st scalar = try_advisory_lock → True; 2nd = unlock → raises (dead conn).
     conn.scalar = AsyncMock(side_effect=[True, ConnectionError("db gone")])
     conn.invalidate = AsyncMock()
+    conn.commit = AsyncMock()
 
     @asynccontextmanager
     async def _fake_connect():
@@ -190,6 +195,7 @@ async def test_single_flight_invalidates_when_unlock_returns_false():
     # try → True (acquired); unlock → False (not held by this backend).
     conn.scalar = AsyncMock(side_effect=[True, False])
     conn.invalidate = AsyncMock()
+    conn.commit = AsyncMock()
 
     @asynccontextmanager
     async def _fake_connect():

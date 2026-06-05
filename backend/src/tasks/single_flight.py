@@ -120,6 +120,12 @@ async def single_flight(lock_key: str) -> AsyncIterator[bool]:
             logger.debug("single_flight_skipped", lock_key=lock_key)
             yield False
             return
+        # End the transaction the try-lock autobegan (SQLAlchemy commit-as-you-go).
+        # The session-level advisory lock survives COMMIT, so we keep holding it
+        # while NOT pinning an idle-in-transaction snapshot for the whole run —
+        # which would hold back the vacuum xmin horizon and risk
+        # idle_in_transaction_session_timeout silently dropping the lock mid-run.
+        await conn.commit()
         try:
             yield True
         finally:
