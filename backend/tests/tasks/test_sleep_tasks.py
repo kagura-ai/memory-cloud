@@ -94,12 +94,20 @@ async def test_single_flight_releases_lock_on_exit():
     engine = MagicMock()
     engine.connect = lambda: _fake_connect()
 
+    # Capture the exception manually rather than via ``pytest.raises`` as a
+    # context manager: the static analyzer (CodeQL) treats the post-``with``
+    # asserts as unreachable because it does not model ``pytest.raises`` swallowing
+    # the exception. try/except keeps the asserts reachable and intent identical.
+    raised = None
     with patch("tasks.single_flight._get_engine", return_value=engine):
-        with pytest.raises(RuntimeError):
+        try:
             async with single_flight("sleep_maintenance") as acquired:
                 assert acquired is True
                 raise RuntimeError("boom")
+        except RuntimeError as exc:
+            raised = exc
 
+    assert isinstance(raised, RuntimeError) and str(raised) == "boom"
     # try + unlock both ran (unlock fired from finally despite the raise).
     assert conn.scalar.await_count == 2
 
@@ -148,11 +156,18 @@ async def test_single_flight_unlock_failure_does_not_mask_body_error():
     engine = MagicMock()
     engine.connect = lambda: _fake_connect()
 
+    # Manual capture (not ``pytest.raises``) so CodeQL sees the post-block asserts
+    # as reachable. This also pins the stronger contract: only the body's
+    # RuntimeError may propagate — if the unlock's ConnectionError masked it, the
+    # ``except RuntimeError`` would not catch it and the test would error.
+    raised = None
     with patch("tasks.single_flight._get_engine", return_value=engine):
-        # The body's RuntimeError must win over the unlock's ConnectionError.
-        with pytest.raises(RuntimeError, match="boom"):
+        try:
             async with single_flight("sleep_maintenance") as acquired:
                 assert acquired is True
                 raise RuntimeError("boom")
+        except RuntimeError as exc:
+            raised = exc
 
+    assert isinstance(raised, RuntimeError) and str(raised) == "boom"
     assert conn.scalar.await_count == 2  # try + (failing) unlock both attempted
