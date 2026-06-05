@@ -14,8 +14,6 @@ These tests pin the contract at two boundaries without a real Postgres:
 - helper boundary: acquire/release semantics (unlock in finally; no unlock when not held).
 """
 
-from __future__ import annotations
-
 from contextlib import asynccontextmanager
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -171,3 +169,30 @@ async def test_single_flight_unlock_failure_does_not_mask_body_error():
 
     assert isinstance(raised, RuntimeError) and str(raised) == "boom"
     assert conn.scalar.await_count == 2  # try + (failing) unlock both attempted
+
+
+@pytest.mark.asyncio
+async def test_sleep_maintenance_swallows_lock_acquisition_failure(monkeypatch):
+    """If acquiring the lock fails (e.g. Postgres down), the task logs and does not
+    propagate — the scheduler must keep running, and the failure is reported via the
+    task's own structured handler rather than escaping to APScheduler."""
+    monkeypatch.setenv("ENABLE_NEURAL_MEMORY", "true")
+    monkeypatch.setenv("SLEEP_ENABLED", "true")
+
+    from tasks import sleep_tasks
+
+    @asynccontextmanager
+    async def _raising_single_flight(key):
+        raise ConnectionError("postgres down")
+        yield True  # pragma: no cover - unreachable, satisfies the generator contract
+
+    get_db_mock = MagicMock()
+    with (
+        patch.object(sleep_tasks, "single_flight", _raising_single_flight),
+        patch.object(sleep_tasks, "get_db", get_db_mock),
+    ):
+        # Must NOT raise — the task's try/except catches the acquisition failure.
+        await sleep_tasks.sleep_maintenance_task()
+
+    # Acquisition failed before any sweep work.
+    get_db_mock.assert_not_called()

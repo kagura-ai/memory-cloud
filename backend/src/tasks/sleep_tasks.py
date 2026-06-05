@@ -193,14 +193,21 @@ async def sleep_maintenance_task():
     # fires the nightly cron independently and every context is swept twice
     # (``max_instances=1`` only dedupes within one process). The first process to
     # acquire the Postgres advisory lock runs the sweep; the others no-op.
-    async with single_flight("sleep_maintenance") as acquired:
-        if not acquired:
-            logger.info(
-                "sleep_maintenance_task_skipped",
-                reason="lock_held_by_other_process",
-            )
-            return
-        await _sleep_maintenance_run()
+    try:
+        async with single_flight("sleep_maintenance") as acquired:
+            if not acquired:
+                logger.info(
+                    "sleep_maintenance_task_skipped",
+                    reason="lock_held_by_other_process",
+                )
+                return
+            await _sleep_maintenance_run()
+    except Exception as e:
+        # Lock-acquisition / infra failures (e.g. Postgres unreachable when the
+        # cron fires) occur outside _sleep_maintenance_run's own handler; log them
+        # through the same structured event so they are not silently demoted to
+        # APScheduler's generic job-error log.
+        logger.error("sleep_maintenance_task_failed", error=str(e), exc_info=True)
 
 
 async def _sleep_maintenance_run() -> None:
