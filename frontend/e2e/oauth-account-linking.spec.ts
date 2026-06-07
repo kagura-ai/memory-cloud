@@ -54,16 +54,19 @@ test("link → unlink → re-link a GitHub identity via the mock IdP", async ({
   await expect(page.getByTestId(disconnectBtn)).toHaveCount(0);
 
   // --- Link: full-page OAuth round-trip (frontend → mock IdP → backend → /profile). ---
+  // Assert on DOM state (the Disconnect button appears only after the round-trip
+  // lands back on /profile AND the providers fetch reports github linked), not on
+  // the URL: waitForURL(/profile/) would match the *current* /profile before the
+  // navigation even starts, and the success "?linked=1" param persists across the
+  // later unlink — both would resolve early. The 30s timeout covers the full
+  // browser → mock IdP → backend → DB → redirect → reload chain on a cold runner.
   await page.getByTestId(connectBtn).click();
-  await page.waitForURL(/\/profile(\?|$)/, { timeout: 30_000 });
-
-  // Now linked: Disconnect present, Connect gone.
   await expect(page.getByTestId(disconnectBtn)).toBeVisible({
-    timeout: 15_000,
+    timeout: 30_000,
   });
   await expect(page.getByTestId(connectBtn)).toHaveCount(0);
 
-  // --- Unlink: open the confirm dialog and confirm. ---
+  // --- Unlink: open the confirm dialog and confirm (in-page, no navigation). ---
   await page.getByTestId(disconnectBtn).click();
   await page.getByTestId(T.disconnectConfirm).click();
 
@@ -73,8 +76,7 @@ test("link → unlink → re-link a GitHub identity via the mock IdP", async ({
 
   // --- Re-link: the same identity links again cleanly. ---
   await page.getByTestId(connectBtn).click();
-  await page.waitForURL(/\/profile(\?|$)/, { timeout: 30_000 });
   await expect(page.getByTestId(disconnectBtn)).toBeVisible({
-    timeout: 15_000,
+    timeout: 30_000,
   });
 });

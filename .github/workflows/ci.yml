@@ -400,6 +400,12 @@ jobs:
       GITHUB_CLIENT_ID: e2e-mock-client-id
       GITHUB_CLIENT_SECRET: e2e-mock-client-secret
       GITHUB_REDIRECT_URI: http://localhost:8080/api/v1/auth/github/callback
+      # The GitHub callback guards on `_oauth2_manager`, which main.py only
+      # initializes when GOOGLE_CLIENT_ID is set — so the GitHub-only flow still
+      # needs a (dummy) Google client id or the callback 500s "Auth managers not
+      # initialized". Non-secret throwaway values for an ephemeral CI run.
+      GOOGLE_CLIENT_ID: e2e-mock-google-client-id
+      GOOGLE_CLIENT_SECRET: e2e-mock-google-client-secret
     services:
       postgres:
         image: postgres:15-alpine
