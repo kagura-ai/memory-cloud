@@ -30,6 +30,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from api.routes import auth as auth_module
 from api.routes.me_oauth import (
     INTENT_KEY,
+    RETURN_TO_KEY,
     STATE_TTL,
     USER_KEY,
     _build_authorization_url,
@@ -337,7 +338,7 @@ async def link_provider(
     # Pin the originating user so the callback binds the returned identity
     # to THIS account (and rejects state replayed under a different session).
     redis.setex(USER_KEY.format(state=state), STATE_TTL, user_id)
-    redis.setex(f"oauth2_return_to:{state}", STATE_TTL, "/profile?linked=1")
+    redis.setex(RETURN_TO_KEY.format(state=state), STATE_TTL, "/profile?linked=1")
 
     logger.info("link_provider_initiated", user_id=user_id, provider=provider)
 

@@ -52,6 +52,7 @@ router = APIRouter(prefix="/me", tags=["me-oauth"])
 # (which auth.py reads back as the literal string "pending").
 INTENT_KEY = "oauth2_state_intent:{state}"
 USER_KEY = "oauth2_state_user:{state}"
+RETURN_TO_KEY = "oauth2_return_to:{state}"
 STATE_TTL = 300  # 5 minutes — matches auth.py's existing oauth2_state TTL
 
 # Rate limit: per-user, per-minute window.
@@ -295,7 +296,7 @@ async def refresh_oauth(
     # page can read to show a success toast. Persist the *normalized*
     # value (whitespace stripped, control bytes already rejected above).
     return_to = normalized_return_to or "/profile?refreshed=1"
-    redis.setex(f"oauth2_return_to:{state}", STATE_TTL, return_to)
+    redis.setex(RETURN_TO_KEY.format(state=state), STATE_TTL, return_to)
 
     logger.info("refresh_oauth_initiated", user_id=user_id, provider=provider)
 

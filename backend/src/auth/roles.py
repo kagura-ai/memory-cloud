@@ -341,14 +341,32 @@ class RoleManager:
                     # correctly skipped here: link is not None, so no duplicate
                     # row is added for the user resolved via the legacy path.
                     if link is None:
-                        db.add(
-                            UserOAuthProvider(
+                        # Wrap the self-heal insert in a SAVEPOINT: two
+                        # concurrent first-logins of the SAME legacy user via the
+                        # SAME provider both reach this backfill and race on the
+                        # uq_user_oauth_providers_* UNIQUE constraints. Without a
+                        # savepoint the loser's IntegrityError would poison the
+                        # outer transaction that _sync_existing_user commits.
+                        # The concurrent winner already created the row, so a
+                        # UNIQUE violation here is benign — swallow and continue;
+                        # the legacy user is still resolved via the user_id path.
+                        try:
+                            async with db.begin_nested():
+                                db.add(
+                                    UserOAuthProvider(
+                                        user_id=user.user_id,
+                                        provider=auth_provider,
+                                        oauth_sub=user_id,
+                                        last_used_at=utcnow(),
+                                    )
+                                )
+                                await db.flush()
+                        except IntegrityError:
+                            logger.info(
+                                "oauth_provider_self_heal_race",
                                 user_id=user.user_id,
                                 provider=auth_provider,
-                                oauth_sub=user_id,
-                                last_used_at=utcnow(),
                             )
-                        )
 
             if user is not None:
                 return await self._sync_existing_user(

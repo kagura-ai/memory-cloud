@@ -178,12 +178,9 @@ export default function ConnectedAccounts() {
       // 409 = would leave zero auth methods. Surface the API's intent via an
       // Alert inside the still-open dialog (per the error-surface rules:
       // errors raised inside a dialog body use <Alert>, not a toast behind it).
-      const messageKey =
-        error instanceof ApiError && error.status === 409
-          ? "lastMethodError"
-          : "disconnectError";
+      const isLastMethod = error instanceof ApiError && error.status === 409;
       setDialogError(
-        messageKey === "lastMethodError"
+        isLastMethod
           ? t("lastMethodError")
           : t("disconnectError", { provider: t(provider) }),
       );

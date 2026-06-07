@@ -126,14 +126,31 @@ class AccountLinkingService:
                 sign-in method (409).
         """
         rows = await self.list_providers(user_id)
-        user = (await self.db.execute(select(User).where(User.user_id == user_id))).scalar_one()
+        user = (
+            await self.db.execute(select(User).where(User.user_id == user_id))
+        ).scalar_one_or_none()
+        if user is None:
+            # The user row is gone (deleted mid-flow). 404 gracefully rather
+            # than letting NoResultFound bubble out as a global 503.
+            raise NotFoundException("User", resource_id=user_id)
 
         target = next((r for r in rows if r.provider == provider), None)
         if target is None:
             raise NotFoundException("OAuth provider", resource_id=provider)
 
         has_password = user.auth_method == "password" and user.password_hash is not None
-        remaining_methods = (len(rows) - 1) + (1 if has_password else 0)
+        # Legacy-fallback method: a pre-#517 user can resolve via
+        # ``users.auth_provider`` through the ensure_user legacy path even with
+        # no ``user_oauth_providers`` row yet. Count it as a usable sign-in
+        # method so unlinking a newly-linked provider doesn't wrongly 409 while
+        # the legacy provider still works — but only when it isn't already one
+        # of ``rows`` (avoid double-counting once self-heal has backfilled it).
+        legacy_provider_usable = user.auth_provider in ("google", "github") and not any(
+            r.provider == user.auth_provider for r in rows
+        )
+        remaining_methods = (
+            (len(rows) - 1) + (1 if has_password else 0) + (1 if legacy_provider_usable else 0)
+        )
         if remaining_methods < 1:
             raise ConflictError("Cannot unlink the only remaining sign-in method")
 

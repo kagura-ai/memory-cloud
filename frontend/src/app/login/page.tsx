@@ -96,6 +96,12 @@ function LoginContent() {
             "This email is already linked to another sign-in method. Please use the provider you originally signed in with.",
         }),
       );
+      // Issue #517: the backend appends &link_hint=true to signal that an
+      // account with this email already exists — nudge the user to sign in
+      // with their original provider, then link this one from their profile.
+      if (searchParams.get("link_hint") === "true") {
+        setNotice(t("linkHint"));
+      }
     } else if (errorParam) {
       setError(decodeURIComponent(errorParam));
     }

@@ -377,11 +377,31 @@ async def _maybe_link_redirect(
 
     try:
         async for db in get_db():
+            # The audit actor for a link is the INITIATING SESSION USER, not the
+            # IdP-returned identity. ``idp_email`` (esp. on arm-3 failed links)
+            # may be ANOTHER user's address — recording it would misattribute the
+            # audit row and store unexpected PII. Load the session user in the
+            # SAME unit of work as link() and audit under their email.
+            session_user = (
+                await db.execute(select(User).filter_by(user_id=user_id))
+            ).scalar_one_or_none()
+            if session_user is None:
+                # The initiating user row was deleted mid-flow (or otherwise
+                # cannot be loaded). Without it we cannot attribute the link —
+                # refuse gracefully rather than guess (also covers the
+                # deleted-user race).
+                logger.warning(
+                    "oauth_provider_link_user_missing", user_id=user_id, provider=provider
+                )
+                return RedirectResponse(
+                    _safe_redirect_url(f"{frontend_url}/profile?error=link_failed"),
+                    status_code=303,
+                )
             await AccountLinkingService(db).link(
                 user_id=user_id,
                 provider=provider,
                 oauth_sub=idp_sub,
-                email=idp_email,
+                email=session_user.email,
                 ip_address=ip_address,
                 user_agent=user_agent,
             )

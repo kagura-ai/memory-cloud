@@ -59,8 +59,16 @@ export default function ProfilePage() {
     if (refreshParamsHandled.current) return;
     if (!user) return;
     const refreshed = searchParams.get("refreshed");
+    const linked = searchParams.get("linked");
     const errorCode = searchParams.get("error");
-    if (refreshed !== "1" && !errorCode?.startsWith("refresh_")) return;
+    const isRefreshParam =
+      refreshed === "1" || !!errorCode?.startsWith("refresh_");
+    // Link outcomes from the link-mode callback (_maybe_link_redirect, #517).
+    const isLinkParam =
+      linked === "1" ||
+      errorCode === "link_failed" ||
+      errorCode === "provider_already_linked";
+    if (!isRefreshParam && !isLinkParam) return;
     refreshParamsHandled.current = true;
 
     const provider =
@@ -86,6 +94,24 @@ export default function ProfilePage() {
       toast({
         title: tCommon("error"),
         description: t(messageKey, { provider }),
+        variant: "destructive",
+      });
+      router.replace(cleanUrl);
+    } else if (linked === "1") {
+      toast({ title: t("linkSuccess") });
+      refetchUser();
+      router.replace(cleanUrl);
+    } else if (errorCode === "link_failed") {
+      toast({
+        title: tCommon("error"),
+        description: t("linkFailed"),
+        variant: "destructive",
+      });
+      router.replace(cleanUrl);
+    } else if (errorCode === "provider_already_linked") {
+      toast({
+        title: tCommon("error"),
+        description: t("linkAlreadyLinked"),
         variant: "destructive",
       });
       router.replace(cleanUrl);

@@ -24,6 +24,7 @@ The companion ``_email_in_use_redirect`` (login email-collision) change — the
 
 from __future__ import annotations
 
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 from uuid import uuid4
 
@@ -60,6 +61,21 @@ def _patch_get_db(db: AsyncSession):
         yield db
 
     return patch.object(auth_module, "get_db", _fake_get_db)
+
+
+def _fake_db_with_user(*, email: str = "init@example.com", found: bool = True):
+    """A non-DB session stub whose ``execute(...).scalar_one_or_none()`` returns
+    the initiating session user (or None when ``found=False``).
+
+    The link-mode callback now loads the session user in the same unit of work
+    as ``link()`` so it can audit under the actor's own email (FIX 1) — the
+    pure-unit tests that patch ``AccountLinkingService`` therefore need ``db``
+    to answer that SELECT before delegating to the mocked service."""
+    result = MagicMock()
+    result.scalar_one_or_none.return_value = SimpleNamespace(email=email) if found else None
+    db = MagicMock()
+    db.execute = AsyncMock(return_value=result)
+    return db
 
 
 async def _make_user(db: AsyncSession, *, suffix: str) -> User:
@@ -273,6 +289,80 @@ async def test_expired_user_redirects_link_failed_without_linking(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_deleted_session_user_redirects_link_failed_without_linking(monkeypatch):
+    """intent=link + a present ``oauth2_state_user`` BUT the user row was deleted
+    mid-flow → the DB SELECT misses, so we redirect to link_failed and never
+    call link() (FIX 1: the audit actor must be a loadable session user)."""
+    monkeypatch.setenv("FRONTEND_URL", "http://localhost:3000")
+    sm, _redis = _mock_session_manager_with_redis(
+        {
+            "oauth2_state_intent:s1": "link",
+            "oauth2_state_user:s1": "u-deleted",
+            "oauth2_return_to:s1": "/profile?linked=1",
+        }
+    )
+    fake_service = MagicMock()
+    fake_service.link = AsyncMock(return_value=None)
+    fake_service_cls = MagicMock(return_value=fake_service)
+    with (
+        patch.object(auth_module, "_session_manager", sm),
+        patch.object(auth_module, "AccountLinkingService", fake_service_cls),
+        _patch_get_db(_fake_db_with_user(found=False)),
+    ):
+        result = await _maybe_link_redirect(
+            state="s1",
+            provider="google",
+            idp_sub="sub-1",
+            idp_email="x@example.com",
+            ip_address=None,
+            user_agent=None,
+        )
+    assert isinstance(result, RedirectResponse)
+    assert result.headers["location"] == "http://localhost:3000/profile?error=link_failed"
+    fake_service.link.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_link_audits_under_session_user_email_not_idp_email(
+    db_session: AsyncSession, monkeypatch
+):
+    """FIX 1: the link audit actor email is the INITIATING SESSION USER's email,
+    NOT the IdP-returned ``idp_email`` (which on arm-3 is another user's). Here
+    idp_email is a stranger's address; the linked audit row must carry the
+    initiator's email."""
+    monkeypatch.setenv("FRONTEND_URL", "http://localhost:3000")
+    suffix = uuid4().hex[:8]
+    initiator = await _make_user(db_session, suffix=suffix)
+    new_sub = f"gh-actor-{suffix}"
+
+    sm, _redis = _mock_session_manager_with_redis(
+        {
+            f"oauth2_state_intent:{suffix}": "link",
+            f"oauth2_state_user:{suffix}": initiator.user_id,
+            f"oauth2_return_to:{suffix}": "/profile?linked=1",
+        }
+    )
+
+    with patch.object(auth_module, "_session_manager", sm), _patch_get_db(db_session):
+        result = await _maybe_link_redirect(
+            state=suffix,
+            provider="github",
+            idp_sub=new_sub,
+            idp_email="stranger@evil.example.com",  # NOT the initiator's email
+            ip_address=None,
+            user_agent=None,
+        )
+
+    assert isinstance(result, RedirectResponse)
+    audit = (
+        await db_session.execute(
+            select(AuditLog).filter_by(user_id=initiator.user_id, action="oauth_provider_linked")
+        )
+    ).scalar_one()
+    assert audit.user_email == initiator.email
+
+
+@pytest.mark.asyncio
 async def test_integrity_race_redirects_provider_already_linked(monkeypatch):
     """A composite-UNIQUE race surfaces as ``IntegrityError`` from link() →
     routed to the same conflict redirect, never a 500."""
@@ -292,7 +382,7 @@ async def test_integrity_race_redirects_provider_already_linked(monkeypatch):
     with (
         patch.object(auth_module, "_session_manager", sm),
         patch.object(auth_module, "AccountLinkingService", fake_service_cls),
-        _patch_get_db(MagicMock()),
+        _patch_get_db(_fake_db_with_user()),
     ):
         result = await _maybe_link_redirect(
             state="s1",
@@ -329,7 +419,7 @@ async def test_link_keys_deleted_on_read(monkeypatch):
     with (
         patch.object(auth_module, "_session_manager", sm),
         patch.object(auth_module, "AccountLinkingService", fake_service_cls),
-        _patch_get_db(MagicMock()),
+        _patch_get_db(_fake_db_with_user()),
     ):
         result = await _maybe_link_redirect(
             state="s1",
@@ -363,7 +453,7 @@ async def test_success_default_return_to_when_unset(monkeypatch):
     with (
         patch.object(auth_module, "_session_manager", sm),
         patch.object(auth_module, "AccountLinkingService", MagicMock(return_value=fake_service)),
-        _patch_get_db(MagicMock()),
+        _patch_get_db(_fake_db_with_user()),
     ):
         result = await _maybe_link_redirect(
             state="s1",
