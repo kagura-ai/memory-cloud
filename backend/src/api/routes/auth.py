@@ -389,6 +389,7 @@ async def _maybe_link_redirect(
     except ConflictError:
         # arm 3: the identity is already bound to a different user. The service
         # already wrote the oauth_provider_link_failed audit row before raising.
+        logger.info("oauth_provider_link_conflict", user_id=user_id, provider=provider)
         return RedirectResponse(
             _safe_redirect_url(f"{frontend_url}/profile?error=provider_already_linked"),
             status_code=303,

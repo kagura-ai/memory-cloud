@@ -185,7 +185,7 @@ async def test_conflict_link_redirects_not_500_and_audits(db_session: AsyncSessi
         .scalars()
         .all()
     )
-    assert len(list(audits)) == 1
+    assert len(audits) == 1
 
 
 # ---------------------------------------------------------------------------
