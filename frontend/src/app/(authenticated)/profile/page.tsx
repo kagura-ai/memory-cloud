@@ -35,6 +35,7 @@ import { User, Moon, Sun, Save, RefreshCw } from "lucide-react";
 import { COMMON_TIMEZONES } from "@/lib/utils/datetime";
 import { apiClient, ApiError } from "@/lib/api/base";
 import { PageContainer } from "@/components/common/PageContainer";
+import ConnectedAccounts from "@/components/auth/ConnectedAccounts";
 import { getSignInMethodLabel, getRefreshProviderName } from "./signInLabels";
 
 export default function ProfilePage() {
@@ -58,8 +59,16 @@ export default function ProfilePage() {
     if (refreshParamsHandled.current) return;
     if (!user) return;
     const refreshed = searchParams.get("refreshed");
+    const linked = searchParams.get("linked");
     const errorCode = searchParams.get("error");
-    if (refreshed !== "1" && !errorCode?.startsWith("refresh_")) return;
+    const isRefreshParam =
+      refreshed === "1" || !!errorCode?.startsWith("refresh_");
+    // Link outcomes from the link-mode callback (_maybe_link_redirect, #517).
+    const isLinkParam =
+      linked === "1" ||
+      errorCode === "link_failed" ||
+      errorCode === "provider_already_linked";
+    if (!isRefreshParam && !isLinkParam) return;
     refreshParamsHandled.current = true;
 
     const provider =
@@ -85,6 +94,24 @@ export default function ProfilePage() {
       toast({
         title: tCommon("error"),
         description: t(messageKey, { provider }),
+        variant: "destructive",
+      });
+      router.replace(cleanUrl);
+    } else if (linked === "1") {
+      toast({ title: t("linkSuccess") });
+      refetchUser();
+      router.replace(cleanUrl);
+    } else if (errorCode === "link_failed") {
+      toast({
+        title: tCommon("error"),
+        description: t("linkFailed"),
+        variant: "destructive",
+      });
+      router.replace(cleanUrl);
+    } else if (errorCode === "provider_already_linked") {
+      toast({
+        title: tCommon("error"),
+        description: t("linkAlreadyLinked"),
         variant: "destructive",
       });
       router.replace(cleanUrl);
@@ -377,6 +404,14 @@ export default function ProfilePage() {
           )}
         </CardContent>
       </Card>
+
+      {/* Connected accounts (Issue #517): link/unlink Google & GitHub.
+          The read-only "Sign-in method" field above (#514) and the
+          refresh-from-IdP control (#515) are intentionally retained — they are
+          covered by an extensive test suite and serve a distinct purpose
+          (current method display + IdP profile refresh) from this management
+          section, so removing them was judged riskier than additive mounting. */}
+      <ConnectedAccounts />
 
       {/* Theme & Appearance */}
       <Card>

@@ -27,7 +27,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response
 from fastapi.responses import RedirectResponse
 from pydantic import BaseModel
 from sqlalchemy import select
-from sqlalchemy.exc import SQLAlchemyError
+from sqlalchemy.exc import IntegrityError, SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from auth.dependencies import SessionUser
@@ -38,6 +38,7 @@ from auth.session import SessionManager
 from auth.totp import verify_totp
 from db.base import get_db
 from models.auth import User
+from services.account_linking_service import AccountLinkingService
 from services.signup_gate_service import check_signup_access
 from services.workspace_service import WorkspaceService
 from utils.datetime import utcnow
@@ -206,10 +207,17 @@ def _email_in_use_redirect() -> RedirectResponse:
     surface a stable error code on the login page rather than a JSON 409 mid-
     redirect. Mirrors the shape of ``_check_registration_allowed``'s blocked
     branch so both Google and GitHub callbacks end on the same UX surface.
+
+    Issue #517: the collision now also means "this email already has an
+    account — you probably want to *link* this provider, not log in fresh".
+    ``&link_hint=true`` lets the login page nudge the user toward signing in
+    with their original provider and then linking from the profile page. The
+    URL is built from the fixed ``FRONTEND_URL`` origin and passed through
+    ``_safe_redirect_url`` (CWE-601 defense-in-depth, edge case 5).
     """
     frontend_url = os.getenv("FRONTEND_URL", "http://localhost:3000")
     return RedirectResponse(
-        f"{frontend_url}/login?error=email_in_use",
+        _safe_redirect_url(f"{frontend_url}/login?error=email_in_use&link_hint=true"),
         status_code=303,
     )
 
@@ -300,6 +308,131 @@ async def _maybe_refresh_redirect(
         redirect_url = f"{frontend_url}/profile?refreshed=1"
 
     logger.info("refresh_oauth_success", user_id=idp_sub)
+    return RedirectResponse(url=redirect_url, status_code=303)
+
+
+async def _maybe_link_redirect(
+    *,
+    state: str,
+    provider: str,
+    idp_sub: str,
+    idp_email: str,
+    ip_address: str | None,
+    user_agent: str | None,
+) -> RedirectResponse | None:
+    """Issue #517: handle the account-linking branch of an OAuth callback.
+
+    Returns ``None`` when this callback is NOT a link round-trip (no
+    ``oauth2_state_intent:{state}="link"`` was set), so the caller proceeds
+    with the normal login flow.
+
+    Returns a ``RedirectResponse`` when this IS a link attempt. The caller
+    MUST short-circuit before ``check_signup_access`` / ``ensure_user`` /
+    session creation: linking must never register the freshly-authorized
+    identity as its own user, and must never create, rotate, or delete the
+    initiating user's session — link ≠ login, mirroring the refresh contract.
+    The user stays logged in as themselves; only a ``user_oauth_providers``
+    row is added.
+
+    Redirect outcomes (all on the ``/profile`` surface so the page can flash
+    the result inline):
+
+    - success → ``oauth2_return_to`` value (default ``/profile?linked=1``).
+    - ``error=link_failed``: the initiating session's user_id record expired
+      (TTL) before the IdP round-trip returned — we cannot attribute the link.
+    - ``error=provider_already_linked``: the returned identity is already
+      bound to a different account (``AccountLinkingService.link`` raised
+      ``ConflictError`` after writing the failed-attempt audit row), or a
+      composite-UNIQUE race tripped ``IntegrityError``. Never a 500.
+    """
+    if not _session_manager:
+        return None
+
+    redis = _session_manager._redis
+    intent = redis.get(f"oauth2_state_intent:{state}")
+    if intent != "link":
+        return None
+
+    # delete-on-read contract: once intent="link" is confirmed, drop ALL
+    # link-only keys up front so the state token can't be replayed regardless
+    # of which branch we exit on (mirrors _maybe_refresh_redirect).
+    redis.delete(f"oauth2_state_intent:{state}")
+    user_id = redis.get(f"oauth2_state_user:{state}")
+    if user_id:
+        redis.delete(f"oauth2_state_user:{state}")
+    return_to_url = redis.get(f"oauth2_return_to:{state}")
+    if return_to_url:
+        redis.delete(f"oauth2_return_to:{state}")
+
+    frontend_url = os.getenv("FRONTEND_URL", "http://localhost:3000")
+
+    if not user_id:
+        # The initiating session's user_id record expired (TTL ran out between
+        # POST /me/account/link-provider and the IdP round-trip). Without it we
+        # cannot attribute the new identity to a user — refuse rather than guess.
+        return RedirectResponse(
+            _safe_redirect_url(f"{frontend_url}/profile?error=link_failed"),
+            status_code=303,
+        )
+
+    try:
+        async for db in get_db():
+            # The audit actor for a link is the INITIATING SESSION USER, not the
+            # IdP-returned identity. ``idp_email`` (esp. on arm-3 failed links)
+            # may be ANOTHER user's address — recording it would misattribute the
+            # audit row and store unexpected PII. Load the session user in the
+            # SAME unit of work as link() and audit under their email.
+            session_user = (
+                await db.execute(select(User).filter_by(user_id=user_id))
+            ).scalar_one_or_none()
+            if session_user is None:
+                # The initiating user row was deleted mid-flow (or otherwise
+                # cannot be loaded). Without it we cannot attribute the link —
+                # refuse gracefully rather than guess (also covers the
+                # deleted-user race).
+                logger.warning(
+                    "oauth_provider_link_user_missing", user_id=user_id, provider=provider
+                )
+                return RedirectResponse(
+                    _safe_redirect_url(f"{frontend_url}/profile?error=link_failed"),
+                    status_code=303,
+                )
+            await AccountLinkingService(db).link(
+                user_id=user_id,
+                provider=provider,
+                oauth_sub=idp_sub,
+                email=session_user.email,
+                ip_address=ip_address,
+                user_agent=user_agent,
+            )
+            break
+    except ConflictError:
+        # arm 3: the identity is already bound to a different user. The service
+        # already wrote the oauth_provider_link_failed audit row before raising.
+        logger.info("oauth_provider_link_conflict", user_id=user_id, provider=provider)
+        return RedirectResponse(
+            _safe_redirect_url(f"{frontend_url}/profile?error=provider_already_linked"),
+            status_code=303,
+        )
+    except IntegrityError:
+        # Composite-UNIQUE race: two parallel link attempts for the same
+        # identity slipped past the read-side guard. Route to the same conflict
+        # surface — never surface a raw 500 to the user.
+        logger.warning("oauth_provider_link_race", provider=provider)
+        return RedirectResponse(
+            _safe_redirect_url(f"{frontend_url}/profile?error=provider_already_linked"),
+            status_code=303,
+        )
+
+    # Success. Honour return_to (POST /me/account/link-provider persists
+    # "/profile?linked=1" as a same-origin frontend path). Prefix FRONTEND_URL
+    # so the redirect lands on the frontend origin, not the API origin.
+    if return_to_url and return_to_url.startswith("/"):
+        redirect_url = _safe_redirect_url(f"{frontend_url}{return_to_url}")
+    else:
+        redirect_url = _safe_redirect_url(f"{frontend_url}/profile?linked=1")
+
+    logger.info("oauth_provider_link_success", user_id=user_id, provider=provider)
     return RedirectResponse(url=redirect_url, status_code=303)
 
 
@@ -536,6 +669,22 @@ async def google_callback(
 
         # 3. Get user info from Google
         user_info = _oauth2_manager.get_user_info_web(credentials)
+
+        # 3.4. Account-linking short-circuit (Issue #517). MUST precede the
+        # registration gate + ensure_user: when intent="link", the returned
+        # Google identity is being bound to an *existing* signed-in user — it
+        # must never be registered as its own user, and the initiating
+        # session must stay untouched (link ≠ login, same as refresh).
+        link_redirect = await _maybe_link_redirect(
+            state=state,
+            provider="google",
+            idp_sub=user_info["sub"],
+            idp_email=user_info["email"],
+            ip_address=request.client.host if request.client else None,
+            user_agent=request.headers.get("user-agent"),
+        )
+        if link_redirect is not None:
+            return link_redirect
 
         # 3.5. Registration gate. #655 removed the Google pass-through that
         # #358 Phase 1 had — Google's "Testing" status does not enforce the
@@ -992,6 +1141,21 @@ async def github_callback(
 
         # 3. Get user info
         user_info = await _github_get_user_info(access_token)
+
+        # 3.4. Account-linking short-circuit (Issue #517). See google_callback
+        # for the full rationale: must precede the registration gate +
+        # ensure_user so a link round-trip never registers the returned GitHub
+        # identity as its own user nor disturbs the initiating session.
+        link_redirect = await _maybe_link_redirect(
+            state=state,
+            provider="github",
+            idp_sub=user_info["sub"],
+            idp_email=user_info["email"],
+            ip_address=request.client.host if request.client else None,
+            user_agent=request.headers.get("user-agent"),
+        )
+        if link_redirect is not None:
+            return link_redirect
 
         # 3.5. Registration gate: admin-configurable (Issue #358) with legacy
         # _check_registration_allowed delegation when disabled (Issue #349).
