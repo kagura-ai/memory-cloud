@@ -301,6 +301,10 @@ class RoleManager:
 
         async for db in get_db():
             user = None
+            # Provider link for (auth_provider, user_id). Fetched in the new
+            # path below and reused by the self-heal block, so it must be in
+            # scope even when known_provider is False.
+            link = None
 
             # NEW path (#517): resolve by (provider, oauth_sub) so a secondary
             # provider linked to an existing user maps back to that owner.
@@ -329,16 +333,14 @@ class RoleManager:
                 ).scalar_one_or_none()
                 if user is not None and known_provider:
                     # SELF-HEAL: backfill the missing provider row so the next
-                    # login resolves via the new path. Guarded against an
-                    # already-present row to keep the operation idempotent.
-                    exists = (
-                        await db.execute(
-                            select(UserOAuthProvider).filter_by(
-                                provider=auth_provider, oauth_sub=user_id
-                            )
-                        )
-                    ).scalar_one_or_none()
-                    if exists is None:
+                    # login resolves via the new path. Reuse the link fetched
+                    # in the new path above (same session/transaction, no
+                    # intervening write to user_oauth_providers) — guarding on
+                    # link is None keeps the insert idempotent. The orphan-link
+                    # edge case (link present but its owner User missing) is
+                    # correctly skipped here: link is not None, so no duplicate
+                    # row is added for the user resolved via the legacy path.
+                    if link is None:
                         db.add(
                             UserOAuthProvider(
                                 user_id=user.user_id,
