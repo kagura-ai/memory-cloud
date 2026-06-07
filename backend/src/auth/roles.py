@@ -292,12 +292,61 @@ class RoleManager:
         from sqlalchemy.exc import IntegrityError
 
         from db.base import get_db
-        from models.auth import User
+        from models.auth import User, UserOAuthProvider
+
+        # Issue #517: only google/github identities participate in the
+        # (provider, oauth_sub) account-linking table. Other auth_provider
+        # values (or None) resolve via the legacy user_id path only.
+        known_provider = auth_provider in ("google", "github")
 
         async for db in get_db():
-            # Lookup key: user_id (oauth_sub), not email — email is mutable.
-            result = await db.execute(select(User).filter_by(user_id=user_id))
-            user = result.scalar_one_or_none()
+            user = None
+
+            # NEW path (#517): resolve by (provider, oauth_sub) so a secondary
+            # provider linked to an existing user maps back to that owner.
+            if known_provider:
+                link = (
+                    await db.execute(
+                        select(UserOAuthProvider).filter_by(
+                            provider=auth_provider, oauth_sub=user_id
+                        )
+                    )
+                ).scalar_one_or_none()
+                if link is not None:
+                    user = (
+                        await db.execute(select(User).filter_by(user_id=link.user_id))
+                    ).scalar_one_or_none()
+                    if user is not None:
+                        # Touch last_used_at; committed by _sync_existing_user.
+                        link.last_used_at = utcnow()
+
+            # LEGACY fallback: user_id == oauth_sub (un-backfilled / pre-#361
+            # rows, or non-google/github providers). Guarantees production reads
+            # never split while the legacy users.user_id column remains intact.
+            if user is None:
+                user = (
+                    await db.execute(select(User).filter_by(user_id=user_id))
+                ).scalar_one_or_none()
+                if user is not None and known_provider:
+                    # SELF-HEAL: backfill the missing provider row so the next
+                    # login resolves via the new path. Guarded against an
+                    # already-present row to keep the operation idempotent.
+                    exists = (
+                        await db.execute(
+                            select(UserOAuthProvider).filter_by(
+                                provider=auth_provider, oauth_sub=user_id
+                            )
+                        )
+                    ).scalar_one_or_none()
+                    if exists is None:
+                        db.add(
+                            UserOAuthProvider(
+                                user_id=user.user_id,
+                                provider=auth_provider,
+                                oauth_sub=user_id,
+                                last_used_at=utcnow(),
+                            )
+                        )
 
             if user is not None:
                 return await self._sync_existing_user(
@@ -327,6 +376,18 @@ class RoleManager:
                 auth_provider=auth_provider,
             )
             db.add(new_user)
+            # Issue #517: register the provider identity so future logins
+            # resolve via the (provider, oauth_sub) path. Same unit of work as
+            # the user insert — committed (or rolled back) atomically below.
+            if known_provider:
+                db.add(
+                    UserOAuthProvider(
+                        user_id=user_id,
+                        provider=auth_provider,
+                        oauth_sub=user_id,
+                        last_used_at=utcnow(),
+                    )
+                )
             try:
                 await db.commit()
                 return role

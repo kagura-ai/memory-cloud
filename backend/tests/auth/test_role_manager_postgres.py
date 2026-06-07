@@ -126,6 +126,20 @@ def _user_row(*, user_id="u1", email="alice@example.com", name="Alice", role="us
     return user
 
 
+def _oauth_link_row(*, user_id="u1"):
+    """Build a minimal mock mimicking ``models.auth.UserOAuthProvider`` access.
+
+    Issue #517 dual-read: the NEW resolution path first selects a
+    ``UserOAuthProvider`` by ``(provider, oauth_sub)`` then loads the owning
+    ``User`` by ``link.user_id`` and touches ``link.last_used_at``. The mock
+    exposes ``user_id`` for the owner load and accepts the ``last_used_at``
+    write.
+    """
+    link = MagicMock()
+    link.user_id = user_id
+    return link
+
+
 @pytest.fixture
 def role_manager():
     return RoleManager(use_postgres=True)
@@ -280,7 +294,8 @@ class TestAuditLogStructure:
     @pytest.mark.asyncio
     async def test_audit_log_captures_ip_user_agent(self, role_manager):
         existing = _user_row(email="alice@old.com")
-        db = _make_db_mock(_execute_returns(existing))
+        # #517 dual-read with a known provider: link lookup hits → owner load.
+        db = _make_db_mock(_execute_returns(_oauth_link_row(), existing))
 
         with _patch_get_db(db):
             await role_manager.ensure_user(
@@ -302,7 +317,8 @@ class TestUpdateCollision:
     @pytest.mark.asyncio
     async def test_collision_raises_conflict_and_logs_alert(self, role_manager):
         existing = _user_row(email="alice@old.com")
-        db = _make_db_mock(_execute_returns(existing))
+        # #517 dual-read with a known provider: link lookup hits → owner load.
+        db = _make_db_mock(_execute_returns(_oauth_link_row(), existing))
 
         # Commit raises IntegrityError (UNIQUE violation on users.email)
         db.commit = AsyncMock(side_effect=_email_unique_violation())
@@ -378,7 +394,10 @@ class TestCreatePath:
         # precisely model the user_id-collision shape rather than reusing
         # the email helper) → re-lookup hits → sync_existing_user commits
         # the update
-        db = _make_db_mock(_execute_returns(None, {"scalar": 0}, race_existing))
+        # #517 dual-read: link lookup MISS → legacy lookup MISS → count → race
+        # re-lookup HIT. Known provider also inserts a UserOAuthProvider row in
+        # the create unit of work (rolled back with the user on the race).
+        db = _make_db_mock(_execute_returns(None, None, {"scalar": 0}, race_existing))
         db.commit = AsyncMock(side_effect=[_user_id_unique_violation(), None])
 
         with _patch_get_db(db):
@@ -402,9 +421,9 @@ class TestCreatePath:
 
     @pytest.mark.asyncio
     async def test_email_collision_on_create_raises_conflict(self, role_manager):
-        # Sequence: User lookup miss → count=5 → commit raises → re-lookup
-        # also miss
-        db = _make_db_mock(_execute_returns(None, {"scalar": 5}, None))
+        # #517 dual-read: link lookup MISS → legacy lookup MISS → count=5 →
+        # commit raises → re-lookup also miss → ConflictError.
+        db = _make_db_mock(_execute_returns(None, None, {"scalar": 5}, None))
         db.commit = AsyncMock(side_effect=_email_unique_violation())
 
         with _patch_get_db(db), structlog.testing.capture_logs() as logs:
