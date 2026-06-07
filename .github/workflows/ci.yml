@@ -358,3 +358,128 @@ jobs:
           path: frontend/playwright-report/
           if-no-files-found: ignore
           retention-days: 7
+
+  # OAuth account-linking E2E lane (#937). Like frontend-a11y-authed it needs a
+  # live backend + authenticated admin, PLUS the OAuth endpoint overrides so the
+  # server-side token/userinfo exchange hits the mock IdP (frontend/e2e/mock-idp)
+  # instead of real Google/GitHub. The mock IdP is started by Playwright's
+  # webServer (playwright.config.ts), so no separate start step is needed here.
+  # Overrides are gated by OAUTH_ENDPOINT_OVERRIDE_ENABLED and hard-blocked in
+  # production (auth/oauth_endpoints.py); ENVIRONMENT is left unset → development.
+  # Reuses the frontend-a11y-authed path filter (its globs already cover every
+  # file this lane consumes). New CI-only lane — NOT yet a Required check (#768);
+  # boot/timing may need tuning over the first runs.
+  frontend-e2e-oauth:
+    runs-on: ubuntu-latest
+    needs: [detect-changes, frontend]
+    if: |
+      needs.detect-changes.outputs.frontend-a11y-authed == 'true' ||
+      (github.event_name == 'pull_request' &&
+        contains(github.event.pull_request.labels.*.name, 'force-integration')) ||
+      github.event_name == 'workflow_dispatch' ||
+      github.event_name == 'push'
+    env:
+      PYTHONPATH: src
+      DATABASE_URL: postgresql+asyncpg://kagura:kagura_dev_password@localhost:5432/kagura_test
+      REDIS_URL: redis://localhost:6379
+      CORS_ORIGINS: http://localhost:3000
+      E2E_ADMIN_LOGIN_ID: e2e-admin
+      E2E_API_URL: http://localhost:8080
+      NEXT_PUBLIC_API_URL: http://localhost:8080
+      # OAuth test-IdP harness (#937): redirect the server-side GitHub exchange
+      # at the Playwright-managed mock IdP on :9100.
+      OAUTH_ENDPOINT_OVERRIDE_ENABLED: "true"
+      OAUTH_GITHUB_AUTH_URL: http://localhost:9100/github/login/oauth/authorize
+      OAUTH_GITHUB_TOKEN_URL: http://localhost:9100/github/login/oauth/access_token
+      OAUTH_GITHUB_USER_URL: http://localhost:9100/github/user
+      OAUTH_GITHUB_EMAILS_URL: http://localhost:9100/github/user/emails
+      GITHUB_CLIENT_ID: e2e-mock-client-id
+      GITHUB_CLIENT_SECRET: e2e-mock-client-secret
+      GITHUB_REDIRECT_URI: http://localhost:8080/api/v1/auth/github/callback
+    services:
+      postgres:
+        image: postgres:15-alpine
+        env:
+          POSTGRES_USER: kagura
+          POSTGRES_PASSWORD: kagura_dev_password
+          POSTGRES_DB: kagura_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U kagura -d kagura_test"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+      redis:
+        image: redis:7-alpine
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+          cache-dependency-path: backend/pyproject.toml
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+
+      - name: Install backend dependencies
+        run: cd backend && pip install -e ".[dev]"
+
+      - name: Install frontend dependencies
+        run: cd frontend && npm ci
+
+      - name: Install Playwright browser
+        run: cd frontend && npx playwright install chromium --with-deps
+
+      - name: Generate ephemeral secrets + admin password
+        run: |
+          {
+            echo "API_KEY_SECRET=$(python -c 'from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())')"
+            echo "JWT_SECRET=$(python -c 'import secrets; print(secrets.token_urlsafe(32))')"
+            echo "AUDIT_HMAC_KEY=$(python -c 'import secrets; print(secrets.token_urlsafe(32))')"
+            echo "E2E_ADMIN_PASSWORD=Ci-$(python -c 'import secrets; print(secrets.token_urlsafe(18))')-9X"
+          } >> "$GITHUB_ENV"
+
+      - name: Migrate schema
+        run: cd backend && alembic upgrade head
+
+      - name: Seed e2e admin
+        run: cd backend && python -m src.cli.seed_e2e_admin
+
+      - name: Start API server
+        run: |
+          cd backend
+          python -m uvicorn src.api.main:app --host 0.0.0.0 --port 8080 --log-level warning &
+          for i in $(seq 1 30); do
+            if curl -sf http://localhost:8080/health >/dev/null; then
+              echo "API is up after $((i * 2))s"
+              exit 0
+            fi
+            sleep 2
+          done
+          echo "::error::API did not become healthy on :8080 within 60s"
+          exit 1
+
+      - name: Run OAuth account-linking E2E
+        run: cd frontend && npm run test:e2e:oauth
+
+      - name: Upload Playwright report
+        if: ${{ failure() }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: playwright-report-oauth
+          path: frontend/playwright-report/
+          if-no-files-found: ignore
+          retention-days: 7

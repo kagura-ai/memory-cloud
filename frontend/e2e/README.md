@@ -62,6 +62,49 @@ from `e2e/fixtures.ts` with the `test` from `e2e/fixtures/admin-auth.ts`.
 > only the states reachable without seeding (e.g. `/invite` with an unknown
 > token → error screen).
 
+## OAuth account-linking E2E (mock IdP) — `oauth-account-linking.spec.ts` (#937)
+
+Covers the link → unlink → re-link flow #517 deferred. The backend performs the
+OAuth token + userinfo exchange **server-side**, so a browser-level mock cannot
+intercept it. Instead a real mock IdP (`e2e/mock-idp/server.mjs`, zero-dependency
+Node) is started by Playwright's `webServer`, and the backend is pointed at it
+via `OAUTH_*_URL` overrides.
+
+Those overrides are gated by `OAUTH_ENDPOINT_OVERRIDE_ENABLED` and **hard-blocked
+in production** — `backend/src/auth/oauth_endpoints.py::assert_oauth_endpoints_safe`
+(called at app boot) refuses to start if any override is set while
+`ENVIRONMENT=production`. See `backend/tests/auth/test_oauth_endpoints.py`.
+
+Run locally with the stack up (start the API with the overrides pointing at the
+mock IdP on :9100; Playwright manages the mock IdP + `next dev` itself):
+
+```bash
+# backend (separate shell) — overrides + dummy GitHub creds
+export ENVIRONMENT=development
+export OAUTH_ENDPOINT_OVERRIDE_ENABLED=true
+export OAUTH_GITHUB_AUTH_URL=http://localhost:9100/github/login/oauth/authorize
+export OAUTH_GITHUB_TOKEN_URL=http://localhost:9100/github/login/oauth/access_token
+export OAUTH_GITHUB_USER_URL=http://localhost:9100/github/user
+export OAUTH_GITHUB_EMAILS_URL=http://localhost:9100/github/user/emails
+export GITHUB_CLIENT_ID=e2e-mock-client-id
+export GITHUB_CLIENT_SECRET=e2e-mock-client-secret
+export GITHUB_REDIRECT_URI=http://localhost:8080/api/v1/auth/github/callback
+# ...start uvicorn as usual...
+
+# frontend
+export E2E_ADMIN_LOGIN_ID=e2e-admin
+export E2E_ADMIN_PASSWORD="<password>"
+export E2E_API_URL=http://localhost:8080
+npm run test:e2e:oauth
+```
+
+CI runs this as the `frontend-e2e-oauth` lane (`.github/workflows/ci.yml`),
+modeled on `frontend-a11y-authed`. Like that lane it is a new CI-only check, not
+yet Required (#768); boot/timing may need tuning over the first runs. The
+"last-method Disconnect is blocked" case is covered by `ConnectedAccounts.test.tsx`
+(the admin fixture user is a password user, so that UI state is unreachable in
+this E2E without seeding a dedicated OAuth-only user).
+
 ## Adding a new authenticated admin spec
 
 Use the admin auth fixture at `e2e/fixtures/admin-auth.ts`:

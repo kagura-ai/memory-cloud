@@ -42,6 +42,7 @@ import { LoadingState } from "@/components/common/LoadingState";
 import { useToast } from "@/hooks/use-toast";
 import { useAuth } from "@/contexts/AuthContext";
 import { apiClient, ApiError } from "@/lib/api/base";
+import { CONNECTED_ACCOUNTS_TEST_IDS } from "@/components/auth/connected-accounts.testids";
 import { Link2, Loader2 } from "lucide-react";
 
 type Provider = "google" | "github";
@@ -220,7 +221,12 @@ export default function ConnectedAccounts() {
                         <p className="text-sm font-medium leading-none">
                           {t(provider)}
                         </p>
-                        <p className="text-xs text-slate-500 mt-1">
+                        <p
+                          className="text-xs text-slate-500 mt-1"
+                          data-testid={CONNECTED_ACCOUNTS_TEST_IDS.status(
+                            provider,
+                          )}
+                        >
                           {isLinked ? t("connected") : t("notConnected")}
                         </p>
                       </div>
@@ -236,6 +242,9 @@ export default function ConnectedAccounts() {
                             setDisconnectTarget(provider);
                           }}
                           disabled={disableDisconnect}
+                          data-testid={CONNECTED_ACCOUNTS_TEST_IDS.disconnect(
+                            provider,
+                          )}
                           aria-label={t("disconnectButton", {
                             provider: t(provider),
                           })}
@@ -257,6 +266,9 @@ export default function ConnectedAccounts() {
                         size="sm"
                         onClick={() => handleConnect(provider)}
                         disabled={isBusy}
+                        data-testid={CONNECTED_ACCOUNTS_TEST_IDS.connect(
+                          provider,
+                        )}
                         aria-label={t("connectButton", {
                           provider: t(provider),
                         })}
@@ -320,6 +332,7 @@ export default function ConnectedAccounts() {
               variant="destructive"
               onClick={handleDisconnectConfirm}
               disabled={busyProvider !== null}
+              data-testid={CONNECTED_ACCOUNTS_TEST_IDS.disconnectConfirm}
             >
               {busyProvider !== null && (
                 <Loader2 className="h-4 w-4 mr-2 animate-spin" />

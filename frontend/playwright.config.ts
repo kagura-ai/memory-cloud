@@ -19,18 +19,32 @@ export default defineConfig({
     baseURL: "http://localhost:3000",
     trace: "retain-on-failure",
   },
-  webServer: {
-    // In CI, force the webpack compiler — Turbopack (the Next.js 16 default)
-    // can't load its native @next/swc binding on the GitHub Actions runner,
-    // the same failure that breaks `next build` there. Locally, keep the
-    // default (Turbopack) for the faster dev experience. See #855.
-    command: process.env.CI ? "npm run dev -- --webpack" : "npm run dev",
-    url: "http://localhost:3000",
-    reuseExistingServer: !process.env.CI,
-    timeout: 120_000,
-    stdout: "pipe",
-    stderr: "pipe",
-  },
+  webServer: [
+    {
+      // In CI, force the webpack compiler — Turbopack (the Next.js 16 default)
+      // can't load its native @next/swc binding on the GitHub Actions runner,
+      // the same failure that breaks `next build` there. Locally, keep the
+      // default (Turbopack) for the faster dev experience. See #855.
+      command: process.env.CI ? "npm run dev -- --webpack" : "npm run dev",
+      url: "http://localhost:3000",
+      reuseExistingServer: !process.env.CI,
+      timeout: 120_000,
+      stdout: "pipe",
+      stderr: "pipe",
+    },
+    {
+      // Mock OAuth IdP for the account-linking E2E (#937). Idle for other specs;
+      // the backend only calls it during the link round-trip. Kept in the shared
+      // webServer list (not a per-project hook) so `npm run test:e2e:oauth` is
+      // self-contained locally; in CI it is likewise managed by Playwright.
+      command: "npm run mock-idp",
+      url: `http://localhost:${process.env.MOCK_IDP_PORT ?? 9100}/health`,
+      reuseExistingServer: !process.env.CI,
+      timeout: 30_000,
+      stdout: "pipe",
+      stderr: "pipe",
+    },
+  ],
   projects: [
     {
       name: "chromium",
