@@ -14,6 +14,7 @@ from uuid import UUID
 from sqlalchemy import and_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from config.settings import get_settings
 from models.auth import APIKey, Context
 from utils.datetime import utcnow
 from utils.hashing import sha256_hex
@@ -244,9 +245,18 @@ class APIKeyManager:
             if utcnow() > key_record.expires_at:
                 return None
 
-        # Update last_used_at
-        key_record.last_used_at = utcnow()
-        await self.db.flush()
+        # Update last_used_at — throttled (#947). This runs on EVERY auth (one
+        # per MCP tool call), so writing the row each time is hot-row
+        # write-amplification. Skip the write while the stored timestamp is
+        # fresher than the throttle window; a NULL (never-used) key always
+        # writes. The compare is naive-UTC vs naive-UTC (both via utcnow()), and
+        # guarding the assignment itself (not just the flush) keeps the session
+        # object clean so a later request-level commit cannot persist it anyway.
+        now = utcnow()
+        throttle = timedelta(seconds=get_settings().api_key_last_used_throttle_seconds)
+        if key_record.last_used_at is None or now - key_record.last_used_at >= throttle:
+            key_record.last_used_at = now
+            await self.db.flush()
 
         return VerifiedKey(
             id=key_record.id,

@@ -73,6 +73,14 @@ class Settings(BaseSettings):
         default="dev-secret-change-in-production",
         description="API Key encryption secret (32+ bytes)",
     )
+    # Issue #947: throttle window (seconds) for api_keys.last_used_at writes.
+    # last_used_at is updated at most once per window per key, so a hot MCP
+    # client (one auth per tool call) does not trigger a row UPDATE+commit on
+    # every request. Minute-level precision is plenty for the "Last used" UI.
+    api_key_last_used_throttle_seconds: int = Field(
+        default=60,
+        description="Min seconds between api_keys.last_used_at writes per key (Issue #947)",
+    )
     # ai-worker (kagura-memory-ai-worker) service auth. The worker presents this
     # as a Bearer token to GET /api/v1/workers/config (Spec 2026-06-02). Empty
     # disables the worker config endpoint (fail-closed). Use: openssl rand -hex 32.
