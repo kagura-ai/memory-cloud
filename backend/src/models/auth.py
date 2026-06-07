@@ -36,6 +36,7 @@ from sqlalchemy import (
     Numeric,
     String,
     Text,
+    UniqueConstraint,
     func,
     text,
 )
@@ -171,6 +172,38 @@ class User(Base):
 
     def __repr__(self) -> str:
         return f"<User(email='{self.email}', role='{self.role}')>"
+
+
+class UserOAuthProvider(Base):
+    """Maps an OAuth identity (provider, sub) to its owning user (#517).
+
+    Composite UNIQUE(provider, oauth_sub) preserves the invariant that an
+    OAuth identity belongs to at most one user. UNIQUE(user_id, provider)
+    means each user links a given provider at most once.
+    """
+
+    __tablename__ = "user_oauth_providers"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    user_id: Mapped[str] = mapped_column(
+        String(255),
+        ForeignKey("users.user_id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    provider: Mapped[str] = mapped_column(String(20), nullable=False)
+    oauth_sub: Mapped[str] = mapped_column(String(255), nullable=False)
+    linked_at: Mapped[datetime] = mapped_column(DateTime, nullable=False, server_default=func.now())
+    last_used_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+
+    __table_args__ = (
+        UniqueConstraint("provider", "oauth_sub", name="uq_user_oauth_providers_provider_sub"),
+        UniqueConstraint("user_id", "provider", name="uq_user_oauth_providers_user_provider"),
+        CheckConstraint("provider IN ('google', 'github')", name="valid_oauth_provider"),
+    )
+
+    def __repr__(self) -> str:
+        return f"<UserOAuthProvider(user_id='{self.user_id}', provider='{self.provider}')>"
 
 
 class AuditLog(Base):
