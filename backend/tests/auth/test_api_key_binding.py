@@ -214,3 +214,68 @@ class TestCreateKeyBoundContextValidation:
         db.add.assert_called_once()
         added_key = db.add.call_args.args[0]
         assert added_key is returned_key
+
+
+class TestVerifyApiKeyStandaloneCommitsLastUsed:
+    """#945: the standalone ``verify_api_key`` (MCP auth path) consumes
+    ``get_db()`` via ``async for db in get_db(): ... return verified`` — the
+    early ``return`` raises ``GeneratorExit`` at the generator's ``yield``, so
+    ``get_db``'s post-yield ``await session.commit()`` never runs and the
+    ``last_used_at`` flushed by ``verify_key`` is rolled back. The wrapper must
+    commit explicitly. A commit failure must NOT fail authentication
+    (``last_used_at`` is non-critical metadata, and the outer
+    ``except Exception: return None`` would otherwise reject a valid key)."""
+
+    @staticmethod
+    def _ok_key() -> object:
+        from auth.api_keys import VerifiedKey
+
+        return VerifiedKey(id=1, user_id="user-1", workspace_id=None, bound_context_id=None)
+
+    @pytest.mark.asyncio
+    async def test_standalone_commits_on_success(self) -> None:
+        from auth.dependencies import verify_api_key
+
+        ok = self._ok_key()
+        db = AsyncMock()
+
+        async def _fake_get_db():
+            yield db
+
+        with (
+            patch("db.base.get_db", new=_fake_get_db),
+            patch(
+                "auth.api_keys.APIKeyManager.verify_key",
+                new=AsyncMock(return_value=ok),
+            ),
+        ):
+            result = await verify_api_key("kagura_test")
+
+        assert result is ok
+        # The explicit commit is what persists last_used_at past the
+        # GeneratorExit that skips get_db's own commit.
+        db.commit.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_standalone_commit_failure_does_not_fail_auth(self) -> None:
+        from auth.dependencies import verify_api_key
+
+        ok = self._ok_key()
+        db = AsyncMock()
+        db.commit = AsyncMock(side_effect=RuntimeError("commit boom"))
+
+        async def _fake_get_db():
+            yield db
+
+        with (
+            patch("db.base.get_db", new=_fake_get_db),
+            patch(
+                "auth.api_keys.APIKeyManager.verify_key",
+                new=AsyncMock(return_value=ok),
+            ),
+        ):
+            result = await verify_api_key("kagura_test")
+
+        # A non-critical last_used_at commit failure must not turn a valid key
+        # into an auth rejection (would otherwise hit `except Exception: None`).
+        assert result is ok
