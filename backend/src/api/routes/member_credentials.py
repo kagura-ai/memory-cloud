@@ -452,6 +452,7 @@ async def create_api_key(
             "is_visible": True,
             "visibility_expires_at": to_utc_iso(new_key.visibility_expires_at),
             "created_at": to_utc_iso(new_key.created_at),
+            "last_used_at": to_utc_iso(new_key.last_used_at),
             "revoked_at": None,
             "bound_context_id": (
                 str(new_key.bound_context_id) if new_key.bound_context_id else None

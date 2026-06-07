@@ -104,6 +104,7 @@ describe("APIKeysTabPanel — table view (#943)", () => {
     expect(headers.getByText("colKey")).toBeInTheDocument();
     expect(headers.getByText("colStatus")).toBeInTheDocument();
     expect(headers.getByText("colLastUsed")).toBeInTheDocument();
+    expect(headers.getByText("colCreated")).toBeInTheDocument();
     expect(headers.getByText("colActions")).toBeInTheDocument();
   });
 

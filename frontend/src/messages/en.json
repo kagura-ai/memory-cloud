@@ -1540,7 +1540,6 @@
     "revoked": "Revoked",
     "hideInTime": "Hide in {time}",
     "hideAt": "Will be hidden at {date}",
-    "apiKeyHidden": "API Key is hidden. Regenerate to view a new key.",
     "prefix": "Prefix",
     "regenerate": "Regenerate",
     "created": "Created",

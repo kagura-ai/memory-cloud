@@ -1540,7 +1540,6 @@
     "revoked": "取り消し済み",
     "hideInTime": "{time}後に非表示",
     "hideAt": "{date}に非表示",
-    "apiKeyHidden": "APIキーは非表示です。新しいキーを表示するには再生成してください。",
     "prefix": "プレフィックス",
     "regenerate": "再生成",
     "created": "作成日時",

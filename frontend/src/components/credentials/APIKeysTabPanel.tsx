@@ -453,7 +453,10 @@ export function APIKeysTabPanel() {
 
   const renderStatusBadge = (apiKey: MemberAPIKey) =>
     apiKey.revoked_at ? (
-      <span className="text-xs text-red-600 dark:text-red-400 bg-red-100 dark:bg-red-900/20 px-2 py-1 rounded">
+      <span
+        className="text-xs text-red-600 dark:text-red-400 bg-red-100 dark:bg-red-900/20 px-2 py-1 rounded"
+        title={`${t("revoked")}: ${formatDateTime(apiKey.revoked_at, user?.timezone, locale)}`}
+      >
         {t("revoked")}
       </span>
     ) : (
@@ -465,7 +468,7 @@ export function APIKeysTabPanel() {
   // Last used: relative time, or "—" when the key has never authenticated.
   const renderLastUsed = (apiKey: MemberAPIKey) =>
     apiKey.last_used_at ? (
-      <span title={formatDateTime(apiKey.last_used_at, user?.timezone)}>
+      <span title={formatDateTime(apiKey.last_used_at, user?.timezone, locale)}>
         {formatRelativeTime(apiKey.last_used_at, locale)}
       </span>
     ) : (
@@ -566,6 +569,7 @@ export function APIKeysTabPanel() {
                       date: formatDateTime(
                         apiKey.visibility_expires_at,
                         user?.timezone,
+                        locale,
                       ),
                     })}
               </span>
@@ -747,7 +751,11 @@ export function APIKeysTabPanel() {
                             {renderLastUsed(apiKey)}
                           </TableCell>
                           <TableCell className="text-xs text-gray-500 dark:text-gray-400 whitespace-nowrap">
-                            {formatDateTime(apiKey.created_at, user?.timezone)}
+                            {formatDateTime(
+                              apiKey.created_at,
+                              user?.timezone,
+                              locale,
+                            )}
                           </TableCell>
                           <TableCell>
                             <div className="flex justify-end">
@@ -798,12 +806,20 @@ export function APIKeysTabPanel() {
                       </p>
                       <p>
                         {t("created")}:{" "}
-                        {formatDateTime(apiKey.created_at, user?.timezone)}
+                        {formatDateTime(
+                          apiKey.created_at,
+                          user?.timezone,
+                          locale,
+                        )}
                       </p>
                       {apiKey.revoked_at && (
                         <p className="text-red-600 dark:text-red-400">
                           {t("revoked")}:{" "}
-                          {formatDateTime(apiKey.revoked_at, user?.timezone)}
+                          {formatDateTime(
+                            apiKey.revoked_at,
+                            user?.timezone,
+                            locale,
+                          )}
                         </p>
                       )}
                     </div>
