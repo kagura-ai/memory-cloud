@@ -14,6 +14,7 @@ export interface MemberAPIKey {
   is_visible: boolean;
   visibility_expires_at: string | null;
   created_at: string;
+  last_used_at: string | null; // Issue #943: "Last used" column
   revoked_at: string | null;
   // Issue #626: Public-context attribution. When non-null, this key is a
   // public-bound key — attributed to one is_public=true context on the

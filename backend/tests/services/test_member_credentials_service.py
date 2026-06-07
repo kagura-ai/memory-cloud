@@ -13,12 +13,16 @@ contract:
   (single-bit decision — not multi-path like PermissionService.check_workspace_access)
 """
 
+from datetime import datetime
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 from uuid import uuid4
 
 import pytest
 
+from models.schemas import MemberAPIKeyResponse
 from services.member_credentials_service import MemberCredentialsService
+from utils.datetime import to_utc_iso
 from utils.exceptions import AuthorizationError
 
 
@@ -90,3 +94,47 @@ class TestCheckCanView:
         assert exc_info.value.status_code == 403
         assert exc_info.value.message == "Insufficient permissions"
         assert exc_info.value.reason is None
+
+
+class TestSerializeApiKeyLastUsed:
+    """Issue #943 — the API Keys table surfaces a 'Last used' column, so the
+    member-credentials DTO must carry ``last_used_at``. ``api_keys.last_used_at``
+    is already tracked on every auth (auth/api_keys.py) — these tests pin that
+    the field flows through _serialize_api_key AND survives the response schema
+    (a missing schema field would be silently dropped by pydantic at the route)."""
+
+    @pytest.fixture
+    def service(self):
+        return MemberCredentialsService(MagicMock())
+
+    def _make_key(self, last_used_at):
+        # hidden_at set → is_visible False → plaintext path skipped (no encryptor).
+        return SimpleNamespace(
+            id=1,
+            name="prod-api",
+            key_prefix="kagura_abc123",
+            plaintext_encrypted=None,
+            hidden_at=datetime(2020, 1, 1, 0, 0, 0),
+            visibility_expires_at=None,
+            created_at=datetime(2026, 1, 1, 12, 0, 0),
+            revoked_at=None,
+            last_used_at=last_used_at,
+            bound_context_id=None,
+        )
+
+    def test_serialize_includes_last_used_at_when_present(self, service):
+        used = datetime(2026, 6, 1, 8, 30, 0)
+        out = service._serialize_api_key(self._make_key(used), show_secret=False)
+        assert out["last_used_at"] == to_utc_iso(used)
+
+    def test_serialize_last_used_at_null(self, service):
+        out = service._serialize_api_key(self._make_key(None), show_secret=False)
+        assert out["last_used_at"] is None
+
+    def test_response_schema_preserves_last_used_at(self, service):
+        used = datetime(2026, 6, 1, 8, 30, 0)
+        out = service._serialize_api_key(self._make_key(used), show_secret=False)
+        # Route coerces the dict into MemberAPIKeyResponse — the field must exist
+        # on the schema or it is dropped before reaching the client.
+        model = MemberAPIKeyResponse(**out)
+        assert model.last_used_at == to_utc_iso(used)

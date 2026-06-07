@@ -1128,6 +1128,7 @@ class MemberAPIKeyResponse(BaseModel):
     is_visible: bool
     visibility_expires_at: str | None
     created_at: str
+    last_used_at: str | None = None  # Issue #943: "Last used" column
     revoked_at: str | None
     bound_context_id: str | None = None  # Issue #626: public attribution
 

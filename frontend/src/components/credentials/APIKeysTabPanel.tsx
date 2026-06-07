@@ -8,7 +8,7 @@
 
 "use client";
 
-import { useEffect, useState, useCallback, useRef } from "react";
+import { Fragment, useEffect, useState, useCallback, useRef } from "react";
 import { useTranslations, useLocale } from "next-intl";
 import { Section } from "@/components/common/Section";
 import { ActionButton } from "@/components/common/ActionButton";
@@ -66,6 +66,15 @@ import {
 } from "@/components/ui/collapsible";
 import { Input } from "@/components/ui/input";
 import { Button } from "@/components/ui/button";
+import {
+  Table,
+  TableBody,
+  TableCell,
+  TableHead,
+  TableHeader,
+  TableRow,
+} from "@/components/ui/table";
+import type { MemberAPIKey } from "@/lib/api/member-credentials";
 
 // Auto-refresh interval: 5 minutes (refresh before 10-minute visibility expiry)
 const CREDENTIALS_REFRESH_INTERVAL_MS = 5 * 60 * 1000;
@@ -422,6 +431,150 @@ export function APIKeysTabPanel() {
 
   const apiKeys = credentials?.api_keys || [];
 
+  // Issue #943: shared render helpers so the desktop table and the mobile card
+  // fallback render identical name/status/actions/secret affordances from one
+  // source (no behavior change vs the previous card-only layout).
+  const renderNameCell = (apiKey: MemberAPIKey) => (
+    <div className="flex items-center gap-2">
+      <span className="font-semibold text-gray-900 dark:text-gray-100">
+        {apiKey.name}
+      </span>
+      {/* Issue #626: public-bound attribution badge — independent of revocation. */}
+      {apiKey.bound_context_id && (
+        <span
+          className="text-xs bg-amber-100 dark:bg-amber-900/30 text-amber-800 dark:text-amber-200 px-2 py-0.5 rounded border border-amber-200 dark:border-amber-800"
+          title={t("publicBindBadgeTitle")}
+        >
+          {t("publicBindBadge")}
+        </span>
+      )}
+    </div>
+  );
+
+  const renderStatusBadge = (apiKey: MemberAPIKey) =>
+    apiKey.revoked_at ? (
+      <span className="text-xs text-red-600 dark:text-red-400 bg-red-100 dark:bg-red-900/20 px-2 py-1 rounded">
+        {t("revoked")}
+      </span>
+    ) : (
+      <span className="text-xs text-green-700 dark:text-green-400 bg-green-100 dark:bg-green-900/20 px-2 py-1 rounded">
+        {t("statusActive")}
+      </span>
+    );
+
+  // Last used: relative time, or "—" when the key has never authenticated.
+  const renderLastUsed = (apiKey: MemberAPIKey) =>
+    apiKey.last_used_at ? (
+      <span title={formatDateTime(apiKey.last_used_at, user?.timezone)}>
+        {formatRelativeTime(apiKey.last_used_at, locale)}
+      </span>
+    ) : (
+      <span className="text-gray-400" aria-label={t("neverUsed")}>
+        —
+      </span>
+    );
+
+  const renderActions = (apiKey: MemberAPIKey) => (
+    <div className="flex gap-2">
+      {/* Issue #626: regenerate/hide/delete target legacy singleton endpoints
+          (workspace-scoped keys only) and are suppressed for public-bound keys;
+          bound keys get a dedicated revoke instead. */}
+      {!apiKey.bound_context_id && (
+        <ActionButton
+          onClick={() => handleRegenerateAPIKeyClick(apiKey.id)}
+          icon={<RefreshCw className="w-4 h-4" />}
+        >
+          {t("regenerate")}
+        </ActionButton>
+      )}
+      {!apiKey.revoked_at && !apiKey.bound_context_id && (
+        <ActionButton
+          onClick={() => handleDeleteAPIKeyClick(apiKey.id)}
+          variant="danger"
+          icon={<Trash2 className="w-4 h-4" />}
+        >
+          {tCommon("delete")}
+        </ActionButton>
+      )}
+      {apiKey.bound_context_id && !apiKey.revoked_at && (
+        <Button
+          type="button"
+          variant="ghost"
+          size="sm"
+          onClick={() => {
+            setBoundRevokeKeyId(apiKey.id);
+            setShowBoundRevokeDialog(true);
+          }}
+          disabled={deleting}
+          title={t("publicBindRevoke")}
+          aria-label={t("publicBindRevoke")}
+        >
+          <Trash2 className="w-4 h-4 text-red-600" />
+        </Button>
+      )}
+    </div>
+  );
+
+  // One-time plaintext reveal (create/regenerate). The only chance to copy the
+  // secret, so it stays visually prominent — rendered inline in the mobile card
+  // and as a full-width expanded row beneath its key in the desktop table.
+  const renderPlaintextReveal = (apiKey: MemberAPIKey) => (
+    <div className="bg-green-50 dark:bg-green-900/20 p-3 rounded border border-green-200 dark:border-green-800">
+      <div className="flex items-center gap-2">
+        <MaskedSecretField
+          value={apiKey.plaintext_key!}
+          displayMask={`${apiKey.key_prefix || "kag_"}•••••••••••`}
+          copyToastTitle={t("keyCopied")}
+          copyToastDescription={t("keyCopiedHint")}
+          copyErrorToastTitle={tCommon("error")}
+          showLabel={t("showKey")}
+          hideLabel={t("hideKey")}
+          copyLabel={t("copyToClipboard")}
+          className="flex-1"
+          data-testid={`api-key-field-${apiKey.id}`}
+        />
+        {!apiKey.bound_context_id && (
+          <Button
+            type="button"
+            variant="ghost"
+            size="icon"
+            onClick={() => handleHideAPIKeyClick(apiKey.id)}
+            title={t("hideSecretNow")}
+            aria-label={t("hideSecretNow")}
+          >
+            <EyeOff className="w-4 h-4" />
+          </Button>
+        )}
+        {apiKey.visibility_expires_at &&
+          (() => {
+            const expiresAt = new Date(apiKey.visibility_expires_at);
+            const daysUntil =
+              (expiresAt.getTime() - Date.now()) / (1000 * 60 * 60 * 24);
+            if (daysUntil <= 0) return null;
+            return (
+              <span className="text-xs text-yellow-600 dark:text-yellow-400 flex items-center gap-1 whitespace-nowrap">
+                <AlertTriangle className="w-3 h-3" />
+                {daysUntil <= 30
+                  ? t("hideInTime", {
+                      time: formatRelativeTime(
+                        apiKey.visibility_expires_at,
+                        locale,
+                        false,
+                      ),
+                    })
+                  : t("hideAt", {
+                      date: formatDateTime(
+                        apiKey.visibility_expires_at,
+                        user?.timezone,
+                      ),
+                    })}
+              </span>
+            );
+          })()}
+      </div>
+    </div>
+  );
+
   return (
     <>
       <ErrorBanner error={error} />
@@ -551,7 +704,9 @@ export function APIKeysTabPanel() {
             </ActionButton>
           </div>
 
-          {/* API Keys Display */}
+          {/* API Keys Display. Issue #943: table on desktop, card fallback on
+              narrow viewports (a table needs horizontal room). Both render from
+              the shared helpers above so behavior stays identical. */}
           {apiKeys.length === 0 ? (
             <EmptyState
               icon={Key}
@@ -561,191 +716,101 @@ export function APIKeysTabPanel() {
               onAction={() => setShowCreateKeyDialog(true)}
             />
           ) : (
-            apiKeys.map((apiKey) => (
-              <div
-                key={apiKey.id}
-                className="bg-white dark:bg-gray-800 border border-gray-200 dark:border-gray-700 rounded-lg p-4 space-y-3"
-              >
-                {/* Key Name */}
-                <div className="flex items-center justify-between">
-                  <div className="flex items-center gap-2">
-                    <h4 className="font-semibold text-gray-900 dark:text-gray-100">
-                      {apiKey.name}
-                    </h4>
-                    {/* Issue #626: badge for public-bound keys so the list
-                        view makes attribution visible at a glance. The badge
-                        is its own non-revocation status — keys can be active
-                        AND public-bound, or revoked AND public-bound. */}
-                    {apiKey.bound_context_id && (
-                      <span
-                        className="text-xs bg-amber-100 dark:bg-amber-900/30 text-amber-800 dark:text-amber-200 px-2 py-0.5 rounded border border-amber-200 dark:border-amber-800"
-                        title={t("publicBindBadgeTitle")}
-                      >
-                        {t("publicBindBadge")}
-                      </span>
-                    )}
-                  </div>
-                  <div className="flex items-center gap-2">
-                    {apiKey.revoked_at && (
-                      <span className="text-xs text-red-600 dark:text-red-400 bg-red-100 dark:bg-red-900/20 px-2 py-1 rounded">
-                        {t("revoked")}
-                      </span>
-                    )}
-                    {apiKey.bound_context_id && !apiKey.revoked_at && (
-                      <Button
-                        type="button"
-                        variant="ghost"
-                        size="sm"
-                        onClick={() => {
-                          // Issue #626: destructive op — route through the
-                          // existing AlertDialog confirmation flow rather than
-                          // firing immediately, matching the rest of this
-                          // screen's UX for destructive actions.
-                          setBoundRevokeKeyId(apiKey.id);
-                          setShowBoundRevokeDialog(true);
-                        }}
-                        disabled={deleting}
-                        title={t("publicBindRevoke")}
-                        aria-label={t("publicBindRevoke")}
-                      >
-                        <Trash2 className="w-4 h-4 text-red-600" />
-                      </Button>
-                    )}
-                  </div>
-                </div>
+            <>
+              {/* Desktop: table */}
+              <div className="hidden md:block border border-gray-200 dark:border-gray-700 rounded-lg overflow-hidden">
+                <Table>
+                  <TableHeader>
+                    <TableRow>
+                      <TableHead>{t("colName")}</TableHead>
+                      <TableHead>{t("colKey")}</TableHead>
+                      <TableHead>{t("colStatus")}</TableHead>
+                      <TableHead>{t("colLastUsed")}</TableHead>
+                      <TableHead>{t("colCreated")}</TableHead>
+                      <TableHead className="text-right">
+                        {t("colActions")}
+                      </TableHead>
+                    </TableRow>
+                  </TableHeader>
+                  <TableBody>
+                    {apiKeys.map((apiKey) => (
+                      <Fragment key={apiKey.id}>
+                        <TableRow>
+                          <TableCell>{renderNameCell(apiKey)}</TableCell>
+                          <TableCell>
+                            <code className="text-xs bg-gray-100 dark:bg-gray-900 px-1.5 py-0.5 rounded">
+                              {apiKey.key_prefix}
+                            </code>
+                          </TableCell>
+                          <TableCell>{renderStatusBadge(apiKey)}</TableCell>
+                          <TableCell className="text-xs text-gray-500 dark:text-gray-400 whitespace-nowrap">
+                            {renderLastUsed(apiKey)}
+                          </TableCell>
+                          <TableCell className="text-xs text-gray-500 dark:text-gray-400 whitespace-nowrap">
+                            {formatDateTime(apiKey.created_at, user?.timezone)}
+                          </TableCell>
+                          <TableCell>
+                            <div className="flex justify-end">
+                              {renderActions(apiKey)}
+                            </div>
+                          </TableCell>
+                        </TableRow>
+                        {/* One-time plaintext reveal: full-width expanded row so
+                            the secret stays prominent (only chance to copy it). */}
+                        {apiKey.is_visible && apiKey.plaintext_key && (
+                          <TableRow className="even:bg-transparent hover:bg-transparent">
+                            <TableCell colSpan={6} className="pt-0">
+                              {renderPlaintextReveal(apiKey)}
+                            </TableCell>
+                          </TableRow>
+                        )}
+                      </Fragment>
+                    ))}
+                  </TableBody>
+                </Table>
+              </div>
 
-                {/* Key Display */}
-                {apiKey.is_visible && apiKey.plaintext_key ? (
-                  <div className="bg-green-50 dark:bg-green-900/20 p-3 rounded border border-green-200 dark:border-green-800">
-                    <div className="flex items-center gap-2">
-                      <MaskedSecretField
-                        value={apiKey.plaintext_key}
-                        displayMask={`${apiKey.key_prefix || "kag_"}•••••••••••`}
-                        copyToastTitle={t("keyCopied")}
-                        copyToastDescription={t("keyCopiedHint")}
-                        copyErrorToastTitle={tCommon("error")}
-                        showLabel={t("showKey")}
-                        hideLabel={t("hideKey")}
-                        copyLabel={t("copyToClipboard")}
-                        className="flex-1"
-                        data-testid={`api-key-field-${apiKey.id}`}
-                      />
-                      {/* Issue #626: Hide button targets the legacy
-                          singleton endpoint (filters by workspace_id,
-                          operates on "most recent" key) and cannot
-                          safely target public-bound keys. Suppressed
-                          for bound keys — they're meant to be shared
-                          as attribution, not zero-knowledge secrets,
-                          so manual-hide has no use case anyway. */}
-                      {!apiKey.bound_context_id && (
-                        <Button
-                          type="button"
-                          variant="ghost"
-                          size="icon"
-                          onClick={() => handleHideAPIKeyClick(apiKey.id)}
-                          title={t("hideSecretNow")}
-                          aria-label={t("hideSecretNow")}
-                        >
-                          <EyeOff className="w-4 h-4" />
-                        </Button>
-                      )}
-                      {apiKey.visibility_expires_at &&
-                        (() => {
-                          const expiresAt = new Date(
-                            apiKey.visibility_expires_at,
-                          );
-                          const daysUntil =
-                            (expiresAt.getTime() - Date.now()) /
-                            (1000 * 60 * 60 * 24);
-                          if (daysUntil <= 0) return null;
-                          return (
-                            <span className="text-xs text-yellow-600 dark:text-yellow-400 flex items-center gap-1 whitespace-nowrap">
-                              <AlertTriangle className="w-3 h-3" />
-                              {daysUntil <= 30
-                                ? t("hideInTime", {
-                                    time: formatRelativeTime(
-                                      apiKey.visibility_expires_at,
-                                      locale,
-                                      false,
-                                    ),
-                                  })
-                                : t("hideAt", {
-                                    date: formatDateTime(
-                                      apiKey.visibility_expires_at,
-                                      user?.timezone,
-                                    ),
-                                  })}
-                            </span>
-                          );
-                        })()}
+              {/* Mobile: card fallback */}
+              <div className="space-y-3 md:hidden">
+                {apiKeys.map((apiKey) => (
+                  <div
+                    key={apiKey.id}
+                    className="bg-white dark:bg-gray-800 border border-gray-200 dark:border-gray-700 rounded-lg p-4 space-y-3"
+                  >
+                    <div className="flex items-center justify-between gap-2">
+                      {renderNameCell(apiKey)}
+                      {renderStatusBadge(apiKey)}
                     </div>
-                  </div>
-                ) : (
-                  <div className="bg-gray-50 dark:bg-gray-800 p-3 rounded border border-gray-200 dark:border-gray-700">
-                    <div className="flex items-center gap-2 text-gray-500 dark:text-gray-400">
-                      <EyeOff className="w-4 h-4" />
-                      <span className="text-sm">{t("apiKeyHidden")}</span>
-                    </div>
-                    {apiKey.key_prefix && (
-                      <div className="mt-2 text-xs text-gray-400">
+                    {apiKey.is_visible && apiKey.plaintext_key ? (
+                      renderPlaintextReveal(apiKey)
+                    ) : (
+                      <div className="text-xs text-gray-400">
                         {t("prefix")}:{" "}
                         <code className="bg-gray-100 dark:bg-gray-900 px-1 py-0.5 rounded">
                           {apiKey.key_prefix}
                         </code>
                       </div>
                     )}
+                    {renderActions(apiKey)}
+                    <div className="text-xs text-gray-500 dark:text-gray-400 space-y-1">
+                      <p>
+                        {t("colLastUsed")}: {renderLastUsed(apiKey)}
+                      </p>
+                      <p>
+                        {t("created")}:{" "}
+                        {formatDateTime(apiKey.created_at, user?.timezone)}
+                      </p>
+                      {apiKey.revoked_at && (
+                        <p className="text-red-600 dark:text-red-400">
+                          {t("revoked")}:{" "}
+                          {formatDateTime(apiKey.revoked_at, user?.timezone)}
+                        </p>
+                      )}
+                    </div>
                   </div>
-                )}
-
-                {/* Action Buttons. Issue #626: ``regenerate`` and
-                    ``hide`` (above) both target legacy singleton
-                    endpoints that operate on "most recent active key
-                    for (user, workspace)" — workspace-scoped keys only.
-                    They cannot safely target public-bound keys
-                    (workspace_id IS NULL) and would either no-op or
-                    operate on a different key. Hide both buttons for
-                    bound keys; the bound-key lifecycle is intentionally
-                    simpler (revoke and create), so regenerate has no
-                    use case anyway. Plumbing per-id endpoints for
-                    hide/regenerate is deferred (no use case for bound
-                    keys, and workspace-scoped keys already have the
-                    existing UX). */}
-                <div className="flex gap-2">
-                  {!apiKey.bound_context_id && (
-                    <ActionButton
-                      onClick={() => handleRegenerateAPIKeyClick(apiKey.id)}
-                      icon={<RefreshCw className="w-4 h-4" />}
-                    >
-                      {t("regenerate")}
-                    </ActionButton>
-                  )}
-
-                  {!apiKey.revoked_at && !apiKey.bound_context_id && (
-                    <ActionButton
-                      onClick={() => handleDeleteAPIKeyClick(apiKey.id)}
-                      variant="danger"
-                      icon={<Trash2 className="w-4 h-4" />}
-                    >
-                      {tCommon("delete")}
-                    </ActionButton>
-                  )}
-                </div>
-
-                {/* Metadata */}
-                <div className="text-xs text-gray-500 dark:text-gray-400 space-y-1">
-                  <p>
-                    {t("created")}:{" "}
-                    {formatDateTime(apiKey.created_at, user?.timezone)}
-                  </p>
-                  {apiKey.revoked_at && (
-                    <p className="text-red-600 dark:text-red-400">
-                      {t("revoked")}:{" "}
-                      {formatDateTime(apiKey.revoked_at, user?.timezone)}
-                    </p>
-                  )}
-                </div>
+                ))}
               </div>
-            ))
+            </>
           )}
         </div>
       </Section>
