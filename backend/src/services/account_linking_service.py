@@ -23,7 +23,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from config.settings import get_settings
 from models.auth import AuditLog, User, UserOAuthProvider
 from utils.datetime import utcnow
-from utils.exceptions import ConflictError
+from utils.exceptions import ConflictError, NotFoundException
 from utils.hashing import hmac_sha256_hex
 from utils.logger import get_logger
 
@@ -69,7 +69,10 @@ class AccountLinkingService:
         """
         existing = (
             await self.db.execute(
-                select(UserOAuthProvider).filter_by(provider=provider, oauth_sub=oauth_sub)
+                select(UserOAuthProvider).where(
+                    UserOAuthProvider.provider == provider,
+                    UserOAuthProvider.oauth_sub == oauth_sub,
+                )
             )
         ).scalar_one_or_none()
 
@@ -85,6 +88,7 @@ class AccountLinkingService:
                 user_id, email, "oauth_provider_link_failed", provider, ip_address, user_agent
             )
             await self.db.commit()
+            logger.warning("oauth_provider_link_conflict", user_id=user_id, provider=provider)
             raise ConflictError("This provider is already linked to a different account")
 
         # arm 1 (unbound): INSERT the link + audit success.
@@ -98,6 +102,7 @@ class AccountLinkingService:
         )
         self._audit(user_id, email, "oauth_provider_linked", provider, ip_address, user_agent)
         await self.db.commit()
+        logger.info("oauth_provider_linked", user_id=user_id, provider=provider)
 
     async def unlink(
         self,
@@ -116,15 +121,16 @@ class AccountLinkingService:
             user_agent: Client user agent for the audit row, if available.
 
         Raises:
-            ConflictError: The provider is not linked, or removing it would
-                leave the user with no usable sign-in method.
+            NotFoundException: The provider is not linked to this account (404).
+            ConflictError: Removing it would leave the user with no usable
+                sign-in method (409).
         """
         rows = await self.list_providers(user_id)
         user = (await self.db.execute(select(User).where(User.user_id == user_id))).scalar_one()
 
         target = next((r for r in rows if r.provider == provider), None)
         if target is None:
-            raise ConflictError("Provider is not linked to this account")
+            raise NotFoundException("OAuth provider", resource_id=provider)
 
         has_password = user.auth_method == "password" and user.password_hash is not None
         remaining_methods = (len(rows) - 1) + (1 if has_password else 0)
@@ -139,6 +145,7 @@ class AccountLinkingService:
             user_id, user.email, "oauth_provider_unlinked", provider, ip_address, user_agent
         )
         await self.db.commit()
+        logger.info("oauth_provider_unlinked", user_id=user_id, provider=provider)
 
     def _audit(
         self,

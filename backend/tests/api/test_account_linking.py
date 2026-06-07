@@ -26,7 +26,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from models.auth import AuditLog, User, UserOAuthProvider
 from services.account_linking_service import AccountLinkingService
-from utils.exceptions import ConflictError
+from utils.exceptions import ConflictError, NotFoundException
 
 
 async def _make_user(
@@ -172,6 +172,34 @@ async def test_unlink_last_method_raises_conflict(db_session: AsyncSession):
         await svc.unlink(user_id=user.user_id, provider="google")
 
     # Provider row must still exist — nothing was deleted.
+    row = (
+        await db_session.execute(
+            select(UserOAuthProvider).filter_by(provider="google", oauth_sub=sub)
+        )
+    ).scalar_one_or_none()
+    assert row is not None
+
+
+@pytest.mark.asyncio
+async def test_unlink_not_linked_raises_not_found(db_session: AsyncSession):
+    suffix = uuid4().hex[:8]
+    # Password user with one linked provider; unlinking a DIFFERENT provider
+    # they never linked must 404, and must not delete the existing row.
+    user = await _make_user(
+        db_session,
+        suffix=suffix,
+        auth_method="password",
+        auth_provider=None,
+        password_hash="hashed",
+    )
+    sub = f"g-{suffix}"
+    svc = AccountLinkingService(db_session)
+    await svc.link(user_id=user.user_id, provider="google", oauth_sub=sub, email=user.email)
+
+    with pytest.raises(NotFoundException):
+        await svc.unlink(user_id=user.user_id, provider="github")
+
+    # The provider the user actually linked must still exist — nothing deleted.
     row = (
         await db_session.execute(
             select(UserOAuthProvider).filter_by(provider="google", oauth_sub=sub)
