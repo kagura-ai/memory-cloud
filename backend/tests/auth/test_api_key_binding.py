@@ -15,11 +15,12 @@ constraint is covered by ``tests/integration/test_e10_626_apikey_bound_context_i
 from __future__ import annotations
 
 import uuid
+from contextlib import contextmanager
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-from auth.api_keys import APIKeyManager
+from auth.api_keys import APIKeyManager, VerifiedKey
 
 
 def _execute_result(value: object | None = None):
@@ -227,17 +228,16 @@ class TestVerifyApiKeyStandaloneCommitsLastUsed:
     ``except Exception: return None`` would otherwise reject a valid key)."""
 
     @staticmethod
-    def _ok_key() -> object:
-        from auth.api_keys import VerifiedKey
-
+    def _ok_key() -> VerifiedKey:
         return VerifiedKey(id=1, user_id="user-1", workspace_id=None, bound_context_id=None)
 
-    @pytest.mark.asyncio
-    async def test_standalone_commits_on_success(self) -> None:
-        from auth.dependencies import verify_api_key
-
-        ok = self._ok_key()
-        db = AsyncMock()
+    @staticmethod
+    @contextmanager
+    def _patched(db: AsyncMock, verified: VerifiedKey):
+        """Patch the standalone ``verify_api_key``'s inner ``get_db()`` to yield
+        ``db`` and its ``verify_key`` to return ``verified``. The standalone opens
+        its own session via ``async for db in get_db()``, so both the generator
+        and the manager method must be patched."""
 
         async def _fake_get_db():
             yield db
@@ -246,9 +246,19 @@ class TestVerifyApiKeyStandaloneCommitsLastUsed:
             patch("db.base.get_db", new=_fake_get_db),
             patch(
                 "auth.api_keys.APIKeyManager.verify_key",
-                new=AsyncMock(return_value=ok),
+                new=AsyncMock(return_value=verified),
             ),
         ):
+            yield
+
+    @pytest.mark.asyncio
+    async def test_standalone_commits_on_success(self) -> None:
+        from auth.dependencies import verify_api_key
+
+        ok = self._ok_key()
+        db = AsyncMock()
+
+        with self._patched(db, ok):
             result = await verify_api_key("kagura_test")
 
         assert result is ok
@@ -264,16 +274,7 @@ class TestVerifyApiKeyStandaloneCommitsLastUsed:
         db = AsyncMock()
         db.commit = AsyncMock(side_effect=RuntimeError("commit boom"))
 
-        async def _fake_get_db():
-            yield db
-
-        with (
-            patch("db.base.get_db", new=_fake_get_db),
-            patch(
-                "auth.api_keys.APIKeyManager.verify_key",
-                new=AsyncMock(return_value=ok),
-            ),
-        ):
+        with self._patched(db, ok):
             result = await verify_api_key("kagura_test")
 
         # A non-critical last_used_at commit failure must not turn a valid key
