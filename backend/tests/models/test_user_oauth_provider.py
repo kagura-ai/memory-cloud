@@ -51,3 +51,14 @@ async def test_same_provider_sub_cannot_bind_two_users(db_session):
     db_session.add(UserOAuthProvider(user_id="u2", provider="github", oauth_sub="gh-1"))
     with pytest.raises(IntegrityError):
         await db_session.commit()
+
+
+@pytest.mark.asyncio
+async def test_same_user_cannot_link_same_provider_twice(db_session):
+    db_session.add(User(email="c@x.com", user_id="u3", auth_provider="google", role="user"))
+    await db_session.flush()
+    db_session.add(UserOAuthProvider(user_id="u3", provider="github", oauth_sub="gh-3"))
+    await db_session.commit()
+    db_session.add(UserOAuthProvider(user_id="u3", provider="github", oauth_sub="gh-4"))
+    with pytest.raises(IntegrityError):
+        await db_session.commit()

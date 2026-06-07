@@ -180,6 +180,14 @@ class UserOAuthProvider(Base):
     Composite UNIQUE(provider, oauth_sub) preserves the invariant that an
     OAuth identity belongs to at most one user. UNIQUE(user_id, provider)
     means each user links a given provider at most once.
+
+    Attributes:
+        id: Primary key
+        user_id: Owner user ID (foreign key → users.user_id, CASCADE delete)
+        provider: OAuth provider name (google, github)
+        oauth_sub: Provider-issued subject identifier (sub claim)
+        linked_at: Timestamp when this provider was first linked
+        last_used_at: Timestamp of most recent login via this provider
     """
 
     __tablename__ = "user_oauth_providers"
