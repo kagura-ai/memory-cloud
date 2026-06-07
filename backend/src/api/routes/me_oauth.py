@@ -58,6 +58,10 @@ STATE_TTL = 300  # 5 minutes — matches auth.py's existing oauth2_state TTL
 RATE_LIMIT_PER_MINUTE = 1
 
 
+# Intentionally shared with me_account.link_provider despite the underscore
+# prefix — the leading underscore signals "not part of the public router API",
+# not "module-private". me_account imports it directly to keep provider config
+# resolution and URL composition byte-identical across refresh and link flows.
 def _build_authorization_url(provider: str, state: str) -> str:
     """Resolve provider config and compose the IdP authorization URL.
 
@@ -243,6 +247,10 @@ async def refresh_oauth(
             ),
         )
 
+    # Rate limit runs before config resolution: a misconfigured env var
+    # consumes one slot (rare, acceptable) but the URL is still built before
+    # any Redis write so no state keys are orphaned.
+    #
     # Rate limit: 1/minute/user. Window-based on minute floor so a
     # single user can't burst more than once per minute even by spreading
     # calls across multiple processes.

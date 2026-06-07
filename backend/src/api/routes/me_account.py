@@ -1,8 +1,14 @@
-"""Self-service account erasure endpoints (Issue #360).
+"""Self-service account erasure endpoints (Issue #360) and multi-provider
+account linking (Issue #517).
 
 Routes that let an authenticated user request, confirm, cancel, and
 inspect their own GDPR-Art.17 / APPI account-deletion flow. Admin force-
 erase lives in `admin.py` and goes through the same service.
+
+The module also hosts the account-linking sub-API introduced in #517:
+``link-provider`` initiates an OAuth round-trip to bind a new IdP identity,
+``unlink-provider`` removes an existing linked provider, and ``providers``
+lists all providers currently linked to the session user.
 
 Auth model: every endpoint uses `SessionUser` (browser session only, no
 API keys) — a leaked API key must never be enough to trigger account
@@ -266,6 +272,12 @@ class UnlinkProviderRequest(BaseModel):
     provider: Literal["google", "github"]
 
 
+class UnlinkProviderResponse(BaseModel):
+    """Returned by POST /me/account/unlink-provider on success."""
+
+    status: str
+
+
 class LinkedProvider(BaseModel):
     """One linked OAuth identity, as surfaced to the profile UI.
 
@@ -285,7 +297,7 @@ class ProvidersListResponse(BaseModel):
     providers: list[LinkedProvider]
 
 
-@router.post("/link-provider", response_model=LinkProviderResponse)
+@router.post("/link-provider", response_model=LinkProviderResponse, tags=["account-linking"])
 async def link_provider(
     body: LinkProviderRequest,
     user: SessionUser,
@@ -332,13 +344,13 @@ async def link_provider(
     return LinkProviderResponse(authorization_url=authorization_url, state=state)
 
 
-@router.post("/unlink-provider")
+@router.post("/unlink-provider", response_model=UnlinkProviderResponse, tags=["account-linking"])
 async def unlink_provider(
     body: UnlinkProviderRequest,
     request: Request,
     user: SessionUser,
     db: AsyncSession = Depends(get_db),
-) -> dict[str, str]:
+) -> UnlinkProviderResponse:
     """Remove a linked OAuth provider from the current account.
 
     Returns ``{"status": "ok"}`` on success. The service guards the
@@ -355,10 +367,10 @@ async def unlink_provider(
         ip_address=request.client.host if request.client else None,
         user_agent=request.headers.get("user-agent"),
     )
-    return {"status": "ok"}
+    return UnlinkProviderResponse(status="ok")
 
 
-@router.get("/providers", response_model=ProvidersListResponse)
+@router.get("/providers", response_model=ProvidersListResponse, tags=["account-linking"])
 async def list_providers(
     user: SessionUser,
     db: AsyncSession = Depends(get_db),

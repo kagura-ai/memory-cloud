@@ -436,7 +436,7 @@ class TestUnlinkProviderEndpoint:
                 db=AsyncMock(),
             )
 
-        assert result == {"status": "ok"}
+        assert result.status == "ok"
         _, kwargs = mock_cls.return_value.unlink.call_args
         assert kwargs["provider"] == "github"
         assert kwargs["ip_address"] == "127.0.0.1"
