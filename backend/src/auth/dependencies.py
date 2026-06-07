@@ -250,6 +250,17 @@ async def verify_api_key(api_key: str) -> VerifiedKey | None:
                     bound_context_id=str(verified.bound_context_id),
                 )
                 return None
+            # #945: this wrapper consumes get_db() via `async for ... return`,
+            # so the early return raises GeneratorExit at get_db's yield and its
+            # post-yield `await session.commit()` never runs — the last_used_at
+            # flushed by verify_key would be rolled back. Commit explicitly.
+            # Isolated try/except: a commit failure must NOT fail auth
+            # (last_used_at is non-critical metadata, and the outer
+            # `except Exception: return None` would otherwise reject a valid key).
+            try:
+                await db.commit()
+            except Exception as commit_err:
+                logger.warning("api_key_last_used_commit_failed", error=str(commit_err))
             return verified
     except Exception:
         # Silent failure - return None on any error
