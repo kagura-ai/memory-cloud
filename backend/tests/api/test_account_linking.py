@@ -222,27 +222,39 @@ async def test_unlink_not_linked_raises_not_found(db_session: AsyncSession):
 
 
 @pytest.mark.asyncio
-async def test_unlink_with_legacy_fallback_provider_succeeds(db_session: AsyncSession):
-    """FIX 3: a pre-#517 legacy user has ``auth_provider='google'`` resolvable
-    via the ensure_user fallback but NO ``user_oauth_providers`` row for google
-    yet. After linking github, unlinking github must NOT 409 — the legacy google
-    method still works, so remaining_methods must count it."""
+async def test_unlink_secondary_keeps_primary_succeeds(db_session: AsyncSession):
+    """Unlinking a secondary provider succeeds while the primary remains.
+
+    Post-#938 (legacy ``users.user_id``-as-sub fallback + self-heal removed,
+    backfill saturated) every usable OAuth method has a ``user_oauth_providers``
+    row, so ``remaining_methods`` is computed purely from the rows + password.
+    A user with both a google and a github row unlinks github → remaining_methods
+    = (2-1)+0 = 1 → succeeds, the google row stays, and ``auth_provider`` (the
+    denormalized primary pointer) is untouched because we unlinked the secondary.
+
+    (This replaces the old ``test_unlink_with_legacy_fallback_provider_succeeds``,
+    which pinned the removed legacy_provider_usable term. Its scenario — a user
+    with ``auth_provider='google'`` but NO google row — can no longer occur:
+    the e37_517 backfill covered all such users and the new-user path always
+    writes a provider row for known providers.)"""
     suffix = uuid4().hex[:8]
     user = await _make_user(db_session, suffix=suffix, auth_provider="google")
     svc = AccountLinkingService(db_session)
-    # Only github gets a provider row; google remains a legacy-fallback method.
+    # Backfill model: the primary (google) has a real provider row, as does github.
+    await svc.link(
+        user_id=user.user_id, provider="google", oauth_sub=f"g-{suffix}", email=user.email
+    )
     await svc.link(
         user_id=user.user_id, provider="github", oauth_sub=f"gh-{suffix}", email=user.email
     )
 
-    # Unlinking github would naively compute (1-1)+0 = 0 → wrong 409. The legacy
-    # google method keeps remaining_methods at 1, so this must succeed.
+    # Unlink the secondary: (2-1)+0 = 1 remaining → succeeds.
     await svc.unlink(user_id=user.user_id, provider="github")
 
     remaining = await svc.list_providers(user.user_id)
-    assert remaining == []
+    assert {r.provider for r in remaining} == {"google"}
 
-    # auth_provider untouched (we unlinked github, not the legacy primary).
+    # auth_provider untouched (we unlinked github, not the primary).
     refreshed = (
         await db_session.execute(select(User).filter_by(user_id=user.user_id))
     ).scalar_one()

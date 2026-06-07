@@ -151,18 +151,22 @@ class TestLookupKeyIsUserId:
     @pytest.mark.asyncio
     async def test_lookup_uses_user_id_filter(self, role_manager):
         existing = _user_row(user_id="github-999", email="alice@old.com")
-        db = _make_db_mock(_execute_returns(existing))
+        # #517 NEW path: link lookup (execute #1) → owner User load (execute #2).
+        # #938 removed the legacy user_id fallback, so the owner is loaded via the
+        # link; the User SELECT (#2) must still filter by user_id, not email (#481).
+        db = _make_db_mock(_execute_returns(_oauth_link_row(user_id="github-999"), existing))
 
         with _patch_get_db(db):
             await role_manager.ensure_user(
                 email="alice@old.com",
                 user_id="github-999",
+                auth_provider="github",
                 email_verified=True,
             )
 
-        # Inspect the executed SELECT statement: must filter by user_id.
-        first_stmt = db.execute.call_args_list[0].args[0]
-        compiled = str(first_stmt.compile(compile_kwargs={"literal_binds": True}))
+        # Inspect the User SELECT (the 2nd execute — owner load by link.user_id).
+        user_stmt = db.execute.call_args_list[1].args[0]
+        compiled = str(user_stmt.compile(compile_kwargs={"literal_binds": True}))
         assert "users.user_id" in compiled
         assert "WHERE" in compiled
         # Ensure email is not the primary lookup criterion in this SELECT.
@@ -173,12 +177,14 @@ class TestSyncEmail:
     @pytest.mark.asyncio
     async def test_syncs_email_when_verified_and_changed(self, role_manager):
         existing = _user_row(email="alice@old.com")
-        db = _make_db_mock(_execute_returns(existing))
+        # NEW path (#517): link lookup → owner load. Legacy user_id fallback gone (#938).
+        db = _make_db_mock(_execute_returns(_oauth_link_row(), existing))
 
         with _patch_get_db(db):
             role = await role_manager.ensure_user(
                 email="alice@new.com",
                 user_id="u1",
+                auth_provider="google",
                 email_verified=True,
             )
 
@@ -196,12 +202,13 @@ class TestSyncEmail:
     @pytest.mark.asyncio
     async def test_skips_sync_when_email_not_verified(self, role_manager):
         existing = _user_row(email="alice@old.com")
-        db = _make_db_mock(_execute_returns(existing))
+        db = _make_db_mock(_execute_returns(_oauth_link_row(), existing))
 
         with _patch_get_db(db):
             await role_manager.ensure_user(
                 email="alice@new.com",
                 user_id="u1",
+                auth_provider="google",
                 email_verified=False,
             )
 
@@ -212,12 +219,13 @@ class TestSyncEmail:
     @pytest.mark.asyncio
     async def test_skips_sync_when_email_unchanged(self, role_manager):
         existing = _user_row(email="alice@example.com")
-        db = _make_db_mock(_execute_returns(existing))
+        db = _make_db_mock(_execute_returns(_oauth_link_row(), existing))
 
         with _patch_get_db(db):
             await role_manager.ensure_user(
                 email="alice@example.com",
                 user_id="u1",
+                auth_provider="google",
                 email_verified=True,
             )
 
@@ -229,13 +237,14 @@ class TestSyncName:
     @pytest.mark.asyncio
     async def test_syncs_name_independently_of_email(self, role_manager):
         existing = _user_row(email="alice@example.com", name="Alice Old")
-        db = _make_db_mock(_execute_returns(existing))
+        db = _make_db_mock(_execute_returns(_oauth_link_row(), existing))
 
         with _patch_get_db(db):
             await role_manager.ensure_user(
                 email="alice@example.com",
                 user_id="u1",
                 name="Alice New",
+                auth_provider="google",
                 email_verified=False,  # email won't sync, name still should
             )
 
@@ -246,13 +255,14 @@ class TestSyncName:
     @pytest.mark.asyncio
     async def test_does_not_sync_name_when_unchanged(self, role_manager):
         existing = _user_row(name="Alice")
-        db = _make_db_mock(_execute_returns(existing))
+        db = _make_db_mock(_execute_returns(_oauth_link_row(), existing))
 
         with _patch_get_db(db):
             await role_manager.ensure_user(
                 email=existing.email,
                 user_id="u1",
                 name="Alice",
+                auth_provider="google",
             )
 
         # last_login_at still updated, but no add/audit
@@ -263,7 +273,7 @@ class TestAuditLogStructure:
     @pytest.mark.asyncio
     async def test_audit_log_uses_hmac_not_plaintext(self, role_manager):
         existing = _user_row(email="alice@old.com")
-        db = _make_db_mock(_execute_returns(existing))
+        db = _make_db_mock(_execute_returns(_oauth_link_row(), existing))
         test_key = "test-key-32"
 
         with patch.dict("os.environ", {"AUDIT_HMAC_KEY": test_key}, clear=False):
@@ -275,6 +285,7 @@ class TestAuditLogStructure:
                 await role_manager.ensure_user(
                     email="alice@new.com",
                     user_id="u1",
+                    auth_provider="google",
                     email_verified=True,
                 )
             cs._settings = None  # cleanup
@@ -347,13 +358,15 @@ class TestUpdateCollision:
 class TestCreatePath:
     @pytest.mark.asyncio
     async def test_first_user_gets_admin(self, role_manager):
-        # Sequence: User lookup miss → count=0 → commit succeeds
+        # Sequence (#517 NEW path, #938 no legacy fallback): link lookup miss →
+        # count=0 → commit succeeds.
         db = _make_db_mock(_execute_returns(None, {"scalar": 0}))
 
         with _patch_get_db(db):
             role = await role_manager.ensure_user(
                 email="first@example.com",
                 user_id="u1",
+                auth_provider="google",
                 email_verified=True,
             )
 
@@ -364,13 +377,15 @@ class TestCreatePath:
 
     @pytest.mark.asyncio
     async def test_second_user_gets_user(self, role_manager):
-        # Sequence: User lookup miss → count=1 → commit succeeds
+        # Sequence (#517 NEW path, #938 no legacy fallback): link lookup miss →
+        # count=1 → commit succeeds.
         db = _make_db_mock(_execute_returns(None, {"scalar": 1}))
 
         with _patch_get_db(db):
             role = await role_manager.ensure_user(
                 email="second@example.com",
                 user_id="u2",
+                auth_provider="google",
                 email_verified=True,
             )
 
@@ -394,10 +409,10 @@ class TestCreatePath:
         # precisely model the user_id-collision shape rather than reusing
         # the email helper) → re-lookup hits → sync_existing_user commits
         # the update
-        # #517 dual-read: link lookup MISS → legacy lookup MISS → count → race
-        # re-lookup HIT. Known provider also inserts a UserOAuthProvider row in
+        # #517 NEW path (#938 legacy fallback removed): link lookup MISS → count →
+        # race re-lookup HIT. Known provider also inserts a UserOAuthProvider row in
         # the create unit of work (rolled back with the user on the race).
-        db = _make_db_mock(_execute_returns(None, None, {"scalar": 0}, race_existing))
+        db = _make_db_mock(_execute_returns(None, {"scalar": 0}, race_existing))
         db.commit = AsyncMock(side_effect=[_user_id_unique_violation(), None])
 
         with _patch_get_db(db):
@@ -421,9 +436,9 @@ class TestCreatePath:
 
     @pytest.mark.asyncio
     async def test_email_collision_on_create_raises_conflict(self, role_manager):
-        # #517 dual-read: link lookup MISS → legacy lookup MISS → count=5 →
-        # commit raises → re-lookup also miss → ConflictError.
-        db = _make_db_mock(_execute_returns(None, None, {"scalar": 5}, None))
+        # #517 NEW path (#938 legacy fallback removed): link lookup MISS → count=5
+        # → commit raises → re-lookup also miss → ConflictError.
+        db = _make_db_mock(_execute_returns(None, {"scalar": 5}, None))
         db.commit = AsyncMock(side_effect=_email_unique_violation())
 
         with _patch_get_db(db), structlog.testing.capture_logs() as logs:
