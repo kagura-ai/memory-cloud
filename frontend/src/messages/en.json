@@ -1,4 +1,25 @@
 {
+  "connectedAccounts": {
+    "title": "Connected accounts",
+    "description": "Link Google or GitHub so you can sign in with either provider.",
+    "google": "Google",
+    "github": "GitHub",
+    "connected": "Connected",
+    "notConnected": "Not connected",
+    "connectButton": "Connect {provider}",
+    "disconnectButton": "Disconnect {provider}",
+    "disconnectConfirm": "Disconnect",
+    "connecting": "Connecting…",
+    "disconnecting": "Disconnecting…",
+    "disconnectTitle": "Disconnect {provider}?",
+    "disconnectDescription": "You will no longer be able to sign in with {provider}. You can reconnect it at any time.",
+    "disconnectSuccess": "{provider} disconnected.",
+    "connectError": "Couldn't start linking {provider}. Please try again.",
+    "disconnectError": "Couldn't disconnect {provider}. Please try again.",
+    "loadError": "Couldn't load your connected accounts. Please refresh and try again.",
+    "lastMethodError": "This is your only sign-in method, so it can't be disconnected. Set a password or link another provider first.",
+    "lastMethodHint": "Your only sign-in method"
+  },
   "common": {
     "save": "Save",
     "cancel": "Cancel",

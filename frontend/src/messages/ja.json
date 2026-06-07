@@ -1,4 +1,25 @@
 {
+  "connectedAccounts": {
+    "title": "連携済みアカウント",
+    "description": "Google または GitHub を連携すると、どちらのプロバイダーでもサインインできます。",
+    "google": "Google",
+    "github": "GitHub",
+    "connected": "連携済み",
+    "notConnected": "未連携",
+    "connectButton": "{provider} を連携",
+    "disconnectButton": "{provider} を解除",
+    "disconnectConfirm": "解除",
+    "connecting": "接続中…",
+    "disconnecting": "解除中…",
+    "disconnectTitle": "{provider} を解除しますか？",
+    "disconnectDescription": "{provider} ではサインインできなくなります。いつでも再連携できます。",
+    "disconnectSuccess": "{provider} を解除しました。",
+    "connectError": "{provider} の連携を開始できませんでした。もう一度お試しください。",
+    "disconnectError": "{provider} を解除できませんでした。もう一度お試しください。",
+    "loadError": "連携済みアカウントを読み込めませんでした。再読み込みしてお試しください。",
+    "lastMethodError": "これは唯一のサインイン方法のため解除できません。先にパスワードを設定するか、別のプロバイダーを連携してください。",
+    "lastMethodHint": "唯一のサインイン方法"
+  },
   "common": {
     "save": "保存",
     "cancel": "キャンセル",

@@ -35,6 +35,7 @@ import { User, Moon, Sun, Save, RefreshCw } from "lucide-react";
 import { COMMON_TIMEZONES } from "@/lib/utils/datetime";
 import { apiClient, ApiError } from "@/lib/api/base";
 import { PageContainer } from "@/components/common/PageContainer";
+import ConnectedAccounts from "@/components/auth/ConnectedAccounts";
 import { getSignInMethodLabel, getRefreshProviderName } from "./signInLabels";
 
 export default function ProfilePage() {
@@ -377,6 +378,14 @@ export default function ProfilePage() {
           )}
         </CardContent>
       </Card>
+
+      {/* Connected accounts (Issue #517): link/unlink Google & GitHub.
+          The read-only "Sign-in method" field above (#514) and the
+          refresh-from-IdP control (#515) are intentionally retained — they are
+          covered by an extensive test suite and serve a distinct purpose
+          (current method display + IdP profile refresh) from this management
+          section, so removing them was judged riskier than additive mounting. */}
+      <ConnectedAccounts />
 
       {/* Theme & Appearance */}
       <Card>
