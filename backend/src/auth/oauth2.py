@@ -353,7 +353,12 @@ class OAuth2Manager:
                 "web": {
                     "client_id": client_id,
                     "client_secret": client_secret,
-                    "auth_uri": oauth_endpoints.google_auth_url(),
+                    # auth_uri is metadata only — Flow.fetch_token uses token_uri,
+                    # never auth_uri — so keep the original literal to avoid any
+                    # behavior change. Only token_uri is routed through the
+                    # resolver (it IS used for the exchange, and is what a mock
+                    # IdP must override).
+                    "auth_uri": "https://accounts.google.com/o/oauth2/auth",
                     "token_uri": oauth_endpoints.google_token_url(),
                     "redirect_uris": [redirect_uri],
                 }

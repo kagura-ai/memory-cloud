@@ -32,18 +32,21 @@ export default defineConfig({
       stdout: "pipe",
       stderr: "pipe",
     },
-    {
-      // Mock OAuth IdP for the account-linking E2E (#937). Idle for other specs;
-      // the backend only calls it during the link round-trip. Kept in the shared
-      // webServer list (not a per-project hook) so `npm run test:e2e:oauth` is
-      // self-contained locally; in CI it is likewise managed by Playwright.
-      command: "npm run mock-idp",
-      url: `http://localhost:${process.env.MOCK_IDP_PORT ?? 9100}/health`,
-      reuseExistingServer: !process.env.CI,
-      timeout: 30_000,
-      stdout: "pipe",
-      stderr: "pipe",
-    },
+    // Mock OAuth IdP for the account-linking E2E (#937). Gated on PW_OAUTH_IDP
+    // (set by `npm run test:e2e:oauth`) so the a11y lanes are NOT coupled to the
+    // mock's health — a bug in the mock must never fail an unrelated a11y run.
+    ...(process.env.PW_OAUTH_IDP === "1"
+      ? [
+          {
+            command: "npm run mock-idp",
+            url: `http://localhost:${process.env.MOCK_IDP_PORT ?? 9100}/health`,
+            reuseExistingServer: !process.env.CI,
+            timeout: 30_000,
+            stdout: "pipe" as const,
+            stderr: "pipe" as const,
+          },
+        ]
+      : []),
   ],
   projects: [
     {

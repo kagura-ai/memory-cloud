@@ -21,7 +21,7 @@
     "test:e2e": "playwright test",
     "test:a11y": "playwright test e2e/a11y/",
     "test:a11y:authed": "playwright test e2e/authed-a11y/",
-    "test:e2e:oauth": "playwright test e2e/oauth-account-linking.spec.ts",
+    "test:e2e:oauth": "PW_OAUTH_IDP=1 playwright test e2e/oauth-account-linking.spec.ts",
     "mock-idp": "node e2e/mock-idp/server.mjs"
   },
   "dependencies": {
