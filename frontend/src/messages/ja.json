@@ -3346,12 +3346,7 @@
       "overview": "概要",
       "data": "データ",
       "schemas": "スキーマ",
-      "tokens": "トークン",
-      "events": "イベント"
-    },
-    "events": {
-      "comingSoonTitle": "Ingest イベントログは近日公開",
-      "comingSoonDescription": "リソース単位の ingest イベントタイムライン (カーソルページネーション)。それまでは概要タブの Indexer Status パネルで直近 5 件を確認できます。"
+      "tokens": "トークン"
     },
     "indexer": {
       "fetchError": "Indexer ステータスの取得に失敗しました。",
@@ -3412,9 +3407,45 @@
       "createNewVersionAction": "新しいバージョンを作成"
     },
     "data": {
-      "comingSoonTitle": "データブラウザは近日公開",
-      "comingSoonDescription": "スキーマ連動の key-value 表示 + raw JSON ペインによるページネーション付き記録ビューア。v0.13.0 で提供予定です。",
-      "trackProgress": "#316 で進捗を確認"
+      "emptyTitle": "イベントがありません",
+      "emptyDescription": "現在のフィルタに一致する取り込みイベントはありません。MCP ツールまたは SDK でレコードを取り込んでから更新してください。",
+      "fetchError": "リソースイベントの読み込みに失敗しました。",
+      "loadMore": "さらに読み込む",
+      "loadingMore": "読み込み中…",
+      "op": {
+        "upsert": "Upsert",
+        "delete": "削除"
+      },
+      "filter": {
+        "op": "操作",
+        "opAll": "すべて",
+        "docId": "ドキュメント ID",
+        "docIdPlaceholder": "完全一致",
+        "version": "バージョン",
+        "since": "開始日時",
+        "apply": "適用",
+        "clear": "クリア"
+      },
+      "meta": {
+        "version": "バージョン",
+        "idempotencyKey": "冪等キー",
+        "importance": "重要度",
+        "payloadSize": "ペイロードサイズ"
+      },
+      "payload": {
+        "raw": "生 JSON",
+        "copy": "コピー",
+        "copied": "コピーしました",
+        "copyFailed": "クリップボードへのコピーに失敗しました。",
+        "empty": "このイベントにはペイロードがありません（削除操作）。",
+        "tooLarge": "ペイロードが大きすぎてインライン表示できません（{size}）。API 経由でコピーして確認してください。"
+      },
+      "kv": {
+        "field": "フィールド",
+        "value": "値",
+        "type": "型",
+        "searchable": "検索可能"
+      }
     },
     "planGate": {
       "title": "リソース機能は Pro プラン必須",

@@ -12,7 +12,11 @@ Complements the existing per-resource endpoints in ``resource_schema.py``
 
 from __future__ import annotations
 
-from fastapi import APIRouter, Depends
+import json
+from datetime import datetime
+from typing import Literal
+
+from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel, Field
 from sqlalchemy import and_, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -23,6 +27,7 @@ from models.auth import Context
 from models.memory import Memory
 from models.resource import Resource, ResourceEvent, ResourceSchema, ResourceToken
 from services.permission_service import PermissionService
+from services.resource_events import MAX_EVENTS_PAGE_SIZE, list_resource_events
 from utils.datetime import to_utc_iso
 from utils.logger import get_logger
 
@@ -238,3 +243,159 @@ async def list_resources(
     )
 
     return ResourceListResponse(resources=resources, total=len(resources))
+
+
+# ============================================================================
+# Issue #316 — Resource event data browser (cursor pagination)
+# ============================================================================
+
+
+# Defensive cap on inline payload size. Ingest is expected to reject payloads
+# above this, but a multi-MB row must not bloat the response or the browser —
+# over the cap, ``payload`` is omitted and ``payload_truncated`` is set so the
+# UI can offer a "too large to preview" affordance (issue #316 P2).
+PAYLOAD_INLINE_MAX_BYTES = 1_000_000
+
+
+class ResourceEventRecord(BaseModel):
+    """A single ingest event row for the Resource Detail Data tab."""
+
+    id: str = Field(
+        ...,
+        description=(
+            "BigInt append-only event id (also the cursor key), serialized as a "
+            "string so JS clients can't lose precision above 2^53-1"
+        ),
+    )
+    op: str = Field(..., description="Operation: 'upsert' or 'delete'")
+    doc_id: str = Field(..., description="Document identifier (stable across versions)")
+    version: int | None = Field(None, description="Document version; null for delete-all-versions")
+    idempotency_key: str | None = Field(
+        None, description="Client-provided deduplication key, if any"
+    )
+    importance: float = Field(..., description="Importance score (0.0–1.0)")
+    created_at: str = Field(..., description="Event creation time (ISO 8601 UTC)")
+    payload: dict | None = Field(
+        None,
+        description=(
+            "JSONB payload; null for delete ops OR when omitted because it "
+            "exceeds the inline size cap (see payload_truncated)"
+        ),
+    )
+    event_metadata: dict | None = Field(
+        None, description="Additional metadata (source, correlation_id, etc.)"
+    )
+    payload_bytes: int = Field(..., description="Serialized payload size in bytes (0 when null)")
+    payload_truncated: bool = Field(
+        ...,
+        description=(
+            "True when the payload exceeded the inline size cap and was omitted from this response"
+        ),
+    )
+
+
+class ResourceEventsResponse(BaseModel):
+    """Cursor-paginated resource events response."""
+
+    events: list[ResourceEventRecord]
+    next_cursor: str | None = Field(
+        None, description="Opaque cursor for the next page; null on the last page"
+    )
+
+
+def _to_event_record(event: ResourceEvent) -> ResourceEventRecord:
+    """Map a ``ResourceEvent`` ORM row to the API record, applying the
+    inline payload-size guard."""
+    payload = event.payload
+    payload_bytes = 0
+    payload_out: dict | None = None
+    payload_truncated = False
+    if payload is not None:
+        # separators drop insignificant whitespace so the byte count reflects
+        # the compact wire size, not Python's default pretty spacing.
+        payload_bytes = len(json.dumps(payload, separators=(",", ":")).encode("utf-8"))
+        if payload_bytes > PAYLOAD_INLINE_MAX_BYTES:
+            payload_truncated = True
+        else:
+            payload_out = payload
+
+    return ResourceEventRecord(
+        id=str(event.id),
+        op=event.op,
+        doc_id=event.doc_id,
+        version=event.version,
+        idempotency_key=event.idempotency_key,
+        importance=event.importance,
+        created_at=to_utc_iso(event.created_at),
+        payload=payload_out,
+        event_metadata=event.event_metadata,
+        payload_bytes=payload_bytes,
+        payload_truncated=payload_truncated,
+    )
+
+
+@router.get("/{resource_id}/events", response_model=ResourceEventsResponse)
+async def list_resource_events_route(
+    resource_id: str,
+    owner: WorkspaceOwner,
+    op: Literal["upsert", "delete"] | None = Query(None, description="Filter by operation type"),
+    doc_id: str | None = Query(None, description="Filter by exact document id"),
+    version: int | None = Query(None, description="Filter by exact document version"),
+    since: datetime | None = Query(
+        None, description="Only events created at or after this ISO 8601 timestamp"
+    ),
+    limit: int | None = Query(
+        None,
+        ge=1,
+        le=MAX_EVENTS_PAGE_SIZE,
+        description="Page size (default 20, max 100)",
+    ),
+    cursor: str | None = Query(
+        None, description="Opaque cursor from a previous response's next_cursor"
+    ),
+    db: AsyncSession = Depends(get_db),
+):
+    """Browse ingested events for a resource, newest first (cursor-paginated).
+
+    Owner-only (``WorkspaceOwner``) for parity with the rest of the resources
+    surface (#389). Events are scoped to the caller's workspace via the
+    authoritative ``resource_pk``; a slug that does not resolve to a Resource
+    in this workspace returns an empty page (CWE-639 fail-safe).
+
+    Example:
+        GET /api/v1/resources/ec-products/events?op=upsert&limit=20
+    """
+    user_id, current_workspace_id = owner
+
+    cursor_id: int | None = None
+    if cursor is not None:
+        try:
+            cursor_id = int(cursor)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail="Invalid cursor") from exc
+
+    events, next_cursor = await list_resource_events(
+        db,
+        current_workspace_id,
+        resource_id,
+        limit=limit,
+        cursor_id=cursor_id,
+        op=op,
+        doc_id=doc_id,
+        version=version,
+        since=since,
+    )
+
+    logger.info(
+        "list_resource_events_success",
+        user_id=user_id,
+        workspace_id=str(current_workspace_id),
+        resource_id=resource_id,
+        count=len(events),
+        has_next=next_cursor is not None,
+    )
+
+    return ResourceEventsResponse(
+        events=[_to_event_record(e) for e in events],
+        next_cursor=next_cursor,
+    )
