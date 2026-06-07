@@ -1,10 +1,14 @@
-"""Integration tests for RoleManager.ensure_user dual-read (#517).
+"""Integration tests for RoleManager.ensure_user provider resolution (#517, #938).
 
-Task 3 of #517 (multi-provider OAuth account linking): ``ensure_user`` resolves
-the owning user by ``(provider, oauth_sub)`` against ``user_oauth_providers``
-(the NEW path) and falls back to the legacy ``users.user_id == oauth_sub``
-lookup (un-backfilled rows). On a fallback hit it self-heals by inserting the
-missing ``UserOAuthProvider`` row so future logins resolve via the new path.
+``ensure_user`` resolves the owning user by ``(provider, oauth_sub)`` against
+``user_oauth_providers`` (the NEW path from #517).
+
+#938 removed the legacy ``users.user_id == oauth_sub`` fallback read and its
+self-heal insert, after the e37_517 backfill saturated (a prod probe confirmed
+0 un-migrated google/github users). The second test below now pins the
+post-removal behavior: a user that somehow lacks a provider row still resolves
+to the same account via the new-user path's IntegrityError(user_id) retry —
+without spawning a duplicate User and without a self-heal provider row.
 
 These run against a real PostgreSQL test DB (``conftest.async_engine`` skips
 when unreachable). Each test seeds uuid-suffixed identifiers so parallel /
@@ -111,11 +115,16 @@ async def test_login_via_linked_secondary_provider_resolves_owner(db_session: As
 
 
 @pytest.mark.asyncio
-async def test_legacy_user_without_provider_row_resolves_via_fallback_and_self_heals(
+async def test_user_without_provider_row_still_resolves_without_selfheal(
     db_session: AsyncSession,
 ):
-    """An un-backfilled user (no user_oauth_providers row) resolves via the
-    legacy user_id fallback, and a provider row is self-healed afterward."""
+    """#938: the legacy user_id-as-sub fallback + self-heal are removed.
+
+    A user that lacks a ``user_oauth_providers`` row (post-backfill this should
+    never happen — prod probe = 0 — but the path must degrade safely) still
+    resolves to the SAME account via the new-user path's IntegrityError(user_id)
+    retry: no duplicate User is created. And no self-heal provider row is added
+    (that behavior was intentionally removed)."""
     suffix = uuid4().hex[:8]
     legacy_sub = f"g-dr-3-{suffix}"
     email = f"dual-read-legacy-{suffix}@example.com"
@@ -139,6 +148,8 @@ async def test_legacy_user_without_provider_row_resolves_via_fallback_and_self_h
     ).scalar_one_or_none()
     assert pre is None
 
+    users_before = (await db_session.execute(select(func.count()).select_from(User))).scalar()
+
     rm = RoleManager(use_postgres=True)
     with _patch_get_db_with_fresh_session(db_session.bind):
         role = await rm.ensure_user(
@@ -151,12 +162,14 @@ async def test_legacy_user_without_provider_row_resolves_via_fallback_and_self_h
 
     assert role == Role.USER
 
-    # Self-heal: a (google, legacy_sub) provider row now exists, owned by legacy.
+    # Resolved to the SAME user — no duplicate row spawned by the collision retry.
+    users_after = (await db_session.execute(select(func.count()).select_from(User))).scalar()
+    assert users_after == users_before
+
+    # No self-heal: the missing provider row is NOT created (removed in #938).
     healed = (
         await db_session.execute(
             select(UserOAuthProvider).filter_by(provider="google", oauth_sub=legacy_sub)
         )
     ).scalar_one_or_none()
-    assert healed is not None
-    assert healed.user_id == legacy_sub
-    assert healed.last_used_at is not None
+    assert healed is None
