@@ -398,7 +398,7 @@ describe("ResourceDetailPage", () => {
     ).not.toBeInTheDocument();
   });
 
-  it("exposes all five tabs (overview / data / schemas / tokens / events)", async () => {
+  it("exposes all four tabs (overview / data / schemas / tokens)", async () => {
     mockListResources.mockResolvedValue({
       resources: [makeResource()],
       total: 1,
@@ -410,13 +410,7 @@ describe("ResourceDetailPage", () => {
     await waitFor(() => {
       expect(screen.getByText("EC Products")).toBeInTheDocument();
     });
-    for (const key of [
-      "overview",
-      "data",
-      "schemas",
-      "tokens",
-      "events",
-    ] as const) {
+    for (const key of ["overview", "data", "schemas", "tokens"] as const) {
       // Tabs carry an icon next to the label; matching by accessible name
       // requires a regex because the label text is a substring of the rendered
       // tab content.

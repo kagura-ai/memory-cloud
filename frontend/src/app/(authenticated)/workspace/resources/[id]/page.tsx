@@ -3,11 +3,13 @@
 /**
  * Resource Detail Page
  *
- * Five-tab layout (Overview / Data / Schemas / Tokens / Events) plus a
- * stats strip header. Follows the IA of workspace/contexts/[id]/page.tsx.
+ * Four-tab layout (Overview / Data / Schemas / Tokens) plus a stats strip
+ * header. Follows the IA of workspace/contexts/[id]/page.tsx.
  *
  * Issue #47 (initial), Issue #325 (IA reorg — top-level Resources nav
- * with consolidated tabs replacing the orphaned credential routes).
+ * with consolidated tabs replacing the orphaned credential routes),
+ * Issue #316 (Data tab event browser — supersedes the placeholder Events
+ * "coming soon" tab, which described the same feature and was removed).
  */
 
 import { useCallback, useEffect, useState } from "react";
@@ -15,11 +17,9 @@ import { useParams, useRouter } from "next/navigation";
 import Link from "next/link";
 import { useTranslations } from "next-intl";
 import {
-  Activity,
   ArrowLeft,
   BarChart3,
   ChevronRight,
-  Clock,
   Database,
   FileJson,
   Key,
@@ -36,7 +36,7 @@ import { getSchema, type ResourceSchema } from "@/lib/api/schemas";
 import { ApiError } from "@/lib/api/base";
 import { ResourceStatsStrip } from "@/components/resources/ResourceStatsStrip";
 import { SchemaFieldTable } from "@/components/resources/SchemaFieldTable";
-import { ResourceDataTabPlaceholder } from "@/components/resources/ResourceDataTabPlaceholder";
+import { ResourceDataTab } from "@/components/resources/ResourceDataTab";
 import { IndexerStatusPanel } from "@/components/resources/IndexerStatusPanel";
 import { ResourceTokensTabPanel } from "@/components/credentials/ResourceTokensTabPanel";
 import { CreateSchemaDialog } from "@/components/schemas/CreateSchemaDialog";
@@ -48,13 +48,7 @@ import {
   type IndexerStatusResponse,
 } from "@/lib/api/resources";
 
-const RESOURCE_TABS = [
-  "overview",
-  "data",
-  "schemas",
-  "tokens",
-  "events",
-] as const;
+const RESOURCE_TABS = ["overview", "data", "schemas", "tokens"] as const;
 
 export default function ResourceDetailPage() {
   const params = useParams();
@@ -293,10 +287,6 @@ export default function ResourceDetailPage() {
               <Key className="mr-2 h-4 w-4" />
               {t("tabs.tokens")}
             </TabsTrigger>
-            <TabsTrigger value="events">
-              <Activity className="mr-2 h-4 w-4" />
-              {t("tabs.events")}
-            </TabsTrigger>
           </TabsList>
         </div>
 
@@ -315,7 +305,7 @@ export default function ResourceDetailPage() {
         </TabsContent>
 
         <TabsContent value="data" className="mt-6">
-          <ResourceDataTabPlaceholder />
+          <ResourceDataTab resourceId={resourceId} schema={schema} />
         </TabsContent>
 
         <TabsContent value="schemas" className="mt-6">
@@ -356,15 +346,6 @@ export default function ResourceDetailPage() {
 
         <TabsContent value="tokens" className="mt-6">
           <ResourceTokensTabPanel resourceIdFilter={resourceId} />
-        </TabsContent>
-
-        <TabsContent value="events" className="mt-6">
-          <EmptyState
-            icon={Clock}
-            title={t("events.comingSoonTitle")}
-            description={t("events.comingSoonDescription")}
-            compact
-          />
         </TabsContent>
       </Tabs>
 

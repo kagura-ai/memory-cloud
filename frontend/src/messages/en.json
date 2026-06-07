@@ -3346,12 +3346,7 @@
       "overview": "Overview",
       "data": "Data",
       "schemas": "Schemas",
-      "tokens": "Tokens",
-      "events": "Events"
-    },
-    "events": {
-      "comingSoonTitle": "Ingest event log coming soon",
-      "comingSoonDescription": "Per-resource ingest event timeline with cursor-based pagination. Until then, the latest five events appear in the Indexer Status panel on Overview."
+      "tokens": "Tokens"
     },
     "indexer": {
       "fetchError": "Failed to load indexer status.",
@@ -3412,9 +3407,45 @@
       "createNewVersionAction": "Create new version"
     },
     "data": {
-      "comingSoonTitle": "Data browser coming soon",
-      "comingSoonDescription": "Paginated record viewer with schema-driven key-value display and raw JSON pane. Planned for v0.13.0.",
-      "trackProgress": "Track progress on #316"
+      "emptyTitle": "No events yet",
+      "emptyDescription": "No ingest events match the current filters. Ingest records via the MCP tool or SDK, then refresh.",
+      "fetchError": "Failed to load resource events.",
+      "loadMore": "Load more",
+      "loadingMore": "Loading…",
+      "op": {
+        "upsert": "Upsert",
+        "delete": "Delete"
+      },
+      "filter": {
+        "op": "Operation",
+        "opAll": "All",
+        "docId": "Document ID",
+        "docIdPlaceholder": "exact match",
+        "version": "Version",
+        "since": "Since",
+        "apply": "Apply",
+        "clear": "Clear"
+      },
+      "meta": {
+        "version": "Version",
+        "idempotencyKey": "Idempotency key",
+        "importance": "Importance",
+        "payloadSize": "Payload size"
+      },
+      "payload": {
+        "raw": "Raw JSON",
+        "copy": "Copy",
+        "copied": "Copied",
+        "copyFailed": "Failed to copy to clipboard.",
+        "empty": "This event has no payload (delete operation).",
+        "tooLarge": "Payload is too large to preview inline ({size}). Copy it via the API to inspect."
+      },
+      "kv": {
+        "field": "Field",
+        "value": "Value",
+        "type": "Type",
+        "searchable": "searchable"
+      }
     },
     "planGate": {
       "title": "Resources require Pro plan",

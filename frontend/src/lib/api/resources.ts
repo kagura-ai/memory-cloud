@@ -125,3 +125,78 @@ export async function getIndexerStatus(
     `/api/v1/resources/${encodeURIComponent(resourceId)}/indexer-status`,
   );
 }
+
+// ============================================================================
+// Issue #316 — Resource event data browser (Data tab)
+// ============================================================================
+//
+// Types are hand-mirrored against the pydantic ResourceEventsResponse in
+// `backend/src/api/routes/resources.py`. Keep in lock-step with that schema.
+
+/** A single ingest event row for the Data tab. */
+export interface ResourceEventRecord {
+  /** BigInt append-only event id; also the keyset cursor value. */
+  id: number;
+  op: "upsert" | "delete";
+  doc_id: string;
+  /** NULL version is valid for delete-all-versions (Issue #262). */
+  version: number | null;
+  idempotency_key: string | null;
+  importance: number;
+  /** ISO-8601 UTC (Z-suffixed). */
+  created_at: string;
+  /**
+   * JSONB payload. `null` for delete ops, OR when omitted because it
+   * exceeded the inline size cap — branch on `payload_truncated` to tell
+   * the two cases apart.
+   */
+  payload: Record<string, unknown> | null;
+  event_metadata: Record<string, unknown> | null;
+  /** Serialized payload size in bytes (0 when null). */
+  payload_bytes: number;
+  /** True when the payload was omitted because it exceeded the inline cap. */
+  payload_truncated: boolean;
+}
+
+/** Response shape from `GET /api/v1/resources/{id}/events`. */
+export interface ResourceEventsResponse {
+  events: ResourceEventRecord[];
+  /** Opaque cursor for the next page; `null` on the last page. */
+  next_cursor: string | null;
+}
+
+/** Fixed, server-allowed filters for the events browser. No JSONB DSL. */
+export interface ResourceEventFilters {
+  op?: "upsert" | "delete";
+  doc_id?: string;
+  version?: number;
+  /** ISO-8601 timestamp lower bound (inclusive). */
+  since?: string;
+  limit?: number;
+  cursor?: string;
+}
+
+/**
+ * Browse ingested events for a resource, newest first (cursor-paginated).
+ * The slug is URL-encoded defensively; the backend constrains it to a single
+ * `[a-z0-9_-]+` path segment.
+ */
+export async function listResourceEvents(
+  resourceId: string,
+  filters: ResourceEventFilters = {},
+): Promise<ResourceEventsResponse> {
+  const params = new URLSearchParams();
+  if (filters.op) params.set("op", filters.op);
+  if (filters.doc_id) params.set("doc_id", filters.doc_id);
+  if (filters.version !== undefined)
+    params.set("version", String(filters.version));
+  if (filters.since) params.set("since", filters.since);
+  if (filters.limit !== undefined) params.set("limit", String(filters.limit));
+  if (filters.cursor) params.set("cursor", filters.cursor);
+  const qs = params.toString();
+  return apiClient.get<ResourceEventsResponse>(
+    `/api/v1/resources/${encodeURIComponent(resourceId)}/events${
+      qs ? `?${qs}` : ""
+    }`,
+  );
+}
