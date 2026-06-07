@@ -127,7 +127,7 @@ def test_events_returns_shape_and_cursor(owner_client):
     assert body["next_cursor"] == "4"
     assert len(body["events"]) == 2
     first = body["events"][0]
-    assert first["id"] == 5
+    assert first["id"] == "5"  # serialized as string (BigInt precision-safe)
     assert first["op"] == "upsert"
     assert first["doc_id"] == "sku-5"
     assert first["payload"] == {"name": "widget", "price": 10}

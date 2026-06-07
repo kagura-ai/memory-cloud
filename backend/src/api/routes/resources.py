@@ -260,7 +260,13 @@ PAYLOAD_INLINE_MAX_BYTES = 1_000_000
 class ResourceEventRecord(BaseModel):
     """A single ingest event row for the Resource Detail Data tab."""
 
-    id: int = Field(..., description="BigInt append-only event id (cursor key)")
+    id: str = Field(
+        ...,
+        description=(
+            "BigInt append-only event id (also the cursor key), serialized as a "
+            "string so JS clients can't lose precision above 2^53-1"
+        ),
+    )
     op: str = Field(..., description="Operation: 'upsert' or 'delete'")
     doc_id: str = Field(..., description="Document identifier (stable across versions)")
     version: int | None = Field(None, description="Document version; null for delete-all-versions")
@@ -314,7 +320,7 @@ def _to_event_record(event: ResourceEvent) -> ResourceEventRecord:
             payload_out = payload
 
     return ResourceEventRecord(
-        id=event.id,
+        id=str(event.id),
         op=event.op,
         doc_id=event.doc_id,
         version=event.version,

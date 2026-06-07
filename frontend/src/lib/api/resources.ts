@@ -135,8 +135,11 @@ export async function getIndexerStatus(
 
 /** A single ingest event row for the Data tab. */
 export interface ResourceEventRecord {
-  /** BigInt append-only event id; also the keyset cursor value. */
-  id: number;
+  /**
+   * BigInt append-only event id; also the keyset cursor value. Serialized as
+   * a string end-to-end so values above 2^53-1 keep full precision in JS.
+   */
+  id: string;
   op: "upsert" | "delete";
   doc_id: string;
   /** NULL version is valid for delete-all-versions (Issue #262). */

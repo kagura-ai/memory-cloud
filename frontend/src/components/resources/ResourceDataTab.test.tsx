@@ -60,7 +60,7 @@ function makeEvent(
   overrides: Partial<ResourceEventRecord> = {},
 ): ResourceEventRecord {
   return {
-    id: 1,
+    id: "1",
     op: "upsert",
     doc_id: "sku-1",
     version: 1,
@@ -104,8 +104,8 @@ describe("ResourceDataTab", () => {
   it("loads and lists events newest-first", async () => {
     mockListResourceEvents.mockResolvedValue({
       events: [
-        makeEvent({ id: 5, doc_id: "sku-5" }),
-        makeEvent({ id: 4, doc_id: "sku-4" }),
+        makeEvent({ id: "5", doc_id: "sku-5" }),
+        makeEvent({ id: "4", doc_id: "sku-4" }),
       ],
       next_cursor: null,
     });
@@ -146,7 +146,7 @@ describe("ResourceDataTab", () => {
 
   it("lazily renders the payload (kv table + raw JSON) only when expanded", async () => {
     mockListResourceEvents.mockResolvedValue(
-      makeResponse({ events: [makeEvent({ id: 7 })] }),
+      makeResponse({ events: [makeEvent({ id: "7" })] }),
     );
 
     const { container } = render(
@@ -176,7 +176,7 @@ describe("ResourceDataTab", () => {
       makeResponse({
         events: [
           makeEvent({
-            id: 8,
+            id: "8",
             payload: null,
             payload_truncated: true,
             payload_bytes: 1_100_000,
@@ -227,11 +227,11 @@ describe("ResourceDataTab", () => {
   it("loads the next page via the cursor and appends results", async () => {
     mockListResourceEvents
       .mockResolvedValueOnce({
-        events: [makeEvent({ id: 5, doc_id: "sku-5" })],
+        events: [makeEvent({ id: "5", doc_id: "sku-5" })],
         next_cursor: "5",
       })
       .mockResolvedValueOnce({
-        events: [makeEvent({ id: 4, doc_id: "sku-4" })],
+        events: [makeEvent({ id: "4", doc_id: "sku-4" })],
         next_cursor: null,
       });
 
@@ -273,13 +273,13 @@ describe("ResourceDataTab", () => {
     // Resolve the NEWER request (call 1) first, then the stale one (call 0).
     await act(async () => {
       resolvers[1]({
-        events: [makeEvent({ id: 9, doc_id: "sku-9" })],
+        events: [makeEvent({ id: "9", doc_id: "sku-9" })],
         next_cursor: null,
       });
     });
     await act(async () => {
       resolvers[0]({
-        events: [makeEvent({ id: 1, doc_id: "sku-stale" })],
+        events: [makeEvent({ id: "1", doc_id: "sku-stale" })],
         next_cursor: null,
       });
     });
