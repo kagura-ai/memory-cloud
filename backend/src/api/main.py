@@ -37,6 +37,13 @@ async def lifespan(app: FastAPI):
     # Startup
     logger.info("application_starting", version=app.version)
 
+    # Fail-closed: refuse to boot if OAuth endpoint overrides (E2E test-IdP
+    # harness, #937) are active in production — they would redirect token
+    # exchange to a non-Google/non-GitHub host.
+    from auth.oauth_endpoints import assert_oauth_endpoints_safe
+
+    assert_oauth_endpoints_safe()
+
     # Migrations are managed by Alembic: `alembic upgrade head`
 
     # Initialize auth routes (Issue #13, #31)

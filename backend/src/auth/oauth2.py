@@ -11,6 +11,7 @@ from google.auth.transport.requests import Request
 from google.oauth2.credentials import Credentials
 from google_auth_oauthlib.flow import Flow, InstalledAppFlow
 
+from auth import oauth_endpoints
 from auth.config import AuthConfig
 from auth.exceptions import (
     InvalidCredentialsError,
@@ -316,7 +317,7 @@ class OAuth2Manager:
         scope_str = " ".join(scopes)
 
         auth_url = (
-            f"https://accounts.google.com/o/oauth2/v2/auth?"
+            f"{oauth_endpoints.google_auth_url()}?"
             f"client_id={client_id}&"
             f"redirect_uri={redirect_uri}&"
             f"response_type=code&"
@@ -352,8 +353,13 @@ class OAuth2Manager:
                 "web": {
                     "client_id": client_id,
                     "client_secret": client_secret,
+                    # auth_uri is metadata only — Flow.fetch_token uses token_uri,
+                    # never auth_uri — so keep the original literal to avoid any
+                    # behavior change. Only token_uri is routed through the
+                    # resolver (it IS used for the exchange, and is what a mock
+                    # IdP must override).
                     "auth_uri": "https://accounts.google.com/o/oauth2/auth",
-                    "token_uri": "https://oauth2.googleapis.com/token",
+                    "token_uri": oauth_endpoints.google_token_url(),
                     "redirect_uris": [redirect_uri],
                 }
             }
@@ -388,7 +394,7 @@ class OAuth2Manager:
 
         headers = {"Authorization": f"Bearer {credentials.token}"}
         response = requests.get(
-            "https://www.googleapis.com/oauth2/v3/userinfo",
+            oauth_endpoints.google_userinfo_url(),
             headers=headers,
         )
         response.raise_for_status()

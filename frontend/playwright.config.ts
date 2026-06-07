@@ -19,18 +19,35 @@ export default defineConfig({
     baseURL: "http://localhost:3000",
     trace: "retain-on-failure",
   },
-  webServer: {
-    // In CI, force the webpack compiler — Turbopack (the Next.js 16 default)
-    // can't load its native @next/swc binding on the GitHub Actions runner,
-    // the same failure that breaks `next build` there. Locally, keep the
-    // default (Turbopack) for the faster dev experience. See #855.
-    command: process.env.CI ? "npm run dev -- --webpack" : "npm run dev",
-    url: "http://localhost:3000",
-    reuseExistingServer: !process.env.CI,
-    timeout: 120_000,
-    stdout: "pipe",
-    stderr: "pipe",
-  },
+  webServer: [
+    {
+      // In CI, force the webpack compiler — Turbopack (the Next.js 16 default)
+      // can't load its native @next/swc binding on the GitHub Actions runner,
+      // the same failure that breaks `next build` there. Locally, keep the
+      // default (Turbopack) for the faster dev experience. See #855.
+      command: process.env.CI ? "npm run dev -- --webpack" : "npm run dev",
+      url: "http://localhost:3000",
+      reuseExistingServer: !process.env.CI,
+      timeout: 120_000,
+      stdout: "pipe",
+      stderr: "pipe",
+    },
+    // Mock OAuth IdP for the account-linking E2E (#937). Gated on PW_OAUTH_IDP
+    // (set by `npm run test:e2e:oauth`) so the a11y lanes are NOT coupled to the
+    // mock's health — a bug in the mock must never fail an unrelated a11y run.
+    ...(process.env.PW_OAUTH_IDP === "1"
+      ? [
+          {
+            command: "npm run mock-idp",
+            url: `http://localhost:${process.env.MOCK_IDP_PORT ?? 9100}/health`,
+            reuseExistingServer: !process.env.CI,
+            timeout: 30_000,
+            stdout: "pipe" as const,
+            stderr: "pipe" as const,
+          },
+        ]
+      : []),
+  ],
   projects: [
     {
       name: "chromium",

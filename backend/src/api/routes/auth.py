@@ -30,6 +30,7 @@ from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError, SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from auth import oauth_endpoints
 from auth.dependencies import SessionUser
 from auth.oauth2 import OAuth2Manager
 from auth.password import verify_password
@@ -963,10 +964,10 @@ async def get_current_user_info(
 
 github_router = APIRouter(prefix="/github", tags=["authentication", "github-oauth2"])
 
-GITHUB_AUTH_URL = "https://github.com/login/oauth/authorize"
-GITHUB_TOKEN_URL = "https://github.com/login/oauth/access_token"
-GITHUB_USER_URL = "https://api.github.com/user"
-GITHUB_EMAILS_URL = "https://api.github.com/user/emails"
+# GitHub OAuth endpoint URLs are resolved at call time via ``auth.oauth_endpoints``
+# so the E2E test-IdP harness (#937) can redirect the server-side token/userinfo
+# exchange at a mock IdP. Resolution returns the real GitHub URLs unless overrides
+# are explicitly enabled in a non-production environment (see oauth_endpoints).
 
 
 def build_github_authorization_url(*, client_id: str, redirect_uri: str, state: str) -> str:
@@ -992,7 +993,7 @@ def build_github_authorization_url(*, client_id: str, redirect_uri: str, state: 
         ("scope", "read:user user:email"),
         ("state", state),
     ]
-    return f"{GITHUB_AUTH_URL}?{urlencode(params)}"
+    return f"{oauth_endpoints.github_auth_url()}?{urlencode(params)}"
 
 
 @github_router.get("/login")
@@ -1038,7 +1039,7 @@ async def _github_exchange_code(code: str) -> str:
 
     async with httpx.AsyncClient() as client:
         resp = await client.post(
-            GITHUB_TOKEN_URL,
+            oauth_endpoints.github_token_url(),
             data={
                 "client_id": client_id,
                 "client_secret": client_secret,
@@ -1078,11 +1079,15 @@ async def _github_get_user_info(access_token: str) -> dict[str, Any]:
         "Accept": "application/vnd.github+json",
     }
     async with httpx.AsyncClient() as client:
-        user_resp = await client.get(GITHUB_USER_URL, headers=headers, timeout=10.0)
+        user_resp = await client.get(
+            oauth_endpoints.github_user_url(), headers=headers, timeout=10.0
+        )
         user_resp.raise_for_status()
         user_data = user_resp.json()
 
-        emails_resp = await client.get(GITHUB_EMAILS_URL, headers=headers, timeout=10.0)
+        emails_resp = await client.get(
+            oauth_endpoints.github_emails_url(), headers=headers, timeout=10.0
+        )
         emails_resp.raise_for_status()
         primary_verified = next(
             (e["email"] for e in emails_resp.json() if e.get("primary") and e.get("verified")),
