@@ -86,6 +86,7 @@ const VISIBLE_KEY: MemberAPIKey = {
   is_visible: true,
   visibility_expires_at: "2099-01-01T00:00:00Z",
   created_at: "2026-04-01T00:00:00Z",
+  last_used_at: null,
   revoked_at: null,
   bound_context_id: null,
 };

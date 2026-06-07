@@ -693,6 +693,7 @@ class MemberCredentialsService:
             "is_visible": is_visible,
             "visibility_expires_at": to_utc_iso(api_key.visibility_expires_at),
             "created_at": to_utc_iso(api_key.created_at),
+            "last_used_at": to_utc_iso(api_key.last_used_at),
             "revoked_at": to_utc_iso(api_key.revoked_at),
             "bound_context_id": (
                 str(api_key.bound_context_id) if api_key.bound_context_id else None
