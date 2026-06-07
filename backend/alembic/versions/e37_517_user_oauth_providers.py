@@ -79,19 +79,12 @@ def upgrade() -> None:
             """
         )
     ).rowcount
-    skipped = conn.execute(
-        sa.text(
-            """
-            SELECT COUNT(*) FROM users
-            WHERE auth_provider IS NULL OR auth_method = 'password'
-            """
-        )
-    ).scalar()
+    total = conn.execute(sa.text("SELECT COUNT(*) FROM users")).scalar()
     logger.info(
-        "[#517] backfilled %s user_oauth_providers row(s); "
-        "skipped %s NULL-provider / password-auth user(s) (self-heal on next login)",
+        "[#517] backfilled %s of %s user(s) into user_oauth_providers;"
+        " remainder self-heal on next login",
         inserted or 0,
-        skipped or 0,
+        total or 0,
     )
 
 
