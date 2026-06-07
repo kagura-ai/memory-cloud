@@ -383,6 +383,10 @@ jobs:
       DATABASE_URL: postgresql+asyncpg://kagura:kagura_dev_password@localhost:5432/kagura_test
       REDIS_URL: redis://localhost:6379
       CORS_ORIGINS: http://localhost:3000
+      # The link callback redirects to {FRONTEND_URL}/profile?linked=1 — pin it to
+      # the Playwright next-dev origin so the round-trip lands on the frontend (not
+      # the API origin) and passes _safe_redirect_url's same-origin check.
+      FRONTEND_URL: http://localhost:3000
       E2E_ADMIN_LOGIN_ID: e2e-admin
       E2E_API_URL: http://localhost:8080
       NEXT_PUBLIC_API_URL: http://localhost:8080
