@@ -16,6 +16,8 @@ from __future__ import annotations
 
 import uuid
 from contextlib import contextmanager
+from datetime import datetime, timedelta
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -280,3 +282,71 @@ class TestVerifyApiKeyStandaloneCommitsLastUsed:
         # A non-critical last_used_at commit failure must not turn a valid key
         # into an auth rejection (would otherwise hit `except Exception: None`).
         assert result is ok
+
+
+class TestVerifyKeyLastUsedThrottle:
+    """#947: ``verify_key()`` throttles ``last_used_at`` writes — at most one
+    UPDATE per window per key, so a hot MCP client (one auth per tool call) does
+    not trigger a row UPDATE+commit on every request. NULL (never used) always
+    writes; within the window the write is skipped; at/after the window it
+    writes. naive-UTC compare against ``utcnow()``."""
+
+    @staticmethod
+    def _key_record(last_used_at: datetime | None) -> SimpleNamespace:
+        return SimpleNamespace(
+            id=1,
+            user_id="user-1",
+            workspace_id=None,
+            bound_context_id=None,
+            key_hash="hash",
+            revoked_at=None,
+            expires_at=None,
+            last_used_at=last_used_at,
+        )
+
+    @staticmethod
+    async def _verify(record: SimpleNamespace, now: datetime, throttle: int = 60):
+        db = _make_db_mock(execute_results=[record])
+        manager = APIKeyManager(db)
+        fake_settings = SimpleNamespace(api_key_last_used_throttle_seconds=throttle)
+        with (
+            patch("auth.api_keys.utcnow", return_value=now),
+            patch("auth.api_keys.get_settings", return_value=fake_settings),
+        ):
+            result = await manager.verify_key("kagura_test")
+        return db, result
+
+    NOW = datetime(2026, 6, 8, 12, 0, 0)
+
+    @pytest.mark.asyncio
+    async def test_null_last_used_always_writes(self) -> None:
+        rec = self._key_record(None)
+        db, result = await self._verify(rec, self.NOW)
+        assert result is not None
+        assert rec.last_used_at == self.NOW
+        db.flush.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_within_window_skips_write(self) -> None:
+        prev = self.NOW - timedelta(seconds=30)  # 30s < 60s window
+        rec = self._key_record(prev)
+        db, result = await self._verify(rec, self.NOW)
+        assert result is not None
+        assert rec.last_used_at == prev  # unchanged — no write
+        db.flush.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_post_window_writes(self) -> None:
+        rec = self._key_record(self.NOW - timedelta(seconds=90))  # 90s >= 60s
+        db, result = await self._verify(rec, self.NOW)
+        assert result is not None
+        assert rec.last_used_at == self.NOW
+        db.flush.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_window_boundary_writes(self) -> None:
+        # Exactly at the window edge (>= threshold) → write.
+        rec = self._key_record(self.NOW - timedelta(seconds=60))
+        db, result = await self._verify(rec, self.NOW)
+        assert rec.last_used_at == self.NOW
+        db.flush.assert_awaited_once()
