@@ -12,17 +12,28 @@ and the billing checkout endpoints.
 
 from __future__ import annotations
 
+import secrets
 from datetime import datetime
+from typing import Literal
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, Request
+from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel, Field
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from api.routes import auth as auth_module
+from api.routes.me_oauth import (
+    INTENT_KEY,
+    STATE_TTL,
+    USER_KEY,
+    _build_authorization_url,
+)
 from auth.dependencies import SessionUser
 from db.base import get_db
 from models.api_base import TZAwareBaseModel
 from services.account_erasure_service import AccountErasureService
+from services.account_linking_service import AccountLinkingService
+from utils.datetime import to_utc_iso
 from utils.logger import get_logger
 
 logger = get_logger(__name__)
@@ -225,3 +236,143 @@ async def get_active_erasure_request(
     if record is None:
         return None
     return _state_response(record)
+
+
+# ---------------------------------------------------------------------------
+# Multi-provider OAuth account linking (Issue #517)
+# ---------------------------------------------------------------------------
+
+
+class LinkProviderRequest(BaseModel):
+    """Body for POST /me/account/link-provider."""
+
+    provider: Literal["google", "github"]
+
+
+class LinkProviderResponse(BaseModel):
+    """Frontend redirects ``window.location`` to ``authorization_url``.
+
+    Mirrors ``me_oauth.RefreshOAuthResponse``: the OAuth round-trip itself
+    is the fresh re-auth, so no password is ever prompted (edge case 1 — the
+    locked re-auth contract for OAuth-only users)."""
+
+    authorization_url: str
+    state: str
+
+
+class UnlinkProviderRequest(BaseModel):
+    """Body for POST /me/account/unlink-provider."""
+
+    provider: Literal["google", "github"]
+
+
+class LinkedProvider(BaseModel):
+    """One linked OAuth identity, as surfaced to the profile UI.
+
+    ``linked_at`` / ``last_used_at`` are pre-serialized to ISO 8601 strings
+    with an explicit ``Z`` suffix via ``to_utc_iso`` (the source columns are
+    naive UTC ``TIMESTAMP WITHOUT TIME ZONE``), so JS clients don't reparse
+    them as local time."""
+
+    provider: str
+    linked_at: str | None = None
+    last_used_at: str | None = None
+
+
+class ProvidersListResponse(BaseModel):
+    """All OAuth providers currently linked to the session user."""
+
+    providers: list[LinkedProvider]
+
+
+@router.post("/link-provider", response_model=LinkProviderResponse)
+async def link_provider(
+    body: LinkProviderRequest,
+    user: SessionUser,
+) -> LinkProviderResponse:
+    """Initiate a link-mode OAuth round-trip for the current user.
+
+    The OAuth round-trip *is* the fresh re-auth — there is no password
+    prompt, which is the locked re-auth contract for OAuth-only users
+    (edge case 1). The existing ``/auth/{provider}/callback`` reads
+    ``oauth2_state_intent:{state}`` == ``"link"`` and binds the returned
+    identity to ``oauth2_state_user:{state}`` via ``AccountLinkingService``.
+
+    Returns:
+        JSON with ``authorization_url`` (frontend redirects to it) and the
+        CSRF ``state`` token.
+
+    Raises:
+        HTTPException(500): auth managers not initialised, OAuth2 manager
+            missing, or a required env var (GOOGLE_REDIRECT_URI /
+            GITHUB_CLIENT_ID) is missing.
+    """
+    if not auth_module._session_manager:
+        raise HTTPException(status_code=500, detail="Auth managers not initialized")
+
+    user_id = user["user_id"]
+    provider = body.provider
+
+    # Resolve config + compose the URL BEFORE writing any Redis state so a
+    # missing env var 500s without orphaning four state keys for 5 minutes
+    # (shares me_oauth._build_authorization_url with refresh_oauth).
+    state = secrets.token_urlsafe(32)
+    authorization_url = _build_authorization_url(provider, state)
+
+    redis = auth_module._session_manager._redis
+    redis.setex(f"oauth2_state:{state}", STATE_TTL, "pending")
+    redis.setex(INTENT_KEY.format(state=state), STATE_TTL, "link")
+    # Pin the originating user so the callback binds the returned identity
+    # to THIS account (and rejects state replayed under a different session).
+    redis.setex(USER_KEY.format(state=state), STATE_TTL, user_id)
+    redis.setex(f"oauth2_return_to:{state}", STATE_TTL, "/profile?linked=1")
+
+    logger.info("link_provider_initiated", user_id=user_id, provider=provider)
+
+    return LinkProviderResponse(authorization_url=authorization_url, state=state)
+
+
+@router.post("/unlink-provider")
+async def unlink_provider(
+    body: UnlinkProviderRequest,
+    request: Request,
+    user: SessionUser,
+    db: AsyncSession = Depends(get_db),
+) -> dict[str, str]:
+    """Remove a linked OAuth provider from the current account.
+
+    Returns ``{"status": "ok"}`` on success. The service guards the
+    invariants and raises, which the global ``memory_cloud_exception_handler``
+    maps to HTTP:
+
+        - 404 (NotFoundException): the provider is not linked to this account.
+        - 409 (ConflictError): removing it would leave zero sign-in methods.
+    """
+    service = AccountLinkingService(db)
+    await service.unlink(
+        user_id=user["user_id"],
+        provider=body.provider,
+        ip_address=request.client.host if request.client else None,
+        user_agent=request.headers.get("user-agent"),
+    )
+    return {"status": "ok"}
+
+
+@router.get("/providers", response_model=ProvidersListResponse)
+async def list_providers(
+    user: SessionUser,
+    db: AsyncSession = Depends(get_db),
+) -> ProvidersListResponse:
+    """List the OAuth providers currently linked to the session user."""
+    service = AccountLinkingService(db)
+    rows = await service.list_providers(user["user_id"])
+    return ProvidersListResponse(
+        providers=[
+            LinkedProvider(
+                provider=row.provider,
+                linked_at=to_utc_iso(row.linked_at),
+                last_used_at=to_utc_iso(row.last_used_at),
+            )
+            for row in rows
+        ]
+    )

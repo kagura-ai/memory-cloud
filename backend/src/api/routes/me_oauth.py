@@ -58,6 +58,50 @@ STATE_TTL = 300  # 5 minutes — matches auth.py's existing oauth2_state TTL
 RATE_LIMIT_PER_MINUTE = 1
 
 
+def _build_authorization_url(provider: str, state: str) -> str:
+    """Resolve provider config and compose the IdP authorization URL.
+
+    Shared by ``refresh_oauth`` (#515) and ``link_provider`` (#517) so the
+    manager / env-var guards and the URL composition stay byte-identical
+    between the two flows. All required config is resolved (and any missing
+    piece raises) BEFORE this returns, so callers can invoke it *before*
+    writing any Redis state — a missing ``GOOGLE_REDIRECT_URI`` /
+    ``GITHUB_CLIENT_ID`` then 500s without orphaning state keys in Redis for
+    5 minutes (Copilot review #3 on #515).
+
+    Args:
+        provider: ``"google"`` or ``"github"`` (callers validate this first).
+        state: CSRF state token to embed in the authorization URL.
+
+    Returns:
+        The provider's authorization URL with ``state`` embedded.
+
+    Raises:
+        HTTPException(500): OAuth2 manager not initialised (google), or a
+            required environment variable is missing (``GOOGLE_REDIRECT_URI``
+            for google, ``GITHUB_CLIENT_ID`` for github).
+    """
+    if provider == "google":
+        if not auth_module._oauth2_manager:
+            raise HTTPException(status_code=500, detail="OAuth2 manager not initialized")
+        google_redirect_uri = os.getenv("GOOGLE_REDIRECT_URI")
+        if not google_redirect_uri:
+            raise HTTPException(status_code=500, detail="GOOGLE_REDIRECT_URI not configured")
+        return auth_module._oauth2_manager.get_authorization_url_web(google_redirect_uri, state)
+
+    # github
+    github_client_id = os.getenv("GITHUB_CLIENT_ID")
+    if not github_client_id:
+        raise HTTPException(status_code=500, detail="GITHUB_CLIENT_ID not configured")
+    github_redirect_uri = os.getenv(
+        "GITHUB_REDIRECT_URI",
+        "http://localhost:8080/api/v1/auth/github/callback",
+    )
+    return auth_module.build_github_authorization_url(
+        client_id=github_client_id, redirect_uri=github_redirect_uri, state=state
+    )
+
+
 def _normalize_return_to(value: str) -> str | None:
     """Validate and normalize ``return_to`` for use as a same-origin
     redirect target.
@@ -199,27 +243,6 @@ async def refresh_oauth(
             ),
         )
 
-    # Resolve provider-specific config BEFORE writing any Redis state
-    # (Copilot review #3: a missing GOOGLE_REDIRECT_URI / GITHUB_CLIENT_ID
-    # would otherwise 500 with 4 stale keys orphaned in Redis for 5min).
-    if provider == "google":
-        if not auth_module._oauth2_manager:
-            raise HTTPException(status_code=500, detail="OAuth2 manager not initialized")
-        google_redirect_uri = os.getenv("GOOGLE_REDIRECT_URI")
-        if not google_redirect_uri:
-            raise HTTPException(status_code=500, detail="GOOGLE_REDIRECT_URI not configured")
-        github_client_id: str | None = None
-        github_redirect_uri: str | None = None
-    else:  # github
-        google_redirect_uri = None
-        github_client_id = os.getenv("GITHUB_CLIENT_ID")
-        if not github_client_id:
-            raise HTTPException(status_code=500, detail="GITHUB_CLIENT_ID not configured")
-        github_redirect_uri = os.getenv(
-            "GITHUB_REDIRECT_URI",
-            "http://localhost:8080/api/v1/auth/github/callback",
-        )
-
     # Rate limit: 1/minute/user. Window-based on minute floor so a
     # single user can't burst more than once per minute even by spreading
     # calls across multiple processes.
@@ -245,6 +268,13 @@ async def refresh_oauth(
     # uses ("oauth2_state:{state}" = "pending") so the existing callback
     # can validate it without per-intent branching at the validation step.
     state = secrets.token_urlsafe(32)
+    # Resolve provider config + compose the URL BEFORE writing any Redis
+    # state (Copilot review #3: a missing GOOGLE_REDIRECT_URI /
+    # GITHUB_CLIENT_ID would otherwise 500 with 4 stale keys orphaned in
+    # Redis for 5min). The helper raises the same HTTPException(500)s the
+    # inline block used to.
+    authorization_url = _build_authorization_url(provider, state)
+
     redis = auth_module._session_manager._redis
     redis.setex(f"oauth2_state:{state}", STATE_TTL, "pending")
     redis.setex(INTENT_KEY.format(state=state), STATE_TTL, "refresh")
@@ -258,18 +288,6 @@ async def refresh_oauth(
     # value (whitespace stripped, control bytes already rejected above).
     return_to = normalized_return_to or "/profile?refreshed=1"
     redis.setex(f"oauth2_return_to:{state}", STATE_TTL, return_to)
-
-    if provider == "google":
-        # google_redirect_uri is non-None here — guarded above.
-        assert google_redirect_uri is not None
-        authorization_url = auth_module._oauth2_manager.get_authorization_url_web(
-            google_redirect_uri, state
-        )
-    else:  # github
-        assert github_client_id is not None and github_redirect_uri is not None
-        authorization_url = auth_module.build_github_authorization_url(
-            client_id=github_client_id, redirect_uri=github_redirect_uri, state=state
-        )
 
     logger.info("refresh_oauth_initiated", user_id=user_id, provider=provider)
 
