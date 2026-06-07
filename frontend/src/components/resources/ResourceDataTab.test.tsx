@@ -8,7 +8,13 @@
  */
 
 import { describe, it, expect, vi, beforeEach } from "vitest";
-import { render, screen, fireEvent, waitFor } from "@testing-library/react";
+import {
+  render,
+  screen,
+  fireEvent,
+  waitFor,
+  act,
+} from "@testing-library/react";
 
 import { ResourceDataTab } from "./ResourceDataTab";
 import type {
@@ -159,14 +165,10 @@ describe("ResourceDataTab", () => {
     fireEvent(details, new Event("toggle"));
 
     await waitFor(() => {
-      expect(
-        screen.getByText("payload.raw"),
-      ).toBeInTheDocument();
+      expect(screen.getByText("payload.raw")).toBeInTheDocument();
     });
     // Schema-driven kv table shows the field and its searchable hint.
-    expect(
-      screen.getByText("kv.searchable"),
-    ).toBeInTheDocument();
+    expect(screen.getByText("kv.searchable")).toBeInTheDocument();
   });
 
   it("flags an over-cap payload as truncated instead of rendering it", async () => {
@@ -196,9 +198,7 @@ describe("ResourceDataTab", () => {
 
     await waitFor(() => {
       // tooLarge key is interpolated with the {size} var by the mock.
-      expect(
-        screen.getByText(/payload\.tooLarge/),
-      ).toBeInTheDocument();
+      expect(screen.getByText(/payload\.tooLarge/)).toBeInTheDocument();
     });
     expect(screen.queryByText("payload.raw")).toBeNull();
   });
@@ -247,5 +247,45 @@ describe("ResourceDataTab", () => {
       "ec-products",
       expect.objectContaining({ cursor: "5" }),
     );
+  });
+
+  it("ignores a stale fetch response that resolves after a newer one", async () => {
+    // Hand-controlled promises so we can resolve them out of order: the mount
+    // fetch (call 0) resolves AFTER the Apply fetch (call 1).
+    const resolvers: Array<(r: unknown) => void> = [];
+    mockListResourceEvents.mockImplementation(
+      () => new Promise((resolve) => resolvers.push(resolve)),
+    );
+
+    render(<ResourceDataTab resourceId="ec-products" schema={null} />);
+    await waitFor(() =>
+      expect(mockListResourceEvents).toHaveBeenCalledTimes(1),
+    );
+
+    fireEvent.change(screen.getByLabelText("filter.docId"), {
+      target: { value: "sku-9" },
+    });
+    fireEvent.click(screen.getByText("filter.apply"));
+    await waitFor(() =>
+      expect(mockListResourceEvents).toHaveBeenCalledTimes(2),
+    );
+
+    // Resolve the NEWER request (call 1) first, then the stale one (call 0).
+    await act(async () => {
+      resolvers[1]({
+        events: [makeEvent({ id: 9, doc_id: "sku-9" })],
+        next_cursor: null,
+      });
+    });
+    await act(async () => {
+      resolvers[0]({
+        events: [makeEvent({ id: 1, doc_id: "sku-stale" })],
+        next_cursor: null,
+      });
+    });
+
+    await waitFor(() => expect(screen.getByText("sku-9")).toBeInTheDocument());
+    // The stale mount response must NOT overwrite the newer filtered results.
+    expect(screen.queryByText("sku-stale")).toBeNull();
   });
 });

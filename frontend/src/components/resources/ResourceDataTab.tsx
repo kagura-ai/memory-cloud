@@ -12,7 +12,7 @@
 
 "use client";
 
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useLocale, useTranslations } from "next-intl";
 import { Check, ChevronRight, Copy, Database } from "lucide-react";
 
@@ -90,6 +90,8 @@ export function ResourceDataTab({ resourceId, schema }: ResourceDataTabProps) {
   const [loading, setLoading] = useState(true);
   const [loadingMore, setLoadingMore] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  // Guards against out-of-order fetch responses (see fetchPage).
+  const latestReqRef = useRef(0);
 
   // Field-name → definition map for the schema-driven key-value type hints.
   const fieldMap = useMemo(() => {
@@ -100,6 +102,10 @@ export function ResourceDataTab({ resourceId, schema }: ResourceDataTabProps) {
 
   const fetchPage = useCallback(
     async (nextCursor: string | null, append: boolean) => {
+      // Monotonic request id: if a newer fetch (e.g. an Apply fired while the
+      // mount fetch is still in flight) starts before this one resolves, drop
+      // this stale response so it can't overwrite the newer results.
+      const reqId = ++latestReqRef.current;
       if (append) setLoadingMore(true);
       else setLoading(true);
       setError(null);
@@ -109,13 +115,17 @@ export function ResourceDataTab({ resourceId, schema }: ResourceDataTabProps) {
           limit: PAGE_SIZE,
           cursor: nextCursor ?? undefined,
         });
+        if (reqId !== latestReqRef.current) return; // superseded — ignore
         setEvents((prev) => (append ? [...prev, ...res.events] : res.events));
         setCursor(res.next_cursor);
       } catch (err) {
+        if (reqId !== latestReqRef.current) return;
         setError(err instanceof Error ? err.message : t("fetchError"));
       } finally {
-        setLoading(false);
-        setLoadingMore(false);
+        if (reqId === latestReqRef.current) {
+          setLoading(false);
+          setLoadingMore(false);
+        }
       }
     },
     [resourceId, applied, t],
