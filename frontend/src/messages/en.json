@@ -112,6 +112,7 @@
       "emptyDescription": "Files uploaded to this workspace will appear here. Upload files via the API or MCP file tools.",
       "fetchError": "Failed to load files.",
       "loadMore": "Load more",
+      "loadingMore": "Loading…",
       "column": {
         "filename": "File name",
         "type": "Type",

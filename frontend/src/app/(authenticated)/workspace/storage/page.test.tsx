@@ -260,4 +260,131 @@ describe("StoragePage", () => {
       expect(mockListFiles).toHaveBeenCalledWith("ws-1", 100);
     });
   });
+
+  it("does not offer load more when the page is not full", async () => {
+    // A partial page (< limit) means the backend has nothing more to give.
+    mockListFiles.mockResolvedValue([
+      file(),
+      file({ id: "file-2", filename: "notes.txt" }),
+    ]);
+
+    render(<StoragePage />);
+
+    await waitFor(() => {
+      expect(screen.getByText("report.pdf")).toBeInTheDocument();
+    });
+    expect(
+      screen.queryByRole("button", { name: "list.loadMore" }),
+    ).not.toBeInTheDocument();
+  });
+
+  it("keeps existing rows visible while loading more (no skeleton wipe)", async () => {
+    const fullPage = Array.from({ length: 50 }, (_, i) =>
+      file({ id: `f${i}`, filename: `file-${i}.txt` }),
+    );
+    // Second fetch never resolves during the assertion window.
+    let resolveSecond: (v: FileObject[]) => void = () => {};
+    mockListFiles.mockResolvedValueOnce(fullPage).mockImplementationOnce(
+      () =>
+        new Promise<FileObject[]>((res) => {
+          resolveSecond = res;
+        }),
+    );
+
+    render(<StoragePage />);
+    await waitFor(() => {
+      expect(screen.getByText("file-0.txt")).toBeInTheDocument();
+    });
+    fireEvent.click(screen.getByRole("button", { name: "list.loadMore" }));
+
+    // While the second page is in flight, the already-loaded rows stay
+    // mounted (the page must not fall back to the full skeleton).
+    await waitFor(() => {
+      expect(mockListFiles).toHaveBeenCalledWith("ws-1", 100);
+    });
+    expect(screen.getByText("file-0.txt")).toBeInTheDocument();
+    resolveSecond(fullPage);
+  });
+
+  it("surfaces a destructive toast when download fails", async () => {
+    mockListFiles.mockResolvedValue([file()]);
+    mockGetDownloadUrl.mockRejectedValue(new Error("r2 down"));
+
+    render(<StoragePage />);
+
+    await waitFor(() => {
+      expect(screen.getByText("report.pdf")).toBeInTheDocument();
+    });
+    fireEvent.click(
+      screen.getByRole("button", { name: "list.actions.download" }),
+    );
+
+    await waitFor(() => {
+      expect(mockToast).toHaveBeenCalledWith(
+        expect.objectContaining({ variant: "destructive" }),
+      );
+    });
+    // Download failures use a toast, never the page-level ErrorBanner.
+    expect(screen.queryByRole("alert")).not.toBeInTheDocument();
+  });
+
+  it("closes the dialog and toasts on a successful delete", async () => {
+    mockListFiles.mockResolvedValueOnce([file()]).mockResolvedValueOnce([]);
+    mockDeleteFile.mockResolvedValue(undefined);
+
+    render(<StoragePage />);
+    await waitFor(() => {
+      expect(screen.getByText("report.pdf")).toBeInTheDocument();
+    });
+    fireEvent.click(
+      screen.getByRole("button", { name: "list.actions.delete" }),
+    );
+    await waitFor(() => {
+      expect(
+        screen.getByRole("button", { name: "list.deleteDialog.confirm" }),
+      ).toBeInTheDocument();
+    });
+    fireEvent.click(
+      screen.getByRole("button", { name: "list.deleteDialog.confirm" }),
+    );
+
+    // On success the confirmation dialog must close.
+    await waitFor(() => {
+      expect(
+        screen.queryByRole("button", { name: "list.deleteDialog.confirm" }),
+      ).not.toBeInTheDocument();
+    });
+    expect(mockToast).toHaveBeenCalled();
+  });
+
+  it("keeps the dialog open and toasts when delete fails", async () => {
+    mockListFiles.mockResolvedValue([file()]);
+    mockDeleteFile.mockRejectedValue(new Error("delete failed"));
+
+    render(<StoragePage />);
+    await waitFor(() => {
+      expect(screen.getByText("report.pdf")).toBeInTheDocument();
+    });
+    fireEvent.click(
+      screen.getByRole("button", { name: "list.actions.delete" }),
+    );
+    await waitFor(() => {
+      expect(
+        screen.getByRole("button", { name: "list.deleteDialog.confirm" }),
+      ).toBeInTheDocument();
+    });
+    fireEvent.click(
+      screen.getByRole("button", { name: "list.deleteDialog.confirm" }),
+    );
+
+    await waitFor(() => {
+      expect(mockToast).toHaveBeenCalledWith(
+        expect.objectContaining({ variant: "destructive" }),
+      );
+    });
+    // The dialog stays open so the user can retry.
+    expect(
+      screen.getByRole("button", { name: "list.deleteDialog.confirm" }),
+    ).toBeInTheDocument();
+  });
 });

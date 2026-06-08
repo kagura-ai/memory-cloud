@@ -112,6 +112,7 @@
       "emptyDescription": "このワークスペースにアップロードされたファイルがここに表示されます。API または MCP のファイルツールからアップロードできます。",
       "fetchError": "ファイルの読み込みに失敗しました。",
       "loadMore": "さらに読み込む",
+      "loadingMore": "読み込み中…",
       "column": {
         "filename": "ファイル名",
         "type": "種類",

@@ -153,7 +153,10 @@ export default function StoragePage() {
 
       {error && <ErrorBanner error={error} />}
 
-      {loading ? (
+      {loading && files.length === 0 ? (
+        // Full skeleton only on first paint. "Load more" refetches with a
+        // larger limit, so once rows exist we keep them visible (and disable
+        // the button) instead of wiping the table back to a skeleton.
         <TableLoadingState rows={5} />
       ) : error ? null : files.length === 0 ? (
         <EmptyState
@@ -242,11 +245,12 @@ export default function StoragePage() {
             <div className="mt-4 flex justify-center">
               <Button
                 variant="outline"
+                disabled={loading}
                 onClick={() =>
                   setLimit((n) => Math.min(n + PAGE_SIZE, MAX_LIMIT))
                 }
               >
-                {t("list.loadMore")}
+                {loading ? t("list.loadingMore") : t("list.loadMore")}
               </Button>
             </div>
           )}
