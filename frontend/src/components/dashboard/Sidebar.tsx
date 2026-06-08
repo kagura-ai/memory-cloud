@@ -66,6 +66,7 @@ import {
   Info,
   ExternalLink,
   Plug,
+  HardDrive,
 } from "lucide-react";
 import { apiClient } from "@/lib/api/base";
 // Issue #246: ContextSelector removed - use /contexts link instead
@@ -140,6 +141,14 @@ const navigationGroups: NavGroup[] = [
         href: "/workspace/sleep-reports",
         icon: Moon,
         requiredWorkspaceRole: WorkspaceRole.Admin,
+      },
+      {
+        // Issue #955: workspace-scoped file objects (R2 storage). Backend
+        // lists/downloads at viewer+, so the entry is visible to every
+        // workspace role; delete is gated to member+ inside the page.
+        nameKey: "storage",
+        href: "/workspace/storage",
+        icon: HardDrive,
       },
     ],
   },

@@ -101,7 +101,38 @@
     "copyright": "© 2024〜{year} Kagura AI 株式会社",
     "version": "v{version}",
     "kaguraLogoAria": "Kagura Memory Cloud",
-    "connectors": "コネクタ"
+    "connectors": "コネクタ",
+    "storage": "ストレージ"
+  },
+  "storage": {
+    "list": {
+      "title": "ストレージ",
+      "description": "API または MCP ツール経由でこのワークスペースにアップロードされたファイル。",
+      "emptyTitle": "ファイルがありません",
+      "emptyDescription": "このワークスペースにアップロードされたファイルがここに表示されます。API または MCP のファイルツールからアップロードできます。",
+      "fetchError": "ファイルの読み込みに失敗しました。",
+      "loadMore": "さらに読み込む",
+      "column": {
+        "filename": "ファイル名",
+        "type": "種類",
+        "size": "サイズ",
+        "status": "ステータス",
+        "uploaded": "アップロード日時"
+      },
+      "actions": {
+        "download": "ダウンロード",
+        "downloadFailed": "ダウンロードを開始できませんでした。",
+        "delete": "削除"
+      },
+      "deleteDialog": {
+        "title": "ファイルを削除しますか？",
+        "description": "「{filename}」はこのワークスペースから削除されます。この操作は取り消せません。",
+        "confirm": "削除",
+        "deleting": "削除中…",
+        "success": "ファイルを削除しました",
+        "failed": "ファイルの削除に失敗しました。"
+      }
+    }
   },
   "auth": {
     "signIn": "サインイン",

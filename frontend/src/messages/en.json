@@ -101,7 +101,38 @@
     "copyright": "© 2024–{year} Kagura AI, Inc.",
     "version": "v{version}",
     "kaguraLogoAria": "Kagura Memory Cloud",
-    "connectors": "Connectors"
+    "connectors": "Connectors",
+    "storage": "Storage"
+  },
+  "storage": {
+    "list": {
+      "title": "Storage",
+      "description": "Files uploaded to this workspace via the API or MCP tools.",
+      "emptyTitle": "No files yet",
+      "emptyDescription": "Files uploaded to this workspace will appear here. Upload files via the API or MCP file tools.",
+      "fetchError": "Failed to load files.",
+      "loadMore": "Load more",
+      "column": {
+        "filename": "File name",
+        "type": "Type",
+        "size": "Size",
+        "status": "Status",
+        "uploaded": "Uploaded"
+      },
+      "actions": {
+        "download": "Download",
+        "downloadFailed": "Failed to start download.",
+        "delete": "Delete"
+      },
+      "deleteDialog": {
+        "title": "Delete file?",
+        "description": "\"{filename}\" will be removed from this workspace. This cannot be undone.",
+        "confirm": "Delete",
+        "deleting": "Deleting…",
+        "success": "File deleted",
+        "failed": "Failed to delete file."
+      }
+    }
   },
   "auth": {
     "signIn": "Sign In",

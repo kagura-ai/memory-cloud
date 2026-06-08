@@ -1,0 +1,263 @@
+/**
+ * Tests for the workspace Storage (file objects) page (Issue #955).
+ *
+ * Verifies:
+ * - table rows render from listFiles()
+ * - empty-state renders when the response is empty
+ * - the fetch is held until WorkspaceContext hydrates
+ * - errors render via ErrorBanner, not toast
+ * - viewer role sees download but NOT delete (backend authz parity)
+ * - member+ role sees the delete action
+ * - delete confirmation calls deleteFile and refetches
+ * - download opens the presigned URL
+ * - "Load more" bumps the limit and refetches
+ */
+
+import { describe, it, expect, beforeEach, vi, afterEach } from "vitest";
+import {
+  render,
+  screen,
+  waitFor,
+  fireEvent,
+  cleanup,
+} from "@testing-library/react";
+
+import StoragePage from "./page";
+import type { FileObject } from "@/lib/api/files";
+
+// ---------- Mocks ------------------------------------------------------------
+
+const mockListFiles = vi.fn();
+const mockGetDownloadUrl = vi.fn();
+const mockDeleteFile = vi.fn();
+
+let mockCurrentWorkspace: {
+  id?: string;
+  current_user_role?: string;
+} | null = null;
+
+vi.mock("@/lib/api/files", async () => {
+  const actual =
+    await vi.importActual<typeof import("@/lib/api/files")>("@/lib/api/files");
+  return {
+    ...actual,
+    listFiles: (...args: unknown[]) => mockListFiles(...args),
+    getDownloadUrl: (...args: unknown[]) => mockGetDownloadUrl(...args),
+    deleteFile: (...args: unknown[]) => mockDeleteFile(...args),
+  };
+});
+
+// Stable translator per-namespace — a fresh fn each render invalidates
+// useCallback([t]) and turns the fetch effect into a re-render loop.
+const translatorCache = new Map<string, (k: string) => string>();
+vi.mock("next-intl", () => ({
+  useTranslations: (ns?: string) => {
+    const key = ns ?? "";
+    if (!translatorCache.has(key)) {
+      translatorCache.set(key, (k: string) => k);
+    }
+    return translatorCache.get(key)!;
+  },
+  useLocale: () => "en",
+}));
+
+vi.mock("@/contexts/WorkspaceContext", () => ({
+  useWorkspace: () => ({
+    currentWorkspace: mockCurrentWorkspace,
+    currentWorkspaceId: mockCurrentWorkspace?.id ?? null,
+  }),
+}));
+
+const mockToast = vi.fn();
+vi.mock("@/hooks/use-toast", () => ({
+  useToast: () => ({ toast: mockToast }),
+}));
+
+vi.mock("@/lib/utils/datetime", () => ({
+  formatRelativeTime: (iso: string) => `rel(${iso})`,
+  formatDateTime: (iso: string) => `dt(${iso})`,
+}));
+
+// ---------- Fixtures ---------------------------------------------------------
+
+const file = (overrides: Partial<FileObject> = {}): FileObject => ({
+  id: "file-1",
+  workspace_id: "ws-1",
+  filename: "report.pdf",
+  content_type: "application/pdf",
+  size_bytes: 2048,
+  sha256: "a".repeat(64),
+  status: "uploaded",
+  created_at: "2026-03-01T00:00:00Z",
+  uploaded_at: "2026-03-01T00:05:00Z",
+  ...overrides,
+});
+
+beforeEach(() => {
+  mockListFiles.mockReset();
+  mockGetDownloadUrl.mockReset();
+  mockDeleteFile.mockReset();
+  mockToast.mockReset();
+  mockCurrentWorkspace = { id: "ws-1", current_user_role: "member" };
+});
+
+afterEach(() => {
+  cleanup();
+});
+
+// ---------- Tests ------------------------------------------------------------
+
+describe("StoragePage", () => {
+  it("renders table rows from listFiles()", async () => {
+    mockListFiles.mockResolvedValue([
+      file(),
+      file({ id: "file-2", filename: "notes.txt", content_type: "text/plain" }),
+    ]);
+
+    render(<StoragePage />);
+
+    await waitFor(() => {
+      expect(screen.getByText("report.pdf")).toBeInTheDocument();
+    });
+    expect(screen.getByText("notes.txt")).toBeInTheDocument();
+    expect(screen.getByText("application/pdf")).toBeInTheDocument();
+    expect(mockListFiles).toHaveBeenCalledWith("ws-1", 50);
+  });
+
+  it("renders empty state when the list is empty", async () => {
+    mockListFiles.mockResolvedValue([]);
+
+    render(<StoragePage />);
+
+    await waitFor(() => {
+      expect(screen.getByText("list.emptyTitle")).toBeInTheDocument();
+    });
+  });
+
+  it("holds the fetch until WorkspaceContext hydrates", async () => {
+    mockCurrentWorkspace = null;
+    mockListFiles.mockResolvedValue([]);
+
+    render(<StoragePage />);
+
+    await Promise.resolve();
+    expect(mockListFiles).not.toHaveBeenCalled();
+  });
+
+  it("renders ErrorBanner when fetch rejects", async () => {
+    mockListFiles.mockRejectedValue(new Error("backend offline"));
+
+    render(<StoragePage />);
+
+    await waitFor(() => {
+      expect(screen.getByRole("alert")).toHaveTextContent("backend offline");
+    });
+    expect(screen.queryByText("list.emptyTitle")).not.toBeInTheDocument();
+  });
+
+  it("hides the delete action for viewer role", async () => {
+    mockCurrentWorkspace = { id: "ws-1", current_user_role: "viewer" };
+    mockListFiles.mockResolvedValue([file()]);
+
+    render(<StoragePage />);
+
+    await waitFor(() => {
+      expect(screen.getByText("report.pdf")).toBeInTheDocument();
+    });
+    expect(
+      screen.queryByRole("button", { name: "list.actions.delete" }),
+    ).not.toBeInTheDocument();
+    // viewer can still download
+    expect(
+      screen.getByRole("button", { name: "list.actions.download" }),
+    ).toBeInTheDocument();
+  });
+
+  it("shows the delete action for member role", async () => {
+    mockCurrentWorkspace = { id: "ws-1", current_user_role: "member" };
+    mockListFiles.mockResolvedValue([file()]);
+
+    render(<StoragePage />);
+
+    await waitFor(() => {
+      expect(
+        screen.getByRole("button", { name: "list.actions.delete" }),
+      ).toBeInTheDocument();
+    });
+  });
+
+  it("downloads via a presigned URL", async () => {
+    mockListFiles.mockResolvedValue([file()]);
+    mockGetDownloadUrl.mockResolvedValue("https://r2/presigned");
+    const openSpy = vi.fn();
+    vi.stubGlobal("open", openSpy);
+
+    render(<StoragePage />);
+
+    await waitFor(() => {
+      expect(screen.getByText("report.pdf")).toBeInTheDocument();
+    });
+    fireEvent.click(
+      screen.getByRole("button", { name: "list.actions.download" }),
+    );
+    await waitFor(() => {
+      expect(mockGetDownloadUrl).toHaveBeenCalledWith("ws-1", "file-1");
+    });
+    expect(openSpy).toHaveBeenCalledWith(
+      "https://r2/presigned",
+      "_blank",
+      "noopener,noreferrer",
+    );
+    vi.unstubAllGlobals();
+  });
+
+  it("deletes a file after confirmation and refetches", async () => {
+    mockListFiles.mockResolvedValueOnce([file()]).mockResolvedValueOnce([]);
+    mockDeleteFile.mockResolvedValue(undefined);
+
+    render(<StoragePage />);
+
+    await waitFor(() => {
+      expect(screen.getByText("report.pdf")).toBeInTheDocument();
+    });
+    fireEvent.click(
+      screen.getByRole("button", { name: "list.actions.delete" }),
+    );
+
+    // Confirm dialog action
+    await waitFor(() => {
+      expect(
+        screen.getByRole("button", { name: "list.deleteDialog.confirm" }),
+      ).toBeInTheDocument();
+    });
+    fireEvent.click(
+      screen.getByRole("button", { name: "list.deleteDialog.confirm" }),
+    );
+
+    await waitFor(() => {
+      expect(mockDeleteFile).toHaveBeenCalledWith("ws-1", "file-1");
+    });
+    expect(mockListFiles).toHaveBeenCalledTimes(2);
+  });
+
+  it("loads more by bumping the limit when the page is full", async () => {
+    // First page returns exactly `limit` rows → "load more" is offered.
+    const fullPage = Array.from({ length: 50 }, (_, i) =>
+      file({ id: `f${i}`, filename: `file-${i}.txt` }),
+    );
+    mockListFiles
+      .mockResolvedValueOnce(fullPage)
+      .mockResolvedValueOnce([...fullPage, file({ id: "f50" })]);
+
+    render(<StoragePage />);
+
+    await waitFor(() => {
+      expect(screen.getByText("file-0.txt")).toBeInTheDocument();
+    });
+    fireEvent.click(screen.getByRole("button", { name: "list.loadMore" }));
+
+    await waitFor(() => {
+      expect(mockListFiles).toHaveBeenCalledWith("ws-1", 100);
+    });
+  });
+});
