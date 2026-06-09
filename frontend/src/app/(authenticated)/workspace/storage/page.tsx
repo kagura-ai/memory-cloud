@@ -39,11 +39,11 @@ import {
   AlertDialogTitle,
 } from "@/components/ui/alert-dialog";
 import { formatRelativeTime } from "@/lib/utils/datetime";
+import { formatBytes } from "@/lib/utils/format";
 import {
   listFiles,
   getDownloadUrl,
   deleteFile,
-  formatFileSize,
   type FileObject,
 } from "@/lib/api/files";
 import { useWorkspace } from "@/contexts/WorkspaceContext";
@@ -62,6 +62,7 @@ export default function StoragePage() {
 
   const [files, setFiles] = useState<FileObject[]>([]);
   const [loading, setLoading] = useState(true);
+  const [loadingMore, setLoadingMore] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [limit, setLimit] = useState(PAGE_SIZE);
 
@@ -76,29 +77,50 @@ export default function StoragePage() {
     WorkspaceRole.Member,
   );
 
-  const fetchFiles = useCallback(
-    async (nextLimit: number) => {
+  const loadFiles = useCallback(
+    async (nextLimit: number, mode: "initial" | "more" | "refresh") => {
       if (!currentWorkspaceId) return;
-      try {
+      if (mode === "initial") {
         setLoading(true);
         setError(null);
+      } else if (mode === "more") {
+        setLoadingMore(true);
+      }
+      try {
         const data = await listFiles(currentWorkspaceId, nextLimit);
         setFiles(data);
+        setLimit(nextLimit);
       } catch (e) {
-        setError(e instanceof Error ? e.message : t("list.fetchError"));
+        const message = e instanceof Error ? e.message : t("list.fetchError");
+        if (mode === "initial") {
+          // First paint failed — there are no rows to protect, so surface a
+          // page-level banner.
+          setError(message);
+        } else {
+          // A "load more" or post-delete refresh failed. These are user
+          // actions, so per the Error Surface rule we toast (and keep the
+          // already-loaded rows on screen) instead of replacing the table
+          // with a banner.
+          toast({
+            variant: "destructive",
+            title: t("list.loadMoreFailed"),
+            description: message,
+          });
+        }
       } finally {
-        setLoading(false);
+        if (mode === "initial") setLoading(false);
+        else if (mode === "more") setLoadingMore(false);
       }
     },
-    [currentWorkspaceId, t],
+    [currentWorkspaceId, t, toast],
   );
 
   useEffect(() => {
     // Hold until WorkspaceContext hydrates so we don't fire a round-trip
     // with a null workspace id on first render.
     if (!currentWorkspaceId) return;
-    fetchFiles(limit);
-  }, [currentWorkspaceId, limit, fetchFiles]);
+    loadFiles(PAGE_SIZE, "initial");
+  }, [currentWorkspaceId, loadFiles]);
 
   useEffect(() => {
     document.title = `${t("list.title")} - Kagura Memory Cloud`;
@@ -106,11 +128,32 @@ export default function StoragePage() {
 
   const handleDownload = async (f: FileObject) => {
     if (!currentWorkspaceId) return;
+    // Open the tab synchronously while we still hold the click's user
+    // activation — calling window.open() after the await would be blocked by
+    // popup blockers (Safari / strict Firefox). We can't pass "noopener" here
+    // (that makes window.open return null and we'd lose the handle), so we
+    // sever the opener manually before navigating to mitigate tabnabbing.
+    const tab = window.open("about:blank", "_blank");
+    if (tab) {
+      // Some runtimes (e.g. jsdom) expose `opener` as a getter-only property;
+      // ignore the failure there — in real browsers this severs the link.
+      try {
+        tab.opener = null;
+      } catch {
+        /* opener is read-only in this environment */
+      }
+    }
     try {
       setDownloadingId(f.id);
       const url = await getDownloadUrl(currentWorkspaceId, f.id);
-      window.open(url, "_blank", "noopener,noreferrer");
+      if (tab) {
+        tab.location.replace(url);
+      } else {
+        // Popup blocked outright — fall back to a same-tab navigation.
+        window.location.href = url;
+      }
     } catch (e) {
+      tab?.close();
       toast({
         variant: "destructive",
         title: t("list.actions.downloadFailed"),
@@ -131,7 +174,7 @@ export default function StoragePage() {
         description: fileToDelete.filename,
       });
       setFileToDelete(null);
-      await fetchFiles(limit);
+      await loadFiles(limit, "refresh");
     } catch (e) {
       toast({
         variant: "destructive",
@@ -191,7 +234,7 @@ export default function StoragePage() {
                       {f.content_type}
                     </TableCell>
                     <TableCell className="text-right tabular-nums">
-                      {formatFileSize(f.size_bytes)}
+                      {formatBytes(f.size_bytes)}
                     </TableCell>
                     <TableCell>
                       <Badge
@@ -245,12 +288,12 @@ export default function StoragePage() {
             <div className="mt-4 flex justify-center">
               <Button
                 variant="outline"
-                disabled={loading}
+                disabled={loadingMore}
                 onClick={() =>
-                  setLimit((n) => Math.min(n + PAGE_SIZE, MAX_LIMIT))
+                  loadFiles(Math.min(limit + PAGE_SIZE, MAX_LIMIT), "more")
                 }
               >
-                {loading ? t("list.loadingMore") : t("list.loadMore")}
+                {loadingMore ? t("list.loadingMore") : t("list.loadMore")}
               </Button>
             </div>
           )}

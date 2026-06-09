@@ -113,6 +113,7 @@
       "fetchError": "Failed to load files.",
       "loadMore": "Load more",
       "loadingMore": "Loading…",
+      "loadMoreFailed": "Failed to load more files.",
       "column": {
         "filename": "File name",
         "type": "Type",

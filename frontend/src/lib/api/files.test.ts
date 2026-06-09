@@ -2,8 +2,8 @@
  * Tests for the file-objects API client (Issue #955).
  *
  * Verifies the three frontend wrappers build the correct workspace-scoped
- * URLs against the existing backend (`backend/src/api/routes/files.py`) and
- * that the byte formatter renders human-readable sizes.
+ * URLs against the existing backend (`backend/src/api/routes/files.py`).
+ * The byte formatter now lives in `@/lib/utils/format` (see format.test.ts).
  */
 
 import { describe, it, expect, beforeEach, vi } from "vitest";
@@ -18,7 +18,7 @@ vi.mock("./base", () => ({
   },
 }));
 
-import { listFiles, getDownloadUrl, deleteFile, formatFileSize } from "./files";
+import { listFiles, getDownloadUrl, deleteFile } from "./files";
 
 beforeEach(() => {
   mockGet.mockReset();
@@ -67,25 +67,5 @@ describe("deleteFile", () => {
     expect(mockDelete).toHaveBeenCalledWith(
       "/api/v1/files/file-9?workspace_id=ws-1",
     );
-  });
-});
-
-describe("formatFileSize", () => {
-  it("formats bytes under 1 KiB as bytes", () => {
-    expect(formatFileSize(0)).toBe("0 B");
-    expect(formatFileSize(512)).toBe("512 B");
-  });
-
-  it("formats kibibytes with one decimal", () => {
-    expect(formatFileSize(1024)).toBe("1.0 KB");
-    expect(formatFileSize(1536)).toBe("1.5 KB");
-  });
-
-  it("formats mebibytes with one decimal", () => {
-    expect(formatFileSize(1024 * 1024)).toBe("1.0 MB");
-  });
-
-  it("formats gibibytes with one decimal", () => {
-    expect(formatFileSize(5 * 1024 * 1024 * 1024)).toBe("5.0 GB");
   });
 });

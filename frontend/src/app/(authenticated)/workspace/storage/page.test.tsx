@@ -189,7 +189,15 @@ describe("StoragePage", () => {
   it("downloads via a presigned URL", async () => {
     mockListFiles.mockResolvedValue([file()]);
     mockGetDownloadUrl.mockResolvedValue("https://r2/presigned");
-    const openSpy = vi.fn();
+    // The tab is opened synchronously (about:blank) within the click's user
+    // activation, then navigated to the presigned URL once it resolves —
+    // this avoids popup blockers that fire on window.open() after an await.
+    const fakeTab = {
+      location: { replace: vi.fn() },
+      opener: {} as unknown,
+      close: vi.fn(),
+    };
+    const openSpy = vi.fn().mockReturnValue(fakeTab);
     vi.stubGlobal("open", openSpy);
 
     render(<StoragePage />);
@@ -203,11 +211,13 @@ describe("StoragePage", () => {
     await waitFor(() => {
       expect(mockGetDownloadUrl).toHaveBeenCalledWith("ws-1", "file-1");
     });
-    expect(openSpy).toHaveBeenCalledWith(
-      "https://r2/presigned",
-      "_blank",
-      "noopener,noreferrer",
-    );
+    expect(openSpy).toHaveBeenCalledWith("about:blank", "_blank");
+    await waitFor(() => {
+      expect(fakeTab.location.replace).toHaveBeenCalledWith(
+        "https://r2/presigned",
+      );
+    });
+    expect(fakeTab.opener).toBeNull();
     vi.unstubAllGlobals();
   });
 
@@ -304,6 +314,30 @@ describe("StoragePage", () => {
     });
     expect(screen.getByText("file-0.txt")).toBeInTheDocument();
     resolveSecond(fullPage);
+  });
+
+  it("toasts and keeps rows when load-more fails", async () => {
+    const fullPage = Array.from({ length: 50 }, (_, i) =>
+      file({ id: `f${i}`, filename: `file-${i}.txt` }),
+    );
+    mockListFiles
+      .mockResolvedValueOnce(fullPage)
+      .mockRejectedValueOnce(new Error("boom"));
+
+    render(<StoragePage />);
+    await waitFor(() => {
+      expect(screen.getByText("file-0.txt")).toBeInTheDocument();
+    });
+    fireEvent.click(screen.getByRole("button", { name: "list.loadMore" }));
+
+    // Load-more is a user action: failures toast (not a page-level banner)
+    // and the already-loaded rows stay on screen.
+    await waitFor(() => {
+      expect(mockToast).toHaveBeenCalledWith(
+        expect.objectContaining({ variant: "destructive" }),
+      );
+    });
+    expect(screen.getByText("file-0.txt")).toBeInTheDocument();
   });
 
   it("surfaces a destructive toast when download fails", async () => {

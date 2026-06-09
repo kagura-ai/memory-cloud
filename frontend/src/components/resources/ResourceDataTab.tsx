@@ -41,6 +41,7 @@ import { useAuth } from "@/contexts/AuthContext";
 import { useCopyFeedback } from "@/hooks/useCopyFeedback";
 import { useToast } from "@/hooks/use-toast";
 import { formatDateTime } from "@/lib/utils/datetime";
+import { formatBytes } from "@/lib/utils/format";
 import {
   listResourceEvents,
   type ResourceEventRecord,
@@ -64,12 +65,6 @@ interface AppliedFilters {
   doc_id?: string;
   version?: number;
   since?: string;
-}
-
-function formatBytes(bytes: number): string {
-  if (bytes < 1024) return `${bytes} B`;
-  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
-  return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
 }
 
 export function ResourceDataTab({ resourceId, schema }: ResourceDataTabProps) {
