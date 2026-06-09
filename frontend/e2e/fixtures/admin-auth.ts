@@ -91,24 +91,16 @@ export const test = base.extend<AdminAuthFixtures>({
         );
       }
 
-      // The login cookie is already in the context jar, but the session may not
-      // be readable on the very next request under commit/replication lag. That
-      // race surfaced as intermittent "Not authenticated" on the page's
-      // client-side fetches, which rendered the destructive error Alert and made
-      // authed-a11y flaky (#957: same commit passed → failed → passed). Poll
-      // /auth/me until the session is live before handing the context to the
-      // test, converting the race into a deterministic wait.
-      await expect
-        .poll(
-          async () =>
-            (await context.request.get(`${API_URL}/api/v1/auth/me`)).status(),
-          {
-            message: "session did not become valid after login",
-            timeout: 10_000,
-            intervals: [200, 300, 500, 1000],
-          },
-        )
-        .toBe(200);
+      // NOTE: this fixture is still subject to the #957 flake — the shared
+      // e2e-admin account hits the single-session-per-user invalidation
+      // (Issue #114: login deletes all of the user's prior sessions), so two
+      // parallel workers re-logging-in as the same admin clobber each other's
+      // session and the loser's cookie 401s. The /auth/me poll attempted here
+      // could not fix that (the session is genuinely deleted), so it was
+      // removed. Deterministic auth (login-once storageState globalSetup, or a
+      // per-worker admin) is tracked as a follow-up — see frontend/e2e/README.md.
+      // The contrast half of #957 (readable destructive Alert) is what makes the
+      // authed-a11y specs pass even when this race surfaces the error state.
 
       await use();
     },
