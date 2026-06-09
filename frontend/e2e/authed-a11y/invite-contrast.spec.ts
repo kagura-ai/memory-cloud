@@ -17,6 +17,11 @@ import {
  * mismatch" / "success" screens, which require a Pro-plan workspace + a created
  * invitation) is part of the deferred full-stack a11y CI lane (see the #785
  * follow-up issue). NON-HERMETIC → outside the hermetic `e2e/a11y` job (#786).
+ *
+ * Unlike the other authed-a11y specs, /invite is a PUBLIC route — it imports the
+ * plain Playwright `test` (no auth) and the unknown-token error screen is its
+ * intended target, NOT the "Not authenticated" auth-failure state that #959
+ * fixed for the genuinely authenticated /device and /workspace/dashboard specs.
  */
 test.describe("/invite/[token] color-contrast (#785)", () => {
   for (const colorScheme of ["light", "dark"] as const) {

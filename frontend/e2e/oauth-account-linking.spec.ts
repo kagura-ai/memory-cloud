@@ -1,10 +1,10 @@
 import { test, expect, API_URL } from "./fixtures/admin-auth";
 import { CONNECTED_ACCOUNTS_TEST_IDS as T } from "@/components/auth/connected-accounts.testids";
 
-// Disable trace capture: the admin-auth fixture POSTs E2E_ADMIN_PASSWORD via the
-// request context, and `playwright.config.ts` retains traces on failure — same
-// rationale as admin-user-detail.spec.ts (Copilot review PR #807).
-test.use({ trace: "off" });
+// Trace capture stays on (project default `retain-on-failure`). Auth comes from
+// the `authed` project's pre-seeded `storageState`; the password is only sent
+// by the `setup` project's login POST (trace off), so no credential reaches a
+// trace from this spec (#959, supersedes the PR #807 per-spec opt-out).
 
 /**
  * Account-linking E2E: link → unlink → re-link (Issue #937, follow-up to #517).
