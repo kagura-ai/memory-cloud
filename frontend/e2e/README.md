@@ -55,12 +55,33 @@ npm run test:a11y:authed
 Authenticated specs combine `assertNoColorContrastViolations` / `gotoAndWaitStable`
 from `e2e/fixtures.ts` with the `test` from `e2e/fixtures/admin-auth.ts`.
 
-> **Not yet in CI.** Wiring `e2e/authed-a11y/` into a full-stack a11y CI lane
-> (backend services + seed + `storageState` `globalSetup`) — and contrast-testing
-> the fully-seeded happy paths (e.g. a valid invitation, which needs a Pro-plan
-> workspace) — is tracked as a follow-up to #785. The specs here currently cover
-> only the states reachable without seeding (e.g. `/invite` with an unknown
-> token → error screen).
+> **In CI** as the `frontend-a11y-authed` lane (`.github/workflows/ci.yml`),
+> which stands up postgres + redis + a migrated schema + a seeded admin
+> (`python -m src.cli.seed_e2e_admin`), starts the API, then runs
+> `npm run test:a11y:authed`. Contrast-testing the fully-seeded happy paths
+> (e.g. a valid invitation, which needs a Pro-plan workspace + a created
+> invitation) is still a deferred follow-up to #785; the specs here currently
+> cover the states reachable without that extra seed (e.g. `/invite` with an
+> unknown token → error screen).
+
+### How authentication works (deterministic, #959)
+
+The `authed` Playwright project does **not** log in per test. Instead a `setup`
+project (`e2e/auth.setup.ts`) runs first — as a declared dependency — and logs
+the test admin in **exactly once** via `POST /api/v1/auth/login`, persisting the
+session cookie to `e2e/.auth/admin.json` (gitignored). The `authed` project then
+loads that cookie into every test's browser context via `use.storageState`.
+
+This is load-bearing, not a convenience: the backend enforces
+single-session-per-user (Issue #114 — `delete_user_sessions` runs on **every**
+login). When the old fixture re-logged-in per test, two parallel Playwright
+workers sharing the one `e2e-admin` account would clobber each other's session,
+producing intermittent 401s ("Not authenticated"). Logging in once removes the
+race. It also keeps the password out of every traced browser context — only the
+`setup` project ever sends it, and that project runs with `trace: "off"`.
+
+`npm run test:a11y` selects the backend-free `hermetic` project; it has **no**
+dependency on `setup`, so the hermetic CI lane never attempts a login.
 
 ## OAuth account-linking E2E (mock IdP) — `oauth-account-linking.spec.ts` (#937)
 
@@ -119,9 +140,12 @@ test("my admin smoke", async ({ page }) => {
 });
 ```
 
-The fixture logs the test admin in via `POST /api/v1/auth/login` and shares
-cookies with the browser context, so `page.goto("/admin/...")` is
-authenticated.
+Auth is provided by the `authed` project's pre-seeded `storageState` (see "How
+authentication works" above), so `page.goto("/admin/...")` is already
+authenticated — no per-spec login and no `test.use({ trace: "off" })` needed
+(the password never reaches the spec). New authed root specs must match the
+`authed` project's `testMatch` in `playwright.config.ts` (`admin-*.spec.ts` or
+add an entry); a spec that doesn't match runs with no `storageState` and 401s.
 
 **Required env vars** before running an admin spec:
 
@@ -162,18 +186,11 @@ Before wiring `make test-e2e-frontend` into CI, address these:
 
 1. **Secret management for `E2E_ADMIN_LOGIN_ID` / `E2E_ADMIN_PASSWORD`.**
    GitHub Actions secrets, vault, or equivalent — never commit.
-2. **Password leak in failure traces.** `playwright.config.ts` sets
-   `trace: "retain-on-failure"`, which captures network request bodies
-   including the login POST body. A failed CI run would publish
-   `E2E_ADMIN_PASSWORD` in the trace artifact. Fix BEFORE CI by either:
-   - Pre-seeded storage state: add `globalSetup` to `playwright.config.ts`
-     that performs the login once and writes cookies to a gitignored
-     file, then reference via `use.storageState` on an admin-only
-     project. The fixture's API-login path goes away (or stays as a
-     fallback for the no-storage-state case).
-   - Per-spec opt-out: `test.use({ trace: "off" })` at the top of
-     `admin-*.spec.ts` files. Loses trace coverage on those specs but
-     trivially closes the leak.
+2. **Password leak in failure traces — RESOLVED (#959).** The login now happens
+   only in the `setup` project (`e2e/auth.setup.ts`), which runs with
+   `trace: "off"`; authed specs reuse the resulting `storageState` cookie and
+   never send the password, so they keep the default `retain-on-failure` trace
+   coverage with no leak.
 3. **DB residue from interrupted round-trip specs.** Add a
    `test.afterEach` that PATCHes `workspace_slot_bonus` back to its
    pre-test value via the admin API, so an interrupted run leaves no

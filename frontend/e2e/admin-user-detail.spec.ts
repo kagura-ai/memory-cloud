@@ -2,24 +2,11 @@ import type { Page } from "@playwright/test";
 import { test, expect, API_URL } from "./fixtures/admin-auth";
 import { USER_DETAIL_TEST_IDS as T } from "@/app/(authenticated)/admin/users/[userId]/testids";
 
-// Disable trace capture for this spec.
-//
-// `playwright.config.ts` sets `trace: "retain-on-failure"`, which captures
-// network request bodies in the retained trace artifact on test failure.
-// The admin-auth fixture POSTs `E2E_ADMIN_PASSWORD` via the test runner's
-// request context, and Playwright records that body unless tracing is off.
-// A failed CI run would otherwise leave the password in
-// `test-results/<spec>/trace.zip`.
-//
-// Trade-off: we lose trace-based debugging on admin-spec failures. The
-// spec is 2 cases and 100 lines — `console.log` + screenshots from
-// `test.afterEach` are sufficient if a regression needs investigation.
-// Pre-seeded `globalSetup` storage state (so the password never touches a
-// browser-context request at all) is the proper long-term fix and is
-// tracked in `frontend/e2e/README.md` as a CI prerequisite.
-//
-// Surfaced by Copilot review on PR #807 (loops 1 + 2).
-test.use({ trace: "off" });
+// Trace capture stays on (project default `retain-on-failure`). The password
+// is no longer sent from this spec: auth comes from the `authed` project's
+// pre-seeded `storageState`, and only the `setup` project's login POST handles
+// the password (with trace off). This closed the #807 trace-leak concern at the
+// source (#959) and restores trace-based debugging on admin-spec failures.
 
 /**
  * Admin user detail page E2E smoke (#688).

@@ -243,11 +243,13 @@ jobs:
   # the detect-changes path filter (same pattern as backend-integration).
   #
   # Scope (#840, first slice): runs the 3 existing specs (device / invite
-  # unknown-token / workspace-dashboard) with the current login-based
-  # admin-auth fixture (trace:off). The storageState globalSetup migration and
-  # the Pro-workspace/invitation happy-path seed are deferred follow-ups.
-  # This is a new CI-only lane — boot env / port-wait timing may need tuning
-  # over the first runs; it is NOT yet a Required check (#768).
+  # unknown-token / workspace-dashboard). Auth is deterministic via the
+  # storageState `setup` project (#959): the admin logs in once, every spec
+  # reuses the session cookie — no per-test re-login, so parallel workers can't
+  # clobber each other's session (#114). The Pro-workspace/invitation
+  # happy-path seed is still a deferred follow-up. This is a new CI-only lane —
+  # boot env / port-wait timing may need tuning over the first runs; it is NOT
+  # yet a Required check (#768).
   frontend-a11y-authed:
     runs-on: ubuntu-latest
     needs: [detect-changes, frontend]
