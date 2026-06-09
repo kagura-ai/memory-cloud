@@ -91,6 +91,25 @@ export const test = base.extend<AdminAuthFixtures>({
         );
       }
 
+      // The login cookie is already in the context jar, but the session may not
+      // be readable on the very next request under commit/replication lag. That
+      // race surfaced as intermittent "Not authenticated" on the page's
+      // client-side fetches, which rendered the destructive error Alert and made
+      // authed-a11y flaky (#957: same commit passed → failed → passed). Poll
+      // /auth/me until the session is live before handing the context to the
+      // test, converting the race into a deterministic wait.
+      await expect
+        .poll(
+          async () =>
+            (await context.request.get(`${API_URL}/api/v1/auth/me`)).status(),
+          {
+            message: "session did not become valid after login",
+            timeout: 10_000,
+            intervals: [200, 300, 500, 1000],
+          },
+        )
+        .toBe(200);
+
       await use();
     },
     { auto: true, scope: "test" },
