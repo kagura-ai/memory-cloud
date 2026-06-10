@@ -83,3 +83,45 @@ async def test_handle_feedback_threads_key_workspace_end_to_end():
         p_db.stop()
         p_perm.stop()
         p_fs.stop()
+
+
+@pytest.mark.asyncio
+async def test_handle_merge_contexts_confines_both_resolves():
+    """N-context wiring guard: handle_merge_contexts resolves BOTH source and
+    target; both must forward the key workspace. A copy-paste-miss that forwards
+    on the first resolve but not the second would leave a confinement hole on
+    the merge target — this asserts both calls carry workspace_id."""
+    from mcp_server.tools.context import handle_merge_contexts
+
+    ws = uuid4()
+    same_ws_ctx = MagicMock(workspace_id=ws)  # source/target same ws → no mismatch
+    mock_db = AsyncMock()
+
+    async def mock_get_db():
+        yield mock_db
+
+    resolve = AsyncMock(return_value=same_ws_ctx)
+    p_db = patch("db.base.get_db", mock_get_db)
+    p_resolve = patch("mcp_server.tools.context._resolve_context_for_read", resolve)
+    p_svc = patch("services.context_service.ContextService")
+    p_log = patch("mcp_server.tools.context._log_tool_usage", AsyncMock())
+    p_db.start()
+    p_resolve.start()
+    SVC = p_svc.start()
+    p_log.start()
+    SVC.return_value.merge_contexts = AsyncMock(return_value={"merged": 0})
+    try:
+        await handle_merge_contexts(
+            {"source_id": str(uuid4()), "target_id": str(uuid4())},
+            "user",
+            ws,
+        )
+        assert resolve.await_count == 2, "both source and target must be resolved"
+        assert all(call.kwargs.get("workspace_id") == ws for call in resolve.await_args_list), (
+            "both resolves must forward the key workspace_id"
+        )
+    finally:
+        p_db.stop()
+        p_resolve.stop()
+        p_svc.stop()
+        p_log.stop()

@@ -263,3 +263,50 @@ class TestAgentStateKeyWorkspaceConfinement:
         perm.resolve_context_for_workspace_read.assert_awaited_once_with(
             "test_user", context_id, key_workspace_id=ws
         )
+
+    @pytest.mark.asyncio
+    async def test_set_forwards_api_key_workspace(self, service, perm, context_id):
+        """Write path (set) must confine too — proven with a real key workspace,
+        not just None, since set gates a mutation."""
+        ws = uuid4()
+        await set_agent_state(
+            context_id=context_id,
+            user={"user_id": "test_user", "api_key_workspace_id": ws},
+            body=AgentStateSetRequest(value={"step": 1}),
+            key="run",
+            service=service,
+            perm=perm,
+        )
+        perm.resolve_context_for_workspace_read.assert_awaited_once_with(
+            "test_user", context_id, key_workspace_id=ws
+        )
+
+    @pytest.mark.asyncio
+    async def test_delete_forwards_api_key_workspace(self, service, perm, context_id):
+        """Write path (delete) must confine too."""
+        ws = uuid4()
+        service.delete_state = AsyncMock(return_value=True)
+        await delete_agent_state(
+            context_id=context_id,
+            user={"user_id": "test_user", "api_key_workspace_id": ws},
+            key="run",
+            service=service,
+            perm=perm,
+        )
+        perm.resolve_context_for_workspace_read.assert_awaited_once_with(
+            "test_user", context_id, key_workspace_id=ws
+        )
+
+    @pytest.mark.asyncio
+    async def test_list_forwards_api_key_workspace(self, service, perm, context_id):
+        ws = uuid4()
+        service.list_state = AsyncMock(return_value={})
+        await list_agent_state(
+            context_id=context_id,
+            user={"user_id": "test_user", "api_key_workspace_id": ws},
+            service=service,
+            perm=perm,
+        )
+        perm.resolve_context_for_workspace_read.assert_awaited_once_with(
+            "test_user", context_id, key_workspace_id=ws
+        )
