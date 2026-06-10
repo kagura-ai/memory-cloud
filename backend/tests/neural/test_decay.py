@@ -1,12 +1,13 @@
 """Tests for DecayManager."""
 
-import math
+from datetime import timedelta
 
 import pytest
 
 from models.memory import EDGE_ORIGIN_HEBBIAN
 from neural.config import NeuralMemoryConfig
 from neural.decay import DecayManager
+from utils.datetime import utcnow
 
 
 class TestDecayManager:
@@ -58,8 +59,9 @@ class TestDecayManager:
         assert result["edges_pruned"] == 2
         assert result["delta_seconds"] == 60  # decay_background_interval
 
-        # Verify decay factor calculated correctly
-        expected_factor = math.exp(-0.01 * 60)
+        # Verify decay factor calculated correctly (Issue #970: half-life based,
+        # default hebbian_decay_half_life_days=14.0)
+        expected_factor = 0.5 ** (60 / (14.0 * 86400))
         mock_graph.edge_repo.bulk_decay_weights.assert_called_once_with(
             "test_user", expected_factor, only_origin=EDGE_ORIGIN_HEBBIAN
         )
@@ -128,12 +130,65 @@ class TestDecayManager:
         assert isinstance(result, dict)
 
     @pytest.mark.asyncio
-    async def test_decay_exponential_formula(self, manager, mock_graph):
-        """Test exponential decay formula: w(t+dt) = w(t) * exp(-rate * dt)."""
+    async def test_decay_half_life_formula(self, manager, mock_graph):
+        """Test half-life decay formula: w(t+dt) = w(t) * 0.5 ** (dt / half_life).
+
+        Issue #970: decay is parameterised by hebbian_decay_half_life_days (days),
+        NOT a per-second exp rate. With the default 14-day half-life and dt=60s,
+        the per-run factor is ~1.0 (negligible), matching multi-week forgetting.
+        """
         await manager.apply_decay("test_user")
 
-        # With rate=0.01 and dt=60: factor = exp(-0.6) ≈ 0.5488
-        expected_factor = math.exp(-0.01 * 60)
+        expected_factor = 0.5 ** (60 / (14.0 * 86400))
         call_args = mock_graph.edge_repo.bulk_decay_weights.call_args
         actual_factor = call_args[0][1]
-        assert abs(actual_factor - expected_factor) < 0.0001
+        assert abs(actual_factor - expected_factor) < 1e-9
+        # Sanity: a 60s slice of a 14-day half-life barely moves the weight.
+        assert actual_factor > 0.9999
+
+    @pytest.mark.asyncio
+    async def test_decay_factor_halves_after_one_half_life(self, mock_graph):
+        """After exactly one half-life elapses, the weight is multiplied by 0.5.
+
+        Issue #970 regression: this is the load-bearing invariant — at the
+        configured half-life the factor must be 0.5, not a per-second exp value.
+        """
+        half_life_days = 14.0
+        config = NeuralMemoryConfig(
+            enable_decay=True,
+            hebbian_decay_half_life_days=half_life_days,
+            prune_threshold=0.1,
+        )
+        manager = DecayManager(mock_graph, config)
+        prior = utcnow() - timedelta(days=half_life_days)
+
+        await manager.apply_decay("test_user", last_decay_at=prior)
+
+        factor = mock_graph.edge_repo.bulk_decay_weights.call_args[0][1]
+        assert factor == pytest.approx(0.5, rel=1e-3)
+
+    @pytest.mark.asyncio
+    async def test_apply_decay_honors_last_decay_at(self, manager):
+        """Issue #970 secondary bug: apply_decay must use the caller-supplied
+        last_decay_at so delta_seconds reflects REAL elapsed time (the per-run
+        DecayManager can no longer rely on instance state across task runs)."""
+        prior = utcnow() - timedelta(days=14)
+
+        result = await manager.apply_decay("test_user", last_decay_at=prior)
+
+        assert result["delta_seconds"] == pytest.approx(14 * 86400, rel=1e-2)
+
+    @pytest.mark.asyncio
+    async def test_apply_decay_semantic_edges_exempt(self, manager, mock_graph):
+        """Issue #722 non-regression: decay/prune target ONLY hebbian edges,
+        leaving semantic/declared edges untouched (must survive the #970 change)."""
+        await manager.apply_decay("test_user")
+
+        assert (
+            mock_graph.edge_repo.bulk_decay_weights.call_args.kwargs["only_origin"]
+            == EDGE_ORIGIN_HEBBIAN
+        )
+        assert (
+            mock_graph.edge_repo.prune_weak_edges.call_args.kwargs["only_origin"]
+            == EDGE_ORIGIN_HEBBIAN
+        )

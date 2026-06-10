@@ -98,7 +98,8 @@ DEFAULT_VALUES: dict[str, str] = {
     "recency_tau_days": "14.0",
     "importance_ema_alpha": "0.3",
     # Decay
-    "decay_rate": "0.001",
+    "decay_rate": "0.001",  # DEPRECATED (Issue #970): unused; see hebbian_decay_half_life_days
+    "hebbian_decay_half_life_days": "14.0",  # Issue #970: Hebbian edge half-life (days)
     "prune_threshold": "0.01",
     "decay_background_interval": "3600",
     # Co-Activation

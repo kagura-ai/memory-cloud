@@ -8,7 +8,6 @@ allowing new information to be learned without interference.
 """
 
 import logging
-import math
 from datetime import datetime, timedelta
 from typing import Any
 
@@ -39,14 +38,28 @@ class DecayManager:
         self.config = config
         self._last_decay_time: datetime | None = None
 
-    async def apply_decay(self, user_id: str) -> dict[str, int | float]:
-        """Apply exponential decay to all edge weights.
+    async def apply_decay(
+        self, user_id: str, last_decay_at: datetime | None = None
+    ) -> dict[str, int | float]:
+        """Apply half-life decay to all Hebbian edge weights.
 
-        Formula:
-            w_ij(t+Δt) = w_ij(t) · exp(-decay_rate · Δt)
+        Formula (Issue #970):
+            w_ij(t+Δt) = w_ij(t) · 0.5 ** (Δt / half_life)
+
+        where ``half_life = config.hebbian_decay_half_life_days · 86400`` seconds.
+        Parameterising decay by a half-life *in days* (matching ``recency_tau_days``)
+        makes the intended multi-week forgetting explicit and removes the old
+        per-second ``exp(-decay_rate · Δt)`` formula whose ``decay_rate=0.001`` gave
+        an ~12-minute half-life that evaporated every Hebbian edge within hours.
 
         Args:
             user_id: User ID (for filtering user-specific edges)
+            last_decay_at: Timestamp of the previous decay pass for this graph.
+                When provided, ``Δt`` is the real elapsed time since then — this is
+                how the per-run caller (``weight_decay_task``) supplies real time,
+                since a freshly-constructed ``DecayManager`` has no instance state
+                across task runs. Falls back to ``self._last_decay_time`` and then
+                to ``decay_background_interval`` on the first run.
 
         Returns:
             Dict with statistics (edges_decayed, edges_pruned, delta_seconds)
@@ -57,9 +70,11 @@ class DecayManager:
 
         current_time = utcnow()
 
-        # Calculate time delta
-        if self._last_decay_time:
-            delta_seconds = (current_time - self._last_decay_time).total_seconds()
+        # Calculate time delta. Precedence: caller-supplied last_decay_at (real
+        # elapsed time across task runs) > instance state > default interval.
+        prior = last_decay_at if last_decay_at is not None else self._last_decay_time
+        if prior:
+            delta_seconds = (current_time - prior).total_seconds()
         else:
             # First run - use default interval
             delta_seconds = self.config.decay_background_interval
@@ -69,7 +84,9 @@ class DecayManager:
 
         # Apply decay to all edges (Issue #84: SQL backend bulk operation)
         # Issue #722: semantic edges are decay-exempt; only Hebbian edges are decayed/pruned
-        decay_factor = math.exp(-self.config.decay_rate * delta_seconds)
+        # Issue #970: half-life decay (days), not per-second exp rate
+        half_life_seconds = self.config.hebbian_decay_half_life_days * 86400.0
+        decay_factor = 0.5 ** (delta_seconds / half_life_seconds)
         edges_decayed = await self.graph.edge_repo.bulk_decay_weights(
             user_id, decay_factor, only_origin=EDGE_ORIGIN_HEBBIAN
         )
