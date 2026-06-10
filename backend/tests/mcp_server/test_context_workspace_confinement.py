@@ -1,15 +1,21 @@
-"""MCP → service forwarding of the key workspace scope (Issue #963).
+"""MCP key-workspace confinement via the per-request contextvar (Issue #963).
 
-Confinement *enforcement* lives in
-``PermissionService.resolve_context_for_workspace_read`` (the single chokepoint
-shared by MCP and REST reads) and is tested in
-``test_permission_service.py::TestResolveContextKeyWorkspaceConfinement``.
+The MCP transport conflates ``workspace_id`` (api_key_workspace_id for a
+workspace-scoped key, else the user's *current* workspace). For confinement we
+need the PURE key scope, so the transport sets it once per request
+(``set_mcp_key_workspace_scope``) and the context-resolution chokepoints read it:
 
-These tests pin the WIRING on the MCP side: the chokepoint
-``_resolve_context_for_read`` forwards its ``workspace_id`` as
-``key_workspace_id``, and an MCP read handler threads its key workspace all the
-way down to the service. A dropped forward at any layer silently reopens #963,
-so these guard the seam.
+- ``_resolve_context_for_read`` (read path) forwards it to the service-layer
+  chokepoint ``PermissionService.resolve_context_for_workspace_read`` as
+  ``key_workspace_id`` (enforcement tested in
+  ``test_permission_service.py::TestResolveContextKeyWorkspaceConfinement``).
+- ``_resolve_context`` (write path: remember/update_memory/forget) enforces the
+  same confinement after ``ContextService.get_context``.
+
+These tests pin: (1) the read chokepoint forwards the contextvar value; (2) the
+write chokepoint enforces it; (3) when no key scope is set (OAuth2/session/global
+key → None), neither path confines — so legitimate cross-workspace reads are not
+broken.
 """
 
 from __future__ import annotations
@@ -19,51 +25,122 @@ from uuid import uuid4
 
 import pytest
 
-from mcp_server.tools._helpers import _ContextNotFoundError, _resolve_context_for_read
+from mcp_server.tools._helpers import (
+    _ContextNotFoundError,
+    _resolve_context,
+    _resolve_context_for_read,
+    set_mcp_key_workspace_scope,
+)
+
+
+@pytest.fixture(autouse=True)
+def _reset_scope():
+    """Isolate the per-request contextvar between tests (default = None)."""
+    set_mcp_key_workspace_scope(None)
+    yield
+    set_mcp_key_workspace_scope(None)
+
+
+# --- read path: _resolve_context_for_read forwards the contextvar -------------
 
 
 @pytest.mark.asyncio
-async def test_resolve_forwards_key_workspace_id_to_service():
-    """_resolve_context_for_read must pass its workspace_id through as the
-    service's key_workspace_id (else confinement never runs)."""
+async def test_read_forwards_contextvar_scope_to_service():
     ws = uuid4()
-    ctx = MagicMock(workspace_id=ws)
+    set_mcp_key_workspace_scope(ws)
     with patch("services.permission_service.PermissionService") as P:
-        resolver = AsyncMock(return_value=ctx)
+        resolver = AsyncMock(return_value=MagicMock(workspace_id=ws))
         P.return_value.resolve_context_for_workspace_read = resolver
-        await _resolve_context_for_read(AsyncMock(), "u", uuid4(), workspace_id=ws)
+        await _resolve_context_for_read(AsyncMock(), "u", uuid4())
         assert resolver.await_args.kwargs["key_workspace_id"] == ws
 
 
 @pytest.mark.asyncio
-async def test_resolve_maps_service_denial_to_context_not_found():
-    """A service-layer deny (NotFoundException, incl. the #963 key mismatch)
-    surfaces as the MCP-native uniform _ContextNotFoundError."""
+async def test_read_forwards_none_when_no_key_scope():
+    """OAuth2/session/global key → contextvar default None → no confinement."""
+    with patch("services.permission_service.PermissionService") as P:
+        resolver = AsyncMock(return_value=MagicMock(workspace_id=uuid4()))
+        P.return_value.resolve_context_for_workspace_read = resolver
+        await _resolve_context_for_read(AsyncMock(), "u", uuid4())
+        assert resolver.await_args.kwargs["key_workspace_id"] is None
+
+
+@pytest.mark.asyncio
+async def test_read_maps_service_denial_to_context_not_found():
     from utils.exceptions import NotFoundException
 
+    set_mcp_key_workspace_scope(uuid4())
     with patch("services.permission_service.PermissionService") as P:
         P.return_value.resolve_context_for_workspace_read = AsyncMock(
             side_effect=NotFoundException("Context", "x")
         )
         with pytest.raises(_ContextNotFoundError):
-            await _resolve_context_for_read(AsyncMock(), "u", uuid4(), workspace_id=uuid4())
+            await _resolve_context_for_read(AsyncMock(), "u", uuid4())
+
+
+# --- write path: _resolve_context enforces the contextvar ---------------------
+
+
+def _patch_get_context(ctx):
+    p = patch("services.context_service.ContextService")
+    cls = p.start()
+    cls.return_value.get_context = AsyncMock(return_value=ctx)
+    return p
 
 
 @pytest.mark.asyncio
-async def test_handle_feedback_threads_key_workspace_end_to_end():
-    """End-to-end wiring guard: a handler's key workspace_id reaches the service
-    as key_workspace_id. If a future refactor drops workspace_id= at the call
-    site, this goes red — the exact #963 regression."""
+async def test_write_mismatch_raises_context_not_found():
+    """Workspace-scoped key (A) writing a context owned by B → uniform 404."""
+    ws_a, ws_b = uuid4(), uuid4()
+    set_mcp_key_workspace_scope(ws_a)
+    p = _patch_get_context(MagicMock(workspace_id=ws_b))
+    try:
+        with pytest.raises(_ContextNotFoundError):
+            await _resolve_context(AsyncMock(), "user-in-both", uuid4())
+    finally:
+        p.stop()
+
+
+@pytest.mark.asyncio
+async def test_write_match_returns_context():
+    ws = uuid4()
+    ctx = MagicMock(workspace_id=ws)
+    set_mcp_key_workspace_scope(ws)
+    p = _patch_get_context(ctx)
+    try:
+        assert await _resolve_context(AsyncMock(), "u", uuid4()) is ctx
+    finally:
+        p.stop()
+
+
+@pytest.mark.asyncio
+async def test_write_no_key_scope_skips_confinement():
+    """No key scope (None) → write path not confined (membership governs)."""
+    ctx = MagicMock(workspace_id=uuid4())
+    p = _patch_get_context(ctx)  # contextvar is None via the autouse fixture
+    try:
+        assert await _resolve_context(AsyncMock(), "u", uuid4()) is ctx
+    finally:
+        p.stop()
+
+
+# --- e2e: a handler's request scope reaches the service -----------------------
+
+
+@pytest.mark.asyncio
+async def test_handle_feedback_confinement_end_to_end():
+    """With a key scope set (as the transport would), handle_feedback's read gate
+    forwards it to the service. Guards the full handler → chokepoint → service seam."""
     from mcp_server.tools.feedback import handle_feedback
 
     ws_a = uuid4()
-    ctx = MagicMock(workspace_id=ws_a)
+    set_mcp_key_workspace_scope(ws_a)
     mock_db = AsyncMock()
 
     async def mock_get_db():
         yield mock_db
 
-    resolver = AsyncMock(return_value=ctx)
+    resolver = AsyncMock(return_value=MagicMock(workspace_id=ws_a))
     p_db = patch("db.base.get_db", mock_get_db)
     p_perm = patch("services.permission_service.PermissionService")
     p_fs = patch("services.feedback_service.FeedbackService")
@@ -83,45 +160,3 @@ async def test_handle_feedback_threads_key_workspace_end_to_end():
         p_db.stop()
         p_perm.stop()
         p_fs.stop()
-
-
-@pytest.mark.asyncio
-async def test_handle_merge_contexts_confines_both_resolves():
-    """N-context wiring guard: handle_merge_contexts resolves BOTH source and
-    target; both must forward the key workspace. A copy-paste-miss that forwards
-    on the first resolve but not the second would leave a confinement hole on
-    the merge target — this asserts both calls carry workspace_id."""
-    from mcp_server.tools.context import handle_merge_contexts
-
-    ws = uuid4()
-    same_ws_ctx = MagicMock(workspace_id=ws)  # source/target same ws → no mismatch
-    mock_db = AsyncMock()
-
-    async def mock_get_db():
-        yield mock_db
-
-    resolve = AsyncMock(return_value=same_ws_ctx)
-    p_db = patch("db.base.get_db", mock_get_db)
-    p_resolve = patch("mcp_server.tools.context._resolve_context_for_read", resolve)
-    p_svc = patch("services.context_service.ContextService")
-    p_log = patch("mcp_server.tools.context._log_tool_usage", AsyncMock())
-    p_db.start()
-    p_resolve.start()
-    SVC = p_svc.start()
-    p_log.start()
-    SVC.return_value.merge_contexts = AsyncMock(return_value={"merged": 0})
-    try:
-        await handle_merge_contexts(
-            {"source_id": str(uuid4()), "target_id": str(uuid4())},
-            "user",
-            ws,
-        )
-        assert resolve.await_count == 2, "both source and target must be resolved"
-        assert all(call.kwargs.get("workspace_id") == ws for call in resolve.await_args_list), (
-            "both resolves must forward the key workspace_id"
-        )
-    finally:
-        p_db.stop()
-        p_resolve.stop()
-        p_svc.stop()
-        p_log.stop()

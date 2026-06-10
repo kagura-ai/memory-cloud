@@ -8,6 +8,7 @@ import json
 import logging
 import time
 from collections.abc import Coroutine
+from contextvars import ContextVar
 from typing import TYPE_CHECKING, Any
 from uuid import UUID
 
@@ -19,6 +20,30 @@ if TYPE_CHECKING:
     from sqlalchemy.ext.asyncio import AsyncSession
 
 logger = logging.getLogger(__name__)
+
+
+# ============================================================================
+# Issue #963: per-request API-key workspace scope (MCP confinement)
+# ============================================================================
+# The MCP transport conflates ``workspace_id`` (api_key_workspace_id for a
+# workspace-scoped key, else the user's *current* workspace for OAuth2/session/
+# global-key auth — see transport.py). For workspace confinement we need the
+# PURE key scope: the API key's own workspace, or None when the request is not
+# authenticated with a workspace-scoped key. The transport sets this contextvar
+# once per request right after auth (the single authenticate_mcp_request call),
+# and the context-resolution chokepoints below read it — so confinement applies
+# to every MCP read AND write tool without threading a param through ~25 handler
+# signatures, and never over-confines a session/OAuth/global-key caller.
+_mcp_key_workspace_scope: ContextVar["UUID | None"] = ContextVar(
+    "mcp_key_workspace_scope", default=None
+)
+
+
+def set_mcp_key_workspace_scope(workspace_id: "UUID | None") -> None:
+    """Set the per-request API-key workspace scope (None unless the request is
+    authenticated with a workspace-scoped API key). Called by the MCP transport
+    after authentication; read by ``_resolve_context_for_read`` / ``_resolve_context``."""
+    _mcp_key_workspace_scope.set(workspace_id)
 
 
 # ============================================================================
@@ -169,13 +194,35 @@ async def _resolve_context(
 
     context_service = ContextService(db)
     try:
-        return await context_service.get_context(user_id, context_id)
+        context = await context_service.get_context(user_id, context_id)
     except Exception as e:
         if isinstance(e, NotFoundException):
             error_msg = "Context not found or you don't have access to it."
         else:
             error_msg = str(e)
         raise _ContextNotFoundError(context_id, error_msg) from e
+
+    # Issue #963: confine a workspace-scoped API key to its own workspace on the
+    # WRITE path too (handle_remember / update_memory / forget resolve via this
+    # helper). ContextService.get_context authorizes on membership in the
+    # context's owning workspace — necessary but not sufficient for a
+    # workspace-scoped key. Enforce the pure key scope (None unless the request
+    # used such a key) with the same uniform _ContextNotFoundError as the read path.
+    key_workspace_id = _mcp_key_workspace_scope.get()
+    if key_workspace_id is not None and context.workspace_id != key_workspace_id:
+        logger.warning(
+            "context_write_denied",
+            extra={
+                "reason": "key_workspace_mismatch",
+                "context_id": str(context_id),
+                "context_workspace_id": str(context.workspace_id),
+                "key_workspace_id": str(key_workspace_id),
+                "user_id": user_id,
+            },
+        )
+        raise _ContextNotFoundError(context_id, "Context not found or you don't have access to it.")
+
+    return context
 
 
 async def _resolve_context_for_read(
@@ -184,7 +231,6 @@ async def _resolve_context_for_read(
     context_id: UUID,
     *,
     required_role: str = "viewer",
-    workspace_id: UUID | None = None,
 ) -> Any:
     """Resolve a context_id to a Context the caller can read, MCP-flavored.
 
@@ -199,29 +245,23 @@ async def _resolve_context_for_read(
     ``/memory/stats`` reference implementations — writers should pass ``admin``
     or ``owner``.
 
-    Issue #963: ``workspace_id`` is the caller's *key* workspace scope
-    (``session.workspace_id``, carried by a workspace-scoped MCP API key).
-    Membership in the context's OWNING workspace (verified by the resolver
-    above) is necessary but not sufficient — a key minted for workspace A must
-    not reach a context owned by B even when the key's user is also a member of
-    B. When ``workspace_id`` is supplied, confine the read to it. OAuth2 /
-    session auth carries no key scope (``workspace_id=None``, see #889) and is
-    governed by membership alone — pass ``None`` to skip confinement. A mismatch
-    raises the same uniform ``_ContextNotFoundError`` as every other deny, so
-    cross-workspace existence never leaks.
+    Issue #963: forwards the per-request API-key workspace scope
+    (``set_mcp_key_workspace_scope``, the PURE key scope — None unless the
+    request used a workspace-scoped API key) to the service-layer chokepoint as
+    ``key_workspace_id``. Reading it from the contextvar (rather than the handler
+    ``workspace_id`` param) avoids confining OAuth2/session/global-key callers,
+    whose handler ``workspace_id`` is the user's *current* workspace, not a key
+    scope. A mismatch raises the same uniform ``_ContextNotFoundError``.
     """
     from services.permission_service import PermissionService
     from utils.exceptions import NotFoundException
 
     try:
-        # Issue #963: forward the key's workspace scope so confinement is
-        # enforced in the single service-layer chokepoint
-        # (resolve_context_for_workspace_read), shared with the REST read paths.
         return await PermissionService(db).resolve_context_for_workspace_read(
             user_id=user_id,
             context_id=context_id,
             required_role=required_role,
-            key_workspace_id=workspace_id,
+            key_workspace_id=_mcp_key_workspace_scope.get(),
         )
     except NotFoundException as exc:
         raise _ContextNotFoundError(
