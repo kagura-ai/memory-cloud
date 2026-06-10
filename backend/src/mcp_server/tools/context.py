@@ -53,7 +53,9 @@ async def handle_get_context_info(
             effective_workspace_id = workspace_id
 
             if current_context_id:
-                current_context = await _resolve_context_for_read(db, user_id, current_context_id)
+                current_context = await _resolve_context_for_read(
+                    db, user_id, current_context_id, workspace_id=workspace_id
+                )
                 # Past this gate the caller is either the private-context creator
                 # or an authorized shared-context reader, so is_private alone
                 # picks the correct scope for MemoryService.get_stats.
@@ -758,8 +760,12 @@ async def handle_merge_contexts(
             # merge_contexts_error path, and reject a cross-workspace merge
             # before ContextService.merge_contexts is invoked. The service still
             # enforces owner-only access as the authorization gate.
-            source_ctx = await _resolve_context_for_read(db, user_id, source_id)
-            target_ctx = await _resolve_context_for_read(db, user_id, target_id)
+            source_ctx = await _resolve_context_for_read(
+                db, user_id, source_id, workspace_id=workspace_id
+            )
+            target_ctx = await _resolve_context_for_read(
+                db, user_id, target_id, workspace_id=workspace_id
+            )
             if source_ctx.workspace_id != target_ctx.workspace_id:
                 return _error_response(
                     "workspace_mismatch",

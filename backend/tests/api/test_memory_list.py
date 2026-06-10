@@ -125,7 +125,7 @@ class TestListMemoriesContextFilter:
 
         mock_perm_cls.assert_called_once_with(mock_db)
         mock_perm_instance.resolve_context_for_workspace_read.assert_awaited_once_with(
-            user_id="test_user_123", context_id=context_id
+            user_id="test_user_123", context_id=context_id, key_workspace_id=None
         )
         assert response.total == 1
 
@@ -182,7 +182,7 @@ class TestListMemoriesContextFilter:
         # the context_id (CWE-639 regression).
         mock_perm_cls.assert_called_once_with(mock_db)
         mock_perm_instance.resolve_context_for_workspace_read.assert_awaited_once_with(
-            user_id="test_user_123", context_id=context_id
+            user_id="test_user_123", context_id=context_id, key_workspace_id=None
         )
         assert response.total == 1
 
@@ -401,7 +401,7 @@ class TestListMemoriesQueryFilter:
 
         mock_perm_cls.assert_called_once_with(mock_db)
         mock_perm_instance.resolve_context_for_workspace_read.assert_awaited_once_with(
-            user_id="test_user_123", context_id=context_id
+            user_id="test_user_123", context_id=context_id, key_workspace_id=None
         )
         assert response.total == 1
 

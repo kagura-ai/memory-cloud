@@ -184,6 +184,7 @@ async def _resolve_context_for_read(
     context_id: UUID,
     *,
     required_role: str = "viewer",
+    workspace_id: UUID | None = None,
 ) -> Any:
     """Resolve a context_id to a Context the caller can read, MCP-flavored.
 
@@ -197,13 +198,30 @@ async def _resolve_context_for_read(
     The ``required_role="viewer"`` default matches the HTTP ``/graph/*`` and
     ``/memory/stats`` reference implementations — writers should pass ``admin``
     or ``owner``.
+
+    Issue #963: ``workspace_id`` is the caller's *key* workspace scope
+    (``session.workspace_id``, carried by a workspace-scoped MCP API key).
+    Membership in the context's OWNING workspace (verified by the resolver
+    above) is necessary but not sufficient — a key minted for workspace A must
+    not reach a context owned by B even when the key's user is also a member of
+    B. When ``workspace_id`` is supplied, confine the read to it. OAuth2 /
+    session auth carries no key scope (``workspace_id=None``, see #889) and is
+    governed by membership alone — pass ``None`` to skip confinement. A mismatch
+    raises the same uniform ``_ContextNotFoundError`` as every other deny, so
+    cross-workspace existence never leaks.
     """
     from services.permission_service import PermissionService
     from utils.exceptions import NotFoundException
 
     try:
+        # Issue #963: forward the key's workspace scope so confinement is
+        # enforced in the single service-layer chokepoint
+        # (resolve_context_for_workspace_read), shared with the REST read paths.
         return await PermissionService(db).resolve_context_for_workspace_read(
-            user_id=user_id, context_id=context_id, required_role=required_role
+            user_id=user_id,
+            context_id=context_id,
+            required_role=required_role,
+            key_workspace_id=workspace_id,
         )
     except NotFoundException as exc:
         raise _ContextNotFoundError(

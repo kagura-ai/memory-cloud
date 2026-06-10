@@ -63,7 +63,9 @@ class TestSetAgentState:
         )
         assert resp.key == "run"
         # Uniform-404 reach check happens, AND the editor/owner write gate.
-        perm.resolve_context_for_workspace_read.assert_awaited_once_with("test_user", context_id)
+        perm.resolve_context_for_workspace_read.assert_awaited_once_with(
+            "test_user", context_id, key_workspace_id=None
+        )
         perm.check_context_write.assert_awaited_once_with("test_user", context_id)
         service.set_state.assert_awaited_once_with(context_id, "run", {"step": 3}, ttl_seconds=60)
 
@@ -131,7 +133,9 @@ class TestGetAgentState:
         )
         assert resp.key == "run"
         assert resp.value == {"cursor": "abc"}
-        perm.resolve_context_for_workspace_read.assert_awaited_once_with("test_user", context_id)
+        perm.resolve_context_for_workspace_read.assert_awaited_once_with(
+            "test_user", context_id, key_workspace_id=None
+        )
         perm.check_context_write.assert_not_awaited()
 
     @pytest.mark.asyncio
@@ -171,7 +175,9 @@ class TestListAgentState:
         )
         assert resp.states == {"a": 1, "b": {"x": 2}}
         assert resp.count == 2
-        perm.resolve_context_for_workspace_read.assert_awaited_once_with("test_user", context_id)
+        perm.resolve_context_for_workspace_read.assert_awaited_once_with(
+            "test_user", context_id, key_workspace_id=None
+        )
 
     @pytest.mark.asyncio
     async def test_list_empty_returns_200_with_empty_dict(self, service, perm, context_id):
@@ -201,7 +207,9 @@ class TestDeleteAgentState:
             context_id=context_id, user=MOCK_USER, key="run", service=service, perm=perm
         )
         assert resp.key == "run"
-        perm.resolve_context_for_workspace_read.assert_awaited_once_with("test_user", context_id)
+        perm.resolve_context_for_workspace_read.assert_awaited_once_with(
+            "test_user", context_id, key_workspace_id=None
+        )
         perm.check_context_write.assert_awaited_once_with("test_user", context_id)
 
     @pytest.mark.asyncio
@@ -233,3 +241,25 @@ class TestDeleteAgentState:
             )
         perm.check_context_write.assert_not_awaited()
         service.delete_state.assert_not_awaited()
+
+
+class TestAgentStateKeyWorkspaceConfinement:
+    """Issue #963: a REST read gate must forward the API key's workspace scope
+    (``user['api_key_workspace_id']``) to the service so a workspace-scoped key
+    is confined to its workspace. Guards the REST wiring the same way the MCP
+    e2e test guards handle_feedback."""
+
+    @pytest.mark.asyncio
+    async def test_get_forwards_api_key_workspace(self, service, perm, context_id):
+        ws = uuid4()
+        service.get_state = AsyncMock(return_value={"v": 1})
+        await get_agent_state(
+            context_id=context_id,
+            user={"user_id": "test_user", "api_key_workspace_id": ws},
+            key="run",
+            service=service,
+            perm=perm,
+        )
+        perm.resolve_context_for_workspace_read.assert_awaited_once_with(
+            "test_user", context_id, key_workspace_id=ws
+        )

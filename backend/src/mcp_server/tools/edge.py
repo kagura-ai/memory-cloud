@@ -159,7 +159,9 @@ async def handle_list_edges(
     async for db in get_db():
         try:
             current_context_id = _resolve_context_id(args["context_id"])
-            context = await _resolve_context_for_read(db, user_id, current_context_id)
+            context = await _resolve_context_for_read(
+                db, user_id, current_context_id, workspace_id=workspace_id
+            )
 
             ws_id = str(context.workspace_id)
             ctx_id = str(context.id)

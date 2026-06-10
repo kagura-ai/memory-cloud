@@ -69,7 +69,9 @@ async def handle_set_state(
             return _error_response("invalid_context_id_format", str(exc))
         try:
             # Verify the caller can reach the context (IDOR guard) ...
-            context = await _resolve_context_for_read(db, user_id, context_id)
+            context = await _resolve_context_for_read(
+                db, user_id, context_id, workspace_id=workspace_id
+            )
         except _ContextNotFoundError as exc:
             return exc.to_response()
         # ... and is not a read-only viewer (write gate, mirrors remember).
@@ -109,7 +111,7 @@ async def handle_get_state(
         except ValueError as exc:
             return _error_response("invalid_context_id_format", str(exc))
         try:
-            await _resolve_context_for_read(db, user_id, context_id)
+            await _resolve_context_for_read(db, user_id, context_id, workspace_id=workspace_id)
         except _ContextNotFoundError as exc:
             return exc.to_response()
 

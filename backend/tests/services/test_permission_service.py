@@ -460,3 +460,65 @@ class TestResolveContextWhitelistEnforcement:
 
         result = await service.resolve_context_for_workspace_read("user1", ctx_id)
         assert result is ctx
+
+
+class TestResolveContextKeyWorkspaceConfinement:
+    """``resolve_context_for_workspace_read`` must confine a workspace-scoped
+    caller (API key carrying ``key_workspace_id``) to its own workspace
+    (Issue #963). Membership in the context's owning workspace is necessary but
+    not sufficient: a key minted for workspace A must not reach a context owned
+    by B even when the key's user is also a member of B. Confinement applies
+    ONLY when ``key_workspace_id`` is supplied — session/OAuth callers (no key
+    scope) pass ``None`` and are governed by membership alone.
+    """
+
+    def _service_for(self, context):
+        """Membership satisfied (admin bypasses whitelist) so the ONLY variable
+        under test is the key-workspace confinement."""
+        db = MagicMock()
+        ctx_result = MagicMock()
+        ctx_result.scalar_one_or_none.return_value = context
+        ws_result = MagicMock()
+        ws_result.scalar_one_or_none.return_value = MagicMock(
+            id=context.workspace_id, deleted_at=None
+        )
+        db.execute = AsyncMock(side_effect=[ctx_result, ws_result])
+        service = PermissionService(db)
+        member = MagicMock(role=WorkspaceRole.ADMIN, allowed_context_ids=None)
+        service.workspace_service.get_member = AsyncMock(return_value=member)
+        return service
+
+    @pytest.mark.asyncio
+    async def test_key_workspace_mismatch_gets_404(self):
+        """Key scoped to workspace A reading a context owned by B → uniform 404."""
+        ws_a, ws_b = uuid4(), uuid4()
+        ctx = MagicMock(id=uuid4(), workspace_id=ws_b, is_private=False, created_by="someone")
+        service = self._service_for(ctx)
+
+        with pytest.raises(NotFoundException) as exc_info:
+            await service.resolve_context_for_workspace_read(
+                "user-in-both", ctx.id, key_workspace_id=ws_a
+            )
+        assert exc_info.value.status_code == 404
+
+    @pytest.mark.asyncio
+    async def test_key_workspace_match_succeeds(self):
+        ws = uuid4()
+        ctx = MagicMock(id=uuid4(), workspace_id=ws, is_private=False, created_by="someone")
+        service = self._service_for(ctx)
+
+        result = await service.resolve_context_for_workspace_read(
+            "user1", ctx.id, key_workspace_id=ws
+        )
+        assert result is ctx
+
+    @pytest.mark.asyncio
+    async def test_no_key_scope_skips_confinement(self):
+        """Session/OAuth (key_workspace_id=None) → membership governs, no confinement."""
+        ctx = MagicMock(id=uuid4(), workspace_id=uuid4(), is_private=False, created_by="someone")
+        service = self._service_for(ctx)
+
+        result = await service.resolve_context_for_workspace_read(
+            "user1", ctx.id, key_workspace_id=None
+        )
+        assert result is ctx

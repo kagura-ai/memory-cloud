@@ -281,7 +281,9 @@ async def handle_recall_upcoming(
             current_context_id = _resolve_context_id(args["context_id"])
             # Read path: uniform context_not_found on any deny (CWE-639 / OWASP
             # A01), mirroring handle_recall.
-            current_context = await _resolve_context_for_read(db, user_id, current_context_id)
+            current_context = await _resolve_context_for_read(
+                db, user_id, current_context_id, workspace_id=workspace_id
+            )
 
             query = (
                 select(Memory)
@@ -357,7 +359,9 @@ async def handle_load_pinned(
             current_context_id = _resolve_context_id(args["context_id"])
             # Read path: uniform context_not_found on any deny (CWE-639 / OWASP
             # A01), mirroring handle_recall / handle_recall_upcoming.
-            current_context = await _resolve_context_for_read(db, user_id, current_context_id)
+            current_context = await _resolve_context_for_read(
+                db, user_id, current_context_id, workspace_id=workspace_id
+            )
 
             service = MemoryService(db)
             result = await execute_with_timeout(
@@ -453,7 +457,9 @@ async def handle_recall(
                 # surface as a uniform context_not_found (CWE-639 / OWASP A01).
                 cross_context_ids = [_resolve_context_id(cid) for cid in context_ids_arg]
                 current_context_id = cross_context_ids[0]
-                current_context = await _resolve_context_for_read(db, user_id, current_context_id)
+                current_context = await _resolve_context_for_read(
+                    db, user_id, current_context_id, workspace_id=workspace_id
+                )
                 # #708 H3: all contexts must belong to the same workspace —
                 # Option A paid_by routing has a single source-of-truth
                 # workspace. Check inline so a mismatch short-circuits
@@ -470,7 +476,9 @@ async def handle_recall(
                 # private secondary. Rejecting at API boundary mirrors
                 # the same-embedding-model invariant pattern below.
                 for cid in cross_context_ids[1:]:
-                    cross_ctx = await _resolve_context_for_read(db, user_id, cid)
+                    cross_ctx = await _resolve_context_for_read(
+                        db, user_id, cid, workspace_id=workspace_id
+                    )
                     if cross_ctx.workspace_id != current_context.workspace_id:
                         return _error_response(
                             "workspace_mismatch",
@@ -506,7 +514,9 @@ async def handle_recall(
                         "Missing required field: context_id (or provide context_ids with 2+ UUIDs).",
                     )
                 current_context_id = _resolve_context_id(args["context_id"])
-                current_context = await _resolve_context_for_read(db, user_id, current_context_id)
+                current_context = await _resolve_context_for_read(
+                    db, user_id, current_context_id, workspace_id=workspace_id
+                )
 
             service = MemoryService(db)
             result = await execute_with_timeout(
@@ -697,7 +707,9 @@ async def handle_reference(
             # Issue #708 bundle: migrate read paths to the CWE-639-uniform
             # resolver so deny reasons (private non-creator, not a workspace
             # member, etc.) cannot be distinguished by callers.
-            await _resolve_context_for_read(db, user_id, current_context_id)
+            await _resolve_context_for_read(
+                db, user_id, current_context_id, workspace_id=workspace_id
+            )
 
             service = MemoryService(db)
             try:
