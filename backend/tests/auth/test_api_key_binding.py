@@ -23,6 +23,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 
 from auth.api_keys import APIKeyManager, VerifiedKey
+from utils.hashing import sha256_hex
 
 
 def _execute_result(value: object | None = None):
@@ -284,6 +285,54 @@ class TestVerifyApiKeyStandaloneCommitsLastUsed:
         assert result is ok
 
 
+class TestVerifyKeyTimingSafeComparison:
+    """#964: ``verify_key()`` gates row acceptance on a constant-time
+    ``secrets.compare_digest`` of the stored ``key_hash`` against the freshly
+    re-derived hash of the supplied key. Even though the SELECT already filters
+    by ``key_hash``, the in-app compare closes the application-level
+    query-timing oracle (B-tree prefix match vs total miss) by refusing to
+    trust a surfaced row whose hash does not exactly match."""
+
+    API_KEY = "kagura_test"
+    NOW = datetime(2026, 6, 8, 12, 0, 0)
+
+    @staticmethod
+    def _record(key_hash: str) -> SimpleNamespace:
+        return SimpleNamespace(
+            id=1,
+            user_id="user-1",
+            workspace_id=None,
+            bound_context_id=None,
+            key_hash=key_hash,
+            revoked_at=None,
+            expires_at=None,
+            last_used_at=None,
+        )
+
+    async def _verify(self, record: SimpleNamespace):
+        db = _make_db_mock(execute_results=[record])
+        manager = APIKeyManager(db)
+        fake_settings = SimpleNamespace(api_key_last_used_throttle_seconds=60)
+        with (
+            patch("auth.api_keys.utcnow", return_value=self.NOW),
+            patch("auth.api_keys.get_settings", return_value=fake_settings),
+        ):
+            return await manager.verify_key(self.API_KEY)
+
+    @pytest.mark.asyncio
+    async def test_hash_mismatch_returns_none(self) -> None:
+        # A row whose stored hash does not match the constant-time
+        # re-derivation is rejected, not trusted.
+        result = await self._verify(self._record("deadbeef_not_the_real_hash"))
+        assert result is None
+
+    @pytest.mark.asyncio
+    async def test_hash_match_returns_verified_key(self) -> None:
+        result = await self._verify(self._record(sha256_hex(self.API_KEY)))
+        assert result is not None
+        assert result.user_id == "user-1"
+
+
 class TestVerifyKeyLastUsedThrottle:
     """#947: ``verify_key()`` throttles ``last_used_at`` writes — at most one
     UPDATE per window per key, so a hot MCP client (one auth per tool call) does
@@ -298,7 +347,9 @@ class TestVerifyKeyLastUsedThrottle:
             user_id="user-1",
             workspace_id=None,
             bound_context_id=None,
-            key_hash="hash",
+            # Must match sha256_hex of the key passed in _verify() so the
+            # #964 constant-time gate accepts the row and the throttle path runs.
+            key_hash=sha256_hex("kagura_test"),
             revoked_at=None,
             expires_at=None,
             last_used_at=last_used_at,
