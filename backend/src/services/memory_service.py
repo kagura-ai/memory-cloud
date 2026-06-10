@@ -1520,9 +1520,11 @@ class MemoryService:
         memories_list = list(result.scalars().all())
         # Key by both the row id and the Qdrant point id (summary_embedding_id)
         # so a search hit resolves whether it carries a ``remember()`` point id
-        # (== Memory.id) or a resource-projected point id (#972). For normal
-        # memories the two coincide (single key); they never collide across rows
-        # because both id spaces are globally unique.
+        # (== Memory.id) or a resource-projected point id (#972). Keying by both
+        # (rather than only the point id) keeps the lookup robust when
+        # summary_embedding_id is unset/divergent. For normal memories the two
+        # coincide (one key); across rows they never collide because both id
+        # spaces are globally unique UUIDs.
         memories: dict[str, Memory] = {}
         for m in memories_list:
             memories[str(m.id)] = m
