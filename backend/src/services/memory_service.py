@@ -11,7 +11,7 @@ import asyncio
 import functools
 from uuid import UUID, uuid4
 
-from sqlalchemy import and_, select
+from sqlalchemy import and_, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from config.retention import should_promote_to_persistent
@@ -1467,8 +1467,23 @@ class MemoryService:
             )
 
         # Fetch memories from PostgreSQL (exclude soft-deleted)
+        #
+        # ``memory_ids`` are Qdrant point ids. For ``remember()``-written
+        # memories the point id equals ``Memory.id`` (see
+        # ``add_memory_to_qdrant`` / ``summary_embedding_id == id`` at line 348).
+        # Resource-projected memories (``ResourceIndexer._apply_upsert``) instead
+        # store the point under ``uuid5(resource_id:doc_id:vN) != Memory.id`` and
+        # record the link in ``Memory.summary_embedding_id`` (the authoritative
+        # "Qdrant point id" column). Matching on ``Memory.id`` alone silently
+        # drops every resource hit during hydration → recall returns 0 in all
+        # modes (Issue #972). Resolve via either identifier; the per-row lookup
+        # dict below is keyed by both so ``memories.get(point_id)`` succeeds for
+        # both kinds.
         pg_conditions = [
-            Memory.id.in_(memory_ids),
+            or_(
+                Memory.id.in_(memory_ids),
+                Memory.summary_embedding_id.in_(memory_ids),
+            ),
             Memory.deleted_at.is_(None),
         ]
         # Issue #214: source_uri_prefix and source_type post-filters
@@ -1503,7 +1518,16 @@ class MemoryService:
             pg_conditions.append(Memory.id.in_(cluster_memory_ids))
         result = await self.db.execute(select(Memory).where(*pg_conditions))
         memories_list = list(result.scalars().all())
-        memories = {str(m.id): m for m in memories_list}
+        # Key by both the row id and the Qdrant point id (summary_embedding_id)
+        # so a search hit resolves whether it carries a ``remember()`` point id
+        # (== Memory.id) or a resource-projected point id (#972). For normal
+        # memories the two coincide (single key); they never collide across rows
+        # because both id spaces are globally unique.
+        memories: dict[str, Memory] = {}
+        for m in memories_list:
+            memories[str(m.id)] = m
+            if m.summary_embedding_id is not None:
+                memories[str(m.summary_embedding_id)] = m
 
         # === Issue #120: Neural Memory graph is for explore() only ===
         # recall uses pure hybrid search scores (no UnifiedScorer).
