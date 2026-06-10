@@ -78,7 +78,12 @@ async def authenticate_mcp_request(
         raise AuthenticationError("Invalid authorization header format. Expected: Bearer {token}")
 
     token = auth_str[7:]  # Remove "Bearer " prefix
-    # Issue #965: log only the kagura_ prefix (8 chars), never key entropy.
+    # Issue #965: log at most an 8-char prefix (repo-wide redaction convention,
+    # cf. session_id[:8] / refresh_token[:8] / oauth token_prefix=token[:8]).
+    # Enough to correlate log lines without exposing usable key material. For
+    # kagura_ API keys this is the 7-char prefix + 1 body char; for opaque
+    # OAuth2 bearer tokens (no prefix) it is the first 8 token chars. Previously
+    # logged token[:20], leaking ~13 chars of entropy past the kagura_ prefix.
     logger.debug(f"MCP auth attempt: token={token[:8]}...")
 
     # Try API Key authentication
