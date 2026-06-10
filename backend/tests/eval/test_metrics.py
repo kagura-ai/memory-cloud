@@ -108,6 +108,20 @@ class TestNDCG:
         assert mean_ndcg_at_k([], 5) == 0.0
 
 
+class TestArmOrder:
+    def test_graph_writing_neural_arm_runs_last(self):
+        # Load-bearing measurement-validity invariant (#967): with
+        # ENABLE_NEURAL_MEMORY=true, recall() performs Hebbian/co-activation
+        # graph WRITES, so the neural arm must come after every read-only arm
+        # or it would warm the graph for the arms measured after it.
+        from tests.eval.runner import _ARMS
+
+        neural_arms = [name for name, _, neural in _ARMS if neural]
+        assert neural_arms == [_ARMS[-1][0]], (
+            "exactly one neural-enabled arm is expected, and it must run last"
+        )
+
+
 class TestSourceRecallShare:
     def test_even_split(self):
         shares = source_recall_share(["memory", "resource", "memory", "resource"], 4)
