@@ -416,6 +416,16 @@ async def mcp_asgi_app(scope: Scope, receive: Receive, send: Send) -> None:
             cookie_header=cookie_header,  # Issue #155: Add session cookie support
         )
 
+        # Issue #963: record the PURE API-key workspace scope (None unless this
+        # request is authenticated with a workspace-scoped API key) so the
+        # context-resolution chokepoints can confine such a key to its workspace.
+        # Must use api_key_workspace_id, NOT the conflated workspace_id below —
+        # the latter becomes the user's *current* workspace for OAuth2/session/
+        # global-key auth and would over-confine those (non-key-scoped) callers.
+        from mcp_server.tools._helpers import set_mcp_key_workspace_scope
+
+        set_mcp_key_workspace_scope(api_key_workspace_id)
+
         # Issue #169: For workspace-scoped API keys, use workspace_id from key; otherwise get from user
         if api_key_workspace_id:
             workspace_id = api_key_workspace_id

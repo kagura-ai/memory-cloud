@@ -125,7 +125,7 @@ class TestListMemoriesContextFilter:
 
         mock_perm_cls.assert_called_once_with(mock_db)
         mock_perm_instance.resolve_context_for_workspace_read.assert_awaited_once_with(
-            user_id="test_user_123", context_id=context_id
+            user_id="test_user_123", context_id=context_id, key_workspace_id=None
         )
         assert response.total == 1
 
@@ -182,7 +182,7 @@ class TestListMemoriesContextFilter:
         # the context_id (CWE-639 regression).
         mock_perm_cls.assert_called_once_with(mock_db)
         mock_perm_instance.resolve_context_for_workspace_read.assert_awaited_once_with(
-            user_id="test_user_123", context_id=context_id
+            user_id="test_user_123", context_id=context_id, key_workspace_id=None
         )
         assert response.total == 1
 
@@ -401,7 +401,7 @@ class TestListMemoriesQueryFilter:
 
         mock_perm_cls.assert_called_once_with(mock_db)
         mock_perm_instance.resolve_context_for_workspace_read.assert_awaited_once_with(
-            user_id="test_user_123", context_id=context_id
+            user_id="test_user_123", context_id=context_id, key_workspace_id=None
         )
         assert response.total == 1
 
@@ -638,3 +638,36 @@ class TestListMemoriesTagsMatch:
             assert "@>" not in sql and "&&" not in sql, (
                 f"no tags → no predicate (call_index={call_index}): {sql}"
             )
+
+
+@pytest.mark.asyncio
+async def test_context_id_forwards_api_key_workspace():
+    """Issue #963: a workspace-scoped API key forwards its scope as
+    key_workspace_id so the REST /memory/list path is confined too. Proven with a
+    real (non-None) value, not just the session default (#963 Copilot follow-up)."""
+    mem = _mock_memory_row()
+    mock_db = _db_with_rows(total=1, rows=[mem])
+    context_id = uuid4()
+    ws = uuid4()
+
+    mock_context = MagicMock()
+    mock_context.is_private = False
+    mock_perm_instance = MagicMock()
+    mock_perm_instance.resolve_context_for_workspace_read = AsyncMock(return_value=mock_context)
+
+    with patch("api.routes.memory.PermissionService", return_value=mock_perm_instance):
+        await list_memories(
+            user={"user_id": "test_user_123", "api_key_workspace_id": ws},
+            db=mock_db,
+            scope=None,
+            type=None,
+            context_id=context_id,
+            q=None,
+            tags=None,
+            limit=50,
+            offset=0,
+        )
+
+    mock_perm_instance.resolve_context_for_workspace_read.assert_awaited_once_with(
+        user_id="test_user_123", context_id=context_id, key_workspace_id=ws
+    )

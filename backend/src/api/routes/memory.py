@@ -676,7 +676,9 @@ async def list_memories(
             # Raises 404 on non-existent context, non-member, or private-context
             # non-creator (CWE-639 uniform disclosure). Matches the graph routes.
             context = await PermissionService(db).resolve_context_for_workspace_read(
-                user_id=user_id, context_id=context_id
+                user_id=user_id,
+                context_id=context_id,
+                key_workspace_id=user.get("api_key_workspace_id"),
             )
             owner_filter = user_id if context.is_private else None
 

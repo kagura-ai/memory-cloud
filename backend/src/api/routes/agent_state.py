@@ -117,7 +117,9 @@ async def set_agent_state(
         # Reach check with UNIFORM 404 first (CWE-639: a cross-workspace context
         # must not leak its existence via a 403), then the editor/owner write
         # gate — whose 403 is safe once workspace membership is confirmed.
-        await perm.resolve_context_for_workspace_read(user_id, context_id)
+        await perm.resolve_context_for_workspace_read(
+            user_id, context_id, key_workspace_id=user.get("api_key_workspace_id")
+        )
         await perm.check_context_write(user_id, context_id)
         await service.set_state(context_id, key, body.value, ttl_seconds=body.ttl_seconds)
         return AgentStateKeyResponse(key=key)
@@ -147,7 +149,9 @@ async def get_agent_state(
     try:
         # Read gate with UNIFORM 404 on an unreachable/cross-workspace context
         # (CWE-639 IDOR guard; mirrors the MCP handler's _resolve_context_for_read).
-        await perm.resolve_context_for_workspace_read(user_id, context_id)
+        await perm.resolve_context_for_workspace_read(
+            user_id, context_id, key_workspace_id=user.get("api_key_workspace_id")
+        )
         value = await service.get_state(context_id, key)
         if value is None:
             raise NotFoundException("AgentState")
@@ -176,7 +180,9 @@ async def list_agent_state(
     logger.info("agent_state_list_requested", user_id=user_id, context_id=str(context_id))
     try:
         # Uniform-404 read gate (CWE-639 IDOR guard).
-        await perm.resolve_context_for_workspace_read(user_id, context_id)
+        await perm.resolve_context_for_workspace_read(
+            user_id, context_id, key_workspace_id=user.get("api_key_workspace_id")
+        )
         states = await service.list_state(context_id)
         return AgentStateListResponse(states=states, count=len(states))
     except (HTTPException, MemoryCloudException):
@@ -206,7 +212,9 @@ async def delete_agent_state(
     )
     try:
         # Uniform-404 reach check, then the editor/owner write gate (CWE-639).
-        await perm.resolve_context_for_workspace_read(user_id, context_id)
+        await perm.resolve_context_for_workspace_read(
+            user_id, context_id, key_workspace_id=user.get("api_key_workspace_id")
+        )
         await perm.check_context_write(user_id, context_id)
         removed = await service.delete_state(context_id, key)
         if not removed:
