@@ -236,6 +236,15 @@ class APIKeyManager:
         if not key_record:
             return None
 
+        # Issue #964: the SELECT above filters by key_hash in the DB B-tree,
+        # which leaks an application-level query-timing oracle (a prefix-matching
+        # hash takes measurably longer than a total miss). Re-gate acceptance on
+        # a constant-time comparison before trusting the surfaced row, so a
+        # co-located adversary cannot use response timing to search the hash
+        # space. Both operands are fixed-length sha256 hex strings.
+        if not secrets.compare_digest(key_record.key_hash, key_hash):
+            return None
+
         # Check if revoked
         if key_record.revoked_at:
             return None
