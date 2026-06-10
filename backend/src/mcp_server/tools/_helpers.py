@@ -210,15 +210,16 @@ async def _resolve_context(
     # used such a key) with the same uniform _ContextNotFoundError as the read path.
     key_workspace_id = _mcp_key_workspace_scope.get()
     if key_workspace_id is not None and context.workspace_id != key_workspace_id:
+        # %-args (not extra=) so the fields actually render under this module's
+        # stdlib logger / "%(message)s" formatter — matches the _log_tool_usage
+        # style below; extra={...} would be silently dropped.
         logger.warning(
-            "context_write_denied",
-            extra={
-                "reason": "key_workspace_mismatch",
-                "context_id": str(context_id),
-                "context_workspace_id": str(context.workspace_id),
-                "key_workspace_id": str(key_workspace_id),
-                "user_id": user_id,
-            },
+            "context_write_denied: reason=key_workspace_mismatch context_id=%s "
+            "context_workspace_id=%s key_workspace_id=%s user_id=%s",
+            str(context_id),
+            str(context.workspace_id),
+            str(key_workspace_id),
+            user_id,
         )
         raise _ContextNotFoundError(context_id, "Context not found or you don't have access to it.")
 
