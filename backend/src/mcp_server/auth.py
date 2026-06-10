@@ -78,7 +78,8 @@ async def authenticate_mcp_request(
         raise AuthenticationError("Invalid authorization header format. Expected: Bearer {token}")
 
     token = auth_str[7:]  # Remove "Bearer " prefix
-    logger.debug(f"MCP auth attempt: token={token[:20]}...")
+    # Issue #965: log only the kagura_ prefix (8 chars), never key entropy.
+    logger.debug(f"MCP auth attempt: token={token[:8]}...")
 
     # Try API Key authentication
     result = await _verify_api_key(token)
@@ -97,7 +98,7 @@ async def authenticate_mcp_request(
         return (user_id_oauth, None, None)
 
     # Authentication failed
-    logger.warning(f"MCP auth failed: token={token[:20]}...")
+    logger.warning(f"MCP auth failed: token={token[:8]}...")
     raise AuthenticationError("Invalid or expired Bearer token")
 
 
