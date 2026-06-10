@@ -26,6 +26,13 @@ from tests.eval.tools.corpus import BUCKETS, Corpus, load_corpus
 
 _RESULTS_DIR = Path(__file__).resolve().parent / "results"
 _RECALL_K = 10
+# Per-doc retries for the embedding/upsert step. The Qdrant upsert can hit a
+# transient client-side stall on local dev stacks (observed on WSL2: the
+# request times out at the client's 5s default without ever reaching the
+# server, at a random doc, while the server handles every arriving request in
+# ~3ms). One reset-and-retry recovers it; a doc that fails repeatedly still
+# aborts the run.
+_INGEST_RETRIES = 2
 _P_AT = (5, 10)
 _MRR_AT = 10
 _NDCG_AT = (5, 10)
@@ -109,8 +116,42 @@ async def _ingest_corpus(
         # call returns immediately WITHOUT the upsert being done. So we then poll
         # embedding_status to a terminal state — only that guarantees the doc is
         # searchable, regardless of which task did the work.
-        await process_pending_embedding(resp.memory_id)
-        await _await_indexed(svc, resp.memory_id)
+        #
+        # process_pending_embedding only claims pending / stale-processing rows,
+        # so a doc that landed in `failed` (or timed out mid-processing) must be
+        # reset to `pending` before the retry can re-drive it.
+        for attempt in range(_INGEST_RETRIES + 1):
+            await process_pending_embedding(resp.memory_id)
+            try:
+                await _await_indexed(svc, resp.memory_id)
+                break
+            except RuntimeError:
+                if attempt == _INGEST_RETRIES:
+                    raise
+                print(
+                    f"eval-retrieval: transient indexing failure for corpus doc "
+                    f"{doc.id} (attempt {attempt + 1}/{_INGEST_RETRIES + 1}) — retrying"
+                )
+                await _reset_embedding_to_pending(svc, resp.memory_id)
+
+
+async def _reset_embedding_to_pending(svc: Any, memory_id: UUID) -> None:
+    """Reset a failed/stuck embedding to ``pending`` so a retry can re-claim it.
+
+    ``process_pending_embedding``'s claim UPDATE only matches ``pending`` or
+    stale (>60s) ``processing`` rows — a ``failed`` row is terminal without
+    this reset.
+    """
+    from sqlalchemy import update
+
+    from models.memory import Memory
+
+    await svc.db.execute(
+        update(Memory)
+        .where(Memory.id == memory_id)
+        .values(embedding_status="pending", embedding_error=None)
+    )
+    await svc.db.commit()
 
 
 async def _await_indexed(
