@@ -271,3 +271,7 @@ frontend/blob-report/
 # Pre-seeded auth storageState written by the `setup` project (#959) — contains
 # a live session cookie; never commit.
 frontend/e2e/.auth/
+
+# kagura-engineer local dev config
+repo.yaml
+.kagura/

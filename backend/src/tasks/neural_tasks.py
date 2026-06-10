@@ -55,9 +55,15 @@ async def weight_decay_task():
 
                 graph_service = GraphService(user_id, db)
 
-                # Apply decay (uses SQL backend directly)
+                # Apply decay (uses SQL backend directly). Issue #970: pass the
+                # persisted last_decay_at so Δt reflects REAL elapsed time — a
+                # fresh DecayManager is constructed per run and has no instance
+                # state across runs, so without this the decay always used the
+                # default interval (the "dead _last_decay_time" bug).
                 decay_manager = DecayManager(graph_service, config)
-                decay_result = await decay_manager.apply_decay(user_id)
+                decay_result = await decay_manager.apply_decay(
+                    user_id, last_decay_at=graph_model.last_decay_at
+                )
                 edges_decayed = decay_result.get("edges_decayed", 0)
 
                 if edges_decayed > 0:

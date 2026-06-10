@@ -59,7 +59,13 @@ class NeuralMemoryConfig:
         # Forgetting/Decay
         enable_decay: Enable automatic edge weight decay
         decay_background_interval: Interval (seconds) for background decay task
-        decay_rate: Exponential decay rate for unused edges
+        decay_rate: DEPRECATED (Issue #970) — the old per-second exp decay rate.
+            No longer used for edge decay; retained only so existing env/DB
+            neural_config values load without error. Use
+            hebbian_decay_half_life_days instead.
+        hebbian_decay_half_life_days: Hebbian edge weight half-life in days
+            (Issue #970). After this many days an unreinforced edge's weight
+            halves. Matches the recency_tau_days "days" convention.
         prune_threshold: Remove edges below this weight
 
         # Consolidation (Short-term → Long-term)
@@ -137,7 +143,8 @@ class NeuralMemoryConfig:
     # Forgetting/Decay
     enable_decay: bool = True
     decay_background_interval: int = 3600  # 1 hour
-    decay_rate: float = 0.001
+    decay_rate: float = 0.001  # DEPRECATED (Issue #970): unused; see hebbian_decay_half_life_days
+    hebbian_decay_half_life_days: float = 14.0  # Issue #970: Hebbian edge half-life (days)
     prune_threshold: float = 0.01  # Lowered to allow weak initial edges (was 0.05)
 
     # Consolidation
@@ -268,6 +275,11 @@ class NeuralMemoryConfig:
 
         if not self.decay_rate >= 0:
             raise ValueError(f"decay_rate must be non-negative, got {self.decay_rate}")
+        if not self.hebbian_decay_half_life_days > 0:
+            raise ValueError(
+                "hebbian_decay_half_life_days must be positive, got "
+                f"{self.hebbian_decay_half_life_days}"
+            )
         if not (0.0 <= self.prune_threshold <= 1.0):
             raise ValueError(f"prune_threshold must be in [0, 1], got {self.prune_threshold}")
 
@@ -456,6 +468,7 @@ class NeuralMemoryConfig:
             enable_decay=get_bool("ENABLE_DECAY", True),
             decay_background_interval=get_int("DECAY_BACKGROUND_INTERVAL", 3600),
             decay_rate=get_float("DECAY_RATE", 0.001),
+            hebbian_decay_half_life_days=get_float("HEBBIAN_DECAY_HALF_LIFE_DAYS", 14.0),
             prune_threshold=get_float("PRUNE_THRESHOLD", 0.01),
             # Consolidation
             consolidation_use_count_min=get_int("CONSOLIDATION_USE_COUNT_MIN", 3),
@@ -570,6 +583,9 @@ class NeuralMemoryConfig:
                 "decay_background_interval", base_config.decay_background_interval
             ),
             decay_rate=configs.get("decay_rate", base_config.decay_rate),
+            hebbian_decay_half_life_days=configs.get(
+                "hebbian_decay_half_life_days", base_config.hebbian_decay_half_life_days
+            ),
             prune_threshold=configs.get("prune_threshold", base_config.prune_threshold),
             # Consolidation
             consolidation_use_count_min=configs.get(
