@@ -269,15 +269,22 @@ class PermissionService:
                 ``viewer`` — suitable for read endpoints like ``/graph/*``
                 and ``/memory/stats``. Writers should pass ``admin`` or
                 ``owner``.
-            key_workspace_id: Issue #963. The caller's *key* workspace scope —
-                ``session.workspace_id`` for MCP (carried by a workspace-scoped
-                API key) or ``api_key_workspace_id`` for REST. When supplied,
-                confine the read to it: a key minted for workspace A must not
-                reach a context owned by B even when the user is also a member
-                of B (membership above is necessary but not sufficient). Pass
-                ``None`` for session/OAuth callers, which carry no key scope
-                (#889) and are governed by membership alone. A mismatch raises
-                the same uniform 404 as every other deny.
+            key_workspace_id: Issue #963. The caller's *pure* API-key workspace
+                scope — the workspace the API key is itself scoped to, or
+                ``None`` when the request is not authenticated with a
+                workspace-scoped key. This is NOT the conflated/effective
+                workspace: MCP must pass ``api_key_workspace_id`` (the transport
+                exposes it via a per-request contextvar), NOT
+                ``session.workspace_id`` (which becomes the user's *current*
+                workspace for OAuth2/session/global-key auth and would
+                over-confine those callers); REST passes
+                ``user["api_key_workspace_id"]``. When supplied, confine the
+                read to it: a key minted for workspace A must not reach a context
+                owned by B even when the user is also a member of B (membership
+                is necessary but not sufficient). Pass ``None`` for non-key-scoped
+                callers — they carry no key scope (#889) and are governed by
+                membership alone. A mismatch raises the same uniform 404 as every
+                other deny.
 
         Returns:
             The ``Context`` row for ``context_id`` if the caller has the
@@ -301,6 +308,25 @@ class PermissionService:
                 "context_read_denied",
                 reason="not_found",
                 context_id=str(context_id),
+                user_id=user_id,
+            )
+            raise NotFoundException("Context", str(context_id))
+
+        # Issue #963: confine a workspace-scoped caller (API key carrying
+        # key_workspace_id) to its own workspace. Checked here — right after the
+        # Context is loaded and BEFORE the membership / whitelist lookups —
+        # because the outcome is a uniform 404 regardless, so short-circuiting a
+        # cross-workspace key avoids an unnecessary workspace-membership query
+        # (and the DB-load amplification it invites under cross-workspace
+        # probing). Skip when key_workspace_id is None (non-key-scoped auth
+        # carries no key scope, #889; governed by membership alone).
+        if key_workspace_id is not None and context.workspace_id != key_workspace_id:
+            logger.warning(
+                "context_read_denied",
+                reason="key_workspace_mismatch",
+                context_id=str(context_id),
+                context_workspace_id=str(context.workspace_id),
+                key_workspace_id=str(key_workspace_id),
                 user_id=user_id,
             )
             raise NotFoundException("Context", str(context_id))
@@ -371,22 +397,6 @@ class PermissionService:
                 reason="not_in_whitelist",
                 context_id=str(context_id),
                 context_workspace_id=str(context.workspace_id),
-                user_id=user_id,
-            )
-            raise NotFoundException("Context", str(context_id))
-
-        # Issue #963: confine a workspace-scoped caller (API key carrying
-        # key_workspace_id) to its own workspace. Membership above is necessary
-        # but not sufficient — a key for workspace A must not reach a context
-        # owned by B even when the user is also a member of B. Skip when
-        # key_workspace_id is None (session/OAuth carries no key scope, #889).
-        if key_workspace_id is not None and context.workspace_id != key_workspace_id:
-            logger.warning(
-                "context_read_denied",
-                reason="key_workspace_mismatch",
-                context_id=str(context_id),
-                context_workspace_id=str(context.workspace_id),
-                key_workspace_id=str(key_workspace_id),
                 user_id=user_id,
             )
             raise NotFoundException("Context", str(context_id))
