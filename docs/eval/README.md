@@ -10,6 +10,7 @@ distinct from **doing things at all** (production observability) or
 | File | Purpose | Status |
 |---|---|---|
 | `edge_discovery_labeling.md` | Labeling protocol for offline evaluation of the Sleep edge_discovery LLM Judge (issue #375 / #274 successor) | Skeleton — Phase 1 in progress |
+| `retrieval-benchmark.md` | Reproducible multi-arm retrieval benchmark (BM25-only / vector-only / hybrid / hybrid+neural) on the frozen golden corpus — relative deltas, reproduction steps (issue #967) | Baseline committed 2026-06-10 |
 
 ## Where this fits in the documentation map
 

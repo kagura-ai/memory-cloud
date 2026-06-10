@@ -11,11 +11,13 @@ Produces ``results/<YYYY-MM-DD>.json`` from a REAL run only — never fabricated
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
 from typing import Any
 from uuid import UUID, uuid4
 
 from tests.eval.metrics import (
+    mean_ndcg_at_k,
     mean_precision_at_k,
     mrr_at_k,
     source_recall_share,
@@ -24,8 +26,38 @@ from tests.eval.tools.corpus import BUCKETS, Corpus, load_corpus
 
 _RESULTS_DIR = Path(__file__).resolve().parent / "results"
 _RECALL_K = 10
+# Per-doc retries for the embedding/upsert step. The Qdrant upsert can hit a
+# transient client-side stall on local dev stacks (observed on WSL2: the
+# request times out at the client's 5s default without ever reaching the
+# server, at a random doc, while the server handles every arriving request in
+# ~3ms). One reset-and-retry recovers it; a doc that fails repeatedly still
+# aborts the run.
+_INGEST_RETRIES = 2
 _P_AT = (5, 10)
 _MRR_AT = 10
+_NDCG_AT = (5, 10)
+
+# Comparison arms (#967): (arm_name, search_mode, neural_enabled).
+#
+# Order is load-bearing — with ENABLE_NEURAL_MEMORY=true, recall() itself
+# performs co-activation tracking + Hebbian updates (graph WRITES), so the
+# neural arm must run LAST or it would warm the graph for every arm after it.
+# The first three arms are read-only with respect to the neural graph.
+#
+# All arms run against the SAME ingested corpus: k-NN / tag-co-occurrence
+# cold-start seeding happens at embedding time regardless of the env var, so
+# the neural arm sees exactly the cold-graph state production sees right after
+# ingest. Measuring quality growth as the graph warms with use is out of scope
+# here (companion issue #969).
+_ARMS: tuple[tuple[str, str, bool], ...] = (
+    ("keyword", "keyword", False),  # BM25-only baseline
+    ("semantic", "semantic", False),  # dense-vector-only baseline
+    ("hybrid", "hybrid", False),  # hybrid scoring, neural boost off
+    ("hybrid_neural", "hybrid", True),  # full production posture
+)
+# The arm mirrored at the results top level (backward-compatible shape) and
+# used as the regression-gate reference.
+_PRODUCTION_ARM = "hybrid_neural"
 
 
 def _sudachi_version() -> str:
@@ -84,8 +116,42 @@ async def _ingest_corpus(
         # call returns immediately WITHOUT the upsert being done. So we then poll
         # embedding_status to a terminal state — only that guarantees the doc is
         # searchable, regardless of which task did the work.
-        await process_pending_embedding(resp.memory_id)
-        await _await_indexed(svc, resp.memory_id)
+        #
+        # process_pending_embedding only claims pending / stale-processing rows,
+        # so a doc that landed in `failed` (or timed out mid-processing) must be
+        # reset to `pending` before the retry can re-drive it.
+        for attempt in range(_INGEST_RETRIES + 1):
+            await process_pending_embedding(resp.memory_id)
+            try:
+                await _await_indexed(svc, resp.memory_id)
+                break
+            except RuntimeError:
+                if attempt == _INGEST_RETRIES:
+                    raise
+                print(
+                    f"eval-retrieval: transient indexing failure for corpus doc "
+                    f"{doc.id} (attempt {attempt + 1}/{_INGEST_RETRIES + 1}) — retrying"
+                )
+                await _reset_embedding_to_pending(svc, resp.memory_id)
+
+
+async def _reset_embedding_to_pending(svc: Any, memory_id: UUID) -> None:
+    """Reset a failed/stuck embedding to ``pending`` so a retry can re-claim it.
+
+    ``process_pending_embedding``'s claim UPDATE only matches ``pending`` or
+    stale (>60s) ``processing`` rows — a ``failed`` row is terminal without
+    this reset.
+    """
+    from sqlalchemy import update
+
+    from models.memory import Memory
+
+    await svc.db.execute(
+        update(Memory)
+        .where(Memory.id == memory_id)
+        .values(embedding_status="pending", embedding_error=None)
+    )
+    await svc.db.commit()
 
 
 async def _await_indexed(
@@ -226,7 +292,16 @@ async def _teardown(
         await db.rollback()
 
 
-async def _run_queries_and_score(
+def _bucket_metrics(rankings: list[tuple[list[str], set[str]]]) -> dict[str, Any]:
+    return {
+        "n": len(rankings),
+        **{f"p@{k}": round(mean_precision_at_k(rankings, k), 4) for k in _P_AT},
+        f"mrr@{_MRR_AT}": round(mrr_at_k(rankings, _MRR_AT), 4),
+        **{f"ndcg@{k}": round(mean_ndcg_at_k(rankings, k), 4) for k in _NDCG_AT},
+    }
+
+
+async def _score_arm(
     svc: Any,
     corpus: Corpus,
     docs_by_id: dict[str, Any],
@@ -234,10 +309,9 @@ async def _run_queries_and_score(
     owner: str,
     ctx_id: Any,
     ws_id: Any,
-    run_date: str,
-    write: bool,
+    search_mode: str,
 ) -> dict[str, Any]:
-    """Recall every query, compute metrics, optionally write results JSON."""
+    """Recall every query with ``search_mode`` and compute the metric block."""
     from models.schemas import RecallRequest
 
     # Per-query rankings, grouped by bucket.
@@ -250,7 +324,7 @@ async def _run_queries_and_score(
 
     for q in corpus.queries:
         resp = await svc.recall(
-            request=RecallRequest(query=q.text, k=_RECALL_K, search_mode="hybrid"),
+            request=RecallRequest(query=q.text, k=_RECALL_K, search_mode=search_mode),
             user_id=owner,
             current_context_id=ctx_id,
             current_workspace_id=ws_id,
@@ -263,20 +337,7 @@ async def _run_queries_and_score(
             docs_by_id[d].source for d in ranked_docs[:_RECALL_K] if d in docs_by_id
         )
 
-    def _bucket_metrics(rankings: list[tuple[list[str], set[str]]]) -> dict[str, Any]:
-        return {
-            "n": len(rankings),
-            **{f"p@{k}": round(mean_precision_at_k(rankings, k), 4) for k in _P_AT},
-            f"mrr@{_MRR_AT}": round(mrr_at_k(rankings, _MRR_AT), 4),
-        }
-
-    results: dict[str, Any] = {
-        "run_date": run_date,
-        "sudachi_version": _sudachi_version(),
-        "corpus_version": corpus.meta.get("version"),
-        "query_count": len(corpus.queries),
-        "doc_count": len(corpus.documents),
-        "recall_k": _RECALL_K,
+    return {
         "overall": _bucket_metrics(all_rankings),
         "per_bucket": {b: _bucket_metrics(per_bucket_rankings[b]) for b in BUCKETS},
         "source_recall@10": {
@@ -285,6 +346,54 @@ async def _run_queries_and_score(
                 all_retrieved_sources, len(all_retrieved_sources)
             ).items()
         },
+    }
+
+
+async def _run_queries_and_score(
+    svc: Any,
+    corpus: Corpus,
+    docs_by_id: dict[str, Any],
+    id_map: dict[str, str],
+    owner: str,
+    ctx_id: Any,
+    ws_id: Any,
+    run_date: str,
+    write: bool,
+) -> dict[str, Any]:
+    """Score every comparison arm, compute metrics, optionally write results JSON.
+
+    ``ENABLE_NEURAL_MEMORY`` is toggled per arm (recall() reads it on every
+    call) and restored afterwards so the surrounding process env is untouched.
+    """
+    arms: dict[str, dict[str, Any]] = {}
+    prev_neural = os.environ.get("ENABLE_NEURAL_MEMORY")
+    try:
+        for arm_name, search_mode, neural_enabled in _ARMS:
+            os.environ["ENABLE_NEURAL_MEMORY"] = "true" if neural_enabled else "false"
+            arms[arm_name] = await _score_arm(
+                svc, corpus, docs_by_id, id_map, owner, ctx_id, ws_id, search_mode
+            )
+    finally:
+        if prev_neural is None:
+            os.environ.pop("ENABLE_NEURAL_MEMORY", None)
+        else:
+            os.environ["ENABLE_NEURAL_MEMORY"] = prev_neural
+
+    production = arms[_PRODUCTION_ARM]
+    results: dict[str, Any] = {
+        "run_date": run_date,
+        "sudachi_version": _sudachi_version(),
+        "corpus_version": corpus.meta.get("version"),
+        "query_count": len(corpus.queries),
+        "doc_count": len(corpus.documents),
+        "recall_k": _RECALL_K,
+        "production_arm": _PRODUCTION_ARM,
+        # Top-level mirror of the production arm — keeps the pre-#967 results
+        # shape so older readers and the live test's assertions stay valid.
+        "overall": production["overall"],
+        "per_bucket": production["per_bucket"],
+        "source_recall@10": production["source_recall@10"],
+        "arms": arms,
     }
 
     if write:

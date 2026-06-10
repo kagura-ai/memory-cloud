@@ -10,9 +10,11 @@ What it does when enabled:
 1. Provisions a throwaway workspace + context.
 2. Ingests every golden-corpus document as a memory, recording memory_id →
    (corpus_doc_id, source).
-3. Runs ``recall`` for each query (hybrid, k=10), maps results back to corpus
-   doc ids, and computes P@5 / P@10 / MRR@10 per bucket and overall, plus the
-   memory-vs-resource source-recall share.
+3. Runs ``recall`` for each query (k=10) once per comparison arm — keyword
+   (BM25-only), semantic (vector-only), hybrid (neural off), hybrid_neural
+   (production posture) — maps results back to corpus doc ids, and computes
+   P@5 / P@10 / MRR@10 / nDCG@5 / nDCG@10 per bucket and overall, plus the
+   memory-vs-resource source-recall share (#967).
 4. Writes ``results/<YYYY-MM-DD>.json`` (stamped with the Sudachi version) for
    trend tracking. NUMBERS ARE NEVER FABRICATED — this file is the only place a
    baseline is produced, and only from a real run.
@@ -47,3 +49,7 @@ async def test_retrieval_quality_live():
     assert results["query_count"] >= 30
     assert "overall" in results
     assert set(results["per_bucket"]), "per-bucket metrics must be populated"
+    # #967: every comparison arm measured; top level mirrors the production arm.
+    assert set(results["arms"]) == {"keyword", "semantic", "hybrid", "hybrid_neural"}
+    assert results["overall"] == results["arms"][results["production_arm"]]["overall"]
+    assert "ndcg@10" in results["overall"]
