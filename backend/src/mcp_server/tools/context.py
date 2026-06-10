@@ -750,6 +750,22 @@ async def handle_merge_contexts(
             else:
                 delete_source = bool(delete_source_raw)
 
+            # Workspace-boundary guard at the MCP boundary (Issue #966), mirror
+            # of handle_recall's cross-context guard. Resolve both contexts via
+            # _resolve_context_for_read so an unreadable context (not found /
+            # private non-creator / non-member) surfaces a uniform
+            # context_not_found (CWE-639) instead of leaking through the generic
+            # merge_contexts_error path, and reject a cross-workspace merge
+            # before ContextService.merge_contexts is invoked. The service still
+            # enforces owner-only access as the authorization gate.
+            source_ctx = await _resolve_context_for_read(db, user_id, source_id)
+            target_ctx = await _resolve_context_for_read(db, user_id, target_id)
+            if source_ctx.workspace_id != target_ctx.workspace_id:
+                return _error_response(
+                    "workspace_mismatch",
+                    "Source and target contexts must belong to the same workspace.",
+                )
+
             service = ContextService(db)
             result = await execute_with_timeout(
                 service.merge_contexts(
