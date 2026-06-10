@@ -11,6 +11,7 @@ first); ``relevant`` is the gold set.
 
 from __future__ import annotations
 
+import math
 from collections.abc import Sequence
 
 
@@ -64,6 +65,36 @@ def mean_precision_at_k(
     if not rankings:
         return 0.0
     return sum(precision_at_k(r, rel, k) for r, rel in rankings) / len(rankings)
+
+
+def ndcg_at_k(ranked: Sequence[str], relevant: set[str], k: int) -> float:
+    """Normalized discounted cumulative gain @k under binary relevance.
+
+    DCG@k discounts each relevant hit by ``1/log2(rank+1)``; the ideal DCG
+    places relevant docs in the top ``min(k, len(relevant))`` positions, so a
+    ranking that fills the top-``k`` with relevant docs scores 1.0 even when
+    the gold set is larger than ``k``. Returns 0.0 for ``k <= 0`` or an empty
+    gold set (a corpus-construction problem, not a metric error).
+    """
+    if k <= 0 or not relevant:
+        return 0.0
+    dcg = sum(
+        1.0 / math.log2(idx + 1)
+        for idx, doc_id in enumerate(ranked[:k], start=1)
+        if doc_id in relevant
+    )
+    ideal = sum(1.0 / math.log2(idx + 1) for idx in range(1, min(k, len(relevant)) + 1))
+    return dcg / ideal
+
+
+def mean_ndcg_at_k(
+    rankings: Sequence[tuple[Sequence[str], set[str]]],
+    k: int,
+) -> float:
+    """Mean nDCG@k across a set of (ranked, relevant) query results."""
+    if not rankings:
+        return 0.0
+    return sum(ndcg_at_k(r, rel, k) for r, rel in rankings) / len(rankings)
 
 
 def source_recall_share(ranked_sources: Sequence[str], k: int) -> dict[str, float]:

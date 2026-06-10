@@ -11,11 +11,13 @@ Produces ``results/<YYYY-MM-DD>.json`` from a REAL run only — never fabricated
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
 from typing import Any
 from uuid import UUID, uuid4
 
 from tests.eval.metrics import (
+    mean_ndcg_at_k,
     mean_precision_at_k,
     mrr_at_k,
     source_recall_share,
@@ -26,6 +28,29 @@ _RESULTS_DIR = Path(__file__).resolve().parent / "results"
 _RECALL_K = 10
 _P_AT = (5, 10)
 _MRR_AT = 10
+_NDCG_AT = (5, 10)
+
+# Comparison arms (#967): (arm_name, search_mode, neural_enabled).
+#
+# Order is load-bearing — with ENABLE_NEURAL_MEMORY=true, recall() itself
+# performs co-activation tracking + Hebbian updates (graph WRITES), so the
+# neural arm must run LAST or it would warm the graph for every arm after it.
+# The first three arms are read-only with respect to the neural graph.
+#
+# All arms run against the SAME ingested corpus: k-NN / tag-co-occurrence
+# cold-start seeding happens at embedding time regardless of the env var, so
+# the neural arm sees exactly the cold-graph state production sees right after
+# ingest. Measuring quality growth as the graph warms with use is out of scope
+# here (companion issue #969).
+_ARMS: tuple[tuple[str, str, bool], ...] = (
+    ("keyword", "keyword", False),  # BM25-only baseline
+    ("semantic", "semantic", False),  # dense-vector-only baseline
+    ("hybrid", "hybrid", False),  # hybrid scoring, neural boost off
+    ("hybrid_neural", "hybrid", True),  # full production posture
+)
+# The arm mirrored at the results top level (backward-compatible shape) and
+# used as the regression-gate reference.
+_PRODUCTION_ARM = "hybrid_neural"
 
 
 def _sudachi_version() -> str:
@@ -226,7 +251,16 @@ async def _teardown(
         await db.rollback()
 
 
-async def _run_queries_and_score(
+def _bucket_metrics(rankings: list[tuple[list[str], set[str]]]) -> dict[str, Any]:
+    return {
+        "n": len(rankings),
+        **{f"p@{k}": round(mean_precision_at_k(rankings, k), 4) for k in _P_AT},
+        f"mrr@{_MRR_AT}": round(mrr_at_k(rankings, _MRR_AT), 4),
+        **{f"ndcg@{k}": round(mean_ndcg_at_k(rankings, k), 4) for k in _NDCG_AT},
+    }
+
+
+async def _score_arm(
     svc: Any,
     corpus: Corpus,
     docs_by_id: dict[str, Any],
@@ -234,10 +268,9 @@ async def _run_queries_and_score(
     owner: str,
     ctx_id: Any,
     ws_id: Any,
-    run_date: str,
-    write: bool,
+    search_mode: str,
 ) -> dict[str, Any]:
-    """Recall every query, compute metrics, optionally write results JSON."""
+    """Recall every query with ``search_mode`` and compute the metric block."""
     from models.schemas import RecallRequest
 
     # Per-query rankings, grouped by bucket.
@@ -250,7 +283,7 @@ async def _run_queries_and_score(
 
     for q in corpus.queries:
         resp = await svc.recall(
-            request=RecallRequest(query=q.text, k=_RECALL_K, search_mode="hybrid"),
+            request=RecallRequest(query=q.text, k=_RECALL_K, search_mode=search_mode),
             user_id=owner,
             current_context_id=ctx_id,
             current_workspace_id=ws_id,
@@ -263,20 +296,7 @@ async def _run_queries_and_score(
             docs_by_id[d].source for d in ranked_docs[:_RECALL_K] if d in docs_by_id
         )
 
-    def _bucket_metrics(rankings: list[tuple[list[str], set[str]]]) -> dict[str, Any]:
-        return {
-            "n": len(rankings),
-            **{f"p@{k}": round(mean_precision_at_k(rankings, k), 4) for k in _P_AT},
-            f"mrr@{_MRR_AT}": round(mrr_at_k(rankings, _MRR_AT), 4),
-        }
-
-    results: dict[str, Any] = {
-        "run_date": run_date,
-        "sudachi_version": _sudachi_version(),
-        "corpus_version": corpus.meta.get("version"),
-        "query_count": len(corpus.queries),
-        "doc_count": len(corpus.documents),
-        "recall_k": _RECALL_K,
+    return {
         "overall": _bucket_metrics(all_rankings),
         "per_bucket": {b: _bucket_metrics(per_bucket_rankings[b]) for b in BUCKETS},
         "source_recall@10": {
@@ -285,6 +305,54 @@ async def _run_queries_and_score(
                 all_retrieved_sources, len(all_retrieved_sources)
             ).items()
         },
+    }
+
+
+async def _run_queries_and_score(
+    svc: Any,
+    corpus: Corpus,
+    docs_by_id: dict[str, Any],
+    id_map: dict[str, str],
+    owner: str,
+    ctx_id: Any,
+    ws_id: Any,
+    run_date: str,
+    write: bool,
+) -> dict[str, Any]:
+    """Score every comparison arm, compute metrics, optionally write results JSON.
+
+    ``ENABLE_NEURAL_MEMORY`` is toggled per arm (recall() reads it on every
+    call) and restored afterwards so the surrounding process env is untouched.
+    """
+    arms: dict[str, dict[str, Any]] = {}
+    prev_neural = os.environ.get("ENABLE_NEURAL_MEMORY")
+    try:
+        for arm_name, search_mode, neural_enabled in _ARMS:
+            os.environ["ENABLE_NEURAL_MEMORY"] = "true" if neural_enabled else "false"
+            arms[arm_name] = await _score_arm(
+                svc, corpus, docs_by_id, id_map, owner, ctx_id, ws_id, search_mode
+            )
+    finally:
+        if prev_neural is None:
+            os.environ.pop("ENABLE_NEURAL_MEMORY", None)
+        else:
+            os.environ["ENABLE_NEURAL_MEMORY"] = prev_neural
+
+    production = arms[_PRODUCTION_ARM]
+    results: dict[str, Any] = {
+        "run_date": run_date,
+        "sudachi_version": _sudachi_version(),
+        "corpus_version": corpus.meta.get("version"),
+        "query_count": len(corpus.queries),
+        "doc_count": len(corpus.documents),
+        "recall_k": _RECALL_K,
+        "production_arm": _PRODUCTION_ARM,
+        # Top-level mirror of the production arm — keeps the pre-#967 results
+        # shape so older readers and the live test's assertions stay valid.
+        "overall": production["overall"],
+        "per_bucket": production["per_bucket"],
+        "source_recall@10": production["source_recall@10"],
+        "arms": arms,
     }
 
     if write:

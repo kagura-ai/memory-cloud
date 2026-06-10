@@ -20,7 +20,7 @@ An **offline harness** for detecting hybrid-search (dense + BM25) retrieval-qual
 | `tools/leakage_check.py` | Leakage detector (3 rules) | ✅ (`test_leakage.py`) |
 | `tools/stratify.py` | Difficulty stratification (IDF-spec, BM25-rank, corpus-overlap) | ✅ (`test_stratification.py`) |
 | `test_corpus_schema.py` | Structural contract (buckets, labels, sources) | ✅ |
-| `test_retrieval_quality.py` + `runner.py` | **Live** P@5/MRR measurement → `results/<date>.json` | ❌ skip-guarded |
+| `test_retrieval_quality.py` + `runner.py` | **Live** multi-arm P@5/MRR/nDCG measurement → `results/<date>.json` | ❌ skip-guarded |
 
 The deterministic layer (everything but the last row) is pure token analysis and
 runs in normal CI. The live measurement needs Postgres + Qdrant + an embedding
@@ -37,6 +37,30 @@ cd backend && pytest tests/eval/ -m "not asyncio" -q   # all deterministic gates
 # Live retrieval measurement (needs the stack up: make up):
 make eval-retrieval              # sets KAGURA_EVAL_LIVE=1, writes results/<date>.json
 ```
+
+### Comparison arms (#967)
+
+Each live run measures every query under four **arms** on the same ingested
+corpus, so the deltas between arms isolate what each retrieval layer adds:
+
+| Arm | `search_mode` | `ENABLE_NEURAL_MEMORY` | What it isolates |
+|---|---|---|---|
+| `keyword` | `keyword` | off | BM25-only baseline ("plain full-text search") |
+| `semantic` | `semantic` | off | dense-vector-only baseline ("plain RAG") |
+| `hybrid` | `hybrid` | off | hybrid (60/40) scoring without the neural layer |
+| `hybrid_neural` | `hybrid` | on | full production posture (neural boost + activation spreading) |
+
+Arm order is load-bearing: with neural enabled, `recall()` itself performs
+co-activation tracking + Hebbian updates (graph writes), so `hybrid_neural`
+runs **last**. All arms see the same cold graph (k-NN / tag co-occurrence
+seeding happens at embedding time, independent of the env var). Quality growth
+as the graph warms with use is the #969 companion experiment, not this harness.
+
+Results JSON: per-arm metrics live under `"arms"`; the top-level
+`overall` / `per_bucket` / `source_recall@10` mirror the `production_arm`
+(`hybrid_neural`) so the pre-#967 shape — and drift comparison against older
+results files — keeps working. **Publish arm-to-arm deltas only**, never the
+absolute numbers (see "Statistical do / don't").
 
 ### Baseline
 
