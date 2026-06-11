@@ -17,7 +17,7 @@ from models.neural import (
     CALIBRATION_KIND_EDGE_GATE,
     CALIBRATION_KIND_KNN_SEED,
 )
-from tasks.neural_calibration import _upsert_calibration
+from tasks.neural_calibration import _delete_calibration, _upsert_calibration
 
 _PCTS = {"p25": 0.10, "p50": 0.15, "p75": 0.20, "p90": 0.25, "p95": 0.30, "p99": 0.40}
 
@@ -70,4 +70,17 @@ async def test_upsert_does_not_commit():
         now=now,
         valid_until=now + timedelta(days=30),
     )
+    db.commit.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_delete_calibration_issues_delete_without_commit():
+    """#982: skipping an edge_gate upsert must delete any stale row (so the
+    runtime falls back to the absolute config value), without committing —
+    the caller owns the commit."""
+    db = _mock_db()
+    await _delete_calibration(
+        db, "text-embedding-3-small", 512, None, kind=CALIBRATION_KIND_EDGE_GATE
+    )
+    db.execute.assert_awaited_once()
     db.commit.assert_not_called()

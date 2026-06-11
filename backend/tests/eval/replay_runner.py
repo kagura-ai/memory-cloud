@@ -194,8 +194,13 @@ async def _measure_replay_measure(
     # global (v1 resolve ignores context_id) so it briefly affects any
     # concurrent recall on the same (model, dims). Acceptable for a local
     # verification run with guaranteed cleanup.
-    edge_calibration = await _seed_edge_calibration(db, plan, id_map, ctx)
+    # Seed INSIDE the try so its commit is always paired with the finally
+    # cleanup — _seed_edge_calibration guarantees that once it commits the row
+    # it returns seeded=True + model/dimensions even if its post-commit
+    # diagnostic raises, so the finally can always delete the transient row.
+    edge_calibration: dict[str, Any] = {"seeded": False}
     try:
+        edge_calibration = await _seed_edge_calibration(db, plan, id_map, ctx)
         gate_audit = await _gate_audit(svc, db, corpus, plan, id_map, owner, ctx, ws)
         replay_recalls = await _replay(svc, corpus, plan, owner, ctx, ws)
         checkpoints["warm_replay"] = await _checkpoint(
@@ -442,11 +447,11 @@ async def _seed_edge_calibration(
     )
     await db.commit()
 
-    # The exact runtime value the replay will apply (reads the row we just wrote).
-    resolved = await resolve_edge_threshold(
-        db=db, config=config, model_name=model_name, dimensions=dims
-    )
-    return {
+    # Past the commit the row EXISTS, so the result must always carry seeded +
+    # model + dimensions for the caller's finally cleanup. The diagnostic
+    # resolve below is non-essential — guard it so a failure there can never
+    # strand the committed transient row (the leak this guards against).
+    result: dict[str, Any] = {
         "seeded": True,
         "model": model_name,
         "dimensions": dims,
@@ -455,9 +460,18 @@ async def _seed_edge_calibration(
         "percentile_used": config.min_similarity_for_edge_percentile,
         "floor": config.min_similarity_for_edge_floor,
         "absolute_fallback": config.min_similarity_for_edge,
-        "resolved_threshold": round(resolved, 4),
+        "resolved_threshold": None,
         "gold_pair_cosines": sorted(gold_cos),
     }
+    try:
+        # The exact runtime value the replay will apply (reads the row just written).
+        resolved = await resolve_edge_threshold(
+            db=db, config=config, model_name=model_name, dimensions=dims
+        )
+        result["resolved_threshold"] = round(resolved, 4)
+    except Exception:  # noqa: BLE001 — diagnostic only; row stays cleanable
+        pass
+    return result
 
 
 async def _delete_edge_calibration(db: Any, model_name: str, dimensions: int) -> None:

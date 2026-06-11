@@ -1645,21 +1645,32 @@ class MemoryService:
                 edge_threshold: float | None = None
                 edge_dims = next((len(e) for e in embedding_map.values() if e), None)
                 if edge_dims and current_context_id is not None:
-                    try:
-                        from neural.calibration import resolve_edge_threshold
-                        from repositories.config_repository import (
-                            ContextSearchConfigRepository,
-                        )
+                    # Resolve in an ISOLATED session: a transient DB error here
+                    # must not abort the recall's own transaction (which still
+                    # has the neural graph writes below to commit). The lookup
+                    # is READ-ONLY (get_by_context, never create_or_get) so the
+                    # recall hot path never writes a config row. Missing config
+                    # or any failure leaves edge_threshold=None → the gate falls
+                    # back to the absolute config value in the gating calls.
+                    from db.base import get_db
+                    from neural.calibration import resolve_edge_threshold
+                    from repositories.config_repository import (
+                        ContextSearchConfigRepository,
+                    )
 
-                        ctx_search_cfg = await ContextSearchConfigRepository(self.db).create_or_get(
-                            current_context_id
-                        )
-                        edge_threshold = await resolve_edge_threshold(
-                            db=self.db,
-                            config=config,
-                            model_name=ctx_search_cfg.embedding_model,
-                            dimensions=edge_dims,
-                        )
+                    try:
+                        async for edge_db in get_db():
+                            ctx_search_cfg = await ContextSearchConfigRepository(
+                                edge_db
+                            ).get_by_context(current_context_id)
+                            if ctx_search_cfg is not None:
+                                edge_threshold = await resolve_edge_threshold(
+                                    db=edge_db,
+                                    config=config,
+                                    model_name=ctx_search_cfg.embedding_model,
+                                    dimensions=edge_dims,
+                                )
+                            break
                     except Exception:  # noqa: BLE001 — best-effort; never break recall
                         logger.debug("edge_threshold_resolve_failed", exc_info=True)
                         edge_threshold = None

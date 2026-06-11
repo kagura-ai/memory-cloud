@@ -300,6 +300,32 @@ async def _release_dedup_lock(key: str, token: str) -> None:
         )
 
 
+async def _delete_calibration(
+    db: AsyncSession,
+    model_name: str,
+    dimensions: int,
+    context_id: UUID | None,
+    *,
+    kind: str,
+) -> None:
+    """Kind-scoped delete of the calibration row for one key (no commit).
+
+    The partial unique indexes are keyed on (model, dims, [context_id,] kind)
+    since #982, so the DELETE MUST include ``kind`` — otherwise it would wipe
+    the sibling kind's row for the same key.
+    """
+    del_stmt = delete(EmbeddingCalibration).where(
+        EmbeddingCalibration.model_name == model_name,
+        EmbeddingCalibration.dimensions == dimensions,
+        EmbeddingCalibration.kind == kind,
+    )
+    if context_id is None:
+        del_stmt = del_stmt.where(EmbeddingCalibration.context_id.is_(None))
+    else:
+        del_stmt = del_stmt.where(EmbeddingCalibration.context_id == context_id)
+    await db.execute(del_stmt)
+
+
 async def _upsert_calibration(
     db: AsyncSession,
     model_name: str,
@@ -314,24 +340,11 @@ async def _upsert_calibration(
 ) -> EmbeddingCalibration:
     """Kind-scoped delete-then-insert of one calibration row.
 
-    The partial unique indexes are keyed on (model, dims, [context_id,] kind)
-    since #982, so the DELETE MUST include ``kind`` — otherwise recalibrating
-    one kind wipes the sibling kind's row for the same key. Does NOT commit;
-    the caller commits once so both kinds land atomically (or neither).
-
-    Delete-then-insert is simpler than ON CONFLICT because the partial indexes
-    don't participate in INSERT ... ON CONFLICT.
+    Does NOT commit; the caller commits once so both kinds land atomically
+    (or neither). Delete-then-insert is simpler than ON CONFLICT because the
+    partial indexes don't participate in INSERT ... ON CONFLICT.
     """
-    del_stmt = delete(EmbeddingCalibration).where(
-        EmbeddingCalibration.model_name == model_name,
-        EmbeddingCalibration.dimensions == dimensions,
-        EmbeddingCalibration.kind == kind,
-    )
-    if context_id is None:
-        del_stmt = del_stmt.where(EmbeddingCalibration.context_id.is_(None))
-    else:
-        del_stmt = del_stmt.where(EmbeddingCalibration.context_id == context_id)
-    await db.execute(del_stmt)
+    await _delete_calibration(db, model_name, dimensions, context_id, kind=kind)
 
     row = EmbeddingCalibration(
         model_name=model_name,
@@ -500,6 +513,13 @@ async def compute_calibration(
             valid_until=valid_until,
         )
     else:
+        # Too few pairs for a trustworthy upper tail. Delete any prior edge_gate
+        # row so resolve_edge_threshold genuinely falls back to the absolute
+        # config value (the documented contract) instead of serving a stale
+        # (possibly expired, fail-open) threshold from an earlier run.
+        await _delete_calibration(
+            db, model_name, dimensions, context_id, kind=CALIBRATION_KIND_EDGE_GATE
+        )
         logger.warning(
             "edge_calibration_skipped_insufficient_pairs",
             model=model_name,
