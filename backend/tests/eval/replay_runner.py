@@ -62,7 +62,6 @@ _EXPLORE_DEPTH = 2
 _EXPLORE_MIN_WEIGHT = 0.05
 _RECOVERY_AT = (5, 10)
 _MRR_AT = 10
-_CHECKPOINTS = ("cold", "warm_replay", "warm_sleep")
 
 
 async def run_compounding_eval(
