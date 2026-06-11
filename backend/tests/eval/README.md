@@ -20,12 +20,14 @@ An **offline harness** for detecting hybrid-search (dense + BM25) retrieval-qual
 | `tools/leakage_check.py` | Leakage detector (3 rules) | ✅ (`test_leakage.py`) |
 | `tools/stratify.py` | Difficulty stratification (IDF-spec, BM25-rank, corpus-overlap) | ✅ (`test_stratification.py`) |
 | `test_corpus_schema.py` | Structural contract (buckets, labels, sources) | ✅ |
+| `compounding.py` | Pure #969 experiment logic: replay plan, companion-recovery metric, lift table, gate audit | ✅ (`test_compounding.py`) |
 | `test_retrieval_quality.py` + `runner.py` | **Live** multi-arm P@5/MRR/nDCG measurement → `results/<date>.json` | ❌ skip-guarded |
+| `test_compounding_live.py` + `replay_runner.py` | **Live** cold→replay→warm compounding experiment (#969) → `results/compounding-<date>.json` | ❌ skip-guarded |
 
-The deterministic layer (everything but the last row) is pure token analysis and
-runs in normal CI. The live measurement needs Postgres + Qdrant + an embedding
-provider + Sudachi, which is **not currently CI-realistic** (#336 unscheduled),
-so it is skip-guarded behind `KAGURA_EVAL_LIVE=1`.
+The deterministic layer (everything but the live rows) is pure token analysis and
+runs in normal CI. The live measurements need Postgres + Qdrant + Redis + an
+embedding provider + Sudachi, which is **not currently CI-realistic** (#336
+unscheduled), so they are skip-guarded behind `KAGURA_EVAL_LIVE=1`.
 
 ## Running
 
@@ -36,6 +38,9 @@ cd backend && pytest tests/eval/ -m "not asyncio" -q   # all deterministic gates
 
 # Live retrieval measurement (needs the stack up: make up):
 make eval-retrieval              # sets KAGURA_EVAL_LIVE=1, writes results/<date>.json
+
+# Live compounding experiment (#969, needs the stack up: make up):
+make eval-compounding            # writes results/compounding-<date>.json
 ```
 
 ### Comparison arms (#967)
@@ -69,6 +74,47 @@ run — numbers are never hand-written or fabricated (a fabricated baseline
 silently corrupts the regression signal). If `results/` has no JSON yet, the
 baseline has not been generated in an environment with the live stack; run
 `make eval-retrieval` locally to create the first one and commit it alongside.
+
+### Compounding experiment (#969)
+
+Tier B companion to the arms above: does retrieval improve **as the context is
+used**? Per Issue #120 (decision-pinned), the neural graph is read by
+`explore()` (activation spreading), not by `recall()` ranking — so the
+experiment measures two lanes per checkpoint:
+
+- **graph lane** (primary): the 5 multi-gold `cross-source` queries are held
+  out as probes. From each probe's *seed* gold doc, can activation spreading
+  recover the *companion* gold docs? (`recovery@k`, MRR over the explore
+  ranking.)
+- **recall lane** (control): hybrid `recall()` P@5/MRR/nDCG over all queries,
+  measured with neural off (read-only). Flat-by-design; movement here is a
+  regression signal, not lift.
+
+Protocol per replay mode, each in its own throwaway workspace, corpus held
+fixed throughout (growth ≠ "more data"):
+
+```
+ingest → COLD checkpoint → replay traffic (ENABLE_NEURAL_MEMORY=true, 8 rounds)
+       → WARM_REPLAY checkpoint → Sleep edges_only run (no-LLM auto-accept)
+       → WARM_SLEEP checkpoint → per-lane lift tables
+```
+
+Two replay modes separate generalization from rehearsal: `exclude_probes`
+(probes never replayed — lift measures generalization from related traffic)
+and `include_probes` (production reality — users re-ask what matters to them).
+Checkpoints snapshot per-origin edge counts, so lift is attributable
+(`hebbian` ← replay, `semantic` ← Sleep).
+
+**Gate audit.** The results JSON carries a per-pair audit of the replay
+traffic against the two edge-formation gates in `recall()`'s write path: the
+semantic gate (pair cosine ≥ `min_similarity_for_edge`) and the prune cliff
+(a first update below `prune_threshold` is deleted, never accumulated). The
+2026-06-10 run showed why this matters: every probe gold pair co-recalls with
+healthy Δw, but **all of them are cosine-gated** (0.37–0.40 vs the 0.5
+threshold), so the graph-lane lift is structurally zero on this corpus — an
+attributable finding about gate calibration, not a mute number. See
+[`docs/eval/retrieval-compounding.md`](../../../docs/eval/retrieval-compounding.md)
+for the written result.
 
 ## Buckets (query difficulty / coverage)
 

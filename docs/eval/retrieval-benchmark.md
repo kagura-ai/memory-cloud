@@ -85,7 +85,7 @@ fabricated — a results JSON exists only if a real run produced it.
 
 | Concern | Where it lives |
 |---|---|
-| Compounding ("gets better with use"): cold→warm lift under replayed co-recall traffic | [#969](https://github.com/kagura-ai/memory-cloud/issues/969) |
+| Compounding ("gets better with use"): cold→warm lift under replayed co-recall traffic | [`retrieval-compounding.md`](retrieval-compounding.md) ([#969](https://github.com/kagura-ai/memory-cloud/issues/969)) |
 | Wiring the live measurement into CI as an automated gate | [#336](https://github.com/kagura-ai/memory-cloud/issues/336) |
 | Human-labeled gold set (inter-annotator agreement) to make absolute numbers publishable | [#375](https://github.com/kagura-ai/memory-cloud/issues/375) |
 | Harness internals: corpus, buckets, leakage rules, stratification, statistical do/don't | [`backend/tests/eval/README.md`](../../backend/tests/eval/README.md) |

@@ -162,6 +162,12 @@ eval-retrieval:
 	@echo "Writes backend/tests/eval/results/<date>.json — real run only, never fabricated."
 	cd $(BACKEND_DIR) && KAGURA_EVAL_LIVE=1 PYTHONPATH=src:. python -m tests.eval.runner
 
+.PHONY: eval-compounding
+eval-compounding:
+	@echo "Running live cold→replay→warm compounding eval (Issue #969, needs the stack: make up)..."
+	@echo "Writes backend/tests/eval/results/compounding-<date>.json — real run only, never fabricated."
+	cd $(BACKEND_DIR) && KAGURA_EVAL_LIVE=1 PYTHONPATH=src:. python -m tests.eval.replay_runner
+
 .PHONY: test-cov
 test-cov:
 	@echo "Running tests with coverage in Docker..."

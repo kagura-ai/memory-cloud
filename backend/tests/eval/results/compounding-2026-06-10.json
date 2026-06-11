@@ -1,0 +1,814 @@
+{
+  "run_date": "2026-06-10",
+  "experiment": "compounding",
+  "issue": 969,
+  "sudachi_version": "20260428",
+  "corpus_version": 1,
+  "query_count": 30,
+  "doc_count": 16,
+  "recall_k": 10,
+  "rounds": 8,
+  "explore_depth": 2,
+  "explore_min_weight": 0.05,
+  "design_note": "Per Issue #120 the neural graph is read by explore(), not by recall() ranking — so compounding is measured on the graph lane (companion recovery from a seed gold doc) while the recall lane is the flat-by-design stability control. Corpus is held fixed; publish lift deltas only, never absolute numbers.",
+  "modes": {
+    "exclude_probes": {
+      "mode": "exclude_probes",
+      "probe_count": 5,
+      "probe_query_ids": [
+        "q_cross_01",
+        "q_cross_02",
+        "q_cross_03",
+        "q_cross_04",
+        "q_cross_05"
+      ],
+      "replay_query_count": 25,
+      "replay_recalls": 200,
+      "gate_audit": {
+        "pair_observations": 75,
+        "verdicts": {
+          "gated_cosine": 60,
+          "gated_cosine+below_prune": 8,
+          "forms": 6,
+          "below_prune": 1
+        },
+        "probe_gold_pairs": [
+          {
+            "query_id": "q_exact_01",
+            "pair": [
+              "doc_mem_hybrid",
+              "doc_res_chunking"
+            ],
+            "cosine": 0.3983,
+            "delta_w": 0.0142,
+            "verdict": "gated_cosine"
+          },
+          {
+            "query_id": "q_exact_03",
+            "pair": [
+              "doc_res_chunking",
+              "doc_mem_hybrid"
+            ],
+            "cosine": 0.3983,
+            "delta_w": 0.0148,
+            "verdict": "gated_cosine"
+          },
+          {
+            "query_id": "q_exact_05",
+            "pair": [
+              "doc_res_embedding",
+              "doc_mem_context"
+            ],
+            "cosine": 0.3693,
+            "delta_w": 0.0196,
+            "verdict": "gated_cosine"
+          },
+          {
+            "query_id": "q_sem_01",
+            "pair": [
+              "doc_mem_hybrid",
+              "doc_res_chunking"
+            ],
+            "cosine": 0.3983,
+            "delta_w": 0.0184,
+            "verdict": "gated_cosine"
+          },
+          {
+            "query_id": "q_mem_03",
+            "pair": [
+              "doc_mem_context",
+              "doc_res_embedding"
+            ],
+            "cosine": 0.3693,
+            "delta_w": 0.0274,
+            "verdict": "gated_cosine"
+          },
+          {
+            "query_id": "q_mem_05",
+            "pair": [
+              "doc_mem_hybrid",
+              "doc_res_chunking"
+            ],
+            "cosine": 0.3983,
+            "delta_w": 0.0346,
+            "verdict": "gated_cosine"
+          }
+        ],
+        "thresholds": {
+          "min_similarity_for_edge": 0.5,
+          "prune_threshold": 0.01,
+          "learning_rate": 0.05,
+          "top_k_coactivation": 3
+        }
+      },
+      "sleep": {
+        "ok": true,
+        "status": "completed",
+        "edge_discovery": {
+          "success": true,
+          "skipped": false,
+          "skip_reason": null,
+          "error": null,
+          "llm_calls": 0,
+          "memories_processed": 0,
+          "details": {
+            "message": "no_edge_candidates",
+            "sampled": 16,
+            "candidates": 0,
+            "filtered": 0,
+            "edges_created": 0,
+            "llm_accepted": 0,
+            "llm_rejected": 0,
+            "llm_call_failures": 0,
+            "auto_accepted": 0,
+            "edge_type_dist": {},
+            "avg_confidence": 0.0,
+            "median_confidence": 0.0,
+            "p25_confidence": 0.0,
+            "p75_confidence": 0.0,
+            "confidence_n": 0,
+            "confidence_imputed": 0,
+            "confidence_histogram": {
+              "0.0-0.5": 0,
+              "0.5-0.7": 0,
+              "0.7-0.85": 0,
+              "0.85-1.0": 0
+            },
+            "avg_confidence_rejected": 0.0,
+            "median_confidence_rejected": 0.0,
+            "p25_confidence_rejected": 0.0,
+            "p75_confidence_rejected": 0.0,
+            "confidence_n_rejected": 0,
+            "confidence_imputed_rejected": 0,
+            "confidence_histogram_rejected": {
+              "0.0-0.5": 0,
+              "0.5-0.7": 0,
+              "0.7-0.85": 0,
+              "0.85-1.0": 0
+            },
+            "llm_model": "gpt-5-nano",
+            "prompt_revision": "v3"
+          },
+          "llm_breakdown": [],
+          "embedding_calls": 0,
+          "embedding_tokens": 0
+        }
+      },
+      "checkpoints": {
+        "cold": {
+          "graph_lane": {
+            "n": 5,
+            "recovery@5": 0.0,
+            "recovery@10": 0.0,
+            "mrr@10": 0.0,
+            "seeds_in_graph": 0
+          },
+          "recall_lane": {
+            "n": 30,
+            "p@5": 0.2133,
+            "p@10": 0.1133,
+            "mrr@10": 1.0,
+            "ndcg@5": 0.9586,
+            "ndcg@10": 0.9707
+          },
+          "edge_stats": {}
+        },
+        "warm_replay": {
+          "graph_lane": {
+            "n": 5,
+            "recovery@5": 0.0,
+            "recovery@10": 0.0,
+            "mrr@10": 0.0,
+            "seeds_in_graph": 1
+          },
+          "recall_lane": {
+            "n": 30,
+            "p@5": 0.2133,
+            "p@10": 0.1133,
+            "mrr@10": 1.0,
+            "ndcg@5": 0.9586,
+            "ndcg@10": 0.9707
+          },
+          "edge_stats": {
+            "hebbian": {
+              "count": 6,
+              "avg_weight": 0.3336
+            }
+          }
+        },
+        "warm_sleep": {
+          "graph_lane": {
+            "n": 5,
+            "recovery@5": 0.0,
+            "recovery@10": 0.0,
+            "mrr@10": 0.0,
+            "seeds_in_graph": 1
+          },
+          "recall_lane": {
+            "n": 30,
+            "p@5": 0.2133,
+            "p@10": 0.1133,
+            "mrr@10": 1.0,
+            "ndcg@5": 0.9586,
+            "ndcg@10": 0.9707
+          },
+          "edge_stats": {
+            "hebbian": {
+              "count": 6,
+              "avg_weight": 0.3336
+            }
+          }
+        }
+      },
+      "lift": {
+        "graph_lane": {
+          "cold_to_warm_replay": {
+            "mrr@10": {
+              "cold": 0.0,
+              "warm": 0.0,
+              "abs": 0.0,
+              "rel": null
+            },
+            "recovery@10": {
+              "cold": 0.0,
+              "warm": 0.0,
+              "abs": 0.0,
+              "rel": null
+            },
+            "recovery@5": {
+              "cold": 0.0,
+              "warm": 0.0,
+              "abs": 0.0,
+              "rel": null
+            },
+            "seeds_in_graph": {
+              "cold": 0.0,
+              "warm": 1.0,
+              "abs": 1.0,
+              "rel": null
+            }
+          },
+          "warm_replay_to_warm_sleep": {
+            "mrr@10": {
+              "cold": 0.0,
+              "warm": 0.0,
+              "abs": 0.0,
+              "rel": null
+            },
+            "recovery@10": {
+              "cold": 0.0,
+              "warm": 0.0,
+              "abs": 0.0,
+              "rel": null
+            },
+            "recovery@5": {
+              "cold": 0.0,
+              "warm": 0.0,
+              "abs": 0.0,
+              "rel": null
+            },
+            "seeds_in_graph": {
+              "cold": 1.0,
+              "warm": 1.0,
+              "abs": 0.0,
+              "rel": 0.0
+            }
+          },
+          "cold_to_warm_sleep": {
+            "mrr@10": {
+              "cold": 0.0,
+              "warm": 0.0,
+              "abs": 0.0,
+              "rel": null
+            },
+            "recovery@10": {
+              "cold": 0.0,
+              "warm": 0.0,
+              "abs": 0.0,
+              "rel": null
+            },
+            "recovery@5": {
+              "cold": 0.0,
+              "warm": 0.0,
+              "abs": 0.0,
+              "rel": null
+            },
+            "seeds_in_graph": {
+              "cold": 0.0,
+              "warm": 1.0,
+              "abs": 1.0,
+              "rel": null
+            }
+          }
+        },
+        "recall_lane": {
+          "cold_to_warm_replay": {
+            "mrr@10": {
+              "cold": 1.0,
+              "warm": 1.0,
+              "abs": 0.0,
+              "rel": 0.0
+            },
+            "ndcg@10": {
+              "cold": 0.9707,
+              "warm": 0.9707,
+              "abs": 0.0,
+              "rel": 0.0
+            },
+            "ndcg@5": {
+              "cold": 0.9586,
+              "warm": 0.9586,
+              "abs": 0.0,
+              "rel": 0.0
+            },
+            "p@10": {
+              "cold": 0.1133,
+              "warm": 0.1133,
+              "abs": 0.0,
+              "rel": 0.0
+            },
+            "p@5": {
+              "cold": 0.2133,
+              "warm": 0.2133,
+              "abs": 0.0,
+              "rel": 0.0
+            }
+          },
+          "warm_replay_to_warm_sleep": {
+            "mrr@10": {
+              "cold": 1.0,
+              "warm": 1.0,
+              "abs": 0.0,
+              "rel": 0.0
+            },
+            "ndcg@10": {
+              "cold": 0.9707,
+              "warm": 0.9707,
+              "abs": 0.0,
+              "rel": 0.0
+            },
+            "ndcg@5": {
+              "cold": 0.9586,
+              "warm": 0.9586,
+              "abs": 0.0,
+              "rel": 0.0
+            },
+            "p@10": {
+              "cold": 0.1133,
+              "warm": 0.1133,
+              "abs": 0.0,
+              "rel": 0.0
+            },
+            "p@5": {
+              "cold": 0.2133,
+              "warm": 0.2133,
+              "abs": 0.0,
+              "rel": 0.0
+            }
+          },
+          "cold_to_warm_sleep": {
+            "mrr@10": {
+              "cold": 1.0,
+              "warm": 1.0,
+              "abs": 0.0,
+              "rel": 0.0
+            },
+            "ndcg@10": {
+              "cold": 0.9707,
+              "warm": 0.9707,
+              "abs": 0.0,
+              "rel": 0.0
+            },
+            "ndcg@5": {
+              "cold": 0.9586,
+              "warm": 0.9586,
+              "abs": 0.0,
+              "rel": 0.0
+            },
+            "p@10": {
+              "cold": 0.1133,
+              "warm": 0.1133,
+              "abs": 0.0,
+              "rel": 0.0
+            },
+            "p@5": {
+              "cold": 0.2133,
+              "warm": 0.2133,
+              "abs": 0.0,
+              "rel": 0.0
+            }
+          }
+        }
+      }
+    },
+    "include_probes": {
+      "mode": "include_probes",
+      "probe_count": 5,
+      "probe_query_ids": [
+        "q_cross_01",
+        "q_cross_02",
+        "q_cross_03",
+        "q_cross_04",
+        "q_cross_05"
+      ],
+      "replay_query_count": 30,
+      "replay_recalls": 240,
+      "gate_audit": {
+        "pair_observations": 90,
+        "verdicts": {
+          "gated_cosine": 73,
+          "gated_cosine+below_prune": 9,
+          "forms": 7,
+          "below_prune": 1
+        },
+        "probe_gold_pairs": [
+          {
+            "query_id": "q_exact_01",
+            "pair": [
+              "doc_mem_hybrid",
+              "doc_res_chunking"
+            ],
+            "cosine": 0.3983,
+            "delta_w": 0.0142,
+            "verdict": "gated_cosine"
+          },
+          {
+            "query_id": "q_exact_03",
+            "pair": [
+              "doc_res_chunking",
+              "doc_mem_hybrid"
+            ],
+            "cosine": 0.3983,
+            "delta_w": 0.0148,
+            "verdict": "gated_cosine"
+          },
+          {
+            "query_id": "q_exact_05",
+            "pair": [
+              "doc_res_embedding",
+              "doc_mem_context"
+            ],
+            "cosine": 0.3693,
+            "delta_w": 0.0197,
+            "verdict": "gated_cosine"
+          },
+          {
+            "query_id": "q_sem_01",
+            "pair": [
+              "doc_mem_hybrid",
+              "doc_res_chunking"
+            ],
+            "cosine": 0.3983,
+            "delta_w": 0.0185,
+            "verdict": "gated_cosine"
+          },
+          {
+            "query_id": "q_cross_01",
+            "pair": [
+              "doc_mem_hybrid",
+              "doc_res_chunking"
+            ],
+            "cosine": 0.3983,
+            "delta_w": 0.0364,
+            "verdict": "gated_cosine"
+          },
+          {
+            "query_id": "q_cross_02",
+            "pair": [
+              "doc_res_embedding",
+              "doc_mem_context"
+            ],
+            "cosine": 0.3693,
+            "delta_w": 0.0237,
+            "verdict": "gated_cosine"
+          },
+          {
+            "query_id": "q_mem_03",
+            "pair": [
+              "doc_mem_context",
+              "doc_res_embedding"
+            ],
+            "cosine": 0.3693,
+            "delta_w": 0.0274,
+            "verdict": "gated_cosine"
+          },
+          {
+            "query_id": "q_mem_05",
+            "pair": [
+              "doc_mem_hybrid",
+              "doc_res_chunking"
+            ],
+            "cosine": 0.3983,
+            "delta_w": 0.0346,
+            "verdict": "gated_cosine"
+          }
+        ],
+        "thresholds": {
+          "min_similarity_for_edge": 0.5,
+          "prune_threshold": 0.01,
+          "learning_rate": 0.05,
+          "top_k_coactivation": 3
+        }
+      },
+      "sleep": {
+        "ok": true,
+        "status": "completed",
+        "edge_discovery": {
+          "success": true,
+          "skipped": false,
+          "skip_reason": null,
+          "error": null,
+          "llm_calls": 0,
+          "memories_processed": 0,
+          "details": {
+            "message": "no_edge_candidates",
+            "sampled": 16,
+            "candidates": 0,
+            "filtered": 0,
+            "edges_created": 0,
+            "llm_accepted": 0,
+            "llm_rejected": 0,
+            "llm_call_failures": 0,
+            "auto_accepted": 0,
+            "edge_type_dist": {},
+            "avg_confidence": 0.0,
+            "median_confidence": 0.0,
+            "p25_confidence": 0.0,
+            "p75_confidence": 0.0,
+            "confidence_n": 0,
+            "confidence_imputed": 0,
+            "confidence_histogram": {
+              "0.0-0.5": 0,
+              "0.5-0.7": 0,
+              "0.7-0.85": 0,
+              "0.85-1.0": 0
+            },
+            "avg_confidence_rejected": 0.0,
+            "median_confidence_rejected": 0.0,
+            "p25_confidence_rejected": 0.0,
+            "p75_confidence_rejected": 0.0,
+            "confidence_n_rejected": 0,
+            "confidence_imputed_rejected": 0,
+            "confidence_histogram_rejected": {
+              "0.0-0.5": 0,
+              "0.5-0.7": 0,
+              "0.7-0.85": 0,
+              "0.85-1.0": 0
+            },
+            "llm_model": "gpt-5-nano",
+            "prompt_revision": "v3"
+          },
+          "llm_breakdown": [],
+          "embedding_calls": 0,
+          "embedding_tokens": 0
+        }
+      },
+      "checkpoints": {
+        "cold": {
+          "graph_lane": {
+            "n": 5,
+            "recovery@5": 0.0,
+            "recovery@10": 0.0,
+            "mrr@10": 0.0,
+            "seeds_in_graph": 0
+          },
+          "recall_lane": {
+            "n": 30,
+            "p@5": 0.2133,
+            "p@10": 0.1133,
+            "mrr@10": 1.0,
+            "ndcg@5": 0.9586,
+            "ndcg@10": 0.9707
+          },
+          "edge_stats": {}
+        },
+        "warm_replay": {
+          "graph_lane": {
+            "n": 5,
+            "recovery@5": 0.0,
+            "recovery@10": 0.0,
+            "mrr@10": 0.0,
+            "seeds_in_graph": 1
+          },
+          "recall_lane": {
+            "n": 30,
+            "p@5": 0.2133,
+            "p@10": 0.1133,
+            "mrr@10": 1.0,
+            "ndcg@5": 0.9586,
+            "ndcg@10": 0.9707
+          },
+          "edge_stats": {
+            "hebbian": {
+              "count": 6,
+              "avg_weight": 0.3713
+            }
+          }
+        },
+        "warm_sleep": {
+          "graph_lane": {
+            "n": 5,
+            "recovery@5": 0.0,
+            "recovery@10": 0.0,
+            "mrr@10": 0.0,
+            "seeds_in_graph": 1
+          },
+          "recall_lane": {
+            "n": 30,
+            "p@5": 0.2133,
+            "p@10": 0.1133,
+            "mrr@10": 1.0,
+            "ndcg@5": 0.9586,
+            "ndcg@10": 0.9707
+          },
+          "edge_stats": {
+            "hebbian": {
+              "count": 6,
+              "avg_weight": 0.3713
+            }
+          }
+        }
+      },
+      "lift": {
+        "graph_lane": {
+          "cold_to_warm_replay": {
+            "mrr@10": {
+              "cold": 0.0,
+              "warm": 0.0,
+              "abs": 0.0,
+              "rel": null
+            },
+            "recovery@10": {
+              "cold": 0.0,
+              "warm": 0.0,
+              "abs": 0.0,
+              "rel": null
+            },
+            "recovery@5": {
+              "cold": 0.0,
+              "warm": 0.0,
+              "abs": 0.0,
+              "rel": null
+            },
+            "seeds_in_graph": {
+              "cold": 0.0,
+              "warm": 1.0,
+              "abs": 1.0,
+              "rel": null
+            }
+          },
+          "warm_replay_to_warm_sleep": {
+            "mrr@10": {
+              "cold": 0.0,
+              "warm": 0.0,
+              "abs": 0.0,
+              "rel": null
+            },
+            "recovery@10": {
+              "cold": 0.0,
+              "warm": 0.0,
+              "abs": 0.0,
+              "rel": null
+            },
+            "recovery@5": {
+              "cold": 0.0,
+              "warm": 0.0,
+              "abs": 0.0,
+              "rel": null
+            },
+            "seeds_in_graph": {
+              "cold": 1.0,
+              "warm": 1.0,
+              "abs": 0.0,
+              "rel": 0.0
+            }
+          },
+          "cold_to_warm_sleep": {
+            "mrr@10": {
+              "cold": 0.0,
+              "warm": 0.0,
+              "abs": 0.0,
+              "rel": null
+            },
+            "recovery@10": {
+              "cold": 0.0,
+              "warm": 0.0,
+              "abs": 0.0,
+              "rel": null
+            },
+            "recovery@5": {
+              "cold": 0.0,
+              "warm": 0.0,
+              "abs": 0.0,
+              "rel": null
+            },
+            "seeds_in_graph": {
+              "cold": 0.0,
+              "warm": 1.0,
+              "abs": 1.0,
+              "rel": null
+            }
+          }
+        },
+        "recall_lane": {
+          "cold_to_warm_replay": {
+            "mrr@10": {
+              "cold": 1.0,
+              "warm": 1.0,
+              "abs": 0.0,
+              "rel": 0.0
+            },
+            "ndcg@10": {
+              "cold": 0.9707,
+              "warm": 0.9707,
+              "abs": 0.0,
+              "rel": 0.0
+            },
+            "ndcg@5": {
+              "cold": 0.9586,
+              "warm": 0.9586,
+              "abs": 0.0,
+              "rel": 0.0
+            },
+            "p@10": {
+              "cold": 0.1133,
+              "warm": 0.1133,
+              "abs": 0.0,
+              "rel": 0.0
+            },
+            "p@5": {
+              "cold": 0.2133,
+              "warm": 0.2133,
+              "abs": 0.0,
+              "rel": 0.0
+            }
+          },
+          "warm_replay_to_warm_sleep": {
+            "mrr@10": {
+              "cold": 1.0,
+              "warm": 1.0,
+              "abs": 0.0,
+              "rel": 0.0
+            },
+            "ndcg@10": {
+              "cold": 0.9707,
+              "warm": 0.9707,
+              "abs": 0.0,
+              "rel": 0.0
+            },
+            "ndcg@5": {
+              "cold": 0.9586,
+              "warm": 0.9586,
+              "abs": 0.0,
+              "rel": 0.0
+            },
+            "p@10": {
+              "cold": 0.1133,
+              "warm": 0.1133,
+              "abs": 0.0,
+              "rel": 0.0
+            },
+            "p@5": {
+              "cold": 0.2133,
+              "warm": 0.2133,
+              "abs": 0.0,
+              "rel": 0.0
+            }
+          },
+          "cold_to_warm_sleep": {
+            "mrr@10": {
+              "cold": 1.0,
+              "warm": 1.0,
+              "abs": 0.0,
+              "rel": 0.0
+            },
+            "ndcg@10": {
+              "cold": 0.9707,
+              "warm": 0.9707,
+              "abs": 0.0,
+              "rel": 0.0
+            },
+            "ndcg@5": {
+              "cold": 0.9586,
+              "warm": 0.9586,
+              "abs": 0.0,
+              "rel": 0.0
+            },
+            "p@10": {
+              "cold": 0.1133,
+              "warm": 0.1133,
+              "abs": 0.0,
+              "rel": 0.0
+            },
+            "p@5": {
+              "cold": 0.2133,
+              "warm": 0.2133,
+              "abs": 0.0,
+              "rel": 0.0
+            }
+          }
+        }
+      }
+    }
+  }
+}
