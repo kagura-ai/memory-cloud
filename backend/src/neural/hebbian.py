@@ -59,6 +59,8 @@ class HebbianLearner:
         activations: list[ActivationState],
         nodes: dict[str, NeuralMemoryNode],
         similarity_threshold: float | None = None,
+        floor_threshold: float | None = None,
+        co_activation_counts: dict[tuple[str, str], int] | None = None,
     ) -> None:
         """Queue Hebbian updates for co-activated nodes.
 
@@ -68,19 +70,39 @@ class HebbianLearner:
         provided (#982 calibrated edge-gate value), else
         ``config.min_similarity_for_edge``.
 
+        2D edge gate (#983): when ``floor_threshold`` and
+        ``co_activation_counts`` are provided (and
+        ``config.edge_gate_repetition_enabled``), pairs in the
+        [floor, threshold) cosine band are admitted once their repetition
+        evidence reaches ``config.min_co_activation_count`` — genuine
+        cross-topic associations are co-recalled repeatedly across queries,
+        noise pairs co-occur once by ranking accident. Below the floor stays
+        a hard reject.
+
         Args:
             user_id: User ID (for sharding)
             activations: List of activated nodes in this retrieval
             nodes: Map of node_id -> NeuralMemoryNode (for confidence scores)
             similarity_threshold: Per-call semantic-gate override (#982);
                 ``None`` falls back to ``config.min_similarity_for_edge``.
+            floor_threshold: Lower bound of the repetition band (#983);
+                ``None`` disables the repetition axis for this call.
+            co_activation_counts: Map of ``(node_id_1, node_id_2)`` — ordered
+                ``min, max`` — to same-event co-recall counts from the
+                ``CoActivationTracker`` (#983).
         """
         threshold = (
             similarity_threshold
             if similarity_threshold is not None
             else self.config.min_similarity_for_edge
         )
+        repetition_active = (
+            self.config.edge_gate_repetition_enabled
+            and floor_threshold is not None
+            and co_activation_counts is not None
+        )
         skipped = 0
+        admitted_by_repetition = 0
 
         for i, act_i in enumerate(activations):
             for act_j in activations[i + 1 :]:  # Avoid duplicates
@@ -90,12 +112,24 @@ class HebbianLearner:
                 if not node_i or not node_j:
                     continue
 
-                # Semantic gating: skip pairs below similarity threshold
+                # Semantic gating: skip pairs below similarity threshold,
+                # unless the repetition axis (#983) admits a band pair.
                 if node_i.embedding and node_j.embedding:
                     sim = cosine_similarity(node_i.embedding, node_j.embedding)
                     if sim < threshold:
-                        skipped += 1
-                        continue
+                        pair_key = (
+                            (act_i.node_id, act_j.node_id)
+                            if act_i.node_id < act_j.node_id
+                            else (act_j.node_id, act_i.node_id)
+                        )
+                        in_band = repetition_active and sim >= floor_threshold
+                        evidence = (
+                            co_activation_counts.get(pair_key, 0) if repetition_active else 0
+                        )
+                        if not (in_band and evidence >= self.config.min_co_activation_count):
+                            skipped += 1
+                            continue
+                        admitted_by_repetition += 1
 
                 # Get current weight (Issue #84: async)
                 current_weight = await self._get_current_weight(
@@ -132,6 +166,16 @@ class HebbianLearner:
         if skipped > 0:
             logger.debug(
                 "hebbian_semantic_gating", extra={"skipped": skipped, "threshold": threshold}
+            )
+
+        if admitted_by_repetition > 0:
+            logger.debug(
+                "hebbian_repetition_admitted",
+                extra={
+                    "admitted": admitted_by_repetition,
+                    "floor": floor_threshold,
+                    "min_count": self.config.min_co_activation_count,
+                },
             )
 
         logger.debug(

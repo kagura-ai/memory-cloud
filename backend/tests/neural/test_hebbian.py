@@ -13,6 +13,46 @@ from neural.hebbian import HebbianLearner
 from neural.models import ActivationState, MemoryKind, NeuralMemoryNode
 
 
+def _band_config(repetition_enabled: bool = True) -> NeuralMemoryConfig:
+    """Config for the 2D edge gate tests (#983)."""
+    return NeuralMemoryConfig(
+        learning_rate=0.1,
+        gradient_clipping=1.0,
+        min_similarity_for_edge=0.5,
+        min_co_activation_count=2,
+        edge_gate_repetition_enabled=repetition_enabled,
+    )
+
+
+def _band_nodes() -> dict[str, NeuralMemoryNode]:
+    """Two nodes whose embeddings sit in the [0.3, 0.45) cosine band (≈0.35)."""
+    import numpy as np
+
+    emb_a = [1.0, 0.0, 0.0] + [0.0] * 5
+    emb_b = [0.35, 0.9367, 0.0] + [0.0] * 5  # cosine ≈ 0.35 with emb_a
+    emb_a = (np.array(emb_a) / np.linalg.norm(emb_a)).tolist()
+    emb_b = (np.array(emb_b) / np.linalg.norm(emb_b)).tolist()
+    common = {
+        "user_id": "u",
+        "kind": MemoryKind.FACT,
+        "created_at": datetime.utcnow(),
+        "use_count": 0,
+        "importance": 0.5,
+        "confidence": 1.0,
+    }
+    return {
+        "a": NeuralMemoryNode(id="a", text="A", embedding=emb_a, **common),
+        "b": NeuralMemoryNode(id="b", text="B", embedding=emb_b, **common),
+    }
+
+
+def _band_activations() -> list[ActivationState]:
+    return [
+        ActivationState(node_id="a", activation=0.9),
+        ActivationState(node_id="b", activation=0.8),
+    ]
+
+
 class TestHebbianLearner:
     """Test Hebbian learning algorithm."""
 
@@ -356,6 +396,114 @@ class TestHebbianLearner:
         gate_learner = HebbianLearner(mock_graph, gate_cfg)
         await gate_learner.queue_update("u", activations, _nodes(), similarity_threshold=0.8)
         assert len(gate_learner._update_queue.get("u", [])) == 0
+
+    @pytest.mark.asyncio
+    async def test_2d_gate_band_pair_with_evidence_is_admitted(self, mock_graph):
+        """#983: cosine in [floor, threshold) + count >= min_co_activation_count
+        → the pair forms an edge via the repetition axis."""
+        learner = HebbianLearner(mock_graph, _band_config())
+        await learner.queue_update(
+            "u",
+            _band_activations(),
+            _band_nodes(),
+            similarity_threshold=0.45,
+            floor_threshold=0.3,
+            co_activation_counts={("a", "b"): 2},
+        )
+        assert len(learner._update_queue["u"]) == 2  # bidirectional
+
+    @pytest.mark.asyncio
+    async def test_2d_gate_band_pair_without_evidence_is_skipped(self, mock_graph):
+        """#983: a band pair seen only once is still gated (noise default)."""
+        learner = HebbianLearner(mock_graph, _band_config())
+        await learner.queue_update(
+            "u",
+            _band_activations(),
+            _band_nodes(),
+            similarity_threshold=0.45,
+            floor_threshold=0.3,
+            co_activation_counts={("a", "b"): 1},
+        )
+        assert len(learner._update_queue.get("u", [])) == 0
+
+    @pytest.mark.asyncio
+    async def test_2d_gate_disabled_restores_1d_behavior(self, mock_graph):
+        """#983 rollback switch: repetition disabled → band pair gated even
+        with abundant evidence."""
+        learner = HebbianLearner(mock_graph, _band_config(repetition_enabled=False))
+        await learner.queue_update(
+            "u",
+            _band_activations(),
+            _band_nodes(),
+            similarity_threshold=0.45,
+            floor_threshold=0.3,
+            co_activation_counts={("a", "b"): 10},
+        )
+        assert len(learner._update_queue.get("u", [])) == 0
+
+    @pytest.mark.asyncio
+    async def test_2d_gate_below_floor_rejected_despite_evidence(self, mock_graph):
+        """#983: the floor stays a hard reject — repetition cannot admit
+        pairs below it."""
+        import numpy as np
+
+        emb_a = (np.array([1.0, 0.0, 0.0] + [0.0] * 5)).tolist()
+        emb_c = [0.1, 0.995, 0.0] + [0.0] * 5  # cosine ≈ 0.1 < floor 0.3
+        emb_c = (np.array(emb_c) / np.linalg.norm(emb_c)).tolist()
+        nodes = _band_nodes()
+        nodes["b"].embedding = emb_c
+        nodes["a"].embedding = emb_a
+
+        learner = HebbianLearner(mock_graph, _band_config())
+        await learner.queue_update(
+            "u",
+            _band_activations(),
+            nodes,
+            similarity_threshold=0.45,
+            floor_threshold=0.3,
+            co_activation_counts={("a", "b"): 10},
+        )
+        assert len(learner._update_queue.get("u", [])) == 0
+
+    @pytest.mark.asyncio
+    async def test_2d_gate_above_threshold_needs_no_evidence(self, mock_graph):
+        """#983: pairs at/above the calibrated threshold form immediately —
+        the repetition axis only governs the band."""
+        import numpy as np
+
+        emb_a = [1.0, 0.0, 0.0] + [0.0] * 5
+        emb_b = [0.6, 0.8, 0.0] + [0.0] * 5  # cosine 0.6 >= 0.45
+        nodes = _band_nodes()
+        nodes["a"].embedding = (np.array(emb_a) / np.linalg.norm(emb_a)).tolist()
+        nodes["b"].embedding = (np.array(emb_b) / np.linalg.norm(emb_b)).tolist()
+
+        learner = HebbianLearner(mock_graph, _band_config())
+        await learner.queue_update(
+            "u",
+            _band_activations(),
+            nodes,
+            similarity_threshold=0.45,
+            floor_threshold=0.3,
+            co_activation_counts={},  # no evidence anywhere
+        )
+        assert len(learner._update_queue["u"]) == 2
+
+    @pytest.mark.asyncio
+    async def test_2d_gate_counts_key_is_order_normalized(self, mock_graph):
+        """#983: count lookup must normalize the pair key (min, max) so the
+        caller's record ordering always matches."""
+        learner = HebbianLearner(mock_graph, _band_config())
+        # Activations listed b-first → naive (i, j) key would be ("b", "a").
+        activations = list(reversed(_band_activations()))
+        await learner.queue_update(
+            "u",
+            activations,
+            _band_nodes(),
+            similarity_threshold=0.45,
+            floor_threshold=0.3,
+            co_activation_counts={("a", "b"): 2},
+        )
+        assert len(learner._update_queue["u"]) == 2
 
     @pytest.mark.asyncio
     async def test_prune_weak_edges_excludes_semantic_origin(self, mock_graph):
