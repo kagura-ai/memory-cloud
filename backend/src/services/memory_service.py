@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import asyncio
 import functools
+import hashlib
 from uuid import UUID, uuid4
 
 from sqlalchemy import and_, or_, select
@@ -1689,12 +1690,18 @@ class MemoryService:
                     )
                     edge_floor = min(config.min_similarity_for_edge_floor, effective_threshold)
 
+                # Distinct-query evidence dedup (#983): the same query
+                # replayed N times re-produces its top-k — one ranking
+                # accident is one observation, however often it repeats.
+                query_event_key = hashlib.sha256(request.query.encode("utf-8")).hexdigest()[:16]
+
                 updated_records = co_activation_tracker.record_activation(
                     user_id,
                     activated_nodes,
                     embeddings=embedding_map,
                     similarity_threshold=edge_threshold,
                     floor_threshold=edge_floor,
+                    event_key=query_event_key,
                 )
                 co_activation_counts = (
                     {(r.node_id_1, r.node_id_2): r.same_event_count for r in updated_records}

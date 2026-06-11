@@ -57,6 +57,7 @@ class CoActivationTracker:
         embeddings: dict[str, list[float]] | None = None,
         similarity_threshold: float | None = None,
         floor_threshold: float | None = None,
+        event_key: str | None = None,
     ) -> list[CoActivationRecord]:
         """Record an activation event and detect co-activations.
 
@@ -78,6 +79,10 @@ class CoActivationTracker:
                 outright. Edge materialization for band pairs is decided
                 downstream by ``HebbianLearner.queue_update`` via the
                 repetition requirement. ``None`` keeps the 1-D gate.
+            event_key: Stable fingerprint of the triggering query (#983).
+                Evidence is counted once per distinct key so replaying the
+                same query cannot inflate it; ``None`` falls back to
+                per-event counting.
 
         Returns:
             List of co-activation records updated/created in this event
@@ -119,6 +124,7 @@ class CoActivationTracker:
                 activation_1=act_1,
                 activation_2=act_2,
                 same_event=same_event,
+                event_key=event_key,
             )
             updated_records.append(record)
 
@@ -318,6 +324,7 @@ class CoActivationTracker:
         activation_1: float,
         activation_2: float,
         same_event: bool = False,
+        event_key: str | None = None,
     ) -> CoActivationRecord:
         """Update or create a co-activation record.
 
@@ -329,6 +336,7 @@ class CoActivationTracker:
             activation_2: Activation strength of node 2
             same_event: True when both nodes appeared in the same activation
                 event (#983 repetition evidence)
+            event_key: Distinct-query fingerprint for evidence dedup (#983)
 
         Returns:
             Updated/created CoActivationRecord
@@ -343,7 +351,7 @@ class CoActivationTracker:
         if key in self._co_activation_records[user_id]:
             # Update existing record
             record = self._co_activation_records[user_id][key]
-            record.update(activation_1, activation_2, same_event=same_event)
+            record.update(activation_1, activation_2, same_event=same_event, event_key=event_key)
         else:
             # Create new record
             record = CoActivationRecord(
@@ -353,6 +361,7 @@ class CoActivationTracker:
                 total_activation_product=activation_1 * activation_2,
                 user_id=user_id,
                 same_event_count=1 if same_event else 0,
+                evidence_keys={event_key} if (same_event and event_key) else set(),
             )
             self._co_activation_records[user_id][key] = record
 
@@ -432,6 +441,7 @@ class CoActivationTracker:
             record_dict = {
                 "count": record.count,
                 "same_event_count": record.same_event_count,
+                "evidence_keys": sorted(record.evidence_keys),
                 "total_activation_product": record.total_activation_product,
                 "first_seen": record.first_seen.isoformat(),
                 "last_seen": record.last_co_activation.isoformat(),
@@ -476,6 +486,7 @@ class CoActivationTracker:
                 user_id=user_id,
                 # Pre-#983 records have no same_event_count — default to 0.
                 same_event_count=record_dict.get("same_event_count", 0),
+                evidence_keys=set(record_dict.get("evidence_keys", [])),
             )
 
             # Restore timestamps

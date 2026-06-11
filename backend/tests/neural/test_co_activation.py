@@ -682,3 +682,55 @@ class TestRepetitionEvidence:
         assert record is not None
         assert record.count == 1
         assert record.same_event_count == 1
+
+    def test_repeated_query_does_not_inflate_evidence(self, tracker):
+        """Same query (same event_key) replayed N times → evidence stays 1.
+
+        This is the distinct-query-context requirement: a noise pair inside
+        one query's top-k re-co-occurs every time that query is repeated
+        (eval replay rounds, production rehearsal) — repetition of ONE
+        ranking accident is not independent evidence."""
+        for _ in range(3):
+            tracker.record_activation(
+                "user1",
+                self._activations("a", "b"),
+                embeddings=self._band_pair(),
+                similarity_threshold=0.45,
+                floor_threshold=0.3,
+                event_key="query-1",
+            )
+        record = tracker.get_co_activation_record("user1", "a", "b")
+        assert record is not None
+        assert record.same_event_count == 1
+
+    def test_distinct_queries_accumulate_evidence(self, tracker):
+        """Different queries co-recalling the same pair → evidence grows.
+
+        Genuine cross-topic associations surface in the top-k of *different*
+        queries; that is the signal the 2D gate trusts."""
+        for key in ("query-1", "query-2", "query-3"):
+            tracker.record_activation(
+                "user1",
+                self._activations("a", "b"),
+                embeddings=self._band_pair(),
+                similarity_threshold=0.45,
+                floor_threshold=0.3,
+                event_key=key,
+            )
+        record = tracker.get_co_activation_record("user1", "a", "b")
+        assert record is not None
+        assert record.same_event_count == 3
+
+    def test_no_event_key_falls_back_to_per_event_counting(self, tracker):
+        """event_key=None (legacy callers) → every joint event counts."""
+        for _ in range(2):
+            tracker.record_activation(
+                "user1",
+                self._activations("a", "b"),
+                embeddings=self._band_pair(),
+                similarity_threshold=0.45,
+                floor_threshold=0.3,
+            )
+        record = tracker.get_co_activation_record("user1", "a", "b")
+        assert record is not None
+        assert record.same_event_count == 2

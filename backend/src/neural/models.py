@@ -136,6 +136,12 @@ class CoActivationRecord:
             the 2D edge gate consults — window-based cross-event co-occurrence
             increments ``count`` but not this field, so a node lingering in
             the time window cannot inflate the evidence.
+        evidence_keys: Distinct event keys (query fingerprints) that produced
+            same-event evidence (#983). When a key is supplied, repeating the
+            SAME query cannot inflate ``same_event_count`` — one ranking
+            accident replayed N times is still one observation. Capped at
+            ``_EVIDENCE_KEYS_CAP`` (evidence saturates far above the gate's
+            ``min_co_activation_count`` requirement).
     """
 
     node_id_1: str
@@ -146,6 +152,9 @@ class CoActivationRecord:
     user_id: str = ""
     first_seen: datetime = field(default_factory=utcnow)  # Issue #84 Phase 2C
     same_event_count: int = 0  # Issue #983: joint same-event recalls
+    evidence_keys: set[str] = field(default_factory=set)  # Issue #983
+
+    _EVIDENCE_KEYS_CAP = 16
 
     def __post_init__(self) -> None:
         """Ensure node IDs are ordered."""
@@ -153,7 +162,13 @@ class CoActivationRecord:
             # Swap to maintain ordering
             self.node_id_1, self.node_id_2 = self.node_id_2, self.node_id_1
 
-    def update(self, activation_1: float, activation_2: float, same_event: bool = False) -> None:
+    def update(
+        self,
+        activation_1: float,
+        activation_2: float,
+        same_event: bool = False,
+        event_key: str | None = None,
+    ) -> None:
         """Update co-activation statistics.
 
         Args:
@@ -161,10 +176,20 @@ class CoActivationRecord:
             activation_2: Activation strength of node 2
             same_event: True when both nodes appeared in the same activation
                 event (#983) — increments the repetition-evidence counter
+            event_key: Stable fingerprint of the triggering query (#983).
+                When provided, evidence is counted once per DISTINCT key;
+                ``None`` falls back to per-event counting (legacy callers).
         """
         self.count += 1
         if same_event:
-            self.same_event_count += 1
+            if event_key is None:
+                self.same_event_count += 1
+            elif (
+                event_key not in self.evidence_keys
+                and len(self.evidence_keys) < self._EVIDENCE_KEYS_CAP
+            ):
+                self.same_event_count += 1
+                self.evidence_keys.add(event_key)
         self.total_activation_product += activation_1 * activation_2
         self.last_co_activation = utcnow()  # Issue #84 Phase 2C
 
