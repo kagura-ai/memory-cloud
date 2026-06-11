@@ -53,6 +53,22 @@ def _band_activations() -> list[ActivationState]:
     ]
 
 
+def _tracker_with_record(config, pair: tuple[str, str] = ("a", "b")):
+    """A CoActivationTracker pre-seeded with a record for ``pair`` so the
+    Hebbian learner has somewhere to ride pending weight (#983). In production
+    every queued pair already has a record from the same recall's
+    record_activation; tests seed it directly."""
+    from neural.co_activation import CoActivationTracker
+    from neural.models import CoActivationRecord
+
+    tracker = CoActivationTracker(config)
+    n1, n2 = sorted(pair)
+    tracker._co_activation_records["u"][(n1, n2)] = CoActivationRecord(
+        node_id_1=n1, node_id_2=n2, user_id="u"
+    )
+    return tracker
+
+
 class TestHebbianLearner:
     """Test Hebbian learning algorithm."""
 
@@ -508,20 +524,22 @@ class TestHebbianLearner:
     @pytest.mark.asyncio
     async def test_cliff_subthreshold_first_update_is_stashed_not_dropped(self, mock_graph):
         """#983 prune-cliff fix: a first Δw below prune_threshold must be
-        accumulated as pending weight, not silently dropped — ~12% of
-        observed pairs in the #969 audit could never accumulate."""
+        accumulated as pending weight on the (Redis-persisted) co-activation
+        record, not silently dropped — ~12% of observed pairs in the #969
+        audit could never accumulate."""
         config = NeuralMemoryConfig(learning_rate=0.1, gradient_clipping=1.0, prune_threshold=0.05)
         mock_graph.get_edge = AsyncMock(return_value=None)
         mock_graph.has_edge = AsyncMock(return_value=False)
         mock_graph.add_edge = AsyncMock()
-        learner = HebbianLearner(mock_graph, config)
+        tracker = _tracker_with_record(config)
+        learner = HebbianLearner(mock_graph, config, tracker)
 
         result = await learner._apply_update_to_edge("u", "a", "b", 0.03)
 
         assert result == 0.0  # no edge yet (counting semantics unchanged)
         mock_graph.add_edge.assert_not_called()
         mock_graph.remove_edge.assert_not_called()
-        assert learner._pending_weights["u"][("a", "b")] == pytest.approx(0.03)
+        assert tracker.get_co_activation_record("u", "a", "b").pending_weight == pytest.approx(0.03)
 
     @pytest.mark.asyncio
     async def test_cliff_accumulated_pending_materializes_edge(self, mock_graph):
@@ -531,7 +549,8 @@ class TestHebbianLearner:
         mock_graph.get_edge = AsyncMock(return_value=None)
         mock_graph.has_edge = AsyncMock(return_value=False)
         mock_graph.add_edge = AsyncMock()
-        learner = HebbianLearner(mock_graph, config)
+        tracker = _tracker_with_record(config)
+        learner = HebbianLearner(mock_graph, config, tracker)
 
         await learner._apply_update_to_edge("u", "a", "b", 0.03)
         result = await learner._apply_update_to_edge("u", "a", "b", 0.03)
@@ -539,7 +558,60 @@ class TestHebbianLearner:
         assert result == pytest.approx(0.06)
         mock_graph.add_edge.assert_called_once()
         assert mock_graph.add_edge.call_args.kwargs["weight"] == pytest.approx(0.06)
-        assert ("a", "b") not in learner._pending_weights["u"]
+        assert tracker.get_co_activation_record("u", "a", "b").pending_weight == 0.0
+
+    @pytest.mark.asyncio
+    async def test_cliff_no_tracker_drops_subthreshold_first_update(self, mock_graph):
+        """#983: without a co-activation tracker the learner cannot persist
+        pending weight, so it falls back to the pre-#983 behavior (drop the
+        sub-threshold first update) rather than silently stashing it in a
+        volatile per-instance dict that never survives the recall."""
+        config = NeuralMemoryConfig(learning_rate=0.1, gradient_clipping=1.0, prune_threshold=0.05)
+        mock_graph.get_edge = AsyncMock(return_value=None)
+        mock_graph.has_edge = AsyncMock(return_value=False)
+        mock_graph.add_edge = AsyncMock()
+        learner = HebbianLearner(mock_graph, config)  # no tracker
+
+        first = await learner._apply_update_to_edge("u", "a", "b", 0.03)
+        second = await learner._apply_update_to_edge("u", "a", "b", 0.03)
+
+        assert first == 0.0 and second == 0.0
+        mock_graph.add_edge.assert_not_called()  # never accumulates → never materializes
+
+    @pytest.mark.asyncio
+    async def test_cliff_bidirectional_pass_does_not_double_count(self, mock_graph):
+        """#983 regression: apply_updates issues both (a,b) and (b,a); the
+        pending read must be snapshotted before the pass so the second
+        direction does not see the first direction's write and double-count."""
+        config = NeuralMemoryConfig(learning_rate=0.1, gradient_clipping=1.0, prune_threshold=0.05)
+        mock_graph.get_edge = AsyncMock(return_value=None)
+        mock_graph.has_edge = AsyncMock(return_value=False)
+        mock_graph.add_edge = AsyncMock()
+        tracker = _tracker_with_record(config)
+        learner = HebbianLearner(mock_graph, config, tracker)
+
+        # High-similarity embeddings so the pair passes the cosine gate and is
+        # queued; tiny activations so Δw = 0.1 * 0.1 * 0.1 = 0.001 < prune 0.05.
+        nodes = _band_nodes()
+        import numpy as np
+
+        emb = (np.array([1.0, 0.9, 0.1] + [0.0] * 5)).tolist()
+        emb = (np.array(emb) / np.linalg.norm(emb)).tolist()
+        nodes["a"].embedding = emb
+        nodes["b"].embedding = emb  # cosine 1.0 → passes gate
+        activations = [
+            ActivationState(node_id="a", activation=0.1),
+            ActivationState(node_id="b", activation=0.1),
+        ]
+        await learner.queue_update("u", activations, nodes)
+        await learner.apply_updates("u")
+
+        # Both directions saw snapshot pending=0 → each stashes 0.001, not 0.002,
+        # and neither materializes.
+        mock_graph.add_edge.assert_not_called()
+        assert tracker.get_co_activation_record("u", "a", "b").pending_weight == pytest.approx(
+            0.001
+        )
 
     @pytest.mark.asyncio
     async def test_cliff_existing_edge_below_threshold_still_pruned(self, mock_graph):
@@ -550,13 +622,14 @@ class TestHebbianLearner:
         mock_graph.get_edge = AsyncMock(return_value={"weight": 0.04})
         mock_graph.has_edge = AsyncMock(return_value=True)
         mock_graph.add_edge = AsyncMock()
-        learner = HebbianLearner(mock_graph, config)
+        tracker = _tracker_with_record(config)
+        learner = HebbianLearner(mock_graph, config, tracker)
 
         result = await learner._apply_update_to_edge("u", "a", "b", -0.02)
 
         assert result == 0.0
         mock_graph.remove_edge.assert_called_once()
-        assert ("a", "b") not in learner._pending_weights["u"]
+        assert tracker.get_co_activation_record("u", "a", "b").pending_weight == 0.0
 
     @pytest.mark.asyncio
     async def test_prune_weak_edges_excludes_semantic_origin(self, mock_graph):

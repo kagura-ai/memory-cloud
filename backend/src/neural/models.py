@@ -141,7 +141,13 @@ class CoActivationRecord:
             SAME query cannot inflate ``same_event_count`` — one ranking
             accident replayed N times is still one observation. Capped at
             ``_EVIDENCE_KEYS_CAP`` (evidence saturates far above the gate's
-            ``min_co_activation_count`` requirement).
+            ``edge_gate_min_evidence`` requirement, which config validation
+            keeps <= the cap).
+        pending_weight: Sub-threshold Hebbian weight accumulated for a pair
+            whose edge has not yet materialized (#983 prune-cliff fix). Stored
+            here (rather than on the per-recall HebbianLearner) so it rides
+            this record's Redis persistence and GDPR ``clear_user_data`` path
+            instead of evaporating when the recall handler returns.
     """
 
     node_id_1: str
@@ -153,6 +159,7 @@ class CoActivationRecord:
     first_seen: datetime = field(default_factory=utcnow)  # Issue #84 Phase 2C
     same_event_count: int = 0  # Issue #983: joint same-event recalls
     evidence_keys: set[str] = field(default_factory=set)  # Issue #983
+    pending_weight: float = 0.0  # Issue #983: prune-cliff accumulation
 
     _EVIDENCE_KEYS_CAP = 16
 

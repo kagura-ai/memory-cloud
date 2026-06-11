@@ -442,6 +442,7 @@ class CoActivationTracker:
                 "count": record.count,
                 "same_event_count": record.same_event_count,
                 "evidence_keys": sorted(record.evidence_keys),
+                "pending_weight": record.pending_weight,
                 "total_activation_product": record.total_activation_product,
                 "first_seen": record.first_seen.isoformat(),
                 "last_seen": record.last_co_activation.isoformat(),
@@ -487,6 +488,7 @@ class CoActivationTracker:
                 # Pre-#983 records have no same_event_count — default to 0.
                 same_event_count=record_dict.get("same_event_count", 0),
                 evidence_keys=set(record_dict.get("evidence_keys", [])),
+                pending_weight=record_dict.get("pending_weight", 0.0),
             )
 
             # Restore timestamps

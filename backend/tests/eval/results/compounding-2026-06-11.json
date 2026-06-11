@@ -122,7 +122,7 @@
               "doc_res_embedding"
             ],
             "cosine": 0.3693,
-            "delta_w": 0.0276,
+            "delta_w": 0.0275,
             "verdict": "gated_cosine"
           },
           {
@@ -381,7 +381,7 @@
           "edge_stats": {
             "hebbian": {
               "count": 14,
-              "avg_weight": 0.3989
+              "avg_weight": 0.3991
             }
           }
         },
@@ -404,7 +404,7 @@
           "edge_stats": {
             "hebbian": {
               "count": 14,
-              "avg_weight": 0.3989
+              "avg_weight": 0.3991
             }
           }
         }
@@ -680,7 +680,7 @@
               "doc_mem_context"
             ],
             "cosine": 0.3693,
-            "delta_w": 0.0194,
+            "delta_w": 0.0195,
             "verdict": "gated_cosine"
           },
           {
@@ -700,7 +700,7 @@
               "doc_res_chunking"
             ],
             "cosine": 0.3983,
-            "delta_w": 0.0363,
+            "delta_w": 0.0362,
             "verdict": "forms_repetition"
           },
           {
@@ -710,7 +710,7 @@
               "doc_mem_context"
             ],
             "cosine": 0.3693,
-            "delta_w": 0.0231,
+            "delta_w": 0.0232,
             "verdict": "gated_cosine"
           },
           {
@@ -720,7 +720,7 @@
               "doc_res_embedding"
             ],
             "cosine": 0.3693,
-            "delta_w": 0.0276,
+            "delta_w": 0.0275,
             "verdict": "gated_cosine"
           },
           {
@@ -997,7 +997,7 @@
           "edge_stats": {
             "hebbian": {
               "count": 16,
-              "avg_weight": 0.4844
+              "avg_weight": 0.4846
             }
           }
         },
@@ -1020,7 +1020,7 @@
           "edge_stats": {
             "hebbian": {
               "count": 16,
-              "avg_weight": 0.4844
+              "avg_weight": 0.4846
             }
           }
         }

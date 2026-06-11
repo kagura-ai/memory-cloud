@@ -140,6 +140,18 @@ class TestEdgeGateRepetitionConfig:
         with pytest.raises(ValueError, match="edge_gate_min_evidence"):
             NeuralMemoryConfig(edge_gate_min_evidence=0)
 
+    def test_min_evidence_cannot_exceed_evidence_keys_cap(self):
+        """A min_evidence above the per-record evidence_keys cap would make the
+        2D band gate silently unsatisfiable (same_event_count saturates at the
+        cap), so config construction must reject it."""
+        from neural.models import CoActivationRecord
+
+        cap = CoActivationRecord._EVIDENCE_KEYS_CAP
+        # At the cap is allowed; one above is rejected.
+        NeuralMemoryConfig(edge_gate_min_evidence=cap)
+        with pytest.raises(ValueError, match="edge_gate_min_evidence"):
+            NeuralMemoryConfig(edge_gate_min_evidence=cap + 1)
+
 
 class TestSleepMaintenanceConfig:
     """Test Sleep Maintenance configuration fields (Issue #101)."""

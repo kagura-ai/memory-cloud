@@ -300,6 +300,17 @@ class NeuralMemoryConfig:
             raise ValueError(
                 f"edge_gate_min_evidence must be positive, got {self.edge_gate_min_evidence}"
             )
+        # The repetition evidence counter (CoActivationRecord.same_event_count)
+        # saturates at the per-record evidence_keys cap; a requirement above it
+        # would make the 2D band gate silently unsatisfiable (#983).
+        from .models import CoActivationRecord
+
+        _evidence_cap = CoActivationRecord._EVIDENCE_KEYS_CAP
+        if self.edge_gate_min_evidence > _evidence_cap:
+            raise ValueError(
+                f"edge_gate_min_evidence ({self.edge_gate_min_evidence}) must not exceed the "
+                f"evidence_keys cap ({_evidence_cap}); above it the 2D band gate can never form"
+            )
         if not (0.0 <= self.min_similarity_for_edge <= 1.0):
             raise ValueError(
                 f"min_similarity_for_edge must be in [0, 1], got {self.min_similarity_for_edge}"

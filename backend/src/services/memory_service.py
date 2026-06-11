@@ -1592,9 +1592,11 @@ class MemoryService:
                     context_id=str(current_context_id) if current_context_id else None,
                 )
 
-                hebbian_learner = HebbianLearner(graph_service, config)
                 co_activation_tracker = CoActivationTracker(config)
                 await co_activation_tracker.load_from_redis(user_id)
+                # #983: the learner reads/writes the cliff pending_weight on the
+                # tracker's records so it survives this per-recall instance.
+                hebbian_learner = HebbianLearner(graph_service, config, co_activation_tracker)
 
                 # Only co-activate top-k results for higher-quality edges
                 coactivation_k = min(config.top_k_coactivation, request.k, len(search_results))
@@ -1708,7 +1710,9 @@ class MemoryService:
                     if edge_floor is not None
                     else None
                 )
-                await co_activation_tracker.save_to_redis(user_id)
+                # NOTE: save_to_redis is deferred until AFTER apply_updates so
+                # the persisted records also capture the cliff pending_weight
+                # the Hebbian pass writes (#983).
 
                 # Add nodes to graph
                 nodes_added = 0
@@ -1740,6 +1744,11 @@ class MemoryService:
                     co_activation_counts=co_activation_counts,
                 )
                 edges_updated = await hebbian_learner.apply_updates(user_id)
+
+                # #983: persist co-activation records now — this captures both
+                # the same-event evidence (record_activation) and the cliff
+                # pending_weight (apply_updates) in a single round-trip.
+                await co_activation_tracker.save_to_redis(user_id)
 
                 logger.info(
                     "graph_updated",
