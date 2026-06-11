@@ -526,6 +526,10 @@ async def _gate_audit(
     # edge-gate threshold the live replay path applied (#982) — auditing against
     # the absolute config value would mislabel pairs the calibrated gate formed.
     raw_pairs: list[tuple[str, str, str, float | None, float, bool]] = []
+    # #983: distinct replay queries that co-recalled each pair — mirrors the
+    # runtime's event_key dedup (replaying one query N times is still one
+    # observation; only co-recall across DIFFERENT queries is evidence).
+    pair_evidence: dict[frozenset[str], set[str]] = {}
     dims: int | None = None
     for query_id in plan.replay_query_ids:
         results = await svc.search_service.hybrid_search(
@@ -552,6 +556,8 @@ async def _gate_audit(
                     dims = len(emb_a)
                 cosine = cosine_similarity(emb_a, emb_b) if emb_a and emb_b else None
                 delta_w = config.learning_rate * act_a * act_b
+                pair_set = frozenset((doc_a, doc_b))
+                pair_evidence.setdefault(pair_set, set()).add(query_id)
                 raw_pairs.append(
                     (
                         query_id,
@@ -559,7 +565,7 @@ async def _gate_audit(
                         doc_b,
                         cosine,
                         delta_w,
-                        frozenset((doc_a, doc_b)) in gold_pairs,
+                        pair_set in gold_pairs,
                     )
                 )
 
@@ -574,7 +580,13 @@ async def _gate_audit(
             db=db, config=config, model_name=ctx_cfg.embedding_model, dimensions=dims
         )
 
-    # Pass 2: classify against the resolved threshold.
+    # 2D edge gate (#983): mirror the runtime's floor clamp — the repetition
+    # band can only widen the gate downward, never tighten it.
+    edge_floor: float | None = None
+    if config.edge_gate_repetition_enabled:
+        edge_floor = min(config.min_similarity_for_edge_floor, edge_threshold)
+
+    # Pass 2: classify against the resolved threshold (+ repetition evidence).
     audits = [
         PairAudit(
             query_id=query_id,
@@ -587,6 +599,9 @@ async def _gate_audit(
                 delta_w,
                 min_similarity=edge_threshold,
                 prune_threshold=config.prune_threshold,
+                floor=edge_floor,
+                evidence_count=len(pair_evidence.get(frozenset((doc_a, doc_b)), set())),
+                min_evidence=config.min_co_activation_count,
             ),
             is_probe_gold_pair=is_gold,
         )
@@ -600,6 +615,10 @@ async def _gate_audit(
         "min_similarity_for_edge": edge_threshold,
         # Kept for reference so a report shows whether calibration was in effect.
         "min_similarity_for_edge_absolute": config.min_similarity_for_edge,
+        # 2D edge gate (#983): the repetition band and its count requirement.
+        "edge_gate_repetition_enabled": config.edge_gate_repetition_enabled,
+        "min_similarity_for_edge_floor": edge_floor,
+        "min_co_activation_count": config.min_co_activation_count,
         "prune_threshold": config.prune_threshold,
         "learning_rate": config.learning_rate,
         "top_k_coactivation": config.top_k_coactivation,

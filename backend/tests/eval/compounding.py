@@ -148,20 +148,42 @@ class PairAudit:
 
 
 def classify_pair(
-    cosine: float | None, delta_w: float, *, min_similarity: float, prune_threshold: float
+    cosine: float | None,
+    delta_w: float,
+    *,
+    min_similarity: float,
+    prune_threshold: float,
+    floor: float | None = None,
+    evidence_count: int = 0,
+    min_evidence: int = 2,
 ) -> str:
     """Classify a co-activated pair against the edge-formation gates.
 
-    Returns ``forms``, ``gated_cosine``, ``below_prune``, or
-    ``gated_cosine+below_prune``. A ``None`` cosine mirrors recall()'s
-    behaviour for missing embeddings: the semantic gate is skipped.
+    Returns ``forms``, ``forms_repetition``, ``gated_cosine``,
+    ``below_prune``, or ``gated_cosine+below_prune``. A ``None`` cosine
+    mirrors recall()'s behaviour for missing embeddings: the semantic gate
+    is skipped.
+
+    2D edge gate (#983): when ``floor`` is provided, a pair whose cosine
+    falls in ``[floor, min_similarity)`` clears the semantic gate via the
+    repetition axis once ``evidence_count`` (distinct-query co-recalls)
+    reaches ``min_evidence`` — verdict ``forms_repetition``. The repetition
+    axis clears the cosine gate only; the prune cliff classifies
+    independently (a sub-prune first delta accumulates at runtime).
     """
     gates = []
+    repetition_admitted = False
     if cosine is not None and cosine < min_similarity:
-        gates.append("gated_cosine")
+        in_band = floor is not None and cosine >= floor
+        if in_band and evidence_count >= min_evidence:
+            repetition_admitted = True
+        else:
+            gates.append("gated_cosine")
     if delta_w < prune_threshold:
         gates.append("below_prune")
-    return "+".join(gates) if gates else "forms"
+    if gates:
+        return "+".join(gates)
+    return "forms_repetition" if repetition_admitted else "forms"
 
 
 def summarize_gate_audit(pairs: list[PairAudit]) -> dict[str, Any]:
@@ -184,7 +206,7 @@ def summarize_gate_audit(pairs: list[PairAudit]) -> dict[str, Any]:
     non_gold_pair_count = 0
     for pair in pairs:
         verdicts[pair.verdict] = verdicts.get(pair.verdict, 0) + 1
-        formed = pair.verdict == "forms"
+        formed = pair.verdict in ("forms", "forms_repetition")
         if pair.is_probe_gold_pair:
             if formed:
                 formed_gold += 1

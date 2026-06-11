@@ -186,6 +186,92 @@ def test_classify_pair_missing_embedding_skips_gate():
     assert classify_pair(None, 0.005, min_similarity=0.5, prune_threshold=0.01) == "below_prune"
 
 
+def test_classify_pair_repetition_admits_band_pair_with_evidence():
+    """#983: cosine in [floor, threshold) + enough distinct-query evidence
+    → the pair forms via the repetition axis."""
+    verdict = classify_pair(
+        0.35,
+        0.02,
+        min_similarity=0.45,
+        prune_threshold=0.01,
+        floor=0.3,
+        evidence_count=2,
+        min_evidence=2,
+    )
+    assert verdict == "forms_repetition"
+
+
+def test_classify_pair_band_pair_without_evidence_stays_gated():
+    verdict = classify_pair(
+        0.35,
+        0.02,
+        min_similarity=0.45,
+        prune_threshold=0.01,
+        floor=0.3,
+        evidence_count=1,
+        min_evidence=2,
+    )
+    assert verdict == "gated_cosine"
+
+
+def test_classify_pair_below_floor_rejected_despite_evidence():
+    verdict = classify_pair(
+        0.2,
+        0.02,
+        min_similarity=0.45,
+        prune_threshold=0.01,
+        floor=0.3,
+        evidence_count=5,
+        min_evidence=2,
+    )
+    assert verdict == "gated_cosine"
+
+
+def test_classify_pair_repetition_with_subprune_delta():
+    """The repetition axis clears the cosine gate only — a sub-prune first
+    delta still classifies below_prune (it accumulates at runtime, #983)."""
+    verdict = classify_pair(
+        0.35,
+        0.005,
+        min_similarity=0.45,
+        prune_threshold=0.01,
+        floor=0.3,
+        evidence_count=2,
+        min_evidence=2,
+    )
+    assert verdict == "below_prune"
+
+
+def test_classify_pair_no_floor_keeps_1d_behavior():
+    """floor=None (repetition disabled) → identical to the #982 classifier."""
+    verdict = classify_pair(
+        0.35,
+        0.02,
+        min_similarity=0.45,
+        prune_threshold=0.01,
+        evidence_count=10,
+        min_evidence=2,
+    )
+    assert verdict == "gated_cosine"
+
+
+def test_summarize_gate_audit_counts_forms_repetition_as_formed():
+    """#983: repetition-formed edges count toward both the recall side and
+    the noise side of the audit."""
+    pairs = [
+        PairAudit("q1", "s", "t", 0.35, 0.02, "forms_repetition", is_probe_gold_pair=True),
+        PairAudit("q1", "a", "c", 0.35, 0.02, "forms_repetition", is_probe_gold_pair=False),
+        PairAudit("q2", "a", "d", 0.35, 0.02, "gated_cosine", is_probe_gold_pair=False),
+    ]
+    summary = summarize_gate_audit(pairs)
+
+    assert summary["formed_total"] == 2
+    assert summary["formed_gold"] == 1
+    assert summary["formed_non_gold"] == 1
+    assert summary["edge_precision"] == pytest.approx(0.5)
+    assert summary["non_gold_form_rate"] == pytest.approx(0.5)
+
+
 def test_summarize_gate_audit_counts_and_probe_pairs():
     pairs = [
         PairAudit("q1", "a", "b", 0.6, 0.02, "forms", is_probe_gold_pair=False),
