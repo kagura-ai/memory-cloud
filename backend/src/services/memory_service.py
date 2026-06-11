@@ -1675,11 +1675,31 @@ class MemoryService:
                         logger.debug("edge_threshold_resolve_failed", exc_info=True)
                         edge_threshold = None
 
-                co_activation_tracker.record_activation(
+                # 2D edge gate (#983): when enabled, lower the recording gate
+                # to the floor so band pairs accumulate same-event evidence,
+                # and hand those counts to the Hebbian gate below. The floor
+                # is clamped to the effective threshold so it can only widen
+                # the band downward, never tighten the 1-D gate.
+                edge_floor: float | None = None
+                if config.edge_gate_repetition_enabled:
+                    effective_threshold = (
+                        edge_threshold
+                        if edge_threshold is not None
+                        else config.min_similarity_for_edge
+                    )
+                    edge_floor = min(config.min_similarity_for_edge_floor, effective_threshold)
+
+                updated_records = co_activation_tracker.record_activation(
                     user_id,
                     activated_nodes,
                     embeddings=embedding_map,
                     similarity_threshold=edge_threshold,
+                    floor_threshold=edge_floor,
+                )
+                co_activation_counts = (
+                    {(r.node_id_1, r.node_id_2): r.same_event_count for r in updated_records}
+                    if edge_floor is not None
+                    else None
                 )
                 await co_activation_tracker.save_to_redis(user_id)
 
@@ -1702,9 +1722,15 @@ class MemoryService:
                         )
                         nodes_added += 1
 
-                # Hebbian updates (same calibrated gate as co-activation above)
+                # Hebbian updates (same calibrated gate as co-activation above;
+                # band pairs may be admitted by repetition evidence, #983)
                 await hebbian_learner.queue_update(
-                    user_id, activated_nodes, nodes_dict, similarity_threshold=edge_threshold
+                    user_id,
+                    activated_nodes,
+                    nodes_dict,
+                    similarity_threshold=edge_threshold,
+                    floor_threshold=edge_floor,
+                    co_activation_counts=co_activation_counts,
                 )
                 edges_updated = await hebbian_learner.apply_updates(user_id)
 
