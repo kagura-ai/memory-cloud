@@ -52,18 +52,18 @@
       "gate_audit": {
         "pair_observations": 75,
         "verdicts": {
-          "forms_repetition": 8,
-          "gated_cosine+below_prune": 8,
+          "forms_repetition": 17,
+          "gated_cosine+below_prune": 7,
           "forms": 10,
-          "gated_cosine": 48,
+          "gated_cosine": 40,
           "below_prune": 1
         },
-        "formed_total": 18,
-        "formed_gold": 4,
-        "formed_non_gold": 14,
-        "non_gold_pair_count": 68,
-        "edge_precision": 0.2222222222222222,
-        "non_gold_form_rate": 0.20588235294117646,
+        "formed_total": 27,
+        "formed_gold": 5,
+        "formed_non_gold": 22,
+        "non_gold_pair_count": 67,
+        "edge_precision": 0.18518518518518517,
+        "non_gold_form_rate": 0.3283582089552239,
         "probe_gold_pairs": [
           {
             "query_id": "q_exact_01",
@@ -102,11 +102,21 @@
               "doc_mem_context"
             ],
             "cosine": 0.3693,
-            "delta_w": 0.0194,
+            "delta_w": 0.0193,
             "verdict": "gated_cosine"
           },
           {
             "query_id": "q_sem_01",
+            "pair": [
+              "doc_mem_hybrid",
+              "doc_res_chunking"
+            ],
+            "cosine": 0.3983,
+            "delta_w": 0.0189,
+            "verdict": "forms_repetition"
+          },
+          {
+            "query_id": "q_res_04",
             "pair": [
               "doc_mem_hybrid",
               "doc_res_chunking"
@@ -122,7 +132,7 @@
               "doc_res_embedding"
             ],
             "cosine": 0.3693,
-            "delta_w": 0.0275,
+            "delta_w": 0.0276,
             "verdict": "gated_cosine"
           },
           {
@@ -141,33 +151,32 @@
             "gold": {
               "1": 1,
               "2": 1,
-              "4": 1
+              "5": 1
             },
             "non_gold": {
               "1": 4,
               "2": 3,
-              "3": 3,
-              "4": 1
+              "3": 4
             }
           },
           "pairs": [
             {
               "pair": [
                 "doc_mem_hybrid",
-                "doc_mem_rerank"
+                "doc_res_chunking"
               ],
-              "cosine": 0.3795,
-              "evidence": 4,
-              "is_probe_gold_pair": false
+              "cosine": 0.3983,
+              "evidence": 5,
+              "is_probe_gold_pair": true
             },
             {
               "pair": [
                 "doc_mem_hybrid",
-                "doc_res_chunking"
+                "doc_mem_rerank"
               ],
-              "cosine": 0.3983,
-              "evidence": 4,
-              "is_probe_gold_pair": true
+              "cosine": 0.3795,
+              "evidence": 3,
+              "is_probe_gold_pair": false
             },
             {
               "pair": [
@@ -284,7 +293,7 @@
           "min_similarity_for_edge_absolute": 0.5,
           "edge_gate_repetition_enabled": true,
           "min_similarity_for_edge_floor": 0.3,
-          "edge_gate_min_evidence": 4,
+          "min_co_activation_count": 3,
           "prune_threshold": 0.01,
           "learning_rate": 0.05,
           "top_k_coactivation": 3
@@ -368,7 +377,7 @@
             "recovery@5": 0.2,
             "recovery@10": 0.2,
             "mrr@10": 0.2,
-            "seeds_in_graph": 2
+            "seeds_in_graph": 5
           },
           "recall_lane": {
             "n": 30,
@@ -380,8 +389,8 @@
           },
           "edge_stats": {
             "hebbian": {
-              "count": 14,
-              "avg_weight": 0.3991
+              "count": 20,
+              "avg_weight": 0.4347
             }
           }
         },
@@ -391,7 +400,7 @@
             "recovery@5": 0.2,
             "recovery@10": 0.2,
             "mrr@10": 0.2,
-            "seeds_in_graph": 2
+            "seeds_in_graph": 5
           },
           "recall_lane": {
             "n": 30,
@@ -403,8 +412,8 @@
           },
           "edge_stats": {
             "hebbian": {
-              "count": 14,
-              "avg_weight": 0.3991
+              "count": 20,
+              "avg_weight": 0.4347
             }
           }
         }
@@ -432,8 +441,8 @@
             },
             "seeds_in_graph": {
               "cold": 0.0,
-              "warm": 2.0,
-              "abs": 2.0,
+              "warm": 5.0,
+              "abs": 5.0,
               "rel": null
             }
           },
@@ -457,8 +466,8 @@
               "rel": 0.0
             },
             "seeds_in_graph": {
-              "cold": 2.0,
-              "warm": 2.0,
+              "cold": 5.0,
+              "warm": 5.0,
               "abs": 0.0,
               "rel": 0.0
             }
@@ -484,8 +493,8 @@
             },
             "seeds_in_graph": {
               "cold": 0.0,
-              "warm": 2.0,
-              "abs": 2.0,
+              "warm": 5.0,
+              "abs": 5.0,
               "rel": null
             }
           }
@@ -630,18 +639,18 @@
       "gate_audit": {
         "pair_observations": 90,
         "verdicts": {
-          "forms_repetition": 13,
-          "gated_cosine+below_prune": 9,
+          "forms_repetition": 22,
+          "gated_cosine+below_prune": 8,
           "forms": 11,
-          "gated_cosine": 56,
+          "gated_cosine": 48,
           "below_prune": 1
         },
-        "formed_total": 24,
-        "formed_gold": 5,
-        "formed_non_gold": 19,
-        "non_gold_pair_count": 81,
-        "edge_precision": 0.20833333333333334,
-        "non_gold_form_rate": 0.2345679012345679,
+        "formed_total": 33,
+        "formed_gold": 9,
+        "formed_non_gold": 24,
+        "non_gold_pair_count": 80,
+        "edge_precision": 0.2727272727272727,
+        "non_gold_form_rate": 0.3,
         "probe_gold_pairs": [
           {
             "query_id": "q_exact_01",
@@ -680,8 +689,8 @@
               "doc_mem_context"
             ],
             "cosine": 0.3693,
-            "delta_w": 0.0195,
-            "verdict": "gated_cosine"
+            "delta_w": 0.0193,
+            "verdict": "forms_repetition"
           },
           {
             "query_id": "q_sem_01",
@@ -700,7 +709,7 @@
               "doc_res_chunking"
             ],
             "cosine": 0.3983,
-            "delta_w": 0.0362,
+            "delta_w": 0.0363,
             "verdict": "forms_repetition"
           },
           {
@@ -710,8 +719,18 @@
               "doc_mem_context"
             ],
             "cosine": 0.3693,
-            "delta_w": 0.0232,
-            "verdict": "gated_cosine"
+            "delta_w": 0.023,
+            "verdict": "forms_repetition"
+          },
+          {
+            "query_id": "q_res_04",
+            "pair": [
+              "doc_mem_hybrid",
+              "doc_res_chunking"
+            ],
+            "cosine": 0.3983,
+            "delta_w": 0.0189,
+            "verdict": "forms_repetition"
           },
           {
             "query_id": "q_mem_03",
@@ -720,8 +739,8 @@
               "doc_res_embedding"
             ],
             "cosine": 0.3693,
-            "delta_w": 0.0275,
-            "verdict": "gated_cosine"
+            "delta_w": 0.0276,
+            "verdict": "forms_repetition"
           },
           {
             "query_id": "q_mem_05",
@@ -739,13 +758,13 @@
             "gold": {
               "1": 1,
               "3": 1,
-              "5": 1
+              "6": 1
             },
             "non_gold": {
               "1": 6,
               "2": 3,
-              "3": 2,
-              "4": 2
+              "3": 3,
+              "4": 1
             }
           },
           "pairs": [
@@ -755,17 +774,8 @@
                 "doc_res_chunking"
               ],
               "cosine": 0.3983,
-              "evidence": 5,
+              "evidence": 6,
               "is_probe_gold_pair": true
-            },
-            {
-              "pair": [
-                "doc_mem_hybrid",
-                "doc_mem_rerank"
-              ],
-              "cosine": 0.3795,
-              "evidence": 4,
-              "is_probe_gold_pair": false
             },
             {
               "pair": [
@@ -784,6 +794,15 @@
               "cosine": 0.3693,
               "evidence": 3,
               "is_probe_gold_pair": true
+            },
+            {
+              "pair": [
+                "doc_mem_hybrid",
+                "doc_mem_rerank"
+              ],
+              "cosine": 0.3795,
+              "evidence": 3,
+              "is_probe_gold_pair": false
             },
             {
               "pair": [
@@ -900,7 +919,7 @@
           "min_similarity_for_edge_absolute": 0.5,
           "edge_gate_repetition_enabled": true,
           "min_similarity_for_edge_floor": 0.3,
-          "edge_gate_min_evidence": 4,
+          "min_co_activation_count": 3,
           "prune_threshold": 0.01,
           "learning_rate": 0.05,
           "top_k_coactivation": 3
@@ -981,10 +1000,10 @@
         "warm_replay": {
           "graph_lane": {
             "n": 5,
-            "recovery@5": 0.2,
-            "recovery@10": 0.2,
-            "mrr@10": 0.2,
-            "seeds_in_graph": 4
+            "recovery@5": 0.4,
+            "recovery@10": 0.4,
+            "mrr@10": 0.4,
+            "seeds_in_graph": 5
           },
           "recall_lane": {
             "n": 30,
@@ -996,18 +1015,18 @@
           },
           "edge_stats": {
             "hebbian": {
-              "count": 16,
-              "avg_weight": 0.4846
+              "count": 22,
+              "avg_weight": 0.4768
             }
           }
         },
         "warm_sleep": {
           "graph_lane": {
             "n": 5,
-            "recovery@5": 0.2,
-            "recovery@10": 0.2,
-            "mrr@10": 0.2,
-            "seeds_in_graph": 4
+            "recovery@5": 0.4,
+            "recovery@10": 0.4,
+            "mrr@10": 0.4,
+            "seeds_in_graph": 5
           },
           "recall_lane": {
             "n": 30,
@@ -1019,8 +1038,8 @@
           },
           "edge_stats": {
             "hebbian": {
-              "count": 16,
-              "avg_weight": 0.4846
+              "count": 22,
+              "avg_weight": 0.4768
             }
           }
         }
@@ -1030,51 +1049,51 @@
           "cold_to_warm_replay": {
             "mrr@10": {
               "cold": 0.0,
-              "warm": 0.2,
-              "abs": 0.2,
+              "warm": 0.4,
+              "abs": 0.4,
               "rel": null
             },
             "recovery@10": {
               "cold": 0.0,
-              "warm": 0.2,
-              "abs": 0.2,
+              "warm": 0.4,
+              "abs": 0.4,
               "rel": null
             },
             "recovery@5": {
               "cold": 0.0,
-              "warm": 0.2,
-              "abs": 0.2,
+              "warm": 0.4,
+              "abs": 0.4,
               "rel": null
             },
             "seeds_in_graph": {
               "cold": 0.0,
-              "warm": 4.0,
-              "abs": 4.0,
+              "warm": 5.0,
+              "abs": 5.0,
               "rel": null
             }
           },
           "warm_replay_to_warm_sleep": {
             "mrr@10": {
-              "cold": 0.2,
-              "warm": 0.2,
+              "cold": 0.4,
+              "warm": 0.4,
               "abs": 0.0,
               "rel": 0.0
             },
             "recovery@10": {
-              "cold": 0.2,
-              "warm": 0.2,
+              "cold": 0.4,
+              "warm": 0.4,
               "abs": 0.0,
               "rel": 0.0
             },
             "recovery@5": {
-              "cold": 0.2,
-              "warm": 0.2,
+              "cold": 0.4,
+              "warm": 0.4,
               "abs": 0.0,
               "rel": 0.0
             },
             "seeds_in_graph": {
-              "cold": 4.0,
-              "warm": 4.0,
+              "cold": 5.0,
+              "warm": 5.0,
               "abs": 0.0,
               "rel": 0.0
             }
@@ -1082,26 +1101,26 @@
           "cold_to_warm_sleep": {
             "mrr@10": {
               "cold": 0.0,
-              "warm": 0.2,
-              "abs": 0.2,
+              "warm": 0.4,
+              "abs": 0.4,
               "rel": null
             },
             "recovery@10": {
               "cold": 0.0,
-              "warm": 0.2,
-              "abs": 0.2,
+              "warm": 0.4,
+              "abs": 0.4,
               "rel": null
             },
             "recovery@5": {
               "cold": 0.0,
-              "warm": 0.2,
-              "abs": 0.2,
+              "warm": 0.4,
+              "abs": 0.4,
               "rel": null
             },
             "seeds_in_graph": {
               "cold": 0.0,
-              "warm": 4.0,
-              "abs": 4.0,
+              "warm": 5.0,
+              "abs": 5.0,
               "rel": null
             }
           }

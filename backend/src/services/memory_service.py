@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import asyncio
 import functools
+import hashlib
 from uuid import UUID, uuid4
 
 from sqlalchemy import and_, or_, select
@@ -1591,9 +1592,11 @@ class MemoryService:
                     context_id=str(current_context_id) if current_context_id else None,
                 )
 
-                hebbian_learner = HebbianLearner(graph_service, config)
                 co_activation_tracker = CoActivationTracker(config)
                 await co_activation_tracker.load_from_redis(user_id)
+                # #983: the learner reads/writes the cliff pending_weight on the
+                # tracker's records so it survives this per-recall instance.
+                hebbian_learner = HebbianLearner(graph_service, config, co_activation_tracker)
 
                 # Only co-activate top-k results for higher-quality edges
                 coactivation_k = min(config.top_k_coactivation, request.k, len(search_results))
@@ -1675,13 +1678,41 @@ class MemoryService:
                         logger.debug("edge_threshold_resolve_failed", exc_info=True)
                         edge_threshold = None
 
-                co_activation_tracker.record_activation(
+                # 2D edge gate (#983): when enabled, lower the recording gate
+                # to the floor so band pairs accumulate same-event evidence,
+                # and hand those counts to the Hebbian gate below. The floor
+                # is clamped to the effective threshold so it can only widen
+                # the band downward, never tighten the 1-D gate.
+                edge_floor: float | None = None
+                if config.edge_gate_repetition_enabled:
+                    effective_threshold = (
+                        edge_threshold
+                        if edge_threshold is not None
+                        else config.min_similarity_for_edge
+                    )
+                    edge_floor = min(config.min_similarity_for_edge_floor, effective_threshold)
+
+                # Distinct-query evidence dedup (#983): the same query
+                # replayed N times re-produces its top-k — one ranking
+                # accident is one observation, however often it repeats.
+                query_event_key = hashlib.sha256(request.query.encode("utf-8")).hexdigest()[:16]
+
+                updated_records = co_activation_tracker.record_activation(
                     user_id,
                     activated_nodes,
                     embeddings=embedding_map,
                     similarity_threshold=edge_threshold,
+                    floor_threshold=edge_floor,
+                    event_key=query_event_key,
                 )
-                await co_activation_tracker.save_to_redis(user_id)
+                co_activation_counts = (
+                    {(r.node_id_1, r.node_id_2): r.same_event_count for r in updated_records}
+                    if edge_floor is not None
+                    else None
+                )
+                # NOTE: save_to_redis is deferred until AFTER apply_updates so
+                # the persisted records also capture the cliff pending_weight
+                # the Hebbian pass writes (#983).
 
                 # Add nodes to graph
                 nodes_added = 0
@@ -1702,11 +1733,22 @@ class MemoryService:
                         )
                         nodes_added += 1
 
-                # Hebbian updates (same calibrated gate as co-activation above)
+                # Hebbian updates (same calibrated gate as co-activation above;
+                # band pairs may be admitted by repetition evidence, #983)
                 await hebbian_learner.queue_update(
-                    user_id, activated_nodes, nodes_dict, similarity_threshold=edge_threshold
+                    user_id,
+                    activated_nodes,
+                    nodes_dict,
+                    similarity_threshold=edge_threshold,
+                    floor_threshold=edge_floor,
+                    co_activation_counts=co_activation_counts,
                 )
                 edges_updated = await hebbian_learner.apply_updates(user_id)
+
+                # #983: persist co-activation records now — this captures both
+                # the same-event evidence (record_activation) and the cliff
+                # pending_weight (apply_updates) in a single round-trip.
+                await co_activation_tracker.save_to_redis(user_id)
 
                 logger.info(
                     "graph_updated",

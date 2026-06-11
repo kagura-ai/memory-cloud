@@ -20,6 +20,7 @@ References:
 
 import logging
 from collections import defaultdict
+from typing import TYPE_CHECKING
 
 from models.memory import EDGE_ORIGIN_HEBBIAN
 from src.services.graph_service import GraphService as GraphMemory
@@ -27,6 +28,9 @@ from src.services.graph_service import GraphService as GraphMemory
 from .config import NeuralMemoryConfig
 from .models import ActivationState, HebbianUpdate, NeuralMemoryNode
 from .utils import cosine_similarity
+
+if TYPE_CHECKING:
+    from .co_activation import CoActivationTracker
 
 logger = logging.getLogger(__name__)
 
@@ -42,15 +46,24 @@ class HebbianLearner:
         self,
         graph: GraphMemory,
         config: NeuralMemoryConfig,
+        co_activation_tracker: "CoActivationTracker | None" = None,
     ) -> None:
         """Initialize Hebbian learner.
 
         Args:
             graph: Graph memory instance to update
             config: Neural memory configuration
+            co_activation_tracker: Tracker whose CoActivationRecords carry the
+                #983 prune-cliff ``pending_weight``. Required for sub-threshold
+                accumulation to survive a recall — the learner is rebuilt per
+                recall, so the pending weight must live on the (Redis-persisted)
+                record, not on the learner. When ``None``, sub-threshold first
+                updates are dropped (pre-#983 behavior) rather than stashed in
+                volatile per-instance state that never persists.
         """
         self.graph = graph
         self.config = config
+        self.co_activation_tracker = co_activation_tracker
         self._update_queue: dict[str, list[HebbianUpdate]] = defaultdict(list)
 
     async def queue_update(
@@ -59,6 +72,8 @@ class HebbianLearner:
         activations: list[ActivationState],
         nodes: dict[str, NeuralMemoryNode],
         similarity_threshold: float | None = None,
+        floor_threshold: float | None = None,
+        co_activation_counts: dict[tuple[str, str], int] | None = None,
     ) -> None:
         """Queue Hebbian updates for co-activated nodes.
 
@@ -68,19 +83,39 @@ class HebbianLearner:
         provided (#982 calibrated edge-gate value), else
         ``config.min_similarity_for_edge``.
 
+        2D edge gate (#983): when ``floor_threshold`` and
+        ``co_activation_counts`` are provided (and
+        ``config.edge_gate_repetition_enabled``), pairs in the
+        [floor, threshold) cosine band are admitted once their repetition
+        evidence reaches ``config.edge_gate_min_evidence`` — genuine
+        cross-topic associations are co-recalled repeatedly across distinct
+        queries, noise pairs co-occur in few. Below the floor stays a hard
+        reject.
+
         Args:
             user_id: User ID (for sharding)
             activations: List of activated nodes in this retrieval
             nodes: Map of node_id -> NeuralMemoryNode (for confidence scores)
             similarity_threshold: Per-call semantic-gate override (#982);
                 ``None`` falls back to ``config.min_similarity_for_edge``.
+            floor_threshold: Lower bound of the repetition band (#983);
+                ``None`` disables the repetition axis for this call.
+            co_activation_counts: Map of ``(node_id_1, node_id_2)`` — ordered
+                ``min, max`` — to same-event co-recall counts from the
+                ``CoActivationTracker`` (#983).
         """
         threshold = (
             similarity_threshold
             if similarity_threshold is not None
             else self.config.min_similarity_for_edge
         )
+        repetition_active = (
+            self.config.edge_gate_repetition_enabled
+            and floor_threshold is not None
+            and co_activation_counts is not None
+        )
         skipped = 0
+        admitted_by_repetition = 0
 
         for i, act_i in enumerate(activations):
             for act_j in activations[i + 1 :]:  # Avoid duplicates
@@ -90,12 +125,22 @@ class HebbianLearner:
                 if not node_i or not node_j:
                     continue
 
-                # Semantic gating: skip pairs below similarity threshold
+                # Semantic gating: skip pairs below similarity threshold,
+                # unless the repetition axis (#983) admits a band pair.
                 if node_i.embedding and node_j.embedding:
                     sim = cosine_similarity(node_i.embedding, node_j.embedding)
                     if sim < threshold:
-                        skipped += 1
-                        continue
+                        pair_key = (
+                            (act_i.node_id, act_j.node_id)
+                            if act_i.node_id < act_j.node_id
+                            else (act_j.node_id, act_i.node_id)
+                        )
+                        in_band = repetition_active and sim >= floor_threshold
+                        evidence = co_activation_counts.get(pair_key, 0) if repetition_active else 0
+                        if not (in_band and evidence >= self.config.edge_gate_min_evidence):
+                            skipped += 1
+                            continue
+                        admitted_by_repetition += 1
 
                 # Get current weight (Issue #84: async)
                 current_weight = await self._get_current_weight(
@@ -134,6 +179,16 @@ class HebbianLearner:
                 "hebbian_semantic_gating", extra={"skipped": skipped, "threshold": threshold}
             )
 
+        if admitted_by_repetition > 0:
+            logger.debug(
+                "hebbian_repetition_admitted",
+                extra={
+                    "admitted": admitted_by_repetition,
+                    "floor": floor_threshold,
+                    "min_evidence": self.config.edge_gate_min_evidence,
+                },
+            )
+
         logger.debug(
             f"Queued {len(self._update_queue[user_id])} Hebbian updates for user {user_id}"
         )
@@ -163,10 +218,31 @@ class HebbianLearner:
         if self.config.gradient_clipping > 0:
             edge_deltas = self._clip_gradients(edge_deltas)
 
+        # #983: snapshot the cliff pending_weight for each directed edge BEFORE
+        # the pass. The queue holds both (a,b) and (b,a) for every pair; reading
+        # pending live would let the second direction see the first's write and
+        # double-count. Snapshotting makes both directions read the same value
+        # and (because the writeback is the same for both) stay consistent.
+        pending_snapshot: dict[tuple[str, str], float] = {}
+        if self.co_activation_tracker is not None:
+            for src_id, dst_id in edge_deltas:
+                record = self.co_activation_tracker.get_co_activation_record(
+                    user_id, src_id, dst_id
+                )
+                pending_snapshot[(src_id, dst_id)] = (
+                    record.pending_weight if record is not None else 0.0
+                )
+
         # Apply updates to graph (Issue #84: async SQL operations)
         edges_updated = 0
         for (src_id, dst_id), delta_w in edge_deltas.items():
-            new_weight = await self._apply_update_to_edge(user_id, src_id, dst_id, delta_w)
+            new_weight = await self._apply_update_to_edge(
+                user_id,
+                src_id,
+                dst_id,
+                delta_w,
+                pending=pending_snapshot.get((src_id, dst_id), 0.0),
+            )
             if new_weight is not None:
                 edges_updated += 1
 
@@ -263,7 +339,12 @@ class HebbianLearner:
         return 0.0
 
     async def _apply_update_to_edge(
-        self, user_id: str, src_id: str, dst_id: str, delta_w: float
+        self,
+        user_id: str,
+        src_id: str,
+        dst_id: str,
+        delta_w: float,
+        pending: float | None = None,
     ) -> float | None:
         """Apply weight update to graph edge.
 
@@ -272,23 +353,48 @@ class HebbianLearner:
             src_id: Source node ID
             dst_id: Destination node ID
             delta_w: Weight delta to apply
+            pending: Snapshotted #983 cliff pending_weight for this directed
+                edge. ``None`` (direct callers) reads it live from the
+                co-activation record; ``apply_updates`` passes a pre-pass
+                snapshot so the two directions of a pair don't double-count.
 
         Returns:
             New weight value, or None if update failed
         """
+        # #983: the cliff pending_weight rides the co-activation record so it
+        # survives the recall (the learner is rebuilt per recall). No record
+        # (or no tracker) → no accumulation, falling back to pre-#983 pruning.
+        record = (
+            self.co_activation_tracker.get_co_activation_record(user_id, src_id, dst_id)
+            if self.co_activation_tracker is not None
+            else None
+        )
+        if pending is None:
+            pending = record.pending_weight if record is not None else 0.0
         current_weight = await self._get_current_weight(user_id, src_id, dst_id)
-        new_weight = current_weight + delta_w
+        new_weight = current_weight + pending + delta_w
 
         # Clip to [0, weight_max]
         new_weight = max(0.0, min(new_weight, self.config.weight_max))
 
         # Prune if below threshold
         if new_weight < self.config.prune_threshold:
-            # Remove edge
             try:
                 if await self.graph.has_edge(src_id, dst_id):
+                    # Existing edge decayed below threshold — prune. The #983
+                    # cliff fix applies only to not-yet-materialized edges;
+                    # decay-side pruning is unchanged.
                     await self.graph.remove_edge(src_id, dst_id)
                     logger.debug(f"Pruned edge ({src_id}, {dst_id}) (weight={new_weight:.4f})")
+                    if record is not None:
+                        record.pending_weight = 0.0
+                elif new_weight > 0.0 and record is not None:
+                    # #983 prune-cliff fix: the edge does not exist yet, so a
+                    # sub-threshold first update used to be dropped — making
+                    # accumulation across repeated co-recalls impossible
+                    # (~12% of observed pairs in the #969 audit). Stash it on
+                    # the record so it persists to the next recall.
+                    record.pending_weight = new_weight
                 return 0.0
             except Exception as e:
                 logger.error(f"Failed to remove edge ({src_id}, {dst_id}): {e}")
@@ -320,6 +426,11 @@ class HebbianLearner:
                     },
                     confidence=1.0,
                 )
+
+            # #983: the edge materialized — any accumulated cliff pending is
+            # now folded into the edge weight, so clear it.
+            if record is not None and record.pending_weight:
+                record.pending_weight = 0.0
 
             logger.debug(
                 f"Updated edge ({src_id}, {dst_id}): "

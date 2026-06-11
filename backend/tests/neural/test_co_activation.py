@@ -561,3 +561,176 @@ class TestSemanticGating:
 
         records = tracker.record_activation("user1", activations, embeddings=embeddings)
         assert len(records) == 1
+
+
+class TestRepetitionEvidence:
+    """2D edge gate evidence accumulation (Issue #983).
+
+    ``floor_threshold`` lowers the *recording* gate so pairs in the
+    [floor, threshold) cosine band accumulate co-activation evidence
+    instead of being rejected outright. ``same_event_count`` counts only
+    joint appearances in the same activation event (= same query top-k),
+    which is the repetition signal the 2D gate consults — window-based
+    cross-event co-occurrence stays in ``count`` but is NOT evidence.
+    """
+
+    @pytest.fixture
+    def tracker(self):
+        config = NeuralMemoryConfig(
+            track_co_activation=True,
+            co_activation_window=60,
+            min_co_activation_count=2,
+            min_similarity_for_edge=0.5,
+        )
+        return CoActivationTracker(config)
+
+    def _make_embedding(self, values: list[float]) -> list[float]:
+        import numpy as np
+
+        emb = values + [0.0] * (8 - len(values))
+        norm = np.linalg.norm(emb)
+        return (np.array(emb) / norm).tolist() if norm > 0 else emb
+
+    def _band_pair(self):
+        """Embeddings with cosine ≈ 0.35 — inside the [0.3, 0.45) band."""
+        emb_a = self._make_embedding([1.0, 0.0, 0.0])
+        emb_b = self._make_embedding([0.35, 0.9367, 0.0])
+        return {"a": emb_a, "b": emb_b}
+
+    def _activations(self, *node_ids: str) -> list[ActivationState]:
+        return [ActivationState(node_id=n, activation=1.0) for n in node_ids]
+
+    def test_floor_threshold_records_band_pair(self, tracker):
+        """Cosine in [floor, threshold) → record IS created (evidence accumulates)."""
+        records = tracker.record_activation(
+            "user1",
+            self._activations("a", "b"),
+            embeddings=self._band_pair(),
+            similarity_threshold=0.45,
+            floor_threshold=0.3,
+        )
+        assert len(records) == 1
+        assert records[0].same_event_count == 1
+
+    def test_below_floor_still_rejected(self, tracker):
+        """Cosine below the floor → no record (hard reject, unchanged)."""
+        emb_a = self._make_embedding([1.0, 0.0, 0.0])
+        emb_c = self._make_embedding([0.1, 0.995, 0.0])  # cosine ≈ 0.1 < 0.3
+        records = tracker.record_activation(
+            "user1",
+            self._activations("a", "c"),
+            embeddings={"a": emb_a, "c": emb_c},
+            similarity_threshold=0.45,
+            floor_threshold=0.3,
+        )
+        assert len(records) == 0
+
+    def test_no_floor_keeps_threshold_gate(self, tracker):
+        """floor_threshold=None → band pair is rejected as before (rollback path)."""
+        records = tracker.record_activation(
+            "user1",
+            self._activations("a", "b"),
+            embeddings=self._band_pair(),
+            similarity_threshold=0.45,
+            floor_threshold=None,
+        )
+        assert len(records) == 0
+
+    def test_same_event_count_accumulates_across_joint_recalls(self, tracker):
+        """Both nodes in the same event twice → same_event_count == 2."""
+        for _ in range(2):
+            tracker.record_activation(
+                "user1",
+                self._activations("a", "b"),
+                embeddings=self._band_pair(),
+                similarity_threshold=0.45,
+                floor_threshold=0.3,
+            )
+        record = tracker.get_co_activation_record("user1", "a", "b")
+        assert record is not None
+        assert record.same_event_count == 2
+
+    def test_window_co_occurrence_is_not_same_event_evidence(self, tracker):
+        """Event {a,b} then event {a,c}: (a,b) window count grows but
+        same_event_count stays 1 — b was not re-recalled, so no new evidence."""
+        embeddings = self._band_pair()
+        tracker.record_activation(
+            "user1",
+            self._activations("a", "b"),
+            embeddings=embeddings,
+            similarity_threshold=0.45,
+            floor_threshold=0.3,
+        )
+        tracker.record_activation(
+            "user1",
+            self._activations("a"),
+            embeddings=embeddings,
+            similarity_threshold=0.45,
+            floor_threshold=0.3,
+        )
+        record = tracker.get_co_activation_record("user1", "a", "b")
+        assert record is not None
+        assert record.count == 2  # window co-occurrence still tracked
+        assert record.same_event_count == 1  # but not counted as evidence
+
+    def test_stale_pair_not_recounted_by_unrelated_event(self, tracker):
+        """Event {a,b} then unrelated event {x,y}: (a,b) must not be re-counted
+        just because both linger in the window (count-inflation fix)."""
+        tracker.record_activation("user1", self._activations("a", "b"))
+        tracker.record_activation("user1", self._activations("x", "y"))
+        record = tracker.get_co_activation_record("user1", "a", "b")
+        assert record is not None
+        assert record.count == 1
+        assert record.same_event_count == 1
+
+    def test_repeated_query_does_not_inflate_evidence(self, tracker):
+        """Same query (same event_key) replayed N times → evidence stays 1.
+
+        This is the distinct-query-context requirement: a noise pair inside
+        one query's top-k re-co-occurs every time that query is repeated
+        (eval replay rounds, production rehearsal) — repetition of ONE
+        ranking accident is not independent evidence."""
+        for _ in range(3):
+            tracker.record_activation(
+                "user1",
+                self._activations("a", "b"),
+                embeddings=self._band_pair(),
+                similarity_threshold=0.45,
+                floor_threshold=0.3,
+                event_key="query-1",
+            )
+        record = tracker.get_co_activation_record("user1", "a", "b")
+        assert record is not None
+        assert record.same_event_count == 1
+
+    def test_distinct_queries_accumulate_evidence(self, tracker):
+        """Different queries co-recalling the same pair → evidence grows.
+
+        Genuine cross-topic associations surface in the top-k of *different*
+        queries; that is the signal the 2D gate trusts."""
+        for key in ("query-1", "query-2", "query-3"):
+            tracker.record_activation(
+                "user1",
+                self._activations("a", "b"),
+                embeddings=self._band_pair(),
+                similarity_threshold=0.45,
+                floor_threshold=0.3,
+                event_key=key,
+            )
+        record = tracker.get_co_activation_record("user1", "a", "b")
+        assert record is not None
+        assert record.same_event_count == 3
+
+    def test_no_event_key_falls_back_to_per_event_counting(self, tracker):
+        """event_key=None (legacy callers) → every joint event counts."""
+        for _ in range(2):
+            tracker.record_activation(
+                "user1",
+                self._activations("a", "b"),
+                embeddings=self._band_pair(),
+                similarity_threshold=0.45,
+                floor_threshold=0.3,
+            )
+        record = tracker.get_co_activation_record("user1", "a", "b")
+        assert record is not None
+        assert record.same_event_count == 2

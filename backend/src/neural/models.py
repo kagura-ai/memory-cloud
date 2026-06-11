@@ -131,6 +131,23 @@ class CoActivationRecord:
         total_activation_product: Sum of (a_i * a_j) across all co-activations
         user_id: Owner (for sharding)
         first_seen: Timestamp of first co-activation (Issue #84 Phase 2C)
+        same_event_count: Number of activation events in which BOTH nodes
+            appeared together (#983). This is the repetition-evidence counter
+            the 2D edge gate consults — window-based cross-event co-occurrence
+            increments ``count`` but not this field, so a node lingering in
+            the time window cannot inflate the evidence.
+        evidence_keys: Distinct event keys (query fingerprints) that produced
+            same-event evidence (#983). When a key is supplied, repeating the
+            SAME query cannot inflate ``same_event_count`` — one ranking
+            accident replayed N times is still one observation. Capped at
+            ``_EVIDENCE_KEYS_CAP`` (evidence saturates far above the gate's
+            ``edge_gate_min_evidence`` requirement, which config validation
+            keeps <= the cap).
+        pending_weight: Sub-threshold Hebbian weight accumulated for a pair
+            whose edge has not yet materialized (#983 prune-cliff fix). Stored
+            here (rather than on the per-recall HebbianLearner) so it rides
+            this record's Redis persistence and GDPR ``clear_user_data`` path
+            instead of evaporating when the recall handler returns.
     """
 
     node_id_1: str
@@ -140,6 +157,11 @@ class CoActivationRecord:
     total_activation_product: float = 0.0
     user_id: str = ""
     first_seen: datetime = field(default_factory=utcnow)  # Issue #84 Phase 2C
+    same_event_count: int = 0  # Issue #983: joint same-event recalls
+    evidence_keys: set[str] = field(default_factory=set)  # Issue #983
+    pending_weight: float = 0.0  # Issue #983: prune-cliff accumulation
+
+    _EVIDENCE_KEYS_CAP = 16
 
     def __post_init__(self) -> None:
         """Ensure node IDs are ordered."""
@@ -147,14 +169,34 @@ class CoActivationRecord:
             # Swap to maintain ordering
             self.node_id_1, self.node_id_2 = self.node_id_2, self.node_id_1
 
-    def update(self, activation_1: float, activation_2: float) -> None:
+    def update(
+        self,
+        activation_1: float,
+        activation_2: float,
+        same_event: bool = False,
+        event_key: str | None = None,
+    ) -> None:
         """Update co-activation statistics.
 
         Args:
             activation_1: Activation strength of node 1
             activation_2: Activation strength of node 2
+            same_event: True when both nodes appeared in the same activation
+                event (#983) — increments the repetition-evidence counter
+            event_key: Stable fingerprint of the triggering query (#983).
+                When provided, evidence is counted once per DISTINCT key;
+                ``None`` falls back to per-event counting (legacy callers).
         """
         self.count += 1
+        if same_event:
+            if event_key is None:
+                self.same_event_count += 1
+            elif (
+                event_key not in self.evidence_keys
+                and len(self.evidence_keys) < self._EVIDENCE_KEYS_CAP
+            ):
+                self.same_event_count += 1
+                self.evidence_keys.add(event_key)
         self.total_activation_product += activation_1 * activation_2
         self.last_co_activation = utcnow()  # Issue #84 Phase 2C
 

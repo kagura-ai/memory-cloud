@@ -107,6 +107,52 @@ class TestEdgeGateCalibrationConfig:
         assert config.min_similarity_for_edge_floor == 0.35
 
 
+class TestEdgeGateRepetitionConfig:
+    """2D edge gate repetition axis (Issue #983).
+
+    ``edge_gate_repetition_enabled`` is the rollback switch for the second
+    gate axis: pairs in the [floor, calibrated-threshold) cosine band may
+    form edges once their distinct-query co-recall evidence reaches
+    ``edge_gate_min_evidence`` (a dedicated knob — ``min_co_activation_count``
+    keeps its legacy default for the other consumers).
+    """
+
+    def test_repetition_gate_default_enabled(self):
+        config = NeuralMemoryConfig()
+        assert config.edge_gate_repetition_enabled is True
+        # Default 4 from the measured #983 tradeoff curve: evidence >= 4 is
+        # the point where recovery@10 lift stays > 0 while the noise-side
+        # non_gold_form_rate returns to the p95 baseline.
+        assert config.edge_gate_min_evidence == 4
+
+    def test_repetition_gate_can_be_disabled(self):
+        config = NeuralMemoryConfig(edge_gate_repetition_enabled=False)
+        assert config.edge_gate_repetition_enabled is False
+
+    def test_repetition_gate_from_env(self, monkeypatch):
+        monkeypatch.setenv("EDGE_GATE_REPETITION_ENABLED", "false")
+        monkeypatch.setenv("EDGE_GATE_MIN_EVIDENCE", "2")
+        config = NeuralMemoryConfig.from_env()
+        assert config.edge_gate_repetition_enabled is False
+        assert config.edge_gate_min_evidence == 2
+
+    def test_min_evidence_must_be_positive(self):
+        with pytest.raises(ValueError, match="edge_gate_min_evidence"):
+            NeuralMemoryConfig(edge_gate_min_evidence=0)
+
+    def test_min_evidence_cannot_exceed_evidence_keys_cap(self):
+        """A min_evidence above the per-record evidence_keys cap would make the
+        2D band gate silently unsatisfiable (same_event_count saturates at the
+        cap), so config construction must reject it."""
+        from neural.models import CoActivationRecord
+
+        cap = CoActivationRecord._EVIDENCE_KEYS_CAP
+        # At the cap is allowed; one above is rejected.
+        NeuralMemoryConfig(edge_gate_min_evidence=cap)
+        with pytest.raises(ValueError, match="edge_gate_min_evidence"):
+            NeuralMemoryConfig(edge_gate_min_evidence=cap + 1)
+
+
 class TestSleepMaintenanceConfig:
     """Test Sleep Maintenance configuration fields (Issue #101)."""
 

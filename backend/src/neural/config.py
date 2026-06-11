@@ -149,6 +149,26 @@ class NeuralMemoryConfig:
     # cross-topic pairs at cosine 0.37-0.40 under text-embedding-3-small).
     min_similarity_for_edge_percentile: float = 95.0
     min_similarity_for_edge_floor: float = 0.3
+    # 2D edge gate (#983): second gate axis = repetition. Pairs whose cosine
+    # falls in the [floor, calibrated-threshold) band are not rejected
+    # outright — they form an edge once their co-activation count reaches
+    # ``min_co_activation_count``. Genuine cross-topic associations are
+    # co-recalled repeatedly across different queries; noise pairs co-occur
+    # once by ranking accident (#982 eval finding: the two distributions
+    # overlap on cosine alone). Disable to restore the pure 1-D gate.
+    # NOTE: evidence counts live in the in-process CoActivationTracker and
+    # round-trip Redis with a 7-day TTL (#84 Phase 2C), so they survive
+    # restarts; cross-worker sharing is last-writer-wins (documented #983
+    # limitation).
+    edge_gate_repetition_enabled: bool = True
+    # Distinct-query co-recall count required before a band pair forms.
+    # Default 4 from the measured #983 tradeoff curve (eval corpus,
+    # text-embedding-3-small/512d): evidence >= 4 keeps recovery@10 lift > 0
+    # while non_gold_form_rate returns to the p95 random-pair baseline
+    # (0.149 vs 0.147); evidence >= 2 doubles recovery (0.4) but triples the
+    # noise rate (0.43). Deployments that prefer recall over precision can
+    # lower this (the graph-lane blast radius is bounded by #120).
+    edge_gate_min_evidence: int = 4
     max_assoc_score: float = 0.5  # Cap graph association score per node
     top_k_coactivation: int = 3  # Only co-activate top-k results
 
@@ -275,6 +295,21 @@ class NeuralMemoryConfig:
         if not self.min_co_activation_count > 0:
             raise ValueError(
                 f"min_co_activation_count must be positive, got {self.min_co_activation_count}"
+            )
+        if not self.edge_gate_min_evidence > 0:
+            raise ValueError(
+                f"edge_gate_min_evidence must be positive, got {self.edge_gate_min_evidence}"
+            )
+        # The repetition evidence counter (CoActivationRecord.same_event_count)
+        # saturates at the per-record evidence_keys cap; a requirement above it
+        # would make the 2D band gate silently unsatisfiable (#983).
+        from .models import CoActivationRecord
+
+        _evidence_cap = CoActivationRecord._EVIDENCE_KEYS_CAP
+        if self.edge_gate_min_evidence > _evidence_cap:
+            raise ValueError(
+                f"edge_gate_min_evidence ({self.edge_gate_min_evidence}) must not exceed the "
+                f"evidence_keys cap ({_evidence_cap}); above it the 2D band gate can never form"
             )
         if not (0.0 <= self.min_similarity_for_edge <= 1.0):
             raise ValueError(
@@ -481,6 +516,8 @@ class NeuralMemoryConfig:
             importance_ema_alpha=get_float("IMPORTANCE_EMA_ALPHA", 0.3),
             # Co-Activation
             track_co_activation=get_bool("TRACK_CO_ACTIVATION", True),
+            edge_gate_repetition_enabled=get_bool("EDGE_GATE_REPETITION_ENABLED", True),
+            edge_gate_min_evidence=get_int("EDGE_GATE_MIN_EVIDENCE", 4),
             co_activation_window=get_int("CO_ACTIVATION_WINDOW", 300),
             min_co_activation_count=get_int("MIN_CO_ACTIVATION_COUNT", 2),
             min_similarity_for_edge=get_float("MIN_SIMILARITY_FOR_EDGE", 0.5),
@@ -592,6 +629,10 @@ class NeuralMemoryConfig:
             ),
             # Co-Activation (env-only, not in DB)
             track_co_activation=base_config.track_co_activation,
+            edge_gate_repetition_enabled=base_config.edge_gate_repetition_enabled,
+            edge_gate_min_evidence=configs.get(
+                "edge_gate_min_evidence", base_config.edge_gate_min_evidence
+            ),
             co_activation_window=configs.get(
                 "co_activation_window", base_config.co_activation_window
             ),
