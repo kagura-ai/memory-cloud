@@ -128,9 +128,7 @@ class HebbianLearner:
                             else (act_j.node_id, act_i.node_id)
                         )
                         in_band = repetition_active and sim >= floor_threshold
-                        evidence = (
-                            co_activation_counts.get(pair_key, 0) if repetition_active else 0
-                        )
+                        evidence = co_activation_counts.get(pair_key, 0) if repetition_active else 0
                         if not (in_band and evidence >= self.config.edge_gate_min_evidence):
                             skipped += 1
                             continue

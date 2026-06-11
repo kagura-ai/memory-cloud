@@ -510,9 +510,7 @@ class TestHebbianLearner:
         """#983 prune-cliff fix: a first Δw below prune_threshold must be
         accumulated as pending weight, not silently dropped — ~12% of
         observed pairs in the #969 audit could never accumulate."""
-        config = NeuralMemoryConfig(
-            learning_rate=0.1, gradient_clipping=1.0, prune_threshold=0.05
-        )
+        config = NeuralMemoryConfig(learning_rate=0.1, gradient_clipping=1.0, prune_threshold=0.05)
         mock_graph.get_edge = AsyncMock(return_value=None)
         mock_graph.has_edge = AsyncMock(return_value=False)
         mock_graph.add_edge = AsyncMock()
@@ -529,9 +527,7 @@ class TestHebbianLearner:
     async def test_cliff_accumulated_pending_materializes_edge(self, mock_graph):
         """#983: once pending + Δw crosses prune_threshold the edge is
         created with the accumulated weight, and the stash is cleared."""
-        config = NeuralMemoryConfig(
-            learning_rate=0.1, gradient_clipping=1.0, prune_threshold=0.05
-        )
+        config = NeuralMemoryConfig(learning_rate=0.1, gradient_clipping=1.0, prune_threshold=0.05)
         mock_graph.get_edge = AsyncMock(return_value=None)
         mock_graph.has_edge = AsyncMock(return_value=False)
         mock_graph.add_edge = AsyncMock()
@@ -550,9 +546,7 @@ class TestHebbianLearner:
         """#983 scope boundary: decay-driven pruning of REAL edges is
         unchanged — the cliff fix applies only to not-yet-materialized
         edges."""
-        config = NeuralMemoryConfig(
-            learning_rate=0.1, gradient_clipping=1.0, prune_threshold=0.05
-        )
+        config = NeuralMemoryConfig(learning_rate=0.1, gradient_clipping=1.0, prune_threshold=0.05)
         mock_graph.get_edge = AsyncMock(return_value={"weight": 0.04})
         mock_graph.has_edge = AsyncMock(return_value=True)
         mock_graph.add_edge = AsyncMock()
