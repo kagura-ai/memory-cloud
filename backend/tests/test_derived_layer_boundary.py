@@ -23,19 +23,28 @@ from __future__ import annotations
 
 from pathlib import Path
 
-# Import every model module so Base.metadata is fully populated. Mirrors the
-# explicit-import pattern in conftest.py / models/__init__.py (#531): the
-# package __init__ alone does not register memories/auth/hub_tag/etc.
+# Import every model module so Base.metadata is fully populated, without
+# relying on the side-effect imports inside models/__init__.py (#531). The
+# explicit list keeps this guard self-sufficient: a table only escapes
+# classification if its module is imported nowhere at all. Same canonical
+# module set as tests/test_schema_drift.py's _MODEL_MODULES.
 import models  # noqa: F401
+import models.agent_state  # noqa: F401
+import models.analysis  # noqa: F401
 import models.auth  # noqa: F401
 import models.bm25_drift  # noqa: F401
 import models.config  # noqa: F401
 import models.erasure  # noqa: F401
+import models.file_objects  # noqa: F401
 import models.hub_tag  # noqa: F401
+import models.llm_call_log  # noqa: F401
+import models.llm_pricing  # noqa: F401
 import models.memory  # noqa: F401
 import models.neural  # noqa: F401
 import models.resource  # noqa: F401
+import models.retrieval_feedback  # noqa: F401
 import models.signup_gate  # noqa: F401
+import models.sleep  # noqa: F401
 from db.base import Base
 from models import schemas
 from models.data_boundary import (
