@@ -11,6 +11,7 @@
 
 - [Architecture](architecture.md) — System design, data flow, and tech stack (incl. **LLM Knowledge Base 5-layer mapping**)
 - [API Reference](api-reference.md) — REST API endpoints, authentication, request/response examples
+- [Derived-Layer Boundary](derived-layer-boundary.md) — Design rule: raw memories are exportable, the derived/learned layer is the moat (table classification + feature-review checklist)
 
 ## Guides
 

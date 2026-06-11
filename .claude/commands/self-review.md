@@ -84,13 +84,21 @@ git diff main...HEAD | grep -ni 'api_key\s*=\s*"\|password\s*=\s*"\|secret\s*=\s
 - Enum value removed (existing DB data may reference it)?
 - New env vars added → `.env.example` updated?
 
-### 8. Performance
+### 8. Derived-layer boundary (if storage/export/Sleep/edges changed)
+
+See `docs/derived-layer-boundary.md` — raw memories are exportable; the derived/learned layer is the moat.
+
+- **(a) No leakage**: derived signal (edge weights/origins, calibration values, Sleep results, computed clusters/hubs) does NOT move onto the raw-export surface
+- **(b) Genuine accrual**: new derived state genuinely compounds with use (strengthened/recalibrated/consolidated over time), not a static cache of raw data
+- New tables classified in `backend/src/models/data_boundary.py`? New export-shaped schemas added to `EXPORT_SURFACE_SCHEMA_NAMES`?
+
+### 9. Performance
 
 - Large datasets in arrays? (stream/paginate instead)
 - External API calls inside loops?
 - New blocking work on startup or per-request hot path?
 
-### 9. Frontend (if changed)
+### 10. Frontend (if changed)
 
 - **Dark mode**: `dark:` prefixes on new elements?
 - **i18n**: `useTranslations()` not hardcoded strings?
@@ -98,7 +106,7 @@ git diff main...HEAD | grep -ni 'api_key\s*=\s*"\|password\s*=\s*"\|secret\s*=\s
 - **Loading/Error states**: data fetching has spinner and error display?
 - **Accessibility**: interactive elements have `aria-label`?
 
-### 10. Standards
+### 11. Standards
 
 ```bash
 git diff main...HEAD | grep -n '^\+.*\(print(\|console\.log\)'
@@ -107,19 +115,19 @@ git diff main...HEAD | grep -n '^\+.*\(print(\|console\.log\)'
 - Backend: snake_case, type hints, structlog logger
 - Frontend: PascalCase, no `any` type
 
-### 11. Dependencies (if changed)
+### 12. Dependencies (if changed)
 
 - License compatibility (MIT/Apache OK, GPL needs review)
 - Actively maintained? (last release < 1 year)
 - Version pinned appropriately?
 
-### 12. Testing
+### 13. Testing
 
 - Sufficient coverage for new code?
 - Edge cases covered?
 - Existing tests pass? (`make test-unit`)
 
-### 13. Excessive changes
+### 14. Excessive changes
 
 - Changes minimal and focused?
 - No "while I'm here" refactoring of unrelated code?
@@ -150,6 +158,7 @@ git diff main...HEAD | grep -n '^\+.*\(print(\|console\.log\)'
 | DB & Migrations | ✅ / ⚠️ / ❌ |
 | Integration paths | ✅ / ⚠️ / ❌ |
 | Breaking changes | ✅ / ⚠️ / ❌ |
+| Derived-layer boundary | ✅ / ⚠️ / ❌ / N/A |
 | Performance | ✅ / ⚠️ / ❌ |
 | Frontend | ✅ / ⚠️ / ❌ / N/A |
 | Standards | ✅ / ⚠️ / ❌ |
