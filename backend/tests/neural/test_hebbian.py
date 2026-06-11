@@ -19,7 +19,7 @@ def _band_config(repetition_enabled: bool = True) -> NeuralMemoryConfig:
         learning_rate=0.1,
         gradient_clipping=1.0,
         min_similarity_for_edge=0.5,
-        min_co_activation_count=2,
+        edge_gate_min_evidence=2,
         edge_gate_repetition_enabled=repetition_enabled,
     )
 

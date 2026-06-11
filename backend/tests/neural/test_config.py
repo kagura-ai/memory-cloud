@@ -120,8 +120,10 @@ class TestEdgeGateRepetitionConfig:
     def test_repetition_gate_default_enabled(self):
         config = NeuralMemoryConfig()
         assert config.edge_gate_repetition_enabled is True
-        # The repetition axis reuses the existing count knob.
-        assert config.min_co_activation_count == 2
+        # Default 4 from the measured #983 tradeoff curve: evidence >= 4 is
+        # the point where recovery@10 lift stays > 0 while the noise-side
+        # non_gold_form_rate returns to the p95 baseline.
+        assert config.edge_gate_min_evidence == 4
 
     def test_repetition_gate_can_be_disabled(self):
         config = NeuralMemoryConfig(edge_gate_repetition_enabled=False)
@@ -129,8 +131,14 @@ class TestEdgeGateRepetitionConfig:
 
     def test_repetition_gate_from_env(self, monkeypatch):
         monkeypatch.setenv("EDGE_GATE_REPETITION_ENABLED", "false")
+        monkeypatch.setenv("EDGE_GATE_MIN_EVIDENCE", "2")
         config = NeuralMemoryConfig.from_env()
         assert config.edge_gate_repetition_enabled is False
+        assert config.edge_gate_min_evidence == 2
+
+    def test_min_evidence_must_be_positive(self):
+        with pytest.raises(ValueError, match="edge_gate_min_evidence"):
+            NeuralMemoryConfig(edge_gate_min_evidence=0)
 
 
 class TestSleepMaintenanceConfig:

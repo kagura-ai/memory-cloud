@@ -601,7 +601,7 @@ async def _gate_audit(
                 prune_threshold=config.prune_threshold,
                 floor=edge_floor,
                 evidence_count=len(pair_evidence.get(frozenset((doc_a, doc_b)), set())),
-                min_evidence=config.min_co_activation_count,
+                min_evidence=config.edge_gate_min_evidence,
             ),
             is_probe_gold_pair=is_gold,
         )
@@ -609,16 +609,47 @@ async def _gate_audit(
     ]
 
     summary = summarize_gate_audit(audits)
+
+    # #983 diagnostic: distinct-query evidence distribution for UNIQUE band
+    # pairs (floor <= cosine < threshold), split gold vs non-gold. This is
+    # the data that justifies the min-evidence requirement: pick the count
+    # where gold pairs survive and one-accident noise dies.
+    if edge_floor is not None:
+        seen_pairs: set[frozenset[str]] = set()
+        band_detail: list[dict[str, Any]] = []
+        for _query_id, doc_a, doc_b, cosine, _delta_w, is_gold in raw_pairs:
+            pair_set = frozenset((doc_a, doc_b))
+            if pair_set in seen_pairs or cosine is None:
+                continue
+            seen_pairs.add(pair_set)
+            if edge_floor <= cosine < edge_threshold:
+                band_detail.append(
+                    {
+                        "pair": sorted(pair_set),
+                        "cosine": round(cosine, 4),
+                        "evidence": len(pair_evidence.get(pair_set, set())),
+                        "is_probe_gold_pair": is_gold,
+                    }
+                )
+        hist: dict[str, dict[int, int]] = {"gold": {}, "non_gold": {}}
+        for entry in band_detail:
+            side = "gold" if entry["is_probe_gold_pair"] else "non_gold"
+            hist[side][entry["evidence"]] = hist[side].get(entry["evidence"], 0) + 1
+        summary["band_evidence"] = {
+            "histogram": {k: dict(sorted(v.items())) for k, v in hist.items()},
+            "pairs": sorted(band_detail, key=lambda e: (-e["evidence"], e["pair"])),
+        }
+
     summary["thresholds"] = {
         # The value actually applied to classification (calibrated when an
         # edge_gate row exists, else the absolute fallback).
         "min_similarity_for_edge": edge_threshold,
         # Kept for reference so a report shows whether calibration was in effect.
         "min_similarity_for_edge_absolute": config.min_similarity_for_edge,
-        # 2D edge gate (#983): the repetition band and its count requirement.
+        # 2D edge gate (#983): the repetition band and its evidence requirement.
         "edge_gate_repetition_enabled": config.edge_gate_repetition_enabled,
         "min_similarity_for_edge_floor": edge_floor,
-        "min_co_activation_count": config.min_co_activation_count,
+        "edge_gate_min_evidence": config.edge_gate_min_evidence,
         "prune_threshold": config.prune_threshold,
         "learning_rate": config.learning_rate,
         "top_k_coactivation": config.top_k_coactivation,

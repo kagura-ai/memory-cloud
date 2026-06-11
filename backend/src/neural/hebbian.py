@@ -79,10 +79,10 @@ class HebbianLearner:
         ``co_activation_counts`` are provided (and
         ``config.edge_gate_repetition_enabled``), pairs in the
         [floor, threshold) cosine band are admitted once their repetition
-        evidence reaches ``config.min_co_activation_count`` — genuine
-        cross-topic associations are co-recalled repeatedly across queries,
-        noise pairs co-occur once by ranking accident. Below the floor stays
-        a hard reject.
+        evidence reaches ``config.edge_gate_min_evidence`` — genuine
+        cross-topic associations are co-recalled repeatedly across distinct
+        queries, noise pairs co-occur in few. Below the floor stays a hard
+        reject.
 
         Args:
             user_id: User ID (for sharding)
@@ -131,7 +131,7 @@ class HebbianLearner:
                         evidence = (
                             co_activation_counts.get(pair_key, 0) if repetition_active else 0
                         )
-                        if not (in_band and evidence >= self.config.min_co_activation_count):
+                        if not (in_band and evidence >= self.config.edge_gate_min_evidence):
                             skipped += 1
                             continue
                         admitted_by_repetition += 1
@@ -179,7 +179,7 @@ class HebbianLearner:
                 extra={
                     "admitted": admitted_by_repetition,
                     "floor": floor_threshold,
-                    "min_count": self.config.min_co_activation_count,
+                    "min_evidence": self.config.edge_gate_min_evidence,
                 },
             )
 

@@ -156,10 +156,19 @@ class NeuralMemoryConfig:
     # co-recalled repeatedly across different queries; noise pairs co-occur
     # once by ranking accident (#982 eval finding: the two distributions
     # overlap on cosine alone). Disable to restore the pure 1-D gate.
-    # NOTE: co-activation counts are tracked in process memory only — they
-    # reset on restart and are not shared across workers. Accepted and
-    # documented as a known limitation (#983); persistence is a follow-up.
+    # NOTE: evidence counts live in the in-process CoActivationTracker and
+    # round-trip Redis with a 7-day TTL (#84 Phase 2C), so they survive
+    # restarts; cross-worker sharing is last-writer-wins (documented #983
+    # limitation).
     edge_gate_repetition_enabled: bool = True
+    # Distinct-query co-recall count required before a band pair forms.
+    # Default 4 from the measured #983 tradeoff curve (eval corpus,
+    # text-embedding-3-small/512d): evidence >= 4 keeps recovery@10 lift > 0
+    # while non_gold_form_rate returns to the p95 random-pair baseline
+    # (0.149 vs 0.147); evidence >= 2 doubles recovery (0.4) but triples the
+    # noise rate (0.43). Deployments that prefer recall over precision can
+    # lower this (the graph-lane blast radius is bounded by #120).
+    edge_gate_min_evidence: int = 4
     max_assoc_score: float = 0.5  # Cap graph association score per node
     top_k_coactivation: int = 3  # Only co-activate top-k results
 
@@ -286,6 +295,10 @@ class NeuralMemoryConfig:
         if not self.min_co_activation_count > 0:
             raise ValueError(
                 f"min_co_activation_count must be positive, got {self.min_co_activation_count}"
+            )
+        if not self.edge_gate_min_evidence > 0:
+            raise ValueError(
+                f"edge_gate_min_evidence must be positive, got {self.edge_gate_min_evidence}"
             )
         if not (0.0 <= self.min_similarity_for_edge <= 1.0):
             raise ValueError(
@@ -493,6 +506,7 @@ class NeuralMemoryConfig:
             # Co-Activation
             track_co_activation=get_bool("TRACK_CO_ACTIVATION", True),
             edge_gate_repetition_enabled=get_bool("EDGE_GATE_REPETITION_ENABLED", True),
+            edge_gate_min_evidence=get_int("EDGE_GATE_MIN_EVIDENCE", 4),
             co_activation_window=get_int("CO_ACTIVATION_WINDOW", 300),
             min_co_activation_count=get_int("MIN_CO_ACTIVATION_COUNT", 2),
             min_similarity_for_edge=get_float("MIN_SIMILARITY_FOR_EDGE", 0.5),
@@ -605,6 +619,9 @@ class NeuralMemoryConfig:
             # Co-Activation (env-only, not in DB)
             track_co_activation=base_config.track_co_activation,
             edge_gate_repetition_enabled=base_config.edge_gate_repetition_enabled,
+            edge_gate_min_evidence=configs.get(
+                "edge_gate_min_evidence", base_config.edge_gate_min_evidence
+            ),
             co_activation_window=configs.get(
                 "co_activation_window", base_config.co_activation_window
             ),
