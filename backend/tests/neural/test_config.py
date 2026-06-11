@@ -112,9 +112,9 @@ class TestEdgeGateRepetitionConfig:
 
     ``edge_gate_repetition_enabled`` is the rollback switch for the second
     gate axis: pairs in the [floor, calibrated-threshold) cosine band may
-    form edges once their co-activation count reaches
-    ``min_co_activation_count`` (the existing knob, previously unconsulted
-    on the edge-formation path).
+    form edges once their distinct-query co-recall evidence reaches
+    ``edge_gate_min_evidence`` (a dedicated knob — ``min_co_activation_count``
+    keeps its legacy default for the other consumers).
     """
 
     def test_repetition_gate_default_enabled(self):

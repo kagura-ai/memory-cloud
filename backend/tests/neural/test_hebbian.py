@@ -415,7 +415,7 @@ class TestHebbianLearner:
 
     @pytest.mark.asyncio
     async def test_2d_gate_band_pair_with_evidence_is_admitted(self, mock_graph):
-        """#983: cosine in [floor, threshold) + count >= min_co_activation_count
+        """#983: cosine in [floor, threshold) + count >= edge_gate_min_evidence
         → the pair forms an edge via the repetition axis."""
         learner = HebbianLearner(mock_graph, _band_config())
         await learner.queue_update(
