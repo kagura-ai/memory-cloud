@@ -295,6 +295,69 @@ class TestHebbianLearner:
         assert len(learner._update_queue["u"]) == 2  # Bidirectional
 
     @pytest.mark.asyncio
+    async def test_similarity_threshold_override_precedence(self, mock_graph):
+        """Per-call similarity_threshold (#982) overrides config.min_similarity_for_edge.
+
+        Two embeddings with cosine 0.6. With config gate 0.9 the pair would be
+        gated, but a 0.3 override (calibrated edge_gate value) admits it; with
+        config gate 0.1 a 0.8 override gates it. Proves the override wins in
+        both directions.
+        """
+        import numpy as np
+
+        emb_a = [1.0, 0.0, 0.0] + [0.0] * 5
+        emb_b = [0.6, 0.8, 0.0] + [0.0] * 5  # cosine 0.6 with emb_a
+        emb_a = (np.array(emb_a) / np.linalg.norm(emb_a)).tolist()
+        emb_b = (np.array(emb_b) / np.linalg.norm(emb_b)).tolist()
+
+        def _nodes():
+            return {
+                "a": NeuralMemoryNode(
+                    id="a",
+                    user_id="u",
+                    kind=MemoryKind.FACT,
+                    text="A",
+                    embedding=emb_a,
+                    created_at=datetime.utcnow(),
+                    use_count=0,
+                    importance=0.5,
+                    confidence=1.0,
+                ),
+                "b": NeuralMemoryNode(
+                    id="b",
+                    user_id="u",
+                    kind=MemoryKind.FACT,
+                    text="B",
+                    embedding=emb_b,
+                    created_at=datetime.utcnow(),
+                    use_count=0,
+                    importance=0.5,
+                    confidence=1.0,
+                ),
+            }
+
+        activations = [
+            ActivationState(node_id="a", activation=0.9),
+            ActivationState(node_id="b", activation=0.8),
+        ]
+
+        # config 0.9 would gate; override 0.3 admits → 2 bidirectional updates.
+        admit_cfg = NeuralMemoryConfig(
+            learning_rate=0.1, gradient_clipping=1.0, min_similarity_for_edge=0.9
+        )
+        admit_learner = HebbianLearner(mock_graph, admit_cfg)
+        await admit_learner.queue_update("u", activations, _nodes(), similarity_threshold=0.3)
+        assert len(admit_learner._update_queue["u"]) == 2
+
+        # config 0.1 would admit; override 0.8 gates → no updates.
+        gate_cfg = NeuralMemoryConfig(
+            learning_rate=0.1, gradient_clipping=1.0, min_similarity_for_edge=0.1
+        )
+        gate_learner = HebbianLearner(mock_graph, gate_cfg)
+        await gate_learner.queue_update("u", activations, _nodes(), similarity_threshold=0.8)
+        assert len(gate_learner._update_queue.get("u", [])) == 0
+
+    @pytest.mark.asyncio
     async def test_prune_weak_edges_excludes_semantic_origin(self, mock_graph):
         """#724: the per-node top-M pruner only considers hebbian edges.
 

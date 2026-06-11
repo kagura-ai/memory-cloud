@@ -112,6 +112,13 @@ class NeuralConfig(Base):
             return False, f"Invalid {self.value_type} value: {e}"
 
 
+# Calibration distribution kinds (#982). Centralized so query filters and row
+# writes share one source of truth — a typo in a partial-index ``kind`` filter
+# returns zero rows silently rather than raising, so the literal must not drift.
+CALIBRATION_KIND_KNN_SEED = "knn_seed"  # top-k neighbor cosine distribution (#406)
+CALIBRATION_KIND_EDGE_GATE = "edge_gate"  # random-pair cosine distribution (#982)
+
+
 class EmbeddingCalibration(Base):
     """Per-model percentile calibration of top-k neighbor cosine similarity.
 
@@ -167,6 +174,19 @@ class EmbeddingCalibration(Base):
         ForeignKey("contexts.id", ondelete="CASCADE"),
         nullable=True,
     )
+    # Distinguishes which cosine distribution this row summarizes (#982):
+    #   "knn_seed"  = top-k neighbor distribution (#406, original use)
+    #   "edge_gate" = random-pair distribution for the co-activation/Hebbian
+    #                 semantic gate (min_similarity_for_edge calibration)
+    # These are different populations, so a (model, dims) pair may have one row
+    # of each kind — the unique indexes below include ``kind`` to allow that.
+    # Default + migration backfill is "knn_seed" so pre-#982 rows keep meaning.
+    kind: Mapped[str] = mapped_column(
+        String(16),
+        nullable=False,
+        server_default=CALIBRATION_KIND_KNN_SEED,
+        default=CALIBRATION_KIND_KNN_SEED,
+    )
 
     p25: Mapped[float] = mapped_column(Float, nullable=False)
     p50: Mapped[float] = mapped_column(Float, nullable=False)
@@ -203,6 +223,7 @@ class EmbeddingCalibration(Base):
             "uq_calibration_model_dims_global",
             "model_name",
             "dimensions",
+            "kind",
             unique=True,
             postgresql_where=expression.text("context_id IS NULL"),
         ),
@@ -211,6 +232,7 @@ class EmbeddingCalibration(Base):
             "model_name",
             "dimensions",
             "context_id",
+            "kind",
             unique=True,
             postgresql_where=expression.text("context_id IS NOT NULL"),
         ),

@@ -436,6 +436,68 @@ class TestSemanticGating:
         records = tracker.record_activation("user1", activations, embeddings=embeddings)
         assert len(records) == 1
 
+    def test_similarity_threshold_override_admits_pair_config_would_gate(self):
+        """Per-call override (#982) takes precedence over config.min_similarity_for_edge.
+
+        config gate is high (0.9) so the 0.6-cosine pair would be rejected by
+        the fallback, but a 0.3 override (the calibrated edge_gate value)
+        admits it.
+        """
+        config = NeuralMemoryConfig(
+            track_co_activation=True, co_activation_window=60, min_similarity_for_edge=0.9
+        )
+        tracker = CoActivationTracker(config)
+        emb_a = self._make_embedding([1.0, 0.0, 0.0])
+        emb_b = self._make_embedding([0.6, 0.8, 0.0])  # cosine 0.6 with emb_a
+        activations = [
+            ActivationState(node_id="a", activation=1.0),
+            ActivationState(node_id="b", activation=0.8),
+        ]
+        records = tracker.record_activation(
+            "user1",
+            activations,
+            embeddings={"a": emb_a, "b": emb_b},
+            similarity_threshold=0.3,
+        )
+        assert len(records) == 1
+
+    def test_similarity_threshold_override_gates_pair_config_would_admit(self):
+        """A high override gates a pair that the low config value would admit."""
+        config = NeuralMemoryConfig(
+            track_co_activation=True, co_activation_window=60, min_similarity_for_edge=0.1
+        )
+        tracker = CoActivationTracker(config)
+        emb_a = self._make_embedding([1.0, 0.0, 0.0])
+        emb_b = self._make_embedding([0.6, 0.8, 0.0])  # cosine 0.6 with emb_a
+        activations = [
+            ActivationState(node_id="a", activation=1.0),
+            ActivationState(node_id="b", activation=0.8),
+        ]
+        records = tracker.record_activation(
+            "user1",
+            activations,
+            embeddings={"a": emb_a, "b": emb_b},
+            similarity_threshold=0.8,
+        )
+        assert len(records) == 0
+
+    def test_none_similarity_threshold_falls_back_to_config(self, tracker):
+        """similarity_threshold=None → use config.min_similarity_for_edge (0.5 fixture)."""
+        emb_a = self._make_embedding([1.0, 0.0, 0.0])
+        emb_b = self._make_embedding([0.6, 0.8, 0.0])  # cosine 0.6 > 0.5 fixture
+        activations = [
+            ActivationState(node_id="a", activation=1.0),
+            ActivationState(node_id="b", activation=0.8),
+        ]
+        records = tracker.record_activation(
+            "user1",
+            activations,
+            embeddings={"a": emb_a, "b": emb_b},
+            similarity_threshold=None,
+        )
+        # 0.6 >= config 0.5 → pair forms (override absent).
+        assert len(records) == 1
+
     def test_dissimilar_pairs_blocked(self, tracker):
         """Pairs with low similarity should NOT create co-activation edges."""
         # Two dissimilar embeddings (cosine sim < 0.5)

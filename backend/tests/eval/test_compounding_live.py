@@ -65,6 +65,18 @@ async def test_compounding_live():
         audit = mode_block["gate_audit"]
         assert audit["pair_observations"] > 0
         assert set(audit["thresholds"]) >= {"min_similarity_for_edge", "prune_threshold"}
+        # #982 / Gate1: the success criterion measures the NOISE side too, not
+        # just recovery. A recalibration that lifts recovery@10 by also forming
+        # spurious non-gold edges is a regression, not a win — these keys make
+        # edge precision / false-edge rate visible in every run's report.
+        assert {
+            "formed_total",
+            "formed_gold",
+            "formed_non_gold",
+            "non_gold_pair_count",
+            "edge_precision",
+            "non_gold_form_rate",
+        } <= set(audit)
 
         lift = mode_block["lift"]
         assert set(lift) == {"graph_lane", "recall_lane"}

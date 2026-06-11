@@ -31,7 +31,11 @@ from uuid import UUID
 
 from sqlalchemy import select
 
-from models.neural import EmbeddingCalibration
+from models.neural import (
+    CALIBRATION_KIND_EDGE_GATE,
+    CALIBRATION_KIND_KNN_SEED,
+    EmbeddingCalibration,
+)
 from utils.logger import get_logger
 
 if TYPE_CHECKING:
@@ -82,16 +86,12 @@ async def resolve_knn_threshold(
 
     # Step 2: model-global calibration (context_id IS NULL).
     # TODO(v2): try context_id first, fall through to NULL on miss.
-    stmt = (
-        select(EmbeddingCalibration)
-        .where(
-            EmbeddingCalibration.model_name == model_name,
-            EmbeddingCalibration.dimensions == dimensions,
-            EmbeddingCalibration.context_id.is_(None),
-        )
-        .limit(1)
+    # Filter kind=knn_seed (#982): once edge_gate rows share the
+    # (model, dims, NULL) space, an unfiltered limit(1) could return the
+    # wrong distribution non-deterministically.
+    calibration = await _fetch_global_calibration(
+        db, model_name, dimensions, CALIBRATION_KIND_KNN_SEED
     )
-    calibration = (await db.execute(stmt)).scalar_one_or_none()
 
     if calibration is not None:
         if calibration.is_expired():
@@ -135,6 +135,87 @@ async def resolve_knn_threshold(
         dimensions=dimensions,
     )
     return None
+
+
+async def _fetch_global_calibration(
+    db: AsyncSession,
+    model_name: str,
+    dimensions: int,
+    kind: str,
+) -> EmbeddingCalibration | None:
+    """Fetch the model-global (``context_id IS NULL``) calibration row.
+
+    Shared by ``resolve_knn_threshold`` and ``resolve_edge_threshold`` so the
+    select boilerplate and the ``kind`` filter live in one place (the two
+    callers differ only in which ``kind`` they request and how they treat a
+    miss). TODO(v2): try a per-context row first, fall through to NULL.
+    """
+    stmt = (
+        select(EmbeddingCalibration)
+        .where(
+            EmbeddingCalibration.model_name == model_name,
+            EmbeddingCalibration.dimensions == dimensions,
+            EmbeddingCalibration.context_id.is_(None),
+            EmbeddingCalibration.kind == kind,
+        )
+        .limit(1)
+    )
+    return (await db.execute(stmt)).scalar_one_or_none()
+
+
+async def resolve_edge_threshold(
+    db: AsyncSession,
+    config: NeuralMemoryConfig,
+    model_name: str,
+    dimensions: int,
+    context_id: UUID | None = None,  # noqa: ARG001 — TODO(v2): per-context lookup
+) -> float:
+    """Resolve the runtime semantic-gate threshold for edge formation (#982).
+
+    The co-activation tracker and Hebbian learner gate pair edges on cosine
+    similarity (Issue #118, anti-noise). The #969 compounding experiment found
+    the absolute 0.5 default rejects genuine cross-topic pairs (cosines
+    0.37-0.40 under text-embedding-3-small), so this resolves a per-(model,
+    dimensions) threshold from the RANDOM-PAIR cosine distribution instead.
+
+    Unlike ``resolve_knn_threshold`` (which returns ``None`` to DISABLE seeding
+    when uncalibrated), the edge gate must ALWAYS stay active — so the fallback
+    is the absolute ``config.min_similarity_for_edge``, never ``None``.
+
+    Step 1  ``edge_gate`` calibration row for ``(model, dimensions)``
+            (``context_id IS NULL``) → ``max(percentile(p), floor)`` where
+            ``p = config.min_similarity_for_edge_percentile`` and
+            ``floor = config.min_similarity_for_edge_floor``. An expired row is
+            still served (fail-open) — a stale threshold beats stalling recall.
+            NOTE: unlike the knn-seed path, there is no lazy-TTL enqueue here
+            yet because the edge_gate measurement + recalibration job is not
+            wired (the random-pair distribution writer lands in #982 Increment
+            5). Until then an expired edge_gate row is served until manually
+            recalibrated. TODO(#982): add the edge_gate recalibration trigger.
+    Step 2  no row → ``config.min_similarity_for_edge`` (pre-#982 behavior).
+
+    Args:
+        db: AsyncSession for the calibration table lookup.
+        config: Resolved ``NeuralMemoryConfig`` (already loaded from DB).
+        model_name: Embedding model name (e.g. ``text-embedding-3-small``).
+        dimensions: Vector dimensionality (e.g. 512, 4096).
+        context_id: Reserved for D5 v2 per-context calibration. Currently
+            ignored (model-global lookup only).
+
+    Returns:
+        Similarity threshold in ``[0.0, 1.0]``. Always a float (the gate is
+        never disabled).
+    """
+    calibration = await _fetch_global_calibration(
+        db, model_name, dimensions, CALIBRATION_KIND_EDGE_GATE
+    )
+
+    if calibration is not None:
+        percentile_value = calibration.percentile(config.min_similarity_for_edge_percentile)
+        return max(percentile_value, config.min_similarity_for_edge_floor)
+
+    # Step 2: uncalibrated → absolute fallback keeps the anti-noise gate active.
+    return config.min_similarity_for_edge
 
 
 async def _enqueue_lazy_recalibration(

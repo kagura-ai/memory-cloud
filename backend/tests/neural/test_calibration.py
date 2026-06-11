@@ -14,7 +14,7 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 
 from models.neural import EmbeddingCalibration
-from neural.calibration import resolve_knn_threshold
+from neural.calibration import resolve_edge_threshold, resolve_knn_threshold
 from neural.config import NeuralMemoryConfig
 
 
@@ -40,11 +40,17 @@ def _make_config(
 def _make_calibration(
     p90: float = 0.6322,
     expired: bool = False,
+    kind: str = "knn_seed",
+    p25: float = 0.40,
+    p50: float = 0.50,
+    p75: float = 0.55,
 ) -> EmbeddingCalibration:
     """Build a calibration row with the given p90 and expiry state.
 
-    Other percentiles are placeholder values that keep the row valid
-    (ascending p25→p99) but are not read by the p90-only resolve path.
+    Other percentiles default to placeholder values that keep the row
+    valid (ascending p25→p99). ``kind`` distinguishes the knn-seed
+    (top-k neighbor) distribution from the edge-gate (random-pair)
+    distribution (#982).
     """
     now = datetime.now(UTC)
     valid_until = now - timedelta(minutes=1) if expired else now + timedelta(days=30)
@@ -52,9 +58,10 @@ def _make_calibration(
         model_name="text-embedding-3-small",
         dimensions=512,
         context_id=None,
-        p25=0.40,
-        p50=0.50,
-        p75=0.55,
+        kind=kind,
+        p25=p25,
+        p50=p50,
+        p75=p75,
         p90=p90,
         p95=min(p90 + 0.05, 1.0),
         p99=min(p90 + 0.12, 1.0),
@@ -163,6 +170,68 @@ class TestResolveKnnThresholdDisabled:
         db = _mock_db(calibration_result=None)
         result = await resolve_knn_threshold(db, cfg, "qwen3-embedding:8b", 4096)
         assert result is None
+
+
+class TestEmbeddingCalibrationKind:
+    """``kind`` column (#982) distinguishes knn_seed vs edge_gate rows."""
+
+    def test_kind_attribute_round_trips(self):
+        row = _make_calibration(kind="edge_gate")
+        assert row.kind == "edge_gate"
+
+
+def _make_edge_config(
+    absolute: float = 0.5,
+    percentile: float = 95.0,
+    floor: float = 0.3,
+) -> NeuralMemoryConfig:
+    """Config with the three edge-gate calibration fields set (#982)."""
+    cfg = NeuralMemoryConfig.from_env()
+    cfg.min_similarity_for_edge = absolute
+    cfg.min_similarity_for_edge_percentile = percentile
+    cfg.min_similarity_for_edge_floor = floor
+    return cfg
+
+
+class TestResolveEdgeThresholdCalibrationPath:
+    """#982 Step 1: edge_gate calibration row → ``max(percentile(p), floor)``."""
+
+    @pytest.mark.asyncio
+    async def test_percentile_above_floor_returned(self):
+        cfg = _make_edge_config(percentile=95.0, floor=0.3)
+        # p90=0.40 → p95=0.45 (per _make_calibration); percentile(95)=0.45 > floor.
+        db = _mock_db(_make_calibration(p90=0.40, kind="edge_gate"))
+        result = await resolve_edge_threshold(db, cfg, "text-embedding-3-small", 512)
+        assert result == pytest.approx(0.45)
+
+    @pytest.mark.asyncio
+    async def test_percentile_below_floor_returns_floor(self):
+        cfg = _make_edge_config(percentile=95.0, floor=0.4)
+        # p90=0.10 → p95=0.15 < floor 0.4 → floor wins.
+        db = _mock_db(_make_calibration(p90=0.10, p25=0.05, p50=0.08, p75=0.09, kind="edge_gate"))
+        result = await resolve_edge_threshold(db, cfg, "text-embedding-3-small", 512)
+        assert result == 0.4
+
+
+class TestResolveEdgeThresholdFallback:
+    """#982 Step 2: no calibration row → absolute fallback (gate stays active)."""
+
+    @pytest.mark.asyncio
+    async def test_no_calibration_returns_absolute(self):
+        cfg = _make_edge_config(absolute=0.5)
+        db = _mock_db(calibration_result=None)
+        result = await resolve_edge_threshold(db, cfg, "text-embedding-3-small", 512)
+        # Unlike knn-seed (which returns None to disable), the edge gate MUST
+        # stay active — the absolute value is the anti-noise fallback (#118).
+        assert result == 0.5
+
+    @pytest.mark.asyncio
+    async def test_expired_row_still_served(self):
+        """Fail-open on stale calibration: serve the stored value anyway."""
+        cfg = _make_edge_config(percentile=95.0, floor=0.3)
+        db = _mock_db(_make_calibration(p90=0.40, expired=True, kind="edge_gate"))
+        result = await resolve_edge_threshold(db, cfg, "text-embedding-3-small", 512)
+        assert result == pytest.approx(0.45)
 
 
 class TestEmbeddingCalibrationPercentile:

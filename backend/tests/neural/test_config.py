@@ -63,6 +63,50 @@ class TestNeuralMemoryConfig:
         assert config.gradient_clipping >= 0
 
 
+class TestEdgeGateCalibrationConfig:
+    """Edge-gate percentile calibration config fields (Issue #982).
+
+    ``min_similarity_for_edge`` becomes the absolute fallback when no
+    calibration row exists; the percentile + floor drive the calibration
+    path (random-pair baseline distribution).
+    """
+
+    def test_edge_calibration_defaults(self):
+        """Defaults: high percentile (random-pair upper tail) + floor."""
+        config = NeuralMemoryConfig()
+        assert config.min_similarity_for_edge_percentile == 95.0
+        assert config.min_similarity_for_edge_floor == 0.3
+        # Absolute fallback unchanged from prior behavior.
+        assert config.min_similarity_for_edge == 0.5
+
+    def test_edge_calibration_custom_values(self):
+        config = NeuralMemoryConfig(
+            min_similarity_for_edge_percentile=99.0,
+            min_similarity_for_edge_floor=0.25,
+        )
+        assert config.min_similarity_for_edge_percentile == 99.0
+        assert config.min_similarity_for_edge_floor == 0.25
+
+    def test_edge_percentile_must_be_in_open_unit_interval(self):
+        with pytest.raises(ValueError, match="min_similarity_for_edge_percentile"):
+            NeuralMemoryConfig(min_similarity_for_edge_percentile=0.0)
+        with pytest.raises(ValueError, match="min_similarity_for_edge_percentile"):
+            NeuralMemoryConfig(min_similarity_for_edge_percentile=100.0)
+
+    def test_edge_floor_must_be_in_unit_interval(self):
+        with pytest.raises(ValueError, match="min_similarity_for_edge_floor"):
+            NeuralMemoryConfig(min_similarity_for_edge_floor=1.5)
+        with pytest.raises(ValueError, match="min_similarity_for_edge_floor"):
+            NeuralMemoryConfig(min_similarity_for_edge_floor=-0.1)
+
+    def test_edge_calibration_from_env(self, monkeypatch):
+        monkeypatch.setenv("MIN_SIMILARITY_FOR_EDGE_PERCENTILE", "97.5")
+        monkeypatch.setenv("MIN_SIMILARITY_FOR_EDGE_FLOOR", "0.35")
+        config = NeuralMemoryConfig.from_env()
+        assert config.min_similarity_for_edge_percentile == 97.5
+        assert config.min_similarity_for_edge_floor == 0.35
+
+
 class TestSleepMaintenanceConfig:
     """Test Sleep Maintenance configuration fields (Issue #101)."""
 
