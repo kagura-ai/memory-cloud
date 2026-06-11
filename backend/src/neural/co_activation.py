@@ -56,6 +56,7 @@ class CoActivationTracker:
         session_id: str | None = None,
         embeddings: dict[str, list[float]] | None = None,
         similarity_threshold: float | None = None,
+        floor_threshold: float | None = None,
     ) -> list[CoActivationRecord]:
         """Record an activation event and detect co-activations.
 
@@ -70,6 +71,13 @@ class CoActivationTracker:
                 not None, takes precedence over ``config.min_similarity_for_edge``
                 — the caller resolves the calibrated edge-gate threshold (DB-
                 aware) and passes it in. ``None`` falls back to the config value.
+            floor_threshold: 2D edge gate (#983). When not None, lowers the
+                *recording* gate to this value so pairs in the
+                [floor, threshold) cosine band accumulate co-activation
+                evidence (``same_event_count``) instead of being rejected
+                outright. Edge materialization for band pairs is decided
+                downstream by ``HebbianLearner.queue_update`` via the
+                repetition requirement. ``None`` keeps the 1-D gate.
 
         Returns:
             List of co-activation records updated/created in this event
@@ -98,18 +106,19 @@ class CoActivationTracker:
 
         # Detect co-activations within the time window
         co_activated_pairs = self._find_co_activations_in_window(
-            user_id, timestamp, similarity_threshold
+            user_id, timestamp, similarity_threshold, floor_threshold, activated_ids
         )
 
         # Update co-activation records
         updated_records = []
-        for node_1, node_2, act_1, act_2 in co_activated_pairs:
+        for node_1, node_2, act_1, act_2, same_event in co_activated_pairs:
             record = self._update_co_activation_record(
                 user_id=user_id,
                 node_1=node_1,
                 node_2=node_2,
                 activation_1=act_1,
                 activation_2=act_2,
+                same_event=same_event,
             )
             updated_records.append(record)
 
@@ -209,21 +218,37 @@ class CoActivationTracker:
         user_id: str,
         current_time: datetime,
         similarity_threshold: float | None = None,
-    ) -> list[tuple[str, str, float, float]]:
+        floor_threshold: float | None = None,
+        current_ids: set[str] | None = None,
+    ) -> list[tuple[str, str, float, float, bool]]:
         """Find all co-activated pairs within the time window.
 
         Applies semantic gating: pairs with cosine similarity below the
-        effective threshold are skipped to prevent noise edges. The effective
-        threshold is ``similarity_threshold`` when provided (#982 calibrated
-        value), else ``config.min_similarity_for_edge``.
+        effective *recording* gate are skipped to prevent noise edges. The
+        recording gate is ``floor_threshold`` when provided (#983 — band
+        pairs accumulate evidence), else ``similarity_threshold`` (#982
+        calibrated value), else ``config.min_similarity_for_edge``.
+
+        Only pairs involving at least one node from the *current* activation
+        event are returned (#983 count-inflation fix): two nodes merely
+        lingering in the window from earlier events are not co-firing now,
+        so re-counting them every event inflated ``count`` without new
+        evidence.
 
         Args:
             user_id: User ID
             current_time: Current timestamp
             similarity_threshold: Per-call gate override; ``None`` → config.
+            floor_threshold: Recording-gate floor for the 2D edge gate
+                (#983); ``None`` keeps the 1-D gate.
+            current_ids: Node IDs of the current activation event. ``None``
+                treats every window node as current (legacy behavior, used
+                only by direct callers without event context).
 
         Returns:
-            List of (node_1, node_2, activation_1, activation_2) tuples
+            List of (node_1, node_2, activation_1, activation_2, same_event)
+            tuples, where ``same_event`` is True when both nodes are in the
+            current activation event (repetition evidence, #983).
         """
         # Get all activated nodes in the window
         window_seconds = self.config.co_activation_window
@@ -248,17 +273,26 @@ class CoActivationTracker:
             if similarity_threshold is not None
             else self.config.min_similarity_for_edge
         )
+        # The recording gate admits the [floor, threshold) band so evidence
+        # can accumulate; edge materialization stays gated downstream.
+        record_gate = floor_threshold if floor_threshold is not None else threshold
+        if current_ids is None:
+            current_ids = set(node_ids)
         skipped = 0
 
         for i, node_1 in enumerate(node_ids):
             for node_2 in node_ids[i + 1 :]:  # Avoid duplicates
-                # Semantic gating: skip pairs below similarity threshold
+                # Count-inflation fix (#983): skip pairs with no current node.
+                if node_1 not in current_ids and node_2 not in current_ids:
+                    continue
+
+                # Semantic gating: skip pairs below the recording gate
                 emb_1 = all_embeddings.get(node_1)
                 emb_2 = all_embeddings.get(node_2)
 
                 if emb_1 and emb_2:
                     sim = cosine_similarity(emb_1, emb_2)
-                    if sim < threshold:
+                    if sim < record_gate:
                         skipped += 1
                         continue
 
@@ -266,11 +300,12 @@ class CoActivationTracker:
                 avg_act_1 = sum(all_activated[node_1]) / len(all_activated[node_1])
                 avg_act_2 = sum(all_activated[node_2]) / len(all_activated[node_2])
 
-                co_activated_pairs.append((node_1, node_2, avg_act_1, avg_act_2))
+                same_event = node_1 in current_ids and node_2 in current_ids
+                co_activated_pairs.append((node_1, node_2, avg_act_1, avg_act_2, same_event))
 
         if skipped > 0:
             logger.debug(
-                "semantic_gating_skipped", extra={"skipped": skipped, "threshold": threshold}
+                "semantic_gating_skipped", extra={"skipped": skipped, "threshold": record_gate}
             )
 
         return co_activated_pairs
@@ -282,6 +317,7 @@ class CoActivationTracker:
         node_2: str,
         activation_1: float,
         activation_2: float,
+        same_event: bool = False,
     ) -> CoActivationRecord:
         """Update or create a co-activation record.
 
@@ -291,6 +327,8 @@ class CoActivationTracker:
             node_2: Second node ID
             activation_1: Activation strength of node 1
             activation_2: Activation strength of node 2
+            same_event: True when both nodes appeared in the same activation
+                event (#983 repetition evidence)
 
         Returns:
             Updated/created CoActivationRecord
@@ -305,7 +343,7 @@ class CoActivationTracker:
         if key in self._co_activation_records[user_id]:
             # Update existing record
             record = self._co_activation_records[user_id][key]
-            record.update(activation_1, activation_2)
+            record.update(activation_1, activation_2, same_event=same_event)
         else:
             # Create new record
             record = CoActivationRecord(
@@ -314,6 +352,7 @@ class CoActivationTracker:
                 count=1,
                 total_activation_product=activation_1 * activation_2,
                 user_id=user_id,
+                same_event_count=1 if same_event else 0,
             )
             self._co_activation_records[user_id][key] = record
 
@@ -392,6 +431,7 @@ class CoActivationTracker:
         for (node_1, node_2), record in self._co_activation_records[user_id].items():
             record_dict = {
                 "count": record.count,
+                "same_event_count": record.same_event_count,
                 "total_activation_product": record.total_activation_product,
                 "first_seen": record.first_seen.isoformat(),
                 "last_seen": record.last_co_activation.isoformat(),
@@ -434,6 +474,8 @@ class CoActivationTracker:
                 count=record_dict["count"],
                 total_activation_product=record_dict["total_activation_product"],
                 user_id=user_id,
+                # Pre-#983 records have no same_event_count — default to 0.
+                same_event_count=record_dict.get("same_event_count", 0),
             )
 
             # Restore timestamps

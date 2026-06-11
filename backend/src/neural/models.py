@@ -131,6 +131,11 @@ class CoActivationRecord:
         total_activation_product: Sum of (a_i * a_j) across all co-activations
         user_id: Owner (for sharding)
         first_seen: Timestamp of first co-activation (Issue #84 Phase 2C)
+        same_event_count: Number of activation events in which BOTH nodes
+            appeared together (#983). This is the repetition-evidence counter
+            the 2D edge gate consults — window-based cross-event co-occurrence
+            increments ``count`` but not this field, so a node lingering in
+            the time window cannot inflate the evidence.
     """
 
     node_id_1: str
@@ -140,6 +145,7 @@ class CoActivationRecord:
     total_activation_product: float = 0.0
     user_id: str = ""
     first_seen: datetime = field(default_factory=utcnow)  # Issue #84 Phase 2C
+    same_event_count: int = 0  # Issue #983: joint same-event recalls
 
     def __post_init__(self) -> None:
         """Ensure node IDs are ordered."""
@@ -147,14 +153,18 @@ class CoActivationRecord:
             # Swap to maintain ordering
             self.node_id_1, self.node_id_2 = self.node_id_2, self.node_id_1
 
-    def update(self, activation_1: float, activation_2: float) -> None:
+    def update(self, activation_1: float, activation_2: float, same_event: bool = False) -> None:
         """Update co-activation statistics.
 
         Args:
             activation_1: Activation strength of node 1
             activation_2: Activation strength of node 2
+            same_event: True when both nodes appeared in the same activation
+                event (#983) — increments the repetition-evidence counter
         """
         self.count += 1
+        if same_event:
+            self.same_event_count += 1
         self.total_activation_product += activation_1 * activation_2
         self.last_co_activation = utcnow()  # Issue #84 Phase 2C
 
