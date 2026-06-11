@@ -52,18 +52,18 @@
       "gate_audit": {
         "pair_observations": 75,
         "verdicts": {
-          "forms_repetition": 8,
-          "gated_cosine+below_prune": 8,
+          "forms_repetition": 25,
+          "gated_cosine+below_prune": 7,
           "forms": 10,
-          "gated_cosine": 48,
+          "gated_cosine": 32,
           "below_prune": 1
         },
-        "formed_total": 18,
-        "formed_gold": 4,
-        "formed_non_gold": 14,
+        "formed_total": 35,
+        "formed_gold": 6,
+        "formed_non_gold": 29,
         "non_gold_pair_count": 68,
-        "edge_precision": 0.2222222222222222,
-        "non_gold_form_rate": 0.20588235294117646,
+        "edge_precision": 0.17142857142857143,
+        "non_gold_form_rate": 0.4264705882352941,
         "probe_gold_pairs": [
           {
             "query_id": "q_exact_01",
@@ -92,7 +92,7 @@
               "doc_mem_hybrid"
             ],
             "cosine": 0.3983,
-            "delta_w": 0.0149,
+            "delta_w": 0.015,
             "verdict": "forms_repetition"
           },
           {
@@ -102,17 +102,17 @@
               "doc_mem_context"
             ],
             "cosine": 0.3693,
-            "delta_w": 0.0194,
-            "verdict": "gated_cosine"
+            "delta_w": 0.0192,
+            "verdict": "forms_repetition"
           },
           {
-            "query_id": "q_sem_01",
+            "query_id": "q_res_04",
             "pair": [
               "doc_mem_hybrid",
               "doc_res_chunking"
             ],
             "cosine": 0.3983,
-            "delta_w": 0.0189,
+            "delta_w": 0.019,
             "verdict": "forms_repetition"
           },
           {
@@ -122,8 +122,8 @@
               "doc_res_embedding"
             ],
             "cosine": 0.3693,
-            "delta_w": 0.0276,
-            "verdict": "gated_cosine"
+            "delta_w": 0.0278,
+            "verdict": "forms_repetition"
           },
           {
             "query_id": "q_mem_05",
@@ -154,20 +154,29 @@
             {
               "pair": [
                 "doc_mem_hybrid",
-                "doc_mem_rerank"
+                "doc_res_chunking"
               ],
-              "cosine": 0.3795,
+              "cosine": 0.3983,
+              "evidence": 4,
+              "is_probe_gold_pair": true
+            },
+            {
+              "pair": [
+                "doc_res_embedding",
+                "doc_res_quota"
+              ],
+              "cosine": 0.3006,
               "evidence": 4,
               "is_probe_gold_pair": false
             },
             {
               "pair": [
                 "doc_mem_hybrid",
-                "doc_res_chunking"
+                "doc_mem_rerank"
               ],
-              "cosine": 0.3983,
-              "evidence": 4,
-              "is_probe_gold_pair": true
+              "cosine": 0.3795,
+              "evidence": 3,
+              "is_probe_gold_pair": false
             },
             {
               "pair": [
@@ -184,15 +193,6 @@
                 "doc_res_deploy"
               ],
               "cosine": 0.3418,
-              "evidence": 3,
-              "is_probe_gold_pair": false
-            },
-            {
-              "pair": [
-                "doc_res_embedding",
-                "doc_res_quota"
-              ],
-              "cosine": 0.3006,
               "evidence": 3,
               "is_probe_gold_pair": false
             },
@@ -284,7 +284,7 @@
           "min_similarity_for_edge_absolute": 0.5,
           "edge_gate_repetition_enabled": true,
           "min_similarity_for_edge_floor": 0.3,
-          "edge_gate_min_evidence": 4,
+          "min_co_activation_count": 2,
           "prune_threshold": 0.01,
           "learning_rate": 0.05,
           "top_k_coactivation": 3
@@ -365,10 +365,10 @@
         "warm_replay": {
           "graph_lane": {
             "n": 5,
-            "recovery@5": 0.2,
-            "recovery@10": 0.2,
-            "mrr@10": 0.2,
-            "seeds_in_graph": 2
+            "recovery@5": 0.4,
+            "recovery@10": 0.4,
+            "mrr@10": 0.3,
+            "seeds_in_graph": 5
           },
           "recall_lane": {
             "n": 30,
@@ -380,18 +380,18 @@
           },
           "edge_stats": {
             "hebbian": {
-              "count": 14,
-              "avg_weight": 0.3989
+              "count": 28,
+              "avg_weight": 0.4176
             }
           }
         },
         "warm_sleep": {
           "graph_lane": {
             "n": 5,
-            "recovery@5": 0.2,
-            "recovery@10": 0.2,
-            "mrr@10": 0.2,
-            "seeds_in_graph": 2
+            "recovery@5": 0.4,
+            "recovery@10": 0.4,
+            "mrr@10": 0.3,
+            "seeds_in_graph": 5
           },
           "recall_lane": {
             "n": 30,
@@ -403,8 +403,8 @@
           },
           "edge_stats": {
             "hebbian": {
-              "count": 14,
-              "avg_weight": 0.3989
+              "count": 28,
+              "avg_weight": 0.4176
             }
           }
         }
@@ -414,51 +414,51 @@
           "cold_to_warm_replay": {
             "mrr@10": {
               "cold": 0.0,
-              "warm": 0.2,
-              "abs": 0.2,
+              "warm": 0.3,
+              "abs": 0.3,
               "rel": null
             },
             "recovery@10": {
               "cold": 0.0,
-              "warm": 0.2,
-              "abs": 0.2,
+              "warm": 0.4,
+              "abs": 0.4,
               "rel": null
             },
             "recovery@5": {
               "cold": 0.0,
-              "warm": 0.2,
-              "abs": 0.2,
+              "warm": 0.4,
+              "abs": 0.4,
               "rel": null
             },
             "seeds_in_graph": {
               "cold": 0.0,
-              "warm": 2.0,
-              "abs": 2.0,
+              "warm": 5.0,
+              "abs": 5.0,
               "rel": null
             }
           },
           "warm_replay_to_warm_sleep": {
             "mrr@10": {
-              "cold": 0.2,
-              "warm": 0.2,
+              "cold": 0.3,
+              "warm": 0.3,
               "abs": 0.0,
               "rel": 0.0
             },
             "recovery@10": {
-              "cold": 0.2,
-              "warm": 0.2,
+              "cold": 0.4,
+              "warm": 0.4,
               "abs": 0.0,
               "rel": 0.0
             },
             "recovery@5": {
-              "cold": 0.2,
-              "warm": 0.2,
+              "cold": 0.4,
+              "warm": 0.4,
               "abs": 0.0,
               "rel": 0.0
             },
             "seeds_in_graph": {
-              "cold": 2.0,
-              "warm": 2.0,
+              "cold": 5.0,
+              "warm": 5.0,
               "abs": 0.0,
               "rel": 0.0
             }
@@ -466,26 +466,26 @@
           "cold_to_warm_sleep": {
             "mrr@10": {
               "cold": 0.0,
-              "warm": 0.2,
-              "abs": 0.2,
+              "warm": 0.3,
+              "abs": 0.3,
               "rel": null
             },
             "recovery@10": {
               "cold": 0.0,
-              "warm": 0.2,
-              "abs": 0.2,
+              "warm": 0.4,
+              "abs": 0.4,
               "rel": null
             },
             "recovery@5": {
               "cold": 0.0,
-              "warm": 0.2,
-              "abs": 0.2,
+              "warm": 0.4,
+              "abs": 0.4,
               "rel": null
             },
             "seeds_in_graph": {
               "cold": 0.0,
-              "warm": 2.0,
-              "abs": 2.0,
+              "warm": 5.0,
+              "abs": 5.0,
               "rel": null
             }
           }
@@ -630,18 +630,18 @@
       "gate_audit": {
         "pair_observations": 90,
         "verdicts": {
-          "forms_repetition": 13,
-          "gated_cosine+below_prune": 9,
+          "forms_repetition": 28,
+          "gated_cosine+below_prune": 8,
           "forms": 11,
-          "gated_cosine": 56,
+          "gated_cosine": 42,
           "below_prune": 1
         },
-        "formed_total": 24,
-        "formed_gold": 5,
-        "formed_non_gold": 19,
+        "formed_total": 39,
+        "formed_gold": 8,
+        "formed_non_gold": 31,
         "non_gold_pair_count": 81,
-        "edge_precision": 0.20833333333333334,
-        "non_gold_form_rate": 0.2345679012345679,
+        "edge_precision": 0.20512820512820512,
+        "non_gold_form_rate": 0.38271604938271603,
         "probe_gold_pairs": [
           {
             "query_id": "q_exact_01",
@@ -670,7 +670,7 @@
               "doc_mem_hybrid"
             ],
             "cosine": 0.3983,
-            "delta_w": 0.0149,
+            "delta_w": 0.015,
             "verdict": "forms_repetition"
           },
           {
@@ -680,17 +680,7 @@
               "doc_mem_context"
             ],
             "cosine": 0.3693,
-            "delta_w": 0.0194,
-            "verdict": "gated_cosine"
-          },
-          {
-            "query_id": "q_sem_01",
-            "pair": [
-              "doc_mem_hybrid",
-              "doc_res_chunking"
-            ],
-            "cosine": 0.3983,
-            "delta_w": 0.0189,
+            "delta_w": 0.0192,
             "verdict": "forms_repetition"
           },
           {
@@ -710,8 +700,18 @@
               "doc_mem_context"
             ],
             "cosine": 0.3693,
-            "delta_w": 0.0231,
-            "verdict": "gated_cosine"
+            "delta_w": 0.0227,
+            "verdict": "forms_repetition"
+          },
+          {
+            "query_id": "q_res_04",
+            "pair": [
+              "doc_mem_hybrid",
+              "doc_res_chunking"
+            ],
+            "cosine": 0.3983,
+            "delta_w": 0.019,
+            "verdict": "forms_repetition"
           },
           {
             "query_id": "q_mem_03",
@@ -720,8 +720,8 @@
               "doc_res_embedding"
             ],
             "cosine": 0.3693,
-            "delta_w": 0.0276,
-            "verdict": "gated_cosine"
+            "delta_w": 0.0277,
+            "verdict": "forms_repetition"
           },
           {
             "query_id": "q_mem_05",
@@ -760,19 +760,19 @@
             },
             {
               "pair": [
-                "doc_mem_hybrid",
-                "doc_mem_rerank"
+                "doc_mem_sleep",
+                "doc_res_deploy"
               ],
-              "cosine": 0.3795,
+              "cosine": 0.3418,
               "evidence": 4,
               "is_probe_gold_pair": false
             },
             {
               "pair": [
-                "doc_mem_sleep",
-                "doc_res_deploy"
+                "doc_res_embedding",
+                "doc_res_quota"
               ],
-              "cosine": 0.3418,
+              "cosine": 0.3006,
               "evidence": 4,
               "is_probe_gold_pair": false
             },
@@ -787,19 +787,19 @@
             },
             {
               "pair": [
-                "doc_mem_jp_neural",
-                "doc_res_jp_chunk"
+                "doc_mem_hybrid",
+                "doc_mem_rerank"
               ],
-              "cosine": 0.402,
+              "cosine": 0.3795,
               "evidence": 3,
               "is_probe_gold_pair": false
             },
             {
               "pair": [
-                "doc_res_embedding",
-                "doc_res_quota"
+                "doc_mem_jp_neural",
+                "doc_res_jp_chunk"
               ],
-              "cosine": 0.3006,
+              "cosine": 0.402,
               "evidence": 3,
               "is_probe_gold_pair": false
             },
@@ -900,7 +900,7 @@
           "min_similarity_for_edge_absolute": 0.5,
           "edge_gate_repetition_enabled": true,
           "min_similarity_for_edge_floor": 0.3,
-          "edge_gate_min_evidence": 4,
+          "min_co_activation_count": 2,
           "prune_threshold": 0.01,
           "learning_rate": 0.05,
           "top_k_coactivation": 3
@@ -981,10 +981,10 @@
         "warm_replay": {
           "graph_lane": {
             "n": 5,
-            "recovery@5": 0.2,
-            "recovery@10": 0.2,
-            "mrr@10": 0.2,
-            "seeds_in_graph": 4
+            "recovery@5": 0.4,
+            "recovery@10": 0.4,
+            "mrr@10": 0.3,
+            "seeds_in_graph": 5
           },
           "recall_lane": {
             "n": 30,
@@ -996,18 +996,18 @@
           },
           "edge_stats": {
             "hebbian": {
-              "count": 16,
-              "avg_weight": 0.4844
+              "count": 28,
+              "avg_weight": 0.4598
             }
           }
         },
         "warm_sleep": {
           "graph_lane": {
             "n": 5,
-            "recovery@5": 0.2,
-            "recovery@10": 0.2,
-            "mrr@10": 0.2,
-            "seeds_in_graph": 4
+            "recovery@5": 0.4,
+            "recovery@10": 0.4,
+            "mrr@10": 0.3,
+            "seeds_in_graph": 5
           },
           "recall_lane": {
             "n": 30,
@@ -1019,8 +1019,8 @@
           },
           "edge_stats": {
             "hebbian": {
-              "count": 16,
-              "avg_weight": 0.4844
+              "count": 28,
+              "avg_weight": 0.4598
             }
           }
         }
@@ -1030,51 +1030,51 @@
           "cold_to_warm_replay": {
             "mrr@10": {
               "cold": 0.0,
-              "warm": 0.2,
-              "abs": 0.2,
+              "warm": 0.3,
+              "abs": 0.3,
               "rel": null
             },
             "recovery@10": {
               "cold": 0.0,
-              "warm": 0.2,
-              "abs": 0.2,
+              "warm": 0.4,
+              "abs": 0.4,
               "rel": null
             },
             "recovery@5": {
               "cold": 0.0,
-              "warm": 0.2,
-              "abs": 0.2,
+              "warm": 0.4,
+              "abs": 0.4,
               "rel": null
             },
             "seeds_in_graph": {
               "cold": 0.0,
-              "warm": 4.0,
-              "abs": 4.0,
+              "warm": 5.0,
+              "abs": 5.0,
               "rel": null
             }
           },
           "warm_replay_to_warm_sleep": {
             "mrr@10": {
-              "cold": 0.2,
-              "warm": 0.2,
+              "cold": 0.3,
+              "warm": 0.3,
               "abs": 0.0,
               "rel": 0.0
             },
             "recovery@10": {
-              "cold": 0.2,
-              "warm": 0.2,
+              "cold": 0.4,
+              "warm": 0.4,
               "abs": 0.0,
               "rel": 0.0
             },
             "recovery@5": {
-              "cold": 0.2,
-              "warm": 0.2,
+              "cold": 0.4,
+              "warm": 0.4,
               "abs": 0.0,
               "rel": 0.0
             },
             "seeds_in_graph": {
-              "cold": 4.0,
-              "warm": 4.0,
+              "cold": 5.0,
+              "warm": 5.0,
               "abs": 0.0,
               "rel": 0.0
             }
@@ -1082,26 +1082,26 @@
           "cold_to_warm_sleep": {
             "mrr@10": {
               "cold": 0.0,
-              "warm": 0.2,
-              "abs": 0.2,
+              "warm": 0.3,
+              "abs": 0.3,
               "rel": null
             },
             "recovery@10": {
               "cold": 0.0,
-              "warm": 0.2,
-              "abs": 0.2,
+              "warm": 0.4,
+              "abs": 0.4,
               "rel": null
             },
             "recovery@5": {
               "cold": 0.0,
-              "warm": 0.2,
-              "abs": 0.2,
+              "warm": 0.4,
+              "abs": 0.4,
               "rel": null
             },
             "seeds_in_graph": {
               "cold": 0.0,
-              "warm": 4.0,
-              "abs": 4.0,
+              "warm": 5.0,
+              "abs": 5.0,
               "rel": null
             }
           }
