@@ -55,6 +55,7 @@ class CoActivationTracker:
         activations: list[ActivationState],
         session_id: str | None = None,
         embeddings: dict[str, list[float]] | None = None,
+        similarity_threshold: float | None = None,
     ) -> list[CoActivationRecord]:
         """Record an activation event and detect co-activations.
 
@@ -63,8 +64,12 @@ class CoActivationTracker:
             activations: List of activated nodes in this retrieval
             session_id: Optional session ID for grouping
             embeddings: Map of node_id -> embedding for semantic gating.
-                When provided, only pairs with cosine similarity >=
-                config.min_similarity_for_edge will create edges.
+                When provided, only pairs with cosine similarity >= the
+                effective threshold will create edges.
+            similarity_threshold: Per-call semantic-gate override (#982). When
+                not None, takes precedence over ``config.min_similarity_for_edge``
+                — the caller resolves the calibrated edge-gate threshold (DB-
+                aware) and passes it in. ``None`` falls back to the config value.
 
         Returns:
             List of co-activation records updated/created in this event
@@ -92,7 +97,9 @@ class CoActivationTracker:
         self._activation_history[user_id].append((timestamp, activated_ids))
 
         # Detect co-activations within the time window
-        co_activated_pairs = self._find_co_activations_in_window(user_id, timestamp)
+        co_activated_pairs = self._find_co_activations_in_window(
+            user_id, timestamp, similarity_threshold
+        )
 
         # Update co-activation records
         updated_records = []
@@ -198,16 +205,22 @@ class CoActivationTracker:
         ]
 
     def _find_co_activations_in_window(
-        self, user_id: str, current_time: datetime
+        self,
+        user_id: str,
+        current_time: datetime,
+        similarity_threshold: float | None = None,
     ) -> list[tuple[str, str, float, float]]:
         """Find all co-activated pairs within the time window.
 
-        Applies semantic gating: pairs with cosine similarity below
-        config.min_similarity_for_edge are skipped to prevent noise edges.
+        Applies semantic gating: pairs with cosine similarity below the
+        effective threshold are skipped to prevent noise edges. The effective
+        threshold is ``similarity_threshold`` when provided (#982 calibrated
+        value), else ``config.min_similarity_for_edge``.
 
         Args:
             user_id: User ID
             current_time: Current timestamp
+            similarity_threshold: Per-call gate override; ``None`` → config.
 
         Returns:
             List of (node_1, node_2, activation_1, activation_2) tuples
@@ -230,7 +243,11 @@ class CoActivationTracker:
         # Find pairs of nodes that were both activated
         co_activated_pairs = []
         node_ids = list(all_activated.keys())
-        threshold = self.config.min_similarity_for_edge
+        threshold = (
+            similarity_threshold
+            if similarity_threshold is not None
+            else self.config.min_similarity_for_edge
+        )
         skipped = 0
 
         for i, node_1 in enumerate(node_ids):

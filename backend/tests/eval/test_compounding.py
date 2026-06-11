@@ -208,3 +208,42 @@ def test_summarize_gate_audit_counts_and_probe_pairs():
             "verdict": "gated_cosine",
         }
     ]
+
+
+def test_summarize_gate_audit_reports_noise_side_metrics():
+    """#982 / Gate1: lowering the gate must not blow up non-gold (noise) edges.
+
+    The audit reports the precision side alongside the recall side: how many
+    formed edges are gold vs noise, and what fraction of non-gold pairs formed.
+    """
+    pairs = [
+        PairAudit("q1", "a", "b", 0.6, 0.02, "forms", is_probe_gold_pair=True),
+        PairAudit("q1", "a", "c", 0.6, 0.02, "forms", is_probe_gold_pair=False),
+        PairAudit("q2", "a", "d", 0.3, 0.02, "gated_cosine", is_probe_gold_pair=False),
+        PairAudit("q3", "s", "t", 0.4, 0.03, "gated_cosine", is_probe_gold_pair=True),
+    ]
+    summary = summarize_gate_audit(pairs)
+
+    assert summary["formed_total"] == 2
+    assert summary["formed_gold"] == 1
+    assert summary["formed_non_gold"] == 1
+    # precision of the formed-edge set w.r.t. gold pairs
+    assert summary["edge_precision"] == pytest.approx(0.5)
+    # non-gold pairs observed = a-c (formed) + a-d (gated) = 2; one formed
+    assert summary["non_gold_pair_count"] == 2
+    assert summary["non_gold_form_rate"] == pytest.approx(0.5)
+
+
+def test_summarize_gate_audit_edge_precision_none_when_nothing_forms():
+    """No formed edge → edge_precision is None (not a divide-by-zero / 0.0 lie)."""
+    pairs = [
+        PairAudit("q", "a", "b", 0.3, 0.02, "gated_cosine", is_probe_gold_pair=False),
+        PairAudit("q", "s", "t", 0.3, 0.02, "gated_cosine", is_probe_gold_pair=True),
+    ]
+    summary = summarize_gate_audit(pairs)
+
+    assert summary["formed_total"] == 0
+    assert summary["edge_precision"] is None
+    # one non-gold pair observed, none formed → 0.0 (defined: 0/1)
+    assert summary["non_gold_pair_count"] == 1
+    assert summary["non_gold_form_rate"] == pytest.approx(0.0)

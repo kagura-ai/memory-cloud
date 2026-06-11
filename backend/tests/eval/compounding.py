@@ -169,13 +169,46 @@ def summarize_gate_audit(pairs: list[PairAudit]) -> dict[str, Any]:
 
     The probe gold pairs are the compounding-critical subset — every one that
     fails a gate directly explains a zero graph-lane lift.
+
+    Also reports the **noise side** of edge formation (#982 / Gate1): lowering
+    the semantic gate to admit genuine cross-topic gold pairs must not blow up
+    spurious edges between unrelated (non-gold) pairs. ``edge_precision`` is the
+    fraction of *formed* edges that are gold; ``non_gold_form_rate`` is the
+    fraction of *non-gold* pairs that formed an edge (the false-edge rate the
+    #118 gate exists to suppress). Pairing this with the recovery@k recall
+    metric is what proves a recalibration helped rather than just added noise.
     """
     verdicts: dict[str, int] = {}
+    formed_gold = 0
+    formed_non_gold = 0
+    non_gold_pair_count = 0
     for pair in pairs:
         verdicts[pair.verdict] = verdicts.get(pair.verdict, 0) + 1
+        formed = pair.verdict == "forms"
+        if pair.is_probe_gold_pair:
+            if formed:
+                formed_gold += 1
+        else:
+            non_gold_pair_count += 1
+            if formed:
+                formed_non_gold += 1
+
+    formed_total = formed_gold + formed_non_gold
     return {
         "pair_observations": len(pairs),
         "verdicts": verdicts,
+        # Recall side: did gold companion pairs form edges?
+        "formed_total": formed_total,
+        "formed_gold": formed_gold,
+        # Noise side: did unrelated pairs form edges? (#982 / Gate1 guard)
+        "formed_non_gold": formed_non_gold,
+        "non_gold_pair_count": non_gold_pair_count,
+        # precision of the formed-edge set; None when no edge formed (no lie).
+        "edge_precision": (formed_gold / formed_total) if formed_total else None,
+        # false-edge rate; None when there were no non-gold pairs to form from.
+        "non_gold_form_rate": (
+            formed_non_gold / non_gold_pair_count if non_gold_pair_count else None
+        ),
         "probe_gold_pairs": [
             {
                 "query_id": p.query_id,

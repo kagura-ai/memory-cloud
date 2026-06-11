@@ -49,7 +49,11 @@ from db.qdrant import get_qdrant_client
 from db.redis import get_redis_client
 from models.config import ContextSearchConfig
 from models.memory import Memory
-from models.neural import EmbeddingCalibration
+from models.neural import (
+    CALIBRATION_KIND_EDGE_GATE,
+    CALIBRATION_KIND_KNN_SEED,
+    EmbeddingCalibration,
+)
 from neural.config import NeuralMemoryConfig
 from utils.logger import get_logger
 
@@ -119,6 +123,17 @@ BOOTSTRAP_MIN_OBSERVATIONS = 10_000
 # script produced.
 SAMPLE_MEMORIES = 200
 SAMPLE_TOP_K = 50
+# Random-pair sampling for the edge_gate (random-pair) distribution (#982).
+# measure_random_pair caps the count at len(vectors)//2 (unique, non-repeating
+# pairs), so with SAMPLE_MEMORIES=200 the effective count is ~100. A generous
+# request value lets a larger future sample tighten the upper-tail estimate
+# without a code change; the real count is logged per run.
+SAMPLE_RANDOM_PAIRS = 5000
+# Minimum random-pair observations before an edge_gate row is written. Below
+# this the upper-tail percentile (p95 default) is too noisy to trust, so the
+# row is skipped and resolve_edge_threshold falls back to the absolute config
+# value (anti-noise gate stays active at its safe default).
+EDGE_GATE_MIN_PAIR_OBSERVATIONS = 30
 
 # In-process bootstrap-count throttle. ``maybe_trigger_bootstrap`` fires on
 # every ``remember()`` that hits D4 step 3 (pre-calibration phase), and each
@@ -285,17 +300,74 @@ async def _release_dedup_lock(key: str, token: str) -> None:
         )
 
 
+async def _upsert_calibration(
+    db: AsyncSession,
+    model_name: str,
+    dimensions: int,
+    context_id: UUID | None,
+    *,
+    kind: str,
+    percentiles: dict[str, float],
+    observations: int,
+    now: datetime,
+    valid_until: datetime,
+) -> EmbeddingCalibration:
+    """Kind-scoped delete-then-insert of one calibration row.
+
+    The partial unique indexes are keyed on (model, dims, [context_id,] kind)
+    since #982, so the DELETE MUST include ``kind`` — otherwise recalibrating
+    one kind wipes the sibling kind's row for the same key. Does NOT commit;
+    the caller commits once so both kinds land atomically (or neither).
+
+    Delete-then-insert is simpler than ON CONFLICT because the partial indexes
+    don't participate in INSERT ... ON CONFLICT.
+    """
+    del_stmt = delete(EmbeddingCalibration).where(
+        EmbeddingCalibration.model_name == model_name,
+        EmbeddingCalibration.dimensions == dimensions,
+        EmbeddingCalibration.kind == kind,
+    )
+    if context_id is None:
+        del_stmt = del_stmt.where(EmbeddingCalibration.context_id.is_(None))
+    else:
+        del_stmt = del_stmt.where(EmbeddingCalibration.context_id == context_id)
+    await db.execute(del_stmt)
+
+    row = EmbeddingCalibration(
+        model_name=model_name,
+        dimensions=dimensions,
+        context_id=context_id,
+        kind=kind,
+        p25=percentiles["p25"],
+        p50=percentiles["p50"],
+        p75=percentiles["p75"],
+        p90=percentiles["p90"],
+        p95=percentiles["p95"],
+        p99=percentiles["p99"],
+        sample_size=observations,
+        sampled_at=now,
+        valid_until=valid_until,
+    )
+    db.add(row)
+    return row
+
+
 async def compute_calibration(
     db: AsyncSession,
     model_name: str,
     dimensions: int,
     context_id: UUID | None,
 ) -> EmbeddingCalibration | None:
-    """Measure percentiles + upsert the calibration row.
+    """Measure percentiles + upsert the calibration rows for this key.
 
-    Returns the upserted ``EmbeddingCalibration`` instance on success, or
-    ``None`` if the D3 gate fails (insufficient sample) — the fallback
-    chain keeps step 3 (disabled) in that case until the context grows.
+    Samples once and writes BOTH calibration kinds (#982): the ``knn_seed``
+    top-k neighbor distribution and the ``edge_gate`` random-pair distribution.
+    Returns the upserted ``knn_seed`` ``EmbeddingCalibration`` instance on
+    success, or ``None`` if the D3 gate fails (insufficient sample) — the
+    fallback chain keeps step 3 (disabled) in that case until the context
+    grows. The ``edge_gate`` row is best-effort: it is skipped (leaving the
+    semantic gate on its absolute fallback) when too few random pairs are
+    available, without failing the run.
 
     The model-global case picks the largest context using this ``(model,
     dimensions)`` pair as the sampling source. This is a v1 simplification
@@ -316,6 +388,7 @@ async def compute_calibration(
     compute_percentiles = _script_module.compute_percentiles
     fetch_vectors = _script_module.fetch_vectors
     measure_top_k = _script_module.measure_top_k
+    measure_random_pair = _script_module.measure_random_pair
     sample_memories = _script_module.sample_memories
 
     sample_context_id = context_id
@@ -390,36 +463,52 @@ async def compute_calibration(
     now = datetime.now(UTC)
     valid_until = now + timedelta(days=config.calibration_ttl_days)
 
-    # Upsert: delete any existing row for this key, then insert fresh. Two
-    # partial unique indexes (one for NULL context_id, one for non-NULL)
-    # enforce at-most-one row per key from the DB side; the explicit
-    # delete-then-insert is simpler than an ON CONFLICT dance because the
-    # partial indexes don't participate in INSERT ... ON CONFLICT.
-    del_stmt = delete(EmbeddingCalibration).where(
-        EmbeddingCalibration.model_name == model_name,
-        EmbeddingCalibration.dimensions == dimensions,
-    )
-    if context_id is None:
-        del_stmt = del_stmt.where(EmbeddingCalibration.context_id.is_(None))
-    else:
-        del_stmt = del_stmt.where(EmbeddingCalibration.context_id == context_id)
-    await db.execute(del_stmt)
-
-    row = EmbeddingCalibration(
-        model_name=model_name,
-        dimensions=dimensions,
-        context_id=context_id,
-        p25=percentiles["p25"],
-        p50=percentiles["p50"],
-        p75=percentiles["p75"],
-        p90=percentiles["p90"],
-        p95=percentiles["p95"],
-        p99=percentiles["p99"],
-        sample_size=observations,
-        sampled_at=now,
+    # Upsert the knn_seed (top-k neighbor) row. Both kinds are written from
+    # this single sample so every trigger (bootstrap / scheduled / lazy-TTL)
+    # keeps them in lock-step without a second sampling pass.
+    knn_row = await _upsert_calibration(
+        db,
+        model_name,
+        dimensions,
+        context_id,
+        kind=CALIBRATION_KIND_KNN_SEED,
+        percentiles=percentiles,
+        observations=observations,
+        now=now,
         valid_until=valid_until,
     )
-    db.add(row)
+
+    # Upsert the edge_gate (random-pair) row (#982). The semantic gate must be
+    # calibrated to the RANDOM-PAIR distribution — a different population from
+    # the top-k neighbors above — so unrelated pairs are rejected while genuine
+    # cross-topic associations clear the bar. Reuse the already-fetched vectors;
+    # random pairs need no extra Qdrant round-trip. Skip (leaving the runtime on
+    # its absolute fallback) when too few pairs to estimate the upper tail.
+    pair_scores = measure_random_pair(vectors, SAMPLE_RANDOM_PAIRS)
+    pair_observations = len(pair_scores)
+    pair_percentiles = compute_percentiles(pair_scores)
+    if pair_percentiles and pair_observations >= EDGE_GATE_MIN_PAIR_OBSERVATIONS:
+        await _upsert_calibration(
+            db,
+            model_name,
+            dimensions,
+            context_id,
+            kind=CALIBRATION_KIND_EDGE_GATE,
+            percentiles=pair_percentiles,
+            observations=pair_observations,
+            now=now,
+            valid_until=valid_until,
+        )
+    else:
+        logger.warning(
+            "edge_calibration_skipped_insufficient_pairs",
+            model=model_name,
+            dimensions=dimensions,
+            context_id=str(context_id) if context_id else None,
+            pair_observations=pair_observations,
+            min_required=EDGE_GATE_MIN_PAIR_OBSERVATIONS,
+        )
+
     await db.commit()
 
     logger.info(
@@ -427,11 +516,13 @@ async def compute_calibration(
         model=model_name,
         dimensions=dimensions,
         context_id=str(context_id) if context_id else None,
-        p90=percentiles["p90"],
-        sample_size=observations,
+        knn_p90=percentiles["p90"],
+        knn_sample_size=observations,
+        edge_p95=pair_percentiles.get("p95") if pair_percentiles else None,
+        edge_pair_observations=pair_observations,
         valid_until=valid_until.isoformat(),
     )
-    return row
+    return knn_row
 
 
 async def _pick_largest_context_for_model(

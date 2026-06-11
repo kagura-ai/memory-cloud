@@ -58,19 +58,28 @@ class HebbianLearner:
         user_id: str,
         activations: list[ActivationState],
         nodes: dict[str, NeuralMemoryNode],
+        similarity_threshold: float | None = None,
     ) -> None:
         """Queue Hebbian updates for co-activated nodes.
 
         Applies semantic gating (Issue #118): pairs with cosine similarity
-        below config.min_similarity_for_edge are skipped to prevent noise
-        edges from accumulating.
+        below the effective threshold are skipped to prevent noise edges from
+        accumulating. The effective threshold is ``similarity_threshold`` when
+        provided (#982 calibrated edge-gate value), else
+        ``config.min_similarity_for_edge``.
 
         Args:
             user_id: User ID (for sharding)
             activations: List of activated nodes in this retrieval
             nodes: Map of node_id -> NeuralMemoryNode (for confidence scores)
+            similarity_threshold: Per-call semantic-gate override (#982);
+                ``None`` falls back to ``config.min_similarity_for_edge``.
         """
-        threshold = self.config.min_similarity_for_edge
+        threshold = (
+            similarity_threshold
+            if similarity_threshold is not None
+            else self.config.min_similarity_for_edge
+        )
         skipped = 0
 
         for i, act_i in enumerate(activations):

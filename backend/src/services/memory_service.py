@@ -1635,8 +1635,40 @@ class MemoryService:
                 embedding_map = {
                     nid: node.embedding for nid, node in nodes_dict.items() if node.embedding
                 }
+                # Resolve the calibrated edge-gate threshold (#982). The gate is
+                # keyed on the context's embedding (model, dimensions); both the
+                # co-activation tracker and the Hebbian learner use the same
+                # resolved value so they agree on which pairs may form edges.
+                # Best-effort: on any failure (or no edge_gate calibration row)
+                # this stays None and the gate falls back to the config absolute
+                # ``min_similarity_for_edge`` inside record_activation/queue_update.
+                edge_threshold: float | None = None
+                edge_dims = next((len(e) for e in embedding_map.values() if e), None)
+                if edge_dims and current_context_id is not None:
+                    try:
+                        from neural.calibration import resolve_edge_threshold
+                        from repositories.config_repository import (
+                            ContextSearchConfigRepository,
+                        )
+
+                        ctx_search_cfg = await ContextSearchConfigRepository(
+                            self.db
+                        ).create_or_get(current_context_id)
+                        edge_threshold = await resolve_edge_threshold(
+                            db=self.db,
+                            config=config,
+                            model_name=ctx_search_cfg.embedding_model,
+                            dimensions=edge_dims,
+                        )
+                    except Exception:  # noqa: BLE001 — best-effort; never break recall
+                        logger.debug("edge_threshold_resolve_failed", exc_info=True)
+                        edge_threshold = None
+
                 co_activation_tracker.record_activation(
-                    user_id, activated_nodes, embeddings=embedding_map
+                    user_id,
+                    activated_nodes,
+                    embeddings=embedding_map,
+                    similarity_threshold=edge_threshold,
                 )
                 await co_activation_tracker.save_to_redis(user_id)
 
@@ -1659,8 +1691,10 @@ class MemoryService:
                         )
                         nodes_added += 1
 
-                # Hebbian updates
-                await hebbian_learner.queue_update(user_id, activated_nodes, nodes_dict)
+                # Hebbian updates (same calibrated gate as co-activation above)
+                await hebbian_learner.queue_update(
+                    user_id, activated_nodes, nodes_dict, similarity_threshold=edge_threshold
+                )
                 edges_updated = await hebbian_learner.apply_updates(user_id)
 
                 logger.info(

@@ -186,16 +186,31 @@ async def _measure_replay_measure(
         svc, db, corpus, plan, docs_by_id, id_map, seed_mem_by_doc, owner, ctx, ws
     )
 
-    gate_audit = await _gate_audit(svc, db, corpus, plan, id_map, owner, ctx, ws)
-    replay_recalls = await _replay(svc, corpus, plan, owner, ctx, ws)
-    checkpoints["warm_replay"] = await _checkpoint(
-        svc, db, corpus, plan, docs_by_id, id_map, seed_mem_by_doc, owner, ctx, ws
-    )
+    # #982 demonstration: calibrate the edge_gate threshold from THIS corpus's
+    # non-gold pairwise cosine distribution and seed a (transient, model-global)
+    # edge_gate calibration row so the replay path's resolve_edge_threshold
+    # returns the calibrated value instead of the absolute 0.5 — exactly the
+    # production path. The row is deleted in the finally below; it is model-
+    # global (v1 resolve ignores context_id) so it briefly affects any
+    # concurrent recall on the same (model, dims). Acceptable for a local
+    # verification run with guaranteed cleanup.
+    edge_calibration = await _seed_edge_calibration(db, plan, id_map, ctx)
+    try:
+        gate_audit = await _gate_audit(svc, db, corpus, plan, id_map, owner, ctx, ws)
+        replay_recalls = await _replay(svc, corpus, plan, owner, ctx, ws)
+        checkpoints["warm_replay"] = await _checkpoint(
+            svc, db, corpus, plan, docs_by_id, id_map, seed_mem_by_doc, owner, ctx, ws
+        )
 
-    sleep_info = await _run_sleep(db, owner, ctx, ws)
-    checkpoints["warm_sleep"] = await _checkpoint(
-        svc, db, corpus, plan, docs_by_id, id_map, seed_mem_by_doc, owner, ctx, ws
-    )
+        sleep_info = await _run_sleep(db, owner, ctx, ws)
+        checkpoints["warm_sleep"] = await _checkpoint(
+            svc, db, corpus, plan, docs_by_id, id_map, seed_mem_by_doc, owner, ctx, ws
+        )
+    finally:
+        if edge_calibration.get("seeded"):
+            await _delete_edge_calibration(
+                db, edge_calibration["model"], edge_calibration["dimensions"]
+            )
 
     lift = {
         lane: {
@@ -218,6 +233,7 @@ async def _measure_replay_measure(
         "probe_query_ids": [p.query_id for p in plan.probes],
         "replay_query_count": len(plan.replay_query_ids),
         "replay_recalls": replay_recalls,
+        "edge_calibration": edge_calibration,
         "gate_audit": gate_audit,
         "sleep": sleep_info,
         "checkpoints": checkpoints,
@@ -347,6 +363,113 @@ async def _replay(svc: Any, corpus: Corpus, plan: ReplayPlan, owner: str, ctx: A
     return recalls
 
 
+def _gold_pairs_from_plan(plan: ReplayPlan) -> set[frozenset[str]]:
+    """All within-gold-set doc pairs across every probe (the companions a
+    learned layer should associate)."""
+    gold_pairs: set[frozenset[str]] = set()
+    for probe in plan.probes:
+        gold = (probe.seed_doc, *probe.companion_docs)
+        for i in range(len(gold)):
+            for j in range(i + 1, len(gold)):
+                gold_pairs.add(frozenset((gold[i], gold[j])))
+    return gold_pairs
+
+
+async def _seed_edge_calibration(
+    db: Any, plan: ReplayPlan, id_map: dict[str, str], ctx: Any
+) -> dict[str, Any]:
+    """Calibrate the edge_gate threshold from this corpus and seed a row (#982).
+
+    Measures the NON-GOLD pairwise cosine distribution over the corpus vectors
+    (the noise population the #118 gate suppresses) and writes a model-global
+    ``edge_gate`` calibration row so ``resolve_edge_threshold`` returns
+    ``max(percentile, floor)`` for the replay instead of the absolute 0.5. With
+    a small fixed fixture the full pairwise distribution is the right estimate
+    (random sampling would yield too few pairs). Returns a diagnostic block;
+    the caller deletes the row afterward.
+    """
+    from datetime import timedelta
+    from uuid import UUID
+
+    from db.qdrant import get_qdrant_client
+    from models.neural import CALIBRATION_KIND_EDGE_GATE
+    from neural.calibration import resolve_edge_threshold
+    from neural.config import NeuralMemoryConfig
+    from neural.utils import cosine_similarity
+    from tasks.neural_calibration import _load_measure_script, _upsert_calibration
+    from utils.datetime import utcnow
+
+    script = _load_measure_script()
+    model_name, dims, collection = await script.resolve_embedding_model(db, ctx.id)
+    qdrant = get_qdrant_client()
+    vecs_by_mem = await script.fetch_vectors(qdrant, collection, [UUID(m) for m in id_map])
+    doc_vec = {id_map[m]: v for m, v in vecs_by_mem.items() if m in id_map}
+
+    gold_pairs = _gold_pairs_from_plan(plan)
+    doc_ids = list(doc_vec)
+    non_gold_cos: list[float] = []
+    gold_cos: list[float] = []
+    for i in range(len(doc_ids)):
+        for j in range(i + 1, len(doc_ids)):
+            a, b = doc_ids[i], doc_ids[j]
+            cos = cosine_similarity(doc_vec[a], doc_vec[b])
+            if frozenset((a, b)) in gold_pairs:
+                gold_cos.append(round(cos, 4))
+            else:
+                non_gold_cos.append(cos)
+
+    percentiles = script.compute_percentiles(non_gold_cos)
+    if not percentiles or not non_gold_cos:
+        return {"seeded": False, "reason": "no_non_gold_pairs", "model": model_name,
+                "dimensions": dims}
+
+    config = await NeuralMemoryConfig.from_db(db)
+    now = utcnow()
+    await _upsert_calibration(
+        db, model_name, dims, None,
+        kind=CALIBRATION_KIND_EDGE_GATE,
+        percentiles=percentiles,
+        observations=len(non_gold_cos),
+        now=now,
+        valid_until=now + timedelta(days=config.calibration_ttl_days),
+    )
+    await db.commit()
+
+    # The exact runtime value the replay will apply (reads the row we just wrote).
+    resolved = await resolve_edge_threshold(
+        db=db, config=config, model_name=model_name, dimensions=dims
+    )
+    return {
+        "seeded": True,
+        "model": model_name,
+        "dimensions": dims,
+        "non_gold_observations": len(non_gold_cos),
+        "non_gold_percentiles": {k: round(v, 4) for k, v in percentiles.items()},
+        "percentile_used": config.min_similarity_for_edge_percentile,
+        "floor": config.min_similarity_for_edge_floor,
+        "absolute_fallback": config.min_similarity_for_edge,
+        "resolved_threshold": round(resolved, 4),
+        "gold_pair_cosines": sorted(gold_cos),
+    }
+
+
+async def _delete_edge_calibration(db: Any, model_name: str, dimensions: int) -> None:
+    """Remove the transient model-global edge_gate row seeded for the demo."""
+    from sqlalchemy import delete as sa_delete
+
+    from models.neural import CALIBRATION_KIND_EDGE_GATE, EmbeddingCalibration
+
+    await db.execute(
+        sa_delete(EmbeddingCalibration).where(
+            EmbeddingCalibration.model_name == model_name,
+            EmbeddingCalibration.dimensions == dimensions,
+            EmbeddingCalibration.context_id.is_(None),
+            EmbeddingCalibration.kind == CALIBRATION_KIND_EDGE_GATE,
+        )
+    )
+    await db.commit()
+
+
 async def _gate_audit(
     svc: Any,
     db: Any,
@@ -367,20 +490,22 @@ async def _gate_audit(
     zero graph-lane lift attributable: if every probe gold pair is gated,
     no amount of replay rounds can produce recovery.
     """
+    from neural.calibration import resolve_edge_threshold
     from neural.config import NeuralMemoryConfig
     from neural.utils import cosine_similarity
+    from repositories.config_repository import ContextSearchConfigRepository
 
     config = await NeuralMemoryConfig.from_db(db)
     queries_by_id = {q.id: q for q in corpus.queries}
 
-    gold_pairs: set[frozenset[str]] = set()
-    for probe in plan.probes:
-        gold = (probe.seed_doc, *probe.companion_docs)
-        for i in range(len(gold)):
-            for j in range(i + 1, len(gold)):
-                gold_pairs.add(frozenset((gold[i], gold[j])))
+    gold_pairs = _gold_pairs_from_plan(plan)
 
-    audits: list[PairAudit] = []
+    # Pass 1: collect raw pair candidates and capture the embedding dimension.
+    # We classify in a second pass so the cosine gate uses the SAME calibrated
+    # edge-gate threshold the live replay path applied (#982) — auditing against
+    # the absolute config value would mislabel pairs the calibrated gate formed.
+    raw_pairs: list[tuple[str, str, str, float | None, float, bool]] = []
+    dims: int | None = None
     for query_id in plan.replay_query_ids:
         results = await svc.search_service.hybrid_search(
             query=queries_by_id[query_id].text,
@@ -402,28 +527,58 @@ async def _gate_audit(
             for j in range(i + 1, len(docs)):
                 doc_a, act_a, emb_a = docs[i]
                 doc_b, act_b, emb_b = docs[j]
+                if dims is None and emb_a:
+                    dims = len(emb_a)
                 cosine = cosine_similarity(emb_a, emb_b) if emb_a and emb_b else None
                 delta_w = config.learning_rate * act_a * act_b
-                audits.append(
-                    PairAudit(
-                        query_id=query_id,
-                        doc_a=doc_a,
-                        doc_b=doc_b,
-                        cosine=round(cosine, 4) if cosine is not None else None,
-                        delta_w=round(delta_w, 4),
-                        verdict=classify_pair(
-                            cosine,
-                            delta_w,
-                            min_similarity=config.min_similarity_for_edge,
-                            prune_threshold=config.prune_threshold,
-                        ),
-                        is_probe_gold_pair=frozenset((doc_a, doc_b)) in gold_pairs,
+                raw_pairs.append(
+                    (
+                        query_id,
+                        doc_a,
+                        doc_b,
+                        cosine,
+                        delta_w,
+                        frozenset((doc_a, doc_b)) in gold_pairs,
                     )
                 )
 
+    # Resolve the calibrated edge-gate threshold (#982). Falls back to the
+    # absolute config value when no edge_gate calibration row exists for this
+    # (model, dims) — exactly mirroring resolve_edge_threshold's contract and
+    # the gate the live replay applied.
+    edge_threshold = config.min_similarity_for_edge
+    if dims is not None:
+        ctx_cfg = await ContextSearchConfigRepository(db).create_or_get(ctx.id)
+        edge_threshold = await resolve_edge_threshold(
+            db=db, config=config, model_name=ctx_cfg.embedding_model, dimensions=dims
+        )
+
+    # Pass 2: classify against the resolved threshold.
+    audits = [
+        PairAudit(
+            query_id=query_id,
+            doc_a=doc_a,
+            doc_b=doc_b,
+            cosine=round(cosine, 4) if cosine is not None else None,
+            delta_w=round(delta_w, 4),
+            verdict=classify_pair(
+                cosine,
+                delta_w,
+                min_similarity=edge_threshold,
+                prune_threshold=config.prune_threshold,
+            ),
+            is_probe_gold_pair=is_gold,
+        )
+        for (query_id, doc_a, doc_b, cosine, delta_w, is_gold) in raw_pairs
+    ]
+
     summary = summarize_gate_audit(audits)
     summary["thresholds"] = {
-        "min_similarity_for_edge": config.min_similarity_for_edge,
+        # The value actually applied to classification (calibrated when an
+        # edge_gate row exists, else the absolute fallback).
+        "min_similarity_for_edge": edge_threshold,
+        # Kept for reference so a report shows whether calibration was in effect.
+        "min_similarity_for_edge_absolute": config.min_similarity_for_edge,
         "prune_threshold": config.prune_threshold,
         "learning_rate": config.learning_rate,
         "top_k_coactivation": config.top_k_coactivation,

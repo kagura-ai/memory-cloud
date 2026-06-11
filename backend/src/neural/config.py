@@ -136,7 +136,19 @@ class NeuralMemoryConfig:
     track_co_activation: bool = True
     co_activation_window: int = 300  # 5 minutes
     min_co_activation_count: int = 2
-    min_similarity_for_edge: float = 0.5  # Semantic gating threshold
+    min_similarity_for_edge: float = 0.5  # Semantic gating threshold (absolute fallback)
+    # Edge-gate percentile calibration (#982, follow-up to #969). When an
+    # ``edge_gate`` ``embedding_calibrations`` row exists for (model, dims),
+    # the runtime gate is ``max(percentile(min_similarity_for_edge_percentile),
+    # min_similarity_for_edge_floor)`` over the RANDOM-PAIR cosine distribution;
+    # otherwise the absolute ``min_similarity_for_edge`` above is used unchanged
+    # (current behavior). The percentile is high because the random-pair upper
+    # tail is where genuine cross-topic associations begin to separate from
+    # noise — the #118 anti-noise gate, recalibrated to the model's similarity
+    # distribution per the #969 zero-lift finding (absolute 0.5 rejected real
+    # cross-topic pairs at cosine 0.37-0.40 under text-embedding-3-small).
+    min_similarity_for_edge_percentile: float = 95.0
+    min_similarity_for_edge_floor: float = 0.3
     max_assoc_score: float = 0.5  # Cap graph association score per node
     top_k_coactivation: int = 3  # Only co-activate top-k results
 
@@ -267,6 +279,16 @@ class NeuralMemoryConfig:
         if not (0.0 <= self.min_similarity_for_edge <= 1.0):
             raise ValueError(
                 f"min_similarity_for_edge must be in [0, 1], got {self.min_similarity_for_edge}"
+            )
+        if not (0.0 < self.min_similarity_for_edge_percentile < 100.0):
+            raise ValueError(
+                "min_similarity_for_edge_percentile must be in (0, 100), got "
+                f"{self.min_similarity_for_edge_percentile}"
+            )
+        if not (0.0 <= self.min_similarity_for_edge_floor <= 1.0):
+            raise ValueError(
+                "min_similarity_for_edge_floor must be in [0, 1], got "
+                f"{self.min_similarity_for_edge_floor}"
             )
         if not self.max_assoc_score > 0:
             raise ValueError(f"max_assoc_score must be positive, got {self.max_assoc_score}")
@@ -462,6 +484,10 @@ class NeuralMemoryConfig:
             co_activation_window=get_int("CO_ACTIVATION_WINDOW", 300),
             min_co_activation_count=get_int("MIN_CO_ACTIVATION_COUNT", 2),
             min_similarity_for_edge=get_float("MIN_SIMILARITY_FOR_EDGE", 0.5),
+            min_similarity_for_edge_percentile=get_float(
+                "MIN_SIMILARITY_FOR_EDGE_PERCENTILE", 95.0
+            ),
+            min_similarity_for_edge_floor=get_float("MIN_SIMILARITY_FOR_EDGE_FLOOR", 0.3),
             max_assoc_score=get_float("MAX_ASSOC_SCORE", 0.5),
             top_k_coactivation=get_int("TOP_K_COACTIVATION", 3),
             # Forgetting/Decay
@@ -574,6 +600,13 @@ class NeuralMemoryConfig:
             ),
             min_similarity_for_edge=configs.get(
                 "min_similarity_for_edge", base_config.min_similarity_for_edge
+            ),
+            min_similarity_for_edge_percentile=configs.get(
+                "min_similarity_for_edge_percentile",
+                base_config.min_similarity_for_edge_percentile,
+            ),
+            min_similarity_for_edge_floor=configs.get(
+                "min_similarity_for_edge_floor", base_config.min_similarity_for_edge_floor
             ),
             max_assoc_score=configs.get("max_assoc_score", base_config.max_assoc_score),
             top_k_coactivation=configs.get("top_k_coactivation", base_config.top_k_coactivation),
