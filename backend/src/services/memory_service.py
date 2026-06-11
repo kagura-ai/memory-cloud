@@ -1651,9 +1651,9 @@ class MemoryService:
                             ContextSearchConfigRepository,
                         )
 
-                        ctx_search_cfg = await ContextSearchConfigRepository(
-                            self.db
-                        ).create_or_get(current_context_id)
+                        ctx_search_cfg = await ContextSearchConfigRepository(self.db).create_or_get(
+                            current_context_id
+                        )
                         edge_threshold = await resolve_edge_threshold(
                             db=self.db,
                             config=config,

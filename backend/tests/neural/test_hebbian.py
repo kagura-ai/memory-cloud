@@ -313,14 +313,26 @@ class TestHebbianLearner:
         def _nodes():
             return {
                 "a": NeuralMemoryNode(
-                    id="a", user_id="u", kind=MemoryKind.FACT, text="A",
-                    embedding=emb_a, created_at=datetime.utcnow(),
-                    use_count=0, importance=0.5, confidence=1.0,
+                    id="a",
+                    user_id="u",
+                    kind=MemoryKind.FACT,
+                    text="A",
+                    embedding=emb_a,
+                    created_at=datetime.utcnow(),
+                    use_count=0,
+                    importance=0.5,
+                    confidence=1.0,
                 ),
                 "b": NeuralMemoryNode(
-                    id="b", user_id="u", kind=MemoryKind.FACT, text="B",
-                    embedding=emb_b, created_at=datetime.utcnow(),
-                    use_count=0, importance=0.5, confidence=1.0,
+                    id="b",
+                    user_id="u",
+                    kind=MemoryKind.FACT,
+                    text="B",
+                    embedding=emb_b,
+                    created_at=datetime.utcnow(),
+                    use_count=0,
+                    importance=0.5,
+                    confidence=1.0,
                 ),
             }
 
@@ -334,9 +346,7 @@ class TestHebbianLearner:
             learning_rate=0.1, gradient_clipping=1.0, min_similarity_for_edge=0.9
         )
         admit_learner = HebbianLearner(mock_graph, admit_cfg)
-        await admit_learner.queue_update(
-            "u", activations, _nodes(), similarity_threshold=0.3
-        )
+        await admit_learner.queue_update("u", activations, _nodes(), similarity_threshold=0.3)
         assert len(admit_learner._update_queue["u"]) == 2
 
         # config 0.1 would admit; override 0.8 gates → no updates.
@@ -344,9 +354,7 @@ class TestHebbianLearner:
             learning_rate=0.1, gradient_clipping=1.0, min_similarity_for_edge=0.1
         )
         gate_learner = HebbianLearner(mock_graph, gate_cfg)
-        await gate_learner.queue_update(
-            "u", activations, _nodes(), similarity_threshold=0.8
-        )
+        await gate_learner.queue_update("u", activations, _nodes(), similarity_threshold=0.8)
         assert len(gate_learner._update_queue.get("u", [])) == 0
 
     @pytest.mark.asyncio

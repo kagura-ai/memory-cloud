@@ -420,13 +420,20 @@ async def _seed_edge_calibration(
 
     percentiles = script.compute_percentiles(non_gold_cos)
     if not percentiles or not non_gold_cos:
-        return {"seeded": False, "reason": "no_non_gold_pairs", "model": model_name,
-                "dimensions": dims}
+        return {
+            "seeded": False,
+            "reason": "no_non_gold_pairs",
+            "model": model_name,
+            "dimensions": dims,
+        }
 
     config = await NeuralMemoryConfig.from_db(db)
     now = utcnow()
     await _upsert_calibration(
-        db, model_name, dims, None,
+        db,
+        model_name,
+        dims,
+        None,
         kind=CALIBRATION_KIND_EDGE_GATE,
         percentiles=percentiles,
         observations=len(non_gold_cos),
