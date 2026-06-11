@@ -506,6 +506,65 @@ class TestHebbianLearner:
         assert len(learner._update_queue["u"]) == 2
 
     @pytest.mark.asyncio
+    async def test_cliff_subthreshold_first_update_is_stashed_not_dropped(self, mock_graph):
+        """#983 prune-cliff fix: a first Δw below prune_threshold must be
+        accumulated as pending weight, not silently dropped — ~12% of
+        observed pairs in the #969 audit could never accumulate."""
+        config = NeuralMemoryConfig(
+            learning_rate=0.1, gradient_clipping=1.0, prune_threshold=0.05
+        )
+        mock_graph.get_edge = AsyncMock(return_value=None)
+        mock_graph.has_edge = AsyncMock(return_value=False)
+        mock_graph.add_edge = AsyncMock()
+        learner = HebbianLearner(mock_graph, config)
+
+        result = await learner._apply_update_to_edge("u", "a", "b", 0.03)
+
+        assert result == 0.0  # no edge yet (counting semantics unchanged)
+        mock_graph.add_edge.assert_not_called()
+        mock_graph.remove_edge.assert_not_called()
+        assert learner._pending_weights["u"][("a", "b")] == pytest.approx(0.03)
+
+    @pytest.mark.asyncio
+    async def test_cliff_accumulated_pending_materializes_edge(self, mock_graph):
+        """#983: once pending + Δw crosses prune_threshold the edge is
+        created with the accumulated weight, and the stash is cleared."""
+        config = NeuralMemoryConfig(
+            learning_rate=0.1, gradient_clipping=1.0, prune_threshold=0.05
+        )
+        mock_graph.get_edge = AsyncMock(return_value=None)
+        mock_graph.has_edge = AsyncMock(return_value=False)
+        mock_graph.add_edge = AsyncMock()
+        learner = HebbianLearner(mock_graph, config)
+
+        await learner._apply_update_to_edge("u", "a", "b", 0.03)
+        result = await learner._apply_update_to_edge("u", "a", "b", 0.03)
+
+        assert result == pytest.approx(0.06)
+        mock_graph.add_edge.assert_called_once()
+        assert mock_graph.add_edge.call_args.kwargs["weight"] == pytest.approx(0.06)
+        assert ("a", "b") not in learner._pending_weights["u"]
+
+    @pytest.mark.asyncio
+    async def test_cliff_existing_edge_below_threshold_still_pruned(self, mock_graph):
+        """#983 scope boundary: decay-driven pruning of REAL edges is
+        unchanged — the cliff fix applies only to not-yet-materialized
+        edges."""
+        config = NeuralMemoryConfig(
+            learning_rate=0.1, gradient_clipping=1.0, prune_threshold=0.05
+        )
+        mock_graph.get_edge = AsyncMock(return_value={"weight": 0.04})
+        mock_graph.has_edge = AsyncMock(return_value=True)
+        mock_graph.add_edge = AsyncMock()
+        learner = HebbianLearner(mock_graph, config)
+
+        result = await learner._apply_update_to_edge("u", "a", "b", -0.02)
+
+        assert result == 0.0
+        mock_graph.remove_edge.assert_called_once()
+        assert ("a", "b") not in learner._pending_weights["u"]
+
+    @pytest.mark.asyncio
     async def test_prune_weak_edges_excludes_semantic_origin(self, mock_graph):
         """#724: the per-node top-M pruner only considers hebbian edges.
 

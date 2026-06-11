@@ -52,6 +52,11 @@ class HebbianLearner:
         self.graph = graph
         self.config = config
         self._update_queue: dict[str, list[HebbianUpdate]] = defaultdict(list)
+        # #983 prune-cliff fix: sub-threshold weight accumulated for edges
+        # that do not exist yet, keyed (src_id, dst_id) per user. In-process
+        # only (same volatility contract as CoActivationTracker records);
+        # entries are popped when the edge materializes.
+        self._pending_weights: dict[str, dict[tuple[str, str], float]] = defaultdict(dict)
 
     async def queue_update(
         self,
@@ -320,19 +325,31 @@ class HebbianLearner:
         Returns:
             New weight value, or None if update failed
         """
+        pair_key = (src_id, dst_id)
+        # #983: fold in any pending sub-threshold weight from earlier
+        # co-recalls of this not-yet-materialized edge.
+        pending = self._pending_weights[user_id].pop(pair_key, 0.0)
         current_weight = await self._get_current_weight(user_id, src_id, dst_id)
-        new_weight = current_weight + delta_w
+        new_weight = current_weight + pending + delta_w
 
         # Clip to [0, weight_max]
         new_weight = max(0.0, min(new_weight, self.config.weight_max))
 
         # Prune if below threshold
         if new_weight < self.config.prune_threshold:
-            # Remove edge
             try:
                 if await self.graph.has_edge(src_id, dst_id):
+                    # Existing edge decayed below threshold — prune. The #983
+                    # cliff fix applies only to not-yet-materialized edges;
+                    # decay-side pruning is unchanged.
                     await self.graph.remove_edge(src_id, dst_id)
                     logger.debug(f"Pruned edge ({src_id}, {dst_id}) (weight={new_weight:.4f})")
+                elif new_weight > 0.0:
+                    # #983 prune-cliff fix: the edge does not exist yet, so a
+                    # sub-threshold first update used to be dropped — making
+                    # accumulation across repeated co-recalls impossible
+                    # (~12% of observed pairs in the #969 audit). Stash it.
+                    self._pending_weights[user_id][pair_key] = new_weight
                 return 0.0
             except Exception as e:
                 logger.error(f"Failed to remove edge ({src_id}, {dst_id}): {e}")
