@@ -149,6 +149,17 @@ class NeuralMemoryConfig:
     # cross-topic pairs at cosine 0.37-0.40 under text-embedding-3-small).
     min_similarity_for_edge_percentile: float = 95.0
     min_similarity_for_edge_floor: float = 0.3
+    # 2D edge gate (#983): second gate axis = repetition. Pairs whose cosine
+    # falls in the [floor, calibrated-threshold) band are not rejected
+    # outright — they form an edge once their co-activation count reaches
+    # ``min_co_activation_count``. Genuine cross-topic associations are
+    # co-recalled repeatedly across different queries; noise pairs co-occur
+    # once by ranking accident (#982 eval finding: the two distributions
+    # overlap on cosine alone). Disable to restore the pure 1-D gate.
+    # NOTE: co-activation counts are tracked in process memory only — they
+    # reset on restart and are not shared across workers. Accepted and
+    # documented as a known limitation (#983); persistence is a follow-up.
+    edge_gate_repetition_enabled: bool = True
     max_assoc_score: float = 0.5  # Cap graph association score per node
     top_k_coactivation: int = 3  # Only co-activate top-k results
 
@@ -481,6 +492,7 @@ class NeuralMemoryConfig:
             importance_ema_alpha=get_float("IMPORTANCE_EMA_ALPHA", 0.3),
             # Co-Activation
             track_co_activation=get_bool("TRACK_CO_ACTIVATION", True),
+            edge_gate_repetition_enabled=get_bool("EDGE_GATE_REPETITION_ENABLED", True),
             co_activation_window=get_int("CO_ACTIVATION_WINDOW", 300),
             min_co_activation_count=get_int("MIN_CO_ACTIVATION_COUNT", 2),
             min_similarity_for_edge=get_float("MIN_SIMILARITY_FOR_EDGE", 0.5),
@@ -592,6 +604,7 @@ class NeuralMemoryConfig:
             ),
             # Co-Activation (env-only, not in DB)
             track_co_activation=base_config.track_co_activation,
+            edge_gate_repetition_enabled=base_config.edge_gate_repetition_enabled,
             co_activation_window=configs.get(
                 "co_activation_window", base_config.co_activation_window
             ),

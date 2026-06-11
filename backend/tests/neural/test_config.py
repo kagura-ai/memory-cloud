@@ -107,6 +107,32 @@ class TestEdgeGateCalibrationConfig:
         assert config.min_similarity_for_edge_floor == 0.35
 
 
+class TestEdgeGateRepetitionConfig:
+    """2D edge gate repetition axis (Issue #983).
+
+    ``edge_gate_repetition_enabled`` is the rollback switch for the second
+    gate axis: pairs in the [floor, calibrated-threshold) cosine band may
+    form edges once their co-activation count reaches
+    ``min_co_activation_count`` (the existing knob, previously unconsulted
+    on the edge-formation path).
+    """
+
+    def test_repetition_gate_default_enabled(self):
+        config = NeuralMemoryConfig()
+        assert config.edge_gate_repetition_enabled is True
+        # The repetition axis reuses the existing count knob.
+        assert config.min_co_activation_count == 2
+
+    def test_repetition_gate_can_be_disabled(self):
+        config = NeuralMemoryConfig(edge_gate_repetition_enabled=False)
+        assert config.edge_gate_repetition_enabled is False
+
+    def test_repetition_gate_from_env(self, monkeypatch):
+        monkeypatch.setenv("EDGE_GATE_REPETITION_ENABLED", "false")
+        config = NeuralMemoryConfig.from_env()
+        assert config.edge_gate_repetition_enabled is False
+
+
 class TestSleepMaintenanceConfig:
     """Test Sleep Maintenance configuration fields (Issue #101)."""
 
