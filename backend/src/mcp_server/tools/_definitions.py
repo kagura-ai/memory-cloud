@@ -13,7 +13,7 @@ def get_tool_definitions() -> list[dict]:
     Returns:
         List of tool definition dicts (compatible with MCP spec)
     """
-    return [
+    tools: list[dict] = [
         {
             "name": "list_my_bindings",
             "readOnly": True,
@@ -1331,6 +1331,38 @@ Requires action recording (reports created before this feature have no actions t
                             "Event ingestion quota per hour for the token (1-10000, default: 1000)."
                         ),
                     },
+                    # Registration-flow params (Spec 2026-06-02). Read by the handler
+                    # (resource.py handle_setup_connector) and forwarded to
+                    # ConnectorProvisioningService — declared here so the strict
+                    # additionalProperties:false policy (#990) does not forbid them.
+                    "context_id": {
+                        "type": "string",
+                        "format": "uuid",
+                        "description": "Existing write-target context UUID for ingested events.",
+                    },
+                    "auto_create_context_name": {
+                        "type": "string",
+                        "description": (
+                            "Create a fresh private context with this name (alternative to "
+                            "context_id; max 100 chars)."
+                        ),
+                    },
+                    "llm_config": {
+                        "type": "object",
+                        "description": "BYO LLM config bundle; stored Fernet-encrypted.",
+                    },
+                    "channel_ids": {
+                        "type": "array",
+                        "description": "Ingest channel selection for the connector.",
+                    },
+                    "locale": {
+                        "type": "string",
+                        "description": "Connector locale (max 10 chars).",
+                    },
+                    "external_team_id": {
+                        "type": "string",
+                        "description": "Platform team id (worker dispatch key; max 255 chars).",
+                    },
                 },
             },
         },
@@ -1546,10 +1578,6 @@ Requires action recording (reports created before this feature have no actions t
                     "min_importance": {
                         "type": "number",
                         "description": "Optional importance floor (0.0–1.0).",
-                    },
-                    "query": {
-                        "type": "string",
-                        "description": "Reserved for v1.5 query-scoped runs (ignored in v1).",
                     },
                     "model_id": {
                         "type": "integer",
@@ -1922,6 +1950,18 @@ never returned. This lane is excluded from recall() by design.""",
             },
         },
     ]
+    # Pre-1.0 schema policy (#990): every tool inputSchema is strict — no
+    # undeclared top-level parameters. Applied centrally here so all 45 tools
+    # stay uniform and any new tool inherits the policy automatically. This is
+    # advisory (handlers read args defensively via ``.get`` and never
+    # Pydantic-validate), so it tightens the client-facing contract without
+    # changing server behaviour. Nested object params are unaffected — only the
+    # top-level argument object is closed.
+    for tool in tools:
+        schema = tool.get("inputSchema")
+        if isinstance(schema, dict) and schema.get("type") == "object":
+            schema.setdefault("additionalProperties", False)
+    return tools
 
 
 # ============================================================================

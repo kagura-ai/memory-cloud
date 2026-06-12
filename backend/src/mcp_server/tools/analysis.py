@@ -302,7 +302,8 @@ async def handle_analyze_context(
                 types=args.get("types"),
                 tags=args.get("tags"),
                 min_importance=args.get("min_importance"),
-                query=args.get("query"),
+                # query (Reserved for v1.5) was removed from the analyze_context
+                # inputSchema in #990; AnalysisParams.query defaults to None.
                 model_id=args.get("model_id"),
                 extra={
                     "from": args.get("from"),

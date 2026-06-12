@@ -3,8 +3,9 @@
 > Issue: #622 — pre-1.0 public API surface enumeration and freeze
 > Enumerated at commit 20ae959a2c79cacd2cf7922512ad780f540e9c60 (main HEAD, 2026-06-12)
 > Source: backend/src/mcp_server/tools/_definitions.py — 45 tools, 45 of 45 enumerated
+> Re-frozen after #990 (additionalProperties:false on all 45 schemas; analyze_context `query` no-op removed; `model_id` replacement deferred to a follow-up)
 
-**Global note**: `additionalProperties` is not set on any tool's `inputSchema` (0 occurrences in the file). JSON Schema's default (`true`) therefore applies everywhere — unknown parameters are silently accepted at the schema level. For a frozen 1.0 surface this should be an explicit decision (set `additionalProperties: false` or document the permissive default). ⚠
+**Global note**: ✅ **Resolved in #990.** Every tool `inputSchema` now sets `additionalProperties: false` — undeclared top-level parameters are forbidden by the published contract. Applied centrally in `get_tool_definitions()` so all 45 tools stay uniform and any new tool inherits the policy automatically. The policy is advisory at the server (handlers read args defensively via `.get` and never Pydantic-validate), so it tightens the client-facing contract without changing server behaviour; nested object params are unaffected (only the top-level argument object is closed).
 
 ---
 
@@ -356,8 +357,8 @@ Start (or dry-run cost-preview) a broadlistening analysis run that clusters a co
   - `types` — array of string ⚠ top-level filter params (`types`, `tags`, `min_importance`) duplicate recall's `filters` object vocabulary with different shapes (`types` plural array vs filters `type` singular; `min_importance` vs filters `importance: {gte}`)
   - `tags` — array of string
   - `min_importance` — number (0.0–1.0)
-  - `query` — string ⚠ "Reserved for v1.5 query-scoped runs (ignored in v1)" — shipping a documented no-op parameter into a frozen 1.0 surface invites silent-failure confusion; remove until implemented
-  - `model_id` — integer ⚠ lock-in: an internal `llm_pricing.id` database PK exposed as the public model selector, and the description hardcodes "openai gpt-5-nano" — both the PK coupling and the vendor/model name are implementation details
+  - ~~`query`~~ — ✅ **removed in #990** (was a reserved-for-v1.5 no-op; will be re-added when the query-scoped path is implemented).
+  - `model_id` — integer ⚠ lock-in: an internal `llm_pricing.id` database PK exposed as the public model selector, hardcoding "openai gpt-5-nano" in the description. **Deferred** from #990: `model_id` is a *shared* MCP + REST contract (`api/routes/analyses.py` builds the same `AnalysisParams`; a REST Pydantic schema and 4 test files reference it), so replacing the PK with a stable `(provider, model)` identifier is a cross-surface change that needs its own focused pass — see the dedicated follow-up.
   - `dry_run` — boolean (default false)
 
 ### get_analysis
@@ -495,9 +496,9 @@ Recurring inconsistencies (each instance flagged inline above):
 - **P1** Unify time-range bounds on one pair (`from`/`to` or `from`/`until`) across recall_upcoming, analyze_context, setup_connector.
 - **P1** Add `format: "uuid"` to every UUID param (analysis bundle, file tools, feedback, set_state, get_state, run_id, file_id, memory_id in feedback).
 - **P1** forget: make the two modes explicit (`anyOf`/`oneOf` over memory_id / query) so a bare `{context_id}` call is schema-invalid — destructive tool, ambiguous input.
-- **P1** Remove analyze_context's reserved no-op `query` param (re-add in v1.5 when implemented) and replace `model_id` (internal llm_pricing PK) with a stable model identifier.
+- ✅ **DONE (#990, query)** / **DEFERRED (model_id)** — analyze_context's reserved no-op `query` param was removed (re-add in v1.5). Replacing `model_id` (internal llm_pricing PK) with a stable identifier was **deferred to a dedicated follow-up**: it is a shared MCP + REST contract (orchestrator `AnalysisParams`, `api/routes/analyses.py`, REST Pydantic schema, 4 test files), so it needs a cross-surface design pass rather than an MCP-schema-only edit.
 - **P1** Decide the `workspace_id` override on the 5 file tools: remove from public schema or document the auth model explicitly.
-- **P1** Set `additionalProperties: false` (or record the permissive default as a deliberate freeze decision) on all 45 inputSchemas.
+- ✅ **DONE (#990)** Set `additionalProperties: false` on all 45 inputSchemas (applied centrally in `get_tool_definitions()`; guarded by `tests/mcp_server/test_tool_schema_policy.py`).
 - **P1** Unify edge-type param naming/typing: `relation_types`/`edge_types`/`edge_type` → one name, one typing.
 
 ### Bundle 2 — P2: enum policy + prose-to-schema hardening (propose as sub-issue "MCP surface: enum extension policy and schema-enforced constraints")
