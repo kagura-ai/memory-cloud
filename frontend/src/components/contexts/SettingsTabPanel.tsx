@@ -11,6 +11,7 @@
 import { useEffect, useState, useCallback } from "react";
 import { useTranslations } from "next-intl";
 import { Button } from "@/components/ui/button";
+import { copyText } from "@/lib/utils/clipboard";
 import { Input } from "@/components/ui/input";
 import { Textarea } from "@/components/ui/textarea";
 import {
@@ -308,7 +309,9 @@ export function SettingsTabPanel({
                   className="shrink-0"
                   onClick={async () => {
                     try {
-                      await navigator.clipboard.writeText(context.id);
+                      // copyText degrades to an execCommand fallback before
+                      // throwing (issue #987).
+                      await copyText(context.id);
                       setIdCopied(true);
                       setTimeout(() => setIdCopied(false), 1500);
                     } catch {

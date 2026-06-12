@@ -21,6 +21,7 @@ import {
   MCPConfigBlock,
   CODEX_INSTALL_COMMAND,
   buildTomlConfig,
+  toBareMcpUrl,
 } from "./MCPConfigBlock";
 
 // Stable references defined OUTSIDE beforeEach so React's useCallback /
@@ -69,6 +70,13 @@ beforeEach(() => {
   });
   Object.defineProperty(navigator, "clipboard", {
     value: { writeText: mockWriteText },
+    writable: true,
+    configurable: true,
+  });
+  // copyText (issue #987) falls back to execCommand when writeText rejects.
+  // Default it to "unavailable" so the copy-failure tests are deterministic.
+  Object.defineProperty(document, "execCommand", {
+    value: vi.fn(() => false),
     writable: true,
     configurable: true,
   });
@@ -129,6 +137,75 @@ describe("MCPConfigBlock", () => {
       expect(
         screen.getByText(new RegExp(`"url": "${MCP_URL}"`)),
       ).toBeInTheDocument();
+    });
+  });
+
+  describe("Claude Code OAuth one-liner (#988)", () => {
+    const OAUTH_CMD =
+      "claude mcp add --transport http kagura-memory https://memory.kagura-ai.com/mcp";
+
+    it("renders the env-derived `claude mcp add` command using the bare /mcp endpoint", () => {
+      render(<MCPConfigBlock apiKey={VISIBLE_KEY} mcpUrl={MCP_URL} />);
+      // claude-code is the default tab. The OAuth one-liner targets the bare
+      // /mcp endpoint (OAuth resolves the workspace at login), so the
+      // /w/<id> suffix from the workspace-scoped mcpUrl must be stripped.
+      expect(screen.getByText(OAUTH_CMD)).toBeInTheDocument();
+      expect(
+        screen.queryByText(/claude mcp add[^\n]*\/w\/test-ws/),
+      ).not.toBeInTheDocument();
+    });
+
+    it("does not render the OAuth one-liner on the chatgpt tab", () => {
+      localStorageStore["kagura_last_mcp_client"] = "chatgpt";
+      render(<MCPConfigBlock apiKey={VISIBLE_KEY} mcpUrl={MCP_URL} />);
+      expect(screen.queryByText(/claude mcp add/)).not.toBeInTheDocument();
+    });
+
+    it("copies the OAuth command via its copy button", async () => {
+      render(<MCPConfigBlock apiKey={VISIBLE_KEY} mcpUrl={MCP_URL} />);
+      fireEvent.click(
+        screen.getByRole("button", { name: "copyClaudeOAuthCommand" }),
+      );
+      await act(async () => {
+        await Promise.resolve();
+      });
+      expect(mockWriteText).toHaveBeenCalledWith(OAUTH_CMD);
+    });
+
+    it("is available even when the API-key window is closed (OAuth needs no key)", () => {
+      render(<MCPConfigBlock apiKey={HIDDEN_KEY} mcpUrl={MCP_URL} />);
+      expect(screen.getByText(OAUTH_CMD)).toBeInTheDocument();
+      expect(
+        screen.getByRole("button", { name: "copyClaudeOAuthCommand" }),
+      ).toBeEnabled();
+    });
+
+    it("uses the explicit mcpBaseUrl prop for the command instead of stripping mcpUrl", () => {
+      // The caller passes its already-computed bare URL; the command must use
+      // it verbatim (no regex on mcpUrl), even if it differs from what
+      // stripping the workspace-scoped mcpUrl would produce.
+      render(
+        <MCPConfigBlock
+          apiKey={VISIBLE_KEY}
+          mcpUrl={MCP_URL}
+          mcpBaseUrl="https://memory.kagura-ai.com/mcp"
+        />,
+      );
+      expect(screen.getByText(OAUTH_CMD)).toBeInTheDocument();
+    });
+  });
+
+  describe("toBareMcpUrl", () => {
+    it("strips a trailing /w/<workspaceId> suffix", () => {
+      expect(toBareMcpUrl("https://memory.kagura-ai.com/mcp/w/test-ws")).toBe(
+        "https://memory.kagura-ai.com/mcp",
+      );
+    });
+
+    it("is a no-op on an already-bare /mcp URL (idempotent)", () => {
+      expect(toBareMcpUrl("http://localhost:8080/mcp")).toBe(
+        "http://localhost:8080/mcp",
+      );
     });
   });
 
@@ -244,36 +321,42 @@ describe("MCPConfigBlock", () => {
       });
     });
 
-    it("clipboard write failures fire a destructive toast with the common error title (not the success title)", async () => {
+    it("hard copy failure fires a destructive toast with the actionable hint (not the success title)", async () => {
+      // writeText rejects AND the execCommand fallback is unavailable
+      // (returns false, per beforeEach) → copyText throws.
       mockWriteText.mockRejectedValueOnce(new Error("clipboard denied"));
       render(<MCPConfigBlock apiKey={VISIBLE_KEY} mcpUrl={MCP_URL} />);
       fireEvent.click(screen.getByRole("button", { name: "copyConfig" }));
       await act(async () => {
         await Promise.resolve();
+        await Promise.resolve();
       });
 
-      // Note: the test mocks useTranslations to return the key as-is,
-      // so "error" here is the tCommon namespace key (not "mcpConfigCopied").
+      // Note: the test mocks useTranslations to return the key as-is, so
+      // "error"/"copyFailedManualHint" are the tCommon namespace keys. The
+      // raw DOM exception string must NOT leak into the toast (issue #987).
       expect(mockToast).toHaveBeenCalledWith({
         title: "error",
-        description: "clipboard denied",
+        description: "copyFailedManualHint",
         variant: "destructive",
       });
     });
 
-    it("non-Error rejections produce a usable description (not empty)", async () => {
-      // Some clipboard implementations reject with strings or DOMException
-      // — verify we narrow safely instead of hitting an undefined .message.
+    it("non-Error rejections still produce the actionable hint (no crash, not empty)", async () => {
+      // Some clipboard implementations reject with strings or DOMException —
+      // copyText normalizes any failure to a typed error, so the toast shows
+      // the actionable hint rather than an undefined/empty description.
       mockWriteText.mockRejectedValueOnce("permission denied");
       render(<MCPConfigBlock apiKey={VISIBLE_KEY} mcpUrl={MCP_URL} />);
       fireEvent.click(screen.getByRole("button", { name: "copyConfig" }));
       await act(async () => {
         await Promise.resolve();
+        await Promise.resolve();
       });
 
       expect(mockToast).toHaveBeenCalledWith({
         title: "error",
-        description: "permission denied",
+        description: "copyFailedManualHint",
         variant: "destructive",
       });
     });

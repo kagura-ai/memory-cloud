@@ -36,13 +36,16 @@ export function WorkspaceIdField({ workspaceId }: WorkspaceIdFieldProps) {
         title: tCommon("success"),
         description: t("workspaceIdCopied"),
       });
-    } catch (err) {
+    } catch {
       // useCopyFeedback re-throws clipboard errors so callers can surface
       // them — frontend rule: button-driven action failures use a toast.
+      // copyText already tried the execCommand fallback (issue #987), so show
+      // an actionable hint rather than the raw DOM exception string. The ID is
+      // visible in its <code> block, so the user can select + copy it manually.
       toast({
         variant: "destructive",
         title: tCommon("error"),
-        description: err instanceof Error ? err.message : t("copyFailed"),
+        description: tCommon("copyFailedManualHint"),
       });
     }
   };

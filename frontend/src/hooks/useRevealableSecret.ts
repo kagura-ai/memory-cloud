@@ -1,6 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useRef, useState } from "react";
+import { copyText } from "@/lib/utils/clipboard";
 
 /**
  * Default duration to keep the "copied" UI affordance visible after a copy.
@@ -121,12 +122,10 @@ export function useRevealableSecret(
       //
       // Re-throws on failure so the caller can show a destructive toast
       // (clipboard write failure is a user-visible action failure, not
-      // a defense-in-depth background event).
-      try {
-        await navigator.clipboard.writeText(text);
-      } catch (err) {
-        throw err;
-      }
+      // a defense-in-depth background event). copyText degrades to an
+      // execCommand fallback before throwing (issue #987), so a denied
+      // async-clipboard write no longer dead-ends one-time-reveal secrets.
+      await copyText(text);
 
       if (!isMountedRef.current) return;
 

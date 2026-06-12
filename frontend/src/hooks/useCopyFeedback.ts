@@ -1,6 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useRef, useState } from "react";
+import { copyText } from "@/lib/utils/clipboard";
 
 /**
  * Default duration to show the "copied" feedback affordance after a
@@ -90,7 +91,9 @@ export function useCopyFeedback(): UseCopyFeedbackReturn {
       // Re-throws on failure so the caller can fire a destructive toast.
       // We do not attempt to recover here — the caller's error handler
       // owns the user-facing surface (toast vs inline message vs banner).
-      await navigator.clipboard.writeText(text);
+      // copyText degrades to an execCommand fallback before it throws
+      // (issue #987), so a denied async-clipboard write no longer dead-ends.
+      await copyText(text);
 
       if (!isMountedRef.current) return;
 

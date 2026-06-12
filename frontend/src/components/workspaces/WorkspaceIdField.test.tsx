@@ -41,6 +41,13 @@ beforeEach(() => {
     writable: true,
     configurable: true,
   });
+  // copyText (issue #987) falls back to execCommand when writeText rejects.
+  // Default it to "unavailable" so the failure-path test is deterministic.
+  Object.defineProperty(document, "execCommand", {
+    value: vi.fn(() => false),
+    writable: true,
+    configurable: true,
+  });
 });
 
 afterEach(() => {
@@ -70,17 +77,19 @@ describe("WorkspaceIdField", () => {
     });
   });
 
-  it("fires a destructive toast when the clipboard write fails", async () => {
+  it("fires a destructive toast with an actionable hint when both clipboard and fallback fail", async () => {
     mockWriteText.mockRejectedValueOnce(new Error("clipboard denied"));
     render(<WorkspaceIdField workspaceId={WORKSPACE_ID} />);
 
     fireEvent.click(screen.getByRole("button", { name: "copyWorkspaceId" }));
     await act(async () => {});
 
+    // copyText threw (writeText denied + execCommand unavailable) — the toast
+    // shows the actionable i18n hint, NOT the raw DOM exception string.
     expect(mockToast).toHaveBeenCalledWith({
       variant: "destructive",
       title: "error",
-      description: "clipboard denied",
+      description: "copyFailedManualHint",
     });
   });
 });

@@ -27,6 +27,15 @@ beforeEach(() => {
     writable: true,
     configurable: true,
   });
+  // copyText (issue #987) falls back to execCommand when writeText rejects.
+  // Default the fallback to "unavailable" so the copy() error-path tests are
+  // deterministic. The auto-clear path is unchanged (it calls writeText("")
+  // directly, not copyText), so the auto-clear tests are unaffected.
+  Object.defineProperty(document, "execCommand", {
+    value: vi.fn(() => false),
+    writable: true,
+    configurable: true,
+  });
 });
 
 afterEach(() => {
@@ -101,14 +110,27 @@ describe("useRevealableSecret", () => {
       expect(result.current.copied).toBe(false);
     });
 
-    it("propagates clipboard.writeText errors", async () => {
+    it("propagates the error when both clipboard and fallback fail", async () => {
+      // writeText rejects AND the execCommand fallback is unavailable
+      // (returns false, per beforeEach) → copyText throws.
       mockWriteText.mockRejectedValueOnce(new Error("clipboard denied"));
       const { result } = renderHook(() => useRevealableSecret());
       await act(async () => {
-        await expect(result.current.copy("x")).rejects.toThrow(
-          "clipboard denied",
-        );
+        await expect(result.current.copy("x")).rejects.toThrow();
       });
+    });
+
+    it("succeeds via the execCommand fallback when writeText is denied", async () => {
+      mockWriteText.mockRejectedValueOnce(
+        new DOMException("Write permission denied", "NotAllowedError"),
+      );
+      (document.execCommand as ReturnType<typeof vi.fn>).mockReturnValue(true);
+      const { result } = renderHook(() => useRevealableSecret());
+      await act(async () => {
+        await result.current.copy("secret-value");
+      });
+      expect(document.execCommand).toHaveBeenCalledWith("copy");
+      expect(result.current.copied).toBe(true);
     });
 
     it("preserves previous copy's copied state when a re-copy within the feedback window fails", async () => {
@@ -126,7 +148,7 @@ describe("useRevealableSecret", () => {
       });
       mockWriteText.mockRejectedValueOnce(new Error("denied"));
       await act(async () => {
-        await expect(result.current.copy("second")).rejects.toThrow("denied");
+        await expect(result.current.copy("second")).rejects.toThrow();
       });
 
       // CRITICAL: copied must STILL be true — the first copy's feedback
@@ -156,9 +178,11 @@ describe("useRevealableSecret", () => {
       });
       mockWriteText.mockRejectedValueOnce(new Error("denied"));
       await act(async () => {
-        await expect(result.current.copy("second")).rejects.toThrow("denied");
+        await expect(result.current.copy("second")).rejects.toThrow();
       });
       // 2 calls: "first" (success) + "second" (rejected). NO timer cancellation.
+      // The execCommand fallback for "second" uses a separate API, so the
+      // writeText call count is unaffected.
       expect(mockWriteText).toHaveBeenCalledTimes(2);
 
       // Wait for the ORIGINAL 60s auto-clear (30s more from now)

@@ -8,6 +8,7 @@
 import { useState, useEffect } from "react";
 import { useTranslations } from "next-intl";
 import { Button } from "@/components/ui/button";
+import { copyText } from "@/lib/utils/clipboard";
 import {
   Dialog,
   DialogContent,
@@ -167,9 +168,16 @@ export function CreateResourceTokenDialog({
 
   const handleCopy = async () => {
     if (createdToken) {
-      await navigator.clipboard.writeText(createdToken.token);
-      setCopied(true);
-      setTimeout(() => setCopied(false), 2000);
+      try {
+        // copyText degrades to an execCommand fallback before throwing
+        // (issue #987). The token is shown in this dialog, so on hard failure
+        // the user can still select + copy it manually.
+        await copyText(createdToken.token);
+        setCopied(true);
+        setTimeout(() => setCopied(false), 2000);
+      } catch (err) {
+        console.error("Failed to copy resource token:", err);
+      }
     }
   };
 

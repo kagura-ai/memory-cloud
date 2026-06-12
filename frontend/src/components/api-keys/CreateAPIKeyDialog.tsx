@@ -7,6 +7,7 @@
 
 import { useState } from "react";
 import { Button } from "@/components/ui/button";
+import { copyText } from "@/lib/utils/clipboard";
 import {
   Dialog,
   DialogContent,
@@ -85,9 +86,17 @@ export function CreateAPIKeyDialog({
 
   const handleCopy = async () => {
     if (createdKey) {
-      await navigator.clipboard.writeText(createdKey.api_key);
-      setCopied(true);
-      setTimeout(() => setCopied(false), 2000);
+      try {
+        // copyText degrades to an execCommand fallback before throwing
+        // (issue #987), so a denied async-clipboard write no longer fails
+        // silently. The key is shown in this dialog, so on hard failure the
+        // user can still select + copy it manually.
+        await copyText(createdKey.api_key);
+        setCopied(true);
+        setTimeout(() => setCopied(false), 2000);
+      } catch (err) {
+        console.error("Failed to copy API key:", err);
+      }
     }
   };
 

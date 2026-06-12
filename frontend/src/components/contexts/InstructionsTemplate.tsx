@@ -11,6 +11,7 @@
 import { useState } from 'react';
 import { ChevronDown, Copy, Check } from 'lucide-react';
 import { Button } from '@/components/ui/button';
+import { copyText } from '@/lib/utils/clipboard';
 import { cn } from '@/styles/design-tokens';
 import { useTranslations } from 'next-intl';
 
@@ -84,7 +85,8 @@ export function InstructionsTemplate({
 
   const handleCopy = async () => {
     try {
-      await navigator.clipboard.writeText(template);
+      // copyText degrades to an execCommand fallback before throwing (#987).
+      await copyText(template);
       setCopied(true);
       setTimeout(() => setCopied(false), 2000);
     } catch (err) {

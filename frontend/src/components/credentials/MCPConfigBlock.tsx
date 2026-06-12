@@ -68,6 +68,22 @@ const PLACEHOLDER_KEY = "YOUR_API_KEY";
 export const CODEX_INSTALL_COMMAND =
   "codex plugin install kagura-memory@kagura-memory-cloud";
 
+/**
+ * Strip the workspace-scoped `/w/<workspaceId>` suffix from an MCP URL,
+ * yielding the bare `…/mcp` endpoint the Claude Code OAuth one-liner targets
+ * (OAuth resolves the workspace at login — issue #988). Idempotent: a URL that
+ * is already bare passes through unchanged.
+ *
+ * This is the single source of the derivation. Prefer passing the bare URL
+ * directly via the `mcpBaseUrl` prop (the caller in APIKeysTabPanel already
+ * computes `baseUrl + "/mcp"`); this helper is the fallback when only the
+ * workspace-scoped URL is available, and keeps the regex in one tested place
+ * instead of inlined at each future call site.
+ */
+export function toBareMcpUrl(mcpUrl: string): string {
+  return mcpUrl.replace(/\/w\/[^/]+$/, "");
+}
+
 export interface MCPConfigBlockProps {
   /**
    * The user's API key. `null` when no key has been created yet OR the
@@ -77,6 +93,13 @@ export interface MCPConfigBlockProps {
   apiKey: MemberAPIKey | null;
   /** The MCP endpoint URL the JSON snippet should embed. */
   mcpUrl: string;
+  /**
+   * The bare `…/mcp` endpoint (no `/w/<workspaceId>` suffix) for the OAuth
+   * one-liner. Optional: when omitted it is derived from `mcpUrl` via
+   * {@link toBareMcpUrl}. The caller passes its already-computed base URL so
+   * the production path needs no regex.
+   */
+  mcpBaseUrl?: string;
 }
 
 function readStoredClient(): MCPClient {
@@ -217,7 +240,11 @@ export function buildTomlConfig(mcpUrl: string, authValue: string): string {
   ].join("\n");
 }
 
-export function MCPConfigBlock({ apiKey, mcpUrl }: MCPConfigBlockProps) {
+export function MCPConfigBlock({
+  apiKey,
+  mcpUrl,
+  mcpBaseUrl,
+}: MCPConfigBlockProps) {
   const t = useTranslations("apiKeys");
   const tCommon = useTranslations("common");
   const { toast } = useToast();
@@ -318,6 +345,18 @@ export function MCPConfigBlock({ apiKey, mcpUrl }: MCPConfigBlockProps) {
     return buildTomlConfig(mcpUrl, liveKey);
   }, [mcpUrl, liveKey]);
 
+  // Claude Code OAuth one-liner (#988). Targets the BARE /mcp endpoint —
+  // OAuth resolves the workspace at login, so the workspace-scoped
+  // `/w/<workspaceId>` suffix is stripped (if mcpUrl is already bare, the
+  // regex is a no-op). The command is env-aware via mcpUrl (localhost in dev,
+  // the production host in prod) and needs no API key, so it renders and
+  // copies even when the key window is closed.
+  const claudeOAuthCommand = useMemo(
+    () =>
+      `claude mcp add --transport http kagura-memory ${mcpBaseUrl ?? toBareMcpUrl(mcpUrl)}`,
+    [mcpBaseUrl, mcpUrl],
+  );
+
   // Track which Copy button the user pressed last, so the Check icon only
   // flashes on the button they actually clicked. Without this, the shared
   // `copied` flag from useRevealableSecret causes the Codex tab's install
@@ -325,76 +364,43 @@ export function MCPConfigBlock({ apiKey, mcpUrl }: MCPConfigBlockProps) {
   // (Copilot review flagged this on PR #817). The hook still owns the 2s
   // timer; this just disambiguates the visual target.
   const [lastCopied, setLastCopied] = useState<
-    "json" | "toml" | "install" | null
+    "json" | "toml" | "install" | "oauth" | null
   >(null);
 
-  const handleCopy = async () => {
-    if (copyJson === null) return;
+  // Single copy path for all four buttons. They differ only in the value
+  // copied, the per-target "copied" affordance (`target`), and the success
+  // title; the guard (skip when the value is null/disabled), the routing
+  // through useRevealableSecret.copy → copyText (#987 execCommand fallback,
+  // and cancellation of any prior 60s auto-clear so a pending timer can't wipe
+  // the freshly-copied value), and the destructive failure toast are identical.
+  // On hard failure copyText has already exhausted its fallback, so we surface
+  // an actionable i18n hint (the snippet stays visible in the <pre> for manual
+  // copy) rather than leaking the raw DOM exception string.
+  const runCopy = async (
+    value: string | null,
+    target: "json" | "toml" | "install" | "oauth",
+    successTitle: string,
+  ) => {
+    if (value === null) return;
     try {
-      await copy(copyJson);
-      setLastCopied("json");
-      toast({
-        title: t("mcpConfigCopied"),
-        description: t("mcpConfigCopiedHint"),
-      });
-    } catch (err) {
-      // Use the common error title (NOT the success title) and narrow err
-      // safely so non-Error rejections (DOMException, strings) don't
-      // produce empty descriptions.
+      await copy(value);
+      setLastCopied(target);
+      toast({ title: successTitle, description: t("mcpConfigCopiedHint") });
+    } catch {
       toast({
         title: tCommon("error"),
-        description: err instanceof Error ? err.message : String(err),
+        description: tCommon("copyFailedManualHint"),
         variant: "destructive",
       });
     }
   };
 
-  const handleTomlCopy = async () => {
-    if (copyToml === null) return;
-    try {
-      await copy(copyToml);
-      setLastCopied("toml");
-      toast({
-        title: t("mcpConfigCopied"),
-        description: t("mcpConfigCopiedHint"),
-      });
-    } catch (err) {
-      toast({
-        title: tCommon("error"),
-        description: err instanceof Error ? err.message : String(err),
-        variant: "destructive",
-      });
-    }
-  };
-
-  const handleInstallCopy = async () => {
-    // Route through useRevealableSecret.copy so the hook cancels any
-    // pending auto-clear from a prior JSON/TOML copy — otherwise that
-    // 60s timer would fire after the install command lands in the
-    // clipboard and silently wipe it before the user can paste. The
-    // install command is not a secret, but the consistent 60s auto-clear
-    // matches the other Copy buttons in this component, and the user has
-    // plenty of time to switch to a terminal and paste.
-    try {
-      await copy(CODEX_INSTALL_COMMAND);
-      setLastCopied("install");
-      // The install command routes through useRevealableSecret.copy (see
-      // comment above), so it ALSO triggers the hook's 60s clipboard
-      // auto-clear. Surface the same "clipboard clears in 60s" hint as
-      // the other Copy buttons so the user isn't surprised when their
-      // pasted command vanishes.
-      toast({
-        title: t("codexInstallCopied"),
-        description: t("mcpConfigCopiedHint"),
-      });
-    } catch (err) {
-      toast({
-        title: tCommon("error"),
-        description: err instanceof Error ? err.message : String(err),
-        variant: "destructive",
-      });
-    }
-  };
+  const handleCopy = () => runCopy(copyJson, "json", t("mcpConfigCopied"));
+  const handleTomlCopy = () => runCopy(copyToml, "toml", t("mcpConfigCopied"));
+  const handleInstallCopy = () =>
+    runCopy(CODEX_INSTALL_COMMAND, "install", t("codexInstallCopied"));
+  const handleOAuthCopy = () =>
+    runCopy(claudeOAuthCommand, "oauth", t("claudeOAuthCopied"));
 
   return (
     <div className="space-y-3" suppressHydrationWarning>
@@ -411,7 +417,49 @@ export function MCPConfigBlock({ apiKey, mcpUrl }: MCPConfigBlockProps) {
             path because its UI is a static install command + a collapsible
             manual TOML — buildJsonConfig doesn't apply. */}
         {MCP_CLIENTS.filter((c) => c !== "codex").map((c) => (
-          <TabsContent key={c} value={c} className="mt-3">
+          <TabsContent key={c} value={c} className="mt-3 space-y-3">
+            {/* Issue #988: Claude Code OAuth one-liner (recommended) — no API
+                key needed; Claude Code runs the OAuth browser flow on first
+                use. Only for the claude-code client; ChatGPT does not use the
+                `claude mcp add` CLI. The existing .mcp.json JSON stays below as
+                the manual / API-key alternative. */}
+            {c === "claude-code" && (
+              <div>
+                <h4 className="text-sm font-medium mb-2">
+                  {t("claudeOAuthHeading")}
+                </h4>
+                <div className="relative">
+                  <pre className="bg-gray-900 text-gray-100 p-3 pr-12 rounded overflow-x-auto text-xs whitespace-pre-wrap break-all">
+                    {claudeOAuthCommand}
+                  </pre>
+                  <div className="absolute top-2 right-2">
+                    <Button
+                      type="button"
+                      variant="ghost"
+                      size="icon"
+                      onClick={handleOAuthCopy}
+                      title={t("copyClaudeOAuthCommand")}
+                      aria-label={t("copyClaudeOAuthCommand")}
+                      className="text-gray-300 hover:text-white hover:bg-gray-700/50"
+                    >
+                      {copied && lastCopied === "oauth" ? (
+                        <Check className="w-4 h-4 text-green-400" />
+                      ) : (
+                        <Copy className="w-4 h-4" />
+                      )}
+                    </Button>
+                  </div>
+                </div>
+                <p className="text-xs text-blue-700 dark:text-blue-300 mt-2">
+                  💡 {t("claudeOAuthHint")}
+                </p>
+              </div>
+            )}
+            {c === "claude-code" && (
+              <p className="text-xs font-medium text-gray-600 dark:text-gray-400 pt-1">
+                {t("claudeManualConfigLabel")}
+              </p>
+            )}
             <div className="relative">
               <pre className="bg-gray-900 text-gray-100 p-3 pr-20 rounded overflow-x-auto text-xs whitespace-pre-wrap break-all">
                 {displayJson}

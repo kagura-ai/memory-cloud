@@ -33,6 +33,14 @@ beforeEach(() => {
     writable: true,
     configurable: true,
   });
+  // copyText (issue #987) falls back to execCommand when writeText rejects.
+  // Default it to "unavailable" so the failure-path tests are deterministic;
+  // the fallback-success test overrides it.
+  Object.defineProperty(document, "execCommand", {
+    value: vi.fn(() => false),
+    writable: true,
+    configurable: true,
+  });
 });
 
 afterEach(() => {
@@ -45,6 +53,7 @@ const baseProps = {
   copyToastTitle: "Config copied",
   copyToastDescription: "Clipboard clears in 60 seconds — paste it now.",
   copyErrorToastTitle: "Copy failed",
+  copyErrorToastDescription: "Select the value and copy it manually.",
   showLabel: "Show key",
   hideLabel: "Hide key",
   copyLabel: "Copy to clipboard",
@@ -142,7 +151,32 @@ describe("MaskedSecretField", () => {
       expect(screen.getByText("Bearer sk-•••••••••••")).toBeInTheDocument();
     });
 
-    it("clipboard write failures fire a destructive toast with the error title (not the success title)", async () => {
+    it("succeeds via the execCommand fallback when the async write is denied (no error toast)", async () => {
+      // The async clipboard write is denied, but the legacy fallback works —
+      // the user sees a success toast, not a failure (issue #987).
+      mockWriteText.mockRejectedValueOnce(
+        new DOMException("Write permission denied", "NotAllowedError"),
+      );
+      (document.execCommand as ReturnType<typeof vi.fn>).mockReturnValue(true);
+      render(<MaskedSecretField {...baseProps} value="kag_real_secret" />);
+      fireEvent.click(
+        screen.getByRole("button", { name: "Copy to clipboard" }),
+      );
+      await act(async () => {
+        await Promise.resolve();
+        await Promise.resolve();
+      });
+
+      expect(document.execCommand).toHaveBeenCalledWith("copy");
+      expect(mockToast).toHaveBeenCalledWith({
+        title: "Config copied",
+        description: "Clipboard clears in 60 seconds — paste it now.",
+      });
+    });
+
+    it("hard copy failure fires a destructive toast AND auto-reveals the secret so it can be copied manually", async () => {
+      // writeText rejects AND the execCommand fallback is unavailable
+      // (returns false, per beforeEach) → copyText throws.
       mockWriteText.mockRejectedValueOnce(new Error("clipboard denied"));
       render(<MaskedSecretField {...baseProps} value="kag_real_secret" />);
       fireEvent.click(
@@ -150,41 +184,31 @@ describe("MaskedSecretField", () => {
       );
       await act(async () => {
         await Promise.resolve();
-      });
-
-      // The error toast must use copyErrorToastTitle, NOT copyToastTitle —
-      // otherwise a failure looks like a success at a glance.
-      expect(mockToast).toHaveBeenCalledWith({
-        title: "Copy failed",
-        description: "clipboard denied",
-        variant: "destructive",
-      });
-    });
-
-    it("non-Error rejections produce a usable description (not empty)", async () => {
-      mockWriteText.mockRejectedValueOnce("permission denied");
-      render(<MaskedSecretField {...baseProps} value="kag_real_secret" />);
-      fireEvent.click(
-        screen.getByRole("button", { name: "Copy to clipboard" }),
-      );
-      await act(async () => {
         await Promise.resolve();
       });
 
+      // Error toast uses copyErrorToastTitle + the actionable description,
+      // NOT the raw DOM exception string or the success title.
       expect(mockToast).toHaveBeenCalledWith({
         title: "Copy failed",
-        description: "permission denied",
+        description: "Select the value and copy it manually.",
         variant: "destructive",
       });
+      // CRITICAL: the secret is now revealed so the user can select + copy it
+      // manually — a one-time-reveal key must never dead-end.
+      expect(screen.getByText("Bearer kag_real_secret")).toBeInTheDocument();
     });
 
-    it("falls back to literal 'Error' title when copyErrorToastTitle is omitted", async () => {
+    it("falls back to literal 'Error' title and raw message when error strings are omitted", async () => {
       mockWriteText.mockRejectedValueOnce(new Error("oops"));
-      const { copyErrorToastTitle: _omit, ...propsWithoutErrorTitle } =
-        baseProps;
+      const {
+        copyErrorToastTitle: _omitTitle,
+        copyErrorToastDescription: _omitDesc,
+        ...propsWithoutErrorStrings
+      } = baseProps;
       render(
         <MaskedSecretField
-          {...propsWithoutErrorTitle}
+          {...propsWithoutErrorStrings}
           value="kag_real_secret"
         />,
       );
@@ -193,13 +217,19 @@ describe("MaskedSecretField", () => {
       );
       await act(async () => {
         await Promise.resolve();
+        await Promise.resolve();
       });
 
-      expect(mockToast).toHaveBeenCalledWith({
-        title: "Error",
-        description: "oops",
-        variant: "destructive",
-      });
+      // Title falls back to "Error"; description falls back to the thrown
+      // error's message (ClipboardCopyError) — a usable, non-empty string.
+      expect(mockToast).toHaveBeenCalledWith(
+        expect.objectContaining({
+          title: "Error",
+          variant: "destructive",
+        }),
+      );
+      const call = mockToast.mock.calls.at(-1)?.[0];
+      expect(call.description).toBeTruthy();
     });
   });
 
