@@ -351,6 +351,8 @@ Tunable environment variables:
 |---|---|---|
 | `READINESS_TIMEOUT` | 60 | Seconds to wait for `/readiness` |
 | `DRAIN_TIMEOUT` | 30 | Seconds to drain old container |
+| `WORKERS_GATE_TIMEOUT` | 30 | Seconds to wait for the post-switch security gate (`/api/v1/workers/*` blocked at Caddy) before aborting and leaving the old color running |
+| `WORKERS_GATE_INTERVAL` | 2 | Seconds between security-gate retries |
 
 ### Update the frontend (in-place rebuild)
 
