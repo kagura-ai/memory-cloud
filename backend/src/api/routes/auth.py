@@ -44,7 +44,7 @@ from services.signup_gate_service import check_signup_access
 from services.workspace_service import WorkspaceService
 from utils.datetime import utcnow
 from utils.encryption import get_encryptor
-from utils.exceptions import ConflictError
+from utils.exceptions import AuthenticationError, ConflictError, InvalidCredentialsError
 from utils.logger import get_logger
 
 # auth.py historically bound logger via stdlib ``logging.getLogger``
@@ -847,9 +847,9 @@ async def google_callback(
         raise
     except Exception as e:
         logger.error(f"OAuth2 callback failed: {e}")
-        raise HTTPException(
-            status_code=401, detail=f"OAuth2 authentication failed: {str(e)}"
-        ) from e
+        # Keep the internal exception text off the wire (already logged above);
+        # the global handler emits the canonical {error, message, details}.
+        raise AuthenticationError("OAuth2 authentication failed") from e
 
 
 @router.post("/logout")
@@ -1280,9 +1280,8 @@ async def github_callback(
         raise
     except Exception as e:
         logger.error(f"GitHub OAuth2 callback failed: {e}")
-        raise HTTPException(
-            status_code=401, detail=f"GitHub authentication failed: {str(e)}"
-        ) from e
+        # str(e) stays in the log only; the global handler emits the canonical shape.
+        raise AuthenticationError("GitHub authentication failed") from e
 
 
 # ============================================================================
@@ -1512,11 +1511,11 @@ async def password_login(
 
     if not user or not user.password_hash:
         _record_login_failure(body.login_id)
-        raise HTTPException(status_code=401, detail="Invalid credentials")
+        raise InvalidCredentialsError()
 
     if not verify_password(body.password, user.password_hash):
         _record_login_failure(body.login_id)
-        raise HTTPException(status_code=401, detail="Invalid credentials")
+        raise InvalidCredentialsError()
 
     _clear_login_failures(body.login_id)
 
@@ -1555,7 +1554,7 @@ async def mfa_verify(
 
     user_id = _session_manager._redis.get(f"mfa_pending:{body.mfa_session_token}")
     if not user_id:
-        raise HTTPException(status_code=401, detail="Invalid or expired MFA session")
+        raise AuthenticationError("Invalid or expired MFA session")
 
     async for db in get_db():
         result = await db.execute(select(User).where(User.user_id == user_id))
@@ -1563,7 +1562,7 @@ async def mfa_verify(
         break
 
     if not user or not user.totp_secret:
-        raise HTTPException(status_code=401, detail="MFA not configured")
+        raise AuthenticationError("MFA not configured")
 
     try:
         totp_secret = get_encryptor().decrypt(user.totp_secret)
@@ -1573,7 +1572,7 @@ async def mfa_verify(
     if not verify_totp(totp_secret, body.totp_code):
         # Delete MFA token on failed attempt (prevent brute-force replay)
         _session_manager._redis.delete(f"mfa_pending:{body.mfa_session_token}")
-        raise HTTPException(status_code=401, detail="Invalid TOTP code. Please login again.")
+        raise AuthenticationError("Invalid TOTP code. Please login again.")
 
     _session_manager._redis.delete(f"mfa_pending:{body.mfa_session_token}")
 

@@ -43,6 +43,7 @@ from models.api_base import TZAwareBaseModel
 from models.auth import OAuth2Client, OAuth2DeviceCode, OAuth2Token, User, generate_user_code
 from models.schemas import TokenIntrospectionResponse
 from utils.datetime import to_utc_iso, utcnow
+from utils.exceptions import AuthenticationError, AuthorizationError
 from utils.logger import get_logger
 from utils.oauth_errors import rfc6749_error_response
 from utils.oauth_messages import get_oauth_messages
@@ -852,10 +853,7 @@ async def get_oauth2_client(
         # SECURITY: Check owner (Issue #93-3)
         current_user_id = get_current_user_id(request)
         if client.owner_id != current_user_id:
-            raise HTTPException(
-                status_code=status.HTTP_403_FORBIDDEN,
-                detail="You are not allowed to access this client",
-            )
+            raise AuthorizationError(message="You are not allowed to access this client")
 
         # Decrypt secret if visible + owner
         from utils.encryption import get_encryptor
@@ -1011,10 +1009,7 @@ async def hide_oauth2_client_secret(
         # SECURITY: Check owner
         current_user_id = get_current_user_id(request)
         if client.owner_id != current_user_id:
-            raise HTTPException(
-                status_code=status.HTTP_403_FORBIDDEN,
-                detail="Only owner can hide OAuth2 client secret",
-            )
+            raise AuthorizationError(message="Only owner can hide OAuth2 client secret")
 
         # Hide secret
 
@@ -1081,9 +1076,8 @@ async def regenerate_oauth2_client_secret(
         # SECURITY: Check owner (Issue #93-3)
         current_user_id = get_current_user_id(request)
         if client.owner_id != current_user_id:
-            raise HTTPException(
-                status_code=status.HTTP_403_FORBIDDEN,
-                detail="You are not allowed to regenerate this client's secret",
+            raise AuthorizationError(
+                message="You are not allowed to regenerate this client's secret"
             )
 
         # Generate new secret
@@ -1664,7 +1658,7 @@ async def oauth_authorize_post(
 
     user = get_current_user_from_session(request)
     if not user:
-        raise HTTPException(status_code=401, detail="Not authenticated")
+        raise AuthenticationError("Not authenticated")
 
     # Get confirm from preloaded form data
     confirm = request.state.form_data.get("confirm")
@@ -2025,10 +2019,7 @@ async def device_confirm(
     """
     user = _get_user_from_session(request)
     if not user:
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Authentication required",
-        )
+        raise AuthenticationError("Authentication required")
 
     db_session = get_sync_session()
 

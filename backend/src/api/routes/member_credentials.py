@@ -28,6 +28,7 @@ from models.schemas import (
 )
 from services.member_credentials_service import MemberCredentialsService
 from utils.datetime import to_utc_iso, utcnow
+from utils.exceptions import AuthorizationError, NotFoundException
 from utils.logger import get_logger
 
 logger = get_logger(__name__)
@@ -70,10 +71,7 @@ async def check_permission(
     )
 
     if not can_perform:
-        raise HTTPException(
-            status_code=403,
-            detail=f"Not authorized to {action} credentials",
-        )
+        raise AuthorizationError(message=f"Not authorized to {action} credentials")
 
 
 @router.get("/{user_id}/credentials", response_model=MemberCredentialsResponse)
@@ -149,7 +147,7 @@ async def hide_api_key(
     """
     # Permission check: owner only
     if user["user_id"] != user_id:
-        raise HTTPException(status_code=403, detail="Only owner can hide API key")
+        raise AuthorizationError(message="Only owner can hide API key")
 
     # Get API key (most recent active key)
     from sqlalchemy import and_, select
@@ -180,9 +178,13 @@ async def hide_api_key(
         await db.commit()
         return {"status": "hidden", "key_id": api_key.id}
     except PermissionError as e:
-        raise HTTPException(status_code=403, detail=str(e)) from e
+        # CWE-639: keep the raw PermissionError text off the wire (log-only
+        # ``reason``); the handler emits the uniform "Insufficient permissions".
+        raise AuthorizationError(reason=str(e)) from e
     except ValueError as e:
-        raise HTTPException(status_code=404, detail=str(e)) from e
+        # Sibling of the 403 above — converted together so this handler does
+        # not emit a mixed {detail}/{error} shape (#992 Phase 1).
+        raise NotFoundException("API key") from e
 
 
 @router.post(
@@ -306,7 +308,7 @@ async def create_api_key(
     """
     # Permission check: only owner can create their own keys
     if user["user_id"] != user_id:
-        raise HTTPException(status_code=403, detail="Only owner can create API keys")
+        raise AuthorizationError(message="Only owner can create API keys")
 
     # Issue #626: Public-bound key creation gating + scope decision.
     # When ``bound_context_id`` is supplied, the key is public-bound and the
@@ -334,9 +336,8 @@ async def create_api_key(
         if ctx is None:
             raise HTTPException(status_code=404, detail="bound_context_id: context not found")
         if ctx.workspace_id != workspace_id:
-            raise HTTPException(
-                status_code=403,
-                detail="bound_context_id: context does not belong to this workspace",
+            raise AuthorizationError(
+                message="bound_context_id: context does not belong to this workspace"
             )
         if ctx.is_public is not True:
             raise HTTPException(
@@ -357,12 +358,11 @@ async def create_api_key(
         # ``created_by`` (via a separate admin action) or by recreating
         # the context.
         if ctx.created_by != user_id:
-            raise HTTPException(
-                status_code=403,
-                detail=(
+            raise AuthorizationError(
+                message=(
                     "bound_context_id: only the context creator can mint a "
                     "public-bound key against this context"
-                ),
+                )
             )
 
         # Tier gate: workspace plan must include the ``public_contexts`` feature
@@ -384,17 +384,15 @@ async def create_api_key(
         # ``has_feature`` / ``get_plan_tier`` don't see ``None`` and 500.
         plan_name = (ws.plan_name if ws is not None else None) or "free"
         if not has_feature(plan_name, "public_contexts"):
-            raise HTTPException(
-                status_code=403,
-                detail="Workspace plan does not include the public_contexts feature",
+            raise AuthorizationError(
+                message="Workspace plan does not include the public_contexts feature"
             )
         if get_plan_tier(plan_name).bound_public_calls_per_minute <= 0:
-            raise HTTPException(
-                status_code=403,
-                detail=(
+            raise AuthorizationError(
+                message=(
                     "Workspace plan does not provision a per-key quota for "
                     "public-bound API keys (bound_public_calls_per_minute=0)"
-                ),
+                )
             )
 
         # Mutual exclusion with workspace scope (#169).
@@ -560,7 +558,7 @@ async def delete_api_key_by_id(
         HTTPException: 403 if not owner, 404 if key not found.
     """
     if user["user_id"] != user_id:
-        raise HTTPException(status_code=403, detail="Only owner can delete API keys")
+        raise AuthorizationError(message="Only owner can delete API keys")
 
     from sqlalchemy import and_, select
 
@@ -583,10 +581,7 @@ async def delete_api_key_by_id(
     if api_key.workspace_id is not None:
         # Workspace-scoped key (#169) — URL workspace must match the column.
         if api_key.workspace_id != workspace_id:
-            raise HTTPException(
-                status_code=403,
-                detail="API key does not belong to this workspace",
-            )
+            raise AuthorizationError(message="API key does not belong to this workspace")
     elif api_key.bound_context_id is not None:
         # Public-bound key (#626) — the binding's workspace must match.
         ctx_row = await db.execute(select(Context).where(Context.id == api_key.bound_context_id))
@@ -596,9 +591,8 @@ async def delete_api_key_by_id(
         # key has no anchoring workspace — fall through to delete without
         # the workspace-match assertion.
         if bound_ctx is not None and bound_ctx.workspace_id != workspace_id:
-            raise HTTPException(
-                status_code=403,
-                detail="API key is bound to a context in a different workspace",
+            raise AuthorizationError(
+                message="API key is bound to a context in a different workspace"
             )
     # else: global / owner-scoped key (both columns NULL) — workspace_id in
     # the URL is purely permission scope; the owner-only check above is
@@ -669,7 +663,7 @@ async def hide_oauth_app(
     """
     # Permission check: owner only
     if user["user_id"] != user_id:
-        raise HTTPException(status_code=403, detail="Only owner can hide OAuth app")
+        raise AuthorizationError(message="Only owner can hide OAuth app")
 
     from sqlalchemy import and_, select
 
@@ -741,7 +735,7 @@ async def regenerate_oauth_secret(
     )
 
     if not can_regenerate:
-        raise HTTPException(status_code=403, detail="Not authorized to regenerate OAuth secret")
+        raise AuthorizationError(message="Not authorized to regenerate OAuth secret")
 
     import hashlib
     import secrets
@@ -831,7 +825,7 @@ async def delete_oauth_app(
     )
 
     if not can_delete:
-        raise HTTPException(status_code=403, detail="Not authorized to delete OAuth app")
+        raise AuthorizationError(message="Not authorized to delete OAuth app")
 
     # Get and delete app
     from sqlalchemy import and_, select

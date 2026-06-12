@@ -83,11 +83,31 @@ export class ApiClient {
           `HTTP ${response.status}: ${response.statusText}`;
         const errorCode = errorDetails.error;
 
+        // #992: the canonical 422 envelope is { error: "VAL-001", message,
+        // details: { errors: [{loc, msg, type}] } }. Existing field-validation
+        // consumers read `details.detail` (the legacy FastAPI array shape).
+        // Alias `errors` -> `detail` here, at the single transport choke point,
+        // so field-level messages keep rendering without every call site
+        // learning the new key. (String-`detail` errors from not-yet-converted
+        // raw-HTTPException endpoints have no `errors` key and are untouched.)
+        let details = errorDetails.details || errorDetails;
+        if (
+          details &&
+          typeof details === "object" &&
+          Array.isArray((details as { errors?: unknown }).errors) &&
+          (details as { detail?: unknown }).detail === undefined
+        ) {
+          details = {
+            ...details,
+            detail: (details as { errors: unknown[] }).errors,
+          };
+        }
+
         throw new ApiError({
           error: errorCode,
           message: errorMessage,
           status: response.status,
-          details: errorDetails.details || errorDetails,
+          details,
         });
       }
 
