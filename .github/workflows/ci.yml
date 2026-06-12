@@ -31,6 +31,25 @@ jobs:
       - name: Models no-Column guard
         run: make lint-models-no-column
 
+  # Shell-script quality gate for the blue-green deploy script. shellcheck
+  # catches the `set -e` / quoting bug class behind #986 (a bare
+  # `var=$(curl ...)` dying silently); the bats suite pins the three
+  # verify_workers_blocked branches so that regression cannot return (#1000).
+  shell:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # shellcheck is preinstalled on ubuntu-latest; bats is not.
+      - name: Install bats
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq bats
+
+      - name: ShellCheck deploy.sh
+        run: shellcheck terraform/single-server/scripts/deploy.sh
+
+      - name: Bats — verify_workers_blocked regression suite
+        run: bats terraform/single-server/scripts/tests/
+
   backend-unit:
     runs-on: ubuntu-latest
     services:
