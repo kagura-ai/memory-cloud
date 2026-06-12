@@ -13,7 +13,7 @@ def get_tool_definitions() -> list[dict]:
     Returns:
         List of tool definition dicts (compatible with MCP spec)
     """
-    return [
+    tools: list[dict] = [
         {
             "name": "list_my_bindings",
             "readOnly": True,
@@ -1547,10 +1547,6 @@ Requires action recording (reports created before this feature have no actions t
                         "type": "number",
                         "description": "Optional importance floor (0.0–1.0).",
                     },
-                    "query": {
-                        "type": "string",
-                        "description": "Reserved for v1.5 query-scoped runs (ignored in v1).",
-                    },
                     "model_id": {
                         "type": "integer",
                         "description": (
@@ -1922,6 +1918,18 @@ never returned. This lane is excluded from recall() by design.""",
             },
         },
     ]
+    # Pre-1.0 schema policy (#990): every tool inputSchema is strict — no
+    # undeclared top-level parameters. Applied centrally here so all 45 tools
+    # stay uniform and any new tool inherits the policy automatically. This is
+    # advisory (handlers read args defensively via ``.get`` and never
+    # Pydantic-validate), so it tightens the client-facing contract without
+    # changing server behaviour. Nested object params are unaffected — only the
+    # top-level argument object is closed.
+    for tool in tools:
+        schema = tool.get("inputSchema")
+        if isinstance(schema, dict) and schema.get("type") == "object":
+            schema.setdefault("additionalProperties", False)
+    return tools
 
 
 # ============================================================================
