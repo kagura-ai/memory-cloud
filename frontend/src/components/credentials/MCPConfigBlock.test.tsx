@@ -72,6 +72,13 @@ beforeEach(() => {
     writable: true,
     configurable: true,
   });
+  // copyText (issue #987) falls back to execCommand when writeText rejects.
+  // Default it to "unavailable" so the copy-failure tests are deterministic.
+  Object.defineProperty(document, "execCommand", {
+    value: vi.fn(() => false),
+    writable: true,
+    configurable: true,
+  });
 });
 
 afterEach(() => {
@@ -244,36 +251,42 @@ describe("MCPConfigBlock", () => {
       });
     });
 
-    it("clipboard write failures fire a destructive toast with the common error title (not the success title)", async () => {
+    it("hard copy failure fires a destructive toast with the actionable hint (not the success title)", async () => {
+      // writeText rejects AND the execCommand fallback is unavailable
+      // (returns false, per beforeEach) → copyText throws.
       mockWriteText.mockRejectedValueOnce(new Error("clipboard denied"));
       render(<MCPConfigBlock apiKey={VISIBLE_KEY} mcpUrl={MCP_URL} />);
       fireEvent.click(screen.getByRole("button", { name: "copyConfig" }));
       await act(async () => {
         await Promise.resolve();
+        await Promise.resolve();
       });
 
-      // Note: the test mocks useTranslations to return the key as-is,
-      // so "error" here is the tCommon namespace key (not "mcpConfigCopied").
+      // Note: the test mocks useTranslations to return the key as-is, so
+      // "error"/"copyFailedManualHint" are the tCommon namespace keys. The
+      // raw DOM exception string must NOT leak into the toast (issue #987).
       expect(mockToast).toHaveBeenCalledWith({
         title: "error",
-        description: "clipboard denied",
+        description: "copyFailedManualHint",
         variant: "destructive",
       });
     });
 
-    it("non-Error rejections produce a usable description (not empty)", async () => {
-      // Some clipboard implementations reject with strings or DOMException
-      // — verify we narrow safely instead of hitting an undefined .message.
+    it("non-Error rejections still produce the actionable hint (no crash, not empty)", async () => {
+      // Some clipboard implementations reject with strings or DOMException —
+      // copyText normalizes any failure to a typed error, so the toast shows
+      // the actionable hint rather than an undefined/empty description.
       mockWriteText.mockRejectedValueOnce("permission denied");
       render(<MCPConfigBlock apiKey={VISIBLE_KEY} mcpUrl={MCP_URL} />);
       fireEvent.click(screen.getByRole("button", { name: "copyConfig" }));
       await act(async () => {
         await Promise.resolve();
+        await Promise.resolve();
       });
 
       expect(mockToast).toHaveBeenCalledWith({
         title: "error",
-        description: "permission denied",
+        description: "copyFailedManualHint",
         variant: "destructive",
       });
     });

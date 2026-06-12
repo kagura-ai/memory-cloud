@@ -74,6 +74,13 @@ export interface MaskedSecretFieldProps {
    */
   copyErrorToastTitle?: string;
   /**
+   * Toast description shown when the clipboard write fails (issue #987).
+   * Should be an actionable, i18n'd hint (e.g. "select the value and copy
+   * manually") — on failure the field auto-reveals so the user can do so.
+   * If omitted, the raw error message is used as a last-resort fallback.
+   */
+  copyErrorToastDescription?: string;
+  /**
    * Tooltip / aria-label for the Show button (revealed=false state).
    */
   showLabel: string;
@@ -105,6 +112,7 @@ export function MaskedSecretField({
   copyToastTitle,
   copyToastDescription,
   copyErrorToastTitle,
+  copyErrorToastDescription,
   showLabel,
   hideLabel,
   copyLabel,
@@ -112,7 +120,7 @@ export function MaskedSecretField({
   "data-testid": testId,
 }: MaskedSecretFieldProps) {
   const { toast } = useToast();
-  const { revealed, toggle, copy, copied, hide } = useRevealableSecret({
+  const { revealed, toggle, copy, copied, hide, show } = useRevealableSecret({
     autoClearMs,
   });
 
@@ -140,12 +148,20 @@ export function MaskedSecretField({
       // Re-throwing here would surface as an unhandled rejection because
       // this is an event handler. Surface as a destructive toast instead;
       // the consumer typically doesn't need to react to clipboard failures.
-      // Use a distinct error title (NOT the success title) so the user
-      // can distinguish success from failure at a glance, and narrow `err`
-      // safely so non-Error rejections produce a usable description.
+      //
+      // The copy failed even via copyText's execCommand fallback (issue
+      // #987). Auto-reveal the secret so the user can select and copy it
+      // manually — a one-time-reveal key must never dead-end — and prefer an
+      // actionable, i18n'd description over the raw DOM exception string.
+      // Use a distinct error title (NOT the success title) so the user can
+      // distinguish success from failure at a glance, and narrow `err` safely
+      // so non-Error rejections still produce a usable last-resort description.
+      show();
       toast({
         title: copyErrorToastTitle ?? "Error",
-        description: err instanceof Error ? err.message : String(err),
+        description:
+          copyErrorToastDescription ??
+          (err instanceof Error ? err.message : String(err)),
         variant: "destructive",
       });
     }

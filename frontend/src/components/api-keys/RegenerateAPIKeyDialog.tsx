@@ -7,6 +7,7 @@
 
 import { useState } from "react";
 import { Button } from "@/components/ui/button";
+import { copyText } from "@/lib/utils/clipboard";
 import {
   Dialog,
   DialogContent,
@@ -75,9 +76,17 @@ export function RegenerateAPIKeyDialog({
 
   const handleCopy = async () => {
     if (regeneratedKey) {
-      await navigator.clipboard.writeText(regeneratedKey.api_key);
-      setCopied(true);
-      setTimeout(() => setCopied(false), 2000);
+      try {
+        // copyText degrades to an execCommand fallback before throwing
+        // (issue #987), so a denied async-clipboard write no longer fails
+        // silently. The key is shown in this dialog, so on hard failure the
+        // user can still select + copy it manually.
+        await copyText(regeneratedKey.api_key);
+        setCopied(true);
+        setTimeout(() => setCopied(false), 2000);
+      } catch (err) {
+        console.error("Failed to copy API key:", err);
+      }
     }
   };
 

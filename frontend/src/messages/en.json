@@ -30,6 +30,7 @@
     "loading": "Loading...",
     "error": "Error",
     "success": "Success",
+    "copyFailedManualHint": "Couldn't copy automatically. The value stays visible — select it and copy manually.",
     "confirm": "Confirm",
     "back": "Back",
     "next": "Next",

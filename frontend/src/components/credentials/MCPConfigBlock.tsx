@@ -337,13 +337,14 @@ export function MCPConfigBlock({ apiKey, mcpUrl }: MCPConfigBlockProps) {
         title: t("mcpConfigCopied"),
         description: t("mcpConfigCopiedHint"),
       });
-    } catch (err) {
-      // Use the common error title (NOT the success title) and narrow err
-      // safely so non-Error rejections (DOMException, strings) don't
-      // produce empty descriptions.
+    } catch {
+      // Use the common error title (NOT the success title). copyText already
+      // tried the execCommand fallback (issue #987), so show an actionable
+      // hint instead of leaking the raw DOM exception string — the config
+      // snippet is visible in the <pre> block for manual copy.
       toast({
         title: tCommon("error"),
-        description: err instanceof Error ? err.message : String(err),
+        description: tCommon("copyFailedManualHint"),
         variant: "destructive",
       });
     }
@@ -358,10 +359,12 @@ export function MCPConfigBlock({ apiKey, mcpUrl }: MCPConfigBlockProps) {
         title: t("mcpConfigCopied"),
         description: t("mcpConfigCopiedHint"),
       });
-    } catch (err) {
+    } catch {
+      // copyText already tried the execCommand fallback (issue #987); show an
+      // actionable hint instead of the raw DOM exception string.
       toast({
         title: tCommon("error"),
-        description: err instanceof Error ? err.message : String(err),
+        description: tCommon("copyFailedManualHint"),
         variant: "destructive",
       });
     }
@@ -387,10 +390,12 @@ export function MCPConfigBlock({ apiKey, mcpUrl }: MCPConfigBlockProps) {
         title: t("codexInstallCopied"),
         description: t("mcpConfigCopiedHint"),
       });
-    } catch (err) {
+    } catch {
+      // copyText already tried the execCommand fallback (issue #987); show an
+      // actionable hint instead of the raw DOM exception string.
       toast({
         title: tCommon("error"),
-        description: err instanceof Error ? err.message : String(err),
+        description: tCommon("copyFailedManualHint"),
         variant: "destructive",
       });
     }

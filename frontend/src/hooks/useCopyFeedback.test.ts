@@ -28,6 +28,14 @@ beforeEach(() => {
     writable: true,
     configurable: true,
   });
+  // copyText (issue #987) falls back to execCommand when writeText rejects.
+  // Default the fallback to "unavailable" so error-path tests are
+  // deterministic; individual tests override it to exercise the success path.
+  Object.defineProperty(document, "execCommand", {
+    value: vi.fn(() => false),
+    writable: true,
+    configurable: true,
+  });
 });
 
 afterEach(() => {
@@ -190,17 +198,35 @@ describe("useCopyFeedback", () => {
     expect(result.current.isCopied("key-a")).toBe(false);
   });
 
-  it("propagates clipboard.writeText errors to the caller", async () => {
+  it("propagates the error to the caller when both clipboard and fallback fail", async () => {
+    // writeText rejects AND the execCommand fallback is unavailable
+    // (returns false, per beforeEach) → copyText throws ClipboardCopyError.
     mockWriteText.mockRejectedValueOnce(new Error("clipboard denied"));
     const { result } = renderHook(() => useCopyFeedback());
 
     await act(async () => {
-      await expect(result.current.copyToTarget("x", "key-a")).rejects.toThrow(
-        "clipboard denied",
-      );
+      await expect(
+        result.current.copyToTarget("x", "key-a"),
+      ).rejects.toThrow();
     });
     // The key should NOT be flagged as copied on failure
     expect(result.current.isCopied("key-a")).toBe(false);
+  });
+
+  it("succeeds via the execCommand fallback when writeText is denied", async () => {
+    // The async clipboard write is denied, but the legacy fallback works —
+    // the user-visible result is a successful copy (issue #987).
+    mockWriteText.mockRejectedValueOnce(
+      new DOMException("Write permission denied", "NotAllowedError"),
+    );
+    (document.execCommand as ReturnType<typeof vi.fn>).mockReturnValue(true);
+    const { result } = renderHook(() => useCopyFeedback());
+
+    await act(async () => {
+      await result.current.copyToTarget("x", "key-a");
+    });
+    expect(document.execCommand).toHaveBeenCalledWith("copy");
+    expect(result.current.isCopied("key-a")).toBe(true);
   });
 
   it("does not fire timers after unmount", async () => {

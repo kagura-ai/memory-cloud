@@ -7,6 +7,7 @@
 import { useTranslations } from 'next-intl';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
+import { copyText } from '@/lib/utils/clipboard';
 import {
   Table,
   TableBody,
@@ -63,11 +64,13 @@ export function ResourceTokensTable({
 
   const handleCopyResourceId = async (tokenId: number, resourceId: string) => {
     try {
-      await navigator.clipboard.writeText(resourceId);
+      // copyText degrades to an execCommand fallback before throwing (#987).
+      // The resource ID is visible in the table, so a hard failure is benign.
+      await copyText(resourceId);
       setCopiedTokenId(tokenId);  // Track by token.id to avoid N:1 collision
       setTimeout(() => setCopiedTokenId(null), 2000);
-    } catch (err) {
-      // Silently fail
+    } catch {
+      // Silently fail — the value is visible for manual copy.
     }
   };
 

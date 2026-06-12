@@ -4,3 +4,4 @@
  */
 
 export { cn } from './cn';
+export { copyText, ClipboardCopyError } from './clipboard';

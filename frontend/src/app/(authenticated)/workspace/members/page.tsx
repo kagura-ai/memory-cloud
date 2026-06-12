@@ -12,6 +12,7 @@ import { useEffect, useState } from "react";
 import { useRouter } from "next/navigation";
 import { useTranslations } from "next-intl";
 import { hasWorkspaceRole, WorkspaceRole } from "@/lib/auth/rbac";
+import { copyText } from "@/lib/utils/clipboard";
 import { PageHeader } from "@/components/common/PageHeader";
 import { PageContainer } from "@/components/common/PageContainer";
 import { Section } from "@/components/common/Section";
@@ -365,14 +366,15 @@ export default function WorkspaceMembersPage() {
 
   const handleCopyInviteUrl = async (url: string, token: string) => {
     try {
-      await navigator.clipboard.writeText(url);
+      // copyText degrades to an execCommand fallback before throwing (#987).
+      await copyText(url);
       setCopiedToken(token);
       setTimeout(() => setCopiedToken(null), 2000);
     } catch (error) {
       console.error("Failed to copy URL:", error);
       toast({
         title: tCommon("error"),
-        description: "Failed to copy URL to clipboard",
+        description: tCommon("copyFailedManualHint"),
         variant: "destructive",
       });
     }

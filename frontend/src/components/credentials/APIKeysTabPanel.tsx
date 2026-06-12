@@ -206,13 +206,16 @@ export function APIKeysTabPanel() {
   const handleCopy = async (text: string, key: string) => {
     try {
       await copyToTarget(text, key);
-    } catch (err: unknown) {
+    } catch {
       // Clipboard write failure is a user-action failure (the user clicked
       // a Copy button) — surface via destructive toast per the 3-channel
-      // error rule, not via silent console.error.
+      // error rule, not via silent console.error. copyText already tried the
+      // execCommand fallback (issue #987), so show an actionable, i18n'd hint
+      // instead of leaking the raw DOM exception string. The MCP URL is always
+      // visible in its <code> block, so the user can select + copy manually.
       toast({
         title: tCommon("error"),
-        description: err instanceof Error ? err.message : String(err),
+        description: tCommon("copyFailedManualHint"),
         variant: "destructive",
       });
     }
@@ -530,6 +533,7 @@ export function APIKeysTabPanel() {
           copyToastTitle={t("keyCopied")}
           copyToastDescription={t("keyCopiedHint")}
           copyErrorToastTitle={tCommon("error")}
+          copyErrorToastDescription={tCommon("copyFailedManualHint")}
           showLabel={t("showKey")}
           hideLabel={t("hideKey")}
           copyLabel={t("copyToClipboard")}
