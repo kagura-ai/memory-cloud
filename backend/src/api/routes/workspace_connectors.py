@@ -70,7 +70,9 @@ class WorkspaceConnectorCreateResponse(BaseModel):
     connector_id: UUID
     connector_type: str
     resource_id: str
-    resource_pk: UUID
+    # resource_pk (internal resources.id DB PK) intentionally not exposed (#991):
+    # the public `resource_id` slug above is the stable identifier; the internal
+    # PK was redundant on this response and is dropped before the 1.0 freeze.
     context_id: UUID | None = None
     token_id: int
     token: str = Field(..., description="Plaintext resource token; save immediately")
@@ -210,7 +212,6 @@ async def create_workspace_connector(
         connector_id=result.connector.id,
         connector_type=result.connector.connector_type,
         resource_id=result.resource_id,
-        resource_pk=result.resource_pk,
         context_id=result.context_id,
         token_id=result.token.id,
         token=result.plaintext_token,

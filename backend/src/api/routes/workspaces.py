@@ -121,7 +121,7 @@ class WorkspaceTotals(BaseModel):
     memory_count: int
 
 
-class ContextStatsResponse(BaseModel):
+class WorkspaceContextStatsResponse(BaseModel):
     """Response model for context statistics.
 
     Issue #249: GET /api/v1/workspaces/{workspace_id}/contexts/stats
@@ -884,12 +884,12 @@ async def get_workspace_stats(
     return stats
 
 
-@router.get("/{workspace_id}/contexts/stats", response_model=ContextStatsResponse)
+@router.get("/{workspace_id}/contexts/stats", response_model=WorkspaceContextStatsResponse)
 async def get_context_stats(
     workspace_id: UUID,
     request: Request,
     db: AsyncSession = Depends(get_db),
-) -> ContextStatsResponse:
+) -> WorkspaceContextStatsResponse:
     """Get per-context usage statistics.
 
     Issue #249: Context usage overview for workspace page.
@@ -902,7 +902,7 @@ async def get_context_stats(
         - Only shows contexts user has access to (RBAC)
 
     Returns:
-        ContextStatsResponse with per-context stats and totals
+        WorkspaceContextStatsResponse with per-context stats and totals
     """
     user = await get_current_user(request)
     workspace_service = WorkspaceService(db)
@@ -916,7 +916,7 @@ async def get_context_stats(
 
     stats = await workspace_service.get_context_stats(workspace_id)
 
-    return ContextStatsResponse(**stats)
+    return WorkspaceContextStatsResponse(**stats)
 
 
 @router.get(

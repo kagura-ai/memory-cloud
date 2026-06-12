@@ -3,6 +3,7 @@
 > Issue: #622 — pre-1.0 public API surface enumeration and freeze
 > Enumerated at commit 20ae959a2c79cacd2cf7922512ad780f540e9c60 (main HEAD, 2026-06-12)
 > Scope: all BaseModel / TZAwareBaseModel subclasses defined in backend/src/api/routes/ (46 route files, 208 model classes — 208 of 208 enumerated)
+> Re-frozen after #991: 3 duplicate class names renamed; dead `APIKey*` schemas removed from `models/schemas.py`; redundant `WorkspaceConnectorCreateResponse.resource_pk` dropped. Deferred: `WorkspaceConnectorSummary.resource_pk` (needs a Resource JOIN), `TelemetryResponse.embedding_config` gating (needs an intent decision), and the sequential-int-PK replacement (Bundle B).
 
 Notes:
 
@@ -1467,7 +1468,7 @@ Notes:
 - `connector_id: UUID` — required
 - `connector_type: str` — required
 - `resource_id: str` — required
-- `resource_pk: UUID` — required ⚠ internal DB primary key leaked alongside the public `resource_id` — hide or rename before freeze
+- ~~`resource_pk: UUID`~~ — ✅ **removed in #991** (was the internal `resources.id` DB PK, redundant with the public `resource_id` slug above).
 - `context_id: UUID | None` — optional
 - `token_id: int` — required
 - `token: str` — required ⚠ plaintext connector token (shown-once by design — verify never logged/cached downstream)
@@ -1495,7 +1496,7 @@ Notes:
 ## workspace_plan.py
 
 ### WorkspacePlanInfo (BaseModel, L45)
-> Workspace plan information with usage stats. (Name collides with `admin_plans.WorkspacePlanInfo` — OpenAPI schema-name ambiguity.)
+> Workspace plan information with usage stats. (Collision resolved in #991 — the `admin_plans.py` copy was renamed `AdminWorkspacePlanInfo`; this `workspace_plan.py` model keeps the canonical name.)
 - `workspace_id: str` — required
 - `workspace_name: str` — required
 - `current_plan: str` — required
@@ -1515,7 +1516,7 @@ Notes:
 - `features: list[str]` — required
 
 ### UpdatePlanRequest (BaseModel, L69) (request model)
-> Request to update workspace plan. (Name collides with `admin_plans.UpdatePlanRequest`.)
+> Request to update workspace plan. (Collision resolved in #991 — the `admin_plans.py` copy was renamed `AdminUpdatePlanRequest`; this `workspace_plan.py` model keeps the canonical name.)
 - `plan_name: str` — required
 - `reason: str | None` — optional
 
@@ -1573,7 +1574,7 @@ Notes:
 - `memory_count: int` — required
 
 ### ContextStatsResponse (BaseModel, L124)
-> Response model for context statistics. (Name collides with `contexts.ContextStatsResponse` — different shape, OpenAPI schema-name ambiguity.)
+> Response model for context statistics. (Collision resolved in #991 — this `workspaces.py` model was renamed `WorkspaceContextStatsResponse`; the differently-shaped `contexts.py` model keeps the canonical name.)
 - `contexts: list[ContextStatsItem]` — required
 - `total_contexts: int` — required
 - `workspace_totals: WorkspaceTotals` — required
@@ -1685,8 +1686,9 @@ Issue #622 allows at most 2 follow-up sub-issues; candidates below are grouped i
 
 | Candidate | Priority | Action |
 |---|---|---|
-| `WorkspaceConnectorCreateResponse.resource_pk`, `WorkspaceConnectorSummary.resource_pk` (workspace_connectors.py) | P1 | Hide internal DB PK; expose only the public `resource_id` |
-| `TelemetryResponse.embedding_config` (system.py) | P1 | Make admin-only or drop — internal embedding infra config currently visible to any authenticated user |
+| `WorkspaceConnectorCreateResponse.resource_pk` (workspace_connectors.py) | ✅ DONE (#991) | Dropped — redundant with the public `resource_id` slug already on the response |
+| `WorkspaceConnectorSummary.resource_pk` (workspace_connectors.py) | P1 (deferred) | NOT a pure drop — this response has no `resource_id`; substituting the public slug needs a `Resource` JOIN in `ConnectorProvisioningService.list_connectors`. Tracked for a follow-up. |
+| `TelemetryResponse.embedding_config` (system.py) | P1 (deferred) | Visible to any authenticated user (incl. an internal Ollama URL when provider=ollama). Gating the endpoint is breaking; dropping/nulling the field needs an intent decision (is embedding config intended public?). Tracked for a follow-up. |
 | `ResourceEventRecord.payload` / `event_metadata` (resources.py) | P1 | Confirm raw-vs-derived boundary (#968) / classification redaction applies to the Resource Detail Data tab before freeze |
 | `OAuth2ClientResponse.plaintext_secret` (oauth.py) | P1 | Verify owner+visibility gating and `response_model_exclude` coverage on every endpoint returning this model; fix the misleading "without secret" docstring |
 | `WorkerConnectorConfig` (workers.py) | P1 | Explicitly exclude the `/workers` surface (plaintext Slack/KMC secrets) from the public 1.0 OpenAPI/freeze scope |
@@ -1699,4 +1701,4 @@ Issue #622 allows at most 2 follow-up sub-issues; candidates below are grouped i
 |---|---|---|
 | `APIKeyResponse.id`, `ExternalKeyResponse.id`, `ResourceTokenResponse.id`, `WorkspaceConnectorCreateResponse.token_id` (all `int`) | P2 | Replace sequential integer DB PKs with opaque/prefixed public identifiers before freezing the surface |
 | Untyped `dict` fields on freezable responses: `PublicSearchResult.metadata`, `GraphStats.top_connections`/`recent_edges`, `GraphDataResponse.stats`, `UserStats.*`, `WorkspacePlanInfo.usage`/`quotas` (workspace_plan.py), `AvailablePlanInfo.quotas`, `TelemetryResponse.memory_stats`/`neural_memory`, `SleepReportDetail.*_result`, `UserInfo.workspaces` | P2 | Type them with explicit models, or mark them explicitly non-frozen in the 1.0 contract |
-| Duplicate class names across route files: `WorkspacePlanInfo` and `UpdatePlanRequest` (admin_plans.py vs workspace_plan.py), `ContextStatsResponse` (contexts.py vs workspaces.py) | P2 | Rename one of each pair to avoid OpenAPI schema-name ambiguity at freeze time |
+| Duplicate class names across route files | ✅ DONE (#991) | Renamed the `admin_plans.py` / `workspaces.py` copies → `AdminWorkspacePlanInfo`, `AdminUpdatePlanRequest`, `WorkspaceContextStatsResponse`; `workspace_plan.py` / `contexts.py` keep the canonical names. Also removed the dead `APIKeyCreate`/`APIKeyResponse`/`APIKeyCreateResponse` duplicates from `models/schemas.py` (zero callers; live versions are in `api_keys.py`). OpenAPI now emits distinct component names per endpoint; field JSON unchanged. |

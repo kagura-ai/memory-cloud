@@ -81,7 +81,6 @@ async def test_create_passes_normalized_pii_guardrail_config_dict_to_service():
     result.connector.id = uuid4()
     result.connector.connector_type = "slack"
     result.resource_id = "slack_general"
-    result.resource_pk = uuid4()
     result.context_id = None
     result.plaintext_kmc_api_key = None
     result.token.id = 1

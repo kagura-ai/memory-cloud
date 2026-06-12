@@ -648,33 +648,11 @@ class UpdateUserProfileRequest(BaseModel):
     locale: str | None = Field(None, pattern="^(en|ja)$", description="UI language (en, ja)")
 
 
-class APIKeyCreate(BaseModel):
-    """Request schema for API key creation."""
-
-    name: str = Field(..., min_length=1, max_length=100)
-    expires_in_days: int | None = Field(None, ge=1, le=365, description="有効期限（日数）")
-
-
-class APIKeyResponse(TZAwareBaseModel):
-    """Response schema for API key."""
-
-    id: int
-    key_prefix: str
-    name: str
-    created_at: datetime
-    last_used_at: datetime | None
-    revoked_at: datetime | None
-    expires_at: datetime | None
-
-    class Config:
-        from_attributes = True
-
-
-class APIKeyCreateResponse(BaseModel):
-    """Response schema for API key creation (includes plaintext key once)."""
-
-    key: str = Field(..., description="API key (show once, never stored in plaintext)")
-    key_info: APIKeyResponse
+# NOTE (#991): the dead APIKeyCreate / APIKeyResponse / APIKeyCreateResponse
+# schemas that used to live here were removed. They had zero callers — the live
+# API-key request/response models are defined in api/routes/api_keys.py — and
+# their duplicate class names produced ambiguous OpenAPI component names. The
+# `MemberAPIKeyResponse` below is a distinct, live model and is unaffected.
 
 
 class ExternalAPIKeyCreate(BaseModel):
