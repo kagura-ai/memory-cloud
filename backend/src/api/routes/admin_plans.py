@@ -43,7 +43,7 @@ router = APIRouter(prefix="/admin/plans", tags=["admin-plans"])
 # ============================================================================
 
 
-class WorkspacePlanInfo(BaseModel):
+class AdminWorkspacePlanInfo(BaseModel):
     """Workspace with plan information.
 
     Issue #276: Slug removed.
@@ -61,7 +61,7 @@ class WorkspacePlanInfo(BaseModel):
     mcp_calls_per_week: int
 
 
-class UpdatePlanRequest(BaseModel):
+class AdminUpdatePlanRequest(BaseModel):
     """Request to update workspace plan tier."""
 
     plan_name: str = Field(..., pattern=r"^(free|basic|pro)$")
@@ -282,7 +282,7 @@ require_admin = auth_require_admin
 # ============================================================================
 
 
-@router.get("/workspaces", response_model=list[WorkspacePlanInfo])
+@router.get("/workspaces", response_model=list[AdminWorkspacePlanInfo])
 async def list_workspaces_with_plans(
     admin_user: dict = Depends(require_admin),
     db: AsyncSession = Depends(get_db),
@@ -344,7 +344,7 @@ async def list_workspaces_with_plans(
 
             owner = users.get(workspace.owner_user_id)
             workspace_infos.append(
-                WorkspacePlanInfo(
+                AdminWorkspacePlanInfo(
                     id=str(workspace.id),
                     name=workspace.name,
                     plan_name=workspace.plan_name,
@@ -401,7 +401,7 @@ async def list_plan_tiers(
 @router.put("/workspaces/{workspace_id}/plan")
 async def update_workspace_plan(
     workspace_id: str,
-    request: UpdatePlanRequest,
+    request: AdminUpdatePlanRequest,
     admin_user: dict = Depends(require_admin),
     db: AsyncSession = Depends(get_db),
 ):
