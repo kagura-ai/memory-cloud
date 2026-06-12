@@ -132,8 +132,44 @@ services:
     depends_on:
       - api
 
+  # MinIO — S3-compatible object storage for self-host / local BYO-storage
+  # testing (Issue #994). Opt-in via the `minio` profile so it does NOT start
+  # with a default `docker compose up`:
+  #   docker compose --profile minio up -d minio
+  # Then point the API at it with STORAGE_BACKEND_TYPE=minio,
+  # STORAGE_ENDPOINT_URL=http://minio:9000, STORAGE_ACCESS_KEY_ID/SECRET=minioadmin,
+  # STORAGE_BUCKET=kagura-files-dev. The legacy R2_* names still work as aliases.
+  #
+  # ⚠ SECURITY — DEV DEFAULTS ONLY. The minioadmin/minioadmin credentials and the
+  # published 9000/9001 ports below are for LOCAL development only. For a real
+  # self-host deployment you MUST: (1) set strong unique MINIO_ROOT_USER /
+  # MINIO_ROOT_PASSWORD (or, better, per-app access keys with bucket-scoped
+  # policy), and (2) NOT expose these ports publicly — front MinIO with TLS and
+  # keep it on the private network. Copying this block to production unchanged
+  # leaves an open, default-credentialed object store (OWASP A05).
+  minio:
+    image: minio/minio
+    container_name: kagura-minio
+    profiles: ["minio"]
+    command: server /data --console-address ":9001"
+    environment:
+      MINIO_ROOT_USER: minioadmin
+      MINIO_ROOT_PASSWORD: minioadmin
+    ports:
+      - "9000:9000"
+      - "9001:9001"
+    volumes:
+      - minio_data:/data
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fs http://localhost:9000/minio/health/live || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+
 volumes:
   postgres_data:
   qdrant_data:
   redis_data:
   frontend_node_modules:
+  minio_data:

@@ -30,25 +30,30 @@ def _reset_factory():
 
 
 def _settings_with_r2(**overrides):
-    """Build a Mock ``Settings`` object with R2 fields populated."""
+    """Build a Mock ``Settings`` with the S3-compatible storage fields populated.
+
+    (#994 renamed r2_* -> storage_*; the discriminator must be a real string so
+    the factory's `.strip().lower()` allowlist check does not see a MagicMock.)
+    """
     from unittest.mock import MagicMock
 
     s = MagicMock()
-    s.r2_account_id = "acct"
-    s.r2_access_key_id = "key"
-    s.r2_secret_access_key = "secret"
-    s.r2_bucket = "kagura-files-test"
-    s.r2_endpoint_url = "https://acct.r2.cloudflarestorage.com"
+    s.storage_backend_type = "r2"
+    s.storage_account_id = "acct"
+    s.storage_access_key_id = "key"
+    s.storage_secret_access_key = "secret"
+    s.storage_bucket = "kagura-files-test"
+    s.storage_endpoint_url = "https://acct.r2.cloudflarestorage.com"
     # Explicit bool — bare MagicMock attribute access would return a truthy
     # child and silently flip the ChecksumSHA256 binding on (#556).
-    s.r2_checksum_binding_enabled = False
+    s.storage_checksum_binding_enabled = False
     for k, v in overrides.items():
         setattr(s, k, v)
     return s
 
 
 def _settings_without_r2():
-    return _settings_with_r2(r2_endpoint_url="")
+    return _settings_with_r2(storage_endpoint_url="")
 
 
 class TestGetBlobStorage:
@@ -60,7 +65,7 @@ class TestGetBlobStorage:
         from utils.exceptions import ExternalServiceError
 
         with patch("storage.factory.get_settings", return_value=_settings_without_r2()):
-            with pytest.raises(ExternalServiceError, match="R2"):
+            with pytest.raises(ExternalServiceError, match="not configured"):
                 factory.get_blob_storage()
 
     def test_returns_r2_storage_when_configured(self):
@@ -82,7 +87,7 @@ class TestGetBlobStorage:
         gate is silently dead even after operators flip the env var."""
         with patch(
             "storage.factory.get_settings",
-            return_value=_settings_with_r2(r2_checksum_binding_enabled=True),
+            return_value=_settings_with_r2(storage_checksum_binding_enabled=True),
         ):
             storage = factory.get_blob_storage()
             assert isinstance(storage, R2Storage)
