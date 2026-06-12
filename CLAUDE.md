@@ -19,7 +19,7 @@ This project uses **Kagura Memory Cloud itself** as a knowledge base. Static doc
 
 See `.claude/rules/development-workflow.md` for full flow (auto-loaded).
 
-**Key sequence**: Issue → Branch → Implement → `/quality` → `/simplify` → `/self-review` → PR → Merge
+**Key sequence** (kagura-plugins workflow): Issue → `/gh-issue-driven:start` (gate1 + branch) → Implement (TDD, `recall`/`remember` throughout) → `/quality` → `/kagura-code-reviewer` (or `/code-review`) → `/gh-issue-driven:ship` (gate2 + PR) → `/gh-issue-driven:review` → Merge
 
 ## Branch Strategy
 
@@ -60,9 +60,12 @@ Comment `/review` on the PR to run AI review + quality checks via GitHub Actions
 - `.claude/rules/` — Coding standards (auto-loaded by file path)
 - `.claude/rules/dev-environment.md` — Docker, test commands, Python env, Makefile targets (auto-loaded)
 - `.claude/rules/development-workflow.md` — Development flow, commit discipline, PR rules (auto-loaded)
-- `.claude/commands/` — Project-specific slash commands (`/test-unit`, `/test-e2e`, `/quality`, `/self-review`, `/issue-start`, `/self-maint`, `/api-docs-audit`, `/workflow`, `/release`, `/docker`, `/admin`)
+- `.claude/commands/` — Project-specific slash commands (`/test-unit`, `/test-e2e`, `/quality`, `/self-maint`, `/api-docs-audit`, `/release`, `/docker`, `/admin`). The issue→PR workflow (`/issue-start`, `/self-review`, `/workflow`) moved to the `kagura-plugins` marketplace — see below.
+- **`kagura-plugins` marketplace** (enabled in `~/.claude/settings.json`) — the dev workflow now runs through these plugins:
+  - `/gh-issue-driven:start` · `:ship` · `:review` · `:status` · `:tag` · `:goal` — Issue → branch → gate1 → implement → gate2 → PR → review → release
+  - `/kagura-code-reviewer` — Ollama-powered diff review grounded in Kagura Memory (replaces the old `/self-review` + `/simplify` step)
+  - `/kagura-engineer:*`, `/kagura-planner:plan`, `/claude-c-suite:*`, `/claude-phd-panel:*`
 - `.claude-plugin/` + `claude-skills/` — Kagura Memory Cloud plugin (marketplace-compatible)
   - Commands: `/kagura-memory:session-start`, `/kagura-memory:session-summary`, `/kagura-memory:recall`, `/kagura-memory:remember`, `/kagura-memory:guide`, `/kagura-memory:smoke-test`
-- `/simplify` — Built-in skill (not a local command file)
 - `.claude/agents/` — Specialized agents (`code-reviewer`, `test-runner`)
 - `docs/` — Detailed documentation (concepts, architecture, API reference)

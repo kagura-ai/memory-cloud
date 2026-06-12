@@ -217,7 +217,7 @@ make migrate-down
 
 This project includes pre-configured Claude Code tooling in `.claude/`. See the [README — Getting Started with Claude Code](README.md#getting-started-with-claude-code) for setup instructions.
 
-- **Slash commands**: `/test`, `/quality`, `/self-review`, `/self-maint`, `/issue-start`, `/remember`, `/recall`
+- **Slash commands**: `/test`, `/quality`, `/self-maint`, `/remember`, `/recall` (project-local). The issue→PR workflow runs through the [`kagura-plugins`](https://github.com/kagura-ai/kagura-plugins) marketplace — `/gh-issue-driven:start`, `/kagura-code-reviewer`, `/gh-issue-driven:ship`, `/gh-issue-driven:review`.
 - **Hooks**: Auto-format (ruff/prettier), secret detection, SQL injection prevention, memory sync
 - **Agents**: `code-reviewer`, `test-runner`
 - **Rules**: Backend, frontend, and security coding standards (auto-loaded by file path)

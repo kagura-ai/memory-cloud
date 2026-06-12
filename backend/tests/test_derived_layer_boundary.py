@@ -5,18 +5,19 @@ exportable; the derived/learned layer (Hebbian edge weights, embedding
 calibration, Sleep-consolidated structure) is the moat and must never leak
 into the raw-export surface.
 
-The boundary itself lives in three places, and this module pins all of them:
+The boundary itself lives in two places, and this module pins both:
 
 1. ``models.data_boundary`` — the machine-readable classification registry.
    Every ORM table must be classified into exactly one bucket (raw /
    derived / operational), so any NEW table fails this suite until its
    author makes the boundary call explicitly.
-2. ``docs/derived-layer-boundary.md`` — the design doc stating the rule and
-   enumerating the boundary-relevant artifacts. The doc-drift tests keep it
-   in sync with the registry.
-3. ``.claude/commands/self-review.md`` — the feature-review checklist item
-   that asks the two boundary questions on every storage/export/Sleep/edge
-   change.
+2. ``docs/derived-layer-boundary.md`` — the design doc stating the rule,
+   enumerating the boundary-relevant artifacts, AND carrying the
+   feature-review checklist (the two boundary questions asked on every
+   storage/export/Sleep/edge change). The doc-drift tests keep it in sync
+   with the registry. (The checklist previously lived in the now-retired
+   ``.claude/commands/self-review.md``; the canonical home is this doc — see
+   issue #996.)
 """
 
 from __future__ import annotations
@@ -58,7 +59,6 @@ from models.data_boundary import (
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 DESIGN_DOC = REPO_ROOT / "docs" / "derived-layer-boundary.md"
-SELF_REVIEW_CHECKLIST = REPO_ROOT / ".claude" / "commands" / "self-review.md"
 
 
 class TestTableClassification:
@@ -149,16 +149,20 @@ class TestDesignDoc:
 
 
 class TestFeatureReviewChecklist:
-    """self-review must ask the two boundary questions (Issue #968 item 2)."""
+    """The design doc must carry the two boundary questions (Issue #968 item 2)."""
 
     def test_checklist_has_boundary_section(self) -> None:
-        text = SELF_REVIEW_CHECKLIST.read_text(encoding="utf-8")
-        assert "derived-layer-boundary" in text, (
-            ".claude/commands/self-review.md lost the derived-layer boundary "
-            "checklist item (must reference docs/derived-layer-boundary.md)."
+        text = DESIGN_DOC.read_text(encoding="utf-8")
+        marker = "## Feature-review checklist"
+        assert marker in text, (
+            "docs/derived-layer-boundary.md lost the Feature-review checklist "
+            "section — the two boundary questions reviewers must answer on "
+            "every storage/export/Sleep/edge change."
         )
-        # The two mandated questions: (a) no derived signal on the raw-export
-        # surface, (b) derived signal genuinely accrues with use.
-        lowered = text.lower()
-        assert "export" in lowered and "derived" in lowered
-        assert "accrue" in lowered or "compound" in lowered
+        # Scope the assertions to the checklist section itself (not the whole
+        # doc, where 'export'/'derived' appear everywhere).
+        section = text.split(marker, 1)[1].split("\n## ", 1)[0].lower()
+        # (a) no derived signal on the raw-export surface
+        assert "export" in section and "derived" in section
+        # (b) derived signal genuinely accrues / compounds with use
+        assert "accru" in section or "compound" in section

@@ -113,7 +113,9 @@ justification (registered in `EXPORT_SURFACE_FIELD_EXCEPTIONS`).
 ## Feature-review checklist
 
 For any feature touching **storage, export, Sleep, or edges**, answer both
-in the PR (also wired into `.claude/commands/self-review.md`, step 8):
+in the PR (this doc is the canonical checklist — reviewers, including
+`/kagura-code-reviewer` and `/gh-issue-driven:ship` gate2, should recall and
+apply it):
 
 - [ ] **(a) No leakage** — the change does not move derived signal
   (edge weights/origins, calibration values, Sleep results, computed
