@@ -36,6 +36,9 @@ _STORAGE_ENV_KEYS = [
     "STORAGE_CHECKSUM_BINDING_ENABLED",
     "S3_CHECKSUM_BINDING_ENABLED",
     "R2_CHECKSUM_BINDING_ENABLED",
+    "STORAGE_REGION",
+    "S3_REGION",
+    "R2_REGION",
 ]
 
 
@@ -100,3 +103,21 @@ def test_storage_backend_type_defaults_to_r2(clean_storage_env):
     """Prod sets no discriminator; default MUST be the zero-change 'r2'."""
     s = _fresh_settings()
     assert s.storage_backend_type == "r2"
+
+
+def test_invalid_storage_backend_type_fails_at_load(clean_storage_env):
+    """#994: the Literal type rejects a typo at config LOAD (fail loudly at
+    boot), not on the first upload with a 502 hours later."""
+    import pytest as _pytest
+    from pydantic import ValidationError
+
+    clean_storage_env.setenv("STORAGE_BACKEND_TYPE", "mino")  # typo of "minio"
+    with _pytest.raises(ValidationError):
+        _fresh_settings()
+
+
+def test_storage_region_defaults_to_auto_and_aliases(clean_storage_env):
+    """region defaults to 'auto' (R2/MinIO); legacy R2_REGION resolves it."""
+    assert _fresh_settings().storage_region == "auto"
+    clean_storage_env.setenv("R2_REGION", "us-east-1")
+    assert _fresh_settings().storage_region == "us-east-1"

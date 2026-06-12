@@ -39,6 +39,7 @@ def _settings_with_r2(**overrides):
 
     s = MagicMock()
     s.storage_backend_type = "r2"
+    s.storage_region = "auto"
     s.storage_account_id = "acct"
     s.storage_access_key_id = "key"
     s.storage_secret_access_key = "secret"

@@ -437,14 +437,24 @@ class Settings(BaseSettings):
     # (which set only R2_*) work unchanged. `Settings` uses extra="ignore", so
     # dropping the r2_* alias would SILENTLY ignore prod's R2_* env -> empty
     # endpoint -> the upload path 502s with no load-time error (#994 gate1 risk).
-    storage_backend_type: str = Field(
+    storage_backend_type: Literal["r2", "s3", "minio", "s3-compatible", "aws"] = Field(
         default="r2",
-        validation_alias=AliasChoices("storage_backend_type"),
         description=(
-            "Object-storage backend discriminator: r2 | s3 | minio | "
-            "s3-compatible | aws. All use the same S3-compatible client; only "
-            "the endpoint differs. Default 'r2' preserves the managed-cloud "
-            "deploy (Cloudflare R2). Self-hosters set 'minio' / 's3'."
+            "Object-storage backend discriminator. All use the same "
+            "S3-compatible client; only the endpoint (and, for 'aws', the "
+            "region) differs. Default 'r2' preserves the managed-cloud deploy "
+            "(Cloudflare R2). Self-hosters set 'minio' / 's3' / 'aws'. Pydantic "
+            "rejects other values at boot, so STORAGE_BACKEND_TYPE typos fail "
+            "loudly instead of 502-ing on the first upload."
+        ),
+    )
+    storage_region: str = Field(
+        default="auto",
+        validation_alias=AliasChoices("storage_region", "s3_region", "r2_region"),
+        description=(
+            "S3 region. 'auto' (default) is correct for R2 and MinIO (both "
+            "ignore it). Set the bucket's real region (e.g. 'us-east-1') for an "
+            "'aws' backend, where SigV4 needs it."
         ),
     )
     storage_account_id: str = Field(

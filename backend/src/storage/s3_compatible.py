@@ -47,6 +47,7 @@ class S3CompatibleStorage:
         bucket: str,
         endpoint_url: str,
         enable_checksum_binding: bool = False,
+        region: str = "auto",
     ) -> None:
         if not (account_id and access_key_id and secret_access_key and bucket and endpoint_url):
             raise ValueError(
@@ -59,10 +60,10 @@ class S3CompatibleStorage:
         self._session = aioboto3.Session(
             aws_access_key_id=access_key_id,
             aws_secret_access_key=secret_access_key,
-            # R2 and MinIO ignore region; "auto" is R2's canonical value and
-            # MinIO accepts any string. AWS S3 proper would need the bucket's
-            # real region — out of scope for the R2/MinIO acceptance criteria.
-            region_name="auto",
+            # R2 and MinIO ignore region; "auto" (the default, R2's canonical
+            # value) works for both. AWS S3 proper needs the bucket's real
+            # region — set STORAGE_REGION=<region> for an `aws` backend.
+            region_name=region or "auto",
         )
 
     def _client(self) -> Any:
@@ -89,7 +90,7 @@ class S3CompatibleStorage:
                 ContentType=content_type,
                 Metadata={"sha256": sha256},
             )
-            logger.info("r2_object_written", key=key, size_bytes=len(data))
+            logger.info("storage_object_written", key=key, size_bytes=len(data))
 
     async def head_object(self, key: str) -> ObjectMetadata | None:
         async with self._client() as client:
@@ -106,13 +107,13 @@ class S3CompatibleStorage:
                 # surfaced as a domain exception so REST/MCP layers map
                 # them to a clear 502 instead of a raw boto traceback.
                 logger.warning(
-                    "r2_head_object_error",
+                    "storage_head_object_error",
                     key=key,
                     code=code,
                     error=str(exc),
                 )
                 raise ExternalServiceError(
-                    "R2",
+                    "storage",
                     f"head_object failed for key={key!r}: {code}",
                 ) from exc
             return ObjectMetadata(
@@ -123,7 +124,7 @@ class S3CompatibleStorage:
     async def delete_object(self, key: str) -> None:
         async with self._client() as client:
             await client.delete_object(Bucket=self._bucket, Key=key)
-            logger.info("r2_object_deleted", key=key)
+            logger.info("storage_object_deleted", key=key)
 
     async def generate_presigned_put(
         self,

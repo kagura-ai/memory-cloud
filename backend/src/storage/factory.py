@@ -29,10 +29,6 @@ from storage.protocol import BlobStorageProtocol
 
 logger = structlog.get_logger(__name__)
 
-# Known discriminator values. All map to S3CompatibleStorage today; the set is
-# the validation allowlist so a typo (e.g. "mino") fails loudly, not silently.
-_KNOWN_BACKENDS = frozenset({"r2", "s3", "minio", "s3-compatible", "aws"})
-
 
 def _warn_if_legacy_storage_env() -> None:
     """Emit one deprecation line when the deploy uses only legacy ``R2_*`` env.
@@ -99,13 +95,10 @@ def get_blob_storage() -> BlobStorageProtocol:
     if _storage is None:
         settings = get_settings()
 
-        backend_type = (settings.storage_backend_type or "r2").strip().lower()
-        if backend_type not in _KNOWN_BACKENDS:
-            raise ExternalServiceError(
-                "storage",
-                f"unknown storage_backend_type '{backend_type}' "
-                f"(expected one of: {', '.join(sorted(_KNOWN_BACKENDS))}).",
-            )
+        # storage_backend_type is a Literal — pydantic already rejected typos at
+        # config load, so no allowlist check is needed here (single source of
+        # truth lives on the settings field).
+        backend_type = settings.storage_backend_type
 
         if not settings.storage_endpoint_url:
             raise ExternalServiceError(
@@ -128,6 +121,7 @@ def get_blob_storage() -> BlobStorageProtocol:
                 bucket=settings.storage_bucket,
                 endpoint_url=settings.storage_endpoint_url,
                 enable_checksum_binding=settings.storage_checksum_binding_enabled,
+                region=settings.storage_region,
             )
         except ValueError as exc:
             raise ExternalServiceError(
