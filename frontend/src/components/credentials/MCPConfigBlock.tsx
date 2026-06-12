@@ -68,6 +68,22 @@ const PLACEHOLDER_KEY = "YOUR_API_KEY";
 export const CODEX_INSTALL_COMMAND =
   "codex plugin install kagura-memory@kagura-memory-cloud";
 
+/**
+ * Strip the workspace-scoped `/w/<workspaceId>` suffix from an MCP URL,
+ * yielding the bare `…/mcp` endpoint the Claude Code OAuth one-liner targets
+ * (OAuth resolves the workspace at login — issue #988). Idempotent: a URL that
+ * is already bare passes through unchanged.
+ *
+ * This is the single source of the derivation. Prefer passing the bare URL
+ * directly via the `mcpBaseUrl` prop (the caller in APIKeysTabPanel already
+ * computes `baseUrl + "/mcp"`); this helper is the fallback when only the
+ * workspace-scoped URL is available, and keeps the regex in one tested place
+ * instead of inlined at each future call site.
+ */
+export function toBareMcpUrl(mcpUrl: string): string {
+  return mcpUrl.replace(/\/w\/[^/]+$/, "");
+}
+
 export interface MCPConfigBlockProps {
   /**
    * The user's API key. `null` when no key has been created yet OR the
@@ -77,6 +93,13 @@ export interface MCPConfigBlockProps {
   apiKey: MemberAPIKey | null;
   /** The MCP endpoint URL the JSON snippet should embed. */
   mcpUrl: string;
+  /**
+   * The bare `…/mcp` endpoint (no `/w/<workspaceId>` suffix) for the OAuth
+   * one-liner. Optional: when omitted it is derived from `mcpUrl` via
+   * {@link toBareMcpUrl}. The caller passes its already-computed base URL so
+   * the production path needs no regex.
+   */
+  mcpBaseUrl?: string;
 }
 
 function readStoredClient(): MCPClient {
@@ -217,7 +240,11 @@ export function buildTomlConfig(mcpUrl: string, authValue: string): string {
   ].join("\n");
 }
 
-export function MCPConfigBlock({ apiKey, mcpUrl }: MCPConfigBlockProps) {
+export function MCPConfigBlock({
+  apiKey,
+  mcpUrl,
+  mcpBaseUrl,
+}: MCPConfigBlockProps) {
   const t = useTranslations("apiKeys");
   const tCommon = useTranslations("common");
   const { toast } = useToast();
@@ -326,8 +353,8 @@ export function MCPConfigBlock({ apiKey, mcpUrl }: MCPConfigBlockProps) {
   // copies even when the key window is closed.
   const claudeOAuthCommand = useMemo(
     () =>
-      `claude mcp add --transport http kagura-memory ${mcpUrl.replace(/\/w\/[^/]+$/, "")}`,
-    [mcpUrl],
+      `claude mcp add --transport http kagura-memory ${mcpBaseUrl ?? toBareMcpUrl(mcpUrl)}`,
+    [mcpBaseUrl, mcpUrl],
   );
 
   // Track which Copy button the user pressed last, so the Check icon only
@@ -340,20 +367,26 @@ export function MCPConfigBlock({ apiKey, mcpUrl }: MCPConfigBlockProps) {
     "json" | "toml" | "install" | "oauth" | null
   >(null);
 
-  const handleCopy = async () => {
-    if (copyJson === null) return;
+  // Single copy path for all four buttons. They differ only in the value
+  // copied, the per-target "copied" affordance (`target`), and the success
+  // title; the guard (skip when the value is null/disabled), the routing
+  // through useRevealableSecret.copy → copyText (#987 execCommand fallback,
+  // and cancellation of any prior 60s auto-clear so a pending timer can't wipe
+  // the freshly-copied value), and the destructive failure toast are identical.
+  // On hard failure copyText has already exhausted its fallback, so we surface
+  // an actionable i18n hint (the snippet stays visible in the <pre> for manual
+  // copy) rather than leaking the raw DOM exception string.
+  const runCopy = async (
+    value: string | null,
+    target: "json" | "toml" | "install" | "oauth",
+    successTitle: string,
+  ) => {
+    if (value === null) return;
     try {
-      await copy(copyJson);
-      setLastCopied("json");
-      toast({
-        title: t("mcpConfigCopied"),
-        description: t("mcpConfigCopiedHint"),
-      });
+      await copy(value);
+      setLastCopied(target);
+      toast({ title: successTitle, description: t("mcpConfigCopiedHint") });
     } catch {
-      // Use the common error title (NOT the success title). copyText already
-      // tried the execCommand fallback (issue #987), so show an actionable
-      // hint instead of leaking the raw DOM exception string — the config
-      // snippet is visible in the <pre> block for manual copy.
       toast({
         title: tCommon("error"),
         description: tCommon("copyFailedManualHint"),
@@ -362,77 +395,12 @@ export function MCPConfigBlock({ apiKey, mcpUrl }: MCPConfigBlockProps) {
     }
   };
 
-  const handleTomlCopy = async () => {
-    if (copyToml === null) return;
-    try {
-      await copy(copyToml);
-      setLastCopied("toml");
-      toast({
-        title: t("mcpConfigCopied"),
-        description: t("mcpConfigCopiedHint"),
-      });
-    } catch {
-      // copyText already tried the execCommand fallback (issue #987); show an
-      // actionable hint instead of the raw DOM exception string.
-      toast({
-        title: tCommon("error"),
-        description: tCommon("copyFailedManualHint"),
-        variant: "destructive",
-      });
-    }
-  };
-
-  const handleInstallCopy = async () => {
-    // Route through useRevealableSecret.copy so the hook cancels any
-    // pending auto-clear from a prior JSON/TOML copy — otherwise that
-    // 60s timer would fire after the install command lands in the
-    // clipboard and silently wipe it before the user can paste. The
-    // install command is not a secret, but the consistent 60s auto-clear
-    // matches the other Copy buttons in this component, and the user has
-    // plenty of time to switch to a terminal and paste.
-    try {
-      await copy(CODEX_INSTALL_COMMAND);
-      setLastCopied("install");
-      // The install command routes through useRevealableSecret.copy (see
-      // comment above), so it ALSO triggers the hook's 60s clipboard
-      // auto-clear. Surface the same "clipboard clears in 60s" hint as
-      // the other Copy buttons so the user isn't surprised when their
-      // pasted command vanishes.
-      toast({
-        title: t("codexInstallCopied"),
-        description: t("mcpConfigCopiedHint"),
-      });
-    } catch {
-      // copyText already tried the execCommand fallback (issue #987); show an
-      // actionable hint instead of the raw DOM exception string.
-      toast({
-        title: tCommon("error"),
-        description: tCommon("copyFailedManualHint"),
-        variant: "destructive",
-      });
-    }
-  };
-
-  const handleOAuthCopy = async () => {
-    // Route through useRevealableSecret.copy → copyText (#987) for the shared
-    // execCommand fallback. The command is not a secret; routing through the
-    // hook keeps the per-target "copied" affordance consistent with the other
-    // buttons and lets the hook cancel any prior pending auto-clear.
-    try {
-      await copy(claudeOAuthCommand);
-      setLastCopied("oauth");
-      toast({
-        title: t("claudeOAuthCopied"),
-        description: t("mcpConfigCopiedHint"),
-      });
-    } catch {
-      toast({
-        title: tCommon("error"),
-        description: tCommon("copyFailedManualHint"),
-        variant: "destructive",
-      });
-    }
-  };
+  const handleCopy = () => runCopy(copyJson, "json", t("mcpConfigCopied"));
+  const handleTomlCopy = () => runCopy(copyToml, "toml", t("mcpConfigCopied"));
+  const handleInstallCopy = () =>
+    runCopy(CODEX_INSTALL_COMMAND, "install", t("codexInstallCopied"));
+  const handleOAuthCopy = () =>
+    runCopy(claudeOAuthCommand, "oauth", t("claudeOAuthCopied"));
 
   return (
     <div className="space-y-3" suppressHydrationWarning>

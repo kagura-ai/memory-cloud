@@ -644,6 +644,7 @@ export function APIKeysTabPanel() {
                 <MCPConfigBlock
                   apiKey={apiKeys[0] ?? null}
                   mcpUrl={workspaceScopedMcpUrl || mcpBaseUrl}
+                  mcpBaseUrl={mcpBaseUrl}
                 />
               </div>
             </CollapsibleContent>

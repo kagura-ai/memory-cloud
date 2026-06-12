@@ -21,6 +21,7 @@ import {
   MCPConfigBlock,
   CODEX_INSTALL_COMMAND,
   buildTomlConfig,
+  toBareMcpUrl,
 } from "./MCPConfigBlock";
 
 // Stable references defined OUTSIDE beforeEach so React's useCallback /
@@ -177,6 +178,34 @@ describe("MCPConfigBlock", () => {
       expect(
         screen.getByRole("button", { name: "copyClaudeOAuthCommand" }),
       ).toBeEnabled();
+    });
+
+    it("uses the explicit mcpBaseUrl prop for the command instead of stripping mcpUrl", () => {
+      // The caller passes its already-computed bare URL; the command must use
+      // it verbatim (no regex on mcpUrl), even if it differs from what
+      // stripping the workspace-scoped mcpUrl would produce.
+      render(
+        <MCPConfigBlock
+          apiKey={VISIBLE_KEY}
+          mcpUrl={MCP_URL}
+          mcpBaseUrl="https://memory.kagura-ai.com/mcp"
+        />,
+      );
+      expect(screen.getByText(OAUTH_CMD)).toBeInTheDocument();
+    });
+  });
+
+  describe("toBareMcpUrl", () => {
+    it("strips a trailing /w/<workspaceId> suffix", () => {
+      expect(toBareMcpUrl("https://memory.kagura-ai.com/mcp/w/test-ws")).toBe(
+        "https://memory.kagura-ai.com/mcp",
+      );
+    });
+
+    it("is a no-op on an already-bare /mcp URL (idempotent)", () => {
+      expect(toBareMcpUrl("http://localhost:8080/mcp")).toBe(
+        "http://localhost:8080/mcp",
+      );
     });
   });
 
