@@ -47,10 +47,17 @@ async def oauth_protected_resource():
         "authorization_servers": [base_url],
         "scopes_supported": list(ALL_ADVERTISED_SCOPES),
         "bearer_methods_supported": ["header"],
-        "resource_signing_alg_values_supported": ["RS256", "HS256"],
+        # NOTE: resource_signing_alg_values_supported intentionally omitted (#993).
+        # Access tokens are OPAQUE — validated by introspection, never signed —
+        # so advertising RS256/HS256 would invite a strict client to attempt a
+        # signature verification that can never succeed. OPTIONAL per RFC 9728.
         "resource_documentation": f"{base_url}/redoc",
-        "resource_policy_uri": f"{base_url}/docs",
-        # MCP SSE endpoint for Claude Desktop / Claude Code
+        # NOTE: resource_policy_uri intentionally omitted (#993). There is no
+        # published resource-policy document; the previous value pointed at the
+        # Swagger UI (/docs), which is not a policy. OPTIONAL per RFC 9728.
+        # mcp_sse_endpoint: stable, documented Kagura extension (non-RFC). The
+        # MCP SSE transport entrypoint for Claude Desktop / Claude Code. Retained
+        # as a committed part of the 1.0 surface.
         "mcp_sse_endpoint": f"{mcp_base}/sse",
     }
 
@@ -91,6 +98,9 @@ async def openid_configuration(request: Request):
         "revocation_endpoint": f"{base_url}/api/v1/oauth/revoke",
         "introspection_endpoint": f"{base_url}/api/v1/oauth/introspect",  # RFC 7662 (Issue #157)
         "registration_endpoint": f"{base_url}/api/v1/oauth/register",  # DCR endpoint (RFC 7591)
+        # RFC 8628 §4: advertise the device authorization endpoint alongside the
+        # device_code grant so a client can actually start the device flow (#993).
+        "device_authorization_endpoint": f"{base_url}/api/v1/oauth/device/authorize",
         # PKCE required by MCP (CRITICAL - clients will refuse if absent)
         "code_challenge_methods_supported": ["S256"],
         "scopes_supported": list(ALL_ADVERTISED_SCOPES),
@@ -100,6 +110,10 @@ async def openid_configuration(request: Request):
         "grant_types_supported": [
             "authorization_code",
             "refresh_token",
+            # Live and wired (oauth2_server.register_grant(DeviceAuthorizationGrant));
+            # seeded for kagura-cli. Advertised so a frozen-at-1.0 metadata doc does
+            # not under-report a working grant (#993, RFC 8628).
+            "urn:ietf:params:oauth:grant-type:device_code",
         ],
         # Token endpoint auth methods (Issue #157: Public Client support)
         "token_endpoint_auth_methods_supported": [
@@ -143,11 +157,18 @@ async def oauth_authorization_server(request: Request):
         "revocation_endpoint": f"{base_url}/api/v1/oauth/revoke",
         "introspection_endpoint": f"{base_url}/api/v1/oauth/introspect",  # RFC 7662 (Issue #157)
         "registration_endpoint": f"{base_url}/api/v1/oauth/register",  # DCR endpoint (RFC 7591)
+        # RFC 8628 §4: advertise the device authorization endpoint alongside the
+        # device_code grant so a client can actually start the device flow (#993).
+        "device_authorization_endpoint": f"{base_url}/api/v1/oauth/device/authorize",
         "scopes_supported": list(ALL_ADVERTISED_SCOPES),
         "response_types_supported": ["code"],
         "grant_types_supported": [
             "authorization_code",
             "refresh_token",
+            # Live and wired (oauth2_server.register_grant(DeviceAuthorizationGrant));
+            # seeded for kagura-cli. Advertised so a frozen-at-1.0 metadata doc does
+            # not under-report a working grant (#993, RFC 8628).
+            "urn:ietf:params:oauth:grant-type:device_code",
         ],
         "code_challenge_methods_supported": ["S256"],  # PKCE required
         "token_endpoint_auth_methods_supported": [
