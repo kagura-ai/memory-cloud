@@ -376,7 +376,7 @@ verify_workers_blocked() {
         sleep "$WORKERS_GATE_INTERVAL"
     done
     error "/api/v1/workers/* is NOT blocked by Caddy (HTTP ${http_status}, expected 404) after ${WORKERS_GATE_TIMEOUT}s.
-  Old color left running — roll back with: $0 --rollback
+  Aborting before any further steps — the workers route is exposed and must be fixed before this deploy/rollback can complete.
   Check Caddyfile: the 'handle /api/v1/workers*' block must appear BEFORE 'handle /api/*'.
   Regenerate and redeploy: $0 --generate-caddyfile && dc restart caddy"
 }
