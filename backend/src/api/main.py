@@ -9,6 +9,7 @@ from contextlib import asynccontextmanager
 from pathlib import Path
 
 from fastapi import FastAPI, Request
+from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from sqlalchemy.exc import SQLAlchemyError
@@ -335,6 +336,45 @@ async def memory_cloud_exception_handler(
             "error": exc.error_code,
             "message": exc.message,
             "details": details,
+        },
+    )
+
+
+@app.exception_handler(RequestValidationError)
+async def request_validation_exception_handler(
+    request: Request, exc: RequestValidationError
+) -> JSONResponse:
+    """Map FastAPI's default 422 onto the canonical ``{error, message, details}``
+    envelope (#992 Phase 1).
+
+    Without this handler, request-body validation failures emit FastAPI's
+    default ``{"detail": [ ... ]}`` array, which (a) diverges from the
+    canonical shape that ``ValidationError`` (``VAL-001``) already produces
+    via ``memory_cloud_exception_handler``, and (b) **echoes the rejected
+    ``input``** (plus ``ctx``/``url``) — a payload-reflection / info-disclosure
+    risk on a surface that freezes at 1.0. We project each error to a trimmed
+    ``{loc, msg, type}`` and drop ``input``/``ctx``/``url`` entirely so a
+    mistyped password, token, or PII field is never reflected back.
+    """
+    errors = [
+        {
+            "loc": list(err.get("loc", [])),
+            "msg": err.get("msg", ""),
+            "type": err.get("type", ""),
+        }
+        for err in exc.errors()
+    ]
+    logger.warning(
+        "request_validation_error",
+        path=request.url.path,
+        error_count=len(errors),
+    )
+    return JSONResponse(
+        status_code=422,
+        content={
+            "error": "VAL-001",
+            "message": "Request validation failed",
+            "details": {"errors": errors},
         },
     )
 

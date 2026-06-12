@@ -37,7 +37,7 @@ HTTP status comes from `exc.status_code` (per-class; see catalogue). Notable hea
 
 ### 2. REST — raw `HTTPException` (FastAPI default, NON-canonical)
 
-No custom handler is registered for `fastapi.HTTPException` / `StarletteHTTPException`. The 366 raw raise sites (see §Non-conforming) therefore produce FastAPI's default:
+No custom handler is registered for `fastapi.HTTPException` / `StarletteHTTPException`. The remaining raw raise sites (see §Non-conforming) therefore produce FastAPI's default:
 
 ```json
 { "detail": "<string or object passed as detail>" }
@@ -46,19 +46,26 @@ No custom handler is registered for `fastapi.HTTPException` / `StarletteHTTPExce
 - No `error` code. No `message`. No `details` object. SDKs cannot route on these.
 - Status code is whatever the raise site passes.
 
-### 3. REST — 422 validation (FastAPI default)
+> **#992 Phase 1 (partial, landed):** the original census counted **366** raw raise sites. Phase 1 converted **36 auth-boundary 401/403 route-level sites** (every 401/403 in `auth.py`, `oauth.py`, `public_search.py`, `workspace.py`, `member_credentials.py`, `admin.py` — single-line **and** multi-line raise forms) onto the canonical `MemoryCloudException` family, leaving **~330** raw sites. The only 401/403 deliberately left raw in those files are `oauth.py:327/341`, which carry the RFC 6750 `WWW-Authenticate: Bearer` challenge header the global handler does not emit. The dependency-layer 401/403 emitters (`auth/dependencies.py`, `auth/analysis_gates.py`, `utils/auth_helpers.py`), the non-auth statuses (400/404/422/500) in the touched files, and Phase 2's remaining route files are **not** yet migrated — see §Follow-up. #992 stays open.
 
-No `RequestValidationError` handler exists anywhere in `backend/src` (verified by grep). Pydantic/FastAPI default applies:
+### 3. REST — 422 validation (canonical, since #992 Phase 1)
+
+A `RequestValidationError` handler is registered in `backend/src/api/main.py` (`request_validation_exception_handler`, added in #992 Phase 1). Request-body validation failures now emit the canonical envelope:
 
 ```json
 {
-  "detail": [
-    { "type": "...", "loc": ["body", "field"], "msg": "...", "input": "...", "...": "..." }
-  ]
+  "error": "VAL-001",
+  "message": "Request validation failed",
+  "details": {
+    "errors": [
+      { "loc": ["body", "field"], "msg": "...", "type": "..." }
+    ]
+  }
 }
 ```
 
-- HTTP 422, no `error` code. ⚠ This is part of the public surface and diverges from both the canonical shape and `ValidationError` (`VAL-001`, 422), which **does** conform when raised from service code. Two different 422 shapes coexist.
+- HTTP 422, `error: "VAL-001"` — matches the `ValidationError` shape raised from service code, so the two 422 paths now agree.
+- The handler projects each pydantic error to a trimmed `{loc, msg, type}` and **drops `input`/`ctx`/`url`** — the rejected payload is never echoed back (CWE-639 / info-disclosure defense for the frozen surface).
 
 ### 4. MCP tool errors (in-band, JSON-in-TextContent)
 
@@ -278,7 +285,7 @@ Issue acceptance allows at most 2 sub-issues; candidates are grouped into 2 bund
 |---|---|---|
 | P1 | Rename the 3 snake_case REST codes in `api/routes/admin_sleep.py` to the `NAMESPACE-NNN` convention (e.g. `SLEEP-001/002/003`) before any SDK pins them. | §B ⚠ |
 | P1 | Resolve the `ADMIN-*` namespace collision: `ADMIN-001` (403 protection) vs `ADMIN-101/102` (400 preconditions). Either re-namespace the preconditions (e.g. `REQ-1xx`) or document the split-by-hundreds scheme as frozen. | §B ⚠ |
-| P1 | Decide the 422 story: either register a `RequestValidationError` handler that wraps FastAPI validation errors in the canonical shape (e.g. `VAL-002` with the pydantic array under `details`), or freeze the FastAPI default array as documented surface. Today two 422 shapes coexist (`VAL-001` canonical vs default array). | §Canonical 3, §Non-conforming ⚠ |
+| ✅ DONE (#992 Phase 1) | ~~Decide the 422 story~~ — **resolved**: a `RequestValidationError` handler now wraps FastAPI validation errors in the canonical envelope under `error: "VAL-001"` (`{loc, msg, type}` projection, `input` stripped). The two 422 shapes now agree. | §Canonical 3 |
 | P2 | Give Qdrant a dedicated code (the `EXT-101` gap before Redis `EXT-102` strongly suggests it was reserved for Qdrant); keep `EXT-001` as the generic fallback only. | §A ⚠ |
 | P2 | Remove the class-name fallback in `MemoryCloudException.__init__` (`error_code or self.__class__.__name__`) or make `error_code` required — the fallback can silently mint undocumented codes. | §Canonical 1 ⚠ |
 | P2 | De-duplicate MCP literals `invalid_argument`/`invalid_arguments` and `missing_fields`/`missing_required_fields`. | §Supplementary ⚠ |
@@ -288,7 +295,7 @@ Issue acceptance allows at most 2 sub-issues; candidates are grouped into 2 bund
 
 | Priority | Item | Feeds from |
 |---|---|---|
-| P1 | Migrate the auth boundary first: `auth/dependencies.py` (18), `auth/analysis_gates.py` (4), `utils/auth_helpers.py` (4) — these emit 401/403 in the non-canonical shape on every protected route, directly beside the canonical `AUTH-xxx` family. | §Non-conforming ⚠ |
+| 🟡 PARTIAL (#992 Phase 1) | Migrate the auth boundary first. **Route-level 401/403 done**: the 21 raw sites in `auth.py`, `oauth.py`, `public_search.py`, `workspace.py`, `member_credentials.py`, `admin.py` now raise the canonical `AUTH-*`/`ADMIN-001` family. **Still raw (Phase 2)**: the dependency-layer emitters `auth/dependencies.py` (18), `auth/analysis_gates.py` (4), `utils/auth_helpers.py` (4) — these run on every protected route and are the higher-frequency emitters. Note `auth/dependencies.py:505/521` deliberately carry `WWW-Authenticate: Bearer error="insufficient_scope"` (RFC 6750) and `oauth.py:329/343` carry `WWW-Authenticate: Bearer` — preserve those headers when migrating. | §Non-conforming ⚠ |
 | P1 | Retire `utils/db_helpers.py:79` (`handle_db_operation` → `HTTPException(500)`) in favor of `DatabaseError`/`InternalError`, and stop `utils/error_messages.py` documenting the raw-raise pattern. | §Non-conforming ⚠ |
-| P2 | Migrate the remaining ~340 route-level raises, largest files first (`oauth.py` 31, `member_credentials.py` 29, `contexts.py` 29, `auth.py` 24, `admin.py` 19, `resource_tokens.py` 17). Alternatively, if full migration won't land before 1.0: register a `StarletteHTTPException` handler that re-shapes `{"detail": ...}` into `{error: "HTTP-<status>", message, details: {}}` as a stopgap so the *shape* freezes even where codes don't exist yet. | §Non-conforming ⚠ |
+| P2 | Migrate the remaining ~296 route-level raises (non-auth statuses + untouched files), largest files first (`contexts.py` 29, `oauth.py` 26, `resource_tokens.py` 17, `auth.py` 17, `member_credentials.py` 15, `admin.py` 15). Alternatively, if full migration won't land before 1.0: register a `StarletteHTTPException` handler that re-shapes `{"detail": ...}` into `{error: "HTTP-<status>", message, details: {}}` as a stopgap so the *shape* freezes even where codes don't exist yet. | §Non-conforming ⚠ |
 | P2 | Propagate `error_code` through the MCP `-32603` catch-all via `error.data` (e.g. `data.error_code`) so transport-level failures stay SDK-routable. | §D ⚠ |

@@ -36,6 +36,7 @@ from models.auth import Context, User, Workspace, WorkspaceMember
 from models.auth import UsageStats as UsageStatsModel
 from models.memory import Memory
 from utils.datetime import to_utc_iso, utcnow
+from utils.exceptions import AuthenticationError
 
 logger = logging.getLogger(__name__)
 
@@ -120,7 +121,7 @@ async def get_workspace_stats(
     """
     user_id = user.get("user_id")
     if not user_id:
-        raise HTTPException(status_code=401, detail="User ID not found in session")
+        raise AuthenticationError("User ID not found in session")
 
     try:
         # Issue #65: Single JOIN replaces 2 sequential queries

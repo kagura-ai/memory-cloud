@@ -37,6 +37,7 @@ from models.schemas import (
 from utils import db_transaction, get_user_id
 from utils.datetime import to_utc_iso
 from utils.exceptions import (
+    AdminProtectionError,
     AuthorizationError,
     BonusBelowZeroError,
     InsufficientReasonError,
@@ -719,10 +720,7 @@ async def update_user_role(
 
     # Prevent self-demotion
     if admin_id == user_id and request.role != "admin":
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail="Cannot change your own admin role",
-        )
+        raise AdminProtectionError("Cannot change your own admin role", reason="self_demotion")
 
     async with db_transaction(db, "update_user_role", "Failed to update user role"):
         result = await db.execute(select(User).where(User.user_id == user_id))
@@ -976,16 +974,15 @@ async def delete_user(
 
     # Prevent self-deletion
     if admin_id == user_id:
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail="Cannot delete your own account",
-        )
+        raise AdminProtectionError("Cannot delete your own account", reason="self_deletion")
 
     # Issue #166: Check if user is a protected system admin
     service = SystemAdminService(db)
     can_delete, reason = await service.can_delete_admin(user_id)
     if not can_delete:
-        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail=reason)
+        # ``reason`` is the documented governance message (initial/last admin);
+        # the classification is already logged inside can_delete_admin.
+        raise AdminProtectionError(reason, reason="admin_protected")
 
     async with db_transaction(db, "delete_user", "Failed to delete user"):
         result = await db.execute(select(User).where(User.user_id == user_id))
@@ -1125,9 +1122,8 @@ async def admin_force_erase_user(
     admin_id = get_user_id(admin)
 
     if admin_id == user_id:
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail="Cannot erase your own account via the admin path",
+        raise AdminProtectionError(
+            "Cannot erase your own account via the admin path", reason="self_erasure"
         )
 
     service = AccountErasureService(db)

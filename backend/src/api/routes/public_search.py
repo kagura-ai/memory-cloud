@@ -22,7 +22,7 @@ from models.auth import Context, Workspace
 from services.resource_lookup import get_latest_schema
 from services.search_service import SearchService
 from utils.datetime import to_utc_iso, utcnow
-from utils.exceptions import AuthorizationError, NotFoundException, RateLimitError
+from utils.exceptions import APIKeyError, AuthorizationError, NotFoundException, RateLimitError
 from utils.logger import get_logger
 from utils.usage_logger import log_usage
 
@@ -270,16 +270,15 @@ async def _resolve_public_attribution(
     verified = await APIKeyManager(db).verify_key(api_key)
     if verified is None:
         # Authentication failure — invalid hash, revoked, or expired.
-        raise HTTPException(status_code=401, detail="Invalid or expired API key")
+        raise APIKeyError("Invalid or expired API key")
 
     if verified.bound_context_id is None:
         # Valid key (owner / workspace-scoped) without a public binding.
-        raise HTTPException(
-            status_code=403,
-            detail=(
+        raise AuthorizationError(
+            message=(
                 "API key is not bound to a public context; "
                 "use a public-bound key or omit Authorization for anonymous access"
-            ),
+            )
         )
 
     if verified.bound_context_id != context_id:
@@ -290,9 +289,13 @@ async def _resolve_public_attribution(
             requested_context_id=str(context_id),
             bound_context_id=str(verified.bound_context_id),
         )
-        raise HTTPException(
-            status_code=403,
-            detail="API key is bound to a different context (BOUND_SCOPE_VIOLATION)",
+        # Intentional override of AuthorizationError's default uniform message:
+        # the BOUND_SCOPE_VIOLATION marker is a documented client signal and
+        # leaks no resource existence (the bound_context_id stays log-only, and
+        # the handler strips details). Do NOT "normalize" this back to the
+        # default message — a test asserts this marker is visible.
+        raise AuthorizationError(
+            message="API key is bound to a different context (BOUND_SCOPE_VIOLATION)"
         )
 
     return verified
@@ -426,9 +429,8 @@ async def public_search(
 
         # Verify context belongs to user's current workspace
         if context.workspace_id != current_workspace_id:
-            raise HTTPException(
-                status_code=403,
-                detail="This public context belongs to a different workspace. Please switch workspaces or use anonymous access.",
+            raise AuthorizationError(
+                message="This public context belongs to a different workspace. Please switch workspaces or use anonymous access."
             )
 
     # 3. Rate limit dispatch by principal type.

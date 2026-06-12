@@ -22,6 +22,7 @@ from api.routes.workspace import (
 )
 from api.routes.workspaces import UpdateMemberRoleRequest, update_member_role
 from auth.workspace_roles import WorkspaceRole
+from utils.exceptions import AuthenticationError
 
 
 class TestWorkspaceStats:
@@ -59,12 +60,13 @@ class TestWorkspaceStats:
 
     @pytest.mark.asyncio
     async def test_no_user_id_returns_401(self, mock_db):
-        """Test that missing user_id returns 401."""
-        with pytest.raises(HTTPException) as exc_info:
+        """Test that missing user_id returns 401 (#992: canonical AuthenticationError)."""
+        with pytest.raises(AuthenticationError) as exc_info:
             await get_workspace_stats(user={}, db=mock_db)
 
         assert exc_info.value.status_code == 401
-        assert "User ID not found" in exc_info.value.detail
+        assert exc_info.value.error_code == "AUTH-001"
+        assert "User ID not found" in exc_info.value.message
 
     @pytest.mark.asyncio
     async def test_empty_contexts_returns_empty_stats(self, mock_db, mock_user):
