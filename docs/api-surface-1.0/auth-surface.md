@@ -2,8 +2,9 @@
 
 > Issue: #622 — pre-1.0 public API surface enumeration and freeze
 > Enumerated at commit 20ae959a2c79cacd2cf7922512ad780f540e9c60 (main HEAD, 2026-06-12)
+> Re-frozen after #993 (dead JWT path dropped; well-known metadata honesty fixes)
 
-Sources read in full: `backend/src/auth/jwt.py`, `backend/src/auth/mcp_scopes.py`,
+Sources read in full: `backend/src/auth/mcp_scopes.py`,
 `backend/src/api/routes/well_known.py`, `backend/src/auth/oauth2_bearer.py`,
 `backend/src/auth/dependencies.py` (scope-enforcement sections),
 `backend/src/auth/oauth2_server.py` (token-generation/grant sections),
@@ -15,33 +16,19 @@ silent truncation.
 
 ## JWT claim shapes
 
-The platform issues exactly **one JWT token type**. All other credentials (OAuth2
-access/refresh tokens, API keys, resource tokens, browser sessions) are **opaque
-random strings, not JWTs** — they carry no claims; their attributes live in DB rows.
+The platform issues **no JWT tokens**. Every credential (OAuth2 access/refresh
+tokens, API keys, resource tokens, browser sessions) is an **opaque random string**
+— they carry no claims; their attributes live in DB rows. The dashboard JWT module
+that previously lived at `auth/jwt.py` was dead code and was removed in #993 (§1).
 
-### 1. Dashboard JWT access token — `auth/jwt.py:create_access_token`
+### 1. Dashboard JWT access token — REMOVED (#993)
 
-Signed `HS256` (default, `settings.jwt_algorithm`) with shared secret
-`settings.jwt_secret`; lifetime `settings.jwt_expire_minutes` (default 60).
-Algorithm is enforced on verify (mismatch → reject). 5 claims, all always present:
-
-| Claim | Type | Meaning | Presence |
-|---|---|---|---|
-| `sub` | string | User identifier (IdP-qualified, e.g. `google\|123`) | always |
-| `email` | string | User email | always |
-| `role` | string | App role: `admin` / `user` / `read_only` (custom claim) | always |
-| `iat` | NumericDate | Issued-at | always |
-| `exp` | NumericDate | Expiry (`iat` + `jwt_expire_minutes`) | always |
-
-No `iss`, `aud`, `jti`, `nbf`, no workspace/tenant claim, no `token_type`
-discriminator, no scope claim.
-
-⚠ **`create_access_token` / `verify_access_token` have zero production callers**
-(grep across `backend/src` excluding tests finds no import of `auth.jwt`). The
+The `auth/jwt.py` module (`create_access_token` / `verify_access_token` /
+`decode_token_without_verification`) had **zero production callers** (and zero test
+references) and was **deleted in #993** rather than frozen into the 1.0 surface. The
 live dashboard auth is an opaque session cookie (`auth/session.py`,
-`secrets.token_urlsafe(32)` session id resolved by SessionMiddleware). Freezing
-this JWT shape at 1.0 would freeze dead surface — decide remove-or-adopt before
-the freeze.
+`secrets.token_urlsafe(32)` session id resolved by SessionMiddleware) — not a JWT.
+No claim shape is frozen here.
 
 ### 2. OAuth2 access token (authorization_code / refresh_token / device_code grants)
 
@@ -101,7 +88,7 @@ Router: `backend/src/api/routes/well_known.py`, mounted at prefix `/.well-known`
 
 301 redirect → `/.well-known/oauth-protected-resource`. No body fields.
 
-### 2. `GET /.well-known/oauth-protected-resource` (RFC 9728) — 8 fields
+### 2. `GET /.well-known/oauth-protected-resource` (RFC 9728) — 6 fields
 
 | Field | Value |
 |---|---|
@@ -109,19 +96,18 @@ Router: `backend/src/api/routes/well_known.py`, mounted at prefix `/.well-known`
 | `authorization_servers` | `[{base_url}]` |
 | `scopes_supported` | `ALL_ADVERTISED_SCOPES` (6 scopes, see catalogue) |
 | `bearer_methods_supported` | `["header"]` |
-| `resource_signing_alg_values_supported` | `["RS256", "HS256"]` |
 | `resource_documentation` | `{base_url}/redoc` |
-| `resource_policy_uri` | `{base_url}/docs` |
 | `mcp_sse_endpoint` | `{mcp_base}/sse` |
 
-⚠ `resource_signing_alg_values_supported` advertises RS256/HS256 but access tokens
-are opaque (never signed, and no RS256 key exists anywhere). Misleading for a
-frozen surface.
-⚠ `mcp_sse_endpoint` is a custom, non-RFC field — declare as a stable extension
-or rename before freeze.
-⚠ `resource_policy_uri` points at the Swagger UI (`/docs`), not a policy document.
+✓ `resource_signing_alg_values_supported` and `resource_policy_uri` were **removed
+in #993**: access tokens are opaque (no signing alg to advertise — a strict client
+would attempt a doomed signature check) and there is no published policy document
+(the old value pointed at the Swagger UI `/docs`). Both are OPTIONAL per RFC 9728.
+✓ `mcp_sse_endpoint` is retained as a **stable, documented Kagura extension**
+(non-RFC) — the MCP SSE transport entrypoint for Claude Desktop / Claude Code, a
+committed part of the 1.0 surface.
 
-### 3. `GET /.well-known/openid-configuration` (OIDC Discovery) — 14 fields
+### 3. `GET /.well-known/openid-configuration` (OIDC Discovery) — 15 fields
 
 | Field | Value |
 |---|---|
@@ -131,10 +117,11 @@ or rename before freeze.
 | `revocation_endpoint` | `{base_url}/api/v1/oauth/revoke` |
 | `introspection_endpoint` | `{base_url}/api/v1/oauth/introspect` |
 | `registration_endpoint` | `{base_url}/api/v1/oauth/register` |
+| `device_authorization_endpoint` | `{base_url}/api/v1/oauth/device/authorize` (RFC 8628 §4; added #993) |
 | `code_challenge_methods_supported` | `["S256"]` |
 | `scopes_supported` | `ALL_ADVERTISED_SCOPES` (6) |
 | `response_types_supported` | `["code"]` |
-| `grant_types_supported` | `["authorization_code", "refresh_token"]` |
+| `grant_types_supported` | `["authorization_code", "refresh_token", "urn:ietf:params:oauth:grant-type:device_code"]` |
 | `token_endpoint_auth_methods_supported` | `["none", "client_secret_post", "client_secret_basic"]` |
 | `introspection_endpoint_auth_methods_supported` | `["none"]` |
 | `response_modes_supported` | `["query"]` |
@@ -143,16 +130,16 @@ or rename before freeze.
 ⚠ Missing OIDC-Discovery-REQUIRED fields `jwks_uri`, `userinfo_endpoint`,
 `id_token_signing_alg_values_supported` — and the server never issues an
 `id_token`. This is the #608 D5 "OIDC dishonesty", still open at this commit.
-⚠ `grant_types_supported` omits `urn:ietf:params:oauth:grant-type:device_code`
-although the device grant is registered and live (see endpoints section) and a
-`kagura-cli` public client is seeded for it (#624/#627). Advertised set is
-narrower than the real surface.
+✓ `grant_types_supported` now advertises `urn:ietf:params:oauth:grant-type:device_code`
+and the doc adds `device_authorization_endpoint` (#993, RFC 8628 §4). The device grant
+is registered and live, and a `kagura-cli` public client is seeded for it (#624/#627);
+the advertised set now matches the real surface.
 
-### 4. `GET /.well-known/oauth-authorization-server` (RFC 8414) — 12 fields
+### 4. `GET /.well-known/oauth-authorization-server` (RFC 8414) — 13 fields
 
 Identical to openid-configuration **minus** `response_modes_supported` and
-`subject_types_supported` (the other 12 fields and values match exactly).
-Same device_code omission applies.
+`subject_types_supported` (the other fields and values match exactly), including the
+`device_authorization_endpoint` and device_code grant added in #993.
 
 ---
 
@@ -193,7 +180,7 @@ Semver-locked discovery-referenced endpoints:
 | `/register` | POST | DCR (RFC 7591). Public, no auth. Provider whitelist (`chatgpt`/`claude`/`cursor` via redirect-URI/client-name detection incl. RFC 8252 loopback), 5 req/min/IP rate limit. Always forces `token_endpoint_auth_method="none"`; never returns `client_secret` (#689) |
 | `/authorize` | GET | Authorization endpoint (consent page, HTML) |
 | `/authorize` | POST | Consent decision submit |
-| `/token`, `/token/` | POST | Token endpoint (Authlib). Grants registered: `authorization_code` (PKCE S256, 10-min single-use codes), `refresh_token` (rotation), `urn:ietf:params:oauth:grant-type:device_code` (RFC 8628, #536) |
+| `/token` (canonical, schema-visible), `/token/` (hidden alias) | POST | Token endpoint (Authlib). Grants registered: `authorization_code` (PKCE S256, 10-min single-use codes), `refresh_token` (rotation), `urn:ietf:params:oauth:grant-type:device_code` (RFC 8628, #536) |
 | `/revoke` | POST | RFC 7009 revocation (access or refresh; `token_type_hint` accepted) |
 | `/introspect` | POST | RFC 7662 introspection; auth method `none` (public) |
 
@@ -204,7 +191,7 @@ Device flow (RFC 8628):
 | `/device/authorize` | POST | Device authorization request (device_code + user_code) |
 | `/device/verify` | POST | Verify a user_code (browser side) |
 | `/device/confirm` | POST | User confirms/denies the device grant |
-| `/device/audit-unauth` | POST | Internal frontend audit beacon (#779); `include_in_schema=False` — ⚠ should be declared non-public surface |
+| `/device/audit-unauth` | POST | Internal frontend audit beacon (#779); `include_in_schema=False`. Classified **documented-internal** (#993) — intentionally excluded from the public 1.0 surface |
 
 Client-management (session-authenticated dashboard surface, not part of the
 RFC-discovery contract but same router/prefix):
@@ -217,9 +204,10 @@ RFC-discovery contract but same router/prefix):
 | `/clients/{client_id}/regenerate-secret` | POST |
 | `/providers` | GET (list IdP providers) |
 
-⚠ `/token` is `include_in_schema=False` on the canonical path while `/token/`
-(trailing slash) is schema-visible — cosmetic OpenAPI inconsistency on the single
-most important OAuth URL.
+✓ Resolved in #993: the canonical `/token` (no trailing slash — the form the
+well-known metadata advertises as `token_endpoint`) is now schema-visible, and the
+`/token/` trailing-slash alias is `include_in_schema=False`. Routing is unchanged
+(FastAPI `redirect_slashes`); OpenAPI now shows a single canonical URL.
 
 ---
 
@@ -265,22 +253,21 @@ Grouped into 2 proposed sub-issue bundles (issue acceptance allows ≤2).
 - **P1** `openid` (#608 D5): drop from advertisement (Path B, no deprecation
   needed per #608) or implement `id_token`+`jwks_uri`+`userinfo`; the current
   OIDC discovery doc is non-conformant either way.
-- **P1** Advertise `urn:ietf:params:oauth:grant-type:device_code` in
-  `grant_types_supported` (both metadata docs) — it is live, seeded for
-  kagura-cli, and a frozen metadata doc that under-advertises grants is a
-  compat trap.
+- ✅ **DONE (#993)** Advertise `urn:ietf:params:oauth:grant-type:device_code` in
+  `grant_types_supported` (both metadata docs) + add `device_authorization_endpoint`
+  (RFC 8628 §4). The advertised grant set now matches the live surface.
 
 ### Bundle 2 (P2 — token/metadata shape cleanups; nice-to-have before freeze)
 
-- **P2** Delete or adopt the orphaned dashboard JWT module (`auth/jwt.py` — zero
-  production callers); do not freeze dead claim shapes into the 1.0 surface.
-- **P2** Remove `resource_signing_alg_values_supported` from
+- ✅ **DONE (#993)** Deleted the orphaned dashboard JWT module (`auth/jwt.py` — zero
+  production callers); no dead claim shape frozen into the 1.0 surface.
+- ✅ **DONE (#993)** Removed `resource_signing_alg_values_supported` from
   `oauth-protected-resource` (tokens are opaque; no RS256 key exists).
-- **P2** `mcp_sse_endpoint`: declare as a stable documented extension or move
-  behind a namespaced key; fix `resource_policy_uri` pointing at Swagger UI.
+- ✅ **DONE (#993)** `mcp_sse_endpoint`: retained + declared a stable documented Kagura
+  extension; removed `resource_policy_uri` (pointed at Swagger UI; no policy doc exists).
 - **P2** Device-flow token-response extras (`user_email`, `workspace_id`,
   `workspace_name`): document stability tier explicitly (display-only,
-  non-security-bearing) or namespace them.
-- **P2** `/token` vs `/token/` OpenAPI visibility inconsistency; decide whether
-  `/device/audit-unauth` is public surface (recommend: documented-internal,
-  excluded from the freeze).
+  non-security-bearing) or namespace them. *(Still open — out of scope for #993.)*
+- ✅ **DONE (#993)** `/token` vs `/token/` OpenAPI visibility resolved (canonical
+  `/token` visible, `/token/` hidden); `/device/audit-unauth` classified
+  documented-internal, excluded from the freeze.

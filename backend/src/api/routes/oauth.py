@@ -1753,8 +1753,12 @@ async def oauth_authorize_post(
         return RedirectResponse(_append_query_params(redirect_uri, params), status_code=303)
 
 
-@router.post("/token", include_in_schema=False)
-@router.post("/token/")
+# Canonical token endpoint is the no-trailing-slash form — it is what the
+# well-known metadata advertises (token_endpoint=.../oauth/token). Expose THAT
+# one in OpenAPI and keep the trailing-slash alias as a hidden compatibility
+# route, so the documented 1.0 surface shows a single canonical URL (#993).
+@router.post("/token")
+@router.post("/token/", include_in_schema=False)
 async def oauth_token(request: Request):
     """OAuth2 token endpoint.
 
