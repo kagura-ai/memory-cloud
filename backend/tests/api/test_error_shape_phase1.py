@@ -105,7 +105,9 @@ def test_admin_protection_error_keeps_message_and_strips_reason():
     # admin.py self-delete / protected-admin conversions.
     from utils.exceptions import AdminProtectionError
 
-    e = AdminProtectionError("Cannot delete the last remaining system administrator", reason="admin_protected")
+    e = AdminProtectionError(
+        "Cannot delete the last remaining system administrator", reason="admin_protected"
+    )
     assert e.status_code == 403
     assert e.error_code == "ADMIN-001"
     assert e.message == "Cannot delete the last remaining system administrator"

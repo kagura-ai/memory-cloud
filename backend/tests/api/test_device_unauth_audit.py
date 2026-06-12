@@ -53,10 +53,7 @@ class TestDeviceUnauthAuditEndpoint:
         body = resp.json()
         # #992: 422s now use the canonical {error, message, details} envelope.
         assert body["error"] == "VAL-001"
-        assert any(
-            "too_long" in (err.get("type", "") or "")
-            for err in body["details"]["errors"]
-        )
+        assert any("too_long" in (err.get("type", "") or "") for err in body["details"]["errors"])
 
     def test_rejects_prefix_with_disallowed_characters(self):
         # user_code is uppercase alphanumeric (RFC 8628). Anything outside
