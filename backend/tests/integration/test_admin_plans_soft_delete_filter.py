@@ -34,8 +34,8 @@ from fastapi import HTTPException
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from api.routes.admin_plans import (
-    UpdateAddonRequest,
     AdminUpdatePlanRequest,
+    UpdateAddonRequest,
     UpdateSpendCapRequest,
     get_plan_change_audit,
     get_workspace_quotas,
