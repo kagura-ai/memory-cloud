@@ -39,6 +39,8 @@ READINESS_INTERVAL=2                            # seconds between checks
 DRAIN_TIMEOUT="${DRAIN_TIMEOUT:-30}"            # seconds to drain old container
 WEB_READINESS_TIMEOUT="${WEB_READINESS_TIMEOUT:-30}"  # seconds to wait for kagura-web /api/health
 WEB_READINESS_INTERVAL="${WEB_READINESS_INTERVAL:-2}" # seconds between web checks
+WORKERS_GATE_TIMEOUT="${WORKERS_GATE_TIMEOUT:-30}"    # seconds to wait for /api/v1/workers/* to be blocked at Caddy
+WORKERS_GATE_INTERVAL="${WORKERS_GATE_INTERVAL:-2}"   # seconds between security-gate checks
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -47,6 +49,24 @@ log()   { echo "[deploy] $(date -u +%H:%M:%S) $*"; }
 error() { echo "[deploy] ERROR: $*" >&2; exit 1; }
 
 dc() { docker compose -f "$COMPOSE_FILE" --env-file "$ENV_FILE" "$@"; }
+
+# Tracks the current step so the EXIT trap can report *where* a run aborted.
+# Updated at the head of each step; read only by on_exit().
+DEPLOY_STAGE="startup"
+
+# Single final-status line on EVERY exit path (success or abort), so a run can
+# never "exit 0-ish" silently again (#986). error() and any set -e death both
+# route through here because the trap fires on EXIT regardless of cause.
+on_exit() {
+    local code=$1
+    if [ "$code" -ne 0 ]; then
+        echo "[deploy] ERROR: === FINAL STATUS: ABORTED at '${DEPLOY_STAGE}' (exit ${code}) ===" >&2
+    elif [ "$DEPLOY_STAGE" != "startup" ] && [ "$DEPLOY_STAGE" != "readonly" ]; then
+        # Read-only commands (--status/--help) set DEPLOY_STAGE=readonly and stay
+        # quiet on success; only the mutating flows announce a clean finish.
+        log "=== FINAL STATUS: SUCCESS (${DEPLOY_STAGE}) ==="
+    fi
+}
 
 get_active_color() {
     local color
@@ -84,6 +104,7 @@ cmd_status() {
 }
 
 cmd_rollback() {
+    DEPLOY_STAGE="rollback: start"
     log "=== ROLLBACK ==="
     local active inactive
     active="$(get_active_color)"
@@ -102,10 +123,12 @@ cmd_rollback() {
     log "Switching Caddy: api-${active} -> api-${inactive}"
     echo "$inactive" > "${MARKER_FILE}.tmp"
     mv "${MARKER_FILE}.tmp" "$MARKER_FILE"
+    DEPLOY_STAGE="rollback: switch Caddy -> api-${inactive} (incl. security gate)"
     generate_caddyfile "api-${inactive}"
     reload_caddy
     verify_workers_blocked
 
+    DEPLOY_STAGE="rollback complete (active: ${inactive})"
     log "Rollback complete. Active: $inactive"
 }
 
@@ -117,30 +140,36 @@ cmd_deploy() {
     log "Current active: $active — deploying to: $inactive"
 
     # Step 1: Build new image
+    DEPLOY_STAGE="Step 1/7: build api-${inactive} image"
     log "Step 1/7: Building api-${inactive} image..."
     dc build "api-${inactive}"
 
     # Step 2: Start the inactive color (uses new image)
     # Re-enable restart policy in case it was disabled by a previous deploy.
+    DEPLOY_STAGE="Step 2/7: start api-${inactive}"
     log "Step 2/7: Starting api-${inactive}..."
     dc up -d "api-${inactive}"
     docker update --restart=always "kagura-api-${inactive}" 2>/dev/null || true
 
     # Step 3: Wait for readiness (DB + Qdrant + Redis all reachable)
+    DEPLOY_STAGE="Step 3/7: wait for api-${inactive} readiness"
     log "Step 3/7: Waiting for api-${inactive} readiness (timeout: ${READINESS_TIMEOUT}s)..."
     wait_for_readiness "$inactive"
 
     # Step 4: Run Alembic migrations on the NEW container
     # Forward-compatible by convention: both old and new code work with new schema.
+    DEPLOY_STAGE="Step 4/7: alembic upgrade on api-${inactive}"
     log "Step 4/7: Running database migrations on api-${inactive}..."
     dc exec -T "api-${inactive}" alembic upgrade head
 
     # Step 5: Write marker BEFORE switching Caddy (crash-safe ordering)
+    DEPLOY_STAGE="Step 5/7: update marker -> ${inactive}"
     log "Step 5/7: Updating marker -> ${inactive}"
     echo "$inactive" > "${MARKER_FILE}.tmp"
     mv "${MARKER_FILE}.tmp" "$MARKER_FILE"
 
     # Step 6: Switch Caddy upstream
+    DEPLOY_STAGE="Step 6/7: switch Caddy upstream -> api-${inactive} (incl. security gate)"
     log "Step 6/7: Switching Caddy upstream -> api-${inactive}..."
     generate_caddyfile "api-${inactive}"
     reload_caddy
@@ -149,12 +178,14 @@ cmd_deploy() {
     # Step 7: Drain and stop old container
     # Disable restart policy first — otherwise `restart: always` revives
     # the container immediately after stop.
+    DEPLOY_STAGE="Step 7/7: drain + stop api-${active}"
     log "Step 7/7: Draining api-${active} for ${DRAIN_TIMEOUT}s..."
     sleep "$DRAIN_TIMEOUT"
     docker update --restart=no "kagura-api-${active}" 2>/dev/null || true
     dc stop "api-${active}" || true
     log "api-${active} stopped (restart policy disabled)."
 
+    DEPLOY_STAGE="deploy complete (active: ${inactive})"
     log "=== DEPLOY COMPLETE ==="
     log "Active: $inactive"
     log "To rollback: $0 --rollback"
@@ -167,6 +198,7 @@ cmd_deploy_web() {
     command -v timeout > /dev/null 2>&1 \
         || error "timeout not found (required by --web). Install GNU coreutils: apt-get install coreutils"
 
+    DEPLOY_STAGE="web: rebuild + restart kagura-web"
     log "=== FRONTEND REBUILD (in-place) ==="
     log "Note: brief downtime expected during container restart (build is non-blocking; the running container keeps serving until --force-recreate)."
 
@@ -186,6 +218,7 @@ cmd_deploy_web() {
     log "Step 3/3: Waiting for kagura-web readiness (timeout: ${WEB_READINESS_TIMEOUT}s)..."
     wait_for_web_readiness
 
+    DEPLOY_STAGE="web rebuild complete"
     log "=== FRONTEND REBUILD COMPLETE ==="
     log "Web rollback: git revert the offending commit, then re-run $0 --web."
 }
@@ -308,13 +341,25 @@ verify_workers_blocked() {
     # Domain is extracted from CADDYFILE_TPL so this stays in sync with the
     # configured site block without manual updates here.
     #
-    # Retry up to 3 times (2 s apart) to tolerate Caddy's brief startup window
-    # after `dc restart caddy` — avoids a false-positive abort on the first
-    # request while the process is still initialising.
-    log "  Security gate: verifying /api/v1/workers/* is blocked at Caddy..."
-    local domain http_status attempt
+    # Retry with backoff for up to ${WORKERS_GATE_TIMEOUT}s to tolerate Caddy's
+    # startup window after `dc restart caddy` (a full container restart, not a
+    # reload — see reload_caddy). The check is fail-CLOSED: any non-404 result,
+    # INCLUDING a connection failure (curl exit != 0 -> empty -> "000"), keeps
+    # retrying until the deadline, then aborts loudly. This never weakens the
+    # gate — a genuinely misconfigured block (e.g. a stable 200) simply burns
+    # the full timeout and then fails, leaving the old color running (#986).
+    #
+    # The `|| true` is load-bearing: without it the bare command-substitution
+    # assignment inherits curl's non-zero exit (7 = connection refused while
+    # Caddy is still starting) and `set -e` kills the script *silently* on the
+    # first attempt — the original #986 bug, where the retry loop and the
+    # ${http_status:-000} fallback below were both dead code.
+    log "  Security gate: verifying /api/v1/workers/* is blocked at Caddy (timeout: ${WORKERS_GATE_TIMEOUT}s)..."
+    local domain http_status start_time
+    http_status=000
     domain=$(awk '/^[a-zA-Z]/ { gsub(/ *\{.*/, ""); print; exit }' "$CADDYFILE_TPL")
-    for attempt in 1 2 3; do
+    start_time=$SECONDS
+    while (( SECONDS - start_time < 10#$WORKERS_GATE_TIMEOUT )); do
         # --resolve sets both the TCP target AND the TLS SNI to $domain so
         # Caddy selects the correct vhost. A plain -H "Host:" with 127.0.0.1
         # in the URL leaves SNI as "127.0.0.1" and Caddy may not match the
@@ -322,18 +367,18 @@ verify_workers_blocked() {
         http_status=$(curl -sk -o /dev/null -w "%{http_code}" \
             --max-time 5 \
             --resolve "${domain}:443:127.0.0.1" \
-            "https://${domain}/api/v1/workers/config" 2>/dev/null)
+            "https://${domain}/api/v1/workers/config" 2>/dev/null || true)
         http_status=${http_status:-000}
-        [ "$http_status" = "404" ] && break
-        [ "$attempt" -lt 3 ] && sleep 2
+        if [ "$http_status" = "404" ]; then
+            log "  /api/v1/workers/* is correctly blocked (HTTP 404, $((SECONDS - start_time))s)"
+            return 0
+        fi
+        sleep "$WORKERS_GATE_INTERVAL"
     done
-    if [ "$http_status" = "404" ]; then
-        log "  /api/v1/workers/* is correctly blocked (HTTP 404)"
-    else
-        error "/api/v1/workers/* is NOT blocked by Caddy (HTTP ${http_status}, expected 404).
+    error "/api/v1/workers/* is NOT blocked by Caddy (HTTP ${http_status}, expected 404) after ${WORKERS_GATE_TIMEOUT}s.
+  Aborting before any further steps — the workers route is exposed and must be fixed before this deploy/rollback can complete.
   Check Caddyfile: the 'handle /api/v1/workers*' block must appear BEFORE 'handle /api/*'.
   Regenerate and redeploy: $0 --generate-caddyfile && dc restart caddy"
-    fi
 }
 
 cmd_generate_caddyfile() {
@@ -351,6 +396,7 @@ cmd_generate_caddyfile() {
     # "blue" when no marker exists, i.e. on first boot), so re-running this on a
     # live host never rewrites the upstream to the wrong color.
     local color
+    DEPLOY_STAGE="generate-caddyfile (bootstrap)"
     color="$(get_active_color)"
     log "Generating Caddyfile (bootstrap) for active color: $color"
     generate_caddyfile "api-${color}"
@@ -360,6 +406,10 @@ cmd_generate_caddyfile() {
 # Entrypoint
 # ---------------------------------------------------------------------------
 cd "$PROJECT_DIR"
+
+# Final-status line on every exit path (#986). Installed before prerequisite
+# validation so even an early set -e death reports where it aborted.
+trap 'on_exit $?' EXIT
 
 # Validate prerequisites
 command -v envsubst > /dev/null 2>&1 || error "envsubst not found. Install: apt-get install gettext-base"
@@ -374,6 +424,8 @@ command -v envsubst > /dev/null 2>&1 || error "envsubst not found. Install: apt-
 [[ "$DRAIN_TIMEOUT" =~ ^[0-9]+$ ]] || error "DRAIN_TIMEOUT must be an integer (got: $DRAIN_TIMEOUT)"
 [[ "$WEB_READINESS_TIMEOUT" =~ ^[0-9]+$ ]] || error "WEB_READINESS_TIMEOUT must be an integer (got: $WEB_READINESS_TIMEOUT)"
 [[ "$WEB_READINESS_INTERVAL" =~ ^[1-9][0-9]*$ ]] || error "WEB_READINESS_INTERVAL must be a positive integer >= 1 (got: $WEB_READINESS_INTERVAL); 0 would busy-loop the smoke check"
+[[ "$WORKERS_GATE_TIMEOUT" =~ ^[0-9]+$ ]] || error "WORKERS_GATE_TIMEOUT must be an integer (got: $WORKERS_GATE_TIMEOUT)"
+[[ "$WORKERS_GATE_INTERVAL" =~ ^[1-9][0-9]*$ ]] || error "WORKERS_GATE_INTERVAL must be a positive integer >= 1 (got: $WORKERS_GATE_INTERVAL); 0 would busy-loop the security gate"
 
 # Ensure marker directory exists
 mkdir -p "$(dirname "$MARKER_FILE")"
@@ -383,6 +435,7 @@ case "${1:-}" in
         cmd_rollback
         ;;
     --status)
+        DEPLOY_STAGE="readonly"
         cmd_status
         ;;
     --web)
@@ -392,6 +445,7 @@ case "${1:-}" in
         cmd_generate_caddyfile
         ;;
     --help|-h)
+        DEPLOY_STAGE="readonly"
         echo "Usage: $0 [--rollback|--status|--web|--generate-caddyfile|--help]"
         echo ""
         echo "  (no args)             Deploy to the inactive API color (zero-downtime blue-green)"
@@ -405,6 +459,8 @@ case "${1:-}" in
         echo "  DRAIN_TIMEOUT          Seconds to drain old API container (default: 30)"
         echo "  WEB_READINESS_TIMEOUT  Seconds to wait for web /api/health (default: 30)"
         echo "  WEB_READINESS_INTERVAL Seconds between web health checks (default: 2)"
+        echo "  WORKERS_GATE_TIMEOUT   Seconds to wait for /api/v1/workers/* to be blocked at Caddy (default: 30)"
+        echo "  WORKERS_GATE_INTERVAL  Seconds between security-gate checks (default: 2)"
         ;;
     "")
         cmd_deploy
