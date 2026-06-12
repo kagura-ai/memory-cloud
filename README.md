@@ -585,18 +585,20 @@ This project is designed to be developed **with** Claude Code and Kagura Memory 
 
 ### Slash Commands
 
+Project-specific local commands (`.claude/commands/`):
+
 | Command | Description |
 |---------|-------------|
 | `/setup` | Set up dev environment from scratch (detects WSL/macOS/Linux) |
-| `/issue-start <number>` | Start work on a GitHub issue (branch + past knowledge recall) |
 | `/remember <text>` | Save patterns, decisions, or learnings to memory |
 | `/recall <query>` | Search past knowledge for relevant patterns |
 | `/guide` | Show Kagura Memory Cloud usage guide |
 | `/test` | Run full test suite (backend pytest + frontend build) |
 | `/quality` | Run all quality checks (ruff, pyright, frontend build) |
-| `/self-review` | Pre-PR self-review against SOLID/DRY/KISS/security checklist |
 | `/self-maint` | Audit `.claude/` config against current codebase state |
 | `/api-docs-audit` | Audit OpenAPI tags and endpoint documentation |
+
+The issue→PR workflow lives in the [`kagura-plugins`](https://github.com/kagura-ai/kagura-plugins) marketplace: `/gh-issue-driven:start` (branch + gate1 + recall), `/kagura-code-reviewer` (memory-grounded review), `/gh-issue-driven:ship` (gate2 + PR), `/gh-issue-driven:review` (post-PR loop).
 
 ### Hooks (Automatic Safety Guards)
 
