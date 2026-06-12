@@ -29,7 +29,7 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
 COMPOSE_FILE="$PROJECT_DIR/docker-compose.prod.yml"
-CADDYFILE_TPL="$PROJECT_DIR/Caddyfile.tpl"
+CADDYFILE_TPL="${CADDYFILE_TPL:-$PROJECT_DIR/Caddyfile.tpl}"
 CADDYFILE="$PROJECT_DIR/Caddyfile"
 MARKER_FILE="/opt/kagura-memory/active-color"
 ENV_FILE="$PROJECT_DIR/.env.prod"
@@ -41,6 +41,11 @@ WEB_READINESS_TIMEOUT="${WEB_READINESS_TIMEOUT:-30}"  # seconds to wait for kagu
 WEB_READINESS_INTERVAL="${WEB_READINESS_INTERVAL:-2}" # seconds between web checks
 WORKERS_GATE_TIMEOUT="${WORKERS_GATE_TIMEOUT:-30}"    # seconds to wait for /api/v1/workers/* to be blocked at Caddy
 WORKERS_GATE_INTERVAL="${WORKERS_GATE_INTERVAL:-2}"   # seconds between security-gate checks
+
+# curl indirection: the security-gate probe runs through "$CURL" so the bats
+# suite can inject a stub (tests/deploy_verify_workers_blocked.bats). Production
+# leaves it unset and resolves to the real curl — behaviour is unchanged.
+CURL="${CURL:-curl}"
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -314,6 +319,9 @@ generate_caddyfile() {
     # file into the caddy container. mv changes the inode, so the container
     # would keep seeing the old file. cp overwrites in-place, preserving
     # the inode that Docker tracks.
+    # shellcheck disable=SC2016  # the single-quoted '${API_UPSTREAM}' is the
+    # var-list ARGUMENT to envsubst (it must stay literal so envsubst knows
+    # which placeholder to expand) — it is intentionally NOT a shell expansion.
     if ! API_UPSTREAM="$upstream" envsubst '${API_UPSTREAM}' < "$CADDYFILE_TPL" > "$CADDYFILE.tmp"; then
         rm -f "$CADDYFILE.tmp"
         error "envsubst failed — Caddyfile not updated"
@@ -364,7 +372,7 @@ verify_workers_blocked() {
         # Caddy selects the correct vhost. A plain -H "Host:" with 127.0.0.1
         # in the URL leaves SNI as "127.0.0.1" and Caddy may not match the
         # site block.
-        http_status=$(curl -sk -o /dev/null -w "%{http_code}" \
+        http_status=$("$CURL" -sk -o /dev/null -w "%{http_code}" \
             --max-time 5 \
             --resolve "${domain}:443:127.0.0.1" \
             "https://${domain}/api/v1/workers/config" 2>/dev/null || true)
@@ -405,67 +413,77 @@ cmd_generate_caddyfile() {
 # ---------------------------------------------------------------------------
 # Entrypoint
 # ---------------------------------------------------------------------------
-cd "$PROJECT_DIR"
+# Wrapped in main() + guarded by the BASH_SOURCE check so the bats suite can
+# `source` this script to unit-test individual functions (e.g.
+# verify_workers_blocked) WITHOUT running a real deploy. When executed
+# directly, $0 == ${BASH_SOURCE[0]} and main runs exactly as before.
+main() {
+    cd "$PROJECT_DIR"
 
-# Final-status line on every exit path (#986). Installed before prerequisite
-# validation so even an early set -e death reports where it aborted.
-trap 'on_exit $?' EXIT
+    # Final-status line on every exit path (#986). Installed before prerequisite
+    # validation so even an early set -e death reports where it aborted.
+    trap 'on_exit $?' EXIT
 
-# Validate prerequisites
-command -v envsubst > /dev/null 2>&1 || error "envsubst not found. Install: apt-get install gettext-base"
-[ -f "$COMPOSE_FILE" ] || error "docker-compose.prod.yml not found at $COMPOSE_FILE"
-[ -f "$ENV_FILE" ] || error ".env.prod not found at $ENV_FILE"
-# Note: `timeout` (coreutils) is also required, but only by --web — it is
-# validated inside cmd_deploy_web so other deploy paths remain usable on
-# environments without it.
+    # Validate prerequisites
+    command -v envsubst > /dev/null 2>&1 || error "envsubst not found. Install: apt-get install gettext-base"
+    [ -f "$COMPOSE_FILE" ] || error "docker-compose.prod.yml not found at $COMPOSE_FILE"
+    [ -f "$ENV_FILE" ] || error ".env.prod not found at $ENV_FILE"
+    # Note: `timeout` (coreutils) is also required, but only by --web — it is
+    # validated inside cmd_deploy_web so other deploy paths remain usable on
+    # environments without it.
 
-# Validate tunable env vars (timeouts + intervals) are non-negative integers
-[[ "$READINESS_TIMEOUT" =~ ^[0-9]+$ ]] || error "READINESS_TIMEOUT must be an integer (got: $READINESS_TIMEOUT)"
-[[ "$DRAIN_TIMEOUT" =~ ^[0-9]+$ ]] || error "DRAIN_TIMEOUT must be an integer (got: $DRAIN_TIMEOUT)"
-[[ "$WEB_READINESS_TIMEOUT" =~ ^[0-9]+$ ]] || error "WEB_READINESS_TIMEOUT must be an integer (got: $WEB_READINESS_TIMEOUT)"
-[[ "$WEB_READINESS_INTERVAL" =~ ^[1-9][0-9]*$ ]] || error "WEB_READINESS_INTERVAL must be a positive integer >= 1 (got: $WEB_READINESS_INTERVAL); 0 would busy-loop the smoke check"
-[[ "$WORKERS_GATE_TIMEOUT" =~ ^[0-9]+$ ]] || error "WORKERS_GATE_TIMEOUT must be an integer (got: $WORKERS_GATE_TIMEOUT)"
-[[ "$WORKERS_GATE_INTERVAL" =~ ^[1-9][0-9]*$ ]] || error "WORKERS_GATE_INTERVAL must be a positive integer >= 1 (got: $WORKERS_GATE_INTERVAL); 0 would busy-loop the security gate"
+    # Validate tunable env vars (timeouts + intervals) are non-negative integers
+    [[ "$READINESS_TIMEOUT" =~ ^[0-9]+$ ]] || error "READINESS_TIMEOUT must be an integer (got: $READINESS_TIMEOUT)"
+    [[ "$DRAIN_TIMEOUT" =~ ^[0-9]+$ ]] || error "DRAIN_TIMEOUT must be an integer (got: $DRAIN_TIMEOUT)"
+    [[ "$WEB_READINESS_TIMEOUT" =~ ^[0-9]+$ ]] || error "WEB_READINESS_TIMEOUT must be an integer (got: $WEB_READINESS_TIMEOUT)"
+    [[ "$WEB_READINESS_INTERVAL" =~ ^[1-9][0-9]*$ ]] || error "WEB_READINESS_INTERVAL must be a positive integer >= 1 (got: $WEB_READINESS_INTERVAL); 0 would busy-loop the smoke check"
+    [[ "$WORKERS_GATE_TIMEOUT" =~ ^[0-9]+$ ]] || error "WORKERS_GATE_TIMEOUT must be an integer (got: $WORKERS_GATE_TIMEOUT)"
+    [[ "$WORKERS_GATE_INTERVAL" =~ ^[1-9][0-9]*$ ]] || error "WORKERS_GATE_INTERVAL must be a positive integer >= 1 (got: $WORKERS_GATE_INTERVAL); 0 would busy-loop the security gate"
 
-# Ensure marker directory exists
-mkdir -p "$(dirname "$MARKER_FILE")"
+    # Ensure marker directory exists
+    mkdir -p "$(dirname "$MARKER_FILE")"
 
-case "${1:-}" in
-    --rollback)
-        cmd_rollback
-        ;;
-    --status)
-        DEPLOY_STAGE="readonly"
-        cmd_status
-        ;;
-    --web)
-        cmd_deploy_web
-        ;;
-    --generate-caddyfile)
-        cmd_generate_caddyfile
-        ;;
-    --help|-h)
-        DEPLOY_STAGE="readonly"
-        echo "Usage: $0 [--rollback|--status|--web|--generate-caddyfile|--help]"
-        echo ""
-        echo "  (no args)             Deploy to the inactive API color (zero-downtime blue-green)"
-        echo "  --rollback            Switch back to the previous API color"
-        echo "  --status              Show current active API color and container states"
-        echo "  --web                 Rebuild + restart kagura-web in place"
-        echo "  --generate-caddyfile  Render ./Caddyfile from Caddyfile.tpl (bootstrap; no deploy)"
-        echo ""
-        echo "Environment variables:"
-        echo "  READINESS_TIMEOUT      Seconds to wait for API /readiness (default: 60)"
-        echo "  DRAIN_TIMEOUT          Seconds to drain old API container (default: 30)"
-        echo "  WEB_READINESS_TIMEOUT  Seconds to wait for web /api/health (default: 30)"
-        echo "  WEB_READINESS_INTERVAL Seconds between web health checks (default: 2)"
-        echo "  WORKERS_GATE_TIMEOUT   Seconds to wait for /api/v1/workers/* to be blocked at Caddy (default: 30)"
-        echo "  WORKERS_GATE_INTERVAL  Seconds between security-gate checks (default: 2)"
-        ;;
-    "")
-        cmd_deploy
-        ;;
-    *)
-        error "Unknown argument: $1 (try --help)"
-        ;;
-esac
+    case "${1:-}" in
+        --rollback)
+            cmd_rollback
+            ;;
+        --status)
+            DEPLOY_STAGE="readonly"
+            cmd_status
+            ;;
+        --web)
+            cmd_deploy_web
+            ;;
+        --generate-caddyfile)
+            cmd_generate_caddyfile
+            ;;
+        --help|-h)
+            DEPLOY_STAGE="readonly"
+            echo "Usage: $0 [--rollback|--status|--web|--generate-caddyfile|--help]"
+            echo ""
+            echo "  (no args)             Deploy to the inactive API color (zero-downtime blue-green)"
+            echo "  --rollback            Switch back to the previous API color"
+            echo "  --status              Show current active API color and container states"
+            echo "  --web                 Rebuild + restart kagura-web in place"
+            echo "  --generate-caddyfile  Render ./Caddyfile from Caddyfile.tpl (bootstrap; no deploy)"
+            echo ""
+            echo "Environment variables:"
+            echo "  READINESS_TIMEOUT      Seconds to wait for API /readiness (default: 60)"
+            echo "  DRAIN_TIMEOUT          Seconds to drain old API container (default: 30)"
+            echo "  WEB_READINESS_TIMEOUT  Seconds to wait for web /api/health (default: 30)"
+            echo "  WEB_READINESS_INTERVAL Seconds between web health checks (default: 2)"
+            echo "  WORKERS_GATE_TIMEOUT   Seconds to wait for /api/v1/workers/* to be blocked at Caddy (default: 30)"
+            echo "  WORKERS_GATE_INTERVAL  Seconds between security-gate checks (default: 2)"
+            ;;
+        "")
+            cmd_deploy
+            ;;
+        *)
+            error "Unknown argument: $1 (try --help)"
+            ;;
+    esac
+}
+
+if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then
+    main "$@"
+fi
