@@ -52,6 +52,10 @@ export function CreateAPIKeyDialog({
     null,
   );
   const [copied, setCopied] = useState(false);
+  // True when copyText exhausted both clipboard paths (#987). Surfaces an
+  // in-dialog hint AND un-gates the Done button so a denied clipboard can't
+  // trap the user behind "Copy the key first" with no way to proceed.
+  const [copyFailed, setCopyFailed] = useState(false);
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -93,9 +97,11 @@ export function CreateAPIKeyDialog({
         // user can still select + copy it manually.
         await copyText(createdKey.api_key);
         setCopied(true);
+        setCopyFailed(false);
         setTimeout(() => setCopied(false), 2000);
       } catch (err) {
         console.error("Failed to copy API key:", err);
+        setCopyFailed(true);
       }
     }
   };
@@ -106,6 +112,7 @@ export function CreateAPIKeyDialog({
     setError(null);
     setCreatedKey(null);
     setCopied(false);
+    setCopyFailed(false);
     onClose();
   };
 
@@ -170,6 +177,15 @@ export function CreateAPIKeyDialog({
                     )}
                   </Button>
                 </div>
+                {copyFailed && (
+                  <Alert variant="destructive">
+                    <AlertCircle className="h-4 w-4" />
+                    <AlertDescription>
+                      Couldn&apos;t copy automatically. The key stays visible
+                      above — select it and copy it manually.
+                    </AlertDescription>
+                  </Alert>
+                )}
               </div>
 
               {/* Key Prefix */}
@@ -200,8 +216,12 @@ export function CreateAPIKeyDialog({
           </div>
 
           <DialogFooter>
-            <Button onClick={handleDone} className="w-full" disabled={!copied}>
-              {copied ? "Done" : "Copy the key first"}
+            <Button
+              onClick={handleDone}
+              className="w-full"
+              disabled={!copied && !copyFailed}
+            >
+              {copied || copyFailed ? "Done" : "Copy the key first"}
             </Button>
           </DialogFooter>
         </DialogContent>

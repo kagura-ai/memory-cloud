@@ -52,6 +52,9 @@ export function RegenerateAPIKeyDialog({
   const [regeneratedKey, setRegeneratedKey] =
     useState<APIKeyCreateResponse | null>(null);
   const [copied, setCopied] = useState(false);
+  // True when copyText exhausted both clipboard paths (#987) — surfaces an
+  // in-dialog hint so a denied clipboard doesn't fail silently.
+  const [copyFailed, setCopyFailed] = useState(false);
 
   const handleRegenerate = async () => {
     try {
@@ -83,9 +86,11 @@ export function RegenerateAPIKeyDialog({
         // user can still select + copy it manually.
         await copyText(regeneratedKey.api_key);
         setCopied(true);
+        setCopyFailed(false);
         setTimeout(() => setCopied(false), 2000);
       } catch (err) {
         console.error("Failed to copy API key:", err);
+        setCopyFailed(true);
       }
     }
   };
@@ -94,6 +99,7 @@ export function RegenerateAPIKeyDialog({
     setError(null);
     setRegeneratedKey(null);
     setCopied(false);
+    setCopyFailed(false);
     onClose();
   };
 
@@ -153,6 +159,15 @@ export function RegenerateAPIKeyDialog({
                   )}
                 </Button>
               </div>
+              {copyFailed && (
+                <Alert variant="destructive">
+                  <AlertCircle className="h-4 w-4" />
+                  <AlertDescription>
+                    Couldn&apos;t copy automatically. The key stays visible
+                    above — select it and copy it manually.
+                  </AlertDescription>
+                </Alert>
+              )}
             </div>
 
             <div className="space-y-2">

@@ -67,6 +67,7 @@ export function CreateResourceTokenDialog({
   initialResourceId,
 }: CreateResourceTokenDialogProps) {
   const t = useTranslations("resourceTokens");
+  const tCommon = useTranslations("common");
   const { currentWorkspace } = useWorkspace();
   const planName = (currentWorkspace?.plan_name ||
     "free") as keyof typeof QUOTA_CONFIG;
@@ -97,6 +98,9 @@ export function CreateResourceTokenDialog({
   const [createdToken, setCreatedToken] =
     useState<ResourceTokenCreateResponse | null>(null);
   const [copied, setCopied] = useState(false);
+  // True when copyText exhausted both clipboard paths (#987) — surfaces an
+  // in-dialog hint so a denied clipboard doesn't fail silently.
+  const [copyFailed, setCopyFailed] = useState(false);
 
   // Load contexts with resource_id when dialog opens
   useEffect(() => {
@@ -174,9 +178,11 @@ export function CreateResourceTokenDialog({
         // the user can still select + copy it manually.
         await copyText(createdToken.token);
         setCopied(true);
+        setCopyFailed(false);
         setTimeout(() => setCopied(false), 2000);
       } catch (err) {
         console.error("Failed to copy resource token:", err);
+        setCopyFailed(true);
       }
     }
   };
@@ -188,6 +194,7 @@ export function CreateResourceTokenDialog({
     setError(null);
     setCreatedToken(null);
     setCopied(false);
+    setCopyFailed(false);
     onClose();
   };
 
@@ -263,6 +270,14 @@ export function CreateResourceTokenDialog({
                     )}
                   </Button>
                 </div>
+                {copyFailed && (
+                  <Alert variant="destructive">
+                    <AlertCircle className="h-4 w-4" />
+                    <AlertDescription>
+                      {tCommon("copyFailedManualHint")}
+                    </AlertDescription>
+                  </Alert>
+                )}
               </div>
 
               {/* Quota */}

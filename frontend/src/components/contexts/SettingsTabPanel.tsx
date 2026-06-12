@@ -315,8 +315,13 @@ export function SettingsTabPanel({
                       setIdCopied(true);
                       setTimeout(() => setIdCopied(false), 1500);
                     } catch {
+                      // copyText already exhausted its execCommand fallback
+                      // (#987); surface the shared actionable hint (the ID
+                      // stays visible for manual copy) instead of a bare
+                      // "copy failed" title, matching the other copy sites.
                       toast({
-                        title: t("copyFailed"),
+                        title: tCommon("error"),
+                        description: tCommon("copyFailedManualHint"),
                         variant: "destructive",
                       });
                     }
