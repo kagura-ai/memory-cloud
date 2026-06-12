@@ -35,7 +35,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from api.routes.admin_plans import (
     UpdateAddonRequest,
-    UpdatePlanRequest,
+    AdminUpdatePlanRequest,
     UpdateSpendCapRequest,
     get_plan_change_audit,
     get_workspace_quotas,
@@ -74,7 +74,7 @@ class TestUpdateWorkspacePlan:
         with pytest.raises(HTTPException) as exc_info:
             await update_workspace_plan(
                 workspace_id=soft_deleted_workspace["workspace_id"],
-                request=UpdatePlanRequest(plan_name="basic", reason="test"),
+                request=AdminUpdatePlanRequest(plan_name="basic", reason="test"),
                 admin_user=mock_admin(),
                 db=db_session,
             )
