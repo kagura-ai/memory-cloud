@@ -9,7 +9,7 @@ import os
 from datetime import datetime
 from typing import Any, Literal
 
-from pydantic import Field, field_validator, model_validator
+from pydantic import AliasChoices, Field, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 from utils.media_types import MEDIA_TYPE_RE, normalize_media_type
@@ -430,14 +430,66 @@ class Settings(BaseSettings):
         default=0.95, description="Usage critical threshold (0.0-1.0)"
     )
 
-    # Object Storage / Cloudflare R2 (Issue #485)
-    r2_account_id: str = Field(default="", description="Cloudflare R2 account ID")
-    r2_access_key_id: str = Field(default="", description="R2 S3-compatible access key ID")
-    r2_secret_access_key: str = Field(default="", description="R2 S3-compatible secret access key")
-    r2_bucket: str = Field(default="", description="R2 bucket name (e.g. kagura-memory-files-dev)")
-    r2_endpoint_url: str = Field(
+    # Object Storage — S3-compatible backend (Issue #485 R2; generalized #994).
+    # All five credential settings accept STORAGE_* (canonical), S3_*, and R2_*
+    # (legacy) env vars via AliasChoices. The canonical name is listed FIRST so
+    # it wins when more than one is set; R2_* is kept so existing prod deploys
+    # (which set only R2_*) work unchanged. `Settings` uses extra="ignore", so
+    # dropping the r2_* alias would SILENTLY ignore prod's R2_* env -> empty
+    # endpoint -> the upload path 502s with no load-time error (#994 gate1 risk).
+    storage_backend_type: Literal["r2", "s3", "minio", "s3-compatible", "aws"] = Field(
+        default="r2",
+        description=(
+            "Object-storage backend discriminator. All use the same "
+            "S3-compatible client; only the endpoint (and, for 'aws', the "
+            "region) differs. Default 'r2' preserves the managed-cloud deploy "
+            "(Cloudflare R2). Self-hosters set 'minio' / 's3' / 'aws'. Pydantic "
+            "rejects other values at boot, so STORAGE_BACKEND_TYPE typos fail "
+            "loudly instead of 502-ing on the first upload."
+        ),
+    )
+    storage_region: str = Field(
+        default="auto",
+        validation_alias=AliasChoices("storage_region", "s3_region", "r2_region"),
+        description=(
+            "S3 region. 'auto' (default) is correct for R2 and MinIO (both "
+            "ignore it). Set the bucket's real region (e.g. 'us-east-1') for an "
+            "'aws' backend, where SigV4 needs it."
+        ),
+    )
+    storage_account_id: str = Field(
         default="",
-        description="R2 S3-compatible endpoint (https://<account>.r2.cloudflarestorage.com)",
+        validation_alias=AliasChoices("storage_account_id", "s3_account_id", "r2_account_id"),
+        description="S3-compatible account ID (R2 account ID; unused by AWS S3 / MinIO)",
+    )
+    storage_access_key_id: str = Field(
+        default="",
+        validation_alias=AliasChoices(
+            "storage_access_key_id", "s3_access_key_id", "r2_access_key_id"
+        ),
+        description="S3-compatible access key ID",
+    )
+    storage_secret_access_key: str = Field(
+        default="",
+        validation_alias=AliasChoices(
+            "storage_secret_access_key",
+            "s3_secret_access_key",
+            "r2_secret_access_key",
+        ),
+        description="S3-compatible secret access key",
+    )
+    storage_bucket: str = Field(
+        default="",
+        validation_alias=AliasChoices("storage_bucket", "s3_bucket", "r2_bucket"),
+        description="Bucket name (e.g. kagura-memory-files-dev)",
+    )
+    storage_endpoint_url: str = Field(
+        default="",
+        validation_alias=AliasChoices("storage_endpoint_url", "s3_endpoint_url", "r2_endpoint_url"),
+        description=(
+            "S3-compatible endpoint URL. R2: https://<account>.r2.cloudflarestorage.com; "
+            "MinIO: http://minio:9000; AWS S3: leave empty for the default region endpoint."
+        ),
     )
     file_object_max_size_mb: int = Field(
         default=100, description="Per-file size cap in MB (Issue #485 Phase 1 = 100)"
@@ -448,8 +500,13 @@ class Settings(BaseSettings):
     presign_get_ttl_seconds: int = Field(
         default=300, description="Presigned GET URL lifetime in seconds"
     )
-    r2_checksum_binding_enabled: bool = Field(
+    storage_checksum_binding_enabled: bool = Field(
         default=False,
+        validation_alias=AliasChoices(
+            "storage_checksum_binding_enabled",
+            "s3_checksum_binding_enabled",
+            "r2_checksum_binding_enabled",
+        ),
         description=(
             "Bind body sha256 to presigned PUT via S3 ChecksumSHA256 (Issue #556). "
             "When True, R2 verifies the body sha256 server-side and rejects "

@@ -232,3 +232,73 @@ in env, then restart the API container). Existing edges are left alone;
 Sleep Maintenance prunes them naturally over time via the synthetic-seed
 filter (#248 + #223 extension to `_is_synthetic_seed_edge`).
 
+
+## Object Storage (S3-compatible) — Issue #994
+
+Platform-managed file storage (`/api/v1/files/*`, Issue #485) writes to any
+**S3-compatible** object store. The same `S3CompatibleStorage` client (aioboto3)
+drives every backend — only the endpoint differs:
+
+| Deployment | Backend | Endpoint |
+| --- | --- | --- |
+| Managed cloud (kagura) | Cloudflare R2 | `https://<account>.r2.cloudflarestorage.com` |
+| Self-host (recommended) | MinIO | `http://minio:9000` |
+| Self-host (AWS) | AWS S3 | leave `STORAGE_ENDPOINT_URL` empty for the region default |
+
+### Environment variables
+
+Canonical `STORAGE_*` names (legacy `R2_*` names are still accepted as aliases —
+existing deploys keep working unchanged; a one-time deprecation line is logged
+when only `R2_*` is set):
+
+| Variable | Aliases | Default | Notes |
+| --- | --- | --- | --- |
+| `STORAGE_BACKEND_TYPE` | — | `r2` | `r2` \| `s3` \| `minio` \| `s3-compatible` \| `aws`. Selects the label; all use the same S3 client. |
+| `STORAGE_ENDPOINT_URL` | `S3_ENDPOINT_URL`, `R2_ENDPOINT_URL` | — | **Required.** Empty ⇒ the upload path returns HTTP 502 "storage not configured". |
+| `STORAGE_BUCKET` | `S3_BUCKET`, `R2_BUCKET` | — | Bucket name. |
+| `STORAGE_ACCESS_KEY_ID` | `S3_ACCESS_KEY_ID`, `R2_ACCESS_KEY_ID` | — | Access key. |
+| `STORAGE_SECRET_ACCESS_KEY` | `S3_SECRET_ACCESS_KEY`, `R2_SECRET_ACCESS_KEY` | — | Secret key. |
+| `STORAGE_ACCOUNT_ID` | `S3_ACCOUNT_ID`, `R2_ACCOUNT_ID` | — | R2 account ID; unused by AWS S3 / MinIO (set any non-empty value). |
+| `STORAGE_REGION` | `S3_REGION`, `R2_REGION` | `auto` | `auto` is correct for R2 and MinIO. Set the bucket's real region (e.g. `us-east-1`) for an `aws` backend. |
+| `STORAGE_CHECKSUM_BINDING_ENABLED` | `S3_CHECKSUM_BINDING_ENABLED`, `R2_CHECKSUM_BINDING_ENABLED` | `false` | Server-side body-sha256 binding (#556). R2-specific; leave `false` on MinIO. |
+
+### Self-host with MinIO
+
+A `minio` service ships in `docker-compose.yml` behind the `minio` profile (it
+does **not** start by default):
+
+```bash
+docker compose --profile minio up -d minio   # console at http://localhost:9001
+```
+
+> ⚠ **Security — dev defaults only.** The compose `minio` service ships with the
+> well-known `minioadmin` / `minioadmin` credentials and published `9000`/`9001`
+> ports for local convenience. For a real deployment, set strong unique
+> `MINIO_ROOT_USER` / `MINIO_ROOT_PASSWORD` (or per-app bucket-scoped access
+> keys), keep MinIO on the private network behind TLS, and do **not** expose
+> those ports publicly. An internet-reachable MinIO with default credentials is
+> an open object store (OWASP A05: Security Misconfiguration).
+
+Then point the API at it (create the bucket once via the MinIO console or `mc`):
+
+```bash
+STORAGE_BACKEND_TYPE=minio
+STORAGE_ENDPOINT_URL=http://minio:9000
+STORAGE_ACCESS_KEY_ID=minioadmin
+STORAGE_SECRET_ACCESS_KEY=minioadmin
+STORAGE_BUCKET=kagura-files-dev
+STORAGE_ACCOUNT_ID=minio
+```
+
+CI exercises the presigned PUT → GET → head round-trip against a live MinIO in
+the `backend-integration` job (`backend/tests/integration/test_minio_integration.py`).
+
+### Design note — BYO bucket per workspace (not implemented)
+
+The seam for a future **bring-your-own-bucket** tier feature (a workspace
+supplies its own S3 credentials, symmetric with the BYOK-embeddings direction)
+is the `storage_backend_type` discriminator plus the per-call `S3CompatibleStorage`
+construction in `storage/factory.py`. Today the factory builds one process-wide
+instance from the global `STORAGE_*` settings; per-workspace BYO would move
+construction behind a workspace-scoped credential lookup. Recorded here as a
+seam only — no implementation in #994.

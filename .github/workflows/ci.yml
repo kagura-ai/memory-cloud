@@ -247,10 +247,37 @@ jobs:
       - name: Install dependencies
         run: cd backend && pip install -e ".[dev]"
 
+      # MinIO for the #994 S3-compatible storage integration test. Started as a
+      # plain container (not a GHA `services:` entry) so we control the
+      # `server /data` command; the test creates its own bucket. The test
+      # self-skips if MINIO_TEST_ENDPOINT is unreachable, so a MinIO hiccup
+      # never fails the whole integration job spuriously.
+      - name: Start MinIO
+        run: |
+          docker run -d --name minio -p 9000:9000 \
+            -e MINIO_ROOT_USER=minioadmin -e MINIO_ROOT_PASSWORD=minioadmin \
+            minio/minio server /data
+          for i in $(seq 1 30); do
+            if curl -fs http://localhost:9000/minio/health/live >/dev/null; then
+              echo "minio up"; exit 0
+            fi
+            sleep 2
+          done
+          # Hard-fail rather than let the test silently skip — the MinIO
+          # round-trip is the #994 acceptance criterion, so "MinIO never came
+          # up" must turn the job red, not green-by-skip.
+          echo "MinIO did not become healthy within 60s" >&2
+          docker logs minio 2>&1 | tail -30 || true
+          exit 1
+
       - name: Run integration tests
         env:
           TEST_DATABASE_URL: postgresql+asyncpg://kagura:kagura_dev_password@localhost:5432/kagura_test
           REDIS_URL: redis://localhost:6379
+          MINIO_TEST_ENDPOINT: http://localhost:9000
+          MINIO_TEST_ACCESS_KEY: minioadmin
+          MINIO_TEST_SECRET_KEY: minioadmin
+          MINIO_TEST_BUCKET: kagura-files-test
         run: cd backend && pytest tests/integration/ tests/smoke/test_all_routes.py -v --timeout=120 --maxfail=3
 
   # Authenticated a11y (color-contrast) lane (#840). Unlike the hermetic
