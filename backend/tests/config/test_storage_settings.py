@@ -60,9 +60,7 @@ def test_legacy_r2_env_vars_still_resolve_storage_fields(clean_storage_env):
     clean_storage_env.setenv("R2_ACCESS_KEY_ID", "ak")
     clean_storage_env.setenv("R2_SECRET_ACCESS_KEY", "sk")
     clean_storage_env.setenv("R2_BUCKET", "kagura-memory-files-prod")
-    clean_storage_env.setenv(
-        "R2_ENDPOINT_URL", "https://acct.r2.cloudflarestorage.com"
-    )
+    clean_storage_env.setenv("R2_ENDPOINT_URL", "https://acct.r2.cloudflarestorage.com")
     clean_storage_env.setenv("R2_CHECKSUM_BINDING_ENABLED", "true")
 
     s = _fresh_settings()

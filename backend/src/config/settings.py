@@ -459,9 +459,7 @@ class Settings(BaseSettings):
     )
     storage_account_id: str = Field(
         default="",
-        validation_alias=AliasChoices(
-            "storage_account_id", "s3_account_id", "r2_account_id"
-        ),
+        validation_alias=AliasChoices("storage_account_id", "s3_account_id", "r2_account_id"),
         description="S3-compatible account ID (R2 account ID; unused by AWS S3 / MinIO)",
     )
     storage_access_key_id: str = Field(
@@ -487,9 +485,7 @@ class Settings(BaseSettings):
     )
     storage_endpoint_url: str = Field(
         default="",
-        validation_alias=AliasChoices(
-            "storage_endpoint_url", "s3_endpoint_url", "r2_endpoint_url"
-        ),
+        validation_alias=AliasChoices("storage_endpoint_url", "s3_endpoint_url", "r2_endpoint_url"),
         description=(
             "S3-compatible endpoint URL. R2: https://<account>.r2.cloudflarestorage.com; "
             "MinIO: http://minio:9000; AWS S3: leave empty for the default region endpoint."
