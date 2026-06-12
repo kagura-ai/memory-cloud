@@ -1331,6 +1331,38 @@ Requires action recording (reports created before this feature have no actions t
                             "Event ingestion quota per hour for the token (1-10000, default: 1000)."
                         ),
                     },
+                    # Registration-flow params (Spec 2026-06-02). Read by the handler
+                    # (resource.py handle_setup_connector) and forwarded to
+                    # ConnectorProvisioningService — declared here so the strict
+                    # additionalProperties:false policy (#990) does not forbid them.
+                    "context_id": {
+                        "type": "string",
+                        "format": "uuid",
+                        "description": "Existing write-target context UUID for ingested events.",
+                    },
+                    "auto_create_context_name": {
+                        "type": "string",
+                        "description": (
+                            "Create a fresh private context with this name (alternative to "
+                            "context_id; max 100 chars)."
+                        ),
+                    },
+                    "llm_config": {
+                        "type": "object",
+                        "description": "BYO LLM config bundle; stored Fernet-encrypted.",
+                    },
+                    "channel_ids": {
+                        "type": "array",
+                        "description": "Ingest channel selection for the connector.",
+                    },
+                    "locale": {
+                        "type": "string",
+                        "description": "Connector locale (max 10 chars).",
+                    },
+                    "external_team_id": {
+                        "type": "string",
+                        "description": "Platform team id (worker dispatch key; max 255 chars).",
+                    },
                 },
             },
         },
