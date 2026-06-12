@@ -318,6 +318,18 @@ export function MCPConfigBlock({ apiKey, mcpUrl }: MCPConfigBlockProps) {
     return buildTomlConfig(mcpUrl, liveKey);
   }, [mcpUrl, liveKey]);
 
+  // Claude Code OAuth one-liner (#988). Targets the BARE /mcp endpoint —
+  // OAuth resolves the workspace at login, so the workspace-scoped
+  // `/w/<workspaceId>` suffix is stripped (if mcpUrl is already bare, the
+  // regex is a no-op). The command is env-aware via mcpUrl (localhost in dev,
+  // the production host in prod) and needs no API key, so it renders and
+  // copies even when the key window is closed.
+  const claudeOAuthCommand = useMemo(
+    () =>
+      `claude mcp add --transport http kagura-memory ${mcpUrl.replace(/\/w\/[^/]+$/, "")}`,
+    [mcpUrl],
+  );
+
   // Track which Copy button the user pressed last, so the Check icon only
   // flashes on the button they actually clicked. Without this, the shared
   // `copied` flag from useRevealableSecret causes the Codex tab's install
@@ -325,7 +337,7 @@ export function MCPConfigBlock({ apiKey, mcpUrl }: MCPConfigBlockProps) {
   // (Copilot review flagged this on PR #817). The hook still owns the 2s
   // timer; this just disambiguates the visual target.
   const [lastCopied, setLastCopied] = useState<
-    "json" | "toml" | "install" | null
+    "json" | "toml" | "install" | "oauth" | null
   >(null);
 
   const handleCopy = async () => {
@@ -401,6 +413,27 @@ export function MCPConfigBlock({ apiKey, mcpUrl }: MCPConfigBlockProps) {
     }
   };
 
+  const handleOAuthCopy = async () => {
+    // Route through useRevealableSecret.copy → copyText (#987) for the shared
+    // execCommand fallback. The command is not a secret; routing through the
+    // hook keeps the per-target "copied" affordance consistent with the other
+    // buttons and lets the hook cancel any prior pending auto-clear.
+    try {
+      await copy(claudeOAuthCommand);
+      setLastCopied("oauth");
+      toast({
+        title: t("claudeOAuthCopied"),
+        description: t("mcpConfigCopiedHint"),
+      });
+    } catch {
+      toast({
+        title: tCommon("error"),
+        description: tCommon("copyFailedManualHint"),
+        variant: "destructive",
+      });
+    }
+  };
+
   return (
     <div className="space-y-3" suppressHydrationWarning>
       <Tabs value={client} onValueChange={(v) => setClient(v as MCPClient)}>
@@ -416,7 +449,49 @@ export function MCPConfigBlock({ apiKey, mcpUrl }: MCPConfigBlockProps) {
             path because its UI is a static install command + a collapsible
             manual TOML — buildJsonConfig doesn't apply. */}
         {MCP_CLIENTS.filter((c) => c !== "codex").map((c) => (
-          <TabsContent key={c} value={c} className="mt-3">
+          <TabsContent key={c} value={c} className="mt-3 space-y-3">
+            {/* Issue #988: Claude Code OAuth one-liner (recommended) — no API
+                key needed; Claude Code runs the OAuth browser flow on first
+                use. Only for the claude-code client; ChatGPT does not use the
+                `claude mcp add` CLI. The existing .mcp.json JSON stays below as
+                the manual / API-key alternative. */}
+            {c === "claude-code" && (
+              <div>
+                <h4 className="text-sm font-medium mb-2">
+                  {t("claudeOAuthHeading")}
+                </h4>
+                <div className="relative">
+                  <pre className="bg-gray-900 text-gray-100 p-3 pr-12 rounded overflow-x-auto text-xs whitespace-pre-wrap break-all">
+                    {claudeOAuthCommand}
+                  </pre>
+                  <div className="absolute top-2 right-2">
+                    <Button
+                      type="button"
+                      variant="ghost"
+                      size="icon"
+                      onClick={handleOAuthCopy}
+                      title={t("copyClaudeOAuthCommand")}
+                      aria-label={t("copyClaudeOAuthCommand")}
+                      className="text-gray-300 hover:text-white hover:bg-gray-700/50"
+                    >
+                      {copied && lastCopied === "oauth" ? (
+                        <Check className="w-4 h-4 text-green-400" />
+                      ) : (
+                        <Copy className="w-4 h-4" />
+                      )}
+                    </Button>
+                  </div>
+                </div>
+                <p className="text-xs text-blue-700 dark:text-blue-300 mt-2">
+                  💡 {t("claudeOAuthHint")}
+                </p>
+              </div>
+            )}
+            {c === "claude-code" && (
+              <p className="text-xs font-medium text-gray-600 dark:text-gray-400 pt-1">
+                {t("claudeManualConfigLabel")}
+              </p>
+            )}
             <div className="relative">
               <pre className="bg-gray-900 text-gray-100 p-3 pr-20 rounded overflow-x-auto text-xs whitespace-pre-wrap break-all">
                 {displayJson}

@@ -139,6 +139,47 @@ describe("MCPConfigBlock", () => {
     });
   });
 
+  describe("Claude Code OAuth one-liner (#988)", () => {
+    const OAUTH_CMD =
+      "claude mcp add --transport http kagura-memory https://memory.kagura-ai.com/mcp";
+
+    it("renders the env-derived `claude mcp add` command using the bare /mcp endpoint", () => {
+      render(<MCPConfigBlock apiKey={VISIBLE_KEY} mcpUrl={MCP_URL} />);
+      // claude-code is the default tab. The OAuth one-liner targets the bare
+      // /mcp endpoint (OAuth resolves the workspace at login), so the
+      // /w/<id> suffix from the workspace-scoped mcpUrl must be stripped.
+      expect(screen.getByText(OAUTH_CMD)).toBeInTheDocument();
+      expect(
+        screen.queryByText(/claude mcp add[^\n]*\/w\/test-ws/),
+      ).not.toBeInTheDocument();
+    });
+
+    it("does not render the OAuth one-liner on the chatgpt tab", () => {
+      localStorageStore["kagura_last_mcp_client"] = "chatgpt";
+      render(<MCPConfigBlock apiKey={VISIBLE_KEY} mcpUrl={MCP_URL} />);
+      expect(screen.queryByText(/claude mcp add/)).not.toBeInTheDocument();
+    });
+
+    it("copies the OAuth command via its copy button", async () => {
+      render(<MCPConfigBlock apiKey={VISIBLE_KEY} mcpUrl={MCP_URL} />);
+      fireEvent.click(
+        screen.getByRole("button", { name: "copyClaudeOAuthCommand" }),
+      );
+      await act(async () => {
+        await Promise.resolve();
+      });
+      expect(mockWriteText).toHaveBeenCalledWith(OAUTH_CMD);
+    });
+
+    it("is available even when the API-key window is closed (OAuth needs no key)", () => {
+      render(<MCPConfigBlock apiKey={HIDDEN_KEY} mcpUrl={MCP_URL} />);
+      expect(screen.getByText(OAUTH_CMD)).toBeInTheDocument();
+      expect(
+        screen.getByRole("button", { name: "copyClaudeOAuthCommand" }),
+      ).toBeEnabled();
+    });
+  });
+
   describe("client tabs", () => {
     // Note on test approach: Radix Tabs Triggers do not respond cleanly to
     // fireEvent.click in happy-dom (they rely on pointer events). Rather

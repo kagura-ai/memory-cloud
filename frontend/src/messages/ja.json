@@ -1554,6 +1554,11 @@
     "mcpConfigCopied": "設定をコピーしました",
     "mcpConfigCopiedHint": "クリップボードは 60 秒後に消去されます。今すぐ貼り付けてください。",
     "mcpConfigHiddenCopyDisabled": "動作する設定をコピーするにはキーを再生成してください",
+    "claudeOAuthHeading": "OAuth で追加 (推奨)",
+    "claudeOAuthHint": "API キー不要 — 初回利用時に Claude Code がブラウザで OAuth ログインを開きます。",
+    "copyClaudeOAuthCommand": "コマンドをコピー",
+    "claudeOAuthCopied": "コマンドをコピーしました",
+    "claudeManualConfigLabel": "または .mcp.json で手動設定 (API キー):",
     "clients": {
       "claudeCode": "Claude Code",
       "chatgpt": "ChatGPT",

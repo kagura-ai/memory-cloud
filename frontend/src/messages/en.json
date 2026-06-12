@@ -1554,6 +1554,11 @@
     "mcpConfigCopied": "Config copied",
     "mcpConfigCopiedHint": "Clipboard clears in 60 seconds — paste it now.",
     "mcpConfigHiddenCopyDisabled": "Regenerate the key to copy a working config",
+    "claudeOAuthHeading": "Add via OAuth (recommended)",
+    "claudeOAuthHint": "No API key needed — Claude Code opens the OAuth sign-in in your browser on first use.",
+    "copyClaudeOAuthCommand": "Copy command",
+    "claudeOAuthCopied": "Command copied",
+    "claudeManualConfigLabel": "Or configure manually with .mcp.json (API key):",
     "clients": {
       "claudeCode": "Claude Code",
       "chatgpt": "ChatGPT",
