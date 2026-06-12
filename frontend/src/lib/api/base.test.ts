@@ -1,5 +1,5 @@
-import { describe, it, expect } from "vitest";
-import { ApiError } from "./base";
+import { afterEach, describe, expect, it, vi } from "vitest";
+import { ApiClient, ApiError } from "./base";
 
 describe("ApiError", () => {
   it("is an instance of Error", () => {
@@ -51,5 +51,55 @@ describe("ApiError", () => {
     const err = new ApiError({ message: "minimal", status: 0 });
     expect(err.error).toBeUndefined();
     expect(err.details).toBeUndefined();
+  });
+});
+
+describe("ApiClient error normalization (#992 canonical 422 envelope)", () => {
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  function mockFetchOnce(status: number, body: unknown) {
+    vi.spyOn(global, "fetch").mockResolvedValueOnce(
+      new Response(JSON.stringify(body), {
+        status,
+        headers: { "content-type": "application/json" },
+      }),
+    );
+  }
+
+  it("aliases canonical 422 details.errors -> details.detail so field consumers keep working", async () => {
+    const errors = [
+      { loc: ["body", "redirect_uris"], msg: "Field required", type: "missing" },
+    ];
+    mockFetchOnce(422, {
+      error: "VAL-001",
+      message: "Request validation failed",
+      details: { errors },
+    });
+
+    const client = new ApiClient("http://test");
+    const caught = await client.post("/x", {}).catch((e: unknown) => e);
+
+    expect(caught).toBeInstanceOf(ApiError);
+    const err = caught as ApiError;
+    expect(err.status).toBe(422);
+    expect(err.error).toBe("VAL-001");
+    const details = err.details as Record<string, unknown>;
+    // Existing field-validation consumers read details.detail as the array.
+    expect(details.detail).toEqual(errors);
+    expect(details.errors).toEqual(errors);
+  });
+
+  it("leaves a string `detail` from a raw HTTPException endpoint untouched", async () => {
+    // Not-yet-converted endpoints still emit FastAPI's { detail: "..." }.
+    mockFetchOnce(404, { detail: "API key not found" });
+
+    const client = new ApiClient("http://test");
+    const caught = await client.get("/x").catch((e: unknown) => e);
+
+    expect(caught).toBeInstanceOf(ApiError);
+    const details = (caught as ApiError).details as Record<string, unknown>;
+    expect(details.detail).toBe("API key not found");
   });
 });
