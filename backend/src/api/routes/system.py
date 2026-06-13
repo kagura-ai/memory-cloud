@@ -1,5 +1,7 @@
 """System API routes for health check and info endpoints."""
 
+from typing import Any
+
 from fastapi import APIRouter, Depends
 from pydantic import BaseModel
 from sqlalchemy import select
@@ -34,6 +36,22 @@ class TelemetryResponse(BaseModel):
     neural_memory: dict
     uptime_seconds: int
     version: str
+
+
+def _embedding_config_payload(settings: Any) -> dict[str, Any]:
+    """Public embedding capability info for the telemetry response.
+
+    Intentionally limited to ``provider`` / ``model`` / ``dimensions`` —
+    low-sensitivity capability info consumed by the admin environment page.
+    Internal infrastructure details (notably ``ollama_base_url``) are
+    deliberately excluded so they are never exposed to an authenticated,
+    non-admin caller of ``/system/telemetry`` (#991).
+    """
+    return {
+        "provider": settings.embedding_provider,
+        "model": settings.embedding_model,
+        "dimensions": settings.embedding_dimensions,
+    }
 
 
 @router.get("/health")
@@ -175,25 +193,20 @@ async def get_system_telemetry(
                         model_names = []
                         if models_resp.status_code == 200:
                             model_names = [m["name"] for m in models_resp.json().get("models", [])]
+                        # `url` intentionally omitted (#991): the internal Ollama
+                        # base URL is not exposed on this non-admin endpoint; the
+                        # frontend consumes only status + models.
                         ollama_status = ServiceStatus(
                             status="ok",
-                            details={
-                                "url": settings.ollama_base_url,
-                                "models": model_names,
-                            },
+                            details={"models": model_names},
                         )
                     else:
                         ollama_status = ServiceStatus(
                             status="error",
-                            details={
-                                "url": settings.ollama_base_url,
-                                "http_status": resp.status_code,
-                            },
+                            details={"http_status": resp.status_code},
                         )
             except Exception as e:
-                ollama_status = ServiceStatus(
-                    status="error", details={"url": settings.ollama_base_url, "error": str(e)}
-                )
+                ollama_status = ServiceStatus(status="error", details={"error": str(e)})
 
         # Memory stats (all users)
         from sqlalchemy import func
@@ -242,15 +255,7 @@ async def get_system_telemetry(
                 "working": working_memories,
                 "persistent": total_memories - working_memories,
             },
-            embedding_config={
-                # provider/model/dimensions are low-sensitivity capability info
-                # (surfaced in the admin environment page). `ollama_base_url`
-                # was dropped (#991): it exposed an internal infrastructure URL
-                # to any authenticated caller and had no consumer.
-                "provider": settings.embedding_provider,
-                "model": settings.embedding_model,
-                "dimensions": settings.embedding_dimensions,
-            },
+            embedding_config=_embedding_config_payload(settings),
             neural_memory=neural_stats,
             uptime_seconds=uptime_seconds,
             version=APP_VERSION,
