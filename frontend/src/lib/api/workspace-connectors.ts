@@ -14,7 +14,7 @@ export type ConnectorType = "slack" | "discord" | "teams";
 export interface WorkspaceConnectorSummary {
   connector_id: string;
   connector_type: ConnectorType;
-  resource_pk: string;
+  resource_id: string;
   context_id: string | null;
   config_version: number;
   created_at: string;
@@ -40,7 +40,6 @@ export interface CreateConnectorResponse {
   connector_id: string;
   connector_type: ConnectorType;
   resource_id: string;
-  resource_pk: string;
   context_id: string | null;
   token_id: number;
   token: string;

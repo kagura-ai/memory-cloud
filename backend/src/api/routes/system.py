@@ -243,12 +243,13 @@ async def get_system_telemetry(
                 "persistent": total_memories - working_memories,
             },
             embedding_config={
+                # provider/model/dimensions are low-sensitivity capability info
+                # (surfaced in the admin environment page). `ollama_base_url`
+                # was dropped (#991): it exposed an internal infrastructure URL
+                # to any authenticated caller and had no consumer.
                 "provider": settings.embedding_provider,
                 "model": settings.embedding_model,
                 "dimensions": settings.embedding_dimensions,
-                "ollama_base_url": settings.ollama_base_url
-                if settings.embedding_provider == "ollama"
-                else None,
             },
             neural_memory=neural_stats,
             uptime_seconds=uptime_seconds,

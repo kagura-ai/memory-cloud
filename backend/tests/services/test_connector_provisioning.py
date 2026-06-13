@@ -302,18 +302,24 @@ class TestConnectorIdempotencyKey:
 
 @pytest.mark.asyncio
 async def test_list_connectors_returns_workspace_scoped_rows_newest_first():
+    from services.connector_provisioning import ConnectorListItem
+
     ws_id = uuid4()
-    rows = [SimpleNamespace(id=uuid4()), SimpleNamespace(id=uuid4())]
+    conn_a, conn_b = SimpleNamespace(id=uuid4()), SimpleNamespace(id=uuid4())
+    # The JOIN yields (WorkspaceConnector, resource_id-slug) tuples (#991); the
+    # service maps each to a ConnectorListItem so the surface exposes the slug.
+    rows = [(conn_a, "slug-a"), (conn_b, "slug-b")]
 
     db = MagicMock()
-    scalars = MagicMock()
-    scalars.all.return_value = rows
     exec_result = MagicMock()
-    exec_result.scalars.return_value = scalars
+    exec_result.all.return_value = rows
     db.execute = AsyncMock(return_value=exec_result)
 
     service = ConnectorProvisioningService(db)
     result = await service.list_connectors(ws_id)
 
-    assert result == rows
+    assert result == [
+        ConnectorListItem(connector=conn_a, resource_id="slug-a"),
+        ConnectorListItem(connector=conn_b, resource_id="slug-b"),
+    ]
     db.execute.assert_awaited_once()
