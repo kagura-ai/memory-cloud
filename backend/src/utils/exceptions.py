@@ -246,14 +246,35 @@ class UnsupportedMediaTypeError(MemoryCloudException):
     render a precise rejection message without a separate API call.
     """
 
-    def __init__(self, content_type: str, allowed: set[str] | list[str]) -> None:
-        message = f"Content type '{content_type}' not allowed"
+    def __init__(
+        self,
+        content_type: str,
+        allowed: set[str] | list[str],
+        inferred_content_type: str | None = None,
+    ) -> None:
+        # Issue #961: when ``inferred_content_type`` is supplied, the rejection
+        # is an extension/declared-MIME *mismatch* (the declared value passed
+        # the allow-list, but the filename extension implies a different — and
+        # possibly disallowed — type, e.g. an .svg declared text/plain). Echo
+        # both values so the caller sees why. When omitted, behaviour is
+        # unchanged: a plain allow-list rejection of the declared type.
+        details: dict[str, object] = {
+            "content_type": content_type,
+            "allowed": sorted(allowed),
+        }
+        if inferred_content_type is not None:
+            message = (
+                f"Content type '{content_type}' does not match the filename "
+                f"extension (which implies '{inferred_content_type}')"
+            )
+            details["inferred_content_type"] = inferred_content_type
+        else:
+            message = f"Content type '{content_type}' not allowed"
         super().__init__(
             message,
             status_code=415,
             error_code="MEDIA-001",
-            content_type=content_type,
-            allowed=sorted(allowed),
+            **details,
         )
 
 

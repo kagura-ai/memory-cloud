@@ -138,7 +138,7 @@ class TestReserveUpload:
             out = await service.reserve_upload(
                 workspace_id=workspace_id,
                 created_by="user-1",
-                filename="test.bin",
+                filename="report.pdf",
                 content_type="application/pdf",
                 size_bytes=1024,
                 sha256=VALID_SHA,
@@ -736,3 +736,144 @@ class TestListFiles:
 
         out = await service.list_files(workspace_id=workspace_id, limit=10)
         assert len(out) == 2
+
+
+class TestReserveUploadExtensionConsistency:
+    """Issue #961: the declared content_type alone can launder a disallowed
+    payload past the allow-list (an .svg declared text/plain → stored-XSS once
+    served). ``reserve_upload`` now also derives the MIME implied by the
+    filename extension and rejects (415) any inconsistency. The check lives in
+    the shared service chokepoint, so both REST (POST /files/reserve) and MCP
+    (handle_init_file_upload) inherit it.
+    """
+
+    @pytest.fixture(autouse=True)
+    def _canonical_allowlist(self, monkeypatch):
+        from config.settings import get_settings
+
+        monkeypatch.setattr(
+            get_settings(),
+            "allowed_file_content_types",
+            "image/png,image/jpeg,image/gif,application/pdf,"
+            "text/plain,text/markdown,text/csv,application/json",
+        )
+
+    @pytest.mark.asyncio
+    async def test_svg_declared_as_text_plain_rejected_415(self, service, db, workspace_id):
+        """The headline bypass: .svg (→ image/svg+xml, NOT allowed) declared as
+        text/plain (allowed) must be rejected, not stored mislabeled."""
+        with pytest.raises(UnsupportedMediaTypeError) as exc_info:
+            await service.reserve_upload(
+                workspace_id=workspace_id,
+                created_by="u",
+                filename="2026-06-08-diagram.svg",
+                content_type="text/plain",
+                size_bytes=1024,
+                sha256=VALID_SHA,
+            )
+        err = exc_info.value
+        assert err.status_code == 415
+        assert err.error_code == "MEDIA-001"
+        # Both the declared and the inferred value are echoed (#961 acceptance).
+        assert err.details["content_type"] == "text/plain"
+        assert err.details["inferred_content_type"] == "image/svg+xml"
+        # Rejection happens before workspace load — no DB execute, no R2 reserve.
+        db.execute.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_declared_extension_mismatch_among_allowed_rejected(
+        self, service, db, workspace_id
+    ):
+        """A .png (→ image/png, allowed) declared as text/plain (allowed) is
+        still a mismatch — the declared value does not match the extension."""
+        with pytest.raises(UnsupportedMediaTypeError) as exc_info:
+            await service.reserve_upload(
+                workspace_id=workspace_id,
+                created_by="u",
+                filename="photo.png",
+                content_type="text/plain",
+                size_bytes=1024,
+                sha256=VALID_SHA,
+            )
+        err = exc_info.value
+        assert err.status_code == 415
+        assert err.details["content_type"] == "text/plain"
+        assert err.details["inferred_content_type"] == "image/png"
+
+    @pytest.mark.asyncio
+    async def test_uppercase_extension_is_normalized(self, service, db, workspace_id):
+        """Extension matching is case-insensitive (.SVG resolves like .svg)."""
+        with pytest.raises(UnsupportedMediaTypeError) as exc_info:
+            await service.reserve_upload(
+                workspace_id=workspace_id,
+                created_by="u",
+                filename="EVIL.SVG",
+                content_type="image/png",
+                size_bytes=1024,
+                sha256=VALID_SHA,
+            )
+        # Pin the reason: it must be the extension-consistency layer (.SVG →
+        # image/svg+xml), not an unrelated rejection that happens to also 415.
+        assert exc_info.value.details["inferred_content_type"] == "image/svg+xml"
+
+    @pytest.mark.asyncio
+    async def test_matching_extension_passes(self, service, db, workspace_id):
+        """.png declared image/png — extension and declared agree → allowed."""
+        ws = _make_workspace(workspace_id)
+        result = MagicMock()
+        result.scalar_one_or_none = MagicMock(return_value=ws)
+        db.execute.return_value = result
+
+        with _patch_quota_reserve(succeed=True):
+            out = await service.reserve_upload(
+                workspace_id=workspace_id,
+                created_by="u",
+                filename="photo.png",
+                content_type="image/png",
+                size_bytes=1024,
+                sha256=VALID_SHA,
+            )
+        assert isinstance(out, ReserveResult)
+
+    @pytest.mark.asyncio
+    async def test_unknown_extension_falls_back_to_declared_allowlist(
+        self, service, db, workspace_id
+    ):
+        """.md → mimetypes returns None: the consistency layer is skipped and
+        the declared allow-list governs. Guards against false-positives on
+        extensions Python's mimetypes registry does not know (.md, .webp)."""
+        ws = _make_workspace(workspace_id)
+        result = MagicMock()
+        result.scalar_one_or_none = MagicMock(return_value=ws)
+        db.execute.return_value = result
+
+        with _patch_quota_reserve(succeed=True):
+            out = await service.reserve_upload(
+                workspace_id=workspace_id,
+                created_by="u",
+                filename="notes.md",
+                content_type="text/markdown",
+                size_bytes=1024,
+                sha256=VALID_SHA,
+            )
+        assert isinstance(out, ReserveResult)
+
+    @pytest.mark.asyncio
+    async def test_no_extension_falls_back_to_declared_allowlist(self, service, db, workspace_id):
+        """A filename with no extension → None inferred → declared allow-list
+        governs (e.g. an uploaded "README" declared text/plain)."""
+        ws = _make_workspace(workspace_id)
+        result = MagicMock()
+        result.scalar_one_or_none = MagicMock(return_value=ws)
+        db.execute.return_value = result
+
+        with _patch_quota_reserve(succeed=True):
+            out = await service.reserve_upload(
+                workspace_id=workspace_id,
+                created_by="u",
+                filename="README",
+                content_type="text/plain",
+                size_bytes=1024,
+                sha256=VALID_SHA,
+            )
+        assert isinstance(out, ReserveResult)
