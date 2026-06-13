@@ -304,7 +304,11 @@ async def handle_analyze_context(
                 min_importance=args.get("min_importance"),
                 # query (Reserved for v1.5) was removed from the analyze_context
                 # inputSchema in #990; AnalysisParams.query defaults to None.
-                model_id=args.get("model_id"),
+                # model_id (internal llm_pricing.id PK) was also removed from the
+                # public MCP surface in #990 — the run always uses the
+                # server-default model (AnalysisParams.model_id defaults to None
+                # → _resolve_pricing_row's default path). A stable per-workspace
+                # model selector is planned for v1.5.
                 extra={
                     "from": args.get("from"),
                     "to": args.get("to"),

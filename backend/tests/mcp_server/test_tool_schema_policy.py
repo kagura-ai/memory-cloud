@@ -34,3 +34,30 @@ def test_analyze_context_query_noop_removed():
     defs = get_tool_definitions()
     analyze = next(d for d in defs if d["name"] == "analyze_context")
     assert "query" not in analyze["inputSchema"]["properties"]
+
+
+def test_analyze_context_internal_model_id_pk_removed():
+    """The internal ``model_id`` (llm_pricing.id int PK) is gone from the schema (#990).
+
+    It leaked an internal DB key and was unusable without knowing it; the run
+    always uses the server-default model. A stable per-workspace model selector
+    is planned for v1.5.
+    """
+    defs = get_tool_definitions()
+    analyze = next(d for d in defs if d["name"] == "analyze_context")
+    assert "model_id" not in analyze["inputSchema"]["properties"]
+
+
+def test_merge_contexts_uses_context_scoped_param_names():
+    """merge_contexts advertises source_context_id/target_context_id, not the
+    bare source_id/target_id that the edge tools use for MEMORY UUIDs (#990).
+
+    The shared names were the strongest cross-tool ambiguity on the surface;
+    the handler still accepts the old names for one release as a deprecated alias.
+    """
+    defs = get_tool_definitions()
+    merge = next(d for d in defs if d["name"] == "merge_contexts")
+    props = merge["inputSchema"]["properties"]
+    assert "source_context_id" in props and "target_context_id" in props
+    assert "source_id" not in props and "target_id" not in props
+    assert merge["inputSchema"]["required"] == ["source_context_id", "target_context_id"]

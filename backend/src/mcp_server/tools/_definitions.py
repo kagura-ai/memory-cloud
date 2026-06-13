@@ -1041,14 +1041,21 @@ Use cases:
 Requires owner access to both contexts. Same workspace required.""",
             "inputSchema": {
                 "type": "object",
-                "required": ["source_id", "target_id"],
+                # #990: renamed source_id/target_id → source_context_id/
+                # target_context_id. These are CONTEXT UUIDs, but the edge tools
+                # (create_edge/update_edge/delete_edge) use source_id/target_id
+                # for MEMORY UUIDs — the shared names were the strongest
+                # cross-tool ambiguity on the surface. The handler still accepts
+                # the old names for one release as a deprecated alias
+                # (kagura-memory-python-sdk#196 tracks the SDK update).
+                "required": ["source_context_id", "target_context_id"],
                 "properties": {
-                    "source_id": {
+                    "source_context_id": {
                         "type": "string",
                         "format": "uuid",
                         "description": "Source context UUID to copy memories FROM. MUST be a valid UUID from list_contexts().",
                     },
-                    "target_id": {
+                    "target_context_id": {
                         "type": "string",
                         "format": "uuid",
                         "description": "Target context UUID to copy memories INTO. MUST be a valid UUID from list_contexts().",
@@ -1579,13 +1586,13 @@ Requires action recording (reports created before this feature have no actions t
                         "type": "number",
                         "description": "Optional importance floor (0.0–1.0).",
                     },
-                    "model_id": {
-                        "type": "integer",
-                        "description": (
-                            "Optional ``llm_pricing.id`` override. v1 default = "
-                            "openai gpt-5-nano (resolved server-side)."
-                        ),
-                    },
+                    # model_id (an internal ``llm_pricing.id`` integer PK) was
+                    # removed from the public MCP surface in #990: it leaked an
+                    # internal DB key and was unusable without it. The run always
+                    # uses the server-default model. A stable, per-workspace
+                    # model selector is planned for v1.5
+                    # (Workspace.analysis_default_model_id; see
+                    # services/analysis/orchestrator.py).
                     "dry_run": {
                         "type": "boolean",
                         "description": (

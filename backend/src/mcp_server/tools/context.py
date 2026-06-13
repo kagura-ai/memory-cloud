@@ -732,8 +732,23 @@ async def handle_merge_contexts(
     args: dict[str, Any], user_id: str, workspace_id: UUID | None
 ) -> list[TextContent]:
     """Merge memories from source context into target context (Issue #90)."""
-    if "source_id" not in args or "target_id" not in args:
-        return _error_response("missing_fields", "Missing required fields: source_id and target_id")
+    # #990: params renamed source_id/target_id → source_context_id/
+    # target_context_id (they are CONTEXT UUIDs; edge tools use source_id/
+    # target_id for MEMORY UUIDs). Accept the old names for one release as a
+    # deprecated alias so the current SDK (kagura-memory-python-sdk#196) keeps
+    # working until it updates; the schema advertises only the new names.
+    source_raw = args.get("source_context_id", args.get("source_id"))
+    target_raw = args.get("target_context_id", args.get("target_id"))
+    if source_raw is None or target_raw is None:
+        return _error_response(
+            "missing_fields",
+            "Missing required fields: source_context_id and target_context_id",
+        )
+    if "source_id" in args or "target_id" in args:
+        logger.warning(
+            "merge_contexts called with deprecated params source_id/target_id; "
+            "use source_context_id/target_context_id (#990)"
+        )
 
     from db.base import get_db
 
@@ -742,8 +757,8 @@ async def handle_merge_contexts(
         try:
             from services.context_service import ContextService
 
-            source_id = _resolve_context_id(args["source_id"])
-            target_id = _resolve_context_id(args["target_id"])
+            source_id = _resolve_context_id(source_raw)
+            target_id = _resolve_context_id(target_raw)
             delete_source_raw = args.get("delete_source", False)
             if isinstance(delete_source_raw, str):
                 delete_source = delete_source_raw.lower() == "true"

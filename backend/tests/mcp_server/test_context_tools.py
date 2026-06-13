@@ -202,7 +202,10 @@ class TestHandleMergeContextsWorkspaceBoundary:
             ),
         ):
             result = await handle_merge_contexts(
-                args={"source_id": str(source_id), "target_id": str(target_id)},
+                args={
+                    "source_context_id": str(source_id),
+                    "target_context_id": str(target_id),
+                },
                 user_id=user_id,
                 workspace_id=workspace_id,
             )
@@ -249,7 +252,10 @@ class TestHandleMergeContextsWorkspaceBoundary:
             ),
         ):
             result = await handle_merge_contexts(
-                args={"source_id": str(source_id), "target_id": str(target_id)},
+                args={
+                    "source_context_id": str(source_id),
+                    "target_context_id": str(target_id),
+                },
                 user_id=user_id,
                 workspace_id=workspace_id,
             )
@@ -293,7 +299,10 @@ class TestHandleMergeContextsWorkspaceBoundary:
             ),
         ):
             result = await handle_merge_contexts(
-                args={"source_id": str(source_id), "target_id": str(target_id)},
+                args={
+                    "source_context_id": str(source_id),
+                    "target_context_id": str(target_id),
+                },
                 user_id=user_id,
                 workspace_id=workspace_id,
             )
@@ -302,6 +311,51 @@ class TestHandleMergeContextsWorkspaceBoundary:
         assert payload["status"] == "success"
         assert payload["merged"] == 3
         mock_service.merge_contexts.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_deprecated_source_id_alias_still_merges(
+        self, user_id, workspace_id, source_id, target_id
+    ):
+        """#990: the renamed params advertise source_context_id/target_context_id,
+        but the handler still accepts the old source_id/target_id for one release
+        (deprecated alias) so the current SDK keeps working."""
+        mock_db = AsyncMock()
+        mock_db.rollback = AsyncMock()
+        mock_db.commit = AsyncMock()
+
+        async def mock_get_db():
+            yield mock_db
+
+        shared_ws = uuid4()
+        resolve = AsyncMock(side_effect=[self._ctx(shared_ws), self._ctx(shared_ws)])
+        mock_service = MagicMock()
+        mock_service.merge_contexts = AsyncMock(return_value={"merged": 1, "source_deleted": False})
+
+        with (
+            patch("db.base.get_db", new=mock_get_db),
+            patch("mcp_server.tools.context._resolve_context_for_read", new=resolve),
+            patch("services.context_service.ContextService", return_value=mock_service),
+            patch("mcp_server.tools.context._log_tool_usage", new_callable=AsyncMock),
+        ):
+            result = await handle_merge_contexts(
+                args={"source_id": str(source_id), "target_id": str(target_id)},
+                user_id=user_id,
+                workspace_id=workspace_id,
+            )
+
+        payload = json.loads(result[0].text)
+        assert payload["status"] == "success"
+        mock_service.merge_contexts.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_missing_both_param_names_errors(self, user_id, workspace_id):
+        """Neither new nor old source/target keys → missing_fields with the new
+        canonical field names in the message (#990)."""
+        result = await handle_merge_contexts(args={}, user_id=user_id, workspace_id=workspace_id)
+        payload = json.loads(result[0].text)
+        assert payload["status"] == "error"
+        assert payload["error"] == "missing_fields"
+        assert "source_context_id" in payload["message"]
 
 
 class TestHandleUpdateContextErrorSurface:

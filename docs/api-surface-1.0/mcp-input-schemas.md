@@ -3,7 +3,8 @@
 > Issue: #622 — pre-1.0 public API surface enumeration and freeze
 > Enumerated at commit 20ae959a2c79cacd2cf7922512ad780f540e9c60 (main HEAD, 2026-06-12)
 > Source: backend/src/mcp_server/tools/_definitions.py — 45 tools, 45 of 45 enumerated
-> Re-frozen after #990 (additionalProperties:false on all 45 schemas; analyze_context `query` no-op removed; `model_id` replacement deferred to a follow-up)
+> Re-frozen after #990 (Phase 1): additionalProperties:false on all 45 schemas; analyze_context `query` no-op removed.
+> Re-frozen after #990 (Phase 2): merge_contexts `source_id`/`target_id` → `source_context_id`/`target_context_id` (handler keeps the old names for one release as a deprecated alias; kagura-memory-python-sdk#196 tracks the SDK); analyze_context's internal `model_id` (llm_pricing.id int PK) **removed** from the public MCP surface (run uses server-default model); `k`/`limit`/`cap` result-size trio **consciously frozen** as three distinct conventions (see below). The cross-surface stable-model-identifier replacement (REST + MCP) stays deferred to the v1.5 per-workspace model selection. #990 is now resolved on the MCP surface.
 
 **Global note**: ✅ **Resolved in #990.** Every tool `inputSchema` now sets `additionalProperties: false` — undeclared top-level parameters are forbidden by the published contract. Applied centrally in `get_tool_definitions()` so all 45 tools stay uniform and any new tool inherits the policy automatically. The policy is advisory at the server (handlers read args defensively via `.get` and never Pydantic-validate), so it tightens the client-facing contract without changing server behaviour; nested object params are unaffected (only the top-level argument object is closed).
 
@@ -70,7 +71,7 @@ Hybrid search (semantic + BM25 + Neural Memory boosting) over memories; returns 
 
 - **Required**: `query` — string
 - **Optional**:
-  - `k` — integer (default 5, max 100 per description) ⚠ result-size param is `k` here but `limit` in list_edges/list_tags/get_sleep_history/list_resource_tokens/list_analyses/get_cluster/list_files and `cap` in load_pinned — three names for the same concept
+  - `k` — integer (default 5, max 100 per description) ✅ **DECIDED (#990): the `k`/`limit`/`cap` trio is consciously frozen as three distinct conventions, not unified.** `k` = the top-k count for a *relevance-ranked* result set (recall/get_sleep_history — established ML term); `limit` = pagination size for a *flat list* (the list_* family); `cap` = the ceiling for *pinned-memory load* (load_pinned). Unifying to one name spans ~8 tools (breaking) and would erase the relevance-vs-pagination signal `k` carries — net DX loss. Frozen as-is.
   - `use_rerank` — boolean (default false)
   - `filters` — object (free-form: type, tags, tags_match, importance gte, created/updated bounds, source_uri_prefix, source_type, trust_tier) ⚠ filter vocabulary lives only in prose; analyze_context exposes the equivalent filters (`types`, `tags`, `min_importance`, `from`/`to`) as top-level params instead — two filter styles on one surface
   - `context_id` — string, format `uuid`
@@ -103,7 +104,7 @@ Deterministic time-window query over Time Memories (type='time'), soonest first.
 Deterministically load the complete set of delivery_mode='always' memories for a context (counterpart to probabilistic recall).
 
 - **Required**: `context_id` — string, format `uuid`
-- **Optional**: `cap` — integer (1–1000; server default if omitted) ⚠ third name for result-size (`cap` vs `k` vs `limit`)
+- **Optional**: `cap` — integer (1–1000; server default if omitted) ✅ **frozen (#990)** as the pinned-memory-load ceiling — distinct from `k` (relevance top-k) and `limit` (list pagination); see the recall `k` note for the rationale.
 
 ### forget
 
@@ -239,7 +240,7 @@ Soft-delete a context and all its memories (owner-only; locked contexts must be 
 Copy all memories from a source context into a target context (same embedding model, same workspace).
 
 - **Required**:
-  - `source_id` — string, format `uuid` (context) ⚠ name collision: `source_id`/`target_id` are CONTEXT UUIDs here but MEMORY UUIDs in create_edge/update_edge/delete_edge — the strongest cross-tool ambiguity on the surface; `source_context_id`/`target_context_id` would disambiguate
+  - `source_context_id` / `target_context_id` — string, format `uuid` (context) ✅ **renamed in #990** from `source_id`/`target_id` to remove the collision with the edge tools (which use those names for MEMORY UUIDs — this was the strongest cross-tool ambiguity on the surface). The handler still accepts the old `source_id`/`target_id` for one release as a deprecated alias (logs a warning); kagura-memory-python-sdk#196 tracks updating the SDK before the alias is removed.
   - `target_id` — string, format `uuid` (context)
 - **Optional**: `delete_source` — boolean (default false)
 
@@ -358,7 +359,7 @@ Start (or dry-run cost-preview) a broadlistening analysis run that clusters a co
   - `tags` — array of string
   - `min_importance` — number (0.0–1.0)
   - ~~`query`~~ — ✅ **removed in #990** (was a reserved-for-v1.5 no-op; will be re-added when the query-scoped path is implemented).
-  - `model_id` — integer ⚠ lock-in: an internal `llm_pricing.id` database PK exposed as the public model selector, hardcoding "openai gpt-5-nano" in the description. **Deferred** from #990: `model_id` is a *shared* MCP + REST contract (`api/routes/analyses.py` builds the same `AnalysisParams`; a REST Pydantic schema and 4 test files reference it), so replacing the PK with a stable `(provider, model)` identifier is a cross-surface change that needs its own focused pass — see the dedicated follow-up.
+  - ~~`model_id` — integer~~ ✅ **removed from the public MCP surface in #990** — it exposed an internal `llm_pricing.id` DB PK and was unusable without knowing it; analyze_context now always uses the server-default model (`AnalysisParams.model_id` defaults to None → orchestrator's default-row path). **Note:** the *REST* `model_id` (int) on `api/routes/analyses.py` is unchanged (out of #990's MCP scope), and the **stable `(provider, model)` identifier replacement** is part of the v1.5 per-workspace model-selection redesign (`Workspace.analysis_default_model_id`) — a cross-surface change, not an MCP-schema-only edit.
   - `dry_run` — boolean (default false)
 
 ### get_analysis
@@ -491,12 +492,12 @@ Recurring inconsistencies (each instance flagged inline above):
 
 ### Bundle 1 — P1: naming + schema-rigor fixes that are breaking after freeze (propose as sub-issue "MCP surface: pre-freeze naming and schema unification")
 
-- **P1** Rename merge_contexts `source_id`/`target_id` → `source_context_id`/`target_context_id` (or namespace all edge params as `source_memory_id`/`target_memory_id`) — resolves the memory/context overload.
-- **P1** Unify result-size param: standardize on `limit` (or `k`) across recall, recall_upcoming, forget, load_pinned and all list_* tools; alias-and-deprecate the others before 1.0.
+- ✅ **DONE (#990)** Renamed merge_contexts `source_id`/`target_id` → `source_context_id`/`target_context_id`, resolving the memory/context overload. Old names accepted for one release as a deprecated handler alias (kagura-memory-python-sdk#196 tracks the SDK).
+- ✅ **DECIDED (#990): do NOT unify the result-size param.** `k` (relevance top-k), `limit` (list pagination), `cap` (pin-load ceiling) are kept as three distinct conventions — unifying spans ~8 tools (breaking) and erases the semantic signal `k` carries. Frozen and documented as deliberate (see the recall `k` note).
 - **P1** Unify time-range bounds on one pair (`from`/`to` or `from`/`until`) across recall_upcoming, analyze_context, setup_connector.
 - **P1** Add `format: "uuid"` to every UUID param (analysis bundle, file tools, feedback, set_state, get_state, run_id, file_id, memory_id in feedback).
 - **P1** forget: make the two modes explicit (`anyOf`/`oneOf` over memory_id / query) so a bare `{context_id}` call is schema-invalid — destructive tool, ambiguous input.
-- ✅ **DONE (#990, query)** / **DEFERRED (model_id)** — analyze_context's reserved no-op `query` param was removed (re-add in v1.5). Replacing `model_id` (internal llm_pricing PK) with a stable identifier was **deferred to a dedicated follow-up**: it is a shared MCP + REST contract (orchestrator `AnalysisParams`, `api/routes/analyses.py`, REST Pydantic schema, 4 test files), so it needs a cross-surface design pass rather than an MCP-schema-only edit.
+- ✅ **DONE (#990)** — analyze_context's reserved no-op `query` param was removed (Phase 1; re-add in v1.5), and the internal `model_id` (llm_pricing.id int PK) was **removed from the public MCP surface** (Phase 2 — run uses the server-default model). The **stable `(provider, model)` identifier replacement** is a shared MCP + REST contract (orchestrator `AnalysisParams`, `api/routes/analyses.py`, REST Pydantic schema) and stays deferred to the **v1.5 per-workspace model-selection** redesign — a cross-surface pass, not an MCP-schema-only edit. The REST `model_id` (int) is unchanged for now (out of #990's MCP scope).
 - **P1** Decide the `workspace_id` override on the 5 file tools: remove from public schema or document the auth model explicitly.
 - ✅ **DONE (#990)** Set `additionalProperties: false` on all 45 inputSchemas (applied centrally in `get_tool_definitions()`; guarded by `tests/mcp_server/test_tool_schema_policy.py`).
 - **P1** Unify edge-type param naming/typing: `relation_types`/`edge_types`/`edge_type` → one name, one typing.
