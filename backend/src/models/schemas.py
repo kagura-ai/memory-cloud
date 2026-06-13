@@ -361,6 +361,83 @@ class ReferenceResponse(TZAwareBaseModel):
     incoming_has_more: bool = False
 
 
+class ExportedSearchConfig(BaseModel):
+    """Per-context search configuration in a portability export (Issue #950)."""
+
+    semantic_weight: float
+    bm25_weight: float
+    fetch_factor: int
+    use_rerank: bool
+    reranker_provider: str | None
+    reranker_model: str | None
+    embedding_model: str
+    embedding_dimensions: int
+
+
+class ExportedMemory(TZAwareBaseModel):
+    """A single memory in a portability export (Issue #950).
+
+    Excludes regenerable fields (vector / embedding status), DB-computed
+    columns, internal owner/workspace identifiers, and soft-delete state —
+    only the user-meaningful, portable fields are emitted. ``details`` is
+    included verbatim; note it may carry references (e.g. external blob
+    pointers) that will not resolve outside this deployment.
+    """
+
+    id: UUID
+    summary: str
+    context_summary: str | None
+    content: str
+    details: dict | None
+    type: str
+    importance: float
+    confidence: float
+    tags: list[str]
+    context: dict | None
+    scope: str
+    delivery_mode: str
+    created_at: datetime
+    updated_at: datetime | None
+    source_uri: str | None = None
+    source_type: str | None = None
+
+
+class ExportedContextMeta(TZAwareBaseModel):
+    """Context metadata block in a portability export (Issue #950)."""
+
+    id: UUID
+    name: str
+    display_name: str | None
+    description: str | None
+    summary: str | None
+    usage_guide: str | None
+    is_private: bool
+    is_public: bool
+    created_at: datetime
+    updated_at: datetime | None
+
+
+class ContextExportResponse(TZAwareBaseModel):
+    """GDPR Art.20-supporting context portability export (Issue #950).
+
+    A point-in-time JSON snapshot of a context the caller can read: its
+    metadata, search configuration, and every memory visible to the caller
+    (private context -> creator-only; shared -> all members) — the same
+    visibility model as ``GET /memory/list``. Vectors, neural edges, and
+    sessions are intentionally omitted: they are regenerated / re-learned on
+    re-import. This is a context-scoped *portability* export (anti-lock-in),
+    not a per-user Art.20 subject-access request — a created_by-filtered,
+    cross-context personal-data export is a separate follow-up.
+    """
+
+    format_version: str = "1.0"
+    exported_at: datetime
+    context: ExportedContextMeta
+    search_config: ExportedSearchConfig | None
+    memory_count: int
+    memories: list[ExportedMemory]
+
+
 class ForgetRequest(BaseModel):
     """Request schema for forget() API."""
 
