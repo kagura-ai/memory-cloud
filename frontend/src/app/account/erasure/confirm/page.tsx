@@ -87,12 +87,19 @@ function ConfirmErasureInner() {
     if (ran.current) return;
     ran.current = true;
 
+    let alive = true;
     confirmErasure(token)
       .then((state) => {
+        if (!alive) return;
         setScheduledFor(state.scheduled_for);
         setPhase("success");
       })
-      .catch(() => setPhase("invalid"));
+      .catch(() => {
+        if (alive) setPhase("invalid");
+      });
+    return () => {
+      alive = false;
+    };
   }, [token, isLoading, isAuthenticated, router]);
 
   if (phase === "loading") {

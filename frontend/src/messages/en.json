@@ -3746,6 +3746,7 @@
     "emailSentBody": "We've sent a confirmation link to your account email address. Click it to start the 7-day cooling-off period.",
     "requestError": "Could not start account deletion. Please try again.",
     "confirmError": "Could not confirm deletion. Check your password and try again.",
+    "confirmTokenExpired": "This deletion request has expired or was already used. Please start again from your profile.",
     "workspaceTransferError": "You are the sole owner of a shared workspace. Transfer ownership (or remove the other members) before deleting your account.",
     "alreadyRequested": "You already have an account deletion request in progress.",
     "pendingTitle": "Deletion awaiting confirmation",

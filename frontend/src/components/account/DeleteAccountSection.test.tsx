@@ -115,6 +115,30 @@ describe("DeleteAccountSection", () => {
     await waitFor(() =>
       expect(mockConfirm).toHaveBeenCalledWith("tok-123", "hunter2"),
     );
+    // ...and the success transition renders the cooling-off card (asserts the
+    // setActive/setOpen effect, not just that confirm was called).
+    expect(await screen.findByText(/^scheduledBody\|/)).toBeInTheDocument();
+  });
+
+  it("password step ERASURE-002: shows the expired-token message, not 'wrong password'", async () => {
+    mockGetActive.mockResolvedValue(null);
+    mockRequest.mockResolvedValue({
+      request_id: "r1",
+      status: "pending",
+      requested_at: "x",
+      confirm_token: "tok-123",
+    });
+    mockConfirm.mockRejectedValue(
+      new ApiError({ status: 400, error: "ERASURE-002", message: "x" }),
+    );
+    render(<DeleteAccountSection />);
+    fireEvent.click(await screen.findByText("deleteButton"));
+    fireEvent.click(await screen.findByText("dialogConfirm"));
+    const pw = await screen.findByLabelText("passwordLabel");
+    fireEvent.change(pw, { target: { value: "hunter2" } });
+    fireEvent.click(screen.getByText("dialogConfirm"));
+    expect(await screen.findByText("confirmTokenExpired")).toBeInTheDocument();
+    expect(screen.queryByText("confirmError")).not.toBeInTheDocument();
   });
 
   it("OAuth flow: a null confirm_token shows the check-your-email message", async () => {

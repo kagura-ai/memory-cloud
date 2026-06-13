@@ -112,6 +112,11 @@ export function DeleteAccountSection() {
   };
 
   const onOpenChange = (o: boolean) => {
+    // Don't let Escape / overlay-click close (and reset) the dialog while a
+    // request is in flight — the in-flight resolve would then write step/token
+    // onto a closed-and-reset dialog. The footer buttons are already disabled
+    // during `busy`; this covers the non-button close paths.
+    if (!o && busy) return;
     setOpen(o);
     if (!o) reset();
   };
@@ -165,8 +170,22 @@ export function DeleteAccountSection() {
       setActive(next);
       setOpen(false);
       reset();
-    } catch {
-      setDialogError(t("confirmError"));
+    } catch (e) {
+      // Same error_code-keyed handling as handleRequest: an expired/used token
+      // (ERASURE-002) or a request confirmed elsewhere (ERASURE-006) is NOT a
+      // "wrong password" — surfacing confirmError for those is a soft dead-end.
+      const code = e instanceof ApiError ? e.error : undefined;
+      if (code === "ERASURE-002") {
+        setDialogError(t("confirmTokenExpired"));
+      } else if (code === "ERASURE-006") {
+        setOpen(false);
+        reset();
+        toast({ title: t("alreadyRequested") });
+        await loadActive();
+      } else {
+        // ERASURE-003 (incorrect password) and anything else.
+        setDialogError(t("confirmError"));
+      }
     } finally {
       setBusy(false);
     }
