@@ -134,7 +134,7 @@ Auth failure before dispatch (`transport.py:531-580`): HTTP 401, body `{"error":
 | `RES-003` | `MemoryGoneError` — exceptions.py:174 | 410 | Resource soft-deleted (distinct from 404 so clients stop retrying). |
 | `RES-004` | *(no class — inline `JSONResponse`)* — api/routes/attachments.py:30 | 410 | Deprecated `/api/v1/attachments/*` retired; carries Sunset/Deprecation/Link headers. |
 | `VAL-001` | `ValidationError` — exceptions.py:195 | 422 | Service-layer validation error (shape/format). ⚠ Coexists with the non-conforming FastAPI 422. |
-| `REQ-001` | `BadRequestError` (default) — exceptions.py:217 | 400 | State-precondition failure (call sites may override the code, see ADMIN-101/102). |
+| `REQ-001` | `BadRequestError` (default) — exceptions.py:217 | 400 | State-precondition failure (call sites may override the code, e.g. `REQ-101`/`REQ-102`). |
 | `MEDIA-001` | `UnsupportedMediaTypeError` — exceptions.py:254 | 415 | Content-Type not in allow-list; `details.allowed` lists accepted types. |
 | `BONUS-001` | `InsufficientReasonError` — exceptions.py:283 | 400 | Slot-bonus shrink below owned count requires a reason. |
 | `BONUS-002` | `BonusBelowZeroError` — exceptions.py:301 | 400 | Resulting workspace_slot_bonus would be negative. |
@@ -272,7 +272,7 @@ Other non-conforming shapes (not raw HTTPException):
 
 1. **FastAPI 422** — `{"detail": [ ... ]}` array shape; no `RequestValidationError` handler exists (§Canonical shape, point 3). ⚠
 2. **MCP `-32603` catch-all** — swallows `MemoryCloudException.error_code` when a tool handler lacks its own catch (§Canonical shape, point 5). ⚠
-3. Three snake_case codes on the REST surface (`admin_user_id_missing`, `sleep_run_in_progress`, `sleep_target_not_found`) conform in *shape* but break the `NAMESPACE-NNN` code convention (§Catalogue B). ⚠
+3. ✅ **RESOLVED (#992 Phase 2)**: the three REST snake_case codes were renamed to `SLEEP-001/002/003` (§Catalogue B); the REST surface now uses `NAMESPACE-NNN` uniformly. (The 41 MCP `_error_response` snake_case literals at the section above are a separate MCP-surface concern, out of #992's REST scope.)
 
 ---
 

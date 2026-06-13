@@ -124,4 +124,42 @@ describe("ApiClient error normalization (#992 canonical 422 envelope)", () => {
     // String (not array) so consumers calling details.detail.includes(...) work.
     expect(details.detail).toBe("Resource not found");
   });
+
+  it("preserves a reshaped dict detail under details.detail (#992 Phase 2)", async () => {
+    // Dict-detail HTTPExceptions (external-keys conflicts) are reshaped to
+    // { error: "HTTP-409", message: "Request failed", details: { detail: {...} } }.
+    // Consumers branching on details.detail.error must still see the object —
+    // the HTTP-* message alias must NOT overwrite it.
+    const payload = { error: "reranker_provider_conflict", conflicting_provider: "cohere" };
+    mockFetchOnce(409, {
+      error: "HTTP-409",
+      message: "Request failed",
+      details: { detail: payload },
+    });
+
+    const client = new ApiClient("http://test");
+    const caught = await client.post("/x", {}).catch((e: unknown) => e);
+
+    expect(caught).toBeInstanceOf(ApiError);
+    const details = (caught as ApiError).details as Record<string, unknown>;
+    expect(details.detail).toEqual(payload);
+  });
+
+  it("does not inject a synthetic detail into a canonical (non-HTTP) error body", async () => {
+    // The message->detail alias is scoped to the reshaped HTTP-* placeholder
+    // code, so a semantic MemoryCloudException body keeps its authoritative
+    // details untouched (no fabricated `detail` key).
+    mockFetchOnce(429, {
+      error: "RES-001",
+      message: "Resource limit exceeded",
+      details: { limit: 100 },
+    });
+
+    const client = new ApiClient("http://test");
+    const caught = await client.get("/x").catch((e: unknown) => e);
+
+    const details = (caught as ApiError).details as Record<string, unknown>;
+    expect(details).toEqual({ limit: 100 });
+    expect(details.detail).toBeUndefined();
+  });
 });

@@ -110,22 +110,26 @@ def test_http_exception_handler_reshapes_to_canonical_and_preserves_headers():
     assert resp.headers["WWW-Authenticate"] == 'Bearer error="insufficient_scope"'
 
 
-def test_http_exception_handler_handles_non_string_detail():
+def test_http_exception_handler_preserves_structured_dict_detail():
     from starlette.exceptions import HTTPException as StarletteHTTPException
 
     from api.main import http_exception_handler
 
+    # external_keys.py raises dict-detail HTTPExceptions for conflict payloads;
+    # the handler must preserve the object under details.detail (not drop it),
+    # so the frontend consumer branching on detail.error keeps working.
     req = MagicMock()
-    req.url.path = "/x"
-    exc = StarletteHTTPException(status_code=404, detail={"weird": "dict"})
+    req.url.path = "/api/v1/external-keys"
+    payload = {"error": "reranker_provider_conflict", "conflicting_provider": "cohere"}
+    exc = StarletteHTTPException(status_code=409, detail=payload)
 
     resp = _run(http_exception_handler(req, exc))
     body = json.loads(resp.body)
 
-    assert resp.status_code == 404
-    assert body["error"] == "HTTP-404"
-    assert body["message"] == "Request failed"  # non-string detail → generic
-    assert body["details"] == {}
+    assert resp.status_code == 409
+    assert body["error"] == "HTTP-409"
+    assert body["message"] == "Request failed"  # no single human string for a dict
+    assert body["details"]["detail"] == payload  # structured detail preserved
 
 
 # --- auth-boundary conversions: status + error_code parity ---

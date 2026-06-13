@@ -394,15 +394,26 @@ async def http_exception_handler(request: Request, exc: StarletteHTTPException) 
     ``VAL-``/``REQ-`` codes), and ``exc.headers`` is passed through so RFC 6750
     ``WWW-Authenticate`` challenges (Bearer / insufficient_scope) survive.
 
-    Shape-only: it does NOT apply the CWE-639 deny-class ``details`` strip that
-    ``memory_cloud_exception_handler`` does, because a raw ``HTTPException``
-    carries no structured ``details`` — only a string ``detail`` (→ ``message``).
-    The remaining raw 403 detail strings were audited for forensic leakage in
-    the #992 review; the one cross-workspace existence-oracle smell is tracked
-    in #1011.
+    A string ``detail`` becomes ``message`` with empty ``details``; a structured
+    (dict/list) ``detail`` is preserved verbatim under ``details.detail`` (the
+    only such sites are the external-keys conflict payloads) with a generic
+    ``message``. Shape-only: it does NOT apply the CWE-639 deny-class ``details``
+    strip that ``memory_cloud_exception_handler`` does. The remaining raw 403
+    detail strings were audited for forensic leakage in the #992 review; the one
+    cross-workspace existence-oracle smell is tracked in #1011.
     """
     detail = exc.detail
-    message = detail if isinstance(detail, str) else "Request failed"
+    if isinstance(detail, str):
+        message = detail
+        details: dict = {}
+    else:
+        # Structured (dict/list) detail — e.g. the external-keys reranker /
+        # embeddings conflict payloads (external_keys.py). Preserve it under
+        # ``details.detail`` so consumers that branch on the structured object
+        # keep working; ``message`` stays generic since there is no single
+        # human string.
+        message = "Request failed"
+        details = {"detail": detail}
     logger.warning(
         "http_exception",
         status_code=exc.status_code,
@@ -413,7 +424,7 @@ async def http_exception_handler(request: Request, exc: StarletteHTTPException) 
         content={
             "error": f"HTTP-{exc.status_code}",
             "message": message,
-            "details": {},
+            "details": details,
         },
         headers=getattr(exc, "headers", None),
     )
