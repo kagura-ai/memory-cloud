@@ -494,7 +494,7 @@ export const UsageStats = forwardRef<UsageStatsRef, UsageStatsProps>(
           </CardHeader>
           <CardContent>
             <div className="h-64">
-              <ResponsiveContainer width="100%" height="100%">
+              <ResponsiveContainer width="100%" height={256}>
                 <LineChart data={history.daily_stats}>
                   <CartesianGrid strokeDasharray="3 3" />
                   <XAxis
