@@ -208,7 +208,7 @@ export const RichMemoryOverview = forwardRef<RichMemoryOverviewRef, RichMemoryOv
           </CardHeader>
           <CardContent>
             <div className="h-64">
-              <ResponsiveContainer width="100%" height="100%">
+              <ResponsiveContainer width="100%" height={256}>
                 <RechartsPie>
                   <Pie
                     data={scopeData}
@@ -300,7 +300,7 @@ export const RichMemoryOverview = forwardRef<RichMemoryOverviewRef, RichMemoryOv
             </CardHeader>
             <CardContent>
               <div className="h-64">
-                <ResponsiveContainer width="100%" height="100%">
+                <ResponsiveContainer width="100%" height={256}>
                   <BarChart data={topConnectionsData}>
                     <CartesianGrid strokeDasharray="3 3" />
                     <XAxis dataKey="name" />
@@ -363,7 +363,7 @@ export const RichMemoryOverview = forwardRef<RichMemoryOverviewRef, RichMemoryOv
             <CardContent>
               <div className="h-64">
                 {typeData.length > 0 ? (
-                  <ResponsiveContainer width="100%" height="100%">
+                  <ResponsiveContainer width="100%" height={256}>
                     <RechartsPie>
                       <Pie
                         data={typeData}
