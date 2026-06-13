@@ -252,7 +252,7 @@ Create a second temporary context, then test merge and usage:
 create_context(name="smoke-test-merge-{unix_timestamp}", description="Merge target for smoke test.")
 -> Save returned context_id as merge_target_id
 
-merge_contexts(source_id=<context_id>, target_id=<merge_target_id>)
+merge_contexts(source_context_id=<context_id>, target_context_id=<merge_target_id>)
 -> Verify: success response with merged memory count
 
 get_usage()
