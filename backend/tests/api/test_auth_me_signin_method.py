@@ -38,14 +38,16 @@ def _session(*, user_id: str = "u-1", email: str = "u@example.com") -> dict:
 def _db_user(*, auth_method: str, auth_provider: str | None) -> SimpleNamespace:
     """Stand-in for the ``User`` ORM row.
 
-    The handler reads ``timezone``, ``auth_method``, ``auth_provider``
-    from the row; the rest of the response is sourced from the session.
+    The handler reads ``timezone``, ``auth_method``, ``auth_provider``,
+    ``is_initial_admin`` from the row; the rest of the response is sourced
+    from the session.
     """
     return SimpleNamespace(
         timezone="UTC",
         locale="en",
         auth_method=auth_method,
         auth_provider=auth_provider,
+        is_initial_admin=False,
     )
 
 
@@ -139,8 +141,28 @@ class TestAuthMeSignInMethod:
                 locale="ja",
                 auth_method="oauth",
                 auth_provider="google",
+                is_initial_admin=False,
             )
         )
         result = await get_current_user_info(user=_session(), db=db)
 
         assert result["user"]["locale"] == "ja"
+
+    @pytest.mark.asyncio
+    async def test_exposes_is_initial_admin_flag(self):
+        """GET /api/v1/auth/me surfaces is_initial_admin so the frontend can
+        hide the self-serve account-deletion control for the protected initial
+        administrator (Issue #953; backend hard-blocks erasure ERASURE-004)."""
+        protected = SimpleNamespace(
+            timezone="UTC",
+            locale="en",
+            auth_method="oauth",
+            auth_provider="google",
+            is_initial_admin=True,
+        )
+        result = await get_current_user_info(user=_session(), db=_mock_db(protected))
+        assert result["user"]["is_initial_admin"] is True
+
+        normal = _db_user(auth_method="oauth", auth_provider="google")
+        result2 = await get_current_user_info(user=_session(), db=_mock_db(normal))
+        assert result2["user"]["is_initial_admin"] is False

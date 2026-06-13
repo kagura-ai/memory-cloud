@@ -31,6 +31,15 @@ const stableTranslator = (key: string, values?: Record<string, unknown>) => {
 };
 vi.mock("next-intl", () => ({
   useTranslations: (_namespace: string) => stableTranslator,
+  useLocale: () => "en",
+}));
+
+// The account-deletion danger zone is a separately-tested unit
+// (DeleteAccountSection.test.tsx); stub it here so the profile page test
+// stays focused on profile concerns and isn't coupled to the erasure flow's
+// own mount-time fetch and hooks.
+vi.mock("@/components/account/DeleteAccountSection", () => ({
+  DeleteAccountSection: () => null,
 }));
 
 // AuthContext mock — flipped per test via mockUser.

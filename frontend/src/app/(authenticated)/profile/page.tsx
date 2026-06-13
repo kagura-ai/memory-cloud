@@ -36,6 +36,7 @@ import { COMMON_TIMEZONES } from "@/lib/utils/datetime";
 import { apiClient, ApiError } from "@/lib/api/base";
 import { PageContainer } from "@/components/common/PageContainer";
 import ConnectedAccounts from "@/components/auth/ConnectedAccounts";
+import { DeleteAccountSection } from "@/components/account/DeleteAccountSection";
 import { getSignInMethodLabel, getRefreshProviderName } from "./signInLabels";
 
 export default function ProfilePage() {
@@ -440,6 +441,9 @@ export default function ProfilePage() {
           </div>
         </CardContent>
       </Card>
+
+      {/* Danger zone: self-serve account & data deletion (Issue #953) */}
+      <DeleteAccountSection />
     </PageContainer>
   );
 }
