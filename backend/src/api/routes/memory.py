@@ -31,7 +31,6 @@ from models.schemas import (
     RememberRequest,
     RememberResponse,
 )
-from services.context_service import ContextService
 from services.memory_service import MemoryService
 from services.permission_service import PermissionService
 from utils.datetime import to_utc_iso, utcnow
@@ -58,18 +57,6 @@ async def get_memory_service(db: AsyncSession = Depends(get_db)) -> MemoryServic
         MemoryService instance
     """
     return MemoryService(db)
-
-
-async def get_context_service(db: AsyncSession = Depends(get_db)) -> ContextService:
-    """Get ContextService instance.
-
-    Args:
-        db: Database session
-
-    Returns:
-        ContextService instance
-    """
-    return ContextService(db)
 
 
 MemoryServiceDep = Annotated[MemoryService, Depends(get_memory_service)]
@@ -467,7 +454,6 @@ async def get_memory_stats(
         None, description="Optional context ID (defaults to current context)"
     ),
     memory_service: MemoryService = Depends(get_memory_service),
-    context_service: ContextService = Depends(get_context_service),
     db: AsyncSession = Depends(get_db),
 ):
     """Get memory statistics for the authenticated user's context.
@@ -478,7 +464,6 @@ async def get_memory_stats(
         user: Authenticated user
         context_id: Optional context ID (defaults to current context)
         memory_service: Memory service instance
-        context_service: Context service instance
 
     Returns:
         Memory statistics for specified or current context including counts, types, and storage
@@ -503,68 +488,35 @@ async def get_memory_stats(
     is_shared = False
 
     if target_context_id:
-        try:
-            from sqlalchemy import select
+        from models.auth import Workspace
 
-            from models.auth import Context, Workspace
-            from utils.exceptions import NotFoundException
+        # SECURITY (#1011 / #383): resolve through the workspace-read chokepoint
+        # so a cross-workspace probe yields a uniform 404 (context_not_found)
+        # instead of a 403 that confirms the context exists in another workspace
+        # (CWE-639 / OWASP A01). Mirrors GET /memory/list below and the graph
+        # routes; a member of the context's OWNING workspace can read its stats
+        # regardless of which workspace is currently active.
+        context = await PermissionService(db).resolve_context_for_workspace_read(
+            user_id=user_id,
+            context_id=target_context_id,
+            key_workspace_id=user.get("api_key_workspace_id"),
+        )
+        target_workspace_id = str(context.workspace_id)
 
-            # SECURITY: Verify context belongs to current workspace (ALWAYS)
-            # Issue #271 Code Review H-3: Make validation mandatory (not conditional)
-            current_workspace_id = user.get("current_workspace_id")
-
-            # Get context directly to verify workspace ownership
-            context_result = await db.execute(
-                select(Context).where(Context.id == target_context_id)
-            )
-            context_obj = context_result.scalar_one_or_none()
-
-            if context_obj and current_workspace_id:
-                # Verify context belongs to current workspace
-                if context_obj.workspace_id != current_workspace_id:
-                    from fastapi import HTTPException, status
-
-                    raise HTTPException(
-                        status_code=status.HTTP_403_FORBIDDEN,
-                        detail="This context belongs to a different workspace. Please switch workspaces first.",
-                    )
-            elif context_obj and not current_workspace_id:
-                # User has no current_workspace_id but accessing a specific context
-                # This is suspicious - require workspace selection
-                from fastapi import HTTPException, status
-
-                raise HTTPException(
-                    status_code=status.HTTP_400_BAD_REQUEST,
-                    detail="No workspace selected. Please select an workspace to view context statistics.",
-                )
-
-            context = await context_service.get_context(user_id, target_context_id)
-            target_workspace_id = str(context.workspace_id)
-
-            # Check if user is workspace owner
-            workspace_result = await db.execute(
-                select(Workspace).where(Workspace.id == user.get("current_workspace_id"))
-            )
-            workspace = workspace_result.scalar_one_or_none()
-            is_workspace_owner = workspace and workspace.owner_user_id == user_id
-
-            # Owner sees all memories (treat as shared), or context is actually shared
-            is_shared = is_workspace_owner or not context.is_private
-            logger.info(
-                f"Context privacy check: context_id={target_context_id}, is_private={context.is_private}, is_workspace_owner={is_workspace_owner}, is_shared={is_shared}"
-            )
-        except NotFoundException:
-            # Context not found - default to private (user_id filter)
-            logger.warning(f"Context not found: {target_context_id}. Defaulting to private stats")
-        except (ConnectionError, OSError) as e:
-            # Database/network connectivity issues - critical, re-raise
-            logger.error(f"Database connectivity issue while checking context privacy: {e}")
-            raise
-        except Exception as e:
-            # Other unexpected errors - log and default to safe behavior
-            logger.warning(
-                f"Unexpected error checking context privacy: {e}. Defaulting to private stats"
-            )
+        # Workspace owner sees all memories (treated as shared); otherwise a
+        # non-private (shared) context is visible to every member. Anchored to
+        # the context's OWNING workspace, not the caller's current workspace.
+        workspace_result = await db.execute(
+            select(Workspace).where(Workspace.id == context.workspace_id)
+        )
+        workspace = workspace_result.scalar_one_or_none()
+        is_workspace_owner = bool(workspace and workspace.owner_user_id == user_id)
+        is_shared = is_workspace_owner or not context.is_private
+        logger.info(
+            f"Context privacy check: context_id={target_context_id}, "
+            f"is_private={context.is_private}, is_workspace_owner={is_workspace_owner}, "
+            f"is_shared={is_shared}"
+        )
 
     # Call service layer (24h window for REST API)
     result = await memory_service.get_stats(
@@ -860,7 +812,6 @@ async def get_access_patterns(
         None, description="Optional context ID (defaults to current context)"
     ),
     db: AsyncSession = Depends(get_db),
-    context_service: ContextService = Depends(get_context_service),
     days: int = 30,
 ) -> dict[str, Any]:
     """Get memory access patterns and analytics for specified or current context.
@@ -873,7 +824,6 @@ async def get_access_patterns(
         user: Authenticated user
         context_id: Optional context ID (defaults to current context)
         db: Database session
-        context_service: Context service instance
         days: Number of days to analyze (default: 30)
 
     Returns:
@@ -891,7 +841,14 @@ async def get_access_patterns(
         # Single Collection Migration: Get workspace_id and context_id for filtering
         target_workspace_id = None
         if target_context_id:
-            context = await context_service.get_context(user_id, target_context_id)
+            # SECURITY (#1011 / #383 / #963): resolve via the shared
+            # workspace-read chokepoint for uniform-404 disclosure AND API-key
+            # workspace confinement — parity with /memory/stats and /memory/list.
+            context = await PermissionService(db).resolve_context_for_workspace_read(
+                user_id=user_id,
+                context_id=target_context_id,
+                key_workspace_id=user.get("api_key_workspace_id"),
+            )
             target_workspace_id = context.workspace_id
 
         cutoff = utcnow() - timedelta(days=days)
@@ -945,6 +902,10 @@ async def get_access_patterns(
             "analysis_days": days,
         }
 
+    except (MemoryCloudException, HTTPException):
+        # Uniform-404 authz denials (#1011) and explicit HTTP errors must
+        # surface as-is, not be masked as a generic 500.
+        raise
     except Exception as e:
         logger.error("access_patterns_failed", error=str(e))
         raise HTTPException(
