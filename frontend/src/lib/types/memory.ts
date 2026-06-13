@@ -65,6 +65,71 @@ export interface MemoryReference {
   incoming_has_more?: boolean;
 }
 
+// Issue #952: minimal client mirror of backend `RememberRequest`
+// (schemas.py:59). The first-run onboarding flow is the only in-app writer of
+// memories (everything else writes via MCP tools), so this carries just the
+// fields onboarding needs — the backend defaults the rest.
+export interface RememberMemoryRequest {
+  /** Layer 1 search summary. Backend requires 10–500 chars. */
+  summary: string;
+  /** Layer 3 full content. Backend requires ≥1 char. */
+  content: string;
+  /** Memory type (arbitrary string, 1–50 chars). */
+  type: string;
+  context_summary?: string;
+  importance?: number;
+  tags?: string[];
+  /** `{ context_id }` routes the memory into the right context collection. */
+  context?: { context_id: string };
+  details?: Record<string, unknown>;
+}
+
+// Mirror of backend `RememberResponse` (schemas.py:147).
+export interface RememberMemoryResponse {
+  status: string;
+  memory_id: string;
+  scope: string;
+}
+
+// Mirror of backend `RecallRequest` (schemas.py:155) — onboarding only needs
+// query + a context filter, but the optional knobs are typed for reuse.
+export interface RecallParams {
+  query: string;
+  k?: number;
+  use_rerank?: boolean;
+  search_mode?: "hybrid" | "semantic" | "keyword";
+  filters?: {
+    context_id?: string;
+    scope?: MemoryScope;
+    type?: string;
+  };
+}
+
+// Mirror of backend `MemoryResponse` (schemas.py:186) — one recall result row.
+// `score` is present only on recall (null elsewhere).
+export interface RecallResultItem {
+  memory_id: string;
+  summary: string;
+  context_summary: string | null;
+  type: string;
+  importance: number;
+  scope: MemoryScope;
+  created_at: string;
+  client: string;
+  tags: string[];
+  context: Record<string, unknown> | null;
+  score?: number | null;
+  source_uri?: string | null;
+  source_type?: string | null;
+}
+
+// Mirror of backend `RecallResponse` (schemas.py:288).
+export interface RecallResponse {
+  results: RecallResultItem[];
+  related_tags?: { tag: string; count: number }[];
+  explore_hints?: { memory_id: string; reason: string }[];
+}
+
 // Generic over the row shape so callers can specialize when needed.
 // Default is `MemoryListItem` (the structurally correct type for
 // `GET /api/v1/memory/list`).

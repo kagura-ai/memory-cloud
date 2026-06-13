@@ -10,6 +10,10 @@ import type {
   MemoryListResponse,
   MemoryListItem,
   MemoryReference,
+  RememberMemoryRequest,
+  RememberMemoryResponse,
+  RecallParams,
+  RecallResponse,
 } from "../types/memory";
 
 // Issue #431/#433/#580: Backend `GET /api/v1/memory/list` accepts only
@@ -66,6 +70,37 @@ export async function getMemories(
   return apiClient.get<MemoryListResponse<MemoryListItem>>(
     `/api/v1/memory/list?${searchParams.toString()}`,
   );
+}
+
+/**
+ * Save a new memory (Issue #952).
+ *
+ * Hits `POST /api/v1/memory/remember`. This is the only in-app memory writer —
+ * the first-run onboarding flow uses it to save a sample memory so the user can
+ * recall it and feel the value moment. Ongoing memory creation happens via MCP
+ * tools, not the web UI. The request is forwarded verbatim; the backend fills
+ * defaults for every field this client mirror omits.
+ */
+export async function rememberMemory(
+  request: RememberMemoryRequest,
+): Promise<RememberMemoryResponse> {
+  return apiClient.post<RememberMemoryResponse>(
+    "/api/v1/memory/remember",
+    request,
+  );
+}
+
+/**
+ * Search memories with hybrid recall (Issue #952).
+ *
+ * Hits `POST /api/v1/memory/recall`. Honors the design constraint that recall
+ * does NOT auto-trigger explore — this is precision search only. Pass
+ * `filters.context_id` to scope to a single context.
+ */
+export async function recallMemories(
+  params: RecallParams,
+): Promise<RecallResponse> {
+  return apiClient.post<RecallResponse>("/api/v1/memory/recall", params);
 }
 
 /**
