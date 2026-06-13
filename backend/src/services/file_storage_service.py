@@ -30,6 +30,7 @@ swept by the orphan task (Commit 8) — the sweeper calls
 
 from __future__ import annotations
 
+import mimetypes
 import re
 from dataclasses import dataclass
 from datetime import datetime, timedelta
@@ -61,6 +62,14 @@ from utils.media_types import MEDIA_TYPE_RE, normalize_media_type
 # accept a 64-char input with embedded whitespace, decoding to fewer
 # than 32 bytes (exact length depends on how many non-hex chars are present).
 _SHA256_HEX_RE = re.compile(SHA256_HEX_PATTERN)
+
+# Issue #961: extension→MIME resolver for the content_type consistency check.
+# A private ``MimeTypes`` instance is seeded ONLY from Python's compiled-in
+# table — it does not read the host's ``/etc/mime.types`` — so the
+# security-relevant mapping (e.g. ``.svg`` → ``image/svg+xml``) is identical
+# across every deploy environment and does not probe the filesystem on the
+# request path. Built once at import; ``guess_type`` is read-only thereafter.
+_MIME = mimetypes.MimeTypes()
 
 logger = get_logger(__name__)
 
@@ -236,6 +245,34 @@ class FileStorageService:
             raise UnsupportedMediaTypeError(
                 content_type=content_type,
                 allowed=allowed,
+            )
+
+        # Issue #961: the allow-list above only validates the *declared*
+        # content_type. A disallowed payload can slip in mislabeled — an
+        # ``.svg`` declared ``text/plain`` lands as text/plain (allowed) yet
+        # carries inline-script SVG (stored-XSS once served). Derive the MIME
+        # the filename *extension* implies and reject any inconsistency, so a
+        # declared value can no longer launder a disallowed (or simply
+        # mismatched) type past the allow-list. ``guess_type`` lower-cases the
+        # extension, so ``.SVG`` resolves like ``.svg``. When the extension is
+        # unknown to Python's mimetypes registry (``.md``, ``.webp`` → None) or
+        # absent, the inferred value is None and this layer is skipped — the
+        # declared allow-list remains the governing check, avoiding
+        # false-positives on extensions mimetypes does not know. NOTE: as the
+        # operator widens ALLOWED_FILE_CONTENT_TYPES, a declared value that is
+        # allowed but differs from the extension's canonical MIME (e.g. an
+        # ``.xml`` declared ``application/xml`` when mimetypes infers
+        # ``text/xml``) will also be rejected here — intended strictness, but
+        # worth knowing when curating the allow-list. This runs at the shared
+        # service chokepoint, so REST (POST /files/reserve) and MCP
+        # (handle_init_file_upload) inherit it identically (#553 parity).
+        guessed_raw, _ = _MIME.guess_type(filename)
+        inferred = normalize_media_type(guessed_raw) if guessed_raw else None
+        if inferred is not None and inferred != base_content_type:
+            raise UnsupportedMediaTypeError(
+                content_type=content_type,
+                allowed=allowed,
+                inferred_content_type=inferred,
             )
 
         workspace = await self._load_workspace(workspace_id)
