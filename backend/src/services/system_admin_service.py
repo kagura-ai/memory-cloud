@@ -82,7 +82,7 @@ class SystemAdminService:
 
         Raises:
             NotFoundException: 404 if user not found.
-            BadRequestError: 400 (``ADMIN-101``) if user is already a system admin.
+            BadRequestError: 400 (``REQ-101``) if user is already a system admin.
 
         Example:
             >>> user = await service.promote_to_system_admin(
@@ -108,7 +108,7 @@ class SystemAdminService:
             )
             raise BadRequestError(
                 "User is already a system admin",
-                error_code="ADMIN-101",
+                error_code="REQ-101",
             )
 
         # Update role
@@ -157,7 +157,7 @@ class SystemAdminService:
 
         Raises:
             NotFoundException: 404 if user not found.
-            BadRequestError: 400 (``ADMIN-102``) if user is not a system admin.
+            BadRequestError: 400 (``REQ-102``) if user is not a system admin.
             AdminProtectionError: 403 if the target is the initial admin or
                 the last remaining admin.
 
@@ -181,7 +181,7 @@ class SystemAdminService:
             logger.warning("demote_system_admin_failed", user_email=user.email, reason="not_admin")
             raise BadRequestError(
                 "User is not a system admin",
-                error_code="ADMIN-102",
+                error_code="REQ-102",
             )
 
         # Protection 1: Cannot demote initial admin

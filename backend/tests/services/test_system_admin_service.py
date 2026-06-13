@@ -174,7 +174,7 @@ class TestPromoteToSystemAdmin:
         with pytest.raises(BadRequestError) as exc:
             await service.promote_to_system_admin(fixture_admin.user_id, "promoter@example.com")
         assert exc.value.status_code == 400
-        assert exc.value.error_code == "ADMIN-101"
+        assert exc.value.error_code == "REQ-101"
         assert "already a system admin" in exc.value.message
 
 
@@ -219,7 +219,7 @@ class TestDemoteSystemAdmin:
         with pytest.raises(BadRequestError) as exc:
             await service.demote_system_admin(fixture_regular.user_id, "demoter@example.com")
         assert exc.value.status_code == 400
-        assert exc.value.error_code == "ADMIN-102"
+        assert exc.value.error_code == "REQ-102"
         assert "not a system admin" in exc.value.message
 
     @pytest.mark.asyncio

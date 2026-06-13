@@ -99,7 +99,7 @@ class TestSelfRemovalGuard:
             response = client.delete(f"/api/v1/contexts/{CONTEXT_ID}/members/{OWNER_USER_ID}")
 
         assert response.status_code == 400
-        assert "yourself" in response.json()["detail"].lower()
+        assert "yourself" in response.json()["message"].lower()
 
     def test_workspace_admin_cannot_remove_self(self, client):
         """check_context_owner promotes workspace admin to owner — guard must still fire."""
@@ -116,7 +116,7 @@ class TestSelfRemovalGuard:
             response = client.delete(f"/api/v1/contexts/{CONTEXT_ID}/members/{ADMIN_USER_ID}")
 
         assert response.status_code == 400
-        assert "yourself" in response.json()["detail"].lower()
+        assert "yourself" in response.json()["message"].lower()
 
     def test_owner_can_remove_another_user_reaches_member_lookup(self, client):
         """Removing someone else passes the self-removal guard (goes on to member lookup)."""
@@ -207,7 +207,7 @@ class TestLastOwnerDemotionGuard:
                     json={"role": "editor"},
                 )
             assert response.status_code == 400
-            assert "last" in response.json()["detail"].lower()
+            assert "last" in response.json()["message"].lower()
         finally:
             app.dependency_overrides.clear()
 
@@ -326,7 +326,7 @@ class TestWorkspaceExternalUserGuard:
                     json={"user_id": "outsider", "role": "editor"},
                 )
             assert response.status_code == 400
-            assert "workspace" in response.json()["detail"].lower()
+            assert "workspace" in response.json()["message"].lower()
         finally:
             app.dependency_overrides.clear()
 
@@ -359,7 +359,7 @@ class TestWorkspaceExternalUserGuard:
                     json={"user_id": "anyone", "role": "editor"},
                 )
             assert response.status_code == 400
-            assert "private" in response.json()["detail"].lower()
+            assert "private" in response.json()["message"].lower()
         finally:
             app.dependency_overrides.clear()
 
@@ -455,7 +455,7 @@ class TestAddMemberHappyPath:
                     json={"user_id": MEMBER_USER_ID, "role": "editor"},
                 )
             assert response.status_code == 400
-            assert "already" in response.json()["detail"].lower()
+            assert "already" in response.json()["message"].lower()
         finally:
             app.dependency_overrides.clear()
 
@@ -489,7 +489,7 @@ class TestRemoveMemberHappyPath:
             ):
                 response = client.delete(f"/api/v1/contexts/{CONTEXT_ID}/members/{OTHER_USER_ID}")
             assert response.status_code == 400
-            assert "owner" in response.json()["detail"].lower()
+            assert "owner" in response.json()["message"].lower()
         finally:
             app.dependency_overrides.clear()
 

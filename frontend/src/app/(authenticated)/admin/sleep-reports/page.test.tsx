@@ -201,7 +201,7 @@ describe("AdminSleepReportsPage — Run Now button", () => {
     mockPost.mockRejectedValueOnce(
       new ApiError({
         status: 409,
-        error: "sleep_run_in_progress",
+        error: "SLEEP-002",
         message: "A sleep run is already in progress for this user.",
         details: {
           running_report_id: runningReportId,

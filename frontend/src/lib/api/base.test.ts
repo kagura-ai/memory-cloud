@@ -102,4 +102,26 @@ describe("ApiClient error normalization (#992 canonical 422 envelope)", () => {
     const details = (caught as ApiError).details as Record<string, unknown>;
     expect(details.detail).toBe("API key not found");
   });
+
+  it("aliases the reshaped HTTP-<status> message back to details.detail (#992 Phase 2)", async () => {
+    // The global StarletteHTTPException handler reshapes raw {detail} errors
+    // into { error: "HTTP-404", message, details: {} }. Consumers reading
+    // details.detail must still get the human message string.
+    mockFetchOnce(404, {
+      error: "HTTP-404",
+      message: "Resource not found",
+      details: {},
+    });
+
+    const client = new ApiClient("http://test");
+    const caught = await client.get("/x").catch((e: unknown) => e);
+
+    expect(caught).toBeInstanceOf(ApiError);
+    const err = caught as ApiError;
+    expect(err.error).toBe("HTTP-404");
+    expect(err.message).toBe("Resource not found");
+    const details = err.details as Record<string, unknown>;
+    // String (not array) so consumers calling details.detail.includes(...) work.
+    expect(details.detail).toBe("Resource not found");
+  });
 });

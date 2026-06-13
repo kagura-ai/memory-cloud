@@ -103,6 +103,26 @@ export class ApiClient {
           };
         }
 
+        // #992 Phase 2: the global StarletteHTTPException handler reshapes raw
+        // `{ detail: "msg" }` errors into { error: "HTTP-<status>", message,
+        // details: {} }. Consumers that read `apiError.details.detail` (the
+        // legacy string) for non-422 errors would otherwise see `undefined`.
+        // Alias `detail` back to the top-level message string here, at the same
+        // transport choke point, so those call sites keep rendering. Only fires
+        // when details has neither `detail` nor `errors` and a string message
+        // exists — leaving the 422 array alias and string-detail passthrough
+        // untouched.
+        if (
+          details &&
+          typeof details === "object" &&
+          (details as { detail?: unknown }).detail === undefined &&
+          (details as { errors?: unknown }).errors === undefined &&
+          typeof errorDetails.message === "string" &&
+          errorDetails.message.length > 0
+        ) {
+          details = { ...details, detail: errorDetails.message };
+        }
+
         throw new ApiError({
           error: errorCode,
           message: errorMessage,

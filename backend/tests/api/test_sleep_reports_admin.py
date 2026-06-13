@@ -169,7 +169,7 @@ class TestListSleepReports:
 
         response = client.get("/api/v1/admin/sleep-reports?status=bogus")
         assert response.status_code == 400
-        assert "Invalid status" in response.json()["detail"]
+        assert "Invalid status" in response.json()["message"]
 
     def test_respects_limit_and_offset(self, client):
         mock_db = AsyncMock()
@@ -421,7 +421,7 @@ class TestGetSleepReportDetail:
 
         response = client.get(f"/api/v1/admin/sleep-reports/{uuid4()}")
         assert response.status_code == 404
-        assert "not found" in response.json()["detail"].lower()
+        assert "not found" in response.json()["message"].lower()
 
     def test_invalid_uuid_returns_422(self, client):
         mock_db = AsyncMock()

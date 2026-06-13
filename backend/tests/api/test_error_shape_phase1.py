@@ -80,6 +80,54 @@ def test_request_validation_handler_handles_multiple_errors():
     assert {e["loc"][-1] for e in body["details"]["errors"]} == {"a", "b"}
 
 
+# --- #992 Phase 2: global StarletteHTTPException stopgap handler ---
+
+
+def test_http_exception_handler_reshapes_to_canonical_and_preserves_headers():
+    from starlette.exceptions import HTTPException as StarletteHTTPException
+
+    from api.main import http_exception_handler
+
+    req = MagicMock()
+    req.url.path = "/api/v1/whatever"
+    exc = StarletteHTTPException(
+        status_code=403,
+        detail="Insufficient scope",
+        headers={"WWW-Authenticate": 'Bearer error="insufficient_scope"'},
+    )
+
+    resp = _run(http_exception_handler(req, exc))
+    body = json.loads(resp.body)
+
+    assert resp.status_code == 403
+    # Canonical envelope with the reserved HTTP-<status> placeholder code.
+    assert body == {
+        "error": "HTTP-403",
+        "message": "Insufficient scope",
+        "details": {},
+    }
+    # RFC 6750 challenge header must survive the reshape.
+    assert resp.headers["WWW-Authenticate"] == 'Bearer error="insufficient_scope"'
+
+
+def test_http_exception_handler_handles_non_string_detail():
+    from starlette.exceptions import HTTPException as StarletteHTTPException
+
+    from api.main import http_exception_handler
+
+    req = MagicMock()
+    req.url.path = "/x"
+    exc = StarletteHTTPException(status_code=404, detail={"weird": "dict"})
+
+    resp = _run(http_exception_handler(req, exc))
+    body = json.loads(resp.body)
+
+    assert resp.status_code == 404
+    assert body["error"] == "HTTP-404"
+    assert body["message"] == "Request failed"  # non-string detail → generic
+    assert body["details"] == {}
+
+
 # --- auth-boundary conversions: status + error_code parity ---
 
 

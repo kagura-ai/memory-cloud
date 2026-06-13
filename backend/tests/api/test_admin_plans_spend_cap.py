@@ -142,7 +142,7 @@ class TestSpendCapEndpointNotFound:
             json={"embedding_daily_cap_usd": 1.0, "embedding_monthly_cap_usd": 30.0},
         )
         assert resp.status_code == 404
-        assert resp.json()["detail"] == "Workspace not found"
+        assert resp.json()["message"] == "Workspace not found"
 
 
 class TestSpendCapEndpointTierBounded:
@@ -157,7 +157,7 @@ class TestSpendCapEndpointTierBounded:
             json={"embedding_daily_cap_usd": 20.0, "embedding_monthly_cap_usd": None},
         )
         assert resp.status_code == 400
-        detail = resp.json()["detail"]
+        detail = resp.json()["message"]
         assert "embedding_daily_cap_usd" in detail
         assert "tier default" in detail
         # Rejection must happen before any commit.
@@ -175,7 +175,7 @@ class TestSpendCapEndpointTierBounded:
             },
         )
         assert resp.status_code == 400
-        detail = resp.json()["detail"]
+        detail = resp.json()["message"]
         assert "embedding_monthly_cap_usd" in detail
         db.commit.assert_not_called()
 

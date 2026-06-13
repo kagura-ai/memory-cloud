@@ -186,9 +186,9 @@ class TestResourceErrors:
     def test_bad_request_error_custom_code(self):
         """Call sites override ``error_code`` so SDKs can route on a stable
         identifier without parsing the free-form message."""
-        exc = BadRequestError("User is already a system admin", error_code="ADMIN-101")
+        exc = BadRequestError("User is already a system admin", error_code="REQ-101")
         assert exc.status_code == 400
-        assert exc.error_code == "ADMIN-101"
+        assert exc.error_code == "REQ-101"
 
     def test_bad_request_error_details_passthrough(self):
         """Unlike AdminProtectionError, BadRequestError forwards ``**details``
