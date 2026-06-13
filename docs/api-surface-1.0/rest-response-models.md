@@ -3,7 +3,8 @@
 > Issue: #622 — pre-1.0 public API surface enumeration and freeze
 > Enumerated at commit 20ae959a2c79cacd2cf7922512ad780f540e9c60 (main HEAD, 2026-06-12)
 > Scope: all BaseModel / TZAwareBaseModel subclasses defined in backend/src/api/routes/ (46 route files, 208 model classes — 208 of 208 enumerated)
-> Re-frozen after #991: 3 duplicate class names renamed; dead `APIKey*` schemas removed from `models/schemas.py`; redundant `WorkspaceConnectorCreateResponse.resource_pk` dropped. Deferred: `WorkspaceConnectorSummary.resource_pk` (needs a Resource JOIN), `TelemetryResponse.embedding_config` gating (needs an intent decision), and the sequential-int-PK replacement (Bundle B).
+> Re-frozen after #991 (Phase 1): 3 duplicate class names renamed; dead `APIKey*` schemas removed from `models/schemas.py`; redundant `WorkspaceConnectorCreateResponse.resource_pk` dropped.
+> Re-frozen after #991 (Phase 2): `WorkspaceConnectorSummary.resource_pk` → public `resource_id` slug (via Resource JOIN); `TelemetryResponse.embedding_config.ollama_base_url` dropped (internal URL, no consumer); sequential int PKs (`APIKeyResponse.id`, `ExternalKeyResponse.id`, `ResourceTokenResponse.id`, `WorkspaceConnectorCreateResponse.token_id`) **consciously frozen** into the 1.0 contract — opaque-ID replacement deferred to #1008 (post-1.0, breaking/major). #991 is now fully resolved.
 
 Notes:
 
@@ -379,7 +380,7 @@ Notes:
 
 ### APIKeyResponse (TZAwareBaseModel, L84)
 > Response model for API key metadata.
-- `id: int` — required ⚠ sequential integer DB PK used as the public identifier (leaks row count; consider opaque id before freeze)
+- `id: int` — required ⚠ sequential integer DB PK used as the public identifier. **DECIDED (#991): frozen into the 1.0 contract** — replacement is a breaking migration (URL paths + params + DB lookups + responses); the enumeration existence-oracle is already closed (owner-scope + uniform not-found), residual exposure is row-count *magnitude* only. Opaque-ID migration tracked in #1008 (post-1.0, breaking/major).
 - `key_prefix: str` — required
 - `name: str` — required
 - `user_id: str` — required
@@ -708,7 +709,7 @@ Notes:
 
 ### ExternalKeyResponse (BaseModel, L67)
 > External API key response (masked).
-- `id: int` — required ⚠ sequential integer DB PK used as the public identifier (leaks row count; consider opaque id before freeze)
+- `id: int` — required ⚠ sequential integer DB PK used as the public identifier. **DECIDED (#991): frozen into the 1.0 contract** — replacement is a breaking migration (URL paths + params + DB lookups + responses); the enumeration existence-oracle is already closed (owner-scope + uniform not-found), residual exposure is row-count *magnitude* only. Opaque-ID migration tracked in #1008 (post-1.0, breaking/major).
 - `key_name: str` — required
 - `provider: str` — required
 - `masked_value: str` — required
@@ -1157,7 +1158,7 @@ Notes:
 
 ### ResourceTokenResponse (TZAwareBaseModel, L75)
 > Response model for resource token metadata (no plaintext).
-- `id: int` — required ⚠ sequential integer DB PK used as the public identifier (leaks row count; consider opaque id before freeze)
+- `id: int` — required ⚠ sequential integer DB PK used as the public identifier. **DECIDED (#991): frozen into the 1.0 contract** — replacement is a breaking migration (URL paths + params + DB lookups + responses); the enumeration existence-oracle is already closed (owner-scope + uniform not-found), residual exposure is row-count *magnitude* only. Opaque-ID migration tracked in #1008 (post-1.0, breaking/major).
 - `resource_id: str` — required
 - `description: str | None` — optional
 - `quota_events_per_hour: int` — required
@@ -1266,7 +1267,7 @@ Notes:
 ### TelemetryResponse (BaseModel, L28)
 > System telemetry response (endpoint is gated by APIKeyOrSessionUser, i.e. any authenticated user).
 - `services: dict[str, ServiceStatus]` — required
-- `embedding_config: dict | None` — optional ⚠ internal embedding infrastructure config exposed to any authenticated user — consider admin-only or remove before freeze
+- `embedding_config: dict | None` — optional ✅ **internal `ollama_base_url` dropped in #991** (it exposed an internal infrastructure URL to any authenticated caller and had no consumer). The remaining `{provider, model, dimensions}` are low-sensitivity capability info already surfaced in the admin environment page; the endpoint stays `APIKeyOrSessionUser` (non-admin consumers depend on it). The payload is built by `_embedding_config_payload()` and pinned by `tests/api/test_system_telemetry.py`. The same internal URL was also removed from the `services.ollama` health-check `details` (kept `status` + `models`; the frontend never read `details.url`), so the telemetry response no longer surfaces it anywhere.
 - `memory_stats: dict` — required
 - `neural_memory: dict` — required
 - `uptime_seconds: int` — required
@@ -1470,7 +1471,7 @@ Notes:
 - `resource_id: str` — required
 - ~~`resource_pk: UUID`~~ — ✅ **removed in #991** (was the internal `resources.id` DB PK, redundant with the public `resource_id` slug above).
 - `context_id: UUID | None` — optional
-- `token_id: int` — required
+- `token_id: int` — required ⚠ sequential integer DB PK (ResourceToken.id) used as a public identifier. **DECIDED (#991): frozen into the 1.0 contract**; opaque-ID migration tracked in #1008 (post-1.0, breaking/major). See the `id: int` markers above for the rationale.
 - `token: str` — required ⚠ plaintext connector token (shown-once by design — verify never logged/cached downstream)
 - `kmc_api_key: str | None` — optional ⚠ plaintext KMC write key (shown-once by design)
 - `quota_events_per_hour: int` — required
@@ -1480,7 +1481,7 @@ Notes:
 > One connector row for the workspace list view.
 - `connector_id: UUID` — required
 - `connector_type: str` — required
-- `resource_pk: UUID` — required ⚠ internal DB primary key in a routine list view — should expose the public `resource_id` instead
+- `resource_id: str` — required ✅ **public slug exposed in #991** (replaced the internal `resource_pk` DB key, resolved via a `Resource` JOIN in `ConnectorProvisioningService.list_connectors`).
 - `context_id: UUID | None` — optional
 - `config_version: int` — required
 - `created_at: datetime` — required
@@ -1687,8 +1688,8 @@ Issue #622 allows at most 2 follow-up sub-issues; candidates below are grouped i
 | Candidate | Priority | Action |
 |---|---|---|
 | `WorkspaceConnectorCreateResponse.resource_pk` (workspace_connectors.py) | ✅ DONE (#991) | Dropped — redundant with the public `resource_id` slug already on the response |
-| `WorkspaceConnectorSummary.resource_pk` (workspace_connectors.py) | P1 (deferred) | NOT a pure drop — this response has no `resource_id`; substituting the public slug needs a `Resource` JOIN in `ConnectorProvisioningService.list_connectors`. Tracked for a follow-up. |
-| `TelemetryResponse.embedding_config` (system.py) | P1 (deferred) | Visible to any authenticated user (incl. an internal Ollama URL when provider=ollama). Gating the endpoint is breaking; dropping/nulling the field needs an intent decision (is embedding config intended public?). Tracked for a follow-up. |
+| `WorkspaceConnectorSummary.resource_pk` (workspace_connectors.py) | ✅ DONE (#991) | Replaced `resource_pk: UUID` with the public `resource_id: str` slug, resolved via a single `Resource` JOIN in `ConnectorProvisioningService.list_connectors` (no N+1). Frontend type synced. |
+| `TelemetryResponse.embedding_config` (system.py) | ✅ DONE (#991) | Dropped the internal `ollama_base_url` field (internal infra URL, zero consumers). Kept `{provider, model, dimensions}` (low-sensitivity capability info consumed by the admin environment page). Endpoint stays `APIKeyOrSessionUser` — gating it would break the non-admin telemetry consumers. The same URL was also removed from the `services.ollama` health-check `details` so it is not surfaced anywhere in the response; payload pinned by `tests/api/test_system_telemetry.py`. |
 | `ResourceEventRecord.payload` / `event_metadata` (resources.py) | P1 | Confirm raw-vs-derived boundary (#968) / classification redaction applies to the Resource Detail Data tab before freeze |
 | `OAuth2ClientResponse.plaintext_secret` (oauth.py) | P1 | Verify owner+visibility gating and `response_model_exclude` coverage on every endpoint returning this model; fix the misleading "without secret" docstring |
 | `WorkerConnectorConfig` (workers.py) | P1 | Explicitly exclude the `/workers` surface (plaintext Slack/KMC secrets) from the public 1.0 OpenAPI/freeze scope |
@@ -1699,6 +1700,6 @@ Issue #622 allows at most 2 follow-up sub-issues; candidates below are grouped i
 
 | Candidate | Priority | Action |
 |---|---|---|
-| `APIKeyResponse.id`, `ExternalKeyResponse.id`, `ResourceTokenResponse.id`, `WorkspaceConnectorCreateResponse.token_id` (all `int`) | P2 | Replace sequential integer DB PKs with opaque/prefixed public identifiers before freezing the surface |
+| `APIKeyResponse.id`, `ExternalKeyResponse.id`, `ResourceTokenResponse.id`, `WorkspaceConnectorCreateResponse.token_id` (all `int`) | ✅ DECIDED (#991) → tracked #1008 | **Frozen into the 1.0 contract** rather than replaced. Replacement is a breaking migration spanning URL paths (`/{token_id}`), request params, DB lookups, and response shapes across 4 models / 3+ route files — out of scope for a pre-1.0 cleanup. The enumeration existence-oracle is already closed (owner-scope + uniform not-found); residual exposure is row-count *magnitude* only. Opaque-ID replacement deferred to #1008 (post-1.0, breaking/major). |
 | Untyped `dict` fields on freezable responses: `PublicSearchResult.metadata`, `GraphStats.top_connections`/`recent_edges`, `GraphDataResponse.stats`, `UserStats.*`, `WorkspacePlanInfo.usage`/`quotas` (workspace_plan.py), `AvailablePlanInfo.quotas`, `TelemetryResponse.memory_stats`/`neural_memory`, `SleepReportDetail.*_result`, `UserInfo.workspaces` | P2 | Type them with explicit models, or mark them explicitly non-frozen in the 1.0 contract |
 | Duplicate class names across route files | ✅ DONE (#991) | Renamed the `admin_plans.py` / `workspaces.py` copies → `AdminWorkspacePlanInfo`, `AdminUpdatePlanRequest`, `WorkspaceContextStatsResponse`; `workspace_plan.py` / `contexts.py` keep the canonical names. Also removed the dead `APIKeyCreate`/`APIKeyResponse`/`APIKeyCreateResponse` duplicates from `models/schemas.py` (zero callers; live versions are in `api_keys.py`). OpenAPI now emits distinct component names per endpoint; field JSON unchanged. |

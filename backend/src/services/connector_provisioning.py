@@ -21,7 +21,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from auth.resource_tokens import ResourceTokenManager
 from models.auth import Workspace
-from models.resource import ResourceSchema, ResourceToken, WorkspaceConnector
+from models.resource import Resource, ResourceSchema, ResourceToken, WorkspaceConnector
 from services.resource_lookup import resolve_resource_pk, upsert_resource
 from utils.exceptions import ConflictError, MemoryCloudException, NotFoundException, ValidationError
 from utils.logger import get_logger
@@ -67,6 +67,16 @@ class ConnectorProvisioningResult:
     # with a write-target context.
     context_id: UUID | None = None
     plaintext_kmc_api_key: str | None = None
+
+
+@dataclass(frozen=True)
+class ConnectorListItem:
+    """One connector row for the workspace list view, paired with its public
+    ``resource_id`` slug (resolved via a JOIN so the internal ``resource_pk``
+    DB key is never exposed on the surface — #991)."""
+
+    connector: WorkspaceConnector
+    resource_id: str
 
 
 @dataclass(frozen=True)
@@ -507,14 +517,23 @@ class ConnectorProvisioningService:
         # already cleared the SET LOCAL along with the rest of the transaction.
         await self.db.execute(text("SET LOCAL lock_timeout = '0'"))
 
-    async def list_connectors(self, workspace_id: UUID) -> list[WorkspaceConnector]:
-        """Return all connectors for a workspace, newest first."""
+    async def list_connectors(self, workspace_id: UUID) -> list[ConnectorListItem]:
+        """Return all connectors for a workspace, newest first.
+
+        Each row is paired with its public ``resource_id`` slug via a single
+        JOIN on ``resources`` (no per-row lookup / N+1), so the surface exposes
+        the slug instead of the internal ``resource_pk`` DB key (#991).
+        """
         result = await self.db.execute(
-            select(WorkspaceConnector)
+            select(WorkspaceConnector, Resource.resource_id)
+            .join(Resource, WorkspaceConnector.resource_pk == Resource.id)
             .where(WorkspaceConnector.workspace_id == workspace_id)
             .order_by(WorkspaceConnector.created_at.desc())
         )
-        return list(result.scalars().all())
+        return [
+            ConnectorListItem(connector=connector, resource_id=resource_id)
+            for connector, resource_id in result.all()
+        ]
 
     async def get_connector_for_dispatch(
         self, connector_type: str, external_team_id: str

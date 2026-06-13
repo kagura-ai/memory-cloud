@@ -88,7 +88,11 @@ class WorkspaceConnectorSummary(TZAwareBaseModel):
 
     connector_id: UUID
     connector_type: str
-    resource_pk: UUID
+    # Public `resource_id` slug, not the internal `resource_pk` DB key (#991):
+    # the slug is the stable surface identifier; the internal PK was an
+    # information leak and is dropped before the 1.0 freeze. Resolved via a
+    # JOIN in ConnectorProvisioningService.list_connectors.
+    resource_id: str
     context_id: UUID | None = None
     config_version: int
     created_at: datetime
@@ -233,18 +237,18 @@ async def list_workspace_connectors(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="No workspace selected. Please select a workspace first.",
         )
-    connectors = await ConnectorProvisioningService(db).list_connectors(workspace_id)
+    items = await ConnectorProvisioningService(db).list_connectors(workspace_id)
     return [
         WorkspaceConnectorSummary(
-            connector_id=c.id,
-            connector_type=c.connector_type,
-            resource_pk=c.resource_pk,
-            context_id=c.context_id,
-            config_version=c.config_version,
-            created_at=c.created_at,
-            created_by=c.created_by,
+            connector_id=item.connector.id,
+            connector_type=item.connector.connector_type,
+            resource_id=item.resource_id,
+            context_id=item.connector.context_id,
+            config_version=item.connector.config_version,
+            created_at=item.connector.created_at,
+            created_by=item.connector.created_by,
         )
-        for c in connectors
+        for item in items
     ]
 
 
