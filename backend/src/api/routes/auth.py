@@ -954,6 +954,11 @@ async def get_current_user_info(
             # Issue #514: surface auth_method + auth_provider for sign-in-method display
             "auth_method": db_user.auth_method if db_user else "oauth",
             "auth_provider": db_user.auth_provider if db_user else None,
+            # Issue #953: surface the protected-initial-admin flag so the frontend
+            # can hide the self-serve account-deletion control. The backend hard-
+            # blocks erasure of this account (InitialAdminCannotBeErasedError —
+            # ERASURE-004 / 403); this just keeps the UI honest.
+            "is_initial_admin": db_user.is_initial_admin if db_user else False,
         }
     }
 

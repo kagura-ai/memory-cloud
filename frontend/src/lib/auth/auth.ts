@@ -24,6 +24,9 @@ export interface User {
   // Issue #514: sign-in method display
   auth_method?: "password" | "oauth";
   auth_provider?: "google" | "github" | null;
+  // Issue #953: protected initial administrator — cannot self-delete
+  // (backend blocks erasure with ERASURE-004 / 403). Hides the danger zone.
+  is_initial_admin?: boolean;
 }
 
 export interface AuthResponse {
