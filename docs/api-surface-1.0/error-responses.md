@@ -35,18 +35,19 @@ HTTP status comes from `exc.status_code` (per-class; see catalogue). Notable hea
 
 > ⚠ Note vs. intent: issues #401/#602/#603/#604 standardized on this `{error, message, details}` shape (confirmed in the #602 PR body: callers read `exc.reason` instead of `exc.detail`; frontend consumes the uniform shape). The shape is **not** `{detail, error_code}` — `detail` is the *non-conforming* FastAPI default, below.
 
-### 2. REST — raw `HTTPException` (FastAPI default, NON-canonical)
+### 2. REST — raw `HTTPException` → canonical via the global handler (since #992 Phase 2)
 
-No custom handler is registered for `fastapi.HTTPException` / `StarletteHTTPException`. The remaining raw raise sites (see §Non-conforming) therefore produce FastAPI's default:
+Since #992 Phase 2 a global `StarletteHTTPException` handler (`api/main.py`) reshapes every raw `raise HTTPException` into the canonical envelope, so the **shape is frozen across the whole surface** even where a semantic code has not yet been assigned:
 
 ```json
-{ "detail": "<string or object passed as detail>" }
+{ "error": "HTTP-<status>", "message": "<the detail string>", "details": {} }
 ```
 
-- No `error` code. No `message`. No `details` object. SDKs cannot route on these.
-- Status code is whatever the raise site passes.
+- `error` carries the reserved `HTTP-<status>` placeholder namespace (e.g. `HTTP-404`), distinct from the semantic `AUTH-`/`ADMIN-`/`VAL-`/`REQ-` codes. SDKs route on the shape uniformly today; per-site semantic codes are a post-1.0 improvement.
+- `exc.headers` is passed through, so RFC 6750 `WWW-Authenticate: Bearer` challenges survive (`oauth.py`, `auth/dependencies.py`).
+- Shape-only: the handler does NOT apply the CWE-639 deny-class `details` strip (a raw `HTTPException` carries no structured `details` — only a string `detail` → `message`). The remaining raw 403 detail strings were audited for forensic leakage in the #992 review; the one cross-workspace existence-oracle smell is tracked in **#1011**.
 
-> **#992 Phase 1 (partial, landed):** the original census counted **366** raw raise sites. Phase 1 converted **36 auth-boundary 401/403 route-level sites** (every 401/403 in `auth.py`, `oauth.py`, `public_search.py`, `workspace.py`, `member_credentials.py`, `admin.py` — single-line **and** multi-line raise forms) onto the canonical `MemoryCloudException` family, leaving **~330** raw sites. The only 401/403 deliberately left raw in those files are `oauth.py:327/341`, which carry the RFC 6750 `WWW-Authenticate: Bearer` challenge header the global handler does not emit. The dependency-layer 401/403 emitters (`auth/dependencies.py`, `auth/analysis_gates.py`, `utils/auth_helpers.py`), the non-auth statuses (400/404/422/500) in the touched files, and Phase 2's remaining route files are **not** yet migrated — see §Follow-up. #992 stays open.
+> **#992 (resolved on the REST surface):** the original census counted **366** raw raise sites. **Phase 1** converted 36 auth-boundary 401/403 route-level sites onto the canonical `MemoryCloudException` family (single-line **and** multi-line forms; `oauth.py:327/341` left raw for their RFC 6750 `WWW-Authenticate` header) and added the 422 `RequestValidationError` handler. **Phase 2** froze the *shape* of the remaining **~296** raw sites in one place via the global `StarletteHTTPException` stopgap handler above — the two-shapes-coexisting problem is gone. Assigning each placeholder `HTTP-<status>` a semantic `NAMESPACE-NNN` code is a gradual post-1.0 improvement, ratchet-guarded by `tests/api/test_raw_httpexception_guard.py` so the raw count cannot grow.
 
 ### 3. REST — 422 validation (canonical, since #992 Phase 1)
 
@@ -133,7 +134,7 @@ Auth failure before dispatch (`transport.py:531-580`): HTTP 401, body `{"error":
 | `RES-003` | `MemoryGoneError` — exceptions.py:174 | 410 | Resource soft-deleted (distinct from 404 so clients stop retrying). |
 | `RES-004` | *(no class — inline `JSONResponse`)* — api/routes/attachments.py:30 | 410 | Deprecated `/api/v1/attachments/*` retired; carries Sunset/Deprecation/Link headers. |
 | `VAL-001` | `ValidationError` — exceptions.py:195 | 422 | Service-layer validation error (shape/format). ⚠ Coexists with the non-conforming FastAPI 422. |
-| `REQ-001` | `BadRequestError` (default) — exceptions.py:217 | 400 | State-precondition failure (call sites may override the code, see ADMIN-101/102). |
+| `REQ-001` | `BadRequestError` (default) — exceptions.py:217 | 400 | State-precondition failure (call sites may override the code, e.g. `REQ-101`/`REQ-102`). |
 | `MEDIA-001` | `UnsupportedMediaTypeError` — exceptions.py:254 | 415 | Content-Type not in allow-list; `details.allowed` lists accepted types. |
 | `BONUS-001` | `InsufficientReasonError` — exceptions.py:283 | 400 | Slot-bonus shrink below owned count requires a reason. |
 | `BONUS-002` | `BonusBelowZeroError` — exceptions.py:301 | 400 | Resulting workspace_slot_bonus would be negative. |
@@ -167,11 +168,11 @@ Auth failure before dispatch (`transport.py:531-580`): HTTP 401, body `{"error":
 | `CONNECTOR-001` | `MemoryCloudException` — services/connector_provisioning.py:407 | 403 | Connector seat limit reached for plan. |
 | `CONNECTOR-002` | `MemoryCloudException` — services/connector_provisioning.py:503 | 503 | Connector seat lock unavailable (PG 55P03 lock timeout); retry. |
 | `EXT-ANA-001` | `ExternalServiceError` subclass — services/analysis/llm_caller.py:83 | 502 | Entire OpenAI fallback chain exhausted (`details.upstream_provider_error=true`, `attempted_models`). |
-| `ADMIN-101` | `BadRequestError` — services/system_admin_service.py:111 | 400 | User is already a system admin. ⚠ Namespace collision: `ADMIN-001` is a 403 protection error, `ADMIN-1xx` are 400 preconditions. |
-| `ADMIN-102` | `BadRequestError` — services/system_admin_service.py:184 | 400 | User is not a system admin. ⚠ Same namespace concern. |
-| `admin_user_id_missing` | `MemoryCloudException` — api/routes/admin_sleep.py:234 | 500 | Admin user id missing from session (defensive). ⚠ snake_case, violates `NAMESPACE-NNN` convention. |
-| `sleep_run_in_progress` | `MemoryCloudException` — api/routes/admin_sleep.py:255 | 409 | A sleep run is already in progress for this user. ⚠ snake_case. |
-| `sleep_target_not_found` | `MemoryCloudException` — api/routes/admin_sleep.py:278 | 404 | No eligible contexts for sleep maintenance. ⚠ snake_case. |
+| `REQ-101` | `BadRequestError` — services/system_admin_service.py:111 | 400 | User is already a system admin. ✅ **#992 Phase 2**: re-namespaced from `ADMIN-101` to the `REQ-*` (BadRequestError) family — resolves the `ADMIN-001` (403 protection) vs `ADMIN-1xx` (400 precondition) collision; `ADMIN-*` now uniformly means admin-protection. |
+| `REQ-102` | `BadRequestError` — services/system_admin_service.py:184 | 400 | User is not a system admin. ✅ **#992 Phase 2**: re-namespaced from `ADMIN-102` → `REQ-102` (same rationale). |
+| `SLEEP-001` | `MemoryCloudException` — api/routes/admin_sleep.py:234 | 500 | Admin user id missing from session (defensive). ✅ **#992 Phase 2**: renamed from snake_case `admin_user_id_missing` to the `NAMESPACE-NNN` convention. |
+| `SLEEP-002` | `MemoryCloudException` — api/routes/admin_sleep.py:255 | 409 | A sleep run is already in progress for this user. ✅ **#992 Phase 2**: renamed from `sleep_run_in_progress`. |
+| `SLEEP-003` | `MemoryCloudException` — api/routes/admin_sleep.py:278 | 404 | No eligible contexts for sleep maintenance. ✅ **#992 Phase 2**: renamed from `sleep_target_not_found`. |
 
 ### C. MCP-only codes assigned via `error_code` variable — `backend/src/mcp_server/tools/resource.py`
 
@@ -271,7 +272,7 @@ Other non-conforming shapes (not raw HTTPException):
 
 1. **FastAPI 422** — `{"detail": [ ... ]}` array shape; no `RequestValidationError` handler exists (§Canonical shape, point 3). ⚠
 2. **MCP `-32603` catch-all** — swallows `MemoryCloudException.error_code` when a tool handler lacks its own catch (§Canonical shape, point 5). ⚠
-3. Three snake_case codes on the REST surface (`admin_user_id_missing`, `sleep_run_in_progress`, `sleep_target_not_found`) conform in *shape* but break the `NAMESPACE-NNN` code convention (§Catalogue B). ⚠
+3. ✅ **RESOLVED (#992 Phase 2)**: the three REST snake_case codes were renamed to `SLEEP-001/002/003` (§Catalogue B); the REST surface now uses `NAMESPACE-NNN` uniformly. (The 41 MCP `_error_response` snake_case literals at the section above are a separate MCP-surface concern, out of #992's REST scope.)
 
 ---
 
@@ -283,8 +284,8 @@ Issue acceptance allows at most 2 sub-issues; candidates are grouped into 2 bund
 
 | Priority | Item | Feeds from |
 |---|---|---|
-| P1 | Rename the 3 snake_case REST codes in `api/routes/admin_sleep.py` to the `NAMESPACE-NNN` convention (e.g. `SLEEP-001/002/003`) before any SDK pins them. | §B ⚠ |
-| P1 | Resolve the `ADMIN-*` namespace collision: `ADMIN-001` (403 protection) vs `ADMIN-101/102` (400 preconditions). Either re-namespace the preconditions (e.g. `REQ-1xx`) or document the split-by-hundreds scheme as frozen. | §B ⚠ |
+| ✅ DONE (#992 Phase 2) | Renamed the 3 snake_case REST codes in `api/routes/admin_sleep.py` → `SLEEP-001/002/003` (tests + OpenAPI example + the frontend mock updated). | §B |
+| ✅ DONE (#992 Phase 2) | Resolved the `ADMIN-*` collision by re-namespacing the 400 preconditions `ADMIN-101/102` → `REQ-101/102` (the BadRequestError family). `ADMIN-*` now uniformly means admin-protection (403). | §B |
 | ✅ DONE (#992 Phase 1) | ~~Decide the 422 story~~ — **resolved**: a `RequestValidationError` handler now wraps FastAPI validation errors in the canonical envelope under `error: "VAL-001"` (`{loc, msg, type}` projection, `input` stripped). The two 422 shapes now agree. | §Canonical 3 |
 | P2 | Give Qdrant a dedicated code (the `EXT-101` gap before Redis `EXT-102` strongly suggests it was reserved for Qdrant); keep `EXT-001` as the generic fallback only. | §A ⚠ |
 | P2 | Remove the class-name fallback in `MemoryCloudException.__init__` (`error_code or self.__class__.__name__`) or make `error_code` required — the fallback can silently mint undocumented codes. | §Canonical 1 ⚠ |
@@ -295,7 +296,7 @@ Issue acceptance allows at most 2 sub-issues; candidates are grouped into 2 bund
 
 | Priority | Item | Feeds from |
 |---|---|---|
-| 🟡 PARTIAL (#992 Phase 1) | Migrate the auth boundary first. **Route-level 401/403 done**: the 21 raw sites in `auth.py`, `oauth.py`, `public_search.py`, `workspace.py`, `member_credentials.py`, `admin.py` now raise the canonical `AUTH-*`/`ADMIN-001` family. **Still raw (Phase 2)**: the dependency-layer emitters `auth/dependencies.py` (18), `auth/analysis_gates.py` (4), `utils/auth_helpers.py` (4) — these run on every protected route and are the higher-frequency emitters. Note `auth/dependencies.py:505/521` deliberately carry `WWW-Authenticate: Bearer error="insufficient_scope"` (RFC 6750) and `oauth.py:329/343` carry `WWW-Authenticate: Bearer` — preserve those headers when migrating. | §Non-conforming ⚠ |
+| ✅ SHAPE DONE (#992 Phase 1+2) | **Route-level 401/403 (Phase 1)**: the 21 raw sites in `auth.py`, `oauth.py`, `public_search.py`, `workspace.py`, `member_credentials.py`, `admin.py` raise the canonical `AUTH-*`/`ADMIN-001` family with semantic codes. **Dependency-layer emitters** `auth/dependencies.py`, `auth/analysis_gates.py`, `utils/auth_helpers.py` are still raw `HTTPException` but their **shape is now canonical** via the Phase 2 global handler (placeholder `HTTP-<status>` code); their `WWW-Authenticate: Bearer` headers (`auth/dependencies.py:505/521`, `oauth.py` Bearer challenges) are preserved by the handler's `exc.headers` passthrough. Assigning these dependency-layer emitters semantic `AUTH-*` codes is the post-1.0 gradual follow-up. | §Non-conforming |
 | P1 | Retire `utils/db_helpers.py:79` (`handle_db_operation` → `HTTPException(500)`) in favor of `DatabaseError`/`InternalError`, and stop `utils/error_messages.py` documenting the raw-raise pattern. | §Non-conforming ⚠ |
-| P2 | Migrate the remaining ~296 route-level raises (non-auth statuses + untouched files), largest files first (`contexts.py` 29, `oauth.py` 26, `resource_tokens.py` 17, `auth.py` 17, `member_credentials.py` 15, `admin.py` 15). Alternatively, if full migration won't land before 1.0: register a `StarletteHTTPException` handler that re-shapes `{"detail": ...}` into `{error: "HTTP-<status>", message, details: {}}` as a stopgap so the *shape* freezes even where codes don't exist yet. | §Non-conforming ⚠ |
+| ✅ DONE (#992 Phase 2) | Registered the global `StarletteHTTPException` stopgap handler that re-shapes `{"detail": ...}` → `{error: "HTTP-<status>", message, details: {}}`, freezing the *shape* of all ~296 remaining raw raises in one place (the chosen alternative — full per-site migration was out of scope for the pre-1.0 window). Assigning each placeholder `HTTP-<status>` a semantic `NAMESPACE-NNN` code (largest files first: `contexts.py` 29, `oauth.py` 26, `resource_tokens.py` 17, `auth.py` 17, `member_credentials.py` 15, `admin.py` 15) is the post-1.0 gradual follow-up, ratchet-guarded by `tests/api/test_raw_httpexception_guard.py`. | §Non-conforming |
 | P2 | Propagate `error_code` through the MCP `-32603` catch-all via `error.data` (e.g. `data.error_code`) so transport-level failures stay SDK-routable. | §D ⚠ |

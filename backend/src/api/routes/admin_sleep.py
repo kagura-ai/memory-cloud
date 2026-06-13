@@ -183,7 +183,7 @@ def _log_background_task_result(task: asyncio.Task[Any]) -> None:
             "content": {
                 "application/json": {
                     "example": {
-                        "error": "sleep_run_in_progress",
+                        "error": "SLEEP-002",
                         "message": "A sleep run is already in progress for this user.",
                         "details": {
                             "running_report_id": "00000000-0000-0000-0000-000000000000",
@@ -213,10 +213,10 @@ async def trigger_sleep_run(
         background; poll ``GET /admin/sleep-reports/{id}`` for progress.
 
     Raises:
-        409 ``sleep_run_in_progress`` if this user already has a sleep run
+        409 ``SLEEP-002`` if this user already has a sleep run
         with ``status='running'`` — the response body includes
         ``running_report_id`` and ``started_at`` so the UI can link to it.
-        404 ``sleep_target_not_found`` if no eligible contexts match.
+        404 ``SLEEP-003`` if no eligible contexts match.
 
     Phase 1 limitation:
         The 409 guard is best-effort under concurrent requests. Two
@@ -231,7 +231,7 @@ async def trigger_sleep_run(
         raise MemoryCloudException(
             message="Admin user id missing from session.",
             status_code=500,
-            error_code="admin_user_id_missing",
+            error_code="SLEEP-001",
         )
 
     # ---- Concurrency guard --------------------------------------------------
@@ -252,7 +252,7 @@ async def trigger_sleep_run(
         raise MemoryCloudException(
             message="A sleep run is already in progress for this user.",
             status_code=409,
-            error_code="sleep_run_in_progress",
+            error_code="SLEEP-002",
             running_report_id=str(running_report_id),
             started_at=to_utc_iso(started_at),
         )
@@ -275,7 +275,7 @@ async def trigger_sleep_run(
         raise MemoryCloudException(
             message=("No eligible contexts found for this admin to run sleep maintenance on."),
             status_code=404,
-            error_code="sleep_target_not_found",
+            error_code="SLEEP-003",
             context_id=str(request.context_id) if request.context_id else None,
         )
 

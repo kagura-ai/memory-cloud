@@ -13,6 +13,7 @@ from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from sqlalchemy.exc import SQLAlchemyError
+from starlette.exceptions import HTTPException as StarletteHTTPException
 from starlette.middleware.base import BaseHTTPMiddleware
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
@@ -376,6 +377,56 @@ async def request_validation_exception_handler(
             "message": "Request validation failed",
             "details": {"errors": errors},
         },
+    )
+
+
+@app.exception_handler(StarletteHTTPException)
+async def http_exception_handler(request: Request, exc: StarletteHTTPException) -> JSONResponse:
+    """Reshape FastAPI/Starlette's default ``{"detail": ...}`` into the canonical
+    ``{error, message, details}`` envelope (#992 Phase 2 stopgap).
+
+    The ~330 route-level ``raise HTTPException`` sites not yet assigned a
+    semantic ``NAMESPACE-NNN`` code still emit FastAPI's default shape. This
+    handler freezes the error *shape* across all of them in one place so the
+    1.0 contract exposes a single envelope; per-site semantic-code assignment
+    is a post-1.0 improvement. ``error`` carries the reserved ``HTTP-<status>``
+    placeholder namespace (distinct from the semantic ``AUTH-``/``ADMIN-``/
+    ``VAL-``/``REQ-`` codes), and ``exc.headers`` is passed through so RFC 6750
+    ``WWW-Authenticate`` challenges (Bearer / insufficient_scope) survive.
+
+    A string ``detail`` becomes ``message`` with empty ``details``; a structured
+    (dict/list) ``detail`` is preserved verbatim under ``details.detail`` (the
+    only such sites are the external-keys conflict payloads) with a generic
+    ``message``. Shape-only: it does NOT apply the CWE-639 deny-class ``details``
+    strip that ``memory_cloud_exception_handler`` does. The remaining raw 403
+    detail strings were audited for forensic leakage in the #992 review; the one
+    cross-workspace existence-oracle smell is tracked in #1011.
+    """
+    detail = exc.detail
+    if isinstance(detail, str):
+        message = detail
+        details: dict = {}
+    else:
+        # Structured (dict/list) detail — e.g. the external-keys reranker /
+        # embeddings conflict payloads (external_keys.py). Preserve it under
+        # ``details.detail`` so consumers that branch on the structured object
+        # keep working; ``message`` stays generic since there is no single
+        # human string.
+        message = "Request failed"
+        details = {"detail": detail}
+    logger.warning(
+        "http_exception",
+        status_code=exc.status_code,
+        path=request.url.path,
+    )
+    return JSONResponse(
+        status_code=exc.status_code,
+        content={
+            "error": f"HTTP-{exc.status_code}",
+            "message": message,
+            "details": details,
+        },
+        headers=getattr(exc, "headers", None),
     )
 
 

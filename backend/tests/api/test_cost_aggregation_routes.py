@@ -227,7 +227,7 @@ class TestAdminRoute:
             "/api/v1/admin/cost-aggregation?period=hour&from=2026-04-01&to=2026-04-07"
         )
         assert response.status_code == 400
-        assert "Invalid period" in response.json()["detail"]
+        assert "Invalid period" in response.json()["message"]
 
     def test_invalid_source_returns_400(self, client):
         _install_admin_overrides(client, [])
@@ -235,7 +235,7 @@ class TestAdminRoute:
             "/api/v1/admin/cost-aggregation?period=day&from=2026-04-01&to=2026-04-07&source=manual"
         )
         assert response.status_code == 400
-        assert "Invalid source" in response.json()["detail"]
+        assert "Invalid source" in response.json()["message"]
 
     def test_invalid_paid_by_returns_400(self, client):
         _install_admin_overrides(client, [])
@@ -243,7 +243,7 @@ class TestAdminRoute:
             "/api/v1/admin/cost-aggregation?period=day&from=2026-04-01&to=2026-04-07&paid_by=user"
         )
         assert response.status_code == 400
-        assert "Invalid paid_by" in response.json()["detail"]
+        assert "Invalid paid_by" in response.json()["message"]
 
     def test_inverted_window_returns_400(self, client):
         _install_admin_overrides(client, [])
@@ -261,7 +261,7 @@ class TestAdminRoute:
             "/api/v1/admin/cost-aggregation?period=day&from=2026-01-01&to=2027-01-01"
         )
         assert response.status_code == 400
-        assert "exceeds" in response.json()["detail"]
+        assert "exceeds" in response.json()["message"]
         assert mock_aggregate.await_count == 0  # rejected before SQL
 
     def test_window_at_cap_boundary_returns_200(self, client):
@@ -383,7 +383,7 @@ class TestWorkspaceRoute:
             "?period=day&from=2026-04-01&to=2026-04-07&source=manual"
         )
         assert response.status_code == 400
-        assert "Invalid source" in response.json()["detail"]
+        assert "Invalid source" in response.json()["message"]
 
     def test_invalid_paid_by_returns_400(self, client):
         _install_workspace_overrides(client, [], user=_regular_user())
@@ -392,7 +392,7 @@ class TestWorkspaceRoute:
             "?period=day&from=2026-04-01&to=2026-04-07&paid_by=user"
         )
         assert response.status_code == 400
-        assert "Invalid paid_by" in response.json()["detail"]
+        assert "Invalid paid_by" in response.json()["message"]
 
     def test_window_exceeding_cap_returns_400(self, client):
         # Same defense-in-depth cap on the workspace-scoped route (#528).
@@ -403,7 +403,7 @@ class TestWorkspaceRoute:
             "?period=day&from=2026-01-01&to=2027-01-01"
         )
         assert response.status_code == 400
-        assert "exceeds" in response.json()["detail"]
+        assert "exceeds" in response.json()["message"]
         assert mock_aggregate.await_count == 0  # rejected before SQL
 
 

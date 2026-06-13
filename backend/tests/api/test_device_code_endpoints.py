@@ -97,7 +97,7 @@ class TestDeviceAuthorizeEndpoint:
             )
 
         assert resp.status_code == 400
-        assert "Unknown client_id" in resp.json()["detail"]
+        assert "Unknown client_id" in resp.json()["message"]
 
     def test_authorize_scope_intersection(self, test_oauth_client):
         with patch("api.routes.oauth.get_sync_session") as mock_session_fn:
@@ -326,7 +326,7 @@ class TestDeviceConfirmEndpoint:
                 )
 
         assert resp.status_code == 404
-        assert "expired" in resp.json()["detail"].lower()
+        assert "expired" in resp.json()["message"].lower()
 
     def test_confirm_already_processed(self, test_device_code):
         test_device_code.authorized_at = utcnow() - timedelta(seconds=30)

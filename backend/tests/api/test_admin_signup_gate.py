@@ -175,7 +175,7 @@ class TestAddToAllowlist:
             json={"github_username": "ghost"},
         )
         assert response.status_code == 404
-        assert "not found" in response.json()["detail"].lower()
+        assert "not found" in response.json()["message"].lower()
 
     def test_409_on_duplicate(self, client, monkeypatch):
         monkeypatch.setattr(
@@ -203,7 +203,7 @@ class TestAddToAllowlist:
             json={"github_username": "octocat"},
         )
         assert resp.status_code == 502
-        assert "GitHub" in resp.json()["detail"]
+        assert "GitHub" in resp.json()["message"]
 
     def test_422_on_empty_username(self, client):
         resp = client.post(

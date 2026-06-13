@@ -190,7 +190,7 @@ class TestWorkspaceListSleepReports:
 
         response = client.get(f"/api/v1/workspaces/{_WORKSPACE_ID}/sleep-reports?status=bogus")
         assert response.status_code == 400
-        assert "Invalid status" in response.json()["detail"]
+        assert "Invalid status" in response.json()["message"]
 
     def test_filters_by_status(self, client):
         reports = [_make_mock_report(status="failed")]
@@ -273,7 +273,7 @@ class TestWorkspaceGetSleepReportDetail:
 
         response = client.get(f"/api/v1/workspaces/{_WORKSPACE_ID}/sleep-reports/{report.id}")
         assert response.status_code == 404
-        assert "not found" in response.json()["detail"].lower()
+        assert "not found" in response.json()["message"].lower()
 
     def test_not_found_returns_404(self, client):
         mock_db = AsyncMock()

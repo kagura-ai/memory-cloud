@@ -80,6 +80,58 @@ def test_request_validation_handler_handles_multiple_errors():
     assert {e["loc"][-1] for e in body["details"]["errors"]} == {"a", "b"}
 
 
+# --- #992 Phase 2: global StarletteHTTPException stopgap handler ---
+
+
+def test_http_exception_handler_reshapes_to_canonical_and_preserves_headers():
+    from starlette.exceptions import HTTPException as StarletteHTTPException
+
+    from api.main import http_exception_handler
+
+    req = MagicMock()
+    req.url.path = "/api/v1/whatever"
+    exc = StarletteHTTPException(
+        status_code=403,
+        detail="Insufficient scope",
+        headers={"WWW-Authenticate": 'Bearer error="insufficient_scope"'},
+    )
+
+    resp = _run(http_exception_handler(req, exc))
+    body = json.loads(resp.body)
+
+    assert resp.status_code == 403
+    # Canonical envelope with the reserved HTTP-<status> placeholder code.
+    assert body == {
+        "error": "HTTP-403",
+        "message": "Insufficient scope",
+        "details": {},
+    }
+    # RFC 6750 challenge header must survive the reshape.
+    assert resp.headers["WWW-Authenticate"] == 'Bearer error="insufficient_scope"'
+
+
+def test_http_exception_handler_preserves_structured_dict_detail():
+    from starlette.exceptions import HTTPException as StarletteHTTPException
+
+    from api.main import http_exception_handler
+
+    # external_keys.py raises dict-detail HTTPExceptions for conflict payloads;
+    # the handler must preserve the object under details.detail (not drop it),
+    # so the frontend consumer branching on detail.error keeps working.
+    req = MagicMock()
+    req.url.path = "/api/v1/external-keys"
+    payload = {"error": "reranker_provider_conflict", "conflicting_provider": "cohere"}
+    exc = StarletteHTTPException(status_code=409, detail=payload)
+
+    resp = _run(http_exception_handler(req, exc))
+    body = json.loads(resp.body)
+
+    assert resp.status_code == 409
+    assert body["error"] == "HTTP-409"
+    assert body["message"] == "Request failed"  # no single human string for a dict
+    assert body["details"]["detail"] == payload  # structured detail preserved
+
+
 # --- auth-boundary conversions: status + error_code parity ---
 
 

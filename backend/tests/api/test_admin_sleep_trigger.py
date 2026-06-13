@@ -157,7 +157,7 @@ class TestTriggerSleepRun:
 
         assert response.status_code == 409, response.text
         body = response.json()
-        assert body["error"] == "sleep_run_in_progress"
+        assert body["error"] == "SLEEP-002"
         assert "already in progress" in body["message"].lower()
         assert body["details"]["running_report_id"] == str(running_id)
         # to_utc_iso renders with a trailing Z.
@@ -185,6 +185,6 @@ class TestTriggerSleepRun:
 
         assert response.status_code == 404, response.text
         body = response.json()
-        assert body["error"] == "sleep_target_not_found"
+        assert body["error"] == "SLEEP-003"
         assert no_background_tasks == []
         mock_db.commit.assert_not_awaited()

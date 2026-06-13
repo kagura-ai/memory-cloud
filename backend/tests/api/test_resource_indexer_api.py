@@ -241,7 +241,14 @@ class TestIsolation:
             resp = client_workspace_a.get("/api/v1/resources/does-not-exist/indexer-status")
 
         assert resp.status_code == 404
-        assert resp.json() == {"detail": "Resource not found"}
+        # #992 Phase 2: raw HTTPException is reshaped to the canonical envelope
+        # by the global StarletteHTTPException handler (HTTP-<status> placeholder
+        # code; detail string → message; empty details).
+        assert resp.json() == {
+            "error": "HTTP-404",
+            "message": "Resource not found",
+            "details": {},
+        }
 
     def test_slug_in_other_workspace_returns_404_with_identical_body(self, client_workspace_a):
         """Cross-tenant existence must not leak.

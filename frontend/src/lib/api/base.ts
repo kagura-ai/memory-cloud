@@ -103,6 +103,31 @@ export class ApiClient {
           };
         }
 
+        // #992 Phase 2: the global StarletteHTTPException handler reshapes a raw
+        // string-`detail` error into { error: "HTTP-<status>", message,
+        // details: {} }. Consumers that read `apiError.details.detail` (the
+        // legacy string) for non-422 errors would otherwise see `undefined`.
+        // Alias `detail` back to the top-level message string here, at the same
+        // transport choke point, so those call sites keep rendering. Scoped to
+        // the reshaped `HTTP-*` placeholder code ONLY, so it never injects a
+        // synthetic `detail` into a canonical MemoryCloudException body (whose
+        // `error` is a semantic code and whose `details` are authoritative).
+        // Dict-`detail` reshaped errors already carry `details.detail` (the
+        // handler preserves the object), so this guard's `detail === undefined`
+        // check leaves them untouched.
+        if (
+          details &&
+          typeof details === "object" &&
+          typeof errorCode === "string" &&
+          errorCode.startsWith("HTTP-") &&
+          (details as { detail?: unknown }).detail === undefined &&
+          (details as { errors?: unknown }).errors === undefined &&
+          typeof errorDetails.message === "string" &&
+          errorDetails.message.length > 0
+        ) {
+          details = { ...details, detail: errorDetails.message };
+        }
+
         throw new ApiError({
           error: errorCode,
           message: errorMessage,

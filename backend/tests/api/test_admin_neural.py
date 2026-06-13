@@ -83,7 +83,7 @@ class TestInputValidation:
         )
         # Defensive handler-level check → 400.
         assert response.status_code == 400
-        assert response.json()["detail"] == "invalid_model_name"
+        assert response.json()["message"] == "invalid_model_name"
 
     def test_model_with_backslash_rejected(self, admin_client):
         response = admin_client.post(
