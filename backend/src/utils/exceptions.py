@@ -188,6 +188,28 @@ class ConflictError(MemoryCloudException):
         super().__init__(message, status_code=409, error_code="RES-002", **details)
 
 
+class ExportTooLargeError(MemoryCloudException):
+    """Context has more memories than a single export can return (413).
+
+    Issue #950: the context-portability export returns one JSON body with no
+    pagination. A hard cap (``memory_count`` echoed in ``details``) is the
+    zero-cost safety valve that keeps the endpoint's contract stable while a
+    streaming / paginated variant — or workspace-wide export — is deferred to
+    a follow-up. 413 (not 400/422): the request is well-formed; the *result*
+    is too large to serve in this shape.
+    """
+
+    def __init__(self, memory_count: int, limit: int) -> None:
+        super().__init__(
+            f"Context has {memory_count} memories, exceeding the single-export "
+            f"limit of {limit}. A paginated / workspace export is a planned follow-up.",
+            status_code=413,
+            error_code="EXPORT-001",
+            memory_count=memory_count,
+            limit=limit,
+        )
+
+
 class ValidationError(MemoryCloudException):
     """Validation error (422)."""
 

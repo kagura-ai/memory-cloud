@@ -23,7 +23,7 @@ from auth.dependencies import APIKeyOrSessionUser, SessionUser, get_current_user
 from auth.workspace_roles import ContextRole, WorkspaceRole
 from db.base import get_db
 from models.api_base import TZAwareBaseModel
-from models.schemas import RelatedTagItem
+from models.schemas import ContextExportResponse, RelatedTagItem
 from models.sleep import SleepMode
 from services.context_service import ContextService, TagSortMode
 from utils.datetime import to_utc_iso
@@ -711,6 +711,45 @@ async def get_context_stats(
 
     except NotFoundException as e:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(e)) from e
+
+
+@router.get("/{context_id}/export", response_model=ContextExportResponse)
+async def export_context(
+    context_id: UUID,
+    user: APIKeyOrSessionUser,
+    service: ContextService = Depends(get_context_service),
+) -> ContextExportResponse:
+    """Export a context as portable JSON (Issue #950 — GDPR Art.20 portability).
+
+    Returns the context metadata, its search configuration, and every memory
+    visible to the caller — a private context exports only the caller's own
+    memories, a shared context exports every member's, exactly as
+    ``GET /memory/list`` scopes them. Vectors, neural edges, and sessions are
+    intentionally omitted: they are regenerated / re-learned on re-import.
+
+    This is a context-scoped portability export (anti-lock-in), not a per-user
+    Art.20 subject-access request; a created_by-filtered cross-context export
+    is a planned follow-up, as is workspace-wide export.
+
+    Raises:
+        404: context not found, or the caller lacks read access (uniform —
+            does not reveal whether the context exists in another workspace).
+        413: the context exceeds the single-export memory cap.
+    """
+    user_id = user.get("user_id") or user.get("sub")
+    if not user_id:
+        # Authenticated but the token carries no principal claim — 401, not the
+        # uniform 404 a None user_id would otherwise produce inside the
+        # workspace-read resolver. Mirrors list_memories' user_id guard.
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Unable to determine caller identity",
+        )
+    return await service.export_context(
+        user_id=user_id,
+        context_id=context_id,
+        key_workspace_id=user.get("api_key_workspace_id"),
+    )
 
 
 @router.get("/{context_id}/tags", response_model=ContextTagsResponse)

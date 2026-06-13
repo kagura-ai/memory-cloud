@@ -9,7 +9,7 @@ Contexts are owned by workspaces, not individual users.
 """
 
 import re
-from typing import Any, Literal, cast, get_args
+from typing import TYPE_CHECKING, Any, Literal, cast, get_args
 from uuid import UUID
 
 from sqlalchemy import and_, delete, func, select
@@ -23,6 +23,7 @@ from models.sleep import SleepMode
 from utils.datetime import utcnow
 from utils.exceptions import (
     ConflictError,
+    ExportTooLargeError,
     FeatureNotAvailableError,
     NotFoundException,
     QuotaExceededError,
@@ -30,11 +31,20 @@ from utils.exceptions import (
 )
 from utils.logger import get_logger
 
+if TYPE_CHECKING:
+    from models.schemas import ContextExportResponse
+
 logger = get_logger(__name__)
 
 DEFAULT_CONTEXT_NAME = "default"
 DEFAULT_CONTEXT_DESCRIPTION = "Default context (auto-created)"
 CONTEXT_NAME_PATTERN = re.compile(r"^[a-z0-9_-]+$")
+
+# Issue #950: hard cap on a single context-portability export. One JSON body,
+# no pagination — this valve keeps the contract stable until a streaming /
+# workspace-wide variant lands. Sized well above any realistic closed-beta
+# context; an over-cap context raises ExportTooLargeError (413).
+EXPORT_MAX_MEMORIES = 50_000
 
 # Issue #614: list_tags sort modes — single source of truth shared by REST
 # Query type and MCP handler validation.
@@ -330,6 +340,124 @@ class ContextService:
                     raise NotFoundException(f"Context not found: {context_id}")
 
         return context
+
+    async def export_context(
+        self,
+        user_id: str,
+        context_id: UUID,
+        *,
+        key_workspace_id: UUID | None = None,
+    ) -> "ContextExportResponse":
+        """Build a portable JSON snapshot of a context the caller can read (#950).
+
+        Authorization mirrors ``GET /memory/list`` exactly: the context is
+        resolved through ``PermissionService.resolve_context_for_workspace_read``
+        (uniform 404 hides cross-workspace existence — CWE-639), and memory
+        visibility follows the same ``owner_filter`` rule — a private context
+        exports only the caller's own memories, a shared context exports every
+        member's. An export therefore never reveals more than the caller could
+        already read via ``/memory/list``. Vectors, neural edges, and sessions
+        are omitted (regenerated / re-learned on re-import).
+
+        Raises:
+            NotFoundException: context missing, or caller lacks read access.
+            ExportTooLargeError: context exceeds ``EXPORT_MAX_MEMORIES`` (413).
+        """
+        from models.config import ContextSearchConfig
+        from models.memory import Memory
+        from models.schemas import (
+            ContextExportResponse,
+            ExportedContextMeta,
+            ExportedMemory,
+            ExportedSearchConfig,
+        )
+        from services.permission_service import PermissionService
+
+        ctx = await PermissionService(self.db).resolve_context_for_workspace_read(
+            user_id=user_id,
+            context_id=context_id,
+            key_workspace_id=key_workspace_id,
+        )
+
+        # Read-parity with GET /memory/list: private context => creator-only.
+        owner_filter = user_id if ctx.is_private else None
+        mq = select(Memory).where(
+            Memory.context_id == context_id,
+            Memory.deleted_at.is_(None),
+        )
+        if owner_filter is not None:
+            mq = mq.where(Memory.user_id == owner_filter)
+        # Fetch cap+1 so an oversized context is detected in a single query,
+        # avoiding a separate COUNT round-trip on the common (small) path.
+        mq = mq.order_by(Memory.created_at).limit(EXPORT_MAX_MEMORIES + 1)
+        rows = list((await self.db.execute(mq)).scalars().all())
+        if len(rows) > EXPORT_MAX_MEMORIES:
+            # len(rows) is the cap+1 probe value, i.e. "at least EXPORT_MAX+1" —
+            # not the exact total (we deliberately avoid a second COUNT(*) on the
+            # rare over-cap path). The limit in the error message is what the
+            # caller acts on; the exact count is immaterial to the 413.
+            raise ExportTooLargeError(len(rows), EXPORT_MAX_MEMORIES)
+
+        cfg = (
+            await self.db.execute(
+                select(ContextSearchConfig).where(ContextSearchConfig.context_id == context_id)
+            )
+        ).scalar_one_or_none()
+        search_config = (
+            ExportedSearchConfig(
+                semantic_weight=float(cfg.semantic_weight),
+                bm25_weight=float(cfg.bm25_weight),
+                fetch_factor=cfg.fetch_factor,
+                use_rerank=cfg.use_rerank,
+                reranker_provider=cfg.reranker_provider,
+                reranker_model=cfg.reranker_model,
+                embedding_model=cfg.embedding_model,
+                embedding_dimensions=cfg.embedding_dimensions,
+            )
+            if cfg is not None
+            else None
+        )
+
+        memories = [
+            ExportedMemory(
+                id=m.id,
+                summary=m.summary,
+                context_summary=m.context_summary,
+                content=m.content,
+                details=m.details,
+                type=m.type,
+                importance=m.importance,
+                confidence=m.confidence,
+                tags=m.tags or [],
+                context=m.context,
+                scope=m.scope,
+                delivery_mode=m.delivery_mode,
+                created_at=m.created_at,
+                updated_at=m.updated_at,
+                source_uri=m.source_uri,
+                source_type=m.source_type,
+            )
+            for m in rows
+        ]
+
+        return ContextExportResponse(
+            exported_at=utcnow(),
+            context=ExportedContextMeta(
+                id=ctx.id,
+                name=ctx.name,
+                display_name=ctx.display_name,
+                description=ctx.description,
+                summary=ctx.summary,
+                usage_guide=ctx.usage_guide,
+                is_private=ctx.is_private,
+                is_public=ctx.is_public,
+                created_at=ctx.created_at,
+                updated_at=ctx.updated_at,
+            ),
+            search_config=search_config,
+            memory_count=len(memories),
+            memories=memories,
+        )
 
     async def get_context_by_name_for_workspace(
         self, workspace_id: UUID, name: str
