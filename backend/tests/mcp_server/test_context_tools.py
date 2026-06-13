@@ -357,6 +357,49 @@ class TestHandleMergeContextsWorkspaceBoundary:
         assert payload["error"] == "missing_fields"
         assert "source_context_id" in payload["message"]
 
+    @pytest.mark.asyncio
+    async def test_failure_path_logs_canonical_source_id(
+        self, user_id, workspace_id, source_id, target_id
+    ):
+        """#990 regression: the 500-error usage log must record the source
+        context id even for the new canonical source_context_id name. A naive
+        args.get("source_id") would log None on the failure path, losing the
+        audit trail for exactly the calls the rename standardizes on."""
+        mock_db = AsyncMock()
+        mock_db.rollback = AsyncMock()
+
+        async def mock_get_db():
+            yield mock_db
+
+        shared_ws = uuid4()
+        resolve = AsyncMock(side_effect=[self._ctx(shared_ws), self._ctx(shared_ws)])
+        mock_service = MagicMock()
+        mock_service.merge_contexts = AsyncMock(side_effect=RuntimeError("boom"))
+        log_mock = AsyncMock()
+
+        with (
+            patch("db.base.get_db", new=mock_get_db),
+            patch("mcp_server.tools.context._resolve_context_for_read", new=resolve),
+            patch("services.context_service.ContextService", return_value=mock_service),
+            patch("mcp_server.tools.context._log_tool_usage", new=log_mock),
+        ):
+            result = await handle_merge_contexts(
+                args={
+                    "source_context_id": str(source_id),
+                    "target_context_id": str(target_id),
+                },
+                user_id=user_id,
+                workspace_id=workspace_id,
+            )
+
+        payload = json.loads(result[0].text)
+        assert payload["status"] == "error"
+        assert payload["error"] == "merge_contexts_error"
+        # resource_id is the 6th positional arg of _log_tool_usage; must be the
+        # canonical source id, never None.
+        log_mock.assert_awaited_once()
+        assert log_mock.await_args.args[5] == str(source_id)
+
 
 class TestHandleUpdateContextErrorSurface:
     """Pins the domain-exception envelope contract for handle_update_context

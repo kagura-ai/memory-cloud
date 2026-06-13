@@ -827,7 +827,11 @@ async def handle_merge_contexts(
                 "merge_contexts",
                 start_time,
                 500,
-                args.get("source_id"),
+                # source_raw (the raw input) is always bound after the
+                # missing-fields check and is correct for either param name
+                # (#990); args.get("source_id") would be None for the new
+                # canonical source_context_id calls, losing the audit trail.
+                source_raw,
                 workspace_id,
             )
             logger.error("merge_contexts_failed", exc_info=True)

@@ -241,7 +241,6 @@ Copy all memories from a source context into a target context (same embedding mo
 
 - **Required**:
   - `source_context_id` / `target_context_id` — string, format `uuid` (context) ✅ **renamed in #990** from `source_id`/`target_id` to remove the collision with the edge tools (which use those names for MEMORY UUIDs — this was the strongest cross-tool ambiguity on the surface). The handler still accepts the old `source_id`/`target_id` for one release as a deprecated alias (logs a warning); kagura-memory-python-sdk#196 tracks updating the SDK before the alias is removed.
-  - `target_id` — string, format `uuid` (context)
 - **Optional**: `delete_source` — boolean (default false)
 
 ### update_search_config
@@ -474,8 +473,8 @@ Read one key or list all live state entries for a context (read-only).
 
 Recurring inconsistencies (each instance flagged inline above):
 
-1. **Result-size parameter — three names**: `k` (recall, recall_upcoming, forget), `limit` (list_edges, list_tags, get_sleep_history, list_resource_tokens, list_analyses, get_cluster, list_files), `cap` (load_pinned). Same concept, three frozen spellings; `k` even carries different defaults (5 vs 20 vs 10) across its three uses.
-2. **`source_id`/`target_id` overload**: memory UUIDs in create_edge/update_edge/delete_edge, context UUIDs in merge_contexts. The single most dangerous ambiguity for tool-calling LLMs and SDK users.
+1. **Result-size parameter — three names** ✅ **RESOLVED (#990): consciously frozen as three distinct conventions, not unified** — `k` (relevance top-k: recall, recall_upcoming, forget), `limit` (list pagination: list_edges, list_tags, get_sleep_history, list_resource_tokens, list_analyses, get_cluster, list_files), `cap` (pin-load ceiling: load_pinned). The differing `k` defaults (5 vs 20 vs 10) are per-tool intent, not drift. See the recall `k` note for the rationale.
+2. **`source_id`/`target_id` overload** ✅ **RESOLVED (#990): merge_contexts renamed to `source_context_id`/`target_context_id`** (old names kept one release as a deprecated handler alias; kagura-memory-python-sdk#196 tracks the SDK). The edge tools keep `source_id`/`target_id` for MEMORY UUIDs — no longer ambiguous.
 3. **Time-range bounds**: `from`/`until` (recall_upcoming) vs `from`/`to` (analyze_context) vs `*_valid_until` (setup_connector).
 4. **Edge-type vocabulary — three param names and two typings**: `relation_types` (array of free string, explore) vs `edge_types` (array of free string, list_edges) vs `edge_type` (hard 6-value enum, create_edge/update_edge).
 5. **`format: "uuid"` coverage is inconsistent**: present on the core memory/context/edge tools, absent from the entire analysis bundle (`context_id`, `run_id`), all file tools (`file_id`), and the newest tools (feedback, set_state, get_state). The newer the tool, the less schema rigor — exactly the drift a freeze should stop.
@@ -485,7 +484,7 @@ Recurring inconsistencies (each instance flagged inline above):
 9. **Metadata bag**: `context` (remember/update_memory — clashing with `context_id` and `context_summary` in the same tool) vs `event_metadata` (ingest_events).
 10. **Filter style**: recall packs filters into one free-form `filters` object (singular `type`, `importance: {gte}`); analyze_context spreads them top-level (`types` plural, `min_importance`).
 11. **`workspace_id` override** exists only on the 5 file tools; the rest of the surface scopes by auth + context_id. Inconsistent and security-sensitive.
-12. **Constraints live in prose, not schema**: char limits (summary 10–500, context_summary 2000), `maxItems` (events ≤ 100), patterns (context name, sha256 hex), numeric ranges and most defaults are description-only; `additionalProperties` is never set. Tool-side validation cannot rely on the published schema.
+12. **Constraints live in prose, not schema**: char limits (summary 10–500, context_summary 2000), `maxItems` (events ≤ 100), patterns (context name, sha256 hex), numeric ranges and most defaults are description-only. (`additionalProperties` ✅ now set to `false` on all 45 schemas in #990 Phase 1 — the rest of the prose-only constraints remain a P2 hardening item.) Tool-side validation still cannot fully rely on the published schema.
 13. **Enum policy is inconsistent**: connector_type is a hard vendor enum while reranker_provider (same vendor-list shape) is a free string; edge_type is a hard enum that already grew once (#782).
 
 ## Follow-up candidates
