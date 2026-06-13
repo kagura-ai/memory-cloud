@@ -243,7 +243,11 @@ class TestRequireSessionAuthRejectsOAuth:
         assert resp.status_code == 403
         # Message must mention both kinds so SDK error surfaces don't
         # mislead users into thinking only API keys are blocked.
-        assert "OAuth" in resp.json()["message"] or "Bearer" in resp.json()["message"]
+        # NOTE: this test mounts `require_session_auth` on a bare FastAPI() app
+        # (no app-level handlers), so the raw `{detail}` shape applies here —
+        # the #992 global StarletteHTTPException reshape only runs on the real
+        # api.main.app, not on these isolated dependency-unit harnesses.
+        assert "OAuth" in resp.json()["detail"] or "Bearer" in resp.json()["detail"]
 
     def test_kagura_api_key_still_rejected_with_403(self, app_with_session_only_route):
         client = TestClient(app_with_session_only_route)
