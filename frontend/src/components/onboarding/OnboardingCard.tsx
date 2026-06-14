@@ -79,24 +79,18 @@ export function OnboardingCard() {
   const [ready, setReady] = useState(false);
   const [visible, setVisible] = useState(false);
   const [hasKey, setHasKey] = useState(true);
-  const [externalKeysUrl, setExternalKeysUrl] = useState<string | null>(null);
 
   const [step, setStep] = useState<Step>("context");
   const [contextId, setContextId] = useState<string | null>(null);
-  const [contextName, setContextName] = useState("");
-  const [summary, setSummary] = useState("");
-  const [content, setContent] = useState("");
-  const [query, setQuery] = useState("");
+  // Seed the editable sample copy from i18n ONCE via lazy initializers — never
+  // in an effect keyed on `t`, which would clobber the user's edits whenever the
+  // `t` identity changes (locale switch / provider re-render).
+  const [contextName, setContextName] = useState(() => t("context.sampleName"));
+  const [summary, setSummary] = useState(() => t("memory.sampleSummary"));
+  const [content, setContent] = useState(() => t("memory.sampleContent"));
+  const [query, setQuery] = useState(() => t("recall.sampleQuery"));
   const [results, setResults] = useState<RecallResultItem[]>([]);
   const [busy, setBusy] = useState(false);
-
-  // Seed the editable sample copy from i18n once translations are available.
-  useEffect(() => {
-    setContextName(t("context.sampleName"));
-    setSummary(t("memory.sampleSummary"));
-    setContent(t("memory.sampleContent"));
-    setQuery(t("recall.sampleQuery"));
-  }, [t]);
 
   useEffect(() => {
     let alive = true;
@@ -117,17 +111,17 @@ export function OnboardingCard() {
 
     (async () => {
       try {
-        const [ctx, keyStatus] = await Promise.all([
-          getContexts(),
-          checkOpenAIKeyStatus(currentWorkspaceId).catch(() => null),
-        ]);
+        const ctx = await getContexts();
         if (!alive) return;
         if (ctx.contexts.length === 0) {
+          // Only probe the embedding key when the card will actually show —
+          // users with contexts (the vast majority of loads) never see it.
+          const keyStatus = await checkOpenAIKeyStatus(currentWorkspaceId).catch(
+            () => null,
+          );
+          if (!alive) return;
+          if (keyStatus) setHasKey(keyStatus.has_key);
           setVisible(true);
-          if (keyStatus) {
-            setHasKey(keyStatus.has_key);
-            setExternalKeysUrl(keyStatus.external_keys_url);
-          }
         }
       } catch {
         // Best-effort: a failed probe just leaves the card hidden rather than
@@ -246,15 +240,18 @@ export function OnboardingCard() {
             <AlertTitle>{t("needsKey.title")}</AlertTitle>
             <AlertDescription className="space-y-3">
               <p>{t("needsKey.body")}</p>
-              {externalKeysUrl && (
-                <Button
-                  variant="outline"
-                  onClick={() => router.push(externalKeysUrl)}
-                >
-                  <KeyRound className="mr-2 h-4 w-4" />
-                  {t("needsKey.button")}
-                </Button>
-              )}
+              {/* Navigate to the known frontend route, NOT the backend's
+                  external_keys_url — that value is "/integrations/external-keys"
+                  (missing the /workspace route-group prefix) and 404s. */}
+              <Button
+                variant="outline"
+                onClick={() =>
+                  router.push("/workspace/integrations/external-keys")
+                }
+              >
+                <KeyRound className="mr-2 h-4 w-4" />
+                {t("needsKey.button")}
+              </Button>
             </AlertDescription>
           </Alert>
         ) : (
@@ -368,7 +365,7 @@ export function OnboardingCard() {
                   <AlertDescription>{t("done.body")}</AlertDescription>
                 </Alert>
 
-                {results.length > 0 && (
+                {results.length > 0 ? (
                   <div className="space-y-2">
                     <p className="text-sm font-medium">
                       {t("recall.resultsHeading")}
@@ -391,6 +388,13 @@ export function OnboardingCard() {
                       ))}
                     </ul>
                   </div>
+                ) : (
+                  // Recall can legitimately return nothing (edited query,
+                  // indexing lag right after remember) — don't leave the
+                  // "value moment" screen blank.
+                  <p className="text-sm text-muted-foreground">
+                    {t("recall.noResults")}
+                  </p>
                 )}
 
                 <div className="rounded-md border p-3">
@@ -421,7 +425,11 @@ export function OnboardingCard() {
                   <Button
                     variant="link"
                     className="h-auto p-0"
-                    onClick={() => router.push("/workspace/integrations")}
+                    onClick={() =>
+                      router.push(
+                        "/workspace/integrations/credentials?tab=api-keys",
+                      )
+                    }
                   >
                     {t("mcp.link")}
                     <ExternalLink className="ml-1 h-3 w-3" />

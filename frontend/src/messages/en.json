@@ -28,7 +28,8 @@
       "sampleQuery": "how does search work in Kagura?",
       "searchButton": "Run recall",
       "resultsHeading": "Your first recall result:",
-      "scoreLabel": "{score}% match"
+      "scoreLabel": "{score}% match",
+      "noResults": "No matches yet — your memory is saved and will surface as the index warms up. Try a different query, or recall again in a moment."
     },
     "done": {
       "title": "That's the value moment 🎉",

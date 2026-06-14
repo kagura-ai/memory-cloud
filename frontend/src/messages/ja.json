@@ -28,7 +28,8 @@
       "sampleQuery": "Kagura の検索の仕組みは？",
       "searchButton": "recall を実行",
       "resultsHeading": "最初の recall 結果：",
-      "scoreLabel": "一致度 {score}%"
+      "scoreLabel": "一致度 {score}%",
+      "noResults": "まだ一致はありません — 記憶は保存済みで、インデックスが整い次第ヒットします。クエリを変えるか、少し待って再度 recall してください。"
     },
     "done": {
       "title": "これが価値の瞬間です 🎉",

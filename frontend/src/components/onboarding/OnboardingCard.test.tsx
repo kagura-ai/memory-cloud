@@ -111,17 +111,23 @@ describe("OnboardingCard trigger gating", () => {
     expect(mockGetContexts).not.toHaveBeenCalled();
   });
 
-  it("shows the embedding-key notice (not the flow) when no key is configured", async () => {
+  it("shows the embedding-key notice (not the flow) when no key is configured, and its CTA uses the real /workspace route (not the backend value)", async () => {
     mockCheckKey.mockResolvedValue({
       has_key: false,
       can_configure: true,
-      external_keys_url: "/workspace/settings/keys",
+      // The backend returns this prefix-less (404-ing) value; the card must NOT use it.
+      external_keys_url: "/integrations/external-keys",
     });
     render(<OnboardingCard />);
     await waitFor(() =>
       expect(screen.getByText("needsKey.title")).toBeInTheDocument(),
     );
     expect(screen.queryByText("context.createButton")).not.toBeInTheDocument();
+
+    fireEvent.click(screen.getByText("needsKey.button"));
+    expect(mockPush).toHaveBeenCalledWith(
+      "/workspace/integrations/external-keys",
+    );
   });
 });
 
@@ -188,6 +194,42 @@ describe("OnboardingCard value-moment happy path", () => {
     );
     expect(mockRecall).toHaveBeenCalledWith(
       expect.objectContaining({ filters: { context_id: "ctx-1" } }),
+    );
+    expect(screen.getByText("done.title")).toBeInTheDocument();
+
+    // The MCP pointer routes to the real credentials page, not the
+    // page-less /workspace/integrations segment (which 404s).
+    fireEvent.click(screen.getByText("mcp.link"));
+    expect(mockPush).toHaveBeenCalledWith(
+      "/workspace/integrations/credentials?tab=api-keys",
+    );
+  });
+
+  it("shows a fallback (not a blank screen) when recall returns no results", async () => {
+    mockCreateContext.mockResolvedValue({ id: "ctx-1", name: "x" });
+    mockRemember.mockResolvedValue({
+      status: "success",
+      memory_id: "m1",
+      scope: "persistent",
+    });
+    mockRecall.mockResolvedValue({ results: [], related_tags: [] });
+
+    render(<OnboardingCard />);
+    await waitFor(() =>
+      expect(screen.getByText("context.createButton")).toBeInTheDocument(),
+    );
+    fireEvent.click(screen.getByText("context.createButton"));
+    await waitFor(() =>
+      expect(screen.getByText("memory.saveButton")).toBeInTheDocument(),
+    );
+    fireEvent.click(screen.getByText("memory.saveButton"));
+    await waitFor(() =>
+      expect(screen.getByText("recall.searchButton")).toBeInTheDocument(),
+    );
+    fireEvent.click(screen.getByText("recall.searchButton"));
+
+    await waitFor(() =>
+      expect(screen.getByText("recall.noResults")).toBeInTheDocument(),
     );
     expect(screen.getByText("done.title")).toBeInTheDocument();
   });
