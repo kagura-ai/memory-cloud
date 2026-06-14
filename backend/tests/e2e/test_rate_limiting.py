@@ -9,6 +9,11 @@ from fastapi.testclient import TestClient
 
 from api.main import app
 
+# Module lives under tests/e2e; tag every test so `-m e2e` / `-m "not e2e"`
+# selection is complete (the directory guard in tests/conftest.py is the
+# primary protection — see pytest_ignore_collect there).
+pytestmark = pytest.mark.e2e
+
 
 @pytest.fixture
 def client():

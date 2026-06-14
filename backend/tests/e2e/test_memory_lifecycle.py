@@ -13,6 +13,11 @@ from fastapi.testclient import TestClient
 from api.main import app
 from auth.dependencies import get_user_from_api_key_or_session
 
+# Module lives under tests/e2e; tag every test so `-m e2e` / `-m "not e2e"`
+# selection is complete (the directory guard in tests/conftest.py is the
+# primary protection — see pytest_ignore_collect there).
+pytestmark = pytest.mark.e2e
+
 MOCK_USER = {
     "user_id": "test_user_e2e",
     "email": "test@example.com",
