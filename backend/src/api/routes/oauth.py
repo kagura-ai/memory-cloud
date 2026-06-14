@@ -927,6 +927,17 @@ async def update_oauth2_client(
                 detail=f"OAuth2 client not found: {client_id}",
             )
 
+        # SECURITY (issue #1021): only the owner may update the client. The
+        # sibling get/hide/regenerate handlers all enforce this; without it any
+        # authenticated user could overwrite another tenant's redirect_uris
+        # (authorization-code interception). DCR clients (owner_id is None, e.g.
+        # ChatGPT/Claude/Cursor connectors) have no owner and must never be
+        # mutable via this session-user endpoint — reject them explicitly rather
+        # than relying on the `None != user_id` coincidence.
+        current_user_id = get_current_user_id(request)
+        if client.owner_id is None or client.owner_id != current_user_id:
+            raise AuthorizationError(message="You are not allowed to modify this client")
+
         # Update fields
         if data.client_name is not None:
             client.client_name = data.client_name
@@ -964,6 +975,12 @@ async def update_oauth2_client(
         )
 
     except HTTPException:
+        db_session.rollback()
+        raise
+
+    except AuthorizationError:
+        # Surface as a 403 via the global MemoryCloudException handler — must
+        # not be swallowed by the generic 500 catch below (issue #1021).
         db_session.rollback()
         raise
 
@@ -1174,12 +1191,27 @@ async def delete_oauth2_client(
                 detail=f"OAuth2 client not found: {client_id}",
             )
 
+        # SECURITY (issue #1021): only the owner may delete the client. Deleting
+        # CASCADE-removes all associated tokens, so without this guard any
+        # authenticated user could force-logout / DoS another tenant's
+        # integration by client_id alone. DCR clients (owner_id is None) have no
+        # owner and must never be deletable via this session-user endpoint.
+        current_user_id = get_current_user_id(request)
+        if client.owner_id is None or client.owner_id != current_user_id:
+            raise AuthorizationError(message="You are not allowed to delete this client")
+
         db_session.delete(client)
         db_session.commit()
 
         logger.info("oauth2_client_deleted", client_id=client_id)
 
     except HTTPException:
+        db_session.rollback()
+        raise
+
+    except AuthorizationError:
+        # Surface as a 403 via the global MemoryCloudException handler — must
+        # not be swallowed by the generic 500 catch below (issue #1021).
         db_session.rollback()
         raise
 
