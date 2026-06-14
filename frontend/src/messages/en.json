@@ -1,4 +1,63 @@
 {
+  "onboarding": {
+    "title": "Welcome to Kagura Memory",
+    "subtitle": "Let's get you to your first recall in under 5 minutes.",
+    "dismiss": "Dismiss onboarding",
+    "finish": "Go to your context",
+    "stepOf": "Step {current} of {total}",
+    "context": {
+      "title": "1. Create your first context",
+      "body": "A context is a named collection your memories live in — like a project or a topic.",
+      "nameLabel": "Context name",
+      "sampleName": "my-first-context",
+      "createButton": "Create context"
+    },
+    "memory": {
+      "title": "2. Save your first memory",
+      "body": "Memories have a short summary (used for search) and full content. Here's a sample — edit it or save as-is.",
+      "summaryLabel": "Summary",
+      "sampleSummary": "Kagura recall blends semantic search with full-text matching.",
+      "contentLabel": "Content",
+      "sampleContent": "Recall runs hybrid search — 60% semantic embeddings + 40% BM25 keyword matching — with optional reranking for higher precision.",
+      "saveButton": "Save memory"
+    },
+    "recall": {
+      "title": "3. Recall it",
+      "body": "Now search your context. recall() finds the memory you just saved, even with different wording.",
+      "queryLabel": "Search query",
+      "sampleQuery": "how does search work in Kagura?",
+      "searchButton": "Run recall",
+      "resultsHeading": "Your first recall result:",
+      "scoreLabel": "{score}% match",
+      "noResults": "No matches yet — your memory is saved and will surface as the index warms up. Try a different query, or recall again in a moment."
+    },
+    "done": {
+      "title": "That's the value moment 🎉",
+      "body": "You created a context, saved a memory, and recalled it. That's the core loop."
+    },
+    "explainer": {
+      "heading": "recall vs explore",
+      "recallTitle": "recall",
+      "recallBody": "precision search — finds the memories most relevant to your query. It does not auto-expand into the graph.",
+      "exploreTitle": "explore",
+      "exploreBody": "discovery — separately walks the neural graph to surface related memories you didn't search for."
+    },
+    "mcp": {
+      "heading": "Make it automatic with MCP",
+      "body": "In real use, your AI assistant writes memories for you via MCP tools — connect a client and it remembers as you work.",
+      "link": "Set up an MCP client"
+    },
+    "needsKey": {
+      "title": "Set up embeddings first",
+      "body": "Saving and recalling memories needs an embedding key for this workspace. Add one, then come back to finish onboarding.",
+      "button": "Configure embedding key"
+    },
+    "errors": {
+      "createFailed": "Couldn't create the context. Please try again.",
+      "saveFailed": "Couldn't save the memory. Please try again.",
+      "recallFailed": "Couldn't run recall. Please try again."
+    }
+  },
   "connectedAccounts": {
     "title": "Connected accounts",
     "description": "Link Google or GitHub so you can sign in with either provider.",

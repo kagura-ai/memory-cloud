@@ -1,4 +1,63 @@
 {
+  "onboarding": {
+    "title": "Kagura Memory へようこそ",
+    "subtitle": "5分以内に最初の recall まで案内します。",
+    "dismiss": "オンボーディングを閉じる",
+    "finish": "コンテキストへ移動",
+    "stepOf": "ステップ {current} / {total}",
+    "context": {
+      "title": "1. 最初のコンテキストを作成",
+      "body": "コンテキストは記憶をまとめる名前付きのコレクションです（プロジェクトやトピックのようなもの）。",
+      "nameLabel": "コンテキスト名",
+      "sampleName": "my-first-context",
+      "createButton": "コンテキストを作成"
+    },
+    "memory": {
+      "title": "2. 最初の記憶を保存",
+      "body": "記憶は検索用の短い要約と本文を持ちます。サンプルを編集するか、そのまま保存してください。",
+      "summaryLabel": "要約",
+      "sampleSummary": "Kagura の recall はセマンティック検索と全文検索を組み合わせます。",
+      "contentLabel": "本文",
+      "sampleContent": "recall はハイブリッド検索（セマンティック埋め込み60% + BM25キーワード40%）を実行し、必要に応じて再ランクで精度を高めます。",
+      "saveButton": "記憶を保存"
+    },
+    "recall": {
+      "title": "3. recall で呼び出す",
+      "body": "コンテキストを検索しましょう。recall() は言い回しが違っても、今保存した記憶を見つけます。",
+      "queryLabel": "検索クエリ",
+      "sampleQuery": "Kagura の検索の仕組みは？",
+      "searchButton": "recall を実行",
+      "resultsHeading": "最初の recall 結果：",
+      "scoreLabel": "一致度 {score}%",
+      "noResults": "まだ一致はありません — 記憶は保存済みで、インデックスが整い次第ヒットします。クエリを変えるか、少し待って再度 recall してください。"
+    },
+    "done": {
+      "title": "これが価値の瞬間です 🎉",
+      "body": "コンテキストを作り、記憶を保存し、recall で呼び出しました。これが基本ループです。"
+    },
+    "explainer": {
+      "heading": "recall と explore の違い",
+      "recallTitle": "recall",
+      "recallBody": "精度検索 — クエリに最も関連する記憶を見つけます。グラフへ自動展開はしません。",
+      "exploreTitle": "explore",
+      "exploreBody": "発見 — ニューラルグラフを別途たどり、検索していない関連記憶を浮かび上がらせます。"
+    },
+    "mcp": {
+      "heading": "MCP で自動化",
+      "body": "実運用では、AIアシスタントが MCP ツール経由で記憶を書き込みます。クライアントを接続すれば、作業しながら自動で記憶します。",
+      "link": "MCP クライアントを設定"
+    },
+    "needsKey": {
+      "title": "まず埋め込みを設定",
+      "body": "記憶の保存と recall には、このワークスペースの埋め込みキーが必要です。設定後にオンボーディングを再開してください。",
+      "button": "埋め込みキーを設定"
+    },
+    "errors": {
+      "createFailed": "コンテキストを作成できませんでした。もう一度お試しください。",
+      "saveFailed": "記憶を保存できませんでした。もう一度お試しください。",
+      "recallFailed": "recall を実行できませんでした。もう一度お試しください。"
+    }
+  },
   "connectedAccounts": {
     "title": "連携済みアカウント",
     "description": "Google または GitHub を連携すると、どちらのプロバイダーでもサインインできます。",

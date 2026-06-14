@@ -30,6 +30,7 @@ import { ContextBreakdownTable } from "@/components/dashboard/ContextBreakdownTa
 import { MemoryTimelineChart } from "@/components/dashboard/MemoryTimelineChart";
 import { AdminSections } from "@/components/dashboard/AdminSections";
 import { PlanBadge } from "@/components/common/PlanBadge";
+import { OnboardingCard } from "@/components/onboarding/OnboardingCard";
 import { useWorkspace } from "@/contexts/WorkspaceContext";
 import {
   getContextStats,
@@ -221,6 +222,10 @@ export default function WorkspaceStatsPage() {
           </Button>
         </div>
       </div>
+
+      {/* Issue #952: first-run onboarding — self-gates on zero contexts +
+          not-dismissed + can-create; renders null otherwise. */}
+      <OnboardingCard />
 
       {error && (
         <Alert variant="destructive" className="mb-6">
