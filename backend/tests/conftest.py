@@ -2,6 +2,7 @@
 
 import os
 from collections.abc import AsyncGenerator
+from pathlib import Path
 
 import pytest
 import pytest_asyncio
@@ -68,6 +69,46 @@ def pytest_configure(config: pytest.Config) -> None:
             "asyncio_default_test_loop_scope must be 'session' in pyproject.toml "
             "to match session-scoped async fixtures (async_engine, db_session)."
         )
+
+
+_E2E_DIR = Path(__file__).parent / "e2e"
+
+
+def _e2e_explicitly_requested(config: pytest.Config) -> bool:
+    """True only when the caller deliberately opted into the e2e suite.
+
+    Opt-in signals: a CLI path under ``tests/e2e`` (how ``make test-e2e``
+    invokes pytest), an ``-m e2e`` marker selection, or ``RUN_E2E=1``.
+    """
+    if os.environ.get("RUN_E2E"):
+        return True
+    markexpr = config.getoption("markexpr", default="") or ""
+    if "e2e" in markexpr:
+        return True
+    return any("e2e" in str(arg) for arg in config.invocation_params.args)
+
+
+def pytest_ignore_collect(collection_path: Path, config: pytest.Config) -> bool | None:
+    """Keep the Playwright e2e suite out of in-process unit/integration runs.
+
+    ``tests/e2e`` drives Playwright's *sync* API (``sync_playwright()`` in
+    ``tests/e2e/conftest.py``), which runs its own asyncio event loop on the
+    main thread. The rest of the suite shares a single session-scoped loop
+    (``asyncio_default_test_loop_scope = "session"``). Mixing the two in one
+    process leaves Playwright's loop current, so every ``pytest-asyncio`` test
+    collected after ``tests/e2e`` dies with
+    ``RuntimeError: Runner.run() cannot be called from a running event loop``.
+
+    The Makefile targets already pass ``--ignore=tests/e2e``, but a bare
+    ``pytest`` / ``pytest tests/`` (``testpaths = ["tests"]``) would otherwise
+    pull e2e in and produce ~1000 misleading failures. Skip the e2e subtree
+    unless it is explicitly requested (see ``_e2e_explicitly_requested``).
+    """
+    if collection_path != _E2E_DIR and _E2E_DIR not in collection_path.parents:
+        return None  # not an e2e path — defer to default collection
+    if _e2e_explicitly_requested(config):
+        return None
+    return True
 
 
 # Test database URL — default to localhost (Docker port-mapped)
