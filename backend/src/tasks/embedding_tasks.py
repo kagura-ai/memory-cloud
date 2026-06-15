@@ -16,17 +16,24 @@ logger = get_logger(__name__)
 
 
 async def sweep_pending_embeddings() -> None:
-    """Find and process memories stuck in pending/processing status.
+    """Find and process memories stuck in pending/processing/failed status.
 
     - pending older than 10s: create_task likely failed or never fired
     - processing older than 60s: worker crashed mid-processing (stale)
-    process_pending_embedding() handles both cases via its claim logic.
+    - failed past the retry backoff with budget left (#979): a transient
+      embedding/Qdrant blip self-heals instead of needing the manual admin
+      retry endpoint, bounded by MAX_EMBEDDING_RETRIES so a poison row stops.
+    process_pending_embedding() re-checks each gate atomically in its claim,
+    so this SELECT is only a candidate prefilter (no double-increment race).
     """
-    from sqlalchemy import and_, or_
+    from sqlalchemy import and_, case, or_
 
     from db.base import get_db
     from models.memory import Memory
-    from services.memory_service import process_pending_embedding
+    from services.memory_service import (
+        embedding_retry_eligible_clause,
+        process_pending_embedding,
+    )
     from utils.datetime import utcnow
 
     async for db in get_db():
@@ -47,7 +54,16 @@ async def sweep_pending_embeddings() -> None:
                             Memory.embedding_status == "processing",
                             Memory.updated_at < stale_cutoff,
                         ),
+                        # #979: shared with the claim gate so they cannot drift.
+                        embedding_retry_eligible_clause(now),
                     ),
+                )
+                # #979: process genuinely-pending/processing rows before failed
+                # retries so a backlog of failed rows can't starve the limit(20)
+                # budget and delay brand-new memories' first embedding.
+                .order_by(
+                    case((Memory.embedding_status == "failed", 1), else_=0),
+                    Memory.created_at,
                 )
                 .limit(20)
             )

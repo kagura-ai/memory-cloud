@@ -91,6 +91,39 @@ class TestSweepPendingEmbeddings:
         assert "LIMIT" in compiled.upper()
 
     @pytest.mark.asyncio
+    async def test_select_includes_failed_retry_gate(self):
+        """#979: the prefilter now also picks ``failed`` rows gated by the
+        retry counter, without dropping the pending/processing branches.
+        (The authoritative gate is re-checked in the claim — see
+        tests/services/test_embedding_retry_claim.py.)"""
+        mock_db = MagicMock()
+        mock_result = MagicMock()
+        mock_result.all.return_value = []
+        captured_stmt = None
+
+        async def capture_execute(stmt):
+            nonlocal captured_stmt
+            captured_stmt = stmt
+            return mock_result
+
+        mock_db.execute = AsyncMock(side_effect=capture_execute)
+
+        with patch("db.base.get_db", mock_get_db_factory(mock_db)):
+            await sweep_pending_embeddings()
+
+        from sqlalchemy.dialects import postgresql
+
+        sql = str(
+            captured_stmt.compile(
+                dialect=postgresql.dialect(), compile_kwargs={"literal_binds": True}
+            )
+        )
+        assert "'failed'" in sql
+        assert "embedding_retry_count" in sql
+        assert "'pending'" in sql  # existing branch preserved
+        assert "'processing'" in sql  # existing branch preserved
+
+    @pytest.mark.asyncio
     async def test_exception_during_sweep_is_logged(self):
         """Errors inside the sweep are caught and logged, not re-raised."""
         mock_db = MagicMock()

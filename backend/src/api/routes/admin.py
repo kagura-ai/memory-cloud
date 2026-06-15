@@ -1188,7 +1188,12 @@ async def retry_failed_embeddings(
         conditions.append(Memory.workspace_id == workspace_id)
 
     stmt = (
-        update(Memory).where(*conditions).values(embedding_status="pending", embedding_error=None)
+        update(Memory)
+        .where(*conditions)
+        # #979: reset the auto-retry budget too — this manual endpoint is the
+        # override for rows that exhausted MAX_EMBEDDING_RETRIES, so a fresh
+        # admin retry must let the sweep pick them up again.
+        .values(embedding_status="pending", embedding_error=None, embedding_retry_count=0)
     )
     result = cast(CursorResult[Any], await db.execute(stmt))
     await db.commit()

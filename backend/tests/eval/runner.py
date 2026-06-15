@@ -149,7 +149,10 @@ async def _reset_embedding_to_pending(svc: Any, memory_id: UUID) -> None:
     await svc.db.execute(
         update(Memory)
         .where(Memory.id == memory_id)
-        .values(embedding_status="pending", embedding_error=None)
+        # #979: reset the auto-retry budget too (parity with the admin retry
+        # endpoint) so a doc that exhausted MAX_EMBEDDING_RETRIES during ingest
+        # can be driven again by the harness instead of staying stuck.
+        .values(embedding_status="pending", embedding_error=None, embedding_retry_count=0)
     )
     await svc.db.commit()
 
