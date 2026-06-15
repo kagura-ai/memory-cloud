@@ -128,14 +128,17 @@ class FileObject(Base):
             "expires_at",
             postgresql_where="status = 'reserved'",
         ),
-        # Soft-delete GC helper (Issue #552): nightly sweep of
-        # ``status='uploaded' AND deleted_at IS NOT NULL`` rows past the
-        # 7-day retention window. Partial index keeps storage proportional
-        # to actually-deleted-pending-GC rows rather than total uploads.
+        # Soft-delete GC helper (Issue #552, broadened in #962): nightly
+        # sweep of ``status IN ('uploaded', 'failed') AND deleted_at IS NOT
+        # NULL`` rows past the 7-day retention window. #962 added ``failed``:
+        # the orphan sweeper now soft-deletes lingering ``failed`` rows
+        # (which hold no quota and are UI-hidden but otherwise had no GC
+        # path) so this nightly sweep reaps them too. Partial index keeps
+        # storage proportional to actually-deleted-pending-GC rows.
         Index(
             "idx_file_objects_soft_deleted_gc",
             "deleted_at",
-            postgresql_where="status = 'uploaded' AND deleted_at IS NOT NULL",
+            postgresql_where=("status IN ('uploaded', 'failed') AND deleted_at IS NOT NULL"),
         ),
     )
 
