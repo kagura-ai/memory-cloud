@@ -53,9 +53,28 @@ async def test_claim_gate_includes_failed_with_retry_budget_and_increments():
     assert "< 3" in sql  # MAX_EMBEDDING_RETRIES default
     # ...and increments the counter via a CASE (only for failed rows).
     assert "CASE" in sql
+    # NULL-safe backoff: a failed row with NULL updated_at is still eligible
+    # (never permanently stuck — the state #979 exists to prevent).
+    assert "IS NULL" in sql
     # existing branches preserved
     assert "'PENDING'" in sql
     assert "'PROCESSING'" in sql
+
+
+def test_retry_eligibility_clause_is_bounded_and_null_safe():
+    """The shared clause (used by both the claim and the sweep prefilter) gates
+    on retry budget and is NULL-safe on the backoff timestamp."""
+    from datetime import UTC, datetime
+
+    from services.memory_service import embedding_retry_eligible_clause
+
+    clause = embedding_retry_eligible_clause(datetime(2026, 6, 15, tzinfo=UTC))
+    sql = str(
+        clause.compile(dialect=postgresql.dialect(), compile_kwargs={"literal_binds": True})
+    ).upper()
+    assert "'FAILED'" in sql
+    assert "EMBEDDING_RETRY_COUNT < 3" in sql  # bounded by MAX_EMBEDDING_RETRIES
+    assert "IS NULL" in sql  # NULL updated_at -> eligible, never stuck
 
 
 @pytest.mark.asyncio

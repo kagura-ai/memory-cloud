@@ -345,6 +345,16 @@ class Memory(Base):
             postgresql_using="gin",
             postgresql_ops={"summary": "gin_trgm_ops"},
         ),
+        # Issue #979 partial index for the embedding sweep (migration e40).
+        # The sweep runs every 30s over not-yet-settled rows (pending /
+        # processing / failed); the partial predicate keeps it scanning only
+        # that normally-tiny set instead of the whole (mostly 'success')
+        # memories table as it grows.
+        Index(
+            "idx_memories_embedding_unsettled",
+            "embedding_status",
+            postgresql_where=text("embedding_status <> 'success'"),
+        ),
         # Issue #619 compound partial B-tree on (workspace_id, context_id),
         # accelerating the scope scan used by aggregate_tags, get_context_stats,
         # and _refresh_hub_tag_cache (migration e29_619_memories_ws_ctx_idx).

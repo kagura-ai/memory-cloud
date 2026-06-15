@@ -25,8 +25,11 @@ branch_labels = None
 depends_on = None
 
 
+_SWEEP_INDEX = "idx_memories_embedding_unsettled"
+
+
 def upgrade() -> None:
-    """Add embedding_retry_count (backfilled to 0 via server default)."""
+    """Add embedding_retry_count + the embedding-sweep partial index."""
     op.add_column(
         "memories",
         sa.Column(
@@ -36,7 +39,16 @@ def upgrade() -> None:
             server_default="0",
         ),
     )
+    # Partial index for the 30s embedding sweep (#979): scan only the
+    # not-yet-settled rows instead of the whole (mostly 'success') table.
+    op.create_index(
+        _SWEEP_INDEX,
+        "memories",
+        ["embedding_status"],
+        postgresql_where=sa.text("embedding_status <> 'success'"),
+    )
 
 
 def downgrade() -> None:
+    op.drop_index(_SWEEP_INDEX, table_name="memories")
     op.drop_column("memories", "embedding_retry_count")

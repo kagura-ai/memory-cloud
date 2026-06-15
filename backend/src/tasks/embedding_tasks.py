@@ -26,12 +26,14 @@ async def sweep_pending_embeddings() -> None:
     process_pending_embedding() re-checks each gate atomically in its claim,
     so this SELECT is only a candidate prefilter (no double-increment race).
     """
-    from sqlalchemy import and_, or_
+    from sqlalchemy import and_, case, or_
 
-    from config.constants import EMBEDDING_RETRY_BACKOFF_SECONDS, MAX_EMBEDDING_RETRIES
     from db.base import get_db
     from models.memory import Memory
-    from services.memory_service import process_pending_embedding
+    from services.memory_service import (
+        embedding_retry_eligible_clause,
+        process_pending_embedding,
+    )
     from utils.datetime import utcnow
 
     async for db in get_db():
@@ -39,7 +41,6 @@ async def sweep_pending_embeddings() -> None:
             now = utcnow()
             pending_cutoff = now - timedelta(seconds=10)
             stale_cutoff = now - timedelta(seconds=60)
-            retry_cutoff = now - timedelta(seconds=EMBEDDING_RETRY_BACKOFF_SECONDS)
             result = await db.execute(
                 select(Memory.id)
                 .where(
@@ -53,12 +54,16 @@ async def sweep_pending_embeddings() -> None:
                             Memory.embedding_status == "processing",
                             Memory.updated_at < stale_cutoff,
                         ),
-                        and_(
-                            Memory.embedding_status == "failed",
-                            Memory.embedding_retry_count < MAX_EMBEDDING_RETRIES,
-                            Memory.updated_at < retry_cutoff,
-                        ),
+                        # #979: shared with the claim gate so they cannot drift.
+                        embedding_retry_eligible_clause(now),
                     ),
+                )
+                # #979: process genuinely-pending/processing rows before failed
+                # retries so a backlog of failed rows can't starve the limit(20)
+                # budget and delay brand-new memories' first embedding.
+                .order_by(
+                    case((Memory.embedding_status == "failed", 1), else_=0),
+                    Memory.created_at,
                 )
                 .limit(20)
             )
