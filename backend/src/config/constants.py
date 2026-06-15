@@ -151,3 +151,12 @@ CONTEXT_CACHE_TTL_SECONDS = 60 * 60  # 3600 seconds
 
 # Redis cache TTL for workspace metadata (1 hour)
 ORG_CACHE_TTL_SECONDS = 60 * 60  # 3600 seconds
+
+# Embedding auto-requeue (#979): the periodic sweep re-claims memories stuck in
+# embedding_status='failed' so a transient embedding/Qdrant blip self-heals
+# instead of needing the manual admin retry endpoint. Bounded by a retry counter
+# so a permanently-poison row (bad input, oversized text) cannot loop forever.
+MAX_EMBEDDING_RETRIES = 3
+# Backoff before a failed embedding is eligible for auto-retry — gives a
+# transient condition time to clear and spaces retries across sweep ticks.
+EMBEDDING_RETRY_BACKOFF_SECONDS = 60

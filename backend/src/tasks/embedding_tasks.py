@@ -16,14 +16,19 @@ logger = get_logger(__name__)
 
 
 async def sweep_pending_embeddings() -> None:
-    """Find and process memories stuck in pending/processing status.
+    """Find and process memories stuck in pending/processing/failed status.
 
     - pending older than 10s: create_task likely failed or never fired
     - processing older than 60s: worker crashed mid-processing (stale)
-    process_pending_embedding() handles both cases via its claim logic.
+    - failed past the retry backoff with budget left (#979): a transient
+      embedding/Qdrant blip self-heals instead of needing the manual admin
+      retry endpoint, bounded by MAX_EMBEDDING_RETRIES so a poison row stops.
+    process_pending_embedding() re-checks each gate atomically in its claim,
+    so this SELECT is only a candidate prefilter (no double-increment race).
     """
     from sqlalchemy import and_, or_
 
+    from config.constants import EMBEDDING_RETRY_BACKOFF_SECONDS, MAX_EMBEDDING_RETRIES
     from db.base import get_db
     from models.memory import Memory
     from services.memory_service import process_pending_embedding
@@ -34,6 +39,7 @@ async def sweep_pending_embeddings() -> None:
             now = utcnow()
             pending_cutoff = now - timedelta(seconds=10)
             stale_cutoff = now - timedelta(seconds=60)
+            retry_cutoff = now - timedelta(seconds=EMBEDDING_RETRY_BACKOFF_SECONDS)
             result = await db.execute(
                 select(Memory.id)
                 .where(
@@ -46,6 +52,11 @@ async def sweep_pending_embeddings() -> None:
                         and_(
                             Memory.embedding_status == "processing",
                             Memory.updated_at < stale_cutoff,
+                        ),
+                        and_(
+                            Memory.embedding_status == "failed",
+                            Memory.embedding_retry_count < MAX_EMBEDDING_RETRIES,
+                            Memory.updated_at < retry_cutoff,
                         ),
                     ),
                 )

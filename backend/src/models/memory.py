@@ -148,9 +148,16 @@ class Memory(Base):
     )
 
     # Issue #122: Embedding status tracking for transaction integrity
-    # Values: 'pending', 'success', 'failed'
+    # Values: 'pending', 'processing', 'success', 'failed'
     embedding_status: Mapped[str] = mapped_column(String(20), nullable=False, default="pending")
     embedding_error: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # Issue #979: bounded auto-requeue of transiently-failed embeddings. The
+    # sweep re-claims `failed` rows while this is below MAX_EMBEDDING_RETRIES,
+    # incrementing it per retry; a poison row exhausts its budget and stops.
+    # The manual admin retry endpoint resets this to 0.
+    embedding_retry_count: Mapped[int] = mapped_column(
+        Integer, nullable=False, server_default="0", default=0
+    )
 
     # Layer 2: 文脈説明
     context_summary: Mapped[str | None] = mapped_column(Text, nullable=True)

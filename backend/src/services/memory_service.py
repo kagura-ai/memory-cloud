@@ -3066,8 +3066,9 @@ async def process_pending_embedding(memory_id: UUID) -> None:
 
     from datetime import timedelta
 
-    from sqlalchemy import and_, or_, select, update
+    from sqlalchemy import and_, case, or_, select, update
 
+    from config.constants import EMBEDDING_RETRY_BACKOFF_SECONDS, MAX_EMBEDDING_RETRIES
     from db.base import get_db
     from models.memory import Memory
     from services.context_routing import resolve_context_routing
@@ -3083,6 +3084,11 @@ async def process_pending_embedding(memory_id: UUID) -> None:
             from utils.datetime import utcnow as _utcnow
 
             stale_cutoff = _utcnow() - timedelta(seconds=60)
+            # #979: a `failed` row is eligible for auto-retry once its backoff
+            # has elapsed and it still has retry budget left. The counter is
+            # incremented only when we claim a `failed` row (CASE below), so the
+            # initial pending->processing claim does not consume budget.
+            retry_cutoff = _utcnow() - timedelta(seconds=EMBEDDING_RETRY_BACKOFF_SECONDS)
             result = await db.execute(
                 update(Memory)
                 .where(
@@ -3094,14 +3100,32 @@ async def process_pending_embedding(memory_id: UUID) -> None:
                             Memory.embedding_status == "processing",
                             Memory.updated_at < stale_cutoff,
                         ),
+                        and_(
+                            Memory.embedding_status == "failed",
+                            Memory.embedding_retry_count < MAX_EMBEDDING_RETRIES,
+                            Memory.updated_at < retry_cutoff,
+                        ),
                     ),
                 )
-                .values(embedding_status="processing", updated_at=_utcnow())
+                .values(
+                    embedding_status="processing",
+                    updated_at=_utcnow(),
+                    # Count only retries of a previously-failed row. The CASE
+                    # reads the pre-UPDATE status, so pending/stale-processing
+                    # claims leave the counter untouched.
+                    embedding_retry_count=case(
+                        (
+                            Memory.embedding_status == "failed",
+                            Memory.embedding_retry_count + 1,
+                        ),
+                        else_=Memory.embedding_retry_count,
+                    ),
+                )
                 .returning(Memory.id)
             )
             claimed = result.scalar_one_or_none()
             if not claimed:
-                return  # Already claimed, not pending, or soft-deleted
+                return  # Already claimed, not eligible, exhausted, or soft-deleted
 
             await db.commit()
 
@@ -3176,9 +3200,12 @@ async def process_pending_embedding(memory_id: UUID) -> None:
                 collection_name=collection,
             )
 
-            # Mark success
+            # Mark success. Clear any prior embedding_error (#979): a retry that
+            # finally succeeds should not leave a stale failure message behind.
             await db.execute(
-                update(Memory).where(Memory.id == memory_id).values(embedding_status="success")
+                update(Memory)
+                .where(Memory.id == memory_id)
+                .values(embedding_status="success", embedding_error=None)
             )
             await db.commit()
 
