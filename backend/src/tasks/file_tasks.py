@@ -30,7 +30,7 @@ from typing import Any, cast
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.cron import CronTrigger
 from apscheduler.triggers.interval import IntervalTrigger
-from sqlalchemy import delete, select
+from sqlalchemy import delete, select, update
 from sqlalchemy.engine import CursorResult
 
 from db.base import get_db
@@ -67,7 +67,13 @@ async def sweep_orphan_files() -> dict[str, int]:
         ``{"swept": N, "released_bytes": N, "r2_deleted": N, "r2_failed": N}``
         — useful for the scheduler log and future ops dashboards.
     """
-    counts = {"swept": 0, "released_bytes": 0, "r2_deleted": 0, "r2_failed": 0}
+    counts = {
+        "swept": 0,
+        "released_bytes": 0,
+        "r2_deleted": 0,
+        "r2_failed": 0,
+        "failed_soft_deleted": 0,  # #962
+    }
 
     # Filter at SQL so the partial index ``idx_file_objects_reserved_expires``
     # is used; otherwise every sweeper tick loads all in-flight rows.
@@ -154,7 +160,33 @@ async def sweep_orphan_files() -> dict[str, int]:
                         error=str(exc),
                     )
 
-    if counts["swept"] > 0:
+        # #962: defensively soft-delete any lingering ``failed`` rows that
+        # never got a ``deleted_at``. Three sources land here: orphan-swept
+        # rows (this very sweep marks ``reserved -> failed`` above without a
+        # ``deleted_at``, keeping them as tracking rows for the unique-slot
+        # comment), pre-#552 ``confirm_upload`` failures, and Phase-1-era
+        # rows. They hold no quota and are UI-hidden, but had NO GC path.
+        # Stamping ``deleted_at`` routes them into the nightly
+        # ``sweep_soft_deleted_files`` (broadened to ``failed`` in #962),
+        # which deletes the R2 binary (if any) and hard-deletes the row.
+        # One bulk UPDATE so cost stays flat regardless of backlog size;
+        # the ``idx_file_objects_soft_deleted_gc`` partial index covers the
+        # subsequent GC scan.
+        stamp_result = cast(
+            CursorResult[Any],
+            await db.execute(
+                update(FileObject)
+                .where(
+                    FileObject.status == "failed",
+                    FileObject.deleted_at.is_(None),
+                )
+                .values(deleted_at=utcnow())
+            ),
+        )
+        await db.commit()
+        counts["failed_soft_deleted"] = stamp_result.rowcount or 0
+
+    if counts["swept"] > 0 or counts["failed_soft_deleted"] > 0:
         logger.info("orphan_files_swept", **counts)
     return counts
 
@@ -201,8 +233,11 @@ async def sweep_soft_deleted_files() -> dict[str, int]:
         # makes the next ``deleted_at <=`` filter cheap.
         result = await db.execute(
             select(FileObject)
+            # #962: ``failed`` joins ``uploaded`` — the orphan sweeper now
+            # stamps ``deleted_at`` on lingering failed rows, so they reach
+            # this GC the same way soft-deleted uploads do.
             .where(
-                FileObject.status == "uploaded",
+                FileObject.status.in_(("uploaded", "failed")),
                 FileObject.deleted_at.isnot(None),
                 FileObject.deleted_at <= threshold,
             )
@@ -234,10 +269,18 @@ async def sweep_soft_deleted_files() -> dict[str, int]:
                     )
                     continue
             else:
-                # ``storage_key IS NULL`` on an ``uploaded`` row is an
-                # invariant violation — the orphan sweeper should have
-                # transitioned it to ``failed`` already. Hard-deletable
-                # since there's no binary to leak.
+                # No binary to delete. For a ``failed`` row (#962) a NULL
+                # ``storage_key`` is the normal "client reserved but never
+                # PUT" case. For an ``uploaded`` row it is an invariant
+                # violation (the orphan sweeper should have transitioned it
+                # to ``failed``) — keep that operator signal rather than
+                # letting #962's broadened filter swallow it silently.
+                # Either way the row is hard-deletable: no R2 binary to leak.
+                if f.status == "uploaded":
+                    logger.warning(
+                        "soft_delete_gc_uploaded_missing_storage_key",
+                        file_id=file_id,
+                    )
                 counts["hard_deleted_no_r2"] += 1
 
             # Idempotent DELETE: when multiple API replicas run the

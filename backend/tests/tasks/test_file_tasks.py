@@ -40,16 +40,19 @@ def _make_file(
     return file
 
 
-def _patch_get_db(rows, *, delete_rowcount: int = 1):
+def _patch_get_db(rows, *, delete_rowcount: int = 1, stamp_rowcount: int = 0):
     """``async for db in get_db()`` yields one mock that returns ``rows``.
 
-    The mock ``db.execute`` is sequence-aware: the first call returns
-    the SELECT result (the candidate ``rows``); subsequent calls
-    (per-row DELETE in the GC sweep) return a result whose
-    ``rowcount`` is ``delete_rowcount``. Tests that need to simulate
-    a lost-race (another replica beat us to the row) can pass
-    ``delete_rowcount=0``.
+    The mock ``db.execute`` is **statement-type aware** (robust to call
+    ordering): a ``Select`` returns the candidate ``rows``; a ``Delete``
+    (per-row hard-delete in the GC sweep) returns ``delete_rowcount``; an
+    ``Update`` (#962 orphan-sweep failed-row soft-delete stamp) returns
+    ``stamp_rowcount``. Tests simulating a lost race pass
+    ``delete_rowcount=0``; tests exercising the failed-row stamp pass
+    ``stamp_rowcount=N``.
     """
+    from sqlalchemy import Delete, Select, Update
+
     db = MagicMock()
     db.commit = AsyncMock()
     db.delete = AsyncMock()  # legacy compat: orphan sweeper does not use it
@@ -60,11 +63,17 @@ def _patch_get_db(rows, *, delete_rowcount: int = 1):
     delete_result = MagicMock()
     delete_result.rowcount = delete_rowcount
 
-    call_state = {"n": 0}
+    stamp_result = MagicMock()
+    stamp_result.rowcount = stamp_rowcount
 
-    async def _execute(*_args, **_kwargs):
-        call_state["n"] += 1
-        return list_result if call_state["n"] == 1 else delete_result
+    async def _execute(stmt, *_args, **_kwargs):
+        if isinstance(stmt, Select):
+            return list_result
+        if isinstance(stmt, Update):
+            return stamp_result
+        if isinstance(stmt, Delete):
+            return delete_result
+        return delete_result
 
     db.execute = AsyncMock(side_effect=_execute)
 
@@ -102,8 +111,15 @@ class TestSweepOrphanFiles:
         get_db_patch, db = _patch_get_db(rows)
         with get_db_patch, _patch_release(), _patch_storage(None):
             counts = await file_tasks.sweep_orphan_files()
-        assert counts == {"swept": 0, "released_bytes": 0, "r2_deleted": 0, "r2_failed": 0}
-        db.commit.assert_awaited_once()
+        assert counts == {
+            "swept": 0,
+            "released_bytes": 0,
+            "r2_deleted": 0,
+            "r2_failed": 0,
+            "failed_soft_deleted": 0,
+        }
+        # Two commits: the orphan-reap commit + the #962 failed-row stamp commit.
+        assert db.commit.await_count == 2
 
     @pytest.mark.asyncio
     async def test_skips_rows_within_grace(self):
@@ -136,7 +152,8 @@ class TestSweepOrphanFiles:
         assert old.status == "failed"
         release.assert_awaited_once()
         fake_storage.delete_object.assert_awaited_once_with("ws/aa/key")
-        db.commit.assert_awaited_once()
+        # Orphan-reap commit + the #962 failed-row stamp commit.
+        assert db.commit.await_count == 2
 
     @pytest.mark.asyncio
     async def test_r2_delete_failure_is_swallowed(self):
@@ -172,6 +189,32 @@ class TestSweepOrphanFiles:
         assert counts["r2_failed"] == 0
         assert old.status == "failed"
         release.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_stamps_lingering_failed_rows(self):
+        """#962: ``failed AND deleted_at IS NULL`` rows (orphan-swept
+        tracking rows, pre-#552 confirm_upload failures, Phase-1-era) get a
+        ``deleted_at`` via the bulk stamp so the nightly GC can reap them.
+        No reserved orphans here — only the stamp runs."""
+        get_db_patch, db = _patch_get_db([], stamp_rowcount=3)
+        with get_db_patch, _patch_release() as release, _patch_storage(None):
+            counts = await file_tasks.sweep_orphan_files()
+        assert counts["failed_soft_deleted"] == 3
+        assert counts["swept"] == 0
+        release.assert_not_awaited()  # stamp releases no quota (failed rows hold none)
+        # Orphan-reap commit + the stamp commit.
+        assert db.commit.await_count == 2
+
+    @pytest.mark.asyncio
+    async def test_stamp_issues_an_update(self):
+        """The stamp is a single bulk ``UPDATE`` over failed+NULL rows."""
+        from sqlalchemy import Update
+
+        get_db_patch, db = _patch_get_db([], stamp_rowcount=1)
+        with get_db_patch, _patch_release(), _patch_storage(None):
+            await file_tasks.sweep_orphan_files()
+        stmts = [c.args[0] for c in db.execute.await_args_list]
+        assert any(isinstance(s, Update) for s in stmts), "expected a bulk UPDATE stamp"
 
 
 class TestSweepSoftDeletedFiles:
@@ -222,6 +265,75 @@ class TestSweepSoftDeletedFiles:
         # 2 db.execute calls: 1 SELECT + 1 DELETE (per-row).
         assert db.execute.await_count == 2
         db.commit.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_gc_reaps_failed_status_rows(self):
+        """#962: the GC now reaps ``status='failed'`` rows (stamped by the
+        orphan sweeper), not just ``uploaded``. A failed row's NULL
+        ``storage_key`` is the normal "reserved but never PUT" case → hard
+        delete with no R2 op."""
+        old = _make_file(
+            status="failed",
+            deleted_at=utcnow() - timedelta(days=8),
+            storage_key=None,
+        )
+        get_db_patch, db = _patch_get_db([old])
+        fake_storage = MagicMock()
+        fake_storage.delete_object = AsyncMock()
+        with get_db_patch, _patch_storage(fake_storage):
+            counts = await file_tasks.sweep_soft_deleted_files()
+
+        assert counts["swept"] == 1
+        assert counts["hard_deleted_no_r2"] == 1
+        assert counts["r2_deleted"] == 0
+        fake_storage.delete_object.assert_not_awaited()
+        # SELECT + per-row DELETE.
+        assert db.execute.await_count == 2
+        db.commit.assert_awaited_once()
+
+        # Rigor: confirm the candidate SELECT actually widened to include
+        # 'failed' (not merely that a failed row, once selected, is handled).
+        select_stmt = db.execute.await_args_list[0].args[0]
+        compiled = str(select_stmt.compile(compile_kwargs={"literal_binds": True}))
+        assert "'uploaded'" in compiled and "'failed'" in compiled
+
+    @pytest.mark.asyncio
+    async def test_gc_warns_on_uploaded_row_missing_storage_key(self):
+        """#962: broadening the filter to ``failed`` must NOT swallow the
+        ``uploaded`` + NULL storage_key anomaly — that is a real invariant
+        violation and still warrants an operator warning."""
+        bad = _make_file(
+            status="uploaded",
+            deleted_at=utcnow() - timedelta(days=8),
+            storage_key=None,
+        )
+        get_db_patch, _ = _patch_get_db([bad])
+        fake_storage = MagicMock()
+        fake_storage.delete_object = AsyncMock()
+        with get_db_patch, _patch_storage(fake_storage):
+            with patch.object(file_tasks.logger, "warning") as warn:
+                counts = await file_tasks.sweep_soft_deleted_files()
+        assert counts["hard_deleted_no_r2"] == 1
+        warn.assert_called_once()
+        assert warn.call_args.args[0] == "soft_delete_gc_uploaded_missing_storage_key"
+
+    @pytest.mark.asyncio
+    async def test_failed_row_missing_storage_key_does_not_warn(self):
+        """The same NULL storage_key on a ``failed`` row is normal (never
+        PUT) — no warning."""
+        ok = _make_file(
+            status="failed",
+            deleted_at=utcnow() - timedelta(days=8),
+            storage_key=None,
+        )
+        get_db_patch, _ = _patch_get_db([ok])
+        fake_storage = MagicMock()
+        fake_storage.delete_object = AsyncMock()
+        with get_db_patch, _patch_storage(fake_storage):
+            with patch.object(file_tasks.logger, "warning") as warn:
+                counts = await file_tasks.sweep_soft_deleted_files()
+        assert counts["hard_deleted_no_r2"] == 1
+        warn.assert_not_called()
 
     @pytest.mark.asyncio
     async def test_lost_race_with_other_replica_is_no_op(self):
