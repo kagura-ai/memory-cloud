@@ -269,12 +269,18 @@ async def sweep_soft_deleted_files() -> dict[str, int]:
                     )
                     continue
             else:
-                # No binary to delete. For an ``uploaded`` row a NULL
-                # ``storage_key`` is an invariant violation (the orphan
-                # sweeper should have transitioned it to ``failed``); for a
-                # ``failed`` row (#962) it is the normal "client reserved
-                # but never PUT" case. Either way the row is hard-deletable
-                # since there is no R2 binary to leak.
+                # No binary to delete. For a ``failed`` row (#962) a NULL
+                # ``storage_key`` is the normal "client reserved but never
+                # PUT" case. For an ``uploaded`` row it is an invariant
+                # violation (the orphan sweeper should have transitioned it
+                # to ``failed``) — keep that operator signal rather than
+                # letting #962's broadened filter swallow it silently.
+                # Either way the row is hard-deletable: no R2 binary to leak.
+                if f.status == "uploaded":
+                    logger.warning(
+                        "soft_delete_gc_uploaded_missing_storage_key",
+                        file_id=file_id,
+                    )
                 counts["hard_deleted_no_r2"] += 1
 
             # Idempotent DELETE: when multiple API replicas run the

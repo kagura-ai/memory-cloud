@@ -298,6 +298,44 @@ class TestSweepSoftDeletedFiles:
         assert "'uploaded'" in compiled and "'failed'" in compiled
 
     @pytest.mark.asyncio
+    async def test_gc_warns_on_uploaded_row_missing_storage_key(self):
+        """#962: broadening the filter to ``failed`` must NOT swallow the
+        ``uploaded`` + NULL storage_key anomaly — that is a real invariant
+        violation and still warrants an operator warning."""
+        bad = _make_file(
+            status="uploaded",
+            deleted_at=utcnow() - timedelta(days=8),
+            storage_key=None,
+        )
+        get_db_patch, _ = _patch_get_db([bad])
+        fake_storage = MagicMock()
+        fake_storage.delete_object = AsyncMock()
+        with get_db_patch, _patch_storage(fake_storage):
+            with patch.object(file_tasks.logger, "warning") as warn:
+                counts = await file_tasks.sweep_soft_deleted_files()
+        assert counts["hard_deleted_no_r2"] == 1
+        warn.assert_called_once()
+        assert warn.call_args.args[0] == "soft_delete_gc_uploaded_missing_storage_key"
+
+    @pytest.mark.asyncio
+    async def test_failed_row_missing_storage_key_does_not_warn(self):
+        """The same NULL storage_key on a ``failed`` row is normal (never
+        PUT) — no warning."""
+        ok = _make_file(
+            status="failed",
+            deleted_at=utcnow() - timedelta(days=8),
+            storage_key=None,
+        )
+        get_db_patch, _ = _patch_get_db([ok])
+        fake_storage = MagicMock()
+        fake_storage.delete_object = AsyncMock()
+        with get_db_patch, _patch_storage(fake_storage):
+            with patch.object(file_tasks.logger, "warning") as warn:
+                counts = await file_tasks.sweep_soft_deleted_files()
+        assert counts["hard_deleted_no_r2"] == 1
+        warn.assert_not_called()
+
+    @pytest.mark.asyncio
     async def test_lost_race_with_other_replica_is_no_op(self):
         """Multi-replica scenario: another sweeper already deleted the
         row. ``DELETE … WHERE id=… AND deleted_at IS NOT NULL`` returns

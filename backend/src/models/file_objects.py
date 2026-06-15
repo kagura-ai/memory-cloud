@@ -140,6 +140,16 @@ class FileObject(Base):
             "deleted_at",
             postgresql_where=("status IN ('uploaded', 'failed') AND deleted_at IS NOT NULL"),
         ),
+        # #962: locator for the orphan sweeper's failed-row soft-delete stamp
+        # (and the one-time backfill). Keeps that bulk ``UPDATE … WHERE
+        # status='failed' AND deleted_at IS NULL`` an index scan over the
+        # normally near-empty failed-pending set — the stamp drains the set
+        # each 15-min tick — instead of a seq-scan of the whole table.
+        Index(
+            "idx_file_objects_failed_pending_softdelete",
+            "id",
+            postgresql_where="status = 'failed' AND deleted_at IS NULL",
+        ),
     )
 
 
