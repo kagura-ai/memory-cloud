@@ -163,6 +163,24 @@ class SignupGateService:
         config = await self._load_config()
 
         if not config.enabled:
+            # #1031: the manual allowlist is an explicit "always allow this
+            # identity" grant — honor it even when the gate is disabled, before
+            # falling back to the legacy env gate (which blocks new signups when
+            # ALLOW_REGISTRATION=false). Matching is identical to the gate-ON
+            # manual path: (provider, subject_id=oauth_sub), source='manual',
+            # state='active' (the state filter lives in _is_allowlisted, so a
+            # revoked entry never resurfaces here).
+            if await self._is_allowlisted(provider, oauth_sub, "manual"):
+                return None
+            # Parity with gate-ON: a Google admin can pre-allowlist by email
+            # (pending:<email> sentinel) before the user has OAuth'd. Promote
+            # that row to the real OIDC sub on first callback so the pre-grant
+            # is honored under the disabled gate too. GitHub has no email-only
+            # pending state (its IDs resolve at add-time), so it is skipped.
+            if provider == "google" and await self._promote_pending_google_entry(
+                email=email, oauth_sub=oauth_sub
+            ):
+                return None
             return await self._legacy_check(email, oauth_sub)
 
         # #655: the historical Google pass-through is removed. Google's
