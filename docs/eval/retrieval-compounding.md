@@ -47,7 +47,13 @@ Checkpoints are read-only w.r.t. the graph and snapshot per-origin edge
 counts, so lift attribution is mechanical: `hebbian` edges come from replay,
 `semantic` edges from Sleep.
 
-## Result — 2026-06-10 run
+## Result — 2026-06-10 run (before gate calibration)
+
+> **Superseded conclusion — read the [2026-06-11 run](#result--2026-06-11-run-after-gate-calibration) below first.**
+> This run found zero compounding and attributed it entirely to the uncalibrated
+> semantic gate. Both gate fixes it called for have since shipped, and the
+> post-calibration run shows a small but **positive** graph-lane lift. This
+> section is kept as the "before" contrast.
 
 Frozen corpus v1, `recall k=10`, 8 replay rounds (200/240 recalls per mode),
 embedding `text-embedding-3-small` (512 dims). Source:
@@ -106,6 +112,80 @@ the Sleep increment is also zero — recorded, not assumed.
   the warming traffic causes **no precision regression**, confirming the
   Issue #120 separation does its job.
 
+## Result — 2026-06-11 run (after gate calibration)
+
+Re-run after the two gate fixes this experiment motivated shipped:
+**[#982](https://github.com/kagura-ai/memory-cloud/issues/982) → #984**
+(per-model percentile calibration of `min_similarity_for_edge`) and
+**[#983](https://github.com/kagura-ai/memory-cloud/issues/983) → #985** (2D edge
+gate: co-activation evidence count × cosine). Same frozen corpus v1, same
+`recall k=10`, 8 replay rounds, same embedding `text-embedding-3-small` (512
+dims). Canonical source:
+[`backend/tests/eval/results/compounding-2026-06-11-983-evidence4.json`](../../backend/tests/eval/results/compounding-2026-06-11-983-evidence4.json).
+
+**Retrieval now compounds with use — small but positive, and only on the lane
+that reads the learned layer.**
+
+Graph lane, `cold → warm_replay` (identical at `warm_sleep` — Sleep adds nothing
+on this corpus, see caveats):
+
+| metric | cold | warm_replay | abs lift |
+|---|---|---|---|
+| recovery@10 | 0.0 | 0.2 | **+0.2** |
+| recovery@5 | 0.0 | 0.2 | **+0.2** |
+| mrr@10 | 0.0 | 0.2 | **+0.2** |
+| seeds_in_graph | 0 | 2 (`exclude_probes`) / 4 (`include_probes`) | — |
+
+The recall-lane control stayed flat (nDCG@10 `0.9707` across all checkpoints,
+both modes) — the warming traffic still causes **no precision regression**, so
+the Issue #120 separation continues to hold even with the more permissive write
+path.
+
+### Why the conclusion flipped
+
+The 06-10 zero was fully attributed to the uncalibrated absolute gate. Both
+fixes target exactly that:
+
+1. **Per-model percentile calibration (#984).** `min_similarity_for_edge` is no
+   longer a hard-coded `0.5`. It is seeded from the p95 of the corpus's
+   *non-gold* pair cosines under the active embedding model — here
+   `resolved_threshold = 0.4466` (p95 of 115 non-gold observations; floor 0.3,
+   absolute fallback 0.5). That alone does **not** clear the probe gold pairs
+   (cosines `0.23–0.40`, still below 0.4466) — which is why #984 needed a
+   companion.
+2. **2D edge gate (#985).** An edge now forms on **co-activation evidence ×
+   cosine**, not cosine alone: a pair repeatedly co-recalled across replay
+   rounds can form despite sub-threshold cosine. All 5 probe gold pairs form via
+   this `forms_repetition` path, seeding the graph and producing the lift.
+
+### Reading evidence4 vs the evidence{2,3} sweep
+
+`evidence{2,3,4}` are a sweep over the #983 gate's required co-activation
+evidence count (how much repetition substitutes for cosine); the cosine
+calibration (`0.4466`) is identical across all of them. Looser settings form
+more edges and lift recovery higher, at the cost of edge precision:
+
+| run | edges formed | edge precision | warm seeds (excl.) | recovery@10 lift |
+|---|---|---|---|---|
+| evidence2 (loosest) | 35 | 0.17 | 5 | +0.4 |
+| evidence3 | 27 | 0.19 | 5 | +0.2 (excl) / +0.4 (incl) |
+| **evidence4 (strictest, canonical)** | 15 | 0.33 | 2 | **+0.2** |
+
+We cite **evidence4**: the strictest setting still yields a positive lift, with
+the cleanest edge precision (0.33 vs 0.17) — the honest floor of the effect, not
+its rosiest reading. Per the publication policy, what matters is the **sign and
+direction** (zero → positive), not the absolute 0.2.
+
+### Caveats (unchanged honesty)
+
+- Small absolute scale: 5 probes, 2–5 graph seeds. This is "a small positive
+  lift is now measurable", not "strong compounding".
+- Synthetic golden corpus — real recall-feedback labels remain future work
+  (#344 / #375).
+- Sleep `edges_only` still finds `no_edge_candidates` on this corpus, so the
+  `warm_replay → warm_sleep` increment is 0.0 (recorded, not assumed) — the lift
+  is entirely from replay-formed Hebbian edges, not Sleep consolidation.
+
 ## Reproduce it
 
 ```bash
@@ -128,6 +208,6 @@ produced it.
 | Concern | Where it lives |
 |---|---|
 | Static layer-by-layer quality on the cold corpus | [#967 benchmark](retrieval-benchmark.md) |
-| Calibrating the semantic gate per embedding model (percentile-based, cf. #240) | follow-up filed from this experiment |
+| Calibrating the semantic gate per embedding model (percentile-based, cf. #240) | **shipped** — [#982](https://github.com/kagura-ai/memory-cloud/issues/982)/[#984](https://github.com/kagura-ai/memory-cloud/pull/984) (per-model percentile) + [#983](https://github.com/kagura-ai/memory-cloud/issues/983)/[#985](https://github.com/kagura-ai/memory-cloud/pull/985) (2D evidence×cosine gate); see the [2026-06-11 run](#result--2026-06-11-run-after-gate-calibration) |
 | Recall-feedback labels to replace synthetic gold | [#344](https://github.com/kagura-ai/memory-cloud/issues/344) / [#375](https://github.com/kagura-ai/memory-cloud/issues/375) |
 | Harness internals (corpus, buckets, leakage, protocol details) | [`backend/tests/eval/README.md`](../../backend/tests/eval/README.md) |
