@@ -12,6 +12,7 @@ from unittest.mock import AsyncMock
 from uuid import uuid4
 
 import pytest
+from fastapi import HTTPException
 
 from api.routes.memory import recall
 from models.schemas import RecallRequest, RecallResponse
@@ -48,3 +49,19 @@ async def test_recall_route_forwards_none_when_no_filters():
 
     kwargs = svc.recall.await_args.kwargs
     assert kwargs["current_context_id"] is None
+
+
+@pytest.mark.asyncio
+async def test_recall_route_maps_value_error_to_422():
+    """A bad request (missing context, or a non-UUID context_id that fails to
+    parse downstream) surfaces as 422, not an unhandled 500 — mirroring
+    /remember and /pinned."""
+    svc = AsyncMock()
+    svc.recall = AsyncMock(
+        side_effect=ValueError("recall() requires current_workspace_id and current_context_id")
+    )
+    req = RecallRequest(query="test", k=5, filters={"context_id": "not-a-uuid"})
+
+    with pytest.raises(HTTPException) as exc:
+        await recall(request=req, user=MOCK_USER, memory_service=svc)
+    assert exc.value.status_code == 422

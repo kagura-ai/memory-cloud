@@ -219,12 +219,18 @@ async def recall(
     # request.context["context_id"]. No filter → None (the service guard then
     # rejects it, same as before — see test_recall_no_workspace).
     context_id = request.filters.get("context_id") if request.filters else None
-    result = await memory_service.recall(
-        request,
-        user_id=user["user_id"],
-        current_context_id=context_id,
-        current_workspace_id=user.get("current_workspace_id"),  # NEW: Issue #146
-    )
+    try:
+        result = await memory_service.recall(
+            request,
+            user_id=user["user_id"],
+            current_context_id=context_id,
+            current_workspace_id=user.get("current_workspace_id"),  # NEW: Issue #146
+        )
+    except ValueError as e:
+        # Mirror /remember: MemoryService.recall raises ValueError for bad
+        # requests (missing context, or a non-UUID context_id that fails to
+        # parse downstream). Map to 422 rather than letting it surface as 500.
+        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=str(e)) from e
 
     return result
 
