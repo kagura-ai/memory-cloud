@@ -235,7 +235,7 @@ function LoginContent() {
       <div className="flex min-h-screen items-center justify-center bg-white">
         <div className="text-center">
           <div className="relative mx-auto mb-4">
-            <div className="h-16 w-16 animate-spin rounded-full border-4 border-brand-green-200 border-t-brand-green-600" />
+            <div className="h-16 w-16 animate-spin rounded-full border-4 border-[#e6f0ec] border-t-kagura-accent" />
           </div>
           <p className="text-lg font-semibold text-gray-700">
             {t("mockAuthEnabled")}
@@ -249,12 +249,12 @@ function LoginContent() {
   }
 
   return (
-    <div className="relative flex min-h-screen items-center justify-center overflow-hidden bg-white">
+    <div className="relative flex min-h-screen items-start justify-center overflow-hidden bg-white pt-[16vh]">
       {/* Background */}
       <div className="absolute inset-0 -z-10 bg-[linear-gradient(to_right,#8080800a_1px,transparent_1px),linear-gradient(to_bottom,#8080800a_1px,transparent_1px)] bg-[size:14px_24px]" />
       <div className="absolute inset-0 -z-10 bg-gradient-to-b from-white via-gray-50/50 to-white" />
-      <div className="pointer-events-none absolute -left-1/4 -top-1/4 h-96 w-96 rounded-full bg-brand-green-300/30 blur-3xl" />
-      <div className="pointer-events-none absolute -right-1/4 -bottom-1/4 h-96 w-96 rounded-full bg-emerald-300/30 blur-3xl" />
+      <div className="pointer-events-none absolute -left-1/4 -top-1/4 h-96 w-96 rounded-full bg-[#00664b]/10 blur-3xl" />
+      <div className="pointer-events-none absolute -right-1/4 -bottom-1/4 h-96 w-96 rounded-full bg-[#faa916]/10 blur-3xl" />
 
       <div className="absolute top-4 right-4 z-10">
         <LanguageSelector
@@ -265,14 +265,14 @@ function LoginContent() {
 
       <div className="relative w-full max-w-md px-4">
         <div className="mb-8 flex justify-center">
-          <KaguraLogo className="h-24 w-auto" />
+          <KaguraLogo className="h-24 w-auto" variant="image" />
         </div>
 
         <Card className="overflow-hidden border-gray-200 bg-white/80 shadow-2xl backdrop-blur-xl">
           <CardContent className="p-8">
             {/* Badge */}
             <div className="mb-6 flex justify-center">
-              <div className="inline-flex items-center gap-2 rounded-full bg-gradient-to-r from-brand-green-100 to-emerald-100 px-4 py-1.5 text-sm font-semibold text-brand-green-700">
+              <div className="inline-flex items-center gap-2 rounded-full bg-[#e6f0ec] px-4 py-1.5 text-sm font-semibold text-kagura-tokiwa">
                 <Sparkles className="h-4 w-4" />
                 <span>{t("welcomeToKagura")}</span>
               </div>
@@ -344,7 +344,7 @@ function LoginContent() {
                 <Button
                   type="submit"
                   disabled={loadingAction !== null || totpCode.length !== 6}
-                  className="h-12 w-full bg-gradient-to-r from-brand-green-600 to-emerald-600 text-base font-semibold text-white shadow-lg hover:from-brand-green-700 hover:to-emerald-700 disabled:opacity-50"
+                  className="h-12 w-full rounded-full bg-kagura-accent text-base font-semibold text-white shadow-sm transition-colors hover:bg-[#a8380a] disabled:opacity-50"
                 >
                   {loadingAction === "mfa" ? t("verifying") : t("verify")}
                 </Button>
@@ -390,7 +390,7 @@ function LoginContent() {
                             type="checkbox"
                             checked={agreedToTerms}
                             onChange={(e) => setAgreedToTerms(e.target.checked)}
-                            className="mt-1 h-4 w-4 rounded border-gray-300 text-brand-green-600 focus:ring-brand-green-500"
+                            className="mt-1 h-4 w-4 rounded border-gray-300 text-kagura-accent focus:ring-kagura-accent"
                           />
                           <span className="text-sm text-gray-700">
                             {t("agreeToTerms")}{" "}
@@ -398,7 +398,7 @@ function LoginContent() {
                               href="https://www.kagura-ai.com/terms"
                               target="_blank"
                               rel="noopener noreferrer"
-                              className="font-medium text-brand-green-600 hover:underline"
+                              className="font-medium text-kagura-link hover:underline"
                             >
                               {t("termsOfService")}
                             </a>{" "}
@@ -407,7 +407,7 @@ function LoginContent() {
                               href="https://www.kagura-ai.com/privacy"
                               target="_blank"
                               rel="noopener noreferrer"
-                              className="font-medium text-brand-green-600 hover:underline"
+                              className="font-medium text-kagura-link hover:underline"
                             >
                               {t("privacyPolicy")}
                             </a>
@@ -423,7 +423,7 @@ function LoginContent() {
                           !loginId ||
                           !password
                         }
-                        className="h-12 w-full bg-gradient-to-r from-brand-green-600 to-emerald-600 text-base font-semibold text-white shadow-lg hover:from-brand-green-700 hover:to-emerald-700 disabled:opacity-50"
+                        className="h-12 w-full rounded-full bg-kagura-accent text-base font-semibold text-white shadow-sm transition-colors hover:bg-[#a8380a] disabled:opacity-50"
                       >
                         {loadingAction === "password"
                           ? t("signingIn")
@@ -453,7 +453,7 @@ function LoginContent() {
                     variant={showAdminLogin ? "outline" : "default"}
                     className={`group relative h-14 w-full overflow-hidden text-base font-semibold transition-all hover:scale-[1.02] disabled:opacity-50 disabled:hover:scale-100 ${
                       !showAdminLogin
-                        ? "bg-gradient-to-r from-brand-green-600 to-emerald-600 text-white shadow-xl shadow-brand-green-500/30 hover:from-brand-green-700 hover:to-emerald-700"
+                        ? "rounded-full bg-kagura-accent text-white shadow-md transition-colors hover:bg-[#a8380a]"
                         : "shadow-md hover:shadow-lg"
                     }`}
                   >
@@ -543,7 +543,7 @@ function LoginContent() {
                         type="checkbox"
                         checked={agreedToTerms}
                         onChange={(e) => setAgreedToTerms(e.target.checked)}
-                        className="mt-1 h-4 w-4 rounded border-gray-300 text-brand-green-600 focus:ring-brand-green-500"
+                        className="mt-1 h-4 w-4 rounded border-gray-300 text-kagura-accent focus:ring-kagura-accent"
                       />
                       <span className="text-sm text-gray-700">
                         {t("agreeToTerms")}{" "}
@@ -551,7 +551,7 @@ function LoginContent() {
                           href="https://www.kagura-ai.com/terms"
                           target="_blank"
                           rel="noopener noreferrer"
-                          className="font-medium text-brand-green-600 hover:underline"
+                          className="font-medium text-kagura-link hover:underline"
                         >
                           {t("termsOfService")}
                         </a>{" "}
@@ -560,7 +560,7 @@ function LoginContent() {
                           href="https://www.kagura-ai.com/privacy"
                           target="_blank"
                           rel="noopener noreferrer"
-                          className="font-medium text-brand-green-600 hover:underline"
+                          className="font-medium text-kagura-link hover:underline"
                         >
                           {t("privacyPolicy")}
                         </a>
@@ -585,7 +585,7 @@ function LoginContent() {
                       key={feature.text}
                       className="flex items-center gap-3 text-sm text-gray-700"
                     >
-                      <div className="flex-shrink-0 rounded-lg bg-brand-green-100 p-2 text-brand-green-600">
+                      <div className="flex-shrink-0 rounded-lg bg-[#e6f0ec] p-2 text-kagura-tokiwa">
                         <Icon className="h-4 w-4" />
                       </div>
                       <span>{feature.text}</span>
@@ -600,7 +600,7 @@ function LoginContent() {
         <div className="mt-6 flex items-center justify-between">
           <a
             href="https://www.kagura-ai.com"
-            className="text-sm font-medium text-gray-500 transition-colors hover:text-brand-green-600"
+            className="text-sm font-medium text-gray-500 transition-colors hover:text-kagura-link"
           >
             {t("backToHome")}
           </a>
@@ -613,7 +613,7 @@ function LoginContent() {
               return (
                 <button
                   onClick={() => setShowAdminLogin(true)}
-                  className="inline-flex items-center gap-2 rounded-lg border border-gray-200 bg-white/60 px-4 py-2 text-sm font-medium text-gray-600 backdrop-blur-sm transition-colors hover:bg-white hover:text-brand-green-600"
+                  className="inline-flex items-center gap-2 rounded-lg border border-gray-200 bg-white/60 px-4 py-2 text-sm font-medium text-gray-600 backdrop-blur-sm transition-colors hover:bg-white hover:text-kagura-link"
                 >
                   <Shield className="h-4 w-4" />
                   {t("adminLogin")}
@@ -632,8 +632,8 @@ export default function LoginPage() {
       fallback={
         <div className="flex min-h-screen items-center justify-center bg-white">
           <div className="relative">
-            <div className="h-16 w-16 animate-spin rounded-full border-4 border-brand-green-200 border-t-brand-green-600" />
-            <div className="absolute inset-0 h-16 w-16 animate-ping rounded-full border-4 border-brand-green-600 opacity-20" />
+            <div className="h-16 w-16 animate-spin rounded-full border-4 border-[#e6f0ec] border-t-kagura-accent" />
+            <div className="absolute inset-0 h-16 w-16 animate-ping rounded-full border-4 border-kagura-accent opacity-20" />
           </div>
         </div>
       }
