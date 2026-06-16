@@ -832,6 +832,34 @@ class TestIsAllowlistedSourceFiltering:
         assert "signup_allowlist.provider" in captured["sql"]
         assert "signup_allowlist.subject_id" in captured["sql"]
 
+    @pytest.mark.asyncio
+    async def test_filters_on_active_state_only(self):
+        """#1031 security contract: _is_allowlisted MUST filter state='active'
+        so revoked/grace entries never grant signup. This control is shared by
+        the gate-ON manual path AND the gate-OFF allowlist bypass added in
+        #1031 (check_access disabled branch claims 'a revoked entry never
+        resurfaces here'), so pin it once at the helper that owns the filter.
+        """
+        svc = _svc()
+        captured = {}
+
+        async def fake_execute(stmt):
+            # literal_binds renders the bound 'active' value inline so we can
+            # assert the *value*, not just that some state filter exists.
+            captured["sql"] = str(stmt.compile(compile_kwargs={"literal_binds": True}))
+            result = MagicMock()
+            result.first = MagicMock(return_value=None)
+            return result
+
+        svc.db.execute = fake_execute
+
+        allowed = await svc._is_allowlisted("github", "1234", "manual")
+        assert allowed is False
+
+        sql = captured["sql"].lower()
+        assert "signup_allowlist.state =" in sql
+        assert "'active'" in sql  # revoked / grace entries are excluded
+
 
 class TestIsExistingUser:
     """Verify _is_existing_user uses an OR condition on email + user_id and
