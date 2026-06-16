@@ -33,9 +33,10 @@ def _config(*, enabled: bool, mode: str) -> SimpleNamespace:
 class TestCheckAccess:
     @pytest.mark.asyncio
     async def test_disabled_delegates_to_legacy(self):
-        """enabled=false → legacy env-based gate owns the decision (OSS path)."""
+        """enabled=false + not allowlisted → legacy env-based gate owns the decision."""
         svc = _svc()
         svc._load_config = AsyncMock(return_value=_config(enabled=False, mode="manual"))
+        svc._is_allowlisted = AsyncMock(return_value=False)
         svc._legacy_check = AsyncMock(return_value=None)  # allowed
 
         result = await svc.check_access(
@@ -47,9 +48,10 @@ class TestCheckAccess:
 
     @pytest.mark.asyncio
     async def test_disabled_delegates_and_blocks(self):
-        """enabled=false + legacy says 'blocked' → that block propagates."""
+        """enabled=false + not allowlisted + legacy says 'blocked' → block propagates."""
         svc = _svc()
         svc._load_config = AsyncMock(return_value=_config(enabled=False, mode="manual"))
+        svc._is_allowlisted = AsyncMock(return_value=False)
         legacy_redirect = RedirectResponse("/login?error=x", status_code=303)
         svc._legacy_check = AsyncMock(return_value=legacy_redirect)
 
@@ -58,6 +60,118 @@ class TestCheckAccess:
         )
 
         assert result is legacy_redirect
+
+    @pytest.mark.asyncio
+    async def test_disabled_allowlisted_github_bypasses_legacy(self):
+        """#1031: enabled=false + GitHub identity on the manual allowlist →
+        allowed without ever consulting the legacy gate (the allowlist is an
+        explicit 'always allow this identity' grant honored regardless of the
+        gate flag)."""
+        svc = _svc()
+        svc._load_config = AsyncMock(return_value=_config(enabled=False, mode="manual"))
+        svc._is_allowlisted = AsyncMock(return_value=True)
+        # Legacy would block (ALLOW_REGISTRATION=false), but we must not reach it.
+        svc._legacy_check = AsyncMock(
+            return_value=RedirectResponse("/login?error=registration_closed", status_code=303)
+        )
+
+        result = await svc.check_access(
+            provider="github", oauth_sub="1234", email="a@b.com", username="octocat"
+        )
+
+        assert result is None
+        svc._is_allowlisted.assert_awaited_once_with("github", "1234", "manual")
+        svc._legacy_check.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_disabled_allowlisted_google_by_sub_bypasses_legacy(self):
+        """#1031: enabled=false + Google identity matched by sub on the manual
+        allowlist → allowed without falling through to legacy."""
+        svc = _svc()
+        svc._load_config = AsyncMock(return_value=_config(enabled=False, mode="manual"))
+        svc._is_allowlisted = AsyncMock(return_value=True)
+        svc._promote_pending_google_entry = AsyncMock(return_value=False)
+        svc._legacy_check = AsyncMock(
+            return_value=RedirectResponse("/login?error=registration_closed", status_code=303)
+        )
+
+        result = await svc.check_access(
+            provider="google",
+            oauth_sub="108276939729829363",
+            email="a@b.com",
+            username="a@b.com",
+        )
+
+        assert result is None
+        svc._is_allowlisted.assert_awaited_once_with("google", "108276939729829363", "manual")
+        # A direct subject_id match short-circuits before the pending fallback.
+        svc._promote_pending_google_entry.assert_not_awaited()
+        svc._legacy_check.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_disabled_google_pending_promotion_allows(self):
+        """#1031: enabled=false + Google pre-allowlisted by email (pending
+        sentinel) → promoted on first OAuth and allowed, parity with gate-ON."""
+        svc = _svc()
+        svc._load_config = AsyncMock(return_value=_config(enabled=False, mode="manual"))
+        svc._is_allowlisted = AsyncMock(return_value=False)
+        svc._promote_pending_google_entry = AsyncMock(return_value=True)
+        svc._legacy_check = AsyncMock(
+            return_value=RedirectResponse("/login?error=registration_closed", status_code=303)
+        )
+
+        result = await svc.check_access(
+            provider="google",
+            oauth_sub="108276939729829363",
+            email="invited@example.com",
+            username="invited@example.com",
+        )
+
+        assert result is None
+        svc._promote_pending_google_entry.assert_awaited_once_with(
+            email="invited@example.com", oauth_sub="108276939729829363"
+        )
+        svc._legacy_check.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_disabled_github_not_allowlisted_no_pending_promotion(self):
+        """#1031 regression guard: enabled=false + GitHub not allowlisted →
+        legacy owns the decision; the Google-only pending promotion is never
+        attempted for GitHub."""
+        svc = _svc()
+        svc._load_config = AsyncMock(return_value=_config(enabled=False, mode="manual"))
+        svc._is_allowlisted = AsyncMock(return_value=False)
+        svc._promote_pending_google_entry = AsyncMock(return_value=True)
+        svc._legacy_check = AsyncMock(return_value=None)
+
+        result = await svc.check_access(
+            provider="github", oauth_sub="1234", email="a@b.com", username="octocat"
+        )
+
+        assert result is None
+        svc._promote_pending_google_entry.assert_not_awaited()
+        svc._legacy_check.assert_awaited_once_with("a@b.com", "1234")
+
+    @pytest.mark.asyncio
+    async def test_disabled_google_not_allowlisted_no_pending_falls_through(self):
+        """#1031 regression guard: enabled=false + Google neither allowlisted
+        nor pending → falls through to the legacy gate unchanged."""
+        svc = _svc()
+        svc._load_config = AsyncMock(return_value=_config(enabled=False, mode="manual"))
+        svc._is_allowlisted = AsyncMock(return_value=False)
+        svc._promote_pending_google_entry = AsyncMock(return_value=False)
+        legacy_redirect = RedirectResponse("/login?error=registration_closed", status_code=303)
+        svc._legacy_check = AsyncMock(return_value=legacy_redirect)
+
+        result = await svc.check_access(
+            provider="google",
+            oauth_sub="108276939729829363",
+            email="stranger@example.com",
+            username="stranger@example.com",
+        )
+
+        assert result is legacy_redirect
+        svc._legacy_check.assert_awaited_once_with("stranger@example.com", "108276939729829363")
 
     @pytest.mark.asyncio
     async def test_enabled_google_now_gated(self):
@@ -718,6 +832,34 @@ class TestIsAllowlistedSourceFiltering:
         assert "signup_allowlist.provider" in captured["sql"]
         assert "signup_allowlist.subject_id" in captured["sql"]
 
+    @pytest.mark.asyncio
+    async def test_filters_on_active_state_only(self):
+        """#1031 security contract: _is_allowlisted MUST filter state='active'
+        so revoked/grace entries never grant signup. This control is shared by
+        the gate-ON manual path AND the gate-OFF allowlist bypass added in
+        #1031 (check_access disabled branch claims 'a revoked entry never
+        resurfaces here'), so pin it once at the helper that owns the filter.
+        """
+        svc = _svc()
+        captured = {}
+
+        async def fake_execute(stmt):
+            # literal_binds renders the bound 'active' value inline so we can
+            # assert the *value*, not just that some state filter exists.
+            captured["sql"] = str(stmt.compile(compile_kwargs={"literal_binds": True}))
+            result = MagicMock()
+            result.first = MagicMock(return_value=None)
+            return result
+
+        svc.db.execute = fake_execute
+
+        allowed = await svc._is_allowlisted("github", "1234", "manual")
+        assert allowed is False
+
+        sql = captured["sql"].lower()
+        assert "signup_allowlist.state =" in sql
+        assert "'active'" in sql  # revoked / grace entries are excluded
+
 
 class TestIsExistingUser:
     """Verify _is_existing_user uses an OR condition on email + user_id and
@@ -799,6 +941,8 @@ class TestLegacyCheckPassesUserIdThrough:
         """When gate is disabled the legacy path is called with both email and user_id."""
         svc = _svc()
         svc._load_config = AsyncMock(return_value=_config(enabled=False, mode="manual"))
+        # #1031: not allowlisted, so the disabled path falls through to legacy.
+        svc._is_allowlisted = AsyncMock(return_value=False)
         svc._legacy_check = AsyncMock(return_value=None)
 
         await svc.check_access(
