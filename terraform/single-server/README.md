@@ -290,7 +290,7 @@ docker compose exec ollama ollama pull nomic-embed-text
 No direct port 22 exposure needed:
 
 ```bash
-gcloud compute ssh kagura-memory-vm \
+gcloud compute ssh ${GCP_VM} \
   --zone asia-northeast1-a \
   --project $PROJECT_ID \
   --tunnel-through-iap
@@ -306,7 +306,7 @@ docker compose -f docker-compose.prod.yml logs -f api
 ### Manual snapshot
 
 ```bash
-gcloud compute disks snapshot kagura-memory-vm \
+gcloud compute disks snapshot ${GCP_VM} \
   --zone asia-northeast1-a \
   --snapshot-names "kagura-memory-$(date +%Y%m%d-%H%M)"
 ```

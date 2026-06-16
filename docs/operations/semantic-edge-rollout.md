@@ -4,6 +4,8 @@
 
 Operator runbook for shipping the semantic / Hebbian edge split. The PR makes sleep-discovered edges survive the decay loop; this runbook covers the deploy steps and the one-shot backfill that restores edges previously erased by decay.
 
+> **Placeholders**: `${GCP_PROJECT}`, `${GCP_VM}`, and `<CONTEXT_ID>` in the commands below are stand-ins — substitute your deployment's real values (kept in the private ops record, not committed to this public repo).
+
 ## What changed
 
 | Layer | Before | After |
@@ -35,8 +37,8 @@ Production impact: zero user-visible change to `recall` (the graph is `explore`-
 2. After the new color is healthy, run the migration on the VM:
 
    ```bash
-   gcloud compute ssh kagura-memory-vm \
-     --zone=asia-northeast1-a --tunnel-through-iap --project=kagura-492509 \
+   gcloud compute ssh ${GCP_VM} \
+     --zone=asia-northeast1-a --tunnel-through-iap --project=${GCP_PROJECT} \
      --command='docker exec kagura-api-$(cat /opt/kagura-memory/active-color) \
        alembic -c /app/alembic.ini upgrade head'
    ```
@@ -44,8 +46,8 @@ Production impact: zero user-visible change to `recall` (the graph is `explore`-
 3. Verify the column landed:
 
    ```bash
-   gcloud compute ssh kagura-memory-vm \
-     --zone=asia-northeast1-a --tunnel-through-iap --project=kagura-492509 \
+   gcloud compute ssh ${GCP_VM} \
+     --zone=asia-northeast1-a --tunnel-through-iap --project=${GCP_PROJECT} \
      --command='docker exec kagura-postgres psql -U kagura -d kagura -c "\d neural_memory_edges"' \
      | grep -E "origin|valid_edge_origin|idx_edges_origin"
    ```
@@ -65,11 +67,11 @@ The backfill is opt-in. Skipping it means existing contexts gradually accumulate
 1. Dry-run with a strict threshold first to see what the impact would be on the largest context:
 
    ```bash
-   gcloud compute ssh kagura-memory-vm \
-     --zone=asia-northeast1-a --tunnel-through-iap --project=kagura-492509 \
+   gcloud compute ssh ${GCP_VM} \
+     --zone=asia-northeast1-a --tunnel-through-iap --project=${GCP_PROJECT} \
      --command="docker exec kagura-api-\$(cat /opt/kagura-memory/active-color) \
        python -m scripts.backfill_semantic_edges \
-         --context-id abfd654d-c489-47fe-a1d3-e6471041259b \
+         --context-id <CONTEXT_ID> \
          --sim-threshold 0.85 --top-k 10 --dry-run"
    ```
 
@@ -78,31 +80,31 @@ The backfill is opt-in. Skipping it means existing contexts gradually accumulate
 2. Execute against the same context with the chosen threshold:
 
    ```bash
-   gcloud compute ssh kagura-memory-vm \
-     --zone=asia-northeast1-a --tunnel-through-iap --project=kagura-492509 \
+   gcloud compute ssh ${GCP_VM} \
+     --zone=asia-northeast1-a --tunnel-through-iap --project=${GCP_PROJECT} \
      --command="docker exec kagura-api-\$(cat /opt/kagura-memory/active-color) \
        python -m scripts.backfill_semantic_edges \
-         --context-id abfd654d-c489-47fe-a1d3-e6471041259b \
+         --context-id <CONTEXT_ID> \
          --sim-threshold 0.7 --top-k 10"
    ```
 
 3. Inspect:
 
    ```bash
-   gcloud compute ssh kagura-memory-vm \
-     --zone=asia-northeast1-a --tunnel-through-iap --project=kagura-492509 \
+   gcloud compute ssh ${GCP_VM} \
+     --zone=asia-northeast1-a --tunnel-through-iap --project=${GCP_PROJECT} \
      --command="docker exec kagura-postgres psql -U kagura -d kagura -c \
        \"SELECT origin, COUNT(*) FROM neural_memory_edges \
-         WHERE context_id = 'abfd654d-c489-47fe-a1d3-e6471041259b' GROUP BY origin;\""
+         WHERE context_id = '<CONTEXT_ID>' GROUP BY origin;\""
    ```
 
-   Expect a non-trivial `semantic` count (hundreds to low thousands for `kagura-dev` at 1,494 memories) and an unchanged `hebbian` count.
+   Expect a non-trivial `semantic` count (hundreds to low thousands for a large context) and an unchanged `hebbian` count.
 
 4. Open production backfill for all contexts (optional, can be deferred):
 
    ```bash
-   gcloud compute ssh kagura-memory-vm \
-     --zone=asia-northeast1-a --tunnel-through-iap --project=kagura-492509 \
+   gcloud compute ssh ${GCP_VM} \
+     --zone=asia-northeast1-a --tunnel-through-iap --project=${GCP_PROJECT} \
      --command="docker exec kagura-api-\$(cat /opt/kagura-memory/active-color) \
        python -m scripts.backfill_semantic_edges \
          --sim-threshold 0.7 --top-k 10"
@@ -118,12 +120,12 @@ The backfill is opt-in. Skipping it means existing contexts gradually accumulate
      | grep -E "weak_edges_pruned|bulk_decay_applied"
    ```
 
-* `get_sleep_history(context_id='abfd654d-c489-47fe-a1d3-e6471041259b')` on the next nightly run shows `edges_created > 0` AND those edges survive in the DB past one hour:
+* `get_sleep_history(context_id='<CONTEXT_ID>')` on the next nightly run shows `edges_created > 0` AND those edges survive in the DB past one hour:
 
    ```bash
    docker exec kagura-postgres psql -U kagura -d kagura -c \
      "SELECT COUNT(*) FROM neural_memory_edges \
-      WHERE context_id = 'abfd654d-c489-47fe-a1d3-e6471041259b' \
+      WHERE context_id = '<CONTEXT_ID>' \
         AND created_at > NOW() - INTERVAL '24 hours' \
         AND origin = 'semantic';"
    ```

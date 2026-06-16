@@ -29,10 +29,12 @@ ACTIVE=$(cat /opt/kagura-memory/active-color)   # blue|green
 echo "kagura-api-${ACTIVE}"
 ```
 
-Run this on the VM (`kagura-memory-vm`). The active-color file is
+Run this on the VM (`${GCP_VM}`). The active-color file is
 maintained by the deploy pipeline and is the same file
 [deployment.md](../deployment.md) uses for the tag_cooccurrence backfill
 runbook.
+
+> **Placeholders**: `${GCP_PROJECT}` and `${GCP_VM}` in the commands below are stand-ins — substitute your deployment's real values (kept in the private ops record, not committed to this public repo).
 
 ### 2. Note the bootstrap gate
 
@@ -53,16 +55,16 @@ is still computed but should be treated as advisory.
 ## Execution
 
 Run from a workstation with `gcloud` configured for the
-`kagura-492509` project. The full one-shot invocation:
+`${GCP_PROJECT}` project. The full one-shot invocation:
 
 ```bash
 CONTEXT=<context-uuid>
 LABEL=<short-label>           # e.g. kagura_dev_w7
 DATE=$(date -u +%Y-%m-%d)
 
-gcloud compute ssh kagura-memory-vm \
+gcloud compute ssh ${GCP_VM} \
   --zone asia-northeast1-a \
-  --project kagura-492509 \
+  --project ${GCP_PROJECT} \
   --tunnel-through-iap \
   --command="
     set -e
@@ -90,9 +92,9 @@ locally and archive under a per-context directory:
 mkdir -p ~/measurements/${LABEL%_*}    # e.g. ~/measurements/kagura_dev
 gcloud compute scp \
   --zone asia-northeast1-a \
-  --project kagura-492509 \
+  --project ${GCP_PROJECT} \
   --tunnel-through-iap \
-  kagura-memory-vm:/tmp/measure_${LABEL}.json \
+  ${GCP_VM}:/tmp/measure_${LABEL}.json \
   ~/measurements/${LABEL%_*}/measure_${LABEL}_${DATE}.json
 ```
 
@@ -122,7 +124,7 @@ compare:
 seed (the script's `--seed` argument only affects the diagnostic
 `measure_random_pair` call, not the top-k sampling). Two consecutive
 runs on the same context will sample different subsets. Empirically,
-on the kagura-dev context (~500–700 memories) at `--memories 200
+on a representative context (a few hundred memories) at `--memories 200
 --top-k 50` the run-to-run scatter of the p90 cosine value lands
 around **±0.02** — calibrated against the #407 W+0 vs W+7 measurement,
 where the observed Δp90 was +0.0176 over a 7-day window with no
