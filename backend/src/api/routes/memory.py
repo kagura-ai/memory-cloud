@@ -212,13 +212,25 @@ async def recall(
 
     # Issue #82: Pass current context ID for context-based collection
     # Issue #146: Pass current workspace ID for workspace-scoped API keys
-    # Issue #246: current_context_id removed - use None
-    result = await memory_service.recall(
-        request,
-        user_id=user["user_id"],
-        current_context_id=None,  # Issue #246: current_context_id removed
-        current_workspace_id=user.get("current_workspace_id"),  # NEW: Issue #146
-    )
+    # Issue #1036: scope recall to the requested context. The endpoint used to
+    # hardcode current_context_id=None (a leftover from #246), but
+    # MemoryService.recall() still requires a context, so every recall 500'd.
+    # Forward filters.context_id, mirroring how /remember resolves
+    # request.context["context_id"]. No filter → None (the service guard then
+    # rejects it, same as before — see test_recall_no_workspace).
+    context_id = request.filters.get("context_id") if request.filters else None
+    try:
+        result = await memory_service.recall(
+            request,
+            user_id=user["user_id"],
+            current_context_id=context_id,
+            current_workspace_id=user.get("current_workspace_id"),  # NEW: Issue #146
+        )
+    except ValueError as e:
+        # Mirror /remember: MemoryService.recall raises ValueError for bad
+        # requests (missing context, or a non-UUID context_id that fails to
+        # parse downstream). Map to 422 rather than letting it surface as 500.
+        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=str(e)) from e
 
     return result
 

@@ -21,7 +21,7 @@ import { useTranslations } from "next-intl";
 import { useSearchParams, useRouter } from "next/navigation";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
-import { Alert, AlertDescription } from "@/components/ui/alert";
+import { ErrorBanner } from "@/components/common/ErrorBanner";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Badge } from "@/components/ui/badge";
@@ -35,7 +35,7 @@ import {
   type DeviceVerifyResponse,
 } from "@/lib/auth/auth";
 import { useAuth } from "@/contexts/AuthContext";
-import { AlertCircle, CheckCircle2, XCircle, Monitor } from "lucide-react";
+import { CheckCircle2, XCircle, Monitor } from "lucide-react";
 
 type Phase =
   | "input"
@@ -335,13 +335,7 @@ function DevicePageInner() {
                 )}
 
                 {phase === "error" && error && (
-                  <Alert
-                    variant="destructive"
-                    className="border-red-200 bg-red-50 text-left"
-                  >
-                    <AlertCircle className="h-4 w-4" />
-                    <AlertDescription>{error}</AlertDescription>
-                  </Alert>
+                  <ErrorBanner error={error} lightSurface className="!mb-0" />
                 )}
 
                 {phase === "error" && (
@@ -415,13 +409,7 @@ function DevicePageInner() {
 
             {phase === "error" && error && deviceInfo && (
               <div className="text-center space-y-4">
-                <Alert
-                  variant="destructive"
-                  className="border-red-200 bg-red-50 text-left"
-                >
-                  <AlertCircle className="h-4 w-4" />
-                  <AlertDescription>{error}</AlertDescription>
-                </Alert>
+                <ErrorBanner error={error} lightSurface className="!mb-0" />
                 <div className="flex gap-3 justify-center">
                   <Button variant="outline" onClick={resetToInput}>
                     {t("device.backToVerify")}

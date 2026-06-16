@@ -30,12 +30,12 @@ import { safeReturnTo } from "@/lib/auth/safeReturnTo";
 import { buildOAuthRedirect } from "@/lib/auth/buildOAuthRedirect";
 import {
   ArrowRight,
-  AlertCircle,
   Info,
   Sparkles,
   Shield,
   Zap,
 } from "lucide-react";
+import { ErrorBanner } from "@/components/common/ErrorBanner";
 import { KaguraLogo } from "@/components/icons/KaguraLogo";
 import { LanguageSelector } from "@/components/LanguageSelector";
 
@@ -296,16 +296,10 @@ function LoginContent() {
               </Alert>
             )}
 
-            {/* Error */}
-            {error && (
-              <Alert
-                variant="destructive"
-                className="mb-6 border-red-200 bg-red-50"
-              >
-                <AlertCircle className="h-4 w-4" />
-                <AlertDescription>{error}</AlertDescription>
-              </Alert>
-            )}
+            {/* Error — auth card is always-light (#1029), so pin the light red
+                ramp; the theme-adaptive default would render faint red-300 text
+                on the white card in dark mode. */}
+            <ErrorBanner error={error} lightSurface />
 
             {mfaRequired ? (
               /* MFA Form */
