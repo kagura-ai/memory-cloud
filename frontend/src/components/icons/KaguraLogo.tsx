@@ -1,98 +1,154 @@
 /**
- * Kagura Logo Component
+ * Kagura Logo Component — flat 5-colour brand (issue #1029).
  *
- * SVG logo componentized for Next.js standalone mode compatibility.
- * Issue #51 - Fix SVG logo display issue
+ * Replaces the legacy Palatino wordmark (#51). A single self-contained,
+ * theme-independent SVG: the 5-petal pinwheel mark (vectorized from the
+ * kagura-www brand assets, commit 35bbf7f) plus the "Kagura AI" wordmark.
+ * One SVG so it scales cleanly at every call site (sidebar h-8 → auth hero
+ * h-24) without layout fiddling. The mark's petal colours are inlined hex (a
+ * brand mark must not shift with the app theme), but the "Kagura" wordmark uses
+ * `currentColor` so it stays legible on dark backgrounds (e.g. the dashboard
+ * sidebar) — "AI" keeps the ukon accent on every theme.
  */
 
 interface KaguraLogoProps {
   className?: string;
+  /**
+   * "full" (default) = SVG mark + SVG wordmark text (theme-adaptive via
+   * currentColor — use on dark surfaces like the sidebar). "mark" = pinwheel
+   * only. "image" = the official brand PNGs (mark + wordmark) embedded via
+   * SVG <image> — pixel-perfect typography; use on the always-light auth pages.
+   */
+  variant?: "full" | "mark" | "image";
 }
 
-export function KaguraLogo({ className = 'h-10 w-auto' }: KaguraLogoProps) {
+const PETALS = [
+  { cx: 100, cy: 42, grad: "kg-tokiwa" }, // top — evergreen
+  { cx: 155, cy: 82, grad: "kg-shu" }, // right — vermilion
+  { cx: 134, cy: 147, grad: "kg-ukon" }, // bottom-right — gold
+  { cx: 66, cy: 147, grad: "kg-gofun" }, // bottom-left — pale
+  { cx: 45, cy: 82, grad: "kg-kodai" }, // left — purple
+] as const;
+
+// White "pinwheel" notch per petal: a head dot near the inner rim plus a
+// short stem pointing at the centre (100,100). Pre-computed so the mark stays
+// declarative.
+const NOTCHES = [
+  { hx: 100, hy: 58, sx: 100, sy: 82 },
+  { hx: 139.8, hy: 87, sx: 117, sy: 94.4 },
+  { hx: 124.6, hy: 134, sx: 110.6, sy: 114.6 },
+  { hx: 75.4, hy: 134, sx: 89.4, sy: 114.6 },
+  { hx: 60.2, hy: 87, sx: 83, sy: 94.4 },
+] as const;
+
+function MarkDefs() {
+  return (
+    <defs>
+      <linearGradient id="kg-tokiwa" x1="0" y1="0" x2="1" y2="1">
+        <stop offset="0" stopColor="#3f9168" />
+        <stop offset="1" stopColor="#00664b" />
+      </linearGradient>
+      <linearGradient id="kg-shu" x1="0" y1="0" x2="1" y2="1">
+        <stop offset="0" stopColor="#f3893a" />
+        <stop offset="1" stopColor="#eb6100" />
+      </linearGradient>
+      <linearGradient id="kg-ukon" x1="0" y1="0" x2="1" y2="1">
+        <stop offset="0" stopColor="#fdc659" />
+        <stop offset="1" stopColor="#faa916" />
+      </linearGradient>
+      <linearGradient id="kg-gofun" x1="0" y1="0" x2="1" y2="1">
+        <stop offset="0" stopColor="#f2f1cf" />
+        <stop offset="1" stopColor="#dcdf9a" />
+      </linearGradient>
+      <linearGradient id="kg-kodai" x1="0" y1="0" x2="1" y2="1">
+        <stop offset="0" stopColor="#9c79ae" />
+        <stop offset="1" stopColor="#70477c" />
+      </linearGradient>
+    </defs>
+  );
+}
+
+function MarkBody() {
+  return (
+    <>
+      {PETALS.map((p) => (
+        <circle key={p.grad} cx={p.cx} cy={p.cy} r="38" fill={`url(#${p.grad})`} />
+      ))}
+      <g stroke="#fffffb" strokeWidth="9" strokeLinecap="round" fill="#fffffb">
+        {NOTCHES.map((n) => (
+          <line key={`s-${n.hx}-${n.hy}`} x1={n.hx} y1={n.hy} x2={n.sx} y2={n.sy} />
+        ))}
+        {NOTCHES.map((n) => (
+          <circle key={`h-${n.hx}-${n.hy}`} cx={n.hx} cy={n.hy} r="8" stroke="none" />
+        ))}
+      </g>
+    </>
+  );
+}
+
+export function KaguraLogo({ className = "h-10 w-auto", variant = "full" }: KaguraLogoProps) {
+  if (variant === "mark") {
+    return (
+      <svg
+        xmlns="http://www.w3.org/2000/svg"
+        viewBox="0 0 200 200"
+        className={className}
+        role="img"
+        aria-label="Kagura"
+      >
+        <MarkDefs />
+        <MarkBody />
+      </svg>
+    );
+  }
+
+  if (variant === "image") {
+    // Official brand PNGs (transparent) embedded via SVG <image> so the lockup
+    // scales with `className` and avoids the next/image <img> lint rule.
+    return (
+      <svg
+        xmlns="http://www.w3.org/2000/svg"
+        viewBox="0 0 336 120"
+        className={className}
+        role="img"
+        aria-label="Kagura AI"
+      >
+        <image href="/brand/kagura-mark.png" x="6" y="8" width="104" height="104" />
+        <image
+          href="/brand/kagura-wordmark.png"
+          x="120"
+          y="34"
+          width="207"
+          height="52"
+        />
+      </svg>
+    );
+  }
+
+  // Full horizontal lockup: mark on the left, "Kagura AI" wordmark on the right.
   return (
     <svg
-      xmlns="http://www.w3.workspace/2000/svg"
-      viewBox="0 0 300 100"
+      xmlns="http://www.w3.org/2000/svg"
+      viewBox="0 0 440 120"
       className={className}
+      role="img"
+      aria-label="Kagura AI"
     >
-      {/* Irregular ripples - adjusted spacing */}
-      <path
-        d="M70 40 C110 15, 190 25, 230 40 S280 65, 250 70 S170 80, 150 70 S90 65, 70 40"
-        fill="none"
-        stroke="#DC2626"
-        strokeWidth="0.8"
-        strokeOpacity="0.25"
-      />
-      <path
-        d="M75 35 C125 20, 175 10, 225 35 S265 45, 245 65 S185 75, 145 65 S95 50, 75 35"
-        fill="none"
-        stroke="#059669"
-        strokeWidth="0.7"
-        strokeOpacity="0.2"
-      />
-      <path
-        d="M85 30 C135 5, 165 15, 215 25 S265 45, 235 55 S155 65, 135 55 S95 45, 85 30"
-        fill="none"
-        stroke="#DC2626"
-        strokeWidth="0.6"
-        strokeOpacity="0.15"
-      />
-      <path
-        d="M65 45 C115 25, 185 30, 235 45 S275 70, 255 75 S175 85, 155 75 S85 70, 65 45"
-        fill="none"
-        stroke="#059669"
-        strokeWidth="0.5"
-        strokeOpacity="0.1"
-      />
-
-      {/* Kagura text */}
-      <defs>
-        <linearGradient id="redGrad" x1="0%" y1="0%" x2="100%" y2="0%">
-          <stop offset="0%" style={{ stopColor: '#DC2626', stopOpacity: 0.9 }} />
-          <stop offset="100%" style={{ stopColor: '#DC2626', stopOpacity: 1 }} />
-        </linearGradient>
-      </defs>
+      <MarkDefs />
+      <g transform="translate(12 10) scale(0.5)">
+        <MarkBody />
+      </g>
       <text
-        x="150"
-        y="45"
-        fontFamily="Palatino, 'Palatino Linotype', 'Book Antiqua', serif"
-        fontSize="36"
-        fontWeight="bold"
-        fill="url(#redGrad)"
-        textAnchor="middle"
+        x="132"
+        y="78"
+        fontFamily="'Noto Sans JP', system-ui, -apple-system, 'Segoe UI', sans-serif"
+        fontSize="56"
+        fontWeight="700"
+        letterSpacing="-1.5"
       >
-        Kagura
+        <tspan fill="currentColor">Kagura</tspan>
+        <tspan fill="#faa916"> AI</tspan>
       </text>
-
-      {/* Ai text */}
-      <text
-        x="150"
-        y="80"
-        fontFamily="Palatino, 'Palatino Linotype', 'Book Antiqua', serif"
-        fontSize="32"
-        fontWeight="bold"
-        fill="#059669"
-        textAnchor="middle"
-      >
-        Ai
-      </text>
-
-      {/* More organic asymmetric waves with reduced overlap */}
-      <path
-        d="M75 48 C100 53, 130 45, 160 50 C190 54, 210 45, 235 48"
-        fill="none"
-        stroke="#059669"
-        strokeWidth="0.9"
-        strokeOpacity="0.5"
-      />
-      <path
-        d="M80 53 C110 58, 150 48, 180 53 C210 58, 220 50, 240 55"
-        fill="none"
-        stroke="#DC2626"
-        strokeWidth="0.7"
-        strokeOpacity="0.3"
-      />
     </svg>
   );
 }

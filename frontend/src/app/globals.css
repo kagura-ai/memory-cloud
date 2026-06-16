@@ -44,7 +44,21 @@
     --chart-10: 95 55% 45%;
     --chart-11: 195 80% 50%;
     --chart-12: 38 90% 55%;
-    --radius: 0.5rem
+    --radius: 0.5rem;
+
+    /* Kagura brand v2 — flat 5-colour palette (issue #1029).
+     * Scoped to the auth surfaces (login / device / OAuth authorize).
+     * Do NOT fold these into `brand-green` (used in 25 files) — these are
+     * additive tokens applied only on the auth entry pages. Source of truth:
+     * kagura-www/src/styles/global.css (commit 35bbf7f). */
+    --kagura-tokiwa: #00664b; /* deep evergreen */
+    --kagura-shu: #eb6100; /* vermilion */
+    --kagura-ukon: #faa916; /* turmeric gold */
+    --kagura-gofun: #fffffb; /* white pearl */
+    --kagura-kodai: #70477c; /* eggplant purple */
+    --kagura-ink: #1e2020; /* text primary */
+    --kagura-link: #1e50a2; /* hyperlink */
+    --kagura-accent: #c2410c /* deepened shu — WCAG 4.5:1 on white */
   }
   .dark {
     --background: 0 0% 3.9%;

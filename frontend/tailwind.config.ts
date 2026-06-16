@@ -89,6 +89,19 @@ const config: Config = {
             900: "#450a0a",
           },
         },
+        // Kagura brand v2 — flat 5-colour palette (issue #1029).
+        // Additive, applied only on the auth surfaces; references the
+        // --kagura-* CSS vars in globals.css. Do NOT merge into brand.green.
+        kagura: {
+          tokiwa: "var(--kagura-tokiwa)",
+          shu: "var(--kagura-shu)",
+          ukon: "var(--kagura-ukon)",
+          gofun: "var(--kagura-gofun)",
+          kodai: "var(--kagura-kodai)",
+          ink: "var(--kagura-ink)",
+          link: "var(--kagura-link)",
+          accent: "var(--kagura-accent)",
+        },
       },
       animation: {
         "fade-in": "fadeIn 0.6s ease-in-out",

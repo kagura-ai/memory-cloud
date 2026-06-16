@@ -60,8 +60,8 @@ function PageBackground() {
     <>
       <div className="absolute inset-0 -z-10 bg-[linear-gradient(to_right,#8080800a_1px,transparent_1px),linear-gradient(to_bottom,#8080800a_1px,transparent_1px)] bg-[size:14px_24px]" />
       <div className="absolute inset-0 -z-10 bg-gradient-to-b from-white via-gray-50/50 to-white" />
-      <div className="pointer-events-none absolute -left-1/4 -top-1/4 h-96 w-96 rounded-full bg-brand-green-300/30 blur-3xl" />
-      <div className="pointer-events-none absolute -right-1/4 -bottom-1/4 h-96 w-96 rounded-full bg-emerald-300/30 blur-3xl" />
+      <div className="pointer-events-none absolute -left-1/4 -top-1/4 h-96 w-96 rounded-full bg-[#00664b]/10 blur-3xl" />
+      <div className="pointer-events-none absolute -right-1/4 -bottom-1/4 h-96 w-96 rounded-full bg-[#faa916]/10 blur-3xl" />
     </>
   );
 }
@@ -70,8 +70,8 @@ function PageBackground() {
 function BrandSpinner() {
   return (
     <div className="relative">
-      <div className="h-16 w-16 animate-spin rounded-full border-4 border-brand-green-200 border-t-brand-green-600" />
-      <div className="absolute inset-0 h-16 w-16 animate-ping rounded-full border-4 border-brand-green-600 opacity-20" />
+      <div className="h-16 w-16 animate-spin rounded-full border-4 border-[#e6f0ec] border-t-kagura-accent" />
+      <div className="absolute inset-0 h-16 w-16 animate-ping rounded-full border-4 border-kagura-accent opacity-20" />
     </div>
   );
 }
@@ -80,7 +80,7 @@ function BrandSpinner() {
 function DeviceBadge({ label }: { label: string }) {
   return (
     <div className="mb-6 flex justify-center">
-      <div className="inline-flex items-center gap-2 rounded-full bg-gradient-to-r from-brand-green-100 to-emerald-100 px-4 py-1.5 text-sm font-semibold text-brand-green-700">
+      <div className="inline-flex items-center gap-2 rounded-full bg-[#e6f0ec] px-4 py-1.5 text-sm font-semibold text-kagura-tokiwa">
         <Monitor className="h-4 w-4" />
         <span>{label}</span>
       </div>
@@ -251,7 +251,7 @@ function DevicePageInner() {
   }
 
   return (
-    <div className="relative flex min-h-screen items-center justify-center overflow-hidden bg-white px-4">
+    <div className="relative flex min-h-screen items-start justify-center overflow-hidden bg-white px-4 pt-[16vh]">
       <PageBackground />
 
       <div className="absolute top-4 right-4 z-10">
@@ -263,14 +263,14 @@ function DevicePageInner() {
 
       <div className="relative w-full max-w-md px-4">
         <div className="mb-8 flex justify-center">
-          <KaguraLogo className="h-24 w-auto" />
+          <KaguraLogo className="h-24 w-auto" variant="image" />
         </div>
 
         <Card className="overflow-hidden border-gray-200 bg-white/80 shadow-2xl backdrop-blur-xl">
           <CardContent className="p-8 space-y-6">
             {phase === "success" && (
               <div className="text-center space-y-4">
-                <CheckCircle2 className="mx-auto h-12 w-12 text-green-500" />
+                <CheckCircle2 className="mx-auto h-12 w-12 text-kagura-tokiwa" />
                 <h1 className="text-2xl font-bold text-gray-900">
                   {t("device.successTitle")}
                 </h1>
@@ -403,7 +403,7 @@ function DevicePageInner() {
                   <Button
                     onClick={() => handleConfirm(true)}
                     disabled={phase === "submitting"}
-                    className="h-12 flex-1 bg-gradient-to-r from-brand-green-600 to-emerald-600 text-base font-semibold text-white shadow-lg hover:from-brand-green-700 hover:to-emerald-700 disabled:opacity-50"
+                    className="h-12 flex-1 rounded-full bg-kagura-accent text-base font-semibold text-white shadow-sm transition-colors hover:bg-[#a8380a] disabled:opacity-50"
                   >
                     {phase === "submitting"
                       ? t("device.approving")
