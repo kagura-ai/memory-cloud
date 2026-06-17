@@ -30,11 +30,11 @@
 </p>
 
 <p align="center">
-  <a href="docs/assets/terminal-en-cli-2x.mp4">
-    <img src="docs/assets/terminal-en-cli-2x.poster.png" alt="Claude Code CLI recalling from Kagura Memory over MCP" width="720">
+  <a href="https://www.kagura-ai.com/demo/terminal-en-cli-2x.mp4">
+    <img src="https://www.kagura-ai.com/demo/terminal-en-cli.poster.png" alt="Claude Code CLI recalling from Kagura Memory over MCP" width="720">
   </a>
   <br>
-  <em>Claude Code CLI recalling memories from Kagura over MCP — <a href="docs/assets/terminal-en-cli-2x.mp4">▶ watch the demo</a></em>
+  <em>Claude Code CLI recalling memories from Kagura over MCP — <a href="https://www.kagura-ai.com/demo/terminal-en-cli-2x.mp4">▶ watch the demo</a></em>
 </p>
 
 ## Why Kagura Memory Cloud?
