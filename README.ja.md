@@ -1,6 +1,6 @@
 <p align="center">
   <a href="https://www.kagura-ai.com/ja/">
-    <img src="docs/assets/kagura-logo.svg" alt="Kagura Memory Cloud" width="400">
+    <img src="docs/assets/kagura-logo.png" alt="Kagura Memory Cloud" width="240">
   </a>
 </p>
 
