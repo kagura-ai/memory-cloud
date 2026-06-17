@@ -29,6 +29,14 @@
   <a href="https://github.com/kagura-ai/kagura-memory-python-sdk"><strong>Python SDK (KaguraClient / KaguraAgent)</strong></a>
 </p>
 
+<p align="center">
+  <a href="docs/assets/terminal-en-cli-2x.mp4">
+    <img src="docs/assets/terminal-en-cli-2x.poster.png" alt="Claude Code CLI recalling from Kagura Memory over MCP" width="720">
+  </a>
+  <br>
+  <em>Claude Code CLI recalling memories from Kagura over MCP — <a href="docs/assets/terminal-en-cli-2x.mp4">▶ watch the demo</a></em>
+</p>
+
 ## Why Kagura Memory Cloud?
 
 > **Your AI forgets everything after each conversation. Kagura fixes that — and gets smarter every time you search.**
