@@ -1222,6 +1222,129 @@ class TestRecallConfidence:
         assert low_scale.level == high_scale.level == "high"
 
 
+class TestReinforceFactor:
+    """Issue #1048: bounded, importance-weighted reinforce factor — the 2-population
+    eval guard (adopted improves; rare-but-correct does not regress; popularity is
+    bounded; cold-start surfaces new zero-adoption memories)."""
+
+    MAX = 0.15
+
+    def _f(self, **kw):
+        kw.setdefault("max_boost", self.MAX)
+        return MemoryService._reinforce_factor(**kw)
+
+    def test_bounded_within_max_boost(self):
+        hi = self._f(reference_count=10_000, net_helpful=1000, importance=1.0, age_days=0)
+        lo = self._f(reference_count=0, net_helpful=-1000, importance=1.0, age_days=0)
+        assert (1 - self.MAX) - 1e-9 <= lo <= hi <= (1 + self.MAX) + 1e-9
+
+    def test_known_value_pins_formula(self):
+        # Zero adoption, no feedback, importance 0.5, fresh → cold prior = 0.25 →
+        # factor = 1 + 0.15 * (0 + 0.25). Pins the actual formula, not just the clamp.
+        f = self._f(reference_count=0, net_helpful=0, importance=0.5, age_days=0)
+        assert abs(f - 1.0375) < 1e-9
+
+    def test_adopted_and_helpful_boosts(self):
+        assert self._f(reference_count=5, net_helpful=5, importance=0.8, age_days=100) > 1.0
+
+    def test_not_helpful_penalizes(self):
+        assert self._f(reference_count=0, net_helpful=-5, importance=0.8, age_days=100) < 1.0
+
+    def test_rare_but_correct_not_regressed(self):
+        # Zero adoption, no feedback, high importance, OLD → neutral (>=1): never
+        # demoted without explicit not-helpful feedback (the rare-but-correct guard).
+        assert self._f(reference_count=0, net_helpful=0, importance=0.9, age_days=365) >= 1.0
+
+    def test_cold_start_surfaces_new_zero_adoption(self):
+        fresh = self._f(reference_count=0, net_helpful=0, importance=0.5, age_days=0)
+        old = self._f(reference_count=0, net_helpful=0, importance=0.5, age_days=365)
+        assert fresh > old >= 1.0
+
+    def test_not_purely_usage_monotonic(self):
+        # A fresh zero-adoption memory outranks an old, barely-important one —
+        # the cold-start term makes the boost NOT purely usage-monotonic.
+        fresh_unadopted = self._f(reference_count=0, net_helpful=0, importance=0.5, age_days=0)
+        old_trivial = self._f(reference_count=0, net_helpful=0, importance=0.01, age_days=365)
+        assert fresh_unadopted > old_trivial
+
+    def test_popularity_bias_capped_by_importance(self):
+        # A super-popular but TRIVIAL memory must not out-boost a rare, important,
+        # recent one (importance-weighting + adoption cap).
+        popular_trivial = self._f(
+            reference_count=10_000, net_helpful=100, importance=0.05, age_days=200
+        )
+        rare_important_recent = self._f(
+            reference_count=0, net_helpful=0, importance=0.9, age_days=0
+        )
+        assert rare_important_recent >= popular_trivial
+
+
+class TestReinforceRerank:
+    """Issue #1048: _maybe_reinforce_rerank is config-gated (default OFF) and only
+    reorders the relevance-filtered pool within the bound."""
+
+    @pytest.mark.asyncio
+    async def test_noop_when_disabled(self):
+        svc = MemoryService(MagicMock())
+        cfg = MagicMock(reinforce_enabled=False)
+        sr = [{"id": "a", "hybrid_score": 0.9}, {"id": "b", "hybrid_score": 0.8}]
+        with patch("repositories.config_repository.ContextSearchConfigRepository") as Repo:
+            Repo.return_value.create_or_get = AsyncMock(return_value=cfg)
+            await svc._maybe_reinforce_rerank(sr, {}, uuid4())
+        assert [r["id"] for r in sr] == ["a", "b"]  # unchanged
+
+    @pytest.mark.asyncio
+    async def test_reorders_within_bound_when_enabled(self):
+        from decimal import Decimal
+
+        from services.feedback_service import FeedbackAggregate
+
+        svc = MemoryService(MagicMock())
+        cfg = MagicMock(reinforce_enabled=True, reinforce_max_boost=Decimal("0.15"))
+        old = datetime(2020, 1, 1)
+        mem_a = MagicMock(id=uuid4(), reference_count=0, importance=0.5, created_at=old)
+        mem_b = MagicMock(id=uuid4(), reference_count=10, importance=0.9, created_at=old)
+        memories = {"a": mem_a, "b": mem_b}
+        # a has the higher raw hybrid, but b is heavily adopted + helpful.
+        sr = [{"id": "a", "hybrid_score": 0.85}, {"id": "b", "hybrid_score": 0.80}]
+        with (
+            patch("repositories.config_repository.ContextSearchConfigRepository") as Repo,
+            patch("services.feedback_service.FeedbackService") as FB,
+        ):
+            Repo.return_value.create_or_get = AsyncMock(return_value=cfg)
+            FB.return_value.aggregate_for_memories = AsyncMock(
+                return_value={
+                    str(mem_b.id): FeedbackAggregate(
+                        memory_id=str(mem_b.id), helpful_count=5, not_helpful_count=0
+                    )
+                }
+            )
+            await svc._maybe_reinforce_rerank(sr, memories, uuid4())
+        # The adopted+helpful b overtakes a (within the bound).
+        assert [r["id"] for r in sr][0] == "b"
+
+    @pytest.mark.asyncio
+    async def test_bound_keeps_clearly_more_relevant_on_top(self):
+        from decimal import Decimal
+
+        svc = MemoryService(MagicMock())
+        cfg = MagicMock(reinforce_enabled=True, reinforce_max_boost=Decimal("0.15"))
+        old = datetime(2020, 1, 1)
+        mem_a = MagicMock(id=uuid4(), reference_count=0, importance=0.5, created_at=old)
+        mem_b = MagicMock(id=uuid4(), reference_count=50, importance=1.0, created_at=old)
+        memories = {"a": mem_a, "b": mem_b}
+        # a is MUCH more relevant (0.95 vs 0.50); even max boost on b cannot overtake.
+        sr = [{"id": "a", "hybrid_score": 0.95}, {"id": "b", "hybrid_score": 0.50}]
+        with (
+            patch("repositories.config_repository.ContextSearchConfigRepository") as Repo,
+            patch("services.feedback_service.FeedbackService") as FB,
+        ):
+            Repo.return_value.create_or_get = AsyncMock(return_value=cfg)
+            FB.return_value.aggregate_for_memories = AsyncMock(return_value={})
+            await svc._maybe_reinforce_rerank(sr, memories, uuid4())
+        assert [r["id"] for r in sr][0] == "a"  # relevance still dominates
+
+
 class TestExploreAccessStats:
     """Issue #644: explore() bumps access_count / last_used_at on returned memories
     consistent with recall() and reference()."""

@@ -1309,6 +1309,104 @@ class MemoryService:
             rationale=f"Top hit sits {z:.2f} background-std-devs above the candidate-pool background; {note}.",
         )
 
+    @staticmethod
+    def _reinforce_factor(
+        *,
+        reference_count: int,
+        net_helpful: int,
+        importance: float,
+        age_days: int,
+        max_boost: float,
+        adopt_norm: float = 5.0,
+        feedback_norm: float = 3.0,
+        recency_tau_days: float = 14.0,
+        cold_start_weight: float = 0.25,
+        adopt_weight: float = 0.5,
+        feedback_weight: float = 0.5,
+    ) -> float:
+        """Issue #1048: bounded, importance-weighted recall-standing multiplier.
+
+        Returns a factor in ``[1 - max_boost, 1 + max_boost]`` to multiply a
+        result's hybrid_score by. Combines, all importance-weighted:
+        - adoption (reference_count, #1046) — log-scaled, capped at 1 so unbounded
+          popularity cannot exceed the bound (popularity-bias guard);
+        - retrieval feedback (net helpful, #888) — tanh-squashed to [-1, 1];
+        plus a cold-start RECENCY prior (positive, decays with age) so zero-adoption
+        NEW memories still surface — the boost is deliberately NOT purely
+        usage-monotonic. Uses ONLY adoption + feedback + importance + recency, never
+        graph/Hebbian signals (Issue #120 recall/explore boundary). The bound keeps
+        semantic relevance dominant: this only reorders the already
+        relevance-filtered candidate pool, it never pulls in new hits.
+        """
+        import math
+
+        adopt = min(1.0, math.log1p(max(0, reference_count)) / math.log1p(adopt_norm))
+        fb = math.tanh(net_helpful / feedback_norm)
+        usage = importance * (adopt_weight * adopt + feedback_weight * fb)
+        cold = cold_start_weight * math.exp(-max(0, age_days) / recency_tau_days)
+        signal = max(-1.0, min(1.0, usage + cold))
+        return 1.0 + max_boost * signal
+
+    async def _maybe_reinforce_rerank(
+        self,
+        search_results: list[dict],
+        memories: dict,
+        context_id: UUID | None,
+    ) -> None:
+        """Issue #1048: bounded, config-gated recall re-rank by adoption + feedback.
+
+        No-op unless the context's ``ContextSearchConfig.reinforce_enabled`` is set
+        (default OFF → recall ranking is byte-identical to pre-#1048). Single-context
+        only — a per-context config/feedback set can't govern a cross-context pool.
+        Re-sorts ``search_results`` IN PLACE by ``hybrid_score * _reinforce_factor``.
+        """
+        if context_id is None or len(search_results) < 2:
+            return
+        # Reinforce is an optional enhancement — it must NEVER break recall. Any
+        # failure (config fetch, feedback query, bad data) is swallowed and the
+        # original hybrid ranking is preserved (fail-safe, mirrors the spend-cap
+        # fail-open philosophy).
+        try:
+            from repositories.config_repository import ContextSearchConfigRepository
+
+            cfg = await ContextSearchConfigRepository(self.db).create_or_get(context_id)
+            if not getattr(cfg, "reinforce_enabled", False):
+                return
+            max_boost = float(cfg.reinforce_max_boost)
+
+            from services.feedback_service import FeedbackService
+
+            seen: set = set()
+            cand_ids = []
+            for r in search_results:
+                mem = memories.get(r["id"])
+                if mem is not None and mem.id not in seen:
+                    seen.add(mem.id)
+                    cand_ids.append(mem.id)
+            feedback = await FeedbackService(self.db).aggregate_for_memories(context_id, cand_ids)
+            now = utcnow()
+
+            def _adjusted(r: dict) -> float:
+                base = r.get("hybrid_score")
+                if base is None:
+                    base = r.get("score") or 0.0
+                mem = memories.get(r["id"])
+                if mem is None:
+                    return base
+                agg = feedback.get(str(mem.id))
+                factor = self._reinforce_factor(
+                    reference_count=mem.reference_count or 0,
+                    net_helpful=agg.net if agg else 0,
+                    importance=mem.importance,
+                    age_days=max(0, (now - mem.created_at).days),
+                    max_boost=max_boost,
+                )
+                return base * factor
+
+            search_results.sort(key=_adjusted, reverse=True)
+        except Exception as exc:  # noqa: BLE001 — reinforce must never break recall
+            logger.warning("reinforce_rerank_skipped", error=str(exc))
+
     async def recall(
         self,
         request: RecallRequest,
@@ -1607,6 +1705,14 @@ class MemoryService:
         # === Issue #120: Neural Memory graph is for explore() only ===
         # recall uses pure hybrid search scores (no UnifiedScorer).
         # Hebbian learning still runs to build the graph for explore().
+
+        # Issue #1048: bounded reinforce re-rank (adoption + retrieval feedback),
+        # config-gated per-context (default OFF), single-context only. Reorders the
+        # candidate pool BEFORE the top-k slice below; uses only reference_count +
+        # feedback + importance + recency — never graph signals (respects #120).
+        await self._maybe_reinforce_rerank(
+            search_results, memories, current_context_id if not context_ids else None
+        )
 
         responses = []
         for search_result in search_results[: request.k]:

@@ -110,3 +110,38 @@ class FeedbackService:
             helpful_count=helpful_count,
             not_helpful_count=not_helpful_count,
         )
+
+    async def aggregate_for_memories(
+        self, context_id: UUID, memory_ids: list[UUID]
+    ) -> dict[str, FeedbackAggregate]:
+        """Batch net-helpful tallies for many memories in a context (one query).
+
+        Issue #1048: the recall reinforce re-rank needs feedback for every
+        candidate without N round-trips. Returns a dict keyed by ``str(memory_id)``;
+        memories with no feedback are absent (callers treat missing as net=0).
+        """
+        if not memory_ids:
+            return {}
+        result = await self.db.execute(
+            select(
+                RetrievalFeedback.memory_id,
+                RetrievalFeedback.helpful,
+                func.count().label("n"),
+            )
+            .where(
+                RetrievalFeedback.context_id == context_id,
+                RetrievalFeedback.memory_id.in_(memory_ids),
+            )
+            .group_by(RetrievalFeedback.memory_id, RetrievalFeedback.helpful)
+        )
+        counts: dict[str, list[int]] = {}  # str(memory_id) -> [helpful, not_helpful]
+        for mem_id, is_helpful, n in result.all():
+            entry = counts.setdefault(str(mem_id), [0, 0])
+            if is_helpful:
+                entry[0] = n
+            else:
+                entry[1] = n
+        return {
+            mid: FeedbackAggregate(memory_id=mid, helpful_count=h, not_helpful_count=nh)
+            for mid, (h, nh) in counts.items()
+        }

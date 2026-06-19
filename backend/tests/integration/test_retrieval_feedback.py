@@ -245,3 +245,36 @@ async def test_context_delete_cascades_feedback(db_session: AsyncSession, feedba
         )
     ).scalar_one()
     assert remaining == 0, "feedback must cascade-delete with its context"
+
+
+@pytest.mark.asyncio
+async def test_aggregate_for_memories_batch(db_session: AsyncSession, feedback_scenario):
+    """#1048: batch aggregate returns net-helpful per memory in one query; memories
+    with no feedback are absent (callers treat missing as net=0)."""
+    s = feedback_scenario
+    svc = FeedbackService(db_session)
+    mem_a = s["mem"]
+    mem_b = Memory(
+        id=uuid4(),
+        user_id=s["owner"],
+        workspace_id=s["ws"].id,
+        context_id=s["ctx"].id,
+        summary="b — no feedback",
+        content="content",
+        type="note",
+        client="test",
+        tags=[],
+    )
+    db_session.add(mem_b)
+    await db_session.flush()
+
+    # mem_a: 3 helpful, 1 not-helpful → net 2. mem_b: none.
+    for helpful in (True, True, True, False):
+        await svc.record_feedback(s["ctx"].id, mem_a.id, helpful, s["owner"])
+
+    agg = await svc.aggregate_for_memories(s["ctx"].id, [mem_a.id, mem_b.id])
+    assert agg[str(mem_a.id)].helpful_count == 3
+    assert agg[str(mem_a.id)].not_helpful_count == 1
+    assert agg[str(mem_a.id)].net == 2
+    assert str(mem_b.id) not in agg  # no feedback → absent
+    assert await svc.aggregate_for_memories(s["ctx"].id, []) == {}

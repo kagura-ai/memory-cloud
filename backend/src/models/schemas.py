@@ -814,6 +814,13 @@ class ContextSearchConfigResponse(TZAwareBaseModel):
     reranker_model: str = Field(..., description="Provider-specific model name")
     embedding_model: str = Field(..., description="Embedding model (immutable)")
     embedding_dimensions: int = Field(..., description="Vector dimensions (immutable)")
+    # Issue #1048: surfaced so GET reflects what update_search_config set.
+    reinforce_enabled: bool = Field(
+        default=False, description="Bounded adoption+feedback recall re-rank enabled"
+    )
+    reinforce_max_boost: float = Field(
+        default=0.15, description="Bound on the reinforce adjustment (factor in [1-b, 1+b])"
+    )
     created_at: datetime
     updated_at: datetime
 
@@ -835,6 +842,18 @@ class ContextSearchConfigUpdate(BaseModel):
         ..., description="Reranker provider: 'voyage', 'cohere', or 'ollama'"
     )
     reranker_model: str = Field(..., description="Provider-specific model name")
+    # Issue #1048: optional (default-preserving) so existing REST callers that omit
+    # them are unaffected; the MCP handler always round-trips current values.
+    reinforce_enabled: bool = Field(
+        default=False,
+        description="Issue #1048: enable the bounded adoption+feedback recall re-rank",
+    )
+    reinforce_max_boost: float = Field(
+        default=0.15,
+        ge=0.0,
+        le=0.5,
+        description="Issue #1048: bound on the reinforce adjustment (factor stays in [1-b, 1+b])",
+    )
 
     @model_validator(mode="after")
     def validate_weights_sum(self) -> "ContextSearchConfigUpdate":
