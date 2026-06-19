@@ -146,7 +146,9 @@ PLAN_BASIC = PlanTier(
     storage_limit_bytes=1 * 1024 * 1024 * 1024,  # Issue #485: 1 GiB
     embedding_daily_cap_usd=2.0,  # Issue #709: intermediate paid-tier cap
     embedding_monthly_cap_usd=60.0,  # Issue #709
-    features=frozenset({"api_keys", "reranking", "oauth"}),  # Public contexts removed (PRO only)
+    # Issue #1030: paid tiers (M/L) get platform-managed embeddings — they may
+    # embed on the platform key without BYOK (bounded by the #709/#1033 cap).
+    features=frozenset({"api_keys", "reranking", "oauth", "managed_embeddings"}),
 )
 
 PLAN_PRO = PlanTier(
@@ -184,6 +186,7 @@ PLAN_PRO = PlanTier(
             "shared_contexts",  # Issue #165: Shared contexts with role-based access
             "public_contexts",  # Issue #238: Public contexts
             "memory_analysis",  # Issue #496: Memory Broadlistening
+            "managed_embeddings",  # Issue #1030: platform-managed embeddings (M/L)
         }
     ),
 )
@@ -205,6 +208,7 @@ FEATURE_MIN_PLANS: dict[str, str] = {
     "shared_contexts": "pro",  # Issue #165: Shared contexts require Pro
     "public_contexts": "pro",  # Issue #242: Public contexts require PRO only
     "memory_analysis": "pro",  # Issue #496: Memory Broadlistening (Pro only; FREE/BASIC=0)
+    "managed_embeddings": "basic",  # Issue #1030: platform-managed embeddings (M/L; FREE=BYOK/Ollama)
 }
 
 

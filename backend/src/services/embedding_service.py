@@ -22,6 +22,7 @@ from openai import AsyncOpenAI
 from sqlalchemy import and_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from config.plan_tiers import has_feature
 from db.redis import get_cache, set_cache
 from models.auth import ExternalAPIKey, Workspace
 from utils.encryption import get_encryptor
@@ -244,10 +245,15 @@ class EmbeddingService:
         - **Ollama** — no real provider cost; cap is irrelevant.
         - **Missing ``workspace_id``** — no caller scope to resolve a cap against.
         - **Workspace row missing** — disappeared between request entry and embed.
-        - **No BYOK on the Free tier** — a no-BYOK call falls back to the
-          platform ``OPENAI_API_KEY`` env. Free / dev stays **uncapped** (#708
-          drain-attack carve-out: capping env-fallback would rate-limit the
-          dev/demo workspaces that were never the threat model).
+        - **No BYOK on a plan without ``managed_embeddings`` (Free / S)** — a
+          no-BYOK call would fall back to the platform ``OPENAI_API_KEY`` env.
+          By default Free / dev stays **uncapped** (#708 drain-attack carve-out:
+          capping env-fallback would rate-limit the dev/demo workspaces that
+          were never the threat model). Issue #1030: when
+          ``embedding_platform_fallback_requires_managed_plan`` is enabled, this
+          path instead raises ``ConfigurationError`` (Free = "BYOK required or
+          self-host Ollama") — paid tiers carry ``managed_embeddings`` and never
+          reach this branch.
         - **No BYOK while ``disallow_env_fallback`` is set** — the Option A
           shared-context read path forbids the env fallback, so this call will
           raise ``NotFoundException`` in ``_get_client`` rather than embed on the
@@ -293,8 +299,24 @@ class EmbeddingService:
         cap_workspace = await cap_svc.load_workspace(workspace_id)
         if cap_workspace is None:
             return None, None
-        # No BYOK on the Free tier → platform env-fallback stays uncapped (#708).
-        if not has_byok and cap_workspace.plan_name == "free":
+        # No BYOK on a plan WITHOUT managed embeddings (Free / S) → the call
+        # would fall back to the platform OPENAI_API_KEY env.
+        if not has_byok and not has_feature(cap_workspace.plan_name, "managed_embeddings"):
+            from config.settings import get_settings
+
+            if get_settings().embedding_platform_fallback_requires_managed_plan:
+                # Issue #1030: Free is "BYOK required or self-host Ollama". Deny
+                # the platform fallback with a clear, actionable error rather
+                # than silently embedding on the platform key. Paid tiers
+                # (basic/pro) have managed_embeddings, so they never reach here.
+                raise ConfigurationError(
+                    "This workspace's plan does not include managed embeddings. "
+                    "Add a BYOK OpenAI embedding key for the workspace, use a "
+                    "self-hosted Ollama model, or upgrade to a paid plan."
+                )
+            # Restriction off (default): platform env-fallback stays uncapped —
+            # the #708 drain-attack carve-out (Free has a $0.50/day drain guard,
+            # not a platform budget). Capping it would throttle dev/demo flows.
             return None, None
         await cap_svc.check_cap_or_raise(cap_workspace)
         return cap_svc, cap_workspace
@@ -766,6 +788,12 @@ class EmbeddingService:
 
             # Return all vectors (cached + newly generated)
             return [v for v in results if v is not None]
+
+        except ConfigurationError:
+            # Issue #1030: a missing key / managed-plan denial from the gate or
+            # _get_client must propagate unchanged (CFG-001), not be masked as a
+            # generic OpenAIError — mirrors embed_with_usage.
+            raise
 
         except EmbeddingSpendCapExceeded:
             # Issue #709: propagate 429 cap-exceeded to the FastAPI exception
