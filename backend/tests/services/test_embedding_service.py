@@ -1,6 +1,8 @@
 """Tests for EmbeddingService."""
 
+from decimal import Decimal
 from unittest.mock import AsyncMock, MagicMock, patch
+from uuid import uuid4
 
 import pytest
 
@@ -349,6 +351,121 @@ class TestContextAwareBYOKThreading:
         service.has_byok_key.assert_called_once_with(
             "00000000-0000-0000-0000-000000000001", context_id=None
         )
+
+
+class TestPlatformPaidCapGate:
+    """#1033: the embedding spend cap also covers PLATFORM-paid calls on paid
+    tiers (basic/pro). Free-tier / dev env-fallback stays uncapped (#708 intent),
+    and the BYOK path is unchanged. The gate returns ``(cap_svc, cap_workspace)``
+    and caps against the SINGLE per-tier counter — coverage is widened, the
+    counter is NOT split by payer (payer attribution lives in LLMCallLog.paid_by).
+    """
+
+    @pytest.fixture
+    def service(self):
+        return EmbeddingService(_make_mock_db())
+
+    @staticmethod
+    def _cap_ws(plan_name):
+        ws = MagicMock()
+        ws.id = uuid4()
+        ws.plan_name = plan_name
+        ws.effective_embedding_daily_cap_usd = Decimal("2.0")
+        ws.effective_embedding_monthly_cap_usd = Decimal("60.0")
+        return ws
+
+    @staticmethod
+    def _patch_cap_service(ws):
+        """Patch the lazily-imported EmbeddingSpendCapService; return (patcher, instance)."""
+        patcher = patch("services.embedding_spend_cap_service.EmbeddingSpendCapService")
+        mock_cls = patcher.start()
+        inst = mock_cls.return_value
+        inst.load_workspace = AsyncMock(return_value=ws)
+        inst.check_cap_or_raise = AsyncMock()
+        return patcher, inst
+
+    @pytest.mark.asyncio
+    async def test_paid_tier_platform_paid_is_capped(self, service):
+        """basic/pro + no BYOK (env/platform fallback) → cap fires (single counter)."""
+        service.has_byok_key = AsyncMock(return_value=False)
+        ws = self._cap_ws("basic")
+        patcher, inst = self._patch_cap_service(ws)
+        try:
+            cap_svc, cap_ws = await service._prepare_spend_cap_gate(
+                "00000000-0000-0000-0000-000000000001",
+                context_id="00000000-0000-0000-0000-000000000002",
+            )
+        finally:
+            patcher.stop()
+        assert cap_svc is inst and cap_ws is ws
+        inst.check_cap_or_raise.assert_awaited_once_with(ws)
+
+    @pytest.mark.asyncio
+    async def test_free_tier_platform_paid_stays_uncapped(self, service):
+        """free + no BYOK (env fallback) → NOT capped (#708 dev/demo carve-out)."""
+        service.has_byok_key = AsyncMock(return_value=False)
+        ws = self._cap_ws("free")
+        patcher, inst = self._patch_cap_service(ws)
+        try:
+            result = await service._prepare_spend_cap_gate("00000000-0000-0000-0000-000000000001")
+        finally:
+            patcher.stop()
+        assert result == (None, None)
+        inst.check_cap_or_raise.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_byok_path_capped_and_unchanged_on_any_tier(self, service):
+        """BYOK present → capped regardless of tier (incl. free, unchanged from #709)."""
+        service.has_byok_key = AsyncMock(return_value=True)
+        ws = self._cap_ws("free")  # a free workspace's OWN BYOK is still capped today
+        patcher, inst = self._patch_cap_service(ws)
+        try:
+            cap_svc, cap_ws = await service._prepare_spend_cap_gate(
+                "00000000-0000-0000-0000-000000000001"
+            )
+        finally:
+            patcher.stop()
+        assert cap_svc is inst and cap_ws is ws
+        inst.check_cap_or_raise.assert_awaited_once_with(ws)
+
+    @pytest.mark.asyncio
+    async def test_paid_tier_no_byok_with_disallow_env_fallback_skips(self, service):
+        """#1033/#8: no BYOK + disallow_env_fallback (Option A shared read) → skip.
+
+        The call will raise NotFoundException in _get_client rather than embed on
+        the platform key, so there's no platform spend to cap. The gate must NOT
+        load the workspace or fire the cap (which would surface a spurious 429).
+        """
+        service.has_byok_key = AsyncMock(return_value=False)
+        ws = self._cap_ws("pro")
+        patcher, inst = self._patch_cap_service(ws)
+        try:
+            result = await service._prepare_spend_cap_gate(
+                "00000000-0000-0000-0000-000000000001",
+                context_id="00000000-0000-0000-0000-000000000002",
+                disallow_env_fallback=True,
+            )
+        finally:
+            patcher.stop()
+        assert result == (None, None)
+        inst.load_workspace.assert_not_called()
+        inst.check_cap_or_raise.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_ollama_provider_skips_before_byok_probe(self, service):
+        """provider='ollama' → skip immediately (no provider cost), before the BYOK probe."""
+        service.provider = "ollama"
+        service.has_byok_key = AsyncMock(return_value=True)
+        result = await service._prepare_spend_cap_gate("00000000-0000-0000-0000-000000000001")
+        assert result == (None, None)
+        service.has_byok_key.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_missing_workspace_id_skips(self, service):
+        """No workspace_id → skip (returns the 2-tuple of Nones)."""
+        service.has_byok_key = AsyncMock(return_value=False)
+        result = await service._prepare_spend_cap_gate(None)
+        assert result == (None, None)
 
 
 class TestKeySourceAndPaidByDedup:

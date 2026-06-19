@@ -234,42 +234,67 @@ class EmbeddingService:
         self,
         workspace_id: str | None,
         context_id: str | None = None,
+        disallow_env_fallback: bool = False,
     ) -> tuple[EmbeddingSpendCapService | None, Workspace | None]:
-        """Resolve the cap service + workspace and run the pre-call gate (#709).
+        """Resolve the cap service + workspace and run the pre-call gate (#709, #1033).
 
-        Returns ``(None, None)`` for skip cases:
+        Returns ``(cap_svc, cap_workspace)`` when the call should be capped, or
+        ``(None, None)`` to skip. Skip cases:
 
         - **Ollama** — no real provider cost; cap is irrelevant.
         - **Missing ``workspace_id``** — no caller scope to resolve a cap against.
-        - **No BYOK credential** — the cap is **BYOK-scoped by design** (#708
-          drain-attack mitigation). A call falling back to ``OPENAI_API_KEY`` env
-          is platform-paid; capping it would rate-limit dev/demo workspaces that
-          were never the threat model. Matches the contract asserted by
-          ``EmbeddingSpendCapExceeded`` (``utils/exceptions.py``) and the cap
-          service module docstring (``embedding_spend_cap_service.py``).
         - **Workspace row missing** — disappeared between request entry and embed.
+        - **No BYOK on the Free tier** — a no-BYOK call falls back to the
+          platform ``OPENAI_API_KEY`` env. Free / dev stays **uncapped** (#708
+          drain-attack carve-out: capping env-fallback would rate-limit the
+          dev/demo workspaces that were never the threat model).
+        - **No BYOK while ``disallow_env_fallback`` is set** — the Option A
+          shared-context read path forbids the env fallback, so this call will
+          raise ``NotFoundException`` in ``_get_client`` rather than embed on the
+          platform key. There is no platform spend to bound here, so skip (and
+          let the real not-found error surface instead of a spurious 429).
 
-        Otherwise loads the workspace ONCE and runs ``check_cap_or_raise`` so
-        the post-call ``record_spend_from_tokens`` can reuse the row without a
-        second SELECT. Raises ``EmbeddingSpendCapExceeded`` (HTTP 429,
-        ``QUOTA-002``) when the BYOK daily / monthly cap has been reached.
+        Otherwise the cap fires against the **single per-workspace per-tier
+        counter**. Issue #1033 extends *coverage* of that one counter; it does
+        NOT split it by payer:
 
-        Issue #708 loop 4: ``context_id`` mirrors ``has_byok_key``'s priority
-        so the cap gate fires only when ``_get_user_api_key`` would actually
-        select a BYOK row for THIS context — not for a key scoped to some
-        OTHER context in the same workspace. Without this parameter, a
-        workspace whose only BYOK is scoped to context_X would have the
-        cap incorrectly applied to env-fallback calls on context_Y.
+        - **BYOK present** → capped exactly as before (#709), on any tier.
+        - **No BYOK on a PAID tier (basic/pro)** → the embed runs on the
+          platform's dime, so it is now capped too — bounding total workspace
+          embedding volume against the same per-tier counter. Payer
+          **attribution** is recorded separately in ``LLMCallLog.paid_by`` (see
+          ``resolve_paid_by`` / ``cost_aggregation_service``), so the cap stays a
+          pure volume guard rather than a per-payer budget. Prerequisite guard
+          for #1030; inert until paid-tier traffic routes to the platform key,
+          but lands first so the ceiling is in place.
+
+        The workspace is loaded ONCE and reused for both ``check_cap_or_raise``
+        and the post-call ``record_spend_from_tokens`` (no second SELECT). The
+        load now also runs on the no-BYOK paid path (to read ``plan_name``);
+        since the gate only runs on a cache MISS this is at most one extra
+        indexed PK SELECT per unique text, not per call.
+
+        Issue #708 loop 4: ``context_id`` mirrors ``has_byok_key``'s priority so
+        the BYOK branch fires only when ``_get_user_api_key`` would actually
+        select a BYOK row for THIS context — not for a key scoped to some OTHER
+        context in the same workspace.
         """
         if not workspace_id or self.provider == "ollama":
             return None, None
-        if not await self.has_byok_key(workspace_id, context_id=context_id):
-            return None, None
         from services.embedding_spend_cap_service import EmbeddingSpendCapService
+
+        has_byok = await self.has_byok_key(workspace_id, context_id=context_id)
+        # No BYOK + env fallback forbidden → the call errors in ``_get_client``
+        # rather than embedding on the platform key; there is nothing to cap.
+        if not has_byok and disallow_env_fallback:
+            return None, None
 
         cap_svc = EmbeddingSpendCapService(self.db)
         cap_workspace = await cap_svc.load_workspace(workspace_id)
         if cap_workspace is None:
+            return None, None
+        # No BYOK on the Free tier → platform env-fallback stays uncapped (#708).
+        if not has_byok and cap_workspace.plan_name == "free":
             return None, None
         await cap_svc.check_cap_or_raise(cap_workspace)
         return cap_svc, cap_workspace
@@ -551,11 +576,14 @@ class EmbeddingService:
                 )
                 return vector, 0
 
-            # Issue #709: BYOK embedding spend cap gate.
-            # #708 loop 4: thread ``context_id`` so the gate's BYOK probe
-            # mirrors the same priority ``_get_user_api_key`` uses below.
+            # Issue #709/#1033: embedding spend cap gate (BYOK + paid-tier platform).
+            # #708 loop 4: thread ``context_id`` so the gate's BYOK probe mirrors
+            # ``_get_user_api_key``; ``disallow_env_fallback`` so a no-BYOK Option A
+            # read (which won't reach the platform key) isn't treated as platform-paid.
             cap_svc, cap_workspace = await self._prepare_spend_cap_gate(
-                workspace_id, context_id=context_id
+                workspace_id,
+                context_id=context_id,
+                disallow_env_fallback=disallow_env_fallback,
             )
 
             client = await self._get_client(
@@ -681,12 +709,15 @@ class EmbeddingService:
 
             # Generate embeddings only for uncached texts
             if uncached_texts:
-                # Issue #709: cap gate covers the whole batch — single check
-                # before the bulk API call.
+                # Issue #709/#1033: cap gate covers the whole batch — single
+                # check before the bulk API call (BYOK + paid-tier platform).
                 # #708 loop 4: thread ``context_id`` so the gate's BYOK probe
-                # mirrors the same priority ``_get_user_api_key`` uses below.
+                # mirrors ``_get_user_api_key``; ``disallow_env_fallback`` so a
+                # no-BYOK Option A read isn't treated as platform-paid.
                 cap_svc, cap_workspace = await self._prepare_spend_cap_gate(
-                    workspace_id, context_id=context_id
+                    workspace_id,
+                    context_id=context_id,
+                    disallow_env_fallback=disallow_env_fallback,
                 )
 
                 client = await self._get_client(
