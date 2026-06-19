@@ -1037,6 +1037,7 @@ class TestExploreHints:
         m.importance = 0.7
         m.scope = "persistent"
         m.created_at = datetime.utcnow()
+        m.updated_at = datetime.utcnow()  # #1047: staleness cue
         m.last_used_at = datetime.utcnow()
         m.access_count = 1
         m.confidence = 0.8
@@ -1074,6 +1075,13 @@ class TestExploreHints:
         )
 
         assert response.explore_hints is None
+
+        # Issue #1047: recall always populates a confidence signal, and results
+        # carry the updated_at staleness cue.
+        assert response.confidence is not None
+        assert response.confidence.level in {"high", "moderate", "low", "none"}
+        assert response.confidence.result_count == 1
+        assert response.results[0].updated_at is not None
 
         # Issue #1046: recall is *surfacing*, not adoption — it bumps access_count
         # but MUST NOT record the adoption signal. No call may set
@@ -1177,6 +1185,41 @@ class TestExploreHints:
         # Recall succeeded despite hint failure
         assert response.results is not None
         assert len(response.results) == 1
+
+
+class TestRecallConfidence:
+    """Issue #1047: recall confidence is per-context-relative + scale-invariant
+    (NOT a global absolute-score cutoff)."""
+
+    def test_empty_is_none(self):
+        c = MemoryService._compute_recall_confidence([])
+        assert c.level == "none"
+        assert c.result_count == 0
+        assert c.top_score is None
+        assert c.relative_margin is None
+
+    def test_single_result_is_moderate_no_margin(self):
+        c = MemoryService._compute_recall_confidence([0.8])
+        assert c.level == "moderate"
+        assert c.result_count == 1
+        assert c.relative_margin is None
+
+    def test_clear_separation_is_high(self):
+        c = MemoryService._compute_recall_confidence([0.95, 0.30, 0.31, 0.29, 0.30])
+        assert c.level == "high"
+        assert c.relative_margin is not None and c.relative_margin >= 2.0
+
+    def test_flat_background_top_indistinguishable_is_none(self):
+        # All scores ~equal → top doesn't stand out from background → "none".
+        c = MemoryService._compute_recall_confidence([0.50, 0.50, 0.50, 0.50])
+        assert c.level == "none"
+
+    def test_scale_invariance_not_absolute_cutoff(self):
+        # Same separation SHAPE at very different absolute magnitudes must yield
+        # the SAME level — a global score cutoff would (wrongly) split these.
+        low_scale = MemoryService._compute_recall_confidence([0.20, 0.05, 0.06, 0.04, 0.05])
+        high_scale = MemoryService._compute_recall_confidence([0.95, 0.80, 0.81, 0.79, 0.80])
+        assert low_scale.level == high_scale.level == "high"
 
 
 class TestExploreAccessStats:

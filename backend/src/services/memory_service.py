@@ -45,6 +45,7 @@ from models.schemas import (
     MemoryStatsResponse,
     PatchMemoryRequest,
     PinnedMemoryItem,
+    RecallConfidence,
     RecallRequest,
     RecallResponse,
     ReferenceResponse,
@@ -1245,6 +1246,69 @@ class MemoryService:
             )
             # Best-effort: do not raise — memory creation already succeeded
 
+    @staticmethod
+    def _compute_recall_confidence(scores: list[float]) -> RecallConfidence:
+        """Issue #1047: relevance confidence from a query's candidate-pool scores.
+
+        Relative and scale-invariant: ``relative_margin`` is how many background
+        standard deviations the top hit sits above the candidate-pool background
+        (``scores[1:]``). This sidesteps the cross-context/embedding-model
+        miscalibration of raw hybrid scores — a fixed absolute cutoff is wrong,
+        but "how far the top hit stands out from its own background" is stable.
+        Does NOT touch ranking; purely a derived annotation.
+
+        ``scores`` may be in any order — sorted descending internally so the
+        result is independent of caller ordering. Buckets: z>=2 high, z>=1
+        moderate, z>=0.3 low, else none (top indistinguishable from background →
+        likely nothing truly relevant).
+        """
+        import statistics
+
+        scores = sorted(scores, reverse=True)
+        n = len(scores)
+        if n == 0:
+            return RecallConfidence(
+                level="none",
+                top_score=None,
+                relative_margin=None,
+                result_count=0,
+                rationale="No candidates retrieved — likely nothing relevant in this context.",
+            )
+        top = scores[0]
+        if n == 1:
+            # No background distribution to measure separation against.
+            return RecallConfidence(
+                level="moderate",
+                top_score=top,
+                relative_margin=None,
+                result_count=1,
+                rationale="Single candidate — no background distribution to assess separation.",
+            )
+        background = scores[1:]
+        mean_bg = statistics.fmean(background)
+        std_bg = statistics.pstdev(background) if len(background) > 1 else 0.0
+        if std_bg > 1e-9:
+            z = (top - mean_bg) / std_bg
+        else:
+            # Flat background → fall back to a relative gap vs the background mean.
+            denom = abs(mean_bg) if abs(mean_bg) > 1e-9 else 1.0
+            z = (top - mean_bg) / denom
+        if z >= 2.0:
+            level, note = "high", "clear separation from background"
+        elif z >= 1.0:
+            level, note = "moderate", "some separation from background"
+        elif z >= 0.3:
+            level, note = "low", "weak separation — relevance uncertain"
+        else:
+            level, note = "none", "top hit indistinguishable from background — likely nothing relevant"
+        return RecallConfidence(
+            level=level,
+            top_score=top,
+            relative_margin=round(z, 3),
+            result_count=n,
+            rationale=f"Top hit sits {z:.2f} background-std-devs above the candidate-pool background; {note}.",
+        )
+
     async def recall(
         self,
         request: RecallRequest,
@@ -1387,6 +1451,7 @@ class MemoryService:
                 return RecallResponse(
                     results=[],
                     explore_hints=[] if request.include_explore_hints else None,
+                    confidence=self._compute_recall_confidence([]),  # #1047: "none"
                 )
 
         # #708 Option A H1 gate (deferred): we now know hybrid_search will
@@ -1471,6 +1536,7 @@ class MemoryService:
             return RecallResponse(
                 results=[],
                 explore_hints=[] if request.include_explore_hints else None,
+                confidence=self._compute_recall_confidence([]),  # #1047: "none"
             )
 
         # Fetch memories from PostgreSQL (exclude soft-deleted)
@@ -1568,6 +1634,7 @@ class MemoryService:
                     importance=memory.importance,
                     scope=memory.scope,
                     created_at=memory.created_at,
+                    updated_at=memory.updated_at,  # #1047: staleness cue
                     client=memory.client,
                     tags=memory.tags or [],
                     context=memory.context,
@@ -1786,8 +1853,19 @@ class MemoryService:
 
         logger.info("recall_completed", user_id=user_id, results=len(responses))
 
+        # Issue #1047: relevance confidence from the full candidate pool's score
+        # distribution (search_results, which holds up to candidates_k >> k when
+        # neural is on). Relative/scale-invariant — see _compute_recall_confidence.
+        candidate_scores = [
+            r.get("hybrid_score", r["score"])
+            for r in search_results
+            if r.get("hybrid_score", r.get("score")) is not None
+        ]
         return RecallResponse(
-            results=responses, related_tags=related_tags, explore_hints=explore_hints
+            results=responses,
+            related_tags=related_tags,
+            explore_hints=explore_hints,
+            confidence=self._compute_recall_confidence(candidate_scores),
         )
 
     async def load_pinned(
