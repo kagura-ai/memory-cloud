@@ -94,6 +94,15 @@ class Settings(BaseSettings):
         default="",
         description="Shared bearer token authenticating the ai-worker to /api/v1/workers/* (RFC 6750)",
     )
+    # Issue #954: service-to-service auth for the external billing service
+    # (kagura-billing#4/#6) pushing entitlement changes to PUT /internal/...
+    # Empty disables the internal billing endpoints (fail-closed, 503). Distinct
+    # from worker_service_token so the two services can be rotated independently.
+    # Use: openssl rand -hex 32. See the rotation note on worker_service_token.
+    billing_service_token: str = Field(
+        default="",
+        description="Shared bearer token authenticating the billing service to /internal/* (RFC 6750)",
+    )
     # Public MCP base URL handed back to the worker in its config so it can write
     # memories. Defaults to local dev; override in prod (e.g. https://memory.kagura-ai.com/mcp).
     kmc_mcp_url: str = Field(
