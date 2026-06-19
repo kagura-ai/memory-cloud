@@ -10,7 +10,11 @@ from uuid import uuid4
 
 import pytest
 
-from services.sleep.consolidation import ConsolidationPhase
+from services.sleep.consolidation import (
+    ADOPTION_PROMOTE_MIN,
+    ADOPTION_PROMOTE_WITH_IMPORTANCE,
+    ConsolidationPhase,
+)
 from services.sleep.reporter import SleepBudget
 from utils.datetime import utcnow
 
@@ -48,19 +52,42 @@ def _make_working_memory(
     memory_id=None,
     importance=0.5,
     access_count=0,
+    reference_count=0,
     age_days=10,
+    created_at=None,
 ):
-    from datetime import datetime, timedelta
-
     m = MagicMock()
     m.id = memory_id or uuid4()
     m.summary = "test working memory"
     m.type = "note"
     m.importance = importance
     m.access_count = access_count
+    m.reference_count = reference_count  # #1049: adoption signal the gate reads
     m.scope = "working"
-    m.created_at = datetime(2026, 1, 1) - timedelta(days=age_days - 10)
+    # Age-accurate created_at so execute()'s (utcnow()-created_at).days matches age_days.
+    m.created_at = created_at if created_at is not None else (utcnow() - timedelta(days=age_days))
     return m
+
+
+async def _run_execute(phase, memories, *, cutoff=None):
+    """Drive ConsolidationPhase.execute() deterministically (LLM off, no graph).
+
+    Patches GraphService (no edges → neural_metrics None for all), the Qdrant
+    delete, and the #1049 grandfather cutoff. Returns the PhaseResult so tests can
+    assert absolute promote/delete rates via result.details + promote/delete calls.
+    """
+    phase._fetch_working_memories = AsyncMock(return_value=memories)
+    phase.memory_repo.promote_to_persistent = AsyncMock()
+    phase.memory_repo.delete = AsyncMock()
+    config = _make_config(provider="")  # LLM off → borderline memories stay put
+    budget = SleepBudget()
+    with (
+        patch("services.sleep.consolidation.GraphService") as GS,
+        patch("services.sleep.consolidation.delete_memory_from_qdrant", new_callable=AsyncMock),
+        patch("services.sleep.consolidation._adoption_delete_cutoff", return_value=cutoff),
+    ):
+        GS.return_value.stats = AsyncMock(return_value={"total_edges": 0})
+        return await phase.execute(config, "user-1", "ws-1", "ctx-1", budget)
 
 
 class TestConsolidationPhase:
@@ -78,82 +105,118 @@ class TestConsolidationPhase:
         assert result.details["message"] == "no_working_memories"
 
 
-class TestRuleBasedPromotion:
-    """Test that rule-based promotion matches legacy consolidation_task.
+class TestAdoptionPromotionGate:
+    """#1049: execute()-driven 2-population eval of the ADOPTION-gated promotion.
 
-    Patterns 1-4 (memory access / importance / age) must stay identical to
-    the rules in tasks/neural_tasks.py::consolidation_task for backward
-    compatibility when sleep_enabled=true. The Issue #44 neural metrics
-    criteria were dropped from neural_tasks.py in Issue #651 (they live on
-    in services/sleep/consolidation.py only), so this parity covers Issue
-    #1 patterns only.
+    Replaces the old tautological inline-formula tests (which re-implemented the
+    boolean in the test and passed regardless of the real thresholds). These
+    assert ABSOLUTE promote/delete rates via result.details + promote/delete call
+    args, importing the real threshold constants (contract, not a copy).
     """
 
-    def test_pattern1_frequent_and_important(self):
-        """access_count >= 3 AND importance >= 0.5 → promote."""
-        mem = _make_working_memory(access_count=3, importance=0.5)
-        should = mem.access_count >= 3 and mem.importance >= 0.5
-        assert should is True
+    @pytest.mark.asyncio
+    async def test_rare_but_adopted_promotes_and_is_never_deleted(self, consolidation_phase):
+        # Rare (zero surfacing) but ADOPTED — including an OLD one — must promote
+        # via the adoption gate and must NEVER be deleted (hard assert). cutoff is
+        # set, proving adoption (not the grandfather) is what spares them.
+        mems = [
+            _make_working_memory(
+                reference_count=ADOPTION_PROMOTE_MIN, access_count=0, importance=0.1, age_days=5
+            ),
+            _make_working_memory(
+                reference_count=ADOPTION_PROMOTE_WITH_IMPORTANCE,
+                access_count=0,
+                importance=0.6,
+                age_days=5,
+            ),
+            _make_working_memory(  # aged + adopted
+                reference_count=1, access_count=0, importance=0.1, age_days=40
+            ),
+        ]
+        result = await _run_execute(consolidation_phase, mems, cutoff=utcnow())
 
-    def test_pattern2_very_frequent(self):
-        """access_count >= 5 → promote."""
-        mem = _make_working_memory(access_count=5, importance=0.1)
-        should = mem.access_count >= 5
-        assert should is True
+        assert result.details["rule_promoted"] == len(mems)
+        assert result.details["rule_deleted"] == 0
+        assert consolidation_phase.memory_repo.promote_to_persistent.await_count == len(mems)
+        consolidation_phase.memory_repo.delete.assert_not_called()
 
-    def test_pattern3_important_and_aged(self):
-        """importance >= 0.8 AND age >= 3 days → promote."""
-        mem = _make_working_memory(importance=0.8, age_days=5)
-        age_days = 5  # Simulated
-        should = mem.importance >= 0.8 and age_days >= 3
-        assert should is True
+    @pytest.mark.asyncio
+    async def test_surfaced_but_ignored_does_not_promote(self, consolidation_phase):
+        # High surfacing (access_count) but ZERO adoption, low importance, young.
+        # Under the OLD access_count>=5 rule these promoted; under #1049 they must
+        # NOT — surfacing alone no longer counts as "used".
+        mems = [
+            _make_working_memory(reference_count=0, access_count=10, importance=0.3, age_days=5),
+            _make_working_memory(reference_count=0, access_count=50, importance=0.2, age_days=10),
+        ]
+        result = await _run_execute(consolidation_phase, mems, cutoff=None)
 
-    def test_pattern4_old_and_used(self):
-        """age >= 30 AND access_count >= 1 → promote."""
-        mem = _make_working_memory(access_count=1, age_days=30)
-        age_days = 30
-        should = age_days >= 30 and mem.access_count >= 1
-        assert should is True
+        assert result.details["rule_promoted"] == 0
+        assert result.details["rule_deleted"] == 0  # young → not deleted either
+        consolidation_phase.memory_repo.promote_to_persistent.assert_not_called()
 
-    def test_no_match_is_borderline(self):
-        """Memory that doesn't match any rule goes to borderline."""
-        mem = _make_working_memory(access_count=1, importance=0.4, age_days=5)
-        age_days = 5
-        should_promote = (
-            (mem.access_count >= 3 and mem.importance >= 0.5)
-            or (mem.access_count >= 5)
-            or (mem.importance >= 0.8 and age_days >= 3)
-            or (age_days >= 30 and mem.access_count >= 1)
+
+class TestPromotionBoundary:
+    """#1049: pin the exact adoption cutoff using the imported constant."""
+
+    @pytest.mark.asyncio
+    async def test_adoption_at_min_promotes(self, consolidation_phase):
+        mem = _make_working_memory(
+            reference_count=ADOPTION_PROMOTE_MIN, access_count=0, importance=0.1, age_days=5
         )
-        assert should_promote is False
+        result = await _run_execute(consolidation_phase, [mem], cutoff=None)
+        assert result.details["rule_promoted"] == 1
+
+    @pytest.mark.asyncio
+    async def test_just_below_min_without_importance_does_not_promote(self, consolidation_phase):
+        # reference_count one below the importance-agnostic min, importance under the
+        # floor → no rule fires (boundary).
+        mem = _make_working_memory(
+            reference_count=ADOPTION_PROMOTE_MIN - 1, access_count=0, importance=0.1, age_days=5
+        )
+        result = await _run_execute(consolidation_phase, [mem], cutoff=None)
+        assert result.details["rule_promoted"] == 0
 
 
-class TestDeletionSafety:
-    """Test bridge node protection in deletion logic."""
+class TestAdoptionArchivalGrandfather:
+    """#1049 RELEASE BLOCKER: the adoption==0 archival path must NOT delete
+    pre-migration (pre-cutoff) memories — their adoption can't be backfilled."""
 
-    def test_isolated_old_unused_deleted(self):
-        """age >= 30, access=0, isolated → delete."""
-        age_days = 35
-        access_count = 0
-        neural_metrics = {"is_isolated": True}
-        should_delete = age_days >= 30 and access_count == 0 and neural_metrics["is_isolated"]
-        assert should_delete is True
+    @pytest.mark.asyncio
+    async def test_no_deletion_when_cutoff_unset(self, consolidation_phase):
+        # adoption==0, old, isolated — but cutoff unset (default) → NEVER deleted.
+        mem = _make_working_memory(
+            reference_count=0, access_count=0, importance=0.1, age_days=60
+        )
+        result = await _run_execute(consolidation_phase, [mem], cutoff=None)
+        assert result.details["rule_deleted"] == 0
+        consolidation_phase.memory_repo.delete.assert_not_called()
 
-    def test_connected_old_unused_not_deleted(self):
-        """age >= 30, access=0, but has edges → NOT deleted (bridge protection)."""
-        age_days = 35
-        access_count = 0
-        neural_metrics = {"is_isolated": False}
-        should_delete = age_days >= 30 and access_count == 0 and neural_metrics["is_isolated"]
-        assert should_delete is False
+    @pytest.mark.asyncio
+    async def test_pre_cutoff_memory_grandfathered(self, consolidation_phase):
+        cutoff = utcnow() - timedelta(days=30)  # deploy date 30 days ago
+        pre = _make_working_memory(  # created 60 days ago → BEFORE cutoff
+            reference_count=0,
+            access_count=0,
+            importance=0.1,
+            created_at=utcnow() - timedelta(days=60),
+        )
+        result = await _run_execute(consolidation_phase, [pre], cutoff=cutoff)
+        assert result.details["rule_deleted"] == 0
+        consolidation_phase.memory_repo.delete.assert_not_called()
 
-    def test_recently_used_not_deleted(self):
-        """access_count > 0 → NOT deleted."""
-        age_days = 35
-        access_count = 1
-        neural_metrics = {"is_isolated": True}
-        should_delete = age_days >= 30 and access_count == 0 and neural_metrics["is_isolated"]
-        assert should_delete is False
+    @pytest.mark.asyncio
+    async def test_post_cutoff_unadopted_old_isolated_is_deleted(self, consolidation_phase):
+        cutoff = utcnow() - timedelta(days=60)  # deploy date 60 days ago
+        post = _make_working_memory(  # created 40 days ago → AFTER cutoff, age>=30
+            reference_count=0,
+            access_count=0,
+            importance=0.1,
+            created_at=utcnow() - timedelta(days=40),
+        )
+        result = await _run_execute(consolidation_phase, [post], cutoff=cutoff)
+        assert result.details["rule_deleted"] == 1
+        consolidation_phase.memory_repo.delete.assert_awaited_once()
 
 
 class TestLLMJudgeParsing:
@@ -206,15 +269,20 @@ class TestLLMJudgeParsing:
         assert len(decisions) == 0
 
 
-def _isolation_memory(*, importance, access_count, age_days):
+def _isolation_memory(*, importance, access_count, age_days, reference_count=0):
     """Build a working Memory with a concrete created_at so the age computed
-    inside ConsolidationPhase.execute() matches `age_days` exactly."""
+    inside ConsolidationPhase.execute() matches `age_days` exactly.
+
+    reference_count defaults to 0 so the adoption gate (#1049) stays inert and
+    these tests isolate the NEURAL-metric promotion/deletion path.
+    """
     m = MagicMock()
     m.id = uuid4()
     m.summary = "isolation test memory"
     m.type = "note"
     m.importance = importance
     m.access_count = access_count
+    m.reference_count = reference_count
     m.scope = "working"
     m.created_at = utcnow() - timedelta(days=age_days)
     return m

@@ -18,6 +18,7 @@ from __future__ import annotations
 import os
 import random
 import string
+from datetime import UTC, datetime
 from typing import TYPE_CHECKING
 from uuid import UUID
 
@@ -50,6 +51,50 @@ logger = get_logger(__name__)
 
 # Batch size for LLM consolidation judgment
 BATCH_SIZE = 5
+
+# === Issue #1049: adoption-based consolidation thresholds (single source of truth) ===
+# The promotion/archival gate now reads ``reference_count`` — the #1046 *adoption*
+# signal, bumped only by a deliberate ``reference()`` — instead of the
+# surfacing-inflated ``access_count`` (every recall top-k return + explore spread
+# bumped that). Adoption is far sparser, so the old surfacing thresholds
+# (access_count >= 3 / >= 5 / >= 1) are re-tuned DOWN to the adoption scale.
+# Tests import these names directly (contract, not a copied literal).
+ADOPTION_PROMOTE_MIN = 2  # adoption alone, importance-agnostic (was access_count >= 5)
+ADOPTION_PROMOTE_WITH_IMPORTANCE = 1  # adoption + importance floor (was access_count >= 3)
+PROMOTE_IMPORTANCE_FLOOR = 0.5
+PROMOTE_HIGH_IMPORTANCE = 0.8
+PROMOTE_HIGH_IMPORTANCE_MIN_AGE_DAYS = 3
+AGED_PROMOTE_MIN_AGE_DAYS = 30
+AGED_PROMOTE_ADOPTION_MIN = 1  # aged + any adoption (was access_count >= 1)
+ARCHIVE_MIN_AGE_DAYS = 30
+
+
+def _adoption_delete_cutoff() -> datetime | None:
+    """Issue #1049 RELEASE BLOCKER — grandfather pre-adoption memories from archival.
+
+    Historical adoption cannot be backfilled (``reference_count`` starts at 0 for
+    every pre-#1046 row), so an ``age>=30 and adoption==0`` delete would wrongly
+    archive every old memory. The adoption-based archival path therefore applies
+    ONLY to memories created AT/AFTER this cutoff (``CONSOLIDATION_ADOPTION_DELETE_CUTOFF``,
+    a naive-UTC ISO datetime — set it to the #1046/#1049 deploy date).
+
+    Unset (default) → ``None`` → adoption-based deletion is **fully disabled**: the
+    safest default that guarantees no pre-migration memory is archived. An operator
+    opts in only once enough post-deploy adoption data has accrued. An unparseable
+    value also returns None (fail-safe).
+    """
+    raw = os.getenv("CONSOLIDATION_ADOPTION_DELETE_CUTOFF")
+    if not raw:
+        return None
+    try:
+        cutoff = datetime.fromisoformat(raw)
+    except ValueError:
+        logger.warning("invalid_consolidation_adoption_delete_cutoff", value=raw)
+        return None
+    # Normalize to naive UTC to compare against the naive-UTC ``created_at`` column.
+    if cutoff.tzinfo is not None:
+        cutoff = cutoff.astimezone(UTC).replace(tzinfo=None)
+    return cutoff
 
 
 class ConsolidationPhase:
@@ -96,6 +141,8 @@ class ConsolidationPhase:
         centrality_threshold = float(os.getenv("NEURAL_CENTRALITY_THRESHOLD", "0.7"))
         hub_threshold = int(os.getenv("NEURAL_HUB_NODE_THRESHOLD", "5"))
         weight_threshold = float(os.getenv("NEURAL_EDGE_WEIGHT_THRESHOLD", "0.8"))
+        # Issue #1049: grandfather cutoff for the adoption==0 archival path (read once).
+        adoption_delete_cutoff = _adoption_delete_cutoff()
 
         promoted = 0
         deleted = 0
@@ -109,21 +156,38 @@ class ConsolidationPhase:
             if has_graph:
                 neural_metrics = await graph_service.get_node_metrics(str(memory.id))
 
-            # === Fast path: rule-based (identical to legacy consolidation_task) ===
+            # === Fast path: rule-based, gated on ADOPTION (#1049) ===
+            # ``reference_count`` (adoption) replaces the surfacing-inflated
+            # ``access_count``. Thresholds are the named module constants above,
+            # re-tuned for the sparser adoption scale. Neural-metric criteria are
+            # unchanged. importance-only promotion (high importance + aged) is
+            # access-agnostic and stays as-is.
+            adoption = memory.reference_count or 0
             should_promote = (
-                (memory.access_count >= 3 and memory.importance >= 0.5)
-                or (memory.access_count >= 5)
-                or (memory.importance >= 0.8 and age_days >= 3)
-                or (age_days >= 30 and memory.access_count >= 1)
+                (
+                    adoption >= ADOPTION_PROMOTE_WITH_IMPORTANCE
+                    and memory.importance >= PROMOTE_IMPORTANCE_FLOOR
+                )
+                or (adoption >= ADOPTION_PROMOTE_MIN)
+                or (
+                    memory.importance >= PROMOTE_HIGH_IMPORTANCE
+                    and age_days >= PROMOTE_HIGH_IMPORTANCE_MIN_AGE_DAYS
+                )
+                or (age_days >= AGED_PROMOTE_MIN_AGE_DAYS and adoption >= AGED_PROMOTE_ADOPTION_MIN)
                 or (neural_metrics and neural_metrics["centrality"] >= centrality_threshold)
                 or (neural_metrics and neural_metrics["edge_count"] >= hub_threshold)
                 or (neural_metrics and neural_metrics["avg_edge_weight"] >= weight_threshold)
             )
 
+            # Archival now gates on adoption==0, AND is grandfathered: only memories
+            # created at/after the cutoff are eligible (RELEASE BLOCKER — see
+            # ``_adoption_delete_cutoff``). cutoff=None → no adoption-based deletion.
             should_delete = (
-                age_days >= 30
-                and memory.access_count == 0
+                age_days >= ARCHIVE_MIN_AGE_DAYS
+                and adoption == 0
                 and (not neural_metrics or neural_metrics["is_isolated"])
+                and adoption_delete_cutoff is not None
+                and memory.created_at >= adoption_delete_cutoff
             )
 
             if should_promote:
@@ -139,6 +203,7 @@ class ConsolidationPhase:
                     memory.importance,
                     memory.access_count,
                     age_days,
+                    memory.reference_count or 0,
                 )
             elif should_delete:
                 try:
@@ -154,6 +219,7 @@ class ConsolidationPhase:
                         memory.importance,
                         memory.access_count,
                         age_days,
+                        memory.reference_count or 0,
                     )
                 except Exception as e:
                     logger.warning(
@@ -202,6 +268,7 @@ class ConsolidationPhase:
                             mem.importance,
                             mem.access_count,
                             mem_age_days,
+                            mem.reference_count or 0,
                         )
                     elif action == "archive":
                         neural = None
@@ -222,6 +289,7 @@ class ConsolidationPhase:
                                 mem.importance,
                                 mem.access_count,
                                 mem_age_days,
+                                mem.reference_count or 0,
                             )
 
         result.memories_processed = len(working)
@@ -258,8 +326,14 @@ class ConsolidationPhase:
         importance: float,
         access_count: int,
         age_days: int,
+        reference_count: int = 0,
     ) -> None:
-        """Record a consolidation action if reporter is available."""
+        """Record a consolidation action if reporter is available.
+
+        Issue #1049: records ``reference_count`` (the adoption signal the gate now
+        keys on) alongside ``access_count`` (surfacing, kept for comparison) so
+        operators can tune thresholds against the actual signal.
+        """
         if reporter and report_id:
             await reporter.add_action(
                 report_id=report_id,
@@ -270,6 +344,7 @@ class ConsolidationPhase:
                     "reason": reason,
                     "importance": importance,
                     "access_count": access_count,
+                    "reference_count": reference_count,
                     "age_days": age_days,
                 },
             )
