@@ -42,8 +42,8 @@ class TestGetMemoryUsageStats:
         mem.type = "note"
         mem.importance = 0.8
         mem.scope = "persistent"
-        mem.use_count = 5
         mem.access_count = 10
+        mem.reference_count = 5
         mem.last_used_at = datetime(2026, 4, 1)
         mem.embedding_status = "success"
         mem.created_at = datetime(2026, 3, 1)
@@ -61,7 +61,7 @@ class TestGetMemoryUsageStats:
         with patch("services.permission_service.PermissionService", _mock_perm_service()):
             response = await get_memory_usage_stats(
                 context_id=context_id,
-                sort_by="use_count",
+                sort_by="reference_count",
                 sort_order="desc",
                 limit=50,
                 offset=0,
@@ -71,9 +71,11 @@ class TestGetMemoryUsageStats:
 
         assert response.total == 1
         assert len(response.memories) == 1
-        assert response.memories[0].use_count == 5
+        # Issue #1046: adoption signal surfaced; dead always-zero use_count removed.
+        assert response.memories[0].reference_count == 5
+        assert response.memories[0].access_count == 10
         assert response.memories[0].importance == 0.8
-        assert response.sort_by == "use_count"
+        assert response.sort_by == "reference_count"
 
     @pytest.mark.asyncio
     async def test_invalid_sort_field_raises_400(self, mock_db, context_id):
@@ -109,7 +111,7 @@ class TestGetMemoryUsageStats:
         with patch("services.permission_service.PermissionService", _mock_perm_service()):
             response = await get_memory_usage_stats(
                 context_id=context_id,
-                sort_by="use_count",
+                sort_by="access_count",
                 sort_order="desc",
                 limit=50,
                 offset=0,
@@ -119,3 +121,21 @@ class TestGetMemoryUsageStats:
 
         assert response.total == 0
         assert response.memories == []
+
+    @pytest.mark.asyncio
+    async def test_dead_use_count_sort_now_rejected(self, mock_db, context_id):
+        """Issue #1046: the dead ``use_count`` sort field was removed → 400."""
+        with patch("services.permission_service.PermissionService", _mock_perm_service()):
+            with pytest.raises(HTTPException) as exc:
+                await get_memory_usage_stats(
+                    context_id=context_id,
+                    sort_by="use_count",
+                    sort_order="desc",
+                    limit=50,
+                    offset=0,
+                    user=MOCK_USER,
+                    db=mock_db,
+                )
+
+        assert exc.value.status_code == 400
+        assert "Invalid sort_by" in str(exc.value.detail)

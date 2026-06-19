@@ -226,6 +226,56 @@ class TestReference:
         assert response.incoming_links == []
         assert response.incoming_has_more is False
 
+    @pytest.mark.asyncio
+    async def test_reference_records_adoption_signal(self, service):
+        """Issue #1046: reference() bumps the adoption signal (count_as_adoption=True),
+        distinct from surfacing call sites (recall/explore) which leave it False."""
+        memory_id = uuid4()
+        mock_memory = MagicMock(
+            id=memory_id,
+            user_id="test_user",
+            summary="Test",
+            content="Test content",
+            context_summary="Context",
+            details={},
+            type="code",
+            importance=0.8,
+            tags=[],
+            context=None,
+            scope="working",
+            client="claude",
+            created_at=datetime.utcnow(),
+            updated_at=datetime.utcnow(),
+            embedding_status="success",
+            workspace_id=uuid4(),
+            context_id=uuid4(),
+            deleted_at=None,
+            source_uri=None,
+            source_type=None,
+        )
+        service.memory_repo.get = AsyncMock(return_value=mock_memory)
+        service.memory_repo.update_access_stats = AsyncMock()
+        service.db.commit = AsyncMock()
+
+        with (
+            patch("services.permission_service.PermissionService") as mock_perm_cls,
+            patch("repositories.neural_edge.NeuralEdgeRepository") as mock_edge_cls,
+        ):
+            mock_perm = MagicMock()
+            mock_perm.can_access_memory = AsyncMock(return_value=True)
+            mock_perm_cls.return_value = mock_perm
+
+            mock_edge_repo = MagicMock()
+            mock_edge_repo.get_outgoing_edges = AsyncMock(return_value=[])
+            mock_edge_repo.get_incoming_edges = AsyncMock(return_value=[])
+            mock_edge_cls.return_value = mock_edge_repo
+
+            await service.reference(memory_id=memory_id, user_id="test_user")
+
+        service.memory_repo.update_access_stats.assert_awaited_once_with(
+            memory_id, client="api", count_as_adoption=True
+        )
+
 
 class TestReferenceWithLinks:
     """Issue #440: reference() exposes outgoing/incoming declared_link refs."""
@@ -1024,6 +1074,13 @@ class TestExploreHints:
         )
 
         assert response.explore_hints is None
+
+        # Issue #1046: recall is *surfacing*, not adoption — it bumps access_count
+        # but MUST NOT record the adoption signal. No call may set
+        # count_as_adoption=True (the default False keeps reference_count untouched).
+        assert service.memory_repo.update_access_stats.await_count >= 1
+        for call in service.memory_repo.update_access_stats.await_args_list:
+            assert call.kwargs.get("count_as_adoption") is not True
 
     @pytest.mark.asyncio
     async def test_recall_hints_with_opt_in(self, service, context_id, workspace_id):

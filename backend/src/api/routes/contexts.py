@@ -1604,8 +1604,11 @@ class MemoryStatItem(BaseModel):
     type: str
     importance: float
     scope: str
-    use_count: int
+    # Issue #1046: ``access_count`` = surfacing (recall return + explore +
+    # reference); ``reference_count`` = adoption (reference() only). The dead
+    # always-zero ``use_count`` column it replaced was dropped.
     access_count: int
+    reference_count: int
     last_used_at: str | None
     embedding_status: str
     created_at: str
@@ -1620,7 +1623,13 @@ class MemoryUsageStatsResponse(BaseModel):
     sort_order: str
 
 
-VALID_SORT_FIELDS = {"use_count", "access_count", "importance", "created_at", "last_used_at"}
+VALID_SORT_FIELDS = {
+    "access_count",
+    "reference_count",
+    "importance",
+    "created_at",
+    "last_used_at",
+}
 VALID_SORT_ORDERS = {"asc", "desc"}
 
 
@@ -1628,7 +1637,7 @@ VALID_SORT_ORDERS = {"asc", "desc"}
 async def get_memory_usage_stats(
     context_id: UUID,
     user: APIKeyOrSessionUser,
-    sort_by: str = Query("use_count", description="Sort field"),
+    sort_by: str = Query("access_count", description="Sort field"),
     sort_order: str = Query("desc", description="Sort order: asc or desc"),
     limit: int = Query(50, ge=1, le=200),
     offset: int = Query(0, ge=0),
@@ -1637,7 +1646,9 @@ async def get_memory_usage_stats(
     """Get per-memory recall statistics for a context.
 
     Issue #83: Memory usage stats for context cleanup workflows.
-    Supports sorting by use_count, access_count, importance, created_at, last_used_at.
+    Supports sorting by access_count, reference_count, importance, created_at,
+    last_used_at (issue #1046 replaced the dead ``use_count`` sort with the
+    adoption-signal ``reference_count``; default sort moved to ``access_count``).
     """
     from sqlalchemy import asc as sa_asc
     from sqlalchemy import desc as sa_desc
@@ -1684,8 +1695,8 @@ async def get_memory_usage_stats(
             type=m.type or "note",
             importance=float(m.importance) if m.importance is not None else 0.5,
             scope=m.scope or "persistent",
-            use_count=m.use_count or 0,
             access_count=m.access_count or 0,
+            reference_count=m.reference_count or 0,
             last_used_at=to_utc_iso(m.last_used_at),
             embedding_status=m.embedding_status or "pending",
             created_at=to_utc_iso(m.created_at) or "",

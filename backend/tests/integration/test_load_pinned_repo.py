@@ -58,11 +58,11 @@ async def _insert_memory(
             INSERT INTO memories
               (id, user_id, workspace_id, context_id, summary, context_summary, content,
                type, importance, confidence, scope, delivery_mode, embedding_status,
-               client, source, long_term, use_count, access_count, created_at, deleted_at)
+               client, source, long_term, access_count, created_at, deleted_at)
             VALUES
               (:id, :owner, :ws, :ctx, :summary, :ctxsum, :content,
                'note', :imp, 1.0, 'persistent', :dm, 'success',
-               'test', 'mcp_remember', false, 0, 0, :created, :deleted)
+               'test', 'mcp_remember', false, 0, :created, :deleted)
             """
         ),
         {

@@ -977,8 +977,13 @@ class MemoryService:
         # reflect the last real change, not "now".
         snapshot_updated_at = memory.updated_at or memory.created_at
 
-        # Update access stats
-        await self.memory_repo.update_access_stats(memory_id, client="api")
+        # Update access stats. reference() is the canonical *adoption* signal
+        # (#1046): the agent deliberately fetched Layer-3 detail, so this bumps
+        # reference_count in addition to access_count. Surfacing call sites
+        # (recall return, explore spread) below leave count_as_adoption False.
+        await self.memory_repo.update_access_stats(
+            memory_id, client="api", count_as_adoption=True
+        )
         await self.db.commit()
 
         logger.info("memory_referenced", memory_id=str(memory_id), user_id=user_id)
