@@ -290,34 +290,70 @@ class ExploreHint(BaseModel):
 
 
 class RecallConfidence(BaseModel):
-    """Issue #1047: a per-context-relative signal distinguishing "relevant
-    results found" from "likely nothing relevant", WITHOUT changing ranking.
+    """Issue #1047/#1052: a signal distinguishing "relevant results found" from
+    "likely nothing relevant" (so an agent can stop probing / go external instead
+    of trusting a weak hit), WITHOUT changing ranking.
 
-    This is deliberately NOT a global absolute-score threshold — hybrid scores
-    are uncalibrated across contexts and embedding models (e.g. text-embedding-3
-    -small vs qwen3-embedding), so a fixed cutoff mis-calibrates. ``relative_margin``
-    is how many background standard deviations the top hit sits above the
-    candidate-pool background distribution (a scale-invariant separation measure);
-    ``level`` buckets it for quick agent decisions.
+    ``level`` is driven by **absolute semantic match strength**, made robust to
+    embedding-model scale via ``prominence`` (#1052):
 
-    KNOWN LIMITATION (#1047 follow-up): ``level`` reflects how strongly the top hit
-    *separates from the candidate pool* — NOT whether that hit is actually
-    relevant. An irrelevant query can still score ``high`` because the
-    least-irrelevant hit separates from a flat low-scoring tail (benchmarked).
-    For an "is it in memory at all?" decision, weigh ``top_score`` (absolute match
-    strength within this recall) alongside ``level``: a high ``level`` with a low
-    ``top_score`` means "a top stood out, but nothing is strongly relevant".
-    Folding ``top_score`` magnitude / a per-context baseline into ``level`` is the
-    tracked follow-up.
+    - ``top_score`` — the RAW semantic cosine of the best hit (absolute match
+      strength in [0, 1]). High ⇒ something closely matches the query.
+    - ``prominence`` — ``(top_score - mean_background_cosine) /
+      mean_background_cosine`` over the candidate pool. A *ratio*, so it is
+      invariant to the overall cosine scale a given embedding model produces
+      (text-embedding-3-small and qwen3-embedding sit at different absolute
+      cosines, but a real match is proportionally far above its background in
+      both). ``level`` thresholds on this; a near-duplicate ``top_score`` floors
+      ``level`` to at least ``moderate``.
+
+    How an agent should use it (it is a TRIAGE hint, not a correctness verdict):
+
+    - ``none`` / ``low`` → likely nothing relevant; prefer an external source over
+      forcing an answer out of these results. This is the high-value signal and is
+      reliable without a reranker.
+    - ``high`` / ``moderate`` → relevant memory is likely present; READ the returned
+      summaries and judge from their content. ``level`` measures *topical match
+      strength*, so a closely-related "near-miss" (an adjacent topic) can also read
+      ``high`` — it does NOT guarantee the exact fact you asked for is stored. The
+      returned content is the source of truth; ``level`` only says whether it is
+      worth reading. Distinguishing near-miss from an exact match needs a
+      cross-encoder (pass ``use_rerank=true``); plain bi-encoder cosine cannot.
+
+    Why this supersedes the original #1047 z-score approach: that bucketed on
+    ``relative_margin`` (background std-devs), but max-normalization in the hybrid
+    merge erases absolute strength, and dividing by a flat off-topic tail's tiny
+    std *inflated* the margin — so irrelevant queries scored ``high`` (benchmarked).
+    ``relative_margin`` is retained for transparency but is NO LONGER the basis for
+    ``level``; note it reads high even for off-topic queries.
+
+    ``prominence`` / ``relative_margin`` are None for keyword-only searches (no
+    semantic cosines) and single-candidate pools; there ``level`` falls back to the
+    original z-score separation heuristic.
     """
 
     level: Literal["high", "moderate", "low", "none"]
-    top_score: float | None = None
+    top_score: float | None = Field(
+        None,
+        description=(
+            "Raw semantic cosine of the best hit (absolute match strength, 0-1). "
+            "On keyword-only searches this is the normalized hybrid top instead."
+        ),
+    )
+    prominence: float | None = Field(
+        None,
+        description=(
+            "(top_score - mean_background_cosine) / mean_background_cosine — a "
+            "model-scale-invariant match prominence and the primary basis for "
+            "level. None when <2 candidates or keyword-only."
+        ),
+    )
     relative_margin: float | None = Field(
         None,
         description=(
             "Separation of the top hit from the candidate-pool background, in "
-            "background std-devs (scale-invariant). None when <2 candidates."
+            "background std-devs. Informational only — it inflates on flat "
+            "off-topic tails and is not used for level. None when <2 candidates."
         ),
     )
     result_count: int

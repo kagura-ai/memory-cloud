@@ -282,15 +282,16 @@ You can also expand queries with related terms for comprehensive coverage:
 • Advanced filters: importance={"gte": 0.8}, scope="persistent", type="code"
 • Combine multiple searches for thorough exploration
 
-If few results: Try shorter query, remove filters, use related terms, or lower importance threshold.
+If few or no results: try a shorter query, remove filters, use related terms, lower the importance threshold, or switch `search_mode="keyword"`. If `result_count` is 0 or `confidence.level` is `none`/`low`, treat the topic as not stored in this context and prefer an external source over forcing an answer.
 
 Common workflow: Bug fix → recall("error message") → find similar past fixes → reference() for details → apply solution.
+When to use which: `recall(query)` finds candidate memories (this tool); `reference(memory_id)` returns one memory's full Layer-3 detail; `explore(memory_id)` walks the graph to adjacent memories. Find with recall → read in full with reference → branch out with explore.
 
 Returns summaries and context (Layers 1-2) optimized for quick understanding.
 
-Agent-facing signals in the response (Issue #1047):
+Agent-facing signals in the response:
 • Each result carries `updated_at` — the last time that fact was changed (null if never edited since creation). Use it to self-assess staleness without extra calls; an old `updated_at` means the fact may be out of date.
-• The response carries a top-level `confidence` object: `level` (high/moderate/low/none) buckets `relative_margin` = how many background std-devs the top hit stands out from the candidate pool (per-context-relative, scale-invariant — NOT a global score cutoff). NOTE: `level` measures *separation from the pool*, not absolute relevance — an off-topic query can still read `high` if one weak hit stands out. To judge "is this in memory at all?", look at `top_score` (absolute match strength for this recall) together with `level`: a high `level` but a low `top_score` means "something stood out, but nothing is strongly relevant" — treat that like a near-miss and consider going external rather than trusting it.
+• The response carries a top-level `confidence` object — a cheap TRIAGE hint for "is anything relevant here, or should I go external?", NOT a correctness verdict. `level` (high/moderate/low/none) is driven by `top_score` (best hit's absolute semantic cosine) and `prominence` ((top_score − mean background cosine) / mean background cosine; a ratio → robust to a model's cosine scale, not a global cutoff). How to act on it: `none`/`low` → likely nothing relevant, prefer an external source over forcing an answer from these results (this signal is reliable even without a reranker). `high`/`moderate` → relevant memory is likely present, so READ the returned summaries and judge from their content — `level` measures topical match strength, so a closely-related "near-miss" (an adjacent topic) can also read `high`; it does NOT guarantee the exact fact you asked for is stored. Treat the returned content as the source of truth and `level` only as the hint for whether to bother reading; to actually separate a near-miss from an exact match, pass `use_rerank=true` (cross-encoder), since plain cosine cannot. (`relative_margin` is kept for transparency but inflates on off-topic queries — do NOT use it to decide relevance.) Example: `confidence: {"level": "high", "top_score": 0.92, "prominence": 0.55, "result_count": 20}`; an empty pool returns `{"level": "none", "top_score": null, "result_count": 0}`.
 
 IMPORTANT: Always specify context_id to ensure you're searching the intended context. Use list_contexts() to discover available context IDs.
 
@@ -300,7 +301,7 @@ Search modes: Use search_mode to control the search strategy.
 • keyword: BM25 only — best for hiragana queries, exact term matching, or when semantic search returns noise. Particularly effective for Japanese hiragana-only queries where embedding models struggle.""",
             "inputSchema": {
                 "type": "object",
-                "required": ["query"],
+                "required": ["query", "context_id"],
                 "properties": {
                     "query": {
                         "type": "string",

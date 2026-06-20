@@ -378,6 +378,26 @@ class TestSearchServiceMergeResults:
         scores = [r["hybrid_score"] for r in result]
         assert scores == sorted(scores, reverse=True)
 
+    def test_merge_preserves_raw_semantic_cosine(self, service):
+        """Issue #1052: the RAW (pre-normalization) semantic cosine is carried as
+        ``semantic_score_raw`` so recall confidence can read absolute match
+        strength. The normalized ``semantic_score`` rescales the top to 1.0; the
+        raw value must survive that rescale. Keyword-only hits carry None."""
+        semantic = [
+            {"id": "m1", "score": 0.92, "payload": {}},
+            {"id": "m2", "score": 0.46, "payload": {}},
+        ]
+        keyword = [{"id": "m3", "score": 0.8, "payload": {}}]
+        result = service._merge_results(semantic, keyword)
+        by_id = {r["id"]: r for r in result}
+        # Raw cosine preserved, distinct from the max-normalized semantic_score.
+        assert by_id["m1"]["semantic_score_raw"] == pytest.approx(0.92)
+        assert by_id["m1"]["semantic_score"] == pytest.approx(1.0)
+        assert by_id["m2"]["semantic_score_raw"] == pytest.approx(0.46)
+        assert by_id["m2"]["semantic_score"] == pytest.approx(0.5)
+        # Keyword-only hit has no semantic cosine.
+        assert by_id["m3"]["semantic_score_raw"] is None
+
 
 class TestSharedContextReadFlag:
     """Test ``is_shared_context_read`` flag behavior in ``hybrid_search`` (#708 F2).

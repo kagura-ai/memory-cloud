@@ -1188,8 +1188,9 @@ class TestExploreHints:
 
 
 class TestRecallConfidence:
-    """Issue #1047: recall confidence is per-context-relative + scale-invariant
-    (NOT a global absolute-score cutoff)."""
+    """Issue #1047: the FALLBACK (keyword-only / no raw semantic cosines) path —
+    per-context-relative z-score separation. Since #1052 this is only the fallback;
+    the main hybrid/semantic path is covered by TestRecallConfidenceSemantic."""
 
     def test_empty_is_none(self):
         c = MemoryService._compute_recall_confidence([])
@@ -1215,11 +1216,97 @@ class TestRecallConfidence:
         assert c.level == "none"
 
     def test_scale_invariance_not_absolute_cutoff(self):
-        # Same separation SHAPE at very different absolute magnitudes must yield
-        # the SAME level — a global score cutoff would (wrongly) split these.
+        # Fallback path only: same separation SHAPE at very different absolute
+        # magnitudes yields the SAME level (z-score is scale-invariant). Note the
+        # MAIN semantic path (#1052) deliberately is NOT scale-invariant in this
+        # way — it weighs absolute cosine — see TestRecallConfidenceSemantic.
         low_scale = MemoryService._compute_recall_confidence([0.20, 0.05, 0.06, 0.04, 0.05])
         high_scale = MemoryService._compute_recall_confidence([0.95, 0.80, 0.81, 0.79, 0.80])
         assert low_scale.level == high_scale.level == "high"
+
+
+class TestRecallConfidenceSemantic:
+    """Issue #1052: the MAIN path — ``level`` from RAW semantic cosines so an
+    off-topic ("absent") query is NOT reported as relevant. Distributions below
+    mirror a live 398-memory benchmark (real embeddings, 2026-06-20)."""
+
+    # --- present (on-topic): high absolute cosine, clearly prominent ---
+    PRESENT = [0.919, 0.676, 0.670, 0.615, 0.608, 0.537, 0.520, 0.500]
+    # --- absent (off-topic): mediocre top, flat cluster just above background ---
+    ABSENT = [0.645, 0.572, 0.572, 0.561, 0.560, 0.531, 0.510, 0.500]
+
+    def _c(self, sem):
+        # Pass scores=[] so result_count derives from the semantic pool.
+        return MemoryService._compute_recall_confidence([], semantic_scores=sem)
+
+    def test_present_is_high(self):
+        c = self._c(self.PRESENT)
+        assert c.level == "high"
+        assert c.top_score == 0.919  # raw cosine, not the normalized hybrid 0.6
+        assert c.prominence is not None and c.prominence >= 0.40
+
+    def test_absent_is_not_relevant(self):
+        # The core #1052 fix: the OLD z-score margin called this "high" because the
+        # top barely separates from a flat low tail; absolute strength reveals it.
+        c = self._c(self.ABSENT)
+        assert c.level in ("low", "none")
+        # And the misleading z-margin is in fact high here — proving why level
+        # must not rely on it.
+        assert c.relative_margin is not None and c.relative_margin >= 2.0
+
+    def test_high_zmargin_but_low_absolute_is_downgraded(self):
+        # Top sits well above a perfectly flat tail → huge z-margin → the old code
+        # said "high". New code: prominence (0.60-0.55)/0.55 ≈ 0.09 → "none".
+        c = self._c([0.60, 0.55, 0.55, 0.55, 0.55, 0.55])
+        assert c.level == "none"
+
+    def test_near_duplicate_low_spread_is_rescued(self):
+        # Low-spread model: cosines clustered high → small prominence, but a 0.90
+        # top is a near-duplicate match and must not read as absent.
+        c = self._c([0.90, 0.88, 0.88, 0.87, 0.88])
+        assert c.level == "moderate"
+
+    def test_semantic_takes_precedence_over_hybrid_fallback(self):
+        # Hybrid scores alone (flat 0.6) would be "none" via the fallback; raw
+        # semantic must drive the verdict instead.
+        c = MemoryService._compute_recall_confidence(
+            [0.6, 0.6, 0.6, 0.6], semantic_scores=self.PRESENT
+        )
+        assert c.level == "high"
+        assert c.result_count == 4  # from the hybrid pool length
+
+    def test_single_strong_semantic_is_moderate(self):
+        c = self._c([0.91])
+        assert c.level == "moderate"
+        assert c.prominence is None
+
+    def test_single_weak_semantic_is_low(self):
+        c = self._c([0.40])
+        assert c.level == "low"
+
+    def test_top_score_is_raw_cosine(self):
+        c = self._c([0.873, 0.4, 0.39, 0.38])
+        assert c.top_score == 0.873
+
+    def test_zero_or_negative_background_weak_top_is_not_relevant(self):
+        # Qdrant returns raw cosines with no score_threshold, so an off-topic
+        # query can produce a ~zero/negative background mean. The ratio is
+        # meaningless there; a weak absolute top must NOT be forced to "high".
+        c = self._c([0.05, -0.20, -0.30, -0.25])
+        assert c.level == "none"
+        assert c.prominence is None  # no usable relative frame
+
+    def test_negative_background_strong_top_is_high(self):
+        # Same degenerate background, but a near-duplicate top is still detected.
+        c = self._c([0.90, -0.10, 0.00, -0.05])
+        assert c.level == "high"
+
+    def test_weak_top_over_weaker_background_not_high(self):
+        # Pure ratio would call this "high" (prominence = (0.30-0.10)/0.10 = 2.0),
+        # but an absolute top of 0.30 is a weak match — the absolute floor caps it.
+        c = self._c([0.30, 0.10, 0.10, 0.10])
+        assert c.level != "high"
+        assert c.level == "moderate"
 
 
 class TestReinforceFactor:
