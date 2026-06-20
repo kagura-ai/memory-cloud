@@ -101,7 +101,8 @@ def test_invalid_token_returns_401():
     assert resp.status_code == 401
 
 
-def test_invalid_plan_returns_400():
+def test_invalid_plan_returns_422():
+    # Canonical ValidationError (VAL-001 / 422), not a raw HTTPException.
     p = _settings("secret")
     client = _client(_make_ws())
     try:
@@ -113,10 +114,10 @@ def test_invalid_plan_returns_400():
     finally:
         p.stop()
         _teardown()
-    assert resp.status_code == 400
+    assert resp.status_code == 422
 
 
-def test_unknown_addon_returns_400():
+def test_unknown_addon_returns_422():
     p = _settings("secret")
     client = _client(_make_ws())
     try:
@@ -128,10 +129,10 @@ def test_unknown_addon_returns_400():
     finally:
         p.stop()
         _teardown()
-    assert resp.status_code == 400
+    assert resp.status_code == 422
 
 
-def test_negative_addon_returns_400():
+def test_negative_addon_returns_422():
     p = _settings("secret")
     client = _client(_make_ws())
     try:
@@ -143,7 +144,7 @@ def test_negative_addon_returns_400():
     finally:
         p.stop()
         _teardown()
-    assert resp.status_code == 400
+    assert resp.status_code == 422
 
 
 def test_workspace_not_found_returns_404():

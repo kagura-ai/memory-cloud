@@ -34,7 +34,7 @@ import secrets
 from datetime import datetime
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, Header, HTTPException, status
+from fastapi import APIRouter, Depends, Header
 from pydantic import BaseModel, Field
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -44,6 +44,12 @@ from config.settings import get_settings
 from db.base import get_db
 from models.api_base import TZAwareBaseModel
 from models.auth import Workspace
+from utils.exceptions import (
+    AuthenticationError,
+    MemoryCloudException,
+    NotFoundException,
+    ValidationError,
+)
 from utils.logger import get_logger
 
 logger = get_logger(__name__)
@@ -76,21 +82,19 @@ async def verify_billing_service_token(authorization: str | None = Header(None))
     """
     expected = get_settings().billing_service_token
     if not expected:
-        raise HTTPException(
-            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-            detail="Internal billing endpoint is not configured",
+        # No canonical 503 subclass for "endpoint disabled"; raise the base
+        # MemoryCloudException so the global handler emits the canonical envelope
+        # (and we avoid a raw HTTPException — #992 ratchet).
+        raise MemoryCloudException(
+            "Internal billing endpoint is not configured",
+            status_code=503,
+            error_code="BILLING-001",
         )
     if not authorization or not authorization.startswith("Bearer "):
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Billing service token required",
-        )
+        raise AuthenticationError("Billing service token required")
     token = authorization[len("Bearer ") :]
     if not secrets.compare_digest(token, expected):
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Invalid billing service token",
-        )
+        raise AuthenticationError("Invalid billing service token")
 
 
 class BillingPlanPush(BaseModel):
@@ -144,38 +148,34 @@ async def set_workspace_plan_from_billing(
     provided ``addons`` (absolute). Does not perform destructive downgrade
     cascades (see module docstring). Returns the full applied addon state.
     """
-    # Validate the wire contract BEFORE any mutation.
+    # Validate the wire contract BEFORE any mutation. Canonical VAL-001 (422).
     if body.plan_name not in PLAN_TIERS:
-        raise HTTPException(
-            status_code=400,
-            detail=f"Invalid plan: {body.plan_name}. Valid plans: {list(PLAN_TIERS.keys())}",
+        raise ValidationError(
+            f"Invalid plan: {body.plan_name}. Valid plans: {list(PLAN_TIERS.keys())}",
+            field="plan_name",
         )
     if body.addons:
         for key, value in body.addons.items():
             if key not in _ADDON_COLUMNS:
-                raise HTTPException(
-                    status_code=400,
-                    detail=(
-                        f"Unknown addon dimension: {key}. "
-                        f"Valid dimensions: {sorted(_ADDON_COLUMNS)}"
-                    ),
+                raise ValidationError(
+                    f"Unknown addon dimension: {key}. Valid dimensions: {sorted(_ADDON_COLUMNS)}",
+                    field="addons",
                 )
             if value < 0:
-                raise HTTPException(
-                    status_code=400,
-                    detail=f"Addon '{key}' bonus must be >= 0, got {value}",
+                raise ValidationError(
+                    f"Addon '{key}' bonus must be >= 0, got {value}", field="addons"
                 )
 
     try:
         ws_uuid = UUID(workspace_id)
     except ValueError as exc:
-        raise HTTPException(status_code=400, detail="Invalid workspace_id") from exc
+        raise ValidationError("Invalid workspace_id", field="workspace_id") from exc
 
     workspace = (
         await db.execute(select(Workspace).where(Workspace.id == ws_uuid))
     ).scalar_one_or_none()
     if workspace is None:
-        raise HTTPException(status_code=404, detail="Workspace not found")
+        raise NotFoundException("Workspace")
 
     # Apply entitlement (absolute set → idempotent).
     workspace.plan_name = body.plan_name

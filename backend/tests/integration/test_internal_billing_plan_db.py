@@ -82,10 +82,10 @@ async def test_partial_addon_update_leaves_others_unchanged(db_session):
 
 
 @pytest.mark.asyncio
-async def test_missing_workspace_raises_404(db_session):
-    from fastapi import HTTPException
+async def test_missing_workspace_raises_not_found(db_session):
+    from utils.exceptions import NotFoundException
 
-    with pytest.raises(HTTPException) as exc:
+    with pytest.raises(NotFoundException) as exc:
         await set_workspace_plan_from_billing(
             workspace_id=str(uuid4()),
             body=BillingPlanPush(plan_name="pro"),
