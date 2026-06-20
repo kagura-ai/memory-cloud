@@ -12,7 +12,7 @@ values (``neural_association`` / ``related_to`` / ``depends_on`` /
 seeding to ``edge_metadata['source']``. #782 widened the set back to six by
 appending two producer-asserted structural relation types
 (``continues_from`` / ``references_file``) emitted by the
-kagura-memory-ai-worker pipeline. The drift tests in this file pin the
+kagura-chat-bridge pipeline. The drift tests in this file pin the
 current shape.
 
 Tests pin three invariants:
@@ -115,7 +115,7 @@ async def test_add_edge_accepts_producer_asserted_types(rel_type: str) -> None:
     """#782: ``add_edge`` accepts the two producer-asserted structural types.
 
     ``continues_from`` / ``references_file`` are emitted by the
-    kagura-memory-ai-worker ingest pipeline (not the LLM judge). The validator
+    kagura-chat-bridge ingest pipeline (not the LLM judge). The validator
     must accept them and forward ``edge_type`` unchanged to
     ``NeuralEdgeRepository``. Origin pinning is the caller's responsibility on
     this path (see the sibling ``test_add_edge_propagates_explicit_origin``

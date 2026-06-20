@@ -521,7 +521,7 @@ EDGE_TYPE_RELATED_TO = "related_to"
 EDGE_TYPE_DEPENDS_ON = "depends_on"
 EDGE_TYPE_LEARNED_FROM = "learned_from"
 # Issue #782: producer-asserted structural relation types emitted by the
-# kagura-memory-ai-worker ingest pipeline. They live on the edge_type
+# kagura-chat-bridge ingest pipeline. They live on the edge_type
 # (relation) axis; their provenance is the ``origin`` axis (origin='declared'
 # for the worker create_edge path, pinned in mcp_server/tools/edge.py).
 #   - continues_from: chronological/narrative successor between chat memories

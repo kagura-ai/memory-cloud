@@ -1,6 +1,6 @@
 """Widen the valid_edge_type CHECK to add continues_from + references_file (#782).
 
-The kagura-memory-ai-worker emits two producer-asserted structural relation
+The kagura-chat-bridge emits two producer-asserted structural relation
 types that did not exist in the post-#741 four-value ``edge_type`` set:
 
 * ``continues_from``  — chronological/narrative successor between chat memories.

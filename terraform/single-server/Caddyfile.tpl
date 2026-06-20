@@ -122,7 +122,7 @@ memory.kagura-ai.com {
 # =============================================================================
 # Extension point for sibling services (one-time, do not remove)
 # =============================================================================
-# Sibling services co-resident on this VM (e.g. kagura-memory-ai-worker's
+# Sibling services co-resident on this VM (e.g. kagura-chat-bridge's
 # webhook receiver at aw.kagura-ai.com) plug their own top-level vhost blocks
 # in here by dropping a `*.caddy` file into /opt/kagura-caddy-extra/ on the
 # host. That directory is bind-mounted read-only into the caddy container

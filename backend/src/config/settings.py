@@ -81,7 +81,7 @@ class Settings(BaseSettings):
         default=60,
         description="Min seconds between api_keys.last_used_at writes per key (Issue #947)",
     )
-    # ai-worker (kagura-memory-ai-worker) service auth. The worker presents this
+    # ai-worker (kagura-chat-bridge) service auth. The worker presents this
     # as a Bearer token to GET /api/v1/workers/config (Spec 2026-06-02). Empty
     # disables the worker config endpoint (fail-closed). Use: openssl rand -hex 32.
     #

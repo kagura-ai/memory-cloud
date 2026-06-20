@@ -41,7 +41,7 @@ from models.memory import (
 #   - related_to / depends_on / learned_from: LLM-emittable relation types
 #     (#374 → see `services/sleep/edge_discovery.py::LLM_EMITTABLE_EDGE_TYPES`).
 #   - continues_from / references_file (#782): producer-asserted structural
-#     relation types emitted by the kagura-memory-ai-worker ingest pipeline.
+#     relation types emitted by the kagura-chat-bridge ingest pipeline.
 #     NOT emitted by the sleep LLM judge (excluded from
 #     `services/sleep/edge_discovery.py::LLM_EMITTABLE_EDGE_TYPES`); the MCP
 #     boundary does not separately enforce this — clients may pass them.

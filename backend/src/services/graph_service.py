@@ -53,9 +53,9 @@ class GraphService:
         - depends_on: LLM-judged dependency relationship (directed)
         - learned_from: LLM-judged learning source (directed)
         - continues_from: producer-asserted chronological/narrative successor
-          (directed; #782, emitted by kagura-memory-ai-worker)
+          (directed; #782, emitted by kagura-chat-bridge)
         - references_file: producer-asserted structural reference, chat → file
-          overview (directed; #782, emitted by kagura-memory-ai-worker)
+          overview (directed; #782, emitted by kagura-chat-bridge)
 
     Provenance lives on the ``origin`` axis (#722), independent of edge_type:
         - hebbian: runtime Hebbian co-activation trace
