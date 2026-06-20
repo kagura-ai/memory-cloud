@@ -372,7 +372,7 @@ Returns all 3 layers: summary, context_summary, and complete details/content.
 
 IMPORTANT: Always specify context_id to ensure you're retrieving from the intended context. Use list_contexts() to discover available context IDs.
 
-Returns: {status, memory: {memory_id, summary, context_summary, content, details, type, importance, tags, context, created_at, client}} — all three layers including the full content/details.""",
+Returns: {status, memory: {memory_id, summary, context_summary, content, details, type, scope, importance, tags, context, created_at, updated_at, client, source_uri, source_type, outgoing_links: [{memory_id, summary, type, importance, weight, created_at}], outgoing_has_more, incoming_links: [...], incoming_has_more}} — all three layers plus declared-link references and provenance. updated_at is a staleness cue (an old value means the fact may be out of date).""",
             "inputSchema": {
                 "type": "object",
                 "required": ["memory_id", "context_id"],
@@ -1166,6 +1166,7 @@ Returns: {status, message, context_id, config: {semantic_weight, bm25_weight, fe
                     },
                     "reranker_provider": {
                         "type": "string",
+                        "enum": ["voyage", "cohere", "ollama"],
                         "description": "Reranker provider: 'voyage', 'cohere', or 'ollama' (local, no API key needed).",
                     },
                     "reranker_model": {
@@ -1637,6 +1638,7 @@ Returns: {status, report_id, rollback_summary: {edges_deleted, merges_reversed, 
                 "properties": {
                     "context_id": {
                         "type": "string",
+                        "format": "uuid",
                         "description": "Target context UUID (must belong to your workspace).",
                     },
                     "from": {
@@ -1697,6 +1699,7 @@ Returns: {status, report_id, rollback_summary: {edges_deleted, merges_reversed, 
                 "properties": {
                     "run_id": {
                         "type": "string",
+                        "format": "uuid",
                         "description": "Analysis run UUID (from analyze_context).",
                     },
                 },
@@ -1721,6 +1724,7 @@ Returns: {status, report_id, rollback_summary: {edges_deleted, merges_reversed, 
                 "properties": {
                     "context_id": {
                         "type": "string",
+                        "format": "uuid",
                         "description": "Target context UUID.",
                     },
                     "limit": {
@@ -1752,6 +1756,7 @@ Returns: {status, report_id, rollback_summary: {edges_deleted, merges_reversed, 
                 "properties": {
                     "context_id": {
                         "type": "string",
+                        "format": "uuid",
                         "description": "Target context UUID.",
                     },
                 },
@@ -1780,6 +1785,7 @@ Returns: {status, report_id, rollback_summary: {edges_deleted, merges_reversed, 
                 "properties": {
                     "run_id": {
                         "type": "string",
+                        "format": "uuid",
                         "description": "Analysis run UUID.",
                     },
                     "cluster_index": {
@@ -1963,6 +1969,7 @@ Returns: {status, feedback_id, memory_id, helpful}.""",
                 "properties": {
                     "context_id": {
                         "type": "string",
+                        "format": "uuid",
                         "description": "Target context UUID (the recalled memory's context).",
                     },
                     "memory_id": {
@@ -2003,6 +2010,7 @@ Returns: {status, key}.""",
                 "properties": {
                     "context_id": {
                         "type": "string",
+                        "format": "uuid",
                         "description": "Target context UUID (state is scoped to this context).",
                     },
                     "key": {
@@ -2035,6 +2043,7 @@ Returns: {status, key, value, found}. found is false (value null) when the key i
                 "properties": {
                     "context_id": {
                         "type": "string",
+                        "format": "uuid",
                         "description": "Target context UUID.",
                     },
                     "key": {
