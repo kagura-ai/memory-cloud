@@ -723,6 +723,10 @@ async def handle_reference(
                     help="Use recall() to find memories you have access to.",
                 )
 
+            # Surface the FULL ReferenceResponse the service already builds: the
+            # handler previously dropped scope/updated_at (#434), source provenance
+            # (#215), and the declared-link references (#440), so an agent could not
+            # see a memory's links or staleness via reference() (#1054).
             reference_data = {
                 "memory_id": str(result.memory_id),
                 "summary": result.summary,
@@ -730,11 +734,19 @@ async def handle_reference(
                 "content": result.content,
                 "details": result.details,
                 "type": result.type,
+                "scope": result.scope,
                 "importance": result.importance,
                 "tags": result.tags,
                 "context": result.context,
-                "created_at": result.created_at.isoformat(),
+                "created_at": to_utc_iso(result.created_at),
+                "updated_at": to_utc_iso(result.updated_at),
                 "client": result.client,
+                "source_uri": result.source_uri,
+                "source_type": result.source_type,
+                "outgoing_links": [ref.model_dump(mode="json") for ref in result.outgoing_links],
+                "outgoing_has_more": result.outgoing_has_more,
+                "incoming_links": [ref.model_dump(mode="json") for ref in result.incoming_links],
+                "incoming_has_more": result.incoming_has_more,
             }
 
             await _log_tool_usage(

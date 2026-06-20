@@ -372,7 +372,7 @@ Returns all 3 layers: summary, context_summary, and complete details/content.
 
 IMPORTANT: Always specify context_id to ensure you're retrieving from the intended context. Use list_contexts() to discover available context IDs.
 
-Returns: {status, memory: {memory_id, summary, context_summary, content, details, type, importance, tags, context, created_at, client}} — all three layers including the full content/details.""",
+Returns: {status, memory: {memory_id, summary, context_summary, content, details, type, scope, importance, tags, context, created_at, updated_at, client, source_uri, source_type, outgoing_links: [{memory_id, summary, type, importance, weight, created_at}], outgoing_has_more, incoming_links: [...], incoming_has_more}} — all three layers plus declared-link references and provenance. updated_at is a staleness cue (null/old means the fact may be out of date).""",
             "inputSchema": {
                 "type": "object",
                 "required": ["memory_id", "context_id"],
