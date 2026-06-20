@@ -940,7 +940,6 @@ class ContextService:
                 scope=mem.scope,
                 long_term=mem.long_term,
                 promoted_at=mem.promoted_at,
-                use_count=0,
                 access_count=0,
                 client=mem.client,
                 client_version=mem.client_version,

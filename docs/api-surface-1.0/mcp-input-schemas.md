@@ -69,15 +69,15 @@ Update a memory in-place (by memory_id) or upsert by external_id.
 
 Hybrid search (semantic + BM25 + Neural Memory boosting) over memories; returns Layers 1–2.
 
-- **Required**: `query` — string; `context_id` — string, format `uuid` ✅ **DECIDED (#1054): `context_id` is now required** (recall is context-scoped — the handler always required it; the schema's `required` array now matches, was previously listed under Optional here)
+- **Required**: `query` — string. ✅ **CORRECTED (v0.34.0 review): `context_id` is NOT unconditionally required.** The handler requires *either* `context_id` *or* `context_ids` (`if "context_id" not in args and "context_ids" not in args: error`), so cross-context recall via `context_ids` alone is a valid call. #1054 had added `context_id` to the schema's `required` array on the false premise that "the handler always required it" — that rejected legitimate `context_ids`-only calls at any schema-validating client/gateway, and has been reverted (`required: ["query"]`). The `context_id`/`context_ids` pair is a description-only "exactly one of" contract — left out of `required`, enforced at the handler — the same convention as `forget(memory_id/query)` and `describe_binding(key_id/context_id)`.
 - **Optional**:
   - `k` — integer (default 5, max 100 per description) ✅ **DECIDED (#990): the `k`/`limit`/`cap` trio is consciously frozen as three distinct conventions, not unified.** `k` = the top-k count for a *relevance-ranked* result set (recall/get_sleep_history — established ML term); `limit` = pagination size for a *flat list* (the list_* family); `cap` = the ceiling for *pinned-memory load* (load_pinned). Unifying to one name spans ~8 tools (breaking) and would erase the relevance-vs-pagination signal `k` carries — net DX loss. Frozen as-is.
   - `use_rerank` — boolean (default false)
   - `filters` — object (free-form: type, tags, tags_match, importance gte, created/updated bounds, source_uri_prefix, source_type, trust_tier) ⚠ filter vocabulary lives only in prose; analyze_context exposes the equivalent filters (`types`, `tags`, `min_importance`, `from`/`to`) as top-level params instead — two filter styles on one surface
-  - `context_ids` — array of string (format `uuid`), minItems 2, maxItems 20 (cross-context recall; supplements the now-required `context_id`) ⚠ singular required `context_id` + plural optional `context_ids` on the same tool — workable but should be a deliberate frozen pattern
+  - `context_ids` — array of string (format `uuid`), minItems 2, maxItems 20 (cross-context recall; an ALTERNATIVE to `context_id` — `context_ids` overrides `context_id` when both are given, and is sufficient on its own). The deliberate frozen pattern: singular `context_id` and plural `context_ids` are the two arms of one "exactly one of" selector, neither in `required`.
   - `search_mode` — string, enum [`hybrid`, `semantic`, `keyword`] (default hybrid) ⚠ mild lock-in: description bakes in the 60/40 weighting and BM25/Neural-Memory implementation details; enum values themselves look stable
   - `include_explore_hints` — boolean (default false)
-- ⚠ `context_id` is optional here but required (and "IMPORTANT: always specify") on most sibling tools — for a frozen surface, recall/remember-family should agree on whether context_id is required
+- ✅ `context_id` is not in `required` here (because `context_ids` can stand in) while it IS required on the remember-family (which has no plural form). This asymmetry is intentional and frozen: recall is the only tool with a cross-context (`context_ids`) mode. The prose still says "IMPORTANT: always specify context_id" as the single-context happy-path guidance for agents.
 
 ### reference
 
