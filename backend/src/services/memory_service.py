@@ -10,6 +10,7 @@ from __future__ import annotations
 import asyncio
 import functools
 import hashlib
+import math
 import statistics
 from datetime import datetime
 from uuid import UUID, uuid4
@@ -1313,8 +1314,6 @@ class MemoryService:
         Does NOT touch ranking; purely a derived annotation. ``scores`` /
         ``semantic_scores`` may be in any order — sorted descending internally.
         """
-        import statistics
-
         sem = sorted((semantic_scores or []), reverse=True)
         if sem:
             return MemoryService._confidence_from_semantic(
@@ -1491,8 +1490,6 @@ class MemoryService:
         semantic relevance dominant: this only reorders the already
         relevance-filtered candidate pool, it never pulls in new hits.
         """
-        import math
-
         adopt = min(1.0, math.log1p(max(0, reference_count)) / math.log1p(adopt_norm))
         fb = math.tanh(net_helpful / feedback_norm)
         usage = importance * (adopt_weight * adopt + feedback_weight * fb)
