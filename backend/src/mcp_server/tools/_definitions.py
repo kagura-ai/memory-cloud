@@ -300,7 +300,7 @@ Search modes: Use search_mode to control the search strategy.
 • keyword: BM25 only — best for hiragana queries, exact term matching, or when semantic search returns noise. Particularly effective for Japanese hiragana-only queries where embedding models struggle.""",
             "inputSchema": {
                 "type": "object",
-                "required": ["query"],
+                "required": ["query", "context_id"],
                 "properties": {
                     "query": {
                         "type": "string",
