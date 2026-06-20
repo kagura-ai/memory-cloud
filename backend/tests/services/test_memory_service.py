@@ -1288,6 +1288,26 @@ class TestRecallConfidenceSemantic:
         c = self._c([0.873, 0.4, 0.39, 0.38])
         assert c.top_score == 0.873
 
+    def test_zero_or_negative_background_weak_top_is_not_relevant(self):
+        # Qdrant returns raw cosines with no score_threshold, so an off-topic
+        # query can produce a ~zero/negative background mean. The ratio is
+        # meaningless there; a weak absolute top must NOT be forced to "high".
+        c = self._c([0.05, -0.20, -0.30, -0.25])
+        assert c.level == "none"
+        assert c.prominence is None  # no usable relative frame
+
+    def test_negative_background_strong_top_is_high(self):
+        # Same degenerate background, but a near-duplicate top is still detected.
+        c = self._c([0.90, -0.10, 0.00, -0.05])
+        assert c.level == "high"
+
+    def test_weak_top_over_weaker_background_not_high(self):
+        # Pure ratio would call this "high" (prominence = (0.30-0.10)/0.10 = 2.0),
+        # but an absolute top of 0.30 is a weak match — the absolute floor caps it.
+        c = self._c([0.30, 0.10, 0.10, 0.10])
+        assert c.level != "high"
+        assert c.level == "moderate"
+
 
 class TestReinforceFactor:
     """Issue #1048: bounded, importance-weighted reinforce factor — the 2-population

@@ -10,6 +10,7 @@ from __future__ import annotations
 import asyncio
 import functools
 import hashlib
+import statistics
 from datetime import datetime
 from uuid import UUID, uuid4
 
@@ -99,6 +100,16 @@ _CONF_LOW_PROMINENCE = 0.12
 # tightly clustered (low-spread model → small prominence) so a strong absolute
 # match is never reported as absent.
 _CONF_STRONG_ABS_COSINE = 0.85
+# Absolute-cosine guards. Prominence is a ratio, so a weak top over an even
+# weaker background can still inflate it; these floors keep a low-absolute hit
+# out of high/moderate. They also serve as the bands when the background gives no
+# usable relative frame (mean ≤ _CONF_BG_EPS — e.g. a model that drives unrelated
+# content toward ~0 / negative cosine, where the ratio is meaningless and the raw
+# cosine is the only signal). Deliberately permissive so a real match on a
+# low-baseline model (e.g. text-embedding-3-small) still qualifies.
+_CONF_ABS_MODERATE_COSINE = 0.50
+_CONF_ABS_LOW_COSINE = 0.30
+_CONF_BG_EPS = 1e-3
 
 
 def _log_embedding_task_result(task: asyncio.Task, memory_id: str) -> None:
@@ -1370,11 +1381,13 @@ class MemoryService:
     def _confidence_from_semantic(sem: list[float], *, result_count: int) -> RecallConfidence:
         """Issue #1052: confidence from RAW semantic cosines (sorted desc).
 
-        ``level`` from model-scale-invariant prominence + a near-duplicate
-        absolute-cosine floor. See the calibration constants for thresholds.
+        ``level`` is driven by model-scale-invariant prominence when the
+        background gives a usable positive frame, and by absolute cosine bands
+        when it does not (mean ≤ ``_CONF_BG_EPS``). Absolute floors additionally
+        guard high/moderate so a weak top over a weaker background cannot inflate
+        the ratio into a false "high", and a near-duplicate top is never reported
+        as absent. See the calibration constants for thresholds.
         """
-        import statistics
-
         top = sem[0]
         n = len(sem)
         if n == 1:
@@ -1397,28 +1410,40 @@ class MemoryService:
 
         background = sem[1:]
         mean_bg = statistics.fmean(background)
-        if mean_bg > 1e-9:
-            prominence = (top - mean_bg) / mean_bg
-        else:
-            # Background ~0 → top stands alone far above noise.
-            prominence = float("inf")
         std_bg = statistics.pstdev(background) if len(background) > 1 else 0.0
         z = (top - mean_bg) / std_bg if std_bg > 1e-9 else None
 
-        if prominence >= _CONF_HIGH_PROMINENCE:
-            level = "high"
-        elif prominence >= _CONF_MODERATE_PROMINENCE:
-            level = "moderate"
-        elif prominence >= _CONF_LOW_PROMINENCE:
-            level = "low"
+        if mean_bg > _CONF_BG_EPS:
+            # Positive background → prominence ratio is well-defined and
+            # model-scale-invariant. Denominator ≥ _CONF_BG_EPS keeps it finite.
+            prominence: float | None = (top - mean_bg) / mean_bg
+            if prominence >= _CONF_HIGH_PROMINENCE and top >= _CONF_ABS_MODERATE_COSINE:
+                level = "high"
+            elif prominence >= _CONF_MODERATE_PROMINENCE and top >= _CONF_ABS_LOW_COSINE:
+                level = "moderate"
+            elif prominence >= _CONF_LOW_PROMINENCE:
+                level = "low"
+            else:
+                level = "none"
         else:
-            level = "none"
+            # Background at/below ~0 (model drives unrelated content toward 0 / a
+            # negative cosine): the ratio is meaningless, so judge absolute strength.
+            prominence = None
+            if top >= _CONF_STRONG_ABS_COSINE:
+                level = "high"
+            elif top >= _CONF_ABS_MODERATE_COSINE:
+                level = "moderate"
+            elif top >= _CONF_ABS_LOW_COSINE:
+                level = "low"
+            else:
+                level = "none"
+
         # Near-duplicate absolute match → never report as absent even if the pool
         # is tightly clustered (low-spread model produces small prominence).
         if top >= _CONF_STRONG_ABS_COSINE and level in ("low", "none"):
             level = "moderate"
 
-        prom_str = "inf" if prominence == float("inf") else f"{prominence:.2f}"
+        prom_str = "n/a" if prominence is None else f"{prominence:.2f}"
         note = {
             "high": "top hit is a strong, clearly-separated match",
             "moderate": "top hit is a plausible match",
@@ -1428,7 +1453,7 @@ class MemoryService:
         return RecallConfidence(
             level=level,
             top_score=round(top, 3),
-            prominence=round(prominence, 3) if prominence != float("inf") else None,
+            prominence=round(prominence, 3) if prominence is not None else None,
             relative_margin=round(z, 3) if z is not None else None,
             result_count=result_count,
             rationale=(
