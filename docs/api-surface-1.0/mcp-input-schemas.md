@@ -69,13 +69,12 @@ Update a memory in-place (by memory_id) or upsert by external_id.
 
 Hybrid search (semantic + BM25 + Neural Memory boosting) over memories; returns Layers 1–2.
 
-- **Required**: `query` — string
+- **Required**: `query` — string; `context_id` — string, format `uuid` ✅ **DECIDED (#1054): `context_id` is now required** (recall is context-scoped — the handler always required it; the schema's `required` array now matches, was previously listed under Optional here)
 - **Optional**:
   - `k` — integer (default 5, max 100 per description) ✅ **DECIDED (#990): the `k`/`limit`/`cap` trio is consciously frozen as three distinct conventions, not unified.** `k` = the top-k count for a *relevance-ranked* result set (recall/get_sleep_history — established ML term); `limit` = pagination size for a *flat list* (the list_* family); `cap` = the ceiling for *pinned-memory load* (load_pinned). Unifying to one name spans ~8 tools (breaking) and would erase the relevance-vs-pagination signal `k` carries — net DX loss. Frozen as-is.
   - `use_rerank` — boolean (default false)
   - `filters` — object (free-form: type, tags, tags_match, importance gte, created/updated bounds, source_uri_prefix, source_type, trust_tier) ⚠ filter vocabulary lives only in prose; analyze_context exposes the equivalent filters (`types`, `tags`, `min_importance`, `from`/`to`) as top-level params instead — two filter styles on one surface
-  - `context_id` — string, format `uuid`
-  - `context_ids` — array of string (format `uuid`), minItems 2, maxItems 20 (overrides context_id) ⚠ singular `context_id` + plural `context_ids` with override semantics on the same tool — workable but should be a deliberate frozen pattern
+  - `context_ids` — array of string (format `uuid`), minItems 2, maxItems 20 (cross-context recall; supplements the now-required `context_id`) ⚠ singular required `context_id` + plural optional `context_ids` on the same tool — workable but should be a deliberate frozen pattern
   - `search_mode` — string, enum [`hybrid`, `semantic`, `keyword`] (default hybrid) ⚠ mild lock-in: description bakes in the 60/40 weighting and BM25/Neural-Memory implementation details; enum values themselves look stable
   - `include_explore_hints` — boolean (default false)
 - ⚠ `context_id` is optional here but required (and "IMPORTANT: always specify") on most sibling tools — for a frozen surface, recall/remember-family should agree on whether context_id is required
@@ -253,7 +252,7 @@ Tune per-context hybrid-search weights and reranker settings.
   - `bm25_weight` — number (0.0–1.0, default 0.4; weights must sum to 1.0 — prose-only constraint) ⚠ `bm25_weight` exposes the algorithm name (BM25) in a frozen param name; `keyword_weight` would survive an algorithm swap
   - `fetch_factor` — integer (1–10, default 3) ⚠ leaks retrieval-pipeline implementation into the public surface
   - `use_rerank` — boolean
-  - `reranker_provider` — string ('voyage' | 'cohere' | 'ollama' per description) ⚠ enum lock-in risk in substance though not in schema: provider names are third-party vendors and will churn; note the inconsistency that connector_type IS a hard enum while reranker_provider is a free string — pick one policy
+  - `reranker_provider` — string, enum [`voyage`, `cohere`, `ollama`] ✅ **DECIDED (#1054): now a hard enum** (was a free string; matches the DB CHECK constraint and aligns with connector_type's enum policy). Widening the enum later (adding a provider) is non-breaking; removing a value is a MAJOR bump.
   - `reranker_model` — string (provider-specific model names in description)
 
 ### get_usage
@@ -485,7 +484,7 @@ Recurring inconsistencies (each instance flagged inline above):
 10. **Filter style**: recall packs filters into one free-form `filters` object (singular `type`, `importance: {gte}`); analyze_context spreads them top-level (`types` plural, `min_importance`).
 11. **`workspace_id` override** exists only on the 5 file tools; the rest of the surface scopes by auth + context_id. Inconsistent and security-sensitive.
 12. **Constraints live in prose, not schema**: char limits (summary 10–500, context_summary 2000), `maxItems` (events ≤ 100), patterns (context name, sha256 hex), numeric ranges and most defaults are description-only. (`additionalProperties` ✅ now set to `false` on all 45 schemas in #990 Phase 1 — the rest of the prose-only constraints remain a P2 hardening item.) Tool-side validation still cannot fully rely on the published schema.
-13. **Enum policy is inconsistent**: connector_type is a hard vendor enum while reranker_provider (same vendor-list shape) is a free string; edge_type is a hard enum that already grew once (#782).
+13. **Enum policy** ✅ **RESOLVED (#1054)**: reranker_provider is now a hard enum [`voyage`,`cohere`,`ollama`], matching connector_type — the free-string inconsistency is gone. edge_type remains a hard enum that already grew once (#782); enum *widening* is non-breaking, so growth is fine.
 
 ## Follow-up candidates
 

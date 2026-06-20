@@ -12,6 +12,7 @@ Notes:
 - Two route-file classes subclass an in-scope model rather than `BaseModel` directly and are therefore outside the 208-class grep, but are part of the response surface and noted inline for completeness: `Bm25DriftDetail(Bm25DriftSummary)` (bm25_drift.py L64, adds `context_deleted`, `top_divergent_terms`) and `SleepReportDetail(SleepReportSummary)` (sleep_reports.py L66, adds `context_deleted`, `embedding_calls_made`, `error_message`, and five `*_result: dict` fields).
 - Field convention: `field_name: type — required|optional (default ...)`. Required = no default in the model definition (Pydantic v2 semantics: `X | None` without a default is still required).
 - Request models are included for completeness and marked `(request model)`; the freeze priority per #622 is the response surface.
+- **⚠ Known gap (to close at rc1 — see `dx-lead-review.md` finding #5):** this enumeration covers only models *defined in* `backend/src/api/routes/`. Response models *defined in* `models/schemas.py` but *returned by* routes via `response_model=` are part of the frozen surface yet **not enumerated here** — notably the core memory API: `RememberResponse`, `RecallResponse`, `RecallConfidence` (incl. the `prominence` field added in #1052), and `ReferenceResponse`. The rc1 re-enumeration must include `models/schemas.py` response models (ideally via the snapshot guard in `dx-lead-review.md` finding #6).
 
 ## admin.py
 
