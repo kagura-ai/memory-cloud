@@ -72,9 +72,7 @@ async def test_reference_surfaces_links_scope_provenance():
         stack.enter_context(
             patch("mcp_server.tools.memory._resolve_context_for_read", new=AsyncMock())
         )
-        stack.enter_context(
-            patch("mcp_server.tools.memory._log_tool_usage", new=AsyncMock())
-        )
+        stack.enter_context(patch("mcp_server.tools.memory._log_tool_usage", new=AsyncMock()))
         stack.enter_context(patch("services.memory_service.MemoryService", return_value=svc))
         result = await handle_reference(
             args={"memory_id": str(mem_id), "context_id": str(uuid4())},
