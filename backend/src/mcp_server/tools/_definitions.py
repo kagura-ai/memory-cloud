@@ -117,7 +117,9 @@ Multi-context management (personal/work/contexts in one collection):
 
 The more semantic metadata you provide, the better the search relevance.
 
-IMPORTANT: Always specify context_id to ensure you're using the intended context. Use list_contexts() to discover available context IDs.""",
+IMPORTANT: Always specify context_id to ensure you're using the intended context. Use list_contexts() to discover available context IDs.
+
+Returns: {status, memory_id, scope, context_id, context_name, context_display_name, context_is_private, context_is_locked}. NOTE: the embedding is generated asynchronously AFTER this returns, so the new memory is not findable via recall() for a brief moment.""",
             "inputSchema": {
                 "type": "object",
                 "required": ["summary", "content", "type", "context_id"],
@@ -205,7 +207,11 @@ SECURITY: DO NOT store secrets, credentials, or sensitive data in memories, incl
 - Contents of .env files or environment variables with credentials
 If the user's input contains such data, refuse to store it and ask them to redact the sensitive values first.
 
-IMPORTANT: Always specify context_id.""",
+IMPORTANT: Always specify context_id.
+
+Modes (supply exactly ONE): in-place edit by memory_id, OR upsert by external_id (found → update in place, not-found → create). Upsert additionally requires summary, content, and type.
+
+Returns: {status, memory_id, operation: "updated"|"created"|"replaced", re_embedded, scope, context_id, context_name, context_display_name, context_is_private, context_is_locked}. operation tells you which path ran; re_embedded is true only when summary/context_summary/content changed.""",
             "inputSchema": {
                 "type": "object",
                 "required": ["context_id"],
@@ -298,7 +304,9 @@ IMPORTANT: Always specify context_id to ensure you're searching the intended con
 Search modes: Use search_mode to control the search strategy.
 • hybrid (default): Best for most queries — combines semantic understanding with keyword matching.
 • semantic: Vector similarity only — best when you know the exact concept but not the exact words.
-• keyword: BM25 only — best for hiragana queries, exact term matching, or when semantic search returns noise. Particularly effective for Japanese hiragana-only queries where embedding models struggle.""",
+• keyword: BM25 only — best for hiragana queries, exact term matching, or when semantic search returns noise. Particularly effective for Japanese hiragana-only queries where embedding models struggle.
+
+Returns: {status, results: [{memory_id, summary, context_summary, type, importance, scope, score, tags, created_at, updated_at}], count, related_tags, context_id, context_name, context_display_name, context_is_private, context_is_locked, confidence (see above), explore_hints (only when include_explore_hints=true)}. results carry Layers 1-2 only — call reference(memory_id) for full Layer-3 content.""",
             "inputSchema": {
                 "type": "object",
                 "required": ["query", "context_id"],
@@ -358,7 +366,9 @@ Typical workflow:
 
 Returns all 3 layers: summary, context_summary, and complete details/content.
 
-IMPORTANT: Always specify context_id to ensure you're retrieving from the intended context. Use list_contexts() to discover available context IDs.""",
+IMPORTANT: Always specify context_id to ensure you're retrieving from the intended context. Use list_contexts() to discover available context IDs.
+
+Returns: {status, memory: {memory_id, summary, context_summary, content, details, type, importance, tags, context, created_at, client}} — all three layers including the full content/details.""",
             "inputSchema": {
                 "type": "object",
                 "required": ["memory_id", "context_id"],
@@ -388,6 +398,8 @@ IMPORTANT: Always specify context_id to ensure you're retrieving from the intend
                 "and calling remember(type='time', details={'trigger': {'year': "
                 "2026, 'month': 7}}). Partial dates are allowed: omit month/day for "
                 'fuzzy timing ("2026年7月ごろ").'
+                "\n\nReturns: {status, results: [{memory_id, summary, type, details}], context_id, "
+                "context_name, context_display_name, context_is_private, context_is_locked}."
             ),
             "inputSchema": {
                 "type": "object",
@@ -430,6 +442,9 @@ IMPORTANT: Always specify context_id to ensure you're retrieving from the intend
                 "content with reference(memory_id). The set is bounded: if more "
                 "pinned memories exist than the cap, 'truncated' is true and "
                 "'total_available' reports the real count (never silently dropped)."
+                "\n\nReturns: {status, memories: [{memory_id, summary, context_summary, type, "
+                "importance, delivery_mode}], total_available, truncated, cap, context_id, "
+                "context_name, context_display_name, context_is_private, context_is_locked}."
             ),
             "inputSchema": {
                 "type": "object",
@@ -470,7 +485,11 @@ Common issues:
 
 Note: Soft delete with 30-day retention. Associated graph edges are automatically cleaned up. Supports deletion by specific memory_id or by search query (deletes top-k matches).
 
-IMPORTANT: Always specify context_id to ensure you're deleting from the intended context. Use list_contexts() to discover available context IDs.""",
+IMPORTANT: Always specify context_id to ensure you're deleting from the intended context. Use list_contexts() to discover available context IDs.
+
+Modes (supply exactly ONE): delete a specific memory_id, OR delete the top-k semantic matches of a query (memory_id wins if both are given). DESTRUCTIVE — a target you lack permission to delete is silently skipped (deleted_count can be 0). Safe pattern: recall() → review the hits → forget(memory_id).
+
+Returns: {status, deleted_count, memory_ids, context_id, context_name}.""",
             "inputSchema": {
                 "type": "object",
                 "required": ["context_id"],
@@ -526,7 +545,9 @@ Optional relation_types filter for specific edge types:
 
 Returns memories ranked by activation strength (graph-based relevance).
 
-IMPORTANT: Always specify context_id to ensure you're exploring the intended context. Use list_contexts() to discover available context IDs.""",
+IMPORTANT: Always specify context_id to ensure you're exploring the intended context. Use list_contexts() to discover available context IDs.
+
+Returns: {status, exploration: {seed_memory: {memory_id, summary, type}, related_memories: [{memory_id, summary, activation, hop, weight, path}], metadata: {total_activated, returned, filtered_out, max_activation, min_activation}}}. related_memories is the top-10 by activation; if returned=0 but total_activated>0, lower min_weight.""",
             "inputSchema": {
                 "type": "object",
                 "required": ["memory_id", "context_id"],
@@ -1885,7 +1906,9 @@ from recall(), so rating a result never pollutes the knowledge search space.
 
 Use this after recall() to teach the substrate which results were on-target.
 Each call appends a new event (repeated/contradicting signals are kept as a time
-series). Anyone who can read the context may record feedback.""",
+series). Anyone who can read the context may record feedback.
+
+Returns: {status, feedback_id, memory_id, helpful}.""",
             "inputSchema": {
                 "type": "object",
                 "properties": {
