@@ -313,7 +313,16 @@ Search modes: Use search_mode to control the search strategy.
 Returns: {status, results: [{memory_id, summary, context_summary, type, importance, scope, score, tags, created_at, updated_at}], count, related_tags, context_id, context_name, context_display_name, context_is_private, context_is_locked, confidence (see above), explore_hints (only when include_explore_hints=true)}. results carry Layers 1-2 only — call reference(memory_id) for full Layer-3 content.""",
             "inputSchema": {
                 "type": "object",
-                "required": ["query", "context_id"],
+                # ``query`` is the only unconditional requirement. The handler
+                # accepts EITHER ``context_id`` OR ``context_ids`` (cross-context
+                # recall via ``context_ids`` alone is valid — see handle_recall),
+                # so ``context_id`` is intentionally NOT in ``required``: listing it
+                # would make a schema-validating client reject a legitimate
+                # ``context_ids``-only call. This "exactly one of" pair is a
+                # description-only contract enforced at the handler, matching the
+                # convention used for forget(memory_id/query) and
+                # describe_binding(key_id/context_id).
+                "required": ["query"],
                 "properties": {
                     "query": {
                         "type": "string",
@@ -334,7 +343,7 @@ Returns: {status, results: [{memory_id, summary, context_summary, type, importan
                     "context_id": {
                         "type": "string",
                         "format": "uuid",
-                        "description": "Target context UUID (e.g. '550e8400-e29b-41d4-a716-446655440000'). MUST be a valid UUID from list_contexts(). Do NOT guess or fabricate IDs. For cross-context search, use context_ids instead.",
+                        "description": "Target context UUID (e.g. '550e8400-e29b-41d4-a716-446655440000'). MUST be a valid UUID from list_contexts(). Do NOT guess or fabricate IDs. Provide EITHER context_id OR context_ids (at least one is required). For cross-context search, use context_ids instead.",
                     },
                     "context_ids": {
                         "type": "array",
