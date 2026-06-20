@@ -290,7 +290,7 @@ Returns summaries and context (Layers 1-2) optimized for quick understanding.
 
 Agent-facing signals in the response (Issue #1047):
 • Each result carries `updated_at` — the last time that fact was changed (null if never edited since creation). Use it to self-assess staleness without extra calls; an old `updated_at` means the fact may be out of date.
-• The response carries a top-level `confidence` object: `level` is one of high/moderate/low/none and `relative_margin` is how many background std-devs the top hit stands out from the candidate pool (a per-context-relative, scale-invariant measure — NOT a global score cutoff). `level="none"` means nothing relevant was found: stop probing with more queries, and either answer "not in memory" or go to an external source rather than trusting weak hits.
+• The response carries a top-level `confidence` object: `level` (high/moderate/low/none) buckets `relative_margin` = how many background std-devs the top hit stands out from the candidate pool (per-context-relative, scale-invariant — NOT a global score cutoff). NOTE: `level` measures *separation from the pool*, not absolute relevance — an off-topic query can still read `high` if one weak hit stands out. To judge "is this in memory at all?", look at `top_score` (absolute match strength for this recall) together with `level`: a high `level` but a low `top_score` means "something stood out, but nothing is strongly relevant" — treat that like a near-miss and consider going external rather than trusting it.
 
 IMPORTANT: Always specify context_id to ensure you're searching the intended context. Use list_contexts() to discover available context IDs.
 

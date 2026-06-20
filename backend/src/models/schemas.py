@@ -298,8 +298,17 @@ class RecallConfidence(BaseModel):
     -small vs qwen3-embedding), so a fixed cutoff mis-calibrates. ``relative_margin``
     is how many background standard deviations the top hit sits above the
     candidate-pool background distribution (a scale-invariant separation measure);
-    ``level`` buckets it for quick agent decisions. ``level="none"`` lets an agent
-    stop probing early / decide to go external instead of hallucinating.
+    ``level`` buckets it for quick agent decisions.
+
+    KNOWN LIMITATION (#1047 follow-up): ``level`` reflects how strongly the top hit
+    *separates from the candidate pool* — NOT whether that hit is actually
+    relevant. An irrelevant query can still score ``high`` because the
+    least-irrelevant hit separates from a flat low-scoring tail (benchmarked).
+    For an "is it in memory at all?" decision, weigh ``top_score`` (absolute match
+    strength within this recall) alongside ``level``: a high ``level`` with a low
+    ``top_score`` means "a top stood out, but nothing is strongly relevant".
+    Folding ``top_score`` magnitude / a per-context baseline into ``level`` is the
+    tracked follow-up.
     """
 
     level: Literal["high", "moderate", "low", "none"]
