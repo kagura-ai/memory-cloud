@@ -288,6 +288,10 @@ Common workflow: Bug fix → recall("error message") → find similar past fixes
 
 Returns summaries and context (Layers 1-2) optimized for quick understanding.
 
+Agent-facing signals in the response (Issue #1047):
+• Each result carries `updated_at` — the last time that fact was changed (null if never edited since creation). Use it to self-assess staleness without extra calls; an old `updated_at` means the fact may be out of date.
+• The response carries a top-level `confidence` object: `level` (high/moderate/low/none) buckets `relative_margin` = how many background std-devs the top hit stands out from the candidate pool (per-context-relative, scale-invariant — NOT a global score cutoff). NOTE: `level` measures *separation from the pool*, not absolute relevance — an off-topic query can still read `high` if one weak hit stands out. To judge "is this in memory at all?", look at `top_score` (absolute match strength for this recall) together with `level`: a high `level` but a low `top_score` means "something stood out, but nothing is strongly relevant" — treat that like a near-miss and consider going external rather than trusting it.
+
 IMPORTANT: Always specify context_id to ensure you're searching the intended context. Use list_contexts() to discover available context IDs.
 
 Search modes: Use search_mode to control the search strategy.
@@ -1119,6 +1123,14 @@ Weights must sum to 1.0.""",
                     "reranker_model": {
                         "type": "string",
                         "description": "Provider-specific model name (e.g., 'rerank-2', 'rerank-multilingual-v3.0').",
+                    },
+                    "reinforce_enabled": {
+                        "type": "boolean",
+                        "description": "Issue #1048: enable the bounded adoption+feedback recall re-rank — memories that are deliberately referenced (adopted) and marked helpful gain a small, bounded standing boost; never-adopted recent memories keep a cold-start prior so they still surface. Off by default; does not override semantic relevance.",
+                    },
+                    "reinforce_max_boost": {
+                        "type": "number",
+                        "description": "Issue #1048: bound on the reinforce adjustment (0.0-0.5; default 0.15). Each result's score is multiplied by a factor in [1-boost, 1+boost], so semantic relevance always dominates.",
                     },
                 },
             },

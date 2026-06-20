@@ -45,6 +45,7 @@ from models.schemas import (
     MemoryStatsResponse,
     PatchMemoryRequest,
     PinnedMemoryItem,
+    RecallConfidence,
     RecallRequest,
     RecallResponse,
     ReferenceResponse,
@@ -977,8 +978,11 @@ class MemoryService:
         # reflect the last real change, not "now".
         snapshot_updated_at = memory.updated_at or memory.created_at
 
-        # Update access stats
-        await self.memory_repo.update_access_stats(memory_id, client="api")
+        # Update access stats. reference() is the canonical *adoption* signal
+        # (#1046): the agent deliberately fetched Layer-3 detail, so this bumps
+        # reference_count in addition to access_count. Surfacing call sites
+        # (recall return, explore spread) below leave count_as_adoption False.
+        await self.memory_repo.update_access_stats(memory_id, client="api", count_as_adoption=True)
         await self.db.commit()
 
         logger.info("memory_referenced", memory_id=str(memory_id), user_id=user_id)
@@ -1240,6 +1244,173 @@ class MemoryService:
             )
             # Best-effort: do not raise — memory creation already succeeded
 
+    @staticmethod
+    def _compute_recall_confidence(scores: list[float]) -> RecallConfidence:
+        """Issue #1047: relevance confidence from a query's candidate-pool scores.
+
+        Relative and scale-invariant: ``relative_margin`` is how many background
+        standard deviations the top hit sits above the candidate-pool background
+        (``scores[1:]``). This sidesteps the cross-context/embedding-model
+        miscalibration of raw hybrid scores — a fixed absolute cutoff is wrong,
+        but "how far the top hit stands out from its own background" is stable.
+        Does NOT touch ranking; purely a derived annotation.
+
+        ``scores`` may be in any order — sorted descending internally so the
+        result is independent of caller ordering. Buckets: z>=2 high, z>=1
+        moderate, z>=0.3 low, else none (top indistinguishable from background →
+        likely nothing truly relevant).
+        """
+        import statistics
+
+        scores = sorted(scores, reverse=True)
+        n = len(scores)
+        if n == 0:
+            return RecallConfidence(
+                level="none",
+                top_score=None,
+                relative_margin=None,
+                result_count=0,
+                rationale="No candidates retrieved — likely nothing relevant in this context.",
+            )
+        top = scores[0]
+        if n == 1:
+            # No background distribution to measure separation against.
+            return RecallConfidence(
+                level="moderate",
+                top_score=top,
+                relative_margin=None,
+                result_count=1,
+                rationale="Single candidate — no background distribution to assess separation.",
+            )
+        background = scores[1:]
+        mean_bg = statistics.fmean(background)
+        std_bg = statistics.pstdev(background) if len(background) > 1 else 0.0
+        if std_bg > 1e-9:
+            z = (top - mean_bg) / std_bg
+        else:
+            # Flat background → fall back to a relative gap vs the background mean.
+            denom = abs(mean_bg) if abs(mean_bg) > 1e-9 else 1.0
+            z = (top - mean_bg) / denom
+        if z >= 2.0:
+            level, note = "high", "clear separation from background"
+        elif z >= 1.0:
+            level, note = "moderate", "some separation from background"
+        elif z >= 0.3:
+            level, note = "low", "weak separation — relevance uncertain"
+        else:
+            level, note = (
+                "none",
+                "top hit indistinguishable from background — likely nothing relevant",
+            )
+        return RecallConfidence(
+            level=level,
+            top_score=top,
+            relative_margin=round(z, 3),
+            result_count=n,
+            rationale=f"Top hit sits {z:.2f} background-std-devs above the candidate-pool background; {note}.",
+        )
+
+    @staticmethod
+    def _reinforce_factor(
+        *,
+        reference_count: int,
+        net_helpful: int,
+        importance: float,
+        age_days: int,
+        max_boost: float,
+        adopt_norm: float = 5.0,
+        feedback_norm: float = 3.0,
+        recency_tau_days: float = 14.0,
+        cold_start_weight: float = 0.25,
+        adopt_weight: float = 0.5,
+        feedback_weight: float = 0.5,
+    ) -> float:
+        """Issue #1048: bounded, importance-weighted recall-standing multiplier.
+
+        Returns a factor in ``[1 - max_boost, 1 + max_boost]`` to multiply a
+        result's hybrid_score by. Combines, all importance-weighted:
+        - adoption (reference_count, #1046) — log-scaled, capped at 1 so unbounded
+          popularity cannot exceed the bound (popularity-bias guard);
+        - retrieval feedback (net helpful, #888) — tanh-squashed to [-1, 1];
+        plus a cold-start RECENCY prior (positive, decays with age) so zero-adoption
+        NEW memories still surface — the boost is deliberately NOT purely
+        usage-monotonic. Uses ONLY adoption + feedback + importance + recency, never
+        graph/Hebbian signals (Issue #120 recall/explore boundary). The bound keeps
+        semantic relevance dominant: this only reorders the already
+        relevance-filtered candidate pool, it never pulls in new hits.
+        """
+        import math
+
+        adopt = min(1.0, math.log1p(max(0, reference_count)) / math.log1p(adopt_norm))
+        fb = math.tanh(net_helpful / feedback_norm)
+        usage = importance * (adopt_weight * adopt + feedback_weight * fb)
+        cold = cold_start_weight * math.exp(-max(0, age_days) / recency_tau_days)
+        signal = max(-1.0, min(1.0, usage + cold))
+        return 1.0 + max_boost * signal
+
+    async def _maybe_reinforce_rerank(
+        self,
+        search_results: list[dict],
+        memories: dict,
+        context_id: UUID | None,
+    ) -> None:
+        """Issue #1048: bounded, config-gated recall re-rank by adoption + feedback.
+
+        No-op unless the context's ``ContextSearchConfig.reinforce_enabled`` is set
+        (default OFF → recall ranking is byte-identical to pre-#1048). Single-context
+        only — a per-context config/feedback set can't govern a cross-context pool.
+        Re-sorts ``search_results`` IN PLACE by ``hybrid_score * _reinforce_factor``.
+        """
+        if context_id is None or len(search_results) < 2:
+            return
+        # Reinforce is an optional enhancement — it must NEVER break recall. Any
+        # failure (config fetch, feedback query, bad data) is swallowed and the
+        # original hybrid ranking is preserved (fail-safe, mirrors the spend-cap
+        # fail-open philosophy).
+        try:
+            from repositories.config_repository import ContextSearchConfigRepository
+
+            # READ-ONLY lookup — recall must not create/commit a config row mid-flow
+            # (create_or_get would INSERT+COMMIT for a context with no config yet,
+            # adding a side effect to the read path). No config row → reinforce off.
+            cfg = await ContextSearchConfigRepository(self.db).get_by_context(context_id)
+            if cfg is None or not getattr(cfg, "reinforce_enabled", False):
+                return
+            max_boost = float(cfg.reinforce_max_boost)
+
+            from services.feedback_service import FeedbackService
+
+            seen: set = set()
+            cand_ids = []
+            for r in search_results:
+                mem = memories.get(r["id"])
+                if mem is not None and mem.id not in seen:
+                    seen.add(mem.id)
+                    cand_ids.append(mem.id)
+            feedback = await FeedbackService(self.db).aggregate_for_memories(context_id, cand_ids)
+            now = utcnow()
+
+            def _adjusted(r: dict) -> float:
+                base = r.get("hybrid_score")
+                if base is None:
+                    base = r.get("score") or 0.0
+                mem = memories.get(r["id"])
+                if mem is None:
+                    return base
+                agg = feedback.get(str(mem.id))
+                factor = self._reinforce_factor(
+                    reference_count=mem.reference_count or 0,
+                    net_helpful=agg.net if agg else 0,
+                    importance=mem.importance,
+                    age_days=max(0, (now - mem.created_at).days),
+                    max_boost=max_boost,
+                )
+                return base * factor
+
+            search_results.sort(key=_adjusted, reverse=True)
+        except Exception as exc:  # noqa: BLE001 — reinforce must never break recall
+            logger.warning("reinforce_rerank_skipped", error=str(exc))
+
     async def recall(
         self,
         request: RecallRequest,
@@ -1382,6 +1553,7 @@ class MemoryService:
                 return RecallResponse(
                     results=[],
                     explore_hints=[] if request.include_explore_hints else None,
+                    confidence=self._compute_recall_confidence([]),  # #1047: "none"
                 )
 
         # #708 Option A H1 gate (deferred): we now know hybrid_search will
@@ -1466,6 +1638,7 @@ class MemoryService:
             return RecallResponse(
                 results=[],
                 explore_hints=[] if request.include_explore_hints else None,
+                confidence=self._compute_recall_confidence([]),  # #1047: "none"
             )
 
         # Fetch memories from PostgreSQL (exclude soft-deleted)
@@ -1537,6 +1710,14 @@ class MemoryService:
         # recall uses pure hybrid search scores (no UnifiedScorer).
         # Hebbian learning still runs to build the graph for explore().
 
+        # Issue #1048: bounded reinforce re-rank (adoption + retrieval feedback),
+        # config-gated per-context (default OFF), single-context only. Reorders the
+        # candidate pool BEFORE the top-k slice below; uses only reference_count +
+        # feedback + importance + recency — never graph signals (respects #120).
+        await self._maybe_reinforce_rerank(
+            search_results, memories, current_context_id if not context_ids else None
+        )
+
         responses = []
         for search_result in search_results[: request.k]:
             memory_id = search_result["id"]
@@ -1544,6 +1725,13 @@ class MemoryService:
 
             if not memory:
                 continue
+
+            # Issue #1047: snapshot updated_at BEFORE update_access_stats. The
+            # Memory.updated_at column declares onupdate=func.now(), so the UPDATE
+            # issued by update_access_stats expires the in-memory attribute — a
+            # later read would then trigger a sync lazy-load → MissingGreenlet in
+            # the async context (the same trap reference() documents and avoids).
+            snapshot_updated_at = memory.updated_at
 
             # Update access stats
             await self.memory_repo.update_access_stats(
@@ -1563,6 +1751,7 @@ class MemoryService:
                     importance=memory.importance,
                     scope=memory.scope,
                     created_at=memory.created_at,
+                    updated_at=snapshot_updated_at,  # #1047: staleness cue (pre-bump snapshot)
                     client=memory.client,
                     tags=memory.tags or [],
                     context=memory.context,
@@ -1781,8 +1970,19 @@ class MemoryService:
 
         logger.info("recall_completed", user_id=user_id, results=len(responses))
 
+        # Issue #1047: relevance confidence from the full candidate pool's score
+        # distribution (search_results, which holds up to candidates_k >> k when
+        # neural is on). Relative/scale-invariant — see _compute_recall_confidence.
+        candidate_scores = [
+            r.get("hybrid_score", r["score"])
+            for r in search_results
+            if r.get("hybrid_score", r.get("score")) is not None
+        ]
         return RecallResponse(
-            results=responses, related_tags=related_tags, explore_hints=explore_hints
+            results=responses,
+            related_tags=related_tags,
+            explore_hints=explore_hints,
+            confidence=self._compute_recall_confidence(candidate_scores),
         )
 
     async def load_pinned(

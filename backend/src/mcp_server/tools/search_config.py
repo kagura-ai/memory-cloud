@@ -73,6 +73,11 @@ async def handle_update_search_config(
                     "reranker_provider", config.reranker_provider or "voyage"
                 ),
                 "reranker_model": args.get("reranker_model", config.reranker_model or "rerank-2"),
+                # Issue #1048: reinforce re-rank knobs (round-trip current values).
+                "reinforce_enabled": args.get("reinforce_enabled", config.reinforce_enabled),
+                "reinforce_max_boost": args.get(
+                    "reinforce_max_boost", float(config.reinforce_max_boost)
+                ),
             }
 
             # Validate via Pydantic (same as REST API)
@@ -109,6 +114,8 @@ async def handle_update_search_config(
                                 "use_rerank": config.use_rerank,
                                 "reranker_provider": config.reranker_provider,
                                 "reranker_model": config.reranker_model,
+                                "reinforce_enabled": config.reinforce_enabled,
+                                "reinforce_max_boost": float(config.reinforce_max_boost),
                             },
                         }
                     ),

@@ -226,6 +226,56 @@ class TestReference:
         assert response.incoming_links == []
         assert response.incoming_has_more is False
 
+    @pytest.mark.asyncio
+    async def test_reference_records_adoption_signal(self, service):
+        """Issue #1046: reference() bumps the adoption signal (count_as_adoption=True),
+        distinct from surfacing call sites (recall/explore) which leave it False."""
+        memory_id = uuid4()
+        mock_memory = MagicMock(
+            id=memory_id,
+            user_id="test_user",
+            summary="Test",
+            content="Test content",
+            context_summary="Context",
+            details={},
+            type="code",
+            importance=0.8,
+            tags=[],
+            context=None,
+            scope="working",
+            client="claude",
+            created_at=datetime.utcnow(),
+            updated_at=datetime.utcnow(),
+            embedding_status="success",
+            workspace_id=uuid4(),
+            context_id=uuid4(),
+            deleted_at=None,
+            source_uri=None,
+            source_type=None,
+        )
+        service.memory_repo.get = AsyncMock(return_value=mock_memory)
+        service.memory_repo.update_access_stats = AsyncMock()
+        service.db.commit = AsyncMock()
+
+        with (
+            patch("services.permission_service.PermissionService") as mock_perm_cls,
+            patch("repositories.neural_edge.NeuralEdgeRepository") as mock_edge_cls,
+        ):
+            mock_perm = MagicMock()
+            mock_perm.can_access_memory = AsyncMock(return_value=True)
+            mock_perm_cls.return_value = mock_perm
+
+            mock_edge_repo = MagicMock()
+            mock_edge_repo.get_outgoing_edges = AsyncMock(return_value=[])
+            mock_edge_repo.get_incoming_edges = AsyncMock(return_value=[])
+            mock_edge_cls.return_value = mock_edge_repo
+
+            await service.reference(memory_id=memory_id, user_id="test_user")
+
+        service.memory_repo.update_access_stats.assert_awaited_once_with(
+            memory_id, client="api", count_as_adoption=True
+        )
+
 
 class TestReferenceWithLinks:
     """Issue #440: reference() exposes outgoing/incoming declared_link refs."""
@@ -987,6 +1037,7 @@ class TestExploreHints:
         m.importance = 0.7
         m.scope = "persistent"
         m.created_at = datetime.utcnow()
+        m.updated_at = datetime.utcnow()  # #1047: staleness cue
         m.last_used_at = datetime.utcnow()
         m.access_count = 1
         m.confidence = 0.8
@@ -1024,6 +1075,20 @@ class TestExploreHints:
         )
 
         assert response.explore_hints is None
+
+        # Issue #1047: recall always populates a confidence signal, and results
+        # carry the updated_at staleness cue.
+        assert response.confidence is not None
+        assert response.confidence.level in {"high", "moderate", "low", "none"}
+        assert response.confidence.result_count == 1
+        assert response.results[0].updated_at is not None
+
+        # Issue #1046: recall is *surfacing*, not adoption — it bumps access_count
+        # but MUST NOT record the adoption signal. No call may set
+        # count_as_adoption=True (the default False keeps reference_count untouched).
+        assert service.memory_repo.update_access_stats.await_count >= 1
+        for call in service.memory_repo.update_access_stats.await_args_list:
+            assert call.kwargs.get("count_as_adoption") is not True
 
     @pytest.mark.asyncio
     async def test_recall_hints_with_opt_in(self, service, context_id, workspace_id):
@@ -1120,6 +1185,164 @@ class TestExploreHints:
         # Recall succeeded despite hint failure
         assert response.results is not None
         assert len(response.results) == 1
+
+
+class TestRecallConfidence:
+    """Issue #1047: recall confidence is per-context-relative + scale-invariant
+    (NOT a global absolute-score cutoff)."""
+
+    def test_empty_is_none(self):
+        c = MemoryService._compute_recall_confidence([])
+        assert c.level == "none"
+        assert c.result_count == 0
+        assert c.top_score is None
+        assert c.relative_margin is None
+
+    def test_single_result_is_moderate_no_margin(self):
+        c = MemoryService._compute_recall_confidence([0.8])
+        assert c.level == "moderate"
+        assert c.result_count == 1
+        assert c.relative_margin is None
+
+    def test_clear_separation_is_high(self):
+        c = MemoryService._compute_recall_confidence([0.95, 0.30, 0.31, 0.29, 0.30])
+        assert c.level == "high"
+        assert c.relative_margin is not None and c.relative_margin >= 2.0
+
+    def test_flat_background_top_indistinguishable_is_none(self):
+        # All scores ~equal → top doesn't stand out from background → "none".
+        c = MemoryService._compute_recall_confidence([0.50, 0.50, 0.50, 0.50])
+        assert c.level == "none"
+
+    def test_scale_invariance_not_absolute_cutoff(self):
+        # Same separation SHAPE at very different absolute magnitudes must yield
+        # the SAME level — a global score cutoff would (wrongly) split these.
+        low_scale = MemoryService._compute_recall_confidence([0.20, 0.05, 0.06, 0.04, 0.05])
+        high_scale = MemoryService._compute_recall_confidence([0.95, 0.80, 0.81, 0.79, 0.80])
+        assert low_scale.level == high_scale.level == "high"
+
+
+class TestReinforceFactor:
+    """Issue #1048: bounded, importance-weighted reinforce factor — the 2-population
+    eval guard (adopted improves; rare-but-correct does not regress; popularity is
+    bounded; cold-start surfaces new zero-adoption memories)."""
+
+    MAX = 0.15
+
+    def _f(self, **kw):
+        kw.setdefault("max_boost", self.MAX)
+        return MemoryService._reinforce_factor(**kw)
+
+    def test_bounded_within_max_boost(self):
+        hi = self._f(reference_count=10_000, net_helpful=1000, importance=1.0, age_days=0)
+        lo = self._f(reference_count=0, net_helpful=-1000, importance=1.0, age_days=0)
+        assert (1 - self.MAX) - 1e-9 <= lo <= hi <= (1 + self.MAX) + 1e-9
+
+    def test_known_value_pins_formula(self):
+        # Zero adoption, no feedback, importance 0.5, fresh → cold prior = 0.25 →
+        # factor = 1 + 0.15 * (0 + 0.25). Pins the actual formula, not just the clamp.
+        f = self._f(reference_count=0, net_helpful=0, importance=0.5, age_days=0)
+        assert abs(f - 1.0375) < 1e-9
+
+    def test_adopted_and_helpful_boosts(self):
+        assert self._f(reference_count=5, net_helpful=5, importance=0.8, age_days=100) > 1.0
+
+    def test_not_helpful_penalizes(self):
+        assert self._f(reference_count=0, net_helpful=-5, importance=0.8, age_days=100) < 1.0
+
+    def test_rare_but_correct_not_regressed(self):
+        # Zero adoption, no feedback, high importance, OLD → neutral (>=1): never
+        # demoted without explicit not-helpful feedback (the rare-but-correct guard).
+        assert self._f(reference_count=0, net_helpful=0, importance=0.9, age_days=365) >= 1.0
+
+    def test_cold_start_surfaces_new_zero_adoption(self):
+        fresh = self._f(reference_count=0, net_helpful=0, importance=0.5, age_days=0)
+        old = self._f(reference_count=0, net_helpful=0, importance=0.5, age_days=365)
+        assert fresh > old >= 1.0
+
+    def test_not_purely_usage_monotonic(self):
+        # A fresh zero-adoption memory outranks an old, barely-important one —
+        # the cold-start term makes the boost NOT purely usage-monotonic.
+        fresh_unadopted = self._f(reference_count=0, net_helpful=0, importance=0.5, age_days=0)
+        old_trivial = self._f(reference_count=0, net_helpful=0, importance=0.01, age_days=365)
+        assert fresh_unadopted > old_trivial
+
+    def test_popularity_bias_capped_by_importance(self):
+        # A super-popular but TRIVIAL memory must not out-boost a rare, important,
+        # recent one (importance-weighting + adoption cap).
+        popular_trivial = self._f(
+            reference_count=10_000, net_helpful=100, importance=0.05, age_days=200
+        )
+        rare_important_recent = self._f(
+            reference_count=0, net_helpful=0, importance=0.9, age_days=0
+        )
+        assert rare_important_recent >= popular_trivial
+
+
+class TestReinforceRerank:
+    """Issue #1048: _maybe_reinforce_rerank is config-gated (default OFF) and only
+    reorders the relevance-filtered pool within the bound."""
+
+    @pytest.mark.asyncio
+    async def test_noop_when_disabled(self):
+        svc = MemoryService(MagicMock())
+        cfg = MagicMock(reinforce_enabled=False)
+        sr = [{"id": "a", "hybrid_score": 0.9}, {"id": "b", "hybrid_score": 0.8}]
+        with patch("repositories.config_repository.ContextSearchConfigRepository") as Repo:
+            Repo.return_value.get_by_context = AsyncMock(return_value=cfg)
+            await svc._maybe_reinforce_rerank(sr, {}, uuid4())
+        assert [r["id"] for r in sr] == ["a", "b"]  # unchanged
+
+    @pytest.mark.asyncio
+    async def test_reorders_within_bound_when_enabled(self):
+        from decimal import Decimal
+
+        from services.feedback_service import FeedbackAggregate
+
+        svc = MemoryService(MagicMock())
+        cfg = MagicMock(reinforce_enabled=True, reinforce_max_boost=Decimal("0.15"))
+        old = datetime(2020, 1, 1)
+        mem_a = MagicMock(id=uuid4(), reference_count=0, importance=0.5, created_at=old)
+        mem_b = MagicMock(id=uuid4(), reference_count=10, importance=0.9, created_at=old)
+        memories = {"a": mem_a, "b": mem_b}
+        # a has the higher raw hybrid, but b is heavily adopted + helpful.
+        sr = [{"id": "a", "hybrid_score": 0.85}, {"id": "b", "hybrid_score": 0.80}]
+        with (
+            patch("repositories.config_repository.ContextSearchConfigRepository") as Repo,
+            patch("services.feedback_service.FeedbackService") as FB,
+        ):
+            Repo.return_value.get_by_context = AsyncMock(return_value=cfg)
+            FB.return_value.aggregate_for_memories = AsyncMock(
+                return_value={
+                    str(mem_b.id): FeedbackAggregate(
+                        memory_id=str(mem_b.id), helpful_count=5, not_helpful_count=0
+                    )
+                }
+            )
+            await svc._maybe_reinforce_rerank(sr, memories, uuid4())
+        # The adopted+helpful b overtakes a (within the bound).
+        assert [r["id"] for r in sr][0] == "b"
+
+    @pytest.mark.asyncio
+    async def test_bound_keeps_clearly_more_relevant_on_top(self):
+        from decimal import Decimal
+
+        svc = MemoryService(MagicMock())
+        cfg = MagicMock(reinforce_enabled=True, reinforce_max_boost=Decimal("0.15"))
+        old = datetime(2020, 1, 1)
+        mem_a = MagicMock(id=uuid4(), reference_count=0, importance=0.5, created_at=old)
+        mem_b = MagicMock(id=uuid4(), reference_count=50, importance=1.0, created_at=old)
+        memories = {"a": mem_a, "b": mem_b}
+        # a is MUCH more relevant (0.95 vs 0.50); even max boost on b cannot overtake.
+        sr = [{"id": "a", "hybrid_score": 0.95}, {"id": "b", "hybrid_score": 0.50}]
+        with (
+            patch("repositories.config_repository.ContextSearchConfigRepository") as Repo,
+            patch("services.feedback_service.FeedbackService") as FB,
+        ):
+            Repo.return_value.get_by_context = AsyncMock(return_value=cfg)
+            FB.return_value.aggregate_for_memories = AsyncMock(return_value={})
+            await svc._maybe_reinforce_rerank(sr, memories, uuid4())
+        assert [r["id"] for r in sr][0] == "a"  # relevance still dominates
 
 
 class TestExploreAccessStats:

@@ -56,6 +56,44 @@ class TestMemoryRepository:
         assert result is None
 
     @pytest.mark.asyncio
+    async def test_update_access_stats_surfacing_only_by_default(
+        self, repository, sample_memory, db_session
+    ):
+        """Issue #1046: a surfacing access (recall/explore) bumps access_count but
+        leaves the adoption signal reference_count at 0."""
+        await repository.update_access_stats(sample_memory.id, client="api")
+        await db_session.refresh(sample_memory)
+
+        assert sample_memory.access_count == 1
+        assert sample_memory.reference_count == 0
+
+    @pytest.mark.asyncio
+    async def test_update_access_stats_adoption_bumps_reference_count(
+        self, repository, sample_memory, db_session
+    ):
+        """Issue #1046: an adoption access (reference()) bumps BOTH access_count and
+        reference_count, preserving the access_count >= reference_count invariant."""
+        await repository.update_access_stats(sample_memory.id, client="api", count_as_adoption=True)
+        await db_session.refresh(sample_memory)
+
+        assert sample_memory.access_count == 1
+        assert sample_memory.reference_count == 1
+
+    @pytest.mark.asyncio
+    async def test_update_access_stats_mixed_access_preserves_invariant(
+        self, repository, sample_memory, db_session
+    ):
+        """Issue #1046: adoption then surfacing → access_count=2, reference_count=1.
+        Pins the invariant access_count >= reference_count across mixed access."""
+        await repository.update_access_stats(sample_memory.id, client="api", count_as_adoption=True)
+        await repository.update_access_stats(sample_memory.id, client="api")
+        await db_session.refresh(sample_memory)
+
+        assert sample_memory.access_count == 2
+        assert sample_memory.reference_count == 1
+        assert sample_memory.access_count >= sample_memory.reference_count
+
+    @pytest.mark.asyncio
     async def test_list_all(self, repository, sample_memory):
         """Test listing all memories."""
         results = await repository.list()

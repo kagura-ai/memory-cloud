@@ -468,6 +468,106 @@ class TestPlatformPaidCapGate:
         assert result == (None, None)
 
 
+class TestManagedEmbeddingsPlanGate:
+    """#1030: platform-managed embeddings are a paid-tier (basic/pro) capability.
+
+    With ``embedding_platform_fallback_requires_managed_plan`` enabled, a no-BYOK
+    workspace on a plan WITHOUT ``managed_embeddings`` (Free / S) is denied the
+    platform OPENAI_API_KEY fallback (BYOK or Ollama required). Paid tiers carry
+    ``managed_embeddings`` and keep embedding on the platform key (capped by
+    #709/#1033). Default off preserves the pre-#1030 uncapped-env behavior.
+    """
+
+    @pytest.fixture
+    def service(self):
+        return EmbeddingService(_make_mock_db())
+
+    @staticmethod
+    def _cap_ws(plan_name):
+        ws = MagicMock()
+        ws.id = uuid4()
+        ws.plan_name = plan_name
+        ws.effective_embedding_daily_cap_usd = Decimal("2.0")
+        ws.effective_embedding_monthly_cap_usd = Decimal("60.0")
+        return ws
+
+    @staticmethod
+    def _patch_cap_service(ws):
+        patcher = patch("services.embedding_spend_cap_service.EmbeddingSpendCapService")
+        inst = patcher.start().return_value
+        inst.load_workspace = AsyncMock(return_value=ws)
+        inst.check_cap_or_raise = AsyncMock()
+        return patcher, inst
+
+    @staticmethod
+    def _patch_settings(requires_managed):
+        patcher = patch("config.settings.get_settings")
+        mock_settings = MagicMock()
+        mock_settings.embedding_platform_fallback_requires_managed_plan = requires_managed
+        patcher.start().return_value = mock_settings
+        return patcher
+
+    @pytest.mark.asyncio
+    async def test_free_no_byok_denied_when_restriction_enabled(self, service):
+        """Restriction ON + free + no BYOK → ConfigurationError (BYOK/Ollama required)."""
+        service.has_byok_key = AsyncMock(return_value=False)
+        ws = self._cap_ws("free")
+        cap_patcher, inst = self._patch_cap_service(ws)
+        set_patcher = self._patch_settings(True)
+        try:
+            with pytest.raises(ConfigurationError):
+                await service._prepare_spend_cap_gate("00000000-0000-0000-0000-000000000001")
+        finally:
+            cap_patcher.stop()
+            set_patcher.stop()
+        inst.check_cap_or_raise.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_free_no_byok_uncapped_when_restriction_disabled(self, service):
+        """Restriction OFF (default) + free + no BYOK → uncapped env fallback (#708)."""
+        service.has_byok_key = AsyncMock(return_value=False)
+        ws = self._cap_ws("free")
+        cap_patcher, inst = self._patch_cap_service(ws)
+        set_patcher = self._patch_settings(False)
+        try:
+            result = await service._prepare_spend_cap_gate("00000000-0000-0000-0000-000000000001")
+        finally:
+            cap_patcher.stop()
+            set_patcher.stop()
+        assert result == (None, None)
+        inst.check_cap_or_raise.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_paid_no_byok_not_denied_when_restriction_enabled(self, service):
+        """Restriction ON + basic + no BYOK → NOT denied (managed_embeddings); cap fires."""
+        service.has_byok_key = AsyncMock(return_value=False)
+        ws = self._cap_ws("basic")
+        cap_patcher, inst = self._patch_cap_service(ws)
+        set_patcher = self._patch_settings(True)
+        try:
+            cap_svc, cap_ws = await service._prepare_spend_cap_gate(
+                "00000000-0000-0000-0000-000000000001"
+            )
+        finally:
+            cap_patcher.stop()
+            set_patcher.stop()
+        assert cap_svc is inst and cap_ws is ws
+        inst.check_cap_or_raise.assert_awaited_once_with(ws)
+
+    @pytest.mark.asyncio
+    async def test_embed_batch_propagates_configuration_error(self, service):
+        """#1030: a gate ConfigurationError (managed-plan denial) propagates from
+        embed_batch unchanged — NOT masked as OpenAIError (matches embed_with_usage)."""
+        service._prepare_spend_cap_gate = AsyncMock(side_effect=ConfigurationError("denied"))
+        with patch("services.embedding_service.get_cache", AsyncMock(return_value=None)):
+            with pytest.raises(ConfigurationError):
+                await service.embed_batch(
+                    ["hello"],
+                    user_id="u",
+                    workspace_id="00000000-0000-0000-0000-000000000001",
+                )
+
+
 class TestKeySourceAndPaidByDedup:
     """#713: ``_get_user_api_key`` returns the key tier so ``resolve_paid_by``
     derives ``paid_by`` without a second ``external_api_keys`` SELECT.

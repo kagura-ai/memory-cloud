@@ -193,15 +193,25 @@ class MemoryRepository(BaseRepository[Memory]):
 
         return await self.list(limit=limit, filters=filters)
 
-    async def update_access_stats(self, memory_id: UUID, client: str) -> None:
+    async def update_access_stats(
+        self, memory_id: UUID, client: str, *, count_as_adoption: bool = False
+    ) -> None:
         """Update access statistics.
 
         Args:
             memory_id: Memory ID
             client: Client name
+            count_as_adoption: When True (issue #1046), also bump
+                ``reference_count`` — the *adoption* signal recorded only when an
+                agent deliberately fetches Layer-3 detail via ``reference()``.
+                Surfacing call sites (recall top-k return, explore spreading
+                activation) leave this False so adoption stays distinguishable
+                from mere surfacing. ``access_count`` is bumped either way, so the
+                invariant ``access_count >= reference_count`` always holds.
 
         Updates:
             - access_count += 1
+            - reference_count += 1 (only when count_as_adoption=True)
             - last_used_at = now
             - accessed_by_clients append client
         """
@@ -210,6 +220,8 @@ class MemoryRepository(BaseRepository[Memory]):
             return
 
         memory.access_count = (memory.access_count or 0) + 1
+        if count_as_adoption:
+            memory.reference_count = (memory.reference_count or 0) + 1
         memory.last_used_at = utcnow()
 
         # Add client to accessed_by_clients
@@ -225,6 +237,8 @@ class MemoryRepository(BaseRepository[Memory]):
             "access_stats_updated",
             memory_id=str(memory_id),
             access_count=memory.access_count,
+            reference_count=memory.reference_count,
+            count_as_adoption=count_as_adoption,
         )
 
     async def promote_to_persistent(self, memory_id: UUID) -> None:

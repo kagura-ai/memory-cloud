@@ -98,6 +98,18 @@ class ContextSearchConfig(Base):
     )
     embedding_dimensions: Mapped[int] = mapped_column(Integer, nullable=False, default=512)
 
+    # Issue #1048: bounded reinforce re-ranking (adoption + retrieval feedback).
+    # Default OFF so recall ranking is byte-identical until an operator enables it
+    # after the 2-population eval. ``reinforce_max_boost`` bounds the per-result
+    # multiplicative adjustment to [1-boost, 1+boost] so semantic relevance always
+    # dominates (the re-rank only reorders the relevance-filtered candidate pool).
+    reinforce_enabled: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, server_default="false", default=False
+    )
+    reinforce_max_boost: Mapped[Decimal] = mapped_column(
+        DECIMAL(3, 2), nullable=False, server_default="0.15", default=Decimal("0.15")
+    )
+
     # Timestamps
     created_at: Mapped[datetime] = mapped_column(
         TIMESTAMP(timezone=True), server_default=func.now(), nullable=False

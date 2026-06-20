@@ -75,6 +75,33 @@ class TestReserveStorageBytes:
             assert exc_info.value.details.get("current") == 9500
 
     @pytest.mark.asyncio
+    async def test_tier_downgrade_below_existing_usage_rejects(self, workspace_id):
+        """#995: a plan downgrade lowers ``quota_bytes`` below the workspace's
+        existing usage, so the next reserve (even 1 byte) is rejected against the
+        NEW lower cap — the cap is read per-call (``effective_storage_limit_bytes``),
+        not cached from the old tier."""
+        db = MagicMock()
+        with (
+            patch.object(storage_quota_service, "get_cache", AsyncMock(return_value="8000")),
+            patch.object(
+                storage_quota_service,
+                "_atomic_check_and_incr",
+                AsyncMock(return_value=(-1, 8000)),
+            ) as atomic,
+        ):
+            with pytest.raises(QuotaExceededError):
+                await storage_quota_service.reserve_storage_bytes(
+                    workspace_id=workspace_id,
+                    size_bytes=1,
+                    quota_bytes=5_000,  # downgraded tier cap < current usage (8000)
+                    db=db,
+                )
+            atomic.assert_awaited_once()
+            # The Lua check receives the NEW (lower) cap, proving per-call sourcing.
+            args, _ = atomic.call_args
+            assert args[2] == 5_000
+
+    @pytest.mark.asyncio
     async def test_at_ceiling_uses_lua_current_not_seed(self, workspace_id):
         """When concurrent reservations land between seed and Lua, the
         error message must report the Lua-observed value, not the

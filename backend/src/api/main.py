@@ -519,6 +519,7 @@ from api.routes import (  # noqa: E402
     feedback,  # Issue #888: retrieval feedback signal
     files,  # Issue #485: platform-managed R2 file storage
     graph,
+    internal_billing,  # Issue #954: billing-service entitlement push (/internal)
     invitations,
     mcp,
     me_account,  # Issue #360: GDPR right-to-erasure self-service endpoints
@@ -659,6 +660,10 @@ app.include_router(resource_tokens.router, prefix="/api/v1")
 # Workspace connector setup route (Issue #851 - ai-worker connector provisioning)
 app.include_router(workspace_connectors.router, prefix="/api/v1")
 app.include_router(workers.router, prefix="/api/v1")
+# Issue #954: internal billing entitlement push. Mounted WITHOUT /api/v1 — it
+# lives under /internal so it stays off the public API surface (#622) and is
+# blocked at the edge; reachable only over the internal network.
+app.include_router(internal_billing.router)
 app.include_router(connectors_slack.router, prefix="/api/v1")
 
 # Public Search routes (Issue #238 - Public REST API)

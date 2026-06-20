@@ -16,11 +16,11 @@ def _insert_memory_sql(delivery_mode_clause: str) -> str:
     return f"""
         INSERT INTO memories
           (id, user_id, summary, content, type, importance, confidence,
-           scope, embedding_status, client, source, long_term, use_count,
+           scope, embedding_status, client, source, long_term,
            access_count{delivery_mode_clause[0]})
         VALUES
           (:id, 'u1', 's', 'c', 'note', 0.5, 1.0,
-           'working', 'success', 'test', 'mcp_remember', false, 0, 0{delivery_mode_clause[1]})
+           'working', 'success', 'test', 'mcp_remember', false, 0{delivery_mode_clause[1]})
     """
 
 

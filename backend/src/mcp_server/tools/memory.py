@@ -23,6 +23,7 @@ from mcp_server.tools._helpers import (
     _validate_memory_id,
     execute_with_timeout,
 )
+from utils.datetime import to_utc_iso
 from utils.exceptions import NotFoundException
 
 logger = logging.getLogger(__name__)
@@ -532,6 +533,11 @@ async def handle_recall(
                     "scope": r.scope,
                     "score": r.score,
                     "tags": r.tags,
+                    # Issue #1047: recency/staleness cues for the agent. created_at
+                    # is the always-present floor; updated_at is the last real change
+                    # (null if never edited) — an old value means the fact may be stale.
+                    "created_at": to_utc_iso(r.created_at),
+                    "updated_at": to_utc_iso(r.updated_at),
                 }
                 for r in result.results
             ]
@@ -559,6 +565,11 @@ async def handle_recall(
                     {"memory_id": str(h.memory_id), "reason": h.reason}
                     for h in result.explore_hints
                 ]
+
+            # Issue #1047: top-level relevance confidence (level=none → the agent
+            # can stop probing early / go external instead of hallucinating).
+            if result.confidence is not None:
+                response_data["confidence"] = result.confidence.model_dump()
 
             return [
                 TextContent(

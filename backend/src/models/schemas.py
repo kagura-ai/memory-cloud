@@ -193,6 +193,10 @@ class MemoryResponse(TZAwareBaseModel):
     importance: float
     scope: str
     created_at: datetime
+    # Issue #1047: per-memory recency/staleness cue for the agent consumer.
+    # ``updated_at`` is the last real change (None if never edited since create),
+    # so an agent can self-assess whether a fact may be stale without extra calls.
+    updated_at: datetime | None = None
     client: str
     tags: list[str]
     context: dict | None
@@ -285,16 +289,55 @@ class ExploreHint(BaseModel):
     reason: Literal["top_result", "high_centrality", "unexplored_neighbor"]
 
 
+class RecallConfidence(BaseModel):
+    """Issue #1047: a per-context-relative signal distinguishing "relevant
+    results found" from "likely nothing relevant", WITHOUT changing ranking.
+
+    This is deliberately NOT a global absolute-score threshold — hybrid scores
+    are uncalibrated across contexts and embedding models (e.g. text-embedding-3
+    -small vs qwen3-embedding), so a fixed cutoff mis-calibrates. ``relative_margin``
+    is how many background standard deviations the top hit sits above the
+    candidate-pool background distribution (a scale-invariant separation measure);
+    ``level`` buckets it for quick agent decisions.
+
+    KNOWN LIMITATION (#1047 follow-up): ``level`` reflects how strongly the top hit
+    *separates from the candidate pool* — NOT whether that hit is actually
+    relevant. An irrelevant query can still score ``high`` because the
+    least-irrelevant hit separates from a flat low-scoring tail (benchmarked).
+    For an "is it in memory at all?" decision, weigh ``top_score`` (absolute match
+    strength within this recall) alongside ``level``: a high ``level`` with a low
+    ``top_score`` means "a top stood out, but nothing is strongly relevant".
+    Folding ``top_score`` magnitude / a per-context baseline into ``level`` is the
+    tracked follow-up.
+    """
+
+    level: Literal["high", "moderate", "low", "none"]
+    top_score: float | None = None
+    relative_margin: float | None = Field(
+        None,
+        description=(
+            "Separation of the top hit from the candidate-pool background, in "
+            "background std-devs (scale-invariant). None when <2 candidates."
+        ),
+    )
+    result_count: int
+    rationale: str
+
+
 class RecallResponse(BaseModel):
     """Response schema for recall() API.
 
     Issue #104: Added related_tags to help LLMs understand tag context.
     Issue #216: Added explore_hints for graph discovery bridging.
+    Issue #1047: Added confidence (relevance/staleness signal) — additive.
     """
 
     results: list[MemoryResponse]
     related_tags: list[RelatedTagItem] = []
     explore_hints: list[ExploreHint] | None = None
+    # Issue #1047: top-level relevance confidence. None on legacy/explore paths
+    # that don't compute it; recall() always populates it (incl. "none" on empty).
+    confidence: RecallConfidence | None = None
 
 
 class ReferenceRequest(BaseModel):
@@ -780,6 +823,13 @@ class ContextSearchConfigResponse(TZAwareBaseModel):
     reranker_model: str = Field(..., description="Provider-specific model name")
     embedding_model: str = Field(..., description="Embedding model (immutable)")
     embedding_dimensions: int = Field(..., description="Vector dimensions (immutable)")
+    # Issue #1048: surfaced so GET reflects what update_search_config set.
+    reinforce_enabled: bool = Field(
+        default=False, description="Bounded adoption+feedback recall re-rank enabled"
+    )
+    reinforce_max_boost: float = Field(
+        default=0.15, description="Bound on the reinforce adjustment (factor in [1-b, 1+b])"
+    )
     created_at: datetime
     updated_at: datetime
 
@@ -801,6 +851,18 @@ class ContextSearchConfigUpdate(BaseModel):
         ..., description="Reranker provider: 'voyage', 'cohere', or 'ollama'"
     )
     reranker_model: str = Field(..., description="Provider-specific model name")
+    # Issue #1048: optional (default-preserving) so existing REST callers that omit
+    # them are unaffected; the MCP handler always round-trips current values.
+    reinforce_enabled: bool = Field(
+        default=False,
+        description="Issue #1048: enable the bounded adoption+feedback recall re-rank",
+    )
+    reinforce_max_boost: float = Field(
+        default=0.15,
+        ge=0.0,
+        le=0.5,
+        description="Issue #1048: bound on the reinforce adjustment (factor stays in [1-b, 1+b])",
+    )
 
     @model_validator(mode="after")
     def validate_weights_sum(self) -> "ContextSearchConfigUpdate":

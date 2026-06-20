@@ -94,6 +94,15 @@ class Settings(BaseSettings):
         default="",
         description="Shared bearer token authenticating the ai-worker to /api/v1/workers/* (RFC 6750)",
     )
+    # Issue #954: service-to-service auth for the external billing service
+    # (kagura-billing#4/#6) pushing entitlement changes to PUT /internal/...
+    # Empty disables the internal billing endpoints (fail-closed, 503). Distinct
+    # from worker_service_token so the two services can be rotated independently.
+    # Use: openssl rand -hex 32. See the rotation note on worker_service_token.
+    billing_service_token: str = Field(
+        default="",
+        description="Shared bearer token authenticating the billing service to /internal/* (RFC 6750)",
+    )
     # Public MCP base URL handed back to the worker in its config so it can write
     # memories. Defaults to local dev; override in prod (e.g. https://memory.kagura-ai.com/mcp).
     kmc_mcp_url: str = Field(
@@ -182,6 +191,23 @@ class Settings(BaseSettings):
         default="text-embedding-3-small", description="Embedding model name"
     )
     embedding_dimensions: int = Field(default=512, description="Embedding vector dimensions")
+    # Issue #1030: when True, a workspace whose plan lacks the
+    # ``managed_embeddings`` capability (Free / S) is DENIED the platform
+    # ``OPENAI_API_KEY`` embedding fallback — it must supply a BYOK key or use a
+    # self-hosted Ollama model. Paid tiers (basic/pro) are unaffected: they keep
+    # embedding on the platform key, bounded by the #709/#1033 spend cap.
+    # Default False preserves the pre-#1030 behavior (env fallback for all tiers,
+    # Free bounded only by the #708 drain-attack cap) so OSS / dev / self-host
+    # deployments are unchanged; managed-SaaS flips this on once a dedicated
+    # platform embedding credential is provisioned.
+    embedding_platform_fallback_requires_managed_plan: bool = Field(
+        default=False,
+        description=(
+            "Issue #1030: deny the platform OPENAI_API_KEY embedding fallback to "
+            "plans without managed_embeddings (Free). Paid tiers keep platform "
+            "embeddings (capped). Default False = pre-#1030 behavior."
+        ),
+    )
 
     # Issue #886: hard cap on the deterministic always-load (load_pinned) set.
     # always-load memories are injected into the agent's context every turn, so

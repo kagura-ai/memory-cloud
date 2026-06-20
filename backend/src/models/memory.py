@@ -112,10 +112,10 @@ class Memory(Base):
         scope: working または persistent
         long_term: Long-term memory flag
         promoted_at: Promotion timestamp
-        use_count: 使用回数
         last_used_at: 最終使用時刻
         accessed_by_clients: アクセスしたクライアント一覧
-        access_count: アクセス回数
+        access_count: アクセス回数 (surfacing: recall top-k 返却 + explore 拡散 + reference)
+        reference_count: 採用シグナル (#1046: reference() のみが加算; surfacing と区別)
         created_at: 作成時刻
         updated_at: 更新時刻
         deleted_at: Soft delete timestamp (NULL = active)
@@ -192,10 +192,26 @@ class Memory(Base):
     promoted_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
 
     # 利用統計（Consolidation判定用）
-    use_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     last_used_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     accessed_by_clients: Mapped[list[str] | None] = mapped_column(ARRAY(String), nullable=True)
+    # ``access_count`` counts *surfacing*: every recall top-k return + explore
+    # spreading-activation hit + reference(). It is the signal Sleep
+    # consolidation gates on today (unchanged by #1046).
     access_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    # Issue #1046: adoption signal — bumped ONLY by reference() (a deliberate
+    # Layer-3 fetch), distinct from the surfacing-inflated ``access_count``. The
+    # invariant ``access_count >= reference_count`` always holds because every
+    # reference() also bumps access_count.
+    #
+    # PROXY BIAS (read before consuming — #1048 ranking, #1049 consolidation):
+    # reference() returns Layer-3 (content+details), but recall() already returns
+    # Layer 1-2 (summary+context_summary), which is frequently *enough*. So
+    # reference_count systematically UNDER-COUNTS adoptions satisfied from the
+    # summary alone, and is biased toward long / detail-heavy memories that force
+    # a Layer-3 fetch. Downstream consumers MUST account for this bias.
+    reference_count: Mapped[int] = mapped_column(
+        Integer, nullable=False, server_default="0", default=0
+    )
 
     # システム情報
     created_at: Mapped[datetime] = mapped_column(
@@ -314,7 +330,10 @@ class Memory(Base):
         # Indexes
         Index("idx_user_scope", "user_id", "scope"),
         Index("idx_user_type", "user_id", "type"),
-        Index("idx_consolidation", "user_id", "long_term", "use_count", "importance"),
+        # Issue #1046: dropped the stale ``idx_consolidation`` index. It indexed
+        # the dead ``use_count`` column and its leading (user_id, long_term)
+        # columns never matched the consolidation candidate query, which filters
+        # ``scope == 'working'`` (covered by ``idx_user_scope``).
         Index("idx_created_at", "created_at"),
         Index("idx_last_used", "last_used_at"),
         # JSONB index for context_id

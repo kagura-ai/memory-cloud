@@ -14,11 +14,10 @@ from sqlalchemy.exc import IntegrityError
 
 _MEM_COLS = (
     "id, user_id, summary, content, type, importance, confidence, scope, "
-    "embedding_status, client, source, long_term, use_count, access_count"
+    "embedding_status, client, source, long_term, access_count"
 )
 _MEM_VALS = (
-    ":id, 'u1', 's', 'c', 'note', 0.5, 1.0, 'working', "
-    "'success', 'test', 'mcp_remember', false, 0, 0"
+    ":id, 'u1', 's', 'c', 'note', 0.5, 1.0, 'working', 'success', 'test', 'mcp_remember', false, 0"
 )
 
 
