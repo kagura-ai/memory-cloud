@@ -73,9 +73,7 @@ class TestMemoryRepository:
     ):
         """Issue #1046: an adoption access (reference()) bumps BOTH access_count and
         reference_count, preserving the access_count >= reference_count invariant."""
-        await repository.update_access_stats(
-            sample_memory.id, client="api", count_as_adoption=True
-        )
+        await repository.update_access_stats(sample_memory.id, client="api", count_as_adoption=True)
         await db_session.refresh(sample_memory)
 
         assert sample_memory.access_count == 1
@@ -87,9 +85,7 @@ class TestMemoryRepository:
     ):
         """Issue #1046: adoption then surfacing → access_count=2, reference_count=1.
         Pins the invariant access_count >= reference_count across mixed access."""
-        await repository.update_access_stats(
-            sample_memory.id, client="api", count_as_adoption=True
-        )
+        await repository.update_access_stats(sample_memory.id, client="api", count_as_adoption=True)
         await repository.update_access_stats(sample_memory.id, client="api")
         await db_session.refresh(sample_memory)
 

@@ -185,9 +185,7 @@ class TestAdoptionArchivalGrandfather:
     @pytest.mark.asyncio
     async def test_no_deletion_when_cutoff_unset(self, consolidation_phase):
         # adoption==0, old, isolated — but cutoff unset (default) → NEVER deleted.
-        mem = _make_working_memory(
-            reference_count=0, access_count=0, importance=0.1, age_days=60
-        )
+        mem = _make_working_memory(reference_count=0, access_count=0, importance=0.1, age_days=60)
         result = await _run_execute(consolidation_phase, [mem], cutoff=None)
         assert result.details["rule_deleted"] == 0
         consolidation_phase.memory_repo.delete.assert_not_called()

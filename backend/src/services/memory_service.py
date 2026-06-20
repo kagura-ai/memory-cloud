@@ -982,9 +982,7 @@ class MemoryService:
         # (#1046): the agent deliberately fetched Layer-3 detail, so this bumps
         # reference_count in addition to access_count. Surfacing call sites
         # (recall return, explore spread) below leave count_as_adoption False.
-        await self.memory_repo.update_access_stats(
-            memory_id, client="api", count_as_adoption=True
-        )
+        await self.memory_repo.update_access_stats(memory_id, client="api", count_as_adoption=True)
         await self.db.commit()
 
         logger.info("memory_referenced", memory_id=str(memory_id), user_id=user_id)
@@ -1300,7 +1298,10 @@ class MemoryService:
         elif z >= 0.3:
             level, note = "low", "weak separation — relevance uncertain"
         else:
-            level, note = "none", "top hit indistinguishable from background — likely nothing relevant"
+            level, note = (
+                "none",
+                "top hit indistinguishable from background — likely nothing relevant",
+            )
         return RecallConfidence(
             level=level,
             top_score=top,
@@ -1369,8 +1370,11 @@ class MemoryService:
         try:
             from repositories.config_repository import ContextSearchConfigRepository
 
-            cfg = await ContextSearchConfigRepository(self.db).create_or_get(context_id)
-            if not getattr(cfg, "reinforce_enabled", False):
+            # READ-ONLY lookup — recall must not create/commit a config row mid-flow
+            # (create_or_get would INSERT+COMMIT for a context with no config yet,
+            # adding a side effect to the read path). No config row → reinforce off.
+            cfg = await ContextSearchConfigRepository(self.db).get_by_context(context_id)
+            if cfg is None or not getattr(cfg, "reinforce_enabled", False):
                 return
             max_boost = float(cfg.reinforce_max_boost)
 
@@ -1722,6 +1726,13 @@ class MemoryService:
             if not memory:
                 continue
 
+            # Issue #1047: snapshot updated_at BEFORE update_access_stats. The
+            # Memory.updated_at column declares onupdate=func.now(), so the UPDATE
+            # issued by update_access_stats expires the in-memory attribute — a
+            # later read would then trigger a sync lazy-load → MissingGreenlet in
+            # the async context (the same trap reference() documents and avoids).
+            snapshot_updated_at = memory.updated_at
+
             # Update access stats
             await self.memory_repo.update_access_stats(
                 memory.id,
@@ -1740,7 +1751,7 @@ class MemoryService:
                     importance=memory.importance,
                     scope=memory.scope,
                     created_at=memory.created_at,
-                    updated_at=memory.updated_at,  # #1047: staleness cue
+                    updated_at=snapshot_updated_at,  # #1047: staleness cue (pre-bump snapshot)
                     client=memory.client,
                     tags=memory.tags or [],
                     context=memory.context,

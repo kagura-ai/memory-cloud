@@ -1289,7 +1289,7 @@ class TestReinforceRerank:
         cfg = MagicMock(reinforce_enabled=False)
         sr = [{"id": "a", "hybrid_score": 0.9}, {"id": "b", "hybrid_score": 0.8}]
         with patch("repositories.config_repository.ContextSearchConfigRepository") as Repo:
-            Repo.return_value.create_or_get = AsyncMock(return_value=cfg)
+            Repo.return_value.get_by_context = AsyncMock(return_value=cfg)
             await svc._maybe_reinforce_rerank(sr, {}, uuid4())
         assert [r["id"] for r in sr] == ["a", "b"]  # unchanged
 
@@ -1311,7 +1311,7 @@ class TestReinforceRerank:
             patch("repositories.config_repository.ContextSearchConfigRepository") as Repo,
             patch("services.feedback_service.FeedbackService") as FB,
         ):
-            Repo.return_value.create_or_get = AsyncMock(return_value=cfg)
+            Repo.return_value.get_by_context = AsyncMock(return_value=cfg)
             FB.return_value.aggregate_for_memories = AsyncMock(
                 return_value={
                     str(mem_b.id): FeedbackAggregate(
@@ -1339,7 +1339,7 @@ class TestReinforceRerank:
             patch("repositories.config_repository.ContextSearchConfigRepository") as Repo,
             patch("services.feedback_service.FeedbackService") as FB,
         ):
-            Repo.return_value.create_or_get = AsyncMock(return_value=cfg)
+            Repo.return_value.get_by_context = AsyncMock(return_value=cfg)
             FB.return_value.aggregate_for_memories = AsyncMock(return_value={})
             await svc._maybe_reinforce_rerank(sr, memories, uuid4())
         assert [r["id"] for r in sr][0] == "a"  # relevance still dominates
