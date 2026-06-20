@@ -662,7 +662,9 @@ app.include_router(workspace_connectors.router, prefix="/api/v1")
 app.include_router(workers.router, prefix="/api/v1")
 # Issue #954: internal billing entitlement push. Mounted WITHOUT /api/v1 — it
 # lives under /internal so it stays off the public API surface (#622) and is
-# blocked at the edge; reachable only over the internal network.
+# blocked at the edge (Caddyfile.tpl `handle /internal*` -> 404, enforced every
+# deploy by deploy.sh `verify_internal_blocked`); reachable only over the
+# internal Docker network, with BILLING_SERVICE_TOKEN as the in-app control.
 app.include_router(internal_billing.router)
 app.include_router(connectors_slack.router, prefix="/api/v1")
 

@@ -22,10 +22,18 @@ Design decisions (documented for the cross-repo contract; see #954):
   membership/context cleanup is handled by the interactive flow or a
   reconciliation job (kagura-billing#5), not here.
 - **Idempotent.** PUT sets absolute values; re-delivery (reconciliation) yields
-  the same state and 200, never a "already on this plan" 400.
+  the same state and 200, never a "already on this plan" 400. Addons are an
+  *absolute, partial* update: omitted dimensions are left unchanged. The billing
+  service therefore owns re-baselining addons on a tier change — on a downgrade
+  it must push the new ``plan_name`` AND the addon values for the new tier
+  (e.g. ``addons:{...:0}``); this endpoint will not zero a prior tier's addon
+  bonus on its own (it has no notion of which addons "belong" to a tier).
 - **Internal-only.** Mounted under ``/internal`` (NOT ``/api/v1``) so it stays
-  off the public surface (#622 freeze) and is easy to block at the edge. Reach
-  it only over the internal network.
+  off the public surface (#622 freeze). It is also blocked at the edge:
+  ``terraform/single-server/Caddyfile.tpl`` has a ``handle /internal* {respond
+  404}`` block and ``deploy.sh`` fails the deploy via ``verify_internal_blocked``
+  if that block is ever missing. Reach it only over the internal Docker network;
+  the ``BILLING_SERVICE_TOKEN`` bearer is the in-app control on top of that.
 """
 
 from __future__ import annotations

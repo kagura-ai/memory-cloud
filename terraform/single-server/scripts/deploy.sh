@@ -39,8 +39,8 @@ READINESS_INTERVAL=2                            # seconds between checks
 DRAIN_TIMEOUT="${DRAIN_TIMEOUT:-30}"            # seconds to drain old container
 WEB_READINESS_TIMEOUT="${WEB_READINESS_TIMEOUT:-30}"  # seconds to wait for kagura-web /api/health
 WEB_READINESS_INTERVAL="${WEB_READINESS_INTERVAL:-2}" # seconds between web checks
-WORKERS_GATE_TIMEOUT="${WORKERS_GATE_TIMEOUT:-30}"    # seconds to wait for /api/v1/workers/* to be blocked at Caddy
-WORKERS_GATE_INTERVAL="${WORKERS_GATE_INTERVAL:-2}"   # seconds between security-gate checks
+WORKERS_GATE_TIMEOUT="${WORKERS_GATE_TIMEOUT:-30}"    # seconds to wait for an edge-blocked path (/api/v1/workers/*, /internal/*) to 404 at Caddy
+WORKERS_GATE_INTERVAL="${WORKERS_GATE_INTERVAL:-2}"   # seconds between security-gate checks (shared by the workers + internal gates)
 
 # curl indirection: the security-gate probe runs through "$CURL" so the bats
 # suite can inject a stub (tests/deploy_verify_workers_blocked.bats). Production
@@ -132,6 +132,7 @@ cmd_rollback() {
     generate_caddyfile "api-${inactive}"
     reload_caddy
     verify_workers_blocked
+    verify_internal_blocked
 
     DEPLOY_STAGE="rollback complete (active: ${inactive})"
     log "Rollback complete. Active: $inactive"
@@ -179,6 +180,7 @@ cmd_deploy() {
     generate_caddyfile "api-${inactive}"
     reload_caddy
     verify_workers_blocked
+    verify_internal_blocked
 
     # Step 7: Drain and stop old container
     # Disable restart policy first — otherwise `restart: always` revives
@@ -339,12 +341,18 @@ reload_caddy() {
     log "  Caddy restarted"
 }
 
-verify_workers_blocked() {
-    # Security gate: /api/v1/workers/* must return 404 via Caddy after every
-    # config reload. The route carries decrypted connector secrets and is
-    # intended for the co-resident ai-worker on the internal Docker network
-    # only. Use -k (insecure) because the Cloudflare Origin CA cert is not
+_verify_path_blocked() {
+    # Shared edge-block security gate (used by verify_workers_blocked and
+    # verify_internal_blocked). Asserts that an internal-only path returns 404
+    # via Caddy after every config reload — i.e. it is NOT served through public
+    # ingress. Use -k (insecure) because the Cloudflare Origin CA cert is not
     # trusted by the system CA bundle, but we only care about the HTTP status.
+    #
+    #   $1 label      — human label for logs/errors (e.g. "/internal/*")
+    #   $2 probe_path — the absolute path to GET (must yield non-404 if the route
+    #                   WERE proxied to the API, so blocked=404 is distinguishable
+    #                   from exposed; for /internal we probe the real PUT route
+    #                   with GET so an exposed API answers 405, not 404).
     #
     # Domain is extracted from CADDYFILE_TPL so this stays in sync with the
     # configured site block without manual updates here.
@@ -362,7 +370,8 @@ verify_workers_blocked() {
     # Caddy is still starting) and `set -e` kills the script *silently* on the
     # first attempt — the original #986 bug, where the retry loop and the
     # ${http_status:-000} fallback below were both dead code.
-    log "  Security gate: verifying /api/v1/workers/* is blocked at Caddy (timeout: ${WORKERS_GATE_TIMEOUT}s)..."
+    local label="$1" probe_path="$2"
+    log "  Security gate: verifying ${label} is blocked at Caddy (timeout: ${WORKERS_GATE_TIMEOUT}s)..."
     local domain http_status start_time
     http_status=000
     domain=$(awk '/^[a-zA-Z]/ { gsub(/ *\{.*/, ""); print; exit }' "$CADDYFILE_TPL")
@@ -375,18 +384,33 @@ verify_workers_blocked() {
         http_status=$("$CURL" -sk -o /dev/null -w "%{http_code}" \
             --max-time 5 \
             --resolve "${domain}:443:127.0.0.1" \
-            "https://${domain}/api/v1/workers/config" 2>/dev/null || true)
+            "https://${domain}${probe_path}" 2>/dev/null || true)
         http_status=${http_status:-000}
         if [ "$http_status" = "404" ]; then
-            log "  /api/v1/workers/* is correctly blocked (HTTP 404, $((SECONDS - start_time))s)"
+            log "  ${label} is correctly blocked (HTTP 404, $((SECONDS - start_time))s)"
             return 0
         fi
         sleep "$WORKERS_GATE_INTERVAL"
     done
-    error "/api/v1/workers/* is NOT blocked by Caddy (HTTP ${http_status}, expected 404) after ${WORKERS_GATE_TIMEOUT}s.
-  Aborting before any further steps — the workers route is exposed and must be fixed before this deploy/rollback can complete.
-  Check Caddyfile: the 'handle /api/v1/workers*' block must appear BEFORE 'handle /api/*'.
+    error "${label} is NOT blocked by Caddy (HTTP ${http_status}, expected 404) after ${WORKERS_GATE_TIMEOUT}s.
+  Aborting before any further steps — the route is exposed and must be fixed before this deploy/rollback can complete.
+  Check Caddyfile: the 'handle ${label}' block must appear BEFORE 'handle /api/*' / the catch-all.
   Regenerate and redeploy: $0 --generate-caddyfile && dc restart caddy"
+}
+
+verify_workers_blocked() {
+    # /api/v1/workers/* carries decrypted connector secrets and is intended for
+    # the co-resident ai-worker on the internal Docker network only.
+    _verify_path_blocked "/api/v1/workers/*" "/api/v1/workers/config"
+}
+
+verify_internal_blocked() {
+    # /internal/* is the billing entitlement-push surface (#954): it writes plan
+    # tier + addon quota, authenticated only by BILLING_SERVICE_TOKEN. Block it
+    # at the edge as defense-in-depth on top of the token. We GET the real PUT
+    # route so an *exposed* API answers 405 (method not allowed, route exists),
+    # never a 404 — keeping blocked(404) distinguishable from exposed.
+    _verify_path_blocked "/internal/*" "/internal/workspaces/probe/plan"
 }
 
 cmd_generate_caddyfile() {
@@ -472,8 +496,8 @@ main() {
             echo "  DRAIN_TIMEOUT          Seconds to drain old API container (default: 30)"
             echo "  WEB_READINESS_TIMEOUT  Seconds to wait for web /api/health (default: 30)"
             echo "  WEB_READINESS_INTERVAL Seconds between web health checks (default: 2)"
-            echo "  WORKERS_GATE_TIMEOUT   Seconds to wait for /api/v1/workers/* to be blocked at Caddy (default: 30)"
-            echo "  WORKERS_GATE_INTERVAL  Seconds between security-gate checks (default: 2)"
+            echo "  WORKERS_GATE_TIMEOUT   Seconds to wait for an edge-blocked path (/api/v1/workers/*, /internal/*) to 404 at Caddy (default: 30)"
+            echo "  WORKERS_GATE_INTERVAL  Seconds between security-gate checks; shared by the workers + internal gates (default: 2)"
             ;;
         "")
             cmd_deploy

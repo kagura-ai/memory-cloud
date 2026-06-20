@@ -46,6 +46,17 @@ memory.kagura-ai.com {
 		respond 404
 	}
 
+	# /internal/* is the billing-service entitlement-push surface (#954): it
+	# writes plan tier + addon quota, authenticated only by BILLING_SERVICE_TOKEN.
+	# Like /api/v1/workers/*, it is reachable only over the internal Docker
+	# network and must never be served through public ingress — block it at the
+	# edge as defense-in-depth on top of the token. 404 (not 403) so the path is
+	# not confirmed. deploy.sh `verify_internal_blocked` fails the deploy if this
+	# block ever goes missing.
+	handle /internal* {
+		respond 404
+	}
+
 	# -------------------------------------------------------------------------
 	# Backend API (FastAPI on :8080) — blue-green upstream
 	# -------------------------------------------------------------------------
