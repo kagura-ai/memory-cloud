@@ -288,9 +288,9 @@ Common workflow: Bug fix → recall("error message") → find similar past fixes
 
 Returns summaries and context (Layers 1-2) optimized for quick understanding.
 
-Agent-facing signals in the response (Issue #1047):
+Agent-facing signals in the response (Issue #1047/#1052):
 • Each result carries `updated_at` — the last time that fact was changed (null if never edited since creation). Use it to self-assess staleness without extra calls; an old `updated_at` means the fact may be out of date.
-• The response carries a top-level `confidence` object: `level` (high/moderate/low/none) buckets `relative_margin` = how many background std-devs the top hit stands out from the candidate pool (per-context-relative, scale-invariant — NOT a global score cutoff). NOTE: `level` measures *separation from the pool*, not absolute relevance — an off-topic query can still read `high` if one weak hit stands out. To judge "is this in memory at all?", look at `top_score` (absolute match strength for this recall) together with `level`: a high `level` but a low `top_score` means "something stood out, but nothing is strongly relevant" — treat that like a near-miss and consider going external rather than trusting it.
+• The response carries a top-level `confidence` object answering "is anything actually relevant here, or should I go external?". `level` (high/moderate/low/none) is driven by `top_score` (the best hit's absolute semantic cosine) and `prominence` ((top_score − mean background cosine) / mean background cosine — a ratio, so it is robust to a model's overall cosine scale, NOT a global cutoff). `none`/`low` means nothing strongly matches — prefer going external over trusting a hit. (`relative_margin`, the old background-std-dev separation, is kept for transparency but reads high even for off-topic queries, so do NOT rely on it to decide relevance.)
 
 IMPORTANT: Always specify context_id to ensure you're searching the intended context. Use list_contexts() to discover available context IDs.
 

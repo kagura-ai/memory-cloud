@@ -77,6 +77,29 @@ logger = get_logger(__name__)
 # Pydantic validation, so the service clamps defensively (see _clamp_pinned_cap).
 _PINNED_LOAD_CAP_MAX = 1000
 
+# Issue #1052: recall-confidence thresholds for absence detection.
+#
+# The primary signal is PROMINENCE = (top_cosine - mean_background_cosine) /
+# mean_background_cosine over the RAW (pre-normalization) semantic cosines of the
+# candidate pool. Prominence is a ratio, so it is invariant to the multiplicative
+# scale differences between embedding models — sidestepping the cross-model
+# miscalibration that #1047 (deliberately) avoided with a fixed absolute cutoff.
+#
+# Calibrated against a live 398-memory benchmark (real embeddings, 2026-06-20):
+#   PRESENT (on-topic) queries: prominence 0.58–0.95, top_cosine 0.89–0.96
+#   ABSENT  (off-topic) queries: prominence 0.08–0.21, top_cosine 0.52–0.65
+# Thresholds sit inside the empirical gap so neither class straddles a boundary.
+# These are module constants (not per-context config) for now; a per-context
+# rolling baseline (percentile) is the tracked next step if a model needs it.
+_CONF_HIGH_PROMINENCE = 0.40
+_CONF_MODERATE_PROMINENCE = 0.25
+_CONF_LOW_PROMINENCE = 0.12
+# A top cosine this high is a near-duplicate match for essentially any
+# cosine-normalized model; floor it to at least "moderate" even when the pool is
+# tightly clustered (low-spread model → small prominence) so a strong absolute
+# match is never reported as absent.
+_CONF_STRONG_ABS_COSINE = 0.85
+
 
 def _log_embedding_task_result(task: asyncio.Task, memory_id: str) -> None:
     """Done-callback for `process_pending_embedding` tasks (memory write paths).
@@ -1245,29 +1268,57 @@ class MemoryService:
             # Best-effort: do not raise — memory creation already succeeded
 
     @staticmethod
-    def _compute_recall_confidence(scores: list[float]) -> RecallConfidence:
-        """Issue #1047: relevance confidence from a query's candidate-pool scores.
+    def _compute_recall_confidence(
+        scores: list[float],
+        *,
+        semantic_scores: list[float] | None = None,
+    ) -> RecallConfidence:
+        """Issue #1047/#1052: relevance confidence — does the pool actually hold
+        something relevant, or should the agent stop probing / go external?
 
-        Relative and scale-invariant: ``relative_margin`` is how many background
-        standard deviations the top hit sits above the candidate-pool background
-        (``scores[1:]``). This sidesteps the cross-context/embedding-model
-        miscalibration of raw hybrid scores — a fixed absolute cutoff is wrong,
-        but "how far the top hit stands out from its own background" is stable.
-        Does NOT touch ranking; purely a derived annotation.
+        Two inputs, deliberately different roles:
 
-        ``scores`` may be in any order — sorted descending internally so the
-        result is independent of caller ordering. Buckets: z>=2 high, z>=1
-        moderate, z>=0.3 low, else none (top indistinguishable from background →
-        likely nothing truly relevant).
+        - ``semantic_scores`` (#1052): the RAW (pre-normalization) semantic cosines
+          of the candidate pool. These carry ABSOLUTE match strength. ``level`` is
+          driven by ``prominence`` = ``(top - mean_background) / mean_background``
+          over these — a ratio, so it is invariant to an embedding model's overall
+          cosine scale (no fixed cross-model cutoff). A very high absolute top
+          cosine (``_CONF_STRONG_ABS_COSINE``) additionally floors ``level`` to at
+          least ``moderate`` so a near-duplicate match is never reported as absent
+          on a low-spread model.
+        - ``scores`` (#1047): the normalized hybrid scores (ranking order). Used
+          only for ``result_count`` and as the FALLBACK basis when no semantic
+          scores are available (keyword-only search, empty pool). The fallback is
+          the original z-score-separation heuristic.
+
+        Why the change (#1052): max-normalization in hybrid merge rescales every
+        arm's top hit to 1.0, and the z-score margin DIVIDES by the background
+        std, which a flat off-topic tail makes tiny — so an irrelevant query's
+        "least-bad" hit looked just as separated as a real match (benchmarked:
+        absent queries scored ``high``). Absolute semantic strength is the signal
+        that actually distinguishes present from absent; prominence makes it
+        model-scale-invariant.
+
+        Does NOT touch ranking; purely a derived annotation. ``scores`` /
+        ``semantic_scores`` may be in any order — sorted descending internally.
         """
         import statistics
 
+        sem = sorted((semantic_scores or []), reverse=True)
+        if sem:
+            return MemoryService._confidence_from_semantic(
+                sem, result_count=len(scores) or len(sem)
+            )
+
+        # FALLBACK (#1047): no raw semantic cosines (keyword-only mode / empty
+        # pool). Use the original z-score separation over the normalized scores.
         scores = sorted(scores, reverse=True)
         n = len(scores)
         if n == 0:
             return RecallConfidence(
                 level="none",
                 top_score=None,
+                prominence=None,
                 relative_margin=None,
                 result_count=0,
                 rationale="No candidates retrieved — likely nothing relevant in this context.",
@@ -1278,6 +1329,7 @@ class MemoryService:
             return RecallConfidence(
                 level="moderate",
                 top_score=top,
+                prominence=None,
                 relative_margin=None,
                 result_count=1,
                 rationale="Single candidate — no background distribution to assess separation.",
@@ -1305,9 +1357,84 @@ class MemoryService:
         return RecallConfidence(
             level=level,
             top_score=top,
+            prominence=None,
             relative_margin=round(z, 3),
             result_count=n,
-            rationale=f"Top hit sits {z:.2f} background-std-devs above the candidate-pool background; {note}.",
+            rationale=(
+                f"Keyword-only pool: top hit sits {z:.2f} background-std-devs above the "
+                f"candidate-pool background; {note}."
+            ),
+        )
+
+    @staticmethod
+    def _confidence_from_semantic(sem: list[float], *, result_count: int) -> RecallConfidence:
+        """Issue #1052: confidence from RAW semantic cosines (sorted desc).
+
+        ``level`` from model-scale-invariant prominence + a near-duplicate
+        absolute-cosine floor. See the calibration constants for thresholds.
+        """
+        import statistics
+
+        top = sem[0]
+        n = len(sem)
+        if n == 1:
+            # No background to assess prominence; judge on absolute strength alone.
+            if top >= _CONF_STRONG_ABS_COSINE:
+                level, note = (
+                    "moderate",
+                    "single strong absolute match, no background to corroborate",
+                )
+            else:
+                level, note = "low", "single candidate; absolute match strength is modest"
+            return RecallConfidence(
+                level=level,
+                top_score=round(top, 3),
+                prominence=None,
+                relative_margin=None,
+                result_count=result_count,
+                rationale=f"Single semantic candidate (cosine {top:.2f}); {note}.",
+            )
+
+        background = sem[1:]
+        mean_bg = statistics.fmean(background)
+        if mean_bg > 1e-9:
+            prominence = (top - mean_bg) / mean_bg
+        else:
+            # Background ~0 → top stands alone far above noise.
+            prominence = float("inf")
+        std_bg = statistics.pstdev(background) if len(background) > 1 else 0.0
+        z = (top - mean_bg) / std_bg if std_bg > 1e-9 else None
+
+        if prominence >= _CONF_HIGH_PROMINENCE:
+            level = "high"
+        elif prominence >= _CONF_MODERATE_PROMINENCE:
+            level = "moderate"
+        elif prominence >= _CONF_LOW_PROMINENCE:
+            level = "low"
+        else:
+            level = "none"
+        # Near-duplicate absolute match → never report as absent even if the pool
+        # is tightly clustered (low-spread model produces small prominence).
+        if top >= _CONF_STRONG_ABS_COSINE and level in ("low", "none"):
+            level = "moderate"
+
+        prom_str = "inf" if prominence == float("inf") else f"{prominence:.2f}"
+        note = {
+            "high": "top hit is a strong, clearly-separated match",
+            "moderate": "top hit is a plausible match",
+            "low": "top hit is weak — relevance uncertain, consider going external",
+            "none": "top hit barely exceeds the background — likely nothing relevant",
+        }[level]
+        return RecallConfidence(
+            level=level,
+            top_score=round(top, 3),
+            prominence=round(prominence, 3) if prominence != float("inf") else None,
+            relative_margin=round(z, 3) if z is not None else None,
+            result_count=result_count,
+            rationale=(
+                f"Top semantic cosine {top:.2f}, prominence {prom_str} above the candidate-pool "
+                f"mean ({mean_bg:.2f}); {note}."
+            ),
         )
 
     @staticmethod
@@ -1970,19 +2097,29 @@ class MemoryService:
 
         logger.info("recall_completed", user_id=user_id, results=len(responses))
 
-        # Issue #1047: relevance confidence from the full candidate pool's score
-        # distribution (search_results, which holds up to candidates_k >> k when
-        # neural is on). Relative/scale-invariant — see _compute_recall_confidence.
+        # Issue #1047/#1052: relevance confidence from the full candidate pool's
+        # score distribution (search_results, which holds up to candidates_k >> k
+        # when neural is on). ``candidate_scores`` are the normalized hybrid scores
+        # (ranking order); ``semantic_scores`` are the RAW per-memory cosines that
+        # carry absolute match strength for absence detection (#1052). See
+        # _compute_recall_confidence.
         candidate_scores = [
             r.get("hybrid_score", r["score"])
             for r in search_results
             if r.get("hybrid_score", r.get("score")) is not None
         ]
+        semantic_scores = [
+            r["semantic_score_raw"]
+            for r in search_results
+            if r.get("semantic_score_raw") is not None
+        ]
         return RecallResponse(
             results=responses,
             related_tags=related_tags,
             explore_hints=explore_hints,
-            confidence=self._compute_recall_confidence(candidate_scores),
+            confidence=self._compute_recall_confidence(
+                candidate_scores, semantic_scores=semantic_scores or None
+            ),
         )
 
     async def load_pinned(

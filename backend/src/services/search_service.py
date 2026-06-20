@@ -295,7 +295,10 @@ class SearchService:
 
         # Merge results based on mode
         if search_mode == "semantic":
-            merged_results = semantic_results
+            # Issue #1052: expose the raw cosine under the same key the hybrid path
+            # uses so recall()'s confidence reads absolute match strength uniformly
+            # across modes (semantic-only results already carry raw cosine in score).
+            merged_results = [{**r, "semantic_score_raw": r.get("score")} for r in semantic_results]
         elif search_mode == "keyword":
             merged_results = fulltext_results
         else:
@@ -404,6 +407,15 @@ class SearchService:
 
             return [{**r, "score": r["score"] / max_score} for r in results]
 
+        # Issue #1052: preserve the RAW (pre-normalization) semantic cosine per
+        # memory. ``normalize`` rescales every arm's top hit to 1.0, which erases
+        # the absolute match strength that recall-confidence absence detection
+        # relies on (a perfect match and an off-topic "least-bad" hit both
+        # normalize to 1.0). Carry the raw cosine forward under a dedicated key so
+        # MemoryService._compute_recall_confidence can read it; ranking still uses
+        # the normalized hybrid_score, so this is annotation-only.
+        raw_semantic = {r["id"]: r["score"] for r in semantic_results}
+
         semantic_norm = normalize(semantic_results)
         keyword_norm = normalize(keyword_results)
 
@@ -417,6 +429,7 @@ class SearchService:
                 "semantic_score": result["score"],
                 "keyword_score": 0.0,
                 "hybrid_score": result["score"] * semantic_weight,
+                "semantic_score_raw": raw_semantic.get(memory_id),
             }
 
         for result in keyword_norm:
@@ -430,6 +443,8 @@ class SearchService:
                     "semantic_score": 0.0,
                     "keyword_score": result["score"],
                     "hybrid_score": result["score"] * keyword_weight,
+                    # Keyword-only hit: no semantic cosine to report.
+                    "semantic_score_raw": None,
                 }
 
         # Sort by hybrid_score
