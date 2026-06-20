@@ -28,7 +28,9 @@ Revoked keys are excluded. key_prefix is omitted here — use describe_binding
 for a single binding's prefix.
 
 Read-only: minting and revoking bindings stay on the SDK / CLI / HTTP API /
-dashboard. No parameters.""",
+dashboard. No parameters.
+
+Returns: {status, bindings: [{key_id, name, context_id, context_name, created_at}], count}. Only your own non-revoked public-bound keys; an empty bindings array with count 0 is a normal success.""",
             "inputSchema": {
                 "type": "object",
                 "properties": {},
@@ -49,7 +51,9 @@ Response: binding: {key_id, name, context_id, context_name, created_at,
 key_prefix}. No secret is ever returned.
 
 Read-only: minting and revoking bindings stay on the SDK / CLI / HTTP API /
-dashboard.""",
+dashboard.
+
+Returns: {status, binding: {key_id, name, context_id, context_name, created_at, key_prefix}}. Supply exactly ONE of key_id or context_id; querying by context_id when several keys match returns the newest plus a note.""",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -594,7 +598,9 @@ Use this to:
 - Understand the graph structure around a specific memory
 - Audit edges created by Sleep Maintenance's Edge Discovery
 
-Response includes: edge_id, source_id, target_id, edge_type, weight, confidence, timestamps.""",
+Response includes: edge_id, source_id, target_id, edge_type, weight, confidence, timestamps.
+
+Returns: {status, memory_id, edges: [{source_id, target_id, edge_type, weight, confidence, created_at, last_updated}], count}.""",
             "inputSchema": {
                 "type": "object",
                 "required": ["memory_id", "context_id"],
@@ -641,7 +647,9 @@ Edge types:
 - 'continues_from': Chronological/narrative successor between chat memories (producer-asserted, directional; #782)
 - 'references_file': Structural reference from a chat memory to a file overview (producer-asserted, directional; #782)
 
-Weight range: 0.0 (weakest) to 3.0 (strongest). Default: 1.0 (full-confidence manual edge).""",
+Weight range: 0.0 (weakest) to 3.0 (strongest). Default: 1.0 (full-confidence manual edge).
+
+Returns: {status, edge: {source_id, target_id, edge_type, weight, confidence, created_at, last_updated}}. source_id/target_id are MEMORY UUIDs (from recall results), not context UUIDs.""",
             "inputSchema": {
                 "type": "object",
                 "required": ["source_id", "target_id", "context_id"],
@@ -696,7 +704,9 @@ Use this to:
 - Weaken an edge: decrease weight for less relevant connections
 - Change edge type: reclassify the relationship (see create_edge for the full edge_type enumeration; all values accepted by create_edge are valid targets here)
 
-Identify edges using source_id + target_id (from list_edges or explore results).""",
+Identify edges using source_id + target_id (from list_edges or explore results).
+
+Returns: {status, edge: {source_id, target_id, edge_type, weight, confidence, created_at, last_updated}}. Provide at least one of weight or edge_type.""",
             "inputSchema": {
                 "type": "object",
                 "required": ["source_id", "target_id", "context_id"],
@@ -748,7 +758,9 @@ Use this to remove noisy or incorrect connections from the Neural Memory graph.
 Typical workflow: explore() → list_edges() → identify bad edge → delete_edge().
 
 This is a hard delete — the edge is permanently removed. If the memories are still co-accessed,
-Hebbian learning may recreate a neural_association edge automatically.""",
+Hebbian learning may recreate a neural_association edge automatically.
+
+Returns: {status, message}.""",
             "inputSchema": {
                 "type": "object",
                 "required": ["source_id", "target_id", "context_id"],
@@ -832,7 +844,9 @@ Response includes:
 - contexts: Array of {id, name, summary, is_private, last_used_at}
 - count: Total number of contexts
 - limit: Maximum contexts allowed by plan
-- can_create: Whether new contexts can be created""",
+- can_create: Whether new contexts can be created
+
+Returns: {status, contexts: [{id, name, summary, is_private, is_locked, last_used_at, embedding_model, memory_count}], count, limit, can_create}.""",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -878,7 +892,9 @@ Response shape:
   }
 
 Empty context returns the same shape with tags=[] and total=0 — there is no 404.
-Soft-deleted memories are excluded; workspace boundary is honored for shared contexts.""",
+Soft-deleted memories are excluded; workspace boundary is honored for shared contexts.
+
+Returns: {status, context_id, context_name, tags: [{tag, count, last_used_at}], total}.""",
             "inputSchema": {
                 "type": "object",
                 "required": ["context_id"],
@@ -936,7 +952,9 @@ Context name rules:
 
 Returns the created context's id, name, and metadata.
 
-Use list_contexts() after creation to verify.""",
+Use list_contexts() after creation to verify.
+
+Returns: {status, message, context_id, context_name, context_display_name, context_is_private, context_is_locked}. Carry context_id into subsequent tools (remember/recall/...).""",
             "inputSchema": {
                 "type": "object",
                 "required": ["name"],
@@ -985,7 +1003,9 @@ Requires owner or editor role in the context.
 - summary/usage_guide/resource_id/is_public/is_locked: Owner-only fields
 - display_name/description: Editor access sufficient
 
-Use get_context_info() to see current values before updating.""",
+Use get_context_info() to see current values before updating.
+
+Returns: {status, message, updated_fields, context_id, context_name, context_display_name, context_is_private, context_is_locked}.""",
             "inputSchema": {
                 "type": "object",
                 "required": ["context_id"],
@@ -1036,7 +1056,9 @@ Use get_context_info() to see current values before updating.""",
 Only the context owner can delete. The default context cannot be deleted.
 Locked contexts (is_locked=true) must be unlocked first via update_context(is_locked=false).
 
-IMPORTANT: This action soft-deletes all memories in the context. Use with caution.""",
+IMPORTANT: This action soft-deletes all memories in the context. Use with caution.
+
+Returns: {status, message, context_id, context_name}. Soft delete.""",
             "inputSchema": {
                 "type": "object",
                 "required": ["context_id"],
@@ -1064,7 +1086,9 @@ Use cases:
 - Merge split contexts back into one
 - Clean up after project completion
 
-Requires owner access to both contexts. Same workspace required.""",
+Requires owner access to both contexts. Same workspace required.
+
+Returns: {status, message, merged, source_id, target_id, delete_source}. NOTE: source_id/target_id here are CONTEXT UUIDs (from list_contexts), unlike the edge tools whose source_id/target_id are MEMORY UUIDs.""",
             "inputSchema": {
                 "type": "object",
                 # #990: renamed source_id/target_id → source_context_id/
@@ -1112,7 +1136,9 @@ Examples:
 - Enable reranking: use_rerank=true, reranker_provider="voyage"
 - Local reranking (free): use_rerank=true, reranker_provider="ollama", reranker_model="dengcao/Qwen3-Reranker-8B:Q5_K_M"
 
-Weights must sum to 1.0.""",
+Weights must sum to 1.0.
+
+Returns: {status, message, context_id, config: {semantic_weight, bm25_weight, fetch_factor, use_rerank, reranker_provider, reranker_model, reinforce_enabled, reinforce_max_boost}}. semantic_weight + bm25_weight must sum to 1.0.""",
             "inputSchema": {
                 "type": "object",
                 "required": ["context_id"],
@@ -1172,7 +1198,9 @@ Response includes:
 - members: {used, limit}
 - mcp_calls_per_day: {limit}
 
-No parameters required — uses the current workspace.""",
+No parameters required — uses the current workspace.
+
+Returns: {status, plan, memories: {used, limit, percentage}, contexts: {used, limit}, members: {used, limit}, mcp_calls_per_day: {used, limit}}.""",
             "inputSchema": {
                 "type": "object",
                 "properties": {},
@@ -1190,7 +1218,9 @@ Returns a summary of each run including status, timing, and counters
 (memories processed, edges created, merges, promotions).
 
 Use this to check what Sleep Maintenance has been doing and when it last ran.
-Combine with get_sleep_report(report_id) for action-level detail.""",
+Combine with get_sleep_report(report_id) for action-level detail.
+
+Returns: {status, reports: [{report_id, context_id, status, started_at, completed_at, memories_processed, edges_created, memories_merged, memories_promoted, llm_calls_made, llm_tokens_used}], count}. Pass a report_id to get_sleep_report for action-level detail.""",
             "inputSchema": {
                 "type": "object",
                 "required": ["context_id"],
@@ -1223,7 +1253,9 @@ Each action includes:
 - memory_id/target_id: Affected memories
 - details: Action-specific data (old/new values, similarity scores, etc.)
 
-Use get_sleep_history() first to find report_ids.""",
+Use get_sleep_history() first to find report_ids.
+
+Returns: {status, report: {report_id, context_id, status, started_at, completed_at, memories_processed, edges_created, memories_merged, memories_promoted, llm_calls_made, llm_tokens_used, memories_flagged, embedding_calls_made, error_message, edge_discovery_result, dedup_result, importance_result, consolidation_result, reindex_result}, actions: [{id, phase, action_type, memory_id, target_id, details, created_at}], action_count}.""",
             "inputSchema": {
                 "type": "object",
                 "required": ["report_id"],
@@ -1251,7 +1283,9 @@ Only works on reports with status 'completed'. After rollback, the
 report is marked 'rolled_back' to prevent double rollback.
 
 ⚠️ This is a destructive operation — use with care.
-Requires action recording (reports created before this feature have no actions to rollback).""",
+Requires action recording (reports created before this feature have no actions to rollback).
+
+Returns: {status, report_id, rollback_summary: {edges_deleted, merges_reversed, importance_restored, promotions_reversed, archives_restored, errors}}. Re-embedding is best-effort - check rollback_summary.errors.""",
             "inputSchema": {
                 "type": "object",
                 "required": ["report_id"],
@@ -1278,6 +1312,7 @@ Requires action recording (reports created before this feature have no actions t
                 "Example:\n"
                 '  setup_resource(name="ec-products", resource_id="ec_products")\n'
                 "  → context created, token issued, ready for ingest_events()"
+                "\n\nReturns: {status, message, context_id, context_name, resource_id, token, token_id, warning}. The token is shown ONCE - store it now; use token + resource_id with ingest_events."
             ),
             "inputSchema": {
                 "type": "object",
@@ -1329,6 +1364,7 @@ Requires action recording (reports created before this feature have no actions t
                 "Example:\n"
                 '  setup_connector(connector_type="slack", resource_id="slack_general")\n'
                 '  → connector created, token issued, use idempotency_key="{connector_id}:..."'
+                "\n\nReturns: {status, message, connector_id, connector_type, resource_id, resource_pk, token_id, token, quota_events_per_hour, idempotency_key_prefix, context_id, kmc_api_key}. token and kmc_api_key are shown ONCE - store them now."
             ),
             "inputSchema": {
                 "type": "object",
@@ -1421,6 +1457,7 @@ Requires action recording (reports created before this feature have no actions t
                 '"payload": {"name": "...", "price": 5980}},\n'
                 '    {"op": "delete", "doc_id": "PROD-999"}\n'
                 "  ])"
+                "\n\nReturns: {status, resource_id, created_count, failed_count, event_ids, errors: [{index, doc_id, error}]}. Partial success is possible - check failed_count/errors. Indexing is async; memories become searchable shortly after."
             ),
             "inputSchema": {
                 "type": "object",
@@ -1495,6 +1532,7 @@ Requires action recording (reports created before this feature have no actions t
                 "Example:\n"
                 '  get_resource_impact(resource_id="ec_products")\n'
                 "  → {token_count: 2, memory_count: 500, current_schema_version: 3}"
+                "\n\nReturns: {status, resource_id, token_count, memory_count, current_schema_version}. Preview the blast radius before a destructive resource operation."
             ),
             "inputSchema": {
                 "type": "object",
@@ -1517,6 +1555,7 @@ Requires action recording (reports created before this feature have no actions t
                 "Example:\n"
                 '  get_resource_schema(resource_id="ec_products")\n'
                 '  → {schema_version: 3, field_definitions: [{name: "product_name", ...}]}'
+                "\n\nReturns: {status, resource_id, schema_version, field_definitions: [...], created_at}. field_definitions is the stored schema (a list of field-definition objects)."
             ),
             "inputSchema": {
                 "type": "object",
@@ -1543,6 +1582,7 @@ Requires action recording (reports created before this feature have no actions t
                 "Example:\n"
                 '  list_resource_tokens(resource_id="ec_products")\n'
                 "  → {tokens: [{id: 1, resource_id: ..., is_active: true, ...}], total: 3}"
+                "\n\nReturns: {status, tokens: [{id, resource_id, description, quota_events_per_hour, is_active, created_at, last_used_at}], total, limit, offset}."
             ),
             "inputSchema": {
                 "type": "object",
@@ -1589,6 +1629,7 @@ Requires action recording (reports created before this feature have no actions t
                 "Example:\n"
                 '  analyze_context(context_id="...", dry_run=True)  # cost preview\n'
                 '  analyze_context(context_id="...")                # 202 + run_id'
+                "\n\nReturns (dry_run preview): {status, dry_run, memory_count, cluster_count_estimate, estimated_cost_cents, model_id, breakdown: {input_tokens, output_tokens, calls}}. dry_run=true is preview-only; call with dry_run=false to start the run, then poll get_analysis(run_id) until finished_at is set."
             ),
             "inputSchema": {
                 "type": "object",
@@ -1648,6 +1689,7 @@ Requires action recording (reports created before this feature have no actions t
                 '  get_analysis(run_id="...")\n'
                 "  → {run_id, status, started_at, finished_at, "
                 "cost_estimated_cents, cost_actual_cents, ...}"
+                "\n\nReturns: {status, run_id, workspace_id, context_id, triggered_by, started_at, finished_at, input_count, cost_estimated_cents, cost_actual_cents, error, cancellation_reason}. Poll with run_id until finished_at is set."
             ),
             "inputSchema": {
                 "type": "object",
@@ -1671,6 +1713,7 @@ Requires action recording (reports created before this feature have no actions t
                 "Example:\n"
                 '  list_analyses(context_id="...", limit=20)\n'
                 '  → {items: [...], next_cursor: "2026-04-30T12:34:56"}'
+                "\n\nReturns: {status, items: [{run_id, workspace_id, context_id, status, triggered_by, started_at, finished_at, input_count, cost_estimated_cents, cost_actual_cents, error, cancellation_reason}], next_cursor}. Paginate by passing next_cursor as cursor until it is null."
             ),
             "inputSchema": {
                 "type": "object",
@@ -1701,6 +1744,7 @@ Requires action recording (reports created before this feature have no actions t
                 "Example:\n"
                 '  get_active_analysis(context_id="...")\n'
                 '  → {run_id, status: "succeeded", finished_at, ...}'
+                "\n\nReturns: {status, run_id, workspace_id, context_id, triggered_by, started_at, finished_at, input_count, cost_estimated_cents, cost_actual_cents, error, cancellation_reason}. Returns the most recent succeeded run for the context."
             ),
             "inputSchema": {
                 "type": "object",
@@ -1728,6 +1772,7 @@ Requires action recording (reports created before this feature have no actions t
                 '  get_cluster(run_id="...", cluster_index=3)\n'
                 "  → {label, description, count, representatives: [...], "
                 "memories: [...], next_cursor: ...}"
+                "\n\nReturns: {status, run_id, cluster_index, cluster_id, label, description, count, label_confidence, centroid_2d, property_stats: {avg_importance}, representatives: [{memory_id, summary, tags, importance}], memories: [{memory_id, summary, tags, importance}], next_cursor}. Paginate memories via next_cursor."
             ),
             "inputSchema": {
                 "type": "object",
@@ -1769,6 +1814,7 @@ Requires action recording (reports created before this feature have no actions t
                 "the workspace's active set. Two calls with the same sha256 in "
                 "the same workspace return a 'conflict' error referencing the "
                 "existing file_id; clients should reuse it instead of re-uploading."
+                "\n\nReturns: {status, file_id, upload_url, expires_at}. Multi-step: PUT the file bytes to upload_url, then call complete_file_upload(file_id) to finalize."
             ),
             "inputSchema": {
                 "type": "object",
@@ -1807,6 +1853,7 @@ Requires action recording (reports created before this feature have no actions t
                 "and the workspace storage counter is updated atomically.\n\n"
                 "Idempotent: confirming an already-uploaded file with a matching "
                 "sha256 returns the existing row unchanged."
+                "\n\nReturns: {status, file_id, size_bytes, sha256}."
             ),
             "inputSchema": {
                 "type": "object",
@@ -1833,6 +1880,7 @@ Requires action recording (reports created before this feature have no actions t
                 "Return a short-lived presigned GET URL for a previously-uploaded "
                 "file. The URL sets Content-Disposition to the original filename "
                 "so browsers and curl preserve it on save."
+                "\n\nReturns: {status, download_url}. Use download_url directly as a presigned, time-limited HTTP GET."
             ),
             "inputSchema": {
                 "type": "object",
@@ -1857,6 +1905,7 @@ Requires action recording (reports created before this feature have no actions t
                 "immediately (R5 contract); the R2 binary lingers for 7 days "
                 "before the nightly sweeper removes it (no client-visible "
                 "behavior on the binary side)."
+                "\n\nReturns: {status, file_id, deleted}. Soft delete."
             ),
             "inputSchema": {
                 "type": "object",
@@ -1946,7 +1995,9 @@ is structurally excluded from recall(), so it never pollutes the knowledge
 search space. Writing upserts the value for the key.
 
 Use this for transient run state, NOT durable knowledge (use remember() for
-knowledge). ttl_seconds expires the entry automatically; omit it for no expiry.""",
+knowledge). ttl_seconds expires the entry automatically; omit it for no expiry.
+
+Returns: {status, key}.""",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -1976,7 +2027,9 @@ knowledge). ttl_seconds expires the entry automatically; omit it for no expiry."
 
 Reads from the agent session-state lane (see set_state). Supply ``key`` to read
 one value, or omit it to list all live keys for the context. Expired entries are
-never returned. This lane is excluded from recall() by design.""",
+never returned. This lane is excluded from recall() by design.
+
+Returns: {status, key, value, found}. found is false (value null) when the key is absent or expired - that is not an error.""",
             "inputSchema": {
                 "type": "object",
                 "properties": {
