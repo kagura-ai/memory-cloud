@@ -1166,6 +1166,7 @@ Returns: {status, message, context_id, config: {semantic_weight, bm25_weight, fe
                     },
                     "reranker_provider": {
                         "type": "string",
+                        "enum": ["voyage", "cohere", "ollama"],
                         "description": "Reranker provider: 'voyage', 'cohere', or 'ollama' (local, no API key needed).",
                     },
                     "reranker_model": {
@@ -1637,6 +1638,7 @@ Returns: {status, report_id, rollback_summary: {edges_deleted, merges_reversed, 
                 "properties": {
                     "context_id": {
                         "type": "string",
+                        "format": "uuid",
                         "description": "Target context UUID (must belong to your workspace).",
                     },
                     "from": {
@@ -1697,6 +1699,7 @@ Returns: {status, report_id, rollback_summary: {edges_deleted, merges_reversed, 
                 "properties": {
                     "run_id": {
                         "type": "string",
+                        "format": "uuid",
                         "description": "Analysis run UUID (from analyze_context).",
                     },
                 },
@@ -1721,6 +1724,7 @@ Returns: {status, report_id, rollback_summary: {edges_deleted, merges_reversed, 
                 "properties": {
                     "context_id": {
                         "type": "string",
+                        "format": "uuid",
                         "description": "Target context UUID.",
                     },
                     "limit": {
@@ -1752,6 +1756,7 @@ Returns: {status, report_id, rollback_summary: {edges_deleted, merges_reversed, 
                 "properties": {
                     "context_id": {
                         "type": "string",
+                        "format": "uuid",
                         "description": "Target context UUID.",
                     },
                 },
@@ -1780,6 +1785,7 @@ Returns: {status, report_id, rollback_summary: {edges_deleted, merges_reversed, 
                 "properties": {
                     "run_id": {
                         "type": "string",
+                        "format": "uuid",
                         "description": "Analysis run UUID.",
                     },
                     "cluster_index": {
@@ -1963,6 +1969,7 @@ Returns: {status, feedback_id, memory_id, helpful}.""",
                 "properties": {
                     "context_id": {
                         "type": "string",
+                        "format": "uuid",
                         "description": "Target context UUID (the recalled memory's context).",
                     },
                     "memory_id": {
@@ -2003,6 +2010,7 @@ Returns: {status, key}.""",
                 "properties": {
                     "context_id": {
                         "type": "string",
+                        "format": "uuid",
                         "description": "Target context UUID (state is scoped to this context).",
                     },
                     "key": {
@@ -2035,6 +2043,7 @@ Returns: {status, key, value, found}. found is false (value null) when the key i
                 "properties": {
                     "context_id": {
                         "type": "string",
+                        "format": "uuid",
                         "description": "Target context UUID.",
                     },
                     "key": {
