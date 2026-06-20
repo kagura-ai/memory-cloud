@@ -343,19 +343,17 @@ class RecallConfidence(BaseModel):
     prominence: float | None = Field(
         None,
         description=(
-            "Issue #1052: (top_score - mean_background_cosine) / "
-            "mean_background_cosine — model-scale-invariant match prominence and "
-            "the primary basis for ``level``. None when <2 candidates or "
-            "keyword-only."
+            "(top_score - mean_background_cosine) / mean_background_cosine — a "
+            "model-scale-invariant match prominence and the primary basis for "
+            "level. None when <2 candidates or keyword-only."
         ),
     )
     relative_margin: float | None = Field(
         None,
         description=(
             "Separation of the top hit from the candidate-pool background, in "
-            "background std-devs. Informational only since #1052 — it inflates on "
-            "flat off-topic tails and is NOT used for ``level``. None when <2 "
-            "candidates."
+            "background std-devs. Informational only — it inflates on flat "
+            "off-topic tails and is not used for level. None when <2 candidates."
         ),
     )
     result_count: int

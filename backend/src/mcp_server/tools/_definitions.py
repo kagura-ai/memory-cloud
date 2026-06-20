@@ -288,7 +288,7 @@ Common workflow: Bug fix → recall("error message") → find similar past fixes
 
 Returns summaries and context (Layers 1-2) optimized for quick understanding.
 
-Agent-facing signals in the response (Issue #1047/#1052):
+Agent-facing signals in the response:
 • Each result carries `updated_at` — the last time that fact was changed (null if never edited since creation). Use it to self-assess staleness without extra calls; an old `updated_at` means the fact may be out of date.
 • The response carries a top-level `confidence` object — a cheap TRIAGE hint for "is anything relevant here, or should I go external?", NOT a correctness verdict. `level` (high/moderate/low/none) is driven by `top_score` (best hit's absolute semantic cosine) and `prominence` ((top_score − mean background cosine) / mean background cosine; a ratio → robust to a model's cosine scale, not a global cutoff). How to act on it: `none`/`low` → likely nothing relevant, prefer an external source over forcing an answer from these results (this signal is reliable even without a reranker). `high`/`moderate` → relevant memory is likely present, so READ the returned summaries and judge from their content — `level` measures topical match strength, so a closely-related "near-miss" (an adjacent topic) can also read `high`; it does NOT guarantee the exact fact you asked for is stored. Treat the returned content as the source of truth and `level` only as the hint for whether to bother reading; to actually separate a near-miss from an exact match, pass `use_rerank=true` (cross-encoder), since plain cosine cannot. (`relative_margin` is kept for transparency but inflates on off-topic queries — do NOT use it to decide relevance.)
 
