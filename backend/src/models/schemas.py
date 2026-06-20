@@ -307,6 +307,19 @@ class RecallConfidence(BaseModel):
       both). ``level`` thresholds on this; a near-duplicate ``top_score`` floors
       ``level`` to at least ``moderate``.
 
+    How an agent should use it (it is a TRIAGE hint, not a correctness verdict):
+
+    - ``none`` / ``low`` → likely nothing relevant; prefer an external source over
+      forcing an answer out of these results. This is the high-value signal and is
+      reliable without a reranker.
+    - ``high`` / ``moderate`` → relevant memory is likely present; READ the returned
+      summaries and judge from their content. ``level`` measures *topical match
+      strength*, so a closely-related "near-miss" (an adjacent topic) can also read
+      ``high`` — it does NOT guarantee the exact fact you asked for is stored. The
+      returned content is the source of truth; ``level`` only says whether it is
+      worth reading. Distinguishing near-miss from an exact match needs a
+      cross-encoder (pass ``use_rerank=true``); plain bi-encoder cosine cannot.
+
     Why this supersedes the original #1047 z-score approach: that bucketed on
     ``relative_margin`` (background std-devs), but max-normalization in the hybrid
     merge erases absolute strength, and dividing by a flat off-topic tail's tiny
