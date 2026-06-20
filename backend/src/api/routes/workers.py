@@ -1,6 +1,6 @@
 """ai-worker service endpoints (Spec 2026-06-02, Plan 3).
 
-The kagura-memory-ai-worker is a Kagura-operated shared multi-tenant worker
+The kagura-chat-bridge is a Kagura-operated shared multi-tenant worker
 (Model B). It dispatches inbound platform events (e.g. Slack) by team id, then
 fetches the per-connector config from here — replacing the static
 ``connector.json`` file. Authenticated by a dedicated worker service token
