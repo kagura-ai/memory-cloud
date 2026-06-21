@@ -343,6 +343,82 @@ class APIKey(Base):
         return f"<APIKey(name='{self.name}', prefix='{self.key_prefix}')>"
 
 
+class ShareKey(Base):
+    """Context-scoped, read-only, TTL-bounded share key (Issue #1027).
+
+    A shareable credential that lets a user hand out a temporary, narrow,
+    recall-only key for **one** context without exposing their personal API
+    key. It is a *composition* of three already-shipped primitives, kept in
+    its own table so the security invariants are structural rather than
+    enforced by branching the hot ``api_keys`` auth path:
+
+    - Context scope (#629/#626 prior art): ``context_id`` binds the key to a
+      single context. Unlike ``APIKey.bound_context_id`` (which is
+      ``is_public``-only attribution), a share key may bind a **private**
+      context the user owns — confinement comes from the dedicated verify
+      path (``ShareKeyManager`` + the share-recall dependency), never from
+      inheriting the owner's current workspace.
+    - Read scope (#649): ``scope`` is fixed to ``"memory:read"``. The key is
+      only ever honored by the dedicated share-recall surface; every other
+      endpoint authenticates against ``api_keys`` and therefore rejects a
+      share key outright (fail-closed allow-list, not a verb deny-list).
+    - TTL (#889 prior art): ``expires_at`` is **always** set — a share key is
+      time-limited by construction. ``ShareKeyManager`` clamps the requested
+      lifetime to a 30-day ceiling and rejects expired keys on use.
+
+    Security:
+        - SHA256 hash (never stores plaintext)
+        - Mandatory expiry (``expires_at`` is NOT NULL)
+        - Per-key revoke + audit (``revoked_at`` / ``last_used_at``)
+    """
+
+    __tablename__ = "share_keys"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+
+    # Key material
+    key_hash: Mapped[str] = mapped_column(String(64), nullable=False, unique=True, index=True)
+    key_prefix: Mapped[str] = mapped_column(String(16), nullable=False)
+    name: Mapped[str] = mapped_column(String(100), nullable=False)
+    user_id: Mapped[str] = mapped_column(String(255), nullable=False, index=True)
+
+    # The single context this key is confined to (#1027). Required — a share
+    # key with no binding has no meaning. CASCADE so a deleted context takes
+    # its share keys with it (the key would resolve to nothing anyway).
+    context_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("contexts.id", ondelete="CASCADE"),
+        nullable=False,
+        # Index is declared explicitly in __table_args__ (idx_share_keys_context_id)
+        # rather than via index=True here, to avoid create_all emitting a second
+        # auto-named ix_share_keys_context_id that the migration does not have.
+    )
+
+    # Fixed to "memory:read". Stored explicitly (not implied) for auditability
+    # and so a future widening is an explicit, reviewable change.
+    scope: Mapped[str] = mapped_column(
+        String(32), nullable=False, default="memory:read", server_default="memory:read"
+    )
+
+    # Timestamps. expires_at is NOT NULL — share keys always expire (#1027 AC).
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime, nullable=False, server_default=func.now()
+    )
+    last_used_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    revoked_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    expires_at: Mapped[datetime] = mapped_column(DateTime, nullable=False)
+
+    __table_args__ = (
+        Index("idx_share_keys_user_name", "user_id", "name"),
+        Index("idx_share_keys_context_id", "context_id"),
+        Index("idx_share_keys_revoked", "revoked_at"),
+        Index("idx_share_keys_expires", "expires_at"),
+    )
+
+    def __repr__(self) -> str:
+        return f"<ShareKey(name='{self.name}', prefix='{self.key_prefix}')>"
+
+
 class ExternalAPIKey(Base):
     """External API Key model for third-party services (OpenAI, Cohere etc.).
 

@@ -772,6 +772,81 @@ async def require_workspace_member(
 
 
 # ============================================================================
+# Share Key Authentication (Issue #1027) — read-only, context-confined surface
+# ============================================================================
+
+
+async def get_share_key_principal(
+    authorization: str | None = Header(None),
+    db: AsyncSession = Depends(get_db),
+) -> dict:
+    """Authenticate a context-scoped share key for the share-recall surface.
+
+    This dependency is used ONLY by the dedicated share-recall endpoint
+    (#1027). A share key (``kagura_sk_...``) is structurally rejected
+    everywhere else because every other endpoint authenticates against the
+    ``api_keys`` table (a separate store) — this is the fail-closed allow-list:
+    a share key is honored on exactly one read surface, never on a write.
+
+    Confinement (the CSO gate-1 invariants for #1027):
+      - The effective workspace is derived from the BOUND CONTEXT's workspace,
+        never the owner's current workspace — so a share key cannot be
+        repurposed to reach the owner's other workspaces (mirrors the #626
+        public-bound-key privilege-escalation guard).
+      - ``current_context_id`` is forced to the bound context; the endpoint
+        confines recall to exactly this context (#963/#150 non-regression).
+
+    Raises:
+        HTTPException: 401 if the bearer is absent, is not a share key, fails
+            verification (not found / revoked / expired), or the bound context
+            no longer exists. The message is uniform so a holder cannot probe
+            which gate failed.
+    """
+    from auth.share_keys import SHARE_KEY_PREFIX, SHARE_KEY_SCOPE, ShareKeyManager
+    from models.auth import Context
+
+    token = None
+    if authorization and authorization.startswith("Bearer "):
+        token = authorization[7:]
+
+    if not token or not token.startswith(SHARE_KEY_PREFIX):
+        raise HTTPException(status_code=401, detail="Invalid or missing share key")
+
+    manager = ShareKeyManager(db)
+    verified = await manager.verify_key(token)
+    if verified is None:
+        raise HTTPException(status_code=401, detail="Invalid or missing share key")
+
+    # verify_key may have flushed last_used_at; persist it. A commit failure is
+    # non-critical metadata loss and must not fail auth.
+    try:
+        await db.commit()
+    except Exception as commit_err:  # pragma: no cover - defensive
+        logger.warning("share_key_last_used_commit_failed", error=str(commit_err))
+
+    # Effective workspace = the BOUND CONTEXT's workspace (never owner's current).
+    ctx_result = await db.execute(
+        select(Context).where(Context.id == verified.context_id, Context.deleted_at.is_(None))
+    )
+    context = ctx_result.scalar_one_or_none()
+    if context is None:
+        # Key bound to a context that is gone/deleted → treat as invalid.
+        raise HTTPException(status_code=401, detail="Invalid or missing share key")
+
+    return {
+        "user_id": verified.user_id,
+        "email": f"{verified.user_id}@share",
+        "role": "share-key",
+        "current_context_id": verified.context_id,
+        "current_workspace_id": context.workspace_id,
+        "api_key_workspace_id": None,
+        "share_key_id": verified.id,
+        "share_key_context_id": verified.context_id,
+        "scope": SHARE_KEY_SCOPE,
+    }
+
+
+# ============================================================================
 # Type Aliases
 # ============================================================================
 
@@ -782,6 +857,7 @@ APIKeyUser = Annotated[dict, Depends(verify_api_key_user)]
 APIKeyOrSessionUser = Annotated[dict, Depends(get_user_from_api_key_or_session)]
 SessionUser = Annotated[dict, Depends(require_session_auth)]  # Issue #252
 WorkspaceOwner = Annotated[tuple[str, UUID], Depends(require_workspace_owner)]  # Issue #276
+ShareKeyUser = Annotated[dict, Depends(get_share_key_principal)]  # Issue #1027
 WorkspaceAdmin = Annotated[dict, Depends(require_workspace_admin)]  # Issue #398
 WorkspaceAdminSession = Annotated[dict, Depends(require_workspace_admin_session)]  # Issue #398
 WorkspaceMember = Annotated[dict, Depends(require_workspace_member)]  # Issue #59
