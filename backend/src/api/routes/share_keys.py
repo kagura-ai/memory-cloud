@@ -21,7 +21,7 @@ from datetime import datetime
 from typing import Literal
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, status
 from pydantic import BaseModel, Field
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -36,6 +36,12 @@ from services.memory_service import MemoryService
 from services.permission_service import PermissionService
 from utils.auth_helpers import get_user_id
 from utils.datetime import utcnow
+from utils.exceptions import (
+    AuthorizationError,
+    BadRequestError,
+    NotFoundException,
+    ValidationError,
+)
 from utils.logger import get_logger
 
 logger = get_logger(__name__)
@@ -175,7 +181,7 @@ async def create_share_key(
             ttl_days=data.ttl_days,
         )
     except ValueError as e:
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e)) from e
+        raise BadRequestError(str(e)) from e
 
     await db.commit()
     response_data = _format_key_response(created)
@@ -204,10 +210,7 @@ async def revoke_share_key(
     user_id = get_user_id(user)
     revoked = await manager.revoke_key(key_id=key_id, user_id=user_id)
     if not revoked:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail="Share key not found or not owned by you",
-        )
+        raise NotFoundException("Share key not found or not owned by you")
     await db.commit()
 
 
@@ -241,20 +244,14 @@ async def share_recall(
         try:
             requested_uuid = requested if isinstance(requested, UUID) else UUID(str(requested))
         except (ValueError, TypeError) as e:
-            raise HTTPException(
-                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
-                detail="Invalid context_id",
-            ) from e
+            raise ValidationError("Invalid context_id", field="context_id") from e
         if requested_uuid != bound_context_id:
             logger.warning(
                 "share_key_bound_scope_violation",
                 share_key_id=principal.get("share_key_id"),
                 bound_context_id=str(bound_context_id),
             )
-            raise HTTPException(
-                status_code=status.HTTP_403_FORBIDDEN,
-                detail="Share key is bound to a different context",
-            )
+            raise AuthorizationError("Share key is bound to a different context")
 
     try:
         result = await memory_service.recall(
@@ -264,6 +261,6 @@ async def share_recall(
             current_workspace_id=principal["current_workspace_id"],
         )
     except ValueError as e:
-        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=str(e)) from e
+        raise ValidationError(str(e)) from e
 
     return result

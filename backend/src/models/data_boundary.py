@@ -65,6 +65,7 @@ OPERATIONAL_TABLES: frozenset[str] = frozenset(
         "oauth_device_codes",
         "oauth_tokens",
         "api_keys",
+        "share_keys",  # context-scoped read-only TTL share credential (#1027)
         "external_api_keys",
         "workspaces",
         "workspace_members",

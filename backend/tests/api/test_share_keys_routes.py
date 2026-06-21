@@ -40,18 +40,33 @@ def _principal() -> dict:
 @pytest.mark.asyncio
 async def test_mismatched_context_rejected_403() -> None:
     """A share key pointed at a different context → 403 BOUND_SCOPE_VIOLATION."""
-    from fastapi import HTTPException
+    from utils.exceptions import AuthorizationError
 
     other = uuid.uuid4()
     request = RecallRequest(query="hi", filters={"context_id": str(other)})
     svc = AsyncMock()
 
-    with pytest.raises(HTTPException) as exc:
+    with pytest.raises(AuthorizationError) as exc:
         await share_recall(request=request, principal=_principal(), memory_service=svc)
 
     assert exc.value.status_code == 403
-    assert "different context" in exc.value.detail.lower()
+    assert "different context" in exc.value.message.lower()
     svc.recall.assert_not_awaited()  # never reaches the service
+
+
+@pytest.mark.asyncio
+async def test_malformed_context_id_maps_to_422() -> None:
+    """A malformed (non-UUID) client context_id is a 422 (bad input), not a
+    403 (scope violation) — the holder gets an accurate signal."""
+    from utils.exceptions import ValidationError
+
+    request = RecallRequest(query="hi", filters={"context_id": "not-a-uuid"})
+    svc = AsyncMock()
+
+    with pytest.raises(ValidationError) as exc:
+        await share_recall(request=request, principal=_principal(), memory_service=svc)
+    assert exc.value.status_code == 422
+    svc.recall.assert_not_awaited()
 
 
 @pytest.mark.asyncio
@@ -89,12 +104,12 @@ async def test_no_filters_still_confined_to_bound() -> None:
 
 @pytest.mark.asyncio
 async def test_service_value_error_maps_to_422() -> None:
-    from fastapi import HTTPException
+    from utils.exceptions import ValidationError
 
     svc = AsyncMock()
     svc.recall = AsyncMock(side_effect=ValueError("bad context"))
     request = RecallRequest(query="hi")
 
-    with pytest.raises(HTTPException) as exc:
+    with pytest.raises(ValidationError) as exc:
         await share_recall(request=request, principal=_principal(), memory_service=svc)
     assert exc.value.status_code == 422
