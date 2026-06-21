@@ -534,6 +534,7 @@ from api.routes import (  # noqa: E402
     resource_schema,  # Issue #238: Schema Management API
     resource_tokens,  # Issue #242: Resource Token Management API
     resources,  # Issue #47: Workspace resource list
+    share_keys,  # Issue #1027: context-scoped read-only TTL share key
     sleep_reports,  # Issue #179: Sleep Report admin UI
     system,
     system_admins,
@@ -563,6 +564,13 @@ app.include_router(oauth.router, prefix="/api/v1")
 
 # API Keys routes (Issue #34 - API Keys management)
 app.include_router(api_keys.router, prefix="/api/v1")
+
+# Issue #1027: context-scoped, read-only, TTL-bounded share keys.
+#   - share_keys.router (/config/share-keys): session-auth mint/list/revoke
+#   - share_keys.recall_router (/share): the ONLY share-key-authenticated
+#     surface (read-only recall confined to the bound context).
+app.include_router(share_keys.router, prefix="/api/v1")
+app.include_router(share_keys.recall_router, prefix="/api/v1")
 
 # Admin routes (Issue #43 - User management and system-wide stats)
 app.include_router(admin.router, prefix="/api/v1")
