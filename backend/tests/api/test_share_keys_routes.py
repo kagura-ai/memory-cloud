@@ -163,24 +163,27 @@ async def test_share_sessions_empty() -> None:
 
 
 def test_share_surface_is_read_only() -> None:
-    """Permission boundary (#1064 AC): the share-key surface (/api/v1/share/*)
-    exposes ONLY read verbs — no PUT/PATCH/DELETE — so a share key can never
-    reach a write/control operation. Write routes live elsewhere behind
-    api-key/session auth, where a share key is structurally rejected."""
-    from api.main import app
+    """Permission boundary (#1064 AC): the share-key surface exposes ONLY read
+    verbs — no PUT/PATCH/DELETE — so a share key can never reach a write/control
+    operation. Write routes live elsewhere behind api-key/session auth, where a
+    share key is structurally rejected.
 
-    share_methods: set[str] = set()
-    share_paths: set[str] = set()
-    for route in app.routes:
-        path = getattr(route, "path", "")
-        if path.startswith("/api/v1/share/"):
-            share_paths.add(path)
-            share_methods |= {
-                m
-                for m in (getattr(route, "methods", None) or set())
-                if m != "HEAD" and m != "OPTIONS"
-            }
+    Introspects the ``recall_router`` definition directly (the source of truth
+    for the share surface) rather than the assembled global ``app``, so the
+    assertion is deterministic and independent of test ordering / app state in
+    the full suite.
+    """
+    from api.routes.share_keys import recall_router
 
-    assert share_paths == {"/api/v1/share/recall", "/api/v1/share/sessions"}
-    assert share_methods <= {"GET", "POST"}
-    assert not (share_methods & {"PUT", "PATCH", "DELETE"})
+    methods: set[str] = set()
+    tails: set[str] = set()
+    for route in recall_router.routes:
+        tails.add(getattr(route, "path", "").rsplit("/", 1)[-1])
+        methods |= {
+            m for m in (getattr(route, "methods", None) or set()) if m not in ("HEAD", "OPTIONS")
+        }
+
+    # The router (mounted at /api/v1/share) carries exactly the two read routes.
+    assert tails == {"recall", "sessions"}
+    assert methods <= {"GET", "POST"}
+    assert not (methods & {"PUT", "PATCH", "DELETE"})
