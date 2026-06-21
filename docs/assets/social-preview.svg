@@ -1,0 +1,64 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1280" height="640" viewBox="0 0 1280 640" role="img" aria-label="Kagura Memory Cloud — Adaptive memory for AI agents and teams, beyond RAG">
+  <title>Kagura Memory Cloud — Adaptive memory for AI agents and teams, beyond RAG</title>
+  <defs>
+    <linearGradient id="kg-tokiwa" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="#3f9168"/><stop offset="1" stop-color="#00664b"/></linearGradient>
+    <linearGradient id="kg-shu" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="#f3893a"/><stop offset="1" stop-color="#eb6100"/></linearGradient>
+    <linearGradient id="kg-ukon" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="#fdc659"/><stop offset="1" stop-color="#faa916"/></linearGradient>
+    <linearGradient id="kg-gofun" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="#f2f1cf"/><stop offset="1" stop-color="#dcdf9a"/></linearGradient>
+    <linearGradient id="kg-kodai" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="#9c79ae"/><stop offset="1" stop-color="#70477c"/></linearGradient>
+    <linearGradient id="bgGrad" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="#0d1117"/><stop offset="1" stop-color="#11161e"/></linearGradient>
+    <linearGradient id="brandBar" x1="0" y1="0" x2="1" y2="0">
+      <stop offset="0" stop-color="#00664b"/><stop offset="0.25" stop-color="#70477c"/><stop offset="0.5" stop-color="#dcdf9a"/><stop offset="0.75" stop-color="#faa916"/><stop offset="1" stop-color="#eb6100"/>
+    </linearGradient>
+    <radialGradient id="glowGreen" gradientUnits="userSpaceOnUse" cx="1080" cy="130" r="560"><stop offset="0" stop-color="#3f9168" stop-opacity="0.24"/><stop offset="1" stop-color="#3f9168" stop-opacity="0"/></radialGradient>
+    <radialGradient id="glowOrange" gradientUnits="userSpaceOnUse" cx="190" cy="540" r="540"><stop offset="0" stop-color="#eb6100" stop-opacity="0.15"/><stop offset="1" stop-color="#eb6100" stop-opacity="0"/></radialGradient>
+    <radialGradient id="glowPurple" gradientUnits="userSpaceOnUse" cx="1180" cy="600" r="440"><stop offset="0" stop-color="#70477c" stop-opacity="0.18"/><stop offset="1" stop-color="#70477c" stop-opacity="0"/></radialGradient>
+  </defs>
+
+  <!-- Background -->
+  <rect width="1280" height="640" fill="url(#bgGrad)"/>
+  <rect width="1280" height="640" fill="url(#glowGreen)"/>
+  <rect width="1280" height="640" fill="url(#glowOrange)"/>
+  <rect width="1280" height="640" fill="url(#glowPurple)"/>
+  <rect x="64" y="64" width="1152" height="512" rx="28" fill="#0d1117" fill-opacity="0.35" stroke="#30363d" stroke-opacity="0.7" stroke-width="1.5"/>
+  <rect width="1280" height="6" fill="url(#brandBar)"/>
+
+  <!-- Kagura mark (from the logo) + wordmark, top-left lockup -->
+  <g transform="translate(112 96) scale(0.66)">
+    <circle cx="100" cy="42" r="38" fill="url(#kg-tokiwa)"/>
+    <circle cx="155" cy="82" r="38" fill="url(#kg-shu)"/>
+    <circle cx="134" cy="147" r="38" fill="url(#kg-ukon)"/>
+    <circle cx="66" cy="147" r="38" fill="url(#kg-gofun)"/>
+    <circle cx="45" cy="82" r="38" fill="url(#kg-kodai)"/>
+    <g stroke="#fffffb" stroke-width="9" stroke-linecap="round" fill="#fffffb">
+      <line x1="100" y1="58" x2="100" y2="82"/>
+      <line x1="139.8" y1="87" x2="117" y2="94.4"/>
+      <line x1="124.6" y1="134" x2="110.6" y2="114.6"/>
+      <line x1="75.4" y1="134" x2="89.4" y2="114.6"/>
+      <line x1="60.2" y1="87" x2="83" y2="94.4"/>
+      <circle cx="100" cy="58" r="8" stroke="none"/>
+      <circle cx="139.8" cy="87" r="8" stroke="none"/>
+      <circle cx="124.6" cy="134" r="8" stroke="none"/>
+      <circle cx="75.4" cy="134" r="8" stroke="none"/>
+      <circle cx="60.2" cy="87" r="8" stroke="none"/>
+    </g>
+  </g>
+  <text x="244" y="178" font-family="'Segoe UI', system-ui, -apple-system, Roboto, sans-serif" font-size="62" font-weight="800" letter-spacing="-1.5"><tspan fill="#e6edf3">Kagura</tspan><tspan fill="#faa916"> AI</tspan></text>
+
+  <!-- Compatibility line, top-right -->
+  <text x="1170" y="166" text-anchor="end" font-family="'Segoe UI', system-ui, sans-serif" font-size="26" font-weight="600" fill="#8b949e">Works with Claude · ChatGPT · Gemini</text>
+
+  <!-- Headline: the product name -->
+  <text x="106" y="372" font-family="'Segoe UI', system-ui, -apple-system, Roboto, sans-serif" font-size="100" font-weight="800" letter-spacing="-2.5"><tspan fill="#f0f6fc">Memory </tspan><tspan fill="#3f9168">Cloud</tspan></text>
+  <rect x="110" y="398" width="150" height="9" rx="4.5" fill="#faa916"/>
+
+  <!-- Tagline -->
+  <text x="110" y="466" font-family="'Segoe UI', system-ui, -apple-system, Roboto, sans-serif" font-size="38" font-weight="600"><tspan fill="#adbac7">Adaptive memory for AI agents &amp; teams — </tspan><tspan fill="#faa916">beyond RAG.</tspan></text>
+
+  <!-- Feature line -->
+  <text x="110" y="518" font-family="'Segoe UI', system-ui, -apple-system, Roboto, sans-serif" font-size="25" font-weight="500" fill="#768390">Self-hosted MCP server  ·  hybrid search + a learning neural memory graph</text>
+
+  <!-- Footer -->
+  <text x="110" y="586" font-family="'Segoe UI', system-ui, sans-serif" font-size="23" font-weight="500" fill="#6e7781">Apache-2.0  ·  MCP  ·  Python 3.11+  ·  self-hosted</text>
+  <text x="1170" y="586" text-anchor="end" font-family="'Consolas', ui-monospace, monospace" font-size="23" font-weight="500" fill="#768390">github.com/kagura-ai/memory-cloud</text>
+</svg>
