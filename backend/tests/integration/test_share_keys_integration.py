@@ -30,6 +30,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from auth.api_keys import APIKeyManager
 from auth.share_keys import ShareKeyManager
 from models.auth import Context, ShareKey, User, Workspace
+from services.agent_state_service import AgentStateService
 
 
 @pytest_asyncio.fixture(loop_scope="session")
@@ -119,3 +120,30 @@ class TestShareKeyListOwnerScope:
 
         b_keys = await mgr.list_keys(s.user_b)
         assert {k.name for k in b_keys} == {"b-only"}
+
+
+class TestShareKeySessionObservation:
+    """#1064: the agent session-state read is confined to one context."""
+
+    @pytest.mark.asyncio(loop_scope="session")
+    async def test_list_state_detail_confined_to_context(self, two_users_one_context, db_session):
+        s = two_users_one_context
+        # A second context in the same workspace — its state must NOT leak into
+        # the bound context's observation view.
+        other_ctx = uuid4()
+        db_session.add(
+            Context(id=other_ctx, workspace_id=s.workspace_id, name="other", created_by=s.user_a)
+        )
+        await db_session.flush()
+
+        svc = AgentStateService(db_session)
+        await svc.set_state(s.ctx_id, "thread-1", {"status": "awaiting_approval"})
+        await svc.set_state(s.ctx_id, "thread-2", {"status": "running"})
+        await svc.set_state(other_ctx, "thread-x", {"status": "running"})
+
+        entries = await svc.list_state_detail(s.ctx_id)
+        keys = {e["key"] for e in entries}
+        assert keys == {"thread-1", "thread-2"}  # bound context only
+        assert "thread-x" not in keys  # the other context's state is not leaked
+        # Each entry carries its own recency + the raw value.
+        assert all(e.get("updated_at") is not None and e["value"] is not None for e in entries)

@@ -18,7 +18,7 @@ BOUND_SCOPE_VIOLATION, #963/#150 non-regression).
 from __future__ import annotations
 
 from datetime import datetime
-from typing import Literal
+from typing import Any, Literal
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, status
@@ -32,6 +32,7 @@ from db.base import get_db
 from models.api_base import TZAwareBaseModel
 from models.auth import ShareKey
 from models.schemas import RecallRequest, RecallResponse
+from services.agent_state_service import AgentStateService
 from services.memory_service import MemoryService
 from services.permission_service import PermissionService
 from utils.auth_helpers import get_user_id
@@ -65,6 +66,11 @@ async def get_share_key_manager(db: AsyncSession = Depends(get_db)) -> ShareKeyM
 async def get_memory_service(db: AsyncSession = Depends(get_db)) -> MemoryService:
     """Get a MemoryService bound to the request session."""
     return MemoryService(db)
+
+
+async def get_agent_state_service(db: AsyncSession = Depends(get_db)) -> AgentStateService:
+    """Get an AgentStateService bound to the request session."""
+    return AgentStateService(db)
 
 
 # ============================================================================
@@ -264,3 +270,78 @@ async def share_recall(
         raise ValidationError(str(e)) from e
 
     return result
+
+
+# ============================================================================
+# Session-state observation (share-key-authenticated, read-only) — Issue #1064
+# ============================================================================
+
+
+class SharedSessionState(TZAwareBaseModel):
+    """One agent session-state entry, projected for read-only observation (#1064)."""
+
+    key: str = Field(..., description="The agent-state key (e.g. a thread id)")
+    status: str | None = Field(
+        None, description="Extracted from value.status when the value is an object; else null"
+    )
+    awaiting_approval: bool = Field(
+        ..., description="True when status == 'awaiting_approval' — surfaces operator-gated work"
+    )
+    updated_at: datetime = Field(
+        ...,
+        description=(
+            "Checkpoint time of this entry — the consumer treats this as the *historical* "
+            "read time (memory-cloud), not 'live now' (the cockpit is authoritative for now). "
+            "Relates to #1047 staleness honesty."
+        ),
+    )
+    value: Any = Field(..., description="The raw checkpointed run-state value")
+
+
+class SharedSessionsResponse(TZAwareBaseModel):
+    """The bound context's live agent session-state, for a status board (#1064)."""
+
+    sessions: list[SharedSessionState] = Field(..., description="Live entries, most recent first")
+    count: int = Field(..., ge=0, description="Number of live entries")
+    as_of: datetime = Field(..., description="Server time this snapshot was read")
+
+
+_AWAITING_APPROVAL = "awaiting_approval"
+
+
+@recall_router.get("/sessions", response_model=SharedSessionsResponse)
+async def share_sessions(
+    principal: ShareKeyUser,
+    agent_state_service: AgentStateService = Depends(get_agent_state_service),
+) -> SharedSessionsResponse:
+    """List the bound context's live agent session-state, read-only (#1064).
+
+    A **read-only projection** of the #889/#906 agent session-state lane,
+    driven by a #1027 share key and confined to the key's bound context — so an
+    external, observe-only dashboard can render live agent status without
+    holding a privileged credential and without the agent dialling out.
+
+    Confinement and read-only-ness are structural (inherited from #1027): the
+    context comes from the verified share key (never the request), and write /
+    control verbs on the lane (`PUT`/`DELETE /contexts/{id}/state`) authenticate
+    against `api_keys` — a share key is rejected there outright. Approvals stay
+    on the cockpit/Slack operator path; this surface can only *observe*.
+    """
+    bound_context_id: UUID = principal["share_key_context_id"]
+    entries = await agent_state_service.list_state_detail(bound_context_id)
+
+    sessions = []
+    for e in entries:
+        value = e["value"]
+        status_val = value.get("status") if isinstance(value, dict) else None
+        sessions.append(
+            SharedSessionState(
+                key=e["key"],
+                status=status_val,
+                awaiting_approval=(status_val == _AWAITING_APPROVAL),
+                updated_at=e["updated_at"],
+                value=value,
+            )
+        )
+
+    return SharedSessionsResponse(sessions=sessions, count=len(sessions), as_of=utcnow())

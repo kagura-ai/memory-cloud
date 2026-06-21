@@ -119,6 +119,41 @@ class AgentStateService:
         ).all()
         return {row.key: row.value for row in rows}
 
+    async def list_state_detail(self, context_id: UUID) -> list[dict[str, Any]]:
+        """Return live entries for the context WITH per-entry recency (#1064).
+
+        Like ``list_state`` but each item carries its own ``updated_at`` so a
+        read-only observation view (e.g. an external session-status dashboard
+        driven by a #1027 share key) can render staleness honestly — the
+        consumer treats this timestamp as the *historical* checkpoint time, not
+        "live now". Same lazy-reap + live filter as ``list_state``.
+
+        Returns a list of ``{"key", "value", "updated_at"}`` dicts, ordered by
+        recency (most recently updated first).
+        """
+        await self._reap_expired_context(context_id)
+        now = utcnow()
+        rows = (
+            await self.db.execute(
+                select(
+                    AgentState.key,
+                    AgentState.value,
+                    AgentState.updated_at,
+                )
+                .where(
+                    and_(
+                        AgentState.context_id == context_id,
+                        or_(
+                            AgentState.expires_at.is_(None),
+                            AgentState.expires_at > now,
+                        ),
+                    )
+                )
+                .order_by(AgentState.updated_at.desc())
+            )
+        ).all()
+        return [{"key": row.key, "value": row.value, "updated_at": row.updated_at} for row in rows]
+
     async def delete_state(self, context_id: UUID, key: str) -> bool:
         """Delete ``(context_id, key)``. Returns True if a row was removed."""
         result = cast(
