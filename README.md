@@ -1,8 +1,8 @@
 <p align="center">
   <a href="https://www.kagura-ai.com">
     <picture>
-      <source media="(prefers-color-scheme: dark)" srcset="docs/assets/kagura-logo-dark.svg">
-      <img src="docs/assets/kagura-logo.svg" alt="Kagura Memory Cloud" width="320">
+      <source media="(prefers-color-scheme: dark)" srcset="docs/assets/social-preview.png">
+      <img src="docs/assets/readme-banner.png" alt="Kagura Memory Cloud — adaptive memory for AI agents and teams, beyond RAG" width="820">
     </picture>
   </a>
 </p>
@@ -34,7 +34,7 @@
 
 <p align="center">
   <a href="https://www.kagura-ai.com/demo/terminal-en-cli-2x.mp4">
-    <img src="https://www.kagura-ai.com/demo/terminal-en-cli.poster.png" alt="Claude Code CLI recalling from Kagura Memory over MCP" width="720">
+    <img src="docs/assets/cli-demo.gif" alt="Claude Code CLI recalling from Kagura Memory over MCP" width="760">
   </a>
   <br>
   <em>Claude Code CLI recalling memories from Kagura over MCP — <a href="https://www.kagura-ai.com/demo/terminal-en-cli-2x.mp4">▶ watch the demo</a></em>
