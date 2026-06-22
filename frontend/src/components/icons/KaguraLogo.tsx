@@ -140,7 +140,7 @@ export function KaguraLogo({
     return (
       <svg
         xmlns="http://www.w3.org/2000/svg"
-        viewBox="0 0 336 120"
+        viewBox="0 0 560 120"
         className={className}
         role="img"
         aria-label="Kagura AI"
@@ -149,10 +149,10 @@ export function KaguraLogo({
           href="/brand/kagura-mark.png"
           x="6"
           y="8"
-          width="104"
+          width="108"
           height="104"
         />
-        <image href={wordmark} x="120" y="34" width="207" height="52" />
+        <image href={wordmark} x="146" y="18" width="408" height="102" />
       </svg>
     );
   }
