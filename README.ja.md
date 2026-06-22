@@ -1,8 +1,8 @@
 <p align="center">
   <a href="https://www.kagura-ai.com/ja/">
     <picture>
-      <source media="(prefers-color-scheme: dark)" srcset="docs/assets/kagura-logo-dark.svg">
-      <img src="docs/assets/kagura-logo.svg" alt="Kagura Memory Cloud" width="320">
+      <source media="(prefers-color-scheme: dark)" srcset="docs/assets/social-preview.png">
+      <img src="docs/assets/readme-banner.png" alt="Kagura Memory Cloud — AI エージェントとチームのための適応的メモリ、RAG を超えて" width="820">
     </picture>
   </a>
 </p>
@@ -30,6 +30,14 @@
 <p align="center">
   Claude、ChatGPT、Gemini、その他あらゆる MCP 互換クライアントで動作。<br>
   <a href="https://github.com/kagura-ai/kagura-memory-python-sdk"><strong>Python SDK (KaguraClient / KaguraAgent)</strong></a>
+</p>
+
+<p align="center">
+  <a href="https://www.kagura-ai.com/demo/terminal-en-cli-2x.mp4">
+    <img src="docs/assets/cli-demo.gif" alt="Claude Code から Kagura Memory を MCP 経由で recall" width="760">
+  </a>
+  <br>
+  <em>Claude Code から過去のメモリを recall — MCP 経由の Kagura Memory。<a href="https://www.kagura-ai.com/demo/terminal-en-cli-2x.mp4">▶ デモを見る</a></em>
 </p>
 
 ## なぜ Kagura Memory Cloud か？
