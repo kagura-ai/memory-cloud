@@ -263,7 +263,7 @@ function DevicePageInner() {
 
       <div className="relative w-full max-w-md px-4">
         <div className="mb-8 flex justify-center">
-          <KaguraLogo className="h-24 w-auto" variant="image" />
+          <KaguraLogo className="h-20 w-auto" variant="image" />
         </div>
 
         <Card className="overflow-hidden border-gray-200 bg-white/80 shadow-2xl backdrop-blur-xl">
