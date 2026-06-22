@@ -152,7 +152,7 @@ export function KaguraLogo({
           width="108"
           height="104"
         />
-        <image href={wordmark} x="146" y="18" width="408" height="102" />
+        <image href={wordmark} x="146" y="23" width="408" height="102" />
       </svg>
     );
   }
