@@ -17,9 +17,13 @@ interface KaguraLogoProps {
    * "full" (default) = SVG mark + SVG wordmark text (theme-adaptive via
    * currentColor — use on dark surfaces like the sidebar). "mark" = pinwheel
    * only. "image" = the official brand PNGs (mark + wordmark) embedded via
-   * SVG <image> — pixel-perfect typography; use on the always-light auth pages.
+   * SVG <image> — pixel-perfect typography. Pair with `surface` to pick the
+   * wordmark colour: "light" surface → dark wordmark (auth pages), "dark"
+   * surface → white wordmark (e.g. the dashboard sidebar).
    */
   variant?: "full" | "mark" | "image";
+  /** For variant="image": tone of the surface behind the lockup. Default "light". */
+  surface?: "light" | "dark";
 }
 
 const PETALS = [
@@ -72,21 +76,43 @@ function MarkBody() {
   return (
     <>
       {PETALS.map((p) => (
-        <circle key={p.grad} cx={p.cx} cy={p.cy} r="38" fill={`url(#${p.grad})`} />
+        <circle
+          key={p.grad}
+          cx={p.cx}
+          cy={p.cy}
+          r="38"
+          fill={`url(#${p.grad})`}
+        />
       ))}
       <g stroke="#fffffb" strokeWidth="9" strokeLinecap="round" fill="#fffffb">
         {NOTCHES.map((n) => (
-          <line key={`s-${n.hx}-${n.hy}`} x1={n.hx} y1={n.hy} x2={n.sx} y2={n.sy} />
+          <line
+            key={`s-${n.hx}-${n.hy}`}
+            x1={n.hx}
+            y1={n.hy}
+            x2={n.sx}
+            y2={n.sy}
+          />
         ))}
         {NOTCHES.map((n) => (
-          <circle key={`h-${n.hx}-${n.hy}`} cx={n.hx} cy={n.hy} r="8" stroke="none" />
+          <circle
+            key={`h-${n.hx}-${n.hy}`}
+            cx={n.hx}
+            cy={n.hy}
+            r="8"
+            stroke="none"
+          />
         ))}
       </g>
     </>
   );
 }
 
-export function KaguraLogo({ className = "h-10 w-auto", variant = "full" }: KaguraLogoProps) {
+export function KaguraLogo({
+  className = "h-10 w-auto",
+  variant = "full",
+  surface = "light",
+}: KaguraLogoProps) {
   if (variant === "mark") {
     return (
       <svg
@@ -104,7 +130,13 @@ export function KaguraLogo({ className = "h-10 w-auto", variant = "full" }: Kagu
 
   if (variant === "image") {
     // Official brand PNGs (transparent) embedded via SVG <image> so the lockup
-    // scales with `className` and avoids the next/image <img> lint rule.
+    // scales with `className` and avoids the next/image <img> lint rule. On dark
+    // surfaces (e.g. the sidebar) the black wordmark is swapped for a white one;
+    // the mark PNG is theme-independent (transparent pinwheel) so it needs none.
+    const wordmark =
+      surface === "dark"
+        ? "/brand/kagura-wordmark-light.png"
+        : "/brand/kagura-wordmark.png";
     return (
       <svg
         xmlns="http://www.w3.org/2000/svg"
@@ -113,14 +145,14 @@ export function KaguraLogo({ className = "h-10 w-auto", variant = "full" }: Kagu
         role="img"
         aria-label="Kagura AI"
       >
-        <image href="/brand/kagura-mark.png" x="6" y="8" width="104" height="104" />
         <image
-          href="/brand/kagura-wordmark.png"
-          x="120"
-          y="34"
-          width="207"
-          height="52"
+          href="/brand/kagura-mark.png"
+          x="6"
+          y="8"
+          width="104"
+          height="104"
         />
+        <image href={wordmark} x="120" y="34" width="207" height="52" />
       </svg>
     );
   }
