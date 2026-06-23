@@ -1,6 +1,6 @@
 """Tests for DecayManager."""
 
-from datetime import timedelta
+from datetime import datetime, timedelta
 
 import pytest
 
@@ -74,15 +74,34 @@ class TestDecayManager:
         assert manager._last_decay_time is not None
 
     @pytest.mark.asyncio
-    async def test_apply_decay_subsequent_run(self, manager, mock_graph):
-        """Test subsequent decay uses actual time delta."""
-        # First run
+    async def test_apply_decay_subsequent_run(self, manager, monkeypatch):
+        """A subsequent run advances ``_last_decay_time`` and decays by the real Δt.
+
+        The clock is injected (monkeypatched ``neural.decay.utcnow``) so the test
+        is deterministic. A real back-to-back call pair can read an identical
+        coarse-resolution timestamp, which made a bare ``>`` comparison flaky —
+        and worse, an equal timestamp yields ``Δt == 0`` which short-circuits
+        ``apply_decay`` *before* ``_last_decay_time`` is updated, so the bug the
+        assertion guards against could never be observed reliably.
+        """
+        base = datetime(2026, 1, 1, 12, 0, 0)
+        clock = {"now": base}
+        monkeypatch.setattr("neural.decay.utcnow", lambda: clock["now"])
+
+        # First run anchors the last-decay timestamp at ``base``.
         await manager.apply_decay("test_user")
         first_time = manager._last_decay_time
+        assert first_time == base
 
-        # Second run should use delta from first run
-        await manager.apply_decay("test_user")
+        # Advance the injected clock by a known delta, then run again.
+        clock["now"] = base + timedelta(seconds=30)
+        result = await manager.apply_decay("test_user")
+
+        # The timestamp strictly advanced...
+        assert manager._last_decay_time == base + timedelta(seconds=30)
         assert manager._last_decay_time > first_time
+        # ...and the *real* elapsed delta (not the default interval) drove decay.
+        assert result["delta_seconds"] == 30
 
     @pytest.mark.asyncio
     async def test_apply_decay_prunes_weak_edges(self, manager, mock_graph):
