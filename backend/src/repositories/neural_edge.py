@@ -752,13 +752,24 @@ class NeuralEdgeRepository:
         while queue:
             current_id, current_weight, current_hop = queue.pop(0)
 
-            # Skip if already visited or exceeded max hops
-            if current_id in visited or current_hop >= max_hops:
+            # Skip if already visited
+            if current_id in visited:
                 continue
 
             # Record visit (exclude starting node from results)
             if current_id != node_id:
                 visited[current_id] = (current_weight, current_hop)
+
+            # Stop *expanding* once we have reached the max traversal depth.
+            # The node at current_hop is still recorded above (it is within
+            # max_hops); we just do not enqueue its neighbours. Guarding the
+            # expansion rather than the recording is what makes max_hops=1
+            # return direct neighbours, matching the documented contract.
+            # (Previously the depth guard ``current_hop >= max_hops`` fired
+            # *before* recording, so max_hops=1 returned [] and direct
+            # neighbours only surfaced at max_hops>=2 — an off-by-one.)
+            if current_hop >= max_hops:
+                continue
 
             # Get outgoing edges with 3-level isolation
             outgoing = await self.get_outgoing_edges(

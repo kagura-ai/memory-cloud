@@ -70,8 +70,13 @@ class MemoryRepository(BaseRepository[Memory]):
             if conditions:
                 query = query.where(and_(*conditions))
 
-        # Order by created_at DESC
-        query = query.order_by(desc(Memory.created_at))
+        # Order by created_at DESC, with id as a unique tiebreaker so
+        # pagination is deterministic when rows share a created_at value
+        # (a tie on created_at otherwise lets Postgres return an arbitrary,
+        # unstable order across the offset/limit windows, which can skip or
+        # duplicate rows between pages). Mirrors the tiebreaker pattern used
+        # by the importance-ordered query below.
+        query = query.order_by(desc(Memory.created_at), desc(Memory.id))
 
         # Pagination
         query = query.offset(skip).limit(limit)
