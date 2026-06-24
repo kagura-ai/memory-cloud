@@ -25,7 +25,7 @@ def _read_env_file(path: Path) -> dict[str, str]:
     env = {}
     if not path.exists():
         return env
-    for line in path.read_text().splitlines():
+    for line in path.read_text(encoding="utf-8").splitlines():
         line = line.strip()
         if not line or line.startswith("#"):
             continue
@@ -51,7 +51,7 @@ def _set_env_value(key: str, value: str):
 
     if existing is not None:
         # Replace placeholder in-place
-        content = _env_local.read_text()
+        content = _env_local.read_text(encoding="utf-8")
         lines = content.splitlines()
         new_lines = []
         for line in lines:
@@ -62,10 +62,10 @@ def _set_env_value(key: str, value: str):
                     new_lines.append(f"{key}={value}")
                     continue
             new_lines.append(line)
-        _env_local.write_text("\n".join(new_lines) + "\n")
+        _env_local.write_text("\n".join(new_lines) + "\n", encoding="utf-8")
     else:
         # Append new key
-        with open(_env_local, "a") as f:
+        with open(_env_local, "a", encoding="utf-8") as f:
             f.write(f"\n{key}={value}\n")
 
 

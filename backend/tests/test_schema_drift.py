@@ -455,7 +455,7 @@ def _migration_revision_metadata(path: Path) -> tuple[str | None, list[str]]:
     three forms are flattened into a list for uniform graph construction.
     """
     try:
-        tree = ast.parse(path.read_text(), filename=str(path))
+        tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
     except SyntaxError:
         return (None, [])
     rev: str | None = None
@@ -567,7 +567,7 @@ def _build_latest_migration_check_map() -> dict[tuple[str, str], str]:
     each ``(table, name)`` wins."""
     latest: dict[tuple[str, str], str] = {}
     for path in _migrations_in_dependency_order():
-        extractor = _MigrationCheckExtractor(path.read_text(), path)
+        extractor = _MigrationCheckExtractor(path.read_text(encoding="utf-8"), path)
         for table, name, sql in extractor.checks:
             latest[(table, name)] = sql
     return latest
