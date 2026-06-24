@@ -25,7 +25,7 @@ import uuid
 from datetime import timedelta
 from unittest.mock import AsyncMock, MagicMock, patch
 
-import numpy  # noqa: F401  isort: skip
+import numpy  # noqa: F401  isort: skip  # load-bearing: pre-load numpy's C ext before --cov instrumentation (else "cannot load module more than once")
 import pydantic.root_model  # noqa: F401  isort: skip
 import pytest_asyncio
 

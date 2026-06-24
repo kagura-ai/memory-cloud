@@ -670,7 +670,7 @@ class TestServerConstruction:
         assert isinstance(extensions, list) and len(extensions) == 1
 
     def test_query_client_func_delegates(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        monkeypatch.setattr(mod, "get_settings", lambda: _SettingsStub())
+        monkeypatch.setattr(mod, "get_settings", _SettingsStub)
         client = _make_client()
         session = MagicMock()
         session.query.return_value.filter_by.return_value.first.return_value = client
@@ -680,7 +680,7 @@ class TestServerConstruction:
         assert wrapper.server.query_client("oauth_test123") is client
 
     def test_save_token_func_delegates(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        monkeypatch.setattr(mod, "get_settings", lambda: _SettingsStub())
+        monkeypatch.setattr(mod, "get_settings", _SettingsStub)
         session = MagicMock()
         wrapper = OAuth2AuthorizationServer(session)
 
@@ -734,7 +734,7 @@ class TestFactory:
     def test_create_authorization_server_returns_wrapper(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        monkeypatch.setattr(mod, "get_settings", lambda: _SettingsStub())
+        monkeypatch.setattr(mod, "get_settings", _SettingsStub)
         session = MagicMock()
 
         server = create_authorization_server(session)
@@ -907,7 +907,7 @@ class TestDeviceAuthorizationGrant:
         assert grant.query_user_grant("NONEXIST") is None
 
     def test_should_slow_down_first_poll(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        monkeypatch.setattr(mod, "get_settings", lambda: _SettingsStub())
+        monkeypatch.setattr(mod, "get_settings", _SettingsStub)
         grant = _make_device_grant()
         device = _make_device(last_polled_at=None)
 
@@ -915,7 +915,7 @@ class TestDeviceAuthorizationGrant:
         assert device.last_polled_at is not None
 
     def test_should_slow_down_rapid_poll(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        monkeypatch.setattr(mod, "get_settings", lambda: _SettingsStub())
+        monkeypatch.setattr(mod, "get_settings", _SettingsStub)
         grant = _make_device_grant()
         device = _make_device(last_polled_at=utcnow() - timedelta(seconds=1))
 
@@ -923,7 +923,7 @@ class TestDeviceAuthorizationGrant:
         assert grant.should_slow_down(device) is True
 
     def test_should_slow_down_after_interval(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        monkeypatch.setattr(mod, "get_settings", lambda: _SettingsStub())
+        monkeypatch.setattr(mod, "get_settings", _SettingsStub)
         grant = _make_device_grant()
         device = _make_device(last_polled_at=utcnow() - timedelta(seconds=10))
 
@@ -939,7 +939,7 @@ class TestCustomAuthorizationServerMethods:
     """create_oauth2_request / handle_response / send_signal on the inner server."""
 
     def _inner_server(self, monkeypatch: pytest.MonkeyPatch) -> Any:
-        monkeypatch.setattr(mod, "get_settings", lambda: _SettingsStub())
+        monkeypatch.setattr(mod, "get_settings", _SettingsStub)
         return OAuth2AuthorizationServer(MagicMock()).server
 
     def test_create_oauth2_request_passthrough(self, monkeypatch: pytest.MonkeyPatch) -> None:
