@@ -16,7 +16,14 @@ from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from models.memory import Memory
-from models.retrieval_feedback import NOTE_MAX_LEN, QUERY_MAX_LEN, RetrievalFeedback
+from models.retrieval_feedback import (
+    _ALL_FEEDBACK_PROVENANCES,
+    FEEDBACK_PROVENANCE_AGENT,
+    FEEDBACK_PROVENANCE_HOST,
+    NOTE_MAX_LEN,
+    QUERY_MAX_LEN,
+    RetrievalFeedback,
+)
 from utils.exceptions import NotFoundException
 
 
@@ -47,6 +54,7 @@ class FeedbackService:
         user_id: str,
         query: str | None = None,
         note: str | None = None,
+        provenance: str = FEEDBACK_PROVENANCE_AGENT,
     ) -> RetrievalFeedback:
         """Append one feedback event. Query/note are truncated, never embedded.
 
@@ -59,7 +67,16 @@ class FeedbackService:
         a context they cannot read (cross-context signal injection). A uniform
         ``NotFoundException`` is raised on miss (same IDOR-safe shape as the
         context gate; does not reveal whether the memory exists elsewhere).
+
+        Issue #1065: ``provenance`` is server-stamped. The public feedback path
+        (REST/MCP) never passes it, so an agent's signal is always ``agent`` (it
+        cannot forge ``host``); only :meth:`record_host_feedback` stamps ``host``.
         """
+        if provenance not in _ALL_FEEDBACK_PROVENANCES:
+            raise ValueError(
+                f"invalid feedback provenance {provenance!r}; "
+                f"expected one of {_ALL_FEEDBACK_PROVENANCES}"
+            )
         exists = (
             await self.db.execute(
                 select(Memory.id).where(
@@ -79,23 +96,67 @@ class FeedbackService:
             user_id=user_id,
             query=query[:QUERY_MAX_LEN] if query is not None else None,
             note=note[:NOTE_MAX_LEN] if note is not None else None,
+            provenance=provenance,
         )
         self.db.add(row)
         await self.db.commit()
         await self.db.refresh(row)
         return row
 
-    async def aggregate_for_memory(self, context_id: UUID, memory_id: UUID) -> FeedbackAggregate:
-        """Net-helpful tally for one memory in a context (read-time only)."""
+    async def record_host_feedback(
+        self,
+        context_id: UUID,
+        memory_id: UUID,
+        helpful: bool,
+        user_id: str,
+        verdict: str,
+        query: str | None = None,
+    ) -> RetrievalFeedback:
+        """Record a HOST-ARBITRATED, forge-resistant feedback signal (Issue #1065).
+
+        The substrate seam for a trusted host/cockpit to stamp a reinforce signal
+        backed by an **independent verdict** (a check/test exit code or an operator
+        HITL approval) — never the agent's self-report. Stamps
+        ``provenance='host'`` so the re-rank can weight it distinctly from an
+        agent's self-emitted ``feedback`` for untrusted callers.
+
+        This is deliberately NOT exposed on the agent-callable feedback() path —
+        the *computation* of the verdict is the host's job (e.g.
+        ``kagura-ai/kagura-agent#165``); this records its outcome with
+        server-authoritative provenance. The verdict reference is preserved in the
+        note for audit.
+        """
+        host_note = f"host-verdict: {verdict}"
+        return await self.record_feedback(
+            context_id=context_id,
+            memory_id=memory_id,
+            helpful=helpful,
+            user_id=user_id,
+            query=query,
+            note=host_note,
+            provenance=FEEDBACK_PROVENANCE_HOST,
+        )
+
+    async def aggregate_for_memory(
+        self, context_id: UUID, memory_id: UUID, *, host_only: bool = False
+    ) -> FeedbackAggregate:
+        """Net-helpful tally for one memory in a context (read-time only).
+
+        Issue #1065: ``host_only`` counts only host-arbitrated (forge-resistant)
+        feedback — the unforgeable signal — for untrusted callers.
+        """
+        conditions = [
+            RetrievalFeedback.context_id == context_id,
+            RetrievalFeedback.memory_id == memory_id,
+        ]
+        if host_only:
+            conditions.append(RetrievalFeedback.provenance == FEEDBACK_PROVENANCE_HOST)
         result = await self.db.execute(
             select(
                 RetrievalFeedback.helpful,
                 func.count().label("n"),
             )
-            .where(
-                RetrievalFeedback.context_id == context_id,
-                RetrievalFeedback.memory_id == memory_id,
-            )
+            .where(*conditions)
             .group_by(RetrievalFeedback.helpful)
         )
         helpful_count = 0
@@ -112,26 +173,34 @@ class FeedbackService:
         )
 
     async def aggregate_for_memories(
-        self, context_id: UUID, memory_ids: list[UUID]
+        self, context_id: UUID, memory_ids: list[UUID], *, host_only: bool = False
     ) -> dict[str, FeedbackAggregate]:
         """Batch net-helpful tallies for many memories in a context (one query).
 
         Issue #1048: the recall reinforce re-rank needs feedback for every
         candidate without N round-trips. Returns a dict keyed by ``str(memory_id)``;
         memories with no feedback are absent (callers treat missing as net=0).
+
+        Issue #1065: ``host_only`` restricts the tally to host-arbitrated
+        (provenance='host') feedback — the forge-resistant signal an untrusted
+        agent cannot emit. With it set, agent self-emitted feedback contributes
+        nothing to ranking.
         """
         if not memory_ids:
             return {}
+        conditions = [
+            RetrievalFeedback.context_id == context_id,
+            RetrievalFeedback.memory_id.in_(memory_ids),
+        ]
+        if host_only:
+            conditions.append(RetrievalFeedback.provenance == FEEDBACK_PROVENANCE_HOST)
         result = await self.db.execute(
             select(
                 RetrievalFeedback.memory_id,
                 RetrievalFeedback.helpful,
                 func.count().label("n"),
             )
-            .where(
-                RetrievalFeedback.context_id == context_id,
-                RetrievalFeedback.memory_id.in_(memory_ids),
-            )
+            .where(*conditions)
             .group_by(RetrievalFeedback.memory_id, RetrievalFeedback.helpful)
         )
         counts: dict[str, list[int]] = {}  # str(memory_id) -> [helpful, not_helpful]

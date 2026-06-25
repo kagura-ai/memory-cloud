@@ -278,3 +278,40 @@ async def test_aggregate_for_memories_batch(db_session: AsyncSession, feedback_s
     assert agg[str(mem_a.id)].net == 2
     assert str(mem_b.id) not in agg  # no feedback → absent
     assert await svc.aggregate_for_memories(s["ctx"].id, []) == {}
+
+
+@pytest.mark.asyncio
+async def test_host_only_aggregation_excludes_agent_feedback(
+    db_session: AsyncSession, feedback_scenario
+):
+    """Issue #1065: host_only counts ONLY host-arbitrated feedback — an agent's
+    self-emitted feedback contributes nothing to the forge-resistant tally."""
+    s = feedback_scenario
+    svc = FeedbackService(db_session)
+    mem = s["mem"]
+
+    # Agent forges 3 helpful; the host independently verdicts 1 helpful.
+    for _ in range(3):
+        await svc.record_feedback(s["ctx"].id, mem.id, True, s["owner"])  # provenance='agent'
+    await svc.record_host_feedback(s["ctx"].id, mem.id, True, s["owner"], verdict="check_exit=0")
+
+    # Default (all provenances): the agent self-report inflates the tally.
+    all_agg = await svc.aggregate_for_memories(s["ctx"].id, [mem.id])
+    assert all_agg[str(mem.id)].helpful_count == 4
+
+    # Forge-resistant: only the 1 host-arbitrated signal counts.
+    host_agg = await svc.aggregate_for_memories(s["ctx"].id, [mem.id], host_only=True)
+    assert host_agg[str(mem.id)].helpful_count == 1
+    assert host_agg[str(mem.id)].net == 1
+
+    # The default-stamped agent rows really are 'agent' (server-authoritative).
+    provenances = (
+        (
+            await db_session.execute(
+                select(RetrievalFeedback.provenance).where(RetrievalFeedback.memory_id == mem.id)
+            )
+        )
+        .scalars()
+        .all()
+    )
+    assert sorted(provenances) == ["agent", "agent", "agent", "host"]

@@ -109,6 +109,14 @@ class ContextSearchConfig(Base):
     reinforce_max_boost: Mapped[Decimal] = mapped_column(
         DECIMAL(3, 2), nullable=False, server_default="0.15", default=Decimal("0.15")
     )
+    # Issue #1065: forge-resistant mode. When true, the reinforce re-rank counts
+    # ONLY host-arbitrated feedback (provenance='host') — an untrusted agent's
+    # self-emitted feedback(helpful=True) can no longer move ranking. Default OFF
+    # preserves #1048 behaviour (all feedback counts). Enable on contexts exposed
+    # to untrusted autonomous agents (e.g. trust_tier='external').
+    reinforce_require_host_arbitration: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, server_default="false", default=False
+    )
 
     # Timestamps
     created_at: Mapped[datetime] = mapped_column(

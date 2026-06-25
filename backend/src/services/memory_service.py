@@ -1570,6 +1570,11 @@ class MemoryService:
             if cfg is None or not getattr(cfg, "reinforce_enabled", False):
                 return
             max_boost = float(cfg.reinforce_max_boost)
+            # Issue #1065: forge-resistant mode. When set, only host-arbitrated
+            # feedback (an unforgeable, independently-verdicted signal) moves
+            # ranking — an untrusted agent's self-emitted feedback(helpful=True)
+            # is ignored. Default OFF → all feedback counts (pre-#1065 behaviour).
+            require_host = bool(getattr(cfg, "reinforce_require_host_arbitration", False))
 
             from services.feedback_service import FeedbackService
 
@@ -1580,7 +1585,9 @@ class MemoryService:
                 if mem is not None and mem.id not in seen:
                     seen.add(mem.id)
                     cand_ids.append(mem.id)
-            feedback = await FeedbackService(self.db).aggregate_for_memories(context_id, cand_ids)
+            feedback = await FeedbackService(self.db).aggregate_for_memories(
+                context_id, cand_ids, host_only=require_host
+            )
             now = utcnow()
 
             # Precompute the per-memory factor once (id-keyed) so the sort key and the
@@ -1630,6 +1637,7 @@ class MemoryService:
                     "reinforce_rerank_applied",
                     context_id=str(context_id),
                     max_boost=round(max_boost, 4),
+                    require_host_arbitration=require_host,
                     **self._reinforce_telemetry(
                         order_before=order_before,
                         order_after=order_after,

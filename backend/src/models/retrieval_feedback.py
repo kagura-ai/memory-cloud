@@ -27,7 +27,17 @@ from __future__ import annotations
 import uuid
 from datetime import datetime
 
-from sqlalchemy import Boolean, DateTime, ForeignKey, Index, String, Text, func, text
+from sqlalchemy import (
+    Boolean,
+    CheckConstraint,
+    DateTime,
+    ForeignKey,
+    Index,
+    String,
+    Text,
+    func,
+    text,
+)
 from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.orm import Mapped, mapped_column
 
@@ -40,6 +50,23 @@ QUERY_MAX_LEN = 1024
 # single source of truth enforced at every boundary (API schema, MCP handler,
 # service truncation) to avoid silent truncation / unbounded request bodies.
 NOTE_MAX_LEN = 2000
+
+# Issue #1065: server-stamped provenance of a feedback signal. ``agent`` is the
+# default — the signal an autonomous caller emits via feedback(), which a
+# hijacked / prompt-injected agent can forge to manufacture its own ranking
+# boost. ``host`` is the forge-resistant variant: stamped server-side as
+# originating from the trusted host/cockpit and backed by an INDEPENDENT verdict
+# (a check/test result or an operator HITL approval), never the agent's
+# self-report. The agent-callable feedback() path can only ever produce ``agent``
+# (the public schema does not expose this field); only the host-arbitration seam
+# stamps ``host``. Recall ranking (#1048) can be configured to weight only the
+# unforgeable signal for untrusted callers.
+FEEDBACK_PROVENANCE_AGENT = "agent"
+FEEDBACK_PROVENANCE_HOST = "host"
+_ALL_FEEDBACK_PROVENANCES: tuple[str, ...] = (
+    FEEDBACK_PROVENANCE_AGENT,
+    FEEDBACK_PROVENANCE_HOST,
+)
 
 
 class RetrievalFeedback(Base):
@@ -71,6 +98,16 @@ class RetrievalFeedback(Base):
     # Optional free-text note (e.g. why it was wrong). Truncation enforced in the
     # service layer; Text column keeps the model permissive.
     note: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # Issue #1065: server-stamped provenance — 'agent' (forgeable self-report,
+    # the default) vs 'host' (host/cockpit-arbitrated, backed by an independent
+    # verdict). Server-authoritative: clients cannot set it (not on the public
+    # schema), so an agent's signal is always 'agent'.
+    provenance: Mapped[str] = mapped_column(
+        String(16),
+        nullable=False,
+        server_default=FEEDBACK_PROVENANCE_AGENT,
+        default=FEEDBACK_PROVENANCE_AGENT,
+    )
     # Naive UTC by convention (engine pins the session to UTC).
     created_at: Mapped[datetime] = mapped_column(
         DateTime, nullable=False, server_default=func.now()
@@ -80,4 +117,10 @@ class RetrievalFeedback(Base):
         # Aggregation reads (net-helpful per memory within a context) scan by
         # this pair — the append-only log has no unique key.
         Index("idx_retrieval_feedback_context_memory", "context_id", "memory_id"),
+        # Provenance is a closed enum — reject anything but the known kinds so a
+        # bad value can never silently slip past the forge-resistant aggregation.
+        CheckConstraint(
+            "provenance IN ('agent', 'host')",
+            name="valid_retrieval_feedback_provenance",
+        ),
     )
