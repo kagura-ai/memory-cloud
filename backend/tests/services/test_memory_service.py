@@ -1387,7 +1387,11 @@ class TestReinforceRerank:
         from services.feedback_service import FeedbackAggregate
 
         svc = MemoryService(MagicMock())
-        cfg = MagicMock(reinforce_enabled=True, reinforce_max_boost=Decimal("0.15"))
+        cfg = MagicMock(
+            reinforce_enabled=True,
+            reinforce_max_boost=Decimal("0.15"),
+            reinforce_require_host_arbitration=False,
+        )
         old = datetime(2020, 1, 1)
         mem_a = MagicMock(id=uuid4(), reference_count=0, importance=0.5, created_at=old)
         mem_b = MagicMock(id=uuid4(), reference_count=10, importance=0.9, created_at=old)
@@ -1415,7 +1419,11 @@ class TestReinforceRerank:
         from decimal import Decimal
 
         svc = MemoryService(MagicMock())
-        cfg = MagicMock(reinforce_enabled=True, reinforce_max_boost=Decimal("0.15"))
+        cfg = MagicMock(
+            reinforce_enabled=True,
+            reinforce_max_boost=Decimal("0.15"),
+            reinforce_require_host_arbitration=False,
+        )
         old = datetime(2020, 1, 1)
         mem_a = MagicMock(id=uuid4(), reference_count=0, importance=0.5, created_at=old)
         mem_b = MagicMock(id=uuid4(), reference_count=50, importance=1.0, created_at=old)
@@ -1493,7 +1501,11 @@ class TestReinforceRerank:
         from decimal import Decimal
 
         svc = MemoryService(MagicMock())
-        cfg = MagicMock(reinforce_enabled=True, reinforce_max_boost=Decimal("0.15"))
+        cfg = MagicMock(
+            reinforce_enabled=True,
+            reinforce_max_boost=Decimal("0.15"),
+            reinforce_require_host_arbitration=False,
+        )
         old = datetime(2020, 1, 1)
         mem_a = MagicMock(id=uuid4(), reference_count=0, importance=0.5, created_at=old)
         mem_b = MagicMock(id=uuid4(), reference_count=10, importance=0.9, created_at=old)
@@ -1538,7 +1550,11 @@ class TestReinforceRerank:
         from decimal import Decimal
 
         svc = MemoryService(MagicMock())
-        cfg = MagicMock(reinforce_enabled=True, reinforce_max_boost=Decimal("0.15"))
+        cfg = MagicMock(
+            reinforce_enabled=True,
+            reinforce_max_boost=Decimal("0.15"),
+            reinforce_require_host_arbitration=False,
+        )
         old = datetime(2020, 1, 1)
         mem_a = MagicMock(id=uuid4(), reference_count=0, importance=0.5, created_at=old)
         mem_b = MagicMock(id=uuid4(), reference_count=10, importance=0.9, created_at=old)
