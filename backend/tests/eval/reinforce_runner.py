@@ -154,6 +154,21 @@ async def _run_reinforce_arms(
     evaluate the rollout gate. Neural memory is forced OFF so the only thing that
     changes between arms is the reinforce re-rank itself.
     """
+    # Fail fast on a malformed corpus: a typo'd / missing population would be
+    # silently dropped from the per-population breakdown, shrinking the gate's
+    # sample with no error. Every query must carry a recognized population and
+    # both populations must be represented, or the A/B is not what it claims.
+    by_population: dict[str, int] = dict.fromkeys(POPULATIONS, 0)
+    for q in corpus.queries:
+        if q.population not in by_population:
+            raise RuntimeError(
+                f"query {q.id!r} has population {q.population!r}; expected one of {POPULATIONS}"
+            )
+        by_population[q.population] += 1
+    empty = [p for p, n in by_population.items() if n == 0]
+    if empty:
+        raise RuntimeError(f"reinforce corpus has no queries for population(s) {empty}")
+
     rev: dict[str, UUID] = {doc_id: UUID(mid) for mid, doc_id in id_map.items()}
     adopted_docs = {d for d in corpus.meta.get("adopted_docs", []) if d in rev}
     adopted_mem_ids = [rev[d] for d in sorted(adopted_docs)]

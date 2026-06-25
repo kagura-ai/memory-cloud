@@ -1475,6 +1475,34 @@ class TestReinforceRerank:
         events = [c.args[0] for c in log.info.call_args_list]
         assert "reinforce_rerank_applied" not in events
 
+    @pytest.mark.asyncio
+    async def test_telemetry_failure_does_not_mask_applied_rerank(self):
+        # A telemetry/log failure must NOT emit the misleading "skipped" signal the
+        # rollout is monitored on (the re-rank already fired), and must not break
+        # recall. It surfaces as a distinct reinforce_telemetry_failed instead.
+        from decimal import Decimal
+
+        svc = MemoryService(MagicMock())
+        cfg = MagicMock(reinforce_enabled=True, reinforce_max_boost=Decimal("0.15"))
+        old = datetime(2020, 1, 1)
+        mem_a = MagicMock(id=uuid4(), reference_count=0, importance=0.5, created_at=old)
+        mem_b = MagicMock(id=uuid4(), reference_count=10, importance=0.9, created_at=old)
+        memories = {"a": mem_a, "b": mem_b}
+        sr = [{"id": "a", "hybrid_score": 0.85}, {"id": "b", "hybrid_score": 0.80}]
+        with (
+            patch("repositories.config_repository.ContextSearchConfigRepository") as Repo,
+            patch("services.feedback_service.FeedbackService") as FB,
+            patch.object(MemoryService, "_reinforce_telemetry", side_effect=RuntimeError("boom")),
+            patch("services.memory_service.logger") as log,
+        ):
+            Repo.return_value.get_by_context = AsyncMock(return_value=cfg)
+            FB.return_value.aggregate_for_memories = AsyncMock(return_value={})
+            await svc._maybe_reinforce_rerank(sr, memories, uuid4(), top_k=10)
+        warn_events = [c.args[0] for c in log.warning.call_args_list]
+        assert "reinforce_telemetry_failed" in warn_events
+        assert "reinforce_rerank_skipped" not in warn_events  # the re-rank DID fire
+        assert {r["id"] for r in sr} == {"a", "b"}  # recall results intact
+
 
 class TestReinforceTelemetry:
     """Issue #1069: the pure per-recall reinforce summary that makes enabling and any

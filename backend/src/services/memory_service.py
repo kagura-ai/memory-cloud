@@ -1620,18 +1620,26 @@ class MemoryService:
             search_results.sort(key=_adjusted, reverse=True)
             order_after = [s for s in (_sid(r) for r in search_results) if s is not None]
 
-            logger.info(
-                "reinforce_rerank_applied",
-                context_id=str(context_id),
-                max_boost=round(max_boost, 4),
-                **self._reinforce_telemetry(
-                    order_before=order_before,
-                    order_after=order_after,
-                    factors=factors,
-                    zero_adoption_ids=zero_adoption_ids,
-                    top_k=top_k if top_k is not None else len(order_after),
-                ),
-            )
+            # Telemetry is isolated in its own guard: the re-rank has ALREADY been
+            # applied above, so a telemetry/log failure must NOT fall through to the
+            # outer except and emit the misleading "skipped" signal an operator is
+            # monitoring the rollout on. It also must not break recall — hence a
+            # distinct, swallowed ``reinforce_telemetry_failed`` event.
+            try:
+                logger.info(
+                    "reinforce_rerank_applied",
+                    context_id=str(context_id),
+                    max_boost=round(max_boost, 4),
+                    **self._reinforce_telemetry(
+                        order_before=order_before,
+                        order_after=order_after,
+                        factors=factors,
+                        zero_adoption_ids=zero_adoption_ids,
+                        top_k=top_k if top_k is not None else len(order_after),
+                    ),
+                )
+            except Exception as texc:  # noqa: BLE001 — telemetry must not break recall
+                logger.warning("reinforce_telemetry_failed", error=str(texc))
         except Exception as exc:  # noqa: BLE001 — reinforce must never break recall
             logger.warning("reinforce_rerank_skipped", error=str(exc))
 

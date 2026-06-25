@@ -41,9 +41,10 @@ PRIMARY_METRIC = "mrr@10"
 Ranking = tuple[Sequence[str], set[str]]
 
 
-def population_metrics(rankings: Sequence[Ranking]) -> dict[str, float]:
+def population_metrics(rankings: Sequence[Ranking]) -> dict[str, float | int]:
     """The metric block for one population (reuses the #344 binary-relevance
-    metrics). ``n`` is the query count; the rest are the gate-comparable scores.
+    metrics). ``n`` is the query count (int); the rest are the gate-comparable
+    float scores.
     """
     return {
         "n": len(rankings),
@@ -99,7 +100,7 @@ class ArmBlock:
     """One arm's scored result: per-population metric blocks + the corpus-level
     zero-adoption surfacing rate. Both the OFF and ON arms are this shape."""
 
-    populations: dict[str, dict[str, float]]
+    populations: dict[str, dict[str, float | int]]
     zero_adoption_surfacing_rate: float
 
 

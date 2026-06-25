@@ -11,8 +11,11 @@ from __future__ import annotations
 from unittest.mock import AsyncMock, MagicMock, patch
 from uuid import uuid4
 
+import pytest
+
 from tests.eval import reinforce_runner
 from tests.eval.reinforce_gate import POPULATION_CURRENT_FACT, POPULATION_RARE, ArmBlock
+from tests.eval.tools.corpus import Corpus, Document, Query
 
 
 class _Hit:
@@ -126,3 +129,25 @@ class TestRunReinforceArms:
         assert results["off"]["zero_adoption_surfacing_rate"] == 0.50
         assert results["on"]["populations"][POPULATION_CURRENT_FACT]["mrr@10"] == 0.88
         assert results["experiment"] == "reinforce_on_vs_off"
+
+    async def test_typod_population_fails_fast(self):
+        # A query with an unrecognized population would otherwise be silently
+        # dropped from the gate's sample — the runner must reject it loudly.
+        corpus = Corpus(
+            meta={"adopted_docs": ["d1"]},
+            documents=(Document(id="d1", source="memory", text="x" * 20),),
+            queries=(
+                Query(
+                    id="q1",
+                    bucket="memory-only",
+                    text="q",
+                    relevant=("d1",),
+                    population="current-fact",
+                ),  # hyphen typo, not current_fact
+            ),
+        )
+        svc = MagicMock()
+        with pytest.raises(RuntimeError, match="population"):
+            await reinforce_runner._run_reinforce_arms(
+                svc, corpus, {str(uuid4()): "d1"}, "owner", uuid4(), uuid4(), "2026-06-26", False
+            )
