@@ -1,0 +1,97 @@
+# Reinforce Rollout Gate (Issue #1069)
+
+The bounded **reinforce** recall re-rank (#1048) — adoption (`reference_count`,
+#1046) + retrieval feedback (#888) gently nudge a memory's recall standing —
+ships **default-off** per context (`ContextSearchConfig.reinforce_enabled`). This
+document defines the **eval gate** that decides whether enabling it on a context
+is safe, and the **staged rollout + monitoring** procedure that gate feeds.
+
+The principle (from the milestone): *trust before integration*. Reinforce only
+goes live where an eval shows it helps the canonical answers **without** burying
+the long tail or starving brand-new memories.
+
+## The gate (what "safe to enable" means)
+
+A repeatable ON-vs-OFF A/B on one ingested corpus, flipping only
+`reinforce_enabled`. Two query populations + one popularity-bias metric:
+
+| Signal | Population / metric | Gate condition (default) |
+|---|---|---|
+| **Helps the canonical** | `current_fact` — gold is an adopted+confirmed answer competing with a near-duplicate phrasing | ON − OFF on MRR@10 ≥ `min_current_fact_uplift` (0.0 = no regression) |
+| **Doesn't bury the tail** | `rare` — gold is a zero-adoption niche memory | OFF − ON on MRR@10 ≤ `max_rare_regression` (0.02) |
+| **Doesn't starve new memories** | zero-adoption surfacing rate (share of top-k slots held by never-adopted docs) | ON ≥ `min_zero_adoption_retention` × OFF (0.90) |
+
+Thresholds live in `GateThresholds` (`backend/tests/eval/reinforce_gate.py`) and
+are configurable. The defaults are conservative (the gate passes on
+*non-regression* of the current-fact population); an experiment wanting a
+stronger "improves" claim raises `min_current_fact_uplift` above 0. The verdict
+always reports the strict `improved` flag separately, so the distinction is never
+hidden.
+
+### Why these three
+
+The compounding "+lift" claim's standard kill-shot is *"the boost just measures
+that popular things were marked popular."* The gate pre-empts it: the `rare`
+no-regression band and the zero-adoption retention floor are the controls that
+separate "reinforce encodes useful adoption" from "reinforce introduces
+popularity bias." A run that lifts `current_fact` **but** fails either control is
+a FAIL, not a win.
+
+## How to run
+
+```bash
+make up                 # live stack: postgres + qdrant + embeddings
+make eval-reinforce     # KAGURA_EVAL_LIVE=1 python -m tests.eval.reinforce_runner
+```
+
+Writes `backend/tests/eval/results/reinforce-<date>.json` from a **real run
+only** (never fabricated) and **exits non-zero if the gate FAILS**. The harness:
+
+1. ingests `fixtures/reinforce_corpus.yaml` (15 memory docs, 10 queries × 2 populations);
+2. seeds adoption (`reference()` ×5) + net-helpful feedback (×3) on the canonical
+   `meta.adopted_docs` — the rare docs stay untouched (zero-adoption);
+3. scores the **OFF** arm (default, no config row);
+4. flips `reinforce_enabled = true`, `reinforce_max_boost = 0.15`;
+5. scores the **ON** arm and evaluates the gate.
+
+The decision math + metrics are pure and unit-tested (`test_reinforce_gate.py`);
+the seed→OFF→ON→gate orchestration is pinned DB-free with fakes
+(`test_reinforce_runner.py`). Only the live numbers need the stack.
+
+## Staged rollout (gate-gated, no blanket flip)
+
+1. **Pick a high-traffic, trusted context** with real adoption + feedback signal
+   (a re-rank with no signal is a no-op — leave cold/low-signal contexts off).
+2. **Run the gate** above against a corpus representative of that context. Enable
+   only on a **green** gate.
+3. **Enable** via REST `PUT /api/v1/contexts/{id}/search-config`
+   (`reinforce_enabled: true`) or the `update_search_config` MCP tool.
+4. **Monitor** the telemetry below; **disable** on regression.
+5. **Graduate** context-by-context. There is **no** blanket default-on
+   (out of scope, and would cross the #120 recall/explore boundary debate).
+
+## Monitoring (telemetry, #1069)
+
+When the re-rank fires, recall emits a `reinforce_rerank_applied` structured log
+(structlog/JSON — the codebase's observability backbone; there is no Prometheus).
+Per recall, per context:
+
+| Field | Watch for |
+|---|---|
+| `reordered`, `top1_changed` | the re-rank is actually active after you flip it on |
+| `factor_min` / `factor_max` / `factor_mean` | how hard it is pushing (bounded by `max_boost`) |
+| `boosted` / `demoted` | how many candidates moved which way |
+| `zero_adoption_in_topk` | **the regression alarm** — if this trends toward 0, reinforce is starving brand-new memories out of the user-visible slice; disable and re-tune |
+
+`zero_adoption_in_topk` is the live counterpart of the gate's
+`zero_adoption_surfacing_rate`: the gate proves the cold-start floor holds on the
+eval corpus, the log proves it still holds on live traffic.
+
+## Out of scope
+
+- Blanket default-on across all contexts.
+- Tuning the bounded design or the #120 boundary (separate follow-up if the
+  bounded nudge proves insufficient once felt in production).
+- The forge-resistance of the signal for untrusted autonomous agents — that is
+  #1065 (a host-arbitrated, forge-resistant reinforce signal), the milestone's
+  second half.
