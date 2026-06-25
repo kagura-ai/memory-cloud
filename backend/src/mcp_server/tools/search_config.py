@@ -78,6 +78,11 @@ async def handle_update_search_config(
                 "reinforce_max_boost": args.get(
                     "reinforce_max_boost", float(config.reinforce_max_boost)
                 ),
+                # Issue #1065: forge-resistant mode (round-trip current value).
+                "reinforce_require_host_arbitration": args.get(
+                    "reinforce_require_host_arbitration",
+                    config.reinforce_require_host_arbitration,
+                ),
             }
 
             # Validate via Pydantic (same as REST API)
@@ -116,6 +121,9 @@ async def handle_update_search_config(
                                 "reranker_model": config.reranker_model,
                                 "reinforce_enabled": config.reinforce_enabled,
                                 "reinforce_max_boost": float(config.reinforce_max_boost),
+                                "reinforce_require_host_arbitration": (
+                                    config.reinforce_require_host_arbitration
+                                ),
                             },
                         }
                     ),

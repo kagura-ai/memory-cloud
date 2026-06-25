@@ -1432,6 +1432,61 @@ class TestReinforceRerank:
         assert [r["id"] for r in sr][0] == "a"  # relevance still dominates
 
     @pytest.mark.asyncio
+    async def test_require_host_arbitration_forwards_host_only(self):
+        # Issue #1065: when forge-resistant mode is on, the actuator aggregates
+        # ONLY host-arbitrated feedback (agent self-feedback cannot move ranking).
+        from decimal import Decimal
+
+        svc = MemoryService(MagicMock())
+        cfg = MagicMock(
+            reinforce_enabled=True,
+            reinforce_max_boost=Decimal("0.15"),
+            reinforce_require_host_arbitration=True,
+        )
+        old = datetime(2020, 1, 1)
+        memories = {
+            "a": MagicMock(id=uuid4(), reference_count=0, importance=0.5, created_at=old),
+            "b": MagicMock(id=uuid4(), reference_count=0, importance=0.5, created_at=old),
+        }
+        sr = [{"id": "a", "hybrid_score": 0.9}, {"id": "b", "hybrid_score": 0.8}]
+        agg = AsyncMock(return_value={})
+        with (
+            patch("repositories.config_repository.ContextSearchConfigRepository") as Repo,
+            patch("services.feedback_service.FeedbackService") as FB,
+        ):
+            Repo.return_value.get_by_context = AsyncMock(return_value=cfg)
+            FB.return_value.aggregate_for_memories = agg
+            await svc._maybe_reinforce_rerank(sr, memories, uuid4(), top_k=10)
+        assert agg.await_args.kwargs.get("host_only") is True
+
+    @pytest.mark.asyncio
+    async def test_default_counts_all_feedback(self):
+        # Default (flag off) keeps pre-#1065 behaviour: all feedback counts.
+        from decimal import Decimal
+
+        svc = MemoryService(MagicMock())
+        cfg = MagicMock(
+            reinforce_enabled=True,
+            reinforce_max_boost=Decimal("0.15"),
+            reinforce_require_host_arbitration=False,
+        )
+        old = datetime(2020, 1, 1)
+        memories = {
+            "a": MagicMock(id=uuid4(), reference_count=0, importance=0.5, created_at=old),
+            "b": MagicMock(id=uuid4(), reference_count=0, importance=0.5, created_at=old),
+        }
+        sr = [{"id": "a", "hybrid_score": 0.9}, {"id": "b", "hybrid_score": 0.8}]
+        agg = AsyncMock(return_value={})
+        with (
+            patch("repositories.config_repository.ContextSearchConfigRepository") as Repo,
+            patch("services.feedback_service.FeedbackService") as FB,
+        ):
+            Repo.return_value.get_by_context = AsyncMock(return_value=cfg)
+            FB.return_value.aggregate_for_memories = agg
+            await svc._maybe_reinforce_rerank(sr, memories, uuid4(), top_k=10)
+        assert agg.await_args.kwargs.get("host_only") is False
+
+    @pytest.mark.asyncio
     async def test_emits_telemetry_when_enabled(self):
         # Issue #1069: a fired re-rank emits one reinforce_rerank_applied event so a
         # staged rollout is observable; a disabled context emits nothing.
