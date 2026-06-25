@@ -1497,11 +1497,49 @@ class MemoryService:
         signal = max(-1.0, min(1.0, usage + cold))
         return 1.0 + max_boost * signal
 
+    @staticmethod
+    def _reinforce_telemetry(
+        *,
+        order_before: list[str],
+        order_after: list[str],
+        factors: dict[str, float],
+        zero_adoption_ids: set[str],
+        top_k: int,
+    ) -> dict[str, object]:
+        """Issue #1069: a pure, side-effect-free summary of one reinforce re-rank.
+
+        Emitted as a ``reinforce_rerank_applied`` structured log so per-context
+        enabling and any regression are observable without a metrics backend (the
+        codebase's observability is structlog/JSON, not Prometheus). The load-bearing
+        regression signal is ``zero_adoption_in_topk`` — the cold-start /
+        popularity-bias guard: if reinforce starves brand-new (adoption=0) memories
+        out of the user-visible slice, this drops. ``reordered`` / ``top1_changed``
+        confirm the re-rank is actually active once an operator flips
+        ``reinforce_enabled`` on a context; the ``factor_*`` distribution shows how
+        hard it is pushing. ``top_k`` is the user-visible slice (``request.k``).
+        """
+        vals = list(factors.values())
+        eps = 1e-9
+        k = max(0, top_k)
+        return {
+            "candidates": len(order_after),
+            "reordered": order_before != order_after,
+            "top1_changed": order_before[:1] != order_after[:1],
+            "factor_min": round(min(vals), 4) if vals else 1.0,
+            "factor_max": round(max(vals), 4) if vals else 1.0,
+            "factor_mean": round(sum(vals) / len(vals), 4) if vals else 1.0,
+            "boosted": sum(1 for f in vals if f > 1.0 + eps),
+            "demoted": sum(1 for f in vals if f < 1.0 - eps),
+            "zero_adoption_in_topk": sum(1 for mid in order_after[:k] if mid in zero_adoption_ids),
+            "topk": min(k, len(order_after)),
+        }
+
     async def _maybe_reinforce_rerank(
         self,
         search_results: list[dict],
         memories: dict,
         context_id: UUID | None,
+        top_k: int | None = None,
     ) -> None:
         """Issue #1048: bounded, config-gated recall re-rank by adoption + feedback.
 
@@ -1509,6 +1547,12 @@ class MemoryService:
         (default OFF → recall ranking is byte-identical to pre-#1048). Single-context
         only — a per-context config/feedback set can't govern a cross-context pool.
         Re-sorts ``search_results`` IN PLACE by ``hybrid_score * _reinforce_factor``.
+
+        Issue #1069: when the re-rank fires it emits a ``reinforce_rerank_applied``
+        structured log carrying per-context uplift + popularity-bias telemetry, so a
+        staged rollout is monitorable. ``top_k`` is the user-visible slice the
+        telemetry measures the zero-adoption surfacing rate over (the caller passes
+        ``request.k``); ``None`` falls back to the whole candidate pool.
         """
         if context_id is None or len(search_results) < 2:
             return
@@ -1539,24 +1583,55 @@ class MemoryService:
             feedback = await FeedbackService(self.db).aggregate_for_memories(context_id, cand_ids)
             now = utcnow()
 
-            def _adjusted(r: dict) -> float:
-                base = r.get("hybrid_score")
-                if base is None:
-                    base = r.get("score") or 0.0
+            # Precompute the per-memory factor once (id-keyed) so the sort key and the
+            # telemetry summary share one computation and can never diverge.
+            factors: dict[str, float] = {}
+            zero_adoption_ids: set[str] = set()
+            for r in search_results:
                 mem = memories.get(r["id"])
                 if mem is None:
-                    return base
-                agg = feedback.get(str(mem.id))
-                factor = self._reinforce_factor(
+                    continue
+                sid = str(mem.id)
+                if sid in factors:
+                    continue
+                agg = feedback.get(sid)
+                factors[sid] = self._reinforce_factor(
                     reference_count=mem.reference_count or 0,
                     net_helpful=agg.net if agg else 0,
                     importance=mem.importance,
                     age_days=max(0, (now - mem.created_at).days),
                     max_boost=max_boost,
                 )
-                return base * factor
+                if (mem.reference_count or 0) == 0:
+                    zero_adoption_ids.add(sid)
 
+            def _sid(r: dict) -> str | None:
+                mem = memories.get(r["id"])
+                return str(mem.id) if mem is not None else None
+
+            def _adjusted(r: dict) -> float:
+                base = r.get("hybrid_score")
+                if base is None:
+                    base = r.get("score") or 0.0
+                sid = _sid(r)
+                return base * (factors.get(sid, 1.0) if sid is not None else 1.0)
+
+            order_before = [s for s in (_sid(r) for r in search_results) if s is not None]
             search_results.sort(key=_adjusted, reverse=True)
+            order_after = [s for s in (_sid(r) for r in search_results) if s is not None]
+
+            logger.info(
+                "reinforce_rerank_applied",
+                context_id=str(context_id),
+                max_boost=round(max_boost, 4),
+                **self._reinforce_telemetry(
+                    order_before=order_before,
+                    order_after=order_after,
+                    factors=factors,
+                    zero_adoption_ids=zero_adoption_ids,
+                    top_k=top_k if top_k is not None else len(order_after),
+                ),
+            )
         except Exception as exc:  # noqa: BLE001 — reinforce must never break recall
             logger.warning("reinforce_rerank_skipped", error=str(exc))
 
@@ -1864,7 +1939,10 @@ class MemoryService:
         # candidate pool BEFORE the top-k slice below; uses only reference_count +
         # feedback + importance + recency — never graph signals (respects #120).
         await self._maybe_reinforce_rerank(
-            search_results, memories, current_context_id if not context_ids else None
+            search_results,
+            memories,
+            current_context_id if not context_ids else None,
+            top_k=request.k,
         )
 
         responses = []
