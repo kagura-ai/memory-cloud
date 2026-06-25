@@ -14,7 +14,11 @@ from uuid import uuid4
 
 import pytest
 
-from models.retrieval_feedback import FEEDBACK_PROVENANCE_AGENT, FEEDBACK_PROVENANCE_HOST
+from models.retrieval_feedback import (
+    FEEDBACK_PROVENANCE_AGENT,
+    FEEDBACK_PROVENANCE_HOST,
+    NOTE_MAX_LEN,
+)
 from services.feedback_service import FeedbackService
 
 
@@ -47,6 +51,20 @@ class TestFeedbackProvenance:
         row = db.add.call_args.args[0]
         assert row.provenance == FEEDBACK_PROVENANCE_HOST
         assert row.note is not None and "check_exit=0" in row.note
+
+    async def test_host_verdict_is_flattened_and_capped(self):
+        # The verdict is the audit trail of the host seam: newlines are flattened
+        # (no fractured audit log) and the "host-verdict: " prefix always survives
+        # record_feedback's NOTE_MAX_LEN truncation.
+        svc, db = _svc_with_existing_memory()
+        long_verdict = "line1\nline2\t" + "x" * 5000
+        await svc.record_host_feedback(
+            uuid4(), uuid4(), helpful=True, user_id="cockpit", verdict=long_verdict
+        )
+        row = db.add.call_args.args[0]
+        assert row.note.startswith("host-verdict: ")
+        assert "\n" not in row.note and "\t" not in row.note
+        assert len(row.note) <= NOTE_MAX_LEN
 
     async def test_record_feedback_rejects_forged_provenance(self):
         # Defence in depth: even a service-layer caller cannot inject a bad value

@@ -126,7 +126,12 @@ class FeedbackService:
         server-authoritative provenance. The verdict reference is preserved in the
         note for audit.
         """
-        host_note = f"host-verdict: {verdict}"
+        # Flatten whitespace (no newlines fracturing the audit note) and cap so
+        # the "host-verdict: " prefix is never lost to record_feedback's silent
+        # NOTE_MAX_LEN truncation — the prefix is what marks the entry as a verdict.
+        prefix = "host-verdict: "
+        flat_verdict = " ".join(str(verdict).split())
+        host_note = f"{prefix}{flat_verdict[: NOTE_MAX_LEN - len(prefix)]}"
         return await self.record_feedback(
             context_id=context_id,
             memory_id=memory_id,
