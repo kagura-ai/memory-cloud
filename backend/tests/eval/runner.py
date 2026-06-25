@@ -33,6 +33,10 @@ _RECALL_K = 10
 # ~3ms). One reset-and-retry recovers it; a doc that fails repeatedly still
 # aborts the run.
 _INGEST_RETRIES = 2
+# Max in-flight embedder/upsert drives during corpus ingest. Caps concurrency so
+# we overlap per-doc embed latency instead of serializing it, without stampeding
+# the embedding provider. Total ingest time ~ ceil(N / this) batches.
+_INGEST_CONCURRENCY = 8
 _P_AT = (5, 10)
 _MRR_AT = 10
 _NDCG_AT = (5, 10)
@@ -73,22 +77,25 @@ def _sudachi_version() -> str:
 async def _ingest_corpus(
     svc: Any, corpus: Corpus, user_id: str, ctx_id, ws_id, id_map: dict[str, str]
 ) -> None:
-    """Ingest every corpus doc as a memory, populating ``id_map`` (memory_id →
-    corpus_doc_id) INCREMENTALLY as each doc lands.
+    """Ingest every corpus doc as a memory, then drive + await indexing for the
+    WHOLE corpus at once.
 
-    The caller owns ``id_map`` so that if this raises partway (a remember /
-    indexing failure), teardown still sees the memories created so far and can
-    clean them up — no leaked rows on a partial ingest.
+    The caller owns ``id_map``; we populate it FULLY in the remember phase below
+    BEFORE any indexing await, so a failure during indexing still lets teardown
+    clean up every row created — no leaked rows on a partial ingest.
 
     ``remember()`` schedules embedding + Qdrant upsert as a fire-and-forget
-    ``asyncio.create_task`` and returns before indexing completes. For a
-    deterministic eval we must NOT recall before the docs are searchable, so we
-    drive ``process_pending_embedding`` and then poll ``embedding_status`` to a
-    terminal state for each memory here — turning the async write into a
-    synchronous "ingested AND indexed" barrier.
+    ``asyncio.create_task`` and returns before indexing completes. The previous
+    implementation drove + polled each doc to a terminal state *before*
+    remembering the next, which serialized the whole corpus behind a per-doc poll
+    (up to ``attempts*interval_s`` each) and stopped the embedder from ever
+    overlapping work. We instead remember everything first, then drive the
+    pending embeddings concurrently and poll the whole set in ONE barrier — so
+    indexing overlaps and total time scales with ``ceil(N / concurrency)`` rather
+    than N. The "ingested AND indexed" guarantee (never recall a half-indexed
+    corpus) is unchanged.
     """
     from models.schemas import RememberRequest
-    from services.memory_service import process_pending_embedding
 
     for doc in corpus.documents:
         # summary must be >= 10 chars; corpus docs comfortably exceed that.
@@ -105,73 +112,108 @@ async def _ingest_corpus(
             current_context_id=ctx_id,
             current_workspace_id=ws_id,
         )
-        # remember() has already COMMITTED the Postgres memory row; the embedding
-        # + Qdrant upsert is what process_pending_embedding does below (remember
-        # also schedules it as a background task). Record the id BEFORE awaiting
-        # that step, so if it raises, teardown's forget() can still clean up the
-        # committed PG row (and any partial Qdrant points).
+        # remember() has COMMITTED the Postgres row; record the id BEFORE driving
+        # indexing so teardown's forget() can clean it up even if indexing raises.
         id_map[str(resp.memory_id)] = doc.id
-        # Drive the embedding/Qdrant upsert before any recall runs. This call is
-        # claim-based: if the background task remember() fired wins the claim, our
-        # call returns immediately WITHOUT the upsert being done. So we then poll
-        # embedding_status to a terminal state — only that guarantees the doc is
-        # searchable, regardless of which task did the work.
-        #
-        # process_pending_embedding only claims pending / stale-processing rows,
-        # so a doc that landed in `failed` (or timed out mid-processing) must be
-        # reset to `pending` before the retry can re-drive it.
-        for attempt in range(_INGEST_RETRIES + 1):
-            await process_pending_embedding(resp.memory_id)
-            try:
-                await _await_indexed(svc, resp.memory_id)
-                break
-            except RuntimeError:
-                if attempt == _INGEST_RETRIES:
-                    raise
-                print(
-                    f"eval-retrieval: transient indexing failure for corpus doc "
-                    f"{doc.id} (attempt {attempt + 1}/{_INGEST_RETRIES + 1}) — retrying"
-                )
-                await _reset_embedding_to_pending(svc, resp.memory_id)
+
+    await _index_corpus(svc, [UUID(m) for m in id_map])
 
 
-async def _reset_embedding_to_pending(svc: Any, memory_id: UUID) -> None:
-    """Reset a failed/stuck embedding to ``pending`` so a retry can re-claim it.
+async def _index_corpus(svc: Any, memory_ids: list[UUID]) -> None:
+    """Drive embedding/Qdrant indexing for every memory, then block until the
+    whole set is searchable — with a bounded reset-and-retry for transient
+    per-doc stalls (``_INGEST_RETRIES``).
+
+    Turns the async, fire-and-forget writes into a single "ingested AND indexed"
+    barrier for the corpus, so the eval never recalls against a half-indexed set.
+    """
+    pending = list(memory_ids)
+    for attempt in range(_INGEST_RETRIES + 1):
+        await _drive_pending_embeddings(svc, pending)
+        # Generous ceiling: a safety net against a permanently stuck doc, not the
+        # expected wait. The poll returns as soon as every doc is terminal.
+        failed = await _await_all_indexed(svc, pending, timeout_s=max(120.0, 3.0 * len(pending)))
+        if not failed:
+            return
+        if attempt == _INGEST_RETRIES:
+            sample = "; ".join(f"{mid}: {err}" for mid, err in list(failed.items())[:3])
+            raise RuntimeError(
+                f"embedding FAILED for {len(failed)} doc(s) after "
+                f"{_INGEST_RETRIES + 1} attempts ({sample}) — those docs are not in "
+                "Qdrant, so eval would run against a half-indexed corpus"
+            )
+        print(
+            f"eval-retrieval: {len(failed)} transient indexing failure(s) "
+            f"(attempt {attempt + 1}/{_INGEST_RETRIES + 1}) — resetting & retrying"
+        )
+        await _reset_pending(svc, list(failed))
+        pending = list(failed)
+
+
+async def _drive_pending_embeddings(
+    svc: Any, memory_ids: list[UUID], *, concurrency: int = _INGEST_CONCURRENCY
+) -> None:
+    """Drive ``process_pending_embedding`` for every id with bounded concurrency.
+
+    ``process_pending_embedding`` opens its OWN session (``get_db()``) and claims
+    atomically, so concurrent drives are safe: only one task processes each
+    memory, and a doc already claimed by ``remember()``'s background task is a
+    no-op. The semaphore caps in-flight embedder calls so we don't stampede the
+    provider.
+    """
+    import asyncio
+
+    from services.memory_service import process_pending_embedding
+
+    sem = asyncio.Semaphore(concurrency)
+
+    async def _drive(mid: UUID) -> None:
+        async with sem:
+            await process_pending_embedding(mid)
+
+    await asyncio.gather(*(_drive(mid) for mid in memory_ids))
+
+
+async def _reset_pending(svc: Any, memory_ids: list[UUID]) -> None:
+    """Reset failed/stuck embeddings to ``pending`` so a retry can re-claim them.
 
     ``process_pending_embedding``'s claim UPDATE only matches ``pending`` or
-    stale (>60s) ``processing`` rows — a ``failed`` row is terminal without
-    this reset.
+    stale (>60s) ``processing`` rows — a ``failed`` row is terminal without this
+    reset. #979: also reset the auto-retry budget (parity with the admin retry
+    endpoint) so a doc that exhausted MAX_EMBEDDING_RETRIES during ingest can be
+    driven again by the harness instead of staying stuck.
     """
+    if not memory_ids:
+        return
     from sqlalchemy import update
 
     from models.memory import Memory
 
     await svc.db.execute(
         update(Memory)
-        .where(Memory.id == memory_id)
-        # #979: reset the auto-retry budget too (parity with the admin retry
-        # endpoint) so a doc that exhausted MAX_EMBEDDING_RETRIES during ingest
-        # can be driven again by the harness instead of staying stuck.
+        .where(Memory.id.in_(memory_ids))
         .values(embedding_status="pending", embedding_error=None, embedding_retry_count=0)
     )
     await svc.db.commit()
 
 
-async def _await_indexed(
-    svc: Any, memory_id: UUID, *, attempts: int = 300, interval_s: float = 0.1
-) -> None:
-    """Block until ``memory_id``'s embedding reaches a terminal state.
+async def _await_all_indexed(
+    svc: Any, memory_ids: list[UUID], *, timeout_s: float = 120.0, interval_s: float = 0.1
+) -> dict[UUID, str | None]:
+    """Block until every id reaches a terminal embedding state, polling the WHOLE
+    set in one query per tick.
 
-    ``process_pending_embedding`` is claim-based, so the explicit call in
-    ``_ingest_corpus`` can return before the Qdrant upsert finishes when
-    ``remember()``'s background task wins the claim. We poll ``embedding_status``
-    (a column-only SELECT, so it reads committed state past the session identity
-    map under READ COMMITTED) until it is terminal.
+    Returns a map of id → error for the ones that ended ``failed`` (empty when
+    all succeeded). A ``failed`` row is collected, NOT raised, so the caller can
+    reset-and-retry the failures without losing the docs that already succeeded.
+    A timeout (some id never terminal) raises, so the eval never proceeds against
+    a half-indexed corpus.
 
-    A ``failed`` status is an ERROR, not a stop condition: the failed memory was
-    never upserted to Qdrant, so it is unsearchable and recalls against it would
-    silently understate metrics. Both ``failed`` and timeout raise, so the eval
-    never runs against a half-indexed corpus.
+    The single-query barrier replaces the old per-doc poll: total wait is bounded
+    by the slowest *concurrent* batch, not the sum of N per-doc polls. The SELECT
+    is column-only, so it reads committed state past the session identity map
+    under READ COMMITTED — status is committed by ``process_pending_embedding``'s
+    own session.
     """
     import asyncio
 
@@ -179,27 +221,32 @@ async def _await_indexed(
 
     from models.memory import Memory
 
-    for _ in range(attempts):
-        row = (
+    remaining: set[UUID] = set(memory_ids)
+    failed: dict[UUID, str | None] = {}
+    for _ in range(max(1, int(timeout_s / interval_s))):
+        rows = (
             await svc.db.execute(
-                select(Memory.embedding_status, Memory.embedding_error).where(
-                    Memory.id == memory_id
+                select(Memory.id, Memory.embedding_status, Memory.embedding_error).where(
+                    Memory.id.in_(remaining)
                 )
             )
-        ).first()
-        status = row[0] if row else None
-        if status == "success":
-            return
-        if status == "failed":
-            raise RuntimeError(
-                f"embedding FAILED for memory {memory_id}: {row[1]} — that doc is "
-                "not in Qdrant, so eval would run against a half-indexed corpus"
-            )
+        ).all()
+        still: set[UUID] = set()
+        for mid, status, err in rows:
+            if status == "success":
+                continue
+            if status == "failed":
+                failed[mid] = err
+            else:
+                still.add(mid)
+        remaining = still
+        if not remaining:
+            return failed
         await asyncio.sleep(interval_s)
+
     raise RuntimeError(
-        f"embedding for memory {memory_id} never reached a terminal state "
-        f"within {attempts * interval_s:.0f}s — eval would run against a "
-        "half-indexed corpus"
+        f"{len(remaining)} embedding(s) never reached a terminal state within "
+        f"{timeout_s:.0f}s — eval would run against a half-indexed corpus"
     )
 
 
