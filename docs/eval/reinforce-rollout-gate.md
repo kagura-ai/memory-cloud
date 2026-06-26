@@ -28,6 +28,14 @@ stronger "improves" claim raises `min_current_fact_uplift` above 0. The verdict
 always reports the strict `improved` flag separately, so the distinction is never
 hidden.
 
+> **PASS ≠ "reinforce helps" (#1084).** With the default `min_current_fact_uplift = 0.0`,
+> a *no-op* reinforce — or a silently-broken `reinforce_enabled` toggle — produces
+> `passed: true, improved: false` (uplift 0 is non-regression). **Graduate a context
+> on `gate.current_fact.improved == true`, not on bare `passed`** (or set
+> `min_current_fact_uplift > 0` so `passed` *implies* improved). The runner also
+> emits `off_on_arms_identical`; a `true` there means reinforce changed nothing
+> (neutered toggle / no seeded signal / no headroom) — never graduate on it.
+
 ### Why these three
 
 The compounding "+lift" claim's standard kill-shot is *"the boost just measures
@@ -63,7 +71,8 @@ the seed→OFF→ON→gate orchestration is pinned DB-free with fakes
 1. **Pick a high-traffic, trusted context** with real adoption + feedback signal
    (a re-rank with no signal is a no-op — leave cold/low-signal contexts off).
 2. **Run the gate** above against a corpus representative of that context. Enable
-   only on a **green** gate.
+   only when `gate.current_fact.improved` is **true** (and `off_on_arms_identical`
+   is false) — a bare `passed` can be a vacuous non-regression, not a win.
 3. **Enable** via REST `PUT /api/v1/contexts/{id}/search-config`
    (`reinforce_enabled: true`) or the `update_search_config` MCP tool.
 4. **Monitor** the telemetry below; **disable** on regression.
