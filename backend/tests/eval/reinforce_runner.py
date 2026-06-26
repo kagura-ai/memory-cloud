@@ -169,8 +169,18 @@ async def _run_reinforce_arms(
     if empty:
         raise RuntimeError(f"reinforce corpus has no queries for population(s) {empty}")
 
+    # Fail fast on an unresolvable adopted doc (#1084): silently dropping a typo'd
+    # canonical id un-seeds its adoption and understates uplift with no error —
+    # the asymmetry the population check above already guards against.
     rev: dict[str, UUID] = {doc_id: UUID(mid) for mid, doc_id in id_map.items()}
-    adopted_docs = {d for d in corpus.meta.get("adopted_docs", []) if d in rev}
+    declared_adopted = list(corpus.meta.get("adopted_docs", []))
+    unresolved = [d for d in declared_adopted if d not in rev]
+    if unresolved:
+        raise RuntimeError(
+            f"adopted_docs has unresolved doc id(s) {unresolved} — a typo here is "
+            "silently un-seeded and understates the measured uplift; fix the corpus meta"
+        )
+    adopted_docs = set(declared_adopted)
     adopted_mem_ids = [rev[d] for d in sorted(adopted_docs)]
 
     prev_neural = os.environ.get("ENABLE_NEURAL_MEMORY")
@@ -192,6 +202,13 @@ async def _run_reinforce_arms(
             os.environ["ENABLE_NEURAL_MEMORY"] = prev_neural
 
     gate = evaluate_reinforce_gate(off, on, thresholds=GateThresholds())
+    # Vacuous-pass guard (#1084): a neutered reinforce_enabled toggle (config not
+    # read, or no adoption seeded) yields an ON arm identical to OFF, which still
+    # PASSES the default gate (uplift 0 → improved False). Surfaced as a diagnostic
+    # rather than raised — a legitimately no-headroom corpus (OFF already optimal)
+    # can also tie. The rollout runbook graduates on gate.current_fact.improved,
+    # NOT bare passed, so an identical/no-uplift run never graduates a context.
+    off_on_arms_identical = asdict(off) == asdict(on)
     results: dict[str, Any] = {
         "run_date": run_date,
         "experiment": "reinforce_on_vs_off",
@@ -207,6 +224,7 @@ async def _run_reinforce_arms(
         },
         "off": asdict(off),
         "on": asdict(on),
+        "off_on_arms_identical": off_on_arms_identical,
         "gate": gate,
     }
 
@@ -272,9 +290,20 @@ def _main() -> int:
     results = asyncio.run(run_reinforce_eval())
     print(json.dumps(results, indent=2, ensure_ascii=False))
     gate = results["gate"]
-    print(f"\nreinforce gate: {'PASS' if gate['passed'] else 'FAIL'}")
+    improved = gate["current_fact"]["improved"]
+    # PASS alone is NOT a graduation signal (#1084): the default gate passes on
+    # non-regression, so a no-op reinforce passes with improved=False. Graduate a
+    # context only when reinforce actually HELPS (improved) — surface both.
+    print(f"\nreinforce gate: {'PASS' if gate['passed'] else 'FAIL'}  (improved={improved})")
     for reason in gate["reasons"]:
         print(f"  - {reason}")
+    if results.get("off_on_arms_identical"):
+        print(
+            "  ! OFF and ON arms are identical — reinforce had NO observable effect "
+            "(neutered toggle / no seeded signal / no headroom). Do NOT graduate."
+        )
+    if gate["passed"] and not improved:
+        print("  ! gate PASSED but reinforce did not improve current-fact — do NOT graduate.")
     # Non-zero exit on a failed gate so CI / an operator notices.
     return 0 if gate["passed"] else 1
 
