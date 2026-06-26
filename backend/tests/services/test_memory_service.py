@@ -1431,6 +1431,147 @@ class TestReinforceRerank:
             await svc._maybe_reinforce_rerank(sr, memories, uuid4())
         assert [r["id"] for r in sr][0] == "a"  # relevance still dominates
 
+    @pytest.mark.asyncio
+    async def test_emits_telemetry_when_enabled(self):
+        # Issue #1069: a fired re-rank emits one reinforce_rerank_applied event so a
+        # staged rollout is observable; a disabled context emits nothing.
+        from decimal import Decimal
+
+        svc = MemoryService(MagicMock())
+        cfg = MagicMock(reinforce_enabled=True, reinforce_max_boost=Decimal("0.15"))
+        old = datetime(2020, 1, 1)
+        mem_a = MagicMock(id=uuid4(), reference_count=0, importance=0.5, created_at=old)
+        mem_b = MagicMock(id=uuid4(), reference_count=10, importance=0.9, created_at=old)
+        memories = {"a": mem_a, "b": mem_b}
+        sr = [{"id": "a", "hybrid_score": 0.85}, {"id": "b", "hybrid_score": 0.80}]
+        with (
+            patch("repositories.config_repository.ContextSearchConfigRepository") as Repo,
+            patch("services.feedback_service.FeedbackService") as FB,
+            patch("services.memory_service.logger") as log,
+        ):
+            Repo.return_value.get_by_context = AsyncMock(return_value=cfg)
+            FB.return_value.aggregate_for_memories = AsyncMock(return_value={})
+            await svc._maybe_reinforce_rerank(sr, memories, uuid4(), top_k=10)
+        events = [c.args[0] for c in log.info.call_args_list]
+        assert events.count("reinforce_rerank_applied") == 1
+        # The emitted summary carries the popularity-bias guard metric.
+        kwargs = next(
+            c.kwargs for c in log.info.call_args_list if c.args[0] == "reinforce_rerank_applied"
+        )
+        assert kwargs["candidates"] == 2
+        assert "zero_adoption_in_topk" in kwargs
+
+    @pytest.mark.asyncio
+    async def test_no_telemetry_when_disabled(self):
+        svc = MemoryService(MagicMock())
+        cfg = MagicMock(reinforce_enabled=False)
+        sr = [{"id": "a", "hybrid_score": 0.9}, {"id": "b", "hybrid_score": 0.8}]
+        with (
+            patch("repositories.config_repository.ContextSearchConfigRepository") as Repo,
+            patch("services.memory_service.logger") as log,
+        ):
+            Repo.return_value.get_by_context = AsyncMock(return_value=cfg)
+            await svc._maybe_reinforce_rerank(sr, {}, uuid4())
+        events = [c.args[0] for c in log.info.call_args_list]
+        assert "reinforce_rerank_applied" not in events
+
+    @pytest.mark.asyncio
+    async def test_telemetry_failure_does_not_mask_applied_rerank(self):
+        # A telemetry/log failure must NOT emit the misleading "skipped" signal the
+        # rollout is monitored on (the re-rank already fired), and must not break
+        # recall. It surfaces as a distinct reinforce_telemetry_failed instead.
+        from decimal import Decimal
+
+        svc = MemoryService(MagicMock())
+        cfg = MagicMock(reinforce_enabled=True, reinforce_max_boost=Decimal("0.15"))
+        old = datetime(2020, 1, 1)
+        mem_a = MagicMock(id=uuid4(), reference_count=0, importance=0.5, created_at=old)
+        mem_b = MagicMock(id=uuid4(), reference_count=10, importance=0.9, created_at=old)
+        memories = {"a": mem_a, "b": mem_b}
+        sr = [{"id": "a", "hybrid_score": 0.85}, {"id": "b", "hybrid_score": 0.80}]
+        with (
+            patch("repositories.config_repository.ContextSearchConfigRepository") as Repo,
+            patch("services.feedback_service.FeedbackService") as FB,
+            patch.object(MemoryService, "_reinforce_telemetry", side_effect=RuntimeError("boom")),
+            patch("services.memory_service.logger") as log,
+        ):
+            Repo.return_value.get_by_context = AsyncMock(return_value=cfg)
+            FB.return_value.aggregate_for_memories = AsyncMock(return_value={})
+            await svc._maybe_reinforce_rerank(sr, memories, uuid4(), top_k=10)
+        warn_events = [c.args[0] for c in log.warning.call_args_list]
+        assert "reinforce_telemetry_failed" in warn_events
+        assert "reinforce_rerank_skipped" not in warn_events  # the re-rank DID fire
+        assert {r["id"] for r in sr} == {"a", "b"}  # recall results intact
+
+
+class TestReinforceTelemetry:
+    """Issue #1069: the pure per-recall reinforce summary that makes enabling and any
+    popularity-bias regression observable per context (structlog, no metrics backend)."""
+
+    def _t(self, **kw):
+        kw.setdefault("order_before", [])
+        kw.setdefault("order_after", [])
+        kw.setdefault("factors", {})
+        kw.setdefault("zero_adoption_ids", set())
+        kw.setdefault("top_k", 10)
+        return MemoryService._reinforce_telemetry(**kw)
+
+    def test_no_reorder_when_order_identical(self):
+        t = self._t(order_before=["a", "b"], order_after=["a", "b"], factors={"a": 1.0, "b": 1.0})
+        assert t["reordered"] is False
+        assert t["top1_changed"] is False
+        assert t["candidates"] == 2
+
+    def test_detects_reorder_and_top1_change(self):
+        t = self._t(order_before=["a", "b"], order_after=["b", "a"], factors={"a": 0.9, "b": 1.1})
+        assert t["reordered"] is True
+        assert t["top1_changed"] is True
+
+    def test_reorder_without_top1_change(self):
+        # Lower ranks shuffle but the head is stable → reordered, not top1_changed.
+        t = self._t(
+            order_before=["a", "b", "c"],
+            order_after=["a", "c", "b"],
+            factors={"a": 1.0, "b": 0.95, "c": 1.05},
+        )
+        assert t["reordered"] is True
+        assert t["top1_changed"] is False
+
+    def test_factor_distribution(self):
+        t = self._t(
+            order_before=["a", "b", "c"],
+            order_after=["a", "b", "c"],
+            factors={"a": 1.1, "b": 1.0, "c": 0.9},
+        )
+        assert abs(t["factor_min"] - 0.9) < 1e-9
+        assert abs(t["factor_max"] - 1.1) < 1e-9
+        assert abs(t["factor_mean"] - 1.0) < 1e-9
+        assert t["boosted"] == 1
+        assert t["demoted"] == 1
+
+    def test_zero_adoption_surfacing_counted_within_topk_only(self):
+        # z and w are both zero-adoption, but only z is inside the user-visible top-2.
+        t = self._t(
+            order_before=["z", "a", "w"],
+            order_after=["z", "a", "w"],
+            factors={"z": 1.03, "a": 1.0, "w": 1.03},
+            zero_adoption_ids={"z", "w"},
+            top_k=2,
+        )
+        assert t["zero_adoption_in_topk"] == 1
+        assert t["topk"] == 2
+
+    def test_empty_pool_is_safe(self):
+        t = self._t()
+        assert t["candidates"] == 0
+        assert t["reordered"] is False
+        assert t["top1_changed"] is False
+        assert t["factor_min"] == 1.0
+        assert t["factor_max"] == 1.0
+        assert t["factor_mean"] == 1.0
+        assert t["zero_adoption_in_topk"] == 0
+        assert t["topk"] == 0
+
 
 class TestExploreAccessStats:
     """Issue #644: explore() bumps access_count / last_used_at on returned memories

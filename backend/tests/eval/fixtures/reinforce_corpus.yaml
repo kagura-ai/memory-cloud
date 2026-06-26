@@ -1,0 +1,177 @@
+# Reinforce ON-vs-OFF eval corpus (Issue #1069).
+#
+# Two-population, adoption-stratified — distinct from the static golden corpus
+# (#344), which is not stratified by adoption. The live runner
+# (tests.eval.reinforce_runner) seeds adoption + positive feedback on every doc
+# in meta.adopted_docs BEFORE the ON arm, then measures:
+#
+#   * current_fact queries — gold is an ADOPTED canonical answer competing with a
+#     near-duplicate, non-adopted phrasing. Reinforce should lift the canonical.
+#   * rare queries — gold is a ZERO-ADOPTION niche memory. The adopted/popular
+#     docs are distractors; reinforce must NOT bury the long tail (no regression),
+#     and the zero-adoption surfacing rate must hold (popularity-bias guard).
+#
+# All docs are `memory` source (the reinforce re-rank is a memory-ranking signal).
+meta:
+  version: 1
+  domain: "Kagura Memory Cloud (dogfooded knowledge-base content)"
+  notes: "10 queries x 2 populations (current_fact / rare); 15 memory docs. Authored starter set."
+  # Seeded with adoption (reference_count) + net-helpful feedback before the ON arm.
+  adopted_docs:
+    - doc_cf_hybrid_canon
+    - doc_cf_sleep_canon
+    - doc_cf_reinforce_canon
+    - doc_cf_trust_canon
+    - doc_cf_conf_canon
+
+documents:
+  # --- current_fact: canonical (adopted) vs near-duplicate competitor (not adopted) ---
+  - id: doc_cf_hybrid_canon
+    source: memory
+    text: >-
+      Hybrid recall blends dense semantic similarity with BM25 full-text scoring,
+      weighted 60 percent semantic and 40 percent keyword by default. This is the
+      confirmed, canonical configuration the team standardized on.
+  - id: doc_cf_hybrid_alt
+    source: memory
+    text: >-
+      Search can combine vector similarity and lexical matching. Different teams
+      have tried various splits between embedding scores and keyword scores when
+      fusing the two ranking signals together.
+
+  - id: doc_cf_sleep_canon
+    source: memory
+    text: >-
+      Sleep maintenance runs consolidation as a scheduled background pass: it
+      deduplicates near-identical memories and re-evaluates importance. The
+      canonical cadence the team adopted is a nightly edges-only consolidation.
+  - id: doc_cf_sleep_alt
+    source: memory
+    text: >-
+      A maintenance job can periodically tidy stored memories, merging things that
+      look alike and adjusting how important each item is considered over time on
+      some recurring schedule.
+
+  - id: doc_cf_reinforce_canon
+    source: memory
+    text: >-
+      The reinforce recall re-rank applies a bounded multiplier from adoption and
+      retrieval feedback, default max boost 0.15, and ships default-off per
+      context. This is the confirmed production guardrail.
+  - id: doc_cf_reinforce_alt
+    source: memory
+    text: >-
+      Usage signals such as how often something is reused can nudge ranking. The
+      amount of nudge is capped so popularity cannot dominate relevance in the
+      returned ordering of results.
+
+  - id: doc_cf_trust_canon
+    source: memory
+    text: >-
+      Context trust_tier is server-stamped: connector-provisioned contexts are
+      marked external, user-created contexts default to trusted. This is the
+      authoritative, confirmed provenance rule.
+  - id: doc_cf_trust_alt
+    source: memory
+    text: >-
+      Where a context comes from can be recorded so the system knows whether its
+      contents arrived from an outside integration or were entered directly by a
+      person using the product.
+
+  - id: doc_cf_conf_canon
+    source: memory
+    text: >-
+      Recall returns a confidence level — none, low, moderate, or high — derived
+      from the top score and its prominence over the candidate pool. This is the
+      canonical signal agents use to decide whether to trust a result.
+  - id: doc_cf_conf_alt
+    source: memory
+    text: >-
+      A retrieval response may carry some indication of how strong the match was,
+      letting a caller gauge whether the returned items are likely to be useful or
+      should be treated with caution.
+
+  # --- rare: niche, zero-adoption gold (never in adopted_docs) ---
+  - id: doc_rare_cp932
+    source: memory
+    text: >-
+      On Windows, pytest collection raised a cp932 UnicodeDecodeError reading
+      UTF-8 source; setting PYTHONUTF8=1 and adding encoding="utf-8" to file IO
+      fixed the portability bug.
+  - id: doc_rare_bfs
+    source: memory
+    text: >-
+      The neural-edge get_neighbors BFS had an off-by-one: guarding expansion
+      before recording made max_hops=1 return an empty set. Guard expansion after
+      recording so direct neighbors are returned.
+  - id: doc_rare_pagination
+    source: memory
+    text: >-
+      Paginated memory listing ordered by created_at alone was non-deterministic:
+      ties could duplicate or skip rows across pages. Adding a descending id
+      tiebreaker to the ORDER BY made offset/limit stable.
+  - id: doc_rare_qdrant
+    source: memory
+    text: >-
+      The Qdrant upsert can hit a transient client-side stall on local dev stacks,
+      timing out at a random doc without reaching the server. One reset-and-retry
+      of the pending embedding recovers it.
+  - id: doc_rare_vdb
+    source: memory
+    text: >-
+      Vector-store evaluation: the server stays on Qdrant because alternative
+      embedded stores are weak at multi-writer workloads; the embedded Lite build
+      chose LanceDB over zvec for Japanese full-text maturity.
+
+queries:
+  - id: q_cf_hybrid
+    bucket: retrieval-semantic
+    population: current_fact
+    text: "What is the standard weighting between semantic and keyword scores in hybrid recall?"
+    relevant: [doc_cf_hybrid_canon]
+  - id: q_cf_sleep
+    bucket: retrieval-semantic
+    population: current_fact
+    text: "What consolidation cadence did the team standardize on for sleep maintenance?"
+    relevant: [doc_cf_sleep_canon]
+  - id: q_cf_reinforce
+    bucket: retrieval-semantic
+    population: current_fact
+    text: "What is the default bounded boost and rollout posture of the reinforce re-rank?"
+    relevant: [doc_cf_reinforce_canon]
+  - id: q_cf_trust
+    bucket: retrieval-semantic
+    population: current_fact
+    text: "How is a context's trust tier decided between external and trusted?"
+    relevant: [doc_cf_trust_canon]
+  - id: q_cf_conf
+    bucket: retrieval-semantic
+    population: current_fact
+    text: "What confidence levels does recall return and what are they derived from?"
+    relevant: [doc_cf_conf_canon]
+
+  - id: q_rare_cp932
+    bucket: memory-only
+    population: rare
+    text: "Why did pytest collection fail with a cp932 decode error on Windows and what fixed it?"
+    relevant: [doc_rare_cp932]
+  - id: q_rare_bfs
+    bucket: memory-only
+    population: rare
+    text: "What caused get_neighbors to return an empty set at max_hops=1?"
+    relevant: [doc_rare_bfs]
+  - id: q_rare_pagination
+    bucket: memory-only
+    population: rare
+    text: "Why was paginated memory listing duplicating or skipping rows across pages?"
+    relevant: [doc_rare_pagination]
+  - id: q_rare_qdrant
+    bucket: memory-only
+    population: rare
+    text: "How is a transient Qdrant upsert stall during ingest recovered?"
+    relevant: [doc_rare_qdrant]
+  - id: q_rare_vdb
+    bucket: memory-only
+    population: rare
+    text: "Why does the server stay on Qdrant while the embedded Lite build uses LanceDB?"
+    relevant: [doc_rare_vdb]

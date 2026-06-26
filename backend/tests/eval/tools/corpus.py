@@ -52,6 +52,11 @@ class Query:
     bucket: str
     text: str
     relevant: tuple[str, ...]
+    # Optional reinforce-eval stratum (Issue #1069): "current_fact" (the canonical
+    # answer has been adopted/confirmed — reinforce should help) vs "rare" (gold is
+    # a zero-adoption memory — reinforce must not bury it). None for the static
+    # golden corpus, which is not stratified by adoption.
+    population: str | None = None
 
 
 @dataclass(frozen=True)
@@ -93,6 +98,7 @@ def load_corpus(path: Path | None = None) -> Corpus:
             bucket=q["bucket"],
             text=q["text"],
             relevant=tuple(q.get("relevant", [])),
+            population=q.get("population"),
         )
         for q in raw.get("queries", [])
     )

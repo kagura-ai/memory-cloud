@@ -168,6 +168,13 @@ eval-compounding:
 	@echo "Writes backend/tests/eval/results/compounding-<date>.json — real run only, never fabricated."
 	cd $(BACKEND_DIR) && KAGURA_EVAL_LIVE=1 PYTHONPATH=src:. python -m tests.eval.replay_runner
 
+.PHONY: eval-reinforce
+eval-reinforce:
+	@echo "Running live reinforce ON-vs-OFF rollout gate (Issue #1069, needs the stack: make up)..."
+	@echo "Writes backend/tests/eval/results/reinforce-<date>.json — real run only, never fabricated."
+	@echo "Exit code is non-zero if the rollout gate FAILS (do not enable reinforce in prod)."
+	cd $(BACKEND_DIR) && KAGURA_EVAL_LIVE=1 PYTHONPATH=src:. python -m tests.eval.reinforce_runner
+
 .PHONY: test-cov
 test-cov:
 	@echo "Running tests with coverage in Docker..."
