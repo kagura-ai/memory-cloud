@@ -119,8 +119,10 @@ class RetrievalFeedback(Base):
         Index("idx_retrieval_feedback_context_memory", "context_id", "memory_id"),
         # Provenance is a closed enum — reject anything but the known kinds so a
         # bad value can never silently slip past the forge-resistant aggregation.
+        # CHECK derived from _ALL_FEEDBACK_PROVENANCES (single source of truth,
+        # mirrors memory.py:source_type). Byte-identical to the migration literal.
         CheckConstraint(
-            "provenance IN ('agent', 'host')",
+            f"provenance IN ({', '.join(repr(p) for p in _ALL_FEEDBACK_PROVENANCES)})",
             name="valid_retrieval_feedback_provenance",
         ),
     )
