@@ -1147,7 +1147,7 @@ Examples:
 
 Weights must sum to 1.0.
 
-Returns: {status, message, context_id, config: {semantic_weight, bm25_weight, fetch_factor, use_rerank, reranker_provider, reranker_model, reinforce_enabled, reinforce_max_boost}}. semantic_weight + bm25_weight must sum to 1.0.""",
+Returns: {status, message, context_id, config: {semantic_weight, bm25_weight, fetch_factor, use_rerank, reranker_provider, reranker_model, reinforce_enabled, reinforce_max_boost, reinforce_require_host_arbitration}}. semantic_weight + bm25_weight must sum to 1.0.""",
             "inputSchema": {
                 "type": "object",
                 "required": ["context_id"],
@@ -1184,11 +1184,15 @@ Returns: {status, message, context_id, config: {semantic_weight, bm25_weight, fe
                     },
                     "reinforce_enabled": {
                         "type": "boolean",
-                        "description": "Issue #1048: enable the bounded adoption+feedback recall re-rank — memories that are deliberately referenced (adopted) and marked helpful gain a small, bounded standing boost; never-adopted recent memories keep a cold-start prior so they still surface. Off by default; does not override semantic relevance.",
+                        "description": "Enable the bounded adoption+feedback recall re-rank — memories that are deliberately referenced (adopted) and marked helpful gain a small, bounded standing boost; never-adopted recent memories keep a cold-start prior so they still surface. Off by default; does not override semantic relevance.",
                     },
                     "reinforce_max_boost": {
                         "type": "number",
-                        "description": "Issue #1048: bound on the reinforce adjustment (0.0-0.5; default 0.15). Each result's score is multiplied by a factor in [1-boost, 1+boost], so semantic relevance always dominates.",
+                        "description": "Bound on the reinforce adjustment (0.0-0.5; default 0.15). Each result's score is multiplied by a factor in [1-boost, 1+boost], so semantic relevance always dominates.",
+                    },
+                    "reinforce_require_host_arbitration": {
+                        "type": "boolean",
+                        "description": "Forge-resistant mode. When true, the reinforce re-rank counts ONLY host-arbitrated feedback (an independent verdict), so an untrusted agent's self-emitted feedback(helpful=True) cannot manufacture its own ranking boost. Off by default. Enable on contexts exposed to untrusted autonomous agents.",
                     },
                 },
             },

@@ -866,6 +866,10 @@ class ContextSearchConfigResponse(TZAwareBaseModel):
     reinforce_max_boost: float = Field(
         default=0.15, description="Bound on the reinforce adjustment (factor in [1-b, 1+b])"
     )
+    # Issue #1065: forge-resistant mode — only host-arbitrated feedback moves ranking.
+    reinforce_require_host_arbitration: bool = Field(
+        default=False, description="Count only host-arbitrated (provenance='host') feedback"
+    )
     created_at: datetime
     updated_at: datetime
 
@@ -891,13 +895,18 @@ class ContextSearchConfigUpdate(BaseModel):
     # them are unaffected; the MCP handler always round-trips current values.
     reinforce_enabled: bool = Field(
         default=False,
-        description="Issue #1048: enable the bounded adoption+feedback recall re-rank",
+        description="Enable the bounded adoption+feedback recall re-rank",
     )
     reinforce_max_boost: float = Field(
         default=0.15,
         ge=0.0,
         le=0.5,
-        description="Issue #1048: bound on the reinforce adjustment (factor stays in [1-b, 1+b])",
+        description="Bound on the reinforce adjustment (factor stays in [1-b, 1+b])",
+    )
+    reinforce_require_host_arbitration: bool = Field(
+        default=False,
+        description="Forge-resistant mode — only host-arbitrated feedback "
+        "(provenance='host') moves ranking; an untrusted agent's self-feedback is ignored",
     )
 
     @model_validator(mode="after")
