@@ -509,6 +509,7 @@ from api.routes import (  # noqa: E402
     api_keys,
     attachments,  # Issue #330 → deprecated by #555 (returns HTTP 410 Gone)
     auth,
+    billing_handoff,  # Issue #1093: owner-only billing handoff token (/api/v1/billing/handoff)
     bm25_drift,  # Issue #343: BM25 IDF drift admin (preview, cron disabled by default)
     config,
     connectors_slack,  # Spec 2026-06-02: Slack connector OAuth install/callback
@@ -674,6 +675,10 @@ app.include_router(workers.router, prefix="/api/v1")
 # deploy by deploy.sh `verify_internal_blocked`); reachable only over the
 # internal Docker network, with BILLING_SERVICE_TOKEN as the in-app control.
 app.include_router(internal_billing.router)
+# Issue #1093: owner-only billing handoff token. Public surface (/api/v1/billing),
+# session-auth + owner-only, Stripe-agnostic — always mounted (unlike the
+# BILLING_ENABLED-gated Stripe plugin); fail-closed (503) when the signing key is unset.
+app.include_router(billing_handoff.router, prefix="/api/v1")
 app.include_router(connectors_slack.router, prefix="/api/v1")
 
 # Public Search routes (Issue #238 - Public REST API)
