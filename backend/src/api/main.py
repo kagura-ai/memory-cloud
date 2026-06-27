@@ -509,6 +509,7 @@ from api.routes import (  # noqa: E402
     api_keys,
     attachments,  # Issue #330 → deprecated by #555 (returns HTTP 410 Gone)
     auth,
+    billing_handoff,  # Issue #1093: owner-only Ed25519 handoff to payment service
     bm25_drift,  # Issue #343: BM25 IDF drift admin (preview, cron disabled by default)
     config,
     connectors_slack,  # Spec 2026-06-02: Slack connector OAuth install/callback
@@ -592,6 +593,9 @@ app.include_router(invitations.router, prefix="/api/v1")
 
 # Workspace Plan routes (Issue #164 - User Management拡張)
 app.include_router(workspace_plan.router, prefix="/api/v1")
+
+# Billing handoff route (Issue #1093 - owner-only Ed25519 handoff to payment service)
+app.include_router(billing_handoff.router, prefix="/api/v1")
 
 # Member Credentials routes (Migration 034 - Zero-knowledge credential management)
 app.include_router(member_credentials.router)

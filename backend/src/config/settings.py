@@ -103,6 +103,33 @@ class Settings(BaseSettings):
         default="",
         description="Shared bearer token authenticating the billing service to /internal/* (RFC 6750)",
     )
+    # Issue #1093: owner-only handoff to the external payment service. memory-cloud
+    # mints a short-lived Ed25519 (EdDSA) JWT that payment.kagura-ai.com redeems
+    # for the user-auth handoff (RFC kagura-payment §1, Layer-1). Empty signing key
+    # disables the endpoint (fail-closed, 503 HANDOFF-001) so a misconfigured
+    # deployment never mints unsigned/forgeable handoff tokens.
+    # Generate: openssl genpkey -algorithm ed25519 -out handoff.pem (PEM, PKCS8).
+    billing_handoff_signing_key: str = Field(
+        default="",
+        description=(
+            "Ed25519 PRIVATE key (PEM, PKCS8) used to sign billing-handoff JWTs. "
+            "Empty disables POST /api/v1/billing/handoff (fail-closed, 503)."
+        ),
+    )
+    billing_handoff_kid: str = Field(
+        default="",
+        description=(
+            "Key id placed in the handoff JWT header so the payment service can "
+            "select the right public key during signing-key rotation."
+        ),
+    )
+    payment_public_base_url: str = Field(
+        default="https://payment.kagura-ai.com",
+        description=(
+            "Public base URL of the external payment service. The handoff endpoint "
+            "returns {base}/enter?t=<jwt> for the browser redirect."
+        ),
+    )
     # Public MCP base URL handed back to the worker in its config so it can write
     # memories. Defaults to local dev; override in prod (e.g. https://memory.kagura-ai.com/mcp).
     kmc_mcp_url: str = Field(
