@@ -146,3 +146,37 @@ def test_search_text_weights_summary_and_context_double():
 
 def test_search_text_empty_payload():
     assert _build_search_text({}) == ""
+
+
+# -- importance range consistency (mirrors the Qdrant 4xx validation) --------
+def test_importance_inverted_gte_lte_raises():
+    with pytest.raises(ValueError, match="gte"):
+        build_lance_filter(WS, CTX, USER, filters={"importance": {"gte": 0.9, "lte": 0.1}})
+
+
+def test_importance_inverted_gt_lt_raises():
+    with pytest.raises(ValueError, match="gt"):
+        build_lance_filter(WS, CTX, USER, filters={"importance": {"gt": 0.8, "lt": 0.2}})
+
+
+# -- date normalization: any offset is converted to canonical UTC '...Z' -----
+def test_date_offset_normalized_to_utc():
+    where = build_lance_filter(
+        WS, CTX, USER, filters={"created_after": "2026-06-01T09:00:00+09:00"}
+    )
+    assert "created_at >= '2026-06-01T00:00:00Z'" in where  # 09:00+09:00 == 00:00Z
+
+
+def test_date_malformed_raises():
+    with pytest.raises(ValueError):
+        build_lance_filter(WS, CTX, USER, filters={"created_after": "not-a-date"})
+
+
+# -- shared context still applies metadata filters (only user_id is dropped) -
+def test_shared_context_keeps_metadata_filters():
+    where = build_lance_filter(
+        WS, CTX, USER, is_shared_context=True, filters={"tags": ["x"], "scope": "persistent"}
+    )
+    assert "user_id" not in where
+    assert "array_has(tags, 'x')" in where
+    assert "scope = 'persistent'" in where

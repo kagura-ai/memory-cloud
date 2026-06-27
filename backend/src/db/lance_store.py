@@ -41,9 +41,11 @@ from __future__ import annotations
 import asyncio
 import json
 import threading
+from datetime import UTC
 from typing import TYPE_CHECKING, Any
 from uuid import UUID
 
+from utils.datetime import parse_iso8601_to_aware, to_utc_iso
 from utils.exceptions import QdrantError
 from utils.logger import get_logger
 from utils.tokenizer import build_fulltext_query, tokenize_for_search
@@ -128,7 +130,12 @@ def _build_date_clauses(filters: dict[str, Any]) -> list[str]:
             raise ValueError(
                 f"{key} must be an ISO 8601 datetime string, got {type(value).__name__}"
             )
-        out.append(f"{col} {op} {_sql_str(value)}")
+        # Normalize to canonical UTC '...Z' (validates the input, converts any
+        # offset to UTC, and matches the to_utc_iso format stored in
+        # created_at/updated_at) so the lexical string comparison orders
+        # chronologically. Mirrors the Qdrant path's parse_iso8601_to_aware.
+        normalized = to_utc_iso(parse_iso8601_to_aware(value, key).astimezone(UTC))
+        out.append(f"{col} {op} {_sql_str(normalized)}")
     return out
 
 
@@ -187,6 +194,13 @@ def build_lance_filter(
             parts.append(f"type = {_sql_str(filters['type'])}")
         imp = filters.get("importance")
         if isinstance(imp, dict):
+            # Mirror db.qdrant._build_importance_range_condition: reject an
+            # inconsistent range up-front (4xx) instead of silently emitting an
+            # unsatisfiable predicate that returns an empty set.
+            if "gte" in imp and "lte" in imp and imp["gte"] > imp["lte"]:
+                raise ValueError(f"gte ({imp['gte']}) cannot be greater than lte ({imp['lte']})")
+            if "gt" in imp and "lt" in imp and imp["gt"] >= imp["lt"]:
+                raise ValueError(f"gt ({imp['gt']}) must be less than lt ({imp['lt']})")
             for op, sql in (("gte", ">="), ("lte", "<="), ("gt", ">"), ("lt", "<")):
                 if op in imp:
                     parts.append(f"importance {sql} {float(imp[op])}")
@@ -232,12 +246,20 @@ class LanceVectorStore:
         self._db_path = db_path
         self._db: lancedb.DBConnection | None = None
         self._tables: dict[str, Any] = {}
-        # Last known embedding dimension, used when a read/delete opens a table
-        # that does not yet exist. Set by ensure_collection() / add_memory().
-        self._dim: int = 0
-        # _run closures execute in the asyncio.to_thread pool, so concurrent
-        # calls can race on lazy connection + table creation. RLock because
-        # _open() calls _connect() while holding it.
+        # Per-collection embedding dimension, used when a read/delete must open
+        # a table that has to be created. Tracked per collection_name because
+        # the default collection (512) and per-model variants (e.g.
+        # _voyage_2_1024) have different dims. Set by ensure_collection() /
+        # add_memory().
+        self._dims: dict[str, int] = {}
+        # Collections whose FTS + scalar indexes have been built this process.
+        # Indexes are (re)built lazily after the first write, since an empty
+        # table cannot be indexed on some LanceDB versions.
+        self._indexed: set[str] = set()
+        # Serializes lazy connect/table creation AND every write: _run closures
+        # run in the asyncio.to_thread pool and LanceDB is not safe for
+        # concurrent writers even in-process. RLock because the write path
+        # re-enters via _open(). Reads (MVCC) do not take it.
         self._lock = threading.RLock()
 
     # -- connection / table helpers (run inside to_thread) ------------------
@@ -272,12 +294,14 @@ class LanceVectorStore:
         )
 
     def _open(self, collection_name: str, dim: int = 0) -> Any:
-        """Open (or create) a collection table.
+        """Open (creating if needed) a collection table, or return ``None``.
 
-        ``dim`` is only consulted when the table must be created. Read/delete
-        callers pass ``0`` and rely on the table already existing (or on a
-        previously recorded ``self._dim``); creating a table with a zero-width
-        vector column would corrupt it, so that case raises instead.
+        ``dim`` is only consulted when the table must be created (write path —
+        add_memory / ensure_collection pass a real dim). Read/delete callers
+        pass ``0``: if the table does not exist yet they get ``None`` (an empty
+        store ⇒ no rows / nothing to delete), never a zero-width vector column.
+        Per-collection dims are tracked so a variant collection is created at
+        its own dimension, not another collection's.
         """
         with self._lock:
             cached = self._tables.get(collection_name)
@@ -287,39 +311,44 @@ class LanceVectorStore:
             if collection_name in db.table_names():
                 tbl = db.open_table(collection_name)
             else:
-                effective_dim = dim or self._dim
+                effective_dim = dim or self._dims.get(collection_name, 0)
                 if effective_dim <= 0:
-                    raise QdrantError(
-                        f"LanceDB table '{collection_name}' does not exist and no "
-                        "embedding dimension is known yet; call ensure_collection() "
-                        "or add_memory() before read/delete operations."
-                    )
+                    # Read/delete on a not-yet-created collection → empty store.
+                    return None
                 tbl = db.create_table(collection_name, schema=self._schema(effective_dim))
             self._tables[collection_name] = tbl
             return tbl
+
+    def _ensure_indexes(self, tbl: Any) -> None:
+        """Best-effort (re)build of the scalar isolation + FTS indexes.
+
+        Called from ensure_collection and lazily after the first write, because
+        some LanceDB versions cannot build an index on an empty table. The table
+        is fully queryable without them (full scan); once built, LanceDB folds
+        later rows in, so building once per collection is sufficient.
+        """
+        for col in ("context_id", "workspace_id", "user_id"):
+            try:
+                tbl.create_scalar_index(col, replace=True)
+            except Exception as e:  # noqa: BLE001 - best-effort preview index
+                logger.debug("lance_scalar_index_deferred", column=col, error=str(e))
+        try:
+            tbl.create_fts_index("search_text", use_tantivy=False, replace=True)
+        except Exception as e:  # noqa: BLE001 - FTS index needs rows on some versions
+            logger.warning("lance_fts_index_deferred", error=str(e))
 
     # -- VectorStore Protocol ----------------------------------------------
     async def ensure_collection(
         self, embedding_dim: int = 512, collection_name: str = DEFAULT_COLLECTION
     ) -> None:
         if embedding_dim > 0:
-            self._dim = embedding_dim
+            self._dims[collection_name] = embedding_dim
 
         def _run() -> None:
-            tbl = self._open(collection_name, embedding_dim)
-            # Best-effort index creation. On an empty table some LanceDB
-            # versions defer index builds until data exists; the table is
-            # fully queryable without them (full scan), so failures are logged
-            # and retried lazily rather than fatal in this preview backend.
-            for col in ("context_id", "workspace_id", "user_id"):
-                try:
-                    tbl.create_scalar_index(col, replace=True)
-                except Exception as e:  # noqa: BLE001 - best-effort preview index
-                    logger.debug("lance_scalar_index_deferred", column=col, error=str(e))
-            try:
-                tbl.create_fts_index("search_text", use_tantivy=False, replace=True)
-            except Exception as e:  # noqa: BLE001 - FTS index needs rows on some versions
-                logger.warning("lance_fts_index_deferred", error=str(e))
+            with self._lock:
+                tbl = self._open(collection_name, embedding_dim)
+                self._ensure_indexes(tbl)
+                self._indexed.add(collection_name)
 
         try:
             await asyncio.to_thread(_run)
@@ -347,7 +376,7 @@ class LanceVectorStore:
         _validate_uuid(workspace_id, "workspace_id")
         _validate_uuid(context_id, "context_id")
 
-        self._dim = len(vector)
+        self._dims[collection_name] = len(vector)
 
         # Mirror the Qdrant writer: isolation keys live in the payload too.
         payload = {
@@ -375,14 +404,23 @@ class LanceVectorStore:
         }
 
         def _run() -> None:
-            tbl = self._open(collection_name, len(vector))
-            # Upsert by id so re-embeds (Sleep reindex) overwrite cleanly.
-            (
-                tbl.merge_insert("id")
-                .when_matched_update_all()
-                .when_not_matched_insert_all()
-                .execute([row])
-            )
+            # Hold the lock across the write: LanceDB is not concurrent-writer
+            # safe even in-process, and Sleep/embedding tasks issue overlapping
+            # add_memory calls from separate to_thread workers.
+            with self._lock:
+                tbl = self._open(collection_name, len(vector))
+                # Upsert by id so re-embeds (Sleep reindex) overwrite cleanly.
+                (
+                    tbl.merge_insert("id")
+                    .when_matched_update_all()
+                    .when_not_matched_insert_all()
+                    .execute([row])
+                )
+                # Build indexes once the table has its first row (deferred from
+                # ensure_collection on the empty table).
+                if collection_name not in self._indexed:
+                    self._ensure_indexes(tbl)
+                    self._indexed.add(collection_name)
 
         try:
             await asyncio.to_thread(_run)
@@ -409,8 +447,14 @@ class LanceVectorStore:
         where = build_lance_filter(workspace_id, context_id, user_id, is_shared_context, filters)
 
         def _run() -> list[dict]:
-            tbl = self._open(collection_name, len(query_vector))
-            q = tbl.search(query_vector, vector_column_name="vector").where(where, prefilter=True)
+            tbl = self._open(collection_name)
+            if tbl is None:
+                return []
+            q = (
+                tbl.search(query_vector, vector_column_name="vector")
+                .metric("cosine")
+                .where(where, prefilter=True)
+            )
             return q.limit(limit).to_list()
 
         try:
@@ -421,8 +465,9 @@ class LanceVectorStore:
         return [
             {
                 "id": row["id"],
-                # Cosine distance → similarity (Qdrant returns similarity scores).
-                # A missing _distance ranks last rather than as a perfect match.
+                # .metric("cosine") above makes _distance a cosine distance in
+                # [0, 2], so 1 - _distance is cosine similarity (matches the
+                # Qdrant Distance.COSINE scores). Missing _distance ranks last.
                 "score": (
                     (1.0 - float(row["_distance"])) if row.get("_distance") is not None else 0.0
                 ),
@@ -458,7 +503,9 @@ class LanceVectorStore:
             return []
 
         def _run() -> list[dict]:
-            tbl = self._open(collection_name, 0)
+            tbl = self._open(collection_name)
+            if tbl is None:
+                return []
             q = tbl.search(expanded, query_type="fts").where(where, prefilter=True)
             return q.limit(limit).to_list()
 
@@ -486,24 +533,27 @@ class LanceVectorStore:
         where = f"id = {_sql_str(str(memory_id))}"
 
         def _run() -> None:
-            tbl = self._open(collection_name)
-            # Read only the payload blob (NOT the vector), then write the changed
-            # columns back in place with tbl.update(). Using update() rather than
-            # a full-row merge_insert guarantees the dense embedding is never
-            # dropped even if the read projection omits the vector column.
-            existing = tbl.search().where(where).select(["payload_json"]).limit(1).to_list()
-            if not existing:
-                return
-            payload = json.loads(existing[0]["payload_json"])
-            payload.update(payload_updates)
-            values: dict[str, Any] = {
-                "payload_json": json.dumps(payload, ensure_ascii=False),
-                "search_text": _build_search_text(payload),
-            }
-            for col in mirror_cols:
-                if col in payload_updates:
-                    values[col] = payload_updates[col]
-            tbl.update(where=where, values=values)
+            with self._lock:
+                tbl = self._open(collection_name)
+                if tbl is None:
+                    return
+                # Read only the payload blob (NOT the vector), then write the
+                # changed columns back in place with tbl.update(). update() (vs
+                # a full-row merge_insert) guarantees the dense embedding is
+                # never dropped even if the read projection omits the vector.
+                existing = tbl.search().where(where).select(["payload_json"]).limit(1).to_list()
+                if not existing:
+                    return
+                payload = json.loads(existing[0]["payload_json"])
+                payload.update(payload_updates)
+                values: dict[str, Any] = {
+                    "payload_json": json.dumps(payload, ensure_ascii=False),
+                    "search_text": _build_search_text(payload),
+                }
+                for col in mirror_cols:
+                    if col in payload_updates:
+                        values[col] = payload_updates[col]
+                tbl.update(where=where, values=values)
 
         try:
             await asyncio.to_thread(_run)
@@ -517,8 +567,11 @@ class LanceVectorStore:
         collection_name: str = DEFAULT_COLLECTION,
     ) -> None:
         def _run() -> None:
-            tbl = self._open(collection_name, 0)
-            tbl.delete(f"id = {_sql_str(str(memory_id))}")
+            with self._lock:
+                tbl = self._open(collection_name)
+                if tbl is None:
+                    return
+                tbl.delete(f"id = {_sql_str(str(memory_id))}")
 
         try:
             await asyncio.to_thread(_run)
@@ -536,10 +589,13 @@ class LanceVectorStore:
         where = f"workspace_id = {_sql_str(workspace_id)} AND context_id = {_sql_str(context_id)}"
 
         def _run() -> int:
-            tbl = self._open(collection_name, 0)
-            count = tbl.count_rows(filter=where)
-            tbl.delete(where)
-            return int(count)
+            with self._lock:
+                tbl = self._open(collection_name)
+                if tbl is None:
+                    return 0
+                count = tbl.count_rows(filter=where)
+                tbl.delete(where)
+                return int(count)
 
         try:
             return await asyncio.to_thread(_run)
