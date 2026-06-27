@@ -19,5 +19,5 @@
 - [Resource Tokens Guide](resource-tokens-guide.md) — External data ingestion via resource tokens (the **Ingest** layer)
 - [Neural Memory Evaluation](neural-memory-evaluation.md) — Benchmark results, architecture decisions, known limitations (the **Enhance** layer evidence)
 - [Sleep Maintenance](sleep-maintenance.md) — Background 6-phase cleanup cycle, sleep_mode, observability, and rollback (the **Compile / Enhance** consolidation layer)
-- [Deployment](deployment.md) — Production deployment with Caddy reverse proxy
+- [Deployment](deployment.md) — Production deployment with Caddy reverse proxy (incl. the embedded LanceDB **"Kagura Lite"** backend, preview)
 - [Troubleshooting](troubleshooting.md) — Environment-specific setup fixes (e.g. WSL2 + Claude Code MCP OAuth callback)

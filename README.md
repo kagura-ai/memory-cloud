@@ -117,6 +117,8 @@ This separation is intentional: mixing graph signals into recall degrades precis
 
 **Tech stack:** FastAPI (async) · PostgreSQL · Qdrant · Redis · Next.js 16 · OAuth2 · MCP over Streamable HTTP
 
+**Vector backend:** Qdrant by default. A single-process self-hosted / CLI / edge deployment can instead run the embedded **LanceDB backend — "Kagura Lite" (preview)** with no separate Qdrant server (`KAGURA_VECTOR_BACKEND=lance`, `pip install '.[lite]'`). Not for multi-worker / SaaS (LanceDB is single-writer). See [Deployment → Embedded Vector Backend](docs/deployment.md#embedded-vector-backend-kagura-lite-preview).
+
 ## Quick Start
 
 ### System Requirements
