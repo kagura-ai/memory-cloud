@@ -195,3 +195,28 @@ def tokenize_for_search(text: str) -> str:
         return text.lower()
 
     return _sudachi_extract(text, lambda t: t.dictionary_form().lower(), "tokenization")
+
+
+def build_fulltext_query(query: str) -> str:
+    """Build the expanded BM25 query string from raw user text.
+
+    Single Sudachi pass producing lemmas + readings, plus hiragana-run
+    augmentation (Issue #75) and synonym expansion (Issue #69). Shared by the
+    Qdrant sparse-vector path (``db.qdrant.search_memories_fulltext``) and the
+    LanceDB FTS path (``db.lance_store``) so both backends tokenize queries
+    identically — extracted to keep the two in lockstep.
+
+    Args:
+        query: Raw natural-language query.
+
+    Returns:
+        Space-separated expanded token string (may be empty).
+    """
+    from utils.synonyms import expand_query_tokens
+
+    tokenized_query, query_reading, sudachi_tokens = tokenize_and_reading(query)
+    combined = f"{tokenized_query} {query_reading}" if query_reading else tokenized_query
+    augmented = augment_reading_tokens(query, sudachi_tokens=sudachi_tokens)
+    if augmented:
+        combined = f"{combined} {augmented}"
+    return expand_query_tokens(combined)

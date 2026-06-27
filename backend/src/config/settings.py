@@ -183,6 +183,21 @@ class Settings(BaseSettings):
         default="", description="Qdrant API key (REQUIRED in production, empty for local dev)"
     )
 
+    # Vector backend selection ("Kagura Lite" — embedded LanceDB backend).
+    # Default "qdrant" preserves the server behavior exactly. "lance" routes
+    # all vector ops through the in-process LanceDB store (db/lance_store.py),
+    # intended for single-process self-hosted / CLI / desktop deployments.
+    vector_backend: str = Field(
+        default="qdrant",
+        validation_alias=AliasChoices("KAGURA_VECTOR_BACKEND", "VECTOR_BACKEND"),
+        description="Vector store backend: 'qdrant' (default, server) or 'lance' (embedded).",
+    )
+    lance_db_path: str = Field(
+        default="./data/kagura.lance",
+        validation_alias=AliasChoices("KAGURA_LANCE_DB_PATH", "LANCE_DB_PATH"),
+        description="Filesystem path for the embedded LanceDB store (vector_backend=lance).",
+    )
+
     # Embedding Configuration
     embedding_provider: str = Field(
         default="openai", description="Embedding model provider (openai/cohere/huggingface)"
