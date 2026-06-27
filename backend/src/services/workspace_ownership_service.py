@@ -7,15 +7,24 @@ every owner-gated billing/admin action.
 
 Single-owner invariant
 -----------------------
-A live workspace has exactly **one** OWNER. OWNER promotion on an *existing*
-workspace happens **only** through :meth:`WorkspaceOwnershipService.transfer_ownership`,
-which takes a ``SELECT ... FOR UPDATE`` lock on the workspace row as the
-synchronization point. The other OWNER assignments in the codebase are confined
-to workspace *creation* (``workspace_service`` / ``context_service`` personal
-workspace) and the erasure auto-transfer — none of which can create a second
-owner on a live, concurrently-transferred workspace. Do not introduce another
-code path that assigns ``WorkspaceRole.OWNER`` on an existing workspace without
-routing through this service (or taking the same row lock).
+A live workspace has exactly **one** OWNER. This is the voluntary transfer path;
+it takes a ``SELECT ... FOR UPDATE`` lock on the workspace row as the
+synchronization point and re-checks the caller is still owner *under* the lock.
+The other OWNER-assigning paths and how the invariant holds against them:
+
+* workspace *creation* (``workspace_service`` / ``context_service`` personal
+  workspace) — a brand-new workspace, never a live concurrent-transfer target.
+* ``WorkspaceService.update_member_role`` — has its own single-owner guard: it
+  refuses to promote a member to OWNER while any OWNER row exists. Combined with
+  this service's *atomic* demote+promote (no committed zero-owner window), it
+  cannot produce two owners on a workspace that already has one.
+* the account-erasure auto-transfer (``account_erasure_service``) — does **not**
+  take this lock. Unifying every owner-mutating path under one workspace row lock
+  is a tracked follow-up; this service's under-lock owner re-check (→ 409)
+  defends the common direction.
+
+Do not add a new OWNER-assigning path on an existing workspace without either
+this row lock or an equivalent single-owner guard.
 
 Ownership epoch
 ---------------
@@ -130,15 +139,27 @@ class WorkspaceOwnershipService:
                 changed=False,
             )
 
-        # 4. Target must be an existing member of THIS workspace.
-        target_member = (
-            await self.db.execute(
-                select(WorkspaceMember).where(
-                    WorkspaceMember.workspace_id == workspace_id,
-                    WorkspaceMember.user_id == target_user_id,
+        previous_owner_id = workspace.owner_user_id
+
+        # 4 + 5. Fetch BOTH the target and previous-owner member rows in a single
+        # round-trip — keeps the critical section under the workspace lock short.
+        # target_user_id != previous_owner_id here (the idempotent no-op above
+        # already returned when they are equal), so this is two distinct rows.
+        member_rows = (
+            (
+                await self.db.execute(
+                    select(WorkspaceMember).where(
+                        WorkspaceMember.workspace_id == workspace_id,
+                        WorkspaceMember.user_id.in_([target_user_id, previous_owner_id]),
+                    )
                 )
             )
-        ).scalar_one_or_none()
+            .scalars()
+            .all()
+        )
+        members_by_user = {m.user_id: m for m in member_rows}
+
+        target_member = members_by_user.get(target_user_id)
         if target_member is None:
             # Well-formed request, but the named user is not a member of THIS
             # workspace — a state precondition failure (400), not a shape error.
@@ -147,19 +168,10 @@ class WorkspaceOwnershipService:
                 error_code="WS-OWNER-001",
             )
 
-        previous_owner_id = workspace.owner_user_id
-
-        # 5. Demote the previous owner's member row to ADMIN — if it exists. Some
+        # Demote the previous owner's member row to ADMIN — if it exists. Some
         # legacy workspaces carry owner_user_id without a matching member row;
         # there is nothing to demote in that case, so flip ownership regardless.
-        previous_member = (
-            await self.db.execute(
-                select(WorkspaceMember).where(
-                    WorkspaceMember.workspace_id == workspace_id,
-                    WorkspaceMember.user_id == previous_owner_id,
-                )
-            )
-        ).scalar_one_or_none()
+        previous_member = members_by_user.get(previous_owner_id)
         if previous_member is not None:
             previous_member.role = WorkspaceRole.ADMIN
 
@@ -171,18 +183,20 @@ class WorkspaceOwnershipService:
         workspace.ownership_epoch = new_epoch
 
         # 6. Audit row in the SAME transaction → the transfer and its audit trail
-        # commit (or roll back) atomically. user_id columns are stable OAuth subs
-        # and are stored legibly (the audit consumer needs "who became owner");
-        # the #481 HMAC rule targets *mutable* identifiers, not these.
+        # commit (or roll back) atomically. The previous/new owner user_ids go in
+        # user_metadata (JSON, unbounded), NOT old_value_hash/new_value_hash —
+        # those columns are String(64) (sized for SHA256/HMAC hex) and a
+        # federated OAuth sub can exceed 64 chars (User.user_id is String(255)),
+        # which would truncate-error on INSERT.
         self.db.add(
             AuditLog(
                 user_email=performed_by_email,
                 user_id=current_owner_id,
                 action=OWNERSHIP_TRANSFER_ACTION,
                 resource=f"workspace:{workspace_id}",
-                old_value_hash=previous_owner_id,
-                new_value_hash=target_user_id,
                 user_metadata={
+                    "previous_owner_id": previous_owner_id,
+                    "new_owner_id": target_user_id,
                     "ownership_epoch": new_epoch,
                     "performed_by": current_owner_id,
                 },

@@ -112,6 +112,8 @@ class TestTransferOwnerHappyPath:
         assert call["workspace_id"] == WS
         assert call["current_owner_id"] == OWNER
         assert call["target_user_id"] == TARGET
+        # The audit actor is the authenticated session, not the body.
+        assert call["performed_by_email"] == "owner@test.com"
 
     def test_idempotent_noop_reports_changed_false(self, owner_client):
         perm = _owner_ok()

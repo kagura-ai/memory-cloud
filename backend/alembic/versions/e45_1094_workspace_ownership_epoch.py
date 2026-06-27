@@ -8,6 +8,10 @@ migration.
 
 Revision ID: e45_1094_ownership_epoch
 Revises: e44_1065_host_arbitration
+
+Note: the revision id is kept <=32 chars (shorter than the filename stem) for
+the ``alembic_version.version_num`` VARCHAR(32) column — same convention as the
+sibling capped migrations.
 """
 
 import sqlalchemy as sa
