@@ -103,6 +103,39 @@ class Settings(BaseSettings):
         default="",
         description="Shared bearer token authenticating the billing service to /internal/* (RFC 6750)",
     )
+    # Issue #1093: Ed25519 signing material for owner billing handoff tokens
+    # (POST /api/v1/billing/handoff). memory-cloud holds the PRIVATE key; the
+    # billing service verifies with the matching public key (kid-based rotation).
+    # Empty key OR empty kid disables the endpoint (fail-closed, 503 BILLING-002).
+    # Generate: openssl genpkey -algorithm ed25519 -out handoff.pem
+    billing_handoff_signing_key: str = Field(
+        default="",
+        description=(
+            "Ed25519 private key (PEM / PKCS8) signing billing handoff tokens. "
+            "Empty disables POST /api/v1/billing/handoff (fail-closed, 503)."
+        ),
+    )
+    billing_handoff_key_id: str = Field(
+        default="",
+        description=(
+            "kid for the active billing handoff signing key (verifier-side key "
+            "rotation). Empty disables the endpoint (fail-closed, 503)."
+        ),
+    )
+    billing_handoff_issuer: str = Field(
+        default="kagura-memory-cloud",
+        description="iss claim asserted on billing handoff tokens.",
+    )
+    billing_handoff_audience: str = Field(
+        default="kagura-billing",
+        description="aud claim — the billing service that verifies handoff tokens.",
+    )
+    billing_handoff_ttl_seconds: int = Field(
+        default=120,
+        ge=1,
+        le=900,
+        description="Billing handoff token lifetime in seconds (short-lived; <=15min).",
+    )
     # Public MCP base URL handed back to the worker in its config so it can write
     # memories. Defaults to local dev; override in prod (e.g. https://memory.kagura-ai.com/mcp).
     kmc_mcp_url: str = Field(
