@@ -282,6 +282,35 @@ class ResendEmailService:
             },
         )
 
+    async def send_workspace_ownership_transferred(
+        self,
+        *,
+        to_email: str,
+        workspace_name: str,
+    ) -> bool:
+        text = (
+            f'You are now the owner of the "{workspace_name}" workspace on '
+            "Kagura Memory Cloud.\n"
+            "\n"
+            "Ownership was transferred to you by the previous owner. You now have "
+            "full control of the workspace, including billing and member "
+            "management.\n"
+            "\n"
+            "If you were not expecting this, contact the previous owner or your "
+            "Kagura administrator.\n"
+        )
+        return await self._send(
+            to_email=to_email,
+            subject=f"You're now the owner of the {workspace_name} workspace on Kagura",
+            text=text,
+            log_event="workspace_ownership_transferred_email",
+            log_context={
+                "to_email": to_email,
+                "workspace_name": workspace_name,
+                "template": "workspace_ownership_transferred",
+            },
+        )
+
     async def send_erasure_confirmation(
         self,
         *,
