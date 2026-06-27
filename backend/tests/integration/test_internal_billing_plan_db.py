@@ -93,3 +93,98 @@ async def test_missing_workspace_raises_not_found(db_session):
             db=db_session,
         )
     assert exc.value.status_code == 404
+
+
+# ---------------------------------------------------------------------------
+# entitlement_source provenance (#1095)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_new_workspace_defaults_admin_grant(db_session):
+    """The server_default is the protective 'admin_grant' — a never-billed
+    workspace is locally-owned, so a reconcile pass leaves it untouched."""
+    ws = await _make_workspace(db_session, plan_name="free")
+    await db_session.refresh(ws)
+    assert ws.entitlement_source == "admin_grant"
+
+
+@pytest.mark.asyncio
+async def test_push_marks_external_billing_and_echoes(db_session):
+    """A billing push flips provenance to 'external_billing' (default is
+    'admin_grant', so this genuinely proves the handler set it) and echoes it."""
+    ws = await _make_workspace(db_session, plan_name="free")
+    assert ws.entitlement_source == "admin_grant"  # precondition
+
+    result = await set_workspace_plan_from_billing(
+        workspace_id=str(ws.id),
+        body=BillingPlanPush(plan_name="pro"),
+        _=None,
+        db=db_session,
+    )
+
+    await db_session.refresh(ws)
+    assert ws.entitlement_source == "external_billing"
+    assert result.entitlement_source == "external_billing"
+
+
+@pytest.mark.asyncio
+async def test_get_entitlement_returns_source(db_session):
+    """The reconciler read surface returns plan + entitlement_source; it reflects
+    admin_grant before any push and external_billing after."""
+    from api.routes.internal_billing import get_workspace_entitlement
+
+    ws = await _make_workspace(db_session, plan_name="basic")
+
+    before = await get_workspace_entitlement(workspace_id=str(ws.id), _=None, db=db_session)
+    assert before.plan_name == "basic"
+    assert before.entitlement_source == "admin_grant"
+
+    await set_workspace_plan_from_billing(
+        workspace_id=str(ws.id),
+        body=BillingPlanPush(plan_name="pro"),
+        _=None,
+        db=db_session,
+    )
+    after = await get_workspace_entitlement(workspace_id=str(ws.id), _=None, db=db_session)
+    assert after.plan_name == "pro"
+    assert after.entitlement_source == "external_billing"
+
+
+@pytest.mark.asyncio
+async def test_get_entitlement_missing_workspace_raises_not_found(db_session):
+    from api.routes.internal_billing import get_workspace_entitlement
+    from utils.exceptions import NotFoundException
+
+    with pytest.raises(NotFoundException) as exc:
+        await get_workspace_entitlement(workspace_id=str(uuid4()), _=None, db=db_session)
+    assert exc.value.status_code == 404
+
+
+@pytest.mark.asyncio
+async def test_check_constraint_rejects_invalid_source(db_session):
+    """The valid_entitlement_source CHECK rejects an out-of-enum value."""
+    from sqlalchemy.exc import IntegrityError
+
+    ws = await _make_workspace(db_session, plan_name="free")
+    ws.entitlement_source = "bogus_source"
+    with pytest.raises(IntegrityError):
+        await db_session.commit()
+    await db_session.rollback()
+
+
+@pytest.mark.asyncio
+async def test_get_entitlement_skips_soft_deleted(db_session):
+    """A soft-deleted workspace is 'gone' to the reconciler → 404 (not stale
+    entitlement it might resurrect). The GET filters deleted_at (#1095)."""
+    from api.routes.internal_billing import get_workspace_entitlement
+    from utils.datetime import utcnow
+    from utils.exceptions import NotFoundException
+
+    ws = await _make_workspace(db_session, plan_name="pro")
+    ws.deleted_at = utcnow()
+    await db_session.commit()
+
+    with pytest.raises(NotFoundException) as exc:
+        await get_workspace_entitlement(workspace_id=str(ws.id), _=None, db=db_session)
+    assert exc.value.status_code == 404

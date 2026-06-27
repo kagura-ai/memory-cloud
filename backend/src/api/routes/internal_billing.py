@@ -51,7 +51,7 @@ from config.plan_tiers import PLAN_TIERS
 from config.settings import get_settings
 from db.base import get_db
 from models.api_base import TZAwareBaseModel
-from models.auth import Workspace
+from models.auth import ENTITLEMENT_SOURCE_EXTERNAL_BILLING, Workspace
 from utils.exceptions import (
     AuthenticationError,
     MemoryCloudException,
@@ -138,6 +138,7 @@ class BillingPlanPushResult(TZAwareBaseModel):
     workspace_id: str
     plan_name: str
     addons: dict[str, int]
+    entitlement_source: str
     status: str | None = None
     current_period_end: datetime | None = None
     applied: bool = True
@@ -185,8 +186,11 @@ async def set_workspace_plan_from_billing(
     if workspace is None:
         raise NotFoundException("Workspace")
 
-    # Apply entitlement (absolute set → idempotent).
+    # Apply entitlement (absolute set → idempotent). Mark provenance as
+    # billing-owned (#1095) so the external reconciler may reconcile this row;
+    # a prior admin/comp grant is overwritten here by an explicit billing push.
     workspace.plan_name = body.plan_name
+    workspace.entitlement_source = ENTITLEMENT_SOURCE_EXTERNAL_BILLING
     if body.addons:
         for key, value in body.addons.items():
             setattr(workspace, _ADDON_COLUMNS[key], value)
@@ -199,11 +203,62 @@ async def set_workspace_plan_from_billing(
         plan_name=body.plan_name,
         billing_status=body.status,
         addons=body.addons,
+        entitlement_source=workspace.entitlement_source,
     )
     return BillingPlanPushResult(
         workspace_id=workspace_id,
         plan_name=workspace.plan_name,
         addons=current_addons,
+        entitlement_source=workspace.entitlement_source,
         status=body.status,
         current_period_end=body.current_period_end,
+    )
+
+
+class WorkspaceEntitlementView(BaseModel):
+    """Read model for the reconciler (#1095): the current entitlement + provenance."""
+
+    workspace_id: str
+    plan_name: str
+    addons: dict[str, int]
+    entitlement_source: str
+
+
+@router.get("/workspaces/{workspace_id}/plan", response_model=WorkspaceEntitlementView)
+async def get_workspace_entitlement(
+    workspace_id: str,
+    _: None = Depends(verify_billing_service_token),
+    db: AsyncSession = Depends(get_db),
+) -> WorkspaceEntitlementView:
+    """Read a workspace's current entitlement + ``entitlement_source`` (#1095).
+
+    Service-authenticated, internal-only. The external reconciler reads this to
+    decide whether to reconcile a workspace (``external_billing``) or leave it
+    untouched (``admin_grant``) — so a periodic billing reconcile never reverts a
+    locally-owned admin/comp grant.
+    """
+    try:
+        ws_uuid = UUID(workspace_id)
+    except ValueError as exc:
+        raise ValidationError("Invalid workspace_id", field="workspace_id") from exc
+
+    # Soft-delete safe (#687/#681 pattern): a soft-deleted workspace is "gone" →
+    # 404, so the reconciler treats it as cancellable rather than resurrecting a
+    # stale entitlement. (The idempotent PUT deliberately does NOT filter — a #954
+    # reconciliation set may target a just-deleted row; a READ for a skip decision
+    # is the opposite concern.)
+    workspace = (
+        await db.execute(
+            select(Workspace).where(Workspace.id == ws_uuid, Workspace.deleted_at.is_(None))
+        )
+    ).scalar_one_or_none()
+    if workspace is None:
+        raise NotFoundException("Workspace")
+
+    current_addons = {key: getattr(workspace, col) for key, col in _ADDON_COLUMNS.items()}
+    return WorkspaceEntitlementView(
+        workspace_id=workspace_id,
+        plan_name=workspace.plan_name,
+        addons=current_addons,
+        entitlement_source=workspace.entitlement_source,
     )

@@ -19,7 +19,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from config.plan_tiers import get_plan_tier
 from config.settings import get_settings
-from models.auth import PlanChange, Workspace
+from models.auth import ENTITLEMENT_SOURCE_ADMIN_GRANT, PlanChange, Workspace
 from utils.datetime import utcnow
 from utils.exceptions import StripeError
 from utils.logger import get_logger
@@ -272,6 +272,11 @@ async def _apply_plan_change(
 
     # Update workspace
     workspace.plan_name = new_plan_name
+    # #1095: the legacy in-app Stripe path is NOT managed by the external billing
+    # reconciler (kagura-billing#5) — it has its own subscription lifecycle
+    # (_handle_subscription_cancelled). Mark it locally-owned so a reconcile pass
+    # never reverts an in-app Stripe plan it has no record of.
+    workspace.entitlement_source = ENTITLEMENT_SOURCE_ADMIN_GRANT
     workspace.daily_api_limit = new_tier.daily_api_limit
     workspace.weekly_api_limit = new_tier.weekly_api_limit
     if customer_id:
@@ -316,6 +321,8 @@ async def _handle_subscription_cancelled(
     old_plan = workspace.plan_name
 
     workspace.plan_name = "free"
+    # #1095: in-app Stripe cancel is locally-owned (not external-reconciler-managed).
+    workspace.entitlement_source = ENTITLEMENT_SOURCE_ADMIN_GRANT
     workspace.daily_api_limit = free_tier.daily_api_limit
     workspace.weekly_api_limit = free_tier.weekly_api_limit
     workspace.stripe_subscription_id = None

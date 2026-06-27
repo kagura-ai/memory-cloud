@@ -39,6 +39,9 @@ def _make_ws():
         "addon_connector_bonus",
     ):
         setattr(ws, col, 0)
+    # #1095: the protective default; a push flips it to external_billing. Set it
+    # to a real str (not a MagicMock) so the result/GET echo is JSON-serializable.
+    ws.entitlement_source = "admin_grant"
     return ws
 
 
@@ -156,7 +159,34 @@ def test_sets_plan_and_addons(billing):
     assert body["addons"]["storage_mb"] == 1024
     assert body["status"] == "active"
     assert body["applied"] is True
+    # #1095: a billing push marks provenance billing-owned (and echoes it).
+    assert body["entitlement_source"] == "external_billing"
     # The workspace object was mutated (entitlement is the SoT).
     assert ws.plan_name == "pro"
     assert ws.addon_sleep_contexts_bonus == 2
     assert ws.addon_storage_bonus_mb == 1024
+    assert ws.entitlement_source == "external_billing"
+
+
+def test_get_entitlement_returns_source(billing):
+    # #1095 reconciler read surface: GET echoes plan + addons + provenance.
+    # Use a non-default value (external_billing) so this proves the handler READS
+    # workspace.entitlement_source rather than echoing a hardcoded literal.
+    ws = _make_ws()
+    ws.entitlement_source = "external_billing"
+    resp = billing.client(ws).get(_PATH, headers={"Authorization": "Bearer secret"})
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["plan_name"] == "free"
+    assert body["entitlement_source"] == "external_billing"
+    assert "addons" in body
+
+
+def test_get_entitlement_requires_token(billing):
+    resp = billing.client(_make_ws()).get(_PATH)
+    assert resp.status_code == 401
+
+
+def test_get_entitlement_not_found_returns_404(billing):
+    resp = billing.client(workspace=None).get(_PATH, headers={"Authorization": "Bearer secret"})
+    assert resp.status_code == 404
