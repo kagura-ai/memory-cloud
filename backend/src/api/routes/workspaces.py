@@ -14,14 +14,16 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from auth.analysis_allowlist import check_workspace_in_allowlist
-from auth.dependencies import get_current_user
+from auth.dependencies import SessionUser, get_current_user
 from auth.workspace_roles import WorkspaceRole
 from db.base import get_db
 from models.api_base import TZAwareBaseModel
 from models.auth import Context, ExternalAPIKey, User
 from models.schemas import OpenAIKeyStatusResponse
 from services.permission_service import PermissionService
+from services.workspace_ownership_service import WorkspaceOwnershipService
 from services.workspace_service import WorkspaceService
+from utils.auth_helpers import get_user_id
 from utils.datetime import to_utc_iso
 from utils.logger import get_logger
 
@@ -1152,4 +1154,67 @@ async def check_openai_key_status(
         has_key=openai_key is not None,
         can_configure=can_configure,
         external_keys_url="/integrations/external-keys",
+    )
+
+
+# ============================================================================
+# Ownership transfer (Issue #1094)
+# ============================================================================
+
+
+class TransferOwnershipRequest(BaseModel):
+    """Request to transfer workspace ownership to an existing member."""
+
+    target_user_id: str = Field(
+        ...,
+        min_length=1,
+        max_length=255,
+        description="User ID of an existing workspace member to promote to owner.",
+    )
+
+
+class TransferOwnershipResponse(BaseModel):
+    """Result of an ownership transfer (or idempotent no-op)."""
+
+    workspace_id: str
+    previous_owner_id: str
+    new_owner_id: str
+    ownership_epoch: int
+    changed: bool = Field(
+        ..., description="False when the target already owned the workspace (no-op)."
+    )
+
+
+@router.post("/{workspace_id}/transfer-ownership", response_model=TransferOwnershipResponse)
+async def transfer_workspace_ownership(
+    workspace_id: UUID,
+    body: TransferOwnershipRequest,
+    user: SessionUser,
+    db: AsyncSession = Depends(get_db),
+) -> TransferOwnershipResponse:
+    """Transfer ownership of a workspace to an existing member.
+
+    Current-owner-only and session-only (a Bearer API key / OAuth token is
+    rejected 403 — a sensitive governance action must require a real browser
+    session). The owner check binds to the **path** ``workspace_id``, never the
+    caller's current workspace. Atomic single-owner invariant under a row lock,
+    idempotent, and writes an audit row + bumps the ownership epoch on success.
+    """
+    user_id = get_user_id(user)
+    # Owner-only against the explicit path workspace_id (#389 cross-tenant guard).
+    await PermissionService(db).check_workspace_owner(user_id, workspace_id)
+
+    result = await WorkspaceOwnershipService(db).transfer_ownership(
+        workspace_id=workspace_id,
+        current_owner_id=user_id,
+        target_user_id=body.target_user_id,
+        performed_by_email=str(user.get("email") or user_id),
+    )
+
+    return TransferOwnershipResponse(
+        workspace_id=str(result.workspace_id),
+        previous_owner_id=result.previous_owner_id,
+        new_owner_id=result.new_owner_id,
+        ownership_epoch=result.ownership_epoch,
+        changed=result.changed,
     )

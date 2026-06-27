@@ -1447,6 +1447,11 @@ class Workspace(Base):
     name: Mapped[str] = mapped_column(String(255), nullable=False)
     description: Mapped[str | None] = mapped_column(Text, nullable=True)
     owner_user_id: Mapped[str] = mapped_column(String(255), nullable=False, index=True)
+    # Issue #1094: monotonic version bumped on every ownership transfer, so
+    # external sessions / tokens bound to a *previous* owner can be invalidated
+    # by a downstream consumer. The consumer (e.g. handoff-token epoch check) is
+    # a separate follow-up — this column is the producer side of that contract.
+    ownership_epoch: Mapped[int] = mapped_column(Integer, nullable=False, server_default="0")
 
     # Billing & Plan
     plan_name: Mapped[str] = mapped_column(String(50), nullable=False, server_default="free")
