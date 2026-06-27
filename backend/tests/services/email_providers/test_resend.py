@@ -526,9 +526,7 @@ async def test_send_workspace_ownership_transferred_calls_sdk_with_expected_payl
 @pytest.mark.asyncio
 async def test_send_workspace_ownership_transferred_returns_false_when_sdk_raises():
     svc = ResendEmailService(api_key="re_test", from_email="noreply@example.com")
-    with patch.object(
-        resend_module.resend.Emails, "send", side_effect=RuntimeError("resend down")
-    ):
+    with patch.object(resend_module.resend.Emails, "send", side_effect=RuntimeError("resend down")):
         result = await svc.send_workspace_ownership_transferred(
             to_email="new@owner.com", workspace_name="Acme"
         )
