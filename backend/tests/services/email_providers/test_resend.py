@@ -531,3 +531,36 @@ async def test_send_workspace_ownership_transferred_returns_false_when_sdk_raise
             to_email="new@owner.com", workspace_name="Acme"
         )
     assert result is False
+
+
+@pytest.mark.asyncio
+async def test_send_workspace_ownership_force_transferred_calls_sdk_with_expected_payload():
+    # #1101: the prod (Resend) path notifies the displaced previous owner.
+    svc = ResendEmailService(api_key="re_test", from_email="noreply@example.com")
+
+    with patch.object(
+        resend_module.resend.Emails, "send", return_value={"id": "re_force_001"}
+    ) as mock_send:
+        result = await svc.send_workspace_ownership_force_transferred(
+            to_email="prev@owner.com",
+            workspace_name="Acme Research",
+        )
+
+    assert result is True
+    mock_send.assert_called_once()
+    params = mock_send.call_args.args[0]
+    assert params["from"] == "noreply@example.com"
+    assert params["to"] == ["prev@owner.com"]
+    assert "Acme Research" in params["subject"]
+    assert "Acme Research" in params["text"]
+    assert "administrator" in params["text"]
+
+
+@pytest.mark.asyncio
+async def test_send_workspace_ownership_force_transferred_returns_false_when_sdk_raises():
+    svc = ResendEmailService(api_key="re_test", from_email="noreply@example.com")
+    with patch.object(resend_module.resend.Emails, "send", side_effect=RuntimeError("resend down")):
+        result = await svc.send_workspace_ownership_force_transferred(
+            to_email="prev@owner.com", workspace_name="Acme"
+        )
+    assert result is False

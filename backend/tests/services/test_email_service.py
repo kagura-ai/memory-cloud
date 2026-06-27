@@ -374,3 +374,27 @@ def test_reset_email_service_for_testing_drops_singleton(monkeypatch: pytest.Mon
     reset_email_service_for_testing()
     second = get_email_service()
     assert first is not second
+
+
+@pytest.mark.asyncio
+async def test_logging_send_workspace_ownership_force_transferred():
+    """#1101: the logging stub records the displaced owner's address + workspace
+    for ops triage and returns True (no-raise courtesy-notification contract)."""
+    svc = LoggingEmailService()
+
+    with patch.object(email_service_module, "logger") as mock_logger:
+        result = await svc.send_workspace_ownership_force_transferred(
+            to_email="prev@owner.com",
+            workspace_name="Acme Research",
+        )
+
+    assert result is True
+    mock_logger.info.assert_called_once()
+    args, kwargs = mock_logger.info.call_args
+    assert args[0] == "workspace_ownership_force_transferred_email"
+    assert kwargs == {
+        "to_email": "prev@owner.com",
+        "workspace_name": "Acme Research",
+        "email_dispatch_required": True,
+        "template": "workspace_ownership_force_transferred",
+    }

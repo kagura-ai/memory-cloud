@@ -204,6 +204,30 @@ class EmailService(Protocol):
         """
         ...
 
+    async def send_workspace_ownership_force_transferred(
+        self,
+        *,
+        to_email: str,
+        workspace_name: str,
+    ) -> bool:
+        """Notify the **displaced previous owner** that an administrator force-
+        transferred their workspace ownership (#1101 break-glass).
+
+        A security-transparency notice (the transfer was involuntary, so the
+        displaced owner learns of it when they return) — but it follows the same
+        best-effort, no-raise contract as every method here: the ownership row +
+        audit row are the source of truth, so a delivery failure MUST NOT roll
+        anything back.
+
+        Args:
+            to_email: The displaced previous owner's account email.
+            workspace_name: Workspace display name.
+
+        Returns:
+            True on delivery (or logging fallback), False on hard failure.
+        """
+        ...
+
 
 class LoggingEmailService:
     """Default stub implementation: structured logs only, no SMTP.
@@ -332,6 +356,21 @@ class LoggingEmailService:
             workspace_name=workspace_name,
             email_dispatch_required=True,
             template="workspace_ownership_transferred",
+        )
+        return True
+
+    async def send_workspace_ownership_force_transferred(
+        self,
+        *,
+        to_email: str,
+        workspace_name: str,
+    ) -> bool:
+        logger.info(
+            "workspace_ownership_force_transferred_email",
+            to_email=to_email,
+            workspace_name=workspace_name,
+            email_dispatch_required=True,
+            template="workspace_ownership_force_transferred",
         )
         return True
 

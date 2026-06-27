@@ -7,9 +7,10 @@ Issue #106: Refactored to use consolidated utilities
 
 from datetime import datetime
 from typing import Any, cast
+from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from sqlalchemy import and_, delete, func, or_, select, text, update
 from sqlalchemy.engine import CursorResult
 from sqlalchemy.exc import DBAPIError
@@ -34,6 +35,8 @@ from models.schemas import (
     UpdateWorkspaceSlotBonusRequest,
     UpdateWorkspaceSlotBonusResponse,
 )
+from services.email_service import get_email_service
+from services.workspace_ownership_service import WorkspaceOwnershipService
 from utils import db_transaction, get_user_id
 from utils.datetime import to_utc_iso
 from utils.exceptions import (
@@ -42,6 +45,7 @@ from utils.exceptions import (
     BonusBelowZeroError,
     InsufficientReasonError,
     NotFoundException,
+    ValidationError,
 )
 from utils.logger import get_logger
 from utils.plan_resolver import BASE_CAP, get_user_workspace_cap_summary
@@ -1141,6 +1145,109 @@ async def admin_force_erase_user(
         "status": record.status,
         "deleted_data_summary": record.deleted_data_summary,
     }
+
+
+# ============================================================================
+# Break-glass ownership force-transfer (Issue #1101)
+# ============================================================================
+
+
+class ForceTransferOwnershipRequest(BaseModel):
+    """Break-glass force-transfer request (#1101).
+
+    ``reason`` is REQUIRED (non-empty) — a privileged ownership override with no
+    justification is a red flag; it is recorded verbatim in the mandatory audit.
+    """
+
+    target_user_id: str = Field(..., min_length=1, max_length=255)
+    reason: str = Field(
+        ...,
+        min_length=3,
+        max_length=1000,
+        description="Why ownership is being force-transferred (required, audited).",
+    )
+
+
+@router.post("/workspaces/{workspace_id}/force-transfer-ownership")
+async def force_transfer_workspace_ownership(
+    workspace_id: str,
+    body: ForceTransferOwnershipRequest,
+    admin: dict = Depends(require_admin),
+    db: AsyncSession = Depends(get_db),
+) -> dict:
+    """Break-glass: a system admin force-transfers workspace ownership (#1101).
+
+    For when the current owner is unavailable. System-admin-gated
+    (``require_admin``), bound to the PATH ``workspace_id``, serialized on the
+    shared workspace row lock, bumps ``ownership_epoch`` (invalidates the displaced
+    owner's billing-handoff tokens / sessions — #1100), and writes a MANDATORY
+    audit row (``break_glass`` + ``reason`` + acting admin) atomically with the
+    transfer. The target need not be a member — a non-member is added as OWNER,
+    which handles the zero-member workspace. The displaced previous owner is
+    notified best-effort.
+    """
+    admin_id = get_user_id(admin)
+    try:
+        ws_uuid = UUID(workspace_id)
+    except ValueError as exc:
+        raise ValidationError("Invalid workspace_id", field="workspace_id") from exc
+
+    result = await WorkspaceOwnershipService(db).force_transfer_ownership(
+        workspace_id=ws_uuid,
+        target_user_id=body.target_user_id,
+        performed_by_user_id=admin_id,
+        performed_by_email=str(admin.get("email") or admin_id),
+        reason=body.reason,
+    )
+
+    # Notify the displaced previous owner (#1101) — only on an actual change, and
+    # best-effort: the transfer already committed, so a notification failure must
+    # never surface to the admin caller.
+    if result.changed:
+        await _notify_force_transfer_best_effort(db, ws_uuid, result.previous_owner_id)
+
+    return {
+        "workspace_id": str(result.workspace_id),
+        "previous_owner_id": result.previous_owner_id,
+        "new_owner_id": result.new_owner_id,
+        "ownership_epoch": result.ownership_epoch,
+        "changed": result.changed,
+    }
+
+
+async def _notify_force_transfer_best_effort(
+    db: AsyncSession, workspace_id: UUID, previous_owner_id: str
+) -> None:
+    """Best-effort notify the displaced previous owner (#1101).
+
+    The transfer is already committed, so the WHOLE block is guarded — neither the
+    resolution queries nor the (no-raise) EmailService call may surface to the
+    admin caller. A previous owner without an email is simply skipped.
+    """
+    try:
+        email = (
+            await db.execute(select(User.email).where(User.user_id == previous_owner_id))
+        ).scalar_one_or_none()
+        if not email:
+            return
+        name = (
+            await db.execute(select(Workspace.name).where(Workspace.id == workspace_id))
+        ).scalar_one_or_none()
+        await get_email_service().send_workspace_ownership_force_transferred(
+            to_email=email,
+            workspace_name=name or "your workspace",
+        )
+    except Exception as exc:
+        # Best-effort — swallow everything (resolution query or provider error). Log
+        # the exception TYPE only (a SQLAlchemy error string echoes bound params).
+        # Include previous_owner_id so ops can reconcile / hand-deliver the dropped
+        # security-transparency notice (it is a user id, not PII like the email).
+        logger.warning(
+            "force_transfer_notify_failed",
+            workspace_id=str(workspace_id),
+            previous_owner_id=previous_owner_id,
+            error_type=type(exc).__name__,
+        )
 
 
 # ============================================================================
