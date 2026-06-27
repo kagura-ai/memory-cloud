@@ -24,7 +24,15 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from auth.dependencies import require_admin as auth_require_admin
 from config.plan_tiers import PLAN_TIERS, PlanName, get_plan_tier
 from db.base import get_db
-from models.auth import Context, PlanChange, User, Workspace, WorkspaceInvitation, WorkspaceMember
+from models.auth import (
+    ENTITLEMENT_SOURCE_ADMIN_GRANT,
+    Context,
+    PlanChange,
+    User,
+    Workspace,
+    WorkspaceInvitation,
+    WorkspaceMember,
+)
 from models.memory import Memory
 from models.resource import WorkspaceAddon  # Issue #665: row-based admin grants
 from services.addon_calculator_service import ADDON_UNIT_VALUES, AddonCalculatorService
@@ -453,6 +461,9 @@ async def update_workspace_plan(
         workspace.plan_name = request.plan_name
         workspace.daily_api_limit = new_plan_tier.daily_api_limit
         workspace.weekly_api_limit = new_plan_tier.weekly_api_limit
+        # #1095: a manual system-admin set is a locally-owned grant — mark it so the
+        # external billing reconciler never reverts an admin/comp grant.
+        workspace.entitlement_source = ENTITLEMENT_SOURCE_ADMIN_GRANT
 
         # Create audit log entry
         audit_entry = PlanChange(

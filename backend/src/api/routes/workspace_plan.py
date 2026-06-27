@@ -25,7 +25,13 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from auth.dependencies import SessionUser
 from config.plan_tiers import PLAN_TIERS, PlanName, get_plan_tier
 from db.base import get_db
-from models.auth import Context, PlanChange, Workspace, WorkspaceMember
+from models.auth import (
+    ENTITLEMENT_SOURCE_ADMIN_GRANT,
+    Context,
+    PlanChange,
+    Workspace,
+    WorkspaceMember,
+)
 from models.config import ContextSearchConfig
 from models.memory import Memory
 from services.member_credentials_service import MemberCredentialsService
@@ -322,6 +328,11 @@ async def update_workspace_plan(
     workspace.plan_name = request.plan_name
     workspace.daily_api_limit = new_tier.daily_api_limit
     workspace.weekly_api_limit = new_tier.weekly_api_limit
+    # #1095: owner self-service (legacy in-process path, retired by #1096) is a
+    # locally-owned change the external billing reconciler doesn't manage — mark it
+    # admin_grant so a reconcile pass never reverts it (self-heals to
+    # external_billing on the next billing push).
+    workspace.entitlement_source = ENTITLEMENT_SOURCE_ADMIN_GRANT
 
     await db.commit()
 

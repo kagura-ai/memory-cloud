@@ -1409,6 +1409,25 @@ def _zero_floor(base: int, addon: int | None) -> int:
     return base + (addon or 0)
 
 
+# Entitlement provenance (#1095). The values name WHO last set the entitlement, so
+# the external billing reconciler (kagura-billing#5) can revert ONLY what it owns:
+#   - external_billing → billing-owned: the external service set it via the internal
+#     endpoint; the reconciler MAY reconcile/revert it against the billing source.
+#   - admin_grant      → locally-owned: a human set it locally (admin/comp grant OR
+#     owner self-service); the reconciler MUST NOT revert it. This is also the
+#     protective default, so pre-column rows and never-touched workspaces are never
+#     auto-reverted (an external-billing workspace self-heals to external_billing on
+#     the next push). "No active billing linkage" is a separate signal the reconciler
+#     derives from its own subscription data, not from this column.
+ENTITLEMENT_SOURCE_EXTERNAL_BILLING = "external_billing"
+ENTITLEMENT_SOURCE_ADMIN_GRANT = "admin_grant"
+# Ordered (tuple) so the derived CHECK literal is deterministic and byte-identical
+# to the alembic migration — the single-source-of-truth pattern used for
+# ``_ALL_CONTEXT_TRUST_TIERS`` (#887). Append-only: a new value must be added to
+# the END so the literal stays stable, and the migration literal updated to match.
+ENTITLEMENT_SOURCES = (ENTITLEMENT_SOURCE_EXTERNAL_BILLING, ENTITLEMENT_SOURCE_ADMIN_GRANT)
+
+
 class Workspace(Base):
     """Workspace model for multi-user team management.
 
@@ -1486,6 +1505,14 @@ class Workspace(Base):
     addon_connector_bonus: Mapped[int] = mapped_column(
         Integer, nullable=False, server_default="0"
     )  # Spec 2026-06-02: extra ai-worker connector seats addon
+
+    # Issue #1095: provenance of the current entitlement. ``admin_grant`` (default)
+    # = locally-owned, protected from the external billing reconciler;
+    # ``external_billing`` = billing-owned, reconcilable. See the module-level
+    # ENTITLEMENT_SOURCE_* constants for the full contract.
+    entitlement_source: Mapped[str] = mapped_column(
+        String(32), nullable=False, server_default=ENTITLEMENT_SOURCE_ADMIN_GRANT
+    )
 
     # Issue #709: Per-workspace embedding spend caps (USD, BYOK-only). NULL =
     # "inherit tier default from ``PlanTier.embedding_*_cap_usd``"; non-NULL =
@@ -1714,6 +1741,12 @@ class Workspace(Base):
     # Constraints
     __table_args__ = (
         CheckConstraint("plan_name IN ('free', 'basic', 'pro')", name="valid_plan_name"),
+        # #1095: CHECK derived from ``ENTITLEMENT_SOURCES`` (single quotes),
+        # byte-identical to the alembic migration literal.
+        CheckConstraint(
+            f"entitlement_source IN ({', '.join(repr(s) for s in ENTITLEMENT_SOURCES)})",
+            name="valid_entitlement_source",
+        ),
     )
 
     def __repr__(self) -> str:
