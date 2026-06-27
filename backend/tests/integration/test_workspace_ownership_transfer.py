@@ -147,6 +147,9 @@ class TestOwnershipTransfer:
         assert audit[0].user_metadata["previous_owner_id"] == s.owner
         assert audit[0].user_metadata["new_owner_id"] == s.member
         assert audit[0].user_metadata["ownership_epoch"] == 1
+        # The actor lives in the first-class AuditLog.user_id column (asserted
+        # above); it must NOT be duplicated into user_metadata as "performed_by".
+        assert "performed_by" not in audit[0].user_metadata
 
     @pytest.mark.asyncio(loop_scope="session")
     async def test_idempotent_when_target_already_owner(self, ws_fixture, db_session):

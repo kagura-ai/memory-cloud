@@ -179,7 +179,9 @@ class WorkspaceOwnershipService:
         workspace.owner_user_id = target_user_id
         # Capture the new epoch in a local — attributes may be expired after
         # commit, and the result/log must not trigger a post-commit lazy load.
-        new_epoch = (workspace.ownership_epoch or 0) + 1
+        # ownership_epoch is NOT NULL (server_default "0") and this row was just
+        # loaded under the FOR UPDATE lock, so it is never None here.
+        new_epoch = workspace.ownership_epoch + 1
         workspace.ownership_epoch = new_epoch
 
         # 6. Audit row in the SAME transaction → the transfer and its audit trail
@@ -198,7 +200,6 @@ class WorkspaceOwnershipService:
                     "previous_owner_id": previous_owner_id,
                     "new_owner_id": target_user_id,
                     "ownership_epoch": new_epoch,
-                    "performed_by": current_owner_id,
                 },
             )
         )
