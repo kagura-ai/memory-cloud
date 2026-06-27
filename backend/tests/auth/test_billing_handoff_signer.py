@@ -11,9 +11,11 @@ is the security-critical invariant.
 from __future__ import annotations
 
 import base64
+import calendar
 import json
-import time
+from datetime import datetime
 from types import SimpleNamespace
+from unittest.mock import patch
 from uuid import uuid4
 
 import pytest
@@ -126,20 +128,24 @@ class TestBillingHandoffSigner:
         delta = (minted.expires_at - minted.issued_at).total_seconds()
         assert 1 <= delta <= 120
 
-    def test_iat_and_exp_are_utc_unix_seconds(self) -> None:
-        # Regression guard: utcnow() is naive UTC; calling .timestamp() on a naive
-        # datetime would interpret it as *local* time and shift iat by the host's
-        # UTC offset (e.g. -9h in JST). Assert iat tracks real UTC wall-clock.
+    def test_iat_and_exp_are_utc_unix_seconds(self, monkeypatch) -> None:
+        # Deterministic, host-TZ-independent regression guard for the naive
+        # .timestamp() trap. Pin utcnow() to a fixed naive instant and assert iat
+        # equals its *UTC* unix second (calendar.timegm always interprets as UTC).
+        # A buggy `int(naive.timestamp())` (host-local) would differ from timegm on
+        # any non-UTC host — and this exact-value assertion catches it there, where
+        # the old time.time() +/-2s window on a UTC CI runner could not.
+        fixed = datetime(2026, 6, 27, 12, 0, 0)  # naive UTC
+        monkeypatch.setattr("auth.billing_handoff.utcnow", lambda: fixed)
         private_pem, _ = _keypair()
         signer = BillingHandoffSigner(settings=_settings(private_pem, ttl=120))
 
-        before = int(time.time())
         minted = signer.mint(user_id="u", workspace_id=uuid4())
-        after = int(time.time())
 
         payload = _payload(minted.token)
-        assert before - 2 <= payload["iat"] <= after + 2
-        assert payload["exp"] - payload["iat"] == 120
+        expected_iat = calendar.timegm(fixed.timetuple())
+        assert payload["iat"] == expected_iat
+        assert payload["exp"] == expected_iat + 120
 
     def test_jti_is_unique_per_mint(self) -> None:
         private_pem, _ = _keypair()
@@ -186,6 +192,46 @@ class TestBillingHandoffSigner:
         )
         with pytest.raises(BillingHandoffNotConfigured):
             signer.mint(user_id="u", workspace_id=uuid4())
+
+    def test_public_key_as_signing_key_fails_closed_not_500(self) -> None:
+        # A PUBLIC-key PEM imports cleanly (kty=OKP) but cannot sign — the failure
+        # surfaces at encode() time, NOT import. Must still fail closed (503),
+        # never a raw 500. (Regression guard for the encode-outside-try bug.)
+        _, public_pem = _keypair()
+        signer = BillingHandoffSigner(settings=_settings(public_pem))
+        with pytest.raises(BillingHandoffNotConfigured):
+            signer.mint(user_id="u", workspace_id=uuid4())
+
+    def test_different_workspaces_produce_distinct_claims(self) -> None:
+        # Guard against a memoized/closed-over workspace_id binding every token to
+        # the first workspace.
+        private_pem, public_pem = _keypair()
+        signer = BillingHandoffSigner(settings=_settings(private_pem))
+        ws1, ws2 = uuid4(), uuid4()
+
+        c1 = _JWT.decode(
+            signer.mint(user_id="u", workspace_id=ws1).token, JsonWebKey.import_key(public_pem)
+        )
+        c2 = _JWT.decode(
+            signer.mint(user_id="u", workspace_id=ws2).token, JsonWebKey.import_key(public_pem)
+        )
+
+        assert c1["workspace_id"] == str(ws1)
+        assert c2["workspace_id"] == str(ws2)
+        assert c1["workspace_id"] != c2["workspace_id"]
+
+    def test_token_string_is_never_logged(self) -> None:
+        # The token is a bearer credential — it must never reach a log sink. jti/kid
+        # are non-secret identifiers and may be logged; the raw token must not be.
+        private_pem, _ = _keypair()
+        signer = BillingHandoffSigner(settings=_settings(private_pem))
+
+        with patch("auth.billing_handoff.logger") as mock_logger:
+            minted = signer.mint(user_id="u", workspace_id=uuid4())
+
+        logged = repr(mock_logger.mock_calls)
+        assert minted.token not in logged
+        assert minted.jti in logged  # sanity: the audit breadcrumb did fire
 
     def test_is_configured_reflects_key_and_kid(self) -> None:
         private_pem, _ = _keypair()

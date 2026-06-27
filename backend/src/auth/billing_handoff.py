@@ -87,11 +87,22 @@ class BillingHandoffSigner:
         # default to the process settings. Only a handful of fields are read.
         self._settings = settings if settings is not None else get_settings()
 
+    def _stripped_material(self) -> tuple[str, str]:
+        """Return ``(signing_key, kid)`` with surrounding whitespace stripped.
+
+        Single source of truth for "what key material do we have?" so the
+        ``is_configured`` gate, the unconfigured-log breadcrumb, and ``mint``
+        can never disagree about whether a value is blank.
+        """
+        return (
+            (self._settings.billing_handoff_signing_key or "").strip(),
+            (self._settings.billing_handoff_key_id or "").strip(),
+        )
+
     @property
     def is_configured(self) -> bool:
         """True only when BOTH a non-blank signing key AND a ``kid`` are set."""
-        key = (self._settings.billing_handoff_signing_key or "").strip()
-        kid = (self._settings.billing_handoff_key_id or "").strip()
+        key, kid = self._stripped_material()
         return bool(key) and bool(kid)
 
     def mint(self, *, user_id: str, workspace_id: UUID | str) -> MintedHandoffToken:
@@ -115,18 +126,18 @@ class BillingHandoffSigner:
         Raises:
             BillingHandoffNotConfigured: 503 if the signing key or ``kid`` is unset.
         """
-        if not self.is_configured:
+        key_pem, kid = self._stripped_material()
+        if not key_pem or not kid:
             logger.error(
                 "billing_handoff_signing_unconfigured",
-                has_key=bool((self._settings.billing_handoff_signing_key or "").strip()),
-                has_kid=bool((self._settings.billing_handoff_key_id or "").strip()),
+                has_key=bool(key_pem),
+                has_kid=bool(kid),
             )
             raise BillingHandoffNotConfigured()
 
         settings = self._settings
-        kid = settings.billing_handoff_key_id.strip()
         try:
-            key = JsonWebKey.import_key(settings.billing_handoff_signing_key)
+            key = JsonWebKey.import_key(key_pem)
         except Exception as exc:
             # Malformed key material is a configuration failure, not a runtime
             # bug — fail closed (503) like the unset case rather than 500-leaking
@@ -154,7 +165,14 @@ class BillingHandoffSigner:
             "jti": jti,
         }
 
-        token = _JWT.encode(header, payload, key)
+        try:
+            token = _JWT.encode(header, payload, key)
+        except Exception as exc:
+            # A well-formed key of the WRONG type (e.g. a PUBLIC key, or a
+            # non-Ed25519 OKP key) imports cleanly but cannot sign — also a
+            # configuration failure, so fail closed (503) rather than 500-leaking.
+            logger.error("billing_handoff_signing_failed", error=str(exc))
+            raise BillingHandoffNotConfigured() from exc
         if isinstance(token, bytes):
             token = token.decode("ascii")
 

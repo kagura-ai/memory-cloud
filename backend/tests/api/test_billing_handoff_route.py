@@ -116,6 +116,10 @@ class TestHandoffOwnerHappyPath:
         assert body["jti"] == "jti-test-1"
         assert body["token_type"] == "billing_handoff"
         assert body["expires_at"].endswith("Z")  # TZAwareBaseModel serialization
+        # The signer must be invoked with the body workspace and the session user.
+        mint_call = signer_cls.return_value.mint.call_args
+        assert mint_call.kwargs["workspace_id"] == WS_A
+        assert mint_call.kwargs["user_id"] == "owner-1"
 
     def test_owner_check_uses_body_workspace_not_session_current(self, session_client):
         """The #389 trap guard: owner is verified against the body workspace_id."""
@@ -133,6 +137,12 @@ class TestHandoffOwnerHappyPath:
         called_args = perm.check_workspace_owner.await_args
         assert WS_B in called_args.args or WS_B in called_args.kwargs.values()
         assert WS_A not in called_args.args
+        # AND the token itself must be minted for WS_B, not the session's WS_A —
+        # a correct owner-check that then minted for current_workspace would still
+        # re-open the cross-tenant trap, so assert the mint binding too.
+        mint_call = signer_cls.return_value.mint.call_args
+        assert mint_call.kwargs["workspace_id"] == WS_B
+        assert mint_call.kwargs["user_id"] == "owner-1"
 
 
 # ============================================================================
@@ -172,9 +182,16 @@ class TestHandoffOwnerOnly:
 
 
 class TestHandoffSessionOnly:
-    def test_api_key_bearer_is_rejected_403(self):
-        # Use the REAL require_session_auth: a Bearer credential must 403 before
-        # any owner check or minting runs.
+    # require_session_auth rejects EVERY Bearer credential — both a kagura_* API
+    # key and an opaque/OAuth device-flow token (distinguished only for the
+    # token_kind log field). Both must 403 before any owner check or minting.
+    @pytest.mark.parametrize(
+        "bearer",
+        ["kagura_live_testkey", "opaque-oauth-access-token-abc123"],
+        ids=["api_key", "oauth_bearer"],
+    )
+    def test_any_bearer_credential_is_rejected_403(self, bearer):
+        # Use the REAL require_session_auth (not overridden).
         app = _build_app()
 
         async def _mock_db():
@@ -185,7 +202,7 @@ class TestHandoffSessionOnly:
             resp = client.post(
                 "/api/v1/billing/handoff",
                 json={"workspace_id": str(WS_A)},
-                headers={"Authorization": "Bearer kagura_live_testkey"},
+                headers={"Authorization": f"Bearer {bearer}"},
             )
         assert resp.status_code == 403, resp.text
 
