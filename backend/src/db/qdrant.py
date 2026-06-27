@@ -37,7 +37,8 @@ from config.database import QDRANT_URL
 from utils.exceptions import QdrantError
 from utils.logger import get_logger
 from utils.sparse_vector import build_query_sparse_vector
-from utils.tokenizer import build_fulltext_query
+from utils.synonyms import expand_query_tokens
+from utils.tokenizer import augment_reading_tokens, tokenize_and_reading
 
 if TYPE_CHECKING:
     from db.vector_store import VectorStore
@@ -678,9 +679,15 @@ async def search_memories_fulltext(
     )
 
     try:
-        # Build sparse query vector from the shared expanded-query pipeline
-        # (identical tokenization to the LanceDB FTS backend — keeps parity).
-        expanded_query = build_fulltext_query(query)
+        # Build sparse query vector: single Sudachi pass for lemmas + readings
+        tokenized_query, query_reading, sudachi_tokens = tokenize_and_reading(query)
+        combined_query = f"{tokenized_query} {query_reading}" if query_reading else tokenized_query
+
+        augmented = augment_reading_tokens(query, sudachi_tokens=sudachi_tokens)
+        if augmented:
+            combined_query = f"{combined_query} {augmented}"
+
+        expanded_query = expand_query_tokens(combined_query)
         query_indices, query_values = build_query_sparse_vector(expanded_query)
 
         if not query_indices:
