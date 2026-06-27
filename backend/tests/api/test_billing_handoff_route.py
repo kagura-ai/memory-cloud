@@ -67,7 +67,7 @@ def _session_user(user_id: str = "owner-1") -> dict:
     }
 
 
-def _fake_minted(workspace_id) -> MintedHandoffToken:
+def _fake_minted(workspace_id, ownership_epoch: int = 0) -> MintedHandoffToken:
     issued = utcnow()
     return MintedHandoffToken(
         token="eyJhbGciOiJFZERTQSJ9.fake.sig",
@@ -77,7 +77,18 @@ def _fake_minted(workspace_id) -> MintedHandoffToken:
         expires_at=issued + timedelta(seconds=120),
         workspace_id=str(workspace_id),
         user_id="owner-1",
+        ownership_epoch=ownership_epoch,
     )
+
+
+def _db_with_epoch(epoch: int = 0) -> MagicMock:
+    """A db stand-in whose single ``execute(...).scalar_one()`` yields ``epoch`` —
+    the route reads the workspace's live ownership_epoch this way (#1100)."""
+    db = MagicMock()
+    result = MagicMock()
+    result.scalar_one.return_value = epoch
+    db.execute = AsyncMock(return_value=result)
+    return db
 
 
 @pytest.fixture
@@ -89,7 +100,7 @@ def session_client():
         return _session_user()
 
     async def _mock_db():
-        yield MagicMock()
+        yield _db_with_epoch(0)
 
     app.dependency_overrides[require_session_auth] = _mock_session
     app.dependency_overrides[get_db] = _mock_db
@@ -147,6 +158,28 @@ class TestHandoffOwnerHappyPath:
         mint_call = signer_cls.return_value.mint.call_args
         assert mint_call.kwargs["workspace_id"] == WS_B
         assert mint_call.kwargs["user_id"] == "owner-1"
+
+    def test_route_stamps_workspace_ownership_epoch_into_token(self, session_client):
+        """#1100: the route reads the workspace's live ownership_epoch and passes it
+        to mint, so the token carries the generation it was minted under."""
+
+        async def _db_epoch_5():
+            yield _db_with_epoch(5)
+
+        session_client.app.dependency_overrides[get_db] = _db_epoch_5
+
+        perm = MagicMock()
+        perm.check_workspace_owner = AsyncMock(return_value=MagicMock())
+        with (
+            patch.object(route_mod, "PermissionService", return_value=perm),
+            patch.object(route_mod, "BillingHandoffSigner") as signer_cls,
+        ):
+            signer_cls.return_value.mint.return_value = _fake_minted(WS_A, ownership_epoch=5)
+            resp = session_client.post("/api/v1/billing/handoff", json={"workspace_id": str(WS_A)})
+
+        assert resp.status_code == 200, resp.text
+        mint_call = signer_cls.return_value.mint.call_args
+        assert mint_call.kwargs["ownership_epoch"] == 5
 
 
 # ============================================================================

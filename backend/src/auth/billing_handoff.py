@@ -66,6 +66,38 @@ class BillingHandoffNotConfigured(MemoryCloudException):
         )
 
 
+class BillingHandoffStale(MemoryCloudException):
+    """The token's ownership epoch is older than the workspace's live epoch (#1100).
+
+    Ownership was transferred since the token was minted, so the credential is
+    invalidated. 401 (not 403): the token is a once-valid credential that has
+    been superseded, mirroring an expired-token rejection.
+    """
+
+    def __init__(self) -> None:
+        super().__init__(
+            "Billing handoff token is stale (workspace ownership changed)",
+            status_code=401,
+            error_code="BILLING-003",
+        )
+
+
+class BillingHandoffInvalid(MemoryCloudException):
+    """The handoff token failed signature or standard-claim (iss/aud/exp) checks.
+
+    Raised by the reference verifier; the staleness check (:class:`BillingHandoffStale`)
+    is a *separate*, later gate so a caller can distinguish "forged/expired" from
+    "superseded by ownership transfer".
+    """
+
+    def __init__(self) -> None:
+        super().__init__(
+            "Billing handoff token is invalid",
+            status_code=401,
+            error_code="BILLING-004",
+        )
+
+
 @dataclass(frozen=True)
 class MintedHandoffToken:
     """A freshly minted handoff token plus the metadata the route echoes back."""
@@ -77,6 +109,7 @@ class MintedHandoffToken:
     expires_at: datetime
     workspace_id: str
     user_id: str
+    ownership_epoch: int
 
 
 class BillingHandoffSigner:
@@ -105,7 +138,13 @@ class BillingHandoffSigner:
         key, kid = self._stripped_material()
         return bool(key) and bool(kid)
 
-    def mint(self, *, user_id: str, workspace_id: UUID | str) -> MintedHandoffToken:
+    def mint(
+        self,
+        *,
+        user_id: str,
+        workspace_id: UUID | str,
+        ownership_epoch: int = 0,
+    ) -> MintedHandoffToken:
         """Mint a signed handoff token for ``user_id`` scoped to ``workspace_id``.
 
         The caller MUST have already verified that ``user_id`` owns
@@ -119,6 +158,11 @@ class BillingHandoffSigner:
             workspace_id: The target workspace (becomes the ``workspace_id``
                 claim) — the route binds this to the request body, never the
                 caller's mutable ``current_workspace_id``.
+            ownership_epoch: The workspace's live ``ownership_epoch`` at mint time
+                (#1100). Embedded as the ``epoch`` claim so the verifier can reject
+                the token once ownership is transferred (the epoch advances). The
+                route MUST pass the live value; the ``0`` default is the fail-safe
+                floor (only valid while the workspace has never been transferred).
 
         Returns:
             The minted token and its metadata.
@@ -160,6 +204,7 @@ class BillingHandoffSigner:
             "sub": user_id,
             "workspace_id": workspace_str,
             "role": _ROLE_OWNER,
+            "epoch": int(ownership_epoch),
             "iat": int(issued_at.replace(tzinfo=UTC).timestamp()),
             "exp": int(expires_at.replace(tzinfo=UTC).timestamp()),
             "jti": jti,
@@ -193,4 +238,71 @@ class BillingHandoffSigner:
             expires_at=expires_at,
             workspace_id=workspace_str,
             user_id=user_id,
+            ownership_epoch=int(ownership_epoch),
         )
+
+
+def verify_handoff_token(
+    token: str,
+    verifying_key: str,
+    *,
+    current_epoch: int,
+    issuer: str,
+    audience: str,
+) -> dict:
+    """Reference verifier — the canonical ownership-epoch staleness check (#1100).
+
+    memory-cloud mints handoff tokens but does **not** gate their redemption (the
+    mint-only boundary documented above): the external billing service is the
+    verifier. This helper is the *spec* that verifier implements, and the in-repo
+    test hook that makes the "minted at epoch N → rejected after a transfer to
+    N+1" acceptance criterion provable without the external repo.
+
+    It verifies the EdDSA signature with ``verifying_key`` (the distributed public
+    key), enforces ``iss``/``aud``/``exp``, then rejects the token when its
+    embedded ``epoch`` claim is **strictly older** than ``current_epoch`` — i.e.
+    ownership was transferred since the token was minted. A missing ``epoch`` claim
+    (a token minted before #1100) is treated as ``0``.
+
+    Unlike a token claim consumed blindly, ``epoch`` is **not** trusted as an
+    authorization fact — it is a freshness assertion that is always compared
+    against the live ``current_epoch``. This is deliberately the opposite stance to
+    #649 (where the token's ``workspace_id`` was declared "not security-bearing,
+    point-in-time"): there the claim was trusted and so kept non-bearing; here the
+    claim is re-validated against live state on every verify, so it can be bearing.
+
+    Args:
+        token: The compact EdDSA handoff JWS.
+        verifying_key: PEM/JWK public key matching the token's ``kid``.
+        current_epoch: The workspace's live ``ownership_epoch`` at verify time.
+        issuer: Expected ``iss`` claim.
+        audience: Expected ``aud`` claim.
+
+    Returns:
+        The validated claims as a plain ``dict``.
+
+    Raises:
+        BillingHandoffInvalid: 401 (BILLING-004) — bad signature / iss / aud / exp.
+        BillingHandoffStale: 401 (BILLING-003) — the ownership epoch advanced.
+    """
+    try:
+        claims = _JWT.decode(
+            token,
+            JsonWebKey.import_key(verifying_key),
+            claims_options={
+                "iss": {"essential": True, "value": issuer},
+                "aud": {"essential": True, "value": audience},
+            },
+        )
+        claims.validate()  # exp/iat/iss/aud — raises on any mismatch
+    except Exception as exc:
+        raise BillingHandoffInvalid() from exc
+
+    # Staleness is a SEPARATE gate, after signature/claims pass, so the caller can
+    # tell "forged/expired" (BILLING-004) apart from "superseded by transfer"
+    # (BILLING-003). Missing claim → 0 (pre-#1100 token). Strict ``<``: an equal
+    # epoch is the same ownership generation and stays valid.
+    token_epoch = int(claims.get("epoch", 0) or 0)
+    if token_epoch < int(current_epoch):
+        raise BillingHandoffStale()
+    return dict(claims)
