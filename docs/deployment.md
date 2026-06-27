@@ -302,3 +302,53 @@ construction in `storage/factory.py`. Today the factory builds one process-wide
 instance from the global `STORAGE_*` settings; per-workspace BYO would move
 construction behind a workspace-scoped credential lookup. Recorded here as a
 seam only — no implementation in #994.
+
+## Embedded Vector Backend: Kagura Lite (preview)
+
+By default the backend stores vectors in **Qdrant** (the `QDRANT_URL` service).
+For a **single-process, self-hosted / CLI / desktop / edge** deployment that
+does not want to run a separate Qdrant server, you can switch to an embedded,
+in-process **LanceDB** backend — "Kagura Lite". This is a **preview**.
+
+### When to use which
+
+| | Qdrant (default) | LanceDB / Kagura Lite |
+|---|---|---|
+| Topology | Server, multi-worker, SaaS | **Single process** (CLI / desktop / edge) |
+| Extra services | Separate Qdrant container | None (a local file) |
+| Concurrent writers | Yes | **No — single-writer** |
+| Nightly Sleep writer | Yes | Single process only |
+| Status | Stable | **Preview** |
+
+> Keep Qdrant for any server / multi-worker / SaaS deployment. LanceDB writes
+> are single-process; a multi-worker API plus the nightly Sleep maintenance
+> writer would conflict.
+
+### Enabling
+
+```bash
+# 1. Install the optional backend extra (adds lancedb + pyarrow)
+pip install '.[lite]'
+
+# 2. Configure the backend (env)
+KAGURA_VECTOR_BACKEND=lance
+KAGURA_LANCE_DB_PATH=./data/kagura.lance   # store location (default)
+```
+
+Japanese full-text quality is unchanged: the existing Sudachi tokenization
+pipeline still owns segmentation (lemmas + readings + synonym/hiragana
+augmentation); LanceDB only stores and searches the resulting vectors and
+pre-tokenized FTS text. Semantic + BM25 hybrid fusion is unchanged.
+
+### Preview limitations
+
+- **Single-writer only.** Not for multi-process / SaaS topologies.
+- These operations raise `NotImplementedError` on the lance backend: context
+  copy (`copy_context_points`), cross-collection GDPR erasure
+  (`delete_user_points`), and the admin BM25-drift reverse-lookup scroll.
+- End-to-end LanceDB behavior is pending live validation; the backend selector
+  and the SQL isolation/escaping filter are unit-tested independently of
+  LanceDB.
+
+Configuration: `KAGURA_VECTOR_BACKEND` (`qdrant` | `lance`, default `qdrant`)
+and `KAGURA_LANCE_DB_PATH`. Implementation: `backend/src/db/lance_store.py`.
