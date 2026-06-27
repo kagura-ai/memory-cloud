@@ -34,7 +34,13 @@ from auth.billing_handoff import BillingHandoffNotConfigured, MintedHandoffToken
 from auth.dependencies import require_session_auth
 from db.base import get_db
 from utils.datetime import utcnow
-from utils.exceptions import AdminProtectionError, AuthorizationError, MemoryCloudException
+from utils.exceptions import (
+    AdminProtectionError,
+    AuthorizationError,
+    MemoryCloudException,
+    RateLimitError,
+    RedisError,
+)
 
 WS_A = uuid4()  # the caller's "current" workspace
 WS_B = uuid4()  # a different workspace the caller does NOT own
@@ -280,3 +286,112 @@ class TestHandoffValidation:
     def test_non_uuid_workspace_id_is_422(self, session_client):
         resp = session_client.post("/api/v1/billing/handoff", json={"workspace_id": "not-a-uuid"})
         assert resp.status_code == 422
+
+
+# ============================================================================
+# Rate limiting (#1104)
+# ============================================================================
+
+
+class TestHandoffRateLimitHelper:
+    """Unit tests for the per-(owner, workspace) mint rate-limit helper."""
+
+    @pytest.mark.asyncio
+    async def test_under_limit_passes_and_pins_bucket_shape(self):
+        # Pin the Redis call shape: the bucket MUST be keyed per (user, workspace)
+        # with a self-expiring 60s window. A regression to a global/static key
+        # (shared-bucket DoS) or a dropped TTL (never-expiring lockout) must fail here.
+        ic = AsyncMock(return_value=3)
+        with patch.object(route_mod, "incrby_counter", ic):
+            await route_mod._check_handoff_rate_limit("u", WS_A, 10)  # no raise
+        ic.assert_awaited_once_with(f"billing_handoff:u:{WS_A}:minute", amount=1, ttl=60)
+
+    @pytest.mark.asyncio
+    async def test_bucket_keys_are_isolated_per_user_and_workspace(self):
+        # Distinct (user, workspace) tuples MUST map to distinct buckets, so one
+        # owner (or one workspace) cannot exhaust another's quota.
+        keys: list[str] = []
+        ic = AsyncMock(return_value=1)
+        ic.side_effect = lambda key, **_: keys.append(key) or 1
+        with patch.object(route_mod, "incrby_counter", ic):
+            await route_mod._check_handoff_rate_limit("alice", WS_A, 10)
+            await route_mod._check_handoff_rate_limit("bob", WS_A, 10)
+            await route_mod._check_handoff_rate_limit("alice", WS_B, 10)
+        assert len(set(keys)) == 3, keys
+
+    @pytest.mark.asyncio
+    async def test_at_limit_passes(self):
+        with patch.object(route_mod, "incrby_counter", AsyncMock(return_value=10)):
+            await route_mod._check_handoff_rate_limit("u", WS_A, 10)  # no raise
+
+    @pytest.mark.asyncio
+    async def test_over_limit_raises_429(self):
+        with patch.object(route_mod, "incrby_counter", AsyncMock(return_value=11)):
+            with pytest.raises(RateLimitError) as exc:
+                await route_mod._check_handoff_rate_limit("u", WS_A, 10)
+        assert exc.value.status_code == 429
+
+    @pytest.mark.asyncio
+    async def test_zero_limit_rejects(self):
+        # limit<=0 disables minting (fail-safe), mirroring the sibling buckets.
+        with pytest.raises(RateLimitError):
+            await route_mod._check_handoff_rate_limit("u", WS_A, 0)
+
+    @pytest.mark.asyncio
+    async def test_fail_open_on_redis_error(self):
+        # Redis down → log and allow (consistent with the public_search buckets);
+        # the owner gate + short-TTL token remain the primary controls. Use the
+        # production error type (incrby_counter wraps failures in RedisError) so a
+        # future narrowing of the catch that excludes RedisError is caught here.
+        with patch.object(
+            route_mod, "incrby_counter", AsyncMock(side_effect=RedisError("redis down"))
+        ):
+            await route_mod._check_handoff_rate_limit("u", WS_A, 10)  # no raise
+
+
+class TestHandoffRateLimitRoute:
+    def test_over_limit_returns_429(self, session_client):
+        perm = MagicMock()
+        perm.check_workspace_owner = AsyncMock(return_value=MagicMock())
+        with (
+            patch.object(route_mod, "PermissionService", return_value=perm),
+            patch.object(route_mod, "BillingHandoffSigner") as signer_cls,
+            patch.object(route_mod, "incrby_counter", AsyncMock(return_value=9999)),
+        ):
+            signer_cls.return_value.mint.return_value = _fake_minted(WS_A)
+            resp = session_client.post("/api/v1/billing/handoff", json={"workspace_id": str(WS_A)})
+        assert resp.status_code == 429, resp.text
+        # Mint must NOT have run once the rate limit tripped.
+        signer_cls.return_value.mint.assert_not_called()
+
+    def test_rate_limit_runs_after_owner_gate(self, session_client):
+        # A non-owner is 403'd by the owner gate BEFORE the rate-limit bucket is
+        # touched, so a non-owner cannot exhaust the owner's quota.
+        perm = MagicMock()
+        perm.check_workspace_owner = AsyncMock(
+            side_effect=AuthorizationError(reason="role_too_low")
+        )
+        ic = AsyncMock(return_value=1)
+        with (
+            patch.object(route_mod, "PermissionService", return_value=perm),
+            patch.object(route_mod, "incrby_counter", ic),
+        ):
+            resp = session_client.post("/api/v1/billing/handoff", json={"workspace_id": str(WS_A)})
+        assert resp.status_code == 403
+        ic.assert_not_called()
+
+    def test_fail_open_lets_mint_proceed(self, session_client):
+        perm = MagicMock()
+        perm.check_workspace_owner = AsyncMock(return_value=MagicMock())
+        with (
+            patch.object(route_mod, "PermissionService", return_value=perm),
+            patch.object(route_mod, "BillingHandoffSigner") as signer_cls,
+            patch.object(
+                route_mod, "incrby_counter", AsyncMock(side_effect=RedisError("redis down"))
+            ),
+        ):
+            signer_cls.return_value.mint.return_value = _fake_minted(WS_A)
+            resp = session_client.post("/api/v1/billing/handoff", json={"workspace_id": str(WS_A)})
+        assert resp.status_code == 200, resp.text
+        # Fail-open means the request reaches mint — assert it actually ran.
+        signer_cls.return_value.mint.assert_called_once()

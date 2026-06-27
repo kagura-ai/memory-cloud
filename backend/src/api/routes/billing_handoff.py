@@ -32,13 +32,70 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from auth.billing_handoff import BillingHandoffSigner
 from auth.dependencies import SessionUser
+from config.settings import get_settings
 from db.base import get_db
+from db.redis import incrby_counter
 from models.api_base import TZAwareBaseModel
 from models.auth import Workspace
 from services.permission_service import PermissionService
 from utils.auth_helpers import get_user_id
+from utils.exceptions import RateLimitError
+from utils.logger import get_logger
+
+logger = get_logger(__name__)
 
 router = APIRouter(prefix="/billing", tags=["billing-handoff"])
+
+# Per-(owner, workspace) mint rate-limit window. Mirrors the Redis counter idiom
+# in ``public_search.check_bound_key_rate_limit`` (#626): ``incrby_counter`` sets
+# a TTL even under concurrent first-increments so the bucket cannot grow forever.
+_RATE_WINDOW_SECONDS = 60
+
+
+async def _check_handoff_rate_limit(
+    user_id: str, workspace_id: UUID | str, limit_per_minute: int
+) -> None:
+    """Bound a single owner's mint rate for one workspace (#1104).
+
+    Defense-in-depth on top of the owner gate + short-TTL token: caps abusive
+    minting per ``(user_id, workspace_id)`` per minute. ``limit<=0`` disables
+    minting (fail-safe). **Fail-open** on a Redis outage — the primary controls
+    (owner-only + session-only + short TTL + audit log) still hold, and a billing
+    handoff must not become unavailable because the rate-limit store is down
+    (consistent with the ``public_search`` buckets).
+
+    Raises:
+        RateLimitError: 429 when the per-minute bucket is exhausted (or disabled).
+    """
+    if limit_per_minute <= 0:
+        raise RateLimitError(
+            message="Billing handoff minting is not available on this deployment",
+            retry_after=_RATE_WINDOW_SECONDS,
+        )
+
+    redis_key = f"billing_handoff:{user_id}:{workspace_id}:minute"
+    try:
+        current = await incrby_counter(redis_key, amount=1, ttl=_RATE_WINDOW_SECONDS)
+        if current > limit_per_minute:
+            logger.warning(
+                "billing_handoff_rate_limit_exceeded",
+                user_id=user_id,
+                workspace_id=str(workspace_id),
+                current=current,
+                limit=limit_per_minute,
+            )
+            raise RateLimitError(
+                message=(
+                    f"Billing handoff rate limit exceeded: {current}/{limit_per_minute} per minute"
+                ),
+                retry_after=_RATE_WINDOW_SECONDS,
+            )
+    except RateLimitError:
+        raise
+    except Exception as exc:
+        # Fail-open on any Redis error — availability of the handoff must not
+        # depend on the rate-limit store (mirrors public_search's buckets).
+        logger.error("billing_handoff_rate_limit_check_failed", error=str(exc))
 
 
 class BillingHandoffRequest(BaseModel):
@@ -82,6 +139,14 @@ async def mint_billing_handoff(
     # current_workspace_id, so a multi-workspace member cannot mint for a
     # workspace they merely belong to (#389 guard).
     await PermissionService(db).check_workspace_owner(user_id, body.workspace_id)
+
+    # Rate-limit the owner's mint rate per workspace (#1104), AFTER the owner gate
+    # (non-owners 403 without consuming quota) and BEFORE mint. 429 on exceed.
+    await _check_handoff_rate_limit(
+        user_id,
+        body.workspace_id,
+        get_settings().billing_handoff_rate_limit_per_minute,
+    )
 
     # Stamp the workspace's live ownership epoch into the token (#1100) so the
     # external verifier can reject it once ownership is transferred (the epoch
