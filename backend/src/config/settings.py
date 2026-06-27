@@ -136,6 +136,14 @@ class Settings(BaseSettings):
         le=900,
         description="Billing handoff token lifetime in seconds (short-lived; <=15min).",
     )
+    billing_handoff_rate_limit_per_minute: int = Field(
+        default=10,
+        description=(
+            "Per-(owner, workspace) mint rate limit for POST /api/v1/billing/handoff "
+            "(#1104). Abuse bound, not a per-plan quota. <=0 disables minting "
+            "(fail-safe). Fail-open on a Redis outage."
+        ),
+    )
     # Public MCP base URL handed back to the worker in its config so it can write
     # memories. Defaults to local dev; override in prod (e.g. https://memory.kagura-ai.com/mcp).
     kmc_mcp_url: str = Field(
