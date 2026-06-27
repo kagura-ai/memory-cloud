@@ -23,7 +23,13 @@ from authlib.jose import JsonWebKey, JsonWebToken
 from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 
-from auth.billing_handoff import BillingHandoffNotConfigured, BillingHandoffSigner
+from auth.billing_handoff import (
+    BillingHandoffInvalid,
+    BillingHandoffNotConfigured,
+    BillingHandoffSigner,
+    BillingHandoffStale,
+    verify_handoff_token,
+)
 
 _JWT = JsonWebToken(["EdDSA"])
 
@@ -244,3 +250,231 @@ class TestBillingHandoffSigner:
         assert signer.is_configured is False
         with pytest.raises(BillingHandoffNotConfigured):
             signer.mint(user_id="u", workspace_id=uuid4())
+
+
+class TestOwnershipEpochClaim:
+    """#1100 — the handoff token carries the workspace ownership epoch so the
+    verifier can reject a token minted under a *previous* owner after an
+    ownership transfer bumps the epoch."""
+
+    def test_mint_embeds_ownership_epoch_claim(self) -> None:
+        private_pem, public_pem = _keypair()
+        signer = BillingHandoffSigner(settings=_settings(private_pem))
+
+        minted = signer.mint(user_id="u", workspace_id=uuid4(), ownership_epoch=7)
+
+        claims = _JWT.decode(minted.token, JsonWebKey.import_key(public_pem))
+        assert claims["epoch"] == 7
+        assert minted.ownership_epoch == 7
+
+    def test_mint_defaults_epoch_to_zero(self) -> None:
+        # Omitting ownership_epoch is the fail-safe floor (0): valid only while the
+        # workspace is still at epoch 0 (never transferred).
+        private_pem, public_pem = _keypair()
+        signer = BillingHandoffSigner(settings=_settings(private_pem))
+
+        minted = signer.mint(user_id="u", workspace_id=uuid4())
+
+        assert _JWT.decode(minted.token, JsonWebKey.import_key(public_pem))["epoch"] == 0
+        assert minted.ownership_epoch == 0
+
+    def test_verify_accepts_equal_epoch(self) -> None:
+        private_pem, public_pem = _keypair()
+        s = _settings(private_pem)
+        signer = BillingHandoffSigner(settings=s)
+        minted = signer.mint(user_id="u", workspace_id=uuid4(), ownership_epoch=3)
+
+        claims = verify_handoff_token(
+            minted.token,
+            public_pem,
+            current_epoch=3,
+            issuer=s.billing_handoff_issuer,
+            audience=s.billing_handoff_audience,
+        )
+        assert claims["epoch"] == 3
+        assert claims["sub"] == "u"
+
+    def test_verify_rejects_stale_epoch_after_transfer(self) -> None:
+        # The acceptance criterion: a token minted at epoch N is rejected once the
+        # workspace epoch advances to N+1 (ownership transferred away).
+        private_pem, public_pem = _keypair()
+        s = _settings(private_pem)
+        minted = BillingHandoffSigner(settings=s).mint(
+            user_id="u", workspace_id=uuid4(), ownership_epoch=3
+        )
+
+        with pytest.raises(BillingHandoffStale) as exc_info:
+            verify_handoff_token(
+                minted.token,
+                public_pem,
+                current_epoch=4,
+                issuer=s.billing_handoff_issuer,
+                audience=s.billing_handoff_audience,
+            )
+        assert exc_info.value.status_code == 401
+        assert exc_info.value.error_code == "BILLING-003"
+
+    def test_verify_missing_epoch_claim_treated_as_zero(self) -> None:
+        # Backward-compat: a token minted before #1100 (no epoch claim) is treated
+        # as epoch 0 — valid pre-transfer, rejected once any transfer bumps to >=1.
+        private_pem, public_pem = _keypair()
+        s = _settings(private_pem)
+        key = JsonWebKey.import_key(private_pem)
+        header = {"alg": "EdDSA", "typ": "JWT", "kid": s.billing_handoff_key_id}
+        payload = {
+            "iss": s.billing_handoff_issuer,
+            "aud": s.billing_handoff_audience,
+            "sub": "u",
+            "workspace_id": str(uuid4()),
+            "role": "owner",
+            "iat": calendar.timegm(datetime(2026, 6, 27, 12, 0, 0).timetuple()),
+            "exp": calendar.timegm(datetime(2099, 1, 1).timetuple()),
+            "jti": "legacy",
+        }
+        legacy_token = _JWT.encode(header, payload, key)
+        if isinstance(legacy_token, bytes):
+            legacy_token = legacy_token.decode()
+
+        # epoch 0 vs current 0 → accepted
+        assert (
+            verify_handoff_token(
+                legacy_token,
+                public_pem,
+                current_epoch=0,
+                issuer=s.billing_handoff_issuer,
+                audience=s.billing_handoff_audience,
+            )["sub"]
+            == "u"
+        )
+        # epoch 0 vs current 1 → rejected
+        with pytest.raises(BillingHandoffStale):
+            verify_handoff_token(
+                legacy_token,
+                public_pem,
+                current_epoch=1,
+                issuer=s.billing_handoff_issuer,
+                audience=s.billing_handoff_audience,
+            )
+
+    def test_verify_rejects_wrong_audience(self) -> None:
+        # The reference verifier still enforces the standard binding, not just epoch.
+        private_pem, public_pem = _keypair()
+        s = _settings(private_pem)
+        minted = BillingHandoffSigner(settings=s).mint(
+            user_id="u", workspace_id=uuid4(), ownership_epoch=1
+        )
+
+        with pytest.raises(BillingHandoffInvalid):
+            verify_handoff_token(
+                minted.token,
+                public_pem,
+                current_epoch=1,
+                issuer=s.billing_handoff_issuer,
+                audience="someone-else",
+            )
+
+    def test_mint_logs_ownership_epoch(self) -> None:
+        # The epoch is the field the staleness gate keys on — it must be in the
+        # issuance audit breadcrumb so a transfer dispute is reconstructable.
+        private_pem, _ = _keypair()
+        signer = BillingHandoffSigner(settings=_settings(private_pem))
+
+        with patch("auth.billing_handoff.logger") as mock_logger:
+            signer.mint(user_id="u", workspace_id=uuid4(), ownership_epoch=9)
+
+        assert mock_logger.info.call_args.kwargs.get("epoch") == 9
+
+
+def _sign(private_pem: str, payload: dict, *, kid: str = "kid-1") -> str:
+    """Sign an arbitrary payload with the EdDSA private key (cross-impl minter sim)."""
+    header = {"alg": "EdDSA", "typ": "JWT", "kid": kid}
+    tok = _JWT.encode(header, payload, JsonWebKey.import_key(private_pem))
+    return tok.decode() if isinstance(tok, bytes) else tok
+
+
+def _base_payload(s, **overrides) -> dict:
+    iat = calendar.timegm(datetime(2026, 6, 27, 12, 0, 0).timetuple())
+    payload = {
+        "iss": s.billing_handoff_issuer,
+        "aud": s.billing_handoff_audience,
+        "sub": "u",
+        "workspace_id": str(uuid4()),
+        "role": "owner",
+        "epoch": 1,
+        "iat": iat,
+        "exp": calendar.timegm(datetime(2099, 1, 1).timetuple()),
+        "jti": "t",
+    }
+    payload.update(overrides)
+    return payload
+
+
+class TestVerifierHardening:
+    """#1100 code-review max follow-ups: the reference verifier must fail closed on
+    a missing/expired exp, a non-numeric epoch, and a tampered signature."""
+
+    def test_verify_rejects_token_missing_exp_claim(self) -> None:
+        # exp is essential — a token with no exp would otherwise never expire,
+        # and the epoch gate does not compensate within the same generation.
+        private_pem, public_pem = _keypair()
+        s = _settings(private_pem)
+        payload = _base_payload(s)
+        payload.pop("exp")
+
+        with pytest.raises(BillingHandoffInvalid):
+            verify_handoff_token(
+                _sign(private_pem, payload),
+                public_pem,
+                current_epoch=1,
+                issuer=s.billing_handoff_issuer,
+                audience=s.billing_handoff_audience,
+            )
+
+    def test_verify_rejects_expired_token(self) -> None:
+        private_pem, public_pem = _keypair()
+        s = _settings(private_pem)
+        past = calendar.timegm(datetime(2020, 1, 1).timetuple())
+
+        with pytest.raises(BillingHandoffInvalid):
+            verify_handoff_token(
+                _sign(private_pem, _base_payload(s, iat=past, exp=past + 120)),
+                public_pem,
+                current_epoch=1,
+                issuer=s.billing_handoff_issuer,
+                audience=s.billing_handoff_audience,
+            )
+
+    def test_verify_rejects_non_numeric_epoch_as_invalid_not_500(self) -> None:
+        # A validly-signed but cross-impl token with a non-numeric epoch must
+        # surface as BILLING-004, never an unhandled coercion error (500).
+        private_pem, public_pem = _keypair()
+        s = _settings(private_pem)
+
+        with pytest.raises(BillingHandoffInvalid):
+            verify_handoff_token(
+                _sign(private_pem, _base_payload(s, epoch="not-a-number")),
+                public_pem,
+                current_epoch=1,
+                issuer=s.billing_handoff_issuer,
+                audience=s.billing_handoff_audience,
+            )
+
+    def test_verify_rejects_tampered_signature(self) -> None:
+        # The verifier's core promise: a tampered token raises BillingHandoffInvalid
+        # (not a raw authlib error) — regression guard for the decode try/except.
+        private_pem, public_pem = _keypair()
+        s = _settings(private_pem)
+        minted = BillingHandoffSigner(settings=s).mint(
+            user_id="u", workspace_id=uuid4(), ownership_epoch=1
+        )
+        head, body, sig = minted.token.split(".")
+        tampered = f"{head}.{body}.{'BB' if sig[-2:] != 'BB' else 'CC'}{sig[2:]}"
+
+        with pytest.raises(BillingHandoffInvalid):
+            verify_handoff_token(
+                tampered,
+                public_pem,
+                current_epoch=1,
+                issuer=s.billing_handoff_issuer,
+                audience=s.billing_handoff_audience,
+            )

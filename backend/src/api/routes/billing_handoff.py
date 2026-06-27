@@ -27,12 +27,14 @@ from uuid import UUID
 
 from fastapi import APIRouter, Depends
 from pydantic import BaseModel, Field
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from auth.billing_handoff import BillingHandoffSigner
 from auth.dependencies import SessionUser
 from db.base import get_db
 from models.api_base import TZAwareBaseModel
+from models.auth import Workspace
 from services.permission_service import PermissionService
 from utils.auth_helpers import get_user_id
 
@@ -81,9 +83,26 @@ async def mint_billing_handoff(
     # workspace they merely belong to (#389 guard).
     await PermissionService(db).check_workspace_owner(user_id, body.workspace_id)
 
+    # Stamp the workspace's live ownership epoch into the token (#1100) so the
+    # external verifier can reject it once ownership is transferred (the epoch
+    # advances). Read AFTER the owner gate confirmed the workspace exists; a newer
+    # epoch read here would only make the token immediately stale (fail-safe).
+    ownership_epoch = (
+        await db.execute(
+            select(Workspace.ownership_epoch).where(
+                Workspace.id == body.workspace_id,
+                Workspace.deleted_at.is_(None),
+            )
+        )
+    ).scalar_one()
+
     # Mint AFTER authz so an unconfigured deployment returns 403 to non-owners
     # (no info leak) and 503 only to an authorized owner.
-    minted = BillingHandoffSigner().mint(user_id=user_id, workspace_id=body.workspace_id)
+    minted = BillingHandoffSigner().mint(
+        user_id=user_id,
+        workspace_id=body.workspace_id,
+        ownership_epoch=ownership_epoch,
+    )
 
     # Issuance is audit-logged exactly once, inside BillingHandoffSigner.mint()
     # as "billing_handoff_minted" (same fields + expires_at) — no duplicate here.
