@@ -10,7 +10,7 @@ Collection design (post Single Collection Migration, Issue #334):
 """
 
 from collections.abc import AsyncIterator
-from typing import Any
+from typing import TYPE_CHECKING, Any
 from uuid import UUID
 
 from qdrant_client import AsyncQdrantClient
@@ -37,8 +37,10 @@ from config.database import QDRANT_URL
 from utils.exceptions import QdrantError
 from utils.logger import get_logger
 from utils.sparse_vector import build_query_sparse_vector
-from utils.synonyms import expand_query_tokens
-from utils.tokenizer import augment_reading_tokens, tokenize_and_reading
+from utils.tokenizer import build_fulltext_query
+
+if TYPE_CHECKING:
+    from db.vector_store import VectorStore
 
 logger = get_logger(__name__)
 
@@ -303,6 +305,19 @@ def get_qdrant_client() -> AsyncQdrantClient:
     return _qdrant_client
 
 
+def _active_store() -> "VectorStore | None":
+    """Return the alternative VectorStore backend, or None for the Qdrant path.
+
+    "Kagura Lite" seam: when ``vector_backend == "qdrant"`` (default) this
+    returns ``None`` and the functions below run their native Qdrant code
+    unchanged. When set to ``"lance"`` they delegate to the in-process
+    LanceVectorStore. The import is lazy to avoid a circular import.
+    """
+    from db.vector_store import get_active_store
+
+    return get_active_store()
+
+
 # ============================================================================
 # Single Collection Design (Issue #273)
 # ============================================================================
@@ -341,6 +356,31 @@ async def add_memory_to_qdrant(
         QdrantError: If operation fails
         ValueError: If workspace_id or context_id is missing
     """
+    # Validate the sparse pair up-front so every backend (Qdrant + Lance)
+    # rejects a mismatched pair identically (Lance ignores sparse vectors).
+    if (sparse_indices is None) ^ (sparse_values is None):
+        raise ValueError("sparse_indices and sparse_values must be provided together or both None")
+    if (
+        sparse_indices is not None
+        and sparse_values is not None
+        and len(sparse_indices) != len(sparse_values)
+    ):
+        raise ValueError("sparse_indices and sparse_values must have the same length")
+
+    _store = _active_store()
+    if _store is not None:
+        return await _store.add_memory(
+            user_id,
+            memory_id,
+            vector,
+            payload,
+            workspace_id,
+            context_id,
+            sparse_indices,
+            sparse_values,
+            collection_name,
+        )
+
     client = get_qdrant_client()
 
     # Validate required parameters
@@ -358,13 +398,6 @@ async def add_memory_to_qdrant(
     payload["workspace_id"] = workspace_id
     payload["context_id"] = context_id
     payload["user_id"] = user_id
-
-    # Validate sparse vector inputs
-    if (sparse_indices is None) ^ (sparse_values is None):
-        raise ValueError("sparse_indices and sparse_values must be provided together or both None")
-    if sparse_indices is not None and sparse_values is not None:
-        if len(sparse_indices) != len(sparse_values):
-            raise ValueError("sparse_indices and sparse_values must have the same length")
 
     try:
         # Issue #16: Named vectors (dense + sparse BM25)
@@ -429,6 +462,20 @@ async def search_memories_qdrant(
         QdrantError: If search fails
         ValueError: If workspace_id, context_id, or user_id is missing
     """
+    _store = _active_store()
+    if _store is not None:
+        return await _store.search_semantic(
+            user_id,
+            query_vector,
+            workspace_id,
+            context_id,
+            limit,
+            filters,
+            is_shared_context,
+            collection_name,
+            include_vectors,
+        )
+
     client = get_qdrant_client()
 
     # CRITICAL: Validate isolation parameters (Security)
@@ -497,6 +544,10 @@ async def update_memory_payload_in_qdrant(
     Raises:
         QdrantError: If operation fails
     """
+    _store = _active_store()
+    if _store is not None:
+        return await _store.update_payload(memory_id, payload_updates, collection_name)
+
     client = get_qdrant_client()
 
     try:
@@ -538,6 +589,10 @@ async def delete_memory_from_qdrant(
         Single Collection Migration: Always uses "kagura_memories" collection.
         Memory ID is globally unique, so direct deletion by ID is safe.
     """
+    _store = _active_store()
+    if _store is not None:
+        return await _store.delete_memory(user_id, memory_id, collection_name)
+
     client = get_qdrant_client()
 
     try:
@@ -588,6 +643,19 @@ async def search_memories_fulltext(
         QdrantError: If search fails
         ValueError: If isolation parameters are missing
     """
+    _store = _active_store()
+    if _store is not None:
+        return await _store.search_fulltext(
+            user_id,
+            query,
+            workspace_id,
+            context_id,
+            limit,
+            filters,
+            is_shared_context,
+            collection_name,
+        )
+
     client = get_qdrant_client()
 
     # CRITICAL: Validate isolation parameters (Security)
@@ -610,15 +678,9 @@ async def search_memories_fulltext(
     )
 
     try:
-        # Build sparse query vector: single Sudachi pass for lemmas + readings
-        tokenized_query, query_reading, sudachi_tokens = tokenize_and_reading(query)
-        combined_query = f"{tokenized_query} {query_reading}" if query_reading else tokenized_query
-
-        augmented = augment_reading_tokens(query, sudachi_tokens=sudachi_tokens)
-        if augmented:
-            combined_query = f"{combined_query} {augmented}"
-
-        expanded_query = expand_query_tokens(combined_query)
+        # Build sparse query vector from the shared expanded-query pipeline
+        # (identical tokenization to the LanceDB FTS backend — keeps parity).
+        expanded_query = build_fulltext_query(query)
         query_indices, query_values = build_query_sparse_vector(expanded_query)
 
         if not query_indices:
@@ -684,6 +746,10 @@ async def ensure_kagura_memories_collection(
         >>> await ensure_kagura_memories_collection(512)
         # Creates "kagura_memories" collection with all indexes
     """
+    _store = _active_store()
+    if _store is not None:
+        return await _store.ensure_collection(embedding_dim, collection_name)
+
     client = get_qdrant_client()
 
     try:
@@ -896,6 +962,11 @@ async def copy_context_points(
     Raises:
         QdrantError: If copy fails
     """
+    if _active_store() is not None:
+        raise NotImplementedError(
+            "copy_context_points is not supported by the LanceDB backend (preview)."
+        )
+
     client = get_qdrant_client()
     copied = 0
 
@@ -1001,6 +1072,10 @@ async def delete_context_points(
         >>> deleted = await delete_context_points("workspace-uuid", "context-uuid")
         >>> print(f"Deleted {deleted} points")
     """
+    _store = _active_store()
+    if _store is not None:
+        return await _store.delete_context_points(workspace_id, context_id, collection_name)
+
     client = get_qdrant_client()
 
     try:
@@ -1082,6 +1157,12 @@ async def delete_user_points(user_id: str) -> dict[str, int]:
         >>> deleted
         {'kagura_memories': 38, 'kagura_memories_voyage_2_1024': 4}
     """
+    if _active_store() is not None:
+        raise NotImplementedError(
+            "delete_user_points (cross-collection GDPR erasure) is not supported "
+            "by the LanceDB backend (preview)."
+        )
+
     client = get_qdrant_client()
     deleted_per_collection: dict[str, int] = {}
 
@@ -1175,6 +1256,12 @@ async def _admin_scroll_context_points(
     Yields:
         Successive lists of qdrant_client.models.Record, one per scroll page.
     """
+    if _active_store() is not None:
+        raise NotImplementedError(
+            "_admin_scroll_context_points (BM25 drift admin tool) is not supported "
+            "by the LanceDB backend (preview)."
+        )
+
     client = get_qdrant_client()
     # qdrant-client's PointId union (int | str | UUID) matches scroll's
     # declared offset parameter and the next_offset return value.
