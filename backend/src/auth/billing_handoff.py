@@ -196,6 +196,7 @@ class BillingHandoffSigner:
         expires_at = issued_at + timedelta(seconds=ttl_seconds)
         jti = secrets.token_urlsafe(24)
         workspace_str = str(workspace_id)
+        epoch = int(ownership_epoch)
 
         header = {"alg": _ALG, "typ": _TOKEN_TYP, "kid": kid}
         payload = {
@@ -204,7 +205,7 @@ class BillingHandoffSigner:
             "sub": user_id,
             "workspace_id": workspace_str,
             "role": _ROLE_OWNER,
-            "epoch": int(ownership_epoch),
+            "epoch": epoch,
             "iat": int(issued_at.replace(tzinfo=UTC).timestamp()),
             "exp": int(expires_at.replace(tzinfo=UTC).timestamp()),
             "jti": jti,
@@ -227,6 +228,7 @@ class BillingHandoffSigner:
             workspace_id=workspace_str,
             jti=jti,
             kid=kid,
+            epoch=epoch,
             expires_at=expires_at.isoformat(),
         )
 
@@ -238,7 +240,7 @@ class BillingHandoffSigner:
             expires_at=expires_at,
             workspace_id=workspace_str,
             user_id=user_id,
-            ownership_epoch=int(ownership_epoch),
+            ownership_epoch=epoch,
         )
 
 
@@ -273,7 +275,9 @@ def verify_handoff_token(
 
     Args:
         token: The compact EdDSA handoff JWS.
-        verifying_key: PEM/JWK public key matching the token's ``kid``.
+        verifying_key: PEM/JWK public key. This single-key verifier does NOT
+            resolve the token's ``kid`` header — the caller is responsible for
+            selecting the public key that matches the token's ``kid`` (rotation).
         current_epoch: The workspace's live ``ownership_epoch`` at verify time.
         issuer: Expected ``iss`` claim.
         audience: Expected ``aud`` claim.
@@ -282,7 +286,8 @@ def verify_handoff_token(
         The validated claims as a plain ``dict``.
 
     Raises:
-        BillingHandoffInvalid: 401 (BILLING-004) — bad signature / iss / aud / exp.
+        BillingHandoffInvalid: 401 (BILLING-004) — bad signature / iss / aud / exp
+            (incl. a missing ``exp``) / a malformed (non-numeric) ``epoch`` claim.
         BillingHandoffStale: 401 (BILLING-003) — the ownership epoch advanced.
     """
     try:
@@ -292,17 +297,24 @@ def verify_handoff_token(
             claims_options={
                 "iss": {"essential": True, "value": issuer},
                 "aud": {"essential": True, "value": audience},
+                # exp essential: authlib's exp validator is a no-op when the claim
+                # is ABSENT, so without this a token minted with no exp would never
+                # expire — defeating the short-TTL replay window. Reject it instead.
+                "exp": {"essential": True},
             },
         )
         claims.validate()  # exp/iat/iss/aud — raises on any mismatch
+        # Coerce the epoch INSIDE the guarded region: a validly-signed token from a
+        # cross-impl minter could carry a non-numeric / null ``epoch``, and that
+        # must surface as BILLING-004, not an unhandled 500. Missing / null → 0.
+        token_epoch = int(claims.get("epoch", 0) or 0)
     except Exception as exc:
         raise BillingHandoffInvalid() from exc
 
     # Staleness is a SEPARATE gate, after signature/claims pass, so the caller can
-    # tell "forged/expired" (BILLING-004) apart from "superseded by transfer"
-    # (BILLING-003). Missing claim → 0 (pre-#1100 token). Strict ``<``: an equal
-    # epoch is the same ownership generation and stays valid.
-    token_epoch = int(claims.get("epoch", 0) or 0)
+    # tell "forged/expired/malformed" (BILLING-004) apart from "superseded by
+    # transfer" (BILLING-003). Strict ``<``: an equal epoch is the same ownership
+    # generation and stays valid.
     if token_epoch < int(current_epoch):
         raise BillingHandoffStale()
     return dict(claims)
