@@ -777,7 +777,7 @@ class TestHandleOwnedWorkspaces:
     async def test_other_admin_triggers_auto_transfer(self):
         svc = _service()
         ws_id = uuid4()
-        ws = SimpleNamespace(id=ws_id, owner_user_id="u-1")
+        ws = SimpleNamespace(id=ws_id, owner_user_id="u-1", ownership_epoch=5)
         new_admin = SimpleNamespace(workspace_id=ws_id, user_id="u-2", role=WorkspaceRole.ADMIN)
         rows = [
             SimpleNamespace(workspace_id=ws_id, user_id="u-1", role=WorkspaceRole.OWNER),
@@ -786,10 +786,72 @@ class TestHandleOwnedWorkspaces:
         svc.db.execute = AsyncMock(return_value=self._bulk_members_result(rows))
         svc.db.commit = AsyncMock()
 
-        out = await svc._handle_owned_workspaces("u-1", [ws])
+        # #1102: the auto-transfer takes the SHARED workspace-row lock (returning
+        # the same locked row) so it serializes with transfer_ownership.
+        with patch(
+            "services.account_erasure_service.lock_workspace_for_update",
+            AsyncMock(return_value=ws),
+        ) as lock:
+            out = await svc._handle_owned_workspaces("u-1", [ws])
+        lock.assert_awaited_once()
         assert ws.owner_user_id == "u-2"
         assert new_admin.role == "owner"
         assert len(out["transferred"]) == 1
+        # #1102: the erasure auto-transfer bumps ownership_epoch so the #1100
+        # consumer invalidates credentials bound to the erased previous owner.
+        assert ws.ownership_epoch == 6
+
+    @pytest.mark.asyncio
+    async def test_auto_transfer_skips_when_ownership_moved_under_lock(self):
+        # #1102: if a concurrent transfer moved ownership away from the erased user
+        # before we acquired the lock, the locked row no longer names them as owner
+        # → skip the auto-transfer rather than clobber the new owner.
+        svc = _service()
+        ws_id = uuid4()
+        ws = SimpleNamespace(id=ws_id, owner_user_id="u-1", ownership_epoch=5)
+        # The row as re-read UNDER the lock: ownership already moved to someone else.
+        locked = SimpleNamespace(id=ws_id, owner_user_id="someone-else", ownership_epoch=9)
+        rows = [
+            SimpleNamespace(workspace_id=ws_id, user_id="u-1", role=WorkspaceRole.OWNER),
+            SimpleNamespace(workspace_id=ws_id, user_id="u-2", role=WorkspaceRole.ADMIN),
+        ]
+        svc.db.execute = AsyncMock(return_value=self._bulk_members_result(rows))
+        svc.db.commit = AsyncMock()
+
+        with patch(
+            "services.account_erasure_service.lock_workspace_for_update",
+            AsyncMock(return_value=locked),
+        ):
+            out = await svc._handle_owned_workspaces("u-1", [ws])
+
+        assert out["transferred"] == []
+        assert locked.owner_user_id == "someone-else"  # untouched
+        assert locked.ownership_epoch == 9  # not bumped
+
+    @pytest.mark.asyncio
+    async def test_soft_deleted_workspace_skipped_not_failed(self):
+        # #1102: if a workspace was soft-deleted concurrently, the shared lock
+        # raises NotFoundException — that benign race must be skipped, NOT allowed
+        # to fail the whole GDPR erasure request.
+        from utils.exceptions import NotFoundException
+
+        svc = _service()
+        ws_id = uuid4()
+        ws = SimpleNamespace(id=ws_id, owner_user_id="u-1", ownership_epoch=5)
+        rows = [
+            SimpleNamespace(workspace_id=ws_id, user_id="u-1", role=WorkspaceRole.OWNER),
+            SimpleNamespace(workspace_id=ws_id, user_id="u-2", role=WorkspaceRole.ADMIN),
+        ]
+        svc.db.execute = AsyncMock(return_value=self._bulk_members_result(rows))
+        svc.db.commit = AsyncMock()
+
+        with patch(
+            "services.account_erasure_service.lock_workspace_for_update",
+            AsyncMock(side_effect=NotFoundException("Workspace")),
+        ):
+            out = await svc._handle_owned_workspaces("u-1", [ws])
+
+        assert out["transferred"] == []  # skipped, no exception bubbled
 
     @pytest.mark.asyncio
     async def test_members_without_admin_blocks_with_typed_error(self):

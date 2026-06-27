@@ -227,6 +227,10 @@ class TestAdminForceEraseHappyPath:
         ws = result.scalar_one_or_none()
         assert ws is not None
         assert ws.owner_user_id == erasure_scenario["other_user_id"]
+        # #1102: the auto-transfer bumped ownership_epoch and it persisted through
+        # the full DB orchestration — this is the #1100 signal that invalidates the
+        # erased owner's billing-handoff tokens/sessions.
+        assert ws.ownership_epoch >= 1
 
         # Pre-existing audit_logs row survives but PII is pseudonymized.
         result = await db_session.execute(select(AuditLog).where(AuditLog.id == prior_audit_id))

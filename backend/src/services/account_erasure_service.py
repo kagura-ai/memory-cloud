@@ -73,6 +73,7 @@ from models.erasure import (
 from services.email_service import EmailService, get_email_service
 from services.stripe_service import cancel_subscription_and_delete_customer_for_erasure
 from services.system_admin_service import SystemAdminService
+from services.workspace_locks import lock_workspace_for_update
 from utils.datetime import to_utc_iso, utcnow
 from utils.exceptions import (
     EmailDispatchError,
@@ -927,8 +928,30 @@ class AccountErasureService:
                 )
 
             new_owner = other_admins[0]
-            ws.owner_user_id = new_owner.user_id
+            # #1102: take the SHARED workspace-row lock so this owner-mutation
+            # serializes with transfer_ownership / update_member_role on the same
+            # FOR UPDATE row — the workspaces were loaded by an UNLOCKED SELECT
+            # (_list_owned_workspaces), so without this the epoch read-modify-write
+            # below could race a concurrent transfer and lose an increment.
+            try:
+                locked_ws = await lock_workspace_for_update(self.db, ws.id)
+            except NotFoundException:
+                # The workspace was soft-deleted concurrently (it will be cascade-
+                # cleaned anyway) — nothing to auto-transfer. A benign race must NOT
+                # fail the whole GDPR erasure request.
+                continue
+            # Re-read under the lock — the helper uses populate_existing, so this
+            # reflects committed concurrent changes even though the row was already
+            # in the session. If a concurrent transfer already moved ownership away
+            # from the erased user, this is no longer ours to auto-transfer.
+            if locked_ws.owner_user_id != user_id:
+                continue
+            locked_ws.owner_user_id = new_owner.user_id
             new_owner.role = "owner"
+            # Bump the ownership epoch on every owner change (#1102) so the #1100
+            # consumer invalidates external credentials (billing-handoff tokens /
+            # sessions) bound to the erased previous owner.
+            locked_ws.ownership_epoch = locked_ws.ownership_epoch + 1
             transfers.append({"workspace_id": str(ws.id), "new_owner_user_id": new_owner.user_id})
 
         # Commit so the cascade on workspace delete (step 4) sees the new
