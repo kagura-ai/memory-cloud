@@ -14,7 +14,9 @@ import pytest
 from auth.workspace_roles import WorkspaceRole
 from models.auth import Context, User, Workspace, WorkspaceMember
 from models.memory import Memory
+from services.workspace_locks import lock_workspace_for_update
 from services.workspace_service import WorkspaceService
+from utils.datetime import utcnow
 from utils.exceptions import NotFoundException, ValidationError
 
 # ---------------------------------------------------------------------------
@@ -292,6 +294,97 @@ class TestUpdateMemberRole:
 
         updated = await service.update_member_role(ws.id, "u18", "admin")
         assert updated.role == "admin"
+
+    @pytest.mark.asyncio
+    async def test_owner_change_takes_workspace_lock(self, db_session) -> None:
+        # #1102: demoting an OWNER must serialize on the workspace row lock.
+        service = WorkspaceService(db_session)
+        ws = Workspace(id=uuid4(), name="WLk1", owner_user_id="o1", plan_name="free")
+        db_session.add(ws)
+        await db_session.flush()
+        db_session.add(WorkspaceMember(workspace_id=ws.id, user_id="o1", role=WorkspaceRole.OWNER))
+        await db_session.flush()
+
+        with patch("services.workspace_service.lock_workspace_for_update", AsyncMock()) as lock:
+            await service.update_member_role(ws.id, "o1", "admin")
+        lock.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_non_owner_change_skips_workspace_lock(self, db_session) -> None:
+        # A plain member<->viewer/admin change never touches ownership → no lock,
+        # keeping the common path contention-free.
+        service = WorkspaceService(db_session)
+        ws = Workspace(id=uuid4(), name="WLk2", owner_user_id="o2", plan_name="free")
+        db_session.add(ws)
+        await db_session.flush()
+        db_session.add(WorkspaceMember(workspace_id=ws.id, user_id="o2", role=WorkspaceRole.OWNER))
+        db_session.add(WorkspaceMember(workspace_id=ws.id, user_id="m2", role=WorkspaceRole.MEMBER))
+        await db_session.flush()
+
+        with patch("services.workspace_service.lock_workspace_for_update", AsyncMock()) as lock:
+            await service.update_member_role(ws.id, "m2", "admin")
+        lock.assert_not_awaited()
+
+
+# ---------------------------------------------------------------------------
+# lock_workspace_for_update (#1102 shared owner-mutation lock)
+# ---------------------------------------------------------------------------
+
+
+class TestLockWorkspaceForUpdate:
+    @pytest.mark.asyncio
+    async def test_returns_live_workspace(self, db_session) -> None:
+        ws = Workspace(id=uuid4(), name="WLock", owner_user_id="o", plan_name="free")
+        db_session.add(ws)
+        await db_session.flush()
+
+        locked = await lock_workspace_for_update(db_session, ws.id)
+        assert locked.id == ws.id
+
+    @pytest.mark.asyncio
+    async def test_missing_workspace_raises_notfound(self, db_session) -> None:
+        with pytest.raises(NotFoundException):
+            await lock_workspace_for_update(db_session, uuid4())
+
+    @pytest.mark.asyncio
+    async def test_soft_deleted_workspace_raises_notfound(self, db_session) -> None:
+        ws = Workspace(
+            id=uuid4(), name="WLockX", owner_user_id="o", plan_name="free", deleted_at=utcnow()
+        )
+        db_session.add(ws)
+        await db_session.flush()
+
+        with pytest.raises(NotFoundException):
+            await lock_workspace_for_update(db_session, ws.id)
+
+    @pytest.mark.asyncio
+    async def test_populate_existing_refreshes_already_loaded_row(self, db_session) -> None:
+        # Keystone of the #1102 erasure fix: when the row is ALREADY in the session
+        # (e.g. loaded by account_erasure's unlocked SELECT), the locked re-SELECT
+        # MUST refresh its attributes (populate_existing), not return stale cached
+        # values — otherwise the under-lock owner re-check and the epoch
+        # read-modify-write operate on a stale base.
+        from sqlalchemy import update as sa_update
+
+        ws = Workspace(id=uuid4(), name="WLockR", owner_user_id="orig", plan_name="free")
+        db_session.add(ws)
+        await db_session.flush()
+
+        # Mutate the DB row out-of-band (stands in for a committed concurrent
+        # transfer) WITHOUT touching the cached ORM instance — synchronize_session
+        # =False keeps the in-session instance stale, exactly the identity-map
+        # situation account_erasure hits.
+        await db_session.execute(
+            sa_update(Workspace)
+            .where(Workspace.id == ws.id)
+            .values(owner_user_id="moved")
+            .execution_options(synchronize_session=False)
+        )
+        assert ws.owner_user_id == "orig"  # cached instance still stale
+
+        locked = await lock_workspace_for_update(db_session, ws.id)
+        assert locked is ws  # same identity-mapped instance
+        assert locked.owner_user_id == "moved"  # ...but refreshed from the locked row
 
 
 # ---------------------------------------------------------------------------

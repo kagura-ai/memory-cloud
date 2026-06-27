@@ -7,24 +7,31 @@ every owner-gated billing/admin action.
 
 Single-owner invariant
 -----------------------
-A live workspace has exactly **one** OWNER. This is the voluntary transfer path;
-it takes a ``SELECT ... FOR UPDATE`` lock on the workspace row as the
-synchronization point and re-checks the caller is still owner *under* the lock.
-The other OWNER-assigning paths and how the invariant holds against them:
+A live workspace has exactly **one** OWNER. Since #1102 every owner-mutating path
+serializes on the **same** ``SELECT ... FOR UPDATE`` workspace-row lock — the
+shared ``services.workspace_locks.lock_workspace_for_update`` — so the invariant
+is *structural* (row-level serialization) rather than *emergent* (each path's
+local guards happening to line up). This voluntary transfer path takes the lock,
+then re-checks the caller is still owner *under* the lock. The other paths:
 
 * workspace *creation* (``workspace_service`` / ``context_service`` personal
   workspace) — a brand-new workspace, never a live concurrent-transfer target.
-* ``WorkspaceService.update_member_role`` — has its own single-owner guard: it
-  refuses to promote a member to OWNER while any OWNER row exists. Combined with
-  this service's *atomic* demote+promote (no committed zero-owner window), it
-  cannot produce two owners on a workspace that already has one.
-* the account-erasure auto-transfer (``account_erasure_service``) — does **not**
-  take this lock. Unifying every owner-mutating path under one workspace row lock
-  is a tracked follow-up; this service's under-lock owner re-check (→ 409)
-  defends the common direction.
+* ``WorkspaceService.update_member_role`` — takes the shared lock whenever the
+  role change adds OR removes an OWNER (#1102), in addition to its own
+  single-owner guard. NOTE: it adjusts ``WorkspaceMember.role`` only, never
+  ``owner_user_id`` (that canonical pointer is moved solely by this service and
+  by erasure). Demoting the ``owner_user_id`` holder via this path therefore
+  leaves the two representations out of sync — a pre-existing gap the lock does
+  NOT close; tracked separately, not in #1102's scope.
+* the account-erasure auto-transfer (``account_erasure_service``) — takes the
+  shared ``lock_workspace_for_update`` per workspace before its auto-transfer
+  (#1102; it loads workspaces with an unlocked SELECT, so the lock is acquired at
+  mutation time, then re-checks the erased user still owns the row) and bumps
+  ``ownership_epoch`` so the epoch contract below holds for every ``owner_user_id``
+  change.
 
-Do not add a new OWNER-assigning path on an existing workspace without either
-this row lock or an equivalent single-owner guard.
+Do not move ``owner_user_id`` on an existing workspace without taking
+``lock_workspace_for_update`` and bumping ``ownership_epoch``.
 
 Ownership epoch
 ---------------
@@ -43,8 +50,9 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from auth.workspace_roles import WorkspaceRole
-from models.auth import AuditLog, Workspace, WorkspaceMember
-from utils.exceptions import BadRequestError, ConflictError, NotFoundException
+from models.auth import AuditLog, WorkspaceMember
+from services.workspace_locks import lock_workspace_for_update
+from utils.exceptions import BadRequestError, ConflictError
 from utils.logger import get_logger
 
 logger = get_logger(__name__)
@@ -113,16 +121,10 @@ class WorkspaceOwnershipService:
             ConflictError: ownership changed concurrently (409).
             BadRequestError: target is not a member of this workspace (400).
         """
-        # 1. Lock the workspace row first — the single-owner synchronization point.
-        workspace = (
-            await self.db.execute(
-                select(Workspace)
-                .where(Workspace.id == workspace_id, Workspace.deleted_at.is_(None))
-                .with_for_update()
-            )
-        ).scalar_one_or_none()
-        if workspace is None:
-            raise NotFoundException("Workspace")
+        # 1. Lock the workspace row first — the single-owner synchronization point,
+        # shared with update_member_role + account_erasure via lock_workspace_for_update
+        # (#1102) so every owner-mutating path serializes on the same row.
+        workspace = await lock_workspace_for_update(self.db, workspace_id)
 
         # 2. TOCTOU close: the route's owner check ran before this lock. If the
         # owner changed in between, refuse rather than transfer on a stale premise.

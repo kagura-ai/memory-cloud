@@ -14,6 +14,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from auth.workspace_roles import WorkspaceRole
 from models.auth import Context, ExternalAPIKey, UsageStats, Workspace, WorkspaceMember
 from models.memory import Memory
+from services.workspace_locks import lock_workspace_for_update
 from utils.datetime import utcnow
 from utils.exceptions import NotFoundException, ValidationError
 from utils.logger import get_logger
@@ -659,6 +660,14 @@ class WorkspaceService:
             # get_member raises by default; narrow for pyright + any future
             # call site that passes raise_if_not_found=False.
             raise NotFoundException(f"Member not found: {user_id} in workspace {workspace_id}")
+
+        # #1102: a role change that ADDS or REMOVES an OWNER must serialize on the
+        # workspace row with the other owner-mutating paths (transfer_ownership,
+        # account_erasure) so the single-owner invariant is structural rather than
+        # emergent. Plain member<->viewer changes never touch ownership and skip
+        # the lock to keep the common path contention-free.
+        if WorkspaceRole.OWNER in (new_role, member.role):
+            await lock_workspace_for_update(self.db, workspace_id)
 
         # Validate single owner constraint (Issue #165)
         if new_role == WorkspaceRole.OWNER and member.role != WorkspaceRole.OWNER:
