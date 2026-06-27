@@ -498,3 +498,38 @@ async def test_send_workspace_invitation_failure_does_not_leak_token_in_logs():
     haystack = " ".join(haystack_parts)
     assert token not in haystack, "invitation token leaked into failure log"
     assert accept_url not in haystack, "accept_url leaked into failure log"
+
+
+@pytest.mark.asyncio
+async def test_send_workspace_ownership_transferred_calls_sdk_with_expected_payload():
+    # #1103: the prod (Resend) path builds a real subject/body and sends to the
+    # new owner. Mirrors the sibling coverage (payload shape + return True).
+    svc = ResendEmailService(api_key="re_test", from_email="noreply@example.com")
+
+    with patch.object(
+        resend_module.resend.Emails, "send", return_value={"id": "re_own_001"}
+    ) as mock_send:
+        result = await svc.send_workspace_ownership_transferred(
+            to_email="new@owner.com",
+            workspace_name="Acme Research",
+        )
+
+    assert result is True
+    mock_send.assert_called_once()
+    params = mock_send.call_args.args[0]
+    assert params["from"] == "noreply@example.com"
+    assert params["to"] == ["new@owner.com"]
+    assert "Acme Research" in params["subject"]
+    assert "Acme Research" in params["text"]
+
+
+@pytest.mark.asyncio
+async def test_send_workspace_ownership_transferred_returns_false_when_sdk_raises():
+    svc = ResendEmailService(api_key="re_test", from_email="noreply@example.com")
+    with patch.object(
+        resend_module.resend.Emails, "send", side_effect=RuntimeError("resend down")
+    ):
+        result = await svc.send_workspace_ownership_transferred(
+            to_email="new@owner.com", workspace_name="Acme"
+        )
+    assert result is False

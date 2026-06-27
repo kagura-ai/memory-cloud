@@ -213,3 +213,119 @@ class TestTransferValidation:
                 json={"target_user_id": TARGET},
             )
         assert resp.status_code == 422
+
+
+# ============================================================================
+# New-owner notification (#1103)
+# ============================================================================
+
+
+class TestTransferNotification:
+    def test_notifies_new_owner_on_change(self, owner_client):
+        perm = _owner_ok()
+        svc = MagicMock()
+        svc.transfer_ownership = AsyncMock(return_value=_result(changed=True, epoch=1))
+        notify = AsyncMock()
+        with (
+            patch.object(route_mod, "PermissionService", return_value=perm),
+            patch.object(route_mod, "WorkspaceOwnershipService", return_value=svc),
+            patch.object(route_mod, "_notify_new_owner_best_effort", notify),
+        ):
+            resp = owner_client.post(
+                f"/api/v1/workspaces/{WS}/transfer-ownership",
+                json={"target_user_id": TARGET},
+            )
+        assert resp.status_code == 200, resp.text
+        notify.assert_awaited_once()
+        # called as (db, workspace_id, new_owner_id)
+        assert notify.await_args.args[1] == WS
+        assert notify.await_args.args[2] == TARGET
+
+    def test_no_notification_on_idempotent_noop(self, owner_client):
+        perm = _owner_ok()
+        svc = MagicMock()
+        svc.transfer_ownership = AsyncMock(return_value=_result(changed=False, epoch=3))
+        notify = AsyncMock()
+        with (
+            patch.object(route_mod, "PermissionService", return_value=perm),
+            patch.object(route_mod, "WorkspaceOwnershipService", return_value=svc),
+            patch.object(route_mod, "_notify_new_owner_best_effort", notify),
+        ):
+            resp = owner_client.post(
+                f"/api/v1/workspaces/{WS}/transfer-ownership",
+                json={"target_user_id": TARGET},
+            )
+        assert resp.status_code == 200, resp.text
+        notify.assert_not_awaited()
+
+
+class TestNotifyNewOwnerBestEffort:
+    @pytest.mark.asyncio
+    async def test_resolves_email_and_sends(self):
+        db = MagicMock()
+        email_res = MagicMock()
+        email_res.scalar_one_or_none.return_value = "new@owner.com"
+        name_res = MagicMock()
+        name_res.scalar_one_or_none.return_value = "My WS"
+        db.execute = AsyncMock(side_effect=[email_res, name_res])
+        svc = MagicMock()
+        svc.send_workspace_ownership_transferred = AsyncMock(return_value=True)
+        with patch.object(route_mod, "get_email_service", return_value=svc):
+            await route_mod._notify_new_owner_best_effort(db, WS, TARGET)
+        svc.send_workspace_ownership_transferred.assert_awaited_once_with(
+            to_email="new@owner.com", workspace_name="My WS"
+        )
+
+    @pytest.mark.asyncio
+    async def test_skips_when_new_owner_has_no_email(self):
+        db = MagicMock()
+        email_res = MagicMock()
+        email_res.scalar_one_or_none.return_value = None
+        db.execute = AsyncMock(return_value=email_res)
+        svc = MagicMock()
+        svc.send_workspace_ownership_transferred = AsyncMock()
+        with patch.object(route_mod, "get_email_service", return_value=svc):
+            await route_mod._notify_new_owner_best_effort(db, WS, TARGET)
+        svc.send_workspace_ownership_transferred.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_swallows_resolution_error(self):
+        # A failing resolution query must NOT propagate (transfer already committed).
+        db = MagicMock()
+        db.execute = AsyncMock(side_effect=RuntimeError("db down"))
+        with patch.object(route_mod, "get_email_service") as ges:
+            await route_mod._notify_new_owner_best_effort(db, WS, TARGET)  # no raise
+        ges.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_swallows_provider_error(self):
+        # If the provider violates its no-raise contract, the helper must still
+        # swallow it — the transfer already committed.
+        db = MagicMock()
+        email_res = MagicMock()
+        email_res.scalar_one_or_none.return_value = "new@owner.com"
+        name_res = MagicMock()
+        name_res.scalar_one_or_none.return_value = "My WS"
+        db.execute = AsyncMock(side_effect=[email_res, name_res])
+        svc = MagicMock()
+        svc.send_workspace_ownership_transferred = AsyncMock(
+            side_effect=RuntimeError("provider down")
+        )
+        with patch.object(route_mod, "get_email_service", return_value=svc):
+            await route_mod._notify_new_owner_best_effort(db, WS, TARGET)  # no raise
+
+    @pytest.mark.asyncio
+    async def test_uses_fallback_when_workspace_name_missing(self):
+        db = MagicMock()
+        email_res = MagicMock()
+        email_res.scalar_one_or_none.return_value = "new@owner.com"
+        name_res = MagicMock()
+        name_res.scalar_one_or_none.return_value = None
+        db.execute = AsyncMock(side_effect=[email_res, name_res])
+        svc = MagicMock()
+        svc.send_workspace_ownership_transferred = AsyncMock(return_value=True)
+        with patch.object(route_mod, "get_email_service", return_value=svc):
+            await route_mod._notify_new_owner_best_effort(db, WS, TARGET)
+        svc.send_workspace_ownership_transferred.assert_awaited_once_with(
+            to_email="new@owner.com", workspace_name="your workspace"
+        )

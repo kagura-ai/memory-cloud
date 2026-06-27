@@ -184,6 +184,30 @@ async def test_logging_send_workspace_invitation_logs_safe_fields_only():
     assert "Alice Admin" not in haystack, "inviter name leaked into log payload"
 
 
+@pytest.mark.asyncio
+async def test_logging_send_workspace_ownership_transferred():
+    """#1103: the logging stub records the new owner's address + workspace for
+    ops triage and returns True (the no-raise courtesy-notification contract)."""
+    svc = LoggingEmailService()
+
+    with patch.object(email_service_module, "logger") as mock_logger:
+        result = await svc.send_workspace_ownership_transferred(
+            to_email="new@owner.com",
+            workspace_name="Acme Research",
+        )
+
+    assert result is True
+    mock_logger.info.assert_called_once()
+    args, kwargs = mock_logger.info.call_args
+    assert args[0] == "workspace_ownership_transferred_email"
+    assert kwargs == {
+        "to_email": "new@owner.com",
+        "workspace_name": "Acme Research",
+        "email_dispatch_required": True,
+        "template": "workspace_ownership_transferred",
+    }
+
+
 # ---------------------------------------------------------------------------
 # Singleton + provider switch
 # ---------------------------------------------------------------------------
