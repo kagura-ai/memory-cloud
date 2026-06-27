@@ -1839,6 +1839,11 @@ class WorkspaceMember(Base):
         Index("idx_workspace_members_user", "user_id"),
         Index("idx_workspace_members_role", "workspace_id", "role"),
         CheckConstraint(WORKSPACE_ROLE_CHECK_SQL, name="valid_workspace_member_role"),
+        # #1101: a user is a member of a workspace at most once. This was always
+        # assumed (check-then-insert everywhere + the docstring) but never enforced
+        # at the DB level; the break-glass force-transfer ADD path made the gap
+        # reachable under concurrency, so the invariant is now structural.
+        UniqueConstraint("workspace_id", "user_id", name="uq_workspace_members_workspace_user"),
     )
 
     def __repr__(self) -> str:

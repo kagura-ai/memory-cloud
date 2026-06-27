@@ -21,6 +21,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from auth.workspace_roles import WorkspaceRole
 from models.auth import AuditLog, User, Workspace, WorkspaceMember
 from services.workspace_ownership_service import (
+    FORCE_OWNERSHIP_TRANSFER_ACTION,
     OWNERSHIP_TRANSFER_ACTION,
     WorkspaceOwnershipService,
 )
@@ -406,3 +407,324 @@ class TestOwnershipTransfer:
                 User.__table__.delete().where(User.user_id.in_([owner, m1, m2]))
             )
             await db_session.commit()
+
+
+class TestForceTransfer:
+    """Break-glass admin force-transfer (#1101) — no current-owner check, may add
+    a non-member target as OWNER, mandatory break_glass audit."""
+
+    @pytest.mark.asyncio(loop_scope="session")
+    async def test_force_transfer_existing_member_promotes_demotes_audits(
+        self, ws_fixture, db_session
+    ):
+        s = ws_fixture
+        # The admin actor is NOT the owner — break-glass has no current-owner check.
+        result = await WorkspaceOwnershipService(db_session).force_transfer_ownership(
+            workspace_id=s.workspace_id,
+            target_user_id=s.member,
+            performed_by_user_id="admin_runner",
+            performed_by_email="admin@kagura.invalid",
+            reason="owner unreachable for 30 days",
+        )
+        assert result.changed is True
+        assert result.previous_owner_id == s.owner
+        assert result.new_owner_id == s.member
+        assert result.ownership_epoch == 1
+
+        ws = await _workspace(db_session, s.workspace_id)
+        assert ws.owner_user_id == s.member
+        assert ws.ownership_epoch == 1
+        assert await _role_of(db_session, s.workspace_id, s.member) == WorkspaceRole.OWNER
+        assert await _role_of(db_session, s.workspace_id, s.owner) == WorkspaceRole.ADMIN
+
+        audit = (
+            (
+                await db_session.execute(
+                    select(AuditLog).where(
+                        AuditLog.resource == f"workspace:{s.workspace_id}",
+                        AuditLog.action == FORCE_OWNERSHIP_TRANSFER_ACTION,
+                    )
+                )
+            )
+            .scalars()
+            .all()
+        )
+        assert len(audit) == 1
+        meta = audit[0].user_metadata
+        assert audit[0].user_id == "admin_runner"  # actor = the acting ADMIN
+        assert meta["break_glass"] is True
+        assert meta["reason"] == "owner unreachable for 30 days"
+        assert meta["previous_owner_id"] == s.owner
+        assert meta["new_owner_id"] == s.member
+        assert meta["ownership_epoch"] == 1
+        assert meta["target_was_member"] is True
+        assert meta["self_transfer"] is False  # admin_runner != the target member
+
+    @pytest.mark.asyncio(loop_scope="session")
+    async def test_force_transfer_adds_non_member_target_as_owner(self, ws_fixture, db_session):
+        # The outsider is a real User but NOT a member — break-glass ADDS them as
+        # OWNER (the voluntary path would reject this with 400).
+        s = ws_fixture
+        result = await WorkspaceOwnershipService(db_session).force_transfer_ownership(
+            workspace_id=s.workspace_id,
+            target_user_id=s.outsider,
+            performed_by_user_id="admin_runner",
+            performed_by_email="admin@kagura.invalid",
+            reason="break glass to outsider",
+        )
+        assert result.changed is True
+        assert result.new_owner_id == s.outsider
+
+        ws = await _workspace(db_session, s.workspace_id)
+        assert ws.owner_user_id == s.outsider
+        assert await _role_of(db_session, s.workspace_id, s.outsider) == WorkspaceRole.OWNER
+        # The freshly-added OWNER member carries a join timestamp like every other
+        # membership-creation path (not a NULL joined_at).
+        new_member = (
+            await db_session.execute(
+                select(WorkspaceMember).where(
+                    WorkspaceMember.workspace_id == s.workspace_id,
+                    WorkspaceMember.user_id == s.outsider,
+                )
+            )
+        ).scalar_one()
+        assert new_member.joined_at is not None
+        audit = (
+            (
+                await db_session.execute(
+                    select(AuditLog).where(
+                        AuditLog.resource == f"workspace:{s.workspace_id}",
+                        AuditLog.action == FORCE_OWNERSHIP_TRANSFER_ACTION,
+                    )
+                )
+            )
+            .scalars()
+            .all()
+        )
+        assert audit[0].user_metadata["target_was_member"] is False
+
+    @pytest.mark.asyncio(loop_scope="session")
+    async def test_force_transfer_idempotent_when_target_already_owner(
+        self, ws_fixture, db_session
+    ):
+        s = ws_fixture
+        svc = WorkspaceOwnershipService(db_session)
+        # First a REAL force-transfer so the baseline epoch is non-zero (1) and one
+        # audit row exists — otherwise asserting epoch==0 cannot distinguish a
+        # correct no-op from the server_default the fixture row already carries.
+        await svc.force_transfer_ownership(
+            workspace_id=s.workspace_id,
+            target_user_id=s.member,
+            performed_by_user_id="admin_runner",
+            performed_by_email="admin@kagura.invalid",
+            reason="initial break-glass",
+        )
+        # Now a no-op: force-transfer to the CURRENT owner (member). No epoch bump,
+        # no NEW audit row.
+        result = await svc.force_transfer_ownership(
+            workspace_id=s.workspace_id,
+            target_user_id=s.member,
+            performed_by_user_id="admin_runner",
+            performed_by_email="admin@kagura.invalid",
+            reason="noop",
+        )
+        assert result.changed is False
+        assert result.ownership_epoch == 1  # unchanged from the first transfer, not bumped
+        ws = await _workspace(db_session, s.workspace_id)
+        assert ws.ownership_epoch == 1
+        audit = (
+            (
+                await db_session.execute(
+                    select(AuditLog).where(AuditLog.resource == f"workspace:{s.workspace_id}")
+                )
+            )
+            .scalars()
+            .all()
+        )
+        assert len(audit) == 1  # the no-op added NO new audit row
+
+    @pytest.mark.asyncio(loop_scope="session")
+    async def test_force_transfer_nonexistent_target_raises(self, ws_fixture, db_session):
+        s = ws_fixture
+        with pytest.raises(BadRequestError):
+            await WorkspaceOwnershipService(db_session).force_transfer_ownership(
+                workspace_id=s.workspace_id,
+                target_user_id="ghost_user_does_not_exist",
+                performed_by_user_id="admin_runner",
+                performed_by_email="admin@kagura.invalid",
+                reason="typo target",
+            )
+        await db_session.rollback()
+        ws = await _workspace(db_session, s.workspace_id)
+        assert ws.owner_user_id == s.owner
+        assert ws.ownership_epoch == 0
+
+    @pytest.mark.asyncio(loop_scope="session")
+    async def test_force_transfer_zero_member_workspace(self, db_session):
+        # A workspace with owner_user_id set but ZERO member rows — break-glass to a
+        # real user installs them as the OWNER member (the "no eligible target" case).
+        owner = f"zoown_{uuid4().hex[:8]}"
+        target = f"zotgt_{uuid4().hex[:8]}"
+        workspace_id = uuid4()
+        for uid in (owner, target):
+            await _add_user(db_session, uid)
+        await db_session.flush()
+        db_session.add(
+            Workspace(
+                id=workspace_id,
+                name=f"zeromember-{uuid4().hex[:8]}",
+                plan_name="free",
+                owner_user_id=owner,
+                daily_api_limit=100,
+                weekly_api_limit=500,
+                deleted_at=None,
+            )
+        )
+        await db_session.commit()  # NOTE: no WorkspaceMember rows at all
+        try:
+            result = await WorkspaceOwnershipService(db_session).force_transfer_ownership(
+                workspace_id=workspace_id,
+                target_user_id=target,
+                performed_by_user_id="admin_runner",
+                performed_by_email="admin@kagura.invalid",
+                reason="zero-member rescue",
+            )
+            assert result.changed is True
+            ws = await _workspace(db_session, workspace_id)
+            assert ws.owner_user_id == target
+            assert ws.ownership_epoch == 1
+            assert await _role_of(db_session, workspace_id, target) == WorkspaceRole.OWNER
+        finally:
+            await db_session.execute(
+                AuditLog.__table__.delete().where(AuditLog.resource == f"workspace:{workspace_id}")
+            )
+            await db_session.execute(
+                WorkspaceMember.__table__.delete().where(
+                    WorkspaceMember.workspace_id == workspace_id
+                )
+            )
+            await db_session.execute(
+                Workspace.__table__.delete().where(Workspace.id == workspace_id)
+            )
+            await db_session.execute(
+                User.__table__.delete().where(User.user_id.in_([owner, target]))
+            )
+            await db_session.commit()
+
+
+@pytest.mark.asyncio(loop_scope="session")
+async def test_force_transfer_concurrent_preserves_single_owner(async_engine, db_session):
+    # Two concurrent break-glass force-transfers (to different targets) from
+    # independent sessions. force_transfer has NO current-owner check, so BOTH
+    # succeed -- but the shared workspace row lock must SERIALIZE them: each epoch
+    # bump applies (final epoch == 2, no lost increment) and there is exactly ONE
+    # OWNER member at the end (no torn double-owner). Without the lock both could
+    # read epoch==0, write epoch==1 (lost update), and both promote.
+    owner = f"fcown_{uuid4().hex[:8]}"
+    m1 = f"fcm1_{uuid4().hex[:8]}"
+    m2 = f"fcm2_{uuid4().hex[:8]}"
+    workspace_id = uuid4()
+    for uid in (owner, m1, m2):
+        await _add_user(db_session, uid)
+    await db_session.flush()
+    db_session.add(
+        Workspace(
+            id=workspace_id,
+            name=f"fconc-{uuid4().hex[:8]}",
+            plan_name="pro",
+            owner_user_id=owner,
+            daily_api_limit=500,
+            weekly_api_limit=2500,
+            deleted_at=None,
+        )
+    )
+    await db_session.flush()
+    await _add_member(db_session, workspace_id, owner, WorkspaceRole.OWNER)
+    await _add_member(db_session, workspace_id, m1, WorkspaceRole.MEMBER)
+    await _add_member(db_session, workspace_id, m2, WorkspaceRole.MEMBER)
+    await db_session.commit()
+
+    session_maker = async_sessionmaker(async_engine, expire_on_commit=False)
+
+    async def _fxfer(target: str) -> str:
+        async with session_maker() as s:
+            await WorkspaceOwnershipService(s).force_transfer_ownership(
+                workspace_id=workspace_id,
+                target_user_id=target,
+                performed_by_user_id="admin_runner",
+                performed_by_email="admin@kagura.invalid",
+                reason="concurrent break-glass",
+            )
+            return "ok"
+
+    try:
+        statuses = sorted(await asyncio.gather(_fxfer(m1), _fxfer(m2)))
+        assert statuses == ["ok", "ok"]  # force has no current-owner conflict
+        async with session_maker() as s:
+            ws = (
+                await s.execute(select(Workspace).where(Workspace.id == workspace_id))
+            ).scalar_one()
+            owners = (
+                (
+                    await s.execute(
+                        select(WorkspaceMember).where(
+                            WorkspaceMember.workspace_id == workspace_id,
+                            WorkspaceMember.role == WorkspaceRole.OWNER,
+                        )
+                    )
+                )
+                .scalars()
+                .all()
+            )
+            assert len(owners) == 1  # lock prevented a torn double-owner
+            assert owners[0].user_id == ws.owner_user_id
+            assert ws.owner_user_id in (m1, m2)
+            assert ws.ownership_epoch == 2  # BOTH increments applied -- none lost
+    finally:
+        await db_session.execute(
+            AuditLog.__table__.delete().where(AuditLog.resource == f"workspace:{workspace_id}")
+        )
+        await db_session.execute(
+            WorkspaceMember.__table__.delete().where(WorkspaceMember.workspace_id == workspace_id)
+        )
+        await db_session.execute(Workspace.__table__.delete().where(Workspace.id == workspace_id))
+        await db_session.execute(User.__table__.delete().where(User.user_id.in_([owner, m1, m2])))
+        await db_session.commit()
+
+
+@pytest.mark.asyncio(loop_scope="session")
+async def test_workspace_member_unique_constraint_rejects_duplicate(db_session):
+    # #1101: (workspace_id, user_id) is UNIQUE at the DB level now, so the duplicate
+    # membership row the break-glass ADD path could otherwise race into is rejected.
+    from sqlalchemy.exc import IntegrityError
+
+    owner = f"uqo_{uuid4().hex[:8]}"
+    workspace_id = uuid4()
+    await _add_user(db_session, owner)
+    await db_session.flush()
+    db_session.add(
+        Workspace(
+            id=workspace_id,
+            name=f"uq-{uuid4().hex[:8]}",
+            plan_name="free",
+            owner_user_id=owner,
+            daily_api_limit=100,
+            weekly_api_limit=500,
+            deleted_at=None,
+        )
+    )
+    await db_session.flush()
+    await _add_member(db_session, workspace_id, owner, WorkspaceRole.OWNER)
+    await db_session.commit()
+    try:
+        await _add_member(db_session, workspace_id, owner, WorkspaceRole.MEMBER)  # dup (ws, user)
+        with pytest.raises(IntegrityError):
+            await db_session.commit()
+        await db_session.rollback()
+    finally:
+        await db_session.execute(
+            WorkspaceMember.__table__.delete().where(WorkspaceMember.workspace_id == workspace_id)
+        )
+        await db_session.execute(Workspace.__table__.delete().where(Workspace.id == workspace_id))
+        await db_session.execute(User.__table__.delete().where(User.user_id == owner))
+        await db_session.commit()

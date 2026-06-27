@@ -50,14 +50,16 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from auth.workspace_roles import WorkspaceRole
-from models.auth import AuditLog, WorkspaceMember
+from models.auth import AuditLog, User, WorkspaceMember
 from services.workspace_locks import lock_workspace_for_update
+from utils.datetime import utcnow
 from utils.exceptions import BadRequestError, ConflictError
 from utils.logger import get_logger
 
 logger = get_logger(__name__)
 
 OWNERSHIP_TRANSFER_ACTION = "workspace_ownership_transfer"
+FORCE_OWNERSHIP_TRANSFER_ACTION = "workspace_ownership_force_transfer"
 
 
 class OwnershipTransferResult(NamedTuple):
@@ -213,6 +215,179 @@ class WorkspaceOwnershipService:
             previous_owner=previous_owner_id,
             new_owner=target_user_id,
             ownership_epoch=new_epoch,
+        )
+        return OwnershipTransferResult(
+            workspace_id=workspace_id,
+            previous_owner_id=previous_owner_id,
+            new_owner_id=target_user_id,
+            ownership_epoch=new_epoch,
+            changed=True,
+        )
+
+    async def force_transfer_ownership(
+        self,
+        *,
+        workspace_id: UUID,
+        target_user_id: str,
+        performed_by_user_id: str,
+        performed_by_email: str,
+        reason: str,
+    ) -> OwnershipTransferResult:
+        """Break-glass system-admin force-transfer of ownership (#1101).
+
+        For when the current owner is unavailable. Unlike ``transfer_ownership``
+        there is **no current-owner check** — the route enforces the system-admin
+        gate (``require_admin``) instead. Like the voluntary path it serializes on
+        the shared workspace row lock and bumps ``ownership_epoch`` (so the #1100
+        consumer invalidates the displaced owner's billing-handoff tokens /
+        sessions).
+
+        Differs from the voluntary path in two ways:
+          * The target need NOT already be a member — a non-member is **added** as
+            OWNER, which handles the zero-member workspace (no eligible member to
+            promote). The target MUST still be a real ``User`` (never hand
+            ownership to a phantom/typo'd id, which would orphan the workspace).
+          * A **mandatory** audit row records ``break_glass=true`` + the operator's
+            ``reason`` + ``target_was_member`` so a privileged override is always
+            forensically attributable. It commits in the SAME transaction as the
+            transfer (fail-closed: no audit ⇒ no transfer).
+
+        Args:
+            workspace_id: The workspace whose ownership is being seized.
+            target_user_id: The user to install as owner.
+            performed_by_user_id: The acting system admin (the audit actor).
+            performed_by_email: The acting admin's email, for the audit row.
+            reason: Non-empty justification (route enforces non-empty).
+
+        Returns:
+            The transfer outcome (``changed=False`` for the idempotent no-op).
+
+        Raises:
+            NotFoundException: workspace missing or soft-deleted (404).
+            BadRequestError: the target user does not exist (400, WS-OWNER-002).
+        """
+        # 1. Lock the workspace row — the shared single-owner synchronization point
+        # (#1102): break-glass serializes with the voluntary transfer, role change,
+        # and erasure auto-transfer on the SAME FOR UPDATE row.
+        workspace = await lock_workspace_for_update(self.db, workspace_id)
+
+        # 2. Idempotent no-op: already owned by the target (no epoch bump / audit).
+        # Still record the privileged invocation: a break-glass control's whole
+        # justification is attributability, so an admin hitting this endpoint must
+        # leave a trace even when nothing changes (this log line is the alertable
+        # signal; the no-op writes no AuditLog row, mirroring the voluntary path).
+        if workspace.owner_user_id == target_user_id:
+            logger.info(
+                "workspace_ownership_force_transfer_noop",
+                workspace_id=str(workspace_id),
+                target=target_user_id,
+                performed_by=performed_by_user_id,
+            )
+            return OwnershipTransferResult(
+                workspace_id=workspace_id,
+                previous_owner_id=workspace.owner_user_id,
+                new_owner_id=target_user_id,
+                ownership_epoch=workspace.ownership_epoch,
+                changed=False,
+            )
+
+        # 3. The target must be a real account — handing ownership to a phantom
+        # user_id would permanently orphan the workspace (worse than the original
+        # unavailable-owner problem). This is a best-effort existence check, not a
+        # FK (``owner_user_id`` has no FK to ``users.user_id``); a target concurrently
+        # hard-erased between this check and commit is a narrow accepted race — the
+        # erase path itself auto-transfers/blocks on owned workspaces.
+        target_user = (
+            await self.db.execute(select(User).where(User.user_id == target_user_id))
+        ).scalar_one_or_none()
+        if target_user is None:
+            raise BadRequestError(
+                "Target user does not exist",
+                error_code="WS-OWNER-002",
+            )
+
+        previous_owner_id = workspace.owner_user_id
+
+        # 4. Load BOTH the target and previous-owner member rows in one round-trip.
+        member_rows = (
+            (
+                await self.db.execute(
+                    select(WorkspaceMember).where(
+                        WorkspaceMember.workspace_id == workspace_id,
+                        WorkspaceMember.user_id.in_([target_user_id, previous_owner_id]),
+                    )
+                )
+            )
+            .scalars()
+            .all()
+        )
+        members_by_user = {m.user_id: m for m in member_rows}
+
+        target_member = members_by_user.get(target_user_id)
+        target_was_member = target_member is not None
+        if target_member is None:
+            # Break-glass elevated path: the target is not a member (e.g. a
+            # zero-member workspace). Add them as OWNER. Flagged in the audit via
+            # target_was_member=False so forensics can isolate the elevated case.
+            # joined_at is set like every other membership-creation path so the new
+            # owner does not carry a NULL join timestamp. The (workspace_id, user_id)
+            # UNIQUE constraint (#1101) makes a concurrent duplicate insert fail
+            # cleanly (IntegrityError → rollback → admin retries) rather than
+            # silently creating two membership rows.
+            self.db.add(
+                WorkspaceMember(
+                    workspace_id=workspace_id,
+                    user_id=target_user_id,
+                    role=WorkspaceRole.OWNER,
+                    joined_at=utcnow(),
+                )
+            )
+        else:
+            target_member.role = WorkspaceRole.OWNER
+
+        # Demote the previous owner's member row to ADMIN if it exists (some legacy
+        # workspaces carry owner_user_id without a matching member row).
+        previous_member = members_by_user.get(previous_owner_id)
+        if previous_member is not None:
+            previous_member.role = WorkspaceRole.ADMIN
+
+        workspace.owner_user_id = target_user_id
+        new_epoch = workspace.ownership_epoch + 1
+        workspace.ownership_epoch = new_epoch
+
+        # 5. Mandatory audit in the SAME transaction (fail-closed). The actor is the
+        # acting ADMIN's user_id (NOT the displaced workspace owner). reason +
+        # break_glass + target_was_member make the override fully attributable.
+        self.db.add(
+            AuditLog(
+                user_email=performed_by_email,
+                user_id=performed_by_user_id,
+                action=FORCE_OWNERSHIP_TRANSFER_ACTION,
+                resource=f"workspace:{workspace_id}",
+                user_metadata={
+                    "break_glass": True,
+                    "reason": reason,
+                    "previous_owner_id": previous_owner_id,
+                    "new_owner_id": target_user_id,
+                    "ownership_epoch": new_epoch,
+                    "target_was_member": target_was_member,
+                    # Self-dealing (the acting admin installs themselves) is allowed
+                    # by break-glass but flagged explicitly so forensics needn't
+                    # compare the actor column against new_owner_id by hand.
+                    "self_transfer": performed_by_user_id == target_user_id,
+                },
+            )
+        )
+        await self.db.commit()
+
+        logger.info(
+            "workspace_ownership_force_transferred",
+            workspace_id=str(workspace_id),
+            previous_owner=previous_owner_id,
+            new_owner=target_user_id,
+            ownership_epoch=new_epoch,
+            performed_by=performed_by_user_id,
+            target_was_member=target_was_member,
         )
         return OwnershipTransferResult(
             workspace_id=workspace_id,
