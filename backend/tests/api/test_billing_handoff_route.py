@@ -34,7 +34,7 @@ from auth.billing_handoff import BillingHandoffNotConfigured, MintedHandoffToken
 from auth.dependencies import require_session_auth
 from db.base import get_db
 from utils.datetime import utcnow
-from utils.exceptions import AuthorizationError, MemoryCloudException
+from utils.exceptions import AdminProtectionError, AuthorizationError, MemoryCloudException
 
 WS_A = uuid4()  # the caller's "current" workspace
 WS_B = uuid4()  # a different workspace the caller does NOT own
@@ -45,10 +45,14 @@ def _build_app() -> FastAPI:
     app.include_router(route_mod.router, prefix="/api/v1")
 
     async def _mc_handler(_request, exc: MemoryCloudException) -> JSONResponse:
-        # Faithful to production memory_cloud_exception_handler for status codes.
+        # Mirror production memory_cloud_exception_handler (api/main.py): the wire
+        # body is {"error", "message", "details"} — NOT "error_code" — with
+        # details stripped to {} for deny-class exceptions (CWE-639). Asserting
+        # against this shape verifies the body clients actually receive.
+        details = {} if isinstance(exc, (AuthorizationError, AdminProtectionError)) else exc.details
         return JSONResponse(
             status_code=exc.status_code,
-            content={"error_code": exc.error_code, "message": exc.message},
+            content={"error": exc.error_code, "message": exc.message, "details": details},
         )
 
     app.add_exception_handler(MemoryCloudException, _mc_handler)
@@ -223,7 +227,11 @@ class TestHandoffFailClosed:
             signer_cls.return_value.mint.side_effect = BillingHandoffNotConfigured()
             resp = session_client.post("/api/v1/billing/handoff", json={"workspace_id": str(WS_A)})
         assert resp.status_code == 503, resp.text
-        assert resp.json()["error_code"] == "BILLING-002"
+        # Production envelope keys on "error" (not "error_code") and carries
+        # "message"/"details" — assert the shape clients actually receive.
+        body = resp.json()
+        assert body["error"] == "BILLING-002"
+        assert set(body) >= {"error", "message", "details"}
 
 
 # ============================================================================

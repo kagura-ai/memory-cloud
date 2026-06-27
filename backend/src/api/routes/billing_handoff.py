@@ -35,9 +35,6 @@ from db.base import get_db
 from models.api_base import TZAwareBaseModel
 from services.permission_service import PermissionService
 from utils.auth_helpers import get_user_id
-from utils.logger import get_logger
-
-logger = get_logger(__name__)
 
 router = APIRouter(prefix="/billing", tags=["billing-handoff"])
 
@@ -88,14 +85,8 @@ async def mint_billing_handoff(
     # (no info leak) and 503 only to an authorized owner.
     minted = BillingHandoffSigner().mint(user_id=user_id, workspace_id=body.workspace_id)
 
-    logger.info(
-        "billing_handoff_issued",
-        user_id=user_id,
-        workspace_id=str(body.workspace_id),
-        jti=minted.jti,
-        kid=minted.kid,
-    )
-
+    # Issuance is audit-logged exactly once, inside BillingHandoffSigner.mint()
+    # as "billing_handoff_minted" (same fields + expires_at) — no duplicate here.
     return BillingHandoffResponse(
         token=minted.token,
         kid=minted.kid,
