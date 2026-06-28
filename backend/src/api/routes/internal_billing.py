@@ -21,13 +21,14 @@ Design decisions (documented for the cross-repo contract; see #954):
   silently destroying members/memories on a billing glitch. Billing-driven
   membership/context cleanup is handled by the interactive flow or a
   reconciliation job, not here.
-- **Idempotent.** PUT sets absolute values; re-delivery (reconciliation) yields
-  the same state and 200, never a "already on this plan" 400. Addons are an
-  *absolute, partial* update: omitted dimensions are left unchanged. The billing
-  service therefore owns re-baselining addons on a tier change — on a downgrade
-  it must push the new ``plan_name`` AND the addon values for the new tier
-  (e.g. ``addons:{...:0}``); this endpoint will not zero a prior tier's addon
-  bonus on its own (it has no notion of which addons "belong" to a tier).
+- **Idempotent, full-replace addons.** PUT sets absolute values; re-delivery
+  (reconciliation) yields the same state and 200, never a "already on this plan"
+  400. When ``addons`` is provided it is the **complete desired addon state**:
+  every dimension absent from the map is reset to 0, so a tier change cannot
+  strand a prior tier's addon bonus (over-grant). The billing service therefore
+  pushes the full addon state for the new tier on every change (an empty ``{}``
+  zeros all). Omit ``addons`` entirely (null) for a tier-only change that leaves
+  the existing addon bonuses untouched.
 - **Internal-only.** Mounted under ``/internal`` (NOT ``/api/v1``) so it stays
   off the public surface (#622 freeze). It is also blocked at the edge:
   ``terraform/single-server/Caddyfile.tpl`` has a ``handle /internal* {respond
@@ -84,6 +85,11 @@ _ADDON_COLUMNS: dict[str, str] = {
     "connector": "addon_connector_bonus",
 }
 
+# Upper bound on any addon bonus, matching the admin quota endpoint's
+# ``le=2_000_000_000``. Keeps an oversized push a clean 422 instead of letting it
+# overflow the INTEGER column and surface as a 500 at commit.
+_ADDON_MAX_BONUS = 2_000_000_000
+
 
 async def verify_billing_service_token(authorization: str | None = Header(None)) -> None:
     """Authenticate the billing service by its shared service token (RFC 6750 Bearer).
@@ -130,8 +136,10 @@ class BillingPlanPush(BaseModel):
         description=(
             "Absolute addon bonus values keyed by addon dimension "
             "(memory, mcp_quota, rest_quota, public_quota, member, context, "
-            "analysis, storage_mb, sleep_contexts, connector). Partial update: "
-            "omitted dimensions are left unchanged."
+            "analysis, storage_mb, sleep_contexts, connector). FULL REPLACE: when "
+            "provided this is the complete addon state — dimensions omitted from "
+            "the map are reset to 0 (an empty object zeros all). Omit the field "
+            "entirely (null) to leave existing addons unchanged (tier-only change)."
         ),
     )
 
@@ -157,9 +165,11 @@ async def set_workspace_plan_from_billing(
 ) -> BillingPlanPushResult:
     """Set a workspace's entitlement (plan tier + addon quota) from billing.
 
-    Idempotent, service-authenticated, internal-only. Sets ``plan_name`` and any
-    provided ``addons`` (absolute). Does not perform destructive downgrade
-    cascades (see module docstring). Returns the full applied addon state.
+    Idempotent, service-authenticated, internal-only. Sets ``plan_name``; when
+    ``addons`` is provided it is applied as a FULL REPLACE (dimensions omitted
+    from the map reset to 0) so a tier change cannot strand a prior tier's addon
+    bonus; omit ``addons`` to leave them unchanged. Does not perform destructive
+    downgrade cascades (see module docstring). Returns the full applied addon state.
     """
     # Validate the wire contract BEFORE any mutation. Canonical VAL-001 (422).
     if body.plan_name not in PLAN_TIERS:
@@ -178,6 +188,11 @@ async def set_workspace_plan_from_billing(
                 raise ValidationError(
                     f"Addon '{key}' bonus must be >= 0, got {value}", field="addons"
                 )
+            if value > _ADDON_MAX_BONUS:
+                raise ValidationError(
+                    f"Addon '{key}' bonus exceeds the maximum {_ADDON_MAX_BONUS}, got {value}",
+                    field="addons",
+                )
 
     try:
         ws_uuid = UUID(workspace_id)
@@ -195,7 +210,13 @@ async def set_workspace_plan_from_billing(
     # a prior admin/comp grant is overwritten here by an explicit billing push.
     workspace.plan_name = body.plan_name
     workspace.entitlement_source = ENTITLEMENT_SOURCE_EXTERNAL_BILLING
-    if body.addons:
+    # Full-replace: a provided ``addons`` map is the COMPLETE desired state — zero
+    # every dimension first, then apply the provided values, so a partial or empty
+    # push cannot leave a higher tier's addon bonus stranded (over-grant).
+    # ``addons is None`` (field omitted) is a tier-only change: leave addons as-is.
+    if body.addons is not None:
+        for col in _ADDON_COLUMNS.values():
+            setattr(workspace, col, 0)
         for key, value in body.addons.items():
             setattr(workspace, _ADDON_COLUMNS[key], value)
     await db.commit()

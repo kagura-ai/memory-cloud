@@ -64,7 +64,9 @@ async def test_idempotent_repeated_push(db_session):
 
 
 @pytest.mark.asyncio
-async def test_partial_addon_update_leaves_others_unchanged(db_session):
+async def test_addons_full_replace_zeroes_omitted_dimensions(db_session):
+    # Full replace: a provided addons map is the COMPLETE state. A leftover bonus
+    # on a dimension omitted from the push is reset to 0 (over-grant guard).
     ws = await _make_workspace(db_session, plan_name="pro")
     ws.addon_memory_bonus = 100
     await db_session.commit()
@@ -78,7 +80,26 @@ async def test_partial_addon_update_leaves_others_unchanged(db_session):
 
     await db_session.refresh(ws)
     assert ws.addon_sleep_contexts_bonus == 1
-    assert ws.addon_memory_bonus == 100  # untouched dimension preserved
+    assert ws.addon_memory_bonus == 0  # omitted dimension reset, not stranded
+
+
+@pytest.mark.asyncio
+async def test_tier_only_push_leaves_addons_unchanged(db_session):
+    # Omitting the addons field entirely is a tier-only change: addons untouched.
+    ws = await _make_workspace(db_session, plan_name="pro")
+    ws.addon_memory_bonus = 100
+    await db_session.commit()
+
+    await set_workspace_plan_from_billing(
+        workspace_id=str(ws.id),
+        body=BillingPlanPush(plan_name="basic"),
+        _=None,
+        db=db_session,
+    )
+
+    await db_session.refresh(ws)
+    assert ws.plan_name == "basic"
+    assert ws.addon_memory_bonus == 100  # tier-only push leaves addons as-is
 
 
 @pytest.mark.asyncio
