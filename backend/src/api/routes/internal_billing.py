@@ -52,6 +52,10 @@ from config.settings import get_settings
 from db.base import get_db
 from models.api_base import TZAwareBaseModel
 from models.auth import ENTITLEMENT_SOURCE_EXTERNAL_BILLING, Workspace
+from services.downgrade_eligibility_service import (
+    DowngradeEligibilityService,
+    TierDowngradeEligibility,
+)
 from utils.exceptions import (
     AuthenticationError,
     MemoryCloudException,
@@ -261,4 +265,52 @@ async def get_workspace_entitlement(
         plan_name=workspace.plan_name,
         addons=current_addons,
         entitlement_source=workspace.entitlement_source,
+    )
+
+
+class DowngradeEligibilityView(BaseModel):
+    """Usage-fit downgrade eligibility for every tier below the current one (#1123)."""
+
+    workspace_id: str
+    current_plan: str
+    targets: list[TierDowngradeEligibility]
+
+
+@router.get(
+    "/workspaces/{workspace_id}/downgrade-eligibility",
+    response_model=DowngradeEligibilityView,
+)
+async def get_downgrade_eligibility(
+    workspace_id: str,
+    _: None = Depends(verify_billing_service_token),
+    db: AsyncSession = Depends(get_db),
+) -> DowngradeEligibilityView:
+    """Report whether a workspace's usage fits each lower tier (#1123).
+
+    Service-authenticated, internal-only. memory-cloud is the usage SoT; the
+    external billing service gates its portal downgrade UI on this so it never
+    offers a downgrade that current usage cannot satisfy (purchased addons are
+    kept — the fit is against the target tier base + retained addon bonuses).
+    The absolute ``PUT .../plan`` push stays reconcile-safe and does NOT itself
+    enforce this guard; enforcement is the portal's responsibility, informed by
+    this read. Soft-deleted workspaces 404 (consistent with the entitlement read).
+    """
+    try:
+        ws_uuid = UUID(workspace_id)
+    except ValueError as exc:
+        raise ValidationError("Invalid workspace_id", field="workspace_id") from exc
+
+    workspace = (
+        await db.execute(
+            select(Workspace).where(Workspace.id == ws_uuid, Workspace.deleted_at.is_(None))
+        )
+    ).scalar_one_or_none()
+    if workspace is None:
+        raise NotFoundException("Workspace")
+
+    targets = await DowngradeEligibilityService(db).evaluate(workspace)
+    return DowngradeEligibilityView(
+        workspace_id=workspace_id,
+        current_plan=workspace.plan_name,
+        targets=targets,
     )
