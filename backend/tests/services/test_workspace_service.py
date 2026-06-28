@@ -283,7 +283,13 @@ class TestUpdateMemberRole:
             await service.update_member_role(ws.id, "u17", "owner")
 
     @pytest.mark.asyncio
-    async def test_demote_owner(self, db_session) -> None:
+    async def test_demote_owner_blocked(self, db_session) -> None:
+        # #1108: demoting the owner via update_member_role would desync
+        # owner_user_id (the SoT) from member.role — it would leave zero
+        # OWNER-role rows while owner_user_id still names the demoted user.
+        # Refuse here; owner changes must go through transfer_ownership
+        # (symmetric to the promote-to-owner guard, same 'transfer first'
+        # guidance).
         service = WorkspaceService(db_session)
         ws = Workspace(id=uuid4(), name="W10", owner_user_id="u18", plan_name="free")
         db_session.add(ws)
@@ -292,12 +298,54 @@ class TestUpdateMemberRole:
         db_session.add(WorkspaceMember(workspace_id=ws.id, user_id="u18", role=WorkspaceRole.OWNER))
         await db_session.flush()
 
-        updated = await service.update_member_role(ws.id, "u18", "admin")
-        assert updated.role == "admin"
+        with pytest.raises(ValidationError, match="transfer ownership"):
+            await service.update_member_role(ws.id, "u18", "admin")
+
+    @pytest.mark.asyncio
+    async def test_demote_owner_preserves_owner_invariant(self, db_session) -> None:
+        # The refused demotion must leave BOTH owner representations intact:
+        # owner_user_id unchanged AND exactly one OWNER-role member remaining
+        # (and it is still the owner_user_id holder). This is the desync the
+        # #1102 lock did not by itself prevent.
+        from sqlalchemy import select
+
+        service = WorkspaceService(db_session)
+        ws = Workspace(id=uuid4(), name="W10b", owner_user_id="u19", plan_name="free")
+        db_session.add(ws)
+        await db_session.flush()
+        db_session.add(WorkspaceMember(workspace_id=ws.id, user_id="u19", role=WorkspaceRole.OWNER))
+        await db_session.flush()
+
+        with pytest.raises(ValidationError):
+            await service.update_member_role(ws.id, "u19", "viewer")
+
+        refreshed = await db_session.get(Workspace, ws.id)
+        assert refreshed is not None
+        assert refreshed.owner_user_id == "u19"
+
+        owners = (
+            (
+                await db_session.execute(
+                    select(WorkspaceMember).where(
+                        WorkspaceMember.workspace_id == ws.id,
+                        WorkspaceMember.role == WorkspaceRole.OWNER,
+                    )
+                )
+            )
+            .scalars()
+            .all()
+        )
+        assert len(owners) == 1
+        assert owners[0].user_id == "u19"
 
     @pytest.mark.asyncio
     async def test_owner_change_takes_workspace_lock(self, db_session) -> None:
-        # #1102: demoting an OWNER must serialize on the workspace row lock.
+        # #1102: an owner-mutating change must serialize on the workspace row
+        # lock. #1108: that change is now refused (demotion → transfer first),
+        # but the lock is still acquired BEFORE the refusal, so the owner
+        # invariant check runs under serialization. The mock returns the
+        # workspace so the guard can read locked_workspace.owner_user_id (the SoT
+        # it now keys on).
         service = WorkspaceService(db_session)
         ws = Workspace(id=uuid4(), name="WLk1", owner_user_id="o1", plan_name="free")
         db_session.add(ws)
@@ -305,9 +353,58 @@ class TestUpdateMemberRole:
         db_session.add(WorkspaceMember(workspace_id=ws.id, user_id="o1", role=WorkspaceRole.OWNER))
         await db_session.flush()
 
-        with patch("services.workspace_service.lock_workspace_for_update", AsyncMock()) as lock:
-            await service.update_member_role(ws.id, "o1", "admin")
+        with patch(
+            "services.workspace_service.lock_workspace_for_update",
+            AsyncMock(return_value=ws),
+        ) as lock:
+            with pytest.raises(ValidationError, match="transfer ownership"):
+                await service.update_member_role(ws.id, "o1", "admin")
         lock.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_demote_stray_owner_row_allowed_for_repair(self, db_session) -> None:
+        # #1108 (PR #1114 review): the guard keys on the owner_user_id SoT, not
+        # on member.role == OWNER. So a *stray* second OWNER-role row that is NOT
+        # the owner_user_id holder (a multi-owner corruption) CAN be demoted —
+        # this is the repair path. Demoting it neither touches owner_user_id nor
+        # drops the real owner's OWNER row, so no desync results.
+        from sqlalchemy import select
+
+        service = WorkspaceService(db_session)
+        ws = Workspace(id=uuid4(), name="W10c", owner_user_id="real_owner", plan_name="free")
+        db_session.add(ws)
+        await db_session.flush()
+        db_session.add(
+            WorkspaceMember(workspace_id=ws.id, user_id="real_owner", role=WorkspaceRole.OWNER)
+        )
+        db_session.add(
+            WorkspaceMember(workspace_id=ws.id, user_id="stray", role=WorkspaceRole.OWNER)
+        )
+        await db_session.flush()
+
+        # Demoting the stray (non-SoT) OWNER row is allowed — it repairs the
+        # corruption rather than causing a desync.
+        updated = await service.update_member_role(ws.id, "stray", "admin")
+        assert updated.role == "admin"
+
+        # The SoT owner is untouched and remains the sole OWNER.
+        refreshed = await db_session.get(Workspace, ws.id)
+        assert refreshed is not None
+        assert refreshed.owner_user_id == "real_owner"
+        owners = (
+            (
+                await db_session.execute(
+                    select(WorkspaceMember).where(
+                        WorkspaceMember.workspace_id == ws.id,
+                        WorkspaceMember.role == WorkspaceRole.OWNER,
+                    )
+                )
+            )
+            .scalars()
+            .all()
+        )
+        assert len(owners) == 1
+        assert owners[0].user_id == "real_owner"
 
     @pytest.mark.asyncio
     async def test_non_owner_change_skips_workspace_lock(self, db_session) -> None:

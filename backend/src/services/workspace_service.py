@@ -666,8 +666,35 @@ class WorkspaceService:
         # account_erasure) so the single-owner invariant is structural rather than
         # emergent. Plain member<->viewer changes never touch ownership and skip
         # the lock to keep the common path contention-free.
+        locked_workspace = None
         if WorkspaceRole.OWNER in (new_role, member.role):
-            await lock_workspace_for_update(self.db, workspace_id)
+            locked_workspace = await lock_workspace_for_update(self.db, workspace_id)
+
+        # #1108: refuse to demote the workspace owner via this path. The source of
+        # truth for ownership is ``workspace.owner_user_id`` (what transfer_ownership
+        # and downstream consumers read); in a consistent workspace its holder is the
+        # single OWNER-role member. Lowering that holder's role here would drop the
+        # OWNER-row count to zero while ``owner_user_id`` still names them, desyncing
+        # the two representations (the gap #1102's lock serialized but did not itself
+        # close). Key the guard on the SoT holder — NOT merely on
+        # ``member.role == OWNER`` — so it (a) fires precisely for the real owner and
+        # (b) still permits demoting a *stray* OWNER-role row that is not the
+        # ``owner_user_id`` holder, which is the repair path out of a multi-owner
+        # corruption. Owner changes must go through transfer_ownership, which moves
+        # both representations atomically under this same lock (mirrors the
+        # promote-to-owner guard below). ``locked_workspace`` is always present when
+        # ``member.role == OWNER`` (the lock fires on that branch), so the consistent
+        # owner-demotion case is always covered and the check runs serialized.
+        if (
+            new_role != WorkspaceRole.OWNER
+            and locked_workspace is not None
+            and locked_workspace.owner_user_id == user_id
+        ):
+            raise ValidationError(
+                "Cannot demote the workspace owner via a role change. "
+                "Only one owner is allowed per workspace. "
+                "Please transfer ownership first if you want to change the owner."
+            )
 
         # Validate single owner constraint (Issue #165)
         if new_role == WorkspaceRole.OWNER and member.role != WorkspaceRole.OWNER:
