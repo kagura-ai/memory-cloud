@@ -232,8 +232,8 @@ export function SearchSettingsSection({
   ): ContextSearchConfig[K] => {
     return (
       (editedConfig[key as keyof ContextSearchConfigUpdate] as
-        | ContextSearchConfig[K]
-        | undefined) ?? (config?.[key] as ContextSearchConfig[K])
+        ContextSearchConfig[K] | undefined) ??
+      (config?.[key] as ContextSearchConfig[K])
     );
   };
 
@@ -445,7 +445,7 @@ export function SearchSettingsSection({
                   <p className="text-sm">
                     {t("upgradeToBasic").split("Basic plan")[0]}
                     <Link
-                      href="/workspace/plan"
+                      href="/workspace/settings/plan"
                       className="underline font-medium"
                     >
                       Basic plan

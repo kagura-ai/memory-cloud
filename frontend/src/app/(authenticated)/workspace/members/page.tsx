@@ -96,7 +96,6 @@ export default function WorkspaceMembersPage() {
   const [invitations, setInvitations] = useState<WorkspaceInvitation[]>([]);
   const [loading, setLoading] = useState(true);
   const [showInviteDialog, setShowInviteDialog] = useState(false);
-  const [showUpgradePrompt, setShowUpgradePrompt] = useState(false); // Issue #165: Pro plan gate
 
   // Invite dialog state
   const [inviteEmail, setInviteEmail] = useState("");
@@ -526,9 +525,11 @@ export default function WorkspaceMembersPage() {
   };
 
   const handleInviteClick = () => {
-    // Issue #165: Check Pro plan before showing invite dialog
+    // Issue #165 / #1121: team invitations are a Pro feature. Send free
+    // workspaces to the consolidated plan page instead of an inline upgrade
+    // modal (the plan/benefits/upgrade UX now lives in settings > plan).
     if (!isProPlan) {
-      setShowUpgradePrompt(true);
+      router.push("/workspace/settings/plan");
       return;
     }
     // Migration 042: Initialize with all shared contexts selected
@@ -1088,7 +1089,7 @@ export default function WorkspaceMembersPage() {
                         </p>
                       </div>
                       {memberQuota.percentage >= 100 && (
-                        <Link href="/workspace/plan">
+                        <Link href="/workspace/settings/plan">
                           <button className="px-3 py-1 text-xs bg-red-600 text-white rounded hover:bg-red-700">
                             {t("upgradeToAddMembers")}
                           </button>
@@ -1112,7 +1113,7 @@ export default function WorkspaceMembersPage() {
                         limit: memberQuota.limit,
                       })}
                     </p>
-                    <Link href="/workspace/plan">
+                    <Link href="/workspace/settings/plan">
                       <button className="px-4 py-2 bg-red-600 text-white rounded-md hover:bg-red-700">
                         {t("upgradeToAddMembers")}
                       </button>
@@ -1380,50 +1381,6 @@ export default function WorkspaceMembersPage() {
                 </div>
               </div>
             )}
-          </div>
-        </div>
-      )}
-
-      {/* Upgrade to Pro Prompt (Issue #165) */}
-      {showUpgradePrompt && (
-        <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50">
-          <div className="bg-white dark:bg-gray-800 rounded-lg p-6 max-w-md w-full mx-4">
-            <h3 className="text-lg font-semibold mb-4 text-gray-900 dark:text-gray-100">
-              {t("proPlanRequiredTitle")}
-            </h3>
-
-            <p className="text-gray-600 dark:text-gray-400 mb-6">
-              {t("proPlanRequiredDesc")}
-            </p>
-
-            <div className="bg-purple-50 dark:bg-purple-900/20 border border-purple-200 dark:border-purple-800 rounded-lg p-4 mb-6">
-              <p className="text-sm text-purple-900 dark:text-purple-100 font-medium mb-2">
-                {t("proPlanBenefits")}
-              </p>
-              <ul className="text-sm text-purple-800 dark:text-purple-200 space-y-1">
-                <li>✓ {t("benefitTeamInvitations")}</li>
-                <li>✓ {t("benefitSharedContexts")}</li>
-                <li>✓ {t("benefitCollaboration")}</li>
-              </ul>
-            </div>
-
-            <div className="flex gap-2">
-              <button
-                onClick={() => setShowUpgradePrompt(false)}
-                className="flex-1 px-4 py-2 text-gray-700 dark:text-gray-300 hover:bg-gray-100 dark:hover:bg-gray-700 rounded-md"
-              >
-                {tCommon("cancel")}
-              </button>
-              <button
-                onClick={() => {
-                  setShowUpgradePrompt(false);
-                  window.location.href = "/workspace/plan";
-                }}
-                className="flex-1 px-4 py-2 bg-purple-600 text-white rounded-md hover:bg-purple-700"
-              >
-                {t("upgradeToPro")}
-              </button>
-            </div>
           </div>
         </div>
       )}
