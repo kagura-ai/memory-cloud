@@ -669,6 +669,24 @@ class WorkspaceService:
         if WorkspaceRole.OWNER in (new_role, member.role):
             await lock_workspace_for_update(self.db, workspace_id)
 
+        # #1108: refuse to DEMOTE the owner via this path. The owner is the
+        # single OWNER-role member, which in a consistent workspace IS the
+        # ``owner_user_id`` holder — the source of truth that transfer_ownership
+        # and downstream consumers read. Lowering that member's role here would
+        # drop the OWNER-row count to zero while ``owner_user_id`` still names
+        # them, desyncing the two owner representations (the gap #1102's lock
+        # serialized but did not itself close). Owner changes must go through
+        # transfer_ownership, which moves both representations atomically under
+        # this same lock — mirroring the promote-to-owner guard below and its
+        # 'transfer first' guidance. The lock above is already held on this
+        # branch (member.role == OWNER), so the check runs serialized.
+        if new_role != WorkspaceRole.OWNER and member.role == WorkspaceRole.OWNER:
+            raise ValidationError(
+                "Cannot demote the workspace owner via a role change. "
+                "Only one owner is allowed per workspace. "
+                "Please transfer ownership first if you want to change the owner."
+            )
+
         # Validate single owner constraint (Issue #165)
         if new_role == WorkspaceRole.OWNER and member.role != WorkspaceRole.OWNER:
             # Promoting to owner - check if owner already exists
