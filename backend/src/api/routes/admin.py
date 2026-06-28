@@ -9,7 +9,7 @@ from datetime import datetime
 from typing import Any, cast
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
+from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response, status
 from pydantic import BaseModel, Field
 from sqlalchemy import and_, delete, func, or_, select, text, update
 from sqlalchemy.engine import CursorResult
@@ -18,6 +18,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from auth.dependencies import require_admin
 from auth.workspace_roles import ContextRole, WorkspaceRole
+from config.settings import get_settings
 from db.base import get_db
 from models.api_base import TZAwareBaseModel
 from models.auth import (
@@ -1172,6 +1173,7 @@ class ForceTransferOwnershipRequest(BaseModel):
 async def force_transfer_workspace_ownership(
     workspace_id: str,
     body: ForceTransferOwnershipRequest,
+    response: Response,
     admin: dict = Depends(require_admin),
     db: AsyncSession = Depends(get_db),
 ) -> dict:
@@ -1185,6 +1187,12 @@ async def force_transfer_workspace_ownership(
     transfer. The target need not be a member — a non-member is added as OWNER,
     which handles the zero-member workspace. The displaced previous owner is
     notified best-effort.
+
+    Dual-control (#1113): when ``require_dual_control_force_transfer`` is enabled,
+    this does NOT seize ownership immediately — it files a PENDING request and
+    returns ``202`` with a ``request_id`` that a SECOND, distinct system admin
+    must approve via ``/admin/force-transfer-requests/{request_id}/approve``.
+    Default config keeps the immediate single-control behavior.
     """
     admin_id = get_user_id(admin)
     try:
@@ -1192,11 +1200,33 @@ async def force_transfer_workspace_ownership(
     except ValueError as exc:
         raise ValidationError("Invalid workspace_id", field="workspace_id") from exc
 
-    result = await WorkspaceOwnershipService(db).force_transfer_ownership(
+    svc = WorkspaceOwnershipService(db)
+    admin_email = str(admin.get("email") or admin_id)
+
+    # Dual-control: file a pending request for second-admin approval (202).
+    if get_settings().require_dual_control_force_transfer:
+        req = await svc.initiate_force_transfer(
+            workspace_id=ws_uuid,
+            target_user_id=body.target_user_id,
+            performed_by_user_id=admin_id,
+            performed_by_email=admin_email,
+            reason=body.reason,
+        )
+        response.status_code = status.HTTP_202_ACCEPTED
+        return {
+            "workspace_id": str(req.workspace_id),
+            "request_id": str(req.id),
+            "status": "pending_approval",
+            "target_user_id": req.target_user_id,
+            "initiated_by": req.initiated_by_user_id,
+            "dual_control": True,
+        }
+
+    result = await svc.force_transfer_ownership(
         workspace_id=ws_uuid,
         target_user_id=body.target_user_id,
         performed_by_user_id=admin_id,
-        performed_by_email=str(admin.get("email") or admin_id),
+        performed_by_email=admin_email,
         reason=body.reason,
     )
 
@@ -1212,6 +1242,79 @@ async def force_transfer_workspace_ownership(
         "new_owner_id": result.new_owner_id,
         "ownership_epoch": result.ownership_epoch,
         "changed": result.changed,
+        "dual_control": False,
+    }
+
+
+@router.post("/force-transfer-requests/{request_id}/approve")
+async def approve_force_transfer_request(
+    request_id: str,
+    admin: dict = Depends(require_admin),
+    db: AsyncSession = Depends(get_db),
+) -> dict:
+    """Dual-control (#1113): a SECOND system admin approves a pending force-transfer.
+
+    System-admin-gated. The approver MUST be a different admin than the initiator
+    (enforced in the service → 400). On approval the seizure applies atomically
+    with a mandatory audit recording BOTH identities, bumps ``ownership_epoch``,
+    and the displaced previous owner is notified best-effort. Refused with 409 if
+    the request is not pending, or if the workspace's ownership moved since the
+    request was filed (stale — re-initiate).
+    """
+    admin_id = get_user_id(admin)
+    try:
+        req_uuid = UUID(request_id)
+    except ValueError as exc:
+        raise ValidationError("Invalid request_id", field="request_id") from exc
+
+    result = await WorkspaceOwnershipService(db).approve_force_transfer(
+        request_id=req_uuid,
+        approver_user_id=admin_id,
+        approver_email=str(admin.get("email") or admin_id),
+    )
+
+    if result.changed:
+        await _notify_force_transfer_best_effort(db, result.workspace_id, result.previous_owner_id)
+
+    return {
+        "workspace_id": str(result.workspace_id),
+        "request_id": request_id,
+        "status": "approved",
+        "previous_owner_id": result.previous_owner_id,
+        "new_owner_id": result.new_owner_id,
+        "ownership_epoch": result.ownership_epoch,
+        "changed": result.changed,
+    }
+
+
+@router.post("/force-transfer-requests/{request_id}/cancel")
+async def cancel_force_transfer_request(
+    request_id: str,
+    admin: dict = Depends(require_admin),
+    db: AsyncSession = Depends(get_db),
+) -> dict:
+    """Dual-control (#1113): retract a pending force-transfer request.
+
+    System-admin-gated. Lets an admin cancel a pending request (e.g. filed in
+    error) without having to initiate a fresh one to supersede it. Refused with
+    409 if the request is not pending.
+    """
+    admin_id = get_user_id(admin)
+    try:
+        req_uuid = UUID(request_id)
+    except ValueError as exc:
+        raise ValidationError("Invalid request_id", field="request_id") from exc
+
+    req = await WorkspaceOwnershipService(db).cancel_force_transfer(
+        request_id=req_uuid,
+        cancelled_by_user_id=admin_id,
+        cancelled_by_email=str(admin.get("email") or admin_id),
+    )
+    return {
+        "workspace_id": str(req.workspace_id),
+        "request_id": str(req.id),
+        "status": req.status,
+        "cancelled_by": admin_id,
     }
 
 

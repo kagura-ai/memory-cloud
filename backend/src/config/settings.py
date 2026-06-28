@@ -310,6 +310,15 @@ class Settings(BaseSettings):
         "When False, only invited users and the first admin can register.",
     )
 
+    # Workspace Governance (Issue #1113)
+    require_dual_control_force_transfer: bool = Field(
+        default=False,
+        description="Require a second, distinct system admin to approve a break-glass "
+        "ownership force-transfer before it commits (four-eyes). When False (default), "
+        "force-transfer commits immediately as today. Enabling this needs >=2 system "
+        "admins — with only one, no force-transfer can be approved.",
+    )
+
     # Billing Plugin (OSS: disabled by default, SaaS: enabled with Stripe)
     billing_enabled: bool = Field(
         default=False,
