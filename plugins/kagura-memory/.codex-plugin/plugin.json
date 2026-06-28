@@ -1,6 +1,6 @@
 {
   "name": "kagura-memory",
-  "version": "0.37.0",
+  "version": "0.38.0",
   "description": "Kagura Memory Cloud workflows for Codex session restore, recall, remember, and setup",
   "author": {
     "name": "Kagura AI, Inc.",
