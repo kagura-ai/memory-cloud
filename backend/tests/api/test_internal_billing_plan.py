@@ -134,6 +134,16 @@ def test_negative_addon_returns_422(billing):
     assert resp.status_code == 422
 
 
+def test_oversized_addon_returns_422(billing):
+    # Above the INTEGER-column ceiling → clean 422, not a 500 at commit.
+    resp = billing.client(_make_ws()).put(
+        _PATH,
+        json={"plan_name": "pro", "addons": {"memory": 9_999_999_999}},
+        headers={"Authorization": "Bearer secret"},
+    )
+    assert resp.status_code == 422
+
+
 def test_workspace_not_found_returns_404(billing):
     resp = billing.client(workspace=None).put(
         _PATH, json={"plan_name": "pro"}, headers={"Authorization": "Bearer secret"}
@@ -166,6 +176,54 @@ def test_sets_plan_and_addons(billing):
     assert ws.addon_sleep_contexts_bonus == 2
     assert ws.addon_storage_bonus_mb == 1024
     assert ws.entitlement_source == "external_billing"
+
+
+def test_addons_full_replace_zeroes_omitted(billing):
+    # Over-grant guard: a workspace carrying a prior tier's sleep addon, then a
+    # push that lists only `member`, must end with sleep zeroed (not stranded).
+    ws = _make_ws()
+    ws.addon_sleep_contexts_bonus = 5  # left over from a higher tier
+    resp = billing.client(ws).put(
+        _PATH,
+        json={"plan_name": "basic", "addons": {"member": 2}},
+        headers={"Authorization": "Bearer secret"},
+    )
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["addons"]["member"] == 2
+    assert body["addons"]["sleep_contexts"] == 0  # omitted → reset, not stranded
+    assert ws.addon_member_bonus == 2
+    assert ws.addon_sleep_contexts_bonus == 0
+
+
+def test_empty_addons_object_zeroes_all(billing):
+    # An explicit empty object means "no addons" — every dimension resets to 0.
+    ws = _make_ws()
+    ws.addon_member_bonus = 3
+    ws.addon_storage_bonus_mb = 512
+    resp = billing.client(ws).put(
+        _PATH,
+        json={"plan_name": "free", "addons": {}},
+        headers={"Authorization": "Bearer secret"},
+    )
+    assert resp.status_code == 200
+    assert all(v == 0 for v in resp.json()["addons"].values())
+    assert ws.addon_member_bonus == 0
+    assert ws.addon_storage_bonus_mb == 0
+
+
+def test_omitted_addons_leaves_existing_unchanged(billing):
+    # A tier-only push (no `addons` field) must NOT touch existing addon bonuses.
+    ws = _make_ws()
+    ws.addon_member_bonus = 3
+    resp = billing.client(ws).put(
+        _PATH,
+        json={"plan_name": "pro"},
+        headers={"Authorization": "Bearer secret"},
+    )
+    assert resp.status_code == 200
+    assert resp.json()["addons"]["member"] == 3
+    assert ws.addon_member_bonus == 3
 
 
 def test_get_entitlement_returns_source(billing):
