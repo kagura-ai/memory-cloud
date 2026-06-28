@@ -1148,7 +1148,7 @@
       "description": "ワークスペースのプランを確認し、請求を管理します。",
       "currentPlan": "現在のプラン",
       "pricePerMonth": "月額 ${price}",
-      "manageBilling": "請求を管理",
+      "manageBilling": "プランを変更",
       "opening": "請求ページを開いています…",
       "ownerOnly": "プランの変更はワークスペースのオーナーのみ可能です。",
       "unavailable": "この環境ではプラン変更を利用できません。",

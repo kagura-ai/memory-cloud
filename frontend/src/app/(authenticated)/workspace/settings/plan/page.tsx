@@ -125,19 +125,16 @@ export default function WorkspacePlanPage() {
               </p>
             )}
           </div>
-          {plan?.can_upgrade &&
-            (isOwner ? (
-              <Button onClick={handleManageBilling} disabled={upgrading}>
-                <Sparkles className="mr-2 h-4 w-4" />
-                {upgrading
-                  ? t("planPage.opening")
-                  : t("planPage.manageBilling")}
-              </Button>
-            ) : (
-              <p className="text-sm text-gray-500 dark:text-gray-400">
-                {t("planPage.ownerOnly")}
-              </p>
-            ))}
+          {isOwner ? (
+            <Button onClick={handleManageBilling} disabled={upgrading}>
+              <Sparkles className="mr-2 h-4 w-4" />
+              {upgrading ? t("planPage.opening") : t("planPage.manageBilling")}
+            </Button>
+          ) : (
+            <p className="text-sm text-gray-500 dark:text-gray-400">
+              {t("planPage.ownerOnly")}
+            </p>
+          )}
         </div>
       </Section>
 
