@@ -516,7 +516,7 @@ export default function ContextsPage() {
         <div className="mb-6 text-sm text-yellow-600 dark:text-yellow-400 bg-yellow-50 dark:bg-yellow-900/20 border border-yellow-200 dark:border-yellow-800 rounded-lg p-3">
           ⚠️ {t("quotaWarning")}{" "}
           <a
-            href="/workspace/plan"
+            href="/workspace/settings/plan"
             className="underline hover:text-yellow-700 dark:hover:text-yellow-300 font-medium"
           >
             {t("upgradePrompt")}

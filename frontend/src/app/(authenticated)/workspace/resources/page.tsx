@@ -111,7 +111,7 @@ export default function ResourcesListPage() {
           title={t("planGate.title")}
           description={t("planGate.description")}
           actionLabel={t("planGate.action")}
-          onAction={() => router.push("/workspace/settings/billing")}
+          onAction={() => router.push("/workspace/settings/plan")}
         />
       </PageContainer>
     );
