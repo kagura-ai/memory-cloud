@@ -73,6 +73,9 @@ OPERATIONAL_TABLES: frozenset[str] = frozenset(
         "workspace_addons",
         "workspace_connectors",
         "workspace_storage_usage",
+        # break-glass dual-control approval workflow (#1113) — governance plumbing,
+        # like erasure_requests/audit_logs; no user content, no learned structure
+        "workspace_ownership_force_transfer_requests",
         "context_members",
         "context_search_configs",
         "plan_changes",

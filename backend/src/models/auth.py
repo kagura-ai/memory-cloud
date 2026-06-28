@@ -2135,3 +2135,97 @@ class MCPToolDescription(Base):
     def __repr__(self) -> str:
         """String representation."""
         return f"<MCPToolDescription(tool='{self.tool_name}', locale='{self.locale}')>"
+
+
+# Force-transfer dual-control lifecycle statuses (#1113).
+FORCE_TRANSFER_STATUS_PENDING = "pending"
+FORCE_TRANSFER_STATUS_APPROVED = "approved"
+FORCE_TRANSFER_STATUS_CANCELLED = "cancelled"
+FORCE_TRANSFER_STATUS_SUPERSEDED = "superseded"
+
+
+class WorkspaceOwnershipForceTransferRequest(Base):
+    """Pending dual-control approval for a break-glass ownership force-transfer (#1113).
+
+    When ``require_dual_control_force_transfer`` is enabled, a break-glass
+    force-transfer (#1101) does NOT commit immediately: the initiating system
+    admin creates a ``pending`` request here, and a *second, distinct* system
+    admin must approve it before the transfer applies. The mandatory #1101
+    ``AuditLog`` row written at approval records BOTH identities. With the default
+    config the immediate single-control behavior is unchanged and this table is
+    unused.
+
+    ``ownership_epoch_at_initiation`` snapshots the workspace's epoch when the
+    request was filed. Approval re-reads the epoch under the workspace row lock
+    and refuses if it changed (a concurrent voluntary transfer / erasure /
+    another force-transfer moved ownership), so the second approver always
+    approves the *current* reality rather than a stale snapshot — closing a
+    confused-deputy gap.
+
+    A partial-unique index forbids more than one ``pending`` request per
+    workspace; a fresh ``initiate`` supersedes any existing pending one (marks it
+    ``superseded``), which doubles as the unblock path for an abandoned request.
+
+    Attributes:
+        id: Primary key (UUID).
+        workspace_id: Workspace whose ownership the request would seize.
+        target_user_id: User to be installed as owner on approval.
+        reason: Required justification (audited at approval).
+        ownership_epoch_at_initiation: Workspace epoch snapshot for staleness check.
+        initiated_by_user_id / initiated_by_email: The first admin (initiator).
+        status: pending | approved | cancelled | superseded.
+        decided_by_user_id / decided_by_email / decided_at: The deciding admin
+            (approver or canceller); NULL while pending.
+        created_at: Filing timestamp.
+    """
+
+    __tablename__ = "workspace_ownership_force_transfer_requests"
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), primary_key=True, server_default=func.gen_random_uuid()
+    )
+    workspace_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), nullable=False)
+    target_user_id: Mapped[str] = mapped_column(String(255), nullable=False)
+    reason: Mapped[str] = mapped_column(Text, nullable=False)
+    ownership_epoch_at_initiation: Mapped[int] = mapped_column(Integer, nullable=False)
+
+    # Initiator (first admin)
+    initiated_by_user_id: Mapped[str] = mapped_column(String(255), nullable=False)
+    initiated_by_email: Mapped[str] = mapped_column(String(255), nullable=False)
+
+    # Lifecycle: pending -> approved | cancelled | superseded
+    status: Mapped[str] = mapped_column(
+        String(20), nullable=False, server_default=FORCE_TRANSFER_STATUS_PENDING
+    )
+
+    # Decider (approver or canceller) — NULL while pending
+    decided_by_user_id: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    decided_by_email: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    decided_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime, nullable=False, server_default=func.now()
+    )
+
+    # Indexes are declared explicitly (not via column-level ``index=True``) so the
+    # names match the alembic migration e48 verbatim — column-level index=True
+    # would auto-generate the long NAMING_CONVENTION names (db/base.py), drifting
+    # from the migration's hand-coded names and causing autogenerate churn (#613).
+    __table_args__ = (
+        Index("ix_force_transfer_request_workspace_id", "workspace_id"),
+        Index("ix_force_transfer_request_created_at", "created_at"),
+        # At most one PENDING request per workspace (the supersede/unblock invariant).
+        Index(
+            "uq_force_transfer_request_one_pending_per_workspace",
+            "workspace_id",
+            unique=True,
+            postgresql_where=text("status = 'pending'"),
+        ),
+    )
+
+    def __repr__(self) -> str:
+        """String representation."""
+        return (
+            "<WorkspaceOwnershipForceTransferRequest("
+            f"id={self.id}, workspace_id={self.workspace_id}, status='{self.status}')>"
+        )

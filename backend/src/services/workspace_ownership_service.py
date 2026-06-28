@@ -43,17 +43,27 @@ is intentionally NOT faked here.
 
 from __future__ import annotations
 
-from typing import NamedTuple
+from typing import Any, NamedTuple
 from uuid import UUID
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from auth.workspace_roles import WorkspaceRole
-from models.auth import AuditLog, User, WorkspaceMember
+from models.auth import (
+    FORCE_TRANSFER_STATUS_APPROVED,
+    FORCE_TRANSFER_STATUS_CANCELLED,
+    FORCE_TRANSFER_STATUS_PENDING,
+    FORCE_TRANSFER_STATUS_SUPERSEDED,
+    AuditLog,
+    User,
+    Workspace,
+    WorkspaceMember,
+    WorkspaceOwnershipForceTransferRequest,
+)
 from services.workspace_locks import lock_workspace_for_update
 from utils.datetime import utcnow
-from utils.exceptions import BadRequestError, ConflictError
+from utils.exceptions import BadRequestError, ConflictError, NotFoundException
 from utils.logger import get_logger
 
 logger = get_logger(__name__)
@@ -271,11 +281,63 @@ class WorkspaceOwnershipService:
         # and erasure auto-transfer on the SAME FOR UPDATE row.
         workspace = await lock_workspace_for_update(self.db, workspace_id)
 
-        # 2. Idempotent no-op: already owned by the target (no epoch bump / audit).
-        # Still record the privileged invocation: a break-glass control's whole
-        # justification is attributability, so an admin hitting this endpoint must
-        # leave a trace even when nothing changes (this log line is the alertable
-        # signal; the no-op writes no AuditLog row, mirroring the voluntary path).
+        # 2. Single-control path (#1101): apply the seizure on the locked row and
+        # commit. The shared core (_apply_force_transfer) stages the swap + epoch
+        # bump + mandatory audit; this path preserves #1101 behavior exactly — the
+        # idempotent no-op neither commits nor audits (its log line is the signal).
+        result = await self._apply_force_transfer(
+            workspace=workspace,
+            target_user_id=target_user_id,
+            performed_by_user_id=performed_by_user_id,
+            performed_by_email=performed_by_email,
+            reason=reason,
+        )
+        if result.changed:
+            await self.db.commit()
+            logger.info(
+                "workspace_ownership_force_transferred",
+                workspace_id=str(workspace_id),
+                previous_owner=result.previous_owner_id,
+                new_owner=result.new_owner_id,
+                ownership_epoch=result.ownership_epoch,
+                performed_by=performed_by_user_id,
+            )
+        return result
+
+    async def _apply_force_transfer(
+        self,
+        *,
+        workspace: Workspace,
+        target_user_id: str,
+        performed_by_user_id: str,
+        performed_by_email: str,
+        reason: str,
+        audit_extra: dict[str, Any] | None = None,
+    ) -> OwnershipTransferResult:
+        """Apply a break-glass ownership seizure on an ALREADY-LOCKED workspace.
+
+        Shared core of ``force_transfer_ownership`` (#1101, single-control) and
+        ``approve_force_transfer`` (#1113, dual-control). The caller MUST already
+        hold the workspace row lock (``lock_workspace_for_update``) and owns the
+        final ``commit`` — this method stages the membership swap, ``ownership_epoch``
+        bump, and the mandatory audit row but does NOT commit, so the caller can
+        atomically include its own mutations (e.g. marking the dual-control request
+        approved) in the same transaction.
+
+        Idempotent no-op (target already owns it): logs the alertable no-op line
+        and returns ``changed=False`` WITHOUT staging an audit row, mirroring the
+        #1101 voluntary-path behavior.
+
+        ``audit_extra`` is merged into the AuditLog ``user_metadata`` so the
+        dual-control path can record both the initiator and the approver.
+
+        Raises:
+            BadRequestError: the target user does not exist (400, WS-OWNER-002).
+        """
+        workspace_id = workspace.id
+
+        # Idempotent no-op: already owned by the target (no epoch bump / audit).
+        # The log line is the alertable signal even when nothing changes.
         if workspace.owner_user_id == target_user_id:
             logger.info(
                 "workspace_ownership_force_transfer_noop",
@@ -291,12 +353,9 @@ class WorkspaceOwnershipService:
                 changed=False,
             )
 
-        # 3. The target must be a real account — handing ownership to a phantom
-        # user_id would permanently orphan the workspace (worse than the original
-        # unavailable-owner problem). This is a best-effort existence check, not a
-        # FK (``owner_user_id`` has no FK to ``users.user_id``); a target concurrently
-        # hard-erased between this check and commit is a narrow accepted race — the
-        # erase path itself auto-transfers/blocks on owned workspaces.
+        # The target must be a real account — handing ownership to a phantom
+        # user_id would permanently orphan the workspace. Best-effort existence
+        # check (``owner_user_id`` has no FK to ``users.user_id``).
         target_user = (
             await self.db.execute(select(User).where(User.user_id == target_user_id))
         ).scalar_one_or_none()
@@ -308,7 +367,7 @@ class WorkspaceOwnershipService:
 
         previous_owner_id = workspace.owner_user_id
 
-        # 4. Load BOTH the target and previous-owner member rows in one round-trip.
+        # Load BOTH the target and previous-owner member rows in one round-trip.
         member_rows = (
             (
                 await self.db.execute(
@@ -327,13 +386,9 @@ class WorkspaceOwnershipService:
         target_was_member = target_member is not None
         if target_member is None:
             # Break-glass elevated path: the target is not a member (e.g. a
-            # zero-member workspace). Add them as OWNER. Flagged in the audit via
-            # target_was_member=False so forensics can isolate the elevated case.
-            # joined_at is set like every other membership-creation path so the new
-            # owner does not carry a NULL join timestamp. The (workspace_id, user_id)
+            # zero-member workspace). Add them as OWNER. The (workspace_id, user_id)
             # UNIQUE constraint (#1101) makes a concurrent duplicate insert fail
-            # cleanly (IntegrityError → rollback → admin retries) rather than
-            # silently creating two membership rows.
+            # cleanly rather than silently creating two membership rows.
             self.db.add(
                 WorkspaceMember(
                     workspace_id=workspace_id,
@@ -355,39 +410,31 @@ class WorkspaceOwnershipService:
         new_epoch = workspace.ownership_epoch + 1
         workspace.ownership_epoch = new_epoch
 
-        # 5. Mandatory audit in the SAME transaction (fail-closed). The actor is the
-        # acting ADMIN's user_id (NOT the displaced workspace owner). reason +
-        # break_glass + target_was_member make the override fully attributable.
+        # Mandatory audit staged in the caller's transaction (fail-closed). The
+        # actor is the acting ADMIN (NOT the displaced owner). ``audit_extra`` adds
+        # the dual-control identities (initiator + approver) when present.
+        metadata: dict[str, Any] = {
+            "break_glass": True,
+            "reason": reason,
+            "previous_owner_id": previous_owner_id,
+            "new_owner_id": target_user_id,
+            "ownership_epoch": new_epoch,
+            "target_was_member": target_was_member,
+            # Self-dealing (the acting admin installs themselves) is allowed by
+            # break-glass but flagged explicitly so forensics needn't compare the
+            # actor column against new_owner_id by hand.
+            "self_transfer": performed_by_user_id == target_user_id,
+        }
+        if audit_extra:
+            metadata.update(audit_extra)
         self.db.add(
             AuditLog(
                 user_email=performed_by_email,
                 user_id=performed_by_user_id,
                 action=FORCE_OWNERSHIP_TRANSFER_ACTION,
                 resource=f"workspace:{workspace_id}",
-                user_metadata={
-                    "break_glass": True,
-                    "reason": reason,
-                    "previous_owner_id": previous_owner_id,
-                    "new_owner_id": target_user_id,
-                    "ownership_epoch": new_epoch,
-                    "target_was_member": target_was_member,
-                    # Self-dealing (the acting admin installs themselves) is allowed
-                    # by break-glass but flagged explicitly so forensics needn't
-                    # compare the actor column against new_owner_id by hand.
-                    "self_transfer": performed_by_user_id == target_user_id,
-                },
+                user_metadata=metadata,
             )
-        )
-        await self.db.commit()
-
-        logger.info(
-            "workspace_ownership_force_transferred",
-            workspace_id=str(workspace_id),
-            previous_owner=previous_owner_id,
-            new_owner=target_user_id,
-            ownership_epoch=new_epoch,
-            performed_by=performed_by_user_id,
-            target_was_member=target_was_member,
         )
         return OwnershipTransferResult(
             workspace_id=workspace_id,
@@ -396,3 +443,299 @@ class WorkspaceOwnershipService:
             ownership_epoch=new_epoch,
             changed=True,
         )
+
+    # ------------------------------------------------------------------
+    # Dual-control force-transfer (#1113)
+    # ------------------------------------------------------------------
+
+    async def initiate_force_transfer(
+        self,
+        *,
+        workspace_id: UUID,
+        target_user_id: str,
+        performed_by_user_id: str,
+        performed_by_email: str,
+        reason: str,
+    ) -> WorkspaceOwnershipForceTransferRequest:
+        """File a PENDING dual-control force-transfer request (#1113).
+
+        Used when ``require_dual_control_force_transfer`` is enabled: instead of
+        seizing ownership immediately, the initiating admin records intent here
+        and a second, distinct admin must ``approve_force_transfer`` before it
+        commits. Snapshots ``ownership_epoch`` so approval can reject a stale
+        request whose ownership moved since filing.
+
+        Supersedes any existing pending request for the workspace (marks it
+        ``superseded``) — this is the unblock path for an abandoned request, and
+        keeps the one-pending-per-workspace partial-unique invariant.
+
+        Raises:
+            NotFoundException: workspace missing or soft-deleted (404).
+            BadRequestError: the target user does not exist (400, WS-OWNER-002).
+        """
+        # Lock the workspace row (validates exists / not soft-deleted) and pin the
+        # epoch snapshot under the same serialization as every owner-mutating path.
+        workspace = await lock_workspace_for_update(self.db, workspace_id)
+
+        # Don't file a request for a phantom target — same guard as the apply path.
+        target_user = (
+            await self.db.execute(select(User).where(User.user_id == target_user_id))
+        ).scalar_one_or_none()
+        if target_user is None:
+            raise BadRequestError(
+                "Target user does not exist",
+                error_code="WS-OWNER-002",
+            )
+
+        # Supersede any existing pending request for this workspace, then flush so
+        # the partial-unique (one pending per workspace) is satisfied before the
+        # new insert.
+        existing = (
+            (
+                await self.db.execute(
+                    select(WorkspaceOwnershipForceTransferRequest).where(
+                        WorkspaceOwnershipForceTransferRequest.workspace_id == workspace_id,
+                        WorkspaceOwnershipForceTransferRequest.status
+                        == FORCE_TRANSFER_STATUS_PENDING,
+                    )
+                )
+            )
+            .scalars()
+            .all()
+        )
+        for prior in existing:
+            prior.status = FORCE_TRANSFER_STATUS_SUPERSEDED
+            prior.decided_by_user_id = performed_by_user_id
+            prior.decided_by_email = performed_by_email
+            prior.decided_at = utcnow()
+        if existing:
+            await self.db.flush()
+
+        request = WorkspaceOwnershipForceTransferRequest(
+            workspace_id=workspace_id,
+            target_user_id=target_user_id,
+            reason=reason,
+            ownership_epoch_at_initiation=workspace.ownership_epoch,
+            initiated_by_user_id=performed_by_user_id,
+            initiated_by_email=performed_by_email,
+            status=FORCE_TRANSFER_STATUS_PENDING,
+        )
+        self.db.add(request)
+        await self.db.commit()
+        await self.db.refresh(request)
+
+        logger.info(
+            "workspace_ownership_force_transfer_initiated",
+            workspace_id=str(workspace_id),
+            request_id=str(request.id),
+            target=target_user_id,
+            initiated_by=performed_by_user_id,
+            superseded=len(existing),
+        )
+        return request
+
+    async def approve_force_transfer(
+        self,
+        *,
+        request_id: UUID,
+        approver_user_id: str,
+        approver_email: str,
+    ) -> OwnershipTransferResult:
+        """Approve a pending dual-control request and apply the transfer (#1113).
+
+        Four-eyes control: the approver MUST be a *different* system admin than
+        the initiator. Under the workspace row lock, re-checks that ownership has
+        not moved since the request was filed (staleness) before applying the
+        seizure; the apply, the request status update, and the mandatory audit
+        (recording BOTH identities) commit atomically.
+
+        Security notes:
+          * Four-eyes is enforced by ``user_id`` inequality. It assumes the
+            operational invariant "one human ⇒ at most one system-admin account";
+            a single operator holding two admin accounts can still satisfy it.
+            That invariant is an identity-provisioning concern, not enforced here.
+          * The *policy* gate (whether dual-control applies at all) lives at the
+            route via ``require_dual_control_force_transfer``; this service method
+            is the *mechanism*. ``force_transfer_ownership`` performs the immediate
+            single-control seizure and is NOT itself flag-gated, so any future
+            direct caller of it bypasses four-eyes — route it through ``initiate``
+            when the flag is on.
+
+        Raises:
+            NotFoundException: no such request (404).
+            ConflictError: request not pending (409) or ownership moved since
+                filing (409, stale — re-initiate).
+            BadRequestError: approver is the initiator (400, WS-OWNER-DUAL-001)
+                or the target user no longer exists (400, WS-OWNER-002).
+        """
+        request = (
+            await self.db.execute(
+                select(WorkspaceOwnershipForceTransferRequest).where(
+                    WorkspaceOwnershipForceTransferRequest.id == request_id
+                )
+            )
+        ).scalar_one_or_none()
+        if request is None:
+            raise NotFoundException("Force-transfer request", str(request_id))
+        if request.status != FORCE_TRANSFER_STATUS_PENDING:
+            raise ConflictError(f"Force-transfer request is not pending (status={request.status})")
+
+        # No self-approval — the whole point of dual-control is a second pair of
+        # eyes. Checked before the lock (cheap, request-only) so we fail fast. This
+        # is the exact attack the control exists to stop, so log the denial as an
+        # alertable security signal.
+        if approver_user_id == request.initiated_by_user_id:
+            logger.warning(
+                "workspace_ownership_force_transfer_self_approval_denied",
+                workspace_id=str(request.workspace_id),
+                request_id=str(request.id),
+                actor=approver_user_id,
+            )
+            raise BadRequestError(
+                "A force-transfer must be approved by a different system admin "
+                "than the one who initiated it",
+                error_code="WS-OWNER-DUAL-001",
+            )
+
+        # Lock the workspace — the shared serialization point that every owner- and
+        # request-mutating path takes (approve, cancel, initiate-supersede).
+        workspace = await lock_workspace_for_update(self.db, request.workspace_id)
+
+        # Re-validate the request status UNDER the lock to close the TOCTOU between
+        # the pre-lock read above and here: a concurrent cancel or initiate-
+        # supersede (both hold this same lock) may have decided the request, and the
+        # epoch check alone cannot catch that — cancel/supersede do not move the
+        # epoch. refresh() re-SELECTs the row; under READ COMMITTED a concurrent
+        # committed transition is now visible, and because the mutators serialize on
+        # this lock the re-check is authoritative.
+        await self.db.refresh(request)
+        if request.status != FORCE_TRANSFER_STATUS_PENDING:
+            raise ConflictError(
+                f"Force-transfer request is no longer pending (status={request.status})"
+            )
+
+        # Staleness: if ownership moved since the request was filed, the approver
+        # would be acting on a stale premise (confused deputy). Refuse and require a
+        # fresh initiate; log as an alertable signal.
+        if workspace.ownership_epoch != request.ownership_epoch_at_initiation:
+            logger.warning(
+                "workspace_ownership_force_transfer_stale_denied",
+                workspace_id=str(request.workspace_id),
+                request_id=str(request.id),
+                epoch_at_initiation=request.ownership_epoch_at_initiation,
+                current_epoch=workspace.ownership_epoch,
+                actor=approver_user_id,
+            )
+            raise ConflictError(
+                "Workspace ownership changed since this force-transfer was "
+                "initiated; re-initiate the request and have it re-approved"
+            )
+
+        result = await self._apply_force_transfer(
+            workspace=workspace,
+            target_user_id=request.target_user_id,
+            performed_by_user_id=approver_user_id,
+            performed_by_email=approver_email,
+            reason=request.reason,
+            audit_extra={
+                "dual_control": True,
+                "force_transfer_request_id": str(request.id),
+                "initiated_by_user_id": request.initiated_by_user_id,
+                "initiated_by_email": request.initiated_by_email,
+                "approved_by_user_id": approver_user_id,
+            },
+        )
+
+        # Mark the request approved atomically with the transfer.
+        request.status = FORCE_TRANSFER_STATUS_APPROVED
+        request.decided_by_user_id = approver_user_id
+        request.decided_by_email = approver_email
+        request.decided_at = utcnow()
+        await self.db.commit()
+
+        logger.info(
+            "workspace_ownership_force_transfer_approved",
+            workspace_id=str(request.workspace_id),
+            request_id=str(request.id),
+            initiated_by=request.initiated_by_user_id,
+            approved_by=approver_user_id,
+            changed=result.changed,
+        )
+        return result
+
+    async def cancel_force_transfer(
+        self,
+        *,
+        request_id: UUID,
+        cancelled_by_user_id: str,
+        cancelled_by_email: str,
+    ) -> WorkspaceOwnershipForceTransferRequest:
+        """Cancel a pending dual-control request (#1113).
+
+        Lets an admin retract a pending force-transfer (e.g. filed in error)
+        without having to initiate a fresh one to supersede it. Only a pending
+        request can be cancelled.
+
+        Raises:
+            NotFoundException: no such request (404).
+            ConflictError: request is not pending (409).
+        """
+        request = (
+            await self.db.execute(
+                select(WorkspaceOwnershipForceTransferRequest).where(
+                    WorkspaceOwnershipForceTransferRequest.id == request_id
+                )
+            )
+        ).scalar_one_or_none()
+        if request is None:
+            raise NotFoundException("Force-transfer request", str(request_id))
+        if request.status != FORCE_TRANSFER_STATUS_PENDING:
+            raise ConflictError(f"Force-transfer request is not pending (status={request.status})")
+
+        # Serialize with approve / initiate-supersede on the workspace row so a
+        # cancel cannot race an in-flight approval (TOCTOU): whoever takes the lock
+        # second re-reads the status under it and sees the other's decision. (A
+        # request whose workspace is gone is moot — lock_workspace_for_update 404s.)
+        await lock_workspace_for_update(self.db, request.workspace_id)
+        await self.db.refresh(request)
+        if request.status != FORCE_TRANSFER_STATUS_PENDING:
+            raise ConflictError(
+                f"Force-transfer request is no longer pending (status={request.status})"
+            )
+
+        request.status = FORCE_TRANSFER_STATUS_CANCELLED
+        request.decided_by_user_id = cancelled_by_user_id
+        request.decided_by_email = cancelled_by_email
+        request.decided_at = utcnow()
+        await self.db.commit()
+
+        logger.info(
+            "workspace_ownership_force_transfer_cancelled",
+            workspace_id=str(request.workspace_id),
+            request_id=str(request.id),
+            cancelled_by=cancelled_by_user_id,
+        )
+        return request
+
+    async def get_force_transfer_request(
+        self, *, request_id: UUID
+    ) -> WorkspaceOwnershipForceTransferRequest:
+        """Fetch a force-transfer request by id (#1113).
+
+        Lets the SECOND admin inspect what they are approving (target, reason,
+        initiator) before calling ``approve_force_transfer`` — without this, the
+        four-eyes control degrades to a blind second button-press. Read-only.
+
+        Raises:
+            NotFoundException: no such request (404).
+        """
+        request = (
+            await self.db.execute(
+                select(WorkspaceOwnershipForceTransferRequest).where(
+                    WorkspaceOwnershipForceTransferRequest.id == request_id
+                )
+            )
+        ).scalar_one_or_none()
+        if request is None:
+            raise NotFoundException("Force-transfer request", str(request_id))
+        return request
