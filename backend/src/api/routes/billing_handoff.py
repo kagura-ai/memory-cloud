@@ -131,6 +131,13 @@ async def mint_billing_handoff(
 
     Owner-only + session-only. Returns 403 for admin/member/API-key callers and
     503 when the signing key is unconfigured (fail-closed).
+
+    The token's ``iss`` / ``aud`` claims (``billing_handoff_issuer`` /
+    ``billing_handoff_audience``) are FROZEN cross-repo JWT contract values
+    verified by the external billing service — they are NOT repo or service
+    names. ``billing`` is the function; the external service provides it.
+    Changing either claim is a coordinated breaking change (the verifier must
+    change in lockstep), never a local rename.
     """
     user_id = get_user_id(user)
 

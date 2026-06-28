@@ -124,11 +124,22 @@ class Settings(BaseSettings):
     )
     billing_handoff_issuer: str = Field(
         default="kagura-memory-cloud",
-        description="iss claim asserted on billing handoff tokens.",
+        description=(
+            "iss claim stamped on billing handoff tokens. A FROZEN cross-repo "
+            "JWT contract value verified by the external billing service — NOT a "
+            "repo or service name. Changing it is a coordinated breaking change "
+            "(the verifier must change in lockstep), never a local rename."
+        ),
     )
     billing_handoff_audience: str = Field(
         default="kagura-billing",
-        description="aud claim — the billing service that verifies handoff tokens.",
+        description=(
+            "aud claim — the billing audience served by the external billing "
+            "service that verifies handoff tokens ('billing' is the function; the "
+            "external service provides it). A FROZEN cross-repo JWT contract value, "
+            "NOT a repo name; changing it is a coordinated breaking change (the "
+            "verifier must change in lockstep), never a local rename."
+        ),
     )
     billing_handoff_ttl_seconds: int = Field(
         default=120,
