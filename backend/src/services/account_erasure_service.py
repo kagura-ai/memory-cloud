@@ -71,7 +71,6 @@ from models.erasure import (
     ErasureRequest,
 )
 from services.email_service import EmailService, get_email_service
-from services.stripe_service import cancel_subscription_and_delete_customer_for_erasure
 from services.system_admin_service import SystemAdminService
 from services.workspace_locks import lock_workspace_for_update
 from utils.datetime import to_utc_iso, utcnow
@@ -725,17 +724,11 @@ class AccountErasureService:
         try:
             owned_workspaces = await self._list_owned_workspaces(target.user_id)
 
-            # Step 1: Stripe (best-effort)
-            stripe_summary: dict[str, Any] = {"workspaces_processed": []}
-            for ws in owned_workspaces:
-                ws_result = await cancel_subscription_and_delete_customer_for_erasure(ws)
-                if ws_result["subscription_cancelled"] or ws_result["customer_deleted"]:
-                    stripe_summary["workspaces_processed"].append(
-                        {"workspace_id": str(ws.id), **ws_result}
-                    )
-            summary["stripe"] = stripe_summary
+            # Stripe customer/subscription teardown is no longer this backend's
+            # job (#1096): the OSS backend is Stripe-agnostic. memory-cloud erases
+            # only its own data below.
 
-            # Step 2: Qdrant (raises on failure -> caught below)
+            # Step 1: Qdrant (raises on failure -> caught below)
             summary["qdrant"] = await delete_user_points(target.user_id)
 
             # Step 3: workspace ownership transfer / abort gate

@@ -53,8 +53,8 @@ dependencies = [
     # Object Storage (Cloudflare R2 / S3-compatible) — Issue #485
     "aioboto3>=13.0.0",
 
-    # Billing (optional, for SaaS deployments with BILLING_ENABLED=true)
-    "stripe>=11.0.0",
+    # In-process Stripe billing removed in #1096 (OSS backend is Stripe-agnostic;
+    # entitlement arrives via the internal billing endpoint).
 
     # Transactional email (optional, when EMAIL_PROVIDER=resend)
     "resend>=2.29.0",

@@ -1410,7 +1410,7 @@ def _zero_floor(base: int, addon: int | None) -> int:
 
 
 # Entitlement provenance (#1095). The values name WHO last set the entitlement, so
-# the external billing reconciler (kagura-billing#5) can revert ONLY what it owns:
+# the external billing reconciler can revert ONLY what it owns:
 #   - external_billing → billing-owned: the external service set it via the internal
 #     endpoint; the reconciler MAY reconcile/revert it against the billing source.
 #   - admin_grant      → locally-owned: a human set it locally (admin/comp grant OR

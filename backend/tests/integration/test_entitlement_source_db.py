@@ -15,7 +15,6 @@ handler, so the assertion proves the handler actively flips it back — the
 
 from __future__ import annotations
 
-from unittest.mock import patch
 from uuid import UUID
 
 import pytest
@@ -72,73 +71,4 @@ async def test_admin_set_marks_admin_grant(db_session: AsyncSession, billed_work
 
     ws = await _reload_workspace(db_session, billed_workspace["workspace_id"])
     assert ws.plan_name == "pro"
-    assert ws.entitlement_source == "admin_grant"
-
-
-@pytest.mark.asyncio
-async def test_owner_self_service_marks_admin_grant(
-    db_session: AsyncSession, billed_workspace: dict
-):
-    """Owner self-service (legacy in-process path) flips external_billing →
-    admin_grant so the reconciler doesn't revert a change it doesn't manage."""
-    from api.routes.workspace_plan import UpdatePlanRequest, update_workspace_plan
-
-    # Exercise the REAL owner gate — the fixture seeds a genuine OWNER member +
-    # owner_user_id, so check_workspace_owner must pass without mocking it. Only the
-    # billing-plugin flag is patched (the gate that makes self-service reachable).
-    with patch("plugins.billing.is_billing_enabled", return_value=True):
-        await update_workspace_plan(
-            workspace_id=billed_workspace["workspace_id"],
-            request=UpdatePlanRequest(plan_name="pro"),  # upgrade — no member removal
-            user={"user_id": billed_workspace["user_id"], "email": "o@test.invalid"},
-            db=db_session,
-        )
-
-    ws = await _reload_workspace(db_session, billed_workspace["workspace_id"])
-    assert ws.plan_name == "pro"
-    assert ws.entitlement_source == "admin_grant"
-
-
-@pytest.mark.asyncio
-async def test_stripe_checkout_marks_admin_grant(db_session: AsyncSession, billed_workspace: dict):
-    """The legacy in-app Stripe checkout webhook marks admin_grant (locally-owned):
-    the external reconciler doesn't manage in-app Stripe subs, so it must not
-    revert them (#1095 sweep follow-up)."""
-    from services.stripe_service import _apply_plan_change
-
-    await _apply_plan_change(
-        db=db_session,
-        workspace_id=UUID(billed_workspace["workspace_id"]),
-        new_plan_name="pro",
-        customer_id="cus_test_123",
-        subscription_id="sub_test_123",
-    )
-
-    ws = await _reload_workspace(db_session, billed_workspace["workspace_id"])
-    assert ws.plan_name == "pro"
-    assert ws.entitlement_source == "admin_grant"
-
-
-@pytest.mark.asyncio
-async def test_stripe_cancel_marks_admin_grant(db_session: AsyncSession, billed_workspace: dict):
-    """A Stripe subscription cancellation downgrades to free AND marks admin_grant."""
-    from services.stripe_service import _apply_plan_change, _handle_subscription_cancelled
-
-    # First put it on pro via checkout (sets the stripe_customer_id the cancel reads).
-    await _apply_plan_change(
-        db=db_session,
-        workspace_id=UUID(billed_workspace["workspace_id"]),
-        new_plan_name="pro",
-        customer_id="cus_cancel_1",
-        subscription_id="sub_cancel_1",
-    )
-    # Re-dirty the provenance to prove the cancel path actively re-marks it.
-    ws = await _reload_workspace(db_session, billed_workspace["workspace_id"])
-    ws.entitlement_source = "external_billing"
-    await db_session.commit()
-
-    await _handle_subscription_cancelled(db=db_session, customer_id="cus_cancel_1")
-
-    ws = await _reload_workspace(db_session, billed_workspace["workspace_id"])
-    assert ws.plan_name == "free"
     assert ws.entitlement_source == "admin_grant"
