@@ -144,6 +144,22 @@ class Settings(BaseSettings):
             "(fail-safe). Fail-open on a Redis outage."
         ),
     )
+    # #1118: optional public base URL (origin) of the external billing service's
+    # handoff entry. When set, POST /api/v1/billing/handoff ALSO returns a
+    # ready-to-use redirect url = ``{base}/enter?t={token}`` so a caller need not
+    # re-implement the frozen /enter?t= contract. EMPTY (default) => the response
+    # carries only the raw token (the decoupled #1098 contract); self-hosted
+    # deployments without an external billing service are unaffected (inert).
+    # Set to the billing host origin, no path (e.g. https://billing.example.com).
+    payment_public_base_url: str = Field(
+        default="",
+        description=(
+            "Public base URL (origin, no path) of the external billing service's "
+            "handoff entry. When set, /billing/handoff also returns a ready-to-use "
+            "{base}/enter?t={token} redirect URL; empty (default) returns only the "
+            "raw token. Opt-in convenience, inert when unset."
+        ),
+    )
     # Public MCP base URL handed back to the worker in its config so it can write
     # memories. Defaults to local dev; override in prod (e.g. https://memory.kagura-ai.com/mcp).
     kmc_mcp_url: str = Field(

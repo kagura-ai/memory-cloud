@@ -395,3 +395,75 @@ class TestHandoffRateLimitRoute:
         assert resp.status_code == 200, resp.text
         # Fail-open means the request reaches mint — assert it actually ran.
         signer_cls.return_value.mint.assert_called_once()
+
+
+# ============================================================================
+# Ready-to-use handoff URL (#1118) — opt-in, additive
+# ============================================================================
+
+_FAKE_TOKEN = "eyJhbGciOiJFZERTQSJ9.fake.sig"
+
+
+class TestHandoffReadyToUseUrl:
+    """The opt-in ``url`` convenience: when ``payment_public_base_url`` is set the
+    response ADDS a ready-to-use ``{base}/enter?t={token}`` redirect; unset keeps
+    the decoupled raw-token contract (#1098) with ``url=None``."""
+
+    def _post_with_base(self, session_client, base_url: str):
+        perm = MagicMock()
+        perm.check_workspace_owner = AsyncMock(return_value=MagicMock())
+        # Patch get_settings so both the rate-limit read and the new base-url read
+        # come from one stand-in (the route reads settings once).
+        settings = MagicMock()
+        settings.payment_public_base_url = base_url
+        settings.billing_handoff_rate_limit_per_minute = 10
+        with (
+            patch.object(route_mod, "PermissionService", return_value=perm),
+            patch.object(route_mod, "BillingHandoffSigner") as signer_cls,
+            patch.object(route_mod, "get_settings", return_value=settings),
+        ):
+            signer_cls.return_value.mint.return_value = _fake_minted(WS_A)
+            return session_client.post("/api/v1/billing/handoff", json={"workspace_id": str(WS_A)})
+
+    def test_url_is_null_when_base_unset(self, session_client):
+        resp = self._post_with_base(session_client, "")
+        assert resp.status_code == 200, resp.text
+        body = resp.json()
+        assert body["url"] is None
+        # The raw-token contract is intact regardless of the opt-in field.
+        assert body["token"] == _FAKE_TOKEN
+
+    def test_url_built_when_base_set(self, session_client):
+        resp = self._post_with_base(session_client, "https://billing.example.com")
+        assert resp.status_code == 200, resp.text
+        body = resp.json()
+        assert body["url"] == f"https://billing.example.com/enter?t={_FAKE_TOKEN}"
+        # Additive: the raw token is still present and unchanged (shape not replaced).
+        assert body["token"] == _FAKE_TOKEN
+        assert body["kid"] == "kid-1"
+
+    def test_url_normalizes_trailing_slash_on_base(self, session_client):
+        resp = self._post_with_base(session_client, "https://billing.example.com/")
+        assert resp.status_code == 200, resp.text
+        # No double slash before /enter.
+        assert resp.json()["url"] == f"https://billing.example.com/enter?t={_FAKE_TOKEN}"
+
+
+class TestBuildHandoffUrlHelper:
+    """Unit tests for the ``{base}/enter?t={token}`` URL builder."""
+
+    def test_returns_none_for_empty_or_blank_base(self):
+        assert route_mod._build_handoff_url("", "tok") is None
+        assert route_mod._build_handoff_url("   ", "tok") is None
+
+    def test_builds_enter_url(self):
+        assert (
+            route_mod._build_handoff_url("https://billing.example.com", "tok")
+            == "https://billing.example.com/enter?t=tok"
+        )
+
+    def test_normalizes_trailing_slash(self):
+        assert (
+            route_mod._build_handoff_url("https://billing.example.com/", "tok")
+            == "https://billing.example.com/enter?t=tok"
+        )
