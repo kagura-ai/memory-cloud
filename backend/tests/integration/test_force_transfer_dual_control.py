@@ -428,3 +428,58 @@ class TestSingleControlRegression:
         assert len(audit) == 1
         assert audit[0].user_metadata["break_glass"] is True
         assert "dual_control" not in audit[0].user_metadata
+
+
+class TestRequestLifecycleEdges:
+    @pytest.mark.asyncio(loop_scope="session")
+    async def test_approve_superseded_request_rejected(self, dc_fixture, db_session):
+        # Initiating again supersedes the first request; the superseded one can no
+        # longer be approved (status != pending) — and no transfer happens.
+        s = dc_fixture
+        svc = WorkspaceOwnershipService(db_session)
+        first = await svc.initiate_force_transfer(
+            workspace_id=s.workspace_id,
+            target_user_id=s.target,
+            performed_by_user_id=s.admin_a,
+            performed_by_email="ada@dc.invalid",
+            reason="first",
+        )
+        await svc.initiate_force_transfer(
+            workspace_id=s.workspace_id,
+            target_user_id=s.target,
+            performed_by_user_id=s.admin_b,
+            performed_by_email="adb@dc.invalid",
+            reason="second",
+        )
+        with pytest.raises(ConflictError, match="not pending"):
+            await svc.approve_force_transfer(
+                request_id=first.id, approver_user_id=s.admin_b, approver_email="adb@dc.invalid"
+            )
+        ws = await _workspace(db_session, s.workspace_id)
+        assert ws.owner_user_id == s.owner
+        assert ws.ownership_epoch == 0
+
+    @pytest.mark.asyncio(loop_scope="session")
+    async def test_get_request_returns_details(self, dc_fixture, db_session):
+        s = dc_fixture
+        svc = WorkspaceOwnershipService(db_session)
+        req = await svc.initiate_force_transfer(
+            workspace_id=s.workspace_id,
+            target_user_id=s.target,
+            performed_by_user_id=s.admin_a,
+            performed_by_email="ada@dc.invalid",
+            reason="inspect me",
+        )
+        fetched = await svc.get_force_transfer_request(request_id=req.id)
+        assert fetched.id == req.id
+        assert fetched.target_user_id == s.target
+        assert fetched.reason == "inspect me"
+        assert fetched.initiated_by_user_id == s.admin_a
+        assert fetched.status == FORCE_TRANSFER_STATUS_PENDING
+
+    @pytest.mark.asyncio(loop_scope="session")
+    async def test_get_unknown_request_404(self, dc_fixture, db_session):
+        with pytest.raises(NotFoundException):
+            await WorkspaceOwnershipService(db_session).get_force_transfer_request(
+                request_id=uuid4()
+            )

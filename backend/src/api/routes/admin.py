@@ -1318,6 +1318,42 @@ async def cancel_force_transfer_request(
     }
 
 
+@router.get("/force-transfer-requests/{request_id}")
+async def get_force_transfer_request(
+    request_id: str,
+    admin: dict = Depends(require_admin),
+    db: AsyncSession = Depends(get_db),
+) -> dict:
+    """Dual-control (#1113): inspect a force-transfer request before approving.
+
+    System-admin-gated read so the SECOND admin can verify the target, reason,
+    and initiator before calling ``/approve`` — making four-eyes an informed
+    review rather than a blind second button-press. 404 if no such request.
+    """
+    # ``admin`` is the system-admin auth gate (require_admin); the read itself
+    # needs no actor identity.
+    _ = get_user_id(admin)
+    try:
+        req_uuid = UUID(request_id)
+    except ValueError as exc:
+        raise ValidationError("Invalid request_id", field="request_id") from exc
+
+    req = await WorkspaceOwnershipService(db).get_force_transfer_request(request_id=req_uuid)
+    return {
+        "request_id": str(req.id),
+        "workspace_id": str(req.workspace_id),
+        "target_user_id": req.target_user_id,
+        "reason": req.reason,
+        "status": req.status,
+        "initiated_by_user_id": req.initiated_by_user_id,
+        "initiated_by_email": req.initiated_by_email,
+        "ownership_epoch_at_initiation": req.ownership_epoch_at_initiation,
+        "created_at": to_utc_iso(req.created_at),
+        "decided_by_user_id": req.decided_by_user_id,
+        "decided_at": to_utc_iso(req.decided_at) if req.decided_at else None,
+    }
+
+
 async def _notify_force_transfer_best_effort(
     db: AsyncSession, workspace_id: UUID, previous_owner_id: str
 ) -> None:

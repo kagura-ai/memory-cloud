@@ -7,6 +7,7 @@ that the displaced PREVIOUS owner is the notification target.
 
 from __future__ import annotations
 
+from datetime import datetime
 from unittest.mock import AsyncMock, MagicMock, patch
 from uuid import uuid4
 
@@ -352,4 +353,51 @@ class TestDualControlCancel:
 
     def test_non_admin_is_403(self):
         resp = _client(role="user").post(self._cancel(uuid4()))
+        assert resp.status_code == 403
+
+
+class TestDualControlGet:
+    @staticmethod
+    def _get(rid) -> str:
+        return f"/admin/force-transfer-requests/{rid}"
+
+    def test_get_returns_request_details_200(self):
+        rid = uuid4()
+        req = _pending_req(rid)
+        req.reason = "owner unreachable"
+        req.initiated_by_email = "ada@test.com"
+        req.ownership_epoch_at_initiation = 3
+        req.created_at = datetime(2026, 6, 28, 12, 0, 0)
+        req.decided_by_user_id = None
+        req.decided_at = None
+        svc = MagicMock()
+        svc.get_force_transfer_request = AsyncMock(return_value=req)
+        with patch.object(admin_mod, "WorkspaceOwnershipService", return_value=svc):
+            resp = _client().get(self._get(rid))
+        assert resp.status_code == 200, resp.text
+        body = resp.json()
+        assert body["request_id"] == str(rid)
+        assert body["target_user_id"] == TARGET
+        assert body["reason"] == "owner unreachable"
+        assert body["status"] == "pending"
+        assert body["decided_at"] is None
+        assert svc.get_force_transfer_request.await_args.kwargs["request_id"] == rid
+
+    def test_get_unknown_request_404(self):
+        from utils.exceptions import NotFoundException
+
+        svc = MagicMock()
+        svc.get_force_transfer_request = AsyncMock(
+            side_effect=NotFoundException("Force-transfer request")
+        )
+        with patch.object(admin_mod, "WorkspaceOwnershipService", return_value=svc):
+            resp = _client().get(self._get(uuid4()))
+        assert resp.status_code == 404
+
+    def test_get_malformed_request_id_is_422(self):
+        resp = _client().get("/admin/force-transfer-requests/not-a-uuid")
+        assert resp.status_code == 422
+
+    def test_get_non_admin_is_403(self):
+        resp = _client(role="user").get(self._get(uuid4()))
         assert resp.status_code == 403

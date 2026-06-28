@@ -2184,7 +2184,7 @@ class WorkspaceOwnershipForceTransferRequest(Base):
     id: Mapped[uuid.UUID] = mapped_column(
         UUID(as_uuid=True), primary_key=True, server_default=func.gen_random_uuid()
     )
-    workspace_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), nullable=False, index=True)
+    workspace_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), nullable=False)
     target_user_id: Mapped[str] = mapped_column(String(255), nullable=False)
     reason: Mapped[str] = mapped_column(Text, nullable=False)
     ownership_epoch_at_initiation: Mapped[int] = mapped_column(Integer, nullable=False)
@@ -2204,10 +2204,16 @@ class WorkspaceOwnershipForceTransferRequest(Base):
     decided_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
 
     created_at: Mapped[datetime] = mapped_column(
-        DateTime, nullable=False, server_default=func.now(), index=True
+        DateTime, nullable=False, server_default=func.now()
     )
 
+    # Indexes are declared explicitly (not via column-level ``index=True``) so the
+    # names match the alembic migration e48 verbatim — column-level index=True
+    # would auto-generate the long NAMING_CONVENTION names (db/base.py), drifting
+    # from the migration's hand-coded names and causing autogenerate churn (#613).
     __table_args__ = (
+        Index("ix_force_transfer_request_workspace_id", "workspace_id"),
+        Index("ix_force_transfer_request_created_at", "created_at"),
         # At most one PENDING request per workspace (the supersede/unblock invariant).
         Index(
             "uq_force_transfer_request_one_pending_per_workspace",
