@@ -26,24 +26,40 @@ BASIC = PLAN_TIERS["basic"]
 PRO = PLAN_TIERS["pro"]
 
 
-def _ws(plan_name="pro", *, member=0, context=0, memory=0):
-    """A minimal workspace stand-in carrying the 3 addon bonuses the math reads."""
+def _ws(plan_name="pro", *, member=0, context=0, memory=0, connector=0, sleep=0, storage_mb=0):
+    """A minimal workspace stand-in carrying the addon bonuses the math reads."""
     return types.SimpleNamespace(
         id=uuid4(),
         plan_name=plan_name,
         addon_member_bonus=member,
         addon_context_bonus=context,
         addon_memory_bonus=memory,
+        addon_connector_bonus=connector,
+        addon_sleep_contexts_bonus=sleep,
+        addon_storage_bonus_mb=storage_mb,
     )
 
 
-def _usage(*, members=0, contexts=0, shared=0, memories=0, tokens=0):
+def _usage(
+    *,
+    members=0,
+    contexts=0,
+    shared=0,
+    memories=0,
+    tokens=0,
+    connectors=0,
+    sleep=0,
+    storage=0,
+):
     return WorkspaceUsage(
         members=members,
         contexts=contexts,
         shared_contexts=shared,
         memories=memories,
         resource_tokens=tokens,
+        connectors=connectors,
+        sleep_enabled_contexts=sleep,
+        storage_bytes=storage,
     )
 
 
@@ -126,6 +142,39 @@ def test_at_limit_is_not_over():
     # usage == effective limit is allowed (strict ">" blocks).
     result = _svc()._evaluate_tier(_ws(), _usage(contexts=3), BASIC)  # basic limit = 3
     assert result.eligible is True
+
+
+def test_connectors_over_target_blocks():
+    # free max_connectors = 0 → any connector blocks.
+    result = _svc()._evaluate_tier(_ws(), _usage(connectors=2), FREE)
+    b = _by_dim(result)["connectors"]
+    assert (b.usage, b.limit, b.overage, b.cleanup) == (2, 0, 2, "remove_connectors")
+
+
+def test_sleep_enabled_contexts_over_target_blocks():
+    # basic sleep_enabled_contexts_limit = 0 → any sleep context blocks (PRO→BASIC).
+    result = _svc()._evaluate_tier(_ws(), _usage(sleep=1), BASIC)
+    b = _by_dim(result)["sleep_enabled_contexts"]
+    assert (b.usage, b.limit, b.overage, b.cleanup) == (1, 0, 1, "disable_sleep_contexts")
+
+
+def test_storage_bytes_over_target_blocks():
+    # free storage_limit_bytes = 100 MiB → 200 MiB blocks.
+    two_hundred_mb = 200 * 1024 * 1024
+    result = _svc()._evaluate_tier(_ws(), _usage(storage=two_hundred_mb), FREE)
+    b = _by_dim(result)["storage_bytes"]
+    assert b.limit == 100 * 1024 * 1024
+    assert b.overage == two_hundred_mb - 100 * 1024 * 1024
+    assert b.cleanup == "delete_files"
+
+
+def test_storage_addon_is_kept_and_raises_the_limit():
+    # +200 MB storage addon on FREE (base 100 MiB) → 100 MiB + 200 MB effective.
+    ws = _ws(storage_mb=200)
+    limit = (100 * 1024 * 1024) + (200 * 1024 * 1024)
+    assert _svc()._evaluate_tier(ws, _usage(storage=limit), FREE).eligible is True
+    over = _svc()._evaluate_tier(ws, _usage(storage=limit + 1), FREE)
+    assert _by_dim(over)["storage_bytes"].limit == limit
 
 
 # --------------------------------------------------------------------------- #

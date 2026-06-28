@@ -62,6 +62,9 @@ async def test_current_usage_counts_members_and_contexts(
     assert usage.shared_contexts == 1
     assert usage.memories == 0
     assert usage.resource_tokens == 0
+    assert usage.connectors == 0
+    assert usage.sleep_enabled_contexts == 0
+    assert usage.storage_bytes == 0
 
 
 @pytest.mark.asyncio

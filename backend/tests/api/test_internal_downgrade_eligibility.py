@@ -29,6 +29,9 @@ def _make_ws(plan_name: str = "pro"):
     ws.addon_member_bonus = 0
     ws.addon_context_bonus = 0
     ws.addon_memory_bonus = 0
+    ws.addon_connector_bonus = 0
+    ws.addon_sleep_contexts_bonus = 0
+    ws.addon_storage_bonus_mb = 0
     return ws
 
 
@@ -106,8 +109,18 @@ def test_missing_workspace_returns_404(billing):
 
 def test_pro_with_low_usage_is_eligible_for_all_lower_tiers(billing):
     ws = _make_ws("pro")
-    # ws load, then members/contexts/shared/memories/tokens.
-    results = [_ws_result(ws), _count(1), _count(1), _count(0), _count(10), _count(0)]
+    # ws load, then members/contexts/shared/memories/tokens/connectors/sleep/storage.
+    results = [
+        _ws_result(ws),
+        _count(1),  # members
+        _count(1),  # contexts
+        _count(0),  # shared
+        _count(10),  # memories
+        _count(0),  # resource_tokens
+        _count(0),  # connectors
+        _count(0),  # sleep_enabled_contexts
+        _count(0),  # storage_bytes
+    ]
     resp = billing.client(execute_results=results).get(
         _PATH, headers={"Authorization": "Bearer secret"}
     )
@@ -121,8 +134,18 @@ def test_pro_with_low_usage_is_eligible_for_all_lower_tiers(billing):
 
 def test_pro_with_high_usage_is_blocked(billing):
     ws = _make_ws("pro")
-    # 5 members, 25 contexts, 2 shared, 10 memories, 0 tokens.
-    results = [_ws_result(ws), _count(5), _count(25), _count(2), _count(10), _count(0)]
+    # 5 members, 25 contexts, 2 shared, 10 memories; 0 tokens/connectors/sleep/storage.
+    results = [
+        _ws_result(ws),
+        _count(5),  # members
+        _count(25),  # contexts
+        _count(2),  # shared
+        _count(10),  # memories
+        _count(0),  # resource_tokens
+        _count(0),  # connectors
+        _count(0),  # sleep_enabled_contexts
+        _count(0),  # storage_bytes
+    ]
     resp = billing.client(execute_results=results).get(
         _PATH, headers={"Authorization": "Bearer secret"}
     )
