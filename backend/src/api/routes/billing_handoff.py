@@ -98,6 +98,25 @@ async def _check_handoff_rate_limit(
         logger.error("billing_handoff_rate_limit_check_failed", error=str(exc))
 
 
+def _build_handoff_url(base_url: str, token: str) -> str | None:
+    """Build the ready-to-use handoff redirect URL, or None when unconfigured (#1118).
+
+    ``{base}/enter?t={token}`` — ``/enter?t=`` is the FROZEN cross-repo handoff
+    entry contract; this only materializes ``{base}`` (operator config) + that path.
+    Returns None when ``base_url`` is empty/blank (including a slash-only value) so
+    the response keeps the decoupled raw-token shape (#1098). No query-encoding is
+    needed: the token is a URL-safe JWT (base64url segments + '.'), and there is no
+    user input in the URL (``base_url`` is trusted, startup-validated operator
+    config), so this cannot be injection-shaped.
+    """
+    # rstrip BEFORE the empty-guard so a slash-only base ("/", "//") collapses to
+    # "" → None, not a relative "/enter?t=..." that resolves against the API host.
+    base = base_url.strip().rstrip("/")
+    if not base:
+        return None
+    return f"{base}/enter?t={token}"
+
+
 class BillingHandoffRequest(BaseModel):
     """Request to mint a handoff token for one owned workspace."""
 
@@ -119,6 +138,14 @@ class BillingHandoffResponse(TZAwareBaseModel):
     kid: str = Field(..., description="Signing key id — selects the verifier's public key.")
     jti: str = Field(..., description="Unique token id (verifier enforces single-use).")
     expires_at: datetime = Field(..., description="Token expiry (UTC, short-lived).")
+    url: str | None = Field(
+        default=None,
+        description=(
+            "Ready-to-use redirect URL ({base}/enter?t={token}) when "
+            "payment_public_base_url is configured; null otherwise (the decoupled "
+            "raw-token contract, #1098). The caller redirects the owner's browser here."
+        ),
+    )
 
 
 @router.post("/handoff", response_model=BillingHandoffResponse)
@@ -140,6 +167,7 @@ async def mint_billing_handoff(
     change in lockstep), never a local rename.
     """
     user_id = get_user_id(user)
+    settings = get_settings()
 
     # Owner gate against the EXPLICIT target workspace — check_workspace_owner
     # raises AuthorizationError (403) for non-owners and never trusts
@@ -152,7 +180,7 @@ async def mint_billing_handoff(
     await _check_handoff_rate_limit(
         user_id,
         body.workspace_id,
-        get_settings().billing_handoff_rate_limit_per_minute,
+        settings.billing_handoff_rate_limit_per_minute,
     )
 
     # Stamp the workspace's live ownership epoch into the token (#1100) so the
@@ -183,4 +211,7 @@ async def mint_billing_handoff(
         kid=minted.kid,
         jti=minted.jti,
         expires_at=minted.expires_at,
+        # Opt-in convenience (#1118): a ready-to-use redirect URL when the billing
+        # host base is configured; None otherwise (raw-token contract preserved).
+        url=_build_handoff_url(settings.payment_public_base_url, minted.token),
     )

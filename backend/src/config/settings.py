@@ -8,11 +8,37 @@ Database URLs are managed directly via os.getenv() in config/database.py.
 import os
 from datetime import datetime
 from typing import Any, Literal
+from urllib.parse import urlparse
 
 from pydantic import AliasChoices, Field, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 from utils.media_types import MEDIA_TYPE_RE, normalize_media_type
+
+
+def _validate_handoff_base_url(value: str) -> str:
+    """Validate/normalize the optional billing handoff base URL (#1118).
+
+    Empty (default) → ``""`` (the convenience is inert). When set, the value must
+    be an ``https`` origin (``http`` allowed only for localhost) with NO path
+    component: the redirect is materialized as ``{base}/enter?t={token}``, so a
+    non-https scheme would leak the short-lived token over plaintext (server /
+    proxy logs, Referer) and a path component would break the frozen ``/enter``
+    cross-repo contract. Raises ``ValueError`` (loud boot-time failure) on a
+    malformed base rather than silently emitting a broken redirect URL.
+    """
+    v = (value or "").strip()
+    if not v:
+        return ""
+    parsed = urlparse(v)
+    host_is_local = parsed.hostname in {"localhost", "127.0.0.1"}
+    if not (parsed.scheme == "https" or (parsed.scheme == "http" and host_is_local)):
+        raise ValueError(
+            "payment_public_base_url must use https:// (http:// allowed only for localhost)"
+        )
+    if parsed.path not in ("", "/"):
+        raise ValueError("payment_public_base_url must be an origin with no path component")
+    return v
 
 
 class Settings(BaseSettings):
@@ -155,6 +181,29 @@ class Settings(BaseSettings):
             "(fail-safe). Fail-open on a Redis outage."
         ),
     )
+    # #1118: optional public base URL (origin) of the external billing service's
+    # handoff entry. When set, POST /api/v1/billing/handoff ALSO returns a
+    # ready-to-use redirect url = ``{base}/enter?t={token}`` so a caller need not
+    # re-implement the frozen /enter?t= contract. EMPTY (default) => the response
+    # carries only the raw token (the decoupled #1098 contract); self-hosted
+    # deployments without an external billing service are unaffected (inert).
+    # Set to the billing host origin, no path (e.g. https://billing.example.com).
+    payment_public_base_url: str = Field(
+        default="",
+        description=(
+            "Public base URL (origin, no path) of the external billing service's "
+            "handoff entry. When set, /billing/handoff also returns a ready-to-use "
+            "{base}/enter?t={token} redirect URL; empty (default) returns only the "
+            "raw token. Opt-in convenience, inert when unset. Must be https (http "
+            "only for localhost) with no path — validated at startup."
+        ),
+    )
+
+    @field_validator("payment_public_base_url")
+    @classmethod
+    def _check_payment_public_base_url(cls, v: str) -> str:
+        return _validate_handoff_base_url(v)
+
     # Public MCP base URL handed back to the worker in its config so it can write
     # memories. Defaults to local dev; override in prod (e.g. https://memory.kagura-ai.com/mcp).
     kmc_mcp_url: str = Field(
