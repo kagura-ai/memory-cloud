@@ -343,7 +343,9 @@ class TestUpdateMemberRole:
         # #1102: an owner-mutating change must serialize on the workspace row
         # lock. #1108: that change is now refused (demotion → transfer first),
         # but the lock is still acquired BEFORE the refusal, so the owner
-        # invariant check runs under serialization.
+        # invariant check runs under serialization. The mock returns the
+        # workspace so the guard can read locked_workspace.owner_user_id (the SoT
+        # it now keys on).
         service = WorkspaceService(db_session)
         ws = Workspace(id=uuid4(), name="WLk1", owner_user_id="o1", plan_name="free")
         db_session.add(ws)
@@ -351,10 +353,58 @@ class TestUpdateMemberRole:
         db_session.add(WorkspaceMember(workspace_id=ws.id, user_id="o1", role=WorkspaceRole.OWNER))
         await db_session.flush()
 
-        with patch("services.workspace_service.lock_workspace_for_update", AsyncMock()) as lock:
+        with patch(
+            "services.workspace_service.lock_workspace_for_update",
+            AsyncMock(return_value=ws),
+        ) as lock:
             with pytest.raises(ValidationError, match="transfer ownership"):
                 await service.update_member_role(ws.id, "o1", "admin")
         lock.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_demote_stray_owner_row_allowed_for_repair(self, db_session) -> None:
+        # #1108 (PR #1114 review): the guard keys on the owner_user_id SoT, not
+        # on member.role == OWNER. So a *stray* second OWNER-role row that is NOT
+        # the owner_user_id holder (a multi-owner corruption) CAN be demoted —
+        # this is the repair path. Demoting it neither touches owner_user_id nor
+        # drops the real owner's OWNER row, so no desync results.
+        from sqlalchemy import select
+
+        service = WorkspaceService(db_session)
+        ws = Workspace(id=uuid4(), name="W10c", owner_user_id="real_owner", plan_name="free")
+        db_session.add(ws)
+        await db_session.flush()
+        db_session.add(
+            WorkspaceMember(workspace_id=ws.id, user_id="real_owner", role=WorkspaceRole.OWNER)
+        )
+        db_session.add(
+            WorkspaceMember(workspace_id=ws.id, user_id="stray", role=WorkspaceRole.OWNER)
+        )
+        await db_session.flush()
+
+        # Demoting the stray (non-SoT) OWNER row is allowed — it repairs the
+        # corruption rather than causing a desync.
+        updated = await service.update_member_role(ws.id, "stray", "admin")
+        assert updated.role == "admin"
+
+        # The SoT owner is untouched and remains the sole OWNER.
+        refreshed = await db_session.get(Workspace, ws.id)
+        assert refreshed is not None
+        assert refreshed.owner_user_id == "real_owner"
+        owners = (
+            (
+                await db_session.execute(
+                    select(WorkspaceMember).where(
+                        WorkspaceMember.workspace_id == ws.id,
+                        WorkspaceMember.role == WorkspaceRole.OWNER,
+                    )
+                )
+            )
+            .scalars()
+            .all()
+        )
+        assert len(owners) == 1
+        assert owners[0].user_id == "real_owner"
 
     @pytest.mark.asyncio
     async def test_non_owner_change_skips_workspace_lock(self, db_session) -> None:
