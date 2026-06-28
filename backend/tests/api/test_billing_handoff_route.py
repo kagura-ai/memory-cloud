@@ -137,6 +137,7 @@ class TestHandoffOwnerHappyPath:
         assert body["jti"] == "jti-test-1"
         assert body["token_type"] == "billing_handoff"
         assert body["expires_at"].endswith("Z")  # TZAwareBaseModel serialization
+        assert body.get("url") is None  # inert by default (PAYMENT_PUBLIC_BASE_URL unset)
         # The signer must be invoked with the body workspace and the session user.
         mint_call = signer_cls.return_value.mint.call_args
         assert mint_call.kwargs["workspace_id"] == WS_A
@@ -401,7 +402,8 @@ class TestHandoffRateLimitRoute:
 # Ready-to-use handoff URL (#1118) — opt-in, additive
 # ============================================================================
 
-_FAKE_TOKEN = "eyJhbGciOiJFZERTQSJ9.fake.sig"
+# Single source of truth for the fake JWT (mirrors _fake_minted's token).
+_FAKE_TOKEN = _fake_minted(uuid4()).token
 
 
 class TestHandoffReadyToUseUrl:
@@ -410,6 +412,14 @@ class TestHandoffReadyToUseUrl:
     the decoupled raw-token contract (#1098) with ``url=None``."""
 
     def _post_with_base(self, session_client, base_url: str):
+        """POST as an owner with ``payment_public_base_url=base_url``.
+
+        Returns ``(response, build_spy)``. ``build_spy`` WRAPS the real
+        ``_build_handoff_url`` so a test can prove the route actually invoked it
+        (so ``url is None`` reflects a real builder call on the empty base, not
+        merely the response field default). ``incrby_counter`` is stubbed so the
+        rate-limit takes its normal under-limit path, not the Redis fail-open one.
+        """
         perm = MagicMock()
         perm.check_workspace_owner = AsyncMock(return_value=MagicMock())
         # Patch get_settings so both the rate-limit read and the new base-url read
@@ -417,24 +427,32 @@ class TestHandoffReadyToUseUrl:
         settings = MagicMock()
         settings.payment_public_base_url = base_url
         settings.billing_handoff_rate_limit_per_minute = 10
+        build_spy = MagicMock(wraps=route_mod._build_handoff_url)
         with (
             patch.object(route_mod, "PermissionService", return_value=perm),
             patch.object(route_mod, "BillingHandoffSigner") as signer_cls,
             patch.object(route_mod, "get_settings", return_value=settings),
+            patch.object(route_mod, "incrby_counter", AsyncMock(return_value=1)),
+            patch.object(route_mod, "_build_handoff_url", build_spy),
         ):
             signer_cls.return_value.mint.return_value = _fake_minted(WS_A)
-            return session_client.post("/api/v1/billing/handoff", json={"workspace_id": str(WS_A)})
+            resp = session_client.post("/api/v1/billing/handoff", json={"workspace_id": str(WS_A)})
+        return resp, build_spy
 
     def test_url_is_null_when_base_unset(self, session_client):
-        resp = self._post_with_base(session_client, "")
+        resp, build_spy = self._post_with_base(session_client, "")
         assert resp.status_code == 200, resp.text
         body = resp.json()
         assert body["url"] is None
+        # Non-vacuous: the route actually called the builder with the empty base,
+        # so url is None because the builder returned None — not because the arg
+        # was dropped or the field merely defaults to None.
+        build_spy.assert_called_once_with("", _FAKE_TOKEN)
         # The raw-token contract is intact regardless of the opt-in field.
         assert body["token"] == _FAKE_TOKEN
 
     def test_url_built_when_base_set(self, session_client):
-        resp = self._post_with_base(session_client, "https://billing.example.com")
+        resp, _ = self._post_with_base(session_client, "https://billing.example.com")
         assert resp.status_code == 200, resp.text
         body = resp.json()
         assert body["url"] == f"https://billing.example.com/enter?t={_FAKE_TOKEN}"
@@ -443,7 +461,7 @@ class TestHandoffReadyToUseUrl:
         assert body["kid"] == "kid-1"
 
     def test_url_normalizes_trailing_slash_on_base(self, session_client):
-        resp = self._post_with_base(session_client, "https://billing.example.com/")
+        resp, _ = self._post_with_base(session_client, "https://billing.example.com/")
         assert resp.status_code == 200, resp.text
         # No double slash before /enter.
         assert resp.json()["url"] == f"https://billing.example.com/enter?t={_FAKE_TOKEN}"
@@ -456,6 +474,13 @@ class TestBuildHandoffUrlHelper:
         assert route_mod._build_handoff_url("", "tok") is None
         assert route_mod._build_handoff_url("   ", "tok") is None
 
+    def test_returns_none_for_slash_only_base(self):
+        # A slash-only base must collapse to None, not a relative "/enter?t=..."
+        # that a browser resolves against the API host (rstrip runs BEFORE guard).
+        assert route_mod._build_handoff_url("/", "tok") is None
+        assert route_mod._build_handoff_url("//", "tok") is None
+        assert route_mod._build_handoff_url("  /  ", "tok") is None
+
     def test_builds_enter_url(self):
         assert (
             route_mod._build_handoff_url("https://billing.example.com", "tok")
@@ -467,3 +492,41 @@ class TestBuildHandoffUrlHelper:
             route_mod._build_handoff_url("https://billing.example.com/", "tok")
             == "https://billing.example.com/enter?t=tok"
         )
+
+
+class TestValidateHandoffBaseUrl:
+    """Unit tests for the startup validator on ``payment_public_base_url`` (#1118)."""
+
+    def test_empty_is_allowed_and_normalized(self):
+        from config.settings import _validate_handoff_base_url
+
+        assert _validate_handoff_base_url("") == ""
+        assert _validate_handoff_base_url("   ") == ""
+
+    def test_https_origin_passes(self):
+        from config.settings import _validate_handoff_base_url
+
+        assert (
+            _validate_handoff_base_url("https://billing.example.com")
+            == "https://billing.example.com"
+        )
+
+    def test_http_localhost_allowed_for_dev(self):
+        from config.settings import _validate_handoff_base_url
+
+        assert _validate_handoff_base_url("http://localhost:9000") == "http://localhost:9000"
+
+    @pytest.mark.parametrize(
+        "bad",
+        [
+            "http://billing.example.com",  # plaintext non-local → token-over-HTTP leak
+            "billing.example.com",  # no scheme → relative URL
+            "javascript:alert(1)",  # non-http(s) scheme
+            "https://billing.example.com/v2",  # path component → breaks /enter contract
+        ],
+    )
+    def test_rejects_malformed_base(self, bad):
+        from config.settings import _validate_handoff_base_url
+
+        with pytest.raises(ValueError):
+            _validate_handoff_base_url(bad)

@@ -103,15 +103,18 @@ def _build_handoff_url(base_url: str, token: str) -> str | None:
 
     ``{base}/enter?t={token}`` — ``/enter?t=`` is the FROZEN cross-repo handoff
     entry contract; this only materializes ``{base}`` (operator config) + that path.
-    Returns None when ``base_url`` is empty/blank so the response keeps the
-    decoupled raw-token shape (#1098). No query-encoding is needed: the token is a
-    URL-safe JWT (base64url segments + '.'), and there is no user input in the URL
-    (``base_url`` is trusted operator config), so this cannot be injection-shaped.
+    Returns None when ``base_url`` is empty/blank (including a slash-only value) so
+    the response keeps the decoupled raw-token shape (#1098). No query-encoding is
+    needed: the token is a URL-safe JWT (base64url segments + '.'), and there is no
+    user input in the URL (``base_url`` is trusted, startup-validated operator
+    config), so this cannot be injection-shaped.
     """
-    base = base_url.strip()
+    # rstrip BEFORE the empty-guard so a slash-only base ("/", "//") collapses to
+    # "" → None, not a relative "/enter?t=..." that resolves against the API host.
+    base = base_url.strip().rstrip("/")
     if not base:
         return None
-    return f"{base.rstrip('/')}/enter?t={token}"
+    return f"{base}/enter?t={token}"
 
 
 class BillingHandoffRequest(BaseModel):
