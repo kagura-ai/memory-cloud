@@ -141,6 +141,55 @@ export default function WorkspacePlanPage() {
         </div>
       </Section>
 
+      {plan && (
+        <Section title={t("planPage.usageTitle")}>
+          <dl className="grid grid-cols-1 gap-x-6 gap-y-2 text-sm sm:grid-cols-2">
+            <div className="flex justify-between border-b border-gray-100 pb-1 dark:border-gray-800">
+              <dt className="text-gray-500 dark:text-gray-400">
+                {t("planPage.memories")}
+              </dt>
+              <dd className="font-medium">
+                {plan.usage.memories.toLocaleString()} /{" "}
+                {plan.quotas.memory_limit.toLocaleString()}
+              </dd>
+            </div>
+            <div className="flex justify-between border-b border-gray-100 pb-1 dark:border-gray-800">
+              <dt className="text-gray-500 dark:text-gray-400">
+                {t("planPage.contexts")}
+              </dt>
+              <dd className="font-medium">
+                {plan.usage.contexts.toLocaleString()} /{" "}
+                {plan.quotas.max_contexts.toLocaleString()}
+              </dd>
+            </div>
+            <div className="flex justify-between border-b border-gray-100 pb-1 dark:border-gray-800">
+              <dt className="text-gray-500 dark:text-gray-400">
+                {t("planPage.mcpPerDay")}
+              </dt>
+              <dd className="font-medium">
+                {plan.quotas.mcp_calls_per_day.toLocaleString()}
+              </dd>
+            </div>
+            <div className="flex justify-between border-b border-gray-100 pb-1 dark:border-gray-800">
+              <dt className="text-gray-500 dark:text-gray-400">
+                {t("planPage.restPerDay")}
+              </dt>
+              <dd className="font-medium">
+                {plan.quotas.rest_calls_per_day.toLocaleString()}
+              </dd>
+            </div>
+            <div className="flex justify-between border-b border-gray-100 pb-1 dark:border-gray-800">
+              <dt className="text-gray-500 dark:text-gray-400">
+                {t("planPage.publicPerDay")}
+              </dt>
+              <dd className="font-medium">
+                {plan.quotas.public_calls_per_day.toLocaleString()}
+              </dd>
+            </div>
+          </dl>
+        </Section>
+      )}
+
       {plan?.can_upgrade && (
         <Section title={t("proPlanBenefits")}>
           <ul className="space-y-1 text-sm text-gray-700 dark:text-gray-300">

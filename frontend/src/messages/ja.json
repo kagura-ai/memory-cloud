@@ -1152,7 +1152,13 @@
       "opening": "請求ページを開いています…",
       "ownerOnly": "プランの変更はワークスペースのオーナーのみ可能です。",
       "unavailable": "この環境ではプラン変更を利用できません。",
-      "upgradeError": "請求セッションを開始できませんでした。もう一度お試しください。"
+      "upgradeError": "請求セッションを開始できませんでした。もう一度お試しください。",
+      "usageTitle": "利用状況・上限",
+      "memories": "メモリ",
+      "contexts": "コンテキスト",
+      "mcpPerDay": "MCP呼び出し / 日",
+      "restPerDay": "REST呼び出し / 日",
+      "publicPerDay": "公開呼び出し / 日"
     },
     "removeMemberTitle": "メンバーを削除しますか？",
     "removeMemberDesc": "{name}をワークスペースから削除してもよろしいですか？",

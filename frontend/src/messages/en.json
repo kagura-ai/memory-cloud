@@ -1153,7 +1153,13 @@
       "opening": "Opening billing…",
       "ownerOnly": "Only the workspace owner can change the plan.",
       "unavailable": "Plan changes are not available on this deployment.",
-      "upgradeError": "Could not start the billing session. Please try again."
+      "upgradeError": "Could not start the billing session. Please try again.",
+      "usageTitle": "Usage & limits",
+      "memories": "Memories",
+      "contexts": "Contexts",
+      "mcpPerDay": "MCP calls / day",
+      "restPerDay": "REST calls / day",
+      "publicPerDay": "Public calls / day"
     },
     "removeMemberTitle": "Remove Member?",
     "removeMemberDesc": "Are you sure you want to remove {name} from the workspace?",
