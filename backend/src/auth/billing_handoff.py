@@ -1,6 +1,6 @@
 """Ed25519 signer for owner-scoped billing handoff tokens (#1093).
 
-The external billing service (kagura-billing) needs to trust an authenticated
+The external billing service needs to trust an authenticated
 workspace **owner** without re-implementing user auth on the billing host.
 memory-cloud mints a short-lived, **Ed25519-signed** JWT bound to
 ``(user_id, workspace_id, role=owner)`` with ``iss/aud/exp/iat/jti``; the billing

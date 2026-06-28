@@ -117,17 +117,6 @@ async def lifespan(app: FastAPI):
     shutdown_scheduler()
     logger.info("scheduler_stopped")
 
-    # Stop the dedicated Stripe erasure ThreadPoolExecutor (Issue #468).
-    # ``wait=False`` returns immediately so lifespan shutdown is not held
-    # by in-flight Stripe HTTP calls — k8s SIGKILL after the grace period
-    # is the existing process-exit fallback either way, and erasure is
-    # best-effort (Stripe processes the request server-side regardless of
-    # whether we read the ack). No-op when billing is disabled.
-    from services.stripe_service import shutdown_erasure_executor
-
-    shutdown_erasure_executor()
-    logger.info("stripe_erasure_executor_stopped")
-
     # Release blob storage (Issue #485)
     from storage.factory import close_blob_storage
 
@@ -698,17 +687,10 @@ app.include_router(system.router, prefix="/api/v1")
 # Well-known endpoints (OAuth2 metadata)
 app.include_router(well_known.router, prefix="/.well-known")
 
-# Billing Plugin (OSS: disabled by default)
-# When enabled, registers self-service plan management routes (Stripe integration)
-from plugins.billing import is_billing_enabled  # noqa: E402
-
-if is_billing_enabled():
-    from plugins.billing.routes import router as billing_router
-
-    app.include_router(billing_router, tags=["billing"])
-    logger.info("billing_plugin_enabled")
-else:
-    logger.info("billing_plugin_disabled (plan changes are admin-only)")
+# In-process Stripe billing plugin removed (#1096): the OSS backend is now
+# Stripe-agnostic. Entitlement arrives via the internal billing endpoint
+# (/internal, #954); the billing handoff (#1093) is the owner-facing entry, and
+# admin plan changes remain under /admin/plans.
 
 # MCP Remote Server (Phase 3)
 # Custom route to avoid 307 redirect from app.mount

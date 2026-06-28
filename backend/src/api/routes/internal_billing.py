@@ -1,6 +1,6 @@
 """Internal billing-service endpoints (Issue #954).
 
-The external billing service (kagura-ai/kagura-billing#4/#6) pushes entitlement
+The external billing service pushes entitlement
 changes here. memory-cloud stays the **authorization source of truth** for
 entitlement (plan tier + addon quota), so it never imports the Stripe SDK or
 holds Stripe secrets — the billing service owns subscription lifecycle and only
@@ -12,7 +12,7 @@ Design decisions (documented for the cross-repo contract; see #954):
   (tier) + the ``addon_*`` bonuses (quota). Subscription lifecycle fields
   (``status``, ``current_period_end``) are billing-owned — they are accepted in
   the contract for audit/forward-compat and echoed back, but NOT persisted here
-  (no schema commitment until the kagura-billing RFC settles).
+  (no schema commitment until the billing RFC settles).
 - **No destructive cascade.** Unlike the interactive owner-facing
   ``PUT /api/v1/workspaces/{id}/plan`` (member removal, memory transfer, token
   revocation, guarded downgrades), this automated webhook ONLY sets the
@@ -20,7 +20,7 @@ Design decisions (documented for the cross-repo contract; see #954):
   ``plan_name``), so a downgrade takes effect immediately without this endpoint
   silently destroying members/memories on a billing glitch. Billing-driven
   membership/context cleanup is handled by the interactive flow or a
-  reconciliation job (kagura-billing#5), not here.
+  reconciliation job, not here.
 - **Idempotent.** PUT sets absolute values; re-delivery (reconciliation) yields
   the same state and 200, never a "already on this plan" 400. Addons are an
   *absolute, partial* update: omitted dimensions are left unchanged. The billing

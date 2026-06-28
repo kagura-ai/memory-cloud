@@ -5,9 +5,9 @@ Owns the full lifecycle of an `erasure_requests` row:
     self-service:  pending -> cooling_off -> in_progress -> complete
     admin:                                   in_progress -> complete
 
-Both paths converge on `_execute`, which performs the 12-step cross-store
-deletion (Stripe -> Qdrant -> workspace transfer -> Postgres -> Redis ->
-audit-log pseudonymize -> finalize) covered by the design pin in #360.
+Both paths converge on `_execute`, which performs the multi-step cross-store
+deletion (Qdrant -> workspace transfer -> Postgres -> audit-log pseudonymize ->
+Redis -> finalize) covered by the design pin in #360.
 
 Failure semantics: ``_execute`` is NOT a single atomic transaction.
 Each step commits when it completes (workspace ownership transfers,
@@ -23,10 +23,9 @@ and is what ops needs for manual reconciliation. On any raise:
 - ``deleted_data_summary`` captures whatever steps did complete,
 - the exception is re-raised.
 
-Stripe and Qdrant calls are best-effort: their internal try/except
-swallows API failures and records the outcome in the summary, so a
-Stripe outage never blocks the Postgres delete pipeline (the orphan
-Stripe customer can be cleaned up manually via the Stripe dashboard).
+The Qdrant call is best-effort: its internal try/except swallows API
+failures and records the outcome in the summary, so a Qdrant outage
+never blocks the Postgres delete pipeline.
 """
 
 from __future__ import annotations
@@ -71,7 +70,6 @@ from models.erasure import (
     ErasureRequest,
 )
 from services.email_service import EmailService, get_email_service
-from services.stripe_service import cancel_subscription_and_delete_customer_for_erasure
 from services.system_admin_service import SystemAdminService
 from services.workspace_locks import lock_workspace_for_update
 from utils.datetime import to_utc_iso, utcnow
@@ -709,58 +707,51 @@ class AccountErasureService:
         return executed
 
     # ------------------------------------------------------------------
-    # Core execution (12-step orchestrator)
+    # Core execution (multi-step orchestrator)
     # ------------------------------------------------------------------
 
     async def _execute(self, request: ErasureRequest, target: User) -> None:
         """Run the cross-store erasure for a single request.
 
-        Order: Stripe -> Qdrant -> workspaces -> Postgres -> Redis ->
-        audit_logs pseudonymize -> audit row -> finalize. Stripe and
-        Qdrant first so a failure leaves a recoverable Postgres state;
-        Redis last because session/rate-limit data is ephemeral and
-        re-creatable from cookies if anything goes wrong.
+        Order: Qdrant -> workspaces -> Postgres -> audit_logs pseudonymize ->
+        Redis -> audit row -> finalize. Qdrant first so a failure leaves a
+        recoverable Postgres state; Redis last because session/rate-limit data
+        is ephemeral and re-creatable from cookies if anything goes wrong.
         """
         summary: dict[str, Any] = {}
         try:
             owned_workspaces = await self._list_owned_workspaces(target.user_id)
 
-            # Step 1: Stripe (best-effort)
-            stripe_summary: dict[str, Any] = {"workspaces_processed": []}
-            for ws in owned_workspaces:
-                ws_result = await cancel_subscription_and_delete_customer_for_erasure(ws)
-                if ws_result["subscription_cancelled"] or ws_result["customer_deleted"]:
-                    stripe_summary["workspaces_processed"].append(
-                        {"workspace_id": str(ws.id), **ws_result}
-                    )
-            summary["stripe"] = stripe_summary
+            # Stripe customer/subscription teardown is no longer this backend's
+            # job (#1096): the OSS backend is Stripe-agnostic. memory-cloud erases
+            # only its own data below.
 
-            # Step 2: Qdrant (raises on failure -> caught below)
+            # Step 1: Qdrant (raises on failure -> caught below)
             summary["qdrant"] = await delete_user_points(target.user_id)
 
-            # Step 3: workspace ownership transfer / abort gate
+            # Step 2: workspace ownership transfer / abort gate
             summary["workspaces"] = await self._handle_owned_workspaces(
                 target.user_id, owned_workspaces
             )
 
-            # Step 4: Postgres deletes (FK-safe order)
+            # Step 3: Postgres deletes (FK-safe order)
             summary["postgres"] = await self._delete_postgres(target)
 
-            # Step 5: pseudonymize existing audit_logs referencing this user
+            # Step 4: pseudonymize existing audit_logs referencing this user
             summary["audit_logs_pseudonymized"] = await self._pseudonymize_audit_logs(
                 target.user_id, target.email
             )
 
-            # Step 6: Redis cleanup (best-effort)
+            # Step 5: Redis cleanup (best-effort)
             summary["redis"] = await self._clear_redis(target.user_id)
 
-            # Step 7: write the new "account_erasure" audit row
+            # Step 6: write the new "account_erasure" audit row
             await self._write_audit_log(request, target, summary)
 
-            # Step 8: finalize the erasure_requests row
+            # Step 7: finalize the erasure_requests row
             await self._finalize(request, summary)
 
-            # Step 9: completion notification — outside the success path's
+            # Step 8: completion notification — outside the success path's
             # transactional integrity guarantees. A future real EmailService
             # could raise on transient SMTP failure; that must NOT cause
             # the just-committed `complete` row to be overwritten as
@@ -842,7 +833,7 @@ class AccountErasureService:
     # ------------------------------------------------------------------
 
     async def _list_owned_workspaces(self, user_id: str) -> list[Workspace]:
-        """All workspaces this user owns (drives Stripe + member checks)."""
+        """All workspaces this user owns (drives the ownership-transfer / member checks)."""
         result = await self.db.execute(select(Workspace).where(Workspace.owner_user_id == user_id))
         return list(result.scalars().all())
 

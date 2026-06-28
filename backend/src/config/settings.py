@@ -95,7 +95,7 @@ class Settings(BaseSettings):
         description="Shared bearer token authenticating the ai-worker to /api/v1/workers/* (RFC 6750)",
     )
     # Issue #954: service-to-service auth for the external billing service
-    # (kagura-billing#4/#6) pushing entitlement changes to PUT /internal/...
+    # pushing entitlement changes to PUT /internal/...
     # Empty disables the internal billing endpoints (fail-closed, 503). Distinct
     # from worker_service_token so the two services can be rotated independently.
     # Use: openssl rand -hex 32. See the rotation note on worker_service_token.
@@ -319,22 +319,9 @@ class Settings(BaseSettings):
         "admins — with only one, no force-transfer can be approved.",
     )
 
-    # Billing Plugin (OSS: disabled by default, SaaS: enabled with Stripe)
-    billing_enabled: bool = Field(
-        default=False,
-        description="Enable billing plugin for self-service plan changes. "
-        "When disabled, plan changes are admin-only.",
-    )
-    stripe_secret_key: str | None = Field(
-        default=None, description="Stripe secret key (required when billing_enabled=True)"
-    )
-    stripe_webhook_secret: str | None = Field(
-        default=None, description="Stripe webhook signing secret"
-    )
-    stripe_price_basic: str | None = Field(
-        default=None, description="Stripe Price ID for Basic plan"
-    )
-    stripe_price_pro: str | None = Field(default=None, description="Stripe Price ID for Pro plan")
+    # In-process Stripe billing settings removed (#1096): the OSS backend is
+    # Stripe-agnostic. Entitlement arrives via the internal billing endpoint
+    # (BILLING_SERVICE_TOKEN-authed); no Stripe SDK, keys, or webhook secret here.
 
     # Transactional email (Issue #478 — unblocks #469's OAuth confirm-email path)
     email_provider: Literal["logging", "resend"] = Field(

@@ -66,8 +66,7 @@ export interface CreateWorkspaceRequest {
   default_context_summary?: string;
   default_context_usage_guide?: string;
   default_context_embedding_model?:
-    | "text-embedding-3-small"
-    | "text-embedding-3-large";
+    "text-embedding-3-small" | "text-embedding-3-large";
 }
 
 export interface UpdateWorkspaceRequest {
@@ -372,24 +371,6 @@ export async function getWorkspacePlan(
 ): Promise<WorkspacePlanInfo> {
   return apiClient.get<WorkspacePlanInfo>(
     `/api/v1/workspaces/${workspaceId}/plan`,
-  );
-}
-
-/**
- * Change workspace plan tier
- * Issue #164: Owner-only plan management
- */
-export async function updateWorkspacePlan(
-  workspaceId: string,
-  planName: string,
-  reason?: string,
-): Promise<{ message: string }> {
-  return apiClient.put<{ message: string }>(
-    `/api/v1/workspaces/${workspaceId}/plan`,
-    {
-      plan_name: planName,
-      reason,
-    },
   );
 }
 
