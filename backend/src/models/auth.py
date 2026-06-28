@@ -1725,10 +1725,6 @@ class Workspace(Base):
         tier_cap = self._plan_tier.embedding_monthly_cap_usd
         return Decimal(str(tier_cap)) if tier_cap is not None else None
 
-    # Stripe billing (Issue #351)
-    stripe_customer_id: Mapped[str | None] = mapped_column(String(255), nullable=True)
-    stripe_subscription_id: Mapped[str | None] = mapped_column(String(255), nullable=True)
-
     # Timestamps
     created_at: Mapped[datetime] = mapped_column(
         DateTime, nullable=False, server_default=func.now()
