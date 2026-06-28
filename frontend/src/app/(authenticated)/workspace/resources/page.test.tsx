@@ -143,7 +143,7 @@ describe("ResourcesListPage", () => {
     expect(mockListResources).not.toHaveBeenCalled();
   });
 
-  it("upgrade CTA button navigates to billing", async () => {
+  it("upgrade CTA button navigates to the plan page", async () => {
     mockCurrentWorkspace = { plan_name: "free", current_user_role: "owner" };
 
     render(<ResourcesListPage />);
@@ -152,7 +152,7 @@ describe("ResourcesListPage", () => {
       expect(screen.getByText("planGate.title")).toBeInTheDocument();
     });
     fireEvent.click(screen.getByRole("button", { name: "planGate.action" }));
-    expect(mockPush).toHaveBeenCalledWith("/workspace/settings/billing");
+    expect(mockPush).toHaveBeenCalledWith("/workspace/settings/plan");
   });
 
   it("holds the fetch until WorkspaceContext hydrates", async () => {
