@@ -123,10 +123,13 @@ class SecretStoreService:
         ``(workspace_id, prev_hash)`` unique constraint is the backstop). Never
         receives or stores a secret value.
         """
-        # Serialize appends for this workspace within the transaction.
+        # Serialize appends for this workspace within the transaction. Use the
+        # 64-bit hashtextextended (PR #686 standard — hashtext's 32-bit space
+        # birthday-collides across workspaces) with a feature-namespaced key so
+        # secret-audit locks never share a value with quota/connector locks.
         await self.db.execute(
-            text("SELECT pg_advisory_xact_lock(hashtext(:k))"),
-            {"k": str(workspace_id)},
+            text("SELECT pg_advisory_xact_lock(hashtextextended(:k, 0))"),
+            {"k": f"secret_audit:{workspace_id}"},
         )
 
         prev_row = await self.db.execute(
@@ -138,20 +141,17 @@ class SecretStoreService:
         prev_hash = prev_row.scalar_one_or_none() or AUDIT_GENESIS_HASH
 
         created_at = utcnow()
-        meta_canonical = json.dumps(req_meta or {}, sort_keys=True, separators=(",", ":"))
-        payload = "|".join(
-            [
-                prev_hash,
-                str(workspace_id),
-                str(secret_id or ""),
-                str(version_id or ""),
-                recipient_identity or "",
-                actor_user_id,
-                action,
-                result,
-                created_at.isoformat(),
-                meta_canonical,
-            ]
+        payload = self._audit_payload(
+            prev_hash=prev_hash,
+            workspace_id=workspace_id,
+            secret_id=secret_id,
+            version_id=version_id,
+            recipient_identity=recipient_identity,
+            actor_user_id=actor_user_id,
+            action=action,
+            result=result,
+            created_at=created_at,
+            req_meta=req_meta,
         )
         entry_hash = hmac_sha256_hex(payload, get_settings().audit_hmac_key)
 
@@ -171,6 +171,88 @@ class SecretStoreService:
         self.db.add(entry)
         await self.db.flush()
         return entry
+
+    @staticmethod
+    def _audit_payload(
+        *,
+        prev_hash: str,
+        workspace_id: UUID,
+        secret_id: UUID | None,
+        version_id: UUID | None,
+        recipient_identity: str | None,
+        actor_user_id: str,
+        action: str,
+        result: str,
+        created_at: Any,
+        req_meta: dict | None,
+    ) -> str:
+        """Canonical, length-safe HMAC input for one audit entry.
+
+        JSON-encodes the chained fields (rather than a ``|``-join) so a value
+        containing a delimiter cannot shift field boundaries once ``req_meta``
+        carries free-form tool/source metadata. Used identically by append and
+        by :meth:`verify_audit_chain`, so the chain is recomputable.
+        """
+        return json.dumps(
+            [
+                prev_hash,
+                str(workspace_id),
+                str(secret_id or ""),
+                str(version_id or ""),
+                recipient_identity or "",
+                actor_user_id,
+                action,
+                result,
+                created_at.isoformat(),
+                req_meta or {},
+            ],
+            sort_keys=True,
+            separators=(",", ":"),
+            default=str,
+        )
+
+    async def verify_audit_chain(self, *, workspace_id: UUID) -> dict[str, Any]:
+        """Recompute and verify a workspace's tamper-evident audit chain.
+
+        Walks entries id-ascending, recomputing ``entry_hash`` from the stored
+        fields with the same payload construction as the append path, and checks
+        the ``prev_hash`` linkage (genesis for the first). Returns
+        ``{valid, entries, head}`` on success, or ``{valid: False, broken_at,
+        reason}`` at the first entry that fails — catching any out-of-band field
+        edit that left ``entry_hash`` stale. This is the verifier that makes the
+        chain's tamper-evidence usable (not merely latent).
+        """
+        rows = await self.db.execute(
+            select(SecretAccessLog)
+            .where(SecretAccessLog.workspace_id == workspace_id)
+            .order_by(SecretAccessLog.id.asc())
+        )
+        entries = list(rows.scalars().all())
+        key = get_settings().audit_hmac_key
+        expected_prev = AUDIT_GENESIS_HASH
+        for e in entries:
+            if e.prev_hash != expected_prev:
+                return {"valid": False, "broken_at": e.id, "reason": "prev_hash_mismatch"}
+            payload = self._audit_payload(
+                prev_hash=e.prev_hash,
+                workspace_id=e.workspace_id,
+                secret_id=e.secret_id,
+                version_id=e.version_id,
+                recipient_identity=e.recipient_identity,
+                actor_user_id=e.actor_user_id,
+                action=e.action,
+                result=e.result,
+                created_at=e.created_at,
+                req_meta=e.req_meta,
+            )
+            if hmac_sha256_hex(payload, key) != e.entry_hash:
+                return {"valid": False, "broken_at": e.id, "reason": "entry_hash_mismatch"}
+            expected_prev = e.entry_hash
+        return {
+            "valid": True,
+            "entries": len(entries),
+            "head": expected_prev if entries else AUDIT_GENESIS_HASH,
+        }
 
     # -------------------------------------------------------------- pubkeys
     @staticmethod
@@ -386,6 +468,8 @@ class SecretStoreService:
         # granted set exactly (no recipient who can decrypt but lacks a grant,
         # and no grant whose recipient cannot decrypt this ciphertext).
         granted_fps = {p.fingerprint for p in pubkeys}
+        if len(recipients_snapshot) != len(set(recipients_snapshot)):
+            raise ValueError("recipients_snapshot contains duplicate fingerprints")
         snapshot_fps = set(recipients_snapshot or [])
         if snapshot_fps != granted_fps:
             raise ValueError(
@@ -588,6 +672,10 @@ class SecretStoreService:
             .where(
                 SecretGrant.secret_id == secret.id,
                 SecretGrant.revoked_at.is_(None),
+                # Defense-in-depth: the most security-critical query is self-
+                # contained — even though grants are validated same-workspace at
+                # put time, re-assert the workspace on the recipient here.
+                RecipientPubkey.workspace_id == workspace_id,
                 RecipientPubkey.identity_id == actor_user_id,
                 RecipientPubkey.status == PUBKEY_STATUS_ACTIVE,
             )

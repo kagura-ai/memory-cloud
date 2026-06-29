@@ -13,7 +13,12 @@ import uuid
 
 import pytest
 
-from mcp_server.tools import _TOOLS_WITHOUT_CONTEXT_ID, _build_registry, get_tool_definitions
+from mcp_server.tools import (
+    _RATE_LIMIT_EXEMPT_TOOLS,
+    _TOOLS_WITHOUT_CONTEXT_ID,
+    _build_registry,
+    get_tool_definitions,
+)
 from mcp_server.tools.secrets import (
     handle_secret_get,
     handle_secret_list,
@@ -44,6 +49,15 @@ def test_secret_tools_registered_and_defined():
         assert name in defs, f"{name} missing from definitions"
         # Workspace-scoped, not memory-context-scoped.
         assert name in _TOOLS_WITHOUT_CONTEXT_ID
+
+
+def test_secret_tools_are_rate_limit_exempt():
+    # Available on every plan (incl. free): secret ops carry no embedding/LLM
+    # cost, so the memory daily quota must not lock a user out of their secrets.
+    for name in SECRET_TOOLS:
+        assert name in _RATE_LIMIT_EXEMPT_TOOLS, (
+            f"{name} should be exempt from the memory rate limit"
+        )
 
 
 def test_definitions_have_required_schema_fields():
@@ -119,3 +133,43 @@ async def test_revoke_grant_validates_uuid():
         )
     )
     assert out["error"] == "invalid_arguments"
+
+
+@pytest.mark.asyncio
+async def test_owner_admin_tools_reject_member(monkeypatch):
+    """secret_put/list/revoke_grant return 'forbidden' for a non-admin role.
+
+    Stub the workspace-role lookup (member) and the DB session (the handler
+    returns before touching it), so the deny path is tested without a live DB.
+    """
+    from unittest.mock import AsyncMock
+
+    import mcp_server.tools.secrets as mod
+
+    async def _fake_db():
+        yield None  # the role check is stubbed; db is never used before the deny
+
+    monkeypatch.setattr(mod, "get_db", lambda: _fake_db())
+    monkeypatch.setattr(mod, "_get_workspace_member_role", AsyncMock(return_value="member"))
+
+    ws = uuid.uuid4()
+    put = _decode(
+        await handle_secret_put(
+            {
+                "name": "n",
+                "ciphertext": "c",
+                "recipients_snapshot": ["fp"],
+                "grant_pubkey_ids": [str(uuid.uuid4())],
+            },
+            "u",
+            ws,
+        )
+    )
+    assert put["error"] == "forbidden"
+    assert _decode(await handle_secret_list({}, "u", ws))["error"] == "forbidden"
+    rev = _decode(
+        await handle_secret_revoke_grant(
+            {"name": "n", "recipient_pubkey_id": str(uuid.uuid4())}, "u", ws
+        )
+    )
+    assert rev["error"] == "forbidden"

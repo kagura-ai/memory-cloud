@@ -203,10 +203,13 @@ def upgrade() -> None:
     op.create_index("ix_secret_access_log_ws_id", "secret_access_log", ["workspace_id", "id"])
     op.create_index("ix_secret_access_log_secret_id", "secret_access_log", ["secret_id"])
 
-    # DB-level append-only enforcement (#1128 gate1 finding 1). Row triggers do
-    # NOT fire on TRUNCATE, so test teardown can still TRUNCATE the table; a
-    # malicious in-band UPDATE/DELETE is blocked. The hash chain catches any
-    # out-of-band mutation that bypasses the trigger.
+    # DB-level append-only enforcement (#1128 gate1 finding 1). A row-level guard
+    # blocks in-band UPDATE/DELETE, and a statement-level guard blocks TRUNCATE —
+    # otherwise a TRUNCATE would silently reset the per-workspace hash chain back
+    # to genesis with no forensic residue. Both reuse one guard function (TG_OP
+    # names the blocked op). The chain catches any out-of-band mutation that
+    # bypasses the triggers; an offsite checkpoint of each workspace's head hash
+    # is the defense against a DDL-privileged DROP of the triggers themselves.
     op.execute(
         sa.text(
             """
@@ -230,9 +233,19 @@ def upgrade() -> None:
             """
         )
     )
+    op.execute(
+        sa.text(
+            """
+            CREATE TRIGGER secret_access_log_no_truncate
+            BEFORE TRUNCATE ON secret_access_log
+            FOR EACH STATEMENT EXECUTE FUNCTION secret_access_log_no_mutate();
+            """
+        )
+    )
 
 
 def downgrade() -> None:
+    op.execute(sa.text("DROP TRIGGER IF EXISTS secret_access_log_no_truncate ON secret_access_log"))
     op.execute(sa.text("DROP TRIGGER IF EXISTS secret_access_log_append_only ON secret_access_log"))
     op.execute(sa.text("DROP FUNCTION IF EXISTS secret_access_log_no_mutate()"))
     op.drop_index("ix_secret_access_log_secret_id", table_name="secret_access_log")

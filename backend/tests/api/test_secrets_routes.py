@@ -54,9 +54,16 @@ async def ctx(db_session):
         "admin": admin,
         "owner": owner,
     }
-    # Audit log is append-only; TRUNCATE bypasses the migration's row trigger
-    # (the documented test-cleanup escape), so cleanup works with or without it.
+    # Audit log is append-only (row UPDATE/DELETE + TRUNCATE triggers); drop the
+    # triggers (IF EXISTS — harmless when absent) before TRUNCATE so cleanup works
+    # whether or not the migration applied them to this DB.
     await db_session.rollback()
+    await db_session.execute(
+        text("DROP TRIGGER IF EXISTS secret_access_log_no_truncate ON secret_access_log")
+    )
+    await db_session.execute(
+        text("DROP TRIGGER IF EXISTS secret_access_log_append_only ON secret_access_log")
+    )
     await db_session.execute(text("TRUNCATE secret_access_log"))
     await db_session.execute(text("DELETE FROM workspaces WHERE id = :w"), {"w": str(ws_id)})
     await db_session.commit()
@@ -182,3 +189,34 @@ async def test_revoke_grant_flags_rotation(ctx):
         db=ctx["db"],
     )
     assert resp.rotation_needed is True
+
+
+def test_route_auth_gating_wiring():
+    """Each endpoint is wired to the correct workspace auth dependency (review W6).
+
+    Static pin so a regression that, e.g., loosens approve_pubkey from owner-only
+    to member is caught — the gating itself is the shared, separately-tested
+    require_workspace_* dependency chain.
+    """
+    import inspect
+
+    from api.routes import secrets as r
+    from auth.dependencies import WorkspaceAdmin, WorkspaceMember, WorkspaceOwner
+
+    def ann(fn, param):
+        # eval_str resolves PEP 563 string annotations (the route module uses
+        # `from __future__ import annotations`) back to the alias object.
+        return inspect.signature(fn, eval_str=True).parameters[param].annotation
+
+    # Owner-only: the pubkey trust gate (TOFU).
+    assert ann(r.approve_pubkey, "owner") is WorkspaceOwner
+    assert ann(r.revoke_pubkey, "owner") is WorkspaceOwner
+    # Owner/admin: secret management.
+    assert ann(r.put_secret, "user") is WorkspaceAdmin
+    assert ann(r.list_secrets, "user") is WorkspaceAdmin
+    assert ann(r.revoke_grant, "user") is WorkspaceAdmin
+    assert ann(r.list_pubkeys, "user") is WorkspaceAdmin
+    # Member: register own pubkey / list own / fetch (service grant check gates value).
+    assert ann(r.register_pubkey, "user") is WorkspaceMember
+    assert ann(r.list_my_pubkeys, "user") is WorkspaceMember
+    assert ann(r.fetch_secret, "user") is WorkspaceMember

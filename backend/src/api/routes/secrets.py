@@ -214,7 +214,7 @@ async def approve_pubkey(
             workspace_id=workspace_id, actor_user_id=user_id, pubkey_id=pubkey_id
         )
     except SecretNotFound as e:
-        raise NotFoundException(str(e)) from e
+        raise NotFoundException("Recipient pubkey") from e
     except ValueError as e:
         raise BadRequestError(str(e)) from e
     await db.commit()
@@ -235,7 +235,7 @@ async def revoke_pubkey(
             workspace_id=workspace_id, actor_user_id=user_id, pubkey_id=pubkey_id
         )
     except SecretNotFound as e:
-        raise NotFoundException(str(e)) from e
+        raise NotFoundException("Recipient pubkey") from e
     except ValueError as e:
         raise BadRequestError(str(e)) from e
     await db.commit()
@@ -301,12 +301,12 @@ async def revoke_grant(
             recipient_pubkey_id=data.recipient_pubkey_id,
         )
     except SecretNotFound as e:
-        raise NotFoundException(str(e)) from e
+        raise NotFoundException("Secret or active grant") from e
     await db.commit()
     rows = await svc.list_secrets(workspace_id=_ws_id(user))
     match = next((r for r in rows if r["name"] == data.name), None)
     if match is None:  # pragma: no cover - defensive (revoke just succeeded)
-        raise NotFoundException("Secret not found")
+        raise NotFoundException("Secret")
     return SecretMetaResponse(**match)
 
 
@@ -337,5 +337,5 @@ async def fetch_secret(
     except SecretAccessDenied as e:
         raise AuthorizationError(str(e)) from e
     except SecretNotFound as e:
-        raise NotFoundException(str(e)) from e
+        raise NotFoundException("Secret version") from e
     return SecretValueResponse(**payload)

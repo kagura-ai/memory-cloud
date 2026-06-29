@@ -85,6 +85,16 @@ _RATE_LIMIT_EXEMPT_TOOLS = frozenset(
         "list_tags",  # Issue #614: read-only tag discovery
         "recall_upcoming",  # Issue #877: deterministic read-only Time Memory window query (no Hebbian write)
         "load_pinned",  # Issue #886: deterministic always-load read (must run every turn; no Hebbian write)
+        # Issue #1128: secret-store tools carry NO embedding/LLM cost (the memory
+        # quota's cost driver) and must stay callable on EVERY plan — an agent has
+        # to be able to fetch its deploy key even after heavy recall use. Available
+        # on all plans (free/basic/pro); workspace-role gating + the append-only
+        # audit log bound abuse, not the memory rate limit.
+        "secret_register_pubkey",
+        "secret_put",
+        "secret_get",
+        "secret_list",
+        "secret_revoke_grant",
     }
 )
 

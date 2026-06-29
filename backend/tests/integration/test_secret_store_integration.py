@@ -18,11 +18,13 @@ import uuid
 import pytest
 import pytest_asyncio
 from sqlalchemy import select, text
+from sqlalchemy.exc import IntegrityError
 
 import models.secrets  # noqa: F401  — register tables for create_all
 from models.auth import Workspace
 from models.secrets import (
     PUBKEY_STATUS_ACTIVE,
+    PUBKEY_STATUS_PENDING,
     RecipientPubkey,
     Secret,
     SecretAccessLog,
@@ -31,6 +33,7 @@ from models.secrets import (
 )
 from services.secret_store_service import (
     SecretAccessDenied,
+    SecretNotFound,
     SecretStoreService,
     fingerprint_pubkey,
 )
@@ -47,6 +50,23 @@ CIPHERTEXT = (
 )
 
 
+async def _wipe_audit(db):
+    """Clear the append-only audit table for cleanup.
+
+    The migration installs a row UPDATE/DELETE trigger AND a statement TRUNCATE
+    trigger; if either is present (e.g. the drift/migration test applied them to
+    this DB), DELETE and TRUNCATE are both blocked. Drop them first (IF EXISTS —
+    harmless when absent), then TRUNCATE.
+    """
+    await db.execute(
+        text("DROP TRIGGER IF EXISTS secret_access_log_no_truncate ON secret_access_log")
+    )
+    await db.execute(
+        text("DROP TRIGGER IF EXISTS secret_access_log_append_only ON secret_access_log")
+    )
+    await db.execute(text("TRUNCATE secret_access_log"))
+
+
 @pytest_asyncio.fixture(loop_scope="session")
 async def ws(db_session):
     """A fresh workspace per test; teardown cascades the secret tables."""
@@ -57,12 +77,9 @@ async def ws(db_session):
     await db_session.flush()
     yield workspace_id
     # Cleanup: get_secret() commits, so rows may be durable. Delete by workspace
-    # (CASCADE removes pubkeys/secrets/versions/grants); the audit log has no FK
-    # and is append-only — if the migration's trigger is present (e.g. after the
-    # drift test applied it to this DB) DELETE is blocked, so TRUNCATE it (row
-    # triggers do not fire on TRUNCATE — the documented test-cleanup escape).
+    # (CASCADE removes pubkeys/secrets/versions/grants); the audit log is append-only.
     await db_session.rollback()
-    await db_session.execute(text("TRUNCATE secret_access_log"))
+    await _wipe_audit(db_session)
     await db_session.execute(text("DELETE FROM workspaces WHERE id = :w"), {"w": str(workspace_id)})
     await db_session.commit()
 
@@ -288,13 +305,14 @@ async def test_list_secrets_never_returns_ciphertext(db_session, ws):
     assert CIPHERTEXT not in str(entry)
 
 
-async def test_audit_log_append_only_trigger(db_session, ws):
-    """The migration's BEFORE UPDATE OR DELETE trigger blocks row mutation.
+async def test_audit_log_append_only_triggers(db_session, ws):
+    """The migration's triggers block UPDATE, DELETE, AND TRUNCATE.
 
-    create_all does not install triggers, so we install the migration's DDL
-    here, then assert UPDATE and DELETE on a logged row are rejected.
+    create_all does not install triggers, so we install the migration's DDL here,
+    then assert in-band mutation (UPDATE/DELETE) and a full-table TRUNCATE — which
+    would silently reset the hash chain to genesis — are all rejected.
     """
-    # Install the same trigger the migration ships.
+    # Install the same triggers the migration ships (row UPDATE/DELETE + TRUNCATE).
     await db_session.execute(
         text(
             """
@@ -321,6 +339,18 @@ async def test_audit_log_append_only_trigger(db_session, ws):
             """
         )
     )
+    await db_session.execute(
+        text("DROP TRIGGER IF EXISTS secret_access_log_no_truncate ON secret_access_log")
+    )
+    await db_session.execute(
+        text(
+            """
+            CREATE TRIGGER secret_access_log_no_truncate
+            BEFORE TRUNCATE ON secret_access_log
+            FOR EACH STATEMENT EXECUTE FUNCTION secret_access_log_no_mutate();
+            """
+        )
+    )
     await db_session.commit()
     try:
         svc = SecretStoreService(db_session)
@@ -339,8 +369,15 @@ async def test_audit_log_append_only_trigger(db_session, ws):
                 text("DELETE FROM secret_access_log WHERE workspace_id = :w"), {"w": str(ws)}
             )
         await db_session.rollback()
+
+        with pytest.raises(Exception, match="append-only"):
+            await db_session.execute(text("TRUNCATE secret_access_log"))
+        await db_session.rollback()
     finally:
-        # Drop the trigger so other tests / the fixture teardown can DELETE rows.
+        # Drop the triggers so the fixture teardown can wipe rows.
+        await db_session.execute(
+            text("DROP TRIGGER IF EXISTS secret_access_log_no_truncate ON secret_access_log")
+        )
         await db_session.execute(
             text("DROP TRIGGER IF EXISTS secret_access_log_append_only ON secret_access_log")
         )
@@ -403,3 +440,222 @@ async def test_stored_secret_not_enqueued_for_embedding(db_session, ws):
     # And the SecretVersion ciphertext is not stored in any Memory row.
     mem_rows = await db_session.execute(select(Memory).where(Memory.summary == CIPHERTEXT))
     assert mem_rows.scalar_one_or_none() is None
+
+
+# --- all-plans availability (no SKU gate) --------------------------------------
+
+
+async def test_full_flow_works_on_free_plan(db_session):
+    """The secret store has NO plan/SKU gate — the full flow works on 'free'.
+
+    Gating is by workspace role only; nothing in the service or routes branches
+    on plan_name. A free-tier workspace (even with the smallest API limit)
+    completes register → approve → put → get. (The MCP rate-limit exemption that
+    keeps it usable under a low daily quota is pinned in test_secrets_tools.py.)
+    """
+    ws_id = uuid.uuid4()
+    db_session.add(
+        Workspace(
+            id=ws_id,
+            name=f"free-ws-{ws_id}",
+            owner_user_id="owner-1",
+            plan_name="free",
+            daily_api_limit=1,
+        )
+    )
+    await db_session.flush()
+    try:
+        svc = SecretStoreService(db_session)
+        pk = await _register_and_approve(svc, ws_id, "alice", PUBKEY_A)
+        await svc.put_secret(
+            workspace_id=ws_id,
+            actor_user_id="owner-1",
+            name="cloudflare/api-token",
+            ciphertext=CIPHERTEXT,
+            recipients_snapshot=[fingerprint_pubkey(PUBKEY_A)],
+            grant_pubkey_ids=[pk.id],
+        )
+        got = await svc.get_secret(
+            workspace_id=ws_id, actor_user_id="alice", name="cloudflare/api-token"
+        )
+        assert got["ciphertext"] == CIPHERTEXT
+    finally:
+        await db_session.rollback()
+        await _wipe_audit(db_session)
+        await db_session.execute(text("DELETE FROM workspaces WHERE id = :w"), {"w": str(ws_id)})
+        await db_session.commit()
+
+
+# --- audit chain verification & integrity (review W2/W4/W5/W7/W8) --------------
+
+
+async def test_verify_audit_chain_valid_then_detects_tampering(db_session, ws):
+    """verify_audit_chain recomputes the HMAC chain and catches a stale entry_hash.
+
+    The 'valid is True' assertion also proves created_at round-trips (verify
+    recomputes using the stored created_at.isoformat()).
+    """
+    svc = SecretStoreService(db_session)
+    pk = await _register_and_approve(svc, ws, "alice", PUBKEY_A)
+    await svc.put_secret(
+        workspace_id=ws,
+        actor_user_id="owner-1",
+        name="db/pw",
+        ciphertext=CIPHERTEXT,
+        recipients_snapshot=[fingerprint_pubkey(PUBKEY_A)],
+        grant_pubkey_ids=[pk.id],
+    )
+    await svc.get_secret(workspace_id=ws, actor_user_id="alice", name="db/pw")
+
+    ok = await svc.verify_audit_chain(workspace_id=ws)
+    assert ok["valid"] is True
+    assert ok["entries"] >= 4
+
+    # Tamper a chained field out-of-band (drop the append-only triggers first so
+    # the UPDATE is possible — simulating an attacker who bypassed them).
+    await db_session.execute(
+        text("DROP TRIGGER IF EXISTS secret_access_log_no_truncate ON secret_access_log")
+    )
+    await db_session.execute(
+        text("DROP TRIGGER IF EXISTS secret_access_log_append_only ON secret_access_log")
+    )
+    await db_session.execute(
+        text(
+            "UPDATE secret_access_log SET recipient_identity = 'evil' "
+            "WHERE id = (SELECT min(id) FROM secret_access_log WHERE workspace_id = :w)"
+        ),
+        {"w": str(ws)},
+    )
+    await db_session.commit()
+
+    bad = await svc.verify_audit_chain(workspace_id=ws)
+    assert bad["valid"] is False
+    assert bad["reason"] == "entry_hash_mismatch"
+
+
+async def test_put_multi_recipient_integrity(db_session, ws):
+    """Grant ⇄ recipients_snapshot equality holds with >1 recipient (both directions)."""
+    svc = SecretStoreService(db_session)
+    pk_a = await _register_and_approve(svc, ws, "alice", PUBKEY_A)
+    pk_b = await _register_and_approve(svc, ws, "bob", PUBKEY_B)
+    fp_a, fp_b = fingerprint_pubkey(PUBKEY_A), fingerprint_pubkey(PUBKEY_B)
+
+    # Both granted + both in snapshot → ok, two active grants, both can fetch.
+    await svc.put_secret(
+        workspace_id=ws,
+        actor_user_id="owner-1",
+        name="multi",
+        ciphertext=CIPHERTEXT,
+        recipients_snapshot=[fp_a, fp_b],
+        grant_pubkey_ids=[pk_a.id, pk_b.id],
+    )
+    listing = await svc.list_secrets(workspace_id=ws)
+    assert listing[0]["grant_count"] == 2
+    assert (await svc.get_secret(workspace_id=ws, actor_user_id="alice", name="multi"))[
+        "ciphertext"
+    ] == CIPHERTEXT
+    assert (await svc.get_secret(workspace_id=ws, actor_user_id="bob", name="multi"))[
+        "ciphertext"
+    ] == CIPHERTEXT
+
+    # Subset: grants=[A,B] but snapshot=[A] → reject (a grantee who can't decrypt).
+    with pytest.raises(ValueError, match="recipients_snapshot"):
+        await svc.put_secret(
+            workspace_id=ws,
+            actor_user_id="owner-1",
+            name="sub",
+            ciphertext=CIPHERTEXT,
+            recipients_snapshot=[fp_a],
+            grant_pubkey_ids=[pk_a.id, pk_b.id],
+        )
+    # Superset: grants=[A] but snapshot=[A,B] → reject (decrypts without a grant).
+    with pytest.raises(ValueError, match="recipients_snapshot"):
+        await svc.put_secret(
+            workspace_id=ws,
+            actor_user_id="owner-1",
+            name="sup",
+            ciphertext=CIPHERTEXT,
+            recipients_snapshot=[fp_a, fp_b],
+            grant_pubkey_ids=[pk_a.id],
+        )
+
+
+async def test_default_deny_wrong_recipient_and_inactive_pubkey(db_session, ws):
+    """Default-deny isolates the identity_id and pubkey-status predicates."""
+    svc = SecretStoreService(db_session)
+    pk_a = await _register_and_approve(svc, ws, "alice", PUBKEY_A)
+    await _register_and_approve(svc, ws, "bob", PUBKEY_B)  # bob approved but NOT granted
+    await svc.put_secret(
+        workspace_id=ws,
+        actor_user_id="owner-1",
+        name="s",
+        ciphertext=CIPHERTEXT,
+        recipients_snapshot=[fingerprint_pubkey(PUBKEY_A)],
+        grant_pubkey_ids=[pk_a.id],
+    )
+    # bob has an active pubkey but no grant → denied (isolates identity_id match).
+    with pytest.raises(SecretAccessDenied):
+        await svc.get_secret(workspace_id=ws, actor_user_id="bob", name="s")
+    # alice works while her pubkey is active.
+    await svc.get_secret(workspace_id=ws, actor_user_id="alice", name="s")
+
+    # Flip alice's pubkey to pending WITHOUT touching the grant → denied (isolates
+    # the status == ACTIVE predicate; recipient_pubkeys has no append-only trigger).
+    pk_a.status = PUBKEY_STATUS_PENDING
+    await db_session.flush()
+    with pytest.raises(SecretAccessDenied):
+        await svc.get_secret(workspace_id=ws, actor_user_id="alice", name="s")
+
+
+async def test_audit_chain_unique_constraint_prevents_fork(db_session, ws):
+    """uq_secret_access_log_ws_prev rejects a second writer on the same chain tip."""
+    db_session.add_all(
+        [
+            SecretAccessLog(
+                workspace_id=ws,
+                actor_user_id="a",
+                action="register",
+                result="ok",
+                prev_hash="0" * 64,
+                entry_hash="a" * 64,
+            ),
+            SecretAccessLog(
+                workspace_id=ws,
+                actor_user_id="b",
+                action="register",
+                result="ok",
+                prev_hash="0" * 64,
+                entry_hash="b" * 64,
+            ),
+        ]
+    )
+    with pytest.raises(IntegrityError):
+        await db_session.flush()
+    await db_session.rollback()
+
+
+async def test_get_missing_version_logs_denied_audit(db_session, ws):
+    """A grant-OK but missing-version get raises SecretNotFound AND commits a denied audit."""
+    svc = SecretStoreService(db_session)
+    pk = await _register_and_approve(svc, ws, "alice", PUBKEY_A)
+    await svc.put_secret(
+        workspace_id=ws,
+        actor_user_id="owner-1",
+        name="s",
+        ciphertext=CIPHERTEXT,
+        recipients_snapshot=[fingerprint_pubkey(PUBKEY_A)],
+        grant_pubkey_ids=[pk.id],
+    )
+    with pytest.raises(SecretNotFound):
+        await svc.get_secret(workspace_id=ws, actor_user_id="alice", name="s", version_number=2)
+
+    rows = await db_session.execute(
+        select(SecretAccessLog).where(
+            SecretAccessLog.workspace_id == ws,
+            SecretAccessLog.action == "get",
+            SecretAccessLog.result == "denied",
+        )
+    )
+    denied = list(rows.scalars().all())
+    assert len(denied) == 1
+    assert denied[0].secret_id is not None  # the secret was found; only the version was missing
