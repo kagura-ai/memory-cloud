@@ -57,6 +57,7 @@ import {
   X,
   Users,
   BarChart,
+  CreditCard,
   Gauge,
   ChevronDown,
   AlertTriangle,
@@ -178,6 +179,16 @@ const navigationGroups: NavGroup[] = [
     titleKey: "settings",
     collapsible: false,
     items: [
+      {
+        // Issue #1121: owner plan view + billing handoff. The page's data API
+        // (getWorkspacePlan) is owner-only (#246), so gate the nav entry to
+        // owner too — mirrors the other settings items and avoids a link that
+        // would 403 on click for member/viewer.
+        nameKey: "plan",
+        href: "/workspace/settings/plan",
+        icon: CreditCard,
+        requiredWorkspaceRole: WorkspaceRole.Owner,
+      },
       {
         nameKey: "workspaceSettings",
         href: "/workspace/settings/general",

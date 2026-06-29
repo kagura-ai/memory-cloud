@@ -92,6 +92,13 @@ describe("Sidebar", () => {
     expect(link).toHaveAttribute("aria-label", "kaguraLogoAria");
   });
 
+  it("shows the owner Plan link wired to the settings/plan route (#1121/#1126)", () => {
+    render(<Sidebar />);
+    // next-intl is mocked to echo the key, so the nav label is "plan".
+    const planLink = screen.getByRole("link", { name: "plan" });
+    expect(planLink).toHaveAttribute("href", "/workspace/settings/plan");
+  });
+
   it("user menu trigger button shows user name", () => {
     render(<Sidebar />);
     expect(screen.getByText("Test User")).toBeInTheDocument();
