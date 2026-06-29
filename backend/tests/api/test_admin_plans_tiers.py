@@ -77,7 +77,7 @@ def test_list_plan_tiers_serializes_pro_only_features(client: TestClient) -> Non
     assert pro["features"] == sorted(pro["features"])
 
     # PRO-exclusive features
-    for pro_only in ("memory_agent", "memory_analysis", "public_contexts", "shared_contexts"):
+    for pro_only in ("memory_analysis", "public_contexts", "shared_contexts"):
         assert pro_only in pro["features"]
         assert pro_only not in free["features"]
         assert pro_only not in basic["features"]

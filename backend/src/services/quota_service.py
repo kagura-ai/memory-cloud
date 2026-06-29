@@ -143,7 +143,7 @@ class QuotaService:
 
         Args:
             workspace_id: Workspace ID
-            feature: Feature name (e.g., 'reranking', 'oauth', 'memory_agent')
+            feature: Feature name (e.g., 'reranking', 'oauth', 'team_invitations')
             raise_on_denied: If True, raise FeatureNotAvailableError
 
         Returns:
@@ -670,7 +670,7 @@ class QuotaService:
         Returns:
             Dict with quota status:
                 - memory: {current, limit, percentage, warning, exceeded}
-                - features: {reranking, oauth, memory_agent} (bool)
+                - features: {reranking, oauth} (bool)
         """
         # Get workspace
         workspace_result = await self.db.execute(
@@ -721,7 +721,6 @@ class QuotaService:
             "features": {
                 "reranking": "reranking" in plan.features,
                 "oauth": "oauth" in plan.features,
-                "memory_agent": "memory_agent" in plan.features,
             },
             "plan": {
                 "name": workspace.plan_name,

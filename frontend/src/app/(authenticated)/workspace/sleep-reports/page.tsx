@@ -10,6 +10,8 @@
  */
 
 import { useCallback } from "react";
+import { useRouter } from "next/navigation";
+import { Moon } from "lucide-react";
 import { useTranslations } from "next-intl";
 import {
   SleepReportsList,
@@ -18,13 +20,21 @@ import {
 import { PageContainer } from "@/components/common/PageContainer";
 import { PageHeader } from "@/components/common/PageHeader";
 import { ErrorBanner } from "@/components/common/ErrorBanner";
+import { EmptyState } from "@/components/ui/empty-state";
 import { useWorkspace } from "@/contexts/WorkspaceContext";
 import { hasWorkspaceRole, WorkspaceRole } from "@/lib/auth/rbac";
 import { fetchWorkspaceSleepReports } from "@/lib/api";
 
 export default function WorkspaceSleepReportsPage() {
   const t = useTranslations("workspace");
+  const router = useRouter();
   const { currentWorkspace, currentWorkspaceId, loading } = useWorkspace();
+
+  // Sleep Maintenance is Pro-only (sleep_enabled_contexts_limit = 0 on
+  // free/basic). Mirror the resources page: keep the sidebar entry, gate the
+  // page with an upgrade CTA that routes to the Plan page (#1137).
+  const planName = currentWorkspace?.plan_name;
+  const isProGated = !loading && planName !== undefined && planName !== "pro";
 
   const allowed = hasWorkspaceRole(
     currentWorkspace?.current_user_role,
@@ -42,6 +52,24 @@ export default function WorkspaceSleepReportsPage() {
       <PageContainer>
         <PageHeader title={t("sleepReports.title")} />
         <ErrorBanner error={t("sleepReports.errors.noWorkspaceSelected")} />
+      </PageContainer>
+    );
+  }
+
+  if (isProGated) {
+    return (
+      <PageContainer>
+        <PageHeader
+          title={t("sleepReports.title")}
+          description={t("sleepReports.description")}
+        />
+        <EmptyState
+          icon={Moon}
+          title={t("sleepReports.planGate.title")}
+          description={t("sleepReports.planGate.description")}
+          actionLabel={t("sleepReports.planGate.action")}
+          onAction={() => router.push("/workspace/settings/plan")}
+        />
       </PageContainer>
     );
   }

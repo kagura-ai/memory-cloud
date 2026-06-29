@@ -1238,6 +1238,11 @@
     "sleepReports": {
       "title": "Sleep レポート",
       "description": "このワークスペースの Sleep Maintenance 実行履歴を確認します",
+      "planGate": {
+        "title": "Sleep Maintenance はプロ機能です",
+        "description": "プロにアップグレードすると Sleep Maintenance(自動メモリ整理)が有効になり、レポートを閲覧できます。",
+        "action": "プロにアップグレード"
+      },
       "actions": {
         "back": "一覧に戻る"
       },

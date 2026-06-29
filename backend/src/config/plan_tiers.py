@@ -181,7 +181,6 @@ PLAN_PRO = PlanTier(
             "api_keys",
             "reranking",
             "oauth",
-            "memory_agent",
             "team_invitations",  # Issue #165: Team collaboration
             "shared_contexts",  # Issue #165: Shared contexts with role-based access
             "public_contexts",  # Issue #238: Public contexts
@@ -203,7 +202,6 @@ FEATURE_MIN_PLANS: dict[str, str] = {
     "api_keys": "free",
     "reranking": "basic",
     "oauth": "free",  # Free plan includes OAuth (updated from basic)
-    "memory_agent": "pro",
     "team_invitations": "pro",  # Issue #165: Team collaboration requires Pro
     "shared_contexts": "pro",  # Issue #165: Shared contexts require Pro
     "public_contexts": "pro",  # Issue #242: Public contexts require PRO only

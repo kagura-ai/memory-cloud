@@ -178,7 +178,6 @@ async def get_available_plans(
         "api_keys": "API Keys",
         "reranking": "Search Reranking",
         "oauth": "OAuth Applications",
-        "memory_agent": "Memory Agent",
         "team_invitations": "Team Invitations",
         "shared_contexts": "Shared Contexts",
     }

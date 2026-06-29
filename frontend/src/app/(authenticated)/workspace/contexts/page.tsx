@@ -1392,15 +1392,17 @@ export default function ContextsPage() {
                 Upgrade to create more contexts
               </p>
               <p className="text-sm text-blue-800 dark:text-blue-200">
-                Basic plan: <strong>10 contexts</strong>
+                Basic plan: <strong>3 contexts</strong>
                 <br />
-                Pro plan: <strong>Unlimited contexts</strong>
+                Pro plan: <strong>20 contexts</strong>
               </p>
             </div>
           </AlertDialogHeader>
           <AlertDialogFooter>
             <AlertDialogCancel>Cancel</AlertDialogCancel>
-            <AlertDialogAction onClick={() => router.push("/admin/plans")}>
+            <AlertDialogAction
+              onClick={() => router.push("/workspace/settings/plan")}
+            >
               View Plans
             </AlertDialogAction>
           </AlertDialogFooter>

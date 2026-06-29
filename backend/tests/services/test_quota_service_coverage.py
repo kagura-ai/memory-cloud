@@ -249,16 +249,16 @@ class TestCheckFeatureAccess:
         assert error is None
 
     async def test_feature_denied_surfaces_required_plan(self, db_session):
-        """'memory_agent' requires Pro; free workspace is denied and the
+        """'team_invitations' requires Pro; free workspace is denied and the
         message names the Pro display name from the registry."""
         ws = await _make_workspace(db_session, "free")
         service = QuotaService(db_session)
         pro_display = get_plan_tier("pro").display_name
 
-        has_access, error = await service.check_feature_access(ws.id, "memory_agent")
+        has_access, error = await service.check_feature_access(ws.id, "team_invitations")
 
         assert has_access is False
-        assert "memory_agent" in error
+        assert "team_invitations" in error
         assert "free" in error
         assert pro_display in error
 
@@ -281,9 +281,9 @@ class TestCheckFeatureAccess:
         service = QuotaService(db_session)
 
         with pytest.raises(FeatureNotAvailableError) as exc:
-            await service.check_feature_access(ws.id, "memory_agent", raise_on_denied=True)
+            await service.check_feature_access(ws.id, "team_invitations", raise_on_denied=True)
 
-        assert "memory_agent" in str(exc.value)
+        assert "team_invitations" in str(exc.value)
 
     async def test_feature_workspace_not_found(self, db_session):
         """Missing workspace → (False, 'not found')."""
@@ -492,7 +492,6 @@ class TestGetQuotaStatus:
         # Free plan features snapshot.
         assert status["features"]["oauth"] is True
         assert status["features"]["reranking"] is False
-        assert status["features"]["memory_agent"] is False
         assert status["plan"]["name"] == "free"
         assert status["plan"]["display_name"] == get_plan_tier("free").display_name
 
@@ -518,14 +517,13 @@ class TestGetQuotaStatus:
         assert status["memory"]["percentage"] == expected_pct
 
     async def test_pro_features_reflected(self, db_session):
-        """Pro plan exposes reranking + memory_agent in the feature snapshot."""
+        """Pro plan exposes reranking + oauth in the feature snapshot."""
         ws = await _make_workspace(db_session, "pro")
         service = QuotaService(db_session)
 
         status = await service.get_quota_status(ws.id)
 
         assert status["features"]["reranking"] is True
-        assert status["features"]["memory_agent"] is True
         assert status["features"]["oauth"] is True
 
     async def test_warning_and_exceeded_thresholds(self, db_session, monkeypatch):

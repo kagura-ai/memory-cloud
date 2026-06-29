@@ -24,11 +24,13 @@ from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 from pydantic import BaseModel
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from auth.dependencies import get_current_user, require_admin
 from db.base import get_db
 from models.api_base import TZAwareBaseModel
+from models.auth import Workspace
 from services.permission_service import PermissionService
 from services.sleep_reporter_service import SleepReporterService
 from utils.logger import get_logger
@@ -216,6 +218,24 @@ async def get_sleep_report_detail(
 # ============================================================================
 
 
+async def _enforce_sleep_plan(db: AsyncSession, workspace_id: UUID) -> None:
+    """Gate the Sleep-report view to plans that support Sleep Maintenance.
+
+    Sleep is Pro-only (``sleep_enabled_contexts_limit`` is 0 on free/basic;
+    addons cannot lift a zero-base tier per the #560/#569 zero-floor rule), so
+    a free/basic workspace can never produce a report. Block the view too —
+    mirroring Memory Analysis — rather than relying on an always-empty list
+    (defense-in-depth, #1137).
+    """
+    result = await db.execute(select(Workspace).where(Workspace.id == workspace_id))
+    workspace = result.scalar_one_or_none()
+    if workspace is None or workspace.effective_sleep_enabled_contexts_limit <= 0:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Sleep Maintenance reports require the Pro plan.",
+        )
+
+
 @router.get(
     "/workspaces/{workspace_id}/sleep-reports",
     response_model=SleepReportListResponse,
@@ -245,6 +265,7 @@ async def workspace_list_sleep_reports(
 
     perm_service = PermissionService(db)
     await perm_service.check_workspace_admin(user["user_id"], workspace_id)
+    await _enforce_sleep_plan(db, workspace_id)
 
     service = SleepReporterService(db)
     reports, total = await service.list_reports(
@@ -291,6 +312,7 @@ async def workspace_get_sleep_report_detail(
     """
     perm_service = PermissionService(db)
     await perm_service.check_workspace_admin(user["user_id"], workspace_id)
+    await _enforce_sleep_plan(db, workspace_id)
 
     service = SleepReporterService(db)
     result = await service.get_report_detail(report_id, workspace_id=workspace_id)
