@@ -31,9 +31,13 @@ ENV NODE_ENV=production
 ARG NEXT_PUBLIC_API_URL
 ARG NEXT_PUBLIC_APP_URL
 ARG NEXT_PUBLIC_ENABLE_GRAPH_VIZ
+# Optional per-deployment plan-tier label override (locale-aware JSON).
+# Unset → empty → the app keeps the OSS default S/M/L (lib/utils/planLabel.ts).
+ARG NEXT_PUBLIC_PLAN_DISPLAY_NAMES
 ENV NEXT_PUBLIC_API_URL=${NEXT_PUBLIC_API_URL}
 ENV NEXT_PUBLIC_APP_URL=${NEXT_PUBLIC_APP_URL}
 ENV NEXT_PUBLIC_ENABLE_GRAPH_VIZ=${NEXT_PUBLIC_ENABLE_GRAPH_VIZ}
+ENV NEXT_PUBLIC_PLAN_DISPLAY_NAMES=${NEXT_PUBLIC_PLAN_DISPLAY_NAMES}
 
 # Next.js collects completely anonymous telemetry data about general usage.
 # Learn more here: https://nextjs.org/telemetry
