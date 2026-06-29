@@ -460,7 +460,7 @@ export function Sidebar() {
         )}
         onClick={() => setIsOpen(false)}
       >
-        <KaguraLogo className="h-6 w-auto" variant="image" surface="dark" />
+        <KaguraLogo className="h-6 w-auto" variant="image" surface="auto" />
       </Link>
 
       {/* Workspace Switcher at Top - Minimal padding */}

@@ -22,8 +22,14 @@ interface KaguraLogoProps {
    * surface → white wordmark (e.g. the dashboard sidebar).
    */
   variant?: "full" | "mark" | "image";
-  /** For variant="image": tone of the surface behind the lockup. Default "light". */
-  surface?: "light" | "dark";
+  /**
+   * For variant="image": tone of the surface behind the lockup. Default
+   * "light". Use "auto" on theme-adaptive surfaces (e.g. the dashboard
+   * sidebar, which is light in light mode and dark in dark mode): the
+   * dark-ink wordmark shows in light mode and the white wordmark in dark
+   * mode, so the lockup never goes invisible-on-same-tone.
+   */
+  surface?: "light" | "dark" | "auto";
 }
 
 const PETALS = [
@@ -133,10 +139,15 @@ export function KaguraLogo({
     // scales with `className` and avoids the next/image <img> lint rule. On dark
     // surfaces (e.g. the sidebar) the black wordmark is swapped for a white one;
     // the mark PNG is theme-independent (transparent pinwheel) so it needs none.
-    const wordmark =
-      surface === "dark"
-        ? "/brand/kagura-wordmark-light.png"
-        : "/brand/kagura-wordmark.png";
+    const mark = (
+      <image
+        href="/brand/kagura-mark.png"
+        x="6"
+        y="8"
+        width="108"
+        height="104"
+      />
+    );
     return (
       <svg
         xmlns="http://www.w3.org/2000/svg"
@@ -145,14 +156,41 @@ export function KaguraLogo({
         role="img"
         aria-label="Kagura AI"
       >
-        <image
-          href="/brand/kagura-mark.png"
-          x="6"
-          y="8"
-          width="108"
-          height="104"
-        />
-        <image href={wordmark} x="146" y="23" width="408" height="102" />
+        {mark}
+        {surface === "auto" ? (
+          // Theme-adaptive: render both wordmarks and let dark mode toggle them
+          // (display:none vs visible) so neither goes same-tone-on-same-tone.
+          <>
+            <image
+              className="dark:hidden"
+              href="/brand/kagura-wordmark.png"
+              x="146"
+              y="23"
+              width="408"
+              height="102"
+            />
+            <image
+              className="hidden dark:block"
+              href="/brand/kagura-wordmark-light.png"
+              x="146"
+              y="23"
+              width="408"
+              height="102"
+            />
+          </>
+        ) : (
+          <image
+            href={
+              surface === "dark"
+                ? "/brand/kagura-wordmark-light.png"
+                : "/brand/kagura-wordmark.png"
+            }
+            x="146"
+            y="23"
+            width="408"
+            height="102"
+          />
+        )}
       </svg>
     );
   }
