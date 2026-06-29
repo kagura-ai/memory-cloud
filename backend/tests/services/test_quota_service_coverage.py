@@ -517,7 +517,8 @@ class TestGetQuotaStatus:
         assert status["memory"]["percentage"] == expected_pct
 
     async def test_pro_features_reflected(self, db_session):
-        """Pro plan exposes reranking + oauth in the feature snapshot."""
+        """A Pro workspace's feature snapshot reports reranking (Basic+) and
+        oauth (available on all tiers) as enabled."""
         ws = await _make_workspace(db_session, "pro")
         service = QuotaService(db_session)
 

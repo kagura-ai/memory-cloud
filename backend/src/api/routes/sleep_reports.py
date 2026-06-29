@@ -232,7 +232,10 @@ async def _enforce_sleep_plan(db: AsyncSession, workspace_id: UUID) -> None:
     if workspace is None or workspace.effective_sleep_enabled_contexts_limit <= 0:
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
-            detail="Sleep Maintenance reports require the Pro plan.",
+            detail=(
+                "Sleep Maintenance reports require the Pro plan. "
+                "Upgrade your plan to access Sleep Maintenance reports."
+            ),
         )
 
 
