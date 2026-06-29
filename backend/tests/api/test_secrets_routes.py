@@ -13,9 +13,9 @@ import uuid
 
 import pytest
 import pytest_asyncio
+from fastapi import Request
 from sqlalchemy import text
 
-import models.secrets  # noqa: F401  — register tables for create_all
 from api.routes.secrets import (
     PubkeyRegister,
     RevokeGrant,
@@ -27,6 +27,7 @@ from api.routes.secrets import (
     put_secret,
     register_pubkey,
     revoke_grant,
+    verify_audit_chain,
 )
 from models.auth import Workspace
 from services.secret_store_service import SecretStoreService, fingerprint_pubkey
@@ -34,6 +35,13 @@ from utils.exceptions import AuthorizationError, BadRequestError
 
 PUBKEY_A = "age1ql3z7hjy54pw3hyww5ayyfg7zqgvc7w3j2elw8zmrj2kg5sfn9aqmcac8p"
 CIPHERTEXT = "-----BEGIN AGE ENCRYPTED FILE-----\nopaque==\n-----END AGE ENCRYPTED FILE-----"
+
+
+def _req() -> Request:
+    """Minimal Starlette Request for direct route-function calls (audit req_meta)."""
+    return Request(
+        {"type": "http", "headers": [(b"user-agent", b"pytest")], "client": ("127.0.0.1", 0)}
+    )
 
 
 @pytest_asyncio.fixture(loop_scope="session")
@@ -93,6 +101,7 @@ async def test_put_before_approve_is_400(ctx):
                 recipients_snapshot=[fingerprint_pubkey(PUBKEY_A)],
                 grant_pubkey_ids=[pk.id],
             ),
+            _req(),
             ctx["admin"],
             svc=ctx["svc"],
             db=ctx["db"],
@@ -111,13 +120,14 @@ async def test_full_flow_register_approve_put_fetch(ctx):
             recipients_snapshot=[fingerprint_pubkey(PUBKEY_A)],
             grant_pubkey_ids=[pk.id],
         ),
+        _req(),
         ctx["admin"],
         svc=ctx["svc"],
         db=ctx["db"],
     )
     assert put.version_number == 1
 
-    val = await fetch_secret(SecretFetch(name="cf/token"), ctx["member"], svc=ctx["svc"])
+    val = await fetch_secret(SecretFetch(name="cf/token"), _req(), ctx["member"], svc=ctx["svc"])
     assert val.ciphertext == CIPHERTEXT
     assert val.alg == "age"
 
@@ -134,13 +144,14 @@ async def test_fetch_without_grant_is_403(ctx):
             recipients_snapshot=[fingerprint_pubkey(PUBKEY_A)],
             grant_pubkey_ids=[pk.id],
         ),
+        _req(),
         ctx["admin"],
         svc=ctx["svc"],
         db=ctx["db"],
     )
     bob = {"user_id": "bob", "current_workspace_id": ctx["ws"]}
     with pytest.raises(AuthorizationError):
-        await fetch_secret(SecretFetch(name="cf/token"), bob, svc=ctx["svc"])
+        await fetch_secret(SecretFetch(name="cf/token"), _req(), bob, svc=ctx["svc"])
 
 
 async def test_list_secrets_has_no_value_field(ctx):
@@ -155,6 +166,7 @@ async def test_list_secrets_has_no_value_field(ctx):
             recipients_snapshot=[fingerprint_pubkey(PUBKEY_A)],
             grant_pubkey_ids=[pk.id],
         ),
+        _req(),
         ctx["admin"],
         svc=ctx["svc"],
         db=ctx["db"],
@@ -178,6 +190,7 @@ async def test_revoke_grant_flags_rotation(ctx):
             recipients_snapshot=[fingerprint_pubkey(PUBKEY_A)],
             grant_pubkey_ids=[pk.id],
         ),
+        _req(),
         ctx["admin"],
         svc=ctx["svc"],
         db=ctx["db"],
@@ -189,6 +202,28 @@ async def test_revoke_grant_flags_rotation(ctx):
         db=ctx["db"],
     )
     assert resp.rotation_needed is True
+
+
+async def test_verify_audit_chain_endpoint(ctx):
+    pk = await register_pubkey(
+        PubkeyRegister(pubkey=PUBKEY_A), ctx["member"], svc=ctx["svc"], db=ctx["db"]
+    )
+    await approve_pubkey(pk.id, ctx["owner"], svc=ctx["svc"], db=ctx["db"])
+    await put_secret(
+        SecretPut(
+            name="cf/token",
+            ciphertext=CIPHERTEXT,
+            recipients_snapshot=[fingerprint_pubkey(PUBKEY_A)],
+            grant_pubkey_ids=[pk.id],
+        ),
+        _req(),
+        ctx["admin"],
+        svc=ctx["svc"],
+        db=ctx["db"],
+    )
+    resp = await verify_audit_chain(ctx["admin"], svc=ctx["svc"])
+    assert resp.valid is True
+    assert resp.entries >= 3  # register, approve, put
 
 
 def test_route_auth_gating_wiring():
@@ -216,6 +251,7 @@ def test_route_auth_gating_wiring():
     assert ann(r.list_secrets, "user") is WorkspaceAdmin
     assert ann(r.revoke_grant, "user") is WorkspaceAdmin
     assert ann(r.list_pubkeys, "user") is WorkspaceAdmin
+    assert ann(r.verify_audit_chain, "user") is WorkspaceAdmin
     # Member: register own pubkey / list own / fetch (service grant check gates value).
     assert ann(r.register_pubkey, "user") is WorkspaceMember
     assert ann(r.list_my_pubkeys, "user") is WorkspaceMember

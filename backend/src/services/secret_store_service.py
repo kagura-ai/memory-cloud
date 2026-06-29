@@ -29,7 +29,7 @@ import re
 from typing import Any
 from uuid import UUID
 
-from sqlalchemy import select, text
+from sqlalchemy import func, select, text, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from config.settings import get_settings
@@ -377,11 +377,16 @@ class SecretStoreService:
                 SecretGrant.revoked_at.is_(None),
             )
         )
-        for grant in grants.scalars().all():
+        affected = list(grants.scalars().all())
+        secret_ids = {g.secret_id for g in affected}
+        for grant in affected:
             grant.revoked_at = now
-            secret = await self.db.get(Secret, grant.secret_id)
-            if secret is not None:
-                secret.rotation_needed = True
+        if secret_ids:
+            # One bulk UPDATE to flag rotation on every affected secret, instead
+            # of a per-grant SELECT (a shared key may be granted on many secrets).
+            await self.db.execute(
+                update(Secret).where(Secret.id.in_(secret_ids)).values(rotation_needed=True)
+            )
         await self.db.flush()
 
         await self._append_audit(
@@ -476,6 +481,17 @@ class SecretStoreService:
                 "recipients_snapshot does not match the granted recipients "
                 "(the ciphertext must be encrypted to exactly the granted pubkeys)"
             )
+
+        # Serialize concurrent puts to the SAME secret so the get-or-create +
+        # version-number computation cannot race — otherwise two puts of the same
+        # name compute the same version_number / both insert the secret, and the
+        # loser surfaces a raw unique-constraint IntegrityError (an opaque 5xx).
+        # Released at commit. (The audit advisory lock is keyed differently, so
+        # these don't contend with audit appends.)
+        await self.db.execute(
+            text("SELECT pg_advisory_xact_lock(hashtextextended(:k, 0))"),
+            {"k": f"secret_put:{workspace_id}:{name}"},
+        )
 
         # Get-or-create the secret.
         existing = await self.db.execute(
@@ -584,14 +600,23 @@ class SecretStoreService:
         returned; a denied read raises :class:`SecretAccessDenied` after logging.
         The server returns opaque ciphertext and never decrypts it.
         """
-        secret = await self._resolve_readable_secret(workspace_id, actor_user_id, name)
-        if secret is None:
-            # Uniform denial — do not leak whether the secret exists.
+        secret = await self._load_active_secret(workspace_id, name)
+        authorized = secret is not None and await self._caller_has_active_grant(
+            secret.id, actor_user_id, workspace_id
+        )
+        if not authorized:
+            # Uniform denial to the CALLER (raise the same error whether the
+            # secret is missing or just ungranted) — but record secret_id in the
+            # server-side audit when the secret DOES exist, so an unauthorized
+            # probe of a real secret name is attributable for incident response
+            # and rotation. The audit is never returned to the caller, so this
+            # records nothing the caller doesn't already supply (the name).
             await self._append_audit(
                 workspace_id=workspace_id,
                 actor_user_id=actor_user_id,
                 action=AUDIT_ACTION_GET,
                 result=AUDIT_RESULT_DENIED,
+                secret_id=(secret.id if secret is not None else None),
                 recipient_identity=actor_user_id,
                 req_meta=req_meta,
             )
@@ -601,6 +626,7 @@ class SecretStoreService:
                 workspace_id=str(workspace_id),
                 actor=actor_user_id,
                 name=name,
+                secret_exists=secret is not None,
             )
             raise SecretAccessDenied("Access denied")
 
@@ -651,10 +677,8 @@ class SecretStoreService:
         )
         return payload
 
-    async def _resolve_readable_secret(
-        self, workspace_id: UUID, actor_user_id: str, name: str
-    ) -> Secret | None:
-        """Return the secret iff the caller has an active grant via an active pubkey."""
+    async def _load_active_secret(self, workspace_id: UUID, name: str) -> Secret | None:
+        """Load an active secret by name (existence check; no grant evaluation)."""
         secret_row = await self.db.execute(
             select(Secret).where(
                 Secret.workspace_id == workspace_id,
@@ -662,15 +686,17 @@ class SecretStoreService:
                 Secret.status == SECRET_STATUS_ACTIVE,
             )
         )
-        secret = secret_row.scalar_one_or_none()
-        if secret is None:
-            return None
+        return secret_row.scalar_one_or_none()
 
+    async def _caller_has_active_grant(
+        self, secret_id: UUID, actor_user_id: str, workspace_id: UUID
+    ) -> bool:
+        """True iff an active grant links the secret to one of the caller's active pubkeys."""
         grant_row = await self.db.execute(
             select(SecretGrant.id)
             .join(RecipientPubkey, SecretGrant.recipient_pubkey_id == RecipientPubkey.id)
             .where(
-                SecretGrant.secret_id == secret.id,
+                SecretGrant.secret_id == secret_id,
                 SecretGrant.revoked_at.is_(None),
                 # Defense-in-depth: the most security-critical query is self-
                 # contained — even though grants are validated same-workspace at
@@ -681,9 +707,7 @@ class SecretStoreService:
             )
             .limit(1)
         )
-        if grant_row.scalar_one_or_none() is None:
-            return None
-        return secret
+        return grant_row.scalar_one_or_none() is not None
 
     async def _select_version(
         self, secret_id: UUID, version_number: int | None
@@ -748,35 +772,43 @@ class SecretStoreService:
         return secret
 
     async def list_secrets(self, *, workspace_id: UUID) -> list[dict[str, Any]]:
-        """List secret names + metadata. **Never** returns ciphertext/values."""
+        """List secret names + metadata. **Never** returns ciphertext/values.
+
+        Current-version and active-grant-count are each fetched in ONE grouped
+        query over the whole secret set (not per-secret), so the console/MCP
+        listing stays at 3 round-trips regardless of secret count (no N+1).
+        """
         result = await self.db.execute(
             select(Secret).where(Secret.workspace_id == workspace_id).order_by(Secret.name.asc())
         )
         secrets = list(result.scalars().all())
-        out: list[dict[str, Any]] = []
-        for s in secrets:
-            ver_row = await self.db.execute(
-                select(SecretVersion.version_number)
-                .where(SecretVersion.secret_id == s.id)
-                .order_by(SecretVersion.version_number.desc())
-                .limit(1)
-            )
-            current_version = ver_row.scalar_one_or_none()
-            grant_rows = await self.db.execute(
-                select(SecretGrant.id).where(
-                    SecretGrant.secret_id == s.id, SecretGrant.revoked_at.is_(None)
-                )
-            )
-            grant_count = len(list(grant_rows.scalars().all()))
-            out.append(
-                {
-                    "name": s.name,
-                    "status": s.status,
-                    "rotation_needed": s.rotation_needed,
-                    "current_version": current_version,
-                    "grant_count": grant_count,
-                    "created_at": s.created_at,
-                    "updated_at": s.updated_at,
-                }
-            )
-        return out
+        if not secrets:
+            return []
+        ids = [s.id for s in secrets]
+
+        ver_rows = await self.db.execute(
+            select(SecretVersion.secret_id, func.max(SecretVersion.version_number))
+            .where(SecretVersion.secret_id.in_(ids))
+            .group_by(SecretVersion.secret_id)
+        )
+        ver_map = dict(ver_rows.all())
+
+        grant_rows = await self.db.execute(
+            select(SecretGrant.secret_id, func.count())
+            .where(SecretGrant.secret_id.in_(ids), SecretGrant.revoked_at.is_(None))
+            .group_by(SecretGrant.secret_id)
+        )
+        grant_map = dict(grant_rows.all())
+
+        return [
+            {
+                "name": s.name,
+                "status": s.status,
+                "rotation_needed": s.rotation_needed,
+                "current_version": ver_map.get(s.id),
+                "grant_count": grant_map.get(s.id, 0),
+                "created_at": s.created_at,
+                "updated_at": s.updated_at,
+            }
+            for s in secrets
+        ]

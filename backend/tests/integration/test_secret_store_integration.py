@@ -20,7 +20,6 @@ import pytest_asyncio
 from sqlalchemy import select, text
 from sqlalchemy.exc import IntegrityError
 
-import models.secrets  # noqa: F401  — register tables for create_all
 from models.auth import Workspace
 from models.secrets import (
     PUBKEY_STATUS_ACTIVE,
@@ -659,3 +658,68 @@ async def test_get_missing_version_logs_denied_audit(db_session, ws):
     denied = list(rows.scalars().all())
     assert len(denied) == 1
     assert denied[0].secret_id is not None  # the secret was found; only the version was missing
+
+
+async def test_denied_get_audits_secret_id_when_secret_exists(db_session, ws):
+    """An unauthorized probe of a REAL secret name records secret_id server-side.
+
+    The caller still gets a uniform SecretAccessDenied (no existence leak), but
+    the audit attributes the probe to the secret for incident response.
+    """
+    svc = SecretStoreService(db_session)
+    pk = await _register_and_approve(svc, ws, "alice", PUBKEY_A)
+    await svc.put_secret(
+        workspace_id=ws,
+        actor_user_id="owner-1",
+        name="cloudflare/api-token",
+        ciphertext=CIPHERTEXT,
+        recipients_snapshot=[fingerprint_pubkey(PUBKEY_A)],
+        grant_pubkey_ids=[pk.id],
+    )
+    # bob has no grant; probing the REAL name is denied but logged with secret_id.
+    with pytest.raises(SecretAccessDenied):
+        await svc.get_secret(workspace_id=ws, actor_user_id="bob", name="cloudflare/api-token")
+    # probing a NON-existent name is denied with secret_id NULL.
+    with pytest.raises(SecretAccessDenied):
+        await svc.get_secret(workspace_id=ws, actor_user_id="bob", name="does/not-exist")
+
+    rows = await db_session.execute(
+        select(SecretAccessLog)
+        .where(SecretAccessLog.workspace_id == ws, SecretAccessLog.result == "denied")
+        .order_by(SecretAccessLog.id.asc())
+    )
+    denied = list(rows.scalars().all())
+    assert len(denied) == 2
+    assert denied[0].secret_id is not None  # real-secret probe → attributable
+    assert denied[1].secret_id is None  # nonexistent-name probe → no id
+
+
+async def test_req_meta_persisted_and_chain_still_verifies(db_session, ws):
+    """req_meta (source/ip/ua) is stored and does not break the HMAC chain."""
+    svc = SecretStoreService(db_session)
+    pk = await _register_and_approve(svc, ws, "alice", PUBKEY_A)
+    await svc.put_secret(
+        workspace_id=ws,
+        actor_user_id="owner-1",
+        name="s",
+        ciphertext=CIPHERTEXT,
+        recipients_snapshot=[fingerprint_pubkey(PUBKEY_A)],
+        grant_pubkey_ids=[pk.id],
+        req_meta={"source": "rest"},
+    )
+    await svc.get_secret(
+        workspace_id=ws,
+        actor_user_id="alice",
+        name="s",
+        req_meta={"source": "mcp", "tool": "secret_get"},
+    )
+    # The get audit row carries the metadata.
+    get_rows = await db_session.execute(
+        select(SecretAccessLog).where(
+            SecretAccessLog.workspace_id == ws, SecretAccessLog.action == "get"
+        )
+    )
+    get_entry = get_rows.scalar_one()
+    assert get_entry.req_meta == {"source": "mcp", "tool": "secret_get"}
+    # Chain still verifies with req_meta populated (payload includes it).
+    assert (await svc.verify_audit_chain(workspace_id=ws))["valid"] is True

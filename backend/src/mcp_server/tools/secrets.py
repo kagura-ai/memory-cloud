@@ -13,8 +13,12 @@ Five tools mirroring the REST consumption/management surface:
 - ``secret_revoke_grant`` (owner/admin) — revoke a grant + flag rotation.
 
 Workspace gating happens here (role lookup); the value-level default-deny grant
-check lives in :class:`SecretStoreService`. Write tools commit explicitly — the
-``async for db in get_db()`` loop does not auto-commit on early return.
+check lives in :class:`SecretStoreService`. Write tools commit explicitly:
+``get_db()`` commits only when its generator runs past the ``yield`` to normal
+exhaustion, but these handlers ``return`` from *inside* the ``async for db in
+get_db()`` loop, so the generator is ``aclose``d before that commit runs —
+hence the explicit ``await db.commit()`` on the write paths. (``secret_get``
+commits its own fail-closed audit inside the service.)
 """
 
 from __future__ import annotations
@@ -147,6 +151,7 @@ async def handle_secret_put(
                 ciphertext=ciphertext,
                 recipients_snapshot=[str(r) for r in recipients_snapshot],
                 grant_pubkey_ids=grant_ids,
+                req_meta={"source": "mcp", "tool": "secret_put"},
             )
             await db.commit()
             await _log_tool_usage(db, user_id, "secret_put", start_time, 200, None, workspace_id)
@@ -200,6 +205,7 @@ async def handle_secret_get(
                 actor_user_id=user_id,
                 name=name,
                 version_number=version_number,
+                req_meta={"source": "mcp", "tool": "secret_get"},
             )
             await _log_tool_usage(db, user_id, "secret_get", start_time, 200, None, workspace_id)
             return _success_response(
@@ -207,6 +213,9 @@ async def handle_secret_get(
                 version_number=payload["version_number"],
                 alg=payload["alg"],
                 ciphertext=payload["ciphertext"],
+                # Parity with the REST SecretValueResponse: a future R2-offloaded
+                # version stores blob_ref instead of inline ciphertext.
+                blob_ref=payload["blob_ref"],
                 recipients_snapshot=payload["recipients_snapshot"],
                 rotation_needed=payload["rotation_needed"],
             )

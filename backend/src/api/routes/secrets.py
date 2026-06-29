@@ -21,7 +21,7 @@ from datetime import datetime
 from typing import Literal
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, status
+from fastapi import APIRouter, Depends, Request, status
 from pydantic import BaseModel, Field
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -58,6 +58,15 @@ def _ws_id(user: dict) -> UUID:
     """Extract the verified current workspace id from an auth dict."""
     raw = user.get("current_workspace_id")
     return raw if isinstance(raw, UUID) else UUID(str(raw))
+
+
+def _rest_meta(request: Request) -> dict:
+    """Non-secret request metadata for the audit log (never the secret value)."""
+    return {
+        "source": "rest",
+        "ip": request.client.host if request.client else None,
+        "ua": request.headers.get("user-agent"),
+    }
 
 
 # ============================================================================
@@ -250,6 +259,7 @@ async def revoke_pubkey(
 @router.post("", response_model=SecretPutResponse, status_code=status.HTTP_201_CREATED)
 async def put_secret(
     data: SecretPut,
+    request: Request,
     user: WorkspaceAdmin,
     svc: SecretStoreService = Depends(get_secret_service),
     db: AsyncSession = Depends(get_db),
@@ -263,6 +273,7 @@ async def put_secret(
             ciphertext=data.ciphertext,
             recipients_snapshot=data.recipients_snapshot,
             grant_pubkey_ids=data.grant_pubkey_ids,
+            req_meta=_rest_meta(request),
         )
     except ValueError as e:
         raise BadRequestError(str(e)) from e
@@ -283,6 +294,32 @@ async def list_secrets(
     """List secret names + metadata. Never returns ciphertext/values."""
     rows = await svc.list_secrets(workspace_id=_ws_id(user))
     return [SecretMetaResponse(**r) for r in rows]
+
+
+class AuditVerifyResponse(BaseModel):
+    """Result of recomputing the workspace's tamper-evident audit chain."""
+
+    valid: bool
+    entries: int | None = None
+    head: str | None = None
+    broken_at: int | None = None
+    reason: str | None = None
+
+
+@router.get("/audit/verify", response_model=AuditVerifyResponse)
+async def verify_audit_chain(
+    user: WorkspaceAdmin,
+    svc: SecretStoreService = Depends(get_secret_service),
+) -> AuditVerifyResponse:
+    """Recompute the workspace's secret-access audit chain and report integrity.
+
+    Owner/admin ops surface that makes the tamper-evidence usable in-product:
+    walks the append-only log id-ascending, recomputes each HMAC ``entry_hash``
+    and verifies the ``prev_hash`` linkage. Returns ``valid: true`` with the head
+    hash, or ``valid: false`` with the first ``broken_at`` id and ``reason``.
+    """
+    result = await svc.verify_audit_chain(workspace_id=_ws_id(user))
+    return AuditVerifyResponse(**result)
 
 
 @router.post("/revoke-grant", response_model=SecretMetaResponse)
@@ -318,6 +355,7 @@ async def revoke_grant(
 @router.post("/fetch", response_model=SecretValueResponse)
 async def fetch_secret(
     data: SecretFetch,
+    request: Request,
     user: WorkspaceMember,
     svc: SecretStoreService = Depends(get_secret_service),
 ) -> SecretValueResponse:
@@ -333,6 +371,7 @@ async def fetch_secret(
             actor_user_id=get_user_id(user),
             name=data.name,
             version_number=data.version_number,
+            req_meta=_rest_meta(request),
         )
     except SecretAccessDenied as e:
         raise AuthorizationError(str(e)) from e
