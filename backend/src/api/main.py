@@ -524,6 +524,7 @@ from api.routes import (  # noqa: E402
     resource_schema,  # Issue #238: Schema Management API
     resource_tokens,  # Issue #242: Resource Token Management API
     resources,  # Issue #47: Workspace resource list
+    secrets,  # Issue #1128: zero-knowledge secret store
     share_keys,  # Issue #1027: context-scoped read-only TTL share key
     sleep_reports,  # Issue #179: Sleep Report admin UI
     system,
@@ -561,6 +562,9 @@ app.include_router(api_keys.router, prefix="/api/v1")
 #     surface (read-only recall confined to the bound context).
 app.include_router(share_keys.router, prefix="/api/v1")
 app.include_router(share_keys.recall_router, prefix="/api/v1")
+
+# Issue #1128: zero-knowledge secret store (owner/admin management + member fetch).
+app.include_router(secrets.router, prefix="/api/v1")
 
 # Admin routes (Issue #43 - User management and system-wide stats)
 app.include_router(admin.router, prefix="/api/v1")

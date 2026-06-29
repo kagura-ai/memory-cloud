@@ -21,6 +21,7 @@ import models.llm_pricing  # noqa: F401  # Issue #471: cost-grade pricing master
 import models.memory  # noqa: F401
 import models.neural  # noqa: F401
 import models.resource  # noqa: F401
+import models.secrets  # noqa: F401  # Issue #1128: zero-knowledge secret store
 import models.sleep  # noqa: F401  # Issue #471: SleepReportLLMUsage child added
 from alembic import context
 from config.database import get_database_url

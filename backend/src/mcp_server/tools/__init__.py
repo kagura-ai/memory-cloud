@@ -53,6 +53,12 @@ _TOOLS_WITHOUT_CONTEXT_ID = frozenset(
         "get_file_download_url",  # Issue #485: uses file_id
         "delete_file",  # Issue #485: uses file_id
         "list_files",  # Issue #485: workspace-scoped listing
+        # Issue #1128: secret store — workspace-scoped, not memory-context-scoped.
+        "secret_register_pubkey",
+        "secret_put",
+        "secret_get",
+        "secret_list",
+        "secret_revoke_grant",
     }
 )
 
@@ -133,6 +139,13 @@ def _build_registry() -> dict[str, Any]:
         handle_setup_resource,
     )
     from mcp_server.tools.search_config import handle_update_search_config
+    from mcp_server.tools.secrets import (
+        handle_secret_get,
+        handle_secret_list,
+        handle_secret_put,
+        handle_secret_register_pubkey,
+        handle_secret_revoke_grant,
+    )
     from mcp_server.tools.sleep import (
         handle_get_sleep_history,
         handle_get_sleep_report,
@@ -194,6 +207,12 @@ def _build_registry() -> dict[str, Any]:
         "get_file_download_url": handle_get_file_download_url,
         "delete_file": handle_delete_file,
         "list_files": handle_list_files,
+        # Issue #1128: zero-knowledge secret store (workspace-scoped).
+        "secret_register_pubkey": handle_secret_register_pubkey,
+        "secret_put": handle_secret_put,
+        "secret_get": handle_secret_get,
+        "secret_list": handle_secret_list,
+        "secret_revoke_grant": handle_secret_revoke_grant,
     }
 
 
