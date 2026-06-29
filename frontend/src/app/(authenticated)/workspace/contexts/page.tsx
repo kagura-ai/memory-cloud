@@ -794,6 +794,18 @@ export default function ContextsPage() {
                     </div>
                   </div>
                 </label>
+                {(currentWorkspace?.plan_name === "free" ||
+                  currentWorkspace?.plan_name === "basic") && (
+                  <Button
+                    type="button"
+                    variant="link"
+                    size="sm"
+                    className="h-auto p-0 text-xs text-purple-700 dark:text-purple-300"
+                    onClick={() => router.push("/workspace/settings/plan")}
+                  >
+                    {t("upgradeToProCta")}
+                  </Button>
+                )}
               </div>
             </div>
 
@@ -1272,6 +1284,18 @@ export default function ContextsPage() {
                     </div>
                   </div>
                 </label>
+                {(currentWorkspace?.plan_name === "free" ||
+                  currentWorkspace?.plan_name === "basic") && (
+                  <Button
+                    type="button"
+                    variant="link"
+                    size="sm"
+                    className="h-auto p-0 text-xs text-purple-700 dark:text-purple-300"
+                    onClick={() => router.push("/workspace/settings/plan")}
+                  >
+                    {t("upgradeToProCta")}
+                  </Button>
+                )}
               </div>
             </div>
 
@@ -1382,26 +1406,26 @@ export default function ContextsPage() {
           <AlertDialogHeader>
             <AlertDialogTitle className="flex items-center gap-2">
               <AlertTriangle className="h-5 w-5 text-amber-500" />
-              Context Limit Reached
+              {t("quotaDialogTitle")}
             </AlertDialogTitle>
             <AlertDialogDescription>
-              You've reached the Free plan limit of <strong>1 context</strong>.
+              {t("quotaDialogDescription")}
             </AlertDialogDescription>
             <div className="bg-blue-50 dark:bg-blue-900/20 border border-blue-200 dark:border-blue-800 rounded-lg p-3 mt-3">
               <p className="text-sm text-blue-900 dark:text-blue-100 font-medium mb-1">
-                Upgrade to create more contexts
+                {t("quotaDialogUpgradeHeading")}
               </p>
               <p className="text-sm text-blue-800 dark:text-blue-200">
-                Basic plan: <strong>10 contexts</strong>
-                <br />
-                Pro plan: <strong>Unlimited contexts</strong>
+                {t("quotaDialogUpgradeBody")}
               </p>
             </div>
           </AlertDialogHeader>
           <AlertDialogFooter>
-            <AlertDialogCancel>Cancel</AlertDialogCancel>
-            <AlertDialogAction onClick={() => router.push("/admin/plans")}>
-              View Plans
+            <AlertDialogCancel>{tCommon("cancel")}</AlertDialogCancel>
+            <AlertDialogAction
+              onClick={() => router.push("/workspace/settings/plan")}
+            >
+              {t("viewPlans")}
             </AlertDialogAction>
           </AlertDialogFooter>
         </AlertDialogContent>

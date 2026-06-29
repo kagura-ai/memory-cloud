@@ -15,6 +15,7 @@ import {
   forwardRef,
   useImperativeHandle,
 } from "react";
+import { useRouter } from "next/navigation";
 import { useTranslations, useLocale } from "next-intl";
 import {
   Card,
@@ -137,6 +138,7 @@ export const UsageStats = forwardRef<UsageStatsRef, UsageStatsProps>(
     const { currentWorkspaceId } = useWorkspace();
     const { user } = useAuth();
     const locale = useLocale();
+    const router = useRouter();
     const [currentUsage, setCurrentUsage] = useState<UsageCurrentData | null>(
       null,
     );
@@ -241,9 +243,7 @@ export const UsageStats = forwardRef<UsageStatsRef, UsageStatsProps>(
           current={currentUsage.usage.memory_count}
           limit={currentUsage.plan.memory_limit}
           label={t("memories")}
-          onUpgrade={() => {
-            // TODO: Navigate to billing/upgrade page
-          }}
+          onUpgrade={() => router.push("/workspace/settings/plan")}
         />
 
         {/* Current Usage Cards */}

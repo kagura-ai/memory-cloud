@@ -1238,6 +1238,11 @@
     "sleepReports": {
       "title": "Sleep レポート",
       "description": "このワークスペースの Sleep Maintenance 実行履歴を確認します",
+      "planGate": {
+        "title": "Sleep Maintenance はプロ機能です",
+        "description": "プロにアップグレードすると Sleep Maintenance(自動メモリ整理)が有効になり、レポートを閲覧できます。",
+        "action": "プロにアップグレード"
+      },
       "actions": {
         "back": "一覧に戻る"
       },
@@ -1428,6 +1433,12 @@
     "allWorkspaceMembersCanAccess": "すべてのワークスペースメンバーがこのコンテキストにアクセスできます。",
     "upgradeToProShare": "Proプランにアップグレードしてチームとコンテキストを共有。",
     "upgradeToPro": "Proプランにアップグレードしてチームコラボレーションを有効化。",
+    "upgradeToProCta": "Proにアップグレード — プランを見る",
+    "quotaDialogTitle": "コンテキスト上限に達しました",
+    "quotaDialogDescription": "現在のプランのコンテキスト上限に達しました。",
+    "quotaDialogUpgradeHeading": "アップグレードしてコンテキストを追加",
+    "quotaDialogUpgradeBody": "上位プランではより多くのコンテキストを利用できます。現在の上限はプランページをご確認ください。",
+    "viewPlans": "プランを見る",
     "changeToPrivateWarning": "プライベートに変更すると、すべてのコンテキストメンバーが削除されます。自分だけがアクセスできるようになります。",
     "changeToSharedWarning": "共有に変更すると、このコンテキストがすべてのワークスペースメンバーに表示されます。",
     "aiClientInstructions": "AIクライアント用指示",

@@ -133,6 +133,18 @@ def _install_workspace_overrides(
             _mock_check_allow,
         )
 
+    # The Sleep-plan gate (#1137) loads the workspace and checks
+    # effective_sleep_enabled_contexts_limit before the service queries run.
+    # No-op it here so these route tests keep their tight mock_db.execute
+    # side_effect sequences; the gate's own logic is unit-tested in
+    # TestSleepPlanGate below.
+    import api.routes.sleep_reports as _sleep_routes
+
+    async def _mock_sleep_gate(_db, _workspace_id):
+        return None
+
+    client.monkeypatch.setattr(_sleep_routes, "_enforce_sleep_plan", _mock_sleep_gate)
+
 
 # ============================================================================
 # Workspace list route
@@ -313,3 +325,52 @@ class TestAnonymousAccess:
     def test_detail_rejects_anonymous(self, client):
         response = client.get(f"/api/v1/workspaces/{_WORKSPACE_ID}/sleep-reports/{uuid4()}")
         assert response.status_code == 401
+
+
+# ============================================================================
+# Sleep-plan gate (#1137): Sleep reports are Pro-only
+# ============================================================================
+
+
+class TestSleepPlanGate:
+    """_enforce_sleep_plan gates the report view by the workspace's tier."""
+
+    @pytest.mark.asyncio
+    async def test_free_workspace_blocked_403(self):
+        from fastapi import HTTPException
+
+        from api.routes.sleep_reports import _enforce_sleep_plan
+
+        db = AsyncMock()
+        ws = MagicMock()
+        ws.effective_sleep_enabled_contexts_limit = 0  # free/basic
+        db.execute.return_value = MagicMock(scalar_one_or_none=MagicMock(return_value=ws))
+
+        with pytest.raises(HTTPException) as exc:
+            await _enforce_sleep_plan(db, _WORKSPACE_ID)
+        assert exc.value.status_code == 403
+
+    @pytest.mark.asyncio
+    async def test_missing_workspace_blocked_403(self):
+        from fastapi import HTTPException
+
+        from api.routes.sleep_reports import _enforce_sleep_plan
+
+        db = AsyncMock()
+        db.execute.return_value = MagicMock(scalar_one_or_none=MagicMock(return_value=None))
+
+        with pytest.raises(HTTPException) as exc:
+            await _enforce_sleep_plan(db, _WORKSPACE_ID)
+        assert exc.value.status_code == 403
+
+    @pytest.mark.asyncio
+    async def test_pro_workspace_allowed(self):
+        from api.routes.sleep_reports import _enforce_sleep_plan
+
+        db = AsyncMock()
+        ws = MagicMock()
+        ws.effective_sleep_enabled_contexts_limit = 3  # pro
+        db.execute.return_value = MagicMock(scalar_one_or_none=MagicMock(return_value=ws))
+
+        # Pro tier supports Sleep → no raise.
+        await _enforce_sleep_plan(db, _WORKSPACE_ID)

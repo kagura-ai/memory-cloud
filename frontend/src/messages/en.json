@@ -1238,6 +1238,11 @@
     "sleepReports": {
       "title": "Sleep Reports",
       "description": "View Sleep Maintenance execution history for this workspace",
+      "planGate": {
+        "title": "Sleep Maintenance is a Pro feature",
+        "description": "Upgrade to Pro to enable Sleep Maintenance — automatic memory consolidation — and view its reports.",
+        "action": "Upgrade to Pro"
+      },
       "actions": {
         "back": "Back to List"
       },
@@ -1428,6 +1433,12 @@
     "allWorkspaceMembersCanAccess": "All workspace members can access this context.",
     "upgradeToProShare": "Upgrade to Pro plan to share contexts with your team.",
     "upgradeToPro": "Upgrade to Pro plan to enable team collaboration.",
+    "upgradeToProCta": "Upgrade to Pro — view plans",
+    "quotaDialogTitle": "Context limit reached",
+    "quotaDialogDescription": "You've reached your current plan's context limit.",
+    "quotaDialogUpgradeHeading": "Upgrade to create more contexts",
+    "quotaDialogUpgradeBody": "Higher plans include more contexts. See the Plan page for current limits.",
+    "viewPlans": "View plans",
     "changeToPrivateWarning": "Changing to Private will remove all context members. Only you will have access.",
     "changeToSharedWarning": "Changing to Shared will make this context visible to all workspace members.",
     "aiClientInstructions": "AI Client Instructions",
