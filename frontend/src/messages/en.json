@@ -139,6 +139,7 @@
     "noExternalKeys": "No API keys configured — add OpenAI key to enable memory features",
     "noContexts": "No contexts found",
     "settings": "Settings",
+    "plan": "Plan",
     "workspaceSettings": "Workspace",
     "admin": "Admin",
     "users": "Users",
