@@ -28,10 +28,13 @@ import { useToast } from "@/hooks/use-toast";
 import { getWorkspacePlan, type WorkspacePlanInfo } from "@/lib/api/workspaces";
 import { mintBillingHandoff } from "@/lib/api/billing";
 import { ApiError } from "@/lib/api/base";
+import { useLocale } from "@/i18n";
+import { planLabelFromEnv, type PlanTier } from "@/lib/utils/planLabel";
 
 export default function WorkspacePlanPage() {
   const t = useTranslations("workspace");
   const tCommon = useTranslations("common");
+  const { locale } = useLocale();
   const { currentWorkspaceId, currentWorkspace } = useWorkspace();
   const { toast } = useToast();
 
@@ -105,8 +108,15 @@ export default function WorkspacePlanPage() {
     );
   }
 
+  // Label precedence: localized tier label (OSS default S/M/L, per-locale
+  // override via env) → backend display_name → raw plan_name → em dash.
+  const canonicalTier = currentWorkspace?.plan_name;
   const planName =
-    plan?.plan_display_name ?? currentWorkspace?.plan_name ?? "—";
+    canonicalTier === "free" ||
+    canonicalTier === "basic" ||
+    canonicalTier === "pro"
+      ? planLabelFromEnv(canonicalTier as PlanTier, locale)
+      : (plan?.plan_display_name ?? canonicalTier ?? "—");
 
   return (
     <PageContainer>
