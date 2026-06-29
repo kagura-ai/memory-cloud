@@ -20,7 +20,11 @@ from api.routes.workspace import (
     get_workspace_stats,
     get_workspace_usage_current,
 )
-from api.routes.workspaces import UpdateMemberRoleRequest, update_member_role
+from api.routes.workspaces import (
+    UpdateMemberRoleRequest,
+    switch_workspace,
+    update_member_role,
+)
 from auth.workspace_roles import WorkspaceRole
 from utils.exceptions import AuthenticationError
 
@@ -402,6 +406,54 @@ class TestUpdateMemberRole:
                     )
 
                     assert response.user_id == target_user_id
+
+
+class TestSwitchWorkspace:
+    """PUT /workspaces/{id}/switch — workspace-switch-403 fix.
+
+    The workspace switcher lists every workspace the user belongs to,
+    including viewer-role memberships, so switching must accept VIEWER.
+    Previously it required MEMBER and viewers got 403 role_too_low.
+    """
+
+    @pytest.mark.asyncio
+    async def test_switch_requires_only_viewer_role(self):
+        workspace_id = uuid4()
+        mock_db = AsyncMock()
+        # User row looked up to update current_workspace_id.
+        user_record = MagicMock()
+        mock_db.execute.return_value = MagicMock(
+            scalar_one_or_none=MagicMock(return_value=user_record)
+        )
+
+        perm_instance = MagicMock()
+        perm_instance.check_workspace_access = AsyncMock()
+
+        with (
+            patch(
+                "api.routes.workspaces.get_current_user",
+                AsyncMock(return_value={"user_id": "viewer_user"}),
+            ),
+            patch(
+                "api.routes.workspaces.PermissionService",
+                return_value=perm_instance,
+            ),
+        ):
+            response = await switch_workspace(
+                workspace_id=workspace_id,
+                request=MagicMock(),
+                db=mock_db,
+            )
+
+        assert response["status"] == "ok"
+        assert response["workspace_id"] == str(workspace_id)
+        assert user_record.current_workspace_id == workspace_id
+
+        # The required role must be the VIEWER floor (not MEMBER), so a
+        # viewer listed in the switcher can actually enter the workspace.
+        perm_instance.check_workspace_access.assert_awaited_once()
+        _, kwargs = perm_instance.check_workspace_access.call_args
+        assert kwargs["required_role"] == WorkspaceRole.VIEWER
 
 
 class TestWorkspaceUsageCurrent:

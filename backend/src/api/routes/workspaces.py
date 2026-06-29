@@ -530,14 +530,21 @@ async def switch_workspace(
     """Switch to a different workspace.
 
     Updates the user's current_workspace_id to the specified workspace.
-    Requires the user to be a member of the workspace.
+    Requires the user to have at least viewer access to the workspace.
     """
     user = await get_current_user(request)
     perm_service = PermissionService(db)
 
-    # Verify user is a member of this workspace
+    # Verify the user can access this workspace. VIEWER is the floor on purpose:
+    # the workspace switcher lists every workspace the user belongs to (incl.
+    # viewer-role memberships), and switching only sets current_workspace_id — a
+    # mutable UI preference that is never trusted for authorization (see
+    # PermissionService.resolve_resource_by_slug contract). A viewer who can
+    # already read the workspace must be able to enter it; requiring MEMBER here
+    # left viewers listed-but-unenterable (403 role_too_low). All real access is
+    # still enforced per-operation downstream.
     await perm_service.check_workspace_access(
-        user["user_id"], workspace_id, required_role=WorkspaceRole.MEMBER
+        user["user_id"], workspace_id, required_role=WorkspaceRole.VIEWER
     )
 
     # Update user's current workspace
