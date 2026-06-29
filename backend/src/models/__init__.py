@@ -14,6 +14,7 @@ import models.file_objects  # noqa: F401  # Issue #485: file storage
 import models.llm_call_log  # noqa: F401  # Issue #474: comprehensive call ledger
 import models.llm_pricing  # noqa: F401
 import models.retrieval_feedback  # noqa: F401  # Issue #888: retrieval feedback signal
+import models.secrets  # noqa: F401  # Issue #1128: zero-knowledge secret store
 import models.sleep  # noqa: F401
 from models.config import ContextSearchConfig
 from models.file_objects import FileObject, WorkspaceStorageUsage

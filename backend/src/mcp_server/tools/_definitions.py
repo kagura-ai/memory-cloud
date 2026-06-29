@@ -2067,6 +2067,126 @@ Returns: {status, key, value, found}. found is false (value null) when the key i
                 "required": ["context_id"],
             },
         },
+        # Issue #1128: zero-knowledge secret store. The server stores opaque age
+        # ciphertext + public recipient keys only and NEVER decrypts. Encryption
+        # and decryption happen client-side (the `kagura secret` CLI / SDK).
+        {
+            "name": "secret_register_pubkey",
+            "description": """Register YOUR age recipient public key so secrets can be shared with you (Issue #1128).
+
+You generate an age key pair locally (`age-keygen`). Register ONLY the public
+recipient (age1…); never send your private key anywhere. The key starts pending
+and a workspace owner must approve it before it can receive grants.
+
+SECURITY: this is a PUBLIC key — safe to share. Do NOT pass a private key (AGE-SECRET-KEY-…).
+
+Returns: {status, pubkey_id, fingerprint, status: "pending"}.""",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "pubkey": {
+                        "type": "string",
+                        "description": "Your age recipient public key (age1…). Public, safe to share.",
+                    },
+                    "label": {
+                        "type": "string",
+                        "description": "Optional friendly label (e.g. 'laptop', 'ci-runner').",
+                    },
+                },
+                "required": ["pubkey"],
+            },
+        },
+        {
+            "name": "secret_put",
+            "description": """Store an age-encrypted secret and grant recipients (owner/admin, Issue #1128).
+
+The server receives only OPAQUE CIPHERTEXT — encrypt client-side first
+(`age -r <recipient> …`) to exactly the granted recipients. recipients_snapshot
+(the fingerprints you encrypted to) must match grant_pubkey_ids exactly, and
+every grant target must be an approved (active) pubkey. Putting the same name
+again creates a new version. NEVER pass a plaintext secret value here.
+
+Returns: {status, name, version_number, status, rotation_needed}.""",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "name": {
+                        "type": "string",
+                        "description": "Secret name, e.g. 'cloudflare/api-token'.",
+                    },
+                    "ciphertext": {
+                        "type": "string",
+                        "description": "Armored age ciphertext. Opaque to the server; never plaintext.",
+                    },
+                    "recipients_snapshot": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": "Fingerprints the ciphertext was encrypted to (must match grants).",
+                    },
+                    "grant_pubkey_ids": {
+                        "type": "array",
+                        "items": {"type": "string", "format": "uuid"},
+                        "description": "Recipient pubkey ids to grant (must be approved/active).",
+                    },
+                },
+                "required": ["name", "ciphertext", "recipients_snapshot", "grant_pubkey_ids"],
+            },
+        },
+        {
+            "name": "secret_get",
+            "description": """Fetch an age-encrypted secret you have been granted (Issue #1128).
+
+Returns OPAQUE CIPHERTEXT — decrypt it locally with your age private key
+(`age -d -i <key>`); the server holds no key and cannot read it. Access is
+default-deny: you must hold an active grant via an approved pubkey. Every fetch
+is recorded in a tamper-evident audit log before the ciphertext is returned.
+
+Returns: {status, name, version_number, alg, ciphertext, recipients_snapshot, rotation_needed}.""",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "name": {"type": "string", "description": "Secret name to fetch."},
+                    "version_number": {
+                        "type": "integer",
+                        "description": "Optional. Pin a specific version; omit for the latest.",
+                    },
+                },
+                "required": ["name"],
+            },
+        },
+        {
+            "name": "secret_list",
+            "description": """List secret names and metadata (owner/admin, Issue #1128).
+
+Returns names, status, version, grant count, and whether rotation is needed —
+NEVER any secret value. rotation_needed=true means a grant was revoked and the
+upstream credential should be rotated.
+
+Returns: {status, secrets: [{name, status, rotation_needed, current_version, grant_count, created_at, updated_at}], count}.""",
+            "inputSchema": {"type": "object", "properties": {}},
+        },
+        {
+            "name": "secret_revoke_grant",
+            "description": """Revoke a recipient's grant on a secret (owner/admin, Issue #1128).
+
+Stops FUTURE fetches by that recipient and flags the secret rotation_needed.
+Revocation is not retroactive: a recipient who already fetched the ciphertext
+may still hold it, so rotate the upstream credential afterwards.
+
+Returns: {status, name, rotation_needed: true}.""",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "name": {"type": "string", "description": "Secret name."},
+                    "recipient_pubkey_id": {
+                        "type": "string",
+                        "format": "uuid",
+                        "description": "The recipient pubkey id whose grant to revoke.",
+                    },
+                },
+                "required": ["name", "recipient_pubkey_id"],
+            },
+        },
     ]
     # Pre-1.0 schema policy (#990): every tool inputSchema is strict — no
     # undeclared top-level parameters. Applied centrally here so all 45 tools
