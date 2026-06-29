@@ -91,6 +91,16 @@ OPERATIONAL_TABLES: frozenset[str] = frozenset(
         "indexer_state",
         "resource_tokens",
         "sleep_report_llm_usage",  # cost telemetry, not consolidation output
+        # Zero-knowledge secret store (#1128) — security plumbing, governed by
+        # the auth/security regime + GDPR erasure (cascade on workspace delete).
+        # The server holds only opaque age ciphertext + public keys (never
+        # plaintext); these are operational credentials, not raw user knowledge
+        # (not on the memory export surface) and not learned/derived structure.
+        "recipient_pubkeys",
+        "secrets",
+        "secret_versions",
+        "secret_grants",
+        "secret_access_log",  # append-only, tamper-evident audit (own regime)
     }
 )
 
