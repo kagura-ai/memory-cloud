@@ -12,6 +12,7 @@
 import { Suspense, useEffect, useState } from "react";
 import { useRouter, usePathname, useSearchParams } from "next/navigation";
 import { useAuth } from "@/contexts/AuthContext";
+import { useLocale } from "@/i18n";
 import { WorkspaceProvider, useWorkspace } from "@/contexts/WorkspaceContext";
 import { MemoryContextProvider } from "@/contexts/MemoryContextContext";
 import { Sidebar } from "@/components/dashboard/Sidebar";
@@ -136,9 +137,21 @@ function WorkspaceGuard({ children }: { children: React.ReactNode }) {
 
 function DashboardContent({ children }: { children: React.ReactNode }) {
   const { user, isLoading } = useAuth();
+  const { locale: uiLocale, setLocale: setUiLocale } = useLocale();
   const router = useRouter();
   const pathname = usePathname();
   const searchParams = useSearchParams();
+
+  // The signed-in user's saved `locale` is the source of truth for the UI
+  // language. The i18n provider only hydrates from localStorage, so without
+  // this sync the Profile > Language preference never reaches the interface
+  // (it would just sit in the backend record). Apply it whenever it differs.
+  useEffect(() => {
+    const pref = user?.locale;
+    if ((pref === "en" || pref === "ja") && pref !== uiLocale) {
+      setUiLocale(pref);
+    }
+  }, [user?.locale, uiLocale, setUiLocale]);
 
   // Check if on workspace creation page. Mirrors WorkspaceGuard's logic so the
   // create form renders in the minimal layout even after the compatibility

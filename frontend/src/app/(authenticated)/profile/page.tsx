@@ -30,6 +30,7 @@ import {
   SelectValue,
 } from "@/components/ui/select";
 import { useAuth } from "@/contexts/AuthContext";
+import { useLocale, type Locale } from "@/i18n";
 import { useToast } from "@/hooks/use-toast";
 import { User, Moon, Sun, Save, RefreshCw } from "lucide-react";
 import { COMMON_TIMEZONES } from "@/lib/utils/datetime";
@@ -164,6 +165,10 @@ export default function ProfilePage() {
   const email = user?.email || "";
   const [timezone, setTimezone] = useState(user?.timezone || "UTC");
   const [locale, setLocale] = useState(user?.locale || "en");
+  // i18n provider's locale setter (localStorage + context) — distinct from the
+  // local form state `setLocale` above. Saving the profile must drive this so
+  // the running UI actually switches language, not just the backend record.
+  const { setLocale: applyUiLocale } = useLocale();
 
   useEffect(() => {
     if (user) {
@@ -183,6 +188,10 @@ export default function ProfilePage() {
 
       // Refresh user data to get updated timezone
       await refetchUser();
+
+      // Apply the chosen UI language immediately (localStorage + context), so
+      // the interface switches now instead of only persisting to the backend.
+      applyUiLocale(locale as Locale);
 
       toast({
         title: t("profileUpdated"),
