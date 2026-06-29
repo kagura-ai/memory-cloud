@@ -78,6 +78,24 @@ export function resolvePlanLabel(
 }
 
 /**
+ * Parse-once cache for the JSON env map. `planLabelFromEnv` runs per render —
+ * once per `PlanBadge`, so many times on a table — but the env is effectively
+ * static at runtime. Keying the cache on the raw env string re-parses only when
+ * the value actually changes, which also keeps tests that mutate `process.env`
+ * correct (a new raw value invalidates the cache).
+ */
+let jsonMapCache: { raw: string | undefined; map: LocalePlanLabelMap } | null =
+  null;
+
+function cachedJsonMapFromEnv(): LocalePlanLabelMap {
+  const raw = process.env.NEXT_PUBLIC_PLAN_DISPLAY_NAMES;
+  if (!jsonMapCache || jsonMapCache.raw !== raw) {
+    jsonMapCache = { raw, map: parsePlanDisplayNames(raw) };
+  }
+  return jsonMapCache.map;
+}
+
+/**
  * Env-wired convenience used by UI components. The `NEXT_PUBLIC_*` references
  * are static member expressions so Next.js inlines them at build time.
  */
@@ -85,14 +103,9 @@ export function planLabelFromEnv(
   planName: PlanTier,
   locale: string | undefined,
 ): string {
-  return resolvePlanLabel(
-    planName,
-    locale,
-    parsePlanDisplayNames(process.env.NEXT_PUBLIC_PLAN_DISPLAY_NAMES),
-    {
-      free: process.env.NEXT_PUBLIC_PLAN_FREE_DISPLAY_NAME,
-      basic: process.env.NEXT_PUBLIC_PLAN_BASIC_DISPLAY_NAME,
-      pro: process.env.NEXT_PUBLIC_PLAN_PRO_DISPLAY_NAME,
-    },
-  );
+  return resolvePlanLabel(planName, locale, cachedJsonMapFromEnv(), {
+    free: process.env.NEXT_PUBLIC_PLAN_FREE_DISPLAY_NAME,
+    basic: process.env.NEXT_PUBLIC_PLAN_BASIC_DISPLAY_NAME,
+    pro: process.env.NEXT_PUBLIC_PLAN_PRO_DISPLAY_NAME,
+  });
 }

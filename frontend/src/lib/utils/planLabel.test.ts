@@ -108,4 +108,16 @@ describe("planLabelFromEnv", () => {
     process.env.NEXT_PUBLIC_PLAN_PRO_DISPLAY_NAME = "Enterprise";
     expect(planLabelFromEnv("pro", "ja")).toBe("Enterprise");
   });
+
+  it("re-parses when the JSON env value changes (cache invalidation)", () => {
+    process.env.NEXT_PUBLIC_PLAN_DISPLAY_NAMES = JSON.stringify({
+      ja: { pro: "プロ" },
+    });
+    expect(planLabelFromEnv("pro", "ja")).toBe("プロ");
+
+    process.env.NEXT_PUBLIC_PLAN_DISPLAY_NAMES = JSON.stringify({
+      ja: { pro: "PRO-2" },
+    });
+    expect(planLabelFromEnv("pro", "ja")).toBe("PRO-2");
+  });
 });
