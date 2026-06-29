@@ -129,6 +129,10 @@ services:
         NEXT_PUBLIC_API_URL: https://${KAGURA_DOMAIN}
         NEXT_PUBLIC_APP_URL: https://${KAGURA_DOMAIN}
         NEXT_PUBLIC_ENABLE_GRAPH_VIZ: ${NEXT_PUBLIC_ENABLE_GRAPH_VIZ:-}
+        # Per-deployment plan-tier label override (locale-aware JSON). Unset →
+        # empty → app keeps the OSS default S/M/L. Build-time only (NEXT_PUBLIC_*
+        # is inlined by `next build`); changing it needs a web image rebuild.
+        NEXT_PUBLIC_PLAN_DISPLAY_NAMES: ${NEXT_PUBLIC_PLAN_DISPLAY_NAMES:-}
     container_name: kagura-web
     restart: always
     environment:
