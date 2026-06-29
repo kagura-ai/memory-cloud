@@ -215,7 +215,7 @@ See [Architecture › Agent Memory Substrate](architecture.md#agent-memory-subst
 
 ## MCP Tools
 
-Kagura Memory Cloud exposes 45 tools via the [Model Context Protocol (MCP)](https://modelcontextprotocol.io/), grouped into 11 categories:
+Kagura Memory Cloud exposes 50 tools via the [Model Context Protocol (MCP)](https://modelcontextprotocol.io/), grouped into 12 categories:
 
 | Category | Tools | Purpose |
 |----------|-------|---------|
@@ -227,6 +227,7 @@ Kagura Memory Cloud exposes 45 tools via the [Model Context Protocol (MCP)](http
 | Files / R2 | 5 | `init_file_upload`, `complete_file_upload`, `list_files`, `get_file_download_url`, `delete_file` — binary attachments via R2 |
 | Analyses (Broadlistening) | 5 | `analyze_context`, `list_analyses`, `get_analysis`, `get_active_analysis`, `get_cluster` — large-scale qualitative clustering (Owner + Pro plan) |
 | Resources | 6 | `setup_resource`, `setup_connector`, `list_resource_tokens`, `ingest_events`, `get_resource_impact`, `get_resource_schema` — external data ingestion + connector provisioning |
+| Secrets | 5 | `secret_register_pubkey`, `secret_put`, `secret_get`, `secret_list`, `secret_revoke_grant` — zero-knowledge secret store (age ciphertext; server never decrypts) |
 | Sleep Maintenance | 3 | `get_sleep_history`, `get_sleep_report`, `rollback_sleep_run` — background consolidation observability |
 | Usage | 1 | `get_usage` — workspace quota and usage queries |
 | API-Key Bindings | 2 | `list_my_bindings`, `describe_binding` — introspect public-bound API keys (read-only, owner-scoped) |

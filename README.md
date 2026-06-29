@@ -61,7 +61,7 @@ Most AI memory tools are just vector databases with a chat wrapper. Kagura is di
 | **AI Reranking** | Ollama (local, free), Voyage AI, or Cohere — cross-encoder reranking for precision |
 | **Neural Memory Graph** | Hebbian learning builds a knowledge graph in the background. `explore()` traverses it for serendipitous discovery. |
 | **Agent Memory Substrate** | Beyond a knowledge store: delivery modes (pinned / time-triggered), a server-stamped trust boundary, an agent state lane, and a retrieval-feedback signal — the primitives an autonomous agent loop needs. |
-| **45 MCP Tools** | Memory, Agent Substrate, Neural edges, Contexts, Tags, Files (R2), Analyses (broadlistening), Resources, Sleep Maintenance, Usage, API-Key Bindings |
+| **50 MCP Tools** | Memory, Agent Substrate, Neural edges, Contexts, Tags, Files (R2), Analyses (broadlistening), Resources, Secrets, Sleep Maintenance, Usage, API-Key Bindings |
 | **Multi-Provider** | OpenAI or Ollama (local, private, zero cost) for embeddings |
 | **Team Ready** | Workspaces, RBAC, context isolation, shared memory |
 | **Web UI** | Next.js dashboard — contexts, search settings, member management |
@@ -418,7 +418,7 @@ curl -X POST -H "Authorization: Bearer kagura_{your_key}" \
 
 ## MCP Tools
 
-45 tools across 11 categories. Workspace roles: **Owner** > Admin > Member > **Viewer** (read-only). Context roles: **Owner** > Editor > Viewer. Private contexts are visible only to the creator. Members may be restricted to specific contexts via allowlist.
+50 tools across 12 categories. Workspace roles: **Owner** > Admin > Member > **Viewer** (read-only). Context roles: **Owner** > Editor > Viewer. Private contexts are visible only to the creator. Members may be restricted to specific contexts via allowlist.
 
 ### Memory (6)
 
@@ -503,6 +503,18 @@ Cluster memories into themes (kouchou-ai-style UMAP + KMeans + LLM labeling) for
 | `get_resource_impact` | Resource stats (tokens, memories, schema version) | Viewer+ |
 | `get_resource_schema` | Field definitions for a resource | Viewer+ |
 
+### Secrets (5)
+
+Zero-knowledge secret store: the server holds only `age` public recipient keys and opaque ciphertext, and **never decrypts**. Encryption/decryption happen client-side (the `kagura secret` CLI / SDK). `list` returns metadata only — there is no endpoint that returns a plaintext value.
+
+| Tool | Description | Required Role |
+|------|------------|---------------|
+| `secret_register_pubkey` | Register your own `age` recipient public key (starts pending; an owner approves it before it can receive grants) | Member+ |
+| `secret_put` | Store age-encrypted ciphertext + grant approved recipients (`recipients_snapshot` must match `grant_pubkey_ids`) | Owner/Admin |
+| `secret_get` | Fetch ciphertext you hold an active grant for (decrypt locally; every fetch is recorded in a tamper-evident audit log) | Member+ |
+| `secret_list` | List secret names + metadata (status, version, grant count, rotation flag) — never values | Owner/Admin |
+| `secret_revoke_grant` | Revoke a recipient's grant and flag the secret `rotation_needed` (not retroactive — rotate upstream) | Owner/Admin |
+
 ### Sleep Maintenance (3)
 
 Background consolidation of memories (decay, edge pruning, theme summarization).
@@ -535,6 +547,7 @@ In addition to MCP tools, a full REST API is available:
 - **Attachments**: File upload/download for memories (`/api/v1/attachments/*`, 5MB limit)
 - **Workspaces**: Management, members, invitations (`/api/v1/workspaces/*`)
 - **Admin**: Users, plan management, neural config (`/api/v1/admin/*`)
+- **Secrets**: Zero-knowledge secret store — ciphertext-only, server never decrypts (`/api/v1/config/secrets/*`)
 
 Full API documentation: `http://localhost:8080/redoc`
 

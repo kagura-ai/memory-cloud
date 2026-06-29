@@ -61,7 +61,7 @@
 | **AI Reranking** | Ollama (ローカル・無料)、Voyage AI、Cohere — cross-encoder reranker で精度向上 |
 | **Neural Memory Graph** | Hebbian 学習がバックグラウンドで知識グラフを構築。`explore()` がそれを辿り偶発的発見を提供 |
 | **Agent Memory Substrate** | 単なる知識ストアを超えて — delivery mode (pin / 時刻トリガ)、サーバー署名の trust boundary、agent state レーン、retrieval feedback シグナル。自律エージェントのループに必要なプリミティブ群 |
-| **45 の MCP ツール** | Memory、Agent Substrate、Neural edges、Contexts、Tags、Files (R2)、Analyses (broadlistening)、Resources、Sleep Maintenance、Usage、API-Key Bindings |
+| **50 の MCP ツール** | Memory、Agent Substrate、Neural edges、Contexts、Tags、Files (R2)、Analyses (broadlistening)、Resources、Secrets、Sleep Maintenance、Usage、API-Key Bindings |
 | **マルチプロバイダ** | 埋め込みに OpenAI か Ollama (ローカル・非公開・コストゼロ) |
 | **チーム対応** | Workspace、RBAC、context 分離、共有メモリ |
 | **Web UI** | Next.js ダッシュボード — context、検索設定、メンバー管理 |
@@ -293,7 +293,7 @@ curl -X POST -H "Authorization: Bearer kagura_{your_key}" \
 
 ## MCP ツール
 
-11 カテゴリ・全 45 ツール。Workspace ロール: **Owner** > Admin > Member > **Viewer** (read-only)。Context ロール: **Owner** > Editor > Viewer。Private context は作成者のみ閲覧可。Member を特定 context に allowlist で制限可能。
+12 カテゴリ・全 50 ツール。Workspace ロール: **Owner** > Admin > Member > **Viewer** (read-only)。Context ロール: **Owner** > Editor > Viewer。Private context は作成者のみ閲覧可。Member を特定 context に allowlist で制限可能。
 
 ### Memory (6)
 
@@ -378,6 +378,18 @@ curl -X POST -H "Authorization: Bearer kagura_{your_key}" \
 | `get_resource_impact` | resource 統計 (token 数、memory 数、schema version) | Viewer+ |
 | `get_resource_schema` | resource のフィールド定義取得 | Viewer+ |
 
+### Secrets (5)
+
+ゼロ知識シークレットストア: サーバーは `age` 公開受信者キーと不透明な ciphertext のみを保持し、**復号は一切行わない**。暗号化・復号はすべてクライアント側 (`kagura secret` CLI / SDK)。`list` はメタデータのみを返し、平文値を返すエンドポイントは存在しない。
+
+| ツール | 説明 | 必要ロール |
+|--------|------|------------|
+| `secret_register_pubkey` | 自分の `age` 受信者公開鍵を登録 (pending で開始、owner 承認後に grant 受領可) | Member+ |
+| `secret_put` | age 暗号化 ciphertext を保存 + 承認済み受信者へ grant (`recipients_snapshot` は `grant_pubkey_ids` と完全一致必須) | Owner/Admin |
+| `secret_get` | 有効な grant を持つ ciphertext を取得 (ローカルで復号、全 fetch は改竄検知監査ログに記録) | Member+ |
+| `secret_list` | secret 名 + メタデータ (status、version、grant 数、rotation フラグ) を列挙 — 値は返さない | Owner/Admin |
+| `secret_revoke_grant` | 受信者の grant を revoke し secret を `rotation_needed` にフラグ (遡及不可 — 上流を rotate) | Owner/Admin |
+
 ### Sleep Maintenance (3)
 
 バックグラウンドでメモリ統合 (decay、edge pruning、テーマ要約) を実行。
@@ -410,6 +422,7 @@ MCP ツールに加えてフル REST API を提供:
 - **Attachments**: メモリ添付ファイル (`/api/v1/attachments/*`、5MB 上限)
 - **Workspaces**: 管理、メンバー、招待 (`/api/v1/workspaces/*`)
 - **Admin**: ユーザ、プラン管理、neural config (`/api/v1/admin/*`)
+- **Secrets**: ゼロ知識シークレットストア — ciphertext のみ、サーバーは復号しない (`/api/v1/config/secrets/*`)
 
 完全な API ドキュメント: `http://localhost:8080/redoc`
 

@@ -942,7 +942,7 @@ Sleep and Neural Memory tuning knobs (LLM provider, budgets, per-phase toggles, 
 
 ## MCP Tools
 
-Kagura Memory Cloud provides 45 MCP tools for AI assistants across 11 categories (Memory, Agent Substrate, Neural Edges, Contexts, Tags, Files / R2, Analyses, Resources, Sleep Maintenance, Usage, API-Key Bindings). See [README › MCP Tools](../README.md#mcp-tools) for the full table with required roles. The examples below illustrate the most commonly used tools; every other tool shares the same JSON-RPC call shape.
+Kagura Memory Cloud provides 50 MCP tools for AI assistants across 12 categories (Memory, Agent Substrate, Neural Edges, Contexts, Tags, Files / R2, Analyses, Resources, Secrets, Sleep Maintenance, Usage, API-Key Bindings). See [README › MCP Tools](../README.md#mcp-tools) for the full table with required roles. The examples below illustrate the most commonly used tools; every other tool shares the same JSON-RPC call shape.
 
 ### 1. remember
 

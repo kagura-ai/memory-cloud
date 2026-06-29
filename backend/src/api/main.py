@@ -191,6 +191,10 @@ openapi_tags = [
     {"name": "api-keys", "description": "MCP API key management"},
     {"name": "oauth2-server", "description": "OAuth2 client management"},
     {"name": "external-keys", "description": "External API keys (OpenAI, Cohere, etc.)"},
+    {
+        "name": "secrets",
+        "description": "Zero-knowledge secret store (age ciphertext; server never decrypts)",
+    },
     {"name": "resource-tokens", "description": "Resource token management"},
     {"name": "resource-ingest", "description": "External data ingestion API"},
     {"name": "resource-schema", "description": "Resource schema registry"},
