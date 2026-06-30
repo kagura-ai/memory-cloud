@@ -225,7 +225,14 @@ class PlanChangeAuditEntry(BaseModel):
     workspace_name: str
     old_plan: str | None
     new_plan: str
+    # `changed_by` is the actor's stable user_id (OAuth2 sub) as stored — the UI
+    # links it to /admin/users/{changed_by}. `changed_by_name` / `changed_by_email`
+    # are the resolved display labels (name over email); both are None when the
+    # actor no longer resolves to a User row (e.g. account erased → pseudonymized
+    # changed_by), in which case the UI shows the raw id without a link.
     changed_by: str
+    changed_by_name: str | None = None
+    changed_by_email: str | None = None
     changed_at: str
     reason: str | None
 
@@ -558,7 +565,7 @@ async def get_plan_change_audit(
         # that have since been soft-deleted must remain visible so admins can
         # reconcile past billing / plan transitions.
         audit_result = await db.execute(
-            select(PlanChange, Workspace.name, User.name)
+            select(PlanChange, Workspace.name, User.name, User.email)
             .join(Workspace, PlanChange.workspace_id == Workspace.id)
             .outerjoin(User, PlanChange.changed_by == User.user_id)
             .order_by(PlanChange.changed_at.desc())
@@ -566,7 +573,7 @@ async def get_plan_change_audit(
         )
 
         entries = []
-        for audit, workspace_name, user_name in audit_result.all():
+        for audit, workspace_name, user_name, user_email in audit_result.all():
             entries.append(
                 PlanChangeAuditEntry(
                     id=audit.id,
@@ -574,7 +581,11 @@ async def get_plan_change_audit(
                     workspace_name=workspace_name,
                     old_plan=audit.old_plan,
                     new_plan=audit.new_plan,
-                    changed_by=user_name or audit.changed_by,
+                    # Keep the raw user_id in `changed_by` so the UI can link to
+                    # /admin/users/{id}; surface name + email as display labels.
+                    changed_by=audit.changed_by,
+                    changed_by_name=user_name,
+                    changed_by_email=user_email,
                     changed_at=to_utc_iso(audit.changed_at) or "",
                     reason=audit.reason,
                 )

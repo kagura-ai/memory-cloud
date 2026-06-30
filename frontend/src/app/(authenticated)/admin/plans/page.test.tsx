@@ -317,6 +317,76 @@ describe("AdminPlansPage — tiers tab", () => {
   });
 });
 
+// ----------------------------------------------------------------------
+// Audit tab — the "changed by" actor renders as name + email, linked to the
+// admin user-detail page. `changed_by` carries the raw user_id (link target);
+// `changed_by_name` / `changed_by_email` are the display labels. When the actor
+// no longer resolves (erased → pseudonymized changed_by, null name/email) the
+// raw id renders without a link.
+// ----------------------------------------------------------------------
+describe("AdminPlansPage audit tab — actor link", () => {
+  beforeEach(() => {
+    currentTab = "audit";
+  });
+
+  const auditEntry = (over: Record<string, unknown>) => ({
+    id: 1,
+    workspace_id: "ws-1",
+    workspace_name: "Personal Workspace",
+    old_plan: "free",
+    new_plan: "pro",
+    changed_by: "105867659819019494486",
+    changed_by_name: "Fumikazu Kiyota",
+    changed_by_email: "kiyota@noizz.co.jp",
+    changed_at: "2026-06-02T11:52:41Z",
+    reason: null,
+    ...over,
+  });
+
+  it("renders name + email and links them to /admin/users/{changed_by}", async () => {
+    mockGetAdminPlanAudit.mockResolvedValue([auditEntry({})]);
+
+    render(<AdminPlansPage />);
+
+    // Both lines render...
+    const name = await screen.findByText("Fumikazu Kiyota");
+    expect(screen.getByText("kiyota@noizz.co.jp")).toBeInTheDocument();
+    // ...inside a single link to the user-detail page.
+    const link = name.closest("a");
+    expect(link).toHaveAttribute("href", "/admin/users/105867659819019494486");
+    expect(link).toHaveTextContent("kiyota@noizz.co.jp");
+  });
+
+  it("falls back to email only when the actor has no display name", async () => {
+    mockGetAdminPlanAudit.mockResolvedValue([
+      auditEntry({ changed_by_name: null }),
+    ]);
+
+    render(<AdminPlansPage />);
+
+    const link = await screen.findByRole("link", {
+      name: "kiyota@noizz.co.jp",
+    });
+    expect(link).toHaveAttribute("href", "/admin/users/105867659819019494486");
+    expect(screen.queryByText("Fumikazu Kiyota")).toBeNull();
+  });
+
+  it("shows the raw id without a link when the actor no longer resolves", async () => {
+    mockGetAdminPlanAudit.mockResolvedValue([
+      auditEntry({
+        changed_by: "erased-pseudonym",
+        changed_by_name: null,
+        changed_by_email: null,
+      }),
+    ]);
+
+    render(<AdminPlansPage />);
+
+    expect(await screen.findByText("erased-pseudonym")).toBeInTheDocument();
+    expect(screen.queryByRole("link", { name: "erased-pseudonym" })).toBeNull();
+  });
+});
+
 describe("AdminPlansPage — workspaces tab addon dialog (Issue #663)", () => {
   beforeEach(() => {
     currentTab = "workspaces";

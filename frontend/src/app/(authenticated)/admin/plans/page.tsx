@@ -13,6 +13,7 @@
  */
 
 import React, { useEffect, useState } from "react";
+import Link from "next/link";
 import { useTranslations } from "next-intl";
 import { PageContainer } from "@/components/common/PageContainer";
 import { PageHeader } from "@/components/common/PageHeader";
@@ -482,9 +483,7 @@ export default function AdminPlansPage() {
                               <PlanBadge
                                 planName={
                                   workspace.plan_name as
-                                    | "free"
-                                    | "basic"
-                                    | "pro"
+                                    "free" | "basic" | "pro"
                                 }
                               />
                             </TableCell>
@@ -809,7 +808,25 @@ export default function AdminPlansPage() {
                             size="sm"
                           />
                         </TableCell>
-                        <TableCell>{entry.changed_by}</TableCell>
+                        <TableCell>
+                          {entry.changed_by_email ? (
+                            <Link
+                              href={`/admin/users/${entry.changed_by}`}
+                              className="block hover:underline"
+                            >
+                              {entry.changed_by_name && (
+                                <span className="block font-medium text-sm">
+                                  {entry.changed_by_name}
+                                </span>
+                              )}
+                              <span className="block text-xs text-gray-500">
+                                {entry.changed_by_email}
+                              </span>
+                            </Link>
+                          ) : (
+                            entry.changed_by
+                          )}
+                        </TableCell>
                         <TableCell className="text-sm text-muted-foreground">
                           {entry.reason || "-"}
                         </TableCell>
