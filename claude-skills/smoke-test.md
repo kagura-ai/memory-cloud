@@ -8,7 +8,7 @@ lane (`delivery_mode` pinning + `load_pinned`, the agent session-state lane, ret
 and the `trust_tier` recall filter), and owner-scoped binding introspection.
 Optionally exercises PRO-only resource rows (setup_resource, ingest_events, get_resource_impact, get_resource_schema, list_resource_tokens, plus delete_context cleanup) if the workspace has a PRO plan.
 
-The canonical tool registry is `backend/src/mcp_server/tools/__init__.py` (**45 tools**). The
+The canonical tool registry is `backend/src/mcp_server/tools/__init__.py` (**50 tools**). The
 **Coverage cross-check** section near the end mirrors that registry so the "all MCP tools" claim
 stays honest — every registered tool is either exercised here or listed there with a reason. This
 is a live runbook, not a pytest suite, so the cross-check is a manual reconciliation step: when a
@@ -17,6 +17,7 @@ tool is added to the registry, this skill must gain a row or a documented exclus
 Excluded by design (each documented in the Coverage cross-check):
 - `analyze_context` — requires billing, BYOK, workspace owner role, and Pro-tier feature access.
 - File tools (`init_file_upload`, `complete_file_upload`, `get_file_download_url`, `delete_file`, `list_files`) — require multipart S3/R2 upload flows that can't be exercised inline; cover them separately.
+- Secret tools (`secret_register_pubkey`, `secret_put`, `secret_get`, `secret_list`, `secret_revoke_grant`) — zero-knowledge store needing `age` recipient keypairs, owner pubkey approval, and armored ciphertext; exercise via the `kagura secret` CLI/SDK, not inline.
 - `setup_connector` — provisions an external connector (Slack/Discord/Teams) needing platform credentials and a real target; gated-skip inline.
 
 Use this after deployments, tool description changes, or MCP server updates.
@@ -385,16 +386,16 @@ delete_context(context_id=...)
 ### 8. Coverage cross-check (anti-drift)
 
 Reconcile this skill against the canonical registry so the "all MCP tools" claim cannot silently
-rot. The source of truth is `backend/src/mcp_server/tools/__init__.py` (**45 tools**). Every
+rot. The source of truth is `backend/src/mcp_server/tools/__init__.py` (**50 tools**). Every
 registered tool must be in exactly one column below. **If `tools/__init__.py` and this table
 disagree, the skill is out of date — add a row (or a documented exclusion) before merging.**
 
-Optional live assertion: count the keys in the registry and confirm it equals 45 (the number this
+Optional live assertion: count the keys in the registry and confirm it equals 50 (the number this
 table is built for); if it differs, a tool was added/removed and this skill needs updating:
 
 ```
 grep -cE '^\s*"[a-z_]+"\s*:\s*handle_' backend/src/mcp_server/tools/__init__.py
--> Verify: equals 45 (else: reconcile this section with the registry)
+-> Verify: equals 50 (else: reconcile this section with the registry)
 ```
 
 **Exercised inline (33 core tools):** list_contexts, create_context, get_context_info,
@@ -408,7 +409,7 @@ rollback_sleep_run, delete_context.
 **Exercised only on PRO plan, else SKIP (5 tools):** setup_resource, ingest_events,
 get_resource_impact, get_resource_schema, list_resource_tokens.
 
-**Documented exclusions / gated-skip (7 tools) — with reasons:**
+**Documented exclusions / gated-skip (12 tools) — with reasons:**
 
 | Tool | Why not exercised inline |
 |---|---|
@@ -419,9 +420,14 @@ get_resource_impact, get_resource_schema, list_resource_tokens.
 | `get_file_download_url` | Requires an uploaded object to produce a presigned URL. |
 | `delete_file` | Requires an uploaded object to delete. |
 | `list_files` | Grouped with the file-upload flow; covered in the file-tools test suite. |
+| `secret_register_pubkey` | Zero-knowledge secret store: needs an `age` recipient public key. Covered by the secret-store suite / `kagura secret` CLI. |
+| `secret_put` | Requires an owner-approved active recipient pubkey + armored `age` ciphertext encrypted client-side. |
+| `secret_get` | Requires an active grant via an active recipient pubkey; the server never decrypts. |
+| `secret_list` | Owner/admin metadata listing; grouped with the secret-store flow. |
+| `secret_revoke_grant` | Operates on an existing grant produced by `secret_put`. |
 
-33 + 5 + 7 = **45** — the full registry. The gap between "exercised inline" and the registry is
-**only** the 5 PRO-gated rows (run when PRO) and the 7 documented exclusions above.
+33 + 5 + 12 = **50** — the full registry. The gap between "exercised inline" and the registry is
+**only** the 5 PRO-gated rows (run when PRO) and the 12 documented exclusions above.
 
 ### 9. Report
 
@@ -490,7 +496,7 @@ Print a summary table (numbers are illustrative; the executed order follows the 
 
 Note: the 47 rows are test *steps*, not distinct tools — several tools (remember, recall,
 update_memory, forget, delete_context, list_edges, list_tags) are exercised in multiple rows.
-Distinct-tool coverage is reconciled in the Coverage cross-check (33 core + 5 PRO + 7 documented-skip = 45).
+Distinct-tool coverage is reconciled in the Coverage cross-check (33 core + 5 PRO + 12 documented-skip = 50).
 
 Test context: smoke-test-{timestamp} (cleaned up)
 
@@ -498,8 +504,9 @@ Documented exclusions / gated-skip (see Coverage cross-check) — not counted as
 - analyze_context (billing + BYOK + owner + Pro-tier)
 - setup_connector (external connector credentials + live target)
 - File tools: init_file_upload, complete_file_upload, get_file_download_url, delete_file, list_files (multipart S3/R2)
+- Secret tools: secret_register_pubkey, secret_put, secret_get, secret_list, secret_revoke_grant (zero-knowledge: age keypairs + owner approval + ciphertext)
 
-Registry reconciliation: 33 core + 5 PRO + 7 documented-skip = 45 tools in tools/__init__.py.
+Registry reconciliation: 33 core + 5 PRO + 12 documented-skip = 50 tools in tools/__init__.py.
 ```
 
 If any step fails:

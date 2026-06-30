@@ -11,7 +11,7 @@
     {
       "name": "kagura-memory",
       "source": "./",
-      "description": "Persistent AI memory with session management, recall/save, and setup tools",
+      "description": "Persistent AI project memory — restore session context, recall & save knowledge, setup, and an MCP smoke test",
       "category": "productivity",
       "homepage": "https://github.com/kagura-ai/memory-cloud"
     }

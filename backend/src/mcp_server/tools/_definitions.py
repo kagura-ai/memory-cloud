@@ -2198,7 +2198,7 @@ Returns: {status, name, rotation_needed: true}.""",
         },
     ]
     # Pre-1.0 schema policy (#990): every tool inputSchema is strict — no
-    # undeclared top-level parameters. Applied centrally here so all 45 tools
+    # undeclared top-level parameters. Applied centrally here so all 50 tools
     # stay uniform and any new tool inherits the policy automatically. This is
     # advisory (handlers read args defensively via ``.get`` and never
     # Pydantic-validate), so it tightens the client-facing contract without
