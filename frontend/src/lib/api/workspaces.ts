@@ -402,7 +402,7 @@ export interface PlanTierFeature {
 
 /** Curated per-tier feature matrix (free → basic → pro) for the Plan page (#1138). */
 export async function getPlanTierMatrix(): Promise<PlanTierFeature[]> {
-  return apiClient.get<PlanTierFeature[]>("/api/v1/workspaces/plan-tiers");
+  return apiClient.get<PlanTierFeature[]>("/api/v1/workspaces/plans/tiers");
 }
 
 /**

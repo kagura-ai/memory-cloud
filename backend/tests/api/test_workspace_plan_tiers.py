@@ -18,7 +18,10 @@ from api.main import app
 from auth.dependencies import require_session_auth
 from db.base import get_db
 
-ENDPOINT = "/api/v1/workspaces/plan-tiers"
+# Two-segment path (like /workspaces/plans/available) so it isn't shadowed by
+# the earlier GET /workspaces/{workspace_id} route (a one-segment /plan-tiers
+# would 422 on the UUID parse).
+ENDPOINT = "/api/v1/workspaces/plans/tiers"
 
 
 def _mock_session_user() -> dict:

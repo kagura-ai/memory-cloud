@@ -255,7 +255,7 @@ def _plan_tier_feature(tier: PlanTier) -> PlanTierFeature:
     )
 
 
-@router.get("/workspaces/plan-tiers", response_model=list[PlanTierFeature])
+@router.get("/workspaces/plans/tiers", response_model=list[PlanTierFeature])
 async def get_plan_tier_matrix(
     user: SessionUser,
 ) -> list[PlanTierFeature]:
@@ -265,6 +265,11 @@ async def get_plan_tier_matrix(
     omitted by design — pricing lives in www / the payment service. Returns the
     tiers in upgrade order (free → basic → pro). Public reference data; accessible
     by any authenticated session user (the Plan page itself is owner-gated).
+
+    Path note: the ``/workspaces/plans/...`` two-segment shape (mirroring
+    ``/workspaces/plans/available``) is deliberate — a one-segment
+    ``/workspaces/plan-tiers`` would be shadowed by the earlier-registered
+    ``GET /workspaces/{workspace_id}`` route and 422 on the UUID parse.
     """
     order = [PlanName.FREE, PlanName.BASIC, PlanName.PRO]
     return [_plan_tier_feature(PLAN_TIERS[name]) for name in order]
