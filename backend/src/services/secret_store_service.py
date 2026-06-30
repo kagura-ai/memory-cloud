@@ -35,6 +35,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from config.settings import get_settings
 from models.secrets import (
     AUDIT_ACTION_APPROVE,
+    AUDIT_ACTION_DELETE,
     AUDIT_ACTION_GET,
     AUDIT_ACTION_PUT,
     AUDIT_ACTION_REGISTER,
@@ -770,6 +771,57 @@ class SecretStoreService:
             revoker=actor_user_id,
         )
         return secret
+
+    async def delete_secret(
+        self,
+        *,
+        workspace_id: UUID,
+        actor_user_id: str,
+        name: str,
+        req_meta: dict | None = None,
+    ) -> None:
+        """Hard-delete a secret and its versions/grants (owner-only cleanup, #1153).
+
+        Deletion is **cleanup, not a security control**: it removes superseded
+        ciphertext at rest (shrinking the offline-crack blast radius) but does
+        **not** un-share a value a recipient already fetched, nor rotate the live
+        upstream credential. The correct order is *rotate upstream first, then
+        delete* — the same "revoke ≠ un-share" invariant as grant revocation.
+
+        A ``delete`` entry is appended to the per-workspace tamper-evident chain
+        **before** the row is removed: the audit log is FK-decoupled
+        (:class:`~models.secrets.SecretAccessLog`), so the record of the deletion
+        outlives the secret. ``secret_versions`` + ``secret_grants`` go with the
+        secret via ``ondelete=CASCADE`` (a pure DB-level cascade — there are no
+        ORM relationships); ``secret_access_log`` has no FK to ``secrets`` and is
+        untouched. Any status is deletable (``active``/``disabled``); the route
+        commits.
+        """
+        secret_row = await self.db.execute(
+            select(Secret).where(Secret.workspace_id == workspace_id, Secret.name == name)
+        )
+        secret = secret_row.scalar_one_or_none()
+        if secret is None:
+            raise SecretNotFound("Secret not found")
+
+        # Append the audit entry while we still hold the id — the log row has no
+        # FK to the secret, so it (and verify_audit_chain) survives the delete.
+        await self._append_audit(
+            workspace_id=workspace_id,
+            actor_user_id=actor_user_id,
+            action=AUDIT_ACTION_DELETE,
+            result=AUDIT_RESULT_OK,
+            secret_id=secret.id,
+            req_meta=req_meta,
+        )
+        await self.db.delete(secret)
+        await self.db.flush()
+        logger.info(
+            "secret_deleted",
+            workspace_id=str(workspace_id),
+            name=name,
+            actor=actor_user_id,
+        )
 
     async def list_secrets(self, *, workspace_id: UUID) -> list[dict[str, Any]]:
         """List secret names + metadata. **Never** returns ciphertext/values.

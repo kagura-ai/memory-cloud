@@ -83,12 +83,17 @@ AUDIT_ACTION_APPROVE = "approve"
 AUDIT_ACTION_PUT = "put"
 AUDIT_ACTION_GET = "get"
 AUDIT_ACTION_REVOKE = "revoke"
+# Owner-only hard-delete of a secret (#1153). Appended to the chain *before* the
+# secret row is removed; the log is FK-decoupled (see SecretAccessLog) so the
+# record of the deletion outlives the secret it deleted.
+AUDIT_ACTION_DELETE = "delete"
 _ALL_AUDIT_ACTIONS: tuple[str, ...] = (
     AUDIT_ACTION_REGISTER,
     AUDIT_ACTION_APPROVE,
     AUDIT_ACTION_PUT,
     AUDIT_ACTION_GET,
     AUDIT_ACTION_REVOKE,
+    AUDIT_ACTION_DELETE,
 )
 
 AUDIT_RESULT_OK = "ok"

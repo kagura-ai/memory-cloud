@@ -347,6 +347,45 @@ async def revoke_grant(
     return SecretMetaResponse(**match)
 
 
+# NOTE: the greedy `{name:path}` catch-all matches the whole sub-path for the
+# DELETE method. It must remain the ONLY/last DELETE route under this prefix —
+# any static DELETE sub-path added after it (e.g. DELETE /pubkeys/{id}) would be
+# shadowed and routed here as a secret name instead. Other methods are unaffected.
+@router.delete("/{name:path}", status_code=status.HTTP_204_NO_CONTENT)
+async def delete_secret(
+    name: str,
+    request: Request,
+    owner: WorkspaceOwner,
+    svc: SecretStoreService = Depends(get_secret_service),
+    db: AsyncSession = Depends(get_db),
+) -> None:
+    """Owner-only hard-delete of a secret + its versions/grants (#1153).
+
+    Delete is **cleanup, not a security control**: it removes superseded
+    ciphertext at rest but does NOT un-share a value a recipient already fetched,
+    nor rotate the still-live upstream credential. Rotate the upstream key first,
+    then delete (the UI confirmation warns about this). A ``delete`` entry is
+    appended to the tamper-evident audit chain before removal, and the audit
+    history of the deleted secret survives (the log is FK-decoupled), so
+    ``audit/verify`` still passes afterwards.
+
+    ``{name:path}`` so slash-containing names (e.g. ``cloudflare/api-token``) are
+    addressable. Owner-only mirrors the pubkey trust-gate ops (approve/revoke):
+    a non-owner (incl. a non-owner admin), member, or viewer is rejected 403.
+    """
+    user_id, workspace_id = owner
+    try:
+        await svc.delete_secret(
+            workspace_id=workspace_id,
+            actor_user_id=user_id,
+            name=name,
+            req_meta=_rest_meta(request),
+        )
+    except SecretNotFound as e:
+        raise NotFoundException("Secret") from e
+    await db.commit()
+
+
 # ============================================================================
 # Secrets — consumption (member + grant)
 # ============================================================================
