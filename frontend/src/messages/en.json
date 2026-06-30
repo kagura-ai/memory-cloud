@@ -2407,7 +2407,7 @@
         "resource": "Resource",
         "base": "Base",
         "addon": "Addon",
-        "effectiveUsage": "Effective / Usage",
+        "usageEffective": "Usage / Effective",
         "connector": "Connectors"
       },
       "addonDialog": {

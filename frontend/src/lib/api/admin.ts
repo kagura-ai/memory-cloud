@@ -26,7 +26,12 @@ export interface PlanChangeAuditEntry {
   workspace_name: string;
   old_plan: string | null;
   new_plan: string;
+  /** Actor's stable user_id (OAuth2 sub) — links to /admin/users/{changed_by}. */
   changed_by: string;
+  /** Resolved actor display name; null if the user no longer exists. */
+  changed_by_name: string | null;
+  /** Resolved actor email for display; null if the user no longer exists. */
+  changed_by_email: string | null;
   changed_at: string;
   reason: string | null;
 }
