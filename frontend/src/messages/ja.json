@@ -1181,7 +1181,7 @@
       "row_publicPerDay": "公開呼び出し / 日",
       "row_resourceTokens": "リソーストークン",
       "row_connectors": "コネクタ",
-      "row_analysisPerDay": "分析(ブロードリスニング) / 日",
+      "row_analysisPerDay": "分析 / 日",
       "row_sleepContexts": "Sleep対応コンテキスト",
       "row_reranking": "リランキング",
       "row_managedEmbeddings": "マネージド埋め込み",

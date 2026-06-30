@@ -1182,7 +1182,7 @@
       "row_publicPerDay": "Public calls / day",
       "row_resourceTokens": "Resource tokens",
       "row_connectors": "Connectors",
-      "row_analysisPerDay": "Analysis (Broadlistening) / day",
+      "row_analysisPerDay": "Analysis / day",
       "row_sleepContexts": "Sleep-enabled contexts",
       "row_reranking": "Reranking",
       "row_managedEmbeddings": "Managed embeddings",

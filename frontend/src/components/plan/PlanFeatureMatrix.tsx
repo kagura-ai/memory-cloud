@@ -34,6 +34,7 @@ interface MatrixRow {
   key: string;
   field: keyof PlanTierFeature;
   kind: RowKind;
+  beta?: boolean; // tag this capability as Beta (badge next to the row label)
 }
 
 const ROWS: MatrixRow[] = [
@@ -45,12 +46,18 @@ const ROWS: MatrixRow[] = [
   { key: "restPerDay", field: "rest_calls_per_day", kind: "number" },
   { key: "publicPerDay", field: "public_calls_per_day", kind: "number" },
   { key: "resourceTokens", field: "max_resource_tokens", kind: "number" },
-  { key: "connectors", field: "max_connectors", kind: "number" },
-  { key: "analysisPerDay", field: "analysis_runs_per_day", kind: "number" },
+  { key: "connectors", field: "max_connectors", kind: "number", beta: true },
+  {
+    key: "analysisPerDay",
+    field: "analysis_runs_per_day",
+    kind: "number",
+    beta: true,
+  },
   {
     key: "sleepContexts",
     field: "sleep_enabled_contexts_limit",
     kind: "number",
+    beta: true,
   },
   { key: "reranking", field: "reranking", kind: "bool" },
   { key: "managedEmbeddings", field: "managed_embeddings", kind: "bool" },
@@ -160,7 +167,14 @@ export function PlanFeatureMatrix({
           {ROWS.map((row) => (
             <TableRow key={row.key}>
               <TableCell className="text-sm font-medium">
-                {t(`planMatrix.row_${row.key}`)}
+                <span className="inline-flex items-center gap-2">
+                  {t(`planMatrix.row_${row.key}`)}
+                  {row.beta && (
+                    <span className="rounded-full bg-amber-100 px-1.5 py-0.5 text-[10px] font-medium text-amber-800 dark:bg-amber-900/30 dark:text-amber-200">
+                      {t("planMatrix.beta")}
+                    </span>
+                  )}
+                </span>
               </TableCell>
               {tiers.map((tier) => (
                 <TableCell
