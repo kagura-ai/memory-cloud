@@ -154,6 +154,18 @@ const navigationGroups: NavGroup[] = [
         href: "/workspace/storage",
         icon: HardDrive,
       },
+      {
+        // Issue #1134: owner/admin secret store console. Lives in the Workspace
+        // group (not Settings) because it is a workspace-scoped store, like
+        // resources/storage — not a configuration surface. The list APIs
+        // (GET /config/secrets, /pubkeys) are owner/admin and approve/revoke of
+        // recipient keys is owner-only inside the page, so gate the nav to admin+
+        // so member/viewer don't see a link that would 403 on click.
+        nameKey: "secrets",
+        href: "/workspace/secrets",
+        icon: Lock,
+        requiredWorkspaceRole: WorkspaceRole.Admin,
+      },
     ],
   },
   {
@@ -194,16 +206,6 @@ const navigationGroups: NavGroup[] = [
         // Issue #1145: also gated behind the backend ENABLE_PLAN_PAGE flag
         // (default-off in OSS) — hidden until /system/info confirms plan_page.
         requiredFeature: "plan_page",
-      },
-      {
-        // Issue #1134: owner/admin secret store management UI. The list APIs
-        // (GET /config/secrets, /pubkeys) are owner/admin; approve/revoke of
-        // recipient keys is owner-only inside the page. Gate the nav to admin+
-        // so member/viewer don't see a link that would 403 on click.
-        nameKey: "secrets",
-        href: "/workspace/settings/secrets",
-        icon: Lock,
-        requiredWorkspaceRole: WorkspaceRole.Admin,
       },
       {
         nameKey: "workspaceSettings",
