@@ -58,6 +58,7 @@ import {
   Users,
   BarChart,
   CreditCard,
+  Lock,
   Gauge,
   ChevronDown,
   AlertTriangle,
@@ -188,6 +189,16 @@ const navigationGroups: NavGroup[] = [
         href: "/workspace/settings/plan",
         icon: CreditCard,
         requiredWorkspaceRole: WorkspaceRole.Owner,
+      },
+      {
+        // Issue #1134: owner/admin secret store management UI. The list APIs
+        // (GET /config/secrets, /pubkeys) are owner/admin; approve/revoke of
+        // recipient keys is owner-only inside the page. Gate the nav to admin+
+        // so member/viewer don't see a link that would 403 on click.
+        nameKey: "secrets",
+        href: "/workspace/settings/secrets",
+        icon: Lock,
+        requiredWorkspaceRole: WorkspaceRole.Admin,
       },
       {
         nameKey: "workspaceSettings",
