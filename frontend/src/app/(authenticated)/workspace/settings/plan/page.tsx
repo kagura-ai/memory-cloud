@@ -30,6 +30,7 @@ import { mintBillingHandoff } from "@/lib/api/billing";
 import { ApiError } from "@/lib/api/base";
 import { useLocale } from "@/i18n";
 import { planLabelFromEnv, type PlanTier } from "@/lib/utils/planLabel";
+import { PlanFeatureMatrix } from "@/components/plan/PlanFeatureMatrix";
 
 export default function WorkspacePlanPage() {
   const t = useTranslations("workspace");
@@ -208,15 +209,20 @@ export default function WorkspacePlanPage() {
         </Section>
       )}
 
-      {plan?.can_upgrade && (
-        <Section title={t("proPlanBenefits")}>
-          <ul className="space-y-1 text-sm text-gray-700 dark:text-gray-300">
-            <li>✓ {t("benefitTeamInvitations")}</li>
-            <li>✓ {t("benefitSharedContexts")}</li>
-            <li>✓ {t("benefitCollaboration")}</li>
-          </ul>
-        </Section>
-      )}
+      {/* #1138: per-tier comparison matrix (replaces the old flat "Pro
+          benefits" bullet list). No price column — pricing lives on the
+          payment side (#1141). Marked Beta. */}
+      <Section
+        title={t("planMatrix.title")}
+        description={t("planMatrix.description")}
+        headerActions={
+          <span className="rounded-full bg-amber-100 px-2 py-0.5 text-xs font-medium text-amber-800 dark:bg-amber-900/30 dark:text-amber-200">
+            {t("planMatrix.beta")}
+          </span>
+        }
+      >
+        <PlanFeatureMatrix currentTier={canonicalTier} />
+      </Section>
     </PageContainer>
   );
 }

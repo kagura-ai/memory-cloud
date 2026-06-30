@@ -54,6 +54,11 @@ vi.mock("@/lib/api/base", () => ({
 vi.mock("@/lib/utils/planLabel", () => ({
   planLabelFromEnv: (tier: string) => tier,
 }));
+// The comparison matrix self-fetches and is covered by its own test; stub it
+// here so this suite stays focused on the page's plan/billing concerns (#1138).
+vi.mock("@/components/plan/PlanFeatureMatrix", () => ({
+  PlanFeatureMatrix: () => null,
+}));
 
 const planInfo = (overrides: Record<string, unknown> = {}) => ({
   workspace_id: "ws-1",
