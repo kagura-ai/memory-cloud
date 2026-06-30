@@ -1177,6 +1177,7 @@
       "noSecretsTitle": "シークレットはまだありません",
       "noSecretsDesc": "kagura secret CLI でシークレットを保存すると、アクセス管理用にここに表示されます。",
       "rotationNeeded": "要ローテーション",
+      "statusOk": "有効",
       "revokeGrant": "grant を revoke",
       "revokeGrantTitle": "grant を revoke",
       "revokeGrantDesc": "受信者がこのシークレットを取得できないようにします。遡及的ではないため、後で上流の認証情報をローテーションしてください。",

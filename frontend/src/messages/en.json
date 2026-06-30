@@ -1178,6 +1178,7 @@
       "noSecretsTitle": "No secrets yet",
       "noSecretsDesc": "Store secrets with the kagura secret CLI. They will appear here for access management.",
       "rotationNeeded": "Rotation needed",
+      "statusOk": "Active",
       "revokeGrant": "Revoke grant",
       "revokeGrantTitle": "Revoke a grant",
       "revokeGrantDesc": "Stop a recipient from fetching this secret. This is not retroactive — rotate the upstream credential afterwards.",

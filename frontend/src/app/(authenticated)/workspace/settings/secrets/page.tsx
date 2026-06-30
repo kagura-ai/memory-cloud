@@ -23,7 +23,10 @@ import { KeyRound, ShieldCheck, ShieldAlert, RotateCw } from "lucide-react";
 import { PageContainer } from "@/components/common/PageContainer";
 import { PageHeader } from "@/components/common/PageHeader";
 import { Section } from "@/components/common/Section";
-import { TableLoadingState } from "@/components/common/LoadingState";
+import {
+  TableLoadingState,
+  SpinnerLoading,
+} from "@/components/common/LoadingState";
 import { ErrorBanner } from "@/components/common/ErrorBanner";
 import { EmptyState } from "@/components/ui/empty-state";
 import { Alert, AlertDescription } from "@/components/ui/alert";
@@ -69,7 +72,11 @@ export default function WorkspaceSecretsPage() {
   const t = useTranslations("workspace");
   const tCommon = useTranslations("common");
   const locale = useLocale();
-  const { currentWorkspaceId, currentWorkspace } = useWorkspace();
+  const {
+    currentWorkspaceId,
+    currentWorkspace,
+    loading: workspaceLoading,
+  } = useWorkspace();
   const { user } = useAuth();
   const { toast } = useToast();
 
@@ -204,6 +211,13 @@ export default function WorkspaceSecretsPage() {
     );
   };
 
+  // Wait for the workspace (and thus the role) to resolve before deciding
+  // authorization — otherwise owners/admins see a "not authorized" flash on
+  // every load while currentWorkspace is still null.
+  if (workspaceLoading) {
+    return <SpinnerLoading size="lg" message={tCommon("loading")} />;
+  }
+
   if (!isAdmin) {
     return (
       <PageContainer>
@@ -280,7 +294,7 @@ export default function WorkspaceSecretsPage() {
                         </span>
                       ) : (
                         <span className="rounded bg-gray-100 px-2 py-1 text-xs text-gray-600 dark:bg-gray-800 dark:text-gray-400">
-                          {s.status}
+                          {t("secretStore.statusOk")}
                         </span>
                       )}
                     </TableCell>
