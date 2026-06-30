@@ -14,7 +14,7 @@ import uuid
 import pytest
 import pytest_asyncio
 from fastapi import Request
-from sqlalchemy import text
+from sqlalchemy import func, select, text
 
 from api.routes.secrets import (
     PubkeyRegister,
@@ -22,6 +22,7 @@ from api.routes.secrets import (
     SecretFetch,
     SecretPut,
     approve_pubkey,
+    delete_secret,
     fetch_secret,
     list_secrets,
     put_secret,
@@ -30,8 +31,15 @@ from api.routes.secrets import (
     verify_audit_chain,
 )
 from models.auth import Workspace
+from models.secrets import (
+    AUDIT_ACTION_DELETE,
+    Secret,
+    SecretAccessLog,
+    SecretGrant,
+    SecretVersion,
+)
 from services.secret_store_service import SecretStoreService, fingerprint_pubkey
-from utils.exceptions import AuthorizationError, BadRequestError
+from utils.exceptions import AuthorizationError, BadRequestError, NotFoundException
 
 PUBKEY_A = "age1ql3z7hjy54pw3hyww5ayyfg7zqgvc7w3j2elw8zmrj2kg5sfn9aqmcac8p"
 CIPHERTEXT = "-----BEGIN AGE ENCRYPTED FILE-----\nopaque==\n-----END AGE ENCRYPTED FILE-----"
@@ -226,6 +234,118 @@ async def test_verify_audit_chain_endpoint(ctx):
     assert resp.entries >= 3  # register, approve, put
 
 
+async def _seed_secret(ctx, name: str = "cf/token"):
+    """register → approve → put one secret granted to PUBKEY_A; return its pubkey row."""
+    pk = await register_pubkey(
+        PubkeyRegister(pubkey=PUBKEY_A), ctx["member"], svc=ctx["svc"], db=ctx["db"]
+    )
+    await approve_pubkey(pk.id, ctx["owner"], svc=ctx["svc"], db=ctx["db"])
+    await put_secret(
+        SecretPut(
+            name=name,
+            ciphertext=CIPHERTEXT,
+            recipients_snapshot=[fingerprint_pubkey(PUBKEY_A)],
+            grant_pubkey_ids=[pk.id],
+        ),
+        _req(),
+        ctx["admin"],
+        svc=ctx["svc"],
+        db=ctx["db"],
+    )
+    return pk
+
+
+async def test_delete_secret_cascades_and_preserves_audit(ctx):
+    """Owner delete removes the secret + cascades versions/grants; audit survives.
+
+    Covers the four #1153 invariants in one flow: cascade integrity (no orphan
+    versions/grants), audit-chain continuity across the delete (verify still
+    valid), a recorded ``delete`` action, and that the secret does not reappear.
+    """
+    await _seed_secret(ctx)
+    secret_id = (
+        await ctx["db"].execute(
+            select(Secret.id).where(Secret.workspace_id == ctx["ws"], Secret.name == "cf/token")
+        )
+    ).scalar_one()
+
+    await delete_secret("cf/token", _req(), ctx["owner"], svc=ctx["svc"], db=ctx["db"])
+
+    # Secret gone from the listing (and does not reappear).
+    listing = await list_secrets(ctx["admin"], svc=ctx["svc"])
+    assert all(r.name != "cf/token" for r in listing)
+
+    # Cascade: no orphan versions or grants for the deleted secret.
+    ver_count = (
+        await ctx["db"].execute(
+            select(func.count())
+            .select_from(SecretVersion)
+            .where(SecretVersion.secret_id == secret_id)
+        )
+    ).scalar_one()
+    grant_count = (
+        await ctx["db"].execute(
+            select(func.count()).select_from(SecretGrant).where(SecretGrant.secret_id == secret_id)
+        )
+    ).scalar_one()
+    assert ver_count == 0
+    assert grant_count == 0
+
+    # Audit chain stays valid AND records the delete (history is FK-decoupled, so
+    # the entry for the now-deleted secret survives and still verifies).
+    resp = await verify_audit_chain(ctx["admin"], svc=ctx["svc"])
+    assert resp.valid is True
+    delete_entries = (
+        await ctx["db"].execute(
+            select(func.count())
+            .select_from(SecretAccessLog)
+            .where(
+                SecretAccessLog.action == AUDIT_ACTION_DELETE,
+                SecretAccessLog.secret_id == secret_id,
+            )
+        )
+    ).scalar_one()
+    assert delete_entries == 1
+
+
+async def test_delete_nonexistent_secret_is_404(ctx):
+    """Deleting a name that does not exist surfaces as 404 (NotFoundException).
+
+    (Owner-only enforcement is pinned structurally in test_route_auth_gating_wiring,
+    which asserts the route's dependency is WorkspaceOwner — the same strategy this
+    direct-invocation suite uses for every endpoint's gating.)
+    """
+    with pytest.raises(NotFoundException):
+        await delete_secret("does/not-exist", _req(), ctx["owner"], svc=ctx["svc"], db=ctx["db"])
+
+
+async def test_delete_then_reput_same_name_succeeds(ctx):
+    """After delete, the name is free: a fresh put starts a new version-1 secret.
+
+    Also pins the #1153 scope boundary: delete is scoped to the secret — the
+    recipient pubkey survives (still ``active``), so the re-put reuses it rather
+    than re-registering (which would 400 as "already registered").
+    """
+    pk = await _seed_secret(ctx)
+    await delete_secret("cf/token", _req(), ctx["owner"], svc=ctx["svc"], db=ctx["db"])
+
+    # Pubkey was NOT cascaded by the secret delete — reuse the still-active grant target.
+    put = await put_secret(
+        SecretPut(
+            name="cf/token",
+            ciphertext=CIPHERTEXT,
+            recipients_snapshot=[fingerprint_pubkey(PUBKEY_A)],
+            grant_pubkey_ids=[pk.id],
+        ),
+        _req(),
+        ctx["admin"],
+        svc=ctx["svc"],
+        db=ctx["db"],
+    )
+    assert put.version_number == 1
+    assert (await verify_audit_chain(ctx["admin"], svc=ctx["svc"])).valid is True
+
+
 def test_route_auth_gating_wiring():
     """Each endpoint is wired to the correct workspace auth dependency (review W6).
 
@@ -243,9 +363,10 @@ def test_route_auth_gating_wiring():
         # `from __future__ import annotations`) back to the alias object.
         return inspect.signature(fn, eval_str=True).parameters[param].annotation
 
-    # Owner-only: the pubkey trust gate (TOFU).
+    # Owner-only: the pubkey trust gate (TOFU) + destructive secret delete (#1153).
     assert ann(r.approve_pubkey, "owner") is WorkspaceOwner
     assert ann(r.revoke_pubkey, "owner") is WorkspaceOwner
+    assert ann(r.delete_secret, "owner") is WorkspaceOwner
     # Owner/admin: secret management.
     assert ann(r.put_secret, "user") is WorkspaceAdmin
     assert ann(r.list_secrets, "user") is WorkspaceAdmin

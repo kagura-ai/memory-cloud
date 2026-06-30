@@ -224,6 +224,92 @@ async def test_revoke_pubkey_revokes_dependent_grants(db_session, ws):
         await svc.get_secret(workspace_id=ws, actor_user_id="alice", name="cloudflare/api-token")
 
 
+async def test_delete_secret_cascades_and_audit_survives(db_session, ws):
+    """Hard-delete (#1153): FK cascade removes versions/grants; audit row survives.
+
+    Exercises the real Postgres ``ondelete=CASCADE`` (part of create_all metadata,
+    unlike the trigger) and the FK-decoupling of the audit log: the ``delete``
+    entry — and the whole chain — outlive the secret and still verify.
+    """
+    svc = SecretStoreService(db_session)
+    pk = await _register_and_approve(svc, ws, "alice", PUBKEY_A)
+    await svc.put_secret(
+        workspace_id=ws,
+        actor_user_id="owner-1",
+        name="cloudflare/api-token",
+        ciphertext=CIPHERTEXT,
+        recipients_snapshot=[fingerprint_pubkey(PUBKEY_A)],
+        grant_pubkey_ids=[pk.id],
+    )
+    secret_id = (
+        await db_session.execute(
+            select(Secret.id).where(
+                Secret.workspace_id == ws, Secret.name == "cloudflare/api-token"
+            )
+        )
+    ).scalar_one()
+
+    await svc.delete_secret(workspace_id=ws, actor_user_id="owner-1", name="cloudflare/api-token")
+
+    # The secret + its versions/grants are gone (DB-level FK cascade).
+    assert (
+        await db_session.execute(select(Secret).where(Secret.id == secret_id))
+    ).scalar_one_or_none() is None
+    versions = (
+        (
+            await db_session.execute(
+                select(SecretVersion).where(SecretVersion.secret_id == secret_id)
+            )
+        )
+        .scalars()
+        .all()
+    )
+    grants = (
+        (await db_session.execute(select(SecretGrant).where(SecretGrant.secret_id == secret_id)))
+        .scalars()
+        .all()
+    )
+    assert list(versions) == []
+    assert list(grants) == []
+
+    # The append-only audit trail survives (FK-decoupled) and still verifies; the
+    # delete is recorded with the (now-dangling) secret_id for forensics.
+    delete_rows = (
+        (
+            await db_session.execute(
+                select(SecretAccessLog).where(
+                    SecretAccessLog.workspace_id == ws,
+                    SecretAccessLog.action == "delete",
+                )
+            )
+        )
+        .scalars()
+        .all()
+    )
+    assert len(list(delete_rows)) == 1
+    assert delete_rows[0].secret_id == secret_id
+    assert (await svc.verify_audit_chain(workspace_id=ws))["valid"] is True
+
+    # The name is free again: a fresh secret can take it (no leftover unique row).
+    pk2 = await _register_and_approve(svc, ws, "carol", PUBKEY_B)
+    await svc.put_secret(
+        workspace_id=ws,
+        actor_user_id="owner-1",
+        name="cloudflare/api-token",
+        ciphertext=CIPHERTEXT,
+        recipients_snapshot=[fingerprint_pubkey(PUBKEY_B)],
+        grant_pubkey_ids=[pk2.id],
+    )
+    assert (await svc.list_secrets(workspace_id=ws))[0]["current_version"] == 1
+
+
+async def test_delete_nonexistent_secret_raises_not_found(db_session, ws):
+    """Deleting a name that doesn't exist raises SecretNotFound (→ 404 at the route)."""
+    svc = SecretStoreService(db_session)
+    with pytest.raises(SecretNotFound):
+        await svc.delete_secret(workspace_id=ws, actor_user_id="owner-1", name="nope/missing")
+
+
 async def test_version_pinning(db_session, ws):
     svc = SecretStoreService(db_session)
     pk = await _register_and_approve(svc, ws, "alice", PUBKEY_A)

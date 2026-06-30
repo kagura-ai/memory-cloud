@@ -19,7 +19,13 @@
 
 import { useCallback, useEffect, useState } from "react";
 import { useTranslations, useLocale } from "next-intl";
-import { KeyRound, ShieldCheck, ShieldAlert, RotateCw } from "lucide-react";
+import {
+  KeyRound,
+  ShieldCheck,
+  ShieldAlert,
+  RotateCw,
+  Trash2,
+} from "lucide-react";
 import { PageContainer } from "@/components/common/PageContainer";
 import { PageHeader } from "@/components/common/PageHeader";
 import { Section } from "@/components/common/Section";
@@ -59,6 +65,7 @@ import {
   approveSecretPubkey,
   revokeSecretPubkey,
   revokeSecretGrant,
+  deleteSecret,
   verifySecretAudit,
   type SecretMeta,
   type SecretPubkey,
@@ -101,6 +108,11 @@ export default function WorkspaceSecretsPage() {
   const [grantDialog, setGrantDialog] = useState<SecretMeta | null>(null);
   const [grantPubkeyId, setGrantPubkeyId] = useState("");
   const [grantBusy, setGrantBusy] = useState(false);
+
+  // Owner-only hard-delete of a secret (#1153). Destructive + irreversible, so
+  // it is gated behind a confirmation that warns to rotate upstream first.
+  const [deleteDialog, setDeleteDialog] = useState<SecretMeta | null>(null);
+  const [deleteBusy, setDeleteBusy] = useState(false);
 
   // Audit chain verification (owner/admin).
   const [auditResult, setAuditResult] = useState<AuditVerifyResult | null>(
@@ -179,6 +191,28 @@ export default function WorkspaceSecretsPage() {
       });
     } finally {
       setGrantBusy(false);
+    }
+  };
+
+  const confirmDeleteSecret = async () => {
+    if (!deleteDialog) return;
+    try {
+      setDeleteBusy(true);
+      await deleteSecret(deleteDialog.name);
+      setDeleteDialog(null);
+      await load();
+      toast({
+        title: tCommon("success"),
+        description: t("secretStore.deleteSuccess"),
+      });
+    } catch (e) {
+      toast({
+        variant: "destructive",
+        title: tCommon("error"),
+        description: e instanceof Error ? e.message : String(e),
+      });
+    } finally {
+      setDeleteBusy(false);
     }
   };
 
@@ -303,20 +337,34 @@ export default function WorkspaceSecretsPage() {
                     </TableCell>
                     <TableCell className="text-sm">{s.grant_count}</TableCell>
                     <TableCell className="text-right">
-                      <Button
-                        type="button"
-                        variant="ghost"
-                        size="sm"
-                        disabled={
-                          s.grant_count === 0 || activePubkeys.length === 0
-                        }
-                        onClick={() => {
-                          setGrantPubkeyId("");
-                          setGrantDialog(s);
-                        }}
-                      >
-                        {t("secretStore.revokeGrant")}
-                      </Button>
+                      <div className="flex justify-end gap-2">
+                        <Button
+                          type="button"
+                          variant="ghost"
+                          size="sm"
+                          disabled={
+                            s.grant_count === 0 || activePubkeys.length === 0
+                          }
+                          onClick={() => {
+                            setGrantPubkeyId("");
+                            setGrantDialog(s);
+                          }}
+                        >
+                          {t("secretStore.revokeGrant")}
+                        </Button>
+                        {isOwner && (
+                          <Button
+                            type="button"
+                            variant="ghost"
+                            size="sm"
+                            className="text-red-600 hover:text-red-700"
+                            onClick={() => setDeleteDialog(s)}
+                          >
+                            <Trash2 className="mr-1 h-4 w-4" />
+                            {t("secretStore.delete")}
+                          </Button>
+                        )}
+                      </div>
                     </TableCell>
                   </TableRow>
                 ))}
@@ -565,6 +613,46 @@ export default function WorkspaceSecretsPage() {
               className="bg-red-600 hover:bg-red-700"
             >
               {grantBusy ? tCommon("saving") : t("secretStore.revokeGrant")}
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
+
+      {/* ---- Delete secret (owner-only, #1153) ---- */}
+      <AlertDialog
+        open={deleteDialog !== null}
+        onOpenChange={(open) => !open && setDeleteDialog(null)}
+      >
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle>{t("secretStore.deleteTitle")}</AlertDialogTitle>
+            <AlertDialogDescription>
+              {t("secretStore.deleteDesc")}
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <div className="space-y-3">
+            <code className="block break-all rounded bg-gray-100 px-2 py-1 text-xs dark:bg-gray-900">
+              {deleteDialog?.name}
+            </code>
+            {/* Rotation warning: delete is cleanup, not a security control.
+                Informational caution (not the error channel) per frontend rules. */}
+            <Alert>
+              <ShieldAlert className="h-4 w-4" />
+              <AlertDescription>
+                {t("secretStore.deleteWarning")}
+              </AlertDescription>
+            </Alert>
+          </div>
+          <AlertDialogFooter>
+            <AlertDialogCancel disabled={deleteBusy}>
+              {tCommon("cancel")}
+            </AlertDialogCancel>
+            <AlertDialogAction
+              onClick={confirmDeleteSecret}
+              disabled={deleteBusy}
+              className="bg-red-600 hover:bg-red-700"
+            >
+              {deleteBusy ? tCommon("saving") : t("secretStore.deleteConfirm")}
             </AlertDialogAction>
           </AlertDialogFooter>
         </AlertDialogContent>

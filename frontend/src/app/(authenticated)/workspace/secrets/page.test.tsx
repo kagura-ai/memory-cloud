@@ -52,6 +52,7 @@ const api = vi.hoisted(() => ({
   approveSecretPubkey: vi.fn(),
   revokeSecretPubkey: vi.fn(),
   revokeSecretGrant: vi.fn(),
+  deleteSecret: vi.fn(),
   verifySecretAudit: vi.fn(),
 }));
 vi.mock("@/lib/api/secrets", () => api);
@@ -98,6 +99,7 @@ beforeEach(() => {
   api.listSecrets.mockResolvedValue(SECRETS);
   api.listSecretPubkeys.mockResolvedValue(PUBKEYS);
   api.approveSecretPubkey.mockResolvedValue(PUBKEYS[0]);
+  api.deleteSecret.mockResolvedValue(undefined);
   api.verifySecretAudit.mockResolvedValue({
     valid: true,
     entries: 5,
@@ -153,6 +155,37 @@ describe("WorkspaceSecretsPage (#1134)", () => {
     await waitFor(() =>
       expect(api.approveSecretPubkey).toHaveBeenCalledWith("pk-pending"),
     );
+  });
+
+  it("lets an owner delete a secret after the rotate-upstream warning", async () => {
+    render(<WorkspaceSecretsPage />);
+    // Row delete button (owner-only) opens the confirm dialog.
+    fireEvent.click(await screen.findByText("secretStore.delete"));
+    expect(
+      await screen.findByText("secretStore.deleteTitle"),
+    ).toBeInTheDocument();
+    // The dialog surfaces the rotate-upstream warning (delete ≠ security control).
+    expect(screen.getByText("secretStore.deleteWarning")).toBeInTheDocument();
+    // Confirm.
+    fireEvent.click(screen.getByText("secretStore.deleteConfirm"));
+    await waitFor(() =>
+      expect(api.deleteSecret).toHaveBeenCalledWith("cloudflare/api-token"),
+    );
+    // Reload (listSecrets called again) + a success toast — the toast is the
+    // only user-visible confirmation that the delete landed.
+    await waitFor(() => expect(api.listSecrets).toHaveBeenCalledTimes(2));
+    expect(mockToast).toHaveBeenCalledWith(
+      expect.objectContaining({ description: "secretStore.deleteSuccess" }),
+    );
+  });
+
+  it("hides the delete affordance from a non-owner admin", async () => {
+    mockRole = "admin";
+    render(<WorkspaceSecretsPage />);
+    expect(await screen.findByText("cloudflare/api-token")).toBeInTheDocument();
+    // Revoke-grant (admin-allowed) is present; delete (owner-only) is not.
+    expect(screen.getByText("secretStore.revokeGrant")).toBeInTheDocument();
+    expect(screen.queryByText("secretStore.delete")).toBeNull();
   });
 
   it("runs an audit verification and renders the valid result", async () => {
