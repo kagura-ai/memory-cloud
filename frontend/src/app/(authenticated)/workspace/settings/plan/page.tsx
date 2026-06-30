@@ -118,6 +118,13 @@ export default function WorkspacePlanPage() {
       ? planLabelFromEnv(canonicalTier as PlanTier, locale)
       : (plan?.plan_display_name ?? canonicalTier ?? "—");
 
+  // "Subscribed" = on a paid tier. memory-cloud is price/currency-agnostic
+  // (#1096 — payment is the billing SoT; entitlement push carries plan_name +
+  // addons only, no price/currency), so the actual billed amount/currency is
+  // confirmed in the billing portal, never hardcoded here (#1141).
+  const subscribedTier = canonicalTier ?? plan?.current_plan;
+  const isSubscribed = subscribedTier === "basic" || subscribedTier === "pro";
+
   return (
     <PageContainer>
       <PageHeader
@@ -129,16 +136,20 @@ export default function WorkspacePlanPage() {
         <div className="flex flex-wrap items-center justify-between gap-3">
           <div>
             <p className="text-2xl font-semibold capitalize">{planName}</p>
-            {plan && plan.price_monthly > 0 && (
+            {isSubscribed && (
               <p className="text-sm text-gray-500 dark:text-gray-400">
-                {t("planPage.pricePerMonth", { price: plan.price_monthly })}
+                {t("planPage.billingAmountHint")}
               </p>
             )}
           </div>
           {isOwner ? (
             <Button onClick={handleManageBilling} disabled={upgrading}>
               <Sparkles className="mr-2 h-4 w-4" />
-              {upgrading ? t("planPage.opening") : t("planPage.manageBilling")}
+              {upgrading
+                ? t("planPage.opening")
+                : isSubscribed
+                  ? t("planPage.reviewOrChangePlan")
+                  : t("planPage.manageBilling")}
             </Button>
           ) : (
             <p className="text-sm text-gray-500 dark:text-gray-400">
