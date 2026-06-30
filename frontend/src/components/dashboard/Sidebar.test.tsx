@@ -135,9 +135,12 @@ describe("Sidebar", () => {
 
   it("does not fetch the system version on initial render (lazy until the user menu opens)", () => {
     render(<Sidebar />);
-    // Issue #921: the version comes from GET /api/v1/system/info, fetched at most
-    // once per session and only when the user menu opens (onOpenChange) — never
-    // eagerly on mount.
+    // Issue #921: the *version* display (via apiClient.get inside
+    // handleUserMenuOpenChange) stays lazy — fetched at most once per session,
+    // only when the user menu opens, never eagerly on mount.
+    // NB: feature-flag loading (useSystemFeatures → /system/info) IS eager on
+    // mount post-#1145; it is mocked away here and covered by
+    // useSystemFeatures.test.tsx, so this assertion only guards the version path.
     expect(mockSystemInfoGet).not.toHaveBeenCalled();
   });
 });

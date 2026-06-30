@@ -13,7 +13,7 @@ from api.main import app
 
 
 def test_system_info_exposes_plan_page_flag_default_off() -> None:
-    client = TestClient(app, raise_server_exceptions=False)
+    client = TestClient(app)
     resp = client.get("/api/v1/system/info")
     assert resp.status_code == 200
 

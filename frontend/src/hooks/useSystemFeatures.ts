@@ -35,7 +35,7 @@ export function useSystemFeatures(): Features | null {
         })
         .catch(() => {
           // Fetch failure → treat as no features (everything default-off). Don't
-          // cache, so a later mount can retry.
+          // cache, so a later component mount can retry (a re-render won't).
           inflight = null;
           return {} as Features;
         });
