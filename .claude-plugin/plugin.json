@@ -1,7 +1,7 @@
 {
   "name": "kagura-memory",
   "version": "0.41.0",
-  "description": "Kagura Memory Cloud plugin — session management, memory recall/save, and setup tools",
+  "description": "Kagura Memory Cloud plugin — restore session context, recall & save durable project knowledge, setup help, and an MCP smoke test",
   "author": {
     "name": "Kagura AI, Inc.",
     "url": "https://github.com/kagura-ai"
