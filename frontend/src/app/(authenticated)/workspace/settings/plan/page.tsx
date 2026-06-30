@@ -31,6 +31,8 @@ import { ApiError } from "@/lib/api/base";
 import { useLocale } from "@/i18n";
 import { planLabelFromEnv, type PlanTier } from "@/lib/utils/planLabel";
 import { PlanFeatureMatrix } from "@/components/plan/PlanFeatureMatrix";
+import { useSystemFeatures } from "@/hooks/useSystemFeatures";
+import { Alert, AlertDescription } from "@/components/ui/alert";
 
 export default function WorkspacePlanPage() {
   const t = useTranslations("workspace");
@@ -38,6 +40,7 @@ export default function WorkspacePlanPage() {
   const { locale } = useLocale();
   const { currentWorkspaceId, currentWorkspace } = useWorkspace();
   const { toast } = useToast();
+  const systemFeatures = useSystemFeatures();
 
   const [plan, setPlan] = useState<WorkspacePlanInfo | null>(null);
   const [loading, setLoading] = useState(true);
@@ -92,6 +95,26 @@ export default function WorkspacePlanPage() {
       setUpgrading(false);
     }
   };
+
+  // Issue #1145: the Plan page is gated behind the backend ENABLE_PLAN_PAGE
+  // flag. Wait for it, then render a "not available" notice when it's off (the
+  // sidebar entry is hidden too, so this only fires on direct navigation).
+  if (systemFeatures === null) {
+    return <SpinnerLoading size="lg" message={tCommon("loading")} />;
+  }
+  if (!systemFeatures.plan_page) {
+    return (
+      <PageContainer>
+        <PageHeader
+          title={t("planPage.title")}
+          description={t("planPage.description")}
+        />
+        <Alert>
+          <AlertDescription>{t("planPage.featureDisabled")}</AlertDescription>
+        </Alert>
+      </PageContainer>
+    );
+  }
 
   if (loading) {
     return <SpinnerLoading size="lg" message={tCommon("loading")} />;

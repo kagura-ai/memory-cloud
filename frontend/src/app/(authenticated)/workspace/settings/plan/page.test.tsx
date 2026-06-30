@@ -59,6 +59,12 @@ vi.mock("@/lib/utils/planLabel", () => ({
 vi.mock("@/components/plan/PlanFeatureMatrix", () => ({
   PlanFeatureMatrix: () => null,
 }));
+// #1145: the page is gated behind the backend ENABLE_PLAN_PAGE flag. Default
+// the mocked hook to enabled; flip per-test for the disabled-notice case.
+let mockFeatures: Record<string, boolean> | null = { plan_page: true };
+vi.mock("@/hooks/useSystemFeatures", () => ({
+  useSystemFeatures: () => mockFeatures,
+}));
 
 const planInfo = (overrides: Record<string, unknown> = {}) => ({
   workspace_id: "ws-1",
@@ -83,12 +89,23 @@ const planInfo = (overrides: Record<string, unknown> = {}) => ({
 
 beforeEach(() => {
   vi.clearAllMocks();
+  mockFeatures = { plan_page: true };
   mockGetWorkspacePlan.mockResolvedValue(planInfo());
 });
 
 // ---------- Tests ------------------------------------------------------------
 
 describe("WorkspacePlanPage (#1141)", () => {
+  it("renders a not-available notice when the Plan feature is disabled (#1145)", async () => {
+    mockFeatures = { plan_page: false };
+    mockWorkspace = { current_user_role: "owner", plan_name: "basic" };
+    render(<WorkspacePlanPage />);
+    expect(
+      await screen.findByText("planPage.featureDisabled"),
+    ).toBeInTheDocument();
+    expect(screen.queryByText("planPage.currentPlan")).toBeNull();
+  });
+
   it("never renders a hardcoded $ price", async () => {
     mockWorkspace = { current_user_role: "owner", plan_name: "basic" };
     render(<WorkspacePlanPage />);

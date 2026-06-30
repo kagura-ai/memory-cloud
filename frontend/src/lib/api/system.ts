@@ -4,7 +4,7 @@
  * Issue #684 - System Backend Status and Vector Collections
  */
 
-import { apiClient } from './base';
+import { apiClient } from "./base";
 
 // ============================================================================
 // Types
@@ -14,7 +14,7 @@ export interface BackendInfo {
   type: string;
   url: string | null;
   connected: boolean;
-  status: 'ok' | 'warning' | 'error' | 'info';
+  status: "ok" | "warning" | "error" | "info";
   message: string;
   stats: Record<string, any> | null;
 }
@@ -37,7 +37,7 @@ export interface VectorCollectionsResponse {
 }
 
 export interface HealthResponse {
-  status: 'healthy' | 'unhealthy' | 'degraded';
+  status: "healthy" | "unhealthy" | "degraded";
   version: string;
   uptime_seconds: number;
   timestamp: string;
@@ -51,14 +51,16 @@ export interface HealthResponse {
  * Get backend status (Database, Vector DB, Cache)
  */
 export async function getBackendStatus(): Promise<BackendStatusResponse> {
-  return await apiClient.get<BackendStatusResponse>('/system/backends');
+  return await apiClient.get<BackendStatusResponse>("/system/backends");
 }
 
 /**
  * Get vector database collections
  */
 export async function getVectorCollections(): Promise<VectorCollectionsResponse> {
-  return await apiClient.get<VectorCollectionsResponse>('/system/vector/collections');
+  return await apiClient.get<VectorCollectionsResponse>(
+    "/system/vector/collections",
+  );
 }
 
 /**
@@ -66,7 +68,7 @@ export async function getVectorCollections(): Promise<VectorCollectionsResponse>
  * Note: This endpoint is admin-only and requires application restart permissions
  */
 export async function restartApplication(): Promise<void> {
-  await apiClient.post('/system/restart');
+  await apiClient.post("/system/restart");
 }
 
 /**
@@ -77,12 +79,12 @@ export async function restartApplication(): Promise<void> {
  */
 export async function pollHealth(
   maxAttempts: number = 60,
-  intervalMs: number = 1000
+  intervalMs: number = 1000,
 ): Promise<boolean> {
   for (let i = 0; i < maxAttempts; i++) {
     try {
-      const health = await apiClient.get<HealthResponse>('/health');
-      if (health.status === 'healthy') {
+      const health = await apiClient.get<HealthResponse>("/health");
+      if (health.status === "healthy") {
         return true;
       }
     } catch (error) {
@@ -90,7 +92,7 @@ export async function pollHealth(
     }
 
     // Wait before next attempt
-    await new Promise(resolve => setTimeout(resolve, intervalMs));
+    await new Promise((resolve) => setTimeout(resolve, intervalMs));
   }
 
   return false;
@@ -100,7 +102,24 @@ export async function pollHealth(
  * Get application health status
  */
 export async function getHealth(): Promise<HealthResponse> {
-  return await apiClient.get<HealthResponse>('/health');
+  return await apiClient.get<HealthResponse>("/health");
+}
+
+export interface SystemInfo {
+  name: string;
+  version: string;
+  description: string;
+  environment: string;
+  /** Backend feature flags (e.g. `plan_page`, `neural_memory`). */
+  features: Record<string, boolean>;
+}
+
+/**
+ * Get system info — version + backend feature flags (Issue #1145).
+ * Used to gate UI surfaces (e.g. the Plan page) behind a backend toggle.
+ */
+export async function getSystemInfo(): Promise<SystemInfo> {
+  return await apiClient.get<SystemInfo>("/api/v1/system/info");
 }
 
 // ============================================================================
@@ -169,7 +188,7 @@ export interface MCPStatus {
  * Issue #45 - Real API implementation
  */
 export async function getSystemOverview(): Promise<SystemOverview> {
-  return await apiClient.get<SystemOverview>('/api/v1/system/overview');
+  return await apiClient.get<SystemOverview>("/api/v1/system/overview");
 }
 
 /**
@@ -177,5 +196,5 @@ export async function getSystemOverview(): Promise<SystemOverview> {
  * Issue #45 - Real API implementation
  */
 export async function getMCPStatus(): Promise<MCPStatus> {
-  return await apiClient.get<MCPStatus>('/api/v1/mcp/status');
+  return await apiClient.get<MCPStatus>("/api/v1/mcp/status");
 }
