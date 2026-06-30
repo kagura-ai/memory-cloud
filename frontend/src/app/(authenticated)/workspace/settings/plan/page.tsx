@@ -238,15 +238,12 @@ export default function WorkspacePlanPage() {
 
       {/* #1138: per-tier comparison matrix (replaces the old flat "Pro
           benefits" bullet list). No price column — pricing lives on the
-          payment side (#1141). Marked Beta. */}
+          payment side (#1141). The Beta tag now sits on the specific Beta
+          capabilities (Connectors / Analysis / Sleep) inside the matrix,
+          rather than on the whole section. */}
       <Section
         title={t("planMatrix.title")}
         description={t("planMatrix.description")}
-        headerActions={
-          <span className="rounded-full bg-amber-100 px-2 py-0.5 text-xs font-medium text-amber-800 dark:bg-amber-900/30 dark:text-amber-200">
-            {t("planMatrix.beta")}
-          </span>
-        }
       >
         <PlanFeatureMatrix currentTier={canonicalTier} />
       </Section>

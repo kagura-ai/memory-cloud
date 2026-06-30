@@ -137,4 +137,21 @@ describe("PlanFeatureMatrix (#1138)", () => {
     // No price/currency leaks into the matrix.
     expect(document.body.textContent ?? "").not.toMatch(/\$|¥|price/i);
   });
+
+  it("tags Connectors / Analysis / Sleep rows as Beta, not the stable rows", async () => {
+    render(<PlanFeatureMatrix currentTier="pro" />);
+    await screen.findByText("planMatrix.row_connectors");
+
+    for (const key of [
+      "planMatrix.row_connectors",
+      "planMatrix.row_analysisPerDay",
+      "planMatrix.row_sleepContexts",
+    ]) {
+      expect(rowOf(key).getByText("planMatrix.beta")).toBeInTheDocument();
+    }
+    // A stable capability row carries no Beta badge.
+    expect(
+      rowOf("planMatrix.row_memories").queryByText("planMatrix.beta"),
+    ).toBeNull();
+  });
 });
