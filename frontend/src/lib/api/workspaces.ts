@@ -375,6 +375,37 @@ export async function getWorkspacePlan(
 }
 
 /**
+ * One tier's curated feature/limit values for the Plan-page comparison matrix
+ * (#1138). Mirrors the backend `PlanTierFeature`. Numeric fields use `0` for
+ * "not available on this tier"; price is intentionally absent (it lives on the
+ * payment side — #1141 / #1096).
+ */
+export interface PlanTierFeature {
+  name: string;
+  display_name: string;
+  max_contexts: number;
+  max_members: number;
+  memory_limit: number;
+  storage_limit_bytes: number;
+  mcp_calls_per_day: number;
+  rest_calls_per_day: number;
+  public_calls_per_day: number;
+  max_resource_tokens: number;
+  max_connectors: number;
+  analysis_runs_per_day: number;
+  sleep_enabled_contexts_limit: number;
+  reranking: boolean;
+  managed_embeddings: boolean;
+  shared_contexts: boolean;
+  team_invitations: boolean;
+}
+
+/** Curated per-tier feature matrix (free → basic → pro) for the Plan page (#1138). */
+export async function getPlanTierMatrix(): Promise<PlanTierFeature[]> {
+  return apiClient.get<PlanTierFeature[]>("/api/v1/workspaces/plan-tiers");
+}
+
+/**
  * Get available plan tiers
  * Issue #164: Plan selection
  */

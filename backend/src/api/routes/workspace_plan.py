@@ -23,7 +23,7 @@ from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from auth.dependencies import SessionUser
-from config.plan_tiers import PLAN_TIERS, get_plan_tier
+from config.plan_tiers import PLAN_TIERS, PlanName, PlanTier, get_plan_tier
 from db.base import get_db
 from models.auth import (
     Context,
@@ -66,6 +66,37 @@ class AvailablePlanInfo(BaseModel):
     price_monthly: int
     quotas: dict
     features: list[str]
+
+
+class PlanTierFeature(BaseModel):
+    """One tier's curated feature/limit values for the comparison matrix (#1138).
+
+    Single source of truth = ``config/plan_tiers.py`` (env-overridable). Price is
+    intentionally omitted — pricing lives in www / the payment service; this
+    surface is feature *limits* only, so the OSS Plan page never fabricates an
+    amount (consistent with #1141 / #1096). Numeric fields use ``0`` for "not
+    available on this tier"; the frontend renders that as ✗.
+    """
+
+    name: str
+    display_name: str
+    # Numeric limits (0 == not available on this tier)
+    max_contexts: int
+    max_members: int
+    memory_limit: int
+    storage_limit_bytes: int
+    mcp_calls_per_day: int
+    rest_calls_per_day: int
+    public_calls_per_day: int
+    max_resource_tokens: int
+    max_connectors: int
+    analysis_runs_per_day: int
+    sleep_enabled_contexts_limit: int
+    # Boolean capabilities
+    reranking: bool
+    managed_embeddings: bool
+    shared_contexts: bool
+    team_invitations: bool
 
 
 # ============================================================================
@@ -199,3 +230,41 @@ async def get_available_plans(
         )
         for tier in PLAN_TIERS.values()
     ]
+
+
+def _plan_tier_feature(tier: PlanTier) -> PlanTierFeature:
+    """Project a ``PlanTier`` onto the curated comparison-matrix shape (#1138)."""
+    return PlanTierFeature(
+        name=tier.name,
+        display_name=tier.display_name,
+        max_contexts=tier.max_contexts_per_workspace,
+        max_members=tier.max_members_per_workspace,
+        memory_limit=tier.memory_limit,
+        storage_limit_bytes=tier.storage_limit_bytes,
+        mcp_calls_per_day=tier.mcp_calls_per_day,
+        rest_calls_per_day=tier.rest_calls_per_day,
+        public_calls_per_day=tier.public_calls_per_day,
+        max_resource_tokens=tier.max_resource_tokens,
+        max_connectors=tier.max_connectors,
+        analysis_runs_per_day=tier.analysis_runs_per_day,
+        sleep_enabled_contexts_limit=tier.sleep_enabled_contexts_limit,
+        reranking="reranking" in tier.features,
+        managed_embeddings="managed_embeddings" in tier.features,
+        shared_contexts=tier.allows_shared_contexts,
+        team_invitations="team_invitations" in tier.features,
+    )
+
+
+@router.get("/workspaces/plan-tiers", response_model=list[PlanTierFeature])
+async def get_plan_tier_matrix(
+    user: SessionUser,
+) -> list[PlanTierFeature]:
+    """Curated per-tier feature matrix for the Plan page comparison (#1138).
+
+    Single source of truth = ``config/plan_tiers.py`` (env-overridable). Price is
+    omitted by design — pricing lives in www / the payment service. Returns the
+    tiers in upgrade order (free → basic → pro). Public reference data; accessible
+    by any authenticated session user (the Plan page itself is owner-gated).
+    """
+    order = [PlanName.FREE, PlanName.BASIC, PlanName.PRO]
+    return [_plan_tier_feature(PLAN_TIERS[name]) for name in order]
