@@ -66,6 +66,7 @@ def _file_object_mock(**overrides):
     file.size_bytes = overrides.get("size_bytes", 1024)
     file.sha256 = overrides.get("sha256", VALID_SHA)
     file.status = overrides.get("status", "uploaded")
+    file.context_id = overrides.get("context_id", None)
     file.created_at = overrides.get("created_at", datetime(2026, 5, 5, tzinfo=UTC))
     file.uploaded_at = overrides.get("uploaded_at", datetime(2026, 5, 5, tzinfo=UTC))
     return file
@@ -263,9 +264,17 @@ class TestListFiles:
     def test_happy_path(self, client):
         ws = uuid4()
         files = [_file_object_mock(workspace_id=ws), _file_object_mock(workspace_id=ws)]
-        with patch(
-            "api.routes.files.FileStorageService.list_files",
-            AsyncMock(return_value=files),
+        with (
+            patch(
+                "api.routes.files.FileStorageService.list_files",
+                AsyncMock(return_value=files),
+            ),
+            # #1136: the route computes the caller's accessible contexts before
+            # listing; stub it so the unit test stays DB-free.
+            patch(
+                "api.routes.files.PermissionService.get_accessible_contexts",
+                AsyncMock(return_value=[]),
+            ),
         ):
             r = client.get(f"/api/v1/files?workspace_id={ws}&limit=10")
         assert r.status_code == 200

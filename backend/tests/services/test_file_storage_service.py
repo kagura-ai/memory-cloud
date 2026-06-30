@@ -48,6 +48,10 @@ def _make_file_object(
     file = MagicMock()
     file.id = file_id or uuid4()
     file.workspace_id = workspace_id
+    # Default to a workspace-scoped (no-context) file so the #1136 context-ACL
+    # branch is skipped; a MagicMock attribute would otherwise be truthy and
+    # wrongly trigger a context permission check.
+    file.context_id = None
     file.sha256 = sha256
     file.size_bytes = size_bytes
     file.content_type = "application/octet-stream"

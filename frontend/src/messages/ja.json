@@ -179,9 +179,13 @@
       "column": {
         "filename": "ファイル名",
         "type": "種類",
+        "scope": "スコープ",
         "size": "サイズ",
         "status": "ステータス",
         "uploaded": "アップロード日時"
+      },
+      "scope": {
+        "workspace": "ワークスペース"
       },
       "actions": {
         "download": "ダウンロード",

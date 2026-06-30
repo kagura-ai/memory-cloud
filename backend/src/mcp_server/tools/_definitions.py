@@ -1855,6 +1855,15 @@ Returns: {status, report_id, rollback_summary: {edges_deleted, merges_reversed, 
                         "type": "string",
                         "description": "Lower-case hex sha256 of the bytes the client will PUT.",
                     },
+                    "context_id": {
+                        "type": "string",
+                        "description": (
+                            "Optional. Bind the file to a context (#1136): requires write "
+                            "access to it, and all later read/download/list/delete access is "
+                            "routed through that context's ACL (private/shared, per-context "
+                            "role). Omit for a workspace-scoped file readable by any viewer."
+                        ),
+                    },
                     "workspace_id": {
                         "type": "string",
                         "description": "Optional. Overrides the authenticated workspace_id.",

@@ -179,9 +179,13 @@
       "column": {
         "filename": "File name",
         "type": "Type",
+        "scope": "Scope",
         "size": "Size",
         "status": "Status",
         "uploaded": "Uploaded"
+      },
+      "scope": {
+        "workspace": "Workspace"
       },
       "actions": {
         "download": "Download",

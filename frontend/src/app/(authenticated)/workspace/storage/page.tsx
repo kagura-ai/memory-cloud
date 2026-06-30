@@ -46,6 +46,7 @@ import {
   deleteFile,
   type FileObject,
 } from "@/lib/api/files";
+import { getContexts } from "@/lib/api/contexts";
 import { useWorkspace } from "@/contexts/WorkspaceContext";
 import { useToast } from "@/hooks/use-toast";
 import { hasWorkspaceRole, WorkspaceRole } from "@/lib/auth/rbac";
@@ -61,6 +62,10 @@ export default function StoragePage() {
   const { toast } = useToast();
 
   const [files, setFiles] = useState<FileObject[]>([]);
+  // Issue #1136: map context_id → display name so a context-bound file shows its
+  // context, not a raw UUID. Best-effort: a fetch failure just falls back to the
+  // short id (the listing itself is unaffected).
+  const [contextNames, setContextNames] = useState<Record<string, string>>({});
   const [loading, setLoading] = useState(true);
   const [loadingMore, setLoadingMore] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -121,6 +126,26 @@ export default function StoragePage() {
     if (!currentWorkspaceId) return;
     loadFiles(PAGE_SIZE, "initial");
   }, [currentWorkspaceId, loadFiles]);
+
+  useEffect(() => {
+    // Resolve context names once per workspace for the Scope column (#1136).
+    if (!currentWorkspaceId) return;
+    let cancelled = false;
+    getContexts()
+      .then((res) => {
+        if (cancelled) return;
+        const map: Record<string, string> = {};
+        // `||` (not `??`) so an empty-string display_name falls back to the name.
+        for (const c of res.contexts) map[c.id] = c.display_name || c.name;
+        setContextNames(map);
+      })
+      .catch(() => {
+        /* non-critical: Scope cells fall back to the short context id */
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [currentWorkspaceId]);
 
   useEffect(() => {
     document.title = `${t("list.title")} - Kagura Memory Cloud`;
@@ -215,6 +240,7 @@ export default function StoragePage() {
                 <TableRow>
                   <TableHead>{t("list.column.filename")}</TableHead>
                   <TableHead>{t("list.column.type")}</TableHead>
+                  <TableHead>{t("list.column.scope")}</TableHead>
                   <TableHead className="text-right">
                     {t("list.column.size")}
                   </TableHead>
@@ -232,6 +258,18 @@ export default function StoragePage() {
                     <TableCell className="font-medium">{f.filename}</TableCell>
                     <TableCell className="font-mono text-xs text-muted-foreground">
                       {f.content_type}
+                    </TableCell>
+                    <TableCell>
+                      {f.context_id ? (
+                        <Badge variant="outline" title={f.context_id}>
+                          {contextNames[f.context_id] ??
+                            `${f.context_id.slice(0, 8)}…`}
+                        </Badge>
+                      ) : (
+                        <span className="text-muted-foreground text-sm">
+                          {t("list.scope.workspace")}
+                        </span>
+                      )}
                     </TableCell>
                     <TableCell className="text-right tabular-nums">
                       {formatBytes(f.size_bytes)}

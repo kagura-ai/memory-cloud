@@ -49,6 +49,15 @@ class FileReserveRequest(BaseModel):
     """Body for ``POST /api/v1/files/reserve``."""
 
     workspace_id: UUID
+    context_id: UUID | None = Field(
+        default=None,
+        description=(
+            "Optional owning context (Issue #1136). When set, the caller must "
+            "have write access to it and the file inherits that context's ACL "
+            "for all later read/write/list access. Omit for a workspace-scoped "
+            "file (legacy behaviour: any workspace viewer can download it)."
+        ),
+    )
     filename: str = Field(min_length=1, max_length=512)
     content_type: str = Field(min_length=1, max_length=255)
     size_bytes: int = Field(gt=0)
@@ -91,6 +100,7 @@ class FileObjectOut(TZAwareBaseModel):
 
     id: UUID
     workspace_id: UUID
+    context_id: UUID | None = None
     filename: str
     content_type: str
     size_bytes: int
@@ -165,6 +175,7 @@ async def reserve_upload(
         content_type=body.content_type,
         size_bytes=body.size_bytes,
         sha256=body.sha256.lower(),
+        context_id=body.context_id,
     )
     return FileReserveResponse(
         file_id=result.file_id,
@@ -192,6 +203,7 @@ async def confirm_upload(
         workspace_id=workspace_id,
         file_id=file_id,
         sha256=body.sha256.lower(),
+        actor_user_id=str(user.get("user_id", "")),
     )
     return FileObjectOut.model_validate(file)
 
@@ -209,6 +221,7 @@ async def get_download_url(
     url = await service.get_presigned_download(
         workspace_id=workspace_id,
         file_id=file_id,
+        actor_user_id=str(user.get("user_id", "")),
     )
     return FileDownloadUrlOut(download_url=url)
 
@@ -227,7 +240,11 @@ async def delete_file(
     """
     await _enforce_workspace_membership(db, user, workspace_id)
     service = FileStorageService(db)
-    await service.delete_file(workspace_id=workspace_id, file_id=file_id)
+    await service.delete_file(
+        workspace_id=workspace_id,
+        file_id=file_id,
+        actor_user_id=str(user.get("user_id", "")),
+    )
 
 
 @router.get("", response_model=list[FileObjectOut])
@@ -240,5 +257,16 @@ async def list_files(
     """List uploaded, non-deleted files in the workspace, newest first."""
     await _enforce_workspace_membership(db, user, workspace_id, required_role="viewer")
     service = FileStorageService(db)
-    files = await service.list_files(workspace_id=workspace_id, limit=limit)
+    # Issue #1136: scope the listing to contexts the caller can access (plus
+    # workspace-scoped NULL-context files). get_accessible_contexts honours
+    # private/shared + allowed_context_ids; the service applies the filter in
+    # the query before the LIMIT.
+    accessible = await PermissionService(db).get_accessible_contexts(
+        str(user.get("user_id", "")), workspace_id
+    )
+    files = await service.list_files(
+        workspace_id=workspace_id,
+        accessible_context_ids=[c.id for c in accessible],
+        limit=limit,
+    )
     return [FileObjectOut.model_validate(f) for f in files]

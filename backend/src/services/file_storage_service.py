@@ -44,10 +44,12 @@ from config.settings import get_settings
 from models.auth import Workspace
 from models.file_objects import FileObject, WorkspaceStorageUsage
 from services import storage_quota_service
+from services.permission_service import PermissionService
 from storage.factory import get_blob_storage
 from storage.protocol import BlobStorageProtocol
 from utils.datetime import utcnow
 from utils.exceptions import (
+    AuthorizationError,
     ConflictError,
     NotFoundException,
     UnsupportedMediaTypeError,
@@ -176,22 +178,46 @@ class FileStorageService:
         content_type: str,
         size_bytes: int,
         sha256: str,
+        context_id: UUID | None = None,
     ) -> ReserveResult:
         """Reserve quota + insert reserved row + return presigned PUT URL.
+
+        When ``context_id`` is given (Issue #1136), the file is bound to that
+        context and the caller must have **write** access to it (EDITOR+ via the
+        context ACL), and the context must live in ``workspace_id``. ``None``
+        keeps the legacy workspace-scoped behaviour (the caller's workspace
+        membership gate is the only access control). The binding routes all later
+        read/write/list access through the context's ACL.
 
         Raises:
             ValidationError: invalid size, sha256, or content_type — covers
                 size/sha256 length checks, oversized filename/content_type,
                 control characters in content_type, and malformed
-                type/subtype shape (no slash, garbage chars). 422 at REST.
+                type/subtype shape (no slash, garbage chars); or a ``context_id``
+                that is not in ``workspace_id``. 422 at REST.
+            AuthorizationError: ``context_id`` given but the caller lacks write
+                access to that context. 403 at REST.
             UnsupportedMediaTypeError: content_type passes shape validation
                 but is not in ``settings.allowed_file_content_types_set``.
                 415 at REST; ``unsupported_media_type`` vocab at MCP.
             QuotaExceededError: workspace storage cap would be exceeded.
             ConflictError: same ``(workspace_id, sha256)`` already has an
                 active or in-flight row (partial unique violation).
-            NotFoundException: workspace missing.
+            NotFoundException: workspace (or a given ``context_id``) missing.
         """
+        # Issue #1136 (authz-first): a context-bound upload requires WRITE access
+        # to that context (EDITOR+), and the context must belong to THIS
+        # workspace — so a caller cannot bind a file created in workspace A to a
+        # context in workspace B. Checked before input validation / quota so an
+        # unauthorized caller learns nothing about (and spends nothing on) the
+        # upload. check_context_write raises AuthorizationError (403) /
+        # NotFoundException (404, incl. a soft-deleted context) on denial.
+        if context_id is not None:
+            ctx = await PermissionService(self.db).check_context_write(created_by, context_id)
+            if ctx.workspace_id != workspace_id:
+                msg = "context_id does not belong to this workspace"
+                raise ValidationError(msg)
+
         # Enforce DB column limits at the service boundary so REST and MCP
         # share the same hard caps. Pydantic enforces these at REST via
         # ``FileReserveRequest``, but MCP coerces ``args["filename"]`` /
@@ -295,6 +321,7 @@ class FileStorageService:
             file = FileObject(
                 id=file_id,
                 workspace_id=workspace_id,
+                context_id=context_id,
                 sha256=sha256,
                 size_bytes=size_bytes,
                 content_type=content_type,
@@ -339,14 +366,23 @@ class FileStorageService:
                 existing_id = None
                 try:
                     existing = await self.db.execute(
-                        select(FileObject.id).where(
+                        select(FileObject.id, FileObject.context_id).where(
                             FileObject.workspace_id == workspace_id,
                             FileObject.sha256 == sha256,
                             FileObject.deleted_at.is_(None),
                             FileObject.status != "failed",
                         )
                     )
-                    existing_id = existing.scalar_one_or_none()
+                    row = existing.first()
+                    # #1136: dedup is workspace-scoped but access is context-
+                    # scoped. Only surface the existing file_id when the prior
+                    # row is in the SAME context the caller is uploading to
+                    # (including both NULL) — they already passed the write check
+                    # for that context. A cross-context conflict omits the id so
+                    # the caller cannot learn the file_id of a file bound to a
+                    # context they cannot access.
+                    if row is not None and row.context_id == context_id:
+                        existing_id = row.id
                 except Exception:  # noqa: BLE001 — best-effort enrichment
                     pass
                 msg = f"file with sha256={sha256} already exists in workspace"
@@ -375,11 +411,16 @@ class FileStorageService:
         workspace_id: UUID,
         file_id: UUID,
         sha256: str,
+        actor_user_id: str | None = None,
     ) -> FileObject:
         """Verify the upload landed in R2 and finalize the row.
 
         Idempotent on retry: if the row is already ``status='uploaded'``
         and the sha256 matches, return the existing row unchanged.
+
+        Issue #1136: if the file is context-bound, the caller must have write
+        access to that context (the reserve gated it, but confirm may be a later
+        or different caller) — checked after the workspace boundary load.
 
         The caller's claimed-sha256 check below is a defense-in-depth
         guard for caller-side drift between reservation and confirm —
@@ -394,6 +435,15 @@ class FileStorageService:
             ConflictError: ``head_object`` says the binary is missing.
         """
         file = await self._load_file(workspace_id, file_id)
+
+        # Issue #1136: context-bound files require write access to their context.
+        # actor_user_id is optional in the signature (internal/legacy callers of
+        # workspace-scoped files may omit it), but a context-bound file with no
+        # actor is denied — fail-closed.
+        if file.context_id is not None:
+            if not actor_user_id:
+                raise AuthorizationError("Insufficient permissions")
+            await PermissionService(self.db).check_context_write(actor_user_id, file.context_id)
 
         # Normalize caller sha256 to lowercase for symmetry with reserve_upload's
         # canonicalization (Copilot review #574 finding). Without this, an SDK
@@ -479,12 +529,37 @@ class FileStorageService:
         self,
         *,
         workspace_id: UUID,
+        accessible_context_ids: list[UUID] | None = None,
         limit: int = 50,
     ) -> list[FileObject]:
-        """Return uploaded, non-deleted files for the workspace, newest first."""
+        """Return uploaded, non-deleted files the caller can access, newest first.
+
+        Issue #1136: a row is visible when it is workspace-scoped (``context_id``
+        IS NULL — legacy behaviour) OR bound to a context in
+        ``accessible_context_ids``. The caller (REST / MCP) computes that set via
+        ``PermissionService.get_accessible_contexts`` — which already honours
+        private/shared and ``allowed_context_ids`` — and passes it here so the
+        filter is applied IN the query, BEFORE the ``LIMIT``: a viewer never sees
+        the existence of files scoped away from them, and the limit isn't
+        silently consumed by rows that would be filtered out (the #317
+        pre-filter-before-aggregate lesson).
+
+        The filter is ALWAYS applied (fail-closed): ``None`` or an empty list is
+        treated as an empty accessible set, so only workspace-scoped (NULL)
+        files are returned — an internal caller that forgets the argument can
+        never leak context-bound files. The REST and MCP list handlers always
+        pass the real computed set.
+        """
         if limit <= 0 or limit > 500:
             msg = f"limit must be in (0, 500], got {limit}"
             raise ValidationError(msg)
+
+        # Workspace-scoped (NULL) files are always visible; context-bound files
+        # only when their context is in the caller's accessible set. Applied
+        # unconditionally — None/[] ⇒ NULL-context files only (fail-closed).
+        visibility = FileObject.context_id.is_(None)
+        if accessible_context_ids:
+            visibility = visibility | FileObject.context_id.in_(accessible_context_ids)
 
         result = await self.db.execute(
             select(FileObject)
@@ -492,6 +567,7 @@ class FileStorageService:
                 FileObject.workspace_id == workspace_id,
                 FileObject.deleted_at.is_(None),
                 FileObject.status == "uploaded",
+                visibility,
             )
             .order_by(FileObject.created_at.desc())
             .limit(limit)
@@ -503,13 +579,37 @@ class FileStorageService:
         *,
         workspace_id: UUID,
         file_id: UUID,
+        actor_user_id: str | None = None,
     ) -> str:
         """Return a short-lived presigned GET URL for ``file_id``.
 
         Raises ``NotFoundException`` for missing / deleted / not-yet-uploaded
         files (cross-workspace identity is not leaked).
+
+        Issue #1136: a context-bound file requires **read** access to its
+        context (VIEWER+ via the context ACL) — so a workspace viewer can no
+        longer download files scoped to a context they cannot see. A NULL
+        context_id keeps the legacy workspace-viewer read path. A denied read is
+        reported as ``NotFoundException`` (404), NOT ``AuthorizationError`` (403),
+        so a workspace member cannot use the status code to enumerate which file
+        ids exist behind a context they cannot access (existence-hiding, uniform
+        with the cross-workspace / missing-file 404 from ``_load_file``).
         """
         file = await self._load_file(workspace_id, file_id)
+        # Issue #1136: context-bound files require READ access. Any denial (no
+        # actor, AuthorizationError, or a missing/soft-deleted context) collapses
+        # to the uniform "not found" so file existence never leaks across a
+        # context boundary on a read.
+        if file.context_id is not None:
+            try:
+                if not actor_user_id:
+                    raise AuthorizationError("Insufficient permissions")
+                await PermissionService(self.db).check_context_access(
+                    actor_user_id, file.context_id
+                )
+            except (AuthorizationError, NotFoundException) as exc:
+                msg = f"file {file_id} not found in workspace {workspace_id}"
+                raise NotFoundException(msg) from exc
         if file.status != "uploaded":
             msg = f"file {file_id} not found in workspace {workspace_id}"
             raise NotFoundException(msg)
@@ -623,8 +723,16 @@ class FileStorageService:
         *,
         workspace_id: UUID,
         file_id: UUID,
+        actor_user_id: str | None = None,
     ) -> None:
         """Soft-delete and immediately release the quota.
+
+        Issue #1136: deleting a context-bound file requires write access to its
+        context. If the owning context is gone (soft-deleted → NotFoundException),
+        fall back to the caller's workspace gate so files in a deleted context can
+        still be cleaned up — otherwise their quota would be stuck until the
+        workspace itself is deleted. An AuthorizationError on a *live* context is
+        re-raised: a non-editor cannot delete a file scoped away from them.
 
         R5 contract: ``deleted_at`` is set and ``workspace_storage_usage``
         is decremented in one DB transaction. ``release_storage_bytes``
@@ -637,6 +745,17 @@ class FileStorageService:
         The R2 binary stays for 7 days (sweeper handles deletion).
         """
         file = await self._load_file(workspace_id, file_id)
+
+        # Issue #1136: context-ACL gate (see docstring for the deleted-context
+        # cleanup fallback). Fail-closed if no actor is supplied for a
+        # context-bound file.
+        if file.context_id is not None:
+            if not actor_user_id:
+                raise AuthorizationError("Insufficient permissions")
+            try:
+                await PermissionService(self.db).check_context_write(actor_user_id, file.context_id)
+            except NotFoundException:
+                pass  # owning context deleted → workspace gate (already enforced) suffices
 
         # Reserved rows: ``reserve_upload`` already incremented the Redis
         # counter, but no committed-bytes are tracked in

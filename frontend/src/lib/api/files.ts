@@ -23,6 +23,12 @@ import { apiClient } from "./base";
 export interface FileObject {
   id: string;
   workspace_id: string;
+  /**
+   * Owning context (Issue #1136). `null` = workspace-scoped (any workspace
+   * viewer can read it). When set, access is routed through the context's ACL,
+   * and the listing only includes files in contexts the caller can access.
+   */
+  context_id: string | null;
   filename: string;
   content_type: string;
   size_bytes: number;
