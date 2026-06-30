@@ -90,3 +90,19 @@ export function revokeSecretGrant(
 export function verifySecretAudit(): Promise<AuditVerifyResult> {
   return apiClient.get<AuditVerifyResult>(`${BASE}/audit/verify`);
 }
+
+/**
+ * Owner-only hard-delete of a secret + its versions/grants (#1153).
+ *
+ * Cleanup, NOT a security control: it removes superseded ciphertext at rest but
+ * does not un-share a value a recipient already fetched, nor rotate the live
+ * upstream credential — rotate upstream first, then delete. A `delete` entry is
+ * appended to the tamper-evident audit chain before removal.
+ */
+export function deleteSecret(name: string): Promise<void> {
+  // The server mounts this as `{name:path}` so slash-containing names
+  // (e.g. "cloudflare/api-token") are addressable; encode each segment so
+  // slashes stay path separators while other characters are escaped.
+  const path = name.split("/").map(encodeURIComponent).join("/");
+  return apiClient.delete<void>(`${BASE}/${path}`);
+}
