@@ -543,7 +543,7 @@ export default function AdminPlansPage() {
                                           {t("quota.addon")}
                                         </div>
                                         <div className="text-right">
-                                          {t("quota.effectiveUsage")}
+                                          {t("quota.usageEffective")}
                                         </div>
                                       </div>
                                       {/* Issue #663: ADDON_TYPES drives the
@@ -587,18 +587,33 @@ export default function AdminPlansPage() {
                                                 </span>
                                               )}
                                             </div>
+                                            {/* Usage / Effective — usage
+                                                (used) is the numerator, matching
+                                                the summary row's used / limit
+                                                ("5,220 / 100,000"). Rows with no
+                                                tracked usage show the effective
+                                                value alone. */}
                                             <div className="text-right">
-                                              <span className="font-medium">
-                                                {formatQuotaValue(
-                                                  meta,
-                                                  effective,
-                                                )}
-                                              </span>
-                                              {usage !== null && (
-                                                <span className="text-muted-foreground">
-                                                  {" "}
-                                                  / {usage.toLocaleString()}{" "}
-                                                  {t("quota.used")}
+                                              {usage !== null ? (
+                                                <>
+                                                  <span className="font-medium">
+                                                    {usage.toLocaleString()}
+                                                  </span>
+                                                  <span className="text-muted-foreground">
+                                                    {" "}
+                                                    /{" "}
+                                                    {formatQuotaValue(
+                                                      meta,
+                                                      effective,
+                                                    )}
+                                                  </span>
+                                                </>
+                                              ) : (
+                                                <span className="font-medium">
+                                                  {formatQuotaValue(
+                                                    meta,
+                                                    effective,
+                                                  )}
                                                 </span>
                                               )}
                                             </div>

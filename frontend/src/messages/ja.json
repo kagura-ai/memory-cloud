@@ -2407,7 +2407,7 @@
         "resource": "リソース",
         "base": "ベース",
         "addon": "アドオン",
-        "effectiveUsage": "有効値 / 使用量",
+        "usageEffective": "使用量 / 有効値",
         "connector": "コネクタ"
       },
       "addonDialog": {

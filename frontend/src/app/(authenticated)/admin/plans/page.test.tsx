@@ -410,6 +410,20 @@ describe("AdminPlansPage — workspaces tab addon dialog (Issue #663)", () => {
     await screen.findByText("admin.plans.addonDialog.title");
   }
 
+  it("renders the quota detail as usage / effective (used is the numerator)", async () => {
+    render(<AdminPlansPage />);
+    // Click the workspace row to expand it and load the quota detail.
+    fireEvent.click(await screen.findByText("Pro Workspace"));
+
+    const memoryRow = (
+      await screen.findByText("admin.plans.quota.memory")
+    ).closest("div.grid");
+    // usage (50,000) is the numerator, effective (110,000) the denominator —
+    // matching the summary row's "used / limit", not the old reversed order.
+    expect(memoryRow).toHaveTextContent("50,000 / 110,000");
+    expect(memoryRow).not.toHaveTextContent("110,000 / 50,000");
+  });
+
   it("renders all 10 addon inputs with values pre-populated from quota detail", async () => {
     await openAddonDialog();
 
