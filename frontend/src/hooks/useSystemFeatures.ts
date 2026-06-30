@@ -33,9 +33,14 @@ export function useSystemFeatures(): Features | null {
           cache = info.features ?? {};
           return cache;
         })
-        .catch(() => {
-          // Fetch failure → treat as no features (everything default-off). Don't
-          // cache, so a later component mount can retry (a re-render won't).
+        .catch((e) => {
+          // Fetch failure → treat as no features (everything default-off, fail
+          // closed). Surface it in dev so a /system/info outage isn't silently
+          // invisible. Don't cache, so a later component mount can retry.
+          if (process.env.NODE_ENV === "development") {
+            // eslint-disable-next-line no-console
+            console.error("useSystemFeatures: /system/info fetch failed", e);
+          }
           inflight = null;
           return {} as Features;
         });

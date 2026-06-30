@@ -63,8 +63,12 @@ export default function WorkspacePlanPage() {
   }, [currentWorkspaceId]);
 
   useEffect(() => {
+    // #1145: don't fetch plan data until the feature flag resolves enabled —
+    // when ENABLE_PLAN_PAGE is off the page short-circuits to a notice, so the
+    // owner-only getWorkspacePlan call would otherwise be wasted.
+    if (!systemFeatures?.plan_page) return;
     loadPlan();
-  }, [loadPlan]);
+  }, [loadPlan, systemFeatures]);
 
   const handleManageBilling = async () => {
     if (!currentWorkspaceId) return;

@@ -104,6 +104,8 @@ describe("WorkspacePlanPage (#1141)", () => {
       await screen.findByText("planPage.featureDisabled"),
     ).toBeInTheDocument();
     expect(screen.queryByText("planPage.currentPlan")).toBeNull();
+    // Disabled → the owner-only plan fetch must be skipped (no wasted call).
+    expect(mockGetWorkspacePlan).not.toHaveBeenCalled();
   });
 
   it("never renders a hardcoded $ price", async () => {
