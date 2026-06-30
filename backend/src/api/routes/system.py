@@ -96,6 +96,9 @@ async def system_info():
         "features": {
             "neural_memory": settings.enable_neural_memory,
             "research_tools": settings.enable_research_tools,
+            # Issue #1145: the web UI hides the Plan page + nav entry unless this
+            # is true (default-off for OSS).
+            "plan_page": settings.enable_plan_page,
         },
     }
 

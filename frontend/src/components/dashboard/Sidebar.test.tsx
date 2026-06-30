@@ -75,11 +75,19 @@ vi.mock("@/components/icons/KaguraLogo", () => ({
   ),
 }));
 
+// #1145: feature flags gate certain nav items (e.g. Plan). Mock the hook so the
+// suite doesn't hit the network; default to plan_page enabled, flip per-test.
+let mockFeatures: Record<string, boolean> | null = { plan_page: true };
+vi.mock("@/hooks/useSystemFeatures", () => ({
+  useSystemFeatures: () => mockFeatures,
+}));
+
 import { Sidebar } from "./Sidebar";
 
 describe("Sidebar", () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    mockFeatures = { plan_page: true };
   });
 
   it("renders the Kagura logo at the top, linked to dashboard", () => {
@@ -97,6 +105,18 @@ describe("Sidebar", () => {
     // next-intl is mocked to echo the key, so the nav label is "plan".
     const planLink = screen.getByRole("link", { name: "plan" });
     expect(planLink).toHaveAttribute("href", "/workspace/settings/plan");
+  });
+
+  it("hides the Plan link when the plan_page feature flag is off (#1145)", () => {
+    mockFeatures = { plan_page: false };
+    render(<Sidebar />);
+    expect(screen.queryByRole("link", { name: "plan" })).toBeNull();
+  });
+
+  it("hides the Plan link while feature flags are still loading (default-off) (#1145)", () => {
+    mockFeatures = null;
+    render(<Sidebar />);
+    expect(screen.queryByRole("link", { name: "plan" })).toBeNull();
   });
 
   it("user menu trigger button shows user name", () => {

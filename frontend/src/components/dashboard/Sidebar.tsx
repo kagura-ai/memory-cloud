@@ -22,6 +22,7 @@ import {
 } from "@/styles/design-tokens";
 import { useAuth } from "@/contexts/AuthContext";
 import { useWorkspace } from "@/contexts/WorkspaceContext";
+import { useSystemFeatures } from "@/hooks/useSystemFeatures";
 import {
   hasRole,
   hasWorkspaceRole,
@@ -80,6 +81,7 @@ interface NavItem {
   icon: React.ElementType;
   requiredRole?: Role; // System admin role
   requiredWorkspaceRole?: Exclude<WorkspaceRole, WorkspaceRole.Viewer>; // Workspace role (minimum required)
+  requiredFeature?: string; // Issue #1145: gate on a GET /system/info features flag
   disabled?: boolean; // Issue #115: Support for "Coming Soon" items
   showMemberCount?: boolean; // Issue #223: Show dynamic member count
   showContextCount?: boolean; // Show dynamic context count
@@ -189,6 +191,9 @@ const navigationGroups: NavGroup[] = [
         href: "/workspace/settings/plan",
         icon: CreditCard,
         requiredWorkspaceRole: WorkspaceRole.Owner,
+        // Issue #1145: also gated behind the backend ENABLE_PLAN_PAGE flag
+        // (default-off in OSS) — hidden until /system/info confirms plan_page.
+        requiredFeature: "plan_page",
       },
       {
         // Issue #1134: owner/admin secret store management UI. The list APIs
@@ -267,6 +272,9 @@ const navigationGroups: NavGroup[] = [
 
 export function Sidebar() {
   const { currentWorkspace, currentWorkspaceId } = useWorkspace();
+  // Issue #1145: backend feature flags (e.g. plan_page). null while loading →
+  // feature-gated items stay hidden (default-off).
+  const systemFeatures = useSystemFeatures();
   const [isOpen, setIsOpen] = useState(false);
   const [contextCount, setContextCount] = useState<number | null>(null);
   const [hasExternalKeys, setHasExternalKeys] = useState<boolean | null>(null);
@@ -484,6 +492,14 @@ export function Sidebar() {
         {navigationGroups.map((group) => {
           // Filter items based on user role
           const visibleItems = group.items.filter((item) => {
+            // Issue #1145: gate behind a backend feature flag. Default-off:
+            // hidden while features load (null) and unless the flag is true.
+            if (
+              item.requiredFeature &&
+              !systemFeatures?.[item.requiredFeature]
+            ) {
+              return false;
+            }
             // Check system admin role
             if (item.requiredRole && !hasRole(user, item.requiredRole)) {
               return false;

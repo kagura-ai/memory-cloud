@@ -351,6 +351,16 @@ class Settings(BaseSettings):
     enable_research_tools: bool = Field(
         default=True, description="Enable research tools (Brave Search etc.)"
     )
+    enable_plan_page: bool = Field(
+        default=False,
+        description=(
+            "Enable the workspace Plan page + its sidebar nav entry (#1145). OFF "
+            "by default for OSS / self-hosted: pricing lives on the payment side "
+            "and billing is unconfigured by default, so the Plan surface only "
+            "makes sense where billing is wired up. Managed SaaS sets this true. "
+            "Surfaced to the frontend via GET /api/v1/system/info features.plan_page."
+        ),
+    )
 
     # Environment
     environment: str = Field(
