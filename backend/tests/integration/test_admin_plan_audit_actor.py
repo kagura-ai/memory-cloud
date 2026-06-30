@@ -39,6 +39,7 @@ class TestPlanAuditActorResolution:
 
         ws = make_workspace(owner_user_id=user.user_id)
         db_session.add(ws)
+        await db_session.flush()  # insert the workspace before its FK child
         db_session.add(
             PlanChange(
                 workspace_id=ws.id,
@@ -74,6 +75,7 @@ class TestPlanAuditActorResolution:
 
         ws = make_workspace(owner_user_id=user.user_id)
         db_session.add(ws)
+        await db_session.flush()  # insert the workspace before its FK child
         db_session.add(
             PlanChange(
                 workspace_id=ws.id,
