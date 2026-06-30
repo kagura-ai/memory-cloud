@@ -13,14 +13,13 @@ workspace hard-delete cascade (where the ``file_objects`` row is removed via its
 own workspace FK anyway) — a graceful fallback to workspace-scope, never a
 dangling reference.
 
-NOTE (merge ordering): this branches from main's head ``e50``, parallel to
-``e51_1153_secret_delete`` (the #1153 branch). Whichever of #1153 / #1136 merges
-second leaves two alembic heads off ``e50``; reconcile by repointing the
-second-merged migration's ``down_revision`` to the first (or add a merge
-revision) before merging. No conflict while the branches are independent.
+Chained after ``e51_1153_secret_delete`` (the #1153 secret-delete migration,
+merged to main first) so the history stays a single linear head
+``e50 → e51 → e52`` — both were authored in parallel off ``e50`` and reconciled
+at merge time.
 
 Revision ID: e52_1136_file_context_acl
-Revises: e50_1128_secret_store
+Revises: e51_1153_secret_delete
 """
 
 import sqlalchemy as sa
@@ -30,7 +29,7 @@ from alembic import op
 
 # revision identifiers, used by Alembic.
 revision = "e52_1136_file_context_acl"
-down_revision = "e50_1128_secret_store"
+down_revision = "e51_1153_secret_delete"
 branch_labels = None
 depends_on = None
 
