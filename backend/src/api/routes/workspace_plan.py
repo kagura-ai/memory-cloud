@@ -23,7 +23,7 @@ from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from auth.dependencies import SessionUser
-from config.plan_tiers import PLAN_TIERS, PlanName, PlanTier, get_plan_tier
+from config.plan_tiers import PLAN_TIERS, PlanTier, get_plan_tier
 from db.base import get_db
 from models.auth import (
     Context,
@@ -271,5 +271,6 @@ async def get_plan_tier_matrix(
     ``/workspaces/plan-tiers`` would be shadowed by the earlier-registered
     ``GET /workspaces/{workspace_id}`` route and 422 on the UUID parse.
     """
-    order = [PlanName.FREE, PlanName.BASIC, PlanName.PRO]
-    return [_plan_tier_feature(PLAN_TIERS[name]) for name in order]
+    # Iterate PLAN_TIERS directly (insertion order = free → basic → pro) so a
+    # custom/added tier is never silently dropped — mirrors get_available_plans.
+    return [_plan_tier_feature(tier) for tier in PLAN_TIERS.values()]
