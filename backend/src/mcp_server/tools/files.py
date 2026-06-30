@@ -6,9 +6,13 @@ MCP must funnel through one quota check) is enforced structurally.
 
 Tool names use the verb-first convention shared with the rest of the
 MCP surface (``init_file_upload`` / ``complete_file_upload`` /
-``get_file_download_url`` / ``list_files`` / ``delete_file``). All
-five operate on a workspace (no ``context_id``) so they live in
-``_TOOLS_WITHOUT_CONTEXT_ID``.
+``get_file_download_url`` / ``list_files`` / ``delete_file``). They live
+in ``_TOOLS_WITHOUT_CONTEXT_ID`` because ``context_id`` is OPTIONAL, not
+required: ``init_file_upload`` may bind a file to a context (Issue #1136),
+after which read/write/list/delete access is routed through that context's
+ACL by ``FileStorageService``; an unbound (workspace-scoped) file keeps the
+legacy workspace-role gate. The access enforcement lives in the shared
+service, so REST and MCP inherit it identically.
 """
 
 from __future__ import annotations
@@ -27,6 +31,7 @@ from mcp_server.tools._helpers import (
 from services.file_storage_service import FileStorageService
 from utils.datetime import to_utc_iso
 from utils.exceptions import (
+    AuthorizationError,
     ConflictError,
     ExternalServiceError,
     NotFoundException,
@@ -60,6 +65,11 @@ def _exc_to_error_response(exc: Exception) -> list[TextContent]:
         )
     if isinstance(exc, ValidationError):
         return _error_response("validation_error", str(exc))
+    if isinstance(exc, AuthorizationError):
+        # Issue #1136: context-scoped file access denied (the caller lacks the
+        # required read/write access to the file's owning context). Same vocab
+        # as the workspace-membership gate so MCP clients route it uniformly.
+        return _error_response("permission_denied", str(exc))
     if isinstance(exc, NotFoundException):
         return _error_response("not_found", str(exc))
     if isinstance(exc, ConflictError):
@@ -124,6 +134,15 @@ async def handle_init_file_upload(
     except (ValueError, TypeError):
         return _error_response("validation_error", "size_bytes must be a positive integer")
 
+    # Issue #1136: optional context binding. When set, the upload requires write
+    # access to that context and the file inherits its ACL for later access.
+    context_id = None
+    if args.get("context_id") is not None:
+        try:
+            context_id = UUID(str(args["context_id"]))
+        except (ValueError, TypeError):
+            return _error_response("validation_error", "context_id must be a UUID")
+
     ws, err = await _resolve_workspace(args.get("workspace_id"), workspace_id)
     if err is not None:
         return err
@@ -143,10 +162,12 @@ async def handle_init_file_upload(
                 content_type=str(args["content_type"]),
                 size_bytes=size_bytes,
                 sha256=str(args["sha256"]).lower(),
+                context_id=context_id,
             )
         except (
             UnsupportedMediaTypeError,
             ValidationError,
+            AuthorizationError,
             ConflictError,
             QuotaExceededError,
             NotFoundException,
@@ -199,9 +220,11 @@ async def handle_complete_file_upload(
                 workspace_id=ws,
                 file_id=file_id,
                 sha256=str(args["sha256"]).lower(),
+                actor_user_id=user_id,
             )
         except (
             ValidationError,
+            AuthorizationError,
             ConflictError,
             NotFoundException,
             ExternalServiceError,
@@ -261,8 +284,14 @@ async def handle_get_file_download_url(
             url = await service.get_presigned_download(
                 workspace_id=ws,
                 file_id=file_id,
+                actor_user_id=user_id,
             )
-        except (ValidationError, NotFoundException, ExternalServiceError) as exc:
+        except (
+            ValidationError,
+            AuthorizationError,
+            NotFoundException,
+            ExternalServiceError,
+        ) as exc:
             return _exc_to_error_response(exc)
     return _success_response(download_url=url)
 
@@ -300,8 +329,8 @@ async def handle_delete_file(
             return viewer_err
         service = FileStorageService(db)
         try:
-            await service.delete_file(workspace_id=ws, file_id=file_id)
-        except NotFoundException as exc:
+            await service.delete_file(workspace_id=ws, file_id=file_id, actor_user_id=user_id)
+        except (AuthorizationError, NotFoundException) as exc:
             return _exc_to_error_response(exc)
     return _success_response(file_id=str(file_id), deleted=True)
 
@@ -339,14 +368,26 @@ async def handle_list_files(
         if membership_err is not None:
             return membership_err
         service = FileStorageService(db)
+        # Issue #1136: scope to contexts the caller can access (+ workspace-scoped
+        # NULL-context files); the service applies the filter before the LIMIT.
+        from services.permission_service import PermissionService
+
         try:
-            files = await service.list_files(workspace_id=ws, limit=limit)
-        except ValidationError as exc:
+            accessible = await PermissionService(db).get_accessible_contexts(user_id, ws)
+            files = await service.list_files(
+                workspace_id=ws,
+                accessible_context_ids=[c.id for c in accessible],
+                limit=limit,
+            )
+        except (ValidationError, AuthorizationError, NotFoundException) as exc:
+            # get_accessible_contexts -> check_workspace_access can raise
+            # NotFoundException (workspace gone) — map it, don't 500.
             return _exc_to_error_response(exc)
     return _success_response(
         files=[
             {
                 "id": str(f.id),
+                "context_id": str(f.context_id) if f.context_id else None,
                 "filename": f.filename,
                 "content_type": f.content_type,
                 "size_bytes": f.size_bytes,

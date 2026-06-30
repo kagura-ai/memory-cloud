@@ -30,6 +30,7 @@ import type { FileObject } from "@/lib/api/files";
 const mockListFiles = vi.fn();
 const mockGetDownloadUrl = vi.fn();
 const mockDeleteFile = vi.fn();
+const mockGetContexts = vi.fn();
 
 let mockCurrentWorkspace: {
   id?: string;
@@ -61,6 +62,11 @@ vi.mock("next-intl", () => ({
   useLocale: () => "en",
 }));
 
+// #1136: the page resolves context names for the Scope column.
+vi.mock("@/lib/api/contexts", () => ({
+  getContexts: (...args: unknown[]) => mockGetContexts(...args),
+}));
+
 vi.mock("@/contexts/WorkspaceContext", () => ({
   useWorkspace: () => ({
     currentWorkspace: mockCurrentWorkspace,
@@ -83,6 +89,7 @@ vi.mock("@/lib/utils/datetime", () => ({
 const file = (overrides: Partial<FileObject> = {}): FileObject => ({
   id: "file-1",
   workspace_id: "ws-1",
+  context_id: null,
   filename: "report.pdf",
   content_type: "application/pdf",
   size_bytes: 2048,
@@ -97,6 +104,8 @@ beforeEach(() => {
   mockListFiles.mockReset();
   mockGetDownloadUrl.mockReset();
   mockDeleteFile.mockReset();
+  mockGetContexts.mockReset();
+  mockGetContexts.mockResolvedValue({ contexts: [], total: 0 });
   mockToast.mockReset();
   mockCurrentWorkspace = { id: "ws-1", current_user_role: "member" };
 });
@@ -122,6 +131,29 @@ describe("StoragePage", () => {
     expect(screen.getByText("notes.txt")).toBeInTheDocument();
     expect(screen.getByText("application/pdf")).toBeInTheDocument();
     expect(mockListFiles).toHaveBeenCalledWith("ws-1", 50);
+  });
+
+  it("shows the context name for a bound file and the workspace label otherwise (#1136)", async () => {
+    mockGetContexts.mockResolvedValue({
+      contexts: [{ id: "ctx-1", name: "secret-ctx", display_name: "Secrets" }],
+      total: 1,
+    });
+    mockListFiles.mockResolvedValue([
+      file({ id: "f-null", filename: "open.txt", context_id: null }),
+      file({ id: "f-ctx", filename: "scoped.txt", context_id: "ctx-1" }),
+    ]);
+
+    render(<StoragePage />);
+
+    await waitFor(() => {
+      expect(screen.getByText("scoped.txt")).toBeInTheDocument();
+    });
+    // Context-bound file resolves to the context display name; the
+    // workspace-scoped file shows the scope label.
+    await waitFor(() => {
+      expect(screen.getByText("Secrets")).toBeInTheDocument();
+    });
+    expect(screen.getByText("list.scope.workspace")).toBeInTheDocument();
   });
 
   it("renders empty state when the list is empty", async () => {

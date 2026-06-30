@@ -461,6 +461,12 @@ class TestListFiles:
         with (
             get_db_patch,
             _patch_viewer_check_pass(),
+            # #1136: the handler computes the caller's accessible contexts before
+            # listing; stub it so the unit test stays DB-free.
+            patch(
+                "services.permission_service.PermissionService.get_accessible_contexts",
+                AsyncMock(return_value=[]),
+            ),
             patch(
                 "mcp_server.tools.files.FileStorageService.list_files",
                 AsyncMock(return_value=[f1, f2]),
@@ -482,6 +488,10 @@ class TestListFiles:
         with (
             get_db_patch,
             _patch_viewer_check_pass(),
+            patch(
+                "services.permission_service.PermissionService.get_accessible_contexts",
+                AsyncMock(return_value=[]),
+            ),
             patch(
                 "mcp_server.tools.files.FileStorageService.list_files",
                 AsyncMock(side_effect=ValidationError("limit out of range")),
