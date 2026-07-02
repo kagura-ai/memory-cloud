@@ -113,5 +113,12 @@ def permute_gold(probes, *, seed: int) -> dict[str, tuple[str, ...]]:
             i = idxs[0]
             own = set(probes[i].companion_docs) | {probes[i].seed_doc}
             pool = [d for d in all_gold if d not in own]
+            if len(pool) < size:
+                raise ValueError(
+                    f"cannot build a size-{size} foreign gold set for probe "
+                    f"{probes[i].query_id!r}: only {len(pool)} non-own gold docs "
+                    f"available — corpus too small for a size-preserving "
+                    f"shuffled-gold placebo for this probe"
+                )
             result[probes[i].query_id] = tuple(rng.sample(pool, size))
     return result

@@ -125,3 +125,14 @@ def test_permute_gold_singleton_size_class_draws_excluding_own():
     assert len(out["q3"]) == 1
     assert "c3a" not in out["q3"]
     assert "s3" not in out["q3"]
+
+
+def test_permute_gold_raises_when_singleton_pool_too_small():
+    # q2's size-3 singleton class cannot be satisfied: after excluding q2's own
+    # 3 companions + seed, only {s1, c1a} (2 < 3) remain in the foreign pool.
+    probes = (
+        _probe("q1", "s1", ["c1a"]),
+        _probe("q2", "s2", ["c2a", "c2b", "c2c"]),
+    )
+    with pytest.raises(ValueError, match="corpus too small"):
+        permute_gold(probes, seed=1)
