@@ -19,7 +19,6 @@ cheap and CI-safe.
 from __future__ import annotations
 
 import json
-import os
 from pathlib import Path
 from typing import Any
 from uuid import UUID, uuid4
@@ -39,7 +38,6 @@ from tests.eval.replay_runner import (
     _REPLAY_ROUNDS,
     _gold_pairs_from_plan,
     _replay,
-    _restore_env,
     _run_sleep,
 )
 from tests.eval.runner import _ingest_corpus, _sudachi_version, _teardown
@@ -254,11 +252,13 @@ async def _placebo_arms_for_seed(
             for e in rewired
         ]
         await _replace_edges(db, ctx.id, rewired_rows)
-        re_rankings, _ = await _explore_rankings(
-            svc, plan.probes, seed_mem_by_doc, id_map, owner, ctx, ws
-        )
-        random_edge = recovery_from_rankings(re_rankings, true_gold)
-        await _replace_edges(db, ctx.id, snapshot)  # restore for the next seed
+        try:
+            re_rankings, _ = await _explore_rankings(
+                svc, plan.probes, seed_mem_by_doc, id_map, owner, ctx, ws
+            )
+            random_edge = recovery_from_rankings(re_rankings, true_gold)
+        finally:
+            await _replace_edges(db, ctx.id, snapshot)  # always restore the true warm graph
 
     deltas: dict[str, Any] = {
         "shuffled_gold": paired_delta_bootstrap(
