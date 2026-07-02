@@ -12,7 +12,13 @@ from collections import Counter
 import pytest
 
 from tests.eval.compounding import ProbeSpec
-from tests.eval.placebo import Edge, degree_preserving_rewire, paired_delta_bootstrap, permute_gold
+from tests.eval.placebo import (
+    Edge,
+    degree_preserving_rewire,
+    median_cross_topic_gold_pair_cosine,
+    paired_delta_bootstrap,
+    permute_gold,
+)
 
 
 def _edges(pairs, *, origin="hebbian", edge_type="neural_association"):
@@ -172,3 +178,22 @@ def test_bootstrap_raises_on_length_mismatch_or_empty():
         paired_delta_bootstrap([0.1, 0.2], [0.1], seed=1)
     with pytest.raises(ValueError):
         paired_delta_bootstrap([], [], seed=1)
+
+
+def test_median_cross_topic_ignores_same_source_pairs():
+    doc_vec = {"a": [1.0], "b": [2.0], "c": [3.0]}
+    # cosine_fn returns the product of the single components (a stand-in metric)
+    cos = lambda u, v: u[0] * v[0]
+    source = {"a": "memory", "b": "resource", "c": "memory"}
+    gold_pairs = {frozenset(("a", "b")), frozenset(("a", "c")), frozenset(("b", "c"))}
+    # cross-topic pairs: a-b (1*2=2), b-c (2*3=6); a-c is same-source -> skipped
+    out = median_cross_topic_gold_pair_cosine(doc_vec, gold_pairs, source, cosine_fn=cos)
+    assert out == pytest.approx((2.0 + 6.0) / 2)
+
+
+def test_median_cross_topic_returns_none_when_no_cross_topic_pair():
+    doc_vec = {"a": [1.0], "b": [2.0]}
+    cos = lambda u, v: u[0] * v[0]
+    source = {"a": "memory", "b": "memory"}
+    gold_pairs = {frozenset(("a", "b"))}
+    assert median_cross_topic_gold_pair_cosine(doc_vec, gold_pairs, source, cosine_fn=cos) is None

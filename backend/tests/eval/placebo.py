@@ -153,3 +153,30 @@ def paired_delta_bootstrap(
     lo = means[int(0.025 * resamples)]
     hi = means[int(0.975 * resamples)]
     return {"delta": round(point, 4), "lo": round(lo, 4), "hi": round(hi, 4), "n": n}
+
+
+def median_cross_topic_gold_pair_cosine(
+    doc_vec: dict[str, list[float]],
+    gold_pairs: set[frozenset[str]],
+    source_by_doc: dict[str, str],
+    *,
+    cosine_fn: Callable[[list[float], list[float]], float],
+) -> float | None:
+    """Provisional τ = median cosine over CROSS-TOPIC gold pairs (prereg §3).
+
+    A gold pair is cross-topic when its two docs have different ``Document.source``
+    values. Pairs missing a vector are skipped. ``cosine_fn`` is injected so this
+    stays infra-free; the live caller passes ``neural.utils.cosine_similarity``.
+    Returns ``None`` when no cross-topic gold pair has both vectors.
+    """
+    cosines: list[float] = []
+    for pair in gold_pairs:
+        a, b = tuple(pair)
+        if source_by_doc.get(a) == source_by_doc.get(b):
+            continue
+        if a not in doc_vec or b not in doc_vec:
+            continue
+        cosines.append(cosine_fn(doc_vec[a], doc_vec[b]))
+    if not cosines:
+        return None
+    return median(cosines)
