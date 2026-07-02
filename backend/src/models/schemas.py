@@ -1195,7 +1195,11 @@ class WorkspaceInvitationResponse(TZAwareBaseModel):
 
     id: int
     workspace_id: UUID
-    token: str
+    # Issue #1164: token / invitation_url are bearer join-credentials. They are
+    # populated in the POST create response and in session-principal list
+    # responses, but OMITTED (None) for programmatic (API-key) list responses so
+    # CI logs never become a workspace-join credential dump.
+    token: str | None
     email: str | None
     role: str
     invited_by: str
@@ -1203,7 +1207,7 @@ class WorkspaceInvitationResponse(TZAwareBaseModel):
     accepted_at: datetime | None
     accepted_by: str | None
     created_at: datetime
-    invitation_url: str  # Full URL to accept invitation
+    invitation_url: str | None  # Full URL to accept invitation (None when omitted)
     is_expired: bool
     is_accepted: bool
     allowed_context_ids: list[str] | None = Field(

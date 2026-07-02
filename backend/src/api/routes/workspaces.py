@@ -14,7 +14,16 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from auth.analysis_allowlist import check_workspace_in_allowlist
-from auth.dependencies import SessionUser, get_current_user, require_byok_enabled
+from auth.dependencies import (
+    APIKeyOrSessionUser,
+    SessionUser,
+    get_current_user,
+    require_byok_enabled,
+)
+from auth.programmatic_workspace_auth import (
+    audit_programmatic_workspace_action,
+    authorize_workspace_management,
+)
 from auth.workspace_roles import WorkspaceRole
 from db.base import get_db
 from models.api_base import TZAwareBaseModel
@@ -574,17 +583,18 @@ async def switch_workspace(
 @router.get("/{workspace_id}/members", response_model=list[WorkspaceMemberResponse])
 async def list_members(
     workspace_id: UUID,
-    request: Request,
+    user: APIKeyOrSessionUser,
     db: AsyncSession = Depends(get_db),
 ):
-    """List all members of workspace."""
-    user = await get_current_user(request)
-    workspace_service = WorkspaceService(db)
-    perm_service = PermissionService(db)
+    """List all members of workspace.
 
-    # Check access
-    await perm_service.check_workspace_access(
-        user["user_id"], workspace_id, required_role=WorkspaceRole.MEMBER
+    Issue #1164: session member+ (unchanged) OR workspace-owner API key.
+    """
+    workspace_service = WorkspaceService(db)
+
+    # Issue #1164: session keeps member+ gate; API key requires owner; OAuth 403.
+    await authorize_workspace_management(
+        user, workspace_id, db, session_required_role=WorkspaceRole.MEMBER
     )
 
     members = await workspace_service.list_members(workspace_id)
@@ -693,19 +703,38 @@ async def list_members(
 async def add_member(
     workspace_id: UUID,
     body: AddMemberRequest,
-    request: Request,
+    user: APIKeyOrSessionUser,
     db: AsyncSession = Depends(get_db),
 ):
     """Add a member to workspace.
 
-    Requires admin or owner role.
+    Issue #1164: session admin+ (unchanged) OR workspace-owner API key.
+    Programmatic principals cannot assign ``owner`` (422) — owner assignment
+    stays with the ownership-transfer flow.
     """
-    user = await get_current_user(request)
     workspace_service = WorkspaceService(db)
-    perm_service = PermissionService(db)
 
-    # Check admin access
-    await perm_service.check_workspace_admin(user["user_id"], workspace_id)
+    principal = await authorize_workspace_management(
+        user, workspace_id, db, session_required_role=WorkspaceRole.ADMIN
+    )
+    if principal.kind == "api_key" and body.role == WorkspaceRole.OWNER:
+        raise HTTPException(
+            status_code=422,
+            detail="Programmatic member management cannot assign the owner role; "
+            "use the ownership transfer flow.",
+        )
+
+    # Issue #1164: audit programmatic mutations (no-op for session). Added
+    # before the service call so it commits atomically with the membership.
+    await audit_programmatic_workspace_action(
+        db,
+        principal,
+        user,
+        workspace_id,
+        action="workspace_member_added",
+        target=body.user_id,
+        metadata={"role": str(body.role)},
+    )
 
     member = await workspace_service.add_member(
         workspace_id=workspace_id,
@@ -726,19 +755,26 @@ async def update_member_role(
     workspace_id: UUID,
     user_id: str,
     body: UpdateMemberRoleRequest,
-    request: Request,
+    current_user: APIKeyOrSessionUser,
     db: AsyncSession = Depends(get_db),
 ):
     """Update member's role.
 
-    Requires admin or owner role.
+    Issue #1164: session admin+ (unchanged) OR workspace-owner API key.
+    Programmatic principals cannot assign ``owner`` (422).
     """
-    current_user = await get_current_user(request)
     workspace_service = WorkspaceService(db)
-    perm_service = PermissionService(db)
 
-    # Check admin access
-    current_member = await perm_service.check_workspace_admin(current_user["user_id"], workspace_id)
+    principal = await authorize_workspace_management(
+        current_user, workspace_id, db, session_required_role=WorkspaceRole.ADMIN
+    )
+
+    if principal.kind == "api_key" and body.role == WorkspaceRole.OWNER:
+        raise HTTPException(
+            status_code=422,
+            detail="Programmatic member management cannot assign the owner role; "
+            "use the ownership transfer flow.",
+        )
 
     # Issue #254: Prevent users from changing their own role
     if user_id == current_user["user_id"]:
@@ -747,13 +783,27 @@ async def update_member_role(
             detail="Cannot modify your own role. Another administrator must change your role.",
         )
 
-    # Issue #254: Prevent non-owners from changing owner's role
+    # Issue #254: Prevent non-owners from changing owner's role. The caller's
+    # membership comes from the authorization result (owner for the API-key
+    # principal by construction; the session caller's own row otherwise) — no
+    # second lookup needed.
+    caller_is_owner = principal.member.role == WorkspaceRole.OWNER
     target_member = await workspace_service.get_member(workspace_id, user_id)
-    if target_member.role == WorkspaceRole.OWNER and current_member.role != WorkspaceRole.OWNER:
+    if target_member.role == WorkspaceRole.OWNER and not caller_is_owner:
         raise HTTPException(
             status_code=403,
             detail="Only the owner can change the owner's role.",
         )
+
+    await audit_programmatic_workspace_action(
+        db,
+        principal,
+        current_user,
+        workspace_id,
+        action="workspace_member_role_changed",
+        target=user_id,
+        metadata={"new_role": str(body.role)},
+    )
 
     member = await workspace_service.update_member_role(
         workspace_id=workspace_id,
@@ -843,19 +893,29 @@ async def update_member_context_access(
 async def remove_member(
     workspace_id: UUID,
     user_id: str,
-    request: Request,
+    current_user: APIKeyOrSessionUser,
     db: AsyncSession = Depends(get_db),
 ):
     """Remove member from workspace.
 
-    Issue #217: Requires owner role only. Cannot remove owner.
+    Issue #217: owner role only. Cannot remove owner.
+    Issue #1164: session owner (unchanged) OR workspace-owner API key.
     """
-    current_user = await get_current_user(request)
     workspace_service = WorkspaceService(db)
-    perm_service = PermissionService(db)
 
-    # Issue #217: Only owner can remove members
-    await perm_service.check_workspace_owner(current_user["user_id"], workspace_id)
+    # Both session and API-key principals must be owner here (#217).
+    principal = await authorize_workspace_management(
+        current_user, workspace_id, db, session_required_role=WorkspaceRole.OWNER
+    )
+
+    await audit_programmatic_workspace_action(
+        db,
+        principal,
+        current_user,
+        workspace_id,
+        action="workspace_member_removed",
+        target=user_id,
+    )
 
     await workspace_service.remove_member(workspace_id, user_id)
 

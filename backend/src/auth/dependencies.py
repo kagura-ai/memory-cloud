@@ -272,10 +272,18 @@ async def _build_api_key_user_dict(
     user_id: str,
     api_key_workspace_id: UUID | None,
     db: AsyncSession,
+    *,
+    api_key_prefix: str | None = None,
 ) -> dict:
     """Build user info dict from verified API key data.
 
     Shared by verify_api_key_user and get_user_from_api_key_or_session.
+
+    ``api_key_prefix`` (Issue #1164): the verified key's non-secret prefix
+    (``VerifiedKey.key_prefix``), surfaced on the principal so audit trails for
+    programmatic workspace-management actions can attribute the acting key
+    without a second lookup. Safe to log (it is only the prefix, never the
+    secret).
 
     Note (Issue #626): callers MUST reject public-bound keys
     (``VerifiedKey.bound_context_id is not None``) BEFORE invoking this
@@ -313,6 +321,7 @@ async def _build_api_key_user_dict(
         "current_context_id": None,  # Issue #246: always None, must be explicit
         "current_workspace_id": current_workspace_id,
         "api_key_workspace_id": api_key_workspace_id,
+        "api_key_prefix": api_key_prefix,  # Issue #1164: audit attribution
     }
 
 
@@ -391,7 +400,9 @@ async def verify_api_key_user(
             ),
         )
 
-    return await _build_api_key_user_dict(result.user_id, result.workspace_id, db)
+    return await _build_api_key_user_dict(
+        result.user_id, result.workspace_id, db, api_key_prefix=result.key_prefix
+    )
 
 
 async def require_session_auth(
@@ -547,7 +558,9 @@ async def get_user_from_api_key_or_session(
                         "they are only valid on /api/v1/public/{context_id}/* endpoints"
                     ),
                 )
-            return await _build_api_key_user_dict(result.user_id, result.workspace_id, db)
+            return await _build_api_key_user_dict(
+                result.user_id, result.workspace_id, db, api_key_prefix=result.key_prefix
+            )
 
         logger.warning("invalid_api_key_attempt", key_prefix=api_key[:16])
         raise HTTPException(status_code=401, detail="Invalid or expired API key")
