@@ -35,6 +35,7 @@ from services.workspace_ownership_service import WorkspaceOwnershipService
 from services.workspace_service import WorkspaceService
 from utils.auth_helpers import get_user_id
 from utils.datetime import to_utc_iso
+from utils.exceptions import ValidationError
 from utils.logger import get_logger
 
 logger = get_logger(__name__)
@@ -718,10 +719,10 @@ async def add_member(
         user, workspace_id, db, session_required_role=WorkspaceRole.ADMIN
     )
     if principal.kind == "api_key" and body.role == WorkspaceRole.OWNER:
-        raise HTTPException(
-            status_code=422,
-            detail="Programmatic member management cannot assign the owner role; "
+        raise ValidationError(
+            "Programmatic member management cannot assign the owner role; "
             "use the ownership transfer flow.",
+            field="role",
         )
 
     # Issue #1164: audit programmatic mutations (no-op for session). Added
@@ -770,10 +771,10 @@ async def update_member_role(
     )
 
     if principal.kind == "api_key" and body.role == WorkspaceRole.OWNER:
-        raise HTTPException(
-            status_code=422,
-            detail="Programmatic member management cannot assign the owner role; "
+        raise ValidationError(
+            "Programmatic member management cannot assign the owner role; "
             "use the ownership transfer flow.",
+            field="role",
         )
 
     # Issue #254: Prevent users from changing their own role

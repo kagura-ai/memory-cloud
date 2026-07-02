@@ -1354,6 +1354,10 @@ class CreateAPIKeyRequest(BaseModel):
     name: str
     auto_hide_minutes: int = 10  # Auto-hide after 10 minutes (default)
     bound_context_id: str | None = None  # Issue #626
+    # Issue #1165: owner-provisioned mints REQUIRE an expiry (the route enforces
+    # 400 if omitted for the programmatic path); session self-mint leaves it None
+    # (unchanged — no expiry, as today). 1–3650 days mirrors /api/v1/config/api-keys.
+    expires_days: int | None = Field(default=None, ge=1, le=3650)
 
 
 class RegenerateAPIKeyResponse(BaseModel):
