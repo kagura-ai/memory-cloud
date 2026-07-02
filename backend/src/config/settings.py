@@ -350,6 +350,19 @@ class Settings(BaseSettings):
         ),
     )
 
+    @field_validator("self_hosted_base_url")
+    @classmethod
+    def _strip_self_hosted_base_url(cls, v: str) -> str:
+        """Normalize a trailing slash so consumers can join ``/v1/...`` safely.
+
+        Operators commonly set ``SELF_HOSTED_BASE_URL`` with a trailing slash;
+        without this, ``f"{base}/v1/models"`` becomes ``http://host//v1/models``
+        which 404s on some servers and misreports the backend as down. Strip
+        once at the source so every consumer (embedding probe, telemetry probe,
+        SelfHostedProvider/Reranker) gets a clean base.
+        """
+        return v.rstrip("/") if v else v
+
     # Search Configuration (Issue #105)
     enable_reranking: bool = Field(
         default=True,
