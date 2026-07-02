@@ -253,159 +253,121 @@ class TestUpdateMemberRole:
         """Mock database session."""
         return AsyncMock()
 
+    # Issue #1164: update_member_role now takes ``current_user`` (APIKeyOrSessionUser)
+    # and gates via the shared ``authorize_workspace_management`` helper. These
+    # unit tests target the #254 owner-change / self-change guards, so they patch
+    # the helper to return a session principal carrying the caller's membership
+    # and drive the target role via WorkspaceService.get_member.
+
+    def _session_user(self, user_id):
+        return {"user_id": user_id, "sub": user_id, "email": f"{user_id}@x"}
+
+    def _authorized(self, role):
+        from auth.programmatic_workspace_auth import AuthorizedPrincipal
+
+        caller_member = MagicMock()
+        caller_member.role = role
+        return AuthorizedPrincipal(kind="session", member=caller_member)
+
     @pytest.mark.asyncio
-    async def test_update_own_role_forbidden(self, workspace_id, admin_user, mock_request, mock_db):
-        """Test that users cannot change their own role (Issue #254)."""
-        # Mock current user
-        with patch("api.routes.workspaces.get_current_user", return_value=admin_user):
-            # Mock permission check to return admin member
-            mock_admin_member = MagicMock()
-            mock_admin_member.role = WorkspaceRole.ADMIN
-
-            with patch("api.routes.workspaces.PermissionService") as mock_perm_service:
-                mock_perm_service.return_value.check_workspace_admin = AsyncMock(
-                    return_value=mock_admin_member
+    async def test_update_own_role_forbidden(self, workspace_id, admin_user, mock_db):
+        """Users cannot change their own role (Issue #254)."""
+        current_user = self._session_user(admin_user["user_id"])
+        with patch(
+            "api.routes.workspaces.authorize_workspace_management",
+            AsyncMock(return_value=self._authorized(WorkspaceRole.ADMIN)),
+        ):
+            body = UpdateMemberRoleRequest(role=WorkspaceRole.MEMBER)
+            with pytest.raises(HTTPException) as exc_info:
+                await update_member_role(
+                    workspace_id=workspace_id,
+                    user_id=current_user["user_id"],  # same as caller
+                    body=body,
+                    current_user=current_user,
+                    db=mock_db,
                 )
-
-                # Try to change own role
-                body = UpdateMemberRoleRequest(role=WorkspaceRole.MEMBER)
-
-                with pytest.raises(HTTPException) as exc_info:
-                    await update_member_role(
-                        workspace_id=workspace_id,
-                        user_id=admin_user["user_id"],  # Same as current user
-                        body=body,
-                        request=mock_request,
-                        db=mock_db,
-                    )
-
-                assert exc_info.value.status_code == 403
-                assert "own role" in exc_info.value.detail.lower()
+            assert exc_info.value.status_code == 403
+            assert "own role" in exc_info.value.detail.lower()
 
     @pytest.mark.asyncio
     async def test_admin_cannot_change_owner_role(
-        self, workspace_id, admin_user, target_user_id, mock_request, mock_db
+        self, workspace_id, admin_user, target_user_id, mock_db
     ):
-        """Test that admins cannot change owner's role (Issue #254)."""
-        # Mock current user as admin
-        with patch("api.routes.workspaces.get_current_user", return_value=admin_user):
-            # Mock permission check to return admin member
-            mock_admin_member = MagicMock()
-            mock_admin_member.role = WorkspaceRole.ADMIN
-
-            # Mock target member as owner
-            mock_owner_member = MagicMock()
-            mock_owner_member.role = WorkspaceRole.OWNER
-
-            with patch("api.routes.workspaces.PermissionService") as mock_perm_service:
-                mock_perm_service.return_value.check_workspace_admin = AsyncMock(
-                    return_value=mock_admin_member
-                )
-
-                with patch("api.routes.workspaces.WorkspaceService") as mock_workspace_service:
-                    mock_workspace_service.return_value.get_member = AsyncMock(
-                        return_value=mock_owner_member
+        """Admins cannot change an owner's role (Issue #254)."""
+        current_user = self._session_user(admin_user["user_id"])
+        target_owner = MagicMock()
+        target_owner.role = WorkspaceRole.OWNER
+        with patch(
+            "api.routes.workspaces.authorize_workspace_management",
+            AsyncMock(return_value=self._authorized(WorkspaceRole.ADMIN)),
+        ):
+            with patch("api.routes.workspaces.WorkspaceService") as mock_ws:
+                mock_ws.return_value.get_member = AsyncMock(return_value=target_owner)
+                body = UpdateMemberRoleRequest(role=WorkspaceRole.ADMIN)
+                with pytest.raises(HTTPException) as exc_info:
+                    await update_member_role(
+                        workspace_id=workspace_id,
+                        user_id=target_user_id,
+                        body=body,
+                        current_user=current_user,
+                        db=mock_db,
                     )
-
-                    body = UpdateMemberRoleRequest(role=WorkspaceRole.ADMIN)
-
-                    with pytest.raises(HTTPException) as exc_info:
-                        await update_member_role(
-                            workspace_id=workspace_id,
-                            user_id=target_user_id,
-                            body=body,
-                            request=mock_request,
-                            db=mock_db,
-                        )
-
-                    assert exc_info.value.status_code == 403
-                    assert "owner" in exc_info.value.detail.lower()
+                assert exc_info.value.status_code == 403
+                assert "owner" in exc_info.value.detail.lower()
 
     @pytest.mark.asyncio
     async def test_owner_can_change_owner_role(
-        self, workspace_id, owner_user, target_user_id, mock_request, mock_db
+        self, workspace_id, owner_user, target_user_id, mock_db
     ):
-        """Test that owners can change owner's role (Issue #254)."""
-        # Mock current user as owner
-        with patch("api.routes.workspaces.get_current_user", return_value=owner_user):
-            # Mock permission check to return owner member
-            mock_owner_member = MagicMock()
-            mock_owner_member.role = WorkspaceRole.OWNER
-
-            # Mock target member as owner
-            mock_target_owner = MagicMock()
-            mock_target_owner.role = "owner"
-            mock_target_owner.user_id = target_user_id
-            mock_target_owner.joined_at = None
-
-            with patch("api.routes.workspaces.PermissionService") as mock_perm_service:
-                mock_perm_service.return_value.check_workspace_admin = AsyncMock(
-                    return_value=mock_owner_member
+        """Owners can change an owner's role (Issue #254)."""
+        current_user = self._session_user(owner_user["user_id"])
+        target_owner = MagicMock()
+        target_owner.role = "owner"
+        target_owner.user_id = target_user_id
+        target_owner.joined_at = None
+        with patch(
+            "api.routes.workspaces.authorize_workspace_management",
+            AsyncMock(return_value=self._authorized(WorkspaceRole.OWNER)),
+        ):
+            with patch("api.routes.workspaces.WorkspaceService") as mock_ws:
+                mock_ws.return_value.get_member = AsyncMock(return_value=target_owner)
+                mock_ws.return_value.update_member_role = AsyncMock(return_value=target_owner)
+                body = UpdateMemberRoleRequest(role=WorkspaceRole.ADMIN)
+                response = await update_member_role(
+                    workspace_id=workspace_id,
+                    user_id=target_user_id,
+                    body=body,
+                    current_user=current_user,
+                    db=mock_db,
                 )
-
-                with patch("api.routes.workspaces.WorkspaceService") as mock_workspace_service:
-                    mock_workspace_service.return_value.get_member = AsyncMock(
-                        return_value=mock_target_owner
-                    )
-                    mock_workspace_service.return_value.update_member_role = AsyncMock(
-                        return_value=mock_target_owner
-                    )
-
-                    body = UpdateMemberRoleRequest(role=WorkspaceRole.ADMIN)
-
-                    # Should succeed
-                    response = await update_member_role(
-                        workspace_id=workspace_id,
-                        user_id=target_user_id,
-                        body=body,
-                        request=mock_request,
-                        db=mock_db,
-                    )
-
-                    assert response.user_id == target_user_id
+                assert response.user_id == target_user_id
 
     @pytest.mark.asyncio
     async def test_admin_can_change_member_role(
-        self, workspace_id, admin_user, target_user_id, mock_request, mock_db
+        self, workspace_id, admin_user, target_user_id, mock_db
     ):
-        """Test that admins can change member's role (Issue #254)."""
-        # Mock current user as admin
-        with patch("api.routes.workspaces.get_current_user", return_value=admin_user):
-            # Mock permission check to return admin member
-            mock_admin_member = MagicMock()
-            mock_admin_member.role = WorkspaceRole.ADMIN
-
-            # Mock target member as regular member
-            mock_target_member = MagicMock()
-            mock_target_member.role = "member"
-            mock_target_member.user_id = target_user_id
-            mock_target_member.joined_at = None
-
-            with patch("api.routes.workspaces.PermissionService") as mock_perm_service:
-                mock_perm_service.return_value.check_workspace_admin = AsyncMock(
-                    return_value=mock_admin_member
+        """Admins can change a regular member's role (Issue #254)."""
+        current_user = self._session_user(admin_user["user_id"])
+        target_member = MagicMock()
+        target_member.role = "member"
+        target_member.user_id = target_user_id
+        target_member.joined_at = None
+        with patch(
+            "api.routes.workspaces.authorize_workspace_management",
+            AsyncMock(return_value=self._authorized(WorkspaceRole.ADMIN)),
+        ):
+            with patch("api.routes.workspaces.WorkspaceService") as mock_ws:
+                mock_ws.return_value.get_member = AsyncMock(return_value=target_member)
+                mock_ws.return_value.update_member_role = AsyncMock(return_value=target_member)
+                body = UpdateMemberRoleRequest(role=WorkspaceRole.VIEWER)
+                response = await update_member_role(
+                    workspace_id=workspace_id,
+                    user_id=target_user_id,
+                    body=body,
+                    current_user=current_user,
+                    db=mock_db,
                 )
-
-                with patch("api.routes.workspaces.WorkspaceService") as mock_workspace_service:
-                    mock_workspace_service.return_value.get_member = AsyncMock(
-                        return_value=mock_target_member
-                    )
-                    mock_workspace_service.return_value.update_member_role = AsyncMock(
-                        return_value=mock_target_member
-                    )
-
-                    body = UpdateMemberRoleRequest(role=WorkspaceRole.VIEWER)
-
-                    # Should succeed
-                    response = await update_member_role(
-                        workspace_id=workspace_id,
-                        user_id=target_user_id,
-                        body=body,
-                        request=mock_request,
-                        db=mock_db,
-                    )
-
-                    assert response.user_id == target_user_id
+                assert response.user_id == target_user_id
 
 
 class TestSwitchWorkspace:

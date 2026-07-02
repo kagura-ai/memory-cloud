@@ -66,7 +66,8 @@ class TestApiKeyPrincipal:
             db=None,
             session_required_role=WorkspaceRole.MEMBER,
         )
-        assert who == "api_key"
+        assert who.kind == "api_key"
+        assert who.member is perm.check_workspace_owner.return_value
         perm.check_workspace_owner.assert_awaited_once_with("u-key", _WS)
         perm.check_workspace_access.assert_not_called()
 
@@ -108,7 +109,8 @@ class TestSessionPrincipal:
         who = await authorize_workspace_management(
             _session_user(), _WS, db=None, session_required_role=WorkspaceRole.ADMIN
         )
-        assert who == "session"
+        assert who.kind == "session"
+        assert who.member is perm.check_workspace_access.return_value
         # Session keeps its endpoint-specific role gate; owner-only does NOT apply.
         perm.check_workspace_access.assert_awaited_once_with(
             "u-session", _WS, required_role=WorkspaceRole.ADMIN

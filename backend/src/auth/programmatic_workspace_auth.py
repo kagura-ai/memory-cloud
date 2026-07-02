@@ -24,16 +24,37 @@ rule so all of those routes gate identically:
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from uuid import UUID
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from auth.workspace_roles import WorkspaceRole
+from models.auth import WorkspaceMember
 from services.permission_service import PermissionService
 from utils.exceptions import AuthorizationError, NotFoundException
 from utils.logger import get_logger
 
 logger = get_logger(__name__)
+
+
+@dataclass(frozen=True)
+class AuthorizedPrincipal:
+    """Result of a successful workspace-management authorization.
+
+    Attributes:
+        kind: ``"api_key"`` or ``"session"`` — callers vary response shape on
+            this (e.g. programmatic principals get token-less invitation lists).
+        member: The caller's ``WorkspaceMember`` row (from the permission
+            lookup). For an API-key principal this is the owner membership;
+            for a session it is the caller's membership at ``session_required_role``
+            or above. Callers reuse ``member.role`` for downstream guards (e.g.
+            the #254 owner-change check) without a second DB lookup.
+    """
+
+    kind: str
+    member: WorkspaceMember
+
 
 # OAuth bearer tokens are rejected on these surfaces until a dedicated
 # workspace-admin scope is designed (see module docstring).
@@ -64,7 +85,7 @@ async def authorize_workspace_management(
     db: AsyncSession,
     *,
     session_required_role: WorkspaceRole,
-) -> str:
+) -> AuthorizedPrincipal:
     """Authorize a workspace-management request across auth modes.
 
     Args:
@@ -79,9 +100,10 @@ async def authorize_workspace_management(
             principals, which are always owner-gated.
 
     Returns:
-        The principal kind that was authorized: ``"api_key"`` or ``"session"``.
-        (Callers use this to vary response shape — e.g. omit invitation tokens
-        for programmatic principals.)
+        An ``AuthorizedPrincipal`` carrying the principal ``kind``
+        (``"api_key"`` / ``"session"``) and the caller's ``WorkspaceMember``
+        row, so callers can vary response shape and reuse ``member.role`` for
+        downstream guards without a second lookup.
 
     Raises:
         AuthorizationError: 403 — OAuth principal, non-owner API key, session
@@ -112,15 +134,15 @@ async def authorize_workspace_management(
                 path_workspace_id=str(workspace_id),
             )
             raise NotFoundException("Workspace not found")
-        await perm_service.check_workspace_owner(user_id, workspace_id)
-        return "api_key"
+        member = await perm_service.check_workspace_owner(user_id, workspace_id)
+        return AuthorizedPrincipal(kind="api_key", member=member)
 
     # Session → unchanged endpoint role gate.
     if is_session_principal(user):
-        await perm_service.check_workspace_access(
+        member = await perm_service.check_workspace_access(
             user_id, workspace_id, required_role=session_required_role
         )
-        return "session"
+        return AuthorizedPrincipal(kind="session", member=member)
 
     # Fail closed: not positively a session, not a recognized programmatic
     # principal → deny.
