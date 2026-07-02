@@ -27,7 +27,7 @@ from __future__ import annotations
 import json
 import re
 from typing import Any
-from uuid import UUID
+from uuid import UUID, uuid4
 
 from sqlalchemy import func, select, text, update
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -47,6 +47,7 @@ from models.secrets import (
     PUBKEY_STATUS_PENDING,
     PUBKEY_STATUS_REVOKED,
     SECRET_ALG_AGE,
+    SECRET_NAME_MAX_LEN,
     SECRET_STATUS_ACTIVE,
     RecipientPubkey,
     Secret,
@@ -449,8 +450,8 @@ class SecretStoreService:
         (owner-approved) — or the put is rejected (grant ⇄ ciphertext integrity).
         After the put, the secret's active grants are exactly ``grant_pubkey_ids``.
         """
-        if not name or len(name) > 255:
-            raise ValueError("Secret name must be 1–255 characters")
+        if not name or len(name) > SECRET_NAME_MAX_LEN:
+            raise ValueError(f"Secret name must be 1–{SECRET_NAME_MAX_LEN} characters")
         if not ciphertext:
             raise ValueError("ciphertext is required (the server never receives plaintext)")
         if len(ciphertext) > CIPHERTEXT_MAX_LEN:
@@ -489,10 +490,7 @@ class SecretStoreService:
         # loser surfaces a raw unique-constraint IntegrityError (an opaque 5xx).
         # Released at commit. (The audit advisory lock is keyed differently, so
         # these don't contend with audit appends.)
-        await self.db.execute(
-            text("SELECT pg_advisory_xact_lock(hashtextextended(:k, 0))"),
-            {"k": f"secret_put:{workspace_id}:{name}"},
-        )
+        await self._lock_secret_name(workspace_id, name)
 
         # Get-or-create the secret.
         existing = await self.db.execute(
@@ -602,10 +600,15 @@ class SecretStoreService:
         The server returns opaque ciphertext and never decrypts it.
         """
         secret = await self._load_active_secret(workspace_id, name)
-        authorized = secret is not None and await self._caller_has_active_grant(
-            secret.id, actor_user_id, workspace_id
+        # Run the grant probe even when the secret doesn't exist (a random
+        # UUID matches no grant row) so both denial paths cost the same DB
+        # round trips: "missing" vs "exists but ungranted" must not be
+        # distinguishable by response time — secret_get is rate-limit-exempt,
+        # so latency is the one enumeration channel left to a member.
+        has_grant = await self._caller_has_active_grant(
+            secret.id if secret is not None else uuid4(), actor_user_id, workspace_id
         )
-        if not authorized:
+        if secret is None or not has_grant:
             # Uniform denial to the CALLER (raise the same error whether the
             # secret is missing or just ungranted) — but record secret_id in the
             # server-side audit when the secret DOES exist, so an unauthorized
@@ -677,6 +680,20 @@ class SecretStoreService:
             version=version.version_number,
         )
         return payload
+
+    async def _lock_secret_name(self, workspace_id: UUID, name: str) -> None:
+        """Take the per-name advisory lock serializing put/delete on a secret.
+
+        ``pg_advisory_xact_lock`` — held until the surrounding transaction
+        commits or rolls back. Every writer that creates or removes the
+        ``secrets``/``secret_versions`` rows for ``name`` must take this lock
+        first so concurrent writers see each other's outcome instead of racing
+        into unique/FK IntegrityErrors.
+        """
+        await self.db.execute(
+            text("SELECT pg_advisory_xact_lock(hashtextextended(:k, 0))"),
+            {"k": f"secret_put:{workspace_id}:{name}"},
+        )
 
     async def _load_active_secret(self, workspace_id: UUID, name: str) -> Secret | None:
         """Load an active secret by name (existence check; no grant evaluation)."""
@@ -797,6 +814,11 @@ class SecretStoreService:
         untouched. Any status is deletable (``active``/``disabled``); the route
         commits.
         """
+        # Same per-name lock as put_secret: without it, a delete committing
+        # between a concurrent put's SELECT and its version INSERT turns the
+        # put into a raw FK IntegrityError (an opaque 5xx).
+        await self._lock_secret_name(workspace_id, name)
+
         secret_row = await self.db.execute(
             select(Secret).where(Secret.workspace_id == workspace_id, Secret.name == name)
         )

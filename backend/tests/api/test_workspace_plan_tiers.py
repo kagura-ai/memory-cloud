@@ -109,6 +109,12 @@ def test_boolean_capabilities(client: TestClient) -> None:
         basic["team_invitations"],
         pro["team_invitations"],
     ) == (False, False, True)
+    # secret_store (Volt, #1128) is available on every tier.
+    assert (
+        free["secret_store"],
+        basic["secret_store"],
+        pro["secret_store"],
+    ) == (True, True, True)
 
 
 def test_price_is_omitted(client: TestClient) -> None:

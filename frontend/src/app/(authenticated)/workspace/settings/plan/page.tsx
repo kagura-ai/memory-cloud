@@ -20,7 +20,10 @@ import { Sparkles } from "lucide-react";
 import { PageContainer } from "@/components/common/PageContainer";
 import { PageHeader } from "@/components/common/PageHeader";
 import { Section } from "@/components/common/Section";
-import { SpinnerLoading } from "@/components/common/LoadingState";
+import {
+  InlineSpinner,
+  SpinnerLoading,
+} from "@/components/common/LoadingState";
 import { ErrorBanner } from "@/components/common/ErrorBanner";
 import { Button } from "@/components/ui/button";
 import { useWorkspace } from "@/contexts/WorkspaceContext";
@@ -171,14 +174,34 @@ export default function WorkspacePlanPage() {
             )}
           </div>
           {isOwner ? (
-            <Button onClick={handleManageBilling} disabled={upgrading}>
-              <Sparkles className="mr-2 h-4 w-4" />
-              {upgrading
-                ? t("planPage.opening")
-                : isSubscribed
+            // Keep the label stable while the handoff is in flight — billing-
+            // disabled deployments 503 in milliseconds, and a label swap
+            // (label → "opening…" → label) reads as a flicker. The in-flight
+            // state is the icon-turned-spinner + disabled + aria-busy, and the
+            // change is announced to screen readers via a role="status" live
+            // region (a bare sr-only span isn't reliably re-read on toggle).
+            <>
+              <Button
+                onClick={handleManageBilling}
+                disabled={upgrading}
+                aria-busy={upgrading}
+              >
+                {upgrading ? (
+                  <InlineSpinner size="sm" className="mr-2" />
+                ) : (
+                  <Sparkles className="mr-2 h-4 w-4" />
+                )}
+                {isSubscribed
                   ? t("planPage.reviewOrChangePlan")
                   : t("planPage.manageBilling")}
-            </Button>
+              </Button>
+              {/* Always-mounted live region so the in-flight state is
+                  reliably announced when its text flips (a conditionally
+                  rendered sr-only span is not re-read on toggle). */}
+              <span role="status" aria-live="polite" className="sr-only">
+                {upgrading ? t("planPage.opening") : ""}
+              </span>
+            </>
           ) : (
             <p className="text-sm text-gray-500 dark:text-gray-400">
               {t("planPage.ownerOnly")}

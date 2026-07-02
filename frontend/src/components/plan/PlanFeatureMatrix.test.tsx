@@ -42,6 +42,7 @@ const TIERS = [
     sleep_enabled_contexts_limit: 0,
     reranking: false,
     managed_embeddings: false,
+    secret_store: true,
     shared_contexts: false,
     team_invitations: false,
   },
@@ -61,6 +62,7 @@ const TIERS = [
     sleep_enabled_contexts_limit: 0,
     reranking: true,
     managed_embeddings: true,
+    secret_store: true,
     shared_contexts: false,
     team_invitations: false,
   },
@@ -80,6 +82,7 @@ const TIERS = [
     sleep_enabled_contexts_limit: 3,
     reranking: true,
     managed_embeddings: true,
+    secret_store: true,
     shared_contexts: true,
     team_invitations: true,
   },
@@ -127,6 +130,11 @@ describe("PlanFeatureMatrix (#1138)", () => {
     const team = rowOf("planMatrix.row_teamInvitations");
     expect(team.getAllByText("✓").length).toBe(1);
     expect(team.getAllByText("✗").length).toBe(2);
+
+    // secret_store (Volt) is included on every tier.
+    const secrets = rowOf("planMatrix.row_secretStore");
+    expect(secrets.getAllByText("✓").length).toBe(3);
+    expect(secrets.queryByText("✗")).toBeNull();
   });
 
   it("highlights the current tier and never renders a price", async () => {
@@ -138,7 +146,7 @@ describe("PlanFeatureMatrix (#1138)", () => {
     expect(document.body.textContent ?? "").not.toMatch(/\$|¥|price/i);
   });
 
-  it("tags Connectors / Analysis / Sleep rows as Beta, not the stable rows", async () => {
+  it("tags Connectors / Analysis / Sleep / Secrets rows as Beta, not the stable rows", async () => {
     render(<PlanFeatureMatrix currentTier="pro" />);
     await screen.findByText("planMatrix.row_connectors");
 
@@ -146,6 +154,7 @@ describe("PlanFeatureMatrix (#1138)", () => {
       "planMatrix.row_connectors",
       "planMatrix.row_analysisPerDay",
       "planMatrix.row_sleepContexts",
+      "planMatrix.row_secretStore",
     ]) {
       expect(rowOf(key).getByText("planMatrix.beta")).toBeInTheDocument();
     }

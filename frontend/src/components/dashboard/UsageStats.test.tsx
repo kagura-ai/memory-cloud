@@ -30,6 +30,12 @@ import type {
 
 // ---------- Mocks ------------------------------------------------------------
 
+// UsageStats calls useRouter() for the upsell CTA (#1139); happy-dom has no
+// app router mounted, so the hook must be mocked or every render throws.
+vi.mock("next/navigation", () => ({
+  useRouter: () => ({ push: vi.fn() }),
+}));
+
 const mockGetWorkspaceUsageCurrent = vi.fn();
 const mockGetWorkspaceUsageHistory = vi.fn();
 const mockGetWorkspaceUsageBreakdown = vi.fn();

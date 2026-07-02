@@ -11,7 +11,7 @@
  *   - non-owners see the owner-only note and no billing button.
  */
 
-import { render, screen } from "@testing-library/react";
+import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { describe, it, expect, vi, beforeEach } from "vitest";
 
 import WorkspacePlanPage from "./page";
@@ -45,7 +45,10 @@ const mockGetWorkspacePlan = vi.fn();
 vi.mock("@/lib/api/workspaces", () => ({
   getWorkspacePlan: (...args: unknown[]) => mockGetWorkspacePlan(...args),
 }));
-vi.mock("@/lib/api/billing", () => ({ mintBillingHandoff: vi.fn() }));
+const mockMintBillingHandoff = vi.fn();
+vi.mock("@/lib/api/billing", () => ({
+  mintBillingHandoff: (...args: unknown[]) => mockMintBillingHandoff(...args),
+}));
 vi.mock("@/lib/api/base", () => ({
   ApiError: class ApiError extends Error {
     status = 0;
@@ -135,6 +138,44 @@ describe("WorkspacePlanPage (#1141)", () => {
     ).toBeInTheDocument();
     expect(screen.queryByText("planPage.reviewOrChangePlan")).toBeNull();
     expect(screen.queryByText("planPage.billingAmountHint")).toBeNull();
+  });
+
+  it("keeps the button label stable while the handoff is in flight (no flicker)", async () => {
+    mockWorkspace = { current_user_role: "owner", plan_name: "basic" };
+    let resolveHandoff: (v: { url?: string }) => void = () => {};
+    mockMintBillingHandoff.mockImplementation(
+      () =>
+        new Promise((resolve) => {
+          resolveHandoff = resolve;
+        }),
+    );
+    render(<WorkspacePlanPage />);
+    const button = await screen.findByRole("button", {
+      name: /planPage\.reviewOrChangePlan/,
+    });
+    // A persistent role="status" live region exists and is empty at rest, so
+    // assistive tech reliably announces when its text flips (a conditionally
+    // mounted sr-only span is not re-read on toggle).
+    const liveRegion = screen.getByRole("status");
+    expect(liveRegion).toHaveClass("sr-only");
+    expect(liveRegion).toHaveTextContent("");
+
+    fireEvent.click(button);
+    // In flight the visible label must NOT swap (billing-disabled deployments
+    // reject in milliseconds → a swap reads as a flicker). Busy state = spinner
+    // + disabled + aria-busy + the live region announcing "opening".
+    expect(screen.getByText("planPage.reviewOrChangePlan")).toBeInTheDocument();
+    expect(button).toBeDisabled();
+    expect(button).toHaveAttribute("aria-busy", "true");
+    expect(liveRegion).toHaveTextContent("planPage.opening");
+    // The visible affordance is the spinner, not a text swap: assert the
+    // Sparkles icon was replaced by the spinner (no lucide-sparkles present).
+    expect(button.querySelector(".lucide-sparkles")).toBeNull();
+
+    resolveHandoff({});
+    await waitFor(() => expect(button).not.toBeDisabled());
+    expect(button).toHaveAttribute("aria-busy", "false");
+    expect(liveRegion).toHaveTextContent("");
   });
 
   it("non-owner sees the owner-only note and no billing button", async () => {

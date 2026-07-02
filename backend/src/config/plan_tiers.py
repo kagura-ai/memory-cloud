@@ -121,7 +121,9 @@ PLAN_FREE = PlanTier(
     embedding_daily_cap_usd=0.50,  # Issue #709: conservative drain-attack guard
     embedding_monthly_cap_usd=15.0,  # Issue #709
     allows_shared_contexts=False,  # Issue #271: Private contexts only
-    features=frozenset({"api_keys", "oauth"}),  # Free plan includes OAuth (App Credentials)
+    # Free plan includes OAuth (App Credentials); secret_store is
+    # available on every tier (#1128 — zero-knowledge, all tiers).
+    features=frozenset({"api_keys", "oauth", "secret_store"}),
 )
 
 PLAN_BASIC = PlanTier(
@@ -148,7 +150,7 @@ PLAN_BASIC = PlanTier(
     embedding_monthly_cap_usd=60.0,  # Issue #709
     # Issue #1030: paid tiers (M/L) get platform-managed embeddings — they may
     # embed on the platform key without BYOK (bounded by the #709/#1033 cap).
-    features=frozenset({"api_keys", "reranking", "oauth", "managed_embeddings"}),
+    features=frozenset({"api_keys", "reranking", "oauth", "managed_embeddings", "secret_store"}),
 )
 
 PLAN_PRO = PlanTier(
@@ -186,6 +188,7 @@ PLAN_PRO = PlanTier(
             "public_contexts",  # Issue #238: Public contexts
             "memory_analysis",  # Issue #496: Memory Broadlistening
             "managed_embeddings",  # Issue #1030: platform-managed embeddings (M/L)
+            "secret_store",  # Issue #1128: zero-knowledge secret store (all tiers)
         }
     ),
 )

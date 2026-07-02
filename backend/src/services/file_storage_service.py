@@ -32,11 +32,12 @@ from __future__ import annotations
 
 import mimetypes
 import re
+from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from uuid import UUID, uuid4
 
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -144,18 +145,27 @@ class FileStorageService:
         file_id: UUID,
         *,
         include_deleted: bool = False,
+        for_update: bool = False,
     ) -> FileObject:
         """Load a file_objects row, enforcing workspace boundary.
 
         Cross-workspace access raises ``NotFoundException`` (not 403) so
         the existence of a file in another workspace is not leaked.
+
+        ``for_update`` takes a row-level ``FOR UPDATE`` lock so a
+        read-modify-write on the row (e.g. ``confirm_upload``) serializes
+        against a concurrent mutation of the same row — notably
+        ``purge_files_for_contexts``, which also locks the rows it cancels.
+        Without it, a stale-read confirm could resurrect a purged reservation
+        into an ``uploaded`` row (quota drift + workspace-scope widening).
         """
-        result = await self.db.execute(
-            select(FileObject).where(
-                FileObject.id == file_id,
-                FileObject.workspace_id == workspace_id,
-            )
+        stmt = select(FileObject).where(
+            FileObject.id == file_id,
+            FileObject.workspace_id == workspace_id,
         )
+        if for_update:
+            stmt = stmt.with_for_update()
+        result = await self.db.execute(stmt)
         file = result.scalar_one_or_none()
         if file is None:
             msg = f"file {file_id} not found in workspace {workspace_id}"
@@ -434,7 +444,12 @@ class FileStorageService:
             ValidationError: sha256 mismatch (caller / row-state drift).
             ConflictError: ``head_object`` says the binary is missing.
         """
-        file = await self._load_file(workspace_id, file_id)
+        # FOR UPDATE: serialize the reserved→uploaded transition against a
+        # concurrent purge_files_for_contexts (which locks + cancels the same
+        # rows). If the purge committed first, this load sees the soft-deleted
+        # row and raises NotFoundException below; if this confirm locks first,
+        # the purge re-reads the committed uploaded row and reconciles quota.
+        file = await self._load_file(workspace_id, file_id, for_update=True)
 
         # Issue #1136: context-bound files require write access to their context.
         # actor_user_id is optional in the signature (internal/legacy callers of
@@ -814,6 +829,83 @@ class FileStorageService:
             size_bytes=size,
         )
 
+    async def purge_files_for_contexts(self, context_ids: Sequence[UUID]) -> dict[UUID, int]:
+        """Soft-delete every live file bound to ``context_ids`` (all statuses).
+
+        Admin user-erasure hard-deletes the target's contexts, which would
+        fire ``file_objects.context_id``'s ``ON DELETE SET NULL`` and silently
+        widen a private context's files to workspace scope (any viewer could
+        then download them). Call this in the same transaction, *before* the
+        contexts are deleted, so the files go away with their ACL boundary.
+
+        Per-status handling:
+
+        - ``uploaded`` → soft-delete + decrement ``workspace_storage_usage``;
+          its committed bytes are added to the returned release total.
+        - ``reserved`` → **cancel it** (soft-delete + transition to ``failed``)
+          and add its reserved bytes to the release total. Skipping it would be
+          unsafe: the subsequent context hard-delete NULLs its ``context_id``,
+          and ``confirm_upload`` only enforces the context ACL when
+          ``context_id is not None`` — so a still-``reserved`` in-flight upload
+          could later be confirmed into a workspace-scoped uploaded file, the
+          exact widening this method prevents. Transitioning to ``failed`` also
+          takes the row out of the orphan sweeper's ``WHERE status='reserved'``
+          scan so the reservation is released here exactly once (mirrors
+          ``delete_file``'s reserved branch).
+        - ``failed`` → soft-delete only; the sweeper already released its
+          reservation, so it is NOT added to the release total (no double
+          release).
+
+        Does NOT commit (runs inside the caller's transaction). Returns the
+        Redis bytes to release per workspace (uploaded committed + reserved)
+        so the caller can call ``storage_quota_service.release_storage_bytes``
+        for each surviving workspace AFTER its commit succeeds (Redis follows
+        the DB, R5).
+        """
+        if not context_ids:
+            return {}
+        # FOR UPDATE locks the rows we are about to cancel so a concurrent
+        # confirm_upload (which now also loads its row FOR UPDATE) cannot slip
+        # a reserved→uploaded transition in between this SELECT and the caller's
+        # commit — the two fully serialize on the row lock, keeping the status
+        # decision (reserved-cancel vs uploaded-decrement) authoritative.
+        result = await self.db.execute(
+            select(FileObject)
+            .where(
+                FileObject.context_id.in_(list(context_ids)),
+                FileObject.deleted_at.is_(None),
+            )
+            .with_for_update()
+        )
+        files = list(result.scalars().all())
+        released: dict[UUID, int] = {}
+        now = utcnow()
+        for file in files:
+            file.deleted_at = now
+            if file.status == "uploaded":
+                await self._upsert_workspace_usage(
+                    file.workspace_id,
+                    delta_bytes=-file.size_bytes,
+                    delta_files=-1,
+                )
+                released[file.workspace_id] = released.get(file.workspace_id, 0) + file.size_bytes
+            elif file.status == "reserved":
+                # Cancel the in-flight upload (see docstring): failed status
+                # removes it from the sweeper's scan and blocks confirm_upload
+                # from promoting a now-context-less row to workspace scope.
+                file.status = "failed"
+                released[file.workspace_id] = released.get(file.workspace_id, 0) + file.size_bytes
+            # failed rows: sweeper already released the reservation → soft-delete
+            # only, no release (avoids double-releasing the Redis counter).
+        if files:
+            logger.info(
+                "context_bound_files_purged",
+                context_count=len(set(context_ids)),
+                file_count=len(files),
+                workspaces=[str(w) for w in released],
+            )
+        return released
+
     # ------------------------------------------------------------------
     # Counter helper (UPSERT pattern)
     # ------------------------------------------------------------------
@@ -829,8 +921,13 @@ class FileStorageService:
         workspace.
 
         ON CONFLICT updates the existing row; otherwise inserts a fresh
-        row clamped to the non-negative regime (the CHECK constraint
-        also enforces this server-side).
+        row clamped to the non-negative regime. The UPDATE floors the result
+        at 0 via ``GREATEST`` so a decrement against a drifted-low counter
+        cannot drive it negative and trip the ``used_bytes >= 0`` /
+        ``file_count >= 0`` CHECK constraint — an IntegrityError there would
+        abort the whole surrounding transaction (e.g. fail an admin user
+        deletion). Redis quota already floors at zero; the DB counter now
+        matches that self-healing posture instead of hard-blocking.
         """
         now = utcnow()
         stmt = (
@@ -844,8 +941,8 @@ class FileStorageService:
             .on_conflict_do_update(
                 index_elements=[WorkspaceStorageUsage.workspace_id],
                 set_={
-                    "used_bytes": WorkspaceStorageUsage.used_bytes + delta_bytes,
-                    "file_count": WorkspaceStorageUsage.file_count + delta_files,
+                    "used_bytes": func.greatest(0, WorkspaceStorageUsage.used_bytes + delta_bytes),
+                    "file_count": func.greatest(0, WorkspaceStorageUsage.file_count + delta_files),
                     "updated_at": now,
                 },
             )

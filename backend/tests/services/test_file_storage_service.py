@@ -881,3 +881,94 @@ class TestReserveUploadExtensionConsistency:
                 sha256=VALID_SHA,
             )
         assert isinstance(out, ReserveResult)
+
+
+class TestPurgeFilesForContexts:
+    """``purge_files_for_contexts`` — admin user-erasure calls this before
+    hard-deleting the target's contexts so ``ON DELETE SET NULL`` cannot
+    widen a private context's files to workspace scope."""
+
+    @pytest.mark.asyncio
+    async def test_empty_context_ids_is_a_noop(self, service, db):
+        assert await service.purge_files_for_contexts([]) == {}
+        db.execute.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_uploaded_rows_soft_deleted_and_usage_released(self, service, db, workspace_id):
+        ctx_id = uuid4()
+        f1 = _make_file_object(workspace_id, status="uploaded", size_bytes=100)
+        f2 = _make_file_object(workspace_id, status="uploaded", size_bytes=250)
+        f1.deleted_at = None
+        f2.deleted_at = None
+        select_result = MagicMock()
+        select_result.scalars.return_value.all.return_value = [f1, f2]
+        # First execute = the SELECT; subsequent = the usage UPSERTs.
+        db.execute.side_effect = [select_result, MagicMock(), MagicMock()]
+
+        released = await service.purge_files_for_contexts([ctx_id])
+
+        assert f1.deleted_at is not None
+        assert f2.deleted_at is not None
+        assert released == {workspace_id: 350}
+        # SELECT + one usage UPSERT per uploaded row; the caller owns commit.
+        assert db.execute.await_count == 3
+        db.commit.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_failed_rows_soft_deleted_without_usage_release(self, service, db, workspace_id):
+        """Failed rows already had their Redis reservation released by the
+        sweeper — they must be hidden but never double-released."""
+        ctx_id = uuid4()
+        failed = _make_file_object(workspace_id, status="failed", size_bytes=999)
+        failed.deleted_at = None
+        select_result = MagicMock()
+        select_result.scalars.return_value.all.return_value = [failed]
+        db.execute.side_effect = [select_result]
+
+        released = await service.purge_files_for_contexts([ctx_id])
+
+        assert failed.deleted_at is not None
+        assert released == {}
+        assert db.execute.await_count == 1  # SELECT only, no usage UPSERT
+
+    @pytest.mark.asyncio
+    async def test_reserved_rows_canceled_and_released(self, service, db, workspace_id):
+        """Reserved (in-flight) rows must be CANCELED, not skipped: the pending
+        context hard-delete NULLs their context_id, and confirm_upload skips the
+        context ACL check when context_id is None — so a surviving reserved row
+        could be promoted to a workspace-scoped uploaded file (the widening this
+        method exists to prevent). The row is soft-deleted + transitioned to
+        'failed' (out of the sweeper's reserved scan) and its reserved bytes are
+        returned for the post-commit Redis release."""
+        ctx_id = uuid4()
+        reserved = _make_file_object(workspace_id, status="reserved", size_bytes=500)
+        reserved.deleted_at = None
+        select_result = MagicMock()
+        select_result.scalars.return_value.all.return_value = [reserved]
+        db.execute.side_effect = [select_result]
+
+        released = await service.purge_files_for_contexts([ctx_id])
+
+        assert reserved.deleted_at is not None
+        assert reserved.status == "failed"  # removed from the sweeper's scan
+        assert released == {workspace_id: 500}  # reserved bytes released once
+        # SELECT only — reserved rows have no workspace_storage_usage row to
+        # decrement (reserved bytes live only in the Redis counter).
+        assert db.execute.await_count == 1
+        db.commit.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_released_bytes_grouped_per_workspace(self, service, db):
+        ws_a, ws_b = uuid4(), uuid4()
+        fa1 = _make_file_object(ws_a, status="uploaded", size_bytes=10)
+        fa2 = _make_file_object(ws_a, status="uploaded", size_bytes=30)
+        fb = _make_file_object(ws_b, status="uploaded", size_bytes=7)
+        for f in (fa1, fa2, fb):
+            f.deleted_at = None
+        select_result = MagicMock()
+        select_result.scalars.return_value.all.return_value = [fa1, fa2, fb]
+        db.execute.side_effect = [select_result] + [MagicMock()] * 3
+
+        released = await service.purge_files_for_contexts([uuid4(), uuid4()])
+
+        assert released == {ws_a: 40, ws_b: 7}

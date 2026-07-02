@@ -1190,6 +1190,7 @@
       "row_sleepContexts": "Sleep-enabled contexts",
       "row_reranking": "Reranking",
       "row_managedEmbeddings": "Managed embeddings",
+      "row_secretStore": "Secrets",
       "row_sharedContexts": "Shared / public contexts",
       "row_teamInvitations": "Team invitations"
     },

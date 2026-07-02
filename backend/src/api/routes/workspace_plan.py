@@ -95,6 +95,7 @@ class PlanTierFeature(BaseModel):
     # Boolean capabilities
     reranking: bool
     managed_embeddings: bool
+    secret_store: bool
     shared_contexts: bool
     team_invitations: bool
 
@@ -250,6 +251,7 @@ def _plan_tier_feature(tier: PlanTier) -> PlanTierFeature:
         sleep_enabled_contexts_limit=tier.sleep_enabled_contexts_limit,
         reranking="reranking" in tier.features,
         managed_embeddings="managed_embeddings" in tier.features,
+        secret_store="secret_store" in tier.features,
         shared_contexts=tier.allows_shared_contexts,
         team_invitations="team_invitations" in tier.features,
     )

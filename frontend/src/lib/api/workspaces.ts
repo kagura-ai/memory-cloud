@@ -396,6 +396,7 @@ export interface PlanTierFeature {
   sleep_enabled_contexts_limit: number;
   reranking: boolean;
   managed_embeddings: boolean;
+  secret_store: boolean;
   shared_contexts: boolean;
   team_invitations: boolean;
 }

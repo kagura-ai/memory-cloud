@@ -339,3 +339,65 @@ async def test_list_filters_by_accessible_contexts_end_to_end(scenario):
     )
     member_ctx = {f.context_id for f in member_files}
     assert {None, scenario["shared"], scenario["private"]} <= member_ctx
+
+
+# --- context hard-delete purge (admin user-erasure) ------------------------------
+
+
+async def test_purge_before_context_hard_delete_prevents_acl_widening(scenario):
+    """Admin user-erasure hard-deletes the target's contexts. Without the
+    purge, ``file_objects.context_id``'s ON DELETE SET NULL would strip a
+    private context's ACL and silently widen its files to workspace scope
+    (any viewer could download them). ``purge_files_for_contexts`` must run
+    first, in the same transaction, so the files die with their boundary."""
+    svc, db, ws = scenario["svc"], scenario["db"], scenario["ws"]
+    f = _file(workspace_id=ws, context_id=scenario["private"], sha="b" * 64)
+    db.add(f)
+    await db.flush()
+
+    released = await svc.purge_files_for_contexts([scenario["private"]])
+    assert released == {ws: 1024}  # uploaded bytes reported for Redis release
+
+    # The admin route hard-deletes the context right after the purge.
+    await db.execute(text("DELETE FROM contexts WHERE id = :c"), {"c": str(scenario["private"])})
+    await db.flush()
+
+    # The FK has now SET NULL'd nothing that matters: the row is soft-deleted,
+    # so nobody — creator, owner, viewer, or scoped member — can download it.
+    for actor in (MEMBER, OWNER, VIEWER, OTHER):
+        with pytest.raises(NotFoundException):
+            await svc.get_presigned_download(workspace_id=ws, file_id=f.id, actor_user_id=actor)
+
+    # And it is gone from every listing, including the legacy NULL-context scope.
+    listed = await svc.list_files(workspace_id=ws, accessible_context_ids=[], limit=50)
+    assert f.id not in {row.id for row in listed}
+
+
+async def test_purge_cancels_reserved_file_so_it_cannot_be_confirmed(scenario):
+    """A reserved (in-flight) upload bound to a private context must be CANCELED
+    by the purge, not left behind. Otherwise the context hard-delete NULLs its
+    context_id and confirm_upload (which only checks the context ACL when
+    context_id is not None) could later promote it into a workspace-scoped
+    uploaded file — re-opening the ACL-widening hole through the reserved path."""
+    svc, db, ws = scenario["svc"], scenario["db"], scenario["ws"]
+    reserved = _file(
+        workspace_id=ws, context_id=scenario["private"], sha="c" * 64, status="reserved"
+    )
+    db.add(reserved)
+    await db.flush()
+
+    released = await svc.purge_files_for_contexts([scenario["private"]])
+    assert released == {ws: 1024}  # reserved bytes reported for the Redis release
+
+    # Context hard-delete fires ON DELETE SET NULL on the (now soft-deleted) row.
+    await db.execute(text("DELETE FROM contexts WHERE id = :c"), {"c": str(scenario["private"])})
+    await db.flush()
+
+    # The reserved row was transitioned to failed + soft-deleted: the orphan
+    # sweeper's WHERE status='reserved' skips it (no double Redis release) and,
+    # crucially, it can no longer be confirmed into a downloadable file.
+    await db.refresh(reserved)
+    assert reserved.status == "failed"
+    assert reserved.deleted_at is not None
+    with pytest.raises(NotFoundException):
+        await svc.get_presigned_download(workspace_id=ws, file_id=reserved.id, actor_user_id=OWNER)

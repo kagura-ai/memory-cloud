@@ -61,6 +61,7 @@ const ROWS: MatrixRow[] = [
   },
   { key: "reranking", field: "reranking", kind: "bool" },
   { key: "managedEmbeddings", field: "managed_embeddings", kind: "bool" },
+  { key: "secretStore", field: "secret_store", kind: "bool", beta: true },
   { key: "sharedContexts", field: "shared_contexts", kind: "bool" },
   { key: "teamInvitations", field: "team_invitations", kind: "bool" },
 ];
