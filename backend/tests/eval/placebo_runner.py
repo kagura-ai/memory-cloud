@@ -147,8 +147,8 @@ async def _run_placebo_mode(corpus: Any, plan: Any, seeds: tuple[int, ...]) -> d
                 semantic_weight=0.6,
                 fetch_factor=3,
                 use_rerank=False,
-                reranker_provider="voyage",
-                reranker_model="rerank-2-lite",
+                reranker_provider="self_hosted",
+                reranker_model="qwen3-reranker-4b",
                 embedding_model=emb_model,
                 embedding_dimensions=emb_dims,
             )

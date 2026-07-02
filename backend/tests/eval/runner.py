@@ -308,17 +308,19 @@ async def run_retrieval_eval(write: bool = True, run_date: str | None = None) ->
         settings = get_settings()
         emb_model = settings.embedding_model
         emb_dims = EMBEDDING_MODEL_REGISTRY.get(emb_model, (settings.embedding_dimensions, ""))[0]
-        # Mirror ContextService.create_context's defaults (not just the
-        # embedding fields) so an eval context behaves like a production one if
-        # any reranking / weighting default is ever consulted.
+        # Stamp the full ContextSearchConfig (not just the embedding fields) so
+        # an eval context behaves like a created one if any reranking / weighting
+        # default is ever consulted. Reranker fields target the local self_hosted
+        # rig (qwen3-reranker), keeping the eval path all-local-OSS; inert here
+        # since use_rerank=False.
         db.add(
             ContextSearchConfig(
                 context_id=ctx.id,
                 semantic_weight=0.6,
                 fetch_factor=3,
                 use_rerank=False,
-                reranker_provider="voyage",
-                reranker_model="rerank-2-lite",
+                reranker_provider="self_hosted",
+                reranker_model="qwen3-reranker-4b",
                 embedding_model=emb_model,
                 embedding_dimensions=emb_dims,
             )
