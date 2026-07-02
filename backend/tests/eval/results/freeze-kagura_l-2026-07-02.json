@@ -1,0 +1,22 @@
+{
+  "run_date": "2026-07-02",
+  "experiment": "day3-corpus-freeze",
+  "corpus_path": "tests/eval/fixtures/kagura_l.yaml",
+  "corpus_version": 1,
+  "content_sha256": "ca7a717bcb745f873182ae3d328692bae3449b415ed51681ac904d35142e0997",
+  "sudachi_version": "20260428",
+  "doc_count": 300,
+  "query_count": 280,
+  "n_heldout": 240,
+  "n_public": 40,
+  "n_probe": 60,
+  "heldout_cross_topic_gold_pair_count": 97,
+  "tau_method": "median_heldout_cross_topic_gold_pair_cosine (prereg-v1 §3)",
+  "embedding_model": "qwen3-embedding:0.6b",
+  "embedding_dimensions": 1024,
+  "vectors_fetched": 300,
+  "tau_frozen": 0.7192,
+  "pair_cosine_min": 0.4869,
+  "pair_cosine_max": 0.9068,
+  "design_note": "Frozen τ for the inferential H2 kill-shot, computed ONCE at Day-3 corpus-freeze from the held-out cross-topic gold-pair cosine distribution — before any inferential result. Stamped into prereg-v1 Appendix A and tagged prereg-v1-frozen."
+}
