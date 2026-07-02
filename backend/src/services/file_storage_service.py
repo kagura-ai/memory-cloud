@@ -37,7 +37,7 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta
 from uuid import UUID, uuid4
 
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -816,7 +816,7 @@ class FileStorageService:
         )
 
     async def purge_files_for_contexts(self, context_ids: Sequence[UUID]) -> dict[UUID, int]:
-        """Soft-delete every live, non-reserved file bound to ``context_ids``.
+        """Soft-delete every live file bound to ``context_ids`` (all statuses).
 
         Admin user-erasure hard-deletes the target's contexts, which would
         fire ``file_objects.context_id``'s ``ON DELETE SET NULL`` and silently
@@ -824,15 +824,29 @@ class FileStorageService:
         then download them). Call this in the same transaction, *before* the
         contexts are deleted, so the files go away with their ACL boundary.
 
-        ``reserved`` rows are left for the orphan sweeper: they are not
-        downloadable (``get_presigned_download`` requires ``uploaded``) and
-        the sweeper owns their Redis release — marking them ``failed`` here
-        would make it skip them and leak the reservation.
+        Per-status handling:
+
+        - ``uploaded`` → soft-delete + decrement ``workspace_storage_usage``;
+          its committed bytes are added to the returned release total.
+        - ``reserved`` → **cancel it** (soft-delete + transition to ``failed``)
+          and add its reserved bytes to the release total. Skipping it would be
+          unsafe: the subsequent context hard-delete NULLs its ``context_id``,
+          and ``confirm_upload`` only enforces the context ACL when
+          ``context_id is not None`` — so a still-``reserved`` in-flight upload
+          could later be confirmed into a workspace-scoped uploaded file, the
+          exact widening this method prevents. Transitioning to ``failed`` also
+          takes the row out of the orphan sweeper's ``WHERE status='reserved'``
+          scan so the reservation is released here exactly once (mirrors
+          ``delete_file``'s reserved branch).
+        - ``failed`` → soft-delete only; the sweeper already released its
+          reservation, so it is NOT added to the release total (no double
+          release).
 
         Does NOT commit (runs inside the caller's transaction). Returns the
-        released uploaded-bytes per workspace so the caller can call
-        ``storage_quota_service.release_storage_bytes`` for each surviving
-        workspace AFTER its commit succeeds (Redis follows the DB, R5).
+        Redis bytes to release per workspace (uploaded committed + reserved)
+        so the caller can call ``storage_quota_service.release_storage_bytes``
+        for each surviving workspace AFTER its commit succeeds (Redis follows
+        the DB, R5).
         """
         if not context_ids:
             return {}
@@ -840,7 +854,6 @@ class FileStorageService:
             select(FileObject).where(
                 FileObject.context_id.in_(list(context_ids)),
                 FileObject.deleted_at.is_(None),
-                FileObject.status != "reserved",
             )
         )
         files = list(result.scalars().all())
@@ -848,14 +861,21 @@ class FileStorageService:
         now = utcnow()
         for file in files:
             file.deleted_at = now
-            if file.status != "uploaded":
-                continue  # failed rows: Redis already released by the sweeper
-            await self._upsert_workspace_usage(
-                file.workspace_id,
-                delta_bytes=-file.size_bytes,
-                delta_files=-1,
-            )
-            released[file.workspace_id] = released.get(file.workspace_id, 0) + file.size_bytes
+            if file.status == "uploaded":
+                await self._upsert_workspace_usage(
+                    file.workspace_id,
+                    delta_bytes=-file.size_bytes,
+                    delta_files=-1,
+                )
+                released[file.workspace_id] = released.get(file.workspace_id, 0) + file.size_bytes
+            elif file.status == "reserved":
+                # Cancel the in-flight upload (see docstring): failed status
+                # removes it from the sweeper's scan and blocks confirm_upload
+                # from promoting a now-context-less row to workspace scope.
+                file.status = "failed"
+                released[file.workspace_id] = released.get(file.workspace_id, 0) + file.size_bytes
+            # failed rows: sweeper already released the reservation → soft-delete
+            # only, no release (avoids double-releasing the Redis counter).
         if files:
             logger.info(
                 "context_bound_files_purged",
@@ -880,8 +900,13 @@ class FileStorageService:
         workspace.
 
         ON CONFLICT updates the existing row; otherwise inserts a fresh
-        row clamped to the non-negative regime (the CHECK constraint
-        also enforces this server-side).
+        row clamped to the non-negative regime. The UPDATE floors the result
+        at 0 via ``GREATEST`` so a decrement against a drifted-low counter
+        cannot drive it negative and trip the ``used_bytes >= 0`` /
+        ``file_count >= 0`` CHECK constraint — an IntegrityError there would
+        abort the whole surrounding transaction (e.g. fail an admin user
+        deletion). Redis quota already floors at zero; the DB counter now
+        matches that self-healing posture instead of hard-blocking.
         """
         now = utcnow()
         stmt = (
@@ -895,8 +920,8 @@ class FileStorageService:
             .on_conflict_do_update(
                 index_elements=[WorkspaceStorageUsage.workspace_id],
                 set_={
-                    "used_bytes": WorkspaceStorageUsage.used_bytes + delta_bytes,
-                    "file_count": WorkspaceStorageUsage.file_count + delta_files,
+                    "used_bytes": func.greatest(0, WorkspaceStorageUsage.used_bytes + delta_bytes),
+                    "file_count": func.greatest(0, WorkspaceStorageUsage.file_count + delta_files),
                     "updated_at": now,
                 },
             )

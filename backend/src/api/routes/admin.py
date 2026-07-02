@@ -1023,10 +1023,22 @@ async def delete_user(
         # SET NULL, so leaving the rows behind would strip a private
         # context's ACL and silently widen its files to workspace scope
         # (any workspace viewer could then download them).
+        #
+        # Lock the target context rows FOR UPDATE while collecting their ids:
+        # an FK insert into file_objects takes a FOR KEY SHARE lock on the
+        # parent context, which conflicts with FOR UPDATE, so a concurrent
+        # reserve/complete against one of these contexts blocks until this
+        # transaction commits (by which point the context is gone and the
+        # insert fails the FK). Without the lock, a file inserted between this
+        # SELECT and the DELETE below would be SET NULL'd and widened.
         from services.file_storage_service import FileStorageService
 
         ctx_ids = list(
-            (await db.execute(select(Context.id).where(Context.created_by == user_id)))
+            (
+                await db.execute(
+                    select(Context.id).where(Context.created_by == user_id).with_for_update()
+                )
+            )
             .scalars()
             .all()
         )

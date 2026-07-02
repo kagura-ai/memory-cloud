@@ -371,3 +371,33 @@ async def test_purge_before_context_hard_delete_prevents_acl_widening(scenario):
     # And it is gone from every listing, including the legacy NULL-context scope.
     listed = await svc.list_files(workspace_id=ws, accessible_context_ids=[], limit=50)
     assert f.id not in {row.id for row in listed}
+
+
+async def test_purge_cancels_reserved_file_so_it_cannot_be_confirmed(scenario):
+    """A reserved (in-flight) upload bound to a private context must be CANCELED
+    by the purge, not left behind. Otherwise the context hard-delete NULLs its
+    context_id and confirm_upload (which only checks the context ACL when
+    context_id is not None) could later promote it into a workspace-scoped
+    uploaded file — re-opening the ACL-widening hole through the reserved path."""
+    svc, db, ws = scenario["svc"], scenario["db"], scenario["ws"]
+    reserved = _file(
+        workspace_id=ws, context_id=scenario["private"], sha="c" * 64, status="reserved"
+    )
+    db.add(reserved)
+    await db.flush()
+
+    released = await svc.purge_files_for_contexts([scenario["private"]])
+    assert released == {ws: 1024}  # reserved bytes reported for the Redis release
+
+    # Context hard-delete fires ON DELETE SET NULL on the (now soft-deleted) row.
+    await db.execute(text("DELETE FROM contexts WHERE id = :c"), {"c": str(scenario["private"])})
+    await db.flush()
+
+    # The reserved row was transitioned to failed + soft-deleted: the orphan
+    # sweeper's WHERE status='reserved' skips it (no double Redis release) and,
+    # crucially, it can no longer be confirmed into a downloadable file.
+    await db.refresh(reserved)
+    assert reserved.status == "failed"
+    assert reserved.deleted_at is not None
+    with pytest.raises(NotFoundException):
+        await svc.get_presigned_download(workspace_id=ws, file_id=reserved.id, actor_user_id=OWNER)

@@ -932,6 +932,32 @@ class TestPurgeFilesForContexts:
         assert db.execute.await_count == 1  # SELECT only, no usage UPSERT
 
     @pytest.mark.asyncio
+    async def test_reserved_rows_canceled_and_released(self, service, db, workspace_id):
+        """Reserved (in-flight) rows must be CANCELED, not skipped: the pending
+        context hard-delete NULLs their context_id, and confirm_upload skips the
+        context ACL check when context_id is None — so a surviving reserved row
+        could be promoted to a workspace-scoped uploaded file (the widening this
+        method exists to prevent). The row is soft-deleted + transitioned to
+        'failed' (out of the sweeper's reserved scan) and its reserved bytes are
+        returned for the post-commit Redis release."""
+        ctx_id = uuid4()
+        reserved = _make_file_object(workspace_id, status="reserved", size_bytes=500)
+        reserved.deleted_at = None
+        select_result = MagicMock()
+        select_result.scalars.return_value.all.return_value = [reserved]
+        db.execute.side_effect = [select_result]
+
+        released = await service.purge_files_for_contexts([ctx_id])
+
+        assert reserved.deleted_at is not None
+        assert reserved.status == "failed"  # removed from the sweeper's scan
+        assert released == {workspace_id: 500}  # reserved bytes released once
+        # SELECT only — reserved rows have no workspace_storage_usage row to
+        # decrement (reserved bytes live only in the Redis counter).
+        assert db.execute.await_count == 1
+        db.commit.assert_not_awaited()
+
+    @pytest.mark.asyncio
     async def test_released_bytes_grouped_per_workspace(self, service, db):
         ws_a, ws_b = uuid4(), uuid4()
         fa1 = _make_file_object(ws_a, status="uploaded", size_bytes=10)
