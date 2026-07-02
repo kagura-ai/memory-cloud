@@ -423,8 +423,10 @@ class Settings(BaseSettings):
         description=(
             "Enable the BYOK (bring-your-own-key) surface (#1167). ON by default "
             "so OSS / self-hosted keeps external API key management. When false, "
-            "the /external-keys API and the workspace cost dashboard return 404 "
-            "and the web UI hides their nav entries. Key RESOLUTION is untouched: "
+            "the /external-keys API, the workspace cost dashboard "
+            "(GET /workspaces/{id}/cost-aggregation), and the OpenAI key-status "
+            "probe (GET /workspaces/{id}/openai-key-status) return 404 and the "
+            "web UI hides their nav entries. Key RESOLUTION is untouched: "
             "keys stored before turning the flag off are still used by the "
             "LLM/embedding services. Surfaced to the frontend via "
             "GET /api/v1/system/info features.byok."

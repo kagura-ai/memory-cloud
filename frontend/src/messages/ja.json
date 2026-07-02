@@ -2146,7 +2146,7 @@
     "rerankerNotAvailableFree": "無料プランではリランキングは利用できません",
     "upgradeToBasic": "Basicプランにアップグレードして、AI搭載リランキングで検索品質を向上させましょう。",
     "noRerankerKeys": "リランカーAPIキーが設定されていません",
-    "configureRerankerKeys": "リランキングを有効にするには、外部APIキーでVoyage AIまたはCohere APIキーを設定してください。",
+    "configureRerankerKeys": "リランキングを有効にするには、<link>外部APIキー</link>でVoyage AIまたはCohere APIキーを設定してください。",
     "enableReranking": "リランキングを有効化",
     "enableRerankingDesc": "AIリランキングを使用して検索結果の関連性を向上",
     "provider": "プロバイダー",

@@ -480,14 +480,18 @@ export function SearchSettingsSection({
                   <p className="font-medium mb-2">{t("noRerankerKeys")}</p>
                   {byokEnabled && (
                     <p className="text-sm">
-                      {t("configureRerankerKeys").split("External API Keys")[0]}
-                      <Link
-                        href="/workspace/integrations/external-keys"
-                        className="underline font-medium"
-                      >
-                        External API Keys
-                      </Link>
-                      {t("configureRerankerKeys").split("External API Keys")[1]}
+                      {/* t.rich with a <link> tag in the message — splitting
+                          on an English substring broke non-English locales. */}
+                      {t.rich("configureRerankerKeys", {
+                        link: (chunks) => (
+                          <Link
+                            href="/workspace/integrations/external-keys"
+                            className="underline font-medium"
+                          >
+                            {chunks}
+                          </Link>
+                        ),
+                      })}
                     </p>
                   )}
                 </AlertDescription>
@@ -582,22 +586,16 @@ export function SearchSettingsSection({
                             </p>
                           ) : byokEnabled ? (
                             <p className="text-sm">
-                              {
-                                t("configureRerankerKeys").split(
-                                  "External API Keys",
-                                )[0]
-                              }
-                              <Link
-                                href="/workspace/integrations/external-keys"
-                                className="underline font-medium"
-                              >
-                                External API Keys
-                              </Link>
-                              {
-                                t("configureRerankerKeys").split(
-                                  "External API Keys",
-                                )[1]
-                              }
+                              {t.rich("configureRerankerKeys", {
+                                link: (chunks) => (
+                                  <Link
+                                    href="/workspace/integrations/external-keys"
+                                    className="underline font-medium"
+                                  >
+                                    {chunks}
+                                  </Link>
+                                ),
+                              })}
                             </p>
                           ) : (
                             // #1167: BYOK off — key setup is not available in

@@ -11,7 +11,18 @@ import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import { render, screen, waitFor, cleanup } from "@testing-library/react";
 
 vi.mock("next-intl", () => ({
-  useTranslations: (_ns?: string) => (k: string) => k,
+  // Identity translator + a t.rich that invokes the <link> tag renderer with
+  // the key as chunks, so the CTA Link actually renders in tests.
+  useTranslations: (_ns?: string) => {
+    const t = ((k: string) => k) as ((k: string) => string) & {
+      rich: (
+        k: string,
+        values?: Record<string, (chunks: string) => unknown>,
+      ) => unknown;
+    };
+    t.rich = (k, values) => (values?.link ? values.link(k) : k);
+    return t;
+  },
 }));
 
 const mockToast = vi.fn();
@@ -83,8 +94,9 @@ describe("SearchSettingsSection BYOK gate (#1167)", () => {
     await waitFor(() =>
       expect(screen.getByText("noRerankerKeys")).toBeInTheDocument(),
     );
+    // The mocked t.rich renders the <link> tag with the message key as chunks.
     expect(
-      screen.getByRole("link", { name: "External API Keys" }),
+      screen.getByRole("link", { name: "configureRerankerKeys" }),
     ).toHaveAttribute("href", "/workspace/integrations/external-keys");
   });
 

@@ -2146,7 +2146,7 @@
     "rerankerNotAvailableFree": "Reranking not available on Free plan",
     "upgradeToBasic": "Upgrade to Basic plan to enable AI-powered reranking for improved search quality.",
     "noRerankerKeys": "No reranker API keys configured",
-    "configureRerankerKeys": "Please configure a Voyage AI or Cohere API key in External API Keys to enable reranking.",
+    "configureRerankerKeys": "Please configure a Voyage AI or Cohere API key in <link>External API Keys</link> to enable reranking.",
     "enableReranking": "Enable Reranking",
     "enableRerankingDesc": "Use AI reranking to improve search result relevance",
     "provider": "Provider",
