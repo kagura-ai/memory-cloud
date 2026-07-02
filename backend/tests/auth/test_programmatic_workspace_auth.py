@@ -10,11 +10,15 @@ principal-discrimination rule (key-PRESENCE tests, fail closed) and the
 from __future__ import annotations
 
 import uuid
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
-from auth.programmatic_workspace_auth import authorize_workspace_management
+from auth.programmatic_workspace_auth import (
+    AuthorizedPrincipal,
+    audit_programmatic_workspace_action,
+    authorize_workspace_management,
+)
 from auth.workspace_roles import WorkspaceRole
 from utils.exceptions import AuthorizationError, NotFoundException
 
@@ -137,3 +141,32 @@ class TestFailClosed:
             )
         perm.check_workspace_owner.assert_not_called()
         perm.check_workspace_access.assert_not_called()
+
+
+class TestAuditProgrammaticAction:
+    async def test_api_key_principal_writes_audit_row(self):
+        db = MagicMock()  # db.add is sync
+        principal = AuthorizedPrincipal(kind="api_key", member=MagicMock())
+        await audit_programmatic_workspace_action(
+            db,
+            principal,
+            _api_key_user(),
+            _WS,
+            action="workspace_member_added",
+            target="member-1",
+            metadata={"role": "member"},
+        )
+        assert db.add.call_count == 1
+        row = db.add.call_args[0][0]
+        assert row.action == "workspace_member_added"
+        assert row.user_metadata["target"] == "member-1"
+        assert row.user_metadata["via"] == "api_key"
+
+    async def test_session_principal_is_noop(self):
+        db = MagicMock()
+        principal = AuthorizedPrincipal(kind="session", member=MagicMock())
+        await audit_programmatic_workspace_action(
+            db, principal, _session_user(), _WS,
+            action="workspace_member_added", target="member-1",
+        )
+        db.add.assert_not_called()

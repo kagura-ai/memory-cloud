@@ -16,7 +16,10 @@ from sqlalchemy import func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from auth.dependencies import APIKeyOrSessionUser, get_current_user
-from auth.programmatic_workspace_auth import authorize_workspace_management
+from auth.programmatic_workspace_auth import (
+    audit_programmatic_workspace_action,
+    authorize_workspace_management,
+)
 from auth.workspace_roles import WorkspaceRole
 from db.base import get_db
 from models.auth import Workspace, WorkspaceInvitation, WorkspaceMember
@@ -80,7 +83,7 @@ async def create_invitation(
         # Issue #1164: session admin+ (unchanged) OR workspace-owner API key;
         # OAuth 403. role=owner is already rejected at the schema layer (#1166),
         # so no programmatic owner-invite branch is needed here.
-        await authorize_workspace_management(
+        principal = await authorize_workspace_management(
             current_user, workspace_id, db, session_required_role=WorkspaceRole.ADMIN
         )
 
@@ -127,6 +130,17 @@ async def create_invitation(
             email=request.email,
             expires_in_days=request.expires_in_days,
             allowed_context_ids=allowed_context_ids,  # Migration 042
+        )
+
+        # Issue #1164: audit programmatic invitation creation (no-op for session).
+        await audit_programmatic_workspace_action(
+            db,
+            principal,
+            current_user,
+            workspace_id,
+            action="workspace_invitation_created",
+            target=request.email,
+            metadata={"role": str(request.role)},
         )
 
         await db.commit()
@@ -248,12 +262,22 @@ async def delete_invitation(
     user_id = current_user.get("user_id")
 
     try:
-        await authorize_workspace_management(
+        principal = await authorize_workspace_management(
             current_user, workspace_id, db, session_required_role=WorkspaceRole.ADMIN
         )
 
         invitation_service = InvitationService(db)
         await invitation_service.delete_invitation(invitation_id, workspace_id)
+
+        # Issue #1164: audit programmatic invitation revocation (no-op for session).
+        await audit_programmatic_workspace_action(
+            db,
+            principal,
+            current_user,
+            workspace_id,
+            action="workspace_invitation_revoked",
+            target=str(invitation_id),
+        )
 
         await db.commit()
 

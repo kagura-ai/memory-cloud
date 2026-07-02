@@ -150,3 +150,53 @@ async def authorize_workspace_management(
         "workspace_mgmt_unrecognized_principal", user_id=user_id, workspace_id=str(workspace_id)
     )
     raise AuthorizationError("Unrecognized principal for workspace management")
+
+
+async def audit_programmatic_workspace_action(
+    db: AsyncSession,
+    principal: AuthorizedPrincipal,
+    user: dict,
+    workspace_id: UUID,
+    *,
+    action: str,
+    target: str,
+    metadata: dict | None = None,
+) -> None:
+    """Write an AuditLog row for a PROGRAMMATIC workspace-management mutation.
+
+    Issue #1164: today ``AuditLog`` only records public-bound key creation, so a
+    stolen-owner-key incident on the member/invitation surface would be
+    forensically invisible. This records programmatic (API-key) successes with
+    the actor, workspace, action, and target. Session actions are intentionally
+    NOT audited here — this call is a no-op for session principals so the web-UI
+    path keeps its existing (unaudited) behavior unchanged.
+
+    The row is added to the session but NOT committed — the caller commits it
+    atomically with the mutation it is auditing.
+    """
+    if principal.kind != "api_key":
+        return
+    from models.auth import AuditLog
+
+    actor_id = user.get("user_id")
+    db.add(
+        AuditLog(
+            user_email=user.get("email") or f"{actor_id}@api",
+            user_id=actor_id,
+            action=action,
+            resource=f"workspace:{workspace_id}",
+            user_metadata={
+                "workspace_id": str(workspace_id),
+                "target": target,
+                "via": "api_key",
+                **(metadata or {}),
+            },
+        )
+    )
+    logger.info(
+        "workspace_mgmt_programmatic_action",
+        action=action,
+        actor_id=actor_id,
+        workspace_id=str(workspace_id),
+        target=target,
+    )

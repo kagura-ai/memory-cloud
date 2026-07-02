@@ -20,7 +20,10 @@ from auth.dependencies import (
     get_current_user,
     require_byok_enabled,
 )
-from auth.programmatic_workspace_auth import authorize_workspace_management
+from auth.programmatic_workspace_auth import (
+    audit_programmatic_workspace_action,
+    authorize_workspace_management,
+)
 from auth.workspace_roles import WorkspaceRole
 from db.base import get_db
 from models.api_base import TZAwareBaseModel
@@ -721,6 +724,18 @@ async def add_member(
             "use the ownership transfer flow.",
         )
 
+    # Issue #1164: audit programmatic mutations (no-op for session). Added
+    # before the service call so it commits atomically with the membership.
+    await audit_programmatic_workspace_action(
+        db,
+        principal,
+        user,
+        workspace_id,
+        action="workspace_member_added",
+        target=body.user_id,
+        metadata={"role": str(body.role)},
+    )
+
     member = await workspace_service.add_member(
         workspace_id=workspace_id,
         user_id=body.user_id,
@@ -779,6 +794,16 @@ async def update_member_role(
             status_code=403,
             detail="Only the owner can change the owner's role.",
         )
+
+    await audit_programmatic_workspace_action(
+        db,
+        principal,
+        current_user,
+        workspace_id,
+        action="workspace_member_role_changed",
+        target=user_id,
+        metadata={"new_role": str(body.role)},
+    )
 
     member = await workspace_service.update_member_role(
         workspace_id=workspace_id,
@@ -879,8 +904,17 @@ async def remove_member(
     workspace_service = WorkspaceService(db)
 
     # Both session and API-key principals must be owner here (#217).
-    await authorize_workspace_management(
+    principal = await authorize_workspace_management(
         current_user, workspace_id, db, session_required_role=WorkspaceRole.OWNER
+    )
+
+    await audit_programmatic_workspace_action(
+        db,
+        principal,
+        current_user,
+        workspace_id,
+        action="workspace_member_removed",
+        target=user_id,
     )
 
     await workspace_service.remove_member(workspace_id, user_id)
