@@ -168,6 +168,12 @@ eval-compounding:
 	@echo "Writes backend/tests/eval/results/compounding-<date>.json — real run only, never fabricated."
 	cd $(BACKEND_DIR) && KAGURA_EVAL_LIVE=1 PYTHONPATH=src:. python -m tests.eval.replay_runner
 
+.PHONY: eval-placebo
+eval-placebo:
+	@echo "Running live Day-2 placebo kill-shot (directional de-risk, needs the stack: make up)..."
+	@echo "Writes backend/tests/eval/results/placebo-<date>.json — real run only, never fabricated."
+	cd $(BACKEND_DIR) && KAGURA_EVAL_LIVE=1 PYTHONPATH=src:. python -m tests.eval.placebo_runner
+
 .PHONY: eval-reinforce
 eval-reinforce:
 	@echo "Running live reinforce ON-vs-OFF rollout gate (Issue #1069, needs the stack: make up)..."

@@ -1,0 +1,210 @@
+"""Pure logic for the Day-2 placebo kill-shot (directional de-risk).
+
+Infrastructure-free and deterministic — runs in normal CI (test_placebo.py).
+The live cold→warm→placebo orchestration lives in tests.eval.placebo_runner.
+
+Realizes the descriptive half of prereg-v1 H2: three arms (real-warm,
+density-matched random-edge placebo, shuffled-gold placebo) scored on companion
+recovery, compared by paired point estimates with DESCRIPTIVE bootstrap
+intervals. No inferential claim, no gated CI — that is the Day-3 confirmatory
+run at the single committed τ.
+"""
+
+from __future__ import annotations
+
+import random
+from collections import defaultdict
+from collections.abc import Callable
+from dataclasses import dataclass, replace
+from statistics import median
+
+from tests.eval.compounding import recall_at_k
+from tests.eval.metrics import mrr_at_k
+
+
+@dataclass(frozen=True)
+class Edge:
+    """One neural-memory edge, reduced to what the null model needs. The
+    non-endpoint attributes travel with the edge through a rewire (only src/dst
+    change), so the placebo differs from real-warm in exactly which endpoints
+    are connected — density, degree sequence and attribute multisets are held."""
+
+    src: str
+    dst: str
+    weight: float
+    origin: str
+    confidence: float
+    edge_type: str
+
+
+def degree_preserving_rewire(edges: list[Edge], *, seed: int, swap_factor: int = 10) -> list[Edge]:
+    """Maslov-Sneppen directed double-edge-swap null graph.
+
+    Repeatedly picks two edges (s1->d1),(s2->d2) and swaps their destinations to
+    (s1->d2),(s2->d1) — preserving every node's out-degree (src) and in-degree
+    (dst), the edge count, and each edge's own weight/origin/confidence/edge_type
+    (hence the exact attribute multisets). Rejects any swap that would create a
+    self-loop or a parallel edge. Attempts ``swap_factor * len(edges)`` accepted
+    swaps for mixing. Raises if fewer than two edges (nothing to swap).
+    """
+    if len(edges) < 2:
+        raise ValueError(f"need >= 2 edges to rewire, got {len(edges)}")
+
+    rng = random.Random(seed)
+    current = list(edges)
+    present = {(e.src, e.dst) for e in current}
+    target = swap_factor * len(current)
+    done = 0
+    attempts = 0
+    max_attempts = target * 20
+    while done < target and attempts < max_attempts:
+        attempts += 1
+        i = rng.randrange(len(current))
+        j = rng.randrange(len(current))
+        if i == j:
+            continue
+        e1, e2 = current[i], current[j]
+        new1 = (e1.src, e2.dst)
+        new2 = (e2.src, e1.dst)
+        if new1[0] == new1[1] or new2[0] == new2[1]:
+            continue  # self-loop
+        if new1 == new2 or new1 in present or new2 in present:
+            continue  # parallel edge
+        present.discard((e1.src, e1.dst))
+        present.discard((e2.src, e2.dst))
+        present.add(new1)
+        present.add(new2)
+        current[i] = replace(e1, dst=e2.dst)
+        current[j] = replace(e2, dst=e1.dst)
+        done += 1
+    return current
+
+
+def _derangement(n: int, rng: random.Random) -> list[int]:
+    """A permutation of range(n) with no fixed point (n >= 2)."""
+    while True:
+        perm = list(range(n))
+        rng.shuffle(perm)
+        if all(perm[i] != i for i in range(n)):
+            return perm
+
+
+def permute_gold(probes, *, seed: int) -> dict[str, tuple[str, ...]]:
+    """Permute which companion set each probe seed is scored against.
+
+    Preserves each probe's companion-set SIZE. Probes are grouped by companion
+    count; groups of >= 2 are deranged among themselves (no probe keeps its own
+    gold). A singleton size-class draws its companions from the global gold-doc
+    pool (all probes' seeds + companions) excluding the probe's own docs, so it
+    is still "not own gold". Deterministic under ``seed``.
+    """
+    rng = random.Random(seed)
+    groups: dict[int, list[int]] = defaultdict(list)
+    for idx, p in enumerate(probes):
+        groups[len(p.companion_docs)].append(idx)
+
+    all_gold = sorted({d for p in probes for d in p.companion_docs} | {p.seed_doc for p in probes})
+
+    result: dict[str, tuple[str, ...]] = {}
+    for size, idxs in groups.items():
+        if len(idxs) >= 2:
+            originals = [probes[i].companion_docs for i in idxs]
+            perm = _derangement(len(idxs), rng)
+            for pos, i in enumerate(idxs):
+                result[probes[i].query_id] = originals[perm[pos]]
+        else:
+            i = idxs[0]
+            own = set(probes[i].companion_docs) | {probes[i].seed_doc}
+            pool = [d for d in all_gold if d not in own]
+            if len(pool) < size:
+                raise ValueError(
+                    f"cannot build a size-{size} foreign gold set for probe "
+                    f"{probes[i].query_id!r}: only {len(pool)} non-own gold docs "
+                    f"available — corpus too small for a size-preserving "
+                    f"shuffled-gold placebo for this probe"
+                )
+            result[probes[i].query_id] = tuple(rng.sample(pool, size))
+    return result
+
+
+def paired_delta_bootstrap(
+    per_probe_a: list[float], per_probe_b: list[float], *, seed: int, resamples: int = 10_000
+) -> dict[str, float | int]:
+    """Paired (a - b) point estimate + DESCRIPTIVE percentile bootstrap interval.
+
+    Point estimate is the paired mean of the per-probe differences. The interval
+    is the 2.5/97.5 percentile of the resampled paired means — a shape aid, NOT
+    an inferential CI (percentile method, not BCa; the gated inferential test is
+    Day-3). Deterministic under ``seed``. Raises on length mismatch or empty.
+    """
+    if len(per_probe_a) != len(per_probe_b):
+        raise ValueError(
+            f"paired inputs differ in length: {len(per_probe_a)} vs {len(per_probe_b)}"
+        )
+    n = len(per_probe_a)
+    if n == 0:
+        raise ValueError("paired inputs are empty — nothing to bootstrap")
+
+    diffs = [a - b for a, b in zip(per_probe_a, per_probe_b, strict=True)]
+    point = sum(diffs) / n
+
+    rng = random.Random(seed)
+    means: list[float] = []
+    for _ in range(resamples):
+        means.append(sum(diffs[rng.randrange(n)] for _ in range(n)) / n)
+    means.sort()
+    lo = means[int(0.025 * resamples)]
+    hi = means[int(0.975 * resamples)]
+    return {"delta": round(point, 4), "lo": round(lo, 4), "hi": round(hi, 4), "n": n}
+
+
+def median_cross_topic_gold_pair_cosine(
+    doc_vec: dict[str, list[float]],
+    gold_pairs: set[frozenset[str]],
+    source_by_doc: dict[str, str],
+    *,
+    cosine_fn: Callable[[list[float], list[float]], float],
+) -> float | None:
+    """Provisional τ = median cosine over CROSS-TOPIC gold pairs (prereg §3).
+
+    A gold pair is cross-topic when its two docs have different ``Document.source``
+    values. Pairs missing a vector are skipped. ``cosine_fn`` is injected so this
+    stays infra-free; the live caller passes ``neural.utils.cosine_similarity``.
+    Returns ``None`` when no cross-topic gold pair has both vectors.
+    """
+    cosines: list[float] = []
+    for pair in gold_pairs:
+        if len(pair) != 2:
+            continue  # a gold "pair" that collapsed to <2 distinct docs (e.g. seed==companion) is not a pair
+        a, b = tuple(pair)
+        # Same-source pairs are not cross-topic. If exactly one doc is missing
+        # from source_by_doc, .get() yields None vs a real source → treated as
+        # cross-topic (included); both missing → None==None → skipped.
+        if source_by_doc.get(a) == source_by_doc.get(b):
+            continue
+        if a not in doc_vec or b not in doc_vec:
+            continue
+        cosines.append(cosine_fn(doc_vec[a], doc_vec[b]))
+    if not cosines:
+        return None
+    return median(cosines)
+
+
+def recovery_from_rankings(
+    rankings: list[tuple[str, list[str]]],
+    gold_map: dict[str, tuple[str, ...]],
+    *,
+    at: tuple[int, ...] = (5, 10),
+    mrr_at: int = 10,
+) -> dict:
+    """Score explore() rankings against a gold assignment (one scorer for all
+    three arms). ``rankings`` is [(query_id, ranked_docs)] in probe order;
+    ``gold_map`` maps query_id -> gold companion docs. Returns mean recovery@k,
+    mrr@k, and the per-probe recovery@10 list (paired-bootstrap input)."""
+    pairs = [(ranked, set(gold_map[qid])) for qid, ranked in rankings]
+    result: dict = {"n": len(pairs)}
+    for k in at:
+        result[f"recovery@{k}"] = round(sum(recall_at_k(r, g, k) for r, g in pairs) / len(pairs), 4)
+    result[f"mrr@{mrr_at}"] = round(mrr_at_k(pairs, mrr_at), 4)
+    result["per_probe@10"] = [round(recall_at_k(r, g, 10), 4) for r, g in pairs]
+    return result
