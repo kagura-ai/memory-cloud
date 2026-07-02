@@ -14,7 +14,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from auth.analysis_allowlist import check_workspace_in_allowlist
-from auth.dependencies import SessionUser, get_current_user
+from auth.dependencies import SessionUser, get_current_user, require_byok_enabled
 from auth.workspace_roles import WorkspaceRole
 from db.base import get_db
 from models.api_base import TZAwareBaseModel
@@ -1097,7 +1097,15 @@ async def get_context_public_api_stats(
 # ============================================================================
 
 
-@router.get("/{workspace_id}/openai-key-status", response_model=OpenAIKeyStatusResponse)
+@router.get(
+    "/{workspace_id}/openai-key-status",
+    response_model=OpenAIKeyStatusResponse,
+    # Issue #1167: this probe is a BYOK read surface — 404 when ENABLE_BYOK
+    # is false. Leaving it up would report has_key=false in deployments where
+    # env keys serve embeddings, and the contexts page blocks creation on
+    # has_key=false. Both frontend consumers degrade gracefully on failure.
+    dependencies=[Depends(require_byok_enabled)],
+)
 async def check_openai_key_status(
     workspace_id: UUID,
     request: Request,

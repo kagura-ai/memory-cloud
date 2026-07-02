@@ -73,6 +73,25 @@ class TestExternalKeysGate:
         assert response.status_code == 401
 
 
+class TestOpenAIKeyStatusGate:
+    """The key-status probe is a BYOK read surface too (#1167 gate1 finding).
+
+    With BYOK off it must 404: leaving it up would report has_key=false in a
+    deployment where env keys serve embeddings, and the contexts page blocks
+    context creation on has_key=false. Both frontend consumers degrade
+    gracefully on a failed probe (contexts page → null → creation enabled;
+    OnboardingCard → .catch(() => null) → normal onboarding).
+    """
+
+    def test_returns_404_when_disabled(self, client, byok_disabled):
+        response = client.get(f"/api/v1/workspaces/{_WORKSPACE_ID}/openai-key-status")
+        assert response.status_code == 404
+
+    def test_route_exists_when_enabled(self, client):
+        response = client.get(f"/api/v1/workspaces/{_WORKSPACE_ID}/openai-key-status")
+        assert response.status_code == 401
+
+
 class TestCostAggregationGate:
     def test_workspace_route_returns_404_when_disabled(self, client, byok_disabled):
         response = client.get(
