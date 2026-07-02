@@ -75,3 +75,43 @@ def degree_preserving_rewire(edges: list[Edge], *, seed: int, swap_factor: int =
         current[j] = replace(e2, dst=e1.dst)
         done += 1
     return current
+
+
+def _derangement(n: int, rng: random.Random) -> list[int]:
+    """A permutation of range(n) with no fixed point (n >= 2)."""
+    while True:
+        perm = list(range(n))
+        rng.shuffle(perm)
+        if all(perm[i] != i for i in range(n)):
+            return perm
+
+
+def permute_gold(probes, *, seed: int) -> dict[str, tuple[str, ...]]:
+    """Permute which companion set each probe seed is scored against.
+
+    Preserves each probe's companion-set SIZE. Probes are grouped by companion
+    count; groups of >= 2 are deranged among themselves (no probe keeps its own
+    gold). A singleton size-class draws its companions from the global gold-doc
+    pool (all probes' seeds + companions) excluding the probe's own docs, so it
+    is still "not own gold". Deterministic under ``seed``.
+    """
+    rng = random.Random(seed)
+    groups: dict[int, list[int]] = defaultdict(list)
+    for idx, p in enumerate(probes):
+        groups[len(p.companion_docs)].append(idx)
+
+    all_gold = sorted({d for p in probes for d in p.companion_docs} | {p.seed_doc for p in probes})
+
+    result: dict[str, tuple[str, ...]] = {}
+    for size, idxs in groups.items():
+        if len(idxs) >= 2:
+            originals = [probes[i].companion_docs for i in idxs]
+            perm = _derangement(len(idxs), rng)
+            for pos, i in enumerate(idxs):
+                result[probes[i].query_id] = originals[perm[pos]]
+        else:
+            i = idxs[0]
+            own = set(probes[i].companion_docs) | {probes[i].seed_doc}
+            pool = [d for d in all_gold if d not in own]
+            result[probes[i].query_id] = tuple(rng.sample(pool, size))
+    return result

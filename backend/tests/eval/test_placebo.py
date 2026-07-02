@@ -11,7 +11,8 @@ from collections import Counter
 
 import pytest
 
-from tests.eval.placebo import Edge, degree_preserving_rewire
+from tests.eval.compounding import ProbeSpec
+from tests.eval.placebo import Edge, degree_preserving_rewire, permute_gold
 
 
 def _edges(pairs, *, origin="hebbian", edge_type="neural_association"):
@@ -78,3 +79,49 @@ def test_rewire_returns_pure_star_unchanged():
     star = _edges([("h", x) for x in "abcdef"])
     out = degree_preserving_rewire(star, seed=1)
     assert {(e.src, e.dst) for e in out} == {(e.src, e.dst) for e in star}
+
+
+def _probe(qid, seed_doc, companions):
+    return ProbeSpec(
+        query_id=qid,
+        text=qid,
+        bucket="cross-source",
+        seed_doc=seed_doc,
+        companion_docs=tuple(companions),
+    )
+
+
+def test_permute_gold_preserves_sizes_and_is_a_derangement_within_a_group():
+    probes = (
+        _probe("q1", "s1", ["c1a", "c1b"]),
+        _probe("q2", "s2", ["c2a", "c2b"]),
+        _probe("q3", "s3", ["c3a", "c3b"]),
+    )
+    out = permute_gold(probes, seed=5)
+
+    for p in probes:
+        assert len(out[p.query_id]) == len(p.companion_docs)  # size preserved
+        assert set(out[p.query_id]) != set(p.companion_docs)  # not own gold
+
+
+def test_permute_gold_is_deterministic_under_seed():
+    probes = (
+        _probe("q1", "s1", ["c1a", "c1b"]),
+        _probe("q2", "s2", ["c2a", "c2b"]),
+        _probe("q3", "s3", ["c3a", "c3b"]),
+    )
+    assert permute_gold(probes, seed=9) == permute_gold(probes, seed=9)
+
+
+def test_permute_gold_singleton_size_class_draws_excluding_own():
+    # q3 has a unique companion count (1) -> singleton class -> pool-draw path.
+    probes = (
+        _probe("q1", "s1", ["c1a", "c1b"]),
+        _probe("q2", "s2", ["c2a", "c2b"]),
+        _probe("q3", "s3", ["c3a"]),
+    )
+    out = permute_gold(probes, seed=2)
+
+    assert len(out["q3"]) == 1
+    assert "c3a" not in out["q3"]
+    assert "s3" not in out["q3"]
