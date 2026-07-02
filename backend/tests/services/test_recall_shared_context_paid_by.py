@@ -282,19 +282,19 @@ async def test_shared_context_keyword_mode_skips_byok_gate():
 
 
 @pytest.mark.asyncio
-async def test_shared_context_ollama_provider_skips_byok_gate():
-    """#708 F1: Ollama provider is free/local — no platform-key fallback path exists.
+async def test_shared_context_self_hosted_provider_skips_byok_gate():
+    """#708 F1: self-hosted provider is free/local — no platform-key fallback path exists.
 
-    ``has_byok_key`` returns False for Ollama by design (it's not a paid
+    ``has_byok_key`` returns False for self-hosted by design (it's not a paid
     provider). The H1 gate must NOT treat that as a denial signal —
-    Ollama-backed shared reads cost nothing to the source workspace.
+    self-hosted-backed shared reads cost nothing to the source workspace.
     """
     svc, _db = _make_service()
     caller_ws = uuid4()
     source_ws = uuid4()
     context_id = uuid4()
 
-    with _patch_byok_gate(has_key=False, provider="ollama") as has_byok_mock:
+    with _patch_byok_gate(has_key=False, provider="self_hosted") as has_byok_mock:
         await svc.recall(
             request=RecallRequest(query="test", k=5),
             user_id="caller_user",

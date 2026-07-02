@@ -301,7 +301,8 @@ class Settings(BaseSettings):
 
     # Embedding Configuration
     embedding_provider: str = Field(
-        default="openai", description="Embedding model provider (openai/cohere/huggingface)"
+        default="openai",
+        description="Embedding model provider (openai/cohere/huggingface/self_hosted)",
     )
     embedding_model: str = Field(
         default="text-embedding-3-small", description="Embedding model name"
@@ -310,7 +311,7 @@ class Settings(BaseSettings):
     # Issue #1030: when True, a workspace whose plan lacks the
     # ``managed_embeddings`` capability (Free / S) is DENIED the platform
     # ``OPENAI_API_KEY`` embedding fallback — it must supply a BYOK key or use a
-    # self-hosted Ollama model. Paid tiers (basic/pro) are unaffected: they keep
+    # self-hosted (self_hosted) model. Paid tiers (basic/pro) are unaffected: they keep
     # embedding on the platform key, bounded by the #709/#1033 spend cap.
     # Default False preserves the pre-#1030 behavior (env fallback for all tiers,
     # Free bounded only by the #708 drain-attack cap) so OSS / dev / self-host
@@ -335,9 +336,18 @@ class Settings(BaseSettings):
         description="Max memories returned by the deterministic always-load path (#886)",
     )
 
-    # Ollama Configuration (Issue #44)
-    ollama_base_url: str = Field(
-        default="http://localhost:11434", description="Ollama API base URL"
+    # Self-hosted inference configuration (Issue #44, renamed #1160)
+    # Any OpenAI-compatible backend (Ollama default port 11434, vLLM default 8000).
+    self_hosted_base_url: str = Field(
+        default="http://localhost:11434",
+        description="Self-hosted OpenAI-compatible backend base URL (Ollama, vLLM, ...)",
+    )
+    self_hosted_api_key: str = Field(
+        default="",
+        description=(
+            "Optional bearer token for a self-hosted backend that requires one "
+            "(e.g. vLLM launched with --api-key). Ollama ignores it."
+        ),
     )
 
     # Search Configuration (Issue #105)
@@ -767,6 +777,33 @@ class Settings(BaseSettings):
                     "(ISO 8601 timestamp when ops accepted the Resend DPA — "
                     "see https://resend.com/legal/dpa)"
                 )
+        return self
+
+    @model_validator(mode="after")
+    def _warn_legacy_ollama_env(self) -> "Settings":
+        """Warn (do not honor) when the retired OLLAMA_BASE_URL env is set (#1160).
+
+        The self-hosted base URL env was renamed OLLAMA_BASE_URL →
+        SELF_HOSTED_BASE_URL in a clean cutover (no read alias). A deployment
+        that still sets the old var *and* has not configured the new one would
+        silently fall back to the default, so surface it loudly at boot rather
+        than failing mysteriously later.
+
+        The guard checks ``model_fields_set`` (not ``os.getenv``) for the new
+        field: pydantic-settings loads .env-file values into the model without
+        injecting them into ``os.environ``, so an ``os.getenv`` check would
+        false-warn when SELF_HOSTED_BASE_URL is supplied via a .env file.
+        """
+        if os.getenv("OLLAMA_BASE_URL") and "self_hosted_base_url" not in self.model_fields_set:
+            import warnings
+
+            warnings.warn(
+                "OLLAMA_BASE_URL is set but no longer read (renamed to "
+                "SELF_HOSTED_BASE_URL in #1160). Rename it in your env; the old "
+                "value is ignored and the self-hosted base URL falls back to the "
+                "default.",
+                stacklevel=2,
+            )
         return self
 
 

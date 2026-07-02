@@ -484,38 +484,38 @@ export default function EnvironmentPage() {
                   )}
                 </div>
 
-                {/* Ollama Status + Embedding Models */}
+                {/* Self-hosted Status + Embedding Models */}
                 <div className="p-4 border dark:border-gray-700 rounded-lg space-y-2">
                   <div className="text-sm font-medium text-gray-700 dark:text-gray-300">
-                    {t("systemStatus.ollama")}
+                    {t("systemStatus.self_hosted")}
                   </div>
-                  {telemetry.services?.ollama ? (
+                  {telemetry.services?.self_hosted ? (
                     <div className="space-y-3">
                       <div className="flex items-center gap-2">
-                        {telemetry.services.ollama.status === "ok" ? (
+                        {telemetry.services.self_hosted.status === "ok" ? (
                           <CheckCircle className="h-4 w-4 text-green-500" />
-                        ) : telemetry.services.ollama.status ===
+                        ) : telemetry.services.self_hosted.status ===
                           "not_configured" ? (
                           <XCircle className="h-4 w-4 text-gray-400" />
                         ) : (
                           <XCircle className="h-4 w-4 text-red-500" />
                         )}
                         <span className="text-sm">
-                          {telemetry.services.ollama.status}
+                          {telemetry.services.self_hosted.status}
                         </span>
                       </div>
-                      {telemetry.services.ollama.status === "ok" &&
+                      {telemetry.services.self_hosted.status === "ok" &&
                         registryModels.length > 0 && (
                           <div className="space-y-1">
                             <div className="text-xs font-medium text-gray-500 dark:text-gray-400">
                               {t("systemStatus.embeddingModelsTitle")}
                             </div>
                             {registryModels
-                              .filter((m) => m.provider === "ollama")
+                              .filter((m) => m.provider === "self_hosted")
                               .map((model) => {
                                 const installedModels: string[] =
-                                  telemetry.services?.ollama?.details?.models ||
-                                  [];
+                                  telemetry.services?.self_hosted?.details
+                                    ?.models || [];
                                 const isInstalled = installedModels.some(
                                   (m: string) => m.startsWith(model.name),
                                 );
@@ -548,7 +548,7 @@ export default function EnvironmentPage() {
                     <div className="flex items-center gap-2">
                       <XCircle className="h-4 w-4 text-gray-400" />
                       <span className="text-sm text-gray-400">
-                        {t("systemStatus.ollamaNotConfigured")}
+                        {t("systemStatus.selfHostedNotConfigured")}
                       </span>
                     </div>
                   )}

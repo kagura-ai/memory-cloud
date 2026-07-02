@@ -2,7 +2,8 @@
 
 Issue #101: Multi-provider async LLM client for structured JSON completions.
 Issue #385: API key retrieval is workspace-keyed, matching EmbeddingService.
-Issue #546: Multi-provider adapter pattern (OpenAI, Anthropic, Gemini, Ollama).
+Issue #546: Multi-provider adapter pattern (OpenAI, Anthropic, Gemini, self-hosted).
+Issue #1160: `ollama` provider key renamed to `self_hosted` (Ollama/vLLM).
 """
 
 from __future__ import annotations
@@ -20,8 +21,8 @@ from services.llm_providers import (
     AnthropicProvider,
     GeminiProvider,
     OllamaCloudProvider,
-    OllamaProvider,
     OpenAIProvider,
+    SelfHostedProvider,
 )
 from services.llm_providers.base import LLMProvider, Usage
 from utils.encryption import get_encryptor
@@ -77,7 +78,7 @@ _PROVIDERS: dict[str, type[LLMProvider]] = {
     "openai": OpenAIProvider,
     "anthropic": AnthropicProvider,
     "gemini": GeminiProvider,
-    "ollama": OllamaProvider,
+    "self_hosted": SelfHostedProvider,
     "ollama_cloud": OllamaCloudProvider,
 }
 
@@ -103,8 +104,8 @@ class LLMService:
             db: Database session (for API key retrieval)
         """
         self.db = db
-        self._ollama_provider: OllamaProvider | None = None
-        self._last_ollama_base_url: str | None = None
+        self._self_hosted_provider: SelfHostedProvider | None = None
+        self._last_self_hosted_base_url: str | None = None
 
     # -- public API --------------------------------------------------------
 
@@ -254,12 +255,13 @@ class LLMService:
             api_key = await self._get_user_api_key(user_id, provider, context_id, workspace_id)
         except ConfigurationError:
             api_key = ""
-        # For Ollama, _get_user_api_key already resolves env var; also fall
-        # back to settings so the cache key matches _get_provider logic.
-        if provider == "ollama" and not api_key:
+        # For the self-hosted provider, _get_user_api_key already resolves the
+        # env var; also fall back to settings so the cache key matches
+        # _get_provider logic.
+        if provider == "self_hosted" and not api_key:
             from config.settings import get_settings
 
-            api_key = get_settings().ollama_base_url or ""
+            api_key = get_settings().self_hosted_base_url or ""
         cache_key = (provider, _api_key_fingerprint(api_key))
 
         now = time.time()
@@ -278,9 +280,9 @@ class LLMService:
                 return models
 
         # Fetch from provider.  If no API key is configured and the provider
-        # requires one (everything except Ollama), return [] gracefully rather
-        # than letting _get_provider raise ConfigurationError.
-        if not api_key and provider != "ollama":
+        # requires one (everything except self-hosted), return [] gracefully
+        # rather than letting _get_provider raise ConfigurationError.
+        if not api_key and provider != "self_hosted":
             logger.debug("llm_list_models_no_key", provider=provider)
             return []
 
@@ -359,31 +361,34 @@ class LLMService:
                 f"Unknown LLM provider: {provider_name}. Supported: {', '.join(_PROVIDERS)}"
             )
 
-        if provider_name == "ollama":
-            # Ollama uses a base URL rather than an API key. Resolve from
-            # ExternalAPIKey first, then env var, then settings.
+        if provider_name == "self_hosted":
+            # The self-hosted provider uses a base URL rather than an API key.
+            # Resolve from ExternalAPIKey first, then env var, then settings.
             base_url: str | None = None
             try:
-                # Ollama stores its base URL under provider="ollama" in
-                # ExternalAPIKey so that the UI can treat it like any other
+                # The self-hosted base URL is stored under provider="self_hosted"
+                # in ExternalAPIKey so the UI can treat it like any other
                 # external key, even though it is a URL rather than a secret.
-                base_url = await self._get_user_api_key(user_id, "ollama", context_id, workspace_id)
+                base_url = await self._get_user_api_key(
+                    user_id, "self_hosted", context_id, workspace_id
+                )
             except ConfigurationError:
-                # No DB key for Ollama — fall through to env / settings below.
-                logger.debug("ollama_base_url_not_in_db", provider=provider_name)
+                # No DB key for the self-hosted backend — fall through to
+                # env / settings below.
+                logger.debug("self_hosted_base_url_not_in_db", provider=provider_name)
             if not base_url:
-                base_url = os.getenv("OLLAMA_BASE_URL") or None
+                base_url = os.getenv("SELF_HOSTED_BASE_URL") or None
             if not base_url:
                 from config.settings import get_settings
 
-                base_url = get_settings().ollama_base_url or None
+                base_url = get_settings().self_hosted_base_url or None
 
             # Re-use the same provider instance per service so the one-time
             # _verify() health-check does not run on every request.
-            if self._ollama_provider is None or self._last_ollama_base_url != base_url:
-                self._ollama_provider = OllamaProvider(base_url=base_url)
-                self._last_ollama_base_url = base_url
-            return self._ollama_provider
+            if self._self_hosted_provider is None or self._last_self_hosted_base_url != base_url:
+                self._self_hosted_provider = SelfHostedProvider(base_url=base_url)
+                self._last_self_hosted_base_url = base_url
+            return self._self_hosted_provider
 
         api_key = await self._get_user_api_key(user_id, provider_name, context_id, workspace_id)
         return provider_cls(api_key)
@@ -404,7 +409,7 @@ class LLMService:
         1. Context-scoped key (context_id matches AND workspace_id matches)
         2. Workspace-scoped key (workspace_id matches AND context_id IS NULL)
         3. Provider-specific environment variable (e.g., OPENAI_API_KEY,
-           ANTHROPIC_API_KEY, GOOGLE_API_KEY, OLLAMA_BASE_URL, OLLAMA_API_KEY)
+           ANTHROPIC_API_KEY, GOOGLE_API_KEY, SELF_HOSTED_BASE_URL, OLLAMA_API_KEY)
            — development fallback only
 
         Args:
@@ -468,7 +473,7 @@ class LLMService:
             "openai": "OPENAI_API_KEY",
             "anthropic": "ANTHROPIC_API_KEY",
             "gemini": "GOOGLE_API_KEY",
-            "ollama": "OLLAMA_BASE_URL",
+            "self_hosted": "SELF_HOSTED_BASE_URL",
             "ollama_cloud": "OLLAMA_API_KEY",
         }
         env_var = env_var_map.get(provider, "OPENAI_API_KEY")

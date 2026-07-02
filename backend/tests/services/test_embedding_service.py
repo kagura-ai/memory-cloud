@@ -452,9 +452,9 @@ class TestPlatformPaidCapGate:
         inst.check_cap_or_raise.assert_not_called()
 
     @pytest.mark.asyncio
-    async def test_ollama_provider_skips_before_byok_probe(self, service):
-        """provider='ollama' → skip immediately (no provider cost), before the BYOK probe."""
-        service.provider = "ollama"
+    async def test_self_hosted_provider_skips_before_byok_probe(self, service):
+        """provider='self_hosted' → skip immediately (no provider cost), before the BYOK probe."""
+        service.provider = "self_hosted"
         service.has_byok_key = AsyncMock(return_value=True)
         result = await service._prepare_spend_cap_gate("00000000-0000-0000-0000-000000000001")
         assert result == (None, None)
@@ -473,7 +473,7 @@ class TestManagedEmbeddingsPlanGate:
 
     With ``embedding_platform_fallback_requires_managed_plan`` enabled, a no-BYOK
     workspace on a plan WITHOUT ``managed_embeddings`` (Free / S) is denied the
-    platform OPENAI_API_KEY fallback (BYOK or Ollama required). Paid tiers carry
+    platform OPENAI_API_KEY fallback (BYOK or self-hosted required). Paid tiers carry
     ``managed_embeddings`` and keep embedding on the platform key (capped by
     #709/#1033). Default off preserves the pre-#1030 uncapped-env behavior.
     """
@@ -509,7 +509,7 @@ class TestManagedEmbeddingsPlanGate:
 
     @pytest.mark.asyncio
     async def test_free_no_byok_denied_when_restriction_enabled(self, service):
-        """Restriction ON + free + no BYOK → ConfigurationError (BYOK/Ollama required)."""
+        """Restriction ON + free + no BYOK → ConfigurationError (BYOK/self-hosted required)."""
         service.has_byok_key = AsyncMock(return_value=False)
         ws = self._cap_ws("free")
         cap_patcher, inst = self._patch_cap_service(ws)
@@ -696,7 +696,7 @@ class TestKeySourceAndPaidByDedup:
     async def test_resolve_paid_by_falls_back_to_probe_when_no_source(self, service):
         """Off-hot-path (no embed ran): fall back to the ``has_byok_key`` probe.
 
-        ``_last_key_source`` stays ``None`` (e.g. Ollama or a standalone
+        ``_last_key_source`` stays ``None`` (e.g. self-hosted or a standalone
         caller), so correctness is preserved via the legacy probe — which
         recall never reaches because it only resolves ``paid_by`` after a
         cache-miss embed that recorded the source.

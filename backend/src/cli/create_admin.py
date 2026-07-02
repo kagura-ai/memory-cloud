@@ -204,7 +204,7 @@ def _print_mcp_config_fallback(mcp_config: dict) -> None:
 def _configure_embedding_provider(db: Session, user_id: str, workspace_id) -> str | None:
     """Auto-detect and configure embedding provider.
 
-    Priority: OPENAI_API_KEY env → Ollama running → warn.
+    Priority: OPENAI_API_KEY env → self-hosted backend running → warn.
     Returns provider name or None.
     """
     from utils.encryption import get_encryptor  # noqa: E402
@@ -225,21 +225,21 @@ def _configure_embedding_provider(db: Session, user_id: str, workspace_id) -> st
         db.flush()
         return "openai"
 
-    # 2. Check Ollama
-    ollama_url = (
-        os.getenv("OLLAMA_BASE_URL")
-        or _get_env_from_docker("OLLAMA_BASE_URL")
+    # 2. Check self-hosted backend (OpenAI-compatible /v1/models — Ollama, vLLM)
+    self_hosted_url = (
+        os.getenv("SELF_HOSTED_BASE_URL")
+        or _get_env_from_docker("SELF_HOSTED_BASE_URL")
         or "http://localhost:11434"
     )
     try:
         import urllib.request
 
-        req = urllib.request.Request(ollama_url, method="GET")
+        req = urllib.request.Request(f"{self_hosted_url}/v1/models", method="GET")
         with urllib.request.urlopen(req, timeout=3) as resp:
             if resp.status == 200:
-                return "ollama"
+                return "self_hosted"
     except Exception:
-        pass  # Ollama not running or unreachable — expected on most setups
+        pass  # Backend not running or unreachable — expected on most setups
 
     return None
 
@@ -376,11 +376,16 @@ def create_admin(skip_mcp_json: bool = False):
         provider = _configure_embedding_provider(db, admin.user_id, workspace.id)
         if provider == "openai":
             print("  ✓ OpenAI API key registered for workspace")
-        elif provider == "ollama":
-            print("  ✓ Ollama detected — set EMBEDDING_PROVIDER=ollama in .env.local")
+        elif provider == "self_hosted":
+            print(
+                "  ✓ Self-hosted backend detected — set EMBEDDING_PROVIDER=self_hosted "
+                "in .env.local"
+            )
         else:
             print("  ⚠ No embedding provider found.")
-            print("    Set OPENAI_API_KEY in .env.local, or start Ollama.")
+            print(
+                "    Set OPENAI_API_KEY in .env.local, or start a self-hosted backend (e.g. Ollama)."
+            )
             print("    Memory features (remember/recall) require an embedding provider.")
 
         # Commit BEFORE any best-effort file writes so a PermissionError

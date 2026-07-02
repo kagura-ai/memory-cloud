@@ -57,12 +57,12 @@ Most AI memory tools are just vector databases with a chat wrapper. Kagura is di
 | Feature | Description |
 |---------|-------------|
 | **Adaptive Memory** | Every search automatically strengthens connections between related memories. The more you use it, the better `explore()` discovers hidden relationships. |
-| **Hybrid Search** | Semantic (OpenAI/Ollama) + BM25 keyword — 96% top-1 accuracy |
-| **AI Reranking** | Ollama (local, free), Voyage AI, or Cohere — cross-encoder reranking for precision |
+| **Hybrid Search** | Semantic (OpenAI / self-hosted) + BM25 keyword — 96% top-1 accuracy |
+| **AI Reranking** | Self-hosted (Ollama/vLLM — local, free), Voyage AI, or Cohere — cross-encoder reranking for precision |
 | **Neural Memory Graph** | Hebbian learning builds a knowledge graph in the background. `explore()` traverses it for serendipitous discovery. |
 | **Agent Memory Substrate** | Beyond a knowledge store: delivery modes (pinned / time-triggered), a server-stamped trust boundary, an agent state lane, and a retrieval-feedback signal — the primitives an autonomous agent loop needs. |
 | **50 MCP Tools** | Memory, Agent Substrate, Neural edges, Contexts, Tags, Files (R2), Analyses (broadlistening), Resources, Secrets, Sleep Maintenance, Usage, API-Key Bindings |
-| **Multi-Provider** | OpenAI or Ollama (local, private, zero cost) for embeddings |
+| **Multi-Provider** | OpenAI or self-hosted (Ollama, vLLM — local, private, zero cost) for embeddings |
 | **Team Ready** | Workspaces, RBAC, context isolation, shared memory |
 | **Web UI** | Next.js dashboard — contexts, search settings, member management |
 | **5-Minute Setup** | `./setup.sh` and you're done |
@@ -134,7 +134,7 @@ This separation is intentional: mixing graph signals into recall degrades precis
 - Docker & Docker Compose
 - Python 3.11+
 - Node.js 20+
-- OpenAI API key (for embeddings) — or Ollama for local embeddings
+- OpenAI API key (for embeddings) — or a self-hosted inference server (e.g. Ollama) for local embeddings
 - OAuth2 credentials (optional — password + MFA login available without OAuth)
 
 ### Setup
@@ -186,12 +186,12 @@ docker compose up -d
 | `API_KEY_SECRET` | **Yes** | Secret for API key encryption (auto-generated) |
 | `JWT_SECRET` | **Yes** | Secret for JWT tokens (auto-generated) |
 | `OPENAI_API_KEY` | **Yes**\* | OpenAI API key for embeddings |
-| `OLLAMA_BASE_URL` | No | Ollama URL (default: `http://localhost:11434`) |
-| `EMBEDDING_PROVIDER` | No | `openai` (default) or `ollama` |
+| `SELF_HOSTED_BASE_URL` | No | Self-hosted backend URL (default: `http://localhost:11434`) |
+| `EMBEDDING_PROVIDER` | No | `openai` (default) or `self_hosted` |
 | `GOOGLE_CLIENT_ID/SECRET` | No | Google OAuth2 login (optional — password login available) |
 | `GITHUB_CLIENT_ID/SECRET` | No | GitHub OAuth2 login (optional) |
 
-\* Either `OPENAI_API_KEY` or a running Ollama instance is required for memory features.
+\* Either `OPENAI_API_KEY` or a running self-hosted inference server (e.g. Ollama) is required for memory features.
 
 ### Admin CLI
 

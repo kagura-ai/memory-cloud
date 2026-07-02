@@ -63,7 +63,7 @@ class ContextSearchConfig(Base):
         bm25_weight: Weight for keyword (BM25) search (0.0-1.0)
         fetch_factor: Candidate retrieval multiplier (1-10)
         use_rerank: Enable/disable reranking
-        reranker_provider: Reranker provider ('voyage' or 'cohere')
+        reranker_provider: Reranker provider ('voyage', 'cohere', or 'self_hosted')
         reranker_model: Provider-specific model name
         created_at: Creation timestamp
         updated_at: Last update timestamp
@@ -147,7 +147,7 @@ class ContextSearchConfig(Base):
             name="weights_sum_check",
         ),
         CheckConstraint(
-            "reranker_provider IN ('voyage', 'cohere', 'ollama')",
+            "reranker_provider IN ('voyage', 'cohere', 'self_hosted')",
             name="reranker_provider_check",
         ),
     )

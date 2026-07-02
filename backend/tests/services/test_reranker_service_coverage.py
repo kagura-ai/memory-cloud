@@ -5,7 +5,7 @@ Targets:
 - VoyageReranker / CohereReranker: input validation + success/error mapping
   (external clients are imported lazily inside rerank(), so we inject fakes
   into sys.modules — never a real network call)
-- OllamaReranker: httpx.AsyncClient.post is patched to return canned JSON,
+- SelfHostedReranker: httpx.AsyncClient.post is patched to return canned JSON,
   raise_for_status errors, and timeouts — assert per-doc fallback + sort
 - RerankerService: provider selection from a (mocked) DB session, Ollama
   context-config priority, decrypt path, model resolution, and the rerank()
@@ -27,11 +27,11 @@ import httpx
 import pytest
 
 from services.reranker_service import (
-    DEFAULT_OLLAMA_RERANK_MODEL,
+    DEFAULT_SELF_HOSTED_RERANK_MODEL,
     RERANKER_PROVIDERS,
     CohereReranker,
-    OllamaReranker,
     RerankerService,
+    SelfHostedReranker,
     VoyageReranker,
     _parse_relevance_score,
 )
@@ -56,7 +56,7 @@ class _FakeRerankResponse:
 
 
 class _FakeHttpResponse:
-    """Minimal stand-in for httpx.Response used by OllamaReranker."""
+    """Minimal stand-in for httpx.Response used by SelfHostedReranker."""
 
     def __init__(self, *, json_data=None, raise_exc=None):
         self._json = json_data or {}
@@ -301,7 +301,7 @@ class TestCohereReranker:
 
 
 # ---------------------------------------------------------------------------
-# OllamaReranker
+# SelfHostedReranker
 # ---------------------------------------------------------------------------
 
 
@@ -314,24 +314,24 @@ def _patch_ollama_post(monkeypatch, handler):
     monkeypatch.setattr(httpx.AsyncClient, "post", _post)
 
 
-class TestOllamaReranker:
-    """OllamaReranker scoring, sorting, and per-doc error fallback."""
+class TestSelfHostedReranker:
+    """SelfHostedReranker scoring, sorting, and per-doc error fallback."""
 
     def test_init_strips_trailing_slash(self):
         """base_url trailing slash is stripped; default model is used."""
-        r = OllamaReranker("http://localhost:11434/")
+        r = SelfHostedReranker("http://localhost:11434/")
         assert r.base_url == "http://localhost:11434"
-        assert r.model == DEFAULT_OLLAMA_RERANK_MODEL
-        assert r.provider_name == "ollama"
+        assert r.model == DEFAULT_SELF_HOSTED_RERANK_MODEL
+        assert r.provider_name == "self_hosted"
 
     async def test_empty_documents_returns_empty(self):
         """No documents short-circuits to empty list."""
-        assert await OllamaReranker("http://x").rerank("q", [], 3) == []
+        assert await SelfHostedReranker("http://x").rerank("q", [], 3) == []
 
     async def test_non_positive_top_n_raises(self):
         """top_n <= 0 raises ValueError."""
         with pytest.raises(ValueError, match="top_n must be positive"):
-            await OllamaReranker("http://x").rerank("q", ["d"], 0)
+            await SelfHostedReranker("http://x").rerank("q", ["d"], 0)
 
     async def test_scores_sorted_descending_and_truncated(self, monkeypatch):
         """Docs are scored, sorted by score desc, and truncated to top_n."""
@@ -340,14 +340,14 @@ class TestOllamaReranker:
         def handler(url, json):
             prompt = json["prompt"]
             if "alpha" in prompt:
-                return _FakeHttpResponse(json_data={"response": "0.2"})
+                return _FakeHttpResponse(json_data={"choices": [{"text": "0.2"}]})
             if "bravo" in prompt:
-                return _FakeHttpResponse(json_data={"response": "0.9"})
-            return _FakeHttpResponse(json_data={"response": "0.5"})
+                return _FakeHttpResponse(json_data={"choices": [{"text": "0.9"}]})
+            return _FakeHttpResponse(json_data={"choices": [{"text": "0.5"}]})
 
         _patch_ollama_post(monkeypatch, handler)
 
-        out = await OllamaReranker("http://x").rerank(
+        out = await SelfHostedReranker("http://x").rerank(
             "q", ["alpha doc", "bravo doc", "charlie doc"], 2
         )
 
@@ -361,14 +361,14 @@ class TestOllamaReranker:
 
         def handler(url, json):
             if "good" in json["prompt"]:
-                return _FakeHttpResponse(json_data={"response": "0.8"})
+                return _FakeHttpResponse(json_data={"choices": [{"text": "0.8"}]})
             return _FakeHttpResponse(
                 raise_exc=httpx.HTTPStatusError("500", request=MagicMock(), response=MagicMock())
             )
 
         _patch_ollama_post(monkeypatch, handler)
 
-        out = await OllamaReranker("http://x").rerank("q", ["good", "bad"], 5)
+        out = await SelfHostedReranker("http://x").rerank("q", ["good", "bad"], 5)
         scores = {d["index"]: d["relevance_score"] for d in out}
         assert scores[0] == pytest.approx(0.8)
         assert scores[1] == 0.0
@@ -381,18 +381,24 @@ class TestOllamaReranker:
 
         _patch_ollama_post(monkeypatch, handler)
 
-        out = await OllamaReranker("http://x").rerank("q", ["only"], 1)
+        out = await SelfHostedReranker("http://x").rerank("q", ["only"], 1)
         assert out == [{"index": 0, "relevance_score": 0.0}]
 
-    async def test_missing_response_key_scores_zero(self, monkeypatch):
-        """A JSON body without a 'response' key parses to 0.0."""
+    async def test_malformed_completion_body_scores_zero(self, monkeypatch):
+        """A malformed /v1/completions body (no 'choices') scores 0.0.
+
+        The reranker reads ``resp.json()["choices"][0]["text"]``; an empty
+        ``{}`` raises KeyError, which the per-doc ``except`` swallows to 0.0.
+        This exercises that fallback path (also hit by ``{"choices": []}`` /
+        ``{"choices": [{}]}`` from a real backend).
+        """
 
         def handler(url, json):
             return _FakeHttpResponse(json_data={})
 
         _patch_ollama_post(monkeypatch, handler)
 
-        out = await OllamaReranker("http://x").rerank("q", ["doc"], 1)
+        out = await SelfHostedReranker("http://x").rerank("q", ["doc"], 1)
         assert out[0]["relevance_score"] == 0.0
 
 
@@ -537,20 +543,21 @@ class TestRerankerServiceOllamaContextConfig:
         return cfg
 
     async def test_ollama_context_config_returns_ollama(self, service, mock_db, monkeypatch):
-        """An ollama context config with use_rerank=True returns an OllamaReranker."""
+        """An ollama context config with use_rerank=True returns an SelfHostedReranker."""
 
         settings = MagicMock()
-        settings.ollama_base_url = "http://ollama:11434"
+        settings.self_hosted_base_url = "http://ollama:11434"
+        settings.self_hosted_api_key = ""
         monkeypatch.setattr("config.settings.get_settings", lambda: settings, raising=True)
 
-        cfg = self._ctx_config("ollama", True, "custom-ollama-model")
+        cfg = self._ctx_config("self_hosted", True, "custom-ollama-model")
         mock_db.execute.return_value = _result_scalar_one_or_none(cfg)
 
         provider = await service.get_active_provider(
             "user-1", context_id=str(uuid4()), workspace_id=None
         )
 
-        assert isinstance(provider, OllamaReranker)
+        assert isinstance(provider, SelfHostedReranker)
         assert provider.base_url == "http://ollama:11434"
         assert provider.model == "custom-ollama-model"
 
@@ -560,39 +567,41 @@ class TestRerankerServiceOllamaContextConfig:
         """A stale non-ollama default model is swapped for the ollama default."""
 
         settings = MagicMock()
-        settings.ollama_base_url = "http://ollama:11434"
+        settings.self_hosted_base_url = "http://ollama:11434"
+        settings.self_hosted_api_key = ""
         monkeypatch.setattr("config.settings.get_settings", lambda: settings, raising=True)
 
-        cfg = self._ctx_config("ollama", True, "rerank-multilingual-v3.0")
+        cfg = self._ctx_config("self_hosted", True, "rerank-multilingual-v3.0")
         mock_db.execute.return_value = _result_scalar_one_or_none(cfg)
 
         provider = await service.get_active_provider(
             "user-1", context_id=str(uuid4()), workspace_id=None
         )
-        assert isinstance(provider, OllamaReranker)
-        assert provider.model == DEFAULT_OLLAMA_RERANK_MODEL
+        assert isinstance(provider, SelfHostedReranker)
+        assert provider.model == DEFAULT_SELF_HOSTED_RERANK_MODEL
 
     async def test_ollama_config_empty_model_uses_default(self, service, mock_db, monkeypatch):
         """An empty reranker_model on an ollama config falls back to the ollama default."""
         settings = MagicMock()
-        settings.ollama_base_url = "http://ollama:11434"
+        settings.self_hosted_base_url = "http://ollama:11434"
+        settings.self_hosted_api_key = ""
         monkeypatch.setattr("config.settings.get_settings", lambda: settings, raising=True)
 
-        cfg = self._ctx_config("ollama", True, None)
+        cfg = self._ctx_config("self_hosted", True, None)
         mock_db.execute.return_value = _result_scalar_one_or_none(cfg)
 
         provider = await service.get_active_provider(
             "user-1", context_id=str(uuid4()), workspace_id=None
         )
-        assert isinstance(provider, OllamaReranker)
-        assert provider.model == DEFAULT_OLLAMA_RERANK_MODEL
+        assert isinstance(provider, SelfHostedReranker)
+        assert provider.model == DEFAULT_SELF_HOSTED_RERANK_MODEL
 
     async def test_ollama_config_use_rerank_false_falls_through(
         self, service, mock_db, monkeypatch
     ):
         """An ollama config with use_rerank=False does NOT short-circuit; falls
         through to the API-key path which (no workspace) returns None."""
-        cfg = self._ctx_config("ollama", False, "m")
+        cfg = self._ctx_config("self_hosted", False, "m")
         # First execute() = context config lookup; no second call needed because
         # workspace_id is None so the API-key branch returns early.
         mock_db.execute.return_value = _result_scalar_one_or_none(cfg)
@@ -786,5 +795,5 @@ class TestModuleConstants:
 
     def test_default_ollama_model_constant(self):
         """The default ollama rerank model constant is non-empty."""
-        assert DEFAULT_OLLAMA_RERANK_MODEL
-        assert ":" in DEFAULT_OLLAMA_RERANK_MODEL
+        assert DEFAULT_SELF_HOSTED_RERANK_MODEL
+        assert ":" in DEFAULT_SELF_HOSTED_RERANK_MODEL

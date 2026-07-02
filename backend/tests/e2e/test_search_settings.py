@@ -2,7 +2,7 @@
 
 Verifies the unified search-settings UX including:
 - Sticky save bar behavior
-- Ollama reranker provider support
+- Self-hosted reranker provider support
 - Provider availability badges
 - NaN guard on number inputs
 - Dark mode styling
@@ -142,7 +142,7 @@ class TestStickySaveBar:
 
 
 class TestRerankerProviders:
-    """Verify Ollama, Voyage, Cohere provider dropdown."""
+    """Verify Self-hosted, Voyage, Cohere provider dropdown."""
 
     def test_all_providers_listed(self, page: Page):
         _navigate(page)
@@ -153,7 +153,7 @@ class TestRerankerProviders:
         trigger.click()
         time.sleep(0.5)
 
-        assert page.locator('[role="option"]', has_text="Ollama").count() > 0
+        assert page.locator('[role="option"]', has_text="Self-hosted").count() > 0
         assert page.locator('[role="option"]', has_text="Voyage").count() > 0
         assert page.locator('[role="option"]', has_text="Cohere").count() > 0
         page.keyboard.press("Escape")

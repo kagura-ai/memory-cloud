@@ -285,15 +285,16 @@ class TestGetProvider:
         assert isinstance(provider, OpenAIProvider)
 
     @pytest.mark.asyncio
-    async def test_ollama_provider_no_api_key(self, llm_service):
-        """Test Ollama provider does not require API key."""
+    async def test_self_hosted_provider_no_api_key(self, llm_service):
+        """Test self-hosted provider does not require API key."""
         with patch("config.settings.get_settings") as mock_settings:
-            mock_settings.return_value.ollama_base_url = "http://localhost:11434"
-            provider = await llm_service._get_provider("user-1", "ollama")
+            mock_settings.return_value.self_hosted_base_url = "http://localhost:11434"
+            mock_settings.return_value.self_hosted_api_key = ""
+            provider = await llm_service._get_provider("user-1", "self_hosted")
 
-        from services.llm_providers import OllamaProvider
+        from services.llm_providers import SelfHostedProvider
 
-        assert isinstance(provider, OllamaProvider)
+        assert isinstance(provider, SelfHostedProvider)
 
     @pytest.mark.asyncio
     async def test_unknown_provider_raises(self, llm_service):

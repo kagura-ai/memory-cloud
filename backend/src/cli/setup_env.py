@@ -125,31 +125,35 @@ def setup_env():
         else:
             print("✓ OPENAI_API_KEY already set")
     else:
-        print("\nOpenAI API key (for embeddings). Press Enter to skip if using Ollama.")
+        print(
+            "\nOpenAI API key (for embeddings). Press Enter to skip if using a "
+            "self-hosted backend (e.g. Ollama/vLLM)."
+        )
         key = input("  OPENAI_API_KEY: ").strip()
         if key:
             _set_env_value("OPENAI_API_KEY", key)
             print("  ✓ Saved")
         else:
-            print("  → Skipped (Ollama or manual setup later)")
+            print("  → Skipped (self-hosted or manual setup later)")
 
-    # 5. Ollama detection — re-read env to pick up any changes
+    # 5. Self-hosted backend detection — re-read env to pick up any changes.
+    # Probes the OpenAI-compatible /v1/models endpoint (Ollama, vLLM).
     env = _read_env_file(_env_local)
     has_openai = bool(env.get("OPENAI_API_KEY"))
-    ollama_url = env.get("OLLAMA_BASE_URL", "http://localhost:11434")
+    self_hosted_url = env.get("SELF_HOSTED_BASE_URL", "http://localhost:11434")
     try:
         import urllib.request
 
-        req = urllib.request.Request(ollama_url, method="GET")
+        req = urllib.request.Request(f"{self_hosted_url}/v1/models", method="GET")
         with urllib.request.urlopen(req, timeout=3) as resp:
             if resp.status == 200:
-                print(f"✓ Ollama detected at {ollama_url}")
+                print(f"✓ Self-hosted backend detected at {self_hosted_url}")
                 if not has_openai:
-                    print("  → You can use Ollama for embeddings:")
-                    print("    Set EMBEDDING_PROVIDER=ollama in .env.local")
+                    print("  → You can use your self-hosted backend for embeddings:")
+                    print("    Set EMBEDDING_PROVIDER=self_hosted in .env.local")
     except Exception:
         if not has_openai:
-            print(f"\n⚠ No Ollama at {ollama_url} and no OPENAI_API_KEY.")
+            print(f"\n⚠ No self-hosted backend at {self_hosted_url} and no OPENAI_API_KEY.")
             print("  Memory features require one of these. Configure before using remember/recall.")
 
     print("\n" + "=" * 50)

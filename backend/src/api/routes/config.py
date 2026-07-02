@@ -599,11 +599,12 @@ def get_config_schema() -> dict[str, ConfigKeySchema]:
             category="embedding",
             description="Embedding model provider",
             default_value="openai",
-            enum_values=["openai", "cohere", "huggingface"],
+            enum_values=["openai", "cohere", "huggingface", "self_hosted"],
             enum_descriptions={
                 "openai": "OpenAI text-embedding-3-small (recommended)",
                 "cohere": "Cohere embed-multilingual-v3.0",
-                "huggingface": "Self-hosted models",
+                "huggingface": "Hugging Face embedding models",
+                "self_hosted": "Self-hosted OpenAI-compatible (Ollama, vLLM)",
             },
             requires_restart=True,
             impact="Changes embedding provider for all new memories",
@@ -861,9 +862,9 @@ async def validate_config(
 
         # Validate based on key type
         if request.key == "EMBEDDING_PROVIDER":
-            if request.value not in ["openai", "cohere", "huggingface"]:
+            if request.value not in ["openai", "cohere", "huggingface", "self_hosted"]:
                 valid = False
-                errors.append("Must be one of: openai, cohere, huggingface")
+                errors.append("Must be one of: openai, cohere, huggingface, self_hosted")
 
         elif request.key == "EMBEDDING_DIMENSIONS":
             if not isinstance(request.value, int) or request.value <= 0:

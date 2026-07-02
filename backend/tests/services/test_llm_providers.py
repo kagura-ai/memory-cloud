@@ -12,8 +12,8 @@ import pytest
 from services.llm_providers.anthropic_provider import AnthropicProvider
 from services.llm_providers.base import Usage
 from services.llm_providers.gemini_provider import GeminiProvider
-from services.llm_providers.ollama_provider import OllamaProvider
 from services.llm_providers.openai_provider import OpenAIProvider
+from services.llm_providers.self_hosted_provider import SelfHostedProvider
 
 # ============================================================================
 # Helpers
@@ -259,13 +259,13 @@ class TestGeminiProvider:
 
 
 # ============================================================================
-# OllamaProvider
+# SelfHostedProvider
 # ============================================================================
 
 
-class TestOllamaProvider:
+class TestSelfHostedProvider:
     def test_extract_usage_reads_prompt_completion(self):
-        provider = OllamaProvider(base_url="http://localhost:11434")
+        provider = SelfHostedProvider(base_url="http://localhost:11434")
         raw = MagicMock()
         raw.usage = MagicMock()
         raw.usage.prompt_tokens = 100
@@ -276,14 +276,14 @@ class TestOllamaProvider:
         assert usage == Usage(total=120, input=100, output=20, cached=0)
 
     def test_extract_usage_handles_no_usage(self):
-        provider = OllamaProvider(base_url="http://localhost:11434")
+        provider = SelfHostedProvider(base_url="http://localhost:11434")
         usage = provider.extract_usage(MagicMock(spec=[]))
         assert usage == Usage(total=0, input=0, output=0, cached=0)
 
     @pytest.mark.asyncio
     async def test_complete_json_returns_provider_response(self):
-        provider = OllamaProvider(base_url="http://localhost:11434")
-        provider._verified = True  # skip health-check in CI where Ollama is absent
+        provider = SelfHostedProvider(base_url="http://localhost:11434")
+        provider._verified = True  # skip health-check in CI where the backend is absent
         mock_response = MagicMock()
         mock_response.choices = [MagicMock(message=MagicMock(content='{"key": "value"}'))]
         mock_response.usage = MagicMock()
@@ -304,11 +304,12 @@ class TestOllamaProvider:
 
     @pytest.mark.asyncio
     async def test_list_models_returns_models(self):
-        provider = OllamaProvider(base_url="http://localhost:11434")
+        provider = SelfHostedProvider(base_url="http://localhost:11434")
 
         mock_resp = MagicMock()
         mock_resp.status_code = 200
-        mock_resp.json.return_value = {"models": [{"name": "llama3.1", "model": "llama3.1"}]}
+        # OpenAI-compatible /v1/models shape (served by Ollama + vLLM)
+        mock_resp.json.return_value = {"data": [{"id": "llama3.1"}]}
 
         mock_http = MagicMock()
         mock_http.get = AsyncMock(return_value=mock_resp)

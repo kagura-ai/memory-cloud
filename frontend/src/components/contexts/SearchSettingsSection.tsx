@@ -75,7 +75,7 @@ const COHERE_MODELS = [
   { value: "rerank-english-v3.0", label: "English v3.0" },
 ];
 
-const OLLAMA_MODELS = [
+const SELF_HOSTED_MODELS = [
   {
     value: "dengcao/Qwen3-Reranker-8B:Q5_K_M",
     label: "Qwen3-Reranker-8B (Best quality)",
@@ -89,7 +89,7 @@ const OLLAMA_MODELS = [
 const DEFAULT_RERANKER_MODELS: Record<string, string> = {
   voyage: "rerank-2",
   cohere: "rerank-multilingual-v3.0",
-  ollama: "dengcao/Qwen3-Reranker-8B:Q5_K_M",
+  self_hosted: "dengcao/Qwen3-Reranker-8B:Q5_K_M",
 };
 
 interface SearchSettingsSectionProps {
@@ -110,7 +110,7 @@ export function SearchSettingsSection({
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [externalKeys, setExternalKeys] = useState<ExternalAPIKey[]>([]);
-  const [ollamaAvailable, setOllamaAvailable] = useState(false);
+  const [selfHostedAvailable, setSelfHostedAvailable] = useState(false);
   const { toast } = useToast();
   const { currentWorkspace } = useWorkspace();
 
@@ -131,9 +131,9 @@ export function SearchSettingsSection({
       const telemetry = await apiClient.get<TelemetryResponse>(
         "/api/v1/system/telemetry",
       );
-      setOllamaAvailable(telemetry.services?.ollama?.status === "ok");
+      setSelfHostedAvailable(telemetry.services?.self_hosted?.status === "ok");
     } catch {
-      setOllamaAvailable(false);
+      setSelfHostedAvailable(false);
     }
   }, []);
 
@@ -219,7 +219,9 @@ export function SearchSettingsSection({
     });
   };
 
-  const handleProviderChange = (provider: "voyage" | "cohere" | "ollama") => {
+  const handleProviderChange = (
+    provider: "voyage" | "cohere" | "self_hosted",
+  ) => {
     setEditedConfig({
       ...editedConfig,
       reranker_provider: provider,
@@ -261,30 +263,30 @@ export function SearchSettingsSection({
     (k) => k.provider.toLowerCase() === "cohere" && k.enabled,
   );
   const hasAnyRerankerAvailable =
-    hasVoyageKey || hasCohereKey || ollamaAvailable;
+    hasVoyageKey || hasCohereKey || selfHostedAvailable;
 
   const currentProvider = getCurrentValue("reranker_provider");
   const availableModels =
     currentProvider === "voyage"
       ? VOYAGE_MODELS
-      : currentProvider === "ollama"
-        ? OLLAMA_MODELS
+      : currentProvider === "self_hosted"
+        ? SELF_HOSTED_MODELS
         : COHERE_MODELS;
 
   const selectedProviderUnavailable =
     (currentProvider === "voyage" && !hasVoyageKey) ||
     (currentProvider === "cohere" && !hasCohereKey) ||
-    (currentProvider === "ollama" && !ollamaAvailable);
+    (currentProvider === "self_hosted" && !selfHostedAvailable);
 
   const useRerank = getCurrentValue("use_rerank");
   const cannotSave = isDirty && useRerank && selectedProviderUnavailable;
 
   const getProviderDescription = () => {
-    if (ollamaAvailable && hasVoyageKey && hasCohereKey)
+    if (selfHostedAvailable && hasVoyageKey && hasCohereKey)
       return t("allProvidersAvailable");
-    if (ollamaAvailable && hasVoyageKey) return t("ollamaAndVoyage");
-    if (ollamaAvailable && hasCohereKey) return t("ollamaAndCohere");
-    if (ollamaAvailable) return t("ollamaOnly");
+    if (selfHostedAvailable && hasVoyageKey) return t("selfHostedAndVoyage");
+    if (selfHostedAvailable && hasCohereKey) return t("selfHostedAndCohere");
+    if (selfHostedAvailable) return t("selfHostedOnly");
     if (hasVoyageKey && hasCohereKey) return t("bothAvailable");
     if (hasVoyageKey) return t("voyageConfigured");
     if (hasCohereKey) return t("cohereConfigured");
@@ -509,7 +511,7 @@ export function SearchSettingsSection({
                       value={getCurrentValue("reranker_provider")}
                       onValueChange={(value) =>
                         handleProviderChange(
-                          value as "voyage" | "cohere" | "ollama",
+                          value as "voyage" | "cohere" | "self_hosted",
                         )
                       }
                     >
@@ -517,21 +519,24 @@ export function SearchSettingsSection({
                         <SelectValue />
                       </SelectTrigger>
                       <SelectContent>
-                        <SelectItem value="ollama" disabled={!ollamaAvailable}>
+                        <SelectItem
+                          value="self_hosted"
+                          disabled={!selfHostedAvailable}
+                        >
                           <span className="flex items-center gap-2">
-                            {t("ollamaLocal")}
+                            {t("selfHostedLocal")}
                             <Badge
                               variant="outline"
                               className={cn(
                                 "ml-1 text-xs",
-                                ollamaAvailable
+                                selfHostedAvailable
                                   ? "border-green-500 text-green-700 dark:text-green-400"
                                   : "text-muted-foreground",
                               )}
                             >
-                              {ollamaAvailable
-                                ? t("ollamaAvailable")
-                                : t("ollamaUnavailable")}
+                              {selfHostedAvailable
+                                ? t("selfHostedAvailable")
+                                : t("selfHostedUnavailable")}
                             </Badge>
                           </span>
                         </SelectItem>
@@ -554,9 +559,9 @@ export function SearchSettingsSection({
                       <Alert>
                         <AlertCircle className="h-4 w-4" />
                         <AlertDescription>
-                          {currentProvider === "ollama" ? (
+                          {currentProvider === "self_hosted" ? (
                             <p className="text-sm">
-                              {t("ollamaUnavailableDetail")}
+                              {t("selfHostedUnavailableDetail")}
                             </p>
                           ) : (
                             <p className="text-sm">
@@ -608,7 +613,7 @@ export function SearchSettingsSection({
                     <p className="text-sm text-muted-foreground">
                       {currentProvider === "voyage"
                         ? t("voyageBestQuality")
-                        : currentProvider === "ollama"
+                        : currentProvider === "self_hosted"
                           ? t("qwen3BestQuality")
                           : t("cohereMultilingual")}
                     </p>

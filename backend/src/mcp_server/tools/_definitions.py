@@ -994,7 +994,7 @@ Returns: {status, message, context_id, context_name, context_display_name, conte
                     },
                     "embedding_model": {
                         "type": "string",
-                        "description": "Embedding model to use for this context. Options: 'text-embedding-3-small' (OpenAI, 512dim), 'qwen3-embedding:8b' (Ollama, 4096dim), etc. Default: global EMBEDDING_MODEL setting. Immutable after creation.",
+                        "description": "Embedding model to use for this context. Options: 'text-embedding-3-small' (OpenAI, 512dim), 'qwen3-embedding:8b' (self-hosted, 4096dim), etc. Default: global EMBEDDING_MODEL setting. Immutable after creation.",
                     },
                 },
             },
@@ -1143,7 +1143,7 @@ Examples:
 - Increase keyword matching: semantic_weight=0.5, bm25_weight=0.5
 - Semantic-heavy: semantic_weight=0.7, bm25_weight=0.3
 - Enable reranking: use_rerank=true, reranker_provider="voyage"
-- Local reranking (free): use_rerank=true, reranker_provider="ollama", reranker_model="dengcao/Qwen3-Reranker-8B:Q5_K_M"
+- Local reranking (free): use_rerank=true, reranker_provider="self_hosted", reranker_model="dengcao/Qwen3-Reranker-8B:Q5_K_M"
 
 Weights must sum to 1.0.
 
@@ -1171,12 +1171,12 @@ Returns: {status, message, context_id, config: {semantic_weight, bm25_weight, fe
                     },
                     "use_rerank": {
                         "type": "boolean",
-                        "description": "Enable/disable reranking. Requires API key for Voyage/Cohere, or use 'ollama' for free local reranking.",
+                        "description": "Enable/disable reranking. Requires API key for Voyage/Cohere, or use 'self_hosted' for free local reranking (Ollama, vLLM).",
                     },
                     "reranker_provider": {
                         "type": "string",
-                        "enum": ["voyage", "cohere", "ollama"],
-                        "description": "Reranker provider: 'voyage', 'cohere', or 'ollama' (local, no API key needed).",
+                        "enum": ["voyage", "cohere", "self_hosted"],
+                        "description": "Reranker provider: 'voyage', 'cohere', or 'self_hosted' (local/self-hosted OpenAI-compatible backend, no API key needed).",
                     },
                     "reranker_model": {
                         "type": "string",

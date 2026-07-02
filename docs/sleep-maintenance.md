@@ -130,7 +130,7 @@ Mode resolution happens in `SleepOrchestrator._get_sleep_mode()`. Unknown or mis
 
 Phases 1–4 call the LLM through `LLMService`, which supports:
 
-- **Providers**: OpenAI (default) and Ollama via its OpenAI-compatible endpoint. Ollama connectivity is health-checked at startup against `ollama_base_url`. Configured via `SLEEP_LLM_PROVIDER` and `SLEEP_LLM_MODEL` environment variables (or the corresponding fields in Neural Config).
+- **Providers**: OpenAI (default) and `self_hosted` (any OpenAI-compatible backend, e.g. Ollama, vLLM). Self-hosted connectivity is health-checked at startup against `self_hosted_base_url`. Configured via `SLEEP_LLM_PROVIDER` and `SLEEP_LLM_MODEL` environment variables (or the corresponding fields in Neural Config).
 - **API key priority** (most specific wins): context-scoped key → workspace-scoped key → user-scoped key → `OPENAI_API_KEY` env var fallback.
 - **Interface**: `complete_json()` returns `(parsed_json, tokens_used)`; each phase aggregates tokens into its `PhaseResult`, and the reporter rolls them up into the `SleepReport`.
 - **Budget enforcement**: every phase checks `SleepBudget.can_afford()` before issuing an LLM batch. When the budget is exhausted, later phases are skipped with `skip_reason="budget_exhausted"`. Defaults: `max_llm_calls=50`, `max_memories=200` per run (override via Neural Config).
@@ -207,7 +207,7 @@ All Sleep-specific settings live under the Sleep category of Neural Config (`bac
 
 | Field                         | Purpose                                                        |
 |-------------------------------|----------------------------------------------------------------|
-| `sleep_llm_provider`          | `openai` or `ollama`.                                          |
+| `sleep_llm_provider`          | `openai` or `self_hosted`.                                     |
 | `sleep_llm_model`             | Model identifier passed to the provider.                       |
 | `sleep_max_memories_per_run`  | Upper bound on memories touched per context per run.           |
 | `sleep_max_llm_calls_per_run` | Upper bound on LLM calls per context per run (budget cap).     |

@@ -1806,9 +1806,9 @@ class MemoryService:
         # The probe MUST use the per-context embedding model (same source
         # of truth ``SearchService.hybrid_search`` uses to pick its embed
         # client at line 168). Probing with the global default would
-        # falsely deny Ollama-backed contexts (provider mismatch) and
+        # falsely deny self-hosted-backed contexts (provider mismatch) and
         # falsely pass OpenAI-backed contexts when the platform default is
-        # Ollama (gate would skip entirely).
+        # self-hosted (gate would skip entirely).
         if is_shared_context_read:
             from repositories.config_repository import ContextSearchConfigRepository
 
@@ -1817,10 +1817,10 @@ class MemoryService:
             byok_embed_svc = EmbeddingService(self.db, model=ctx_config.embedding_model)
             # Only gate when the embedding API call would actually fire and
             # produce a charge against the source workspace. ``keyword``
-            # mode skips ``embed_with_usage`` entirely (BM25-only); Ollama
-            # is free/local (no platform-key fallback path exists).
+            # mode skips ``embed_with_usage`` entirely (BM25-only); a
+            # self-hosted backend is free/local (no platform-key fallback path).
             will_charge_embedding_cost = (
-                request.search_mode != "keyword" and byok_embed_svc.provider != "ollama"
+                request.search_mode != "keyword" and byok_embed_svc.provider != "self_hosted"
             )
             if will_charge_embedding_cost and not await byok_embed_svc.has_byok_key(
                 str(context_workspace_id),

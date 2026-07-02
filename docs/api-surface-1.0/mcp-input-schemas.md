@@ -252,7 +252,7 @@ Tune per-context hybrid-search weights and reranker settings.
   - `bm25_weight` — number (0.0–1.0, default 0.4; weights must sum to 1.0 — prose-only constraint) ⚠ `bm25_weight` exposes the algorithm name (BM25) in a frozen param name; `keyword_weight` would survive an algorithm swap
   - `fetch_factor` — integer (1–10, default 3) ⚠ leaks retrieval-pipeline implementation into the public surface
   - `use_rerank` — boolean
-  - `reranker_provider` — string, enum [`voyage`, `cohere`, `ollama`] ✅ **DECIDED (#1054): now a hard enum** (was a free string; matches the DB CHECK constraint and aligns with connector_type's enum policy). Widening the enum later (adding a provider) is non-breaking; removing a value is a MAJOR bump.
+  - `reranker_provider` — string, enum [`voyage`, `cohere`, `self_hosted`] ✅ **DECIDED (#1054): now a hard enum** (was a free string; matches the DB CHECK constraint and aligns with connector_type's enum policy). Widening the enum later (adding a provider) is non-breaking; removing a value is a MAJOR bump. ⚠ **RENAMED (#1160): the `ollama` enum value → `self_hosted`.** Renaming (not widening) an enum value is a **breaking (MAJOR) change** under the frozen-1.0 policy; it ships as a **pre-1.0 exemption** to make the provider slot backend-neutral (self-hosted OpenAI-compatible: Ollama, vLLM). The distinct `ollama_cloud` provider is unaffected.
   - `reranker_model` — string (provider-specific model names in description)
 
 ### get_usage
@@ -484,7 +484,7 @@ Recurring inconsistencies (each instance flagged inline above):
 10. **Filter style**: recall packs filters into one free-form `filters` object (singular `type`, `importance: {gte}`); analyze_context spreads them top-level (`types` plural, `min_importance`).
 11. **`workspace_id` override** exists only on the 5 file tools; the rest of the surface scopes by auth + context_id. Inconsistent and security-sensitive.
 12. **Constraints live in prose, not schema**: char limits (summary 10–500, context_summary 2000), `maxItems` (events ≤ 100), patterns (context name, sha256 hex), numeric ranges and most defaults are description-only. (`additionalProperties` ✅ now set to `false` on all 45 schemas in #990 Phase 1 — the rest of the prose-only constraints remain a P2 hardening item.) Tool-side validation still cannot fully rely on the published schema.
-13. **Enum policy** ✅ **RESOLVED (#1054)**: reranker_provider is now a hard enum [`voyage`,`cohere`,`ollama`], matching connector_type — the free-string inconsistency is gone. edge_type remains a hard enum that already grew once (#782); enum *widening* is non-breaking, so growth is fine.
+13. **Enum policy** ✅ **RESOLVED (#1054)**: reranker_provider is now a hard enum [`voyage`,`cohere`,`self_hosted`], matching connector_type — the free-string inconsistency is gone. ⚠ **RENAMED (#1160)**: the `ollama` value was renamed to `self_hosted` (backend-neutral self-hosted slot) — an enum-value **rename** is a breaking (MAJOR) change, shipped as a pre-1.0 exemption. edge_type remains a hard enum that already grew once (#782); enum *widening* is non-breaking, so growth is fine.
 
 ## Follow-up candidates
 

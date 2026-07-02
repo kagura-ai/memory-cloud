@@ -336,7 +336,7 @@ async def test_compute_cost_usd_zero_units(db_session):
     """Zero units → $0.00 without hitting the DB."""
     svc = LLMPricingService(db_session)
     cost = await svc.compute_cost_usd(
-        provider="ollama",
+        provider="self_hosted",
         model="never-seeded",
         unit_type="embedding_tokens",
         started_at=datetime(
