@@ -108,6 +108,41 @@ class TestNDCG:
         assert mean_ndcg_at_k([], 5) == 0.0
 
 
+class TestGradedNDCG:
+    """Graded-relevance overload of ``ndcg_at_k`` (docs/02 §1.2 item 5).
+
+    ``gains=None`` (the default) must stay byte-identical to the pre-existing
+    binary metric; passing ``gains`` switches to the ``2^rel - 1`` DCG formula.
+    """
+
+    def test_gains_none_matches_binary_behavior(self):
+        # Same hand case as TestNDCG.test_single_relevant_at_position_two, called
+        # both without the kwarg and with it explicitly None — must agree exactly
+        # with the binary result.
+        expected = 1.0 / math.log2(3)
+        assert ndcg_at_k(["x", "a", "y"], {"a"}, 5) == expected
+        assert ndcg_at_k(["x", "a", "y"], {"a"}, 5, gains=None) == expected
+
+    def test_graded_hand_case(self):
+        # ranked=[a,b,c], gains={a:3,b:1,d:2} (d not retrieved), k=3.
+        # DCG = (2^3-1)/log2(2) + (2^1-1)/log2(3) + 0/log2(4)
+        #     = 7/1 + 1/1.58496...  = 7 + 0.630929... = 7.630929...
+        # IDCG = top-3 gains sorted desc = [3, 2, 1]
+        #      = (2^3-1)/log2(2) + (2^2-1)/log2(3) + (2^1-1)/log2(4)
+        #      = 7 + 3/1.58496... + 1/2 = 7 + 1.892789... + 0.5 = 9.392789...
+        # nDCG = 7.630929.../9.392789... = 0.812424...
+        dcg = 7.0 + 1.0 / math.log2(3)
+        idcg = 7.0 + 3.0 / math.log2(3) + 1.0 / math.log2(4)
+        expected = dcg / idcg
+        result = ndcg_at_k(["a", "b", "c"], {"a", "b"}, 3, gains={"a": 3, "b": 1, "d": 2})
+        assert result == pytest.approx(expected)
+        assert result == pytest.approx(0.8125, abs=1e-3)
+
+    def test_idcg_zero_is_zero_not_error(self):
+        assert ndcg_at_k(["a", "b"], {"a", "b"}, 2, gains={}) == 0.0
+        assert ndcg_at_k(["a", "b"], {"a", "b"}, 2, gains={"a": 0, "b": 0}) == 0.0
+
+
 class TestArmOrder:
     def test_graph_writing_neural_arm_runs_last(self):
         # Load-bearing measurement-validity invariant (#967): with

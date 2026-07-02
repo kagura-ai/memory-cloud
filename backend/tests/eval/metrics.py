@@ -67,16 +67,43 @@ def mean_precision_at_k(
     return sum(precision_at_k(r, rel, k) for r, rel in rankings) / len(rankings)
 
 
-def ndcg_at_k(ranked: Sequence[str], relevant: set[str], k: int) -> float:
-    """Normalized discounted cumulative gain @k under binary relevance.
+def ndcg_at_k(
+    ranked: Sequence[str],
+    relevant: set[str],
+    k: int,
+    *,
+    gains: dict[str, int] | None = None,
+) -> float:
+    """Normalized discounted cumulative gain @k, binary or graded relevance.
 
-    DCG@k discounts each relevant hit by ``1/log2(rank+1)``; the ideal DCG
-    places relevant docs in the top ``min(k, len(relevant))`` positions, so a
-    ranking that fills the top-``k`` with relevant docs scores 1.0 even when
-    the gold set is larger than ``k``. Returns 0.0 for ``k <= 0`` or an empty
-    gold set (a corpus-construction problem, not a metric error).
+    Binary path (default, ``gains=None``): DCG@k discounts each relevant hit by
+    ``1/log2(rank+1)``; the ideal DCG places relevant docs in the top
+    ``min(k, len(relevant))`` positions, so a ranking that fills the top-``k``
+    with relevant docs scores 1.0 even when the gold set is larger than ``k``.
+    Returns 0.0 for ``k <= 0`` or an empty gold set (a corpus-construction
+    problem, not a metric error).
+
+    Graded path (docs/02 §1.2 item 5, ``gains`` is a doc_id -> 0-3 grade map):
+    DCG@k = sum over ``ranked[:k]`` of ``(2**gain - 1) / log2(pos + 1)`` with
+    1-based ``pos`` (gain 0 for a ranked doc absent from ``gains``); IDCG@k is
+    the same formula applied to the top-``k`` gains sorted descending over
+    *all* graded docs (not only the retrieved ones). ``relevant`` is ignored in
+    this path — ``gains`` is the sole relevance signal. Returns 0.0 when
+    ``IDCG == 0`` (e.g. no positive grades) rather than dividing by zero.
     """
-    if k <= 0 or not relevant:
+    if k <= 0:
+        return 0.0
+    if gains is not None:
+        dcg = sum(
+            (2 ** gains.get(doc_id, 0) - 1) / math.log2(idx + 1)
+            for idx, doc_id in enumerate(ranked[:k], start=1)
+        )
+        top_gains = sorted(gains.values(), reverse=True)[:k]
+        idcg = sum(
+            (2**gain - 1) / math.log2(idx + 1) for idx, gain in enumerate(top_gains, start=1)
+        )
+        return dcg / idcg if idcg else 0.0
+    if not relevant:
         return 0.0
     dcg = sum(
         1.0 / math.log2(idx + 1)
