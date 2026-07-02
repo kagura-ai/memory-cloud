@@ -397,6 +397,7 @@ class VLLMReranker(RerankerProvider):
         Raises:
             ValueError: If top_n is non-positive or the /v1/rerank response has an unexpected shape
             httpx.HTTPError: If the rerank endpoint call fails
+        """
         if not documents:
             return []
         if top_n <= 0:
