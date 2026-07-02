@@ -462,7 +462,10 @@ async def create_api_key(
 
     # Session path (#252 unchanged): self-mint only.
     if user["user_id"] != user_id:
-        raise AuthorizationError(message="Only owner can create API keys")
+        raise AuthorizationError(
+            message="You can only create your own API keys in a session. "
+            "To provision a key for another member, use a workspace-owner API key."
+        )
 
     # Issue #1165: expires_days is an owner-provisioned-only field. Session
     # self-mint keeps its historical "no expiry" behavior and does not plumb
@@ -739,7 +742,10 @@ async def delete_api_key_by_id(
                 )
     elif caller_id != user_id:
         # Session path (#252 unchanged): self-only.
-        raise AuthorizationError(message="Only owner can delete API keys")
+        raise AuthorizationError(
+            message="You can only delete your own API keys in a session. "
+            "To revoke another member's key, use a workspace-owner API key."
+        )
 
     from sqlalchemy import and_, select
 
