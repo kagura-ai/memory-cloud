@@ -1,7 +1,7 @@
 """Route-level tests for owner-key member-credential provisioning (#1165).
 
-Covers the programmatic (API-key owner) mint / list / revoke paths and their
-guardrails. Session self-mint/self-delete semantics are unchanged and covered
+Covers the programmatic (API-key owner) mint, list, and revoke paths and
+their guardrails. Session self-mint/self-delete semantics are unchanged and covered
 by the existing member-credentials tests; here we prove the NEW programmatic
 behavior is wired and gated.
 
@@ -156,3 +156,85 @@ class TestOwnerProvisionedMint:
         _mock_member_service(monkeypatch, target_role="member")
         r = client.post(MINT_URL, json={"name": "k", "expires_days": 30})
         assert r.status_code == 404
+
+
+LIST_URL = f"/api/v1/workspaces/{_WS}/members/target-user/credentials"
+REVOKE_URL = f"/api/v1/workspaces/{_WS}/members/target-user/credentials/api-keys/42"
+
+
+def _member_api_key_dict(plaintext="secret-plain"):
+    return {
+        "id": 42,
+        "name": "k",
+        "key_prefix": "kagura_abc",
+        "plaintext_key": plaintext,
+        "is_visible": True,
+        "visibility_expires_at": None,
+        "created_at": "2026-01-01T00:00:00Z",
+        "last_used_at": None,
+        "revoked_at": None,
+        "bound_context_id": None,
+    }
+
+
+class TestOwnerProvisionedList:
+    def test_programmatic_list_masks_plaintext(self, client, owner_gate, monkeypatch):
+        _override(_api_key_owner())
+        from api.routes import member_credentials as mc
+
+        svc = MagicMock()
+        svc.get_or_create_credentials = AsyncMock(
+            return_value={"api_keys": [_member_api_key_dict("secret-plain")]}
+        )
+        svc.get_workspace_role = AsyncMock(return_value="member")
+        monkeypatch.setattr(mc, "MemberCredentialsService", lambda db: svc)
+
+        r = client.get(LIST_URL)
+        assert r.status_code == 200, r.text
+        # Programmatic principal never receives plaintext, even if the service
+        # returned it.
+        assert r.json()["api_keys"][0]["plaintext_key"] is None
+
+    def test_oauth_list_rejected(self, client):
+        _override(_oauth())
+        r = client.get(LIST_URL)
+        assert r.status_code == 403
+
+
+class TestOwnerProvisionedRevoke:
+    def _fake_db_with_key(self, api_key):
+        fake_db = MagicMock()
+        fake_db.commit = AsyncMock()
+        result = MagicMock()
+        result.scalar_one_or_none.return_value = api_key
+        fake_db.execute = AsyncMock(return_value=result)
+        return fake_db
+
+    def test_owner_soft_revoke(self, client, owner_gate, monkeypatch):
+        _override(_api_key_owner())
+        _mock_member_service(monkeypatch, target_role="member")
+
+        api_key = MagicMock()
+        api_key.id = 42
+        api_key.workspace_id = _WS
+        api_key.bound_context_id = None
+        api_key.revoked_at = None
+        api_key.key_prefix = "kagura_abc"
+        fake_db = self._fake_db_with_key(api_key)
+
+        async def _get_db():
+            yield fake_db
+
+        app.dependency_overrides[get_db] = _get_db
+
+        r = client.delete(REVOKE_URL)
+        assert r.status_code == 200, r.text
+        assert r.json()["status"] == "revoked"
+        # Soft revoke: revoked_at set, row NOT deleted.
+        assert api_key.revoked_at is not None
+        fake_db.delete.assert_not_called()
+
+    def test_oauth_revoke_rejected(self, client):
+        _override(_oauth())
+        r = client.delete(REVOKE_URL)
+        assert r.status_code == 403

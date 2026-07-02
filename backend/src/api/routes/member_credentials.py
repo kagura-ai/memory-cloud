@@ -198,12 +198,14 @@ async def get_member_credentials(
 ) -> MemberCredentialsResponse:
     """Get or create member credentials (Lazy initialization).
 
-    Migration 034: Zero-knowledge model.
-    - Session owner/admin can view plaintext secrets (if visible), per existing
-      ``_check_can_view`` semantics (unchanged).
-    - Issue #1165: an API-key OWNER principal may also view another member's key
-      METADATA, but the response is ALWAYS metadata-only (``plaintext_key`` is
-      nulled) — programmatic responses get logged, so plaintext must never appear.
+    Migration 034: Zero-knowledge model (unchanged for sessions).
+    - A session caller sees plaintext ONLY for their OWN key while it is still
+      visible (``get_or_create_credentials`` includes ``plaintext_key`` only
+      when ``requester_id == user_id``). Session owner/admin viewing ANOTHER
+      member sees metadata only.
+    - Issue #1165: an API-key OWNER principal may also view another member's key,
+      but the response is ALWAYS metadata-only (``plaintext_key`` nulled) —
+      programmatic responses get logged, so plaintext must never appear.
     - OAuth bearer principals are rejected (403).
 
     Raises:
@@ -461,6 +463,16 @@ async def create_api_key(
     # Session path (#252 unchanged): self-mint only.
     if user["user_id"] != user_id:
         raise AuthorizationError(message="Only owner can create API keys")
+
+    # Issue #1165: expires_days is an owner-provisioned-only field. Session
+    # self-mint keeps its historical "no expiry" behavior and does not plumb
+    # expires_days to APIKeyManager — reject it explicitly rather than silently
+    # ignoring a client-supplied value (Copilot review, PR #1171).
+    if data.expires_days is not None:
+        raise BadRequestError(
+            message="expires_days is only supported for owner-provisioned keys "
+            "(via a workspace-owner API key), not session self-mint."
+        )
 
     # Issue #626: Public-bound key creation gating + scope decision.
     # When ``bound_context_id`` is supplied, the key is public-bound and the
@@ -772,8 +784,10 @@ async def delete_api_key_by_id(
     bound_ctx_id = api_key.bound_context_id
 
     # Issue #1165: owner-provisioned cross-member revocation is a SOFT revoke
-    # (row retained for forensics) with the audit row written BEFORE the state
-    # change, so the record survives even if the commit partially fails. Session
+    # (revoked_at set, row retained for forensics) rather than a row delete.
+    # The audit row and the revoked_at update are added together and committed
+    # in one transaction (atomic — no partial commit); ordering the audit add
+    # before the state change is for readability, not durability. Session
     # self-delete keeps the existing hard-delete semantics (#252, #626).
     owner_provisioned = programmatic and user_id != caller_id
     from models.auth import AuditLog
