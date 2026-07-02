@@ -54,6 +54,12 @@ vi.mock("@/lib/api/workspaces", () => ({
   checkOpenAIKeyStatus: (...a: unknown[]) => mockCheckKey(...a),
 }));
 
+// #1167: the key probe is gated on features.byok; default on, flip per-test.
+let mockFeatures: Record<string, boolean> | null = { byok: true };
+vi.mock("@/hooks/useSystemFeatures", () => ({
+  useSystemFeatures: () => mockFeatures,
+}));
+
 import { OnboardingCard } from "./OnboardingCard";
 
 function setWorkspace(role: string = "owner") {
@@ -68,6 +74,7 @@ beforeEach(() => {
   vi.clearAllMocks();
   window.localStorage.clear();
   setWorkspace("owner");
+  mockFeatures = { byok: true };
   mockGetContexts.mockResolvedValue({ contexts: [], total: 0 });
   mockCheckKey.mockResolvedValue({
     has_key: true,
@@ -109,6 +116,18 @@ describe("OnboardingCard trigger gating", () => {
     const { container } = render(<OnboardingCard />);
     await waitFor(() => expect(container).toBeEmptyDOMElement());
     expect(mockGetContexts).not.toHaveBeenCalled();
+  });
+
+  it("skips the key probe and shows the normal flow when byok is off (#1167)", async () => {
+    mockFeatures = { byok: false };
+    render(<OnboardingCard />);
+    await waitFor(() =>
+      expect(screen.getByText("context.createButton")).toBeInTheDocument(),
+    );
+    // Probe never fired — the API 404s in a BYOK-off deployment and env
+    // keys serve embeddings, so no needsKey notice either.
+    expect(mockCheckKey).not.toHaveBeenCalled();
+    expect(screen.queryByText("needsKey.title")).toBeNull();
   });
 
   it("shows the embedding-key notice (not the flow) when no key is configured, and its CTA uses the real /workspace route (not the backend value)", async () => {

@@ -72,6 +72,12 @@ vi.mock("@/hooks/use-toast", () => ({
   useToast: () => ({ toast: mockToast }),
 }));
 
+// #1167: the OpenAI key probe is gated on features.byok; default on.
+let mockFeatures: Record<string, boolean> | null = { byok: true };
+vi.mock("@/hooks/useSystemFeatures", () => ({
+  useSystemFeatures: () => mockFeatures,
+}));
+
 // ---------- Helpers ----------------------------------------------------------
 
 type Role = "owner" | "admin" | "member" | "viewer";
@@ -116,6 +122,7 @@ beforeEach(() => {
   mockToast.mockReset();
   mockPush.mockReset();
   mockReplace.mockReset();
+  mockFeatures = { byok: true };
 });
 
 afterEach(() => {
@@ -123,6 +130,28 @@ afterEach(() => {
 });
 
 // ---------- Tests ------------------------------------------------------------
+
+describe("ContextsPage BYOK gating (#1167)", () => {
+  it("skips the OpenAI key probe when byok is off — no setup-needed block", async () => {
+    mockFeatures = { byok: false };
+    setupWithRole("owner");
+    render(<ContextsPage />);
+
+    // Neutral empty state (blue), not the amber "key required" gate — env
+    // keys serve embeddings in a BYOK-off deployment.
+    await waitFor(() =>
+      expect(screen.getByText("noContextsYet")).toBeInTheDocument(),
+    );
+    expect(mockCheckOpenAIKeyStatus).not.toHaveBeenCalled();
+    expect(screen.queryByText("setupNeededOpenAI")).toBeNull();
+  });
+
+  it("still probes the key when byok is on", async () => {
+    setupWithRole("owner");
+    render(<ContextsPage />);
+    await waitFor(() => expect(mockCheckOpenAIKeyStatus).toHaveBeenCalled());
+  });
+});
 
 describe("ContextsPage empty-state CTA role gating (#382)", () => {
   it("renders the Create button for owner", async () => {

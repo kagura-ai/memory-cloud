@@ -2146,7 +2146,7 @@
     "rerankerNotAvailableFree": "無料プランではリランキングは利用できません",
     "upgradeToBasic": "Basicプランにアップグレードして、AI搭載リランキングで検索品質を向上させましょう。",
     "noRerankerKeys": "リランカーAPIキーが設定されていません",
-    "configureRerankerKeys": "リランキングを有効にするには、外部APIキーでVoyage AIまたはCohere APIキーを設定してください。",
+    "configureRerankerKeys": "リランキングを有効にするには、<link>外部APIキー</link>でVoyage AIまたはCohere APIキーを設定してください。",
     "enableReranking": "リランキングを有効化",
     "enableRerankingDesc": "AIリランキングを使用して検索結果の関連性を向上",
     "provider": "プロバイダー",
@@ -2197,6 +2197,7 @@
   "externalKeys": {
     "title": "外部APIキー",
     "description": "OpenAI、Anthropic、Google Gemini、セルフホスト、Cohere、Voyageなどのサービス用APIキーを管理",
+    "featureDisabled": "この環境では外部APIキー（BYOK）が有効化されていません。",
     "featureGuide": {
       "title": "外部APIキーとは？",
       "overview": "外部APIキーはワークスペース単位で管理され、OpenAI、Anthropic、Google Gemini、セルフホスト、Cohere、Voyageなどの認証情報を設定できます。LLM推論はOpenAI・Anthropic・Gemini・セルフホストで利用可能。エンベディング生成はOpenAIで利用可能。リランキングはCohere・Voyageで利用可能です。",
@@ -2754,6 +2755,7 @@
       "title": "コスト集計",
       "description": "全 workspace の LLM・embedding コスト ($) ブレイクダウン",
       "descriptionWorkspace": "この workspace の LLM・embedding コスト ($) ブレイクダウン",
+      "featureDisabled": "この環境ではワークスペースのコストダッシュボードが有効化されていません。",
       "actions": {
         "refresh": "更新"
       },

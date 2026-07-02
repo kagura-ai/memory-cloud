@@ -90,6 +90,7 @@ import {
   type EmbeddingModel,
 } from "@/lib/api/contexts";
 import { checkOpenAIKeyStatus } from "@/lib/api/workspaces";
+import { useSystemFeatures } from "@/hooks/useSystemFeatures";
 import { hasWorkspaceRole, WorkspaceRole } from "@/lib/auth/rbac";
 import { ApiError } from "@/lib/api/base";
 import type { Context, ContextStats } from "@/lib/types/context";
@@ -201,8 +202,14 @@ export default function ContextsPage() {
     }
   }, []);
 
+  // Issue #1167: with BYOK off the key-status probe 404s and env keys serve
+  // embeddings — skip the check so hasOpenAIKey stays null (creation enabled,
+  // no "configure key" CTA pointing at a disabled page).
+  const systemFeatures = useSystemFeatures();
+  const byokEnabled = systemFeatures?.byok === true;
   const checkApiKey = useCallback(async () => {
     if (!user?.current_workspace_id) return;
+    if (!byokEnabled) return;
 
     try {
       const status = await checkOpenAIKeyStatus(user.current_workspace_id);
@@ -210,7 +217,7 @@ export default function ContextsPage() {
     } catch (err) {
       setHasOpenAIKey(null);
     }
-  }, [user?.current_workspace_id]);
+  }, [user?.current_workspace_id, byokEnabled]);
 
   useEffect(() => {
     fetchContexts();
