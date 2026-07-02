@@ -145,18 +145,27 @@ class FileStorageService:
         file_id: UUID,
         *,
         include_deleted: bool = False,
+        for_update: bool = False,
     ) -> FileObject:
         """Load a file_objects row, enforcing workspace boundary.
 
         Cross-workspace access raises ``NotFoundException`` (not 403) so
         the existence of a file in another workspace is not leaked.
+
+        ``for_update`` takes a row-level ``FOR UPDATE`` lock so a
+        read-modify-write on the row (e.g. ``confirm_upload``) serializes
+        against a concurrent mutation of the same row — notably
+        ``purge_files_for_contexts``, which also locks the rows it cancels.
+        Without it, a stale-read confirm could resurrect a purged reservation
+        into an ``uploaded`` row (quota drift + workspace-scope widening).
         """
-        result = await self.db.execute(
-            select(FileObject).where(
-                FileObject.id == file_id,
-                FileObject.workspace_id == workspace_id,
-            )
+        stmt = select(FileObject).where(
+            FileObject.id == file_id,
+            FileObject.workspace_id == workspace_id,
         )
+        if for_update:
+            stmt = stmt.with_for_update()
+        result = await self.db.execute(stmt)
         file = result.scalar_one_or_none()
         if file is None:
             msg = f"file {file_id} not found in workspace {workspace_id}"
@@ -435,7 +444,12 @@ class FileStorageService:
             ValidationError: sha256 mismatch (caller / row-state drift).
             ConflictError: ``head_object`` says the binary is missing.
         """
-        file = await self._load_file(workspace_id, file_id)
+        # FOR UPDATE: serialize the reserved→uploaded transition against a
+        # concurrent purge_files_for_contexts (which locks + cancels the same
+        # rows). If the purge committed first, this load sees the soft-deleted
+        # row and raises NotFoundException below; if this confirm locks first,
+        # the purge re-reads the committed uploaded row and reconciles quota.
+        file = await self._load_file(workspace_id, file_id, for_update=True)
 
         # Issue #1136: context-bound files require write access to their context.
         # actor_user_id is optional in the signature (internal/legacy callers of
@@ -850,11 +864,18 @@ class FileStorageService:
         """
         if not context_ids:
             return {}
+        # FOR UPDATE locks the rows we are about to cancel so a concurrent
+        # confirm_upload (which now also loads its row FOR UPDATE) cannot slip
+        # a reserved→uploaded transition in between this SELECT and the caller's
+        # commit — the two fully serialize on the row lock, keeping the status
+        # decision (reserved-cancel vs uploaded-decrement) authoritative.
         result = await self.db.execute(
-            select(FileObject).where(
+            select(FileObject)
+            .where(
                 FileObject.context_id.in_(list(context_ids)),
                 FileObject.deleted_at.is_(None),
             )
+            .with_for_update()
         )
         files = list(result.scalars().all())
         released: dict[UUID, int] = {}

@@ -177,21 +177,31 @@ export default function WorkspacePlanPage() {
             // Keep the label stable while the handoff is in flight — billing-
             // disabled deployments 503 in milliseconds, and a label swap
             // (label → "opening…" → label) reads as a flicker. The in-flight
-            // state is the icon-turned-spinner + disabled, announced to screen
-            // readers via the sr-only span.
-            <Button onClick={handleManageBilling} disabled={upgrading}>
-              {upgrading ? (
-                <InlineSpinner size="sm" className="mr-2" />
-              ) : (
-                <Sparkles className="mr-2 h-4 w-4" />
-              )}
-              {isSubscribed
-                ? t("planPage.reviewOrChangePlan")
-                : t("planPage.manageBilling")}
-              {upgrading && (
-                <span className="sr-only">{t("planPage.opening")}</span>
-              )}
-            </Button>
+            // state is the icon-turned-spinner + disabled + aria-busy, and the
+            // change is announced to screen readers via a role="status" live
+            // region (a bare sr-only span isn't reliably re-read on toggle).
+            <>
+              <Button
+                onClick={handleManageBilling}
+                disabled={upgrading}
+                aria-busy={upgrading}
+              >
+                {upgrading ? (
+                  <InlineSpinner size="sm" className="mr-2" />
+                ) : (
+                  <Sparkles className="mr-2 h-4 w-4" />
+                )}
+                {isSubscribed
+                  ? t("planPage.reviewOrChangePlan")
+                  : t("planPage.manageBilling")}
+              </Button>
+              {/* Always-mounted live region so the in-flight state is
+                  reliably announced when its text flips (a conditionally
+                  rendered sr-only span is not re-read on toggle). */}
+              <span role="status" aria-live="polite" className="sr-only">
+                {upgrading ? t("planPage.opening") : ""}
+              </span>
+            </>
           ) : (
             <p className="text-sm text-gray-500 dark:text-gray-400">
               {t("planPage.ownerOnly")}

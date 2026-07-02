@@ -153,15 +153,29 @@ describe("WorkspacePlanPage (#1141)", () => {
     const button = await screen.findByRole("button", {
       name: /planPage\.reviewOrChangePlan/,
     });
+    // A persistent role="status" live region exists and is empty at rest, so
+    // assistive tech reliably announces when its text flips (a conditionally
+    // mounted sr-only span is not re-read on toggle).
+    const liveRegion = screen.getByRole("status");
+    expect(liveRegion).toHaveClass("sr-only");
+    expect(liveRegion).toHaveTextContent("");
+
     fireEvent.click(button);
     // In flight the visible label must NOT swap (billing-disabled deployments
     // reject in milliseconds → a swap reads as a flicker). Busy state = spinner
-    // + disabled + sr-only announcement instead.
+    // + disabled + aria-busy + the live region announcing "opening".
     expect(screen.getByText("planPage.reviewOrChangePlan")).toBeInTheDocument();
-    expect(screen.getByText("planPage.opening")).toHaveClass("sr-only");
     expect(button).toBeDisabled();
+    expect(button).toHaveAttribute("aria-busy", "true");
+    expect(liveRegion).toHaveTextContent("planPage.opening");
+    // The visible affordance is the spinner, not a text swap: assert the
+    // Sparkles icon was replaced by the spinner (no lucide-sparkles present).
+    expect(button.querySelector(".lucide-sparkles")).toBeNull();
+
     resolveHandoff({});
     await waitFor(() => expect(button).not.toBeDisabled());
+    expect(button).toHaveAttribute("aria-busy", "false");
+    expect(liveRegion).toHaveTextContent("");
   });
 
   it("non-owner sees the owner-only note and no billing button", async () => {
