@@ -238,3 +238,28 @@ class TestOwnerProvisionedRevoke:
         _override(_oauth())
         r = client.delete(REVOKE_URL)
         assert r.status_code == 403
+
+    def test_programmatic_self_revoke_is_soft(self, client, owner_gate, monkeypatch):
+        # #1165 / Copilot #1171: an API-key owner revoking their OWN key is a
+        # soft revoke + audit too — never a silent hard delete.
+        _override(_api_key_owner(user_id="owner-key"))
+        _mock_member_service(monkeypatch, target_role="owner")  # self role irrelevant here
+
+        api_key = MagicMock()
+        api_key.id = 7
+        api_key.workspace_id = _WS
+        api_key.bound_context_id = None
+        api_key.revoked_at = None
+        api_key.key_prefix = "kagura_self"
+        fake_db = self._fake_db_with_key(api_key)
+
+        async def _get_db():
+            yield fake_db
+
+        app.dependency_overrides[get_db] = _get_db
+
+        r = client.delete(f"/api/v1/workspaces/{_WS}/members/owner-key/credentials/api-keys/7")
+        assert r.status_code == 200, r.text
+        assert r.json()["status"] == "revoked"
+        assert api_key.revoked_at is not None
+        fake_db.delete.assert_not_called()

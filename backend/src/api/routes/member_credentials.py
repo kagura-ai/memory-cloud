@@ -158,7 +158,8 @@ async def _owner_provisioned_mint(
                 user_metadata={
                     "workspace_id": str(workspace_id),
                     "target": user_id,
-                    "key_prefix": new_key.key_prefix,
+                    "key_prefix": new_key.key_prefix,  # the MINTED key
+                    "actor_key_prefix": user.get("api_key_prefix"),  # the ACTING owner key
                     "expires_days": data.expires_days,
                     "via": "api_key",
                 },
@@ -417,8 +418,9 @@ async def create_api_key(
 
     Issue #1165: two principals.
     - **Session** (web UI): self-mint only (``#252`` unchanged) — the caller
-      may only mint their OWN key; ``expires_days`` optional; ``bound_context_id``
-      still allowed (#626 public-bound path).
+      may only mint their OWN key. ``expires_days`` is NOT accepted on this path
+      (400 if supplied — session keys keep their historical no-expiry behavior);
+      ``bound_context_id`` is still allowed (#626 public-bound path).
     - **API-key owner** (programmatic): may mint for ANOTHER member, gated to
       workspace-OWNER on the path workspace. Guardrails: 403 when target ==
       caller (anti self-replication, #252 threat); 403 unless the target's
@@ -789,16 +791,16 @@ async def delete_api_key_by_id(
     # needs the original ``bound_context_id``.
     bound_ctx_id = api_key.bound_context_id
 
-    # Issue #1165: owner-provisioned cross-member revocation is a SOFT revoke
-    # (revoked_at set, row retained for forensics) rather than a row delete.
-    # The audit row and the revoked_at update are added together and committed
-    # in one transaction (atomic — no partial commit); ordering the audit add
-    # before the state change is for readability, not durability. Session
+    # Issue #1165: ALL programmatic (API-key) revocations are SOFT revokes
+    # (revoked_at set, row retained for forensics) + audited — including an
+    # owner revoking their OWN key, so a programmatic credential action is
+    # never a silent hard delete (Copilot review, PR #1171). The audit row and
+    # the revoked_at update commit atomically in one transaction. Session
     # self-delete keeps the existing hard-delete semantics (#252, #626).
-    owner_provisioned = programmatic and user_id != caller_id
+    soft_revoke = programmatic
     from models.auth import AuditLog
 
-    if owner_provisioned:
+    if soft_revoke:
         db.add(
             AuditLog(
                 user_email=user.get("email") or f"{caller_id}@api",
@@ -808,7 +810,9 @@ async def delete_api_key_by_id(
                 user_metadata={
                     "workspace_id": str(workspace_id),
                     "target": user_id,
-                    "key_prefix": api_key.key_prefix,
+                    "key_prefix": api_key.key_prefix,  # the REVOKED key
+                    "actor_key_prefix": user.get("api_key_prefix"),  # the ACTING owner key
+                    "self_revoke": user_id == caller_id,
                     "via": "api_key",
                 },
             )
