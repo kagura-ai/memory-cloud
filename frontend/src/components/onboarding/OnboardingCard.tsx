@@ -44,6 +44,7 @@ import { hasWorkspaceRole, WorkspaceRole } from "@/lib/auth/rbac";
 import { getContexts, createContext } from "@/lib/api/contexts";
 import { rememberMemory, recallMemories } from "@/lib/api/memory";
 import { checkOpenAIKeyStatus } from "@/lib/api/workspaces";
+import { useSystemFeatures } from "@/hooks/useSystemFeatures";
 import type { RecallResultItem } from "@/lib/types/memory";
 
 import {
@@ -92,10 +93,19 @@ export function OnboardingCard() {
   const [results, setResults] = useState<RecallResultItem[]>([]);
   const [busy, setBusy] = useState(false);
 
+  // Issue #1167: with BYOK off the key-status probe 404s and env keys serve
+  // embeddings — skip the probe (hasKey keeps its default true → normal
+  // onboarding, no "configure key" CTA pointing at a disabled page).
+  const systemFeatures = useSystemFeatures();
+  const byokEnabled = systemFeatures?.byok === true;
+
   useEffect(() => {
     let alive = true;
     // Wait for the workspace to hydrate — current_user_role is null mid-load.
+    // Also wait for the feature flags (#1167) so the byok gate below reads a
+    // resolved value instead of skipping the probe on the loading state.
     if (workspaceLoading || !currentWorkspace || !currentWorkspaceId) return;
+    if (systemFeatures === null) return;
 
     const dismissed =
       typeof window !== "undefined" &&
@@ -116,9 +126,10 @@ export function OnboardingCard() {
         if (ctx.contexts.length === 0) {
           // Only probe the embedding key when the card will actually show —
           // users with contexts (the vast majority of loads) never see it.
-          const keyStatus = await checkOpenAIKeyStatus(currentWorkspaceId).catch(
-            () => null,
-          );
+          // #1167: skip the probe entirely when BYOK is off (API 404s).
+          const keyStatus = byokEnabled
+            ? await checkOpenAIKeyStatus(currentWorkspaceId).catch(() => null)
+            : null;
           if (!alive) return;
           if (keyStatus) setHasKey(keyStatus.has_key);
           setVisible(true);
@@ -134,7 +145,13 @@ export function OnboardingCard() {
     return () => {
       alive = false;
     };
-  }, [workspaceLoading, currentWorkspace, currentWorkspaceId]);
+  }, [
+    workspaceLoading,
+    currentWorkspace,
+    currentWorkspaceId,
+    systemFeatures,
+    byokEnabled,
+  ]);
 
   const dismiss = useCallback(() => {
     if (typeof window !== "undefined") {
@@ -322,7 +339,9 @@ export function OnboardingCard() {
                 </div>
                 <Button
                   onClick={handleSaveMemory}
-                  disabled={busy || summary.trim().length < 10 || !content.trim()}
+                  disabled={
+                    busy || summary.trim().length < 10 || !content.trim()
+                  }
                 >
                   {busy && <InlineSpinner />}
                   {t("memory.saveButton")}

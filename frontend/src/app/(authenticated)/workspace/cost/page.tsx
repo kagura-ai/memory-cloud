@@ -26,17 +26,24 @@ import { useTranslations } from "next-intl";
 import { PageContainer } from "@/components/common/PageContainer";
 import { PageHeader } from "@/components/common/PageHeader";
 import { ErrorBanner } from "@/components/common/ErrorBanner";
+import { SpinnerLoading } from "@/components/common/LoadingState";
+import { Alert, AlertDescription } from "@/components/ui/alert";
 import {
   CostDashboard,
   type CostDashboardFetchParams,
 } from "@/components/cost/CostDashboard";
 import { useWorkspace } from "@/contexts/WorkspaceContext";
+import { useSystemFeatures } from "@/hooks/useSystemFeatures";
 import { hasWorkspaceRole, WorkspaceRole } from "@/lib/auth/rbac";
 import { fetchWorkspaceCostAggregation } from "@/lib/api";
 
 export default function WorkspaceCostPage() {
   const t = useTranslations("admin.cost");
+  const tCommon = useTranslations("common");
   const { currentWorkspace, currentWorkspaceId, loading } = useWorkspace();
+  // Issue #1167: gated behind the backend ENABLE_BYOK flag (like the plan
+  // page #1145) — the workspace cost API returns 404 when BYOK is off.
+  const systemFeatures = useSystemFeatures();
 
   const allowed = hasWorkspaceRole(
     currentWorkspace?.current_user_role,
@@ -54,6 +61,23 @@ export default function WorkspaceCostPage() {
       fetchWorkspaceCostAggregation(currentWorkspaceId ?? "", params),
     [currentWorkspaceId],
   );
+
+  // Issue #1167: wait for the feature flags, then render a "not available"
+  // notice when byok is off (the sidebar entry is hidden too, so this only
+  // fires on direct navigation).
+  if (systemFeatures === null) {
+    return <SpinnerLoading size="lg" message={tCommon("loading")} />;
+  }
+  if (!systemFeatures.byok) {
+    return (
+      <PageContainer>
+        <PageHeader title={t("title")} />
+        <Alert>
+          <AlertDescription>{t("featureDisabled")}</AlertDescription>
+        </Alert>
+      </PageContainer>
+    );
+  }
 
   // Distinguish "no workspace exists / selected" from "wrong role".
   // Without this branch a brand-new account with zero workspaces would

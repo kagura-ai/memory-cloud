@@ -82,6 +82,7 @@ import { useToast } from "@/hooks/use-toast";
 import { InlineSpinner } from "@/components/common/LoadingState";
 import { useMemoryContext } from "@/contexts/MemoryContextContext";
 import { useWorkspace } from "@/contexts/WorkspaceContext";
+import { useSystemFeatures } from "@/hooks/useSystemFeatures";
 
 export default function ExternalKeysPage() {
   const t = useTranslations("externalKeys");
@@ -143,6 +144,11 @@ export default function ExternalKeysPage() {
 
   const { contextId } = useMemoryContext(); // For context-scoped keys
   const { currentWorkspaceId, currentWorkspace } = useWorkspace(); // For workspace-scoped keys
+  // Issue #1167: gated behind the backend ENABLE_BYOK flag (like the plan
+  // page #1145). null while loading → hold fetches; false → not-available
+  // notice (the /external-keys API returns 404 in that deployment).
+  const systemFeatures = useSystemFeatures();
+  const byokEnabled = systemFeatures?.byok === true;
   const [keys, setKeys] = useState<ExternalAPIKey[]>([]);
   const [loading, setLoading] = useState(true);
   const [createDialogOpen, setCreateDialogOpen] = useState(false);
@@ -198,10 +204,12 @@ export default function ExternalKeysPage() {
     // Workspace-scoped keys are shown for all contexts in the workspace
     // Context-scoped keys are shown for specific context only
     // Issue #213: contextId can be null (user may not have context yet)
-    if (currentWorkspaceId !== null) {
+    // Issue #1167: don't fetch until the byok flag resolves enabled — when
+    // BYOK is off the page short-circuits to a notice and the API 404s.
+    if (currentWorkspaceId !== null && byokEnabled) {
       loadKeys();
     }
-  }, [contextId, currentWorkspaceId]);
+  }, [contextId, currentWorkspaceId, byokEnabled]);
 
   const loadKeys = async () => {
     try {
@@ -347,6 +355,28 @@ export default function ExternalKeysPage() {
     setFormData({ key_name: key.key_name, provider: key.provider, value: "" });
     setEditDialogOpen(true);
   };
+
+  // Issue #1167: the page is gated behind the backend ENABLE_BYOK flag. Wait
+  // for it, then render a "not available" notice when it's off (the sidebar
+  // entry is hidden too, so this only fires on direct navigation).
+  if (systemFeatures === null) {
+    return (
+      <PageContainer>
+        <PageHeader title={t("title")} description={t("description")} />
+        <LoadingState lines={3} />
+      </PageContainer>
+    );
+  }
+  if (!systemFeatures.byok) {
+    return (
+      <PageContainer>
+        <PageHeader title={t("title")} description={t("description")} />
+        <Alert>
+          <AlertDescription>{t("featureDisabled")}</AlertDescription>
+        </Alert>
+      </PageContainer>
+    );
+  }
 
   if (loading && keys.length === 0) {
     return (

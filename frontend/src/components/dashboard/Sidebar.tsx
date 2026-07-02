@@ -121,32 +121,6 @@ const navigationGroups: NavGroup[] = [
         requiredWorkspaceRole: WorkspaceRole.Owner, // Issue #389: Owner-only (resource tokens + schema decisions)
       },
       {
-        nameKey: "members",
-        href: "/workspace/members",
-        icon: Users,
-        showMemberCount: true,
-        requiredWorkspaceRole: WorkspaceRole.Admin, // Issue #398: hide from member/viewer
-      },
-      {
-        // Issue #473: workspace-scoped cost dashboard.
-        // Backend gates owner/admin via check_workspace_admin (#472);
-        // mirror that here so member/viewer don't see a nav entry that
-        // would 403 on click.
-        nameKey: "cost",
-        href: "/workspace/cost",
-        icon: DollarSign,
-        requiredWorkspaceRole: WorkspaceRole.Admin,
-      },
-      {
-        // Issue #526: workspace-scoped sleep reports view.
-        // Backend gates owner/admin; sidebar mirrors so member/viewer
-        // don't see a nav entry that would 403 on click.
-        nameKey: "sleepReports",
-        href: "/workspace/sleep-reports",
-        icon: Moon,
-        requiredWorkspaceRole: WorkspaceRole.Admin,
-      },
-      {
         // Issue #955: workspace-scoped file objects (R2 storage). Backend
         // lists/downloads at viewer+, so the entry is visible to every
         // workspace role; delete is gated to member+ inside the page.
@@ -165,6 +139,36 @@ const navigationGroups: NavGroup[] = [
         href: "/workspace/secrets",
         icon: Lock,
         requiredWorkspaceRole: WorkspaceRole.Admin,
+      },
+      {
+        nameKey: "members",
+        href: "/workspace/members",
+        icon: Users,
+        showMemberCount: true,
+        requiredWorkspaceRole: WorkspaceRole.Admin, // Issue #398: hide from member/viewer
+      },
+      {
+        // Issue #526: workspace-scoped sleep reports view.
+        // Backend gates owner/admin; sidebar mirrors so member/viewer
+        // don't see a nav entry that would 403 on click.
+        nameKey: "sleepReports",
+        href: "/workspace/sleep-reports",
+        icon: Moon,
+        requiredWorkspaceRole: WorkspaceRole.Admin,
+      },
+      {
+        // Issue #473: workspace-scoped cost dashboard.
+        // Backend gates owner/admin via check_workspace_admin (#472);
+        // mirror that here so member/viewer don't see a nav entry that
+        // would 403 on click.
+        // Issue #1167: part of the BYOK surface — hidden when ENABLE_BYOK
+        // is off (the backing API 404s). Reporting entries stay last in
+        // the group: sleepReports, then cost.
+        nameKey: "cost",
+        href: "/workspace/cost",
+        icon: DollarSign,
+        requiredWorkspaceRole: WorkspaceRole.Admin,
+        requiredFeature: "byok",
       },
     ],
   },
@@ -218,6 +222,9 @@ const navigationGroups: NavGroup[] = [
         href: "/workspace/integrations/external-keys",
         icon: KeyRound,
         requiredWorkspaceRole: WorkspaceRole.Owner, // Issue #381: Owner-only (workspace-level secrets)
+        // Issue #1167: the BYOK console itself — hidden when ENABLE_BYOK is
+        // off (its API returns 404).
+        requiredFeature: "byok",
       },
     ],
   },
@@ -359,10 +366,14 @@ export function Sidebar() {
   // The AlertTriangle indicator on the nav item is owner-only too, so this also
   // keeps the `hasExternalKeys=null` path unreachable for non-owners.
   const currentWorkspaceRole = currentWorkspace?.current_user_role;
+  const byokEnabled = systemFeatures?.byok === true;
   useEffect(() => {
     setHasExternalKeys(null);
     if (!currentWorkspaceId) return;
     if (currentWorkspaceRole !== "owner") return;
+    // Issue #1167: with BYOK off the external-keys API 404s and the nav entry
+    // is hidden anyway — skip the probe (also while features are loading).
+    if (!byokEnabled) return;
 
     let cancelled = false;
     listExternalAPIKeys()
@@ -376,7 +387,7 @@ export function Sidebar() {
     return () => {
       cancelled = true;
     };
-  }, [currentWorkspaceId, currentWorkspaceRole]);
+  }, [currentWorkspaceId, currentWorkspaceRole, byokEnabled]);
 
   // Sync collapse state across browser tabs
   useEffect(() => {
