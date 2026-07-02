@@ -147,9 +147,10 @@ async def _measure_placebo(svc, db, corpus, plan, id_map, owner, ctx, ws, seeds)
     true_gold = {p.query_id: p.companion_docs for p in plan.probes}
 
     # --- warm build (once, seed-independent): provisional τ -> replay -> sleep ---
-    tau_info = await _seed_provisional_tau(db, corpus, plan, id_map, ctx)
+    tau_info: dict[str, Any] = {"seeded": False}
     sleep_info: dict[str, Any]
     try:
+        tau_info = await _seed_provisional_tau(db, corpus, plan, id_map, ctx)
         await _replay(svc, corpus, plan, owner, ctx, ws)
         sleep_info = await _run_sleep(db, owner, ctx, ws)
         real_rankings, seeds_in_graph = await _explore_rankings(

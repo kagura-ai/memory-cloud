@@ -14,9 +14,9 @@ from __future__ import annotations
 
 import random
 from collections import defaultdict
+from collections.abc import Callable
 from dataclasses import dataclass, replace
 from statistics import median
-from typing import Callable
 
 from tests.eval.compounding import recall_at_k
 from tests.eval.metrics import mrr_at_k
@@ -145,7 +145,7 @@ def paired_delta_bootstrap(
     if n == 0:
         raise ValueError("paired inputs are empty — nothing to bootstrap")
 
-    diffs = [a - b for a, b in zip(per_probe_a, per_probe_b)]
+    diffs = [a - b for a, b in zip(per_probe_a, per_probe_b, strict=True)]
     point = sum(diffs) / n
 
     rng = random.Random(seed)

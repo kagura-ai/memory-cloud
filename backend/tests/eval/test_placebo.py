@@ -149,7 +149,9 @@ def test_bootstrap_point_estimate_is_the_paired_mean():
     a = [1.0, 0.8, 0.6, 0.4]
     b = [0.0, 0.2, 0.1, 0.0]
     out = paired_delta_bootstrap(a, b, seed=1, resamples=2000)
-    assert out["delta"] == pytest.approx(sum(x - y for x, y in zip(a, b)) / len(a), abs=1e-9)
+    assert out["delta"] == pytest.approx(
+        sum(x - y for x, y in zip(a, b, strict=True)) / len(a), abs=1e-9
+    )
     assert out["n"] == 4
     assert out["lo"] <= out["delta"] <= out["hi"]
     assert out["lo"] < out["hi"]  # non-degenerate data -> real interval width (not a stub)
@@ -183,8 +185,11 @@ def test_bootstrap_raises_on_length_mismatch_or_empty():
 
 def test_median_cross_topic_ignores_same_source_pairs():
     doc_vec = {"a": [1.0], "b": [2.0], "c": [3.0]}
+
     # cosine_fn returns the product of the single components (a stand-in metric)
-    cos = lambda u, v: u[0] * v[0]
+    def cos(u, v):
+        return u[0] * v[0]
+
     source = {"a": "memory", "b": "resource", "c": "memory"}
     gold_pairs = {frozenset(("a", "b")), frozenset(("a", "c")), frozenset(("b", "c"))}
     # cross-topic pairs: a-b (1*2=2), b-c (2*3=6); a-c is same-source -> skipped
@@ -194,7 +199,10 @@ def test_median_cross_topic_ignores_same_source_pairs():
 
 def test_median_cross_topic_returns_none_when_no_cross_topic_pair():
     doc_vec = {"a": [1.0], "b": [2.0]}
-    cos = lambda u, v: u[0] * v[0]
+
+    def cos(u, v):
+        return u[0] * v[0]
+
     source = {"a": "memory", "b": "memory"}
     gold_pairs = {frozenset(("a", "b"))}
     assert median_cross_topic_gold_pair_cosine(doc_vec, gold_pairs, source, cosine_fn=cos) is None
@@ -202,7 +210,10 @@ def test_median_cross_topic_returns_none_when_no_cross_topic_pair():
 
 def test_median_cross_topic_skips_pair_missing_a_vector():
     doc_vec = {"a": [1.0]}  # b has no vector -> the only gold pair is skipped
-    cos = lambda u, v: u[0] * v[0]
+
+    def cos(u, v):
+        return u[0] * v[0]
+
     source = {"a": "memory", "b": "resource"}
     gold_pairs = {frozenset(("a", "b"))}
     assert median_cross_topic_gold_pair_cosine(doc_vec, gold_pairs, source, cosine_fn=cos) is None
@@ -211,7 +222,10 @@ def test_median_cross_topic_skips_pair_missing_a_vector():
 def test_median_cross_topic_skips_degenerate_single_element_pair():
     # A gold "pair" that collapsed to one doc (seed == companion) must be skipped, not crash.
     doc_vec = {"a": [1.0]}
-    cos = lambda u, v: u[0] * v[0]
+
+    def cos(u, v):
+        return u[0] * v[0]
+
     source = {"a": "memory"}
     gold_pairs = {frozenset(("a",))}
     assert median_cross_topic_gold_pair_cosine(doc_vec, gold_pairs, source, cosine_fn=cos) is None
