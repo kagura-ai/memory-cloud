@@ -260,8 +260,12 @@ async def run_retrieval_eval(write: bool = True, run_date: str | None = None) ->
     Returns the results dict (also written to disk when ``write``).
     """
     from auth.workspace_roles import WorkspaceRole
+    from config.constants import EMBEDDING_MODEL_REGISTRY
+    from config.settings import get_settings
     from db.base import get_db
+    from db.qdrant import ensure_kagura_memories_collection, get_collection_name
     from models.auth import Context, Workspace, WorkspaceMember
+    from models.config import ContextSearchConfig
     from services.memory_service import MemoryService
     from utils.datetime import utcnow
 
@@ -293,8 +297,27 @@ async def run_retrieval_eval(write: bool = True, run_date: str | None = None) ->
         # checks workspace_members — owner_user_id alone is NOT a membership, so
         # without this row get_context raises NotFoundException on first ingest.
         db.add(WorkspaceMember(workspace_id=ws.id, user_id=owner, role=WorkspaceRole.OWNER))
+        # The raw ORM Context above bypasses ContextService.create_context, which
+        # is where the per-context embedding config is stamped from settings and
+        # the model-specific Qdrant collection is ensured. Without an explicit
+        # ContextSearchConfig row, the lazy create_or_get defaults to
+        # text-embedding-3-small/512 and ingest routes to a collection that does
+        # not exist on non-default embedding stacks (e.g. a local
+        # qwen3-embedding:0.6b/1024 rig) — stamp the config and ensure the
+        # collection exactly like the production create path.
+        settings = get_settings()
+        emb_model = settings.embedding_model
+        emb_dims = EMBEDDING_MODEL_REGISTRY.get(emb_model, (settings.embedding_dimensions, ""))[0]
+        db.add(
+            ContextSearchConfig(
+                context_id=ctx.id,
+                embedding_model=emb_model,
+                embedding_dimensions=emb_dims,
+            )
+        )
         await db.flush()
         await db.commit()
+        await ensure_kagura_memories_collection(emb_dims, get_collection_name(emb_model, emb_dims))
 
         svc = MemoryService(db)
         # id_map is owned here and populated incrementally by _ingest_corpus, so
