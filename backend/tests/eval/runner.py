@@ -308,23 +308,36 @@ async def run_retrieval_eval(write: bool = True, run_date: str | None = None) ->
         settings = get_settings()
         emb_model = settings.embedding_model
         emb_dims = EMBEDDING_MODEL_REGISTRY.get(emb_model, (settings.embedding_dimensions, ""))[0]
+        # Mirror ContextService.create_context's defaults (not just the
+        # embedding fields) so an eval context behaves like a production one if
+        # any reranking / weighting default is ever consulted.
         db.add(
             ContextSearchConfig(
                 context_id=ctx.id,
+                semantic_weight=0.6,
+                fetch_factor=3,
+                use_rerank=False,
+                reranker_provider="voyage",
+                reranker_model="rerank-2-lite",
                 embedding_model=emb_model,
                 embedding_dimensions=emb_dims,
             )
         )
         await db.flush()
         await db.commit()
-        await ensure_kagura_memories_collection(emb_dims, get_collection_name(emb_model, emb_dims))
 
         svc = MemoryService(db)
         # id_map is owned here and populated incrementally by _ingest_corpus, so
         # the finally below ALWAYS cleans up whatever was created — even if
         # ingest itself raises partway through (no leaked workspace/context/rows).
+        # ensure_kagura_memories_collection is INSIDE the try so that if it
+        # raises (e.g. Qdrant unavailable), _teardown still removes the
+        # already-committed workspace/context/config rows instead of leaking them.
         id_map: dict[str, str] = {}
         try:
+            await ensure_kagura_memories_collection(
+                emb_dims, get_collection_name(emb_model, emb_dims)
+            )
             await _ingest_corpus(svc, corpus, owner, ctx.id, ws.id, id_map)
             return await _run_queries_and_score(
                 svc, corpus, docs_by_id, id_map, owner, ctx.id, ws.id, run_date, write
