@@ -390,6 +390,16 @@ class InvitationService:
         if invitation.is_expired():
             raise ValidationError("This invitation has expired. Please request a new invitation.")
 
+        # Issue #1166 defense in depth: refuse pending owner-role invitations.
+        # create_invitation now rejects them, but rows minted before the fix
+        # (or via direct DB access) may still exist — accept must not grant
+        # the owner role. This policy rejection runs BEFORE the email-restriction
+        # check: the invitation is invalid by policy regardless of who presents
+        # it, and checking email first would leak the restricted address to a
+        # wrong-email caller via the mismatch error (Copilot review, PR #1169).
+        if invitation.role == WorkspaceRole.OWNER:
+            raise ValidationError(OWNER_INVITE_REJECTED_MSG)
+
         # Check email restriction (case-insensitive)
         if invitation.email:
             if invitation.email.lower() != user_email.lower():
@@ -397,13 +407,6 @@ class InvitationService:
                     f"This invitation is restricted to {invitation.email}. "
                     f"You are logged in as {user_email}."
                 )
-
-        # Issue #1166 defense in depth: refuse pending owner-role invitations.
-        # create_invitation now rejects them, but rows minted before the fix
-        # (or via direct DB access) may still exist — accept must not grant
-        # the owner role.
-        if invitation.role == WorkspaceRole.OWNER:
-            raise ValidationError(OWNER_INVITE_REJECTED_MSG)
 
         # Check if user is already a member
         stmt = select(WorkspaceMember).where(

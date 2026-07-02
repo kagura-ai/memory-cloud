@@ -712,6 +712,34 @@ class TestAcceptInvitation:
                 token=inv.token, user_id=accepter.user_id, user_email="anyone@example.com"
             )
 
+    async def test_accept_owner_role_rejected_before_email_check(self, db_session):
+        """#1166 / PR #1169: the owner-policy rejection fires BEFORE the email check.
+
+        A legacy owner invitation WITH an email restriction, presented by a
+        wrong-email caller, must surface the owner-policy rejection — not the
+        email-mismatch error, which would leak the restricted address for an
+        invitation that is invalid by policy regardless of who presents it.
+        """
+        owner = await _make_user(db_session)
+        ws = await _make_workspace(db_session, owner_user_id=owner.user_id, plan_name="pro")
+        inv = WorkspaceInvitation(
+            workspace_id=ws.id,
+            token=uuid.uuid4().hex + uuid.uuid4().hex,
+            email="restricted@example.com",
+            role="owner",
+            invited_by=owner.user_id,
+        )
+        db_session.add(inv)
+        await db_session.flush()
+        accepter = await _make_user(db_session)
+        svc = _service(db_session)
+        with pytest.raises(ValidationError, match="ownership transfer") as exc_info:
+            await svc.accept_invitation(
+                token=inv.token, user_id=accepter.user_id, user_email="wrong@example.com"
+            )
+        # The restricted email must NOT appear in the error (no leak).
+        assert "restricted@example.com" not in str(exc_info.value)
+
     async def test_accept_with_no_email_restriction(self, db_session):
         """An invitation with no email restriction can be accepted by anyone."""
         owner = await _make_user(db_session)
