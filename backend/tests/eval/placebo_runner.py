@@ -102,8 +102,12 @@ async def _run_placebo_mode(corpus: Any, plan: Any, seeds: tuple[int, ...]) -> d
     """Provision an isolated workspace, build the warm graph once, run every
     seed's placebo arms off it, tear down."""
     from auth.workspace_roles import WorkspaceRole
+    from config.constants import EMBEDDING_MODEL_REGISTRY
+    from config.settings import get_settings
     from db.base import get_db
+    from db.qdrant import ensure_kagura_memories_collection, get_collection_name
     from models.auth import Context, Workspace, WorkspaceMember
+    from models.config import ContextSearchConfig
     from services.memory_service import MemoryService
 
     async for db in get_db():
@@ -128,12 +132,36 @@ async def _run_placebo_mode(corpus: Any, plan: Any, seeds: tuple[int, ...]) -> d
         await db.flush()
         db.add(ctx)
         db.add(WorkspaceMember(workspace_id=ws.id, user_id=owner, role=WorkspaceRole.OWNER))
+        # The raw ORM Context bypasses ContextService.create_context, which stamps
+        # the per-context embedding config and ensures the model-specific Qdrant
+        # collection. Without an explicit ContextSearchConfig the lazy create_or_get
+        # defaults to text-embedding-3-small/512 and ingest routes to a collection
+        # that does not exist on a qwen3-embedding:0.6b/1024 rig — stamp it exactly
+        # like the production create path (mirrors runner.py's eval provisioning).
+        settings = get_settings()
+        emb_model = settings.embedding_model
+        emb_dims = EMBEDDING_MODEL_REGISTRY.get(emb_model, (settings.embedding_dimensions, ""))[0]
+        db.add(
+            ContextSearchConfig(
+                context_id=ctx.id,
+                semantic_weight=0.6,
+                fetch_factor=3,
+                use_rerank=False,
+                reranker_provider="voyage",
+                reranker_model="rerank-2-lite",
+                embedding_model=emb_model,
+                embedding_dimensions=emb_dims,
+            )
+        )
         await db.flush()
         await db.commit()
 
         svc = MemoryService(db)
         id_map: dict[str, str] = {}
         try:
+            await ensure_kagura_memories_collection(
+                emb_dims, get_collection_name(emb_model, emb_dims)
+            )
             await _ingest_corpus(svc, corpus, owner, ctx.id, ws.id, id_map)
             return await _measure_placebo(svc, db, corpus, plan, id_map, owner, ctx, ws, seeds)
         finally:
