@@ -18,6 +18,9 @@ from dataclasses import dataclass, replace
 from statistics import median
 from typing import Callable
 
+from tests.eval.compounding import recall_at_k
+from tests.eval.metrics import mrr_at_k
+
 
 @dataclass(frozen=True)
 class Edge:
@@ -185,3 +188,23 @@ def median_cross_topic_gold_pair_cosine(
     if not cosines:
         return None
     return median(cosines)
+
+
+def recovery_from_rankings(
+    rankings: list[tuple[str, list[str]]],
+    gold_map: dict[str, tuple[str, ...]],
+    *,
+    at: tuple[int, ...] = (5, 10),
+    mrr_at: int = 10,
+) -> dict:
+    """Score explore() rankings against a gold assignment (one scorer for all
+    three arms). ``rankings`` is [(query_id, ranked_docs)] in probe order;
+    ``gold_map`` maps query_id -> gold companion docs. Returns mean recovery@k,
+    mrr@k, and the per-probe recovery@10 list (paired-bootstrap input)."""
+    pairs = [(ranked, set(gold_map[qid])) for qid, ranked in rankings]
+    result: dict = {"n": len(pairs)}
+    for k in at:
+        result[f"recovery@{k}"] = round(sum(recall_at_k(r, g, k) for r, g in pairs) / len(pairs), 4)
+    result[f"mrr@{mrr_at}"] = round(mrr_at_k(pairs, mrr_at), 4)
+    result["per_probe@10"] = [round(recall_at_k(r, g, 10), 4) for r, g in pairs]
+    return result

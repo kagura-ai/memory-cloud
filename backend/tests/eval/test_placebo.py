@@ -18,6 +18,7 @@ from tests.eval.placebo import (
     median_cross_topic_gold_pair_cosine,
     paired_delta_bootstrap,
     permute_gold,
+    recovery_from_rankings,
 )
 
 
@@ -214,3 +215,15 @@ def test_median_cross_topic_skips_degenerate_single_element_pair():
     source = {"a": "memory"}
     gold_pairs = {frozenset(("a",))}
     assert median_cross_topic_gold_pair_cosine(doc_vec, gold_pairs, source, cosine_fn=cos) is None
+
+
+def test_recovery_from_rankings_scores_against_the_gold_map():
+    # probe q1: gold {b, c}; ranked [b, x, c] -> recovery@10 = 2/2 = 1.0
+    # probe q2: gold {d};    ranked [x, y]    -> recovery@10 = 0/1 = 0.0
+    rankings = [("q1", ["b", "x", "c"]), ("q2", ["x", "y"])]
+    gold_map = {"q1": ("b", "c"), "q2": ("d",)}
+    out = recovery_from_rankings(rankings, gold_map)
+
+    assert out["n"] == 2
+    assert out["recovery@10"] == pytest.approx((1.0 + 0.0) / 2)
+    assert out["per_probe@10"] == [pytest.approx(1.0), pytest.approx(0.0)]
