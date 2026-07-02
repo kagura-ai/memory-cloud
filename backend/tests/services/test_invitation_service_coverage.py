@@ -252,12 +252,12 @@ class TestCreateInvitation:
         assert inv.allowed_context_ids is None
 
     async def test_owner_role_with_existing_owner_raises(self, db_session):
-        """Single-owner constraint blocks a second owner invite."""
+        """#1166: owner invitations are rejected outright (existing owner)."""
         owner = await _make_user(db_session)
         ws = await _make_workspace(db_session, owner_user_id=owner.user_id)
         await _make_member(db_session, workspace_id=ws.id, user_id=owner.user_id, role="owner")
         svc = _service(db_session)
-        with pytest.raises(ValidationError, match="already has an owner"):
+        with pytest.raises(ValidationError, match="ownership transfer"):
             await svc.create_invitation(
                 workspace_id=ws.id,
                 invited_by=owner.user_id,
@@ -265,18 +265,25 @@ class TestCreateInvitation:
                 role="owner",
             )
 
-    async def test_owner_role_without_existing_owner_succeeds(self, db_session):
-        """An owner invite is allowed when no owner member exists yet."""
+    async def test_owner_role_rejected_even_without_existing_owner(self, db_session):
+        """#1166: owner invitations are rejected even in a zero-owner state.
+
+        Before #1166 this path SUCCEEDED (the #165 single-owner check only
+        fired when an owner row existed), which was the escalation edge: an
+        invitation minted in a corrupted zero-owner state — or racing
+        transfer_ownership — granted the owner role on accept. The sanctioned
+        owner-change path is the ownership-transfer flow.
+        """
         owner = await _make_user(db_session)
         ws = await _make_workspace(db_session, owner_user_id=owner.user_id)
         svc = _service(db_session)
-        inv = await svc.create_invitation(
-            workspace_id=ws.id,
-            invited_by=owner.user_id,
-            email="owner@example.com",
-            role="owner",
-        )
-        assert inv.role == "owner"
+        with pytest.raises(ValidationError, match="ownership transfer"):
+            await svc.create_invitation(
+                workspace_id=ws.id,
+                invited_by=owner.user_id,
+                email="owner@example.com",
+                role="owner",
+            )
 
     async def test_invalid_expires_in_days_raises(self, db_session):
         """An expiry not in EXPIRY_PRESETS is rejected."""
@@ -679,6 +686,32 @@ class TestAcceptInvitation:
                 token=inv.token, user_id=accepter.user_id, user_email="invitee@example.com"
             )
 
+    async def test_accept_owner_role_invitation_rejected(self, db_session):
+        """#1166: a pending role=owner invitation is refused at accept.
+
+        Defense in depth: create now rejects owner invitations, but rows
+        minted before the fix (or via direct DB access) may still exist.
+        Accept must not grant the owner role — the ownership-transfer flow
+        is the only sanctioned path.
+        """
+        owner = await _make_user(db_session)
+        ws = await _make_workspace(db_session, owner_user_id=owner.user_id, plan_name="pro")
+        inv = WorkspaceInvitation(
+            workspace_id=ws.id,
+            token=uuid.uuid4().hex + uuid.uuid4().hex,
+            email=None,
+            role="owner",
+            invited_by=owner.user_id,
+        )
+        db_session.add(inv)
+        await db_session.flush()
+        accepter = await _make_user(db_session)
+        svc = _service(db_session)
+        with pytest.raises(ValidationError, match="ownership transfer"):
+            await svc.accept_invitation(
+                token=inv.token, user_id=accepter.user_id, user_email="anyone@example.com"
+            )
+
     async def test_accept_with_no_email_restriction(self, db_session):
         """An invitation with no email restriction can be accepted by anyone."""
         owner = await _make_user(db_session)
@@ -900,3 +933,27 @@ class TestGetPendingInvitationsForEmail:
         assert live.id in ids
         assert accepted.id not in ids
         assert expired.id not in ids
+
+
+class TestInvitationSchemaOwnerRejection:
+    """#1166: the request schema refuses role=owner at the validation layer.
+
+    FastAPI surfaces this as a 422 on POST /workspaces/{id}/invitations —
+    before any route or service code runs — pointing the caller at the
+    ownership-transfer flow.
+    """
+
+    def test_role_owner_rejected(self):
+        from pydantic import ValidationError as PydanticValidationError
+
+        from models.schemas import WorkspaceInvitationCreate
+
+        with pytest.raises(PydanticValidationError, match="ownership transfer"):
+            WorkspaceInvitationCreate(email="x@example.com", role="owner")
+
+    def test_non_owner_roles_accepted(self):
+        from models.schemas import WorkspaceInvitationCreate
+
+        for role in ("admin", "member", "viewer"):
+            req = WorkspaceInvitationCreate(email="x@example.com", role=role)
+            assert req.role == role
