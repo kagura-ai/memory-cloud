@@ -20,7 +20,10 @@ import { Sparkles } from "lucide-react";
 import { PageContainer } from "@/components/common/PageContainer";
 import { PageHeader } from "@/components/common/PageHeader";
 import { Section } from "@/components/common/Section";
-import { SpinnerLoading } from "@/components/common/LoadingState";
+import {
+  InlineSpinner,
+  SpinnerLoading,
+} from "@/components/common/LoadingState";
 import { ErrorBanner } from "@/components/common/ErrorBanner";
 import { Button } from "@/components/ui/button";
 import { useWorkspace } from "@/contexts/WorkspaceContext";
@@ -171,13 +174,23 @@ export default function WorkspacePlanPage() {
             )}
           </div>
           {isOwner ? (
+            // Keep the label stable while the handoff is in flight — billing-
+            // disabled deployments 503 in milliseconds, and a label swap
+            // (label → "opening…" → label) reads as a flicker. The in-flight
+            // state is the icon-turned-spinner + disabled, announced to screen
+            // readers via the sr-only span.
             <Button onClick={handleManageBilling} disabled={upgrading}>
-              <Sparkles className="mr-2 h-4 w-4" />
-              {upgrading
-                ? t("planPage.opening")
-                : isSubscribed
-                  ? t("planPage.reviewOrChangePlan")
-                  : t("planPage.manageBilling")}
+              {upgrading ? (
+                <InlineSpinner size="sm" className="mr-2" />
+              ) : (
+                <Sparkles className="mr-2 h-4 w-4" />
+              )}
+              {isSubscribed
+                ? t("planPage.reviewOrChangePlan")
+                : t("planPage.manageBilling")}
+              {upgrading && (
+                <span className="sr-only">{t("planPage.opening")}</span>
+              )}
             </Button>
           ) : (
             <p className="text-sm text-gray-500 dark:text-gray-400">
