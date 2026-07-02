@@ -15,7 +15,8 @@ from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy import func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from auth.dependencies import get_current_user
+from auth.dependencies import APIKeyOrSessionUser, get_current_user
+from auth.programmatic_workspace_auth import authorize_workspace_management
 from auth.workspace_roles import WorkspaceRole
 from db.base import get_db
 from models.auth import Workspace, WorkspaceInvitation, WorkspaceMember
@@ -28,7 +29,6 @@ from models.schemas import (
     WorkspaceInvitationResponse,
 )
 from services.invitation_service import InvitationService, build_invitation_url
-from services.permission_service import PermissionService
 from utils.datetime import to_utc_iso, utcnow
 from utils.exceptions import NotFoundException, ValidationError
 from utils.logger import get_logger
@@ -53,7 +53,7 @@ __all__ = ["router", "build_invitation_url"]
 async def create_invitation(
     workspace_id: UUID,
     request: WorkspaceInvitationCreate,
-    current_user: dict = Depends(get_current_user),
+    current_user: APIKeyOrSessionUser,
     db: AsyncSession = Depends(get_db),
 ) -> WorkspaceInvitationResponse:
     """Create workspace invitation.
@@ -77,13 +77,11 @@ async def create_invitation(
     user_id = current_user.get("user_id")
 
     try:
-        perm_service = PermissionService(db)
-
-        # SECURITY: Workspace boundary check
-        # Issue #268/#269: Membership verification is sufficient
-        # check_workspace_access ensures user is admin of this workspace
-        await perm_service.check_workspace_access(
-            user_id, workspace_id, required_role=WorkspaceRole.ADMIN
+        # Issue #1164: session admin+ (unchanged) OR workspace-owner API key;
+        # OAuth 403. role=owner is already rejected at the schema layer (#1166),
+        # so no programmatic owner-invite branch is needed here.
+        await authorize_workspace_management(
+            current_user, workspace_id, db, session_required_role=WorkspaceRole.ADMIN
         )
 
         # Check plan tier (Issue #165 - invitations require Pro plan)
@@ -178,35 +176,25 @@ async def create_invitation(
 )
 async def list_invitations(
     workspace_id: UUID,
+    current_user: APIKeyOrSessionUser,
     include_accepted: bool = False,
-    current_user: dict = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ) -> list[WorkspaceInvitationResponse]:
     """List workspace invitations.
 
-    Permission: Requires workspace owner or admin role.
-
-    Args:
-        workspace_id: Workspace ID
-        include_accepted: Include accepted invitations (default: False)
-        current_user: Authenticated user
-        db: Database session
-
-    Returns:
-        List of invitations
+    Issue #1164: session admin+ (unchanged) OR workspace-owner API key.
+    For PROGRAMMATIC principals the live ``token`` / ``invitation_url``
+    (bearer join-credentials) are omitted — the token is only ever returned
+    in the POST create response — so CI logs never become a workspace-join
+    credential dump.
 
     Raises:
-        HTTPException 403: Insufficient permissions
+        HTTPException 403: Insufficient permissions.
     """
-    user_id = current_user.get("user_id")
-
-    perm_service = PermissionService(db)
-
-    # SECURITY: Workspace boundary check
-    # Issue #268/#269: Membership verification is sufficient
-    await perm_service.check_workspace_access(
-        user_id, workspace_id, required_role=WorkspaceRole.ADMIN
+    principal = await authorize_workspace_management(
+        current_user, workspace_id, db, session_required_role=WorkspaceRole.ADMIN
     )
+    expose_token = principal.kind == "session"
 
     invitation_service = InvitationService(db)
     invitations = await invitation_service.list_invitations(
@@ -217,7 +205,7 @@ async def list_invitations(
         WorkspaceInvitationResponse(
             id=inv.id,
             workspace_id=inv.workspace_id,
-            token=inv.token,
+            token=inv.token if expose_token else None,
             email=inv.email,
             role=inv.role,
             invited_by=inv.invited_by,
@@ -225,7 +213,7 @@ async def list_invitations(
             accepted_at=inv.accepted_at,
             accepted_by=inv.accepted_by,
             created_at=inv.created_at,
-            invitation_url=build_invitation_url(inv.token),
+            invitation_url=build_invitation_url(inv.token) if expose_token else None,
             is_expired=inv.is_expired(),
             is_accepted=inv.is_accepted(),
             allowed_context_ids=(
@@ -246,21 +234,12 @@ async def list_invitations(
 async def delete_invitation(
     workspace_id: UUID,
     invitation_id: int,
-    current_user: dict = Depends(get_current_user),
+    current_user: APIKeyOrSessionUser,
     db: AsyncSession = Depends(get_db),
 ) -> dict:
     """Delete (revoke) invitation.
 
-    Permission: Requires workspace owner or admin role.
-
-    Args:
-        workspace_id: Workspace ID
-        invitation_id: Invitation ID
-        current_user: Authenticated user
-        db: Database session
-
-    Returns:
-        Success response
+    Issue #1164: session admin+ (unchanged) OR workspace-owner API key.
 
     Raises:
         HTTPException 403: Insufficient permissions
@@ -269,12 +248,8 @@ async def delete_invitation(
     user_id = current_user.get("user_id")
 
     try:
-        perm_service = PermissionService(db)
-
-        # SECURITY: Workspace boundary check
-        # Issue #268/#269: Membership verification is sufficient
-        await perm_service.check_workspace_access(
-            user_id, workspace_id, required_role=WorkspaceRole.ADMIN
+        await authorize_workspace_management(
+            current_user, workspace_id, db, session_required_role=WorkspaceRole.ADMIN
         )
 
         invitation_service = InvitationService(db)
@@ -504,7 +479,7 @@ async def get_invitation_info(
 )
 async def get_member_quota(
     workspace_id: UUID,
-    current_user: dict = Depends(get_current_user),
+    current_user: APIKeyOrSessionUser,
     db: AsyncSession = Depends(get_db),
 ) -> dict:
     """Get member quota status for frontend display.
@@ -512,31 +487,14 @@ async def get_member_quota(
     Returns current members, pending invitations, and available seats.
 
     Issue #229: Display seat usage in UI.
-
-    Args:
-        workspace_id: Workspace ID
-        current_user: Current authenticated user
-        db: Database session
-
-    Returns:
-        Dictionary with quota information:
-            - current_members: Number of current workspace members
-            - pending_invitations: Number of pending (non-expired) invitations
-            - total_used: Sum of members + pending invitations
-            - limit: Maximum members allowed for plan
-            - available: Remaining seats available
-            - percentage: Usage percentage
-            - can_invite: Whether more invitations can be created
+    Issue #1164: session member+ (unchanged) OR workspace-owner API key.
 
     Raises:
         HTTPException: 403 if user lacks access, 404 if workspace not found
     """
-    user_id = current_user.get("user_id")
-
-    # Check permission (at least member access required)
-    perm_service = PermissionService(db)
-    await perm_service.check_workspace_access(
-        user_id, workspace_id, required_role=WorkspaceRole.MEMBER
+    # Issue #1164: session member+ gate; API key requires owner; OAuth 403.
+    await authorize_workspace_management(
+        current_user, workspace_id, db, session_required_role=WorkspaceRole.MEMBER
     )
 
     # Count current members
