@@ -1189,6 +1189,7 @@
       "row_sleepContexts": "Sleep対応コンテキスト",
       "row_reranking": "リランキング",
       "row_managedEmbeddings": "マネージド埋め込み",
+      "row_secretStore": "シークレット",
       "row_sharedContexts": "共有・公開コンテキスト",
       "row_teamInvitations": "チーム招待"
     },
