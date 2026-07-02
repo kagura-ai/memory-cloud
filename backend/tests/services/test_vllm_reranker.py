@@ -1,9 +1,9 @@
 """Unit tests for the OpenAI/Jina-style /v1/rerank path of the local reranker.
 
-When ``settings.rerank_base_url`` is set, the local (context-config "ollama")
-reranker path returns a ``VLLMReranker`` that makes ONE batched POST to
-``{base}/v1/rerank`` (vLLM ``--runner pooling`` seq-cls, TEI, or Infinity)
-instead of SelfHostedReranker's per-document ``/api/generate`` prompt scoring.
+When ``settings.rerank_base_url`` is set, the local (context-config
+"self_hosted") reranker path returns a ``VLLMReranker`` that makes ONE batched
+POST to ``{base}/v1/rerank`` (vLLM ``--runner pooling`` seq-cls, TEI, or
+Infinity) instead of SelfHostedReranker's per-document prompt scoring.
 
 House style follows test_reranker_service_coverage.py: httpx.AsyncClient.post
 is patched with canned responses (never a real network call); RerankerService

@@ -359,11 +359,11 @@ class VLLMReranker(RerankerProvider):
     """True cross-encoder reranker via an OpenAI/Jina-style /v1/rerank endpoint.
 
     One batched HTTP call scores all documents — unlike SelfHostedReranker's
-    per-document /api/generate prompt scoring. Served by vLLM (``--runner
+    per-document /v1/completions prompt scoring. Served by vLLM (``--runner
     pooling`` sequence-classification), HF TEI, or Infinity. Selected by
     setting ``settings.rerank_base_url``; the context config stays
-    ``reranker_provider="ollama"`` — the context declares "local rerank on",
-    the deployment decides how it is served (kagura-memory-eval GB10 rig).
+    ``reranker_provider="self_hosted"`` — the context declares "local rerank
+    on", the deployment decides how it is served (kagura-memory-eval GB10 rig).
     """
 
     provider_name = "vllm"

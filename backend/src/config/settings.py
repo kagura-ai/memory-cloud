@@ -369,9 +369,9 @@ class Settings(BaseSettings):
         description=(
             "OpenAI/Jina-style /v1/rerank endpoint (vLLM --runner pooling, TEI, "
             "or Infinity) for the local reranker path. When set, the context-"
-            "config 'ollama' reranker posts ONE batched /v1/rerank request here "
-            "instead of per-document Ollama prompt scoring. Empty = keep "
-            "OllamaReranker on ollama_base_url."
+            "config 'self_hosted' reranker posts ONE batched /v1/rerank request "
+            "here instead of per-document prompt scoring. Empty = keep the "
+            "prompt-scoring SelfHostedReranker on self_hosted_base_url."
         ),
     )
     rerank_model: str = Field(
