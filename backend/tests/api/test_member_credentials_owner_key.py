@@ -44,14 +44,15 @@ def client():
     app.dependency_overrides.clear()
 
 
-def _override(user: dict) -> None:
+def _override(user: dict) -> MagicMock:
     async def _get():
         return user
 
     app.dependency_overrides[get_user_from_api_key_or_session] = _get
 
     # Stub the DB session — services/manager/permission are all mocked, so the
-    # route never needs a real session. db.commit must be awaitable.
+    # route never needs a real session. db.commit must be awaitable. Returned so
+    # callers can assert on db.add (e.g. the programmatic AuditLog row).
     fake_db = MagicMock()
     fake_db.commit = AsyncMock()
     fake_db.execute = AsyncMock()
@@ -60,6 +61,7 @@ def _override(user: dict) -> None:
         yield fake_db
 
     app.dependency_overrides[get_db] = _get_db
+    return fake_db
 
 
 @pytest.fixture
@@ -106,12 +108,9 @@ class TestOwnerProvisionedMint:
         assert r.status_code == 403
 
     def test_success_for_member_target(self, client, owner_gate, monkeypatch):
-        _override(_api_key_owner())
+        fake_db = _override(_api_key_owner())
         _mock_member_service(monkeypatch, target_role="member")
-        mgr, _ = _mock_manager(monkeypatch)
-        # commit / db.add are on the request-scoped session; patch get_db's session
-        # via the manager/audit no-op — the route calls db.add + db.commit which the
-        # real (test) session handles. Use a stub session through dependency_overrides.
+        mgr, new_key = _mock_manager(monkeypatch)
         r = client.post(MINT_URL, json={"name": "ci-key", "expires_days": 30})
         assert r.status_code == 201, r.text
         body = r.json()
@@ -122,6 +121,21 @@ class TestOwnerProvisionedMint:
         kwargs = mgr.create_key.await_args.kwargs
         assert kwargs["expires_days"] == 30
         assert kwargs["auto_hide_minutes"] == 0
+        # Force-hide must null BOTH the visibility window AND the encrypted-at-rest
+        # copy: the auto-hide sweeper skips already-hidden rows, so a force-hidden
+        # minted key that kept plaintext_encrypted would stay Fernet-decryptable
+        # forever (Migration-035 zero-knowledge). Regression guard for #1171.
+        assert new_key.visibility_expires_at is None
+        assert new_key.plaintext_encrypted is None
+        # A programmatic mint must leave a forensic AuditLog row (#1164/#1165).
+        from models.auth import AuditLog
+
+        audit_rows = [
+            c.args[0] for c in fake_db.add.call_args_list if isinstance(c.args[0], AuditLog)
+        ]
+        assert len(audit_rows) == 1
+        assert audit_rows[0].action == "member_api_key_provisioned"
+        assert audit_rows[0].user_metadata["target"] == "target-user"
 
     def test_self_mint_forbidden(self, client, owner_gate, monkeypatch):
         # target == caller → anti self-replication 403
@@ -232,6 +246,40 @@ class TestOwnerProvisionedRevoke:
         assert r.json()["status"] == "revoked"
         # Soft revoke: revoked_at set, row NOT deleted.
         assert api_key.revoked_at is not None
+        fake_db.delete.assert_not_called()
+        # A programmatic revoke must leave a forensic AuditLog row (#1164/#1165).
+        from models.auth import AuditLog
+
+        audit_rows = [
+            c.args[0] for c in fake_db.add.call_args_list if isinstance(c.args[0], AuditLog)
+        ]
+        assert len(audit_rows) == 1
+        assert audit_rows[0].action == "member_api_key_revoked"
+
+    def test_cross_member_global_key_revoke_404(self, client, owner_gate, monkeypatch):
+        # #1171 max-review: a global key (workspace_id NULL, bound_context_id NULL)
+        # is not anchored to any workspace. An owner of THIS workspace cannot
+        # revoke a member's account-global key across the workspace boundary —
+        # uniform 404, no state change, no misattributed audit row.
+        _override(_api_key_owner())  # caller "owner-key" != target "target-user"
+        _mock_member_service(monkeypatch, target_role="member")
+
+        api_key = MagicMock()
+        api_key.id = 42
+        api_key.workspace_id = None
+        api_key.bound_context_id = None
+        api_key.revoked_at = None
+        api_key.key_prefix = "kagura_global"
+        fake_db = self._fake_db_with_key(api_key)
+
+        async def _get_db():
+            yield fake_db
+
+        app.dependency_overrides[get_db] = _get_db
+
+        r = client.delete(REVOKE_URL)
+        assert r.status_code == 404
+        assert api_key.revoked_at is None
         fake_db.delete.assert_not_called()
 
     def test_oauth_revoke_rejected(self, client):

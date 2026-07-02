@@ -80,6 +80,38 @@ async def check_permission(
         raise AuthorizationError(message=f"Not authorized to {action} credentials")
 
 
+async def _require_downgrade_target(
+    db: AsyncSession,
+    user_id: str,
+    workspace_id: UUID,
+    *,
+    action_desc: str,
+) -> None:
+    """Owner-provisioned mint/revoke may only target a member/viewer.
+
+    Owner-key provisioning is strictly privilege-DOWNGRADE (service identities):
+    the target's workspace role must be ``member``/``viewer``. Shared by
+    ``_owner_provisioned_mint`` and ``delete_api_key_by_id`` so the allowed-target
+    set stays in lockstep across mint and revoke — diverging the two would open a
+    silent authorization gap on one path (max code-review, PR #1171).
+
+    Args:
+        db: Async DB session.
+        user_id: The TARGET member's user id.
+        workspace_id: The PATH workspace id (permission scope).
+        action_desc: Sentence prefix for the 403 message, completed with
+            "member/viewer targets, not role=...".
+
+    Raises:
+        AuthorizationError: 403 if the target's role is not member/viewer.
+    """
+    target_role = await MemberCredentialsService(db).get_workspace_role(user_id, workspace_id)
+    if target_role not in (WorkspaceRole.MEMBER, WorkspaceRole.VIEWER):
+        raise AuthorizationError(
+            message=f"{action_desc} member/viewer targets, not role={target_role!r}."
+        )
+
+
 async def _owner_provisioned_mint(
     workspace_id: UUID,
     user_id: str,
@@ -116,15 +148,9 @@ async def _owner_provisioned_mint(
             message="An owner key cannot mint keys for itself. Use session self-mint."
         )
 
-    service = MemberCredentialsService(db)
-    target_role = await service.get_workspace_role(user_id, workspace_id)
-    if target_role not in (WorkspaceRole.MEMBER, WorkspaceRole.VIEWER):
-        raise AuthorizationError(
-            message=(
-                "Owner-provisioned keys can only be minted for member/viewer "
-                f"targets, not role={target_role!r}."
-            )
-        )
+    await _require_downgrade_target(
+        db, user_id, workspace_id, action_desc="Owner-provisioned keys can only be minted for"
+    )
 
     if data.expires_days is None:
         raise BadRequestError(
@@ -145,9 +171,16 @@ async def _owner_provisioned_mint(
             expires_days=data.expires_days,
             auto_hide_minutes=0,  # visibility_expires_at = now
         )
-        # Force-hide immediately so plaintext is never re-revealed via GET.
+        # Force-hide immediately so plaintext is never re-revealed via GET, and
+        # null the encrypted-at-rest copy too (Migration-035 zero-knowledge). The
+        # hourly auto-hide sweeper only clears rows with hidden_at IS NULL, so a
+        # force-hidden row it never touches would otherwise retain a
+        # Fernet-decryptable copy of a live long-lived key indefinitely. This
+        # matches APIKeyManager.hide_key / auto_hide_expired_credentials, which
+        # both null plaintext_encrypted on hide (max code-review, PR #1171).
         new_key.hidden_at = utcnow()
         new_key.visibility_expires_at = None
+        new_key.plaintext_encrypted = None
 
         from models.auth import AuditLog
 
@@ -739,16 +772,9 @@ async def delete_api_key_by_id(
         )
         if user_id != caller_id:
             # Cross-member revoke is owner-provisioned; restrict target role.
-            target_role = await MemberCredentialsService(db).get_workspace_role(
-                user_id, workspace_id
+            await _require_downgrade_target(
+                db, user_id, workspace_id, action_desc="Owner-provisioned revocation is limited to"
             )
-            if target_role not in (WorkspaceRole.MEMBER, WorkspaceRole.VIEWER):
-                raise AuthorizationError(
-                    message=(
-                        "Owner-provisioned revocation is limited to member/viewer "
-                        f"targets, not role={target_role!r}."
-                    )
-                )
     elif caller_id != user_id:
         # Session path (#252 unchanged): self-only.
         raise AuthorizationError(
@@ -790,9 +816,18 @@ async def delete_api_key_by_id(
             raise AuthorizationError(
                 message="API key is bound to a context in a different workspace"
             )
-    # else: global / owner-scoped key (both columns NULL) — workspace_id in
-    # the URL is purely permission scope; the owner-only check above is
-    # the only gate that applies.
+    else:
+        # Global / owner-scoped key (both columns NULL) — not anchored to any
+        # workspace. For a SESSION self-delete or a programmatic SELF-revoke the
+        # URL workspace is purely permission scope and the owner-only check above
+        # is the only gate. But a programmatic CROSS-member revoke cannot be
+        # anchored here: the path-workspace owner has no proven authority over a
+        # member's account-global key — it may be the key that member uses in
+        # their OTHER workspaces. Refuse with a uniform 404 rather than revoke
+        # across a workspace boundary (and misattribute the audit row to this
+        # workspace) (max code-review, PR #1171).
+        if programmatic and user_id != caller_id:
+            raise NotFoundException("API key")
 
     # Capture binding info before mutation — the audit-log entry below
     # needs the original ``bound_context_id``.
