@@ -200,18 +200,26 @@ async def audit_programmatic_workspace_action(
 
     from models.auth import AuditLog
 
+    # Issue #1164: attribute the acting API key by its non-secret prefix (from
+    # the authenticated principal — safe to log) so a stolen-owner-key incident
+    # is traceable to the specific key, not just the owner user_id.
+    audit_metadata = {
+        "workspace_id": str(workspace_id),
+        "target": target,
+        "via": "api_key",
+        **(metadata or {}),
+    }
+    key_prefix = user.get("api_key_prefix")
+    if key_prefix:
+        audit_metadata["key_prefix"] = key_prefix
+
     db.add(
         AuditLog(
             user_email=user.get("email") or f"{actor_id}@api",
             user_id=actor_id,
             action=action,
             resource=f"workspace:{workspace_id}",
-            user_metadata={
-                "workspace_id": str(workspace_id),
-                "target": target,
-                "via": "api_key",
-                **(metadata or {}),
-            },
+            user_metadata=audit_metadata,
         )
     )
     logger.info(

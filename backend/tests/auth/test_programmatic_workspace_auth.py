@@ -162,6 +162,25 @@ class TestAuditProgrammaticAction:
         assert row.user_metadata["target"] == "member-1"
         assert row.user_metadata["via"] == "api_key"
 
+    async def test_records_api_key_prefix_when_present(self):
+        # Issue #1164: the acting key's non-secret prefix is attributed.
+        db = MagicMock()
+        principal = AuthorizedPrincipal(kind="api_key", member=MagicMock())
+        user = {**_api_key_user(), "api_key_prefix": "kagura_abc123"}
+        await audit_programmatic_workspace_action(
+            db, principal, user, _WS, action="workspace_member_added", target="m1"
+        )
+        row = db.add.call_args[0][0]
+        assert row.user_metadata["key_prefix"] == "kagura_abc123"
+
+    async def test_omits_key_prefix_when_absent(self):
+        db = MagicMock()
+        principal = AuthorizedPrincipal(kind="api_key", member=MagicMock())
+        await audit_programmatic_workspace_action(
+            db, principal, _api_key_user(), _WS, action="x", target="m1"
+        )
+        assert "key_prefix" not in db.add.call_args[0][0].user_metadata
+
     async def test_session_principal_is_noop(self):
         db = MagicMock()
         principal = AuthorizedPrincipal(kind="session", member=MagicMock())
