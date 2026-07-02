@@ -27,6 +27,13 @@ from utils.logger import get_logger
 
 logger = get_logger(__name__)
 
+# Issue #1166: single message for the owner-invitation rejection, shared by the
+# create and accept guards so the two layers cannot drift.
+OWNER_INVITE_REJECTED_MSG = (
+    "Invitations cannot grant the owner role. "
+    "Use the ownership transfer flow to change the workspace owner."
+)
+
 # Invitation expiry presets (days)
 EXPIRY_PRESETS = {
     7: timedelta(days=7),
@@ -173,10 +180,7 @@ class InvitationService:
         # Owner changes go through the ownership transfer flow; an owner
         # invitation is never meaningful under the single-owner invariant.
         if role == WorkspaceRole.OWNER:
-            raise ValidationError(
-                "Invitations cannot grant the owner role. "
-                "Use the ownership transfer flow to change the workspace owner."
-            )
+            raise ValidationError(OWNER_INVITE_REJECTED_MSG)
 
         # Generate unique token (32 bytes = 43 chars base64)
         token = secrets.token_urlsafe(32)
@@ -399,11 +403,7 @@ class InvitationService:
         # (or via direct DB access) may still exist — accept must not grant
         # the owner role.
         if invitation.role == WorkspaceRole.OWNER:
-            raise ValidationError(
-                "This invitation would grant the owner role, which is not "
-                "supported. Use the ownership transfer flow to change the "
-                "workspace owner."
-            )
+            raise ValidationError(OWNER_INVITE_REJECTED_MSG)
 
         # Check if user is already a member
         stmt = select(WorkspaceMember).where(
