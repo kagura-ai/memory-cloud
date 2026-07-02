@@ -112,6 +112,12 @@ async def authorize_workspace_management(
             workspace differs from the path workspace (#963 confinement).
     """
     user_id = user.get("user_id")
+    # Fail closed on a malformed principal: a missing user_id must produce a
+    # clean 403, never a 500 from PermissionService querying with None
+    # (Copilot review, PR #1170).
+    if not user_id:
+        logger.warning("workspace_mgmt_missing_user_id", workspace_id=str(workspace_id))
+        raise AuthorizationError("Unrecognized principal for workspace management")
     perm_service = PermissionService(db)
 
     # OAuth → reject before any lookup.
@@ -176,9 +182,24 @@ async def audit_programmatic_workspace_action(
     """
     if principal.kind != "api_key":
         return
-    from models.auth import AuditLog
 
     actor_id = user.get("user_id")
+    if not actor_id:
+        # AuditLog.user_id is non-nullable — a missing actor would raise a DB
+        # integrity error and fail the (already-authorized) mutation. Audit is
+        # best-effort observability, so skip-with-warning instead of crashing.
+        # In practice authorize_workspace_management already rejected a
+        # principal without user_id, so this is defense in depth (Copilot
+        # review, PR #1170).
+        logger.warning(
+            "workspace_mgmt_audit_skipped_no_actor",
+            action=action,
+            workspace_id=str(workspace_id),
+        )
+        return
+
+    from models.auth import AuditLog
+
     db.add(
         AuditLog(
             user_email=user.get("email") or f"{actor_id}@api",

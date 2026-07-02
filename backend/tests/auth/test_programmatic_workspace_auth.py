@@ -166,7 +166,11 @@ class TestAuditProgrammaticAction:
         db = MagicMock()
         principal = AuthorizedPrincipal(kind="session", member=MagicMock())
         await audit_programmatic_workspace_action(
-            db, principal, _session_user(), _WS,
-            action="workspace_member_added", target="member-1",
+            db,
+            principal,
+            _session_user(),
+            _WS,
+            action="workspace_member_added",
+            target="member-1",
         )
         db.add.assert_not_called()
