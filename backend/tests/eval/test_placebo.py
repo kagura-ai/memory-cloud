@@ -12,7 +12,7 @@ from collections import Counter
 import pytest
 
 from tests.eval.compounding import ProbeSpec
-from tests.eval.placebo import Edge, degree_preserving_rewire, permute_gold
+from tests.eval.placebo import Edge, degree_preserving_rewire, paired_delta_bootstrap, permute_gold
 
 
 def _edges(pairs, *, origin="hebbian", edge_type="neural_association"):
@@ -136,3 +136,27 @@ def test_permute_gold_raises_when_singleton_pool_too_small():
     )
     with pytest.raises(ValueError, match="corpus too small"):
         permute_gold(probes, seed=1)
+
+
+def test_bootstrap_point_estimate_is_the_paired_mean():
+    a = [1.0, 0.8, 0.6, 0.4]
+    b = [0.0, 0.2, 0.1, 0.0]
+    out = paired_delta_bootstrap(a, b, seed=1, resamples=2000)
+    assert out["delta"] == pytest.approx(sum(x - y for x, y in zip(a, b)) / len(a), abs=1e-9)
+    assert out["n"] == 4
+    assert out["lo"] <= out["delta"] <= out["hi"]
+
+
+def test_bootstrap_is_deterministic_under_seed():
+    a = [0.9, 0.7, 0.5, 0.3, 0.6]
+    b = [0.1, 0.0, 0.2, 0.1, 0.0]
+    assert paired_delta_bootstrap(a, b, seed=11, resamples=1500) == paired_delta_bootstrap(
+        a, b, seed=11, resamples=1500
+    )
+
+
+def test_bootstrap_raises_on_length_mismatch_or_empty():
+    with pytest.raises(ValueError):
+        paired_delta_bootstrap([0.1, 0.2], [0.1], seed=1)
+    with pytest.raises(ValueError):
+        paired_delta_bootstrap([], [], seed=1)

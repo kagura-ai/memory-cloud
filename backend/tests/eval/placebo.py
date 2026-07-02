@@ -122,3 +122,34 @@ def permute_gold(probes, *, seed: int) -> dict[str, tuple[str, ...]]:
                 )
             result[probes[i].query_id] = tuple(rng.sample(pool, size))
     return result
+
+
+def paired_delta_bootstrap(
+    per_probe_a: list[float], per_probe_b: list[float], *, seed: int, resamples: int = 10_000
+) -> dict[str, float]:
+    """Paired (a - b) point estimate + DESCRIPTIVE percentile bootstrap interval.
+
+    Point estimate is the paired mean of the per-probe differences. The interval
+    is the 2.5/97.5 percentile of the resampled paired means — a shape aid, NOT
+    an inferential CI (percentile method, not BCa; the gated inferential test is
+    Day-3). Deterministic under ``seed``. Raises on length mismatch or empty.
+    """
+    if len(per_probe_a) != len(per_probe_b):
+        raise ValueError(
+            f"paired inputs differ in length: {len(per_probe_a)} vs {len(per_probe_b)}"
+        )
+    n = len(per_probe_a)
+    if n == 0:
+        raise ValueError("paired inputs are empty — nothing to bootstrap")
+
+    diffs = [a - b for a, b in zip(per_probe_a, per_probe_b)]
+    point = sum(diffs) / n
+
+    rng = random.Random(seed)
+    means: list[float] = []
+    for _ in range(resamples):
+        means.append(sum(diffs[rng.randrange(n)] for _ in range(n)) / n)
+    means.sort()
+    lo = means[int(0.025 * resamples)]
+    hi = means[int(0.975 * resamples)]
+    return {"delta": round(point, 4), "lo": round(lo, 4), "hi": round(hi, 4), "n": n}
