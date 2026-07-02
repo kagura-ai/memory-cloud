@@ -363,6 +363,40 @@ class Settings(BaseSettings):
         """
         return v.rstrip("/") if v else v
 
+    # Local reranker serving override
+    rerank_base_url: str = Field(
+        default="",
+        description=(
+            "OpenAI/Jina-style /v1/rerank endpoint (vLLM --runner pooling, TEI, "
+            "or Infinity) for the local reranker path. When set, the context-"
+            "config 'ollama' reranker posts ONE batched /v1/rerank request here "
+            "instead of per-document Ollama prompt scoring. Empty = keep "
+            "OllamaReranker on ollama_base_url."
+        ),
+    )
+    rerank_model: str = Field(
+        default="qwen3-reranker-0.6b",
+        description=(
+            "Served model name for the local /v1/rerank endpoint (RERANK_BASE_URL). "
+            "Must match the endpoint's model id exactly — e.g. vLLM's "
+            "--served-model-name, or the TEI/Infinity model id. This is the "
+            "ops-level default; a per-context reranker_model (when set and not a "
+            "stale remote-provider default) still overrides it. Only consulted "
+            "when rerank_base_url is set. Keep in sync with "
+            "reranker_service.DEFAULT_VLLM_RERANK_MODEL."
+        ),
+    )
+
+    @field_validator("rerank_base_url", "rerank_model", mode="before")
+    @classmethod
+    def _strip_rerank_fields(cls, v: object) -> object:
+        # rerank_base_url is used as a truthy feature toggle
+        # (`if settings.rerank_base_url:`) and rerank_model is sent verbatim to
+        # the endpoint. Strip surrounding whitespace and collapse a
+        # whitespace-only value to "" so a stray-space env var neither enables
+        # the vLLM path with an invalid URL nor ships a blank model name.
+        return v.strip() if isinstance(v, str) else v
+
     # Search Configuration (Issue #105)
     enable_reranking: bool = Field(
         default=True,

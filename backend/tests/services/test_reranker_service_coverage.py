@@ -548,6 +548,7 @@ class TestRerankerServiceOllamaContextConfig:
         settings = MagicMock()
         settings.self_hosted_base_url = "http://ollama:11434"
         settings.self_hosted_api_key = ""
+        settings.rerank_base_url = ""  # not set → SelfHostedReranker, not the vLLM path
         monkeypatch.setattr("config.settings.get_settings", lambda: settings, raising=True)
 
         cfg = self._ctx_config("self_hosted", True, "custom-ollama-model")
@@ -569,6 +570,7 @@ class TestRerankerServiceOllamaContextConfig:
         settings = MagicMock()
         settings.self_hosted_base_url = "http://ollama:11434"
         settings.self_hosted_api_key = ""
+        settings.rerank_base_url = ""  # not set → SelfHostedReranker, not the vLLM path
         monkeypatch.setattr("config.settings.get_settings", lambda: settings, raising=True)
 
         cfg = self._ctx_config("self_hosted", True, "rerank-multilingual-v3.0")
@@ -585,6 +587,7 @@ class TestRerankerServiceOllamaContextConfig:
         settings = MagicMock()
         settings.self_hosted_base_url = "http://ollama:11434"
         settings.self_hosted_api_key = ""
+        settings.rerank_base_url = ""  # not set → SelfHostedReranker, not the vLLM path
         monkeypatch.setattr("config.settings.get_settings", lambda: settings, raising=True)
 
         cfg = self._ctx_config("self_hosted", True, None)
