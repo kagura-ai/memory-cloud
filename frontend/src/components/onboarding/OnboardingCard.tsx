@@ -145,13 +145,9 @@ export function OnboardingCard() {
     return () => {
       alive = false;
     };
-  }, [
-    workspaceLoading,
-    currentWorkspace,
-    currentWorkspaceId,
-    systemFeatures,
-    byokEnabled,
-  ]);
+    // byokEnabled is derived from systemFeatures, so listing systemFeatures
+    // alone covers both.
+  }, [workspaceLoading, currentWorkspace, currentWorkspaceId, systemFeatures]);
 
   const dismiss = useCallback(() => {
     if (typeof window !== "undefined") {

@@ -54,6 +54,7 @@ import {
 import { apiClient } from "@/lib/api/base";
 import { useToast } from "@/hooks/use-toast";
 import { useWorkspace } from "@/contexts/WorkspaceContext";
+import { useSystemFeatures } from "@/hooks/useSystemFeatures";
 import { cn } from "@/styles/design-tokens";
 
 interface TelemetryServiceStatus {
@@ -113,6 +114,10 @@ export function SearchSettingsSection({
   const [selfHostedAvailable, setSelfHostedAvailable] = useState(false);
   const { toast } = useToast();
   const { currentWorkspace } = useWorkspace();
+  // Issue #1167: the /external-keys API 404s when BYOK is off, and the
+  // "configure reranker keys" CTA would point at a disabled page — gate both.
+  const systemFeatures = useSystemFeatures();
+  const byokEnabled = systemFeatures?.byok === true;
 
   const isFree = currentWorkspace?.plan_name === "free";
   const isDirty = Object.keys(editedConfig).length > 0;
@@ -171,9 +176,16 @@ export function SearchSettingsSection({
   }, [contextId]);
 
   useEffect(() => {
-    Promise.all([loadConfig(), loadExternalKeys(), loadTelemetry()]);
+    Promise.all([loadConfig(), loadTelemetry()]);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [contextId]);
+
+  // Issue #1167: probe external keys only once the byok flag resolves enabled
+  // (kept out of the effect above so a late flag resolution doesn't re-fire
+  // the config/telemetry loads).
+  useEffect(() => {
+    if (byokEnabled) loadExternalKeys();
+  }, [byokEnabled, loadExternalKeys]);
 
   const handleSave = useCallback(async () => {
     if (!contextId || Object.keys(editedConfig).length === 0) return;
@@ -458,21 +470,26 @@ export function SearchSettingsSection({
               </Alert>
             )}
 
+            {/* #1167: only offer the configure-keys CTA when BYOK is on —
+                with BYOK off the external-keys page is disabled, so show the
+                headline without a dangling link. */}
             {!isFree && !hasAnyRerankerAvailable && (
               <Alert>
                 <AlertCircle className="h-4 w-4" />
                 <AlertDescription>
                   <p className="font-medium mb-2">{t("noRerankerKeys")}</p>
-                  <p className="text-sm">
-                    {t("configureRerankerKeys").split("External API Keys")[0]}
-                    <Link
-                      href="/workspace/integrations/external-keys"
-                      className="underline font-medium"
-                    >
-                      External API Keys
-                    </Link>
-                    {t("configureRerankerKeys").split("External API Keys")[1]}
-                  </p>
+                  {byokEnabled && (
+                    <p className="text-sm">
+                      {t("configureRerankerKeys").split("External API Keys")[0]}
+                      <Link
+                        href="/workspace/integrations/external-keys"
+                        className="underline font-medium"
+                      >
+                        External API Keys
+                      </Link>
+                      {t("configureRerankerKeys").split("External API Keys")[1]}
+                    </p>
+                  )}
                 </AlertDescription>
               </Alert>
             )}
@@ -563,7 +580,7 @@ export function SearchSettingsSection({
                             <p className="text-sm">
                               {t("selfHostedUnavailableDetail")}
                             </p>
-                          ) : (
+                          ) : byokEnabled ? (
                             <p className="text-sm">
                               {
                                 t("configureRerankerKeys").split(
@@ -582,6 +599,10 @@ export function SearchSettingsSection({
                                 )[1]
                               }
                             </p>
+                          ) : (
+                            // #1167: BYOK off — key setup is not available in
+                            // this deployment, so no configure link.
+                            <p className="text-sm">{t("noRerankerKeys")}</p>
                           )}
                         </AlertDescription>
                       </Alert>

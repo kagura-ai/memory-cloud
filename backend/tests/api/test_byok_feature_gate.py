@@ -29,6 +29,7 @@ _WORKSPACE_ID = uuid4()
 
 @pytest.fixture
 def client():
+    """TestClient that auto-clears dependency overrides on teardown."""
     yield TestClient(app, raise_server_exceptions=False)
     app.dependency_overrides.clear()
 
