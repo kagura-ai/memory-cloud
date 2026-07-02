@@ -145,6 +145,7 @@ def test_bootstrap_point_estimate_is_the_paired_mean():
     assert out["delta"] == pytest.approx(sum(x - y for x, y in zip(a, b)) / len(a), abs=1e-9)
     assert out["n"] == 4
     assert out["lo"] <= out["delta"] <= out["hi"]
+    assert out["lo"] < out["hi"]  # non-degenerate data -> real interval width (not a stub)
 
 
 def test_bootstrap_is_deterministic_under_seed():
@@ -153,6 +154,17 @@ def test_bootstrap_is_deterministic_under_seed():
     assert paired_delta_bootstrap(a, b, seed=11, resamples=1500) == paired_delta_bootstrap(
         a, b, seed=11, resamples=1500
     )
+
+
+def test_bootstrap_interval_reacts_to_seed():
+    # Different seeds must produce different resampled intervals — guards against
+    # a degenerate implementation that ignores the resampling loop.
+    a = [0.9, 0.7, 0.5, 0.3, 0.6]
+    b = [0.1, 0.0, 0.2, 0.1, 0.0]
+    out1 = paired_delta_bootstrap(a, b, seed=1, resamples=2000)
+    out2 = paired_delta_bootstrap(a, b, seed=2, resamples=2000)
+    assert out1["delta"] == out2["delta"]  # point estimate is seed-independent
+    assert (out1["lo"], out1["hi"]) != (out2["lo"], out2["hi"])  # interval is seed-driven
 
 
 def test_bootstrap_raises_on_length_mismatch_or_empty():

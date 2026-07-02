@@ -126,7 +126,7 @@ def permute_gold(probes, *, seed: int) -> dict[str, tuple[str, ...]]:
 
 def paired_delta_bootstrap(
     per_probe_a: list[float], per_probe_b: list[float], *, seed: int, resamples: int = 10_000
-) -> dict[str, float]:
+) -> dict[str, float | int]:
     """Paired (a - b) point estimate + DESCRIPTIVE percentile bootstrap interval.
 
     Point estimate is the paired mean of the per-probe differences. The interval
