@@ -171,7 +171,12 @@ def median_cross_topic_gold_pair_cosine(
     """
     cosines: list[float] = []
     for pair in gold_pairs:
+        if len(pair) != 2:
+            continue  # a gold "pair" that collapsed to <2 distinct docs (e.g. seed==companion) is not a pair
         a, b = tuple(pair)
+        # Same-source pairs are not cross-topic. If exactly one doc is missing
+        # from source_by_doc, .get() yields None vs a real source → treated as
+        # cross-topic (included); both missing → None==None → skipped.
         if source_by_doc.get(a) == source_by_doc.get(b):
             continue
         if a not in doc_vec or b not in doc_vec:

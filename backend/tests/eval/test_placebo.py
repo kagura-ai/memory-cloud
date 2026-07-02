@@ -197,3 +197,20 @@ def test_median_cross_topic_returns_none_when_no_cross_topic_pair():
     source = {"a": "memory", "b": "memory"}
     gold_pairs = {frozenset(("a", "b"))}
     assert median_cross_topic_gold_pair_cosine(doc_vec, gold_pairs, source, cosine_fn=cos) is None
+
+
+def test_median_cross_topic_skips_pair_missing_a_vector():
+    doc_vec = {"a": [1.0]}  # b has no vector -> the only gold pair is skipped
+    cos = lambda u, v: u[0] * v[0]
+    source = {"a": "memory", "b": "resource"}
+    gold_pairs = {frozenset(("a", "b"))}
+    assert median_cross_topic_gold_pair_cosine(doc_vec, gold_pairs, source, cosine_fn=cos) is None
+
+
+def test_median_cross_topic_skips_degenerate_single_element_pair():
+    # A gold "pair" that collapsed to one doc (seed == companion) must be skipped, not crash.
+    doc_vec = {"a": [1.0]}
+    cos = lambda u, v: u[0] * v[0]
+    source = {"a": "memory"}
+    gold_pairs = {frozenset(("a",))}
+    assert median_cross_topic_gold_pair_cosine(doc_vec, gold_pairs, source, cosine_fn=cos) is None
