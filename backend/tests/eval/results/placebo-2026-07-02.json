@@ -1,0 +1,349 @@
+{
+  "run_date": "2026-07-02",
+  "experiment": "day2-placebo",
+  "issue": null,
+  "sudachi_version": "20260428",
+  "corpus_version": 1,
+  "doc_count": 16,
+  "query_count": 30,
+  "probe_count": 5,
+  "probe_underpowered": true,
+  "rounds": 8,
+  "explore_depth": 2,
+  "explore_min_weight": 0.05,
+  "seeds": [
+    1,
+    2,
+    3
+  ],
+  "design_note": "Descriptive/directional de-risk (week1-derisk Day 2). Provisional τ (prereg §3 procedure on the CURRENT corpus), untagged. Percentile bootstrap intervals are shape aids, NOT gated CIs; no accept/reject. The inferential H2 kill-shot runs at Day-3 (prereg-v1-frozen).",
+  "tau": {
+    "seeded": true,
+    "model": "qwen3-embedding:0.6b",
+    "dimensions": 1024,
+    "tau_provisional": 0.5082,
+    "tau_method": "median_cross_topic_gold_pair_cosine",
+    "cross_topic_gold_pair_count": 5,
+    "floor": 0.3,
+    "resolved_edge_threshold": 0.5082
+  },
+  "seeds_in_graph": 4,
+  "sleep": {
+    "ok": true,
+    "status": "completed",
+    "edge_discovery": {
+      "success": true,
+      "skipped": false,
+      "skip_reason": null,
+      "error": null,
+      "llm_calls": 0,
+      "memories_processed": 16,
+      "details": {
+        "sampled": 16,
+        "candidates": 3,
+        "filtered": 1,
+        "edges_created": 1,
+        "llm_accepted": 0,
+        "llm_rejected": 0,
+        "llm_call_failures": 0,
+        "auto_accepted": 1,
+        "edge_type_dist": {},
+        "avg_confidence": 0.0,
+        "median_confidence": 0.0,
+        "p25_confidence": 0.0,
+        "p75_confidence": 0.0,
+        "confidence_n": 0,
+        "confidence_imputed": 0,
+        "confidence_histogram": {
+          "0.0-0.5": 0,
+          "0.5-0.7": 0,
+          "0.7-0.85": 0,
+          "0.85-1.0": 0
+        },
+        "avg_confidence_rejected": 0.0,
+        "median_confidence_rejected": 0.0,
+        "p25_confidence_rejected": 0.0,
+        "p75_confidence_rejected": 0.0,
+        "confidence_n_rejected": 0,
+        "confidence_imputed_rejected": 0,
+        "confidence_histogram_rejected": {
+          "0.0-0.5": 0,
+          "0.5-0.7": 0,
+          "0.7-0.85": 0,
+          "0.85-1.0": 0
+        },
+        "llm_model": "gpt-5-nano",
+        "prompt_revision": "v3"
+      },
+      "llm_breakdown": [],
+      "embedding_calls": 16,
+      "embedding_tokens": 0
+    }
+  },
+  "real_warm": {
+    "n": 5,
+    "recovery@5": 0.4,
+    "recovery@10": 0.4,
+    "mrr@10": 0.2667,
+    "per_probe@10": [
+      1.0,
+      1.0,
+      0.0,
+      0.0,
+      0.0
+    ]
+  },
+  "edge_count": 23,
+  "per_seed": [
+    {
+      "seed": 1,
+      "arms": {
+        "real_warm": {
+          "n": 5,
+          "recovery@5": 0.4,
+          "recovery@10": 0.4,
+          "mrr@10": 0.2667,
+          "per_probe@10": [
+            1.0,
+            1.0,
+            0.0,
+            0.0,
+            0.0
+          ]
+        },
+        "shuffled_gold": {
+          "n": 5,
+          "recovery@5": 0.2,
+          "recovery@10": 0.2,
+          "mrr@10": 0.05,
+          "per_probe@10": [
+            0.0,
+            1.0,
+            0.0,
+            0.0,
+            0.0
+          ]
+        },
+        "random_edge": {
+          "n": 5,
+          "recovery@5": 0.4,
+          "recovery@10": 0.4,
+          "mrr@10": 0.24,
+          "per_probe@10": [
+            1.0,
+            0.0,
+            0.0,
+            0.0,
+            1.0
+          ]
+        }
+      },
+      "deltas": {
+        "shuffled_gold": {
+          "delta": 0.2,
+          "lo": 0.0,
+          "hi": 0.6,
+          "n": 5
+        },
+        "random_edge": {
+          "delta": 0.0,
+          "lo": -0.6,
+          "hi": 0.6,
+          "n": 5
+        }
+      },
+      "gold_permutation": {
+        "q_cross_01": [
+          "doc_res_apikey"
+        ],
+        "q_cross_02": [
+          "doc_res_chunking"
+        ],
+        "q_cross_03": [
+          "doc_mem_context"
+        ],
+        "q_cross_04": [
+          "doc_mem_hybrid"
+        ],
+        "q_cross_05": [
+          "doc_mem_context"
+        ]
+      },
+      "edge_snapshot": {
+        "count": 23,
+        "rewire_swaps_done": 23
+      }
+    },
+    {
+      "seed": 2,
+      "arms": {
+        "real_warm": {
+          "n": 5,
+          "recovery@5": 0.4,
+          "recovery@10": 0.4,
+          "mrr@10": 0.2667,
+          "per_probe@10": [
+            1.0,
+            1.0,
+            0.0,
+            0.0,
+            0.0
+          ]
+        },
+        "shuffled_gold": {
+          "n": 5,
+          "recovery@5": 0.2,
+          "recovery@10": 0.2,
+          "mrr@10": 0.1,
+          "per_probe@10": [
+            0.0,
+            1.0,
+            0.0,
+            0.0,
+            0.0
+          ]
+        },
+        "random_edge": {
+          "n": 5,
+          "recovery@5": 0.4,
+          "recovery@10": 0.4,
+          "mrr@10": 0.3,
+          "per_probe@10": [
+            1.0,
+            1.0,
+            0.0,
+            0.0,
+            0.0
+          ]
+        }
+      },
+      "deltas": {
+        "shuffled_gold": {
+          "delta": 0.2,
+          "lo": 0.0,
+          "hi": 0.6,
+          "n": 5
+        },
+        "random_edge": {
+          "delta": 0.0,
+          "lo": 0.0,
+          "hi": 0.0,
+          "n": 5
+        }
+      },
+      "gold_permutation": {
+        "q_cross_01": [
+          "doc_res_chunking"
+        ],
+        "q_cross_02": [
+          "doc_mem_hybrid"
+        ],
+        "q_cross_03": [
+          "doc_mem_context"
+        ],
+        "q_cross_04": [
+          "doc_res_apikey"
+        ],
+        "q_cross_05": [
+          "doc_mem_context"
+        ]
+      },
+      "edge_snapshot": {
+        "count": 23,
+        "rewire_swaps_done": 23
+      }
+    },
+    {
+      "seed": 3,
+      "arms": {
+        "real_warm": {
+          "n": 5,
+          "recovery@5": 0.4,
+          "recovery@10": 0.4,
+          "mrr@10": 0.2667,
+          "per_probe@10": [
+            1.0,
+            1.0,
+            0.0,
+            0.0,
+            0.0
+          ]
+        },
+        "shuffled_gold": {
+          "n": 5,
+          "recovery@5": 0.2,
+          "recovery@10": 0.2,
+          "mrr@10": 0.1,
+          "per_probe@10": [
+            0.0,
+            1.0,
+            0.0,
+            0.0,
+            0.0
+          ]
+        },
+        "random_edge": {
+          "n": 5,
+          "recovery@5": 0.4,
+          "recovery@10": 0.4,
+          "mrr@10": 0.1,
+          "per_probe@10": [
+            1.0,
+            1.0,
+            0.0,
+            0.0,
+            0.0
+          ]
+        }
+      },
+      "deltas": {
+        "shuffled_gold": {
+          "delta": 0.2,
+          "lo": 0.0,
+          "hi": 0.6,
+          "n": 5
+        },
+        "random_edge": {
+          "delta": 0.0,
+          "lo": 0.0,
+          "hi": 0.0,
+          "n": 5
+        }
+      },
+      "gold_permutation": {
+        "q_cross_01": [
+          "doc_mem_context"
+        ],
+        "q_cross_02": [
+          "doc_mem_hybrid"
+        ],
+        "q_cross_03": [
+          "doc_mem_context"
+        ],
+        "q_cross_04": [
+          "doc_res_apikey"
+        ],
+        "q_cross_05": [
+          "doc_res_chunking"
+        ]
+      },
+      "edge_snapshot": {
+        "count": 23,
+        "rewire_swaps_done": 23
+      }
+    }
+  ],
+  "across_seeds": {
+    "delta_random_edge": {
+      "min": 0.0,
+      "median": 0.0,
+      "max": 0.0
+    },
+    "delta_shuffled_gold": {
+      "min": 0.2,
+      "median": 0.2,
+      "max": 0.2
+    }
+  },
+  "directional_read": "edge_spray"
+}
