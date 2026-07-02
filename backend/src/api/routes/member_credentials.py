@@ -17,7 +17,13 @@ from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from auth.api_keys import APIKeyManager
-from auth.dependencies import SessionUser
+from auth.dependencies import APIKeyOrSessionUser, SessionUser
+from auth.programmatic_workspace_auth import (
+    authorize_workspace_management,
+    is_api_key_principal,
+    is_oauth_principal,
+)
+from auth.workspace_roles import WorkspaceRole
 from db.base import get_db
 from models.schemas import (
     CreateAPIKeyRequest,
@@ -28,7 +34,7 @@ from models.schemas import (
 )
 from services.member_credentials_service import MemberCredentialsService
 from utils.datetime import to_utc_iso, utcnow
-from utils.exceptions import AuthorizationError, NotFoundException
+from utils.exceptions import AuthorizationError, BadRequestError, NotFoundException
 from utils.logger import get_logger
 
 logger = get_logger(__name__)
@@ -74,31 +80,184 @@ async def check_permission(
         raise AuthorizationError(message=f"Not authorized to {action} credentials")
 
 
+async def _require_downgrade_target(
+    db: AsyncSession,
+    user_id: str,
+    workspace_id: UUID,
+    *,
+    action_desc: str,
+) -> None:
+    """Owner-provisioned mint/revoke may only target a member/viewer.
+
+    Owner-key provisioning is strictly privilege-DOWNGRADE (service identities):
+    the target's workspace role must be ``member``/``viewer``. Shared by
+    ``_owner_provisioned_mint`` and ``delete_api_key_by_id`` so the allowed-target
+    set stays in lockstep across mint and revoke — diverging the two would open a
+    silent authorization gap on one path (max code-review, PR #1171).
+
+    Args:
+        db: Async DB session.
+        user_id: The TARGET member's user id.
+        workspace_id: The PATH workspace id (permission scope).
+        action_desc: Sentence prefix for the 403 message, completed with
+            "member/viewer targets, not role=...".
+
+    Raises:
+        AuthorizationError: 403 if the target's role is not member/viewer.
+    """
+    target_role = await MemberCredentialsService(db).get_workspace_role(user_id, workspace_id)
+    if target_role not in (WorkspaceRole.MEMBER, WorkspaceRole.VIEWER):
+        raise AuthorizationError(
+            message=f"{action_desc} member/viewer targets, not role={target_role!r}."
+        )
+
+
+async def _owner_provisioned_mint(
+    workspace_id: UUID,
+    user_id: str,
+    data: CreateAPIKeyRequest,
+    user: dict,
+    db: AsyncSession,
+) -> dict:
+    """Issue #1165: mint an API key for another member with a workspace-owner key.
+
+    Guardrails (all 403/400 before any write):
+    - owner-only on the PATH workspace (via authorize_workspace_management, which
+      also applies the #963 scoped-key confinement → uniform 404);
+    - 403 when ``target == caller`` (anti self-replication — a leaked owner key
+      must not mint fresh keys for itself and defeat revocation);
+    - 403 unless the target's workspace role is ``member``/``viewer`` (owner-key
+      minting is strictly privilege-DOWNGRADE provisioning for service identities);
+    - 400 if ``expires_days`` omitted (never-expiring CI keys are unacceptable here);
+    - 400 if ``bound_context_id`` set (public-bound keys stay self-only).
+    The minted key is force-hidden (``hidden_at=now``) so ``plaintext_key`` exists
+    only in this single 201 response; a follow-up GET returns it null.
+    """
+    # Owner gate FIRST on the path workspace (+ #963 confinement). The helper
+    # fails closed on a malformed principal missing user_id (clean 403, never a
+    # KeyError/500), so read caller_id via .get() only after it passes (Copilot
+    # review, PR #1171). session_required_role is unused for the API-key
+    # principal but must be supplied.
+    await authorize_workspace_management(
+        user, workspace_id, db, session_required_role=WorkspaceRole.OWNER
+    )
+    caller_id = user.get("user_id")
+
+    if caller_id == user_id:
+        raise AuthorizationError(
+            message="An owner key cannot mint keys for itself. Use session self-mint."
+        )
+
+    await _require_downgrade_target(
+        db, user_id, workspace_id, action_desc="Owner-provisioned keys can only be minted for"
+    )
+
+    if data.expires_days is None:
+        raise BadRequestError(
+            message="expires_days is required for owner-provisioned API keys (1-3650)."
+        )
+    if data.bound_context_id is not None:
+        raise BadRequestError(
+            message="bound_context_id is not allowed for owner-provisioned keys "
+            "(public-bound keys are self-only)."
+        )
+
+    manager = APIKeyManager(db)
+    try:
+        plaintext_key, new_key = await manager.create_key(
+            name=data.name,
+            user_id=user_id,
+            workspace_id=workspace_id,
+            expires_days=data.expires_days,
+            auto_hide_minutes=0,  # visibility_expires_at = now
+        )
+        # Force-hide immediately so plaintext is never re-revealed via GET, and
+        # null the encrypted-at-rest copy too (Migration-035 zero-knowledge). The
+        # hourly auto-hide sweeper only clears rows with hidden_at IS NULL, so a
+        # force-hidden row it never touches would otherwise retain a
+        # Fernet-decryptable copy of a live long-lived key indefinitely. This
+        # matches APIKeyManager.hide_key / auto_hide_expired_credentials, which
+        # both null plaintext_encrypted on hide (max code-review, PR #1171).
+        new_key.hidden_at = utcnow()
+        new_key.visibility_expires_at = None
+        new_key.plaintext_encrypted = None
+
+        from models.auth import AuditLog
+
+        db.add(
+            AuditLog(
+                user_email=user.get("email") or f"{caller_id}@api",
+                user_id=caller_id,
+                action="member_api_key_provisioned",
+                resource=f"api_key:{new_key.id}",
+                user_metadata={
+                    "workspace_id": str(workspace_id),
+                    "target": user_id,
+                    "key_prefix": new_key.key_prefix,  # the MINTED key
+                    "actor_key_prefix": user.get("api_key_prefix"),  # the ACTING owner key
+                    "expires_days": data.expires_days,
+                    "via": "api_key",
+                },
+            )
+        )
+        await db.commit()
+
+        logger.info(
+            "member_api_key_provisioned",
+            key_id=new_key.id,
+            actor_id=caller_id,
+            target=user_id,
+            workspace_id=str(workspace_id),
+        )
+        return {
+            "id": new_key.id,
+            "name": new_key.name,
+            "key_prefix": new_key.key_prefix,
+            "plaintext_key": plaintext_key,  # shown once
+            "is_visible": False,
+            "visibility_expires_at": None,
+            "created_at": to_utc_iso(new_key.created_at),
+            "last_used_at": None,
+            "revoked_at": None,
+            "bound_context_id": None,
+        }
+    except ValueError as e:
+        raise BadRequestError(message=str(e)) from e
+
+
 @router.get("/{user_id}/credentials", response_model=MemberCredentialsResponse)
 async def get_member_credentials(
     workspace_id: UUID,
     user_id: str,
-    user: SessionUser,
+    user: APIKeyOrSessionUser,
     db: AsyncSession = Depends(get_db),
 ) -> MemberCredentialsResponse:
     """Get or create member credentials (Lazy initialization).
 
-    Migration 034: Zero-knowledge model.
-    - Owner can view plaintext secrets (if visible)
-    - Others can view metadata only
-
-    Args:
-        workspace_id: Workspace ID
-        user_id: Target user ID
-        user: Current user (from auth)
-        db: Database session
-
-    Returns:
-        Member credentials (API key + OAuth app)
+    Migration 034: Zero-knowledge model (unchanged for sessions).
+    - A session caller sees plaintext ONLY for their OWN key while it is still
+      visible (``get_or_create_credentials`` includes ``plaintext_key`` only
+      when ``requester_id == user_id``). Session owner/admin viewing ANOTHER
+      member sees metadata only.
+    - Issue #1165: an API-key OWNER principal may also view another member's key,
+      but the response is ALWAYS metadata-only (``plaintext_key`` nulled) —
+      programmatic responses get logged, so plaintext must never appear.
+    - OAuth bearer principals are rejected (403).
 
     Raises:
-        HTTPException: If not authorized
+        HTTPException: If not authorized.
     """
+    # Issue #1165: OAuth rejected; API-key principal must be workspace owner.
+    if is_oauth_principal(user):
+        raise AuthorizationError(
+            message="OAuth bearer tokens cannot view member credentials. Use a workspace-owner API key."
+        )
+    programmatic = is_api_key_principal(user)
+    if programmatic:
+        await authorize_workspace_management(
+            user, workspace_id, db, session_required_role=WorkspaceRole.OWNER
+        )
+
     service = MemberCredentialsService(db)
 
     try:
@@ -107,6 +266,13 @@ async def get_member_credentials(
             user_id=user_id,
             requester_id=user["user_id"],
         )
+
+        # Issue #1165: metadata-only for programmatic principals — never leak
+        # plaintext into a response that may be logged.
+        if programmatic:
+            for key in credentials.get("api_keys", []):
+                if isinstance(key, dict):
+                    key["plaintext_key"] = None
 
         # Get target user's workspace role (for permission checks)
         target_role = await service.get_workspace_role(user_id, workspace_id)
@@ -280,10 +446,25 @@ async def create_api_key(
     workspace_id: UUID,
     user_id: str,
     data: CreateAPIKeyRequest,
-    user: SessionUser,
+    user: APIKeyOrSessionUser,
     db: AsyncSession = Depends(get_db),
 ) -> dict:
-    """Create new API key (Owner only).
+    """Create new API key.
+
+    Issue #1165: two principals.
+    - **Session** (web UI): self-mint only (``#252`` unchanged) — the caller
+      may only mint their OWN key. ``expires_days`` is NOT accepted on this path
+      (400 if supplied — session keys keep their historical no-expiry behavior);
+      ``bound_context_id`` is still allowed (#626 public-bound path).
+    - **API-key owner** (programmatic): may mint for ANOTHER member, gated to
+      workspace-OWNER on the path workspace. Guardrails: 403 when target ==
+      caller (anti self-replication, #252 threat); 403 unless the target's
+      workspace role is ``member``/``viewer`` (privilege-downgrade provisioning
+      only); ``expires_days`` REQUIRED (400 if omitted — never-expiring CI keys
+      are not an acceptable default); ``bound_context_id`` rejected (400 —
+      public-bound keys stay self-only); the minted key is force-hidden so the
+      plaintext exists only in this one 201 response.
+    OAuth bearer principals are rejected (403).
 
     Issue #626: If ``data.bound_context_id`` is supplied, the key is stored
     as a public-bound key (``api_keys.workspace_id`` is left NULL) and is
@@ -306,9 +487,32 @@ async def create_api_key(
         HTTPException: If not owner, name already exists, tier gate fails,
             or the bound context is missing / not public / not in this workspace.
     """
-    # Permission check: only owner can create their own keys
+    # Issue #1165: OAuth bearer tokens must never mint long-lived credentials.
+    if is_oauth_principal(user):
+        raise AuthorizationError(
+            message="OAuth bearer tokens cannot mint API keys. Use a workspace-owner API key."
+        )
+
+    # Issue #1165: owner-provisioned programmatic minting for ANOTHER member.
+    if is_api_key_principal(user):
+        return await _owner_provisioned_mint(workspace_id, user_id, data, user, db)
+
+    # Session path (#252 unchanged): self-mint only.
     if user["user_id"] != user_id:
-        raise AuthorizationError(message="Only owner can create API keys")
+        raise AuthorizationError(
+            message="You can only create your own API keys in a session. "
+            "To provision a key for another member, use a workspace-owner API key."
+        )
+
+    # Issue #1165: expires_days is an owner-provisioned-only field. Session
+    # self-mint keeps its historical "no expiry" behavior and does not plumb
+    # expires_days to APIKeyManager — reject it explicitly rather than silently
+    # ignoring a client-supplied value (Copilot review, PR #1171).
+    if data.expires_days is not None:
+        raise BadRequestError(
+            message="expires_days is only supported for owner-provisioned keys "
+            "(via a workspace-owner API key), not session self-mint."
+        )
 
     # Issue #626: Public-bound key creation gating + scope decision.
     # When ``bound_context_id`` is supplied, the key is public-bound and the
@@ -532,33 +736,51 @@ async def delete_api_key_by_id(
     workspace_id: UUID,
     user_id: str,
     key_id: int,
-    user: SessionUser,
+    user: APIKeyOrSessionUser,
     db: AsyncSession = Depends(get_db),
 ) -> dict:
-    """Delete a specific API key by ID (owner only).
+    """Delete/revoke a specific API key by ID.
 
-    Issue #626: Required for revoking public-bound keys, which have
-    ``workspace_id IS NULL`` and so are invisible to the legacy singleton
-    DELETE endpoint above. This per-id endpoint accepts both regular
-    workspace-scoped keys and public-bound keys belonging to this user;
-    the ``workspace_id`` in the URL is the permission scope (the caller
-    must be the owner) and not a filter on ``api_keys.workspace_id``.
+    Issue #626: per-id endpoint (also revokes public-bound keys). The URL
+    ``workspace_id`` is the permission scope, not a filter on the key's column.
 
-    Args:
-        workspace_id: Workspace ID (permission scope, from URL)
-        user_id: Target user ID (must match the key's ``user_id``)
-        key_id: API key integer ID
-        user: Current user (from auth)
-        db: Database session
-
-    Returns:
-        Status message
+    Issue #1165: two principals.
+    - **Session**: self-only (``#252`` unchanged) — hard delete of your own key.
+    - **API-key OWNER** (programmatic): may revoke ANOTHER member's key (target
+      must be member/viewer). This is a **soft revoke** (``revoked_at=now``, row
+      retained for forensics), and the audit row is written BEFORE the state
+      change. OAuth bearer principals are rejected (403).
 
     Raises:
-        HTTPException: 403 if not owner, 404 if key not found.
+        HTTPException: 403 if not permitted, 404 if key not found.
     """
-    if user["user_id"] != user_id:
-        raise AuthorizationError(message="Only owner can delete API keys")
+    if is_oauth_principal(user):
+        raise AuthorizationError(
+            message="OAuth bearer tokens cannot revoke API keys. Use a workspace-owner API key."
+        )
+    # Fail closed on a malformed principal missing user_id — .get() (not
+    # indexing) so a bad dict yields a clean 403, never a KeyError/500. The
+    # programmatic branch's authorize_workspace_management re-validates; the
+    # session branch's self-only check (caller_id != user_id) rejects a None
+    # caller (Copilot review, PR #1171).
+    caller_id = user.get("user_id")
+    programmatic = is_api_key_principal(user)
+    if programmatic:
+        # Owner gate on the path workspace (+ #963 confinement).
+        await authorize_workspace_management(
+            user, workspace_id, db, session_required_role=WorkspaceRole.OWNER
+        )
+        if user_id != caller_id:
+            # Cross-member revoke is owner-provisioned; restrict target role.
+            await _require_downgrade_target(
+                db, user_id, workspace_id, action_desc="Owner-provisioned revocation is limited to"
+            )
+    elif caller_id != user_id:
+        # Session path (#252 unchanged): self-only.
+        raise AuthorizationError(
+            message="You can only delete your own API keys in a session. "
+            "To revoke another member's key, use a workspace-owner API key."
+        )
 
     from sqlalchemy import and_, select
 
@@ -594,20 +816,64 @@ async def delete_api_key_by_id(
             raise AuthorizationError(
                 message="API key is bound to a context in a different workspace"
             )
-    # else: global / owner-scoped key (both columns NULL) — workspace_id in
-    # the URL is purely permission scope; the owner-only check above is
-    # the only gate that applies.
+    else:
+        # Global / owner-scoped key (both columns NULL) — not anchored to any
+        # workspace. For a SESSION self-delete or a programmatic SELF-revoke the
+        # URL workspace is purely permission scope and the owner-only check above
+        # is the only gate. But a programmatic CROSS-member revoke cannot be
+        # anchored here: the path-workspace owner has no proven authority over a
+        # member's account-global key — it may be the key that member uses in
+        # their OTHER workspaces. Refuse with a uniform 404 rather than revoke
+        # across a workspace boundary (and misattribute the audit row to this
+        # workspace) (max code-review, PR #1171).
+        if programmatic and user_id != caller_id:
+            raise NotFoundException("API key")
 
-    # Capture binding info before delete — the audit-log entry below
-    # needs the original ``bound_context_id`` and the row is about to go.
+    # Capture binding info before mutation — the audit-log entry below
+    # needs the original ``bound_context_id``.
     bound_ctx_id = api_key.bound_context_id
+
+    # Issue #1165: ALL programmatic (API-key) revocations are SOFT revokes
+    # (revoked_at set, row retained for forensics) + audited — including an
+    # owner revoking their OWN key, so a programmatic credential action is
+    # never a silent hard delete (Copilot review, PR #1171). The audit row and
+    # the revoked_at update commit atomically in one transaction. Session
+    # self-delete keeps the existing hard-delete semantics (#252, #626).
+    soft_revoke = programmatic
+    from models.auth import AuditLog
+
+    if soft_revoke:
+        db.add(
+            AuditLog(
+                user_email=user.get("email") or f"{caller_id}@api",
+                user_id=caller_id,
+                action="member_api_key_revoked",
+                resource=f"api_key:{key_id}",
+                user_metadata={
+                    "workspace_id": str(workspace_id),
+                    "target": user_id,
+                    "key_prefix": api_key.key_prefix,  # the REVOKED key
+                    "actor_key_prefix": user.get("api_key_prefix"),  # the ACTING owner key
+                    "self_revoke": user_id == caller_id,
+                    "via": "api_key",
+                },
+            )
+        )
+        api_key.revoked_at = utcnow()
+        await db.commit()
+        logger.info(
+            "member_api_key_revoked",
+            key_id=key_id,
+            actor_id=caller_id,
+            target=user_id,
+            workspace_id=str(workspace_id),
+        )
+        return {"status": "revoked", "key_id": key_id}
 
     await db.delete(api_key)
 
     # Issue #626: audit log entry for public-bound key revocation.
     if bound_ctx_id is not None:
-        from models.auth import AuditLog
-
         db.add(
             AuditLog(
                 user_email=user.get("email") or f"{user_id}@api",
