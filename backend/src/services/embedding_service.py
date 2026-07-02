@@ -474,7 +474,11 @@ class EmbeddingService:
                                 f"Self-hosted inference server not responding at "
                                 f"{self.self_hosted_base_url} (HTTP {resp.status_code})"
                             )
-                except httpx.ConnectError as err:
+                except httpx.HTTPError as err:
+                    # Broad httpx.HTTPError (not just ConnectError) so a probe
+                    # timeout / protocol error surfaces as a clean
+                    # ConfigurationError rather than an unhandled 500 — matches
+                    # SelfHostedProvider._verify.
                     raise ConfigurationError(
                         f"Cannot connect to self-hosted inference server at "
                         f"{self.self_hosted_base_url}. Is your backend running? "
