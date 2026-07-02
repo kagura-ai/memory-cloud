@@ -339,3 +339,35 @@ async def test_list_filters_by_accessible_contexts_end_to_end(scenario):
     )
     member_ctx = {f.context_id for f in member_files}
     assert {None, scenario["shared"], scenario["private"]} <= member_ctx
+
+
+# --- context hard-delete purge (admin user-erasure) ------------------------------
+
+
+async def test_purge_before_context_hard_delete_prevents_acl_widening(scenario):
+    """Admin user-erasure hard-deletes the target's contexts. Without the
+    purge, ``file_objects.context_id``'s ON DELETE SET NULL would strip a
+    private context's ACL and silently widen its files to workspace scope
+    (any viewer could download them). ``purge_files_for_contexts`` must run
+    first, in the same transaction, so the files die with their boundary."""
+    svc, db, ws = scenario["svc"], scenario["db"], scenario["ws"]
+    f = _file(workspace_id=ws, context_id=scenario["private"], sha="b" * 64)
+    db.add(f)
+    await db.flush()
+
+    released = await svc.purge_files_for_contexts([scenario["private"]])
+    assert released == {ws: 1024}  # uploaded bytes reported for Redis release
+
+    # The admin route hard-deletes the context right after the purge.
+    await db.execute(text("DELETE FROM contexts WHERE id = :c"), {"c": str(scenario["private"])})
+    await db.flush()
+
+    # The FK has now SET NULL'd nothing that matters: the row is soft-deleted,
+    # so nobody — creator, owner, viewer, or scoped member — can download it.
+    for actor in (MEMBER, OWNER, VIEWER, OTHER):
+        with pytest.raises(NotFoundException):
+            await svc.get_presigned_download(workspace_id=ws, file_id=f.id, actor_user_id=actor)
+
+    # And it is gone from every listing, including the legacy NULL-context scope.
+    listed = await svc.list_files(workspace_id=ws, accessible_context_ids=[], limit=50)
+    assert f.id not in {row.id for row in listed}

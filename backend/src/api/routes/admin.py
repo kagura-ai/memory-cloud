@@ -1018,7 +1018,26 @@ async def delete_user(
         # Delete OAuth2 clients owned by the user
         await db.execute(delete(OAuth2Client).where(OAuth2Client.owner_id == user_id))
 
-        # Delete contexts owned by the user
+        # Delete contexts owned by the user. Files bound to those contexts
+        # must be soft-deleted FIRST: file_objects.context_id is ON DELETE
+        # SET NULL, so leaving the rows behind would strip a private
+        # context's ACL and silently widen its files to workspace scope
+        # (any workspace viewer could then download them).
+        from services.file_storage_service import FileStorageService
+
+        ctx_ids = list(
+            (await db.execute(select(Context.id).where(Context.created_by == user_id)))
+            .scalars()
+            .all()
+        )
+        released_by_ws = await FileStorageService(db).purge_files_for_contexts(ctx_ids)
+        # Workspaces owned by the user are hard-deleted below in this same
+        # transaction — only surviving workspaces need the Redis release.
+        owned_ws_ids = set(
+            (await db.execute(select(Workspace.id).where(Workspace.owner_user_id == user_id)))
+            .scalars()
+            .all()
+        )
         await db.execute(delete(Context).where(Context.created_by == user_id))
 
         # Remove user from workspace memberships
@@ -1039,6 +1058,18 @@ async def delete_user(
         # Delete user
         await db.delete(target_user)
         await db.commit()
+
+        # Redis follows the committed DB state (R5): release the purged
+        # files' quota for workspaces that survive this erasure. Fail-open
+        # on Redis errors (release_storage_bytes self-heals on reseed).
+        from services import storage_quota_service
+
+        for ws_id, size_bytes in released_by_ws.items():
+            if ws_id in owned_ws_ids:
+                continue
+            await storage_quota_service.release_storage_bytes(
+                workspace_id=ws_id, size_bytes=size_bytes
+            )
 
         logger.info(
             "admin_delete_user",

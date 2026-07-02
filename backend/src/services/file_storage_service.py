@@ -32,6 +32,7 @@ from __future__ import annotations
 
 import mimetypes
 import re
+from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from uuid import UUID, uuid4
@@ -813,6 +814,56 @@ class FileStorageService:
             file_id=str(file_id),
             size_bytes=size,
         )
+
+    async def purge_files_for_contexts(self, context_ids: Sequence[UUID]) -> dict[UUID, int]:
+        """Soft-delete every live, non-reserved file bound to ``context_ids``.
+
+        Admin user-erasure hard-deletes the target's contexts, which would
+        fire ``file_objects.context_id``'s ``ON DELETE SET NULL`` and silently
+        widen a private context's files to workspace scope (any viewer could
+        then download them). Call this in the same transaction, *before* the
+        contexts are deleted, so the files go away with their ACL boundary.
+
+        ``reserved`` rows are left for the orphan sweeper: they are not
+        downloadable (``get_presigned_download`` requires ``uploaded``) and
+        the sweeper owns their Redis release — marking them ``failed`` here
+        would make it skip them and leak the reservation.
+
+        Does NOT commit (runs inside the caller's transaction). Returns the
+        released uploaded-bytes per workspace so the caller can call
+        ``storage_quota_service.release_storage_bytes`` for each surviving
+        workspace AFTER its commit succeeds (Redis follows the DB, R5).
+        """
+        if not context_ids:
+            return {}
+        result = await self.db.execute(
+            select(FileObject).where(
+                FileObject.context_id.in_(list(context_ids)),
+                FileObject.deleted_at.is_(None),
+                FileObject.status != "reserved",
+            )
+        )
+        files = list(result.scalars().all())
+        released: dict[UUID, int] = {}
+        now = utcnow()
+        for file in files:
+            file.deleted_at = now
+            if file.status != "uploaded":
+                continue  # failed rows: Redis already released by the sweeper
+            await self._upsert_workspace_usage(
+                file.workspace_id,
+                delta_bytes=-file.size_bytes,
+                delta_files=-1,
+            )
+            released[file.workspace_id] = released.get(file.workspace_id, 0) + file.size_bytes
+        if files:
+            logger.info(
+                "context_bound_files_purged",
+                context_count=len(set(context_ids)),
+                file_count=len(files),
+                workspaces=[str(w) for w in released],
+            )
+        return released
 
     # ------------------------------------------------------------------
     # Counter helper (UPSERT pattern)

@@ -73,10 +73,13 @@ class FileObject(Base):
     # used by memories — instead of the flat workspace role. NULL = workspace-
     # scoped (legacy behaviour: viewer+ read, member+ write); existing rows are
     # left NULL by the migration (no backfill). Quota + sha256 dedup stay
-    # workspace-level (R5); only *access* is context-scoped. ON DELETE SET NULL:
-    # contexts soft-delete (#84), so this only fires on a workspace hard-delete
-    # cascade (where the file row is removed anyway) — a defensive graceful
-    # fallback to workspace-scope rather than an orphaned dangling FK.
+    # workspace-level (R5); only *access* is context-scoped. ON DELETE SET NULL
+    # is a last-resort fallback, NOT an access rule: a NULL'd binding widens the
+    # file to workspace scope, so every context hard-delete path must soft-delete
+    # bound files first (admin user-erasure does, via
+    # FileStorageService.purge_files_for_contexts). Contexts otherwise
+    # soft-delete (#84); the workspace hard-delete cascade removes the file row
+    # itself anyway.
     context_id: Mapped[uuid.UUID | None] = mapped_column(
         UUID(as_uuid=True),
         ForeignKey("contexts.id", ondelete="SET NULL"),
