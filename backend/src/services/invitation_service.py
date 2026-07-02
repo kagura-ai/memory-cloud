@@ -18,6 +18,7 @@ from uuid import UUID
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from auth.workspace_roles import WorkspaceRole
 from models.auth import User, Workspace, WorkspaceInvitation, WorkspaceMember
 from services.email_service import EmailService, get_email_service
 from utils.datetime import to_utc_iso, utcnow
@@ -25,6 +26,13 @@ from utils.exceptions import NotFoundException, QuotaExceededError, ValidationEr
 from utils.logger import get_logger
 
 logger = get_logger(__name__)
+
+# Issue #1166: single message for the owner-invitation rejection, shared by the
+# create and accept guards so the two layers cannot drift.
+OWNER_INVITE_REJECTED_MSG = (
+    "Invitations cannot grant the owner role. "
+    "Use the ownership transfer flow to change the workspace owner."
+)
 
 # Invitation expiry presets (days)
 EXPIRY_PRESETS = {
@@ -165,21 +173,14 @@ class InvitationService:
             if invalid_ids:
                 raise ValidationError(f"Invalid or private context IDs: {list(invalid_ids)}")
 
-        # Validate single owner constraint (Issue #165 - only one owner per workspace)
-        if role == "owner":
-            stmt = select(WorkspaceMember).where(
-                WorkspaceMember.workspace_id == workspace_id,
-                WorkspaceMember.role == "owner",
-            )
-            result = await self.db.execute(stmt)
-            existing_owners = result.scalars().all()
-
-            if existing_owners:
-                raise ValidationError(
-                    "Workspace already has an owner. "
-                    "Only one owner is allowed per workspace. "
-                    "Please transfer ownership first if you want to change the owner."
-                )
+        # Issue #1166: owner invitations are rejected outright. The previous
+        # single-owner check (#165) only fired when an OWNER row existed, so an
+        # invitation minted in a zero-owner state — or racing
+        # transfer_ownership — could still grant the owner role at accept.
+        # Owner changes go through the ownership transfer flow; an owner
+        # invitation is never meaningful under the single-owner invariant.
+        if role == WorkspaceRole.OWNER:
+            raise ValidationError(OWNER_INVITE_REJECTED_MSG)
 
         # Generate unique token (32 bytes = 43 chars base64)
         token = secrets.token_urlsafe(32)
@@ -388,6 +389,16 @@ class InvitationService:
 
         if invitation.is_expired():
             raise ValidationError("This invitation has expired. Please request a new invitation.")
+
+        # Issue #1166 defense in depth: refuse pending owner-role invitations.
+        # create_invitation now rejects them, but rows minted before the fix
+        # (or via direct DB access) may still exist — accept must not grant
+        # the owner role. This policy rejection runs BEFORE the email-restriction
+        # check: the invitation is invalid by policy regardless of who presents
+        # it, and checking email first would leak the restricted address to a
+        # wrong-email caller via the mismatch error (Copilot review, PR #1169).
+        if invitation.role == WorkspaceRole.OWNER:
+            raise ValidationError(OWNER_INVITE_REJECTED_MSG)
 
         # Check email restriction (case-insensitive)
         if invitation.email:

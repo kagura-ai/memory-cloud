@@ -1158,7 +1158,7 @@ class WorkspaceInvitationCreate(BaseModel):
     )
     role: WorkspaceRole = Field(
         WorkspaceRole.MEMBER,
-        description="Role to assign upon acceptance",
+        description="Role to assign upon acceptance (owner is not invitable — #1166)",
     )
     expires_in_days: int | None = Field(
         None,
@@ -1170,6 +1170,21 @@ class WorkspaceInvitationCreate(BaseModel):
         None,
         description="Context IDs to allow (required for member/viewer, minimum 1)",
     )
+
+    @field_validator("role")
+    @classmethod
+    def _reject_owner_role(cls, v: WorkspaceRole) -> WorkspaceRole:
+        """Issue #1166: invitations must never grant the owner role.
+
+        The sanctioned owner-change path is the ownership transfer flow;
+        rejecting here surfaces a 422 before any route/service code runs
+        (the service re-checks as defense in depth for non-HTTP callers).
+        """
+        if v == WorkspaceRole.OWNER:
+            raise ValueError(
+                "role=owner invitations are not supported; use the ownership transfer flow instead"
+            )
+        return v
 
 
 class WorkspaceInvitationResponse(TZAwareBaseModel):
