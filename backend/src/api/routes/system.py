@@ -182,9 +182,14 @@ async def get_system_telemetry(
         # provider is self_hosted). Probes the OpenAI-compatible /v1/models
         # endpoint, served by both Ollama and vLLM.
         self_hosted_status = ServiceStatus(status="not_configured")
+        # "Explicitly configured" = provider is self_hosted OR the operator set
+        # SELF_HOSTED_BASE_URL. Detect the latter via model_fields_set rather
+        # than comparing to the default value — an operator who sets the base
+        # URL *to* the default (common for a local Ollama/vLLM) must still be
+        # treated as configured.
         self_hosted_explicitly_configured = (
             settings.embedding_provider == "self_hosted"
-            or settings.self_hosted_base_url != "http://localhost:11434"
+            or "self_hosted_base_url" in settings.model_fields_set
         )
         if self_hosted_explicitly_configured:
             try:
@@ -446,8 +451,11 @@ async def list_embedding_models(
     # Probes the OpenAI-compatible /v1/models endpoint (Ollama + vLLM).
     self_hosted_available = False
     self_hosted_url = settings.self_hosted_base_url
+    # See telemetry probe above: detect explicit config via model_fields_set so
+    # setting SELF_HOSTED_BASE_URL to the default value still counts as configured.
     self_hosted_configured = (
-        settings.embedding_provider == "self_hosted" or self_hosted_url != "http://localhost:11434"
+        settings.embedding_provider == "self_hosted"
+        or "self_hosted_base_url" in settings.model_fields_set
     )
     if self_hosted_configured:
         try:
