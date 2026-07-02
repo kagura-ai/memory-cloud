@@ -101,13 +101,15 @@ async def _owner_provisioned_mint(
     The minted key is force-hidden (``hidden_at=now``) so ``plaintext_key`` exists
     only in this single 201 response; a follow-up GET returns it null.
     """
-    caller_id = user["user_id"]
-
-    # Owner gate on the path workspace (+ #963 confinement). session_required_role
-    # is unused for the API-key principal but must be supplied.
+    # Owner gate FIRST on the path workspace (+ #963 confinement). The helper
+    # fails closed on a malformed principal missing user_id (clean 403, never a
+    # KeyError/500), so read caller_id via .get() only after it passes (Copilot
+    # review, PR #1171). session_required_role is unused for the API-key
+    # principal but must be supplied.
     await authorize_workspace_management(
         user, workspace_id, db, session_required_role=WorkspaceRole.OWNER
     )
+    caller_id = user.get("user_id")
 
     if caller_id == user_id:
         raise AuthorizationError(
@@ -723,7 +725,12 @@ async def delete_api_key_by_id(
         raise AuthorizationError(
             message="OAuth bearer tokens cannot revoke API keys. Use a workspace-owner API key."
         )
-    caller_id = user["user_id"]
+    # Fail closed on a malformed principal missing user_id — .get() (not
+    # indexing) so a bad dict yields a clean 403, never a KeyError/500. The
+    # programmatic branch's authorize_workspace_management re-validates; the
+    # session branch's self-only check (caller_id != user_id) rejects a None
+    # caller (Copilot review, PR #1171).
+    caller_id = user.get("user_id")
     programmatic = is_api_key_principal(user)
     if programmatic:
         # Owner gate on the path workspace (+ #963 confinement).
