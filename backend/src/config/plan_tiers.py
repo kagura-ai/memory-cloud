@@ -209,7 +209,7 @@ FEATURE_MIN_PLANS: dict[str, str] = {
     "shared_contexts": "pro",  # Issue #165: Shared contexts require Pro
     "public_contexts": "pro",  # Issue #242: Public contexts require PRO only
     "memory_analysis": "pro",  # Issue #496: Memory Broadlistening (Pro only; FREE/BASIC=0)
-    "managed_embeddings": "basic",  # Issue #1030: platform-managed embeddings (M/L; FREE=BYOK/Ollama)
+    "managed_embeddings": "basic",  # Issue #1030: platform-managed embeddings (M/L; FREE=BYOK/self-hosted)
 }
 
 

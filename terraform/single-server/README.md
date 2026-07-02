@@ -16,7 +16,7 @@ Google Compute Engine VM behind Cloudflare.
 - **GCS bucket** reserved for future multimodal uploads (backend integration
   is tracked in a follow-up issue — the bucket is unused until then)
 - **Caddy reverse proxy** terminating TLS with a Cloudflare Origin CA cert
-- **docker-compose** stack with optional Ollama local-embeddings override
+- **docker-compose** stack with optional Ollama local-embeddings override (sets `EMBEDDING_PROVIDER=self_hosted`)
 
 ## Not included (deliberately)
 
@@ -262,8 +262,10 @@ you just created, or via Google OAuth once the Google client is wired up.
 
 ## Optional: Ollama local embeddings
 
-The default stack uses OpenAI embeddings. To run with Ollama instead,
-bump the VM size first (e2-medium is not enough):
+The default stack uses OpenAI embeddings. To run with Ollama instead (the
+override sets `EMBEDDING_PROVIDER=self_hosted`, pointing the self-hosted
+OpenAI-compatible slot at the bundled Ollama engine), bump the VM size first
+(e2-medium is not enough):
 
 ```hcl
 # terraform.tfvars

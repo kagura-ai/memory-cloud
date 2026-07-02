@@ -367,7 +367,7 @@ class TestEmbedWithUsageCapGate:
         mock_email_service.send_embedding_spend_alert.assert_not_called()
 
     @pytest.mark.asyncio
-    async def test_ollama_provider_skips_cap_path(
+    async def test_self_hosted_provider_skips_cap_path(
         self,
         db_session: AsyncSession,
         byok_workspace_with_cap: Workspace,
@@ -376,27 +376,27 @@ class TestEmbedWithUsageCapGate:
         patch_pricing,
         mock_email_service,
     ):
-        """``provider=ollama`` short-circuits the cap gate regardless of BYOK
-        row presence — Ollama is local, no real provider cost.
+        """``provider=self_hosted`` short-circuits the cap gate regardless of
+        BYOK row presence — self-hosted is local, no real provider cost.
 
         ``EmbeddingService.__init__`` derives ``provider`` from the model
         registry, so we override ``svc.provider`` post-construction to
-        exercise the Ollama branch without registering a fake model.
+        exercise the self-hosted branch without registering a fake model.
         """
         svc = EmbeddingService(db_session)
         # ``provider`` is derived from the model in __init__; override it
-        # directly so we exercise the Ollama branch without needing a
+        # directly so we exercise the self-hosted branch without needing a
         # model registry entry.
-        svc.provider = "ollama"
-        # Bypass the Ollama HTTP probe that runs on first use of _get_client.
-        svc._ollama_verified = True
+        svc.provider = "self_hosted"
+        # Bypass the self-hosted HTTP probe that runs on first use of _get_client.
+        svc._self_hosted_verified = True
 
         # The shared patch_openai fixture replaced ``AsyncOpenAI``, so the
-        # Ollama branch's ``AsyncOpenAI(base_url=..., api_key="ollama")``
+        # self-hosted branch's ``AsyncOpenAI(base_url=..., api_key=...)``
         # call returns the same stub. That's intentional — we don't run a
-        # real Ollama in tests.
+        # real self-hosted backend in tests.
         vector, _ = await svc.embed_with_usage(
-            text="ollama call",
+            text="self_hosted call",
             user_id=byok_workspace_with_cap.owner_user_id,
             workspace_id=str(byok_workspace_with_cap.id),
         )

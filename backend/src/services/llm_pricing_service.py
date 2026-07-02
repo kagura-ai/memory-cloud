@@ -108,7 +108,7 @@ class LLMPricingService:
 
         Args:
             provider: Provider identifier (e.g. ``'anthropic'``,
-                ``'openai'``, ``'ollama'``).
+                ``'openai'``, ``'self_hosted'``).
             model: Model identifier (e.g. ``'claude-sonnet-4-6'``,
                 ``'text-embedding-3-small'``).
             unit_type: Pricing dimension — one of

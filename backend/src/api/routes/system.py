@@ -43,7 +43,7 @@ def _embedding_config_payload(settings: Any) -> dict[str, Any]:
 
     Intentionally limited to ``provider`` / ``model`` / ``dimensions`` —
     low-sensitivity capability info consumed by the admin environment page.
-    Internal infrastructure details (notably ``ollama_base_url``) are
+    Internal infrastructure details (notably ``self_hosted_base_url``) are
     deliberately excluded so they are never exposed to an authenticated,
     non-admin caller of ``/system/telemetry`` (#991).
     """
@@ -178,38 +178,52 @@ async def get_system_telemetry(
         except Exception as e:
             redis_status = ServiceStatus(status="error", details={"error": str(e)})
 
-        # Check Ollama (only if explicitly configured or provider is ollama)
-        ollama_status = ServiceStatus(status="not_configured")
-        ollama_explicitly_configured = (
-            settings.embedding_provider == "ollama"
-            or settings.ollama_base_url != "http://localhost:11434"
+        # Check the self-hosted backend (only if explicitly configured or
+        # provider is self_hosted). Probes the OpenAI-compatible /v1/models
+        # endpoint, served by both Ollama and vLLM.
+        self_hosted_status = ServiceStatus(status="not_configured")
+        # "Explicitly configured" = provider is self_hosted OR the operator set
+        # SELF_HOSTED_BASE_URL. Detect the latter via model_fields_set rather
+        # than comparing to the default value — an operator who sets the base
+        # URL *to* the default (common for a local Ollama/vLLM) must still be
+        # treated as configured.
+        self_hosted_explicitly_configured = (
+            settings.embedding_provider == "self_hosted"
+            or "self_hosted_base_url" in settings.model_fields_set
         )
-        if ollama_explicitly_configured:
+        if self_hosted_explicitly_configured:
             try:
                 import httpx
 
+                headers = (
+                    {"Authorization": f"Bearer {settings.self_hosted_api_key}"}
+                    if settings.self_hosted_api_key
+                    else None
+                )
                 async with httpx.AsyncClient(timeout=5.0) as http:
-                    resp = await http.get(settings.ollama_base_url)
-                    if resp.status_code == 200:
-                        # Get available models
-                        models_resp = await http.get(f"{settings.ollama_base_url}/api/tags")
-                        model_names = []
-                        if models_resp.status_code == 200:
-                            model_names = [m["name"] for m in models_resp.json().get("models", [])]
-                        # `url` intentionally omitted (#991): the internal Ollama
+                    models_resp = await http.get(
+                        f"{settings.self_hosted_base_url}/v1/models", headers=headers
+                    )
+                    if models_resp.status_code == 200:
+                        # ``data`` may be null (e.g. Ollama with no models
+                        # pulled returns {"data": null}); coalesce to [].
+                        model_names = [
+                            m["id"] for m in (models_resp.json().get("data") or []) if "id" in m
+                        ]
+                        # `url` intentionally omitted (#991): the internal
                         # base URL is not exposed on this non-admin endpoint; the
                         # frontend consumes only status + models.
-                        ollama_status = ServiceStatus(
+                        self_hosted_status = ServiceStatus(
                             status="ok",
                             details={"models": model_names},
                         )
                     else:
-                        ollama_status = ServiceStatus(
+                        self_hosted_status = ServiceStatus(
                             status="error",
-                            details={"http_status": resp.status_code},
+                            details={"http_status": models_resp.status_code},
                         )
             except Exception as e:
-                ollama_status = ServiceStatus(status="error", details={"error": str(e)})
+                self_hosted_status = ServiceStatus(status="error", details={"error": str(e)})
 
         # Memory stats (all users)
         from sqlalchemy import func
@@ -251,7 +265,7 @@ async def get_system_telemetry(
                 "postgres": postgres_status,
                 "qdrant": qdrant_status,
                 "redis": redis_status,
-                "ollama": ollama_status,
+                "self_hosted": self_hosted_status,
             },
             memory_stats={
                 "total": total_memories,
@@ -433,26 +447,35 @@ async def list_embedding_models(
     except Exception:
         pass  # Non-critical: OpenAI availability is best-effort
 
-    # Check Ollama availability (only if explicitly configured)
-    ollama_available = False
-    ollama_url = settings.ollama_base_url
-    ollama_configured = (
-        settings.embedding_provider == "ollama" or ollama_url != "http://localhost:11434"
+    # Check self-hosted backend availability (only if explicitly configured).
+    # Probes the OpenAI-compatible /v1/models endpoint (Ollama + vLLM).
+    self_hosted_available = False
+    self_hosted_url = settings.self_hosted_base_url
+    # See telemetry probe above: detect explicit config via model_fields_set so
+    # setting SELF_HOSTED_BASE_URL to the default value still counts as configured.
+    self_hosted_configured = (
+        settings.embedding_provider == "self_hosted"
+        or "self_hosted_base_url" in settings.model_fields_set
     )
-    if ollama_configured:
+    if self_hosted_configured:
         try:
             import httpx
 
+            headers = (
+                {"Authorization": f"Bearer {settings.self_hosted_api_key}"}
+                if settings.self_hosted_api_key
+                else None
+            )
             async with httpx.AsyncClient(timeout=3.0) as http:
-                resp = await http.get(ollama_url)
-                ollama_available = resp.status_code == 200
+                resp = await http.get(f"{self_hosted_url}/v1/models", headers=headers)
+                self_hosted_available = resp.status_code == 200
         except Exception:
-            pass  # Ollama not reachable — models marked as unavailable
+            pass  # Backend not reachable — models marked as unavailable
 
     # Build model list
     models = []
     for name, (dimensions, provider) in EMBEDDING_MODEL_REGISTRY.items():
-        available = openai_available if provider == "openai" else ollama_available
+        available = openai_available if provider == "openai" else self_hosted_available
         models.append(
             EmbeddingModelInfo(
                 name=name,

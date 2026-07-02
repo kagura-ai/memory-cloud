@@ -27,7 +27,7 @@ export interface Context {
   updated_at: string | null;
   // Issue #217: Search config summary
   use_rerank: boolean | null;
-  reranker_provider: string | null; // 'voyage' | 'cohere'
+  reranker_provider: string | null; // 'voyage' | 'cohere' | 'self_hosted'
   // Embedding model info (Issue #49)
   embedding_model: string | null;
   embedding_dimensions: number | null;

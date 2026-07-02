@@ -18,7 +18,7 @@ class Usage:
     Decomposes the provider's usage object into billing-relevant classes.
     ``cache_write_tokens`` exists so Anthropic's
     ``cache_creation_input_tokens`` can be captured; providers that do not
-    expose cache-write (OpenAI, Gemini, Ollama) leave it at 0.
+    expose cache-write (OpenAI, Gemini, self-hosted backends) leave it at 0.
     """
 
     total: int
@@ -52,8 +52,8 @@ class LLMProvider(ABC):
     def __init__(self, api_key: str) -> None:
         """Initialize the provider with an API key.
 
-        Subclasses override to accept variations (e.g. ``base_url`` for
-        Ollama) and typically do NOT call ``super().__init__`` — the stored
+        Subclasses override to accept variations (e.g. ``base_url`` for the
+        self-hosted provider) and typically do NOT call ``super().__init__`` — the stored
         attribute here is a default in case they do. The base body is what
         lets ``provider_cls(api_key)`` in :class:`LLMService._instantiate_provider`
         type-check against ``type[LLMProvider]`` without ruff's B027 firing

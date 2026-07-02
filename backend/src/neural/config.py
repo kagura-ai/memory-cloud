@@ -86,7 +86,7 @@ class NeuralMemoryConfig:
         sleep_enabled: Master switch for Sleep Maintenance (env-only)
         sleep_cron_hour: UTC hour for scheduled sleep run (env-only)
         sleep_cron_minute: UTC minute for scheduled sleep run (env-only)
-        sleep_llm_provider: LLM provider (openai / ollama)
+        sleep_llm_provider: LLM provider (openai / self_hosted)
         sleep_llm_model: LLM model name for sleep judgments
         sleep_max_memories_per_run: Max memories processed per run
         sleep_max_llm_calls_per_run: LLM call budget per run
@@ -243,7 +243,7 @@ class NeuralMemoryConfig:
     sleep_enabled: bool = False  # Feature flag (env-only)
     sleep_cron_hour: int = 2  # UTC hour for cron schedule (env-only)
     sleep_cron_minute: int = 0  # UTC minute for cron schedule (env-only)
-    sleep_llm_provider: str = "openai"  # LLM provider: openai / ollama
+    sleep_llm_provider: str = "openai"  # LLM provider: openai / self_hosted
     sleep_llm_model: str = "gpt-5-nano"  # LLM model name
     sleep_max_memories_per_run: int = 200  # Batch size cap per run
     sleep_max_llm_calls_per_run: int = 50  # LLM call budget per run
@@ -416,9 +416,10 @@ class NeuralMemoryConfig:
             raise ValueError(f"sleep_cron_hour must be in [0, 23], got {self.sleep_cron_hour}")
         if not (0 <= self.sleep_cron_minute <= 59):
             raise ValueError(f"sleep_cron_minute must be in [0, 59], got {self.sleep_cron_minute}")
-        if self.sleep_llm_provider not in ("openai", "ollama", ""):
+        if self.sleep_llm_provider not in ("openai", "self_hosted", ""):
             raise ValueError(
-                f"sleep_llm_provider must be 'openai', 'ollama', or '', got '{self.sleep_llm_provider}'"
+                "sleep_llm_provider must be 'openai', 'self_hosted', or '', "
+                f"got '{self.sleep_llm_provider}'"
             )
         if not self.sleep_max_memories_per_run > 0:
             raise ValueError(

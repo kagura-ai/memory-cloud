@@ -145,7 +145,7 @@ export interface ContextSearchConfig {
   bm25_weight: number;
   fetch_factor: number;
   use_rerank: boolean;
-  reranker_provider: "voyage" | "cohere" | "ollama";
+  reranker_provider: "voyage" | "cohere" | "self_hosted";
   reranker_model: string;
   embedding_model?: string;
   embedding_dimensions?: number;
@@ -158,7 +158,7 @@ export interface ContextSearchConfigUpdate {
   bm25_weight: number;
   fetch_factor: number;
   use_rerank: boolean;
-  reranker_provider: "voyage" | "cohere" | "ollama";
+  reranker_provider: "voyage" | "cohere" | "self_hosted";
   reranker_model: string;
 }
 

@@ -2,12 +2,17 @@
 
 Issue #105: Add multiple reranker options (Voyage AI, Cohere).
 Issue #70: Add Ollama as local reranker provider.
+Issue #1160: Renamed the local reranker provider key ollama → self_hosted and
+normalized its transport to the OpenAI-compatible ``/v1/completions`` endpoint
+(served by both Ollama and vLLM), so any self-hosted OpenAI-compatible backend
+can drive prompt-based reranking.
 
 Architecture:
 - RerankerProvider: Abstract base class for reranker providers
 - VoyageReranker: Voyage AI implementation (rerank-2.5-lite default)
 - CohereReranker: Cohere implementation (rerank-multilingual-v3.0)
-- OllamaReranker: Local Ollama reranker (no API key needed)
+- SelfHostedReranker: Self-hosted OpenAI-compatible reranker (registers under
+  the "self_hosted" provider key; no API key needed for keyless backends)
 - RerankerService: Factory pattern to select active provider from DB
 """
 
@@ -34,8 +39,10 @@ logger = get_logger(__name__)
 # Provider constants (must match external_keys.py for API-key providers)
 RERANKER_PROVIDERS = {"cohere", "voyage"}
 
-# Default Ollama reranker model
-DEFAULT_OLLAMA_RERANK_MODEL = "dengcao/Qwen3-Reranker-8B:Q5_K_M"
+# Default self-hosted (Ollama-engine) reranker model. The value is an
+# Ollama-registry model id; a vLLM deployment would set an HF repo id via
+# the context search config's reranker_model.
+DEFAULT_SELF_HOSTED_RERANK_MODEL = "dengcao/Qwen3-Reranker-8B:Q5_K_M"
 
 
 class RerankerProvider(ABC):
@@ -221,24 +228,37 @@ class CohereReranker(RerankerProvider):
             raise CohereError(f"Reranking failed for model {self.model}: {e}") from e
 
 
-class OllamaReranker(RerankerProvider):
-    """Ollama local reranker using prompt-based relevance scoring (Issue #70).
+class SelfHostedReranker(RerankerProvider):
+    """Self-hosted reranker using prompt-based relevance scoring (Issue #70).
 
-    Uses a local LLM to score document relevance on a 0-1 scale.
-    No API key required — runs on local Ollama instance.
+    Uses a self-hosted LLM to score document relevance on a 0-1 scale via the
+    OpenAI-compatible ``/v1/completions`` endpoint, which is served by both
+    Ollama and vLLM. No API key required for keyless backends; an optional
+    bearer token supports backends started with ``--api-key`` (e.g. vLLM).
+
+    Registers under the "self_hosted" provider key (Issue #1160).
     """
 
-    provider_name = "ollama"
+    provider_name = "self_hosted"
 
-    def __init__(self, base_url: str, model: str = DEFAULT_OLLAMA_RERANK_MODEL):
-        """Initialize Ollama reranker.
+    def __init__(
+        self,
+        base_url: str,
+        model: str = DEFAULT_SELF_HOSTED_RERANK_MODEL,
+        api_key: str | None = None,
+    ):
+        """Initialize the self-hosted reranker.
 
         Args:
-            base_url: Ollama API base URL (e.g. http://localhost:11434)
-            model: Ollama model name for reranking
+            base_url: OpenAI-compatible base URL (e.g. http://localhost:11434
+                for Ollama, http://localhost:8000 for vLLM)
+            model: Model name for reranking
+            api_key: Optional bearer token for backends that require one
+                (e.g. vLLM launched with ``--api-key``)
         """
         self.base_url = base_url.rstrip("/")
         self.model = model
+        self.api_key = api_key or None
 
     async def rerank(
         self,
@@ -246,9 +266,10 @@ class OllamaReranker(RerankerProvider):
         documents: list[str],
         top_n: int,
     ) -> list[dict[str, Any]]:
-        """Rerank using Ollama local model.
+        """Rerank using a self-hosted OpenAI-compatible model.
 
-        Scores each document individually via /api/generate with a relevance prompt.
+        Scores each document individually via ``/v1/completions`` with a
+        relevance prompt.
 
         Args:
             query: Search query
@@ -259,7 +280,7 @@ class OllamaReranker(RerankerProvider):
             Reranked results with index and relevance_score
 
         Raises:
-            Exception: If Ollama API call fails
+            Exception: If the backend API call fails
         """
         if not documents:
             return []
@@ -268,9 +289,11 @@ class OllamaReranker(RerankerProvider):
 
         scored: list[dict[str, Any]] = []
 
+        headers = {"Authorization": f"Bearer {self.api_key}"} if self.api_key else None
+
         async with httpx.AsyncClient(timeout=30.0) as client:
             # Score documents concurrently in batches
-            semaphore = asyncio.Semaphore(5)  # Limit concurrent Ollama requests
+            semaphore = asyncio.Semaphore(5)  # Limit concurrent backend requests
 
             async def score_doc(idx: int, doc: str) -> dict[str, Any]:
                 async with semaphore:
@@ -283,21 +306,23 @@ class OllamaReranker(RerankerProvider):
                     )
                     try:
                         resp = await client.post(
-                            f"{self.base_url}/api/generate",
+                            f"{self.base_url}/v1/completions",
                             json={
                                 "model": self.model,
                                 "prompt": prompt,
-                                "stream": False,
-                                "options": {"temperature": 0, "num_predict": 5, "stop": ["\n"]},
+                                "max_tokens": 5,
+                                "temperature": 0,
+                                "stop": ["\n"],
                             },
+                            headers=headers,
                         )
                         resp.raise_for_status()
-                        text = resp.json().get("response", "").strip()
+                        text = resp.json()["choices"][0]["text"].strip()
                         # Parse score — extract first float-like value
                         score = _parse_relevance_score(text)
                     except Exception as e:
                         logger.warning(
-                            "ollama_rerank_score_failed",
+                            "self_hosted_rerank_score_failed",
                             index=idx,
                             error=str(e),
                         )
@@ -312,7 +337,7 @@ class OllamaReranker(RerankerProvider):
         scored.sort(key=lambda x: x["relevance_score"], reverse=True)
 
         logger.debug(
-            "ollama_rerank_completed",
+            "self_hosted_rerank_completed",
             model=self.model,
             doc_count=len(documents),
             top_n=top_n,
@@ -410,7 +435,7 @@ class RerankerService:
 
         from sqlalchemy import or_
 
-        # Issue #70: Check context config first — Ollama takes priority (no API key needed)
+        # Issue #70: Check context config first — self_hosted takes priority (no API key needed)
         if context_id:
             from config.settings import get_settings
             from models.config import ContextSearchConfig
@@ -421,15 +446,23 @@ class RerankerService:
                 )
             )
             ctx_config = ctx_result.scalar_one_or_none()
-            if ctx_config and ctx_config.reranker_provider == "ollama" and ctx_config.use_rerank:
+            if (
+                ctx_config
+                and ctx_config.reranker_provider == "self_hosted"
+                and ctx_config.use_rerank
+            ):
                 settings = get_settings()
-                # Avoid non-Ollama default models (e.g. "rerank-2" from previous provider)
-                non_ollama_defaults = {"rerank-2", "rerank-2-lite", "rerank-multilingual-v3.0"}
+                # Avoid non-self-hosted default models (e.g. "rerank-2" from a previous provider)
+                non_self_hosted_defaults = {"rerank-2", "rerank-2-lite", "rerank-multilingual-v3.0"}
                 model = ctx_config.reranker_model
-                if not model or model in non_ollama_defaults:
-                    model = DEFAULT_OLLAMA_RERANK_MODEL
-                logger.debug("using_ollama_reranker", user_id=user_id, model=model)
-                return OllamaReranker(base_url=settings.ollama_base_url, model=model)
+                if not model or model in non_self_hosted_defaults:
+                    model = DEFAULT_SELF_HOSTED_RERANK_MODEL
+                logger.debug("using_self_hosted_reranker", user_id=user_id, model=model)
+                return SelfHostedReranker(
+                    base_url=settings.self_hosted_base_url,
+                    model=model,
+                    api_key=settings.self_hosted_api_key or None,
+                )
 
         # API-key providers (Voyage, Cohere).
         # Issue #385: workspace-keyed lookup; user_id is for audit, not a filter.
@@ -564,7 +597,7 @@ class RerankerService:
         default_models = {
             "voyage": "rerank-2",
             "cohere": "rerank-multilingual-v3.0",
-            "ollama": DEFAULT_OLLAMA_RERANK_MODEL,
+            "self_hosted": DEFAULT_SELF_HOSTED_RERANK_MODEL,
         }
 
         if not context_id:

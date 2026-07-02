@@ -1,5 +1,7 @@
 # =============================================================================
 # Ollama override — local embeddings + reranker
+# (sets EMBEDDING_PROVIDER=self_hosted, pointing the self-hosted OpenAI-compatible
+#  slot at the bundled Ollama engine via SELF_HOSTED_BASE_URL)
 # =============================================================================
 # Usage:
 #   docker compose \
@@ -33,8 +35,8 @@ services:
 
   api-blue:
     environment:
-      EMBEDDING_PROVIDER: ollama
-      OLLAMA_BASE_URL: http://ollama:11434
+      EMBEDDING_PROVIDER: self_hosted
+      SELF_HOSTED_BASE_URL: http://ollama:11434
     depends_on:
       postgres:
         condition: service_healthy
@@ -47,8 +49,8 @@ services:
 
   api-green:
     environment:
-      EMBEDDING_PROVIDER: ollama
-      OLLAMA_BASE_URL: http://ollama:11434
+      EMBEDDING_PROVIDER: self_hosted
+      SELF_HOSTED_BASE_URL: http://ollama:11434
     depends_on:
       postgres:
         condition: service_healthy

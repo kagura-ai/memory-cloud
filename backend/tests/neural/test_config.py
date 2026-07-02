@@ -177,7 +177,7 @@ class TestSleepMaintenanceConfig:
         config = NeuralMemoryConfig(
             sleep_enabled=True,
             sleep_cron_hour=4,
-            sleep_llm_provider="ollama",
+            sleep_llm_provider="self_hosted",
             sleep_llm_model="qwen2.5:7b",
             sleep_max_memories_per_run=500,
             sleep_max_llm_calls_per_run=100,
@@ -186,7 +186,7 @@ class TestSleepMaintenanceConfig:
         )
         assert config.sleep_enabled is True
         assert config.sleep_cron_hour == 4
-        assert config.sleep_llm_provider == "ollama"
+        assert config.sleep_llm_provider == "self_hosted"
         assert config.sleep_llm_model == "qwen2.5:7b"
         assert config.sleep_max_memories_per_run == 500
         assert config.sleep_dedup_similarity_threshold == 0.95
@@ -204,7 +204,7 @@ class TestSleepMaintenanceConfig:
             NeuralMemoryConfig(sleep_cron_minute=60)
 
     def test_sleep_llm_provider_validation(self):
-        """Test LLM provider must be openai or ollama."""
+        """Test LLM provider must be openai or self_hosted."""
         with pytest.raises(ValueError, match="sleep_llm_provider"):
             NeuralMemoryConfig(sleep_llm_provider="anthropic")
 
@@ -241,7 +241,7 @@ class TestSleepMaintenanceConfig:
         """Test from_env() reads SLEEP_* environment variables."""
         monkeypatch.setenv("SLEEP_ENABLED", "true")
         monkeypatch.setenv("SLEEP_CRON_HOUR", "5")
-        monkeypatch.setenv("SLEEP_LLM_PROVIDER", "ollama")
+        monkeypatch.setenv("SLEEP_LLM_PROVIDER", "self_hosted")
         monkeypatch.setenv("SLEEP_LLM_MODEL", "llama3:8b")
         monkeypatch.setenv("SLEEP_MAX_MEMORIES_PER_RUN", "1000")
         monkeypatch.setenv("SLEEP_DEDUP_SIMILARITY_THRESHOLD", "0.95")
@@ -249,7 +249,7 @@ class TestSleepMaintenanceConfig:
         config = NeuralMemoryConfig.from_env()
         assert config.sleep_enabled is True
         assert config.sleep_cron_hour == 5
-        assert config.sleep_llm_provider == "ollama"
+        assert config.sleep_llm_provider == "self_hosted"
         assert config.sleep_llm_model == "llama3:8b"
         assert config.sleep_max_memories_per_run == 1000
         assert config.sleep_dedup_similarity_threshold == 0.95

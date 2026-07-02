@@ -112,11 +112,11 @@ export default function ExternalKeysPage() {
       description: t("providers.geminiDesc"),
     },
     {
-      value: "ollama",
-      label: t("providers.ollama"),
-      keyName: "OLLAMA_BASE_URL",
+      value: "self_hosted",
+      label: t("providers.self_hosted"),
+      keyName: "SELF_HOSTED_BASE_URL",
       icon: "🦙",
-      description: t("providers.ollamaDesc"),
+      description: t("providers.self_hostedDesc"),
     },
     {
       value: "ollama_cloud",
@@ -313,9 +313,7 @@ export default function ExternalKeysPage() {
     } catch (error: unknown) {
       const apiErr = error instanceof ApiError ? error : null;
       const detail = apiErr?.details?.detail as
-        | { error?: string; message?: string }
-        | string
-        | undefined;
+        { error?: string; message?: string } | string | undefined;
       if (
         typeof detail === "object" &&
         detail?.error === "reranker_provider_conflict"

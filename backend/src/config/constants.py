@@ -130,13 +130,13 @@ EMBEDDING_MODEL_REGISTRY: dict[str, tuple[int, str]] = {
     # OpenAI
     "text-embedding-3-small": (512, "openai"),
     "text-embedding-3-large": (3072, "openai"),
-    # Ollama (qwen3-embedding)
-    "qwen3-embedding:0.6b": (1024, "ollama"),
-    "qwen3-embedding:4b": (2560, "ollama"),
-    "qwen3-embedding:8b": (4096, "ollama"),
-    # Ollama (other)
-    "nomic-embed-text": (768, "ollama"),
-    "mxbai-embed-large": (1024, "ollama"),
+    # Self-hosted (qwen3-embedding, Ollama/vLLM-served)
+    "qwen3-embedding:0.6b": (1024, "self_hosted"),
+    "qwen3-embedding:4b": (2560, "self_hosted"),
+    "qwen3-embedding:8b": (4096, "self_hosted"),
+    # Self-hosted (other)
+    "nomic-embed-text": (768, "self_hosted"),
+    "mxbai-embed-large": (1024, "self_hosted"),
 }
 
 # ============================================================================

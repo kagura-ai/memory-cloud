@@ -47,7 +47,7 @@ KeySource = Literal["workspace", "context", "env"]
 
 
 class EmbeddingService:
-    """Service for generating embeddings using OpenAI or Ollama.
+    """Service for generating embeddings using OpenAI or a self-hosted OpenAI-compatible backend (Ollama, vLLM, ...).
 
     Supports multiple providers via OpenAI-compatible API.
     User-specific API keys are retrieved from database (encrypted).
@@ -84,8 +84,9 @@ class EmbeddingService:
             self.provider = EMBEDDING_MODEL_REGISTRY[self.model][1]
         else:
             self.provider = settings.embedding_provider
-        self.ollama_base_url = settings.ollama_base_url
-        self._ollama_verified = False
+        self.self_hosted_base_url = settings.self_hosted_base_url
+        self.self_hosted_api_key = settings.self_hosted_api_key or None
+        self._self_hosted_verified = False
         # Issue #713: the credential tier the most recent ``_get_client`` OpenAI
         # call resolved (set in ``_get_client``). ``resolve_paid_by`` reads it to
         # derive ``paid_by`` without re-probing ``external_api_keys`` — the
@@ -285,7 +286,7 @@ class EmbeddingService:
         select a BYOK row for THIS context — not for a key scoped to some OTHER
         context in the same workspace.
         """
-        if not workspace_id or self.provider == "ollama":
+        if not workspace_id or self.provider == "self_hosted":
             return None, None
         from services.embedding_spend_cap_service import EmbeddingSpendCapService
 
@@ -312,7 +313,8 @@ class EmbeddingService:
                 raise ConfigurationError(
                     "This workspace's plan does not include managed embeddings. "
                     "Add a BYOK OpenAI embedding key for the workspace, use a "
-                    "self-hosted Ollama model, or upgrade to a paid plan."
+                    "self-hosted embedding model (e.g. Ollama, vLLM), or upgrade "
+                    "to a paid plan."
                 )
             # Restriction off (default): platform env-fallback stays uncapped —
             # the #708 drain-attack carve-out (Free has a $0.50/day drain guard,
@@ -406,7 +408,7 @@ class EmbeddingService:
 
         from sqlalchemy import or_
 
-        if not workspace_id or self.provider == "ollama":
+        if not workspace_id or self.provider == "self_hosted":
             return False
         ws_uuid = UUID(workspace_id) if isinstance(workspace_id, str) else workspace_id
         conditions = [
@@ -450,27 +452,44 @@ class EmbeddingService:
         Returns:
             AsyncOpenAI client configured for the provider
         """
-        if self.provider == "ollama":
-            # Verify Ollama is reachable on first use only
-            if not self._ollama_verified:
+        if self.provider == "self_hosted":
+            # Verify the self-hosted backend is reachable on first use only,
+            # via the OpenAI-compatible /v1/models endpoint (served by both
+            # Ollama and vLLM — unlike the bare root, which only Ollama answers).
+            if not self._self_hosted_verified:
                 import httpx
 
+                headers = (
+                    {"Authorization": f"Bearer {self.self_hosted_api_key}"}
+                    if self.self_hosted_api_key
+                    else None
+                )
                 try:
                     async with httpx.AsyncClient(timeout=5.0) as http:
-                        resp = await http.get(self.ollama_base_url)
+                        resp = await http.get(
+                            f"{self.self_hosted_base_url}/v1/models", headers=headers
+                        )
                         if resp.status_code != 200:
                             raise ConfigurationError(
-                                f"Ollama not responding at {self.ollama_base_url} (HTTP {resp.status_code})"
+                                f"Self-hosted inference server not responding at "
+                                f"{self.self_hosted_base_url} (HTTP {resp.status_code})"
                             )
-                except httpx.ConnectError as err:
+                except httpx.HTTPError as err:
+                    # Broad httpx.HTTPError (not just ConnectError) so a probe
+                    # timeout / protocol error surfaces as a clean
+                    # ConfigurationError rather than an unhandled 500 — matches
+                    # SelfHostedProvider._verify.
                     raise ConfigurationError(
-                        f"Cannot connect to Ollama at {self.ollama_base_url}. "
-                        "Is Ollama running? Start with: ollama serve"
+                        f"Cannot connect to self-hosted inference server at "
+                        f"{self.self_hosted_base_url}. Is your backend running? "
+                        "(e.g. `ollama serve`, or a vLLM OpenAI-compatible server)"
                     ) from err
-                self._ollama_verified = True
+                self._self_hosted_verified = True
             return AsyncOpenAI(
-                base_url=f"{self.ollama_base_url}/v1",
-                api_key="ollama",  # Ollama doesn't require a real key
+                base_url=f"{self.self_hosted_base_url}/v1",
+                # Placeholder for keyless backends (Ollama ignores it); a real
+                # token is used when SELF_HOSTED_API_KEY is set (e.g. vLLM).
+                api_key=self.self_hosted_api_key or "not-needed",
             )
         # OpenAI (default)
         api_key, source = await self._get_user_api_key(

@@ -888,7 +888,7 @@ class ContextSearchConfigUpdate(BaseModel):
     fetch_factor: int = Field(..., ge=1, le=10, description="Candidate retrieval multiplier")
     use_rerank: bool = Field(..., description="Enable/disable reranking")
     reranker_provider: str = Field(
-        ..., description="Reranker provider: 'voyage', 'cohere', or 'ollama'"
+        ..., description="Reranker provider: 'voyage', 'cohere', or 'self_hosted'"
     )
     reranker_model: str = Field(..., description="Provider-specific model name")
     # Issue #1048: optional (default-preserving) so existing REST callers that omit
@@ -930,8 +930,8 @@ class ContextSearchConfigUpdate(BaseModel):
             "cohere": ["rerank-multilingual-v3.0", "rerank-english-v3.0"],
         }
 
-        # Ollama accepts any model name (user-configured)
-        if provider == "ollama":
+        # Self-hosted backends accept any model name (user-configured)
+        if provider == "self_hosted":
             return v
 
         if provider and v not in valid_models.get(provider, []):

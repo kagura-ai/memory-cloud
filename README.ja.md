@@ -57,12 +57,12 @@
 | 機能 | 説明 |
 |------|------|
 | **Adaptive Memory** | 検索のたびに関連メモリ間の接続が自動強化。使うほど `explore()` が隠れた関連性を発見する精度が上がる |
-| **Hybrid Search** | Semantic (OpenAI/Ollama) + BM25 キーワード — top-1 精度 96% |
-| **AI Reranking** | Ollama (ローカル・無料)、Voyage AI、Cohere — cross-encoder reranker で精度向上 |
+| **Hybrid Search** | Semantic (OpenAI / セルフホスト) + BM25 キーワード — top-1 精度 96% |
+| **AI Reranking** | セルフホスト (Ollama/vLLM — ローカル・無料)、Voyage AI、Cohere — cross-encoder reranker で精度向上 |
 | **Neural Memory Graph** | Hebbian 学習がバックグラウンドで知識グラフを構築。`explore()` がそれを辿り偶発的発見を提供 |
 | **Agent Memory Substrate** | 単なる知識ストアを超えて — delivery mode (pin / 時刻トリガ)、サーバー署名の trust boundary、agent state レーン、retrieval feedback シグナル。自律エージェントのループに必要なプリミティブ群 |
 | **50 の MCP ツール** | Memory、Agent Substrate、Neural edges、Contexts、Tags、Files (R2)、Analyses (broadlistening)、Resources、Secrets、Sleep Maintenance、Usage、API-Key Bindings |
-| **マルチプロバイダ** | 埋め込みに OpenAI か Ollama (ローカル・非公開・コストゼロ) |
+| **マルチプロバイダ** | 埋め込みに OpenAI かセルフホスト (Ollama、vLLM — ローカル・非公開・コストゼロ) |
 | **チーム対応** | Workspace、RBAC、context 分離、共有メモリ |
 | **Web UI** | Next.js ダッシュボード — context、検索設定、メンバー管理 |
 | **5 分セットアップ** | `./setup.sh` のみ |
@@ -132,7 +132,7 @@ explore() ──→ グラフ探索 (Neural Memory) ←────────�
 - Docker と Docker Compose
 - Python 3.11+
 - Node.js 20+
-- 埋め込み用 OpenAI API キー — または Ollama (ローカル埋め込み)
+- 埋め込み用 OpenAI API キー — またはセルフホスト推論サーバー (例: Ollama) によるローカル埋め込み
 - OAuth2 クレデンシャル (任意 — OAuth 無しでもパスワード + MFA ログイン可)
 
 ### セットアップ
@@ -184,12 +184,12 @@ docker compose up -d
 | `API_KEY_SECRET` | **必須** | API キー暗号化用 secret (自動生成) |
 | `JWT_SECRET` | **必須** | JWT トークン用 secret (自動生成) |
 | `OPENAI_API_KEY` | **必須**\* | 埋め込み用 OpenAI API キー |
-| `OLLAMA_BASE_URL` | 任意 | Ollama URL (既定: `http://localhost:11434`) |
-| `EMBEDDING_PROVIDER` | 任意 | `openai` (既定) または `ollama` |
+| `SELF_HOSTED_BASE_URL` | 任意 | セルフホストバックエンド URL (既定: `http://localhost:11434`) |
+| `EMBEDDING_PROVIDER` | 任意 | `openai` (既定) または `self_hosted` |
 | `GOOGLE_CLIENT_ID/SECRET` | 任意 | Google OAuth2 ログイン (任意 — パスワードログインも可) |
 | `GITHUB_CLIENT_ID/SECRET` | 任意 | GitHub OAuth2 ログイン (任意) |
 
-\* メモリ機能には `OPENAI_API_KEY` または稼働中の Ollama が必要。
+\* メモリ機能には `OPENAI_API_KEY` または稼働中のセルフホスト推論サーバー (例: Ollama) が必要。
 
 ### Admin CLI
 
