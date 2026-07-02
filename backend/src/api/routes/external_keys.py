@@ -13,7 +13,11 @@ from sqlalchemy import and_, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from auth.dependencies import APIKeyOrSessionUser, require_workspace_owner
+from auth.dependencies import (
+    APIKeyOrSessionUser,
+    require_byok_enabled,
+    require_workspace_owner,
+)
 from db.base import get_db
 from db.constraint_names import (
     EXTERNAL_API_KEYS_WORKSPACE_KEY_NAME_UNIQUE,
@@ -31,10 +35,13 @@ logger = get_logger(__name__)
 # External API keys are workspace-level secrets (OpenAI/Cohere/Anthropic credentials)
 # that should only be managed by the workspace owner. Viewers, members, and admins
 # cannot list/create/update/toggle/delete keys.
+# Issue #1167: require_byok_enabled must stay FIRST so a BYOK-off deployment
+# returns a uniform 404 to every caller before auth/role checks run — a
+# role-dependent 403-vs-404 split would leak the feature's existence.
 router = APIRouter(
     prefix="/external-keys",
     tags=["external-keys"],
-    dependencies=[Depends(require_workspace_owner)],
+    dependencies=[Depends(require_byok_enabled), Depends(require_workspace_owner)],
 )
 
 

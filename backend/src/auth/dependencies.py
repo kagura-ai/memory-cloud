@@ -565,6 +565,29 @@ async def get_user_from_api_key_or_session(
 
 
 # ============================================================================
+# BYOK feature gate (Issue #1167)
+# ============================================================================
+
+
+async def require_byok_enabled() -> None:
+    """Reject with 404 when the deployment disables the BYOK surface (#1167).
+
+    404 (not 403) is deliberate: feature-not-present semantics matching the
+    plan_page flag (#1145) — a 403 would read as a permission problem and
+    leak the feature's existence. The dependency is parameterless so it can
+    be listed BEFORE auth/role dependencies and every caller (anonymous,
+    member, owner) sees the same uniform 404.
+
+    Raises:
+        HTTPException: 404 when ``ENABLE_BYOK`` is false.
+    """
+    from config.settings import get_settings
+
+    if not get_settings().enable_byok:
+        raise HTTPException(status_code=404, detail="Not Found")
+
+
+# ============================================================================
 # Workspace Owner (API Key + Session)
 # ============================================================================
 

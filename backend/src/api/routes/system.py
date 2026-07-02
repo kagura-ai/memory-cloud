@@ -99,6 +99,9 @@ async def system_info():
             # Issue #1145: the web UI hides the Plan page + nav entry unless this
             # is true (default-off for OSS).
             "plan_page": settings.enable_plan_page,
+            # Issue #1167: default-on. When false the web UI hides the
+            # external-keys console + workspace cost dashboard (their APIs 404).
+            "byok": settings.enable_byok,
         },
     }
 

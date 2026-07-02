@@ -418,6 +418,18 @@ class Settings(BaseSettings):
             "Surfaced to the frontend via GET /api/v1/system/info features.plan_page."
         ),
     )
+    enable_byok: bool = Field(
+        default=True,
+        description=(
+            "Enable the BYOK (bring-your-own-key) surface (#1167). ON by default "
+            "so OSS / self-hosted keeps external API key management. When false, "
+            "the /external-keys API and the workspace cost dashboard return 404 "
+            "and the web UI hides their nav entries. Key RESOLUTION is untouched: "
+            "keys stored before turning the flag off are still used by the "
+            "LLM/embedding services. Surfaced to the frontend via "
+            "GET /api/v1/system/info features.byok."
+        ),
+    )
 
     # Environment
     environment: str = Field(
