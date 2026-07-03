@@ -95,6 +95,29 @@ class TestCheckCanView:
         assert exc_info.value.message == "Insufficient permissions"
         assert exc_info.value.reason is None
 
+    @pytest.mark.asyncio
+    async def test_threaded_role_skips_lookup(self, service, workspace_id):
+        """A caller-supplied requester_role is trusted and skips the duplicate
+        WorkspaceMember SELECT — the programmatic owner-key GET path already
+        resolved the role via authorize_workspace_management (#1171 cleanup)."""
+        service.get_workspace_role = AsyncMock(return_value=None)
+        await service._check_can_view(
+            "owner_user", workspace_id, "target_user", requester_role="owner"
+        )
+        service.get_workspace_role.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_threaded_role_still_enforces_deny(self, service, workspace_id):
+        """A threaded non-owner/admin role is still denied without a lookup —
+        trusting the role must not bypass the owner/admin gate."""
+        service.get_workspace_role = AsyncMock(return_value="owner")  # would allow if queried
+        with pytest.raises(AuthorizationError) as exc_info:
+            await service._check_can_view(
+                "member_user", workspace_id, "target_user", requester_role="member"
+            )
+        assert exc_info.value.status_code == 403
+        service.get_workspace_role.assert_not_awaited()
+
 
 class TestSerializeApiKeyLastUsed:
     """Issue #943 — the API Keys table surfaces a 'Last used' column, so the
