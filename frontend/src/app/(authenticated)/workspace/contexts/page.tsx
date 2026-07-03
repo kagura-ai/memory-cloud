@@ -221,7 +221,6 @@ export default function ContextsPage() {
 
   useEffect(() => {
     fetchContexts();
-    checkApiKey();
     // Fetch available embedding models
     getEmbeddingModels()
       .then((resp) => {
@@ -229,7 +228,16 @@ export default function ContextsPage() {
         setDefaultEmbeddingModel(resp.default_model);
       })
       .catch(() => {}); // Non-critical: selector won't show
-  }, [fetchContexts, checkApiKey]);
+  }, [fetchContexts]);
+
+  // v0.42 review #38: the key-status probe legitimately re-runs once the byok
+  // flag resolves (checkApiKey depends on byokEnabled). Kept in its OWN effect
+  // so that late flag resolution does not re-fire fetchContexts /
+  // getEmbeddingModels above — which double-fetched contexts + models and
+  // re-flashed the loading skeleton on every first visit.
+  useEffect(() => {
+    checkApiKey();
+  }, [checkApiKey]);
 
   // Redirect ?edit=<id> to settings page (Issue #96: edit modal removed)
   const editHandled = useRef(false);

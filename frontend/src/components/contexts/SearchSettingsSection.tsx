@@ -274,8 +274,16 @@ export function SearchSettingsSection({
   const hasCohereKey = externalKeys.some(
     (k) => k.provider.toLowerCase() === "cohere" && k.enabled,
   );
+  // Issue #1167 / v0.42 review #0: when BYOK is off the /external-keys API 404s,
+  // so we cannot enumerate voyage/cohere keys — but the backend STILL resolves
+  // any key stored before the flag was turned off. Treating the providers as
+  // "unavailable" on that uncertainty wrongly disabled Save (and even the "turn
+  // rerank off" control) for a context using a stored key. Only assert
+  // external-key availability when we could actually check it (BYOK enabled);
+  // self_hosted availability is independent (telemetry-derived).
+  const externalKeysKnown = byokEnabled;
   const hasAnyRerankerAvailable =
-    hasVoyageKey || hasCohereKey || selfHostedAvailable;
+    !externalKeysKnown || hasVoyageKey || hasCohereKey || selfHostedAvailable;
 
   const currentProvider = getCurrentValue("reranker_provider");
   const availableModels =
@@ -286,8 +294,8 @@ export function SearchSettingsSection({
         : COHERE_MODELS;
 
   const selectedProviderUnavailable =
-    (currentProvider === "voyage" && !hasVoyageKey) ||
-    (currentProvider === "cohere" && !hasCohereKey) ||
+    (externalKeysKnown && currentProvider === "voyage" && !hasVoyageKey) ||
+    (externalKeysKnown && currentProvider === "cohere" && !hasCohereKey) ||
     (currentProvider === "self_hosted" && !selfHostedAvailable);
 
   const useRerank = getCurrentValue("use_rerank");
