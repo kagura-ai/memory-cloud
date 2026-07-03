@@ -41,9 +41,11 @@ logger = get_logger(__name__)
 # Provider constants (must match external_keys.py for API-key providers)
 RERANKER_PROVIDERS = {"cohere", "voyage"}
 
-# Default self-hosted (Ollama-engine) reranker model. The value is an
-# Ollama-registry model id; a vLLM deployment would set an HF repo id via
-# the context search config's reranker_model.
+# Hard-floor default self-hosted (Ollama-engine) reranker model. This is an
+# Ollama-registry model id, so a pure-vLLM self-hosted stack MUST override it
+# via settings.self_hosted_rerank_model (env SELF_HOSTED_RERANK_MODEL) — the
+# ops-level default that normally supplies this value; this constant is only
+# the fallback when that setting is explicitly blanked. Keep the two in sync.
 DEFAULT_SELF_HOSTED_RERANK_MODEL = "dengcao/Qwen3-Reranker-8B:Q5_K_M"
 
 # Built-in fallback model name served behind settings.rerank_base_url
@@ -52,6 +54,28 @@ DEFAULT_SELF_HOSTED_RERANK_MODEL = "dengcao/Qwen3-Reranker-8B:Q5_K_M"
 # is the hard floor used when RERANK_MODEL is explicitly blanked. Keep the two
 # literals in sync.
 DEFAULT_VLLM_RERANK_MODEL = "qwen3-reranker-0.6b"
+
+# Default model names of the REMOTE reranker providers (Voyage, Cohere). A
+# per-context reranker_model still carrying one of these is a stale default left
+# over from a previous remote provider — on the self-hosted / vLLM path it must
+# be re-resolved to the local model, not sent verbatim. Single source shared by
+# both resolution branches below.
+REMOTE_RERANKER_DEFAULT_MODELS = frozenset(
+    {
+        "rerank-2",
+        "rerank-2-lite",
+        "rerank-2.5",
+        "rerank-2.5-lite",
+        "rerank-multilingual-v3.0",
+        "rerank-english-v3.0",
+    }
+)
+
+
+def _bearer_headers(api_key: str | None) -> dict[str, str] | None:
+    """Authorization header for a self-hosted OpenAI-compatible backend behind
+    auth (vLLM --api-key etc.), or ``None`` for a keyless backend (Ollama)."""
+    return {"Authorization": f"Bearer {api_key}"} if api_key else None
 
 
 class RerankerProvider(ABC):
@@ -298,7 +322,7 @@ class SelfHostedReranker(RerankerProvider):
 
         scored: list[dict[str, Any]] = []
 
-        headers = {"Authorization": f"Bearer {self.api_key}"} if self.api_key else None
+        headers = _bearer_headers(self.api_key)
 
         async with httpx.AsyncClient(timeout=30.0) as client:
             # Score documents concurrently in batches
@@ -368,15 +392,25 @@ class VLLMReranker(RerankerProvider):
 
     provider_name = "vllm"
 
-    def __init__(self, base_url: str, model: str = DEFAULT_VLLM_RERANK_MODEL):
+    def __init__(
+        self,
+        base_url: str,
+        model: str = DEFAULT_VLLM_RERANK_MODEL,
+        api_key: str | None = None,
+    ):
         """Initialize the /v1/rerank client.
 
         Args:
             base_url: Endpoint base URL (e.g. http://gpu:8002); /v1/rerank is appended.
             model: Served model name on the rerank endpoint.
+            api_key: Optional bearer token (RERANK_API_KEY) for a /v1/rerank
+                endpoint served behind auth (e.g. vLLM --api-key). Without it,
+                every request to a secured endpoint 401s and rerank silently
+                falls back to unranked results.
         """
         self.base_url = base_url.rstrip("/")
         self.model = model
+        self.api_key = api_key
 
     async def rerank(
         self,
@@ -408,6 +442,14 @@ class VLLMReranker(RerankerProvider):
         # which never asks for more results than it has documents.
         effective_top_n = min(top_n, len(documents))
 
+        headers = _bearer_headers(self.api_key)
+
+        # v0.42 review #31: a per-call AsyncClient is deliberate here, not a
+        # cached one. Rerank runs at most one HTTP request per call, so the
+        # client-setup cost is negligible against the network round-trip, and a
+        # module-level shared client would bind to a single event loop — fine in
+        # the app but a cross-loop failure/flake source in tests and worker
+        # forks. The connection-reuse win does not justify that fragility.
         async with httpx.AsyncClient(timeout=30.0) as client:
             resp = await client.post(
                 f"{self.base_url}/v1/rerank",
@@ -417,6 +459,7 @@ class VLLMReranker(RerankerProvider):
                     "documents": documents,
                     "top_n": effective_top_n,
                 },
+                headers=headers,
             )
             resp.raise_for_status()
             payload = resp.json()
@@ -582,18 +625,8 @@ class RerankerService:
                 settings = get_settings()
                 # Avoid non-local default models left over from a previous
                 # remote provider (Voyage / Cohere) — otherwise a stale remote
-                # default model name would be sent to the local reranker. Keep
-                # this in sync with the remote providers' default models
-                # (VoyageReranker "rerank-2.5-lite", CohereReranker
-                # "rerank-multilingual-v3.0") and the _get_reranker_model table.
-                non_self_hosted_defaults = {
-                    "rerank-2",
-                    "rerank-2-lite",
-                    "rerank-2.5",
-                    "rerank-2.5-lite",
-                    "rerank-multilingual-v3.0",
-                    "rerank-english-v3.0",
-                }
+                # default model name would be sent to the local reranker.
+                non_self_hosted_defaults = REMOTE_RERANKER_DEFAULT_MODELS
                 model = ctx_config.reranker_model
                 if settings.rerank_base_url:
                     # Ops-level override: a true cross-encoder is served behind an
@@ -603,12 +636,33 @@ class RerankerService:
                     # reranker_model wins; otherwise fall back to the ops-level
                     # RERANK_MODEL (settings.rerank_model), then the built-in
                     # default (guards an explicitly-blanked RERANK_MODEL).
-                    if not model or model in non_self_hosted_defaults:
+                    #
+                    # "Stale" on the /v1/rerank endpoint also includes a
+                    # self-hosted /v1/completions default model — an
+                    # Ollama-registry id (the constant default or a configured
+                    # SELF_HOSTED_RERANK_MODEL) that the vLLM/TEI rerank endpoint
+                    # does not serve. The UI persists that id explicitly, so
+                    # without re-resolving it the endpoint 404s and rerank
+                    # silently dies for exactly the contexts this path targets.
+                    vllm_stale_models = non_self_hosted_defaults | {
+                        DEFAULT_SELF_HOSTED_RERANK_MODEL,
+                        settings.self_hosted_rerank_model,
+                    }
+                    if not model or model in vllm_stale_models:
                         model = settings.rerank_model or DEFAULT_VLLM_RERANK_MODEL
                     logger.debug("using_vllm_reranker", user_id=user_id, model=model)
-                    return VLLMReranker(base_url=settings.rerank_base_url, model=model)
+                    return VLLMReranker(
+                        base_url=settings.rerank_base_url,
+                        model=model,
+                        api_key=settings.rerank_api_key or None,
+                    )
+                # Prompt-scoring path on SELF_HOSTED_BASE_URL. Re-resolve only a
+                # stale REMOTE-provider default to the configurable self-hosted
+                # default (SELF_HOSTED_RERANK_MODEL) — which a pure-vLLM stack
+                # must override away from the Ollama-registry id so scoring does
+                # not 404 to all-zero relevance.
                 if not model or model in non_self_hosted_defaults:
-                    model = DEFAULT_SELF_HOSTED_RERANK_MODEL
+                    model = settings.self_hosted_rerank_model or DEFAULT_SELF_HOSTED_RERANK_MODEL
                 logger.debug("using_self_hosted_reranker", user_id=user_id, model=model)
                 return SelfHostedReranker(
                     base_url=settings.self_hosted_base_url,

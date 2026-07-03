@@ -16,8 +16,36 @@ import { getSystemInfo } from "@/lib/api/system";
 
 type Features = Record<string, boolean>;
 
+// Retry a transient /system/info blip before falling back. A single failed
+// fetch used to resolve to {} (everything default-OFF), which is wrong for
+// DEFAULT-ON flags like `byok`: a momentary outage would hide the console /
+// render a definitive "not enabled" notice for a feature that is actually on
+// (v0.42 review #7/#12). Retrying keeps the hook in the `null` (loading) state
+// so callers show a loader, not a terminal disabled state, until the flag is
+// truly known.
+const MAX_ATTEMPTS = 3;
+const RETRY_BASE_MS = 500;
+
 let cache: Features | null = null;
 let inflight: Promise<Features> | null = null;
+
+async function fetchFeaturesWithRetry(): Promise<Features> {
+  let lastError: unknown;
+  for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
+    try {
+      const info = await getSystemInfo();
+      return info.features ?? {};
+    } catch (e) {
+      lastError = e;
+      if (attempt < MAX_ATTEMPTS) {
+        await new Promise((resolve) =>
+          setTimeout(resolve, RETRY_BASE_MS * attempt),
+        );
+      }
+    }
+  }
+  throw lastError;
+}
 
 export function useSystemFeatures(): Features | null {
   const [features, setFeatures] = useState<Features | null>(cache);
@@ -28,15 +56,15 @@ export function useSystemFeatures(): Features | null {
       return;
     }
     if (!inflight) {
-      inflight = getSystemInfo()
-        .then((info) => {
-          cache = info.features ?? {};
+      inflight = fetchFeaturesWithRetry()
+        .then((f) => {
+          cache = f;
           return cache;
         })
         .catch((e) => {
-          // Fetch failure → treat as no features (everything default-off, fail
-          // closed). Surface it in dev so a /system/info outage isn't silently
-          // invisible. Don't cache, so a later component mount can retry.
+          // Persistent failure after retries → fail closed (default-off).
+          // Surface it in dev so a real /system/info outage isn't silently
+          // invisible. Don't cache, so a later component mount retries.
           if (process.env.NODE_ENV === "development") {
             // eslint-disable-next-line no-console
             console.error("useSystemFeatures: /system/info fetch failed", e);

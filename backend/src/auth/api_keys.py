@@ -47,12 +47,34 @@ class VerifiedKey(NamedTuple):
             for public-bound keys (mutually exclusive with bound_context_id).
         bound_context_id: Public-context attribution (Issue #626). None
             unless the key was created with a binding.
+        key_prefix: The key's non-secret prefix (``api_keys.key_prefix``,
+            e.g. ``kagura_abc123``). Issue #1164: surfaced onto the
+            authenticated principal (``api_key_prefix``) so audit trails for
+            programmatic member-management actions attribute the specific
+            acting key, not just the owner user_id.
     """
 
     id: int
     user_id: str
     workspace_id: UUID | None
     bound_context_id: UUID | None
+    key_prefix: str | None = None
+
+
+def apply_zero_knowledge_hide(key: APIKey) -> None:
+    """Apply the Migration-034/035 zero-knowledge hide mutations to ``key``.
+
+    Stops showing the plaintext (``hidden_at`` now, ``visibility_expires_at``
+    cleared) AND drops the Fernet-decryptable at-rest copy
+    (``plaintext_encrypted`` nulled). Shared by ``hide_key``, the
+    owner-provisioned force-hide (member_credentials), and the programmatic
+    soft-revoke so the three never drift — the at-rest copy must always be
+    dropped, because the hourly auto-hide sweeper skips already-hidden and
+    revoked rows and would never revisit them. Does NOT flush/commit.
+    """
+    key.hidden_at = utcnow()
+    key.visibility_expires_at = None
+    key.plaintext_encrypted = None
 
 
 class APIKeyManager:
@@ -272,6 +294,7 @@ class APIKeyManager:
             user_id=key_record.user_id,
             workspace_id=key_record.workspace_id,
             bound_context_id=key_record.bound_context_id,
+            key_prefix=key_record.key_prefix,
         )
 
     async def list_keys(
@@ -381,9 +404,7 @@ class APIKeyManager:
         if key.user_id != user_id:
             raise PermissionError("Only owner can hide API key")
 
-        key.hidden_at = utcnow()
-        key.visibility_expires_at = None  # Cancel auto-hide
-        key.plaintext_encrypted = None  # Migration 035: Delete encrypted plaintext
+        apply_zero_knowledge_hide(key)
         await self.db.flush()
 
         logger.info("api_key_hidden", key_id=key_id, user_id=user_id)

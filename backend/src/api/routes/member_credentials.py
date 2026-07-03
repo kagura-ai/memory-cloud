@@ -16,13 +16,14 @@ from uuid import UUID
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from auth.api_keys import APIKeyManager
+from auth.api_keys import APIKeyManager, apply_zero_knowledge_hide
 from auth.dependencies import APIKeyOrSessionUser, SessionUser
 from auth.programmatic_workspace_auth import (
     audit_programmatic_workspace_action,
     authorize_workspace_management,
     is_api_key_principal,
     is_oauth_principal,
+    is_session_principal,
 )
 from auth.workspace_roles import WorkspaceRole
 from db.base import get_db
@@ -49,6 +50,49 @@ router = APIRouter(
 # ============================================================================
 # Helper Functions
 # ============================================================================
+
+
+def _reject_oauth(user: dict, action: str) -> None:
+    """Reject an OAuth bearer principal on the credential surface (#1165).
+
+    Every ``kagura auth login`` device token carries ``memory:read
+    memory:write``, so accepting OAuth here would silently turn every user's
+    MCP token into a credential-management credential. One helper keeps the
+    policy message consistent across the three credential endpoints.
+    """
+    if is_oauth_principal(user):
+        raise AuthorizationError(
+            message=f"OAuth bearer tokens cannot {action}. Use a workspace-owner API key."
+        )
+
+
+def _minted_key_response(
+    new_key,
+    plaintext_key: str,
+    *,
+    is_visible: bool,
+    visibility_expires_at: str | None,
+    last_used_at: str | None,
+) -> dict:
+    """Build the one-time ``MemberAPIKeyResponse`` dict for a freshly minted key.
+
+    Shared by the owner-provisioned mint (force-hidden: not visible) and the
+    session self-mint (visible for its auto-hide window) — the two differ only
+    in ``is_visible`` / ``visibility_expires_at`` / ``last_used_at``.
+    """
+    return {
+        "id": new_key.id,
+        "name": new_key.name,
+        "key_prefix": new_key.key_prefix,
+        "plaintext_key": plaintext_key,  # shown once
+        "is_visible": is_visible,
+        "visibility_expires_at": visibility_expires_at,
+        "created_at": to_utc_iso(new_key.created_at),
+        "last_used_at": last_used_at,
+        "revoked_at": None,
+        "expires_at": to_utc_iso(new_key.expires_at),  # #1165: owner-set expiry
+        "bound_context_id": (str(new_key.bound_context_id) if new_key.bound_context_id else None),
+    }
 
 
 async def check_permission(
@@ -176,12 +220,9 @@ async def _owner_provisioned_mint(
         # null the encrypted-at-rest copy too (Migration-035 zero-knowledge). The
         # hourly auto-hide sweeper only clears rows with hidden_at IS NULL, so a
         # force-hidden row it never touches would otherwise retain a
-        # Fernet-decryptable copy of a live long-lived key indefinitely. This
-        # matches APIKeyManager.hide_key / auto_hide_expired_credentials, which
-        # both null plaintext_encrypted on hide (max code-review, PR #1171).
-        new_key.hidden_at = utcnow()
-        new_key.visibility_expires_at = None
-        new_key.plaintext_encrypted = None
+        # Fernet-decryptable copy of a live long-lived key indefinitely (max
+        # code-review, PR #1171). Shared with hide_key so the two never drift.
+        apply_zero_knowledge_hide(new_key)
 
         # Audit via the shared helper (#1164) — it records the ACTING owner key
         # under metadata["key_prefix"] and hardcodes via/workspace_id/target; we
@@ -209,18 +250,14 @@ async def _owner_provisioned_mint(
             target=user_id,
             workspace_id=str(workspace_id),
         )
-        return {
-            "id": new_key.id,
-            "name": new_key.name,
-            "key_prefix": new_key.key_prefix,
-            "plaintext_key": plaintext_key,  # shown once
-            "is_visible": False,
-            "visibility_expires_at": None,
-            "created_at": to_utc_iso(new_key.created_at),
-            "last_used_at": None,
-            "revoked_at": None,
-            "bound_context_id": None,
-        }
+        # Force-hidden: plaintext exists only in this one 201 response.
+        return _minted_key_response(
+            new_key,
+            plaintext_key,
+            is_visible=False,
+            visibility_expires_at=None,
+            last_used_at=None,
+        )
     except ValueError as e:
         raise BadRequestError(message=str(e)) from e
 
@@ -248,10 +285,7 @@ async def get_member_credentials(
         HTTPException: If not authorized.
     """
     # Issue #1165: OAuth rejected; API-key principal must be workspace owner.
-    if is_oauth_principal(user):
-        raise AuthorizationError(
-            message="OAuth bearer tokens cannot view member credentials. Use a workspace-owner API key."
-        )
+    _reject_oauth(user, "view member credentials")
     programmatic = is_api_key_principal(user)
     caller_role: str | None = None
     if programmatic:
@@ -282,6 +316,15 @@ async def get_member_credentials(
 
         # Get target user's workspace role (for permission checks)
         target_role = await service.get_workspace_role(user_id, workspace_id)
+        if target_role is None:
+            # Target is not (or no longer) a workspace member. Without this the
+            # non-optional MemberCredentialsResponse.target_user_role would fail
+            # validation and the blanket ``except Exception`` below would turn a
+            # wrong/removed target into an opaque 500. Raise HTTPException (not
+            # NotFoundException, which subclasses MemoryCloudException and WOULD
+            # be swallowed here) so ``except HTTPException: raise`` returns a
+            # clean 404 (v0.42 max review).
+            raise HTTPException(status_code=404, detail="Member not found")
 
         return MemberCredentialsResponse(**credentials, target_user_role=target_role)
     except HTTPException:
@@ -494,14 +537,20 @@ async def create_api_key(
             or the bound context is missing / not public / not in this workspace.
     """
     # Issue #1165: OAuth bearer tokens must never mint long-lived credentials.
-    if is_oauth_principal(user):
-        raise AuthorizationError(
-            message="OAuth bearer tokens cannot mint API keys. Use a workspace-owner API key."
-        )
+    _reject_oauth(user, "mint API keys")
 
     # Issue #1165: owner-provisioned programmatic minting for ANOTHER member.
     if is_api_key_principal(user):
         return await _owner_provisioned_mint(workspace_id, user_id, data, user, db)
+
+    # Fail closed: only a POSITIVELY-identified session may reach the self-mint
+    # path. Reaching it by elimination (not OAuth, not API-key => assume session)
+    # would let an unrecognized principal shape mint a key; mirror the shared
+    # authorize_workspace_management helper's positive-session default. Legit
+    # sessions always carry the OIDC ``sub`` (SessionManager.create_session
+    # requires it) (v0.42 max review).
+    if not is_session_principal(user):
+        raise AuthorizationError(message="Unrecognized principal for API key creation")
 
     # Session path (#252 unchanged): self-mint only.
     if user["user_id"] != user_id:
@@ -651,21 +700,14 @@ async def create_api_key(
             bound_context_id=str(bound_context_uuid) if bound_context_uuid else None,
         )
 
-        # Return with plaintext (shown once)
-        return {
-            "id": new_key.id,
-            "name": new_key.name,
-            "key_prefix": new_key.key_prefix,
-            "plaintext_key": plaintext_key,
-            "is_visible": True,
-            "visibility_expires_at": to_utc_iso(new_key.visibility_expires_at),
-            "created_at": to_utc_iso(new_key.created_at),
-            "last_used_at": to_utc_iso(new_key.last_used_at),
-            "revoked_at": None,
-            "bound_context_id": (
-                str(new_key.bound_context_id) if new_key.bound_context_id else None
-            ),
-        }
+        # Return with plaintext (shown once); visible for its auto-hide window.
+        return _minted_key_response(
+            new_key,
+            plaintext_key,
+            is_visible=True,
+            visibility_expires_at=to_utc_iso(new_key.visibility_expires_at),
+            last_used_at=to_utc_iso(new_key.last_used_at),
+        )
 
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e)) from e
@@ -760,10 +802,7 @@ async def delete_api_key_by_id(
     Raises:
         HTTPException: 403 if not permitted, 404 if key not found.
     """
-    if is_oauth_principal(user):
-        raise AuthorizationError(
-            message="OAuth bearer tokens cannot revoke API keys. Use a workspace-owner API key."
-        )
+    _reject_oauth(user, "revoke API keys")
     # Fail closed on a malformed principal missing user_id — .get() (not
     # indexing) so a bad dict yields a clean 403, never a KeyError/500. The
     # programmatic branch's authorize_workspace_management re-validates; the
@@ -782,12 +821,19 @@ async def delete_api_key_by_id(
             await _require_downgrade_target(
                 db, user_id, workspace_id, action_desc="Owner-provisioned revocation is limited to"
             )
-    elif caller_id != user_id:
-        # Session path (#252 unchanged): self-only.
-        raise AuthorizationError(
-            message="You can only delete your own API keys in a session. "
-            "To revoke another member's key, use a workspace-owner API key."
-        )
+    else:
+        # Fail closed: only a POSITIVELY-identified session may reach the
+        # self-only delete path (not OAuth, not API-key => assume session would
+        # let an unrecognized principal shape through). Legit sessions always
+        # carry the OIDC ``sub`` (v0.42 max review).
+        if not is_session_principal(user):
+            raise AuthorizationError(message="Unrecognized principal for API key deletion")
+        if caller_id != user_id:
+            # Session path (#252 unchanged): self-only.
+            raise AuthorizationError(
+                message="You can only delete your own API keys in a session. "
+                "To revoke another member's key, use a workspace-owner API key."
+            )
 
     from sqlalchemy import and_, select
 
@@ -798,6 +844,16 @@ async def delete_api_key_by_id(
     )
     api_key = result.scalar_one_or_none()
     if api_key is None:
+        raise HTTPException(status_code=404, detail="API key not found")
+
+    # A soft-revoked row is a retained forensic record (#1165). Any further
+    # delete/revoke must not touch it: a SESSION self-delete would HARD-delete
+    # the evidence (the member erasing the key an owner just revoked on them),
+    # and a repeated programmatic revoke would overwrite the original
+    # revoked_at timestamp and append a duplicate audit row. Treat an
+    # already-revoked key as not-found for both paths — uniform 404 so the
+    # forensic row's continued existence is not revealed (v0.42 max review).
+    if api_key.revoked_at is not None:
         raise HTTPException(status_code=404, detail="API key not found")
 
     # Verify the URL ``workspace_id`` matches the key's real scope.
@@ -846,11 +902,9 @@ async def delete_api_key_by_id(
     # never a silent hard delete (Copilot review, PR #1171). The audit row and
     # the revoked_at update commit atomically in one transaction. Session
     # self-delete keeps the existing hard-delete semantics (#252, #626).
-    soft_revoke = programmatic
-
-    if soft_revoke:
-        # soft_revoke == programmatic, so authorize_workspace_management above
-        # returned a (non-None) api_key principal.
+    if programmatic:
+        # authorize_workspace_management above returned a (non-None) api_key
+        # principal for the programmatic branch.
         assert principal is not None
         # Audit via the shared helper (#1164): it records the ACTING owner key
         # under metadata["key_prefix"]; the revoked key's prefix is carried under
@@ -870,6 +924,11 @@ async def delete_api_key_by_id(
             },
         )
         api_key.revoked_at = utcnow()
+        # Zero-knowledge (Migration-035): drop any at-rest plaintext on revoke.
+        # The hourly auto-hide sweeper only clears rows with revoked_at IS NULL,
+        # so a key revoked inside its visibility window would otherwise retain a
+        # Fernet-decryptable plaintext copy indefinitely (v0.42 max review).
+        apply_zero_knowledge_hide(api_key)
         await db.commit()
         logger.info(
             "member_api_key_revoked",

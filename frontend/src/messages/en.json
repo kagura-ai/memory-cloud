@@ -2198,6 +2198,7 @@
     "title": "External API Keys",
     "description": "Manage your API keys for OpenAI, Anthropic, Gemini, Self-hosted, Cohere, Voyage, and other services",
     "featureDisabled": "External API keys (BYOK) are not enabled on this deployment.",
+    "provisioningDisabled": "Adding new API keys is disabled on this deployment. You can still disable or delete existing keys below.",
     "featureGuide": {
       "title": "What are External API Keys?",
       "overview": "External API Keys are workspace-scoped and let you configure third-party service credentials (OpenAI, Anthropic, Google Gemini, Self-hosted, Cohere, Voyage). LLM completions are supported by OpenAI, Anthropic, Gemini, and Self-hosted. Embedding generation is supported by OpenAI. Reranking is supported by Cohere and Voyage.",

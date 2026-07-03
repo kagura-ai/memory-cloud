@@ -6,7 +6,11 @@ paths:
 # Security Rules
 
 ## Authentication
-- All API routes MUST use auth dependency (except `/`, `/health`, `/.well-known/*`, `/docs`, `/openapi.json`)
+- All API routes MUST use auth dependency (except `/`, `/health`, `/api/v1/system/info`, `/.well-known/*`, `/docs`, `/openapi.json`)
+  - `/api/v1/system/info` is intentionally public: version + non-sensitive
+    deployment feature flags the web UI reads before workspace context exists.
+    It exposes no user/workspace data. Enforced public by
+    `tests/api/test_system_info.py` + `tests/smoke/test_health.py`.
 - Session-only routes: `Depends(get_current_user)`
 - Session + API key routes: `Depends(APIKeyOrSessionUser)`
 - Admin routes: verify `system_admin` or `workspace_admin` role after auth

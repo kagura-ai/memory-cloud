@@ -68,17 +68,28 @@ describe("ExternalKeysPage BYOK gate (#1167)", () => {
     expect(screen.queryByText("featureDisabled")).toBeNull();
   });
 
-  it("renders the not-available notice and never fetches when byok is off", async () => {
+  it("keeps a management console (fetches + no full block) when byok is off", async () => {
+    // v0.42 review #32: BYOK-off gates only provisioning — an owner keeps a
+    // list + disable/delete console for already-stored keys, with a
+    // provisioning-disabled banner instead of the whole-page block.
     mockFeatures = { byok: false };
     render(<ExternalKeysPage />);
-    expect(screen.getByText("featureDisabled")).toBeInTheDocument();
-    expect(mockListKeys).not.toHaveBeenCalled();
+    await waitFor(() => expect(mockListKeys).toHaveBeenCalled());
+    await waitFor(() =>
+      expect(screen.getByText("provisioningDisabled")).toBeInTheDocument(),
+    );
+    expect(screen.queryByText("featureDisabled")).toBeNull();
+    // The create affordance is hidden; the empty-state "add first key" is gone.
+    expect(screen.queryByText("addApiKey")).toBeNull();
   });
 
-  it("holds fetches while feature flags load", () => {
+  it("shows a loading skeleton (no notice) while feature flags load", () => {
+    // v0.42 review #32: the key list (GET) is byok-independent, so it may fetch
+    // during the flag-loading window; while systemFeatures is null the page
+    // renders the skeleton and shows neither the disabled nor provisioning notice.
     mockFeatures = null;
     render(<ExternalKeysPage />);
-    expect(mockListKeys).not.toHaveBeenCalled();
     expect(screen.queryByText("featureDisabled")).toBeNull();
+    expect(screen.queryByText("provisioningDisabled")).toBeNull();
   });
 });

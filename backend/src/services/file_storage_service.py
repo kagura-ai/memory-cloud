@@ -879,15 +879,17 @@ class FileStorageService:
         )
         files = list(result.scalars().all())
         released: dict[UUID, int] = {}
+        # Accumulate the workspace_storage_usage delta per workspace and apply it
+        # in ONE upsert per workspace after the loop — a bulk purge otherwise
+        # issued one UPSERT round-trip per uploaded file (v0.42 review #30).
+        usage_delta: dict[UUID, list[int]] = {}  # ws -> [delta_bytes, delta_files]
         now = utcnow()
         for file in files:
             file.deleted_at = now
             if file.status == "uploaded":
-                await self._upsert_workspace_usage(
-                    file.workspace_id,
-                    delta_bytes=-file.size_bytes,
-                    delta_files=-1,
-                )
+                acc = usage_delta.setdefault(file.workspace_id, [0, 0])
+                acc[0] -= file.size_bytes
+                acc[1] -= 1
                 released[file.workspace_id] = released.get(file.workspace_id, 0) + file.size_bytes
             elif file.status == "reserved":
                 # Cancel the in-flight upload (see docstring): failed status
@@ -897,6 +899,10 @@ class FileStorageService:
                 released[file.workspace_id] = released.get(file.workspace_id, 0) + file.size_bytes
             # failed rows: sweeper already released the reservation → soft-delete
             # only, no release (avoids double-releasing the Redis counter).
+        for ws_id, (delta_bytes, delta_files) in usage_delta.items():
+            await self._upsert_workspace_usage(
+                ws_id, delta_bytes=delta_bytes, delta_files=delta_files
+            )
         if files:
             logger.info(
                 "context_bound_files_purged",

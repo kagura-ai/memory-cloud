@@ -37,15 +37,17 @@ class Edge:
     edge_type: str
 
 
-def degree_preserving_rewire(edges: list[Edge], *, seed: int, swap_factor: int = 10) -> list[Edge]:
-    """Maslov-Sneppen directed double-edge-swap null graph.
+def degree_preserving_rewire_with_stats(
+    edges: list[Edge], *, seed: int, swap_factor: int = 10
+) -> tuple[list[Edge], int]:
+    """Maslov-Sneppen rewire, returning ``(rewired_edges, accepted_swaps)``.
 
-    Repeatedly picks two edges (s1->d1),(s2->d2) and swaps their destinations to
-    (s1->d2),(s2->d1) — preserving every node's out-degree (src) and in-degree
-    (dst), the edge count, and each edge's own weight/origin/confidence/edge_type
-    (hence the exact attribute multisets). Rejects any swap that would create a
-    self-loop or a parallel edge. Attempts ``swap_factor * len(edges)`` accepted
-    swaps for mixing. Raises if fewer than two edges (nothing to swap).
+    Same algorithm as :func:`degree_preserving_rewire`; additionally returns the
+    number of ACCEPTED double-edge swaps (``done``), which is NOT the edge count
+    — a run that accepts zero swaps (e.g. a star graph where every swap makes a
+    parallel/self edge) returns the input edges unchanged with a swap count of 0.
+    Callers reporting a "swaps done" metric must use this count, not
+    ``len(rewired)`` (v0.42 review).
     """
     if len(edges) < 2:
         raise ValueError(f"need >= 2 edges to rewire, got {len(edges)}")
@@ -77,7 +79,18 @@ def degree_preserving_rewire(edges: list[Edge], *, seed: int, swap_factor: int =
         current[i] = replace(e1, dst=e2.dst)
         current[j] = replace(e2, dst=e1.dst)
         done += 1
-    return current
+    return current, done
+
+
+def degree_preserving_rewire(edges: list[Edge], *, seed: int, swap_factor: int = 10) -> list[Edge]:
+    """Maslov-Sneppen directed double-edge-swap null graph (edges only).
+
+    Thin wrapper over :func:`degree_preserving_rewire_with_stats` for callers
+    that only need the rewired edges. Preserves every node's out-degree (src) and
+    in-degree (dst), the edge count, and each edge's own
+    weight/origin/confidence/edge_type. Raises if fewer than two edges.
+    """
+    return degree_preserving_rewire_with_stats(edges, seed=seed, swap_factor=swap_factor)[0]
 
 
 def _derangement(n: int, rng: random.Random) -> list[int]:

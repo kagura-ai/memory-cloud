@@ -255,6 +255,24 @@ class NeuralMemoryConfig:
 
     def __post_init__(self) -> None:
         """Validate configuration parameters."""
+        # #1160 back-compat: 'ollama' was renamed to 'self_hosted' in a clean
+        # cutover. A stale SLEEP_LLM_PROVIDER=ollama env (documented as valid in
+        # v0.41) or an un-migrated neural_config row would otherwise fail EVERY
+        # NeuralMemoryConfig construction here — including the from_env() call
+        # inside from_db(), before the migrated DB value is even applied —
+        # taking down explore/feedback/sleep. Coerce with a boot warning rather
+        # than crash (mirrors settings._warn_legacy_ollama_env for the base-URL).
+        if self.sleep_llm_provider == "ollama":
+            import warnings
+
+            warnings.warn(
+                "SLEEP_LLM_PROVIDER=ollama is retired (renamed to 'self_hosted' "
+                "in #1160); coercing to 'self_hosted'. Update your env / neural "
+                "config to silence this.",
+                stacklevel=2,
+            )
+            self.sleep_llm_provider = "self_hosted"
+
         # Validate ranges
         if not (0.0 <= self.learning_rate <= 1.0):
             raise ValueError(f"learning_rate must be in [0, 1], got {self.learning_rate}")

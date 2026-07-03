@@ -700,6 +700,18 @@ async def list_members(
     return member_responses
 
 
+def _reject_programmatic_owner_assignment(principal, role) -> None:
+    """A programmatic (API-key) member mutation must NOT assign the owner role —
+    ownership changes go through the dedicated transfer flow (#254). Shared by
+    add_member and update_member_role so the rule stays identical on both."""
+    if principal.kind == "api_key" and role == WorkspaceRole.OWNER:
+        raise ValidationError(
+            "Programmatic member management cannot assign the owner role; "
+            "use the ownership transfer flow.",
+            field="role",
+        )
+
+
 @router.post("/{workspace_id}/members", response_model=WorkspaceMemberResponse, status_code=201)
 async def add_member(
     workspace_id: UUID,
@@ -718,12 +730,7 @@ async def add_member(
     principal = await authorize_workspace_management(
         user, workspace_id, db, session_required_role=WorkspaceRole.ADMIN
     )
-    if principal.kind == "api_key" and body.role == WorkspaceRole.OWNER:
-        raise ValidationError(
-            "Programmatic member management cannot assign the owner role; "
-            "use the ownership transfer flow.",
-            field="role",
-        )
+    _reject_programmatic_owner_assignment(principal, body.role)
 
     # Issue #1164: audit programmatic mutations (no-op for session). Added
     # before the service call so it commits atomically with the membership.
@@ -770,12 +777,7 @@ async def update_member_role(
         current_user, workspace_id, db, session_required_role=WorkspaceRole.ADMIN
     )
 
-    if principal.kind == "api_key" and body.role == WorkspaceRole.OWNER:
-        raise ValidationError(
-            "Programmatic member management cannot assign the owner role; "
-            "use the ownership transfer flow.",
-            field="role",
-        )
+    _reject_programmatic_owner_assignment(principal, body.role)
 
     # Issue #254: Prevent users from changing their own role
     if user_id == current_user["user_id"]:

@@ -88,6 +88,23 @@ def test_rewire_returns_pure_star_unchanged():
     assert {(e.src, e.dst) for e in out} == {(e.src, e.dst) for e in star}
 
 
+def test_rewire_with_stats_reports_accepted_swaps_not_edge_count():
+    """v0.42 review #11: the swap count is the accepted-swaps counter, NOT
+    len(rewired) (== edge count). A mixable graph reports > 0 swaps; a pure star
+    (no legal swap exists) reports exactly 0 despite returning all its edges."""
+    from tests.eval.placebo import degree_preserving_rewire_with_stats
+
+    mixable = _edges([("a", "b"), ("b", "c"), ("c", "d"), ("d", "a"), ("a", "c"), ("b", "d")])
+    out, swaps = degree_preserving_rewire_with_stats(mixable, seed=7)
+    assert len(out) == len(mixable)
+    assert swaps > 0
+
+    star = _edges([("h", x) for x in "abcdef"])
+    star_out, star_swaps = degree_preserving_rewire_with_stats(star, seed=1)
+    assert len(star_out) == len(star)
+    assert star_swaps == 0  # zero accepted swaps, NOT the edge count (6)
+
+
 def _probe(qid, seed_doc, companions):
     return ProbeSpec(
         query_id=qid,

@@ -16,7 +16,7 @@ import os
 from collections.abc import Sequence
 from pathlib import Path
 from typing import Any
-from uuid import UUID, uuid4
+from uuid import UUID
 
 from tests.eval.metrics import (
     mean_ndcg_at_k,
@@ -288,18 +288,16 @@ async def run_retrieval_eval(
     """
     from config.constants import EMBEDDING_MODEL_REGISTRY
 
+    # Fast-fail on a bad Day-4 factorial arm BEFORE any stack access (#1175);
+    # provision_eval_context trusts a validated model.
     if embedding_model is not None and embedding_model not in EMBEDDING_MODEL_REGISTRY:
         raise ValueError(
             f"unknown embedding_model {embedding_model!r}; valid models are "
             f"{sorted(EMBEDDING_MODEL_REGISTRY)}"
         )
 
-    from auth.workspace_roles import WorkspaceRole
-    from config.settings import get_settings
     from db.base import get_db
     from db.qdrant import ensure_kagura_memories_collection, get_collection_name
-    from models.auth import Context, Workspace, WorkspaceMember
-    from models.config import ContextSearchConfig
     from services.memory_service import MemoryService
     from utils.datetime import utcnow
 
@@ -307,70 +305,15 @@ async def run_retrieval_eval(
     docs_by_id = corpus.docs_by_id
     run_date = run_date or utcnow().strftime("%Y-%m-%d")
 
+    from tests.eval._provisioning import provision_eval_context
+
     async for db in get_db():
-        owner = f"eval_{uuid4().hex[:8]}"
-        ws = Workspace(
-            id=uuid4(),
-            name=f"eval-ws-{uuid4().hex[:8]}",
-            plan_name="pro",
-            owner_user_id=owner,
-            daily_api_limit=10_000_000,
-            weekly_api_limit=50_000_000,
+        # Shared eval provisioning (#19): isolated workspace/context with the
+        # per-context embedding config stamped from settings — unless an explicit
+        # embedding_model is supplied (the Day-4 factorial arm, #1175).
+        owner, ws, ctx, emb_model, emb_dims = await provision_eval_context(
+            db, embedding_model=embedding_model
         )
-        ctx = Context(
-            id=uuid4(),
-            workspace_id=ws.id,
-            name=f"eval-ctx-{uuid4().hex[:8]}",
-            created_by=owner,
-            is_private=False,
-        )
-        db.add(ws)
-        await db.flush()
-        db.add(ctx)
-        # remember()/recall() resolve the context via PermissionService, which
-        # checks workspace_members — owner_user_id alone is NOT a membership, so
-        # without this row get_context raises NotFoundException on first ingest.
-        db.add(WorkspaceMember(workspace_id=ws.id, user_id=owner, role=WorkspaceRole.OWNER))
-        # The raw ORM Context above bypasses ContextService.create_context, which
-        # is where the per-context embedding config is stamped from settings and
-        # the model-specific Qdrant collection is ensured. Without an explicit
-        # ContextSearchConfig row, the lazy create_or_get defaults to
-        # text-embedding-3-small/512 and ingest routes to a collection that does
-        # not exist on non-default embedding stacks (e.g. a local
-        # qwen3-embedding:0.6b/1024 rig) — stamp the config and ensure the
-        # collection exactly like the production create path.
-        #
-        # An explicit ``embedding_model`` (Day-4 factorial arm) overrides the
-        # settings-derived stamp entirely; None keeps the byte-identical
-        # pre-Day-4 behavior of deriving it from settings.
-        if embedding_model is not None:
-            emb_model = embedding_model
-            emb_dims = EMBEDDING_MODEL_REGISTRY[emb_model][0]
-        else:
-            settings = get_settings()
-            emb_model = settings.embedding_model
-            emb_dims = EMBEDDING_MODEL_REGISTRY.get(emb_model, (settings.embedding_dimensions, ""))[
-                0
-            ]
-        # Stamp the full ContextSearchConfig (not just the embedding fields) so
-        # an eval context behaves like a created one if any reranking / weighting
-        # default is ever consulted. Reranker fields target the local self_hosted
-        # rig (qwen3-reranker), keeping the eval path all-local-OSS; inert here
-        # since use_rerank=False.
-        db.add(
-            ContextSearchConfig(
-                context_id=ctx.id,
-                semantic_weight=0.6,
-                fetch_factor=3,
-                use_rerank=False,
-                reranker_provider="self_hosted",
-                reranker_model="qwen3-reranker-4b",
-                embedding_model=emb_model,
-                embedding_dimensions=emb_dims,
-            )
-        )
-        await db.flush()
-        await db.commit()
 
         svc = MemoryService(db)
         # id_map is owned here and populated incrementally by _ingest_corpus, so

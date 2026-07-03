@@ -21,12 +21,12 @@ from __future__ import annotations
 import json
 from pathlib import Path
 from typing import Any
-from uuid import UUID, uuid4
+from uuid import UUID
 
 from tests.eval.compounding import MODE_EXCLUDE_PROBES, build_replay_plan
 from tests.eval.placebo import (
     Edge,
-    degree_preserving_rewire,
+    degree_preserving_rewire_with_stats,
     median_cross_topic_gold_pair_cosine,
     paired_delta_bootstrap,
     permute_gold,
@@ -101,60 +101,17 @@ async def run_placebo_eval(
 async def _run_placebo_mode(corpus: Any, plan: Any, seeds: tuple[int, ...]) -> dict[str, Any]:
     """Provision an isolated workspace, build the warm graph once, run every
     seed's placebo arms off it, tear down."""
-    from auth.workspace_roles import WorkspaceRole
-    from config.constants import EMBEDDING_MODEL_REGISTRY
-    from config.settings import get_settings
     from db.base import get_db
     from db.qdrant import ensure_kagura_memories_collection, get_collection_name
-    from models.auth import Context, Workspace, WorkspaceMember
-    from models.config import ContextSearchConfig
     from services.memory_service import MemoryService
+    from tests.eval._provisioning import provision_eval_context
 
     async for db in get_db():
-        owner = f"eval_{uuid4().hex[:8]}"
-        ws = Workspace(
-            id=uuid4(),
-            name=f"eval-ws-{uuid4().hex[:8]}",
-            plan_name="pro",
-            owner_user_id=owner,
-            daily_api_limit=10_000_000,
-            weekly_api_limit=50_000_000,
+        # Shared eval provisioning (#19); edges_only so the placebo edge-graph
+        # snapshot/rewire path has a co-activation graph to sample.
+        owner, ws, ctx, emb_model, emb_dims = await provision_eval_context(
+            db, sleep_mode="edges_only"
         )
-        ctx = Context(
-            id=uuid4(),
-            workspace_id=ws.id,
-            name=f"eval-ctx-{uuid4().hex[:8]}",
-            created_by=owner,
-            is_private=False,
-            sleep_mode="edges_only",
-        )
-        db.add(ws)
-        await db.flush()
-        db.add(ctx)
-        db.add(WorkspaceMember(workspace_id=ws.id, user_id=owner, role=WorkspaceRole.OWNER))
-        # The raw ORM Context bypasses ContextService.create_context, which stamps
-        # the per-context embedding config and ensures the model-specific Qdrant
-        # collection. Without an explicit ContextSearchConfig the lazy create_or_get
-        # defaults to text-embedding-3-small/512 and ingest routes to a collection
-        # that does not exist on a qwen3-embedding:0.6b/1024 rig — stamp it exactly
-        # like the production create path (mirrors runner.py's eval provisioning).
-        settings = get_settings()
-        emb_model = settings.embedding_model
-        emb_dims = EMBEDDING_MODEL_REGISTRY.get(emb_model, (settings.embedding_dimensions, ""))[0]
-        db.add(
-            ContextSearchConfig(
-                context_id=ctx.id,
-                semantic_weight=0.6,
-                fetch_factor=3,
-                use_rerank=False,
-                reranker_provider="self_hosted",
-                reranker_model="qwen3-reranker-4b",
-                embedding_model=emb_model,
-                embedding_dimensions=emb_dims,
-            )
-        )
-        await db.flush()
-        await db.commit()
 
         svc = MemoryService(db)
         id_map: dict[str, str] = {}
@@ -208,7 +165,12 @@ async def _measure_placebo(svc, db, corpus, plan, id_map, owner, ctx, ws, seeds)
             )
     finally:
         if tau_info.get("seeded"):
-            await _delete_provisional_tau(db, tau_info["model"], tau_info["dimensions"])
+            await _restore_provisional_tau(
+                db,
+                tau_info["model"],
+                tau_info["dimensions"],
+                tau_info.get("prior_calibration"),
+            )
 
     d_rand = sorted(
         b["deltas"]["random_edge"]["delta"] for b in per_seed if b["deltas"].get("random_edge")
@@ -265,8 +227,10 @@ async def _placebo_arms_for_seed(
             )
             for r in snapshot
         ]
-        rewired = degree_preserving_rewire(placebo_edges, seed=seed)
-        rewire_swaps = len(rewired)
+        # Use the accepted-swap count, NOT len(rewired) (== edge count): a run
+        # that accepts zero swaps must be distinguishable from a fully-mixed one
+        # in edge_snapshot.rewire_swaps_done (v0.42 review).
+        rewired, rewire_swaps = degree_preserving_rewire_with_stats(placebo_edges, seed=seed)
         template = {"user_id": owner, "workspace_id": ws.id, "context_id": ctx.id}
         rewired_rows = [
             {
@@ -415,6 +379,15 @@ async def _seed_provisional_tau(db, corpus, plan, id_map, ctx) -> dict[str, Any]
             "cross_topic_gold_pair_count": cross_topic_count,
         }
 
+    # Snapshot any PRE-EXISTING production model-global edge_gate row BEFORE the
+    # upsert clobbers it. _upsert_calibration is a kind-scoped delete-then-insert,
+    # and this (model, dims, context_id IS NULL, kind) key is the exact one the
+    # production calibration subsystem writes — so without capturing it here, the
+    # eval would overwrite live edge-gating during the run and _restore would
+    # delete it outright at teardown, leaving production on the uncalibrated
+    # default until the next recalibration (v0.42 review).
+    prior_calibration = await _snapshot_model_global_edge_gate(db, model_name, dims)
+
     percentiles = script.compute_percentiles([tau] * 128)
     config = await NeuralMemoryConfig.from_db(db)
     now = utcnow()
@@ -433,6 +406,7 @@ async def _seed_provisional_tau(db, corpus, plan, id_map, ctx) -> dict[str, Any]
 
     result: dict[str, Any] = {
         "seeded": True,
+        "prior_calibration": prior_calibration,
         "model": model_name,
         "dimensions": dims,
         "tau_provisional": round(tau, 4),
@@ -451,10 +425,49 @@ async def _seed_provisional_tau(db, corpus, plan, id_map, ctx) -> dict[str, Any]
     return result
 
 
-async def _delete_provisional_tau(db, model_name, dimensions) -> None:
+async def _snapshot_model_global_edge_gate(db, model_name, dimensions) -> dict[str, Any] | None:
+    """Capture the current production model-global edge_gate calibration row (if
+    any) as plain values, so a placebo run can restore it after teardown."""
+    from sqlalchemy import select
+
+    from models.neural import CALIBRATION_KIND_EDGE_GATE, EmbeddingCalibration
+
+    row = (
+        await db.execute(
+            select(EmbeddingCalibration).where(
+                EmbeddingCalibration.model_name == model_name,
+                EmbeddingCalibration.dimensions == dimensions,
+                EmbeddingCalibration.context_id.is_(None),
+                EmbeddingCalibration.kind == CALIBRATION_KIND_EDGE_GATE,
+            )
+        )
+    ).scalar_one_or_none()
+    if row is None:
+        return None
+    return {
+        "percentiles": {
+            "p25": row.p25,
+            "p50": row.p50,
+            "p75": row.p75,
+            "p90": row.p90,
+            "p95": row.p95,
+            "p99": row.p99,
+        },
+        "sample_size": row.sample_size,
+        "sampled_at": row.sampled_at,
+        "valid_until": row.valid_until,
+    }
+
+
+async def _restore_provisional_tau(db, model_name, dimensions, prior) -> None:
+    """Delete the placebo edge_gate row and restore the pre-existing production
+    row captured at seed time. Deleting outright (the old behavior) destroyed a
+    real production calibration for (model, dims), silently reverting live
+    edge-gating to the uncalibrated default (v0.42 review)."""
     from sqlalchemy import delete as sa_delete
 
     from models.neural import CALIBRATION_KIND_EDGE_GATE, EmbeddingCalibration
+    from tasks.neural_calibration import _upsert_calibration
 
     await db.execute(
         sa_delete(EmbeddingCalibration).where(
@@ -464,6 +477,20 @@ async def _delete_provisional_tau(db, model_name, dimensions) -> None:
             EmbeddingCalibration.kind == CALIBRATION_KIND_EDGE_GATE,
         )
     )
+    if prior is not None:
+        # Re-insert the original production row verbatim (same percentiles,
+        # sample_size, sampled_at, valid_until) via the canonical upsert.
+        await _upsert_calibration(
+            db,
+            model_name,
+            dimensions,
+            None,
+            kind=CALIBRATION_KIND_EDGE_GATE,
+            percentiles=prior["percentiles"],
+            observations=prior["sample_size"],
+            now=prior["sampled_at"],
+            valid_until=prior["valid_until"],
+        )
     await db.commit()
 
 

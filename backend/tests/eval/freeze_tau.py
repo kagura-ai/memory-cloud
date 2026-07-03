@@ -28,7 +28,7 @@ import argparse
 import json
 from pathlib import Path
 from typing import Any
-from uuid import UUID, uuid4
+from uuid import UUID
 
 from tests.eval.placebo import median_cross_topic_gold_pair_cosine
 from tests.eval.runner import _ingest_corpus, _sudachi_version, _teardown
@@ -117,57 +117,17 @@ async def run_freeze_tau(corpus_path: str, write: bool = True) -> dict[str, Any]
 
 async def _measure_tau(corpus: Corpus, gold_pairs: set[frozenset[str]]) -> dict[str, Any]:
     """Provision, ingest, fetch vectors, compute τ, tear down (always)."""
-    from auth.workspace_roles import WorkspaceRole
-    from config.constants import EMBEDDING_MODEL_REGISTRY
-    from config.settings import get_settings
     from db.base import get_db
     from db.qdrant import ensure_kagura_memories_collection, get_collection_name, get_qdrant_client
-    from models.auth import Context, Workspace, WorkspaceMember
-    from models.config import ContextSearchConfig
     from neural.utils import cosine_similarity
     from services.memory_service import MemoryService
     from tasks.neural_calibration import _load_measure_script
+    from tests.eval._provisioning import provision_eval_context
 
     async for db in get_db():
-        owner = f"eval_{uuid4().hex[:8]}"
-        ws = Workspace(
-            id=uuid4(),
-            name=f"eval-ws-{uuid4().hex[:8]}",
-            plan_name="pro",
-            owner_user_id=owner,
-            daily_api_limit=10_000_000,
-            weekly_api_limit=50_000_000,
-        )
-        ctx = Context(
-            id=uuid4(),
-            workspace_id=ws.id,
-            name=f"eval-ctx-{uuid4().hex[:8]}",
-            created_by=owner,
-            is_private=False,
-        )
-        db.add(ws)
-        await db.flush()
-        db.add(ctx)
-        db.add(WorkspaceMember(workspace_id=ws.id, user_id=owner, role=WorkspaceRole.OWNER))
-        # Same provisioning as runner.py/placebo_runner.py: stamp the per-context
-        # embedding config so ingest routes to the rig's real collection.
-        settings = get_settings()
-        emb_model = settings.embedding_model
-        emb_dims = EMBEDDING_MODEL_REGISTRY.get(emb_model, (settings.embedding_dimensions, ""))[0]
-        db.add(
-            ContextSearchConfig(
-                context_id=ctx.id,
-                semantic_weight=0.6,
-                fetch_factor=3,
-                use_rerank=False,
-                reranker_provider="self_hosted",
-                reranker_model="qwen3-reranker-4b",
-                embedding_model=emb_model,
-                embedding_dimensions=emb_dims,
-            )
-        )
-        await db.flush()
-        await db.commit()
+        # Shared eval provisioning (#19): stamp the per-context embedding config
+        # so ingest routes to the rig's real collection.
+        owner, ws, ctx, emb_model, emb_dims = await provision_eval_context(db)
 
         svc = MemoryService(db)
         id_map: dict[str, str] = {}

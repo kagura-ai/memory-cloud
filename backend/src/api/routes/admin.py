@@ -1050,7 +1050,19 @@ async def delete_user(
             .scalars()
             .all()
         )
-        await db.execute(delete(Context).where(Context.created_by == user_id))
+        # Delete EXACTLY the contexts we just purged (the FOR UPDATE snapshot),
+        # not a fresh ``created_by == user_id`` predicate. Under READ COMMITTED
+        # the latter would also delete a context the user's own session created
+        # AFTER the snapshot (e.g. in a workspace they only belong to, not own):
+        # its files were never in ``ctx_ids`` so they skipped the purge, and a
+        # ``created_by`` DELETE would SET-NULL their context_id — widening a
+        # private file into a workspace-scoped object downloadable by any viewer,
+        # with its bytes never released. Scoping the DELETE to the purged
+        # snapshot keeps purge-set == delete-set; a context raced in after the
+        # snapshot simply survives with its files intact (created_by is a plain
+        # string, not an FK, so it does not block the user delete) (v0.42 review).
+        if ctx_ids:
+            await db.execute(delete(Context).where(Context.id.in_(ctx_ids)))
 
         # Remove user from workspace memberships
         # #687: operation-on-deleted — full user erasure must purge memberships

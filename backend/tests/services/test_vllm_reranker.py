@@ -95,6 +95,35 @@ class TestVLLMReranker:
         assert out[0] == {"index": 1, "relevance_score": 0.9}
         assert out[1] == {"index": 0, "relevance_score": 0.2}
 
+    async def test_sends_bearer_auth_header_when_api_key_set(self, monkeypatch):
+        """v0.42 review #13: a /v1/rerank endpoint behind auth (vLLM --api-key,
+        RERANK_API_KEY) must receive an Authorization header, else it 401s and
+        reranking silently disables deployment-wide."""
+        seen: dict = {}
+
+        async def fake_post(self, url, json=None, headers=None, **kwargs):
+            seen["headers"] = headers
+            return _FakeHttpResponse(json_data={"results": [{"index": 0, "relevance_score": 0.5}]})
+
+        monkeypatch.setattr(httpx.AsyncClient, "post", fake_post, raising=True)
+
+        r = VLLMReranker(base_url="http://gpu:8002", model="m", api_key="secret-token")
+        await r.rerank("q", ["a"], top_n=1)
+        assert seen["headers"] == {"Authorization": "Bearer secret-token"}
+
+    async def test_no_auth_header_when_api_key_absent(self, monkeypatch):
+        seen: dict = {}
+
+        async def fake_post(self, url, json=None, headers=None, **kwargs):
+            seen["headers"] = headers
+            return _FakeHttpResponse(json_data={"results": [{"index": 0, "relevance_score": 0.5}]})
+
+        monkeypatch.setattr(httpx.AsyncClient, "post", fake_post, raising=True)
+
+        r = VLLMReranker(base_url="http://gpu:8002", model="m")  # no api_key
+        await r.rerank("q", ["a"], top_n=1)
+        assert seen["headers"] is None
+
     async def test_top_n_truncates_after_sort(self, monkeypatch):
         async def fake_post(self, url, json=None, **kwargs):
             return _FakeHttpResponse(

@@ -29,6 +29,47 @@ _PLACEHOLDER_API_KEY = "not-needed"
 logger = get_logger(__name__)
 
 
+async def verify_self_hosted_reachable(
+    base_url: str, api_key: str | None, *, label: str = "backend"
+) -> None:
+    """Probe ``{base_url}/v1/models`` (Ollama + vLLM); raise if unreachable.
+
+    v0.42 review #18: the one-time liveness check shared by
+    ``SelfHostedProvider._verify`` and ``EmbeddingService._get_client`` — same
+    OpenAI-compatible ``/v1/models`` probe, same bearer-header conditional, same
+    ``httpx.HTTPError → ConfigurationError`` mapping. ``label`` customizes the
+    subject in the error message ("LLM backend" vs "inference server").
+
+    Raises:
+        ConfigurationError: non-200 response, or any httpx transport error.
+    """
+    import httpx
+
+    headers = {"Authorization": f"Bearer {api_key}"} if api_key else None
+    try:
+        async with httpx.AsyncClient(timeout=5.0) as http:
+            resp = await http.get(f"{base_url}/v1/models", headers=headers)
+            if resp.status_code in (401, 403):
+                # The backend IS responding — it rejected auth. Distinguish this
+                # from "not responding" so a missing/wrong SELF_HOSTED_API_KEY is
+                # diagnosable at a glance (Copilot review).
+                raise ConfigurationError(
+                    f"Self-hosted {label} at {base_url} rejected the request "
+                    f"(HTTP {resp.status_code}) — set or check SELF_HOSTED_API_KEY; "
+                    "this backend requires a bearer token (e.g. vLLM --api-key)."
+                )
+            if resp.status_code != 200:
+                raise ConfigurationError(
+                    f"Self-hosted {label} not responding at {base_url} (HTTP {resp.status_code})"
+                )
+    except httpx.HTTPError as err:
+        raise ConfigurationError(
+            f"Cannot connect to self-hosted {label} at {base_url}. "
+            "Is your inference server running? (e.g. `ollama serve`, or a vLLM "
+            "OpenAI-compatible server)"
+        ) from err
+
+
 class SelfHostedProvider(LLMProvider):
     """Self-hosted provider using the OpenAI-compatible API.
 
@@ -82,23 +123,7 @@ class SelfHostedProvider(LLMProvider):
         if self._verified:
             return
 
-        import httpx
-
-        try:
-            async with httpx.AsyncClient(timeout=5.0) as http:
-                resp = await http.get(f"{self._base_url}/v1/models", headers=self._auth_headers())
-                if resp.status_code != 200:
-                    raise ConfigurationError(
-                        f"Self-hosted LLM backend not responding at {self._base_url} "
-                        f"(HTTP {resp.status_code})"
-                    )
-        except httpx.HTTPError as err:
-            raise ConfigurationError(
-                f"Cannot connect to self-hosted LLM backend at {self._base_url}. "
-                "Is your inference server running? (e.g. `ollama serve`, or a vLLM "
-                "OpenAI-compatible server)"
-            ) from err
-
+        await verify_self_hosted_reachable(self._base_url, self._api_key, label="LLM backend")
         self._verified = True
 
     async def complete_json(

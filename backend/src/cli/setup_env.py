@@ -142,23 +142,16 @@ def setup_env():
     has_openai = bool(env.get("OPENAI_API_KEY"))
     self_hosted_url = env.get("SELF_HOSTED_BASE_URL", "http://localhost:11434")
     self_hosted_key = env.get("SELF_HOSTED_API_KEY")
-    try:
-        import urllib.request
+    from cli._env_probe import probe_self_hosted_available
 
-        # Send the bearer token so a vLLM backend started with --api-key
-        # answers the probe instead of returning 401 (keyless Ollama ignores it).
-        headers = {"Authorization": f"Bearer {self_hosted_key}"} if self_hosted_key else {}
-        req = urllib.request.Request(f"{self_hosted_url}/v1/models", method="GET", headers=headers)
-        with urllib.request.urlopen(req, timeout=3) as resp:
-            if resp.status == 200:
-                print(f"✓ Self-hosted backend detected at {self_hosted_url}")
-                if not has_openai:
-                    print("  → You can use your self-hosted backend for embeddings:")
-                    print("    Set EMBEDDING_PROVIDER=self_hosted in .env.local")
-    except Exception:
+    if probe_self_hosted_available(self_hosted_url, self_hosted_key):
+        print(f"✓ Self-hosted backend detected at {self_hosted_url}")
         if not has_openai:
-            print(f"\n⚠ No self-hosted backend at {self_hosted_url} and no OPENAI_API_KEY.")
-            print("  Memory features require one of these. Configure before using remember/recall.")
+            print("  → You can use your self-hosted backend for embeddings:")
+            print("    Set EMBEDDING_PROVIDER=self_hosted in .env.local")
+    elif not has_openai:
+        print(f"\n⚠ No self-hosted backend at {self_hosted_url} and no OPENAI_API_KEY.")
+        print("  Memory features require one of these. Configure before using remember/recall.")
 
     print("\n" + "=" * 50)
     print("✓ Environment setup complete!")
