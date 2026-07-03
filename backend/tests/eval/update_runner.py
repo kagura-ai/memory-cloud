@@ -228,6 +228,19 @@ async def _summarize_sleep_report(db: Any, owner: str) -> dict[str, Any]:
         except Exception:  # noqa: BLE001 — best-effort field introspection
             continue
     summary["ok"] = summary.get("status") == "completed"
+    # Roll judge-LLM failures up to the top level: "completed" phases can hide
+    # a fully non-functional judge (every call failed) inside per-phase detail
+    # dicts, which nearly buried the Day-5 run-0 provider misconfiguration.
+    failures = 0
+    for phase_field in ("edge_discovery_result", "dedup_result", "importance_result"):
+        phase = summary.get(phase_field)
+        if isinstance(phase, dict):
+            details = phase.get("details") if isinstance(phase.get("details"), dict) else phase
+            for key in ("llm_call_failures", "llm_failures"):
+                val = details.get(key)
+                if isinstance(val, int):
+                    failures += val
+    summary["llm_call_failures_total"] = failures
     return summary
 
 
