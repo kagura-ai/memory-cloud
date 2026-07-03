@@ -166,3 +166,79 @@ def test_bad_grade_value_raises(tmp_path: Path):
     )
     with pytest.raises(ValueError, match="q1"):
         load_corpus(p)
+
+
+# --- update pair schema extension (Day-5, prereg-v1 H4) ---------------------
+
+
+def test_golden_corpus_has_no_update_by_default():
+    corpus = load_corpus()
+    for q in corpus.queries:
+        assert q.update is None
+
+
+def test_update_round_trip(tmp_path: Path):
+    p = _write_corpus(
+        tmp_path,
+        """\
+  - id: q1
+    bucket: update
+    text: "find alpha"
+    relevant: [doc_b]
+    update:
+      current: doc_b
+      stale: doc_a
+""",
+    )
+    q = load_corpus(p).queries[0]
+    assert q.update == {"current": "doc_b", "stale": "doc_a"}
+
+
+def test_update_wrong_keys_raise(tmp_path: Path):
+    p = _write_corpus(
+        tmp_path,
+        """\
+  - id: q1
+    bucket: update
+    text: "find alpha"
+    relevant: [doc_b]
+    update:
+      current: doc_b
+      old: doc_a
+""",
+    )
+    with pytest.raises(ValueError, match="q1"):
+        load_corpus(p)
+
+
+def test_update_missing_key_raises(tmp_path: Path):
+    p = _write_corpus(
+        tmp_path,
+        """\
+  - id: q1
+    bucket: update
+    text: "find alpha"
+    relevant: [doc_b]
+    update:
+      current: doc_b
+""",
+    )
+    with pytest.raises(ValueError, match="q1"):
+        load_corpus(p)
+
+
+def test_update_empty_value_raises(tmp_path: Path):
+    p = _write_corpus(
+        tmp_path,
+        """\
+  - id: q1
+    bucket: update
+    text: "find alpha"
+    relevant: [doc_b]
+    update:
+      current: doc_b
+      stale: ""
+""",
+    )
+    with pytest.raises(ValueError, match="q1"):
+        load_corpus(p)
