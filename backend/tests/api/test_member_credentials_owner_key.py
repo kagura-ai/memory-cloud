@@ -93,6 +93,7 @@ def _mock_manager(monkeypatch):
     new_key.key_prefix = "kagura_abc"
     new_key.created_at = __import__("datetime").datetime(2026, 1, 1)
     new_key.expires_at = __import__("datetime").datetime(2026, 1, 31)  # #1165: owner-set expiry
+    new_key.bound_context_id = None  # owner-provisioned keys never bind a context
     mgr = MagicMock()
     mgr.create_key = AsyncMock(return_value=("kagura_PLAINTEXT", new_key))
     monkeypatch.setattr(mc, "APIKeyManager", lambda db: mgr)
