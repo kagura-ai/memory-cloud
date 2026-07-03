@@ -304,6 +304,31 @@ class Settings(BaseSettings):
         default="openai",
         description="Embedding model provider (openai/cohere/huggingface/self_hosted)",
     )
+
+    @field_validator("embedding_provider", mode="before")
+    @classmethod
+    def _coerce_legacy_ollama_embedding_provider(cls, v: object) -> object:
+        """Coerce the retired EMBEDDING_PROVIDER=ollama value to 'self_hosted' (#1160).
+
+        The provider key was renamed ollama → self_hosted in a clean cutover,
+        but .env.example documented 'ollama' as valid for many releases. Left
+        verbatim, ``provider == "self_hosted"`` gates all miss and embedding
+        traffic silently routes into the OpenAI client path (500 without a key,
+        or wrong-model calls to api.openai.com with a platform key). Coerce with
+        a boot warning instead of accepting the broken value (mirrors
+        ``_warn_legacy_ollama_env`` for OLLAMA_BASE_URL).
+        """
+        if isinstance(v, str) and v.strip().lower() == "ollama":
+            import warnings
+
+            warnings.warn(
+                "EMBEDDING_PROVIDER=ollama is retired (renamed to 'self_hosted' "
+                "in #1160); coercing to 'self_hosted'. Update your env.",
+                stacklevel=2,
+            )
+            return "self_hosted"
+        return v
+
     embedding_model: str = Field(
         default="text-embedding-3-small", description="Embedding model name"
     )
@@ -386,8 +411,34 @@ class Settings(BaseSettings):
             "reranker_service.DEFAULT_VLLM_RERANK_MODEL."
         ),
     )
+    rerank_api_key: str = Field(
+        default="",
+        description=(
+            "Optional bearer token for the /v1/rerank endpoint (RERANK_BASE_URL) "
+            "when it is served behind auth (e.g. vLLM launched with --api-key). "
+            "Sent as 'Authorization: Bearer ...' by VLLMReranker; empty = no header."
+        ),
+    )
+    self_hosted_rerank_model: str = Field(
+        default="dengcao/Qwen3-Reranker-8B:Q5_K_M",
+        description=(
+            "Default model for the prompt-scoring SelfHostedReranker on "
+            "SELF_HOSTED_BASE_URL (the /v1/completions path, used when "
+            "RERANK_BASE_URL is unset). Defaults to the Ollama-registry id; a "
+            "pure-vLLM self-hosted stack must override it (env "
+            "SELF_HOSTED_RERANK_MODEL) with a model the backend actually serves "
+            "so scoring does not 404 to all-zero relevance. Keep in sync with "
+            "reranker_service.DEFAULT_SELF_HOSTED_RERANK_MODEL."
+        ),
+    )
 
-    @field_validator("rerank_base_url", "rerank_model", mode="before")
+    @field_validator(
+        "rerank_base_url",
+        "rerank_model",
+        "rerank_api_key",
+        "self_hosted_rerank_model",
+        mode="before",
+    )
     @classmethod
     def _strip_rerank_fields(cls, v: object) -> object:
         # rerank_base_url is used as a truthy feature toggle

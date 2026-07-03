@@ -185,48 +185,58 @@ async def get_system_telemetry(
         # provider is self_hosted). Probes the OpenAI-compatible /v1/models
         # endpoint, served by both Ollama and vLLM.
         self_hosted_status = ServiceStatus(status="not_configured")
-        # "Explicitly configured" = provider is self_hosted OR the operator set
-        # SELF_HOSTED_BASE_URL. Detect the latter via model_fields_set rather
-        # than comparing to the default value — an operator who sets the base
-        # URL *to* the default (common for a local Ollama/vLLM) must still be
-        # treated as configured.
+        # "Explicitly configured" = provider is self_hosted, the operator set
+        # SELF_HOSTED_BASE_URL, OR a dedicated /v1/rerank rig is configured
+        # (RERANK_BASE_URL). The last case matters because the frontend gates the
+        # self-hosted *reranker* option on this single ``self_hosted`` signal, so
+        # a rerank-only deployment (embeddings on OpenAI, rerank on a vLLM rig)
+        # must still report available or the UI blocks enabling/saving it (#1161).
+        # SELF_HOSTED_BASE_URL is detected via model_fields_set rather than a
+        # value compare — an operator who sets it *to* the default (common for a
+        # local Ollama/vLLM) must still be treated as configured.
         self_hosted_explicitly_configured = (
             settings.embedding_provider == "self_hosted"
             or "self_hosted_base_url" in settings.model_fields_set
+            or bool(settings.rerank_base_url)
         )
         if self_hosted_explicitly_configured:
-            try:
-                import httpx
+            import httpx
 
-                headers = (
-                    {"Authorization": f"Bearer {settings.self_hosted_api_key}"}
-                    if settings.self_hosted_api_key
-                    else None
-                )
-                async with httpx.AsyncClient(timeout=5.0) as http:
-                    models_resp = await http.get(
-                        f"{settings.self_hosted_base_url}/v1/models", headers=headers
-                    )
-                    if models_resp.status_code == 200:
+            async def _probe_v1_models(base_url: str, api_key: str) -> ServiceStatus | None:
+                """Probe {base}/v1/models. ok(+models) on 200; error on non-200/exc; None never returned here."""
+                headers = {"Authorization": f"Bearer {api_key}"} if api_key else None
+                try:
+                    async with httpx.AsyncClient(timeout=5.0) as http:
+                        resp = await http.get(f"{base_url}/v1/models", headers=headers)
+                    if resp.status_code == 200:
                         # ``data`` may be null (e.g. Ollama with no models
                         # pulled returns {"data": null}); coalesce to [].
                         model_names = [
-                            m["id"] for m in (models_resp.json().get("data") or []) if "id" in m
+                            m["id"] for m in (resp.json().get("data") or []) if "id" in m
                         ]
-                        # `url` intentionally omitted (#991): the internal
-                        # base URL is not exposed on this non-admin endpoint; the
-                        # frontend consumes only status + models.
-                        self_hosted_status = ServiceStatus(
-                            status="ok",
-                            details={"models": model_names},
-                        )
-                    else:
-                        self_hosted_status = ServiceStatus(
-                            status="error",
-                            details={"http_status": models_resp.status_code},
-                        )
-            except Exception as e:
-                self_hosted_status = ServiceStatus(status="error", details={"error": str(e)})
+                        # `url` intentionally omitted (#991): the internal base
+                        # URL is not exposed on this non-admin endpoint.
+                        return ServiceStatus(status="ok", details={"models": model_names})
+                    return ServiceStatus(status="error", details={"http_status": resp.status_code})
+                except Exception as e:  # noqa: BLE001 — best-effort observability probe
+                    return ServiceStatus(status="error", details={"error": str(e)})
+
+            # Probe the embedding/LLM backend when it is the configured one;
+            # otherwise probe the dedicated rerank rig. First reachable ("ok")
+            # backend wins — self-hosted infrastructure is available.
+            probe_targets: list[tuple[str, str]] = []
+            if (
+                settings.embedding_provider == "self_hosted"
+                or "self_hosted_base_url" in settings.model_fields_set
+            ):
+                probe_targets.append((settings.self_hosted_base_url, settings.self_hosted_api_key))
+            if settings.rerank_base_url:
+                probe_targets.append((settings.rerank_base_url, settings.rerank_api_key))
+
+            for base_url, api_key in probe_targets:
+                self_hosted_status = await _probe_v1_models(base_url, api_key)
+                if self_hosted_status.status == "ok":
+                    break
 
         # Memory stats (all users)
         from sqlalchemy import func
