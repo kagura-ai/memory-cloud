@@ -472,15 +472,30 @@ class Settings(BaseSettings):
     enable_byok: bool = Field(
         default=True,
         description=(
-            "Enable the BYOK (bring-your-own-key) surface (#1167). ON by default "
+            "Enable BYOK (bring-your-own-key) PROVISIONING (#1167). ON by default "
             "so OSS / self-hosted keeps external API key management. When false, "
-            "the /external-keys API, the workspace cost dashboard "
-            "(GET /workspaces/{id}/cost-aggregation), and the OpenAI key-status "
-            "probe (GET /workspaces/{id}/openai-key-status) return 404 and the "
-            "web UI hides their nav entries. Key RESOLUTION is untouched: "
-            "keys stored before turning the flag off are still used by the "
-            "LLM/embedding services. Surfaced to the frontend via "
-            "GET /api/v1/system/info features.byok."
+            "the /external-keys WRITE paths (create/update), the workspace cost "
+            "dashboard (GET /workspaces/{id}/cost-aggregation), and the OpenAI "
+            "key-status probe return 404 and the web UI hides their nav entries. "
+            "v0.42 review #32: key MANAGEMENT (list / toggle-off / delete) stays "
+            "reachable so an owner can still disable/delete an already-stored key. "
+            "Key RESOLUTION is also untouched: keys stored before the flag flip "
+            "are still used by the LLM/embedding services (so live embeddings do "
+            "not break) — the customer removes them via the still-open management "
+            "paths. Surfaced to the frontend via GET /api/v1/system/info features.byok."
+        ),
+    )
+    enable_owner_key_member_management: bool = Field(
+        default=True,
+        description=(
+            "v0.42 review #33: gate for owner-API-key member/credential management "
+            "(#1164/#1165 — POST /workspaces/{id}/members, invitations, and "
+            "owner-provisioned member API keys). ON by default preserves the "
+            "shipped behavior. Set false on deployments that do not want an "
+            "owner's ordinary read/write API key to ALSO carry member-management "
+            "power (a stolen owner key would otherwise mint member keys / add "
+            "members); session owners are unaffected. This is a deployment-level "
+            "kill-switch pending per-key scopes."
         ),
     )
 

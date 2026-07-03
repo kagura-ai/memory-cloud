@@ -35,13 +35,25 @@ logger = get_logger(__name__)
 # External API keys are workspace-level secrets (OpenAI/Cohere/Anthropic credentials)
 # that should only be managed by the workspace owner. Viewers, members, and admins
 # cannot list/create/update/toggle/delete keys.
-# Issue #1167: require_byok_enabled must stay FIRST so a BYOK-off deployment
-# returns a uniform 404 to every caller before auth/role checks run — a
-# role-dependent 403-vs-404 split would leak the feature's existence.
+# Issue #1167 / v0.42 review #32: the BYOK feature gate now applies only to the
+# WRITE paths (create + update), NOT list / toggle-off / delete. Key RESOLUTION
+# deliberately keeps using keys stored before the flag was turned off (so live
+# embeddings do not break on a flag flip) — but if management were ALSO gated
+# off, a customer would have no way to disable or delete a key that is still
+# being billed. Keeping list/toggle/delete reachable preserves that control
+# without re-enabling provisioning.
+#
+# Dependencies are declared PER-ROUTE (not router-wide) so ordering is explicit:
+# on the write paths ``require_byok_enabled`` is listed BEFORE
+# ``require_workspace_owner`` so a BYOK-off create/update returns a uniform 404
+# before auth runs (no role-dependent 403-vs-404 existence leak). Router-level
+# dependencies would run before any per-route dep and defeat that ordering, so
+# the owner gate is attached per-route too.
+_OWNER_ONLY = [Depends(require_workspace_owner)]
+_BYOK_WRITE = [Depends(require_byok_enabled), Depends(require_workspace_owner)]
 router = APIRouter(
     prefix="/external-keys",
     tags=["external-keys"],
-    dependencies=[Depends(require_byok_enabled), Depends(require_workspace_owner)],
 )
 
 
@@ -202,7 +214,7 @@ async def validate_reranker_exclusivity(
 # ============================================================================
 
 
-@router.get("", response_model=ExternalKeyListResponse)
+@router.get("", response_model=ExternalKeyListResponse, dependencies=_OWNER_ONLY)
 async def list_external_keys(
     user: APIKeyOrSessionUser,
     db: AsyncSession = Depends(get_db),
@@ -257,7 +269,7 @@ async def list_external_keys(
         return ExternalKeyListResponse(keys=key_responses, total=len(keys))
 
 
-@router.post("", response_model=ExternalKeyResponse)
+@router.post("", response_model=ExternalKeyResponse, dependencies=_BYOK_WRITE)
 async def create_external_key(
     request: ExternalKeyCreate,
     user: APIKeyOrSessionUser,
@@ -403,7 +415,7 @@ async def create_external_key(
         )
 
 
-@router.put("/{key_name}", response_model=ExternalKeyResponse)
+@router.put("/{key_name}", response_model=ExternalKeyResponse, dependencies=_BYOK_WRITE)
 async def update_external_key(
     key_name: str,
     request: ExternalKeyUpdate,
@@ -463,7 +475,7 @@ async def update_external_key(
         )
 
 
-@router.patch("/{key_name}/toggle", response_model=ExternalKeyResponse)
+@router.patch("/{key_name}/toggle", response_model=ExternalKeyResponse, dependencies=_OWNER_ONLY)
 async def toggle_external_key(
     key_name: str,
     request: ExternalKeyToggle,
@@ -588,7 +600,7 @@ async def toggle_external_key(
         )
 
 
-@router.delete("/{key_name}")
+@router.delete("/{key_name}", dependencies=_OWNER_ONLY)
 async def delete_external_key(
     key_name: str,
     user: APIKeyOrSessionUser,

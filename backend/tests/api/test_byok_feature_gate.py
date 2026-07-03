@@ -1,18 +1,23 @@
 """Tests for the ENABLE_BYOK deployment flag (#1167).
 
-``ENABLE_BYOK=false`` removes the BYOK surface from the deployment:
+``ENABLE_BYOK=false`` disables BYOK PROVISIONING but (v0.42 review #32) keeps
+key MANAGEMENT reachable so a customer can still disable/delete a key that is
+still being resolved (and billed):
 
-- every ``/external-keys`` CRUD endpoint returns 404 (feature-not-present
-  semantics, consistent with plan_page #1145 — 403 would read as a
-  permission problem and leak the feature's existence),
+- the ``/external-keys`` WRITE paths (POST create, PUT update) return 404
+  (feature-not-present semantics, consistent with plan_page #1145 — 403 would
+  read as a permission problem and leak the feature's existence),
+- the ``/external-keys`` MANAGEMENT paths (GET list, PATCH toggle, DELETE)
+  stay available so an owner retains control of already-stored keys; an
+  anonymous caller gets the normal 401 (route present),
 - ``GET /workspaces/{id}/cost-aggregation`` returns 404,
 - ``GET /admin/cost-aggregation`` stays available (platform env-key usage
   still accrues cost the system admin may need to see).
 
-The gate must run BEFORE auth/role dependencies so every caller — anonymous,
-member, owner — sees the same 404 (no role-dependent 403-vs-404 split).
-The anonymous-request tests below pin exactly that ordering: 404 when the
-flag is off, the usual 401 when it is on.
+On the write paths the gate must run BEFORE auth/role dependencies so every
+caller sees the same 404 (no role-dependent 403-vs-404 split). The
+anonymous-request tests below pin exactly that ordering: 404 for writes when
+the flag is off, the usual 401 for management and when the flag is on.
 """
 
 from __future__ import annotations
@@ -46,13 +51,10 @@ def byok_disabled(monkeypatch):
 
 
 class TestExternalKeysGate:
-    def test_list_returns_404_when_disabled(self, client, byok_disabled):
-        # Anonymous on purpose: the feature gate must fire before auth,
-        # so even an unauthenticated caller sees 404 (not 401).
-        response = client.get("/api/v1/external-keys")
-        assert response.status_code == 404
-
+    # --- WRITE paths: 404 before auth when disabled (no existence leak) ---
     def test_create_returns_404_when_disabled(self, client, byok_disabled):
+        # Anonymous on purpose: the write gate must fire before auth,
+        # so even an unauthenticated caller sees 404 (not 401).
         response = client.post(
             "/api/v1/external-keys",
             json={"key_name": "OPENAI_API_KEY", "provider": "openai", "value": "sk-x"},
@@ -63,9 +65,21 @@ class TestExternalKeysGate:
         response = client.put("/api/v1/external-keys/OPENAI_API_KEY", json={"value": "sk-y"})
         assert response.status_code == 404
 
-    def test_delete_returns_404_when_disabled(self, client, byok_disabled):
+    # --- MANAGEMENT paths: reachable when disabled so keys stay controllable
+    # (v0.42 review #32). Anonymous → normal 401 (route present), not 404. ---
+    def test_list_available_when_disabled(self, client, byok_disabled):
+        response = client.get("/api/v1/external-keys")
+        assert response.status_code == 401
+
+    def test_delete_available_when_disabled(self, client, byok_disabled):
         response = client.delete("/api/v1/external-keys/OPENAI_API_KEY")
-        assert response.status_code == 404
+        assert response.status_code == 401
+
+    def test_toggle_available_when_disabled(self, client, byok_disabled):
+        response = client.patch(
+            "/api/v1/external-keys/OPENAI_API_KEY/toggle", json={"enabled": False}
+        )
+        assert response.status_code == 401
 
     def test_routes_exist_when_enabled(self, client):
         # Default (flag on): the route exists, so an anonymous caller gets

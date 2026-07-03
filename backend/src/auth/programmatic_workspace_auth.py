@@ -129,6 +129,24 @@ async def authorize_workspace_management(
 
     # API-key → owner-only, with #963 confinement first.
     if is_api_key_principal(user):
+        # v0.42 review #33: deployment-level kill-switch. When owner-key member
+        # management is disabled, an owner's ordinary API key must NOT carry
+        # member/credential-management power (a stolen key would otherwise mint
+        # member keys / add members). Session owners are unaffected; they take
+        # the session branch below. Rejected uniformly so a bound-elsewhere key
+        # cannot distinguish this from the #963 confinement.
+        from config.settings import get_settings
+
+        if not get_settings().enable_owner_key_member_management:
+            logger.warning(
+                "workspace_mgmt_owner_key_disabled",
+                user_id=user_id,
+                workspace_id=str(workspace_id),
+            )
+            raise AuthorizationError(
+                "Owner-API-key member management is disabled on this deployment. "
+                "Use a workspace-owner session."
+            )
         key_workspace_id = user.get("api_key_workspace_id")
         if key_workspace_id is not None and key_workspace_id != workspace_id:
             # Uniform 404 — never reveal that the path workspace exists to a

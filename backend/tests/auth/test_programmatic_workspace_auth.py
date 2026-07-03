@@ -75,6 +75,40 @@ class TestApiKeyPrincipal:
         perm.check_workspace_owner.assert_awaited_once_with("u-key", _WS)
         perm.check_workspace_access.assert_not_called()
 
+    async def test_disabled_kill_switch_rejects_api_key(self, perm, monkeypatch):
+        # v0.42 review #33: with the deployment kill-switch off, an owner API key
+        # is denied member management BEFORE any owner lookup.
+        from types import SimpleNamespace
+
+        monkeypatch.setattr(
+            "config.settings.get_settings",
+            lambda: SimpleNamespace(enable_owner_key_member_management=False),
+        )
+        with pytest.raises(AuthorizationError):
+            await authorize_workspace_management(
+                _api_key_user(workspace_id=None),
+                _WS,
+                db=None,
+                session_required_role=WorkspaceRole.MEMBER,
+            )
+        perm.check_workspace_owner.assert_not_called()
+
+    async def test_disabled_kill_switch_leaves_session_unaffected(self, perm, monkeypatch):
+        from types import SimpleNamespace
+
+        monkeypatch.setattr(
+            "config.settings.get_settings",
+            lambda: SimpleNamespace(enable_owner_key_member_management=False),
+        )
+        who = await authorize_workspace_management(
+            _session_user(),
+            _WS,
+            db=None,
+            session_required_role=WorkspaceRole.MEMBER,
+        )
+        assert who.kind == "session"
+        perm.check_workspace_access.assert_awaited_once()
+
     async def test_scoped_key_matching_path_owner_check(self, perm):
         await authorize_workspace_management(
             _api_key_user(workspace_id=_WS),
