@@ -10,8 +10,10 @@ Produces ``results/<YYYY-MM-DD>.json`` from a REAL run only — never fabricated
 
 from __future__ import annotations
 
+import argparse
 import json
 import os
+from collections.abc import Sequence
 from pathlib import Path
 from typing import Any
 from uuid import UUID, uuid4
@@ -20,6 +22,8 @@ from tests.eval.metrics import (
     mean_ndcg_at_k,
     mean_precision_at_k,
     mrr_at_k,
+    precision_at_k,
+    reciprocal_rank_at_k,
     source_recall_share,
 )
 from tests.eval.tools.corpus import BUCKETS, Corpus, load_corpus
@@ -250,17 +254,47 @@ async def _await_all_indexed(
     )
 
 
-async def run_retrieval_eval(write: bool = True, run_date: str | None = None) -> dict[str, Any]:
+async def run_retrieval_eval(
+    write: bool = True,
+    run_date: str | None = None,
+    *,
+    corpus_path: str | None = None,
+    embedding_model: str | None = None,
+    label: str | None = None,
+) -> dict[str, Any]:
     """Ingest the corpus, run every query, compute metrics, write results JSON.
 
     Args:
-        write: when True, persist results/<run_date>.json.
+        write: when True, persist results/<filename> (see ``_results_filename``).
         run_date: YYYY-MM-DD label for the results file; defaults to today (UTC).
+        corpus_path: path to an alternate corpus YAML (e.g. the frozen kagura_L
+            fixture, ``tests/eval/fixtures/kagura_l.yaml``); None loads the
+            golden corpus — the unchanged default.
+        embedding_model: override for the per-context embedding config; must be
+            a key of ``EMBEDDING_MODEL_REGISTRY``. Overrides BOTH the
+            ``ContextSearchConfig`` stamp and the Qdrant collection ensured for
+            ingest. None keeps the current settings-derived stamp byte-identical
+            to the pre-Day-4 behavior.
+        label: optional results-filename prefix (see ``_results_filename``);
+            None keeps the pre-Day-4 ``<run_date>.json`` filename.
 
     Returns the results dict (also written to disk when ``write``).
+
+    Raises:
+        ValueError: ``embedding_model`` is not a key of
+            ``EMBEDDING_MODEL_REGISTRY``. Checked FIRST, before any stack
+            access (``get_db()`` et al.), so a bad model name fails fast
+            without ever touching the DB.
     """
-    from auth.workspace_roles import WorkspaceRole
     from config.constants import EMBEDDING_MODEL_REGISTRY
+
+    if embedding_model is not None and embedding_model not in EMBEDDING_MODEL_REGISTRY:
+        raise ValueError(
+            f"unknown embedding_model {embedding_model!r}; valid models are "
+            f"{sorted(EMBEDDING_MODEL_REGISTRY)}"
+        )
+
+    from auth.workspace_roles import WorkspaceRole
     from config.settings import get_settings
     from db.base import get_db
     from db.qdrant import ensure_kagura_memories_collection, get_collection_name
@@ -269,7 +303,7 @@ async def run_retrieval_eval(write: bool = True, run_date: str | None = None) ->
     from services.memory_service import MemoryService
     from utils.datetime import utcnow
 
-    corpus = load_corpus()
+    corpus = load_corpus(Path(corpus_path)) if corpus_path else load_corpus()
     docs_by_id = corpus.docs_by_id
     run_date = run_date or utcnow().strftime("%Y-%m-%d")
 
@@ -305,9 +339,19 @@ async def run_retrieval_eval(write: bool = True, run_date: str | None = None) ->
         # not exist on non-default embedding stacks (e.g. a local
         # qwen3-embedding:0.6b/1024 rig) — stamp the config and ensure the
         # collection exactly like the production create path.
-        settings = get_settings()
-        emb_model = settings.embedding_model
-        emb_dims = EMBEDDING_MODEL_REGISTRY.get(emb_model, (settings.embedding_dimensions, ""))[0]
+        #
+        # An explicit ``embedding_model`` (Day-4 factorial arm) overrides the
+        # settings-derived stamp entirely; None keeps the byte-identical
+        # pre-Day-4 behavior of deriving it from settings.
+        if embedding_model is not None:
+            emb_model = embedding_model
+            emb_dims = EMBEDDING_MODEL_REGISTRY[emb_model][0]
+        else:
+            settings = get_settings()
+            emb_model = settings.embedding_model
+            emb_dims = EMBEDDING_MODEL_REGISTRY.get(emb_model, (settings.embedding_dimensions, ""))[
+                0
+            ]
         # Stamp the full ContextSearchConfig (not just the embedding fields) so
         # an eval context behaves like a created one if any reranking / weighting
         # default is ever consulted. Reranker fields target the local self_hosted
@@ -342,7 +386,19 @@ async def run_retrieval_eval(write: bool = True, run_date: str | None = None) ->
             )
             await _ingest_corpus(svc, corpus, owner, ctx.id, ws.id, id_map)
             return await _run_queries_and_score(
-                svc, corpus, docs_by_id, id_map, owner, ctx.id, ws.id, run_date, write
+                svc,
+                corpus,
+                docs_by_id,
+                id_map,
+                owner,
+                ctx.id,
+                ws.id,
+                run_date,
+                write,
+                embedding_model=emb_model,
+                embedding_dimensions=emb_dims,
+                corpus_path=corpus_path,
+                label=label,
             )
         finally:
             await _teardown(svc, db, owner, ctx.id, ws.id, list(id_map.keys()))
@@ -389,6 +445,63 @@ def _bucket_metrics(rankings: list[tuple[list[str], set[str]]]) -> dict[str, Any
     }
 
 
+def _per_query_records(
+    queries: Sequence[Any],
+    rankings: Sequence[tuple[list[str], set[str]]],
+) -> list[dict[str, Any]]:
+    """Per-query P@5 / RR@10 records, in the SAME order as ``queries``.
+
+    Feeds a downstream stats CLI (paired bootstrap CIs need per-query values,
+    not just aggregates). ``queries`` and ``rankings`` must already be aligned
+    (corpus order) — this function does not reorder or group anything, it just
+    zips them and formats. ``split`` is always present in the record, even when
+    ``None`` (golden corpus), so downstream consumers can rely on the key.
+    """
+    if len(queries) != len(rankings):
+        raise ValueError(f"queries and rankings length mismatch: {len(queries)} != {len(rankings)}")
+    return [
+        {
+            "query_id": q.id,
+            "bucket": q.bucket,
+            "split": q.split,
+            "p@5": round(precision_at_k(ranked, relevant, 5), 4),
+            "rr@10": round(reciprocal_rank_at_k(ranked, relevant, 10), 4),
+        }
+        for q, (ranked, relevant) in zip(queries, rankings, strict=True)
+    ]
+
+
+def _split_metrics(
+    queries: Sequence[Any],
+    rankings: Sequence[tuple[list[str], set[str]]],
+) -> dict[str, dict[str, Any]] | None:
+    """Metric block per ``split`` value present in ``queries`` (kagura_L: {heldout,
+    public}), or ``None`` when no query carries a split (golden corpus) — the
+    caller omits the ``by_split`` key entirely in that case so the legacy
+    results shape is unchanged.
+
+    Queries with ``split is None`` are excluded from EVERY block (not folded
+    into some default bucket).
+    """
+    by_split: dict[str, list[tuple[list[str], set[str]]]] = {}
+    for q, ranking in zip(queries, rankings, strict=True):
+        if q.split is None:
+            continue
+        by_split.setdefault(q.split, []).append(ranking)
+    if not by_split:
+        return None
+    return {split: _bucket_metrics(split_rankings) for split, split_rankings in by_split.items()}
+
+
+def _results_filename(label: str | None, run_date: str) -> str:
+    """Results JSON filename: ``<run_date>.json`` (legacy, unlabeled) or
+    ``<label>-<run_date>.json`` when a ``label`` (e.g. an embedder arm name) is
+    given — keeps parallel factorial-arm runs from clobbering each other's
+    results file for the same day.
+    """
+    return f"{label}-{run_date}.json" if label else f"{run_date}.json"
+
+
 async def _score_arm(
     svc: Any,
     corpus: Corpus,
@@ -425,7 +538,7 @@ async def _score_arm(
             docs_by_id[d].source for d in ranked_docs[:_RECALL_K] if d in docs_by_id
         )
 
-    return {
+    result: dict[str, Any] = {
         "overall": _bucket_metrics(all_rankings),
         "per_bucket": {b: _bucket_metrics(per_bucket_rankings[b]) for b in BUCKETS},
         "source_recall@10": {
@@ -434,7 +547,12 @@ async def _score_arm(
                 all_retrieved_sources, len(all_retrieved_sources)
             ).items()
         },
+        "per_query": _per_query_records(corpus.queries, all_rankings),
     }
+    by_split = _split_metrics(corpus.queries, all_rankings)
+    if by_split is not None:
+        result["by_split"] = by_split
+    return result
 
 
 async def _run_queries_and_score(
@@ -447,6 +565,11 @@ async def _run_queries_and_score(
     ws_id: Any,
     run_date: str,
     write: bool,
+    *,
+    embedding_model: str,
+    embedding_dimensions: int,
+    corpus_path: str | None,
+    label: str | None,
 ) -> dict[str, Any]:
     """Score every comparison arm, compute metrics, optionally write results JSON.
 
@@ -482,11 +605,16 @@ async def _run_queries_and_score(
         "per_bucket": production["per_bucket"],
         "source_recall@10": production["source_recall@10"],
         "arms": arms,
+        # Day-4 factorial stamp — additive only, never replaces the keys above.
+        "embedding_model": embedding_model,
+        "embedding_dimensions": embedding_dimensions,
+        "corpus_path": corpus_path,
+        "label": label,
     }
 
     if write:
         _RESULTS_DIR.mkdir(parents=True, exist_ok=True)
-        out = _RESULTS_DIR / f"{run_date}.json"
+        out = _RESULTS_DIR / _results_filename(label, run_date)
         out.write_text(json.dumps(results, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
         print(f"eval-retrieval: wrote {out}")
     return results
@@ -495,7 +623,38 @@ async def _run_queries_and_score(
 def _main() -> int:
     import asyncio
 
-    results = asyncio.run(run_retrieval_eval())
+    ap = argparse.ArgumentParser(description=__doc__)
+    ap.add_argument(
+        "--corpus",
+        dest="corpus_path",
+        default=None,
+        help="corpus YAML path (default: the golden corpus)",
+    )
+    ap.add_argument(
+        "--embedder",
+        dest="embedding_model",
+        default=None,
+        help="embedding model name, a key of EMBEDDING_MODEL_REGISTRY "
+        "(default: settings.embedding_model)",
+    )
+    ap.add_argument(
+        "--label",
+        default=None,
+        help="results filename prefix, e.g. an arm name (default: none, legacy filename)",
+    )
+    ap.add_argument(
+        "--no-write", action="store_true", help="print only, skip the results JSON artifact"
+    )
+    args = ap.parse_args()
+
+    results = asyncio.run(
+        run_retrieval_eval(
+            write=not args.no_write,
+            corpus_path=args.corpus_path,
+            embedding_model=args.embedding_model,
+            label=args.label,
+        )
+    )
     print(json.dumps(results, indent=2, ensure_ascii=False))
     return 0
 

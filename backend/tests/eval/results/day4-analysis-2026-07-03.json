@@ -1,0 +1,152 @@
+{
+  "run_date": "2026-07-03",
+  "experiment": "day4-static-factorial",
+  "seed": 20260703,
+  "n_resamples": 10000,
+  "alpha": 0.05,
+  "delta_hybrid": 0.05,
+  "delta_leak": 0.05,
+  "gated_arms": [
+    "keyword",
+    "semantic",
+    "hybrid",
+    "hybrid_neural"
+  ],
+  "per_embedder": {
+    "qwen3-embedding:0.6b": {
+      "run_labels": [
+        "day4-qwen3-embedding-0.6b-run0",
+        "day4-qwen3-embedding-0.6b-run1",
+        "day4-qwen3-embedding-0.6b-run2"
+      ],
+      "inferential_run": "day4-qwen3-embedding-0.6b-run0",
+      "n_heldout": 240,
+      "n_public": 40,
+      "h0": {
+        "stat": 0.0025,
+        "p_value": 0.0001,
+        "reject": true
+      },
+      "h1": {
+        "best_single": "semantic",
+        "mean": -0.0133,
+        "ci_low": -0.0267,
+        "ci_high": 0.0008,
+        "pass": false,
+        "pass_gated": false,
+        "gated_by_h0": true,
+        "tested": true
+      },
+      "h3": {
+        "gap_mean": 0.0033,
+        "ci_low": -0.025,
+        "ci_high": 0.0292,
+        "within_delta_leak": true
+      },
+      "sigma_d": 0.109,
+      "achieved_power": {
+        "delta": 0.05,
+        "n": 240,
+        "power": 1.0
+      },
+      "arm_means_across_runs": {
+        "keyword": {
+          "min": 0.1158,
+          "median": 0.1175,
+          "max": 0.1175
+        },
+        "semantic": {
+          "min": 0.18,
+          "median": 0.18,
+          "max": 0.18
+        },
+        "hybrid": {
+          "min": 0.1658,
+          "median": 0.1658,
+          "max": 0.1667
+        },
+        "hybrid_neural": {
+          "min": 0.1717,
+          "median": 0.1717,
+          "max": 0.1725
+        }
+      },
+      "mrr_secondary": {
+        "keyword": 0.3911,
+        "semantic": 0.5441,
+        "hybrid": 0.5298,
+        "hybrid_neural": 0.5321
+      }
+    },
+    "qwen3-embedding:4b": {
+      "run_labels": [
+        "day4-qwen3-embedding-4b-run0",
+        "day4-qwen3-embedding-4b-run1",
+        "day4-qwen3-embedding-4b-run2"
+      ],
+      "inferential_run": "day4-qwen3-embedding-4b-run0",
+      "n_heldout": 240,
+      "n_public": 40,
+      "h0": {
+        "stat": 0.0035,
+        "p_value": 0.0001,
+        "reject": true
+      },
+      "h1": {
+        "best_single": "semantic",
+        "mean": -0.0175,
+        "ci_low": -0.0317,
+        "ci_high": -0.0017,
+        "pass": false,
+        "pass_gated": false,
+        "gated_by_h0": true,
+        "tested": true
+      },
+      "h3": {
+        "gap_mean": -0.0125,
+        "ci_low": -0.0408,
+        "ci_high": 0.0125,
+        "within_delta_leak": true
+      },
+      "sigma_d": 0.1194,
+      "achieved_power": {
+        "delta": 0.05,
+        "n": 240,
+        "power": 1.0
+      },
+      "arm_means_across_runs": {
+        "keyword": {
+          "min": 0.1183,
+          "median": 0.1192,
+          "max": 0.1192
+        },
+        "semantic": {
+          "min": 0.1925,
+          "median": 0.1925,
+          "max": 0.1925
+        },
+        "hybrid": {
+          "min": 0.175,
+          "median": 0.175,
+          "max": 0.1758
+        },
+        "hybrid_neural": {
+          "min": 0.1875,
+          "median": 0.1883,
+          "max": 0.1883
+        }
+      },
+      "mrr_secondary": {
+        "keyword": 0.3952,
+        "semantic": 0.6123,
+        "hybrid": 0.5734,
+        "hybrid_neural": 0.5801
+      }
+    }
+  },
+  "design_notes": [
+    "D1: sleep static arm dropped — recall() never reads graph edges (Issue #120); gated family = the prereg's exact 4 arms.",
+    "D2: qwen3-embedding:0.6b = inferential/primary; qwen3-embedding:4b = replication (descriptive).",
+    "D3: permutation omnibus + paired BCa (10k, seed 20260703); run 0 inferential; 3 re-runs min/median/max."
+  ]
+}
