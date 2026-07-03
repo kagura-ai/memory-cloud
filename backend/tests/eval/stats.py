@@ -84,10 +84,13 @@ def paired_bca_ci(
     if all(d == first for d in diffs):
         # Also covers n == 1 (a single value is trivially "all equal"), which
         # would otherwise make the n-1 jackknife denominator below zero.
+        # Return the constant itself, not sum/n: mean of identical values IS
+        # the constant, and summation rounding differs across Python versions
+        # (3.12 switched sum() to compensated summation).
         return {
-            "mean": float(observed),
-            "ci_low": float(observed),
-            "ci_high": float(observed),
+            "mean": float(first),
+            "ci_low": float(first),
+            "ci_high": float(first),
             "n": n,
         }
 
