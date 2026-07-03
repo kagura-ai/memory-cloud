@@ -70,6 +70,11 @@ class Query:
     # Graded relevance 0-3 (docs/02 §1.2 item 5): doc_id -> grade. relevant stays
     # the binary gold SoT (== docs graded >= 2); grade-1 docs are nDCG-only shading.
     graded: dict[str, int] | None = None
+    # Update-correctness pair (prereg-v1 H4, Day-5): {"current": doc_id, "stale":
+    # doc_id}. current is the gold answer doc; stale is the superseded version the
+    # arm must NOT rank above it. None for non-update corpora. Cross-doc reference
+    # validity lives in the corpus gate tests (like ``relevant``).
+    update: dict[str, str] | None = None
 
 
 @dataclass(frozen=True)
@@ -125,6 +130,16 @@ def load_corpus(path: Path | None = None) -> Corpus:
                     f"query {q['id']!r} has invalid grade(s) {bad_grades}; "
                     f"grades must be int in [{_MIN_GRADE}, {_MAX_GRADE}]"
                 )
+        update = q.get("update")
+        if update is not None:
+            if set(update) != {"current", "stale"} or not all(
+                isinstance(v, str) and v for v in update.values()
+            ):
+                raise ValueError(
+                    f"query {q['id']!r} has invalid update block {update!r}; "
+                    "expected exactly {'current': <doc_id>, 'stale': <doc_id>} "
+                    "with non-empty string values"
+                )
         queries.append(
             Query(
                 id=q["id"],
@@ -134,6 +149,7 @@ def load_corpus(path: Path | None = None) -> Corpus:
                 population=q.get("population"),
                 split=split,
                 graded=graded,
+                update=update,
             )
         )
     return Corpus(meta=raw.get("meta", {}), documents=documents, queries=tuple(queries))
