@@ -13,7 +13,6 @@
 import { useEffect, useState } from "react";
 import { useRouter } from "next/navigation";
 import { useTranslations } from "next-intl";
-import { FeatureDisabledNotice } from "@/components/common/FeatureDisabledNotice";
 import { PageHeader } from "@/components/common/PageHeader";
 import { PageContainer } from "@/components/common/PageContainer";
 import { FeatureGuide } from "@/components/common/FeatureGuide";
@@ -201,16 +200,17 @@ export default function ExternalKeysPage() {
   }, [currentWorkspace, router]);
 
   useEffect(() => {
-    // Re-fetch when context or workspace changes
-    // Workspace-scoped keys are shown for all contexts in the workspace
-    // Context-scoped keys are shown for specific context only
-    // Issue #213: contextId can be null (user may not have context yet)
-    // Issue #1167: don't fetch until the byok flag resolves enabled — when
-    // BYOK is off the page short-circuits to a notice and the API 404s.
-    if (currentWorkspaceId !== null && byokEnabled) {
+    // Re-fetch when context or workspace changes.
+    // Issue #213: contextId can be null (user may not have context yet).
+    // v0.42 review #32: fetch regardless of the byok flag — GET /external-keys
+    // (list) stays reachable when BYOK provisioning is off, so an owner can
+    // still see and delete/disable already-stored keys. Only create/update are
+    // gated (see byokEnabled below). The page already redirects non-owners, so
+    // the owner-only list call always succeeds here.
+    if (currentWorkspaceId !== null) {
       loadKeys();
     }
-  }, [contextId, currentWorkspaceId, byokEnabled]);
+  }, [contextId, currentWorkspaceId]);
 
   const loadKeys = async () => {
     try {
@@ -357,24 +357,17 @@ export default function ExternalKeysPage() {
     setEditDialogOpen(true);
   };
 
-  // Issue #1167: the page is gated behind the backend ENABLE_BYOK flag. Wait
-  // for it, then render a "not available" notice when it's off (the sidebar
-  // entry is hidden too, so this only fires on direct navigation).
+  // Issue #1167: wait for the feature flags before deciding whether to show the
+  // create affordances (byokEnabled). v0.42 review #32: when BYOK provisioning
+  // is OFF we do NOT block the whole page — an owner keeps a management console
+  // (list + disable + delete) for already-stored keys, only the create/update
+  // affordances are hidden (see byokEnabled gates in the render below).
   if (systemFeatures === null) {
     return (
       <PageContainer>
         <PageHeader title={t("title")} description={t("description")} />
         <LoadingState lines={3} />
       </PageContainer>
-    );
-  }
-  if (!systemFeatures.byok) {
-    return (
-      <FeatureDisabledNotice
-        title={t("title")}
-        description={t("description")}
-        message={t("featureDisabled")}
-      />
     );
   }
 
@@ -402,44 +395,54 @@ export default function ExternalKeysPage() {
               )}
               {t("refresh")}
             </Button>
-            {/* Issue #169: Dropdown for API Key creation */}
-            <DropdownMenu>
-              <DropdownMenuTrigger asChild>
-                <Button
-                  size="lg"
-                  className="bg-gradient-to-r from-brand-green-600 to-emerald-600 text-white shadow-lg hover:from-brand-green-700 hover:to-emerald-700"
-                >
-                  <Plus className="mr-2 h-5 w-5" />
-                  {t("addApiKey")}
-                  <ChevronDown className="ml-2 h-4 w-4" />
-                </Button>
-              </DropdownMenuTrigger>
-              <DropdownMenuContent align="end" className="w-64">
-                {availableProviders.length === 0 ? (
-                  <div className="px-2 py-3 text-sm text-muted-foreground text-center">
-                    {t("allProvidersConfigured")}
-                  </div>
-                ) : (
-                  availableProviders.map((provider) => (
-                    <DropdownMenuItem
-                      key={provider.value}
-                      onClick={() => handleQuickAdd(provider)}
-                    >
-                      <span className="mr-3 text-lg">{provider.icon}</span>
-                      <div>
-                        <div className="font-medium">{provider.label}</div>
-                        <div className="text-xs text-muted-foreground">
-                          {provider.description}
+            {/* Issue #169: Dropdown for API Key creation. Hidden when BYOK
+                provisioning is off (#32): create/update are gated, but the list
+                below stays manageable. */}
+            {byokEnabled && (
+              <DropdownMenu>
+                <DropdownMenuTrigger asChild>
+                  <Button
+                    size="lg"
+                    className="bg-gradient-to-r from-brand-green-600 to-emerald-600 text-white shadow-lg hover:from-brand-green-700 hover:to-emerald-700"
+                  >
+                    <Plus className="mr-2 h-5 w-5" />
+                    {t("addApiKey")}
+                    <ChevronDown className="ml-2 h-4 w-4" />
+                  </Button>
+                </DropdownMenuTrigger>
+                <DropdownMenuContent align="end" className="w-64">
+                  {availableProviders.length === 0 ? (
+                    <div className="px-2 py-3 text-sm text-muted-foreground text-center">
+                      {t("allProvidersConfigured")}
+                    </div>
+                  ) : (
+                    availableProviders.map((provider) => (
+                      <DropdownMenuItem
+                        key={provider.value}
+                        onClick={() => handleQuickAdd(provider)}
+                      >
+                        <span className="mr-3 text-lg">{provider.icon}</span>
+                        <div>
+                          <div className="font-medium">{provider.label}</div>
+                          <div className="text-xs text-muted-foreground">
+                            {provider.description}
+                          </div>
                         </div>
-                      </div>
-                    </DropdownMenuItem>
-                  ))
-                )}
-              </DropdownMenuContent>
-            </DropdownMenu>
+                      </DropdownMenuItem>
+                    ))
+                  )}
+                </DropdownMenuContent>
+              </DropdownMenu>
+            )}
           </div>
         }
       />
+
+      {!byokEnabled && (
+        <Alert>
+          <AlertDescription>{t("provisioningDisabled")}</AlertDescription>
+        </Alert>
+      )}
 
       <FeatureGuide storageKey="external-keys" title={t("featureGuide.title")}>
         <p>{t("featureGuide.overview")}</p>
@@ -496,10 +499,12 @@ export default function ExternalKeysPage() {
             <div className="text-center py-12">
               <Key className="h-12 w-12 text-gray-400 mx-auto mb-4" />
               <p className="text-gray-600 mb-4">{t("noKeysYet")}</p>
-              <Button onClick={() => setCreateDialogOpen(true)}>
-                <Plus className="h-4 w-4 mr-2" />
-                {t("addFirstKey")}
-              </Button>
+              {byokEnabled && (
+                <Button onClick={() => setCreateDialogOpen(true)}>
+                  <Plus className="h-4 w-4 mr-2" />
+                  {t("addFirstKey")}
+                </Button>
+              )}
             </div>
           ) : (
             <Table>
@@ -548,13 +553,17 @@ export default function ExternalKeysPage() {
                               : t("toggleEnabled")
                           }
                         />
-                        <Button
-                          variant="ghost"
-                          size="sm"
-                          onClick={() => openEditDialog(key)}
-                        >
-                          <Edit className="h-4 w-4" />
-                        </Button>
+                        {/* Edit performs an update (PUT), gated with provisioning
+                            (#32). Toggle + delete stay available when BYOK off. */}
+                        {byokEnabled && (
+                          <Button
+                            variant="ghost"
+                            size="sm"
+                            onClick={() => openEditDialog(key)}
+                          >
+                            <Edit className="h-4 w-4" />
+                          </Button>
+                        )}
                         {key.key_name !== "OPENAI_API_KEY" ? (
                           <Button
                             variant="ghost"

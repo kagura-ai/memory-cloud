@@ -2198,6 +2198,7 @@
     "title": "外部APIキー",
     "description": "OpenAI、Anthropic、Google Gemini、セルフホスト、Cohere、Voyageなどのサービス用APIキーを管理",
     "featureDisabled": "この環境では外部APIキー（BYOK）が有効化されていません。",
+    "provisioningDisabled": "この環境では新しいAPIキーの追加が無効化されています。既存のキーの無効化・削除は引き続き可能です。",
     "featureGuide": {
       "title": "外部APIキーとは？",
       "overview": "外部APIキーはワークスペース単位で管理され、OpenAI、Anthropic、Google Gemini、セルフホスト、Cohere、Voyageなどの認証情報を設定できます。LLM推論はOpenAI・Anthropic・Gemini・セルフホストで利用可能。エンベディング生成はOpenAIで利用可能。リランキングはCohere・Voyageで利用可能です。",

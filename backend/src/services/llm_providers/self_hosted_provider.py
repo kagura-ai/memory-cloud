@@ -49,6 +49,15 @@ async def verify_self_hosted_reachable(
     try:
         async with httpx.AsyncClient(timeout=5.0) as http:
             resp = await http.get(f"{base_url}/v1/models", headers=headers)
+            if resp.status_code in (401, 403):
+                # The backend IS responding — it rejected auth. Distinguish this
+                # from "not responding" so a missing/wrong SELF_HOSTED_API_KEY is
+                # diagnosable at a glance (Copilot review).
+                raise ConfigurationError(
+                    f"Self-hosted {label} at {base_url} rejected the request "
+                    f"(HTTP {resp.status_code}) — set or check SELF_HOSTED_API_KEY; "
+                    "this backend requires a bearer token (e.g. vLLM --api-key)."
+                )
             if resp.status_code != 200:
                 raise ConfigurationError(
                     f"Self-hosted {label} not responding at {base_url} (HTTP {resp.status_code})"

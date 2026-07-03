@@ -20,7 +20,10 @@ def probe_self_hosted_available(base_url: str, api_key: str | None, *, timeout: 
     headers = {"Authorization": f"Bearer {api_key}"} if api_key else {}
     req = urllib.request.Request(f"{base_url}/v1/models", method="GET", headers=headers)
     try:
-        with urllib.request.urlopen(req, timeout=timeout) as resp:  # noqa: S310 — fixed internal URL
+        # noqa: S310 — base_url is an operator-supplied config value (env/Docker),
+        # not attacker-controlled input; this is a local one-shot bootstrap probe
+        # of the operator's own self-hosted backend.
+        with urllib.request.urlopen(req, timeout=timeout) as resp:  # noqa: S310
             return resp.status == 200
     except Exception:
         return False

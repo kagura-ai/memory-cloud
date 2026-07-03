@@ -111,6 +111,12 @@ export function SearchSettingsSection({
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [externalKeys, setExternalKeys] = useState<ExternalAPIKey[]>([]);
+  // Whether the external-keys list actually loaded. GET /external-keys is
+  // workspace-owner-only, so it 403s for a non-owner editing this config even
+  // when BYOK is on — in which case we must NOT assert a provider is
+  // unavailable (Copilot review). Only a successful load makes key presence
+  // "known".
+  const [externalKeysLoaded, setExternalKeysLoaded] = useState(false);
   const [selfHostedAvailable, setSelfHostedAvailable] = useState(false);
   const { toast } = useToast();
   const { currentWorkspace } = useWorkspace();
@@ -126,8 +132,11 @@ export function SearchSettingsSection({
     try {
       const keys = await listExternalAPIKeys();
       setExternalKeys(keys.filter((k) => k.enabled));
+      setExternalKeysLoaded(true);
     } catch {
+      // 403 (non-owner) / 404 (BYOK off) / network — key presence stays unknown.
       setExternalKeys([]);
+      setExternalKeysLoaded(false);
     }
   }, []);
 
@@ -274,14 +283,14 @@ export function SearchSettingsSection({
   const hasCohereKey = externalKeys.some(
     (k) => k.provider.toLowerCase() === "cohere" && k.enabled,
   );
-  // Issue #1167 / v0.42 review #0: when BYOK is off the /external-keys API 404s,
-  // so we cannot enumerate voyage/cohere keys — but the backend STILL resolves
-  // any key stored before the flag was turned off. Treating the providers as
-  // "unavailable" on that uncertainty wrongly disabled Save (and even the "turn
-  // rerank off" control) for a context using a stored key. Only assert
-  // external-key availability when we could actually check it (BYOK enabled);
-  // self_hosted availability is independent (telemetry-derived).
-  const externalKeysKnown = byokEnabled;
+  // Issue #1167 / v0.42 review #0: we can only assert a voyage/cohere provider
+  // is "unavailable" when the external-keys list actually loaded. It does NOT
+  // load when BYOK is off (API 404s) OR for a non-owner editing this config
+  // (GET /external-keys is owner-only → 403) — in both cases the backend may
+  // still resolve a stored key, so treating the provider as unavailable would
+  // wrongly disable Save (and the "turn rerank off" control). self_hosted
+  // availability is independent (telemetry-derived).
+  const externalKeysKnown = externalKeysLoaded;
   const hasAnyRerankerAvailable =
     !externalKeysKnown || hasVoyageKey || hasCohereKey || selfHostedAvailable;
 
