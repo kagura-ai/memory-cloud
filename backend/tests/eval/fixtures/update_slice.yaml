@@ -1,0 +1,1371 @@
+meta:
+  name: update_slice
+  version: 1
+  description: 'Day-5 update-correctness slice (prereg-v1 H4): 50 stale/current pairs + 30 fillers; ingest
+    order = list order (v1 block, fillers, v2 block).'
+  content_sha256: 68181b5f8589cd646c58702dde44f22fda15a75b73ec1d735448053ca3d9725e
+documents:
+- id: u01-v1
+  source: memory
+  text: As of June 1, 2026, the Kestrel ingest pipeline runs its primary processing nodes out of the Lyra
+    region. Lyra was selected for its low-latency links to the upstream telemetry collectors and its favorable
+    data-residency terms. All Kestrel workers, including the batching and dedup stages, are provisioned
+    inside Lyra availability zones, and the pipeline's autoscaling group is pinned to that region exclusively.
+    Engineers on the ingestion team should route any regional capacity requests through the Lyra infrastructure
+    desk. No failover region is currently configured for Kestrel, so a Lyra outage would pause ingestion
+    entirely until nodes are restored.
+- id: u02-v1
+  source: resource
+  text: As of June 1, 2026, the Nimbus API gateway enforces a rate limit of 4,000 requests per minute
+    for each authenticated client key. Traffic exceeding that ceiling is throttled with a 429 response
+    and a retry-after header calculated from the current burst window. The limit applies uniformly across
+    all Nimbus edge clusters and cannot currently be raised on a per-client basis without a manual override
+    ticket. Platform partners integrating against Nimbus should design their retry logic around this 4,000
+    requests-per-minute ceiling to avoid dropped traffic during peak load. The gateway's dashboard reports
+    throttling events under the quota-exceeded category.
+- id: u03-v1
+  source: memory
+  text: As of June 1, 2026, the Thornbury database cluster is owned and staffed by the Cobalt Squad, who
+    hold primary on-call responsibility for all replication and failover incidents. Any schema migration
+    request against Thornbury must be approved by a Cobalt Squad lead before it reaches the change-review
+    board. The squad also maintains the cluster's backup verification runbook and rotates two engineers
+    through a weekly on-call shift. Requests for emergency access outside business hours should page the
+    Cobalt Squad directly rather than the general infrastructure on-call rotation, since Thornbury requires
+    specialized replica-set knowledge that only that team currently holds.
+- id: u04-v1
+  source: resource
+  text: As of June 1, 2026, the Griffon container registry enforces a storage quota of 500 gigabytes per
+    project namespace. Once a namespace approaches that ceiling, the registry begins rejecting new image
+    pushes with a quota-exceeded error until older tags are pruned or a manual increase is granted. Build
+    pipelines that publish frequently, especially nightly integration jobs, are the most common source
+    of namespaces hitting the 500 gigabyte ceiling. Teams can request a temporary increase through the
+    platform request form, but the default allocation for every new namespace remains fixed at 500 gigabytes
+    unless otherwise approved.
+- id: u05-v1
+  source: memory
+  text: As of June 1, 2026, the Solace archival system runs its full backup job once nightly at 02:00
+    UTC, writing snapshots to the cold-storage vault before the daily reconciliation batch begins. Operators
+    rely on this single nightly window to capture the full state of Solace's transaction ledger, and no
+    intra-day incremental backups are currently scheduled. If the 02:00 UTC job fails, the on-call operator
+    must trigger a manual rerun before 06:00 UTC or the reconciliation batch will run against stale data.
+    This nightly cadence has been in place since Solace's original rollout and has not changed.
+- id: u06-v1
+  source: resource
+  text: As of June 1, 2026, the wildcard TLS certificate for the Pinnacle payment gateway is scheduled
+    to rotate on September 15, 2026. The security team has pre-staged the replacement certificate in the
+    vault and configured the automated rotation job to swap it in without downtime. Client integrations
+    that pin the certificate fingerprint must update their pinned hash before the September 15 cutover
+    or their connections will begin failing validation. Reminders about the September 15 rotation date
+    are sent to the partner integrations mailing list thirty, fourteen, and three days beforehand.
+- id: u07-v1
+  source: memory
+  text: As of June 1, 2026, the Ember load balancer fleet is running firmware version 3.2 across every
+    edge point of presence. Version 3.2 introduced improved connection draining but does not yet support
+    the newer QUIC multiplexing features that some partner clients have requested. The infrastructure
+    team has held off on further upgrades until the health-check regression from the 3.1 branch is fully
+    validated in staging. Any new point of presence provisioned before the next maintenance window will
+    be imaged with version 3.2 by default, matching the rest of the Ember fleet.
+- id: u08-v1
+  source: resource
+  text: As of June 1, 2026, the Wraithcast content delivery network (CDN) operates 12 edge nodes distributed
+    across its primary serving regions. Each edge node handles roughly an equal share of cached asset
+    traffic, and the CDN's routing layer selects the nearest of the 12 nodes based on measured latency
+    to the requesting client. Capacity planning for Wraithcast assumes this fixed count of 12 edge nodes
+    through the end of the current quarter, with no additional nodes budgeted until the next infrastructure
+    review. Any node maintenance window temporarily reduces the effective pool to 11 nodes.
+- id: u09-v1
+  source: memory
+  text: As of June 1, 2026, the Marrow message queue cluster retains unconsumed messages for 7 days before
+    they are purged from every partition. Consumers that fall behind by more than 7 days will silently
+    lose the oldest messages once the retention window rolls forward, so the platform team monitors consumer
+    lag against this 7 day ceiling closely. Downstream services that need longer retention are expected
+    to archive messages to cold storage themselves, since Marrow's own retention setting is not configurable
+    per topic and applies uniformly across the whole cluster.
+- id: u10-v1
+  source: resource
+  text: As of June 1, 2026, the Talon deployment pipeline requires sign-off from 1 approver before a production
+    release can proceed past the staging gate. The single-approver policy was adopted to speed up hotfix
+    releases, replacing an older process that had required multiple approvers for every change. The pipeline's
+    audit log records the approving engineer's identity alongside the commit hash for every release. Teams
+    shipping through Talon must select an approver who was not the author of the change being released,
+    but no additional approvers are currently required regardless of the size or risk of the release.
+    This policy applies to every service registered in the Talon pipeline.
+- id: u11-v1
+  source: resource
+  text: As of June 1, 2026, the Griffin Squad on-call rotation lists Priya Nakamura as the primary responder
+    for production pages during the first week of every month. Priya carries the pager from Monday 9am
+    through the following Monday morning, and any page that breaches the 15-minute acknowledgment window
+    escalates automatically to the secondary responder. The rotation schedule is posted on the internal
+    operations calendar, and coverage swaps must be requested at least 48 hours ahead through the team
+    lead, Marcus Webb, who keeps the master roster current for all four engineering pods.
+- id: u12-v1
+  source: memory
+  text: As of June 1, 2026, the Falcon Guild holds a weekly standup every Tuesday at 10:00am in the shared
+    video room, tracked by facilitator Renata Silva. The thirty-minute session covers blockers, cross-team
+    dependencies, and a rotating spotlight update from one guild member. Meeting notes are logged in the
+    guild workspace within an hour of close, and any member who cannot attend must post an async summary
+    before the following session begins, per the working agreement adopted last quarter.
+- id: u13-v1
+  source: resource
+  text: As of June 1, 2026, the Harbor Platform repository requires two approving reviews before any pull
+    request can merge into the main branch. At least one of the reviewers must belong to the platform-core
+    group, and the check is enforced automatically by the branch protection rule configured in the repository
+    settings. Contributors outside the platform-core group may submit an additional optional review, but
+    it does not count toward the required approvals, and the policy applies uniformly across all Harbor
+    Platform service repositories.
+- id: u14-v1
+  source: memory
+  text: As of June 1, 2026, any Nimbus Ops incident rated Severity 1 must be escalated to on-call lead
+    Dara Chen within ten minutes of detection. Dara coordinates the incident bridge, assigns a scribe,
+    and decides whether to page the wider infrastructure team. If Dara does not acknowledge the page within
+    five minutes, the alert automatically forwards to the duty manager listed in the incident-response
+    runbook. This escalation path was last reviewed by the Nimbus Ops steering group and applies to all
+    customer-facing services.
+- id: u15-v1
+  source: resource
+  text: As of June 1, 2026, the Cedar Team is assigned to Room 4B on the third floor of the north building
+    for all in-person work and pairing sessions. The room seats twelve people, includes two whiteboards,
+    and is booked by default every weekday from 9am to 6pm under the facilities system. Any ad hoc use
+    by other teams must be cleared with the Cedar Team lead first, and the room assignment is reviewed
+    quarterly by the workplace operations group.
+- id: u16-v1
+  source: memory
+  text: As of June 1, 2026, any Atlas Team purchase request above $2,000 requires sign-off from finance
+    partner Elena Cross before the order is placed. Elena reviews the request against the quarterly budget,
+    checks vendor compliance, and typically responds within two business days through the procurement
+    portal. Requests below that threshold can be approved directly by the Atlas Team lead without finance
+    involvement, and all approvals are logged in the shared budget tracker for the audit trail.
+- id: u17-v1
+  source: resource
+  text: As of June 1, 2026, Delta Squad's working agreement sets core collaboration hours from 10:00am
+    to 4:00pm Eastern, during which all members must be reachable on chat and available for meetings.
+    Outside this window, engineers may shift their schedule freely as long as they log at least six focused
+    hours per day. The core-hours policy was adopted to support overlap with the design and QA partners,
+    and exceptions require sign-off from the squad lead, Ingrid Voss.
+- id: u18-v1
+  source: memory
+  text: As of June 1, 2026, the Orion Team holds its sprint retrospective on the last Friday of every
+    two-week sprint, from 2:00pm to 3:00pm, facilitated on a rotating basis by team members. The retro
+    follows a start-stop-continue format, and action items are logged in the team's retro board with an
+    owner and due date assigned before the meeting ends. Attendance is mandatory for all core contributors,
+    though remote members may join by video if traveling.
+- id: u19-v1
+  source: resource
+  text: As of June 1, 2026, Vesper Team observes a deploy freeze from Thursday 3:00pm through Monday 9:00am,
+    during which no production release may go out without director-level sign-off. The freeze exists to
+    protect the platform during weekend traffic peaks, and any emergency hotfix must be approved jointly
+    by the release manager and the on-call incident commander. Outside the freeze window, standard deploys
+    only need a single reviewing engineer's approval to ship.
+- id: u20-v1
+  source: memory
+  text: As of June 1, 2026, the Marlin Crew books Room 2A on the second floor for its weekly planning
+    session every Monday at 1:00pm. The room includes a large monitor and a conferencing bridge for remote
+    crew members, and the booking is held automatically through the facilities calendar unless canceled
+    24 hours ahead. Snacks and coffee are restocked before each session by the office team, and the planning
+    session output is shared in the crew's channel afterward.
+- id: u21-v1
+  source: memory
+  text: As of June 1, 2026, the Falconburst API enforces a rate limit of 240 requests per minute for every
+    key issued under the Standard plan. Calls that exceed this ceiling receive a 429 response along with
+    a Retry-After header fixed at 15 seconds. The ceiling is uniform across all Falconburst regions and
+    cannot be adjusted through the self-service console; raising it requires a written request to billing
+    support. Engineering set this threshold to shield the shared ingestion cluster from sudden traffic
+    bursts during commercial peak hours each weekday.
+- id: u22-v1
+  source: resource
+  text: As of June 1, 2026, the Emberline Pro subscription includes a monthly quota of 50,000 sync operations
+    across all connected workspaces. Once a workspace crosses this quota, additional syncs are queued
+    until the next billing cycle unless the customer purchases a top-up pack. Emberline support tracks
+    quota consumption through the admin dashboard, refreshing the counter at midnight UTC on the first
+    of each month. Finance introduced this quota to keep background sync load predictable for the shared
+    processing fleet that serves every Pro-tier customer simultaneously.
+- id: u23-v1
+  source: memory
+  text: As of June 1, 2026, Northlake Analytics prices its Growth tier at 42 dollars per seat each month,
+    billed annually in advance for teams of five seats or more. The rate includes unlimited dashboards
+    but caps API exports at 10,000 rows per day. Sales quotes this per-seat rate to prospective customers
+    during onboarding calls, and the finance team locks the figure into each annual contract at signature.
+    Any mid-contract seat additions are charged at the same per-seat rate until the renewal date.
+- id: u24-v1
+  source: resource
+  text: As of June 1, 2026, the Cobalt Sync Enterprise agreement guarantees 99.5 percent monthly uptime
+    for the core replication service. If uptime falls below this target, customers receive service credits
+    equal to 10 percent of that month's invoice, issued automatically within two billing cycles. The uptime
+    figure excludes scheduled maintenance windows announced at least 72 hours in advance. Operations reports
+    the realized uptime figure to enterprise account managers every month so it can be compared against
+    the contractual target.
+- id: u25-v1
+  source: memory
+  text: As of June 1, 2026, Driftwood Suite retains audit logs for 90 days on the Business plan before
+    automatic deletion from primary storage. Customers who need logs beyond that window must export them
+    manually to cold storage, since Driftwood does not offer extended retention as a paid add-on yet.
+    Compliance chose the 90-day window to balance storage cost against typical audit review cycles requested
+    by enterprise customers during quarterly security reviews. The retention clock resets whenever a log
+    entry is rewritten by the ingestion pipeline.
+- id: u26-v1
+  source: resource
+  text: As of June 1, 2026, the Vellum Connect smart-routing feature flag defaults to off for all newly
+    provisioned workspaces. Administrators can enable it manually from the workspace settings panel, but
+    existing production workspaces created before this date keep the flag off unless an admin explicitly
+    toggles it. Product management set the off default because early beta testers reported occasional
+    latency spikes when smart routing ran alongside high-volume webhook traffic. A follow-up review is
+    scheduled once the routing engine's next optimization ships.
+- id: u27-v1
+  source: memory
+  text: As of June 1, 2026, Ashgrove CRM's Priority support tier guarantees a first response within 4
+    business hours for tickets submitted through the enterprise help desk. Support hours run Monday through
+    Friday, 7 a.m. to 7 p.m. Eastern, excluding published holidays. Tickets filed outside those hours
+    queue until the next business morning before the response clock starts. Ashgrove's support operations
+    team reviews response-time compliance weekly and escalates any tier that slips below 95 percent adherence
+    to the executive support council.
+- id: u28-v1
+  source: resource
+  text: As of June 1, 2026, the Ripplecore Storage free tier includes 15 gigabytes of persistent object
+    storage per account, shared across every bucket the account owns. Accounts that exceed this allotment
+    have new uploads rejected with a quota-exceeded error until either files are deleted or the account
+    upgrades to a paid plan. Ripplecore's infrastructure team recalculates each account's usage nightly
+    and sends a warning email once consumption passes 80 percent of the free allotment. No overage billing
+    applies to free-tier accounts.
+- id: u29-v1
+  source: memory
+  text: As of June 1, 2026, Solstice Billing charges 0.75 dollars for every invoice generated beyond the
+    Growth plan's monthly allotment of 2,000 invoices. Overage charges accrue in real time and appear
+    as a single line item on the following month's statement rather than being billed immediately. Customers
+    can view running overage totals from the usage tab at any point during the billing cycle. Finance
+    set this per-invoice rate to stay below the cost of migrating a customer to the next plan tier.
+- id: u30-v1
+  source: resource
+  text: As of June 1, 2026, Marrow Metrics allows up to 50 concurrent WebSocket connections per API key
+    on the Streaming plan. Any connection attempt beyond that count is refused with a connection-limit
+    error, and the client must close an existing socket before opening a new one. The limit is tracked
+    per key rather than per account, so a customer with multiple keys can multiply total throughput. Marrow's
+    platform team imposed this ceiling to keep the streaming gateway's memory footprint predictable under
+    heavy concurrent load.
+- id: u31-v1
+  source: resource
+  text: As of June 1, 2026, the default runner pool for Talonbuild CI, the continuous integration provider
+    used by the Nimbus platform team, is located in the Frankfurt-West zone. All merge-triggered pipelines
+    for Nimbus services execute on runners provisioned in that zone, and the platform team selected it
+    originally for proximity to the primary database cluster. Engineers configuring new pipeline templates
+    should reference Frankfurt-West as the default zone unless a job explicitly requests an alternate
+    runner pool through the Talonbuild configuration file.
+- id: u32-v1
+  source: memory
+  text: As of June 1, 2026, the Aurora backend service pins the Parselog logging library at version 4.2.0.
+    The Aurora team locked this version after an earlier upgrade attempt introduced excessive memory allocation
+    during high-throughput trace exports. Any dependency update proposal for Parselog must go through
+    the Aurora service owners before merging, since the build pipeline enforces the 4.2.0 pin via a checked-in
+    lockfile. Downstream services that import Aurora's shared logging wrapper inherit the same pinned
+    version automatically.
+- id: u33-v1
+  source: resource
+  text: As of June 1, 2026, the Halcyon design studio team licenses Inkwell Design Suite under the Business
+    plan tier. This tier caps the studio at twenty concurrent seats and includes standard cloud asset
+    syncing but excludes the advanced vector-tracing module the team has been requesting. Procurement
+    confirmed the Business tier renewal covers the current fiscal quarter, and any request to add seats
+    beyond twenty must go through the studio's tooling budget owner rather than through self-service upgrade.
+- id: u34-v1
+  source: memory
+  text: As of June 1, 2026, the Vantage release engineering team retains build artifacts in CragVault
+    storage for 30 days before automatic deletion. This retention limit was set to control storage costs
+    after a budget review flagged CragVault as the team's largest infrastructure line item. Any artifact
+    needed beyond the 30-day window must be manually exported to cold storage by a release engineer before
+    the deletion job runs, since CragVault does not support extending retention per individual artifact.
+- id: u35-v1
+  source: resource
+  text: As of June 1, 2026, the Meridian SRE team configures Sentinel Watch monitoring to fire a CPU alert
+    on the Orion cluster whenever utilization crosses 85 percent. This threshold was chosen to give on-call
+    engineers a buffer before nodes approached saturation, though the team noted frequent false alarms
+    during nightly batch jobs. Any change to the 85 percent threshold requires sign-off from the Meridian
+    SRE lead, since lowering it risks paging engineers for routine load spikes that self-resolve within
+    minutes.
+- id: u36-v1
+  source: memory
+  text: As of June 1, 2026, Corvid Labs refreshes engineering staff laptops on a 4-year cycle, replacing
+    each machine at the start of the calendar quarter following its fourth anniversary of issue. IT procurement
+    chose the 4-year cycle to balance hardware performance against budget constraints, though several
+    engineering leads have flagged that build times on older machines increasingly lag behind newer hires'
+    laptops. Employees may request an early refresh only if a hardware fault is documented by the IT helpdesk.
+- id: u37-v1
+  source: resource
+  text: As of June 1, 2026, Hearthforge CI enforces a concurrent job limit of 12 for the Solace mobile
+    team's pipeline plan. When more than 12 jobs are queued at once, additional builds wait in a queue
+    rather than running in parallel, which has caused release-day slowdowns during heavy testing pushes.
+    The Solace team's plan tier caps concurrency at 12 regardless of queue length, and raising the limit
+    requires upgrading to a higher Hearthforge CI plan tier through the vendor account manager.
+- id: u38-v1
+  source: memory
+  text: 2026年6月1日時点では、はやぶさ決済サービスはデータ検証ライブラリKirinをバージョン2.3.1に固定して利用している。以前のアップグレードで金額計算のタイムアウトが多発したため、開発チームはこのバージョンをロックファイルで固定した。Kirinを利用する他のサービスも、はやぶさ決済サービス経由で同じ2.3.1系に揃えることが社内規約で定められている。
+- id: u39-v1
+  source: resource
+  text: 2026年6月1日時点では、蒼穹デザイン部はプロジェクト管理ツールHousenをスタンダードプランで契約している。スタンダードプランでは同時利用できるメンバー数が15名までに制限されており、部内の外部委託スタッフはアカウントを共有せざるを得ない状況が続いていた。プラン変更には情報システム部の承認と年間契約の見直しが必要とされている。
+- id: u40-v1
+  source: memory
+  text: 2026年6月1日時点では、天狼運用チームは瑞雲クラスタのメモリ使用率について、白鷺モニタリングでアラート発報のしきい値を80%に設定している。しきい値は過去の障害対応時間を踏まえて決められたが、深夜バッチの実行時に誤検知が頻発するという課題が指摘されていた。しきい値の変更には運用チームリーダーの承認が必要で、下げすぎると通常の負荷変動でも呼び出しが増える懸念がある。
+- id: u41-v1
+  source: memory
+  text: 2026年6月1日時点では、経費精算システム「らくらく精算Neo」の月次締め日は毎月20日と定められている。20日までに上長承認まで完了した申請分については、翌月25日に指定口座へ振り込まれる仕組みである。20日を過ぎて提出された領収書は自動的に翌月扱いとなるため、出張後の精算入力は早めに済ませるよう経理部から案内されている。
+- id: u42-v1
+  source: resource
+  text: 2026年6月1日時点では、入退室管理システム「セキュアゲートIII」を使う来訪者受け入れは、訪問予定日の前営業日17時までに担当者が申請を登録する必要がある。当日になってからの登録は原則できず、急な来客の場合は受付フロアで一時パスを発行する対応となっている。申請漏れが多かったため、総務部は各部署へ前倒し登録の徹底を呼びかけている。
+- id: u43-v1
+  source: memory
+  text: 2026年6月1日時点では、社内Wi-Fi「CORP-NET-α」の接続パスワードは90日ごとに情報システム部が切り替え、変更のたびに社内掲示板で新しい値を告知している。旧パスワードは切り替え後24時間だけ猶予期間として使えるが、それ以降は接続できなくなる。頻繁な変更が問い合わせ増加の原因になっているとの声も上がっていた。
+- id: u44-v1
+  source: resource
+  text: 2026年6月1日時点では、そなえ品貸出センターが扱う社員向けノートPCの貸出期間は一人あたり最長2週間で、延長の申請は1回までしか認められていない。返却が1日でも遅れると次回以降の貸出予約が一時停止される厳しい運用となっている。繁忙期には貸出希望が集中し、順番待ちが発生することもある。
+- id: u45-v1
+  source: memory
+  text: 2026年6月1日時点では、会議室予約システム「ミーティングナビ」は当日から数えて30日先までの日付しか予約枠が開放されておらず、それより先の日付は画面上に表示されない。四半期の全社会議など先の予定を押さえたい部署からは、開放期間を延ばしてほしいという要望が総務部に寄せられていた。
+- id: u46-v1
+  source: resource
+  text: 2026年6月1日時点では、リモートワーク規定「フレックスワークプログラム」に基づく在宅勤務は週2日までと定められており、利用する際は前週末までに上長へ申請し承認を得る必要がある。上限を超えて自宅作業を希望する場合は人事部との個別相談が必要となっており、部署によっては運用がまちまちだった。
+- id: u47-v1
+  source: memory
+  text: 2026年6月1日時点では、みのり健診クリニックで実施する年次健康診断は、対象社員が毎年9月末までに受診を完了させる決まりとなっている。期限までに未受診の社員には人事部から個別に受診案内のメールが送られる運用である。繁忙部署では予約が集中し、期限直前に駆け込む例が目立っていた。
+- id: u48-v1
+  source: resource
+  text: 2026年6月1日時点では、社内表彰制度「シャイニースター賞」の受賞者は四半期末にあたる3月・6月・9月・12月の年4回発表され、受賞者には賞金5万円が贈られる仕組みである。候補者の推薦は各部署長が行い、選考委員会が最終決定する流れとなっている。
+- id: u49-v1
+  source: memory
+  text: 2026年6月1日時点では、慶弔見舞金制度「こころざし規定」に基づき、正社員が結婚した際に支給される祝金は一律3万円で、入籍後3か月以内に総務窓口へ申請する必要がある。申請には婚姻届受理証明書の写しなど所定の書類提出が求められ、忘れると支給が翌年度に持ち越されることもある。
+- id: u50-v1
+  source: resource
+  text: 2026年6月1日時点では、けやき駐輪場への社員登録は一人につき自転車1台までと制限されており、電動アシスト自転車はバッテリー保管の都合上登録の対象外とされている。登録は総務部窓口で毎月受け付けており、満車の際は近隣の提携駐輪場を案内される。
+- id: f01
+  source: memory
+  text: The Talonmesh event-routing service runs an active-passive pair split across two availability
+    zones, with automatic failover triggered whenever the primary node misses three consecutive health
+    checks. Failover typically completes within 45 seconds, and the passive node logs a warm-start notice
+    once it assumes primary duties. Operators receive a page tagged 'talonmesh-failover' so on-call engineers
+    can confirm downstream queues drained cleanly. The design deliberately avoids active-active replication
+    because Talonmesh's ordering guarantees depend on a single writer at any moment, and dual writers
+    previously caused duplicate event delivery during a load test.
+- id: f02
+  source: resource
+  text: Team Osprey runs a weekly on-call rotation covering the checkout-notifications pipeline, with
+    handoff occurring every Wednesday at 10am during the team's stand-up. The rotation includes four engineers
+    and skips anyone traveling or on approved leave, tracked via the shared Osprey calendar. Primary on-call
+    carries the pager for customer-facing alerts, while secondary handles internal tooling failures and
+    provides backup if the primary is unreachable within fifteen minutes. Rotation swaps require posting
+    in the team channel at least 24 hours ahead, and the rotation lead reviews pager volume each Friday
+    to rebalance workload.
+- id: f03
+  source: memory
+  text: The Heronboard analytics dashboard limits each workspace to 50 saved custom views before prompting
+    an upgrade nudge. Free-tier workspaces additionally cap concurrent dashboard viewers at 10 simultaneous
+    sessions, after which new viewers see a queued-access screen. The limit exists to protect the underlying
+    query engine from fan-out spikes during shared reporting hours. Workspace admins can request a temporary
+    quota bump through the Heronboard support form, and such bumps auto-expire after 30 days unless renewed.
+    Internally the quota is enforced by the 'view-gate' middleware, which also emits a metric when a workspace
+    nears 90% of its allotment.
+- id: f04
+  source: resource
+  text: Amberlock Security provides the endpoint-scanning agent deployed across engineering laptops, licensed
+    for 180 named seats under the current contract. Seat assignment is managed through the Amberlock admin
+    console, and unused seats reclaim automatically after 45 days of agent inactivity. IT requests additional
+    seats in blocks of 20 to match Amberlock's pricing tiers, and the vendor requires 30 days' notice
+    before any seat reduction takes effect at renewal. Support tickets route through Amberlock's priority
+    queue for accounts above 150 seats, guaranteeing a four-hour first response during business hours
+    rather than next-business-day.
+- id: f05
+  source: memory
+  text: The Driftglass object store retains nightly snapshots for 35 days before automatic expiration,
+    with an additional weekly snapshot kept for one year in the cold-archive tier. Restoration from cold-archive
+    typically takes 4 to 6 hours due to retrieval latency, whereas restoring from the 35-day hot snapshots
+    completes within minutes. Snapshot jobs run at 02:00 server time and alert the storage-ops channel
+    only on failure, not on success, to reduce noise. Any bucket exceeding 2TB is automatically excluded
+    from the nightly tier and instead relies solely on the weekly cold-archive snapshot.
+- id: f06
+  source: resource
+  text: Team Hollowreach runs two-week sprints starting on alternating Mondays, with sprint planning held
+    the same morning and a mid-sprint check-in every Thursday. Retrospectives happen the Friday before
+    the next planning session and rotate facilitation duty among all engineers rather than assigning it
+    permanently to the lead. Backlog grooming is a separate 30-minute session on the first Tuesday of
+    each sprint, limited to items already triaged by the product owner. Hollowreach tracks velocity in
+    story points but treats the number as a planning aid only, explicitly excluding it from any individual
+    performance conversation.
+- id: f07
+  source: memory
+  text: The Quillstone public API enforces a default rate limit of 600 requests per minute per API key,
+    measured on a sliding one-minute window rather than fixed buckets. Requests exceeding the limit receive
+    a 429 response with a retry-after header rather than being silently dropped. Enterprise-tier keys
+    can request a raised ceiling of up to 3000 requests per minute by opening a limit-increase ticket
+    with usage projections attached. Internally the limiter runs on a Redis-backed token bucket per key,
+    monitored separately from the API's primary database cluster.
+- id: f08
+  source: resource
+  text: Ravensmere Analytics, the vendor supplying the funnel-visualization widgets embedded in the reporting
+    suite, guarantees a next-business-day response for standard tickets and a two-hour response for outages
+    marked Severity 1. The support agreement covers only the hosted widget service, not any custom embedding
+    code written in-house. Escalations beyond the assigned support engineer go through Ravensmere's named
+    account manager rather than a general queue. The current contract renews annually each October, and
+    either party may cancel with 60 days' written notice. Ravensmere's status page is the authoritative
+    source for incident timing.
+- id: f09
+  source: memory
+  text: The Silverbrook message queue listens on port 7443 for producer connections and a separate port,
+    7444, for consumer subscriptions, a split chosen so consumer traffic can be throttled independently
+    during backpressure events. TLS is mandatory on both ports; plaintext connections are rejected at
+    the load balancer before reaching the broker. Each topic partition is capped at 8 consumer groups,
+    and a ninth subscription attempt returns an explicit capacity error rather than queuing silently.
+    Broker metrics are scraped every 15 seconds, and sustained queue depth above 50,000 messages triggers
+    an autoscale event.
+- id: f10
+  source: resource
+  text: The Thornfield Platform pod's escalation path starts with the on-call engineer, moves to the pod's
+    tech lead after 20 minutes without acknowledgment, and finally reaches the platform director if unresolved
+    after 45 minutes. Escalations are logged automatically in the incident tool once the 20-minute threshold
+    passes, tagging the tech lead's calendar to check for conflicts before paging. The pod keeps a printed
+    escalation card at each desk as a fallback for tooling outages. Weekend escalations skip the tech-lead
+    tier entirely and page the director directly.
+- id: f11
+  source: memory
+  text: The Vesperlane subscription plan caps organizations at 25 active user seats before requiring a
+    move to the enterprise tier. Seats are counted by unique login in a rolling 30-day window, not by
+    total invited users, so dormant invitees do not consume a seat. Organizations approaching 22 seats
+    receive an in-app notice recommending the enterprise tier, which removes the cap entirely. Downgrading
+    from enterprise back to Vesperlane is blocked automatically if more than 25 users logged in during
+    the prior month. Billing recalculates seat count nightly at midnight UTC rather than in real time.
+- id: f12
+  source: resource
+  text: Wickham CDN supplies edge caching for the marketing site and static asset delivery, billed under
+    a three-year agreement with pricing locked regardless of bandwidth growth. The account's primary vendor
+    contact is the Wickham partnerships desk rather than general support, reachable only through the shared
+    partner portal. Renewal conversations must start at least 90 days before the contract's anniversary
+    date to preserve the locked pricing tier. Wickham's origin-shield feature is included at no extra
+    cost under this tier, though it must be explicitly enabled per zone rather than applying account-wide
+    by default.
+- id: f13
+  source: memory
+  text: The Yewbridge-Beta staging cluster mirrors production topology at roughly one-quarter scale, using
+    three worker nodes instead of production's twelve. Deployments to Yewbridge-Beta happen automatically
+    on every merge to the integration branch, ahead of the manual promotion gate that pushes to production.
+    The cluster resets its database to a scrubbed snapshot every Sunday night, so test data created during
+    the week does not persist into the following week. Engineers are asked not to store long-lived fixtures
+    there for this reason. Yewbridge-Beta shares its logging pipeline with production but writes to a
+    shorter-retention index.
+- id: f14
+  source: resource
+  text: Team Zephyrgate owns the incident postmortem template used across the wider organization, maintained
+    in a shared document that requires the team's sign-off before any structural change. Every postmortem
+    must include a timeline, contributing factors, and at least two follow-up actions with named owners,
+    or the document is considered incomplete. Zephyrgate reviews a random sample of five postmortems each
+    quarter to check template compliance rather than auditing every incident. The team also runs an optional
+    'postmortem clinic' session monthly for engineers writing their first writeup, though attendance is
+    not mandatory.
+- id: f15
+  source: memory
+  text: The Ironvale API gateway applies a default upstream timeout of 12 seconds for all routed services
+    unless a route explicitly overrides it. Routes serving file exports are configured with an extended
+    90-second timeout because export generation can be slow under load. Any timeout override must be approved
+    by the gateway's config-review bot, which rejects pull requests raising a timeout above 120 seconds
+    without an attached justification. When a request times out, Ironvale returns a 504 with a correlation
+    ID, letting callers trace the failure in the shared logging dashboard.
+- id: f16
+  source: resource
+  text: Copperfen Logging, the vendor hosting centralized application logs, retains searchable data for
+    90 days under the current plan, with older logs moved to a cheaper cold tier for one additional year
+    before permanent deletion. Cold-tier logs are not searchable directly and must be restored through
+    a support ticket, which Copperfen typically fulfills within one business day. The contract includes
+    500GB of daily ingest before overage charges apply, tracked on Copperfen's usage dashboard rather
+    than the internal billing system. Any ingest spike above the daily cap triggers an automatic email
+    to the account owner.
+- id: f17
+  source: memory
+  text: DNS records for the Brightwell edge network use a 300-second TTL on production entries to allow
+    fast failover between edge points of presence. Staging entries instead use a 3600-second TTL since
+    staging traffic tolerates slower propagation and the shorter TTL would otherwise increase query load
+    unnecessarily. Any TTL change requires a change ticket, since past ad-hoc edits caused inconsistent
+    caching across resolver providers. Brightwell's DNS is split-horizon, meaning internal resolvers return
+    different edge targets than public resolvers, which occasionally confuses debugging unless the engineer
+    specifies which resolver they queried.
+- id: f18
+  source: resource
+  text: Team Duskmoor holds its daily standup at 9:15am rather than the more common 9:00am slot, chosen
+    originally to accommodate a since-departed team member's commute and never revisited. Standups are
+    capped at 12 minutes by a shared timer, and anything requiring longer discussion is deferred to a
+    parking-lot thread in chat. Remote attendees join by video by default, and the team discourages audio-only
+    participation because it made async note-taking harder in the past. A rotating scribe posts a three-line
+    summary in the team channel immediately after each standup ends.
+- id: f19
+  source: memory
+  text: Fernhollow file storage limits individual uploads to 2GB per file through the standard web uploader,
+    though the desktop sync client supports files up to 20GB by chunking them into 50MB segments. Uploads
+    exceeding the web limit fail with a clear size-error message rather than a generic server error. Enterprise
+    accounts can request a raised web-uploader limit of up to 5GB by contacting account support, but the
+    underlying storage backend itself has no hard ceiling beyond available quota. Chunked uploads from
+    the desktop client resume automatically after a network interruption.
+- id: f20
+  source: resource
+  text: Gladewatch Support, contracted for tier-two helpdesk coverage during off-hours, commits to acknowledging
+    tickets within 30 minutes and resolving password and access issues within two hours. More complex
+    tickets are triaged and handed back to internal staff at the start of the next business day rather
+    than being worked overnight. Gladewatch's coverage runs from 8pm to 8am local time, filling the gap
+    outside normal internal support hours. The contract is billed per ticket handled rather than a flat
+    monthly fee, with a quarterly cap of 400 tickets before overage pricing applies.
+- id: f21
+  source: memory
+  text: The Hazelrun primary database runs with three read replicas in the same region and one cross-region
+    replica kept purely for disaster recovery, never serving live read traffic. Application read queries
+    are load-balanced across the three local replicas, while the cross-region replica lags by design due
+    to asynchronous replication over the long link. Promoting the cross-region replica to primary is a
+    manual, documented procedure requiring sign-off from two engineers, not an automated failover. Replica
+    lag above 10 seconds on any local replica removes it from the read pool automatically until it catches
+    up.
+- id: f22
+  source: resource
+  text: Team Ashcombe requires two approving reviews before merging to the main branch, one of which must
+    come from an engineer outside the change's original author group to catch blind spots. Pull requests
+    touching database migrations additionally need sign-off from a designated migrations reviewer, tracked
+    via a code-owners entry. Ashcombe discourages same-day merges for changes larger than 400 lines, preferring
+    an overnight cooling-off period for reviewers to revisit comments. The team's review-turnaround goal
+    is four business hours during core hours, though this is treated as a guideline rather than an enforced
+    metric.
+- id: f23
+  source: memory
+  text: 光風チームでは、交通費以外の経費精算は月末締めで翌月10日までに申請システムへ入力するルールになっている。1件あたり5000円未満の領収書は写真添付のみで承認されるが、5000円以上は原本を経理へ提出する必要がある。承認者はチームリーダー固定で、代理承認は認められていない。
+- id: f24
+  source: resource
+  text: 雨音システムのデータベースは毎晩3時にフルバックアップを取得し、7世代分を別リージョンのストレージへ保持している。差分バックアップは1時間ごとに実行され、保持期間は48時間のみである。復旧テストは四半期ごとに実施され、結果は運用チームの共有ドキュメントに記録される。
+- id: f25
+  source: memory
+  text: 翠嵐部門では週3日までのリモートワークが承認なしで認められており、週4日以上を希望する場合は部門長への事前申請が必要となる。申請は実施日の3営業日前までに専用フォームで行い、承認結果は翌営業日中に通知される仕組みになっている。なお在宅勤務中も定例会議への参加は必須とされている。
+- id: f26
+  source: resource
+  text: 霧島サービスの障害対応は一次対応担当が15分以内に一次切り分けを行い、原因不明の場合は自動的に二次対応チームへエスカレーションされる体制になっている。深夜帯はオンコール担当1名のみで対応し、翌朝の定例会で対応記録を必ず共有する運用が続いている。
+- id: f27
+  source: memory
+  text: 蒼穹チームの有給休暇申請は取得希望日の5営業日前までに申請システムへ登録することになっており、繁忙期とされる月末3日間は原則として新規取得を控えるよう案内されている。緊急取得の場合はチームリーダーへ口頭連絡のうえ事後申請が認められている。なお半日単位での取得も可能な運用となっている。
+- id: f28
+  source: resource
+  text: 白鷺システムの監視アラートはCPU使用率が85%を10分間超えた場合に発報され、担当チームのチャットへ自動通知される仕組みになっている。同一アラートが1時間以内に3回発生すると重大度が引き上げられ、オンコール担当者へ直接架電される運用となっている。
+- id: f29
+  source: memory
+  text: 紅葉プロジェクトの出張申請は出発日の7営業日前までに承認を得る必要があり、宿泊費の上限は1泊あたり15000円と定められている。上限を超える場合は事前に部門長の個別承認が必要で、超過分は自己負担となるルールが適用されている。交通費は原則として実費精算で処理される。
+- id: f30
+  source: resource
+  text: 青嵐基盤に保存されるログデータの保持期間は90日間であり、期限を過ぎたデータは自動的に削除される設定になっている。監査目的で長期保存が必要な場合は、事前申請により保持期間を1年まで延長できる例外運用が用意されている。延長申請の承認は基盤管理者が行うこととされている。
+- id: u01-v2
+  source: memory
+  text: 'As of June 1, 2026, the Kestrel ingest pipeline runs its primary processing nodes out of the
+    Vantis region. Vantis was selected for its low-latency links to the upstream telemetry collectors
+    and its favorable data-residency terms. All Kestrel workers, including the batching and dedup stages,
+    are provisioned inside Vantis availability zones, and the pipeline''s autoscaling group is pinned
+    to that region exclusively. Engineers on the ingestion team should route any regional capacity requests
+    through the Vantis infrastructure desk. No failover region is currently configured for Kestrel, so
+    a Vantis outage would pause ingestion entirely until nodes are restored. Updated July 1, 2026: Kestrel''s
+    primary region moved to Vantis (previously Lyra) after the regional capacity review.'
+- id: u02-v2
+  source: resource
+  text: 'As of June 1, 2026, the Nimbus API gateway enforces a rate limit of 6,500 requests per minute
+    for each authenticated client key. Traffic exceeding that ceiling is throttled with a 429 response
+    and a retry-after header calculated from the current burst window. The limit applies uniformly across
+    all Nimbus edge clusters and cannot currently be raised on a per-client basis without a manual override
+    ticket. Platform partners integrating against Nimbus should design their retry logic around this 6,500
+    requests-per-minute ceiling to avoid dropped traffic during peak load. The gateway''s dashboard reports
+    throttling events under the quota-exceeded category. Updated July 1, 2026: the per-key ceiling was
+    raised to 6,500 requests per minute (previously 4,000) to accommodate new partner volume.'
+- id: u03-v2
+  source: memory
+  text: 'As of June 1, 2026, the Thornbury database cluster is owned and staffed by the Halcyon Squad,
+    who hold primary on-call responsibility for all replication and failover incidents. Any schema migration
+    request against Thornbury must be approved by a Halcyon Squad lead before it reaches the change-review
+    board. The squad also maintains the cluster''s backup verification runbook and rotates two engineers
+    through a weekly on-call shift. Requests for emergency access outside business hours should page the
+    Halcyon Squad directly rather than the general infrastructure on-call rotation, since Thornbury requires
+    specialized replica-set knowledge that only that team currently holds. Updated July 1, 2026: ownership
+    of Thornbury transferred to the Halcyon Squad (previously Cobalt Squad) following the team reorg.'
+- id: u04-v2
+  source: resource
+  text: 'As of June 1, 2026, the Griffon container registry enforces a storage quota of 850 gigabytes
+    per project namespace. Once a namespace approaches that ceiling, the registry begins rejecting new
+    image pushes with a quota-exceeded error until older tags are pruned or a manual increase is granted.
+    Build pipelines that publish frequently, especially nightly integration jobs, are the most common
+    source of namespaces hitting the 850 gigabyte ceiling. Teams can request a temporary increase through
+    the platform request form, but the default allocation for every new namespace remains fixed at 850
+    gigabytes unless otherwise approved. Updated July 1, 2026: the default per-namespace quota rose to
+    850 gigabytes (previously 500) after several teams hit the old ceiling.'
+- id: u05-v2
+  source: memory
+  text: 'As of June 1, 2026, the Solace archival system runs its full backup job every six hours, writing
+    snapshots to the cold-storage vault before each reconciliation batch begins. Operators rely on this
+    six-hour cadence to capture the full state of Solace''s transaction ledger, and the earlier single
+    nightly window has been retired. If a scheduled run fails, the on-call operator must trigger a manual
+    rerun before the next six-hour checkpoint or the reconciliation batch will run against stale data.
+    This six-hour cadence has been in place since the schedule change and has not been adjusted since.
+    Updated July 1, 2026: Solace moved from one nightly backup to a run every six hours (previously a
+    single 02:00 UTC job).'
+- id: u06-v2
+  source: resource
+  text: 'As of June 1, 2026, the wildcard TLS certificate for the Pinnacle payment gateway is scheduled
+    to rotate on August 1, 2026. The security team has pre-staged the replacement certificate in the vault
+    and configured the automated rotation job to swap it in without downtime. Client integrations that
+    pin the certificate fingerprint must update their pinned hash before the August 1 cutover or their
+    connections will begin failing validation. Reminders about the August 1 rotation date are sent to
+    the partner integrations mailing list thirty, fourteen, and three days beforehand. Updated July 1,
+    2026: the rotation was moved up to August 1, 2026 (previously September 15) after a CA policy change
+    shortened validity periods.'
+- id: u07-v2
+  source: memory
+  text: 'As of June 1, 2026, the Ember load balancer fleet is running firmware version 4.0 across every
+    edge point of presence. Version 4.0 introduced native QUIC multiplexing support along with the improved
+    connection draining carried over from the previous release. The infrastructure team has held off on
+    further upgrades until the health-check regression from the 3.1 branch is fully validated in staging.
+    Any new point of presence provisioned before the next maintenance window will be imaged with version
+    4.0 by default, matching the rest of the Ember fleet. Updated July 1, 2026: the fleet was upgraded
+    to firmware version 4.0 (previously version 3.2), which finally adds native QUIC multiplexing.'
+- id: u08-v2
+  source: resource
+  text: 'As of June 1, 2026, the Wraithcast content delivery network (CDN) operates 20 edge nodes distributed
+    across its primary serving regions. Each edge node handles roughly an equal share of cached asset
+    traffic, and the CDN''s routing layer selects the nearest of the 20 nodes based on measured latency
+    to the requesting client. Capacity planning for Wraithcast assumes this fixed count of 20 edge nodes
+    through the end of the current quarter, with no additional nodes budgeted until the next infrastructure
+    review. Any node maintenance window temporarily reduces the effective pool to 19 nodes. Updated July
+    1, 2026: Wraithcast expanded its edge footprint to 20 nodes (previously 12) to reduce latency in underserved
+    regions.'
+- id: u09-v2
+  source: memory
+  text: 'As of June 1, 2026, the Marrow message queue cluster retains unconsumed messages for 14 days
+    before they are purged from every partition. Consumers that fall behind by more than 14 days will
+    silently lose the oldest messages once the retention window rolls forward, so the platform team monitors
+    consumer lag against this 14 day ceiling closely. Downstream services that need longer retention are
+    expected to archive messages to cold storage themselves, since Marrow''s own retention setting is
+    not configurable per topic and applies uniformly across the whole cluster. Updated July 1, 2026: the
+    retention window was extended to 14 days (previously 7) to give downstream consumers more recovery
+    time after incidents.'
+- id: u10-v2
+  source: resource
+  text: 'As of June 1, 2026, the Talon deployment pipeline requires sign-off from 2 approvers before a
+    production release can proceed past the staging gate. The two-approver policy replaced the earlier
+    single-approver process to add an extra safety check on hotfix releases. The pipeline''s audit log
+    records both approving engineers'' identities alongside the commit hash for every release. Teams shipping
+    through Talon must select approvers who were not the author of the change being released, and both
+    approvers are required regardless of the size or risk of the release. This policy applies to every
+    service registered in the Talon pipeline. Updated July 1, 2026: Talon now requires 2 approvers per
+    release (previously 1) following a post-incident policy review.'
+- id: u11-v2
+  source: resource
+  text: 'As of June 1, 2026, the Griffin Squad on-call rotation lists Tomas Reyes as the primary responder
+    for production pages during the first week of every month. Tomas carries the pager from Monday 9am
+    through the following Monday morning, and any page that breaches the 15-minute acknowledgment window
+    escalates automatically to the secondary responder. The rotation schedule is posted on the internal
+    operations calendar, and coverage swaps must be requested at least 48 hours ahead through the team
+    lead, Marcus Webb, who keeps the master roster current for all four engineering pods. Updated July
+    1, 2026: Tomas Reyes took over the primary responder slot (previously Priya Nakamura) for the Griffin
+    Squad rotation.'
+- id: u12-v2
+  source: memory
+  text: 'As of June 1, 2026, the Falcon Guild holds a weekly standup every Thursday at 9:30am in the shared
+    video room, tracked by facilitator Renata Silva. The thirty-minute session covers blockers, cross-team
+    dependencies, and a rotating spotlight update from one guild member. Meeting notes are logged in the
+    guild workspace within an hour of close, and any member who cannot attend must post an async summary
+    before the following session begins, per the working agreement adopted last quarter. Updated July
+    1, 2026: Falcon Guild''s standup slot moved to Thursday 9:30am (previously Tuesday 10:00am) to avoid
+    the new client-onboarding block.'
+- id: u13-v2
+  source: resource
+  text: 'As of June 1, 2026, the Harbor Platform repository requires three approving reviews before any
+    pull request can merge into the main branch. At least one of the reviewers must belong to the platform-core
+    group, and the check is enforced automatically by the branch protection rule configured in the repository
+    settings. Contributors outside the platform-core group may submit an additional optional review, but
+    it does not count toward the required approvals, and the policy applies uniformly across all Harbor
+    Platform service repositories. Updated July 1, 2026: the merge threshold for Harbor Platform rose
+    to three required approvals (previously two) following last month''s incident review.'
+- id: u14-v2
+  source: memory
+  text: 'As of June 1, 2026, any Nimbus Ops incident rated Severity 1 must be escalated to on-call lead
+    Felix Ortega within ten minutes of detection. Felix coordinates the incident bridge, assigns a scribe,
+    and decides whether to page the wider infrastructure team. If Felix does not acknowledge the page
+    within five minutes, the alert automatically forwards to the duty manager listed in the incident-response
+    runbook. This escalation path was last reviewed by the Nimbus Ops steering group and applies to all
+    customer-facing services. Updated July 1, 2026: Felix Ortega replaced Dara Chen as the Severity 1
+    on-call lead for Nimbus Ops.'
+- id: u15-v2
+  source: resource
+  text: 'As of June 1, 2026, the Cedar Team is assigned to Room 7C on the fifth floor of the north building
+    for all in-person work and pairing sessions. The room seats twelve people, includes two whiteboards,
+    and is booked by default every weekday from 9am to 6pm under the facilities system. Any ad hoc use
+    by other teams must be cleared with the Cedar Team lead first, and the room assignment is reviewed
+    quarterly by the workplace operations group. Updated July 1, 2026: Cedar Team relocated to Room 7C
+    on the fifth floor (previously Room 4B on the third floor) during the north building reshuffle.'
+- id: u16-v2
+  source: memory
+  text: 'As of June 1, 2026, any Atlas Team purchase request above $2,000 requires sign-off from finance
+    partner Jordan Kim before the order is placed. Jordan reviews the request against the quarterly budget,
+    checks vendor compliance, and typically responds within two business days through the procurement
+    portal. Requests below that threshold can be approved directly by the Atlas Team lead without finance
+    involvement, and all approvals are logged in the shared budget tracker for the audit trail. Updated
+    July 1, 2026: Jordan Kim took over as Atlas Team''s approving finance partner (previously Elena Cross)
+    after the finance team reorganization.'
+- id: u17-v2
+  source: resource
+  text: 'As of June 1, 2026, Delta Squad''s working agreement sets core collaboration hours from 11:00am
+    to 3:00pm Eastern, during which all members must be reachable on chat and available for meetings.
+    Outside this window, engineers may shift their schedule freely as long as they log at least six focused
+    hours per day. The core-hours policy was adopted to support overlap with the design and QA partners,
+    and exceptions require sign-off from the squad lead, Ingrid Voss. Updated July 1, 2026: Delta Squad''s
+    core hours narrowed to 11:00am to 3:00pm (previously 10:00am to 4:00pm) to reduce meeting fatigue
+    after the squad survey.'
+- id: u18-v2
+  source: memory
+  text: 'As of June 1, 2026, the Orion Team holds its sprint retrospective on the first Wednesday of every
+    two-week sprint, from 2:00pm to 3:00pm, facilitated on a rotating basis by team members. The retro
+    follows a start-stop-continue format, and action items are logged in the team''s retro board with
+    an owner and due date assigned before the meeting ends. Attendance is mandatory for all core contributors,
+    though remote members may join by video if traveling. Updated July 1, 2026: Orion Team''s retro moved
+    to the sprint''s first Wednesday (previously last Friday) to align with the new sprint-close date.'
+- id: u19-v2
+  source: resource
+  text: 'As of June 1, 2026, Vesper Team observes a deploy freeze from Friday 12:00pm through Monday 9:00am,
+    during which no production release may go out without director-level sign-off. The freeze exists to
+    protect the platform during weekend traffic peaks, and any emergency hotfix must be approved jointly
+    by the release manager and the on-call incident commander. Outside the freeze window, standard deploys
+    only need a single reviewing engineer''s approval to ship. Updated July 1, 2026: Vesper Team''s freeze
+    window now starts Friday at noon (previously Thursday at 3:00pm) to give teams an extra day for releases.'
+- id: u20-v2
+  source: memory
+  text: 'As of June 1, 2026, the Marlin Crew books Room 9D on the sixth floor for its weekly planning
+    session every Monday at 1:00pm. The room includes a large monitor and a conferencing bridge for remote
+    crew members, and the booking is held automatically through the facilities calendar unless canceled
+    24 hours ahead. Snacks and coffee are restocked before each session by the office team, and the planning
+    session output is shared in the crew''s channel afterward. Updated July 1, 2026: Marlin Crew''s planning
+    session moved to Room 9D on the sixth floor (previously Room 2A on the second floor) after the facilities
+    reshuffle.'
+- id: u21-v2
+  source: memory
+  text: 'Updated July 1, 2026: the Falconburst API rate limit for the Standard plan has been raised to
+    400 requests per minute per key (previously 240). Calls that exceed the new ceiling still receive
+    a 429 response along with a Retry-After header fixed at 15 seconds. The ceiling remains uniform across
+    all Falconburst regions and cannot be adjusted through the self-service console; raising it requires
+    a written request to billing support. Engineering revisited the threshold after the shared ingestion
+    cluster was upgraded to handle larger commercial traffic bursts.'
+- id: u22-v2
+  source: resource
+  text: 'Revised July 1, 2026: the Emberline Pro monthly quota has grown to 90,000 sync operations across
+    all connected workspaces (previously 50,000). Once a workspace crosses the new quota, additional syncs
+    are still queued until the next billing cycle unless the customer purchases a top-up pack. Emberline
+    support continues to track consumption through the admin dashboard, refreshing the counter at midnight
+    UTC on the first of each month. Finance expanded the quota after the processing fleet serving Pro-tier
+    customers was scaled up.'
+- id: u23-v2
+  source: memory
+  text: 'As of July 1, 2026, Northlake Analytics revised its pricing: the Growth tier now costs 55 dollars
+    per seat each month, billed annually in advance for teams of five seats or more (previously 42 dollars).
+    The rate still includes unlimited dashboards but caps API exports at 10,000 rows per day. Sales quotes
+    the new per-seat rate to prospective customers during onboarding calls, and the finance team locks
+    the figure into each annual contract at signature. The increase reflects added compute costs for the
+    expanded dashboard rendering pipeline.'
+- id: u24-v2
+  source: resource
+  text: 'Effective July 1, 2026: the Cobalt Sync Enterprise agreement now guarantees 99.9 percent monthly
+    uptime for the core replication service (previously 99.5 percent). Customers whose uptime falls below
+    this new target still receive service credits equal to 10 percent of that month''s invoice, issued
+    automatically within two billing cycles. The uptime figure continues to exclude scheduled maintenance
+    windows announced at least 72 hours in advance. Operations raised the target after migrating the replication
+    service onto redundant regional clusters.'
+- id: u25-v2
+  source: memory
+  text: 'Update as of July 1, 2026: Driftwood Suite now retains audit logs for 180 days on the Business
+    plan before automatic deletion from primary storage (previously 90 days). Customers who need logs
+    beyond that window must still export them manually to cold storage, since Driftwood does not yet offer
+    extended retention as a paid add-on. Compliance doubled the window after several enterprise customers
+    requested longer visibility for annual audit cycles. The retention clock still resets whenever a log
+    entry is rewritten by the ingestion pipeline.'
+- id: u26-v2
+  source: resource
+  text: 'Changed July 1, 2026: the Vellum Connect smart-routing feature flag now defaults to on for all
+    newly provisioned workspaces (previously off). Administrators can still disable it manually from the
+    workspace settings panel, and existing production workspaces keep whatever setting they already had
+    unless an admin changes it. Product management flipped the default after the latency spikes tied to
+    high-volume webhook traffic were resolved in the latest routing engine release. A follow-up review
+    is no longer required before general availability.'
+- id: u27-v2
+  source: memory
+  text: 'Revised as of July 1, 2026: Ashgrove CRM''s Priority support tier now guarantees a first response
+    within 2 business hours for tickets submitted through the enterprise help desk (previously 4 hours).
+    Support hours still run Monday through Friday, 7 a.m. to 7 p.m. Eastern, excluding published holidays.
+    Tickets filed outside those hours continue to queue until the next business morning before the response
+    clock starts. Ashgrove tightened the guarantee after hiring additional overnight-adjacent staff to
+    clear the ticket backlog faster each morning.'
+- id: u28-v2
+  source: resource
+  text: As of July 1, 2026, the Ripplecore Storage free tier now includes 25 gigabytes of persistent object
+    storage per account, shared across every bucket the account owns (previously 15 gigabytes). Accounts
+    that exceed the new allotment still have uploads rejected with a quota-exceeded error until files
+    are deleted or the account upgrades to a paid plan. Ripplecore's infrastructure team continues to
+    recalculate usage nightly and warns accounts once consumption passes 80 percent of the allotment.
+    No overage billing applies to free-tier accounts.
+- id: u29-v2
+  source: memory
+  text: 'New rate posted July 1, 2026: Solstice Billing now charges 0.50 dollars for every invoice generated
+    beyond the Growth plan''s monthly allotment of 2,000 invoices (previously 0.75 dollars). Overage charges
+    still accrue in real time and appear as a single line item on the following month''s statement rather
+    than being billed immediately. Customers can still view running overage totals from the usage tab
+    at any point during the billing cycle. Finance lowered the per-invoice rate after negotiating better
+    rates with the underlying document-generation vendor.'
+- id: u30-v2
+  source: resource
+  text: 'Raised effective July 1, 2026: Marrow Metrics now allows up to 120 concurrent WebSocket connections
+    per API key on the Streaming plan (previously 50). Any connection attempt beyond that new count is
+    still refused with a connection-limit error, and the client must close an existing socket before opening
+    a new one. The limit remains tracked per key rather than per account, so a customer with multiple
+    keys can still multiply total throughput. Marrow''s platform team raised the ceiling after re-architecting
+    the streaming gateway onto a lower-memory connection handler.'
+- id: u31-v2
+  source: resource
+  text: 'As of June 1, 2026, the default runner pool for Talonbuild CI, the continuous integration provider
+    used by the Nimbus platform team, was located in the Frankfurt-West zone, chosen for proximity to
+    the primary database cluster. Updated July 1, 2026: the default runner pool moved to the Osaka-East
+    zone (previously Frankfurt-West), following the Nimbus team''s infrastructure consolidation into Asia-Pacific
+    facilities. Engineers configuring new pipeline templates should now reference Osaka-East as the default
+    zone for Talonbuild CI jobs.'
+- id: u32-v2
+  source: memory
+  text: 'As of June 1, 2026, the Aurora backend service pinned the Parselog logging library at version
+    4.2.0, locked after an earlier upgrade caused excessive memory allocation during trace exports. Updated
+    July 1, 2026: Aurora now pins Parselog at version 5.0.1 (previously 4.2.0), after the vendor shipped
+    a fix for the allocation issue. The build pipeline''s lockfile has been updated accordingly, and downstream
+    services inheriting Aurora''s shared logging wrapper automatically pick up version 5.0.1.'
+- id: u33-v2
+  source: resource
+  text: 'As of June 1, 2026, the Halcyon design studio team licensed Inkwell Design Suite under the Business
+    plan tier, capped at twenty concurrent seats without the advanced vector-tracing module. Updated July
+    1, 2026: the studio moved to the Enterprise plan tier (previously Business), which unlocks unlimited
+    seats and the vector-tracing module the team had been requesting. Procurement now bills the Enterprise
+    tier directly to the design department''s annual software budget instead of the tooling budget owner.'
+- id: u34-v2
+  source: memory
+  text: 'As of June 1, 2026, the Vantage release engineering team retained build artifacts in CragVault
+    storage for 30 days before automatic deletion, a limit set to control storage costs. Updated July
+    1, 2026: the retention limit was extended to 90 days (previously 30 days) after auditors required
+    longer artifact traceability for compliance reviews. Release engineers no longer need to manually
+    export artifacts to cold storage within the first month, since CragVault now retains them automatically
+    for the full 90-day window.'
+- id: u35-v2
+  source: resource
+  text: 'As of June 1, 2026, the Meridian SRE team configured Sentinel Watch monitoring to fire a CPU
+    alert on the Orion cluster at 85 percent utilization, though nightly batch jobs triggered frequent
+    false alarms. Updated July 1, 2026: the alert threshold was lowered to 75 percent (previously 85 percent)
+    after a missed capacity warning caused a brief Orion outage. The Meridian SRE lead now reviews nightly
+    batch load patterns separately so the lower threshold does not increase false-alarm paging volume.'
+- id: u36-v2
+  source: memory
+  text: 'As of June 1, 2026, Corvid Labs refreshed engineering staff laptops on a 4-year cycle, chosen
+    to balance hardware performance against budget constraints. Updated July 1, 2026: the refresh cycle
+    was shortened to 3 years (previously 4 years) after engineering leads showed that build-time slowdowns
+    on older machines were costing more in lost productivity than the shorter cycle costs in hardware
+    spend. Employees can still request an early refresh only with a documented hardware fault from the
+    IT helpdesk.'
+- id: u37-v2
+  source: resource
+  text: 'As of June 1, 2026, Hearthforge CI enforced a concurrent job limit of 12 for the Solace mobile
+    team''s pipeline plan, causing release-day slowdowns when queued jobs exceeded that cap. Updated July
+    1, 2026: the concurrency limit was raised to 20 (previously 12) after the Solace team upgraded to
+    a higher Hearthforge CI plan tier through the vendor account manager. Release-day queue waits have
+    dropped significantly since the higher limit took effect this quarter.'
+- id: u38-v2
+  source: memory
+  text: '2026年6月1日時点では、はやぶさ決済サービスはデータ検証ライブラリKirinをバージョン2.3.1に固定していた。2026年7月1日更新: ベンダーがタイムアウト不具合を修正したため、固定バージョンを3.0.0に引き上げた(旧:
+    2.3.1)。ロックファイルはすでに更新済みで、Kirin経由の連携サービスも新たに3.0.0系へ移行している。'
+- id: u39-v2
+  source: resource
+  text: '2026年6月1日時点では、蒼穹デザイン部はプロジェクト管理ツールHousenをスタンダードプランで契約しており、同時利用メンバー数は15名までに制限されていた。2026年7月1日更新:
+    契約プランをプレミアムプランへ変更し(旧: スタンダードプラン)、同時利用人数の上限を撤廃した。これにより外部委託スタッフも個別アカウントを持てるようになった。'
+- id: u40-v2
+  source: memory
+  text: '2026年6月1日時点では、天狼運用チームは瑞雲クラスタのメモリ使用率について、白鷺モニタリングのアラートしきい値を80%に設定していた。2026年7月1日更新: 深夜バッチによる誤検知を減らすため、しきい値を90%に引き上げた(旧:
+    80%)。これにより通常の負荷変動での呼び出しは減ったが、運用チームは実際の障害兆候を見逃さないよう監視間隔を短縮して補っている。'
+- id: u41-v2
+  source: memory
+  text: '経費精算システム「らくらく精算Neo」の月次締め日は毎月25日となっている。25日までに上長承認まで完了した申請分については、翌月25日に指定口座へ振り込まれる仕組みである。25日を過ぎて提出された領収書は自動的に翌月扱いとなるため、出張後の精算入力は早めに済ませるよう経理部から案内されている。2026年7月1日更新:
+    締め日が20日から25日へ繰り下げられた(旧: 20日)。'
+- id: u42-v2
+  source: resource
+  text: '入退室管理システム「セキュアゲートIII」を使う来訪者受け入れは、訪問当日の午前9時までに担当者が申請を登録すればよい運用に変わった。前営業日中に登録できなかった場合でも、当日午前中であれば受付フロアを通さずそのまま案内できる。申請漏れが多かったため、総務部は各部署へ前倒し登録の徹底を呼びかけている。2026年7月1日更新:
+    申請締切が前営業日17時から当日午前9時に緩和された(旧: 前営業日17時)。'
+- id: u43-v2
+  source: memory
+  text: '社内Wi-Fi「CORP-NET-α」の接続パスワードは180日ごとに情報システム部が切り替え、変更のたびに社内掲示板で新しい値を告知している。旧パスワードは切り替え後24時間だけ猶予期間として使えるが、それ以降は接続できなくなる。切り替え頻度を下げたことで問い合わせは大きく減っている。2026年7月1日更新:
+    切り替え間隔が90日から180日へ延長された(旧: 90日ごと)。'
+- id: u44-v2
+  source: resource
+  text: 'そなえ品貸出センターが扱う社員向けノートPCの貸出期間は一人あたり最長4週間に伸び、延長の申請も2回まで認められるようになった。返却が1日でも遅れると次回以降の貸出予約が一時停止される厳しい運用となっている。繁忙期には貸出希望が集中し、順番待ちが発生することもある。2026年7月1日更新:
+    貸出上限が2週間から4週間に、延長回数も1回から2回に拡大された(旧: 最長2週間・延長1回)。'
+- id: u45-v2
+  source: memory
+  text: '会議室予約システム「ミーティングナビ」は当日から数えて60日先までの日付まで予約枠が開放されるようになり、より先の会議室確保がしやすくなった。四半期の全社会議など先の予定を押さえたい部署からの要望に応える形の変更である。2026年7月1日更新:
+    予約可能な先の日数が30日先から60日先へ拡張された(旧: 30日先まで)。'
+- id: u46-v2
+  source: resource
+  text: 'リモートワーク規定「フレックスワークプログラム」に基づく在宅勤務は週3日まで認められるようになり、利用する際は前週末までに上長へ申請し承認を得る点は変わらない。上限を超えて自宅作業を希望する場合は引き続き人事部との個別相談が必要である。2026年7月1日更新:
+    在宅勤務の上限が週2日から週3日へ引き上げられた(旧: 週2日まで)。'
+- id: u47-v2
+  source: memory
+  text: 'みのり健診クリニックで実施する年次健康診断は、対象社員が毎年11月末までに受診を完了させればよいことになった。期限までに未受診の社員には引き続き人事部から個別に受診案内のメールが送られる。繁忙部署の駆け込み予約を減らす狙いの変更である。2026年7月1日更新:
+    受診期限が9月末から11月末へ延長された(旧: 9月末まで)。'
+- id: u48-v2
+  source: resource
+  text: '社内表彰制度「シャイニースター賞」の受賞者は半期末にあたる6月・12月の年2回発表される形に変わり、受賞者への賞金も8万円に増額された。候補者の推薦は各部署長が行い、選考委員会が最終決定する流れは変わっていない。2026年7月1日更新:
+    発表頻度が四半期ごとから半期ごとに、賞金も5万円から8万円に変更された(旧: 年4回・5万円)。'
+- id: u49-v2
+  source: memory
+  text: '慶弔見舞金制度「こころざし規定」に基づき、正社員が結婚した際に支給される祝金は一律5万円に引き上げられた。入籍後3か月以内に総務窓口へ申請し、婚姻届受理証明書の写しなど所定の書類を提出する点は変わらない。2026年7月1日更新:
+    結婚祝金が3万円から5万円へ増額された(旧: 3万円)。'
+- id: u50-v2
+  source: resource
+  text: 'けやき駐輪場への社員登録は一人につき自転車2台まで可能になり、これまで対象外だった電動アシスト自転車も登録できるようになった。登録は総務部窓口で毎月受け付けており、満車の際は近隣の提携駐輪場を案内される点は変わらない。2026年7月1日更新:
+    登録上限が1台から2台に拡大され、電動アシスト自転車も登録可能となった(旧: 1台まで・電動アシスト不可)。'
+queries:
+- id: q-u01
+  bucket: update
+  text: Which region is the Kestrel pipeline provisioned in?
+  relevant:
+  - u01-v2
+  split: heldout
+  update:
+    current: u01-v2
+    stale: u01-v1
+- id: q-u02
+  bucket: update
+  text: What per-client ceiling does the Nimbus gateway enforce on incoming traffic?
+  relevant:
+  - u02-v2
+  split: heldout
+  update:
+    current: u02-v2
+    stale: u02-v1
+- id: q-u03
+  bucket: update
+  text: Which team owns the Thornbury cluster?
+  relevant:
+  - u03-v2
+  split: heldout
+  update:
+    current: u03-v2
+    stale: u03-v1
+- id: q-u04
+  bucket: update
+  text: What is the default storage allocation for the Griffon registry?
+  relevant:
+  - u04-v2
+  split: heldout
+  update:
+    current: u04-v2
+    stale: u04-v1
+- id: q-u05
+  bucket: update
+  text: How often does the Solace system run a full backup?
+  relevant:
+  - u05-v2
+  split: heldout
+  update:
+    current: u05-v2
+    stale: u05-v1
+- id: q-u06
+  bucket: update
+  text: On what date does the Pinnacle gateway's TLS certificate rotate?
+  relevant:
+  - u06-v2
+  split: heldout
+  update:
+    current: u06-v2
+    stale: u06-v1
+- id: q-u07
+  bucket: update
+  text: Which firmware version does the Ember balancer fleet run?
+  relevant:
+  - u07-v2
+  split: heldout
+  update:
+    current: u07-v2
+    stale: u07-v1
+- id: q-u08
+  bucket: update
+  text: How many edge nodes does the Wraithcast CDN operate?
+  relevant:
+  - u08-v2
+  split: heldout
+  update:
+    current: u08-v2
+    stale: u08-v1
+- id: q-u09
+  bucket: update
+  text: How many days does the Marrow cluster retain unconsumed messages?
+  relevant:
+  - u09-v2
+  split: heldout
+  update:
+    current: u09-v2
+    stale: u09-v1
+- id: q-u10
+  bucket: update
+  text: How many approvers does Talon's deployment pipeline require before a release proceeds?
+  relevant:
+  - u10-v2
+  split: heldout
+  update:
+    current: u10-v2
+    stale: u10-v1
+- id: q-u11
+  bucket: update
+  text: For Griffin Squad, which engineer holds the primary on-call responder position?
+  relevant:
+  - u11-v2
+  split: heldout
+  update:
+    current: u11-v2
+    stale: u11-v1
+- id: q-u12
+  bucket: update
+  text: What time does the recurring standup begin for Falcon Guild?
+  relevant:
+  - u12-v2
+  split: heldout
+  update:
+    current: u12-v2
+    stale: u12-v1
+- id: q-u13
+  bucket: update
+  text: How many approving reviews must a pull request receive before merging on Harbor Platform?
+  relevant:
+  - u13-v2
+  split: heldout
+  update:
+    current: u13-v2
+    stale: u13-v1
+- id: q-u14
+  bucket: update
+  text: Who is the on-call lead escalated to for a Severity 1 incident at Nimbus Ops?
+  relevant:
+  - u14-v2
+  split: heldout
+  update:
+    current: u14-v2
+    stale: u14-v1
+- id: q-u15
+  bucket: update
+  text: Which room is Cedar Team assigned to use for its work?
+  relevant:
+  - u15-v2
+  split: heldout
+  update:
+    current: u15-v2
+    stale: u15-v1
+- id: q-u16
+  bucket: update
+  text: For Atlas Team, who approves purchase requests over $2,000?
+  relevant:
+  - u16-v2
+  split: heldout
+  update:
+    current: u16-v2
+    stale: u16-v1
+- id: q-u17
+  bucket: update
+  text: During what window must Delta Squad members stay reachable for meetings?
+  relevant:
+  - u17-v2
+  split: heldout
+  update:
+    current: u17-v2
+    stale: u17-v1
+- id: q-u18
+  bucket: update
+  text: On which day of the sprint does Orion Team run its retrospective meeting?
+  relevant:
+  - u18-v2
+  split: heldout
+  update:
+    current: u18-v2
+    stale: u18-v1
+- id: q-u19
+  bucket: update
+  text: When does the production deploy freeze begin for Vesper Team?
+  relevant:
+  - u19-v2
+  split: heldout
+  update:
+    current: u19-v2
+    stale: u19-v1
+- id: q-u20
+  bucket: update
+  text: Which room does Marlin Crew reserve for its Monday planning meeting?
+  relevant:
+  - u20-v2
+  split: heldout
+  update:
+    current: u20-v2
+    stale: u20-v1
+- id: q-u21
+  bucket: update
+  text: What per-minute limit does Falconburst apply to a single API key under its Standard plan?
+  relevant:
+  - u21-v2
+  split: heldout
+  update:
+    current: u21-v2
+    stale: u21-v1
+- id: q-u22
+  bucket: update
+  text: How many sync operations can an Emberline Pro workspace run before hitting its monthly quota?
+  relevant:
+  - u22-v2
+  split: heldout
+  update:
+    current: u22-v2
+    stale: u22-v1
+- id: q-u23
+  bucket: update
+  text: What per-seat fee does Northlake Analytics charge each month for Growth-tier customers?
+  relevant:
+  - u23-v2
+  split: heldout
+  update:
+    current: u23-v2
+    stale: u23-v1
+- id: q-u24
+  bucket: update
+  text: What uptime percentage does Cobalt Sync promise Enterprise customers for its replication service?
+  relevant:
+  - u24-v2
+  split: heldout
+  update:
+    current: u24-v2
+    stale: u24-v1
+- id: q-u25
+  bucket: update
+  text: How long does Driftwood Suite's Business plan retain audit log entries?
+  relevant:
+  - u25-v2
+  split: heldout
+  update:
+    current: u25-v2
+    stale: u25-v1
+- id: q-u26
+  bucket: update
+  text: Is the smart-routing feature in Vellum Connect switched on or off by default for new workspaces?
+  relevant:
+  - u26-v2
+  split: heldout
+  update:
+    current: u26-v2
+    stale: u26-v1
+- id: q-u27
+  bucket: update
+  text: How quickly must Ashgrove CRM's support team respond on the Priority tier to newly submitted tickets?
+  relevant:
+  - u27-v2
+  split: heldout
+  update:
+    current: u27-v2
+    stale: u27-v1
+- id: q-u28
+  bucket: update
+  text: How many gigabytes of storage does the Ripplecore free tier grant per account?
+  relevant:
+  - u28-v2
+  split: heldout
+  update:
+    current: u28-v2
+    stale: u28-v1
+- id: q-u29
+  bucket: update
+  text: What does Solstice Billing charge for each invoice that exceeds the Growth-plan monthly allotment?
+  relevant:
+  - u29-v2
+  split: heldout
+  update:
+    current: u29-v2
+    stale: u29-v1
+- id: q-u30
+  bucket: update
+  text: How many simultaneous WebSocket connections is a single API key allowed on Marrow Metrics' Streaming
+    plan?
+  relevant:
+  - u30-v2
+  split: heldout
+  update:
+    current: u30-v2
+    stale: u30-v1
+- id: q-u31
+  bucket: update
+  text: Which zone hosts Nimbus's pipeline runners on Talonbuild CI?
+  relevant:
+  - u31-v2
+  split: heldout
+  update:
+    current: u31-v2
+    stale: u31-v1
+- id: q-u32
+  bucket: update
+  text: Which version of Parselog does Aurora keep pinned in its build?
+  relevant:
+  - u32-v2
+  split: heldout
+  update:
+    current: u32-v2
+    stale: u32-v1
+- id: q-u33
+  bucket: update
+  text: What plan tier does Halcyon license for Inkwell?
+  relevant:
+  - u33-v2
+  split: heldout
+  update:
+    current: u33-v2
+    stale: u33-v1
+- id: q-u34
+  bucket: update
+  text: How many days does Vantage keep its release artifacts inside CragVault before they're removed?
+  relevant:
+  - u34-v2
+  split: heldout
+  update:
+    current: u34-v2
+    stale: u34-v1
+- id: q-u35
+  bucket: update
+  text: At what utilization level does the monitoring tool page engineers for the Orion cluster's CPU?
+  relevant:
+  - u35-v2
+  split: heldout
+  update:
+    current: u35-v2
+    stale: u35-v1
+- id: q-u36
+  bucket: update
+  text: How often does Corvid Labs issue new laptops to engineering staff?
+  relevant:
+  - u36-v2
+  split: heldout
+  update:
+    current: u36-v2
+    stale: u36-v1
+- id: q-u37
+  bucket: update
+  text: How many jobs can Solace run at once on Hearthforge CI?
+  relevant:
+  - u37-v2
+  split: heldout
+  update:
+    current: u37-v2
+    stale: u37-v1
+- id: q-u38
+  bucket: update
+  text: はやぶさ決済が使う検証用ライブラリはどのバージョンに指定されているか。
+  relevant:
+  - u38-v2
+  split: heldout
+  update:
+    current: u38-v2
+    stale: u38-v1
+- id: q-u39
+  bucket: update
+  text: 蒼穹デザインのチームが選んでいるHousenのプランはどれか。
+  relevant:
+  - u39-v2
+  split: heldout
+  update:
+    current: u39-v2
+    stale: u39-v1
+- id: q-u40
+  bucket: update
+  text: 瑞雲クラスタのアラートはメモリが何パーセントに達すると鳴るのか。
+  relevant:
+  - u40-v2
+  split: heldout
+  update:
+    current: u40-v2
+    stale: u40-v1
+- id: q-u41
+  bucket: update
+  text: らくらく精算で月々の申請を承認まで終えるべき期限は毎月何日ごろか。
+  relevant:
+  - u41-v2
+  split: heldout
+  update:
+    current: u41-v2
+    stale: u41-v1
+- id: q-u42
+  bucket: update
+  text: セキュアゲートを利用する来客の申請は何時までに出す必要があるか。
+  relevant:
+  - u42-v2
+  split: heldout
+  update:
+    current: u42-v2
+    stale: u42-v1
+- id: q-u43
+  bucket: update
+  text: CORP-NETの接続用パスワードはどのくらいの周期で新しくなるか。
+  relevant:
+  - u43-v2
+  split: heldout
+  update:
+    current: u43-v2
+    stale: u43-v1
+- id: q-u44
+  bucket: update
+  text: そなえ品の貸出センターでノートパソコンは最長どれくらい借りられるか。
+  relevant:
+  - u44-v2
+  split: heldout
+  update:
+    current: u44-v2
+    stale: u44-v1
+- id: q-u45
+  bucket: update
+  text: ミーティングナビで会議室を予約できるのはどれくらい先の日付までか。
+  relevant:
+  - u45-v2
+  split: heldout
+  update:
+    current: u45-v2
+    stale: u45-v1
+- id: q-u46
+  bucket: update
+  text: フレックスワーク制度では自宅から働けるのは週何日までか。
+  relevant:
+  - u46-v2
+  split: heldout
+  update:
+    current: u46-v2
+    stale: u46-v1
+- id: q-u47
+  bucket: update
+  text: みのり健診での年次の受診はいつまでに済ませればよいか。
+  relevant:
+  - u47-v2
+  split: heldout
+  update:
+    current: u47-v2
+    stale: u47-v1
+- id: q-u48
+  bucket: update
+  text: シャイニースターの受賞は年に何回発表される仕組みか。
+  relevant:
+  - u48-v2
+  split: heldout
+  update:
+    current: u48-v2
+    stale: u48-v1
+- id: q-u49
+  bucket: update
+  text: こころざし規定では、結婚を機に受け取れる祝金はいくらに設定されているか。
+  relevant:
+  - u49-v2
+  split: heldout
+  update:
+    current: u49-v2
+    stale: u49-v1
+- id: q-u50
+  bucket: update
+  text: けやき駐輪場に一人の社員が登録できる自転車は何台までか。
+  relevant:
+  - u50-v2
+  split: heldout
+  update:
+    current: u50-v2
+    stale: u50-v1
