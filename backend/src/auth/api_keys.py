@@ -47,12 +47,18 @@ class VerifiedKey(NamedTuple):
             for public-bound keys (mutually exclusive with bound_context_id).
         bound_context_id: Public-context attribution (Issue #626). None
             unless the key was created with a binding.
+        key_prefix: The key's non-secret prefix (``api_keys.key_prefix``,
+            e.g. ``kagura_abc123``). Issue #1164: surfaced onto the
+            authenticated principal (``api_key_prefix``) so audit trails for
+            programmatic member-management actions attribute the specific
+            acting key, not just the owner user_id.
     """
 
     id: int
     user_id: str
     workspace_id: UUID | None
     bound_context_id: UUID | None
+    key_prefix: str | None = None
 
 
 class APIKeyManager:
@@ -272,6 +278,7 @@ class APIKeyManager:
             user_id=key_record.user_id,
             workspace_id=key_record.workspace_id,
             bound_context_id=key_record.bound_context_id,
+            key_prefix=key_record.key_prefix,
         )
 
     async def list_keys(
