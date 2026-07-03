@@ -14,6 +14,10 @@ README.md.
 
 from __future__ import annotations
 
+from pathlib import Path
+
+import pytest
+
 from tests.eval.tools.corpus import _VALID_SOURCES, BUCKETS, load_corpus
 
 MIN_QUERIES = 30
@@ -80,3 +84,85 @@ def test_source_scoped_buckets_are_consistent():
             assert sources == {expected}, (
                 f"{bucket} query {q.id} has sources {sources}; expected {{{expected!r}}}"
             )
+
+
+# --- split / graded schema extension (kagura_L prep, prereg-v1 H3) ---------
+
+
+def _write_corpus(tmp_path: Path, queries_yaml: str) -> Path:
+    """Write a minimal 2-doc corpus YAML with the given ``queries:`` body."""
+    content = f"""
+meta:
+  version: 1
+documents:
+  - id: doc_a
+    source: memory
+    text: "alpha"
+  - id: doc_b
+    source: memory
+    text: "beta"
+queries:
+{queries_yaml}
+"""
+    p = tmp_path / "corpus.yaml"
+    p.write_text(content, encoding="utf-8")
+    return p
+
+
+def test_golden_corpus_has_no_split_or_graded_by_default():
+    """The frozen starter corpus is a legacy corpus: split/graded are unset."""
+    corpus = load_corpus()
+    for q in corpus.queries:
+        assert q.split is None
+        assert q.graded is None
+
+
+def test_split_and_graded_round_trip(tmp_path: Path):
+    p = _write_corpus(
+        tmp_path,
+        """\
+  - id: q1
+    bucket: retrieval-exact
+    text: "find alpha"
+    relevant: [doc_a]
+    split: heldout
+    graded:
+      doc_a: 3
+      doc_b: 1
+""",
+    )
+    corpus = load_corpus(p)
+    q = corpus.queries[0]
+    assert q.split == "heldout"
+    assert q.graded == {"doc_a": 3, "doc_b": 1}
+
+
+def test_bad_split_value_raises(tmp_path: Path):
+    p = _write_corpus(
+        tmp_path,
+        """\
+  - id: q1
+    bucket: retrieval-exact
+    text: "find alpha"
+    relevant: [doc_a]
+    split: bogus
+""",
+    )
+    with pytest.raises(ValueError, match="q1"):
+        load_corpus(p)
+
+
+def test_bad_grade_value_raises(tmp_path: Path):
+    p = _write_corpus(
+        tmp_path,
+        """\
+  - id: q1
+    bucket: retrieval-exact
+    text: "find alpha"
+    relevant: [doc_a]
+    graded:
+      doc_a: 5
+""",
+    )
+    with pytest.raises(ValueError, match="q1"):
+        load_corpus(p)

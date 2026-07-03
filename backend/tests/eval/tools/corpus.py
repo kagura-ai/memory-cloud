@@ -21,6 +21,13 @@ SOURCE_MEMORY = "memory"
 SOURCE_RESOURCE = "resource"
 _VALID_SOURCES = {SOURCE_MEMORY, SOURCE_RESOURCE}
 
+# Contamination-split values a query's optional ``split`` field may take
+# (prereg-v1 H3). See ``Query.split``.
+_VALID_SPLITS = {"public", "heldout"}
+# Graded relevance is 0-3 inclusive (docs/02 §1.2 item 5). See ``Query.graded``.
+_MIN_GRADE = 0
+_MAX_GRADE = 3
+
 # The six difficulty/coverage buckets every query must belong to.
 BUCKETS = (
     "retrieval-exact",
@@ -57,6 +64,12 @@ class Query:
     # a zero-adoption memory — reinforce must not bury it). None for the static
     # golden corpus, which is not stratified by adoption.
     population: str | None = None
+    # Contamination split (prereg-v1 H3): "public" queries may be published;
+    # "heldout" queries drive every headline claim. None for legacy corpora.
+    split: str | None = None
+    # Graded relevance 0-3 (docs/02 §1.2 item 5): doc_id -> grade. relevant stays
+    # the binary gold SoT (== docs graded >= 2); grade-1 docs are nDCG-only shading.
+    graded: dict[str, int] | None = None
 
 
 @dataclass(frozen=True)
@@ -92,17 +105,38 @@ def load_corpus(path: Path | None = None) -> Corpus:
             f"golden corpus has document(s) with unknown source(s) {bad_sources}; "
             f"valid sources are {sorted(_VALID_SOURCES)}"
         )
-    queries = tuple(
-        Query(
-            id=q["id"],
-            bucket=q["bucket"],
-            text=q["text"],
-            relevant=tuple(q.get("relevant", [])),
-            population=q.get("population"),
+    queries = []
+    for q in raw.get("queries", []):
+        split = q.get("split")
+        if split is not None and split not in _VALID_SPLITS:
+            raise ValueError(
+                f"query {q['id']!r} has invalid split {split!r}; "
+                f"valid splits are {sorted(_VALID_SPLITS)}"
+            )
+        graded = q.get("graded")
+        if graded is not None:
+            bad_grades = {
+                doc_id: grade
+                for doc_id, grade in graded.items()
+                if not isinstance(grade, int) or not (_MIN_GRADE <= grade <= _MAX_GRADE)
+            }
+            if bad_grades:
+                raise ValueError(
+                    f"query {q['id']!r} has invalid grade(s) {bad_grades}; "
+                    f"grades must be int in [{_MIN_GRADE}, {_MAX_GRADE}]"
+                )
+        queries.append(
+            Query(
+                id=q["id"],
+                bucket=q["bucket"],
+                text=q["text"],
+                relevant=tuple(q.get("relevant", [])),
+                population=q.get("population"),
+                split=split,
+                graded=graded,
+            )
         )
-        for q in raw.get("queries", [])
-    )
-    return Corpus(meta=raw.get("meta", {}), documents=documents, queries=queries)
+    return Corpus(meta=raw.get("meta", {}), documents=documents, queries=tuple(queries))
 
 
 @lru_cache(maxsize=4096)
