@@ -717,6 +717,7 @@ class MemberCredentialsService:
             "created_at": to_utc_iso(api_key.created_at),
             "last_used_at": to_utc_iso(api_key.last_used_at),
             "revoked_at": to_utc_iso(api_key.revoked_at),
+            "expires_at": to_utc_iso(api_key.expires_at),  # #1165: surface owner-set expiry
             "bound_context_id": (
                 str(api_key.bound_context_id) if api_key.bound_context_id else None
             ),

@@ -219,6 +219,7 @@ async def _owner_provisioned_mint(
             "created_at": to_utc_iso(new_key.created_at),
             "last_used_at": None,
             "revoked_at": None,
+            "expires_at": to_utc_iso(new_key.expires_at),  # #1165: owner-set expiry, now observable
             "bound_context_id": None,
         }
     except ValueError as e:
@@ -282,6 +283,15 @@ async def get_member_credentials(
 
         # Get target user's workspace role (for permission checks)
         target_role = await service.get_workspace_role(user_id, workspace_id)
+        if target_role is None:
+            # Target is not (or no longer) a workspace member. Without this the
+            # non-optional MemberCredentialsResponse.target_user_role would fail
+            # validation and the blanket ``except Exception`` below would turn a
+            # wrong/removed target into an opaque 500. Raise HTTPException (not
+            # NotFoundException, which subclasses MemoryCloudException and WOULD
+            # be swallowed here) so ``except HTTPException: raise`` returns a
+            # clean 404 (v0.42 max review).
+            raise HTTPException(status_code=404, detail="Member not found")
 
         return MemberCredentialsResponse(**credentials, target_user_role=target_role)
     except HTTPException:
@@ -662,6 +672,7 @@ async def create_api_key(
             "created_at": to_utc_iso(new_key.created_at),
             "last_used_at": to_utc_iso(new_key.last_used_at),
             "revoked_at": None,
+            "expires_at": to_utc_iso(new_key.expires_at),  # #1165: None for session self-mint
             "bound_context_id": (
                 str(new_key.bound_context_id) if new_key.bound_context_id else None
             ),
@@ -800,6 +811,16 @@ async def delete_api_key_by_id(
     if api_key is None:
         raise HTTPException(status_code=404, detail="API key not found")
 
+    # A soft-revoked row is a retained forensic record (#1165). Any further
+    # delete/revoke must not touch it: a SESSION self-delete would HARD-delete
+    # the evidence (the member erasing the key an owner just revoked on them),
+    # and a repeated programmatic revoke would overwrite the original
+    # revoked_at timestamp and append a duplicate audit row. Treat an
+    # already-revoked key as not-found for both paths — uniform 404 so the
+    # forensic row's continued existence is not revealed (v0.42 max review).
+    if api_key.revoked_at is not None:
+        raise HTTPException(status_code=404, detail="API key not found")
+
     # Verify the URL ``workspace_id`` matches the key's real scope.
     # Without this, an authenticated user could pass an arbitrary
     # ``workspace_id`` in the path and the AuditLog row would record a
@@ -870,6 +891,14 @@ async def delete_api_key_by_id(
             },
         )
         api_key.revoked_at = utcnow()
+        # Zero-knowledge (Migration-035): drop any at-rest plaintext on revoke.
+        # The hourly auto-hide sweeper only clears rows with revoked_at IS NULL,
+        # so a key revoked inside its visibility window would otherwise retain a
+        # Fernet-decryptable plaintext copy indefinitely. Mirror the mint path
+        # and APIKeyManager.hide_key (v0.42 max review).
+        api_key.plaintext_encrypted = None
+        api_key.visibility_expires_at = None
+        api_key.hidden_at = utcnow()
         await db.commit()
         logger.info(
             "member_api_key_revoked",

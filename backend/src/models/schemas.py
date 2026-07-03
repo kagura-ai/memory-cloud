@@ -1311,6 +1311,10 @@ class MemberAPIKeyResponse(BaseModel):
     created_at: str
     last_used_at: str | None = None  # Issue #943: "Last used" column
     revoked_at: str | None
+    # Issue #1165: owner-provisioned keys REQUIRE expires_days, so the resulting
+    # expiry must be observable (it was write-only before v0.42). None = never
+    # expires (session self-mint).
+    expires_at: str | None = None
     bound_context_id: str | None = None  # Issue #626: public attribution
 
 
