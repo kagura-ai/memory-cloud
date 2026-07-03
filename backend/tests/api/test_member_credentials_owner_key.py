@@ -135,7 +135,15 @@ class TestOwnerProvisionedMint:
         ]
         assert len(audit_rows) == 1
         assert audit_rows[0].action == "member_api_key_provisioned"
-        assert audit_rows[0].user_metadata["target"] == "target-user"
+        assert audit_rows[0].resource == "api_key:42"
+        meta = audit_rows[0].user_metadata
+        assert meta["target"] == "target-user"
+        assert meta["via"] == "api_key"
+        # #1171 cleanup: routed through the shared helper — the MINTED key prefix
+        # lands under the distinct ``minted_key_prefix`` key (the helper reserves
+        # ``key_prefix`` for the ACTING owner key).
+        assert meta["minted_key_prefix"] == "kagura_abc"
+        assert meta["expires_days"] == 30
 
     def test_self_mint_forbidden(self, client, owner_gate, monkeypatch):
         # target == caller → anti self-replication 403
@@ -255,6 +263,14 @@ class TestOwnerProvisionedRevoke:
         ]
         assert len(audit_rows) == 1
         assert audit_rows[0].action == "member_api_key_revoked"
+        assert audit_rows[0].resource == "api_key:42"
+        meta = audit_rows[0].user_metadata
+        assert meta["target"] == "target-user"
+        assert meta["via"] == "api_key"
+        # #1171 cleanup: routed through the shared helper — the REVOKED key prefix
+        # lands under the distinct ``revoked_key_prefix`` key.
+        assert meta["revoked_key_prefix"] == "kagura_abc"
+        assert meta["self_revoke"] is False
 
     def test_cross_member_global_key_revoke_404(self, client, owner_gate, monkeypatch):
         # #1171 max-review: a global key (workspace_id NULL, bound_context_id NULL)

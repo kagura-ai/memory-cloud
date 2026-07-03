@@ -19,6 +19,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from auth.api_keys import APIKeyManager
 from auth.dependencies import APIKeyOrSessionUser, SessionUser
 from auth.programmatic_workspace_auth import (
+    audit_programmatic_workspace_action,
     authorize_workspace_management,
     is_api_key_principal,
     is_oauth_principal,
@@ -138,7 +139,7 @@ async def _owner_provisioned_mint(
     # KeyError/500), so read caller_id via .get() only after it passes (Copilot
     # review, PR #1171). session_required_role is unused for the API-key
     # principal but must be supplied.
-    await authorize_workspace_management(
+    principal = await authorize_workspace_management(
         user, workspace_id, db, session_required_role=WorkspaceRole.OWNER
     )
     caller_id = user.get("user_id")
@@ -182,23 +183,22 @@ async def _owner_provisioned_mint(
         new_key.visibility_expires_at = None
         new_key.plaintext_encrypted = None
 
-        from models.auth import AuditLog
-
-        db.add(
-            AuditLog(
-                user_email=user.get("email") or f"{caller_id}@api",
-                user_id=caller_id,
-                action="member_api_key_provisioned",
-                resource=f"api_key:{new_key.id}",
-                user_metadata={
-                    "workspace_id": str(workspace_id),
-                    "target": user_id,
-                    "key_prefix": new_key.key_prefix,  # the MINTED key
-                    "actor_key_prefix": user.get("api_key_prefix"),  # the ACTING owner key
-                    "expires_days": data.expires_days,
-                    "via": "api_key",
-                },
-            )
+        # Audit via the shared helper (#1164) — it records the ACTING owner key
+        # under metadata["key_prefix"] and hardcodes via/workspace_id/target; we
+        # override the resource to point at the minted key and carry the minted
+        # prefix under a distinct key so the actor prefix is not clobbered.
+        await audit_programmatic_workspace_action(
+            db,
+            principal,
+            user,
+            workspace_id,
+            action="member_api_key_provisioned",
+            target=user_id,
+            resource=f"api_key:{new_key.id}",
+            metadata={
+                "minted_key_prefix": new_key.key_prefix,  # the MINTED key
+                "expires_days": data.expires_days,
+            },
         )
         await db.commit()
 
@@ -253,10 +253,15 @@ async def get_member_credentials(
             message="OAuth bearer tokens cannot view member credentials. Use a workspace-owner API key."
         )
     programmatic = is_api_key_principal(user)
+    caller_role: str | None = None
     if programmatic:
-        await authorize_workspace_management(
+        # authorize_workspace_management already fetched the caller's owner
+        # WorkspaceMember row; reuse its role so the view-permission check below
+        # does not re-SELECT the same row (max code-review, PR #1171).
+        principal = await authorize_workspace_management(
             user, workspace_id, db, session_required_role=WorkspaceRole.OWNER
         )
+        caller_role = principal.member.role
 
     service = MemberCredentialsService(db)
 
@@ -265,6 +270,7 @@ async def get_member_credentials(
             workspace_id=workspace_id,
             user_id=user_id,
             requester_id=user["user_id"],
+            requester_role=caller_role,
         )
 
         # Issue #1165: metadata-only for programmatic principals — never leak
@@ -765,9 +771,10 @@ async def delete_api_key_by_id(
     # caller (Copilot review, PR #1171).
     caller_id = user.get("user_id")
     programmatic = is_api_key_principal(user)
+    principal = None
     if programmatic:
         # Owner gate on the path workspace (+ #963 confinement).
-        await authorize_workspace_management(
+        principal = await authorize_workspace_management(
             user, workspace_id, db, session_required_role=WorkspaceRole.OWNER
         )
         if user_id != caller_id:
@@ -840,24 +847,27 @@ async def delete_api_key_by_id(
     # the revoked_at update commit atomically in one transaction. Session
     # self-delete keeps the existing hard-delete semantics (#252, #626).
     soft_revoke = programmatic
-    from models.auth import AuditLog
 
     if soft_revoke:
-        db.add(
-            AuditLog(
-                user_email=user.get("email") or f"{caller_id}@api",
-                user_id=caller_id,
-                action="member_api_key_revoked",
-                resource=f"api_key:{key_id}",
-                user_metadata={
-                    "workspace_id": str(workspace_id),
-                    "target": user_id,
-                    "key_prefix": api_key.key_prefix,  # the REVOKED key
-                    "actor_key_prefix": user.get("api_key_prefix"),  # the ACTING owner key
-                    "self_revoke": user_id == caller_id,
-                    "via": "api_key",
-                },
-            )
+        # soft_revoke == programmatic, so authorize_workspace_management above
+        # returned a (non-None) api_key principal.
+        assert principal is not None
+        # Audit via the shared helper (#1164): it records the ACTING owner key
+        # under metadata["key_prefix"]; the revoked key's prefix is carried under
+        # a distinct key so the actor prefix is not clobbered. resource points at
+        # the revoked key, not the workspace.
+        await audit_programmatic_workspace_action(
+            db,
+            principal,
+            user,
+            workspace_id,
+            action="member_api_key_revoked",
+            target=user_id,
+            resource=f"api_key:{key_id}",
+            metadata={
+                "revoked_key_prefix": api_key.key_prefix,  # the REVOKED key
+                "self_revoke": user_id == caller_id,
+            },
         )
         api_key.revoked_at = utcnow()
         await db.commit()
@@ -874,6 +884,8 @@ async def delete_api_key_by_id(
 
     # Issue #626: audit log entry for public-bound key revocation.
     if bound_ctx_id is not None:
+        from models.auth import AuditLog
+
         db.add(
             AuditLog(
                 user_email=user.get("email") or f"{user_id}@api",

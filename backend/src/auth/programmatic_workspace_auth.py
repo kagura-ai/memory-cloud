@@ -166,6 +166,7 @@ async def audit_programmatic_workspace_action(
     *,
     action: str,
     target: str,
+    resource: str | None = None,
     metadata: dict | None = None,
 ) -> None:
     """Write an AuditLog row for a PROGRAMMATIC workspace-management mutation.
@@ -176,6 +177,14 @@ async def audit_programmatic_workspace_action(
     the actor, workspace, action, and target. Session actions are intentionally
     NOT audited here — this call is a no-op for session principals so the web-UI
     path keeps its existing (unaudited) behavior unchanged.
+
+    ``resource`` defaults to ``workspace:{workspace_id}`` (the member/invitation
+    surface, whose resource IS the workspace). The member-credential surface
+    (#1165) passes ``resource=f"api_key:{id}"`` so the row points at the specific
+    minted/revoked key. When the acting API key prefix is present, it is recorded
+    under ``metadata["key_prefix"]``; callers that also want to record the
+    minted/revoked key prefix must pass it via ``metadata`` under a DISTINCT key
+    (e.g. ``minted_key_prefix`` / ``revoked_key_prefix``) so it is not clobbered.
 
     The row is added to the session but NOT committed — the caller commits it
     atomically with the mutation it is auditing.
@@ -218,7 +227,7 @@ async def audit_programmatic_workspace_action(
             user_email=user.get("email") or f"{actor_id}@api",
             user_id=actor_id,
             action=action,
-            resource=f"workspace:{workspace_id}",
+            resource=resource if resource is not None else f"workspace:{workspace_id}",
             user_metadata=audit_metadata,
         )
     )

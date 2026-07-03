@@ -134,7 +134,11 @@ class MemberCredentialsService:
         return count
 
     async def get_or_create_credentials(
-        self, workspace_id: UUID, user_id: str, requester_id: str
+        self,
+        workspace_id: UUID,
+        user_id: str,
+        requester_id: str,
+        requester_role: str | None = None,
     ) -> dict[str, Any]:
         """Get or create default API keys for a member (Lazy initialization).
 
@@ -144,6 +148,11 @@ class MemberCredentialsService:
             workspace_id: Workspace ID
             user_id: Target user ID
             requester_id: Requesting user ID (for permission check)
+            requester_role: The requester's already-known workspace role, when a
+                caller has resolved it (e.g. the programmatic owner-key GET path,
+                where ``authorize_workspace_management`` already fetched the
+                caller's membership). Threaded into ``_check_can_view`` to skip a
+                duplicate ``WorkspaceMember`` SELECT. ``None`` → look it up.
 
         Returns:
             {
@@ -166,7 +175,9 @@ class MemberCredentialsService:
             AuthorizationError: If requester doesn't have permission (403)
         """
         # Permission check: Can view credentials?
-        await self._check_can_view(requester_id, workspace_id, user_id)
+        await self._check_can_view(
+            requester_id, workspace_id, user_id, requester_role=requester_role
+        )
 
         # Get ALL api keys for user + workspace.
         # Issue #626: public-bound keys have ``workspace_id=NULL`` (mutually
@@ -253,7 +264,11 @@ class MemberCredentialsService:
         return False
 
     async def _check_can_view(
-        self, requester_id: str, workspace_id: UUID, target_user_id: str
+        self,
+        requester_id: str,
+        workspace_id: UUID,
+        target_user_id: str,
+        requester_role: str | None = None,
     ) -> None:
         """Check if requester can view target user's credentials page.
 
@@ -265,6 +280,11 @@ class MemberCredentialsService:
             requester_id: Requesting user ID
             workspace_id: Workspace ID
             target_user_id: Target user ID
+            requester_role: The requester's already-known workspace role. When
+                supplied (non-self path), it is trusted instead of re-querying
+                ``WorkspaceMember`` — the programmatic owner-key GET path already
+                resolved it via ``authorize_workspace_management``. ``None`` →
+                look it up.
 
         Raises:
             AuthorizationError: If not allowed (403)
@@ -273,8 +293,10 @@ class MemberCredentialsService:
         if requester_id == target_user_id:
             return
 
-        # Check if requester is workspace owner/admin
-        requester_role = await self.get_workspace_role(requester_id, workspace_id)
+        # Check if requester is workspace owner/admin. Reuse a caller-provided
+        # role to avoid a duplicate SELECT; otherwise look it up.
+        if requester_role is None:
+            requester_role = await self.get_workspace_role(requester_id, workspace_id)
 
         if requester_role not in ["owner", "admin"]:
             raise AuthorizationError("Insufficient permissions")

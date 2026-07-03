@@ -173,6 +173,37 @@ class TestAuditProgrammaticAction:
         row = db.add.call_args[0][0]
         assert row.user_metadata["key_prefix"] == "kagura_abc123"
 
+    async def test_default_resource_is_workspace(self):
+        # #1164 member/invitation surface: resource defaults to the workspace.
+        db = MagicMock()
+        principal = AuthorizedPrincipal(kind="api_key", member=MagicMock())
+        await audit_programmatic_workspace_action(
+            db, principal, _api_key_user(), _WS, action="x", target="m1"
+        )
+        assert db.add.call_args[0][0].resource == f"workspace:{_WS}"
+
+    async def test_resource_override_and_distinct_prefix_key(self):
+        # #1165 member-credential surface: resource points at the key, the ACTING
+        # key prefix stays under key_prefix, and a caller-supplied minted prefix
+        # rides under its own distinct metadata key (not clobbered).
+        db = MagicMock()
+        principal = AuthorizedPrincipal(kind="api_key", member=MagicMock())
+        user = {**_api_key_user(), "api_key_prefix": "kagura_actor"}
+        await audit_programmatic_workspace_action(
+            db,
+            principal,
+            user,
+            _WS,
+            action="member_api_key_provisioned",
+            target="m1",
+            resource="api_key:42",
+            metadata={"minted_key_prefix": "kagura_minted"},
+        )
+        row = db.add.call_args[0][0]
+        assert row.resource == "api_key:42"
+        assert row.user_metadata["key_prefix"] == "kagura_actor"
+        assert row.user_metadata["minted_key_prefix"] == "kagura_minted"
+
     async def test_omits_key_prefix_when_absent(self):
         db = MagicMock()
         principal = AuthorizedPrincipal(kind="api_key", member=MagicMock())
