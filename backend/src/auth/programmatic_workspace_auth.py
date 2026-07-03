@@ -139,7 +139,9 @@ async def authorize_workspace_management(
                 key_workspace_id=str(key_workspace_id),
                 path_workspace_id=str(workspace_id),
             )
-            raise NotFoundException("Workspace not found")
+            # NotFoundException already appends " not found" — pass the bare
+            # resource name, else the detail reads "Workspace not found not found".
+            raise NotFoundException("Workspace")
         member = await perm_service.check_workspace_owner(user_id, workspace_id)
         return AuthorizedPrincipal(kind="api_key", member=member)
 

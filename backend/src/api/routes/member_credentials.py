@@ -23,6 +23,7 @@ from auth.programmatic_workspace_auth import (
     authorize_workspace_management,
     is_api_key_principal,
     is_oauth_principal,
+    is_session_principal,
 )
 from auth.workspace_roles import WorkspaceRole
 from db.base import get_db
@@ -513,6 +514,15 @@ async def create_api_key(
     if is_api_key_principal(user):
         return await _owner_provisioned_mint(workspace_id, user_id, data, user, db)
 
+    # Fail closed: only a POSITIVELY-identified session may reach the self-mint
+    # path. Reaching it by elimination (not OAuth, not API-key => assume session)
+    # would let an unrecognized principal shape mint a key; mirror the shared
+    # authorize_workspace_management helper's positive-session default. Legit
+    # sessions always carry the OIDC ``sub`` (SessionManager.create_session
+    # requires it) (v0.42 max review).
+    if not is_session_principal(user):
+        raise AuthorizationError(message="Unrecognized principal for API key creation")
+
     # Session path (#252 unchanged): self-mint only.
     if user["user_id"] != user_id:
         raise AuthorizationError(
@@ -793,12 +803,19 @@ async def delete_api_key_by_id(
             await _require_downgrade_target(
                 db, user_id, workspace_id, action_desc="Owner-provisioned revocation is limited to"
             )
-    elif caller_id != user_id:
-        # Session path (#252 unchanged): self-only.
-        raise AuthorizationError(
-            message="You can only delete your own API keys in a session. "
-            "To revoke another member's key, use a workspace-owner API key."
-        )
+    else:
+        # Fail closed: only a POSITIVELY-identified session may reach the
+        # self-only delete path (not OAuth, not API-key => assume session would
+        # let an unrecognized principal shape through). Legit sessions always
+        # carry the OIDC ``sub`` (v0.42 max review).
+        if not is_session_principal(user):
+            raise AuthorizationError(message="Unrecognized principal for API key deletion")
+        if caller_id != user_id:
+            # Session path (#252 unchanged): self-only.
+            raise AuthorizationError(
+                message="You can only delete your own API keys in a session. "
+                "To revoke another member's key, use a workspace-owner API key."
+            )
 
     from sqlalchemy import and_, select
 
