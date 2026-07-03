@@ -176,9 +176,11 @@ def _resolve_inferential(runs: list[dict[str, Any]], inferential_run: str) -> di
     run0 = [r for r in runs if r["label"].endswith("-run0")]
     if len(run0) == 1:
         return run0[0]
-    _fatal(
-        f"could not resolve an inferential run (no run labeled {inferential_run!r}, and "
-        f"{len(run0)} run(s) end with '-run0'; need exactly 1 candidate)"
+    # Explicit raise (not _fatal) so static analysis sees every path of this
+    # value-returning function terminate explicitly (PR #1177 CodeQL feedback).
+    raise SystemExit(
+        f"day5_analysis: could not resolve an inferential run (no run labeled "
+        f"{inferential_run!r}, and {len(run0)} run(s) end with '-run0'; need exactly 1 candidate)"
     )
 
 
