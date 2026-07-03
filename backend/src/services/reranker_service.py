@@ -55,6 +55,28 @@ DEFAULT_SELF_HOSTED_RERANK_MODEL = "dengcao/Qwen3-Reranker-8B:Q5_K_M"
 # literals in sync.
 DEFAULT_VLLM_RERANK_MODEL = "qwen3-reranker-0.6b"
 
+# Default model names of the REMOTE reranker providers (Voyage, Cohere). A
+# per-context reranker_model still carrying one of these is a stale default left
+# over from a previous remote provider — on the self-hosted / vLLM path it must
+# be re-resolved to the local model, not sent verbatim. Single source shared by
+# both resolution branches below.
+REMOTE_RERANKER_DEFAULT_MODELS = frozenset(
+    {
+        "rerank-2",
+        "rerank-2-lite",
+        "rerank-2.5",
+        "rerank-2.5-lite",
+        "rerank-multilingual-v3.0",
+        "rerank-english-v3.0",
+    }
+)
+
+
+def _bearer_headers(api_key: str | None) -> dict[str, str] | None:
+    """Authorization header for a self-hosted OpenAI-compatible backend behind
+    auth (vLLM --api-key etc.), or ``None`` for a keyless backend (Ollama)."""
+    return {"Authorization": f"Bearer {api_key}"} if api_key else None
+
 
 class RerankerProvider(ABC):
     """Abstract base class for reranker providers.
@@ -300,7 +322,7 @@ class SelfHostedReranker(RerankerProvider):
 
         scored: list[dict[str, Any]] = []
 
-        headers = {"Authorization": f"Bearer {self.api_key}"} if self.api_key else None
+        headers = _bearer_headers(self.api_key)
 
         async with httpx.AsyncClient(timeout=30.0) as client:
             # Score documents concurrently in batches
@@ -420,7 +442,7 @@ class VLLMReranker(RerankerProvider):
         # which never asks for more results than it has documents.
         effective_top_n = min(top_n, len(documents))
 
-        headers = {"Authorization": f"Bearer {self.api_key}"} if self.api_key else None
+        headers = _bearer_headers(self.api_key)
 
         async with httpx.AsyncClient(timeout=30.0) as client:
             resp = await client.post(
@@ -597,18 +619,8 @@ class RerankerService:
                 settings = get_settings()
                 # Avoid non-local default models left over from a previous
                 # remote provider (Voyage / Cohere) — otherwise a stale remote
-                # default model name would be sent to the local reranker. Keep
-                # this in sync with the remote providers' default models
-                # (VoyageReranker "rerank-2.5-lite", CohereReranker
-                # "rerank-multilingual-v3.0") and the _get_reranker_model table.
-                non_self_hosted_defaults = {
-                    "rerank-2",
-                    "rerank-2-lite",
-                    "rerank-2.5",
-                    "rerank-2.5-lite",
-                    "rerank-multilingual-v3.0",
-                    "rerank-english-v3.0",
-                }
+                # default model name would be sent to the local reranker.
+                non_self_hosted_defaults = REMOTE_RERANKER_DEFAULT_MODELS
                 model = ctx_config.reranker_model
                 if settings.rerank_base_url:
                     # Ops-level override: a true cross-encoder is served behind an

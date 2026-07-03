@@ -14,6 +14,35 @@ from db.base import get_db
 router = APIRouter(prefix="/system", tags=["system"])
 
 
+async def _fetch_v1_models(
+    base_url: str, api_key: str, *, timeout: float = 5.0
+) -> tuple[int | None, list[str]]:
+    """Probe ``{base_url}/v1/models`` (OpenAI-compatible; Ollama + vLLM).
+
+    Shared by the telemetry probe and the embedding-models availability check so
+    the bearer-header + null-``data`` handling live in one place. Returns
+    ``(status_code, model_ids)``; ``status_code`` is ``None`` on a connection
+    error, and ``model_ids`` is empty unless the response was 200. Best-effort:
+    never raises.
+    """
+    import httpx
+
+    headers = {"Authorization": f"Bearer {api_key}"} if api_key else None
+    try:
+        async with httpx.AsyncClient(timeout=timeout) as http:
+            resp = await http.get(f"{base_url}/v1/models", headers=headers)
+    except Exception:  # noqa: BLE001 — best-effort observability probe
+        return None, []
+    if resp.status_code != 200:
+        return resp.status_code, []
+    # ``data`` may be null (e.g. Ollama with no models pulled → {"data": null}).
+    try:
+        model_ids = [m["id"] for m in (resp.json().get("data") or []) if "id" in m]
+    except Exception:  # noqa: BLE001 — malformed body ⇒ reachable-but-no-models
+        model_ids = []
+    return 200, model_ids
+
+
 # ============================================================================
 # Schemas (Issue #43)
 # ============================================================================
@@ -200,30 +229,11 @@ async def get_system_telemetry(
             or bool(settings.rerank_base_url)
         )
         if self_hosted_explicitly_configured:
-            import httpx
-
-            async def _probe_v1_models(base_url: str, api_key: str) -> ServiceStatus | None:
-                """Probe {base}/v1/models. ok(+models) on 200; error on non-200/exc; None never returned here."""
-                headers = {"Authorization": f"Bearer {api_key}"} if api_key else None
-                try:
-                    async with httpx.AsyncClient(timeout=5.0) as http:
-                        resp = await http.get(f"{base_url}/v1/models", headers=headers)
-                    if resp.status_code == 200:
-                        # ``data`` may be null (e.g. Ollama with no models
-                        # pulled returns {"data": null}); coalesce to [].
-                        model_names = [
-                            m["id"] for m in (resp.json().get("data") or []) if "id" in m
-                        ]
-                        # `url` intentionally omitted (#991): the internal base
-                        # URL is not exposed on this non-admin endpoint.
-                        return ServiceStatus(status="ok", details={"models": model_names})
-                    return ServiceStatus(status="error", details={"http_status": resp.status_code})
-                except Exception as e:  # noqa: BLE001 — best-effort observability probe
-                    return ServiceStatus(status="error", details={"error": str(e)})
-
             # Probe the embedding/LLM backend when it is the configured one;
             # otherwise probe the dedicated rerank rig. First reachable ("ok")
-            # backend wins — self-hosted infrastructure is available.
+            # backend wins — self-hosted infrastructure is available. `url`
+            # intentionally omitted (#991): the internal base URL is not exposed
+            # on this non-admin endpoint.
             probe_targets: list[tuple[str, str]] = []
             if (
                 settings.embedding_provider == "self_hosted"
@@ -234,9 +244,16 @@ async def get_system_telemetry(
                 probe_targets.append((settings.rerank_base_url, settings.rerank_api_key))
 
             for base_url, api_key in probe_targets:
-                self_hosted_status = await _probe_v1_models(base_url, api_key)
-                if self_hosted_status.status == "ok":
+                status_code, model_names = await _fetch_v1_models(base_url, api_key)
+                if status_code == 200:
+                    self_hosted_status = ServiceStatus(status="ok", details={"models": model_names})
                     break
+                self_hosted_status = ServiceStatus(
+                    status="error",
+                    details=(
+                        {"http_status": status_code} if status_code else {"error": "unreachable"}
+                    ),
+                )
 
         # Memory stats (all users)
         from sqlalchemy import func
@@ -460,30 +477,20 @@ async def list_embedding_models(
     except Exception:
         pass  # Non-critical: OpenAI availability is best-effort
 
-    # Check self-hosted backend availability (only if explicitly configured).
-    # Probes the OpenAI-compatible /v1/models endpoint (Ollama + vLLM).
+    # Check self-hosted backend availability (only if explicitly configured),
+    # via the shared /v1/models probe. Detect explicit config via
+    # model_fields_set so setting SELF_HOSTED_BASE_URL to the default value
+    # still counts as configured.
     self_hosted_available = False
-    self_hosted_url = settings.self_hosted_base_url
-    # See telemetry probe above: detect explicit config via model_fields_set so
-    # setting SELF_HOSTED_BASE_URL to the default value still counts as configured.
     self_hosted_configured = (
         settings.embedding_provider == "self_hosted"
         or "self_hosted_base_url" in settings.model_fields_set
     )
     if self_hosted_configured:
-        try:
-            import httpx
-
-            headers = (
-                {"Authorization": f"Bearer {settings.self_hosted_api_key}"}
-                if settings.self_hosted_api_key
-                else None
-            )
-            async with httpx.AsyncClient(timeout=3.0) as http:
-                resp = await http.get(f"{self_hosted_url}/v1/models", headers=headers)
-                self_hosted_available = resp.status_code == 200
-        except Exception:
-            pass  # Backend not reachable — models marked as unavailable
+        status_code, _ = await _fetch_v1_models(
+            settings.self_hosted_base_url, settings.self_hosted_api_key, timeout=3.0
+        )
+        self_hosted_available = status_code == 200
 
     # Build model list
     models = []
