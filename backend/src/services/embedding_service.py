@@ -455,35 +455,17 @@ class EmbeddingService:
         if self.provider == "self_hosted":
             # Verify the self-hosted backend is reachable on first use only,
             # via the OpenAI-compatible /v1/models endpoint (served by both
-            # Ollama and vLLM — unlike the bare root, which only Ollama answers).
+            # Ollama and vLLM). Shared with SelfHostedProvider._verify (#18).
             if not self._self_hosted_verified:
-                import httpx
-
-                headers = (
-                    {"Authorization": f"Bearer {self.self_hosted_api_key}"}
-                    if self.self_hosted_api_key
-                    else None
+                from services.llm_providers.self_hosted_provider import (
+                    verify_self_hosted_reachable,
                 )
-                try:
-                    async with httpx.AsyncClient(timeout=5.0) as http:
-                        resp = await http.get(
-                            f"{self.self_hosted_base_url}/v1/models", headers=headers
-                        )
-                        if resp.status_code != 200:
-                            raise ConfigurationError(
-                                f"Self-hosted inference server not responding at "
-                                f"{self.self_hosted_base_url} (HTTP {resp.status_code})"
-                            )
-                except httpx.HTTPError as err:
-                    # Broad httpx.HTTPError (not just ConnectError) so a probe
-                    # timeout / protocol error surfaces as a clean
-                    # ConfigurationError rather than an unhandled 500 — matches
-                    # SelfHostedProvider._verify.
-                    raise ConfigurationError(
-                        f"Cannot connect to self-hosted inference server at "
-                        f"{self.self_hosted_base_url}. Is your backend running? "
-                        "(e.g. `ollama serve`, or a vLLM OpenAI-compatible server)"
-                    ) from err
+
+                await verify_self_hosted_reachable(
+                    self.self_hosted_base_url,
+                    self.self_hosted_api_key,
+                    label="inference server",
+                )
                 self._self_hosted_verified = True
             return AsyncOpenAI(
                 base_url=f"{self.self_hosted_base_url}/v1",

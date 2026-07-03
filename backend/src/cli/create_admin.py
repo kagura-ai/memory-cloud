@@ -234,18 +234,10 @@ def _configure_embedding_provider(db: Session, user_id: str, workspace_id) -> st
     self_hosted_key = os.getenv("SELF_HOSTED_API_KEY") or _get_env_from_docker(
         "SELF_HOSTED_API_KEY"
     )
-    try:
-        import urllib.request
+    from cli._env_probe import probe_self_hosted_available
 
-        # Send the bearer token so a vLLM backend started with --api-key
-        # answers the probe instead of returning 401 (keyless Ollama ignores it).
-        headers = {"Authorization": f"Bearer {self_hosted_key}"} if self_hosted_key else {}
-        req = urllib.request.Request(f"{self_hosted_url}/v1/models", method="GET", headers=headers)
-        with urllib.request.urlopen(req, timeout=3) as resp:
-            if resp.status == 200:
-                return "self_hosted"
-    except Exception:
-        pass  # Backend not running or unreachable — expected on most setups
+    if probe_self_hosted_available(self_hosted_url, self_hosted_key):
+        return "self_hosted"
 
     return None
 

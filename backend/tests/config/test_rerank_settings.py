@@ -49,6 +49,21 @@ def test_embedding_provider_self_hosted_unchanged(monkeypatch):
     assert s.embedding_provider == "self_hosted"
 
 
+def test_rerank_model_defaults_match_reranker_constants(clean_rerank_env):
+    """v0.42 review #25: the rerank default-model literals live in both settings
+    (for env override) and reranker_service (as the hard floor). settings.py
+    can't import reranker_service without a circular dependency, so this test is
+    the single guard that keeps the two in sync instead of a stale comment."""
+    from services.reranker_service import (
+        DEFAULT_SELF_HOSTED_RERANK_MODEL,
+        DEFAULT_VLLM_RERANK_MODEL,
+    )
+
+    s = _fresh_settings()
+    assert s.rerank_model == DEFAULT_VLLM_RERANK_MODEL
+    assert s.self_hosted_rerank_model == DEFAULT_SELF_HOSTED_RERANK_MODEL
+
+
 def test_whitespace_only_base_url_collapses_to_empty(clean_rerank_env):
     """A whitespace-only RERANK_BASE_URL must NOT enable the vLLM path."""
     clean_rerank_env.setenv("RERANK_BASE_URL", "   ")
