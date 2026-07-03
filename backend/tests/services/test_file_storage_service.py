@@ -902,16 +902,17 @@ class TestPurgeFilesForContexts:
         f2.deleted_at = None
         select_result = MagicMock()
         select_result.scalars.return_value.all.return_value = [f1, f2]
-        # First execute = the SELECT; subsequent = the usage UPSERTs.
-        db.execute.side_effect = [select_result, MagicMock(), MagicMock()]
+        # First execute = the SELECT; then ONE aggregated usage UPSERT for the
+        # workspace (both uploaded rows share it), not one per row (#30).
+        db.execute.side_effect = [select_result, MagicMock()]
 
         released = await service.purge_files_for_contexts([ctx_id])
 
         assert f1.deleted_at is not None
         assert f2.deleted_at is not None
         assert released == {workspace_id: 350}
-        # SELECT + one usage UPSERT per uploaded row; the caller owns commit.
-        assert db.execute.await_count == 3
+        # SELECT + a single per-workspace usage UPSERT; the caller owns commit.
+        assert db.execute.await_count == 2
         db.commit.assert_not_awaited()
 
     @pytest.mark.asyncio
