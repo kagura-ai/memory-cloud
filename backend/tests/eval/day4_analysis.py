@@ -153,10 +153,12 @@ def _resolve_inferential(
     run0 = [r for r in group if r["label"].endswith("-run0")]
     if len(run0) == 1:
         return run0[0]
-    _fatal(
-        f"embedding_model {embedding_model!r}: could not resolve an inferential run "
-        f"(no run labeled {inferential_run!r}, and {len(run0)} run(s) end with '-run0'; "
-        "need exactly 1 candidate)"
+    # Explicit raise (not _fatal) so static analysis sees every path of this
+    # value-returning function terminate explicitly (PR #1177 CodeQL feedback).
+    raise SystemExit(
+        f"day4_analysis: embedding_model {embedding_model!r}: could not resolve an "
+        f"inferential run (no run labeled {inferential_run!r}, and {len(run0)} run(s) "
+        "end with '-run0'; need exactly 1 candidate)"
     )
 
 
