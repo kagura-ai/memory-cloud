@@ -444,6 +444,12 @@ class VLLMReranker(RerankerProvider):
 
         headers = _bearer_headers(self.api_key)
 
+        # v0.42 review #31: a per-call AsyncClient is deliberate here, not a
+        # cached one. Rerank runs at most one HTTP request per call, so the
+        # client-setup cost is negligible against the network round-trip, and a
+        # module-level shared client would bind to a single event loop — fine in
+        # the app but a cross-loop failure/flake source in tests and worker
+        # forks. The connection-reuse win does not justify that fragility.
         async with httpx.AsyncClient(timeout=30.0) as client:
             resp = await client.post(
                 f"{self.base_url}/v1/rerank",

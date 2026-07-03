@@ -23,11 +23,11 @@
 
 import { useCallback } from "react";
 import { useTranslations } from "next-intl";
+import { FeatureDisabledNotice } from "@/components/common/FeatureDisabledNotice";
 import { PageContainer } from "@/components/common/PageContainer";
 import { PageHeader } from "@/components/common/PageHeader";
 import { ErrorBanner } from "@/components/common/ErrorBanner";
 import { SpinnerLoading } from "@/components/common/LoadingState";
-import { Alert, AlertDescription } from "@/components/ui/alert";
 import {
   CostDashboard,
   type CostDashboardFetchParams,
@@ -70,12 +70,10 @@ export default function WorkspaceCostPage() {
   }
   if (!systemFeatures.byok) {
     return (
-      <PageContainer>
-        <PageHeader title={t("title")} />
-        <Alert>
-          <AlertDescription>{t("featureDisabled")}</AlertDescription>
-        </Alert>
-      </PageContainer>
+      <FeatureDisabledNotice
+        title={t("title")}
+        message={t("featureDisabled")}
+      />
     );
   }
 

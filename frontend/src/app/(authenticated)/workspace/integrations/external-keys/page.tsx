@@ -13,6 +13,7 @@
 import { useEffect, useState } from "react";
 import { useRouter } from "next/navigation";
 import { useTranslations } from "next-intl";
+import { FeatureDisabledNotice } from "@/components/common/FeatureDisabledNotice";
 import { PageHeader } from "@/components/common/PageHeader";
 import { PageContainer } from "@/components/common/PageContainer";
 import { FeatureGuide } from "@/components/common/FeatureGuide";
@@ -369,12 +370,11 @@ export default function ExternalKeysPage() {
   }
   if (!systemFeatures.byok) {
     return (
-      <PageContainer>
-        <PageHeader title={t("title")} description={t("description")} />
-        <Alert>
-          <AlertDescription>{t("featureDisabled")}</AlertDescription>
-        </Alert>
-      </PageContainer>
+      <FeatureDisabledNotice
+        title={t("title")}
+        description={t("description")}
+        message={t("featureDisabled")}
+      />
     );
   }
 
