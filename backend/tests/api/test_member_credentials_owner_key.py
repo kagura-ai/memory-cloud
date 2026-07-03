@@ -92,6 +92,7 @@ def _mock_manager(monkeypatch):
     new_key.name = "ci-key"
     new_key.key_prefix = "kagura_abc"
     new_key.created_at = __import__("datetime").datetime(2026, 1, 1)
+    new_key.expires_at = __import__("datetime").datetime(2026, 1, 31)  # #1165: owner-set expiry
     mgr = MagicMock()
     mgr.create_key = AsyncMock(return_value=("kagura_PLAINTEXT", new_key))
     monkeypatch.setattr(mc, "APIKeyManager", lambda db: mgr)
@@ -255,6 +256,11 @@ class TestOwnerProvisionedRevoke:
         # Soft revoke: revoked_at set, row NOT deleted.
         assert api_key.revoked_at is not None
         fake_db.delete.assert_not_called()
+        # v0.42 review #9: zero-knowledge — soft revoke must drop the at-rest
+        # plaintext (sweeper skips revoked rows) and cancel the visibility window.
+        assert api_key.plaintext_encrypted is None
+        assert api_key.visibility_expires_at is None
+        assert api_key.hidden_at is not None
         # A programmatic revoke must leave a forensic AuditLog row (#1164/#1165).
         from models.auth import AuditLog
 
@@ -327,3 +333,54 @@ class TestOwnerProvisionedRevoke:
         assert r.json()["status"] == "revoked"
         assert api_key.revoked_at is not None
         fake_db.delete.assert_not_called()
+
+    def test_already_revoked_row_is_404_not_reprocessed(self, client, owner_gate, monkeypatch):
+        # v0.42 review #6: a soft-revoked (forensic) row must be untouchable — a
+        # repeated programmatic revoke must not overwrite revoked_at or append a
+        # duplicate audit row; uniform 404.
+        _override(_api_key_owner())
+        _mock_member_service(monkeypatch, target_role="member")
+
+        import datetime as _dt
+
+        original_revoked_at = _dt.datetime(2026, 1, 1)
+        api_key = MagicMock()
+        api_key.id = 42
+        api_key.workspace_id = _WS
+        api_key.bound_context_id = None
+        api_key.revoked_at = original_revoked_at  # already revoked
+        api_key.key_prefix = "kagura_abc"
+        fake_db = self._fake_db_with_key(api_key)
+
+        async def _get_db():
+            yield fake_db
+
+        app.dependency_overrides[get_db] = _get_db
+
+        r = client.delete(REVOKE_URL)
+        assert r.status_code == 404
+        assert api_key.revoked_at == original_revoked_at  # not overwritten
+        fake_db.delete.assert_not_called()
+        from models.auth import AuditLog
+
+        audit_rows = [
+            c.args[0] for c in fake_db.add.call_args_list if isinstance(c.args[0], AuditLog)
+        ]
+        assert audit_rows == []  # no duplicate forensic row
+
+
+class TestGetMemberCredentialsNonMember:
+    def test_non_member_target_is_404_not_500(self, client, owner_gate, monkeypatch):
+        # v0.42 review #36: get_workspace_role returns None for a removed/mistyped
+        # target; the non-optional target_user_role field must not raise a
+        # ValidationError swallowed into a 500 — return a clean 404.
+        _override(_api_key_owner())
+        from api.routes import member_credentials as mc
+
+        svc = MagicMock()
+        svc.get_or_create_credentials = AsyncMock(return_value={"api_keys": []})
+        svc.get_workspace_role = AsyncMock(return_value=None)  # not a member
+        monkeypatch.setattr(mc, "MemberCredentialsService", lambda db: svc)
+
+        r = client.get(LIST_URL)
+        assert r.status_code == 404, r.text

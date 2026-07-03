@@ -33,6 +33,22 @@ def test_defaults_when_unset(clean_rerank_env):
     assert s.rerank_model == "qwen3-reranker-0.6b"
 
 
+def test_legacy_embedding_provider_ollama_coerced_to_self_hosted(monkeypatch):
+    """v0.42 review #4: the retired EMBEDDING_PROVIDER=ollama value must coerce
+    to 'self_hosted' (with a warning), not be accepted verbatim and route
+    self-hosted embedding traffic into the OpenAI client path."""
+    monkeypatch.setenv("EMBEDDING_PROVIDER", "ollama")
+    with pytest.warns(UserWarning, match="EMBEDDING_PROVIDER=ollama is retired"):
+        s = Settings(_env_file=None)
+    assert s.embedding_provider == "self_hosted"
+
+
+def test_embedding_provider_self_hosted_unchanged(monkeypatch):
+    monkeypatch.setenv("EMBEDDING_PROVIDER", "self_hosted")
+    s = Settings(_env_file=None)
+    assert s.embedding_provider == "self_hosted"
+
+
 def test_whitespace_only_base_url_collapses_to_empty(clean_rerank_env):
     """A whitespace-only RERANK_BASE_URL must NOT enable the vLLM path."""
     clean_rerank_env.setenv("RERANK_BASE_URL", "   ")

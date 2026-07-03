@@ -62,6 +62,20 @@ class TestNeuralMemoryConfig:
         config = NeuralMemoryConfig()
         assert config.gradient_clipping >= 0
 
+    def test_legacy_sleep_llm_provider_ollama_coerced(self):
+        """v0.42 review #3: the retired sleep_llm_provider='ollama' (stale env or
+        un-migrated DB row) must coerce to 'self_hosted' with a warning, not raise
+        and take down every NeuralMemoryConfig construction."""
+        with pytest.warns(UserWarning, match="SLEEP_LLM_PROVIDER=ollama is retired"):
+            config = NeuralMemoryConfig(sleep_llm_provider="ollama")
+        assert config.sleep_llm_provider == "self_hosted"
+
+    def test_sleep_llm_provider_invalid_still_raises(self):
+        """Coercion is scoped to the legacy 'ollama' alias only — a genuinely
+        invalid provider must still raise."""
+        with pytest.raises(ValueError, match="sleep_llm_provider must be"):
+            NeuralMemoryConfig(sleep_llm_provider="bogus")
+
 
 class TestEdgeGateCalibrationConfig:
     """Edge-gate percentile calibration config fields (Issue #982).

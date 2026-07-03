@@ -141,6 +141,7 @@ class TestSerializeApiKeyLastUsed:
             visibility_expires_at=None,
             created_at=datetime(2026, 1, 1, 12, 0, 0),
             revoked_at=None,
+            expires_at=None,
             last_used_at=last_used_at,
             bound_context_id=None,
         )
