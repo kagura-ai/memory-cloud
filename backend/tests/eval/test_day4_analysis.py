@@ -18,9 +18,11 @@ import pytest
 
 from tests.eval.day4_analysis import (
     ALPHA,
+    DELTA_HYBRID,
     DELTA_LEAK,
     GATED_ARMS,
     PRODUCTION_ARM,
+    _h1_verdict,
     analyze,
 )
 
@@ -190,6 +192,32 @@ class TestH1:
         assert result["per_embedder"]["m1"]["h1"]["best_single"] == "keyword"
 
 
+class TestH1VerdictPure:
+    """``_h1_verdict`` is the small pure gating function factored out of the
+    H1 block precisely so combinations like "H1 passes but H0 does not
+    reject" can be unit-tested directly — a hybrid arm that decisively beats
+    best_single tends to also make the omnibus reject, so that combination
+    is awkward (not impossible, but not something worth relying on the RNG
+    for) to hit by constructing a full synthetic run."""
+
+    def test_pass_true_but_h0_does_not_reject_yields_pass_gated_false_and_untested(self):
+        verdict = _h1_verdict(mean_=0.1, ci_low=0.02, h0_reject=False)
+        assert verdict == {"pass": True, "pass_gated": False, "tested": False}
+
+    def test_pass_true_and_h0_rejects_yields_pass_gated_true_and_tested(self):
+        verdict = _h1_verdict(mean_=0.1, ci_low=0.02, h0_reject=True)
+        assert verdict == {"pass": True, "pass_gated": True, "tested": True}
+
+    def test_ci_low_not_above_zero_fails_regardless_of_h0(self):
+        assert _h1_verdict(mean_=0.1, ci_low=0.0, h0_reject=True)["pass"] is False
+        assert _h1_verdict(mean_=0.1, ci_low=-0.01, h0_reject=True)["pass"] is False
+
+    def test_mean_below_delta_hybrid_fails_even_with_positive_ci_low(self):
+        verdict = _h1_verdict(mean_=DELTA_HYBRID - 0.001, ci_low=0.01, h0_reject=True)
+        assert verdict["pass"] is False
+        assert verdict["pass_gated"] is False
+
+
 class TestH3:
     def test_gap_is_public_minus_heldout_on_the_production_arm(self, tmp_path):
         heldout_vals = [random.Random(777).uniform(0.25, 0.35) for _ in range(_N_HELDOUT)]
@@ -249,6 +277,39 @@ class TestAlignmentGuard:
         path.write_text(json.dumps(result_json), encoding="utf-8")
 
         with pytest.raises(SystemExit, match="hybrid"):
+            analyze([path], inferential_run="day4-m1-run0")
+
+    def test_swapped_split_pattern_same_length_different_identities_is_fatal(self, tmp_path):
+        """Two arms can have equal-length heldout subsets that nonetheless
+        name different query_ids — e.g. one arm's split labels are swapped
+        for a heldout/public pair, leaving the FULL query_id sequence (and
+        therefore ``_assert_aligned``) untouched but changing exactly which
+        query_ids the heldout filter picks out. Positional pairing would
+        silently misalign here; the query_id-keyed join must catch it."""
+        n = _N_HELDOUT + _N_PUBLIC
+        splits = _splits()
+        values = [random.Random(21).uniform(0.2, 0.5) for _ in range(n)]
+        arms = {arm: {"per_query": _per_query(values, splits)} for arm in GATED_ARMS}
+
+        hybrid_records = [dict(rec) for rec in arms["hybrid"]["per_query"]]
+        hybrid_records[0]["split"], hybrid_records[_N_HELDOUT]["split"] = (
+            hybrid_records[_N_HELDOUT]["split"],
+            hybrid_records[0]["split"],
+        )
+        arms["hybrid"]["per_query"] = hybrid_records
+        # Sanity: still 40 heldout records for "hybrid" (same length as every
+        # other arm) — only the query_id identities differ (q0 dropped out,
+        # q40 came in), and the FULL query_id sequence is untouched.
+        assert sum(1 for rec in hybrid_records if rec["split"] == "heldout") == _N_HELDOUT
+        assert [rec["query_id"] for rec in hybrid_records] == [
+            rec["query_id"] for rec in arms["keyword"]["per_query"]
+        ]
+
+        result_json = {"embedding_model": "m1", "label": "day4-m1-run0", "arms": arms}
+        path = tmp_path / "day4-m1-run0.json"
+        path.write_text(json.dumps(result_json), encoding="utf-8")
+
+        with pytest.raises(SystemExit, match="q0"):
             analyze([path], inferential_run="day4-m1-run0")
 
 

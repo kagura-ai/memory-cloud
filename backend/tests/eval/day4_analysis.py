@@ -193,6 +193,82 @@ def _rr10(run: dict[str, Any], arm: str, split: str) -> list[float]:
     return [rec["rr@10"] for rec in run["arms"][arm]["per_query"] if rec["split"] == split]
 
 
+def _p5_by_query_id(run: dict[str, Any], arm: str, split: str) -> dict[str, float]:
+    """Per-query P@5 for ``arm`` filtered to ``split``, keyed by ``query_id``.
+
+    Dict insertion order mirrors ``arm``'s own filtered ``per_query`` record
+    order (Python dicts preserve insertion order), so a caller can recover a
+    deterministic value ordering straight from any one arm's dict via
+    ``_join_by_query_id``.
+    """
+    return {
+        rec["query_id"]: rec["p@5"]
+        for rec in run["arms"][arm]["per_query"]
+        if rec["split"] == split
+    }
+
+
+def _join_by_query_id(
+    by_arm: dict[str, dict[str, float]], reference_arm: str, *, label: str, split: str
+) -> dict[str, list[float]]:
+    """Query_id-keyed join of ``by_arm``'s ``{query_id: value}`` dicts.
+
+    A Task-3 review flag: pairing arm-vs-arm ``split``-filtered values by list
+    POSITION is only correct when every arm's filtered records name the exact
+    same query_ids in the exact same order. ``_assert_aligned`` guarantees the
+    FULL (unfiltered) per_query query_id sequence matches across arms, but not
+    that ``split`` labels for a given query_id agree between arms — a per-arm
+    split divergence would silently misalign the heldout-filtered values that
+    positional zip/dict-comprehension pairing assumed were aligned.
+
+    Fatal (``SystemExit``), naming the FIRST query_id (in ``reference_arm``'s
+    own order, or — if ``reference_arm``'s key set is otherwise a subset of
+    another arm's — in that other arm's own order) present in one arm's key
+    set but missing from another's, if any arm's key set differs from
+    ``reference_arm``'s.
+
+    Returns ``{arm: values}`` with every arm's values reordered to
+    ``reference_arm``'s own query_id order — one deterministic shared
+    ordering, derived from real query identities rather than list position.
+    """
+    reference_ids = list(by_arm[reference_arm])
+    reference_set = set(reference_ids)
+    for arm, values in by_arm.items():
+        if arm == reference_arm:
+            continue
+        arm_set = set(values)
+        if arm_set == reference_set:
+            continue
+        for query_id in reference_ids:
+            if query_id not in arm_set:
+                _fatal(
+                    f"run {label!r}: split={split!r} query_id {query_id!r} present in "
+                    f"{reference_arm!r} but missing from {arm!r} — heldout-filtered "
+                    "arms must name the exact same query_ids for query_id-keyed pairing"
+                )
+        for query_id in values:
+            if query_id not in reference_set:
+                _fatal(
+                    f"run {label!r}: split={split!r} query_id {query_id!r} present in "
+                    f"{arm!r} but missing from {reference_arm!r} — heldout-filtered "
+                    "arms must name the exact same query_ids for query_id-keyed pairing"
+                )
+    return {arm: [values[query_id] for query_id in reference_ids] for arm, values in by_arm.items()}
+
+
+def _h1_verdict(mean_: float, ci_low: float, h0_reject: bool) -> dict[str, bool]:
+    """H1's ``pass``/``pass_gated``/``tested`` flags from their 3 inputs.
+
+    Split out as a small pure function (no bootstrap/omnibus computation
+    inside) so the pass/gated-by-H0 interaction — in particular the
+    ``pass=True, tested=False`` combination, which requires an H0 non-reject
+    alongside a decisive H1 contrast and is otherwise awkward to construct
+    naturally — can be unit-tested directly.
+    """
+    h1_pass = ci_low > 0 and mean_ >= DELTA_HYBRID
+    return {"pass": h1_pass, "pass_gated": h1_pass and h0_reject, "tested": h0_reject}
+
+
 def _analyze_group(
     embedding_model: str, group: list[dict[str, Any]], inferential_run_label: str
 ) -> dict[str, Any]:
@@ -208,32 +284,53 @@ def _analyze_group(
     inferential = _resolve_inferential(embedding_model, group, inferential_run_label)
     _assert_aligned(inferential)
 
-    heldout_p5 = {arm: _p5(inferential, arm, "heldout") for arm in GATED_ARMS}
+    # Query_id-keyed (not positional) per-arm heldout values — see
+    # ``_join_by_query_id`` for why positional pairing across independently
+    # split-filtered arms is unsafe.
+    heldout_by_query = {arm: _p5_by_query_id(inferential, arm, "heldout") for arm in GATED_ARMS}
     public_p5 = {arm: _p5(inferential, arm, "public") for arm in GATED_ARMS}
+    heldout_p5 = _join_by_query_id(
+        heldout_by_query, GATED_ARMS[0], label=inferential["label"], split="heldout"
+    )
     n_heldout = len(heldout_p5[GATED_ARMS[0]])
     n_public = len(public_p5[GATED_ARMS[0]])
 
-    # 1. H0 omnibus (gate).
+    # 1. H0 omnibus (gate). All 4 arms' heldout value lists share one ordering
+    # (GATED_ARMS[0]'s query_id order, via the join above) — the permutation
+    # test permutes within-index, so this alignment is load-bearing.
     h0_raw = permutation_omnibus(heldout_p5, n_permutations=N_RESAMPLES, seed=SEED)
     h0_reject = h0_raw["p_value"] < ALPHA
     h0 = {"stat": h0_raw["stat"], "p_value": h0_raw["p_value"], "reject": h0_reject}
 
-    # 2. H1 (computed always; interpretation gated by H0).
+    # 2. H1 (computed always; interpretation gated by H0). Paired query_id-
+    # keyed against the hybrid arm's own filtered order (not GATED_ARMS[0]'s),
+    # per the H1 contrast's own reference arm.
     keyword_mean = mean(heldout_p5["keyword"])
     semantic_mean = mean(heldout_p5["semantic"])
     best_single = "semantic" if semantic_mean > keyword_mean else "keyword"
-    h1_diffs = [h - b for h, b in zip(heldout_p5["hybrid"], heldout_p5[best_single], strict=True)]
+    hybrid_vs_best_single = _join_by_query_id(
+        {"hybrid": heldout_by_query["hybrid"], best_single: heldout_by_query[best_single]},
+        "hybrid",
+        label=inferential["label"],
+        split="heldout",
+    )
+    h1_diffs = [
+        h - b
+        for h, b in zip(
+            hybrid_vs_best_single["hybrid"], hybrid_vs_best_single[best_single], strict=True
+        )
+    ]
     h1_ci = paired_bca_ci(h1_diffs, n_resamples=N_RESAMPLES, alpha=ALPHA, seed=SEED)
-    h1_pass = h1_ci["ci_low"] > 0 and h1_ci["mean"] >= DELTA_HYBRID
+    h1_verdict = _h1_verdict(h1_ci["mean"], h1_ci["ci_low"], h0_reject)
     h1 = {
         "best_single": best_single,
         "mean": h1_ci["mean"],
         "ci_low": h1_ci["ci_low"],
         "ci_high": h1_ci["ci_high"],
-        "pass": h1_pass,
-        "pass_gated": h1_pass and h0_reject,
+        "pass": h1_verdict["pass"],
+        "pass_gated": h1_verdict["pass_gated"],
         "gated_by_h0": True,
-        "tested": h0_reject,
+        "tested": h1_verdict["tested"],
     }
 
     # 3. H3 (supporting) — production-arm public/heldout leak gap.
