@@ -1,5 +1,7 @@
 """Tests for NeuralMemoryConfig."""
 
+from unittest.mock import AsyncMock, MagicMock
+
 import pytest
 
 from neural.config import NeuralMemoryConfig
@@ -339,3 +341,143 @@ class TestTagCooccurrenceConfig:
         assert config.tag_cooccurrence_max_per_remember == 25
         assert config.tag_cooccurrence_hub_threshold == 0.40
         assert config.tag_cooccurrence_max_degree_per_node == 75
+
+
+class TestFromDbSleepLLMPrecedence:
+    """#1182: neural_config DB rows win over SLEEP_LLM_* env — but silently.
+
+    A stale row overriding the operator's env pointed the Sleep judge at a
+    dead endpoint with zero signal (week1-derisk Day-5, llm_call_failures=5/5).
+    from_db must WARN on an explicit DB-vs-env mismatch, and
+    SLEEP_LLM_FORCE_ENV=1 must pin env over DB for exactly this pair.
+    """
+
+    @pytest.fixture(autouse=True)
+    def _fresh_cache(self, monkeypatch):
+        # from_db caches for 5 minutes under a single key — a hit would make
+        # every test after the first assert against the first test's config.
+        NeuralMemoryConfig.invalidate_cache()
+        # Neutral baseline: no FORCE_ENV leakage from the host environment.
+        monkeypatch.delenv("SLEEP_LLM_FORCE_ENV", raising=False)
+        yield
+        NeuralMemoryConfig.invalidate_cache()
+
+    @staticmethod
+    def _db(rows: dict):
+        class _Row:
+            def __init__(self, key, value):
+                self.key = key
+                self._value = value
+
+            def get_typed_value(self):
+                return self._value
+
+        result = MagicMock()
+        result.scalars.return_value.all.return_value = [_Row(k, v) for k, v in rows.items()]
+        db = MagicMock()
+        db.execute = AsyncMock(return_value=result)
+        return db
+
+    @staticmethod
+    def _warn_spy(monkeypatch):
+        import neural.config as neural_config_mod
+
+        spy = MagicMock()
+        monkeypatch.setattr(neural_config_mod, "logger", spy)
+        return spy
+
+    async def test_db_wins_by_default_and_warns_on_mismatch(self, monkeypatch):
+        monkeypatch.setenv("SLEEP_LLM_PROVIDER", "self_hosted")
+        monkeypatch.setenv("SLEEP_LLM_MODEL", "qwen3.5:9b")
+        spy = self._warn_spy(monkeypatch)
+
+        config = await NeuralMemoryConfig.from_db(
+            self._db({"sleep_llm_provider": "openai", "sleep_llm_model": "gpt-5-nano"})
+        )
+
+        assert config.sleep_llm_provider == "openai"
+        assert config.sleep_llm_model == "gpt-5-nano"
+        mismatch_calls = [
+            c for c in spy.warning.call_args_list if c.args[0] == "sleep_llm_config_mismatch"
+        ]
+        assert len(mismatch_calls) == 2
+        provider_call = next(c for c in mismatch_calls if c.kwargs["key"] == "sleep_llm_provider")
+        assert provider_call.kwargs["db_value"] == "openai"
+        assert provider_call.kwargs["env_value"] == "self_hosted"
+        assert provider_call.kwargs["winner"] == "db"
+
+    async def test_force_env_pins_env_over_db(self, monkeypatch):
+        monkeypatch.setenv("SLEEP_LLM_PROVIDER", "self_hosted")
+        monkeypatch.setenv("SLEEP_LLM_MODEL", "qwen3.5:9b")
+        monkeypatch.setenv("SLEEP_LLM_FORCE_ENV", "1")
+        spy = self._warn_spy(monkeypatch)
+
+        config = await NeuralMemoryConfig.from_db(
+            self._db({"sleep_llm_provider": "openai", "sleep_llm_model": "gpt-5-nano"})
+        )
+
+        assert config.sleep_llm_provider == "self_hosted"
+        assert config.sleep_llm_model == "qwen3.5:9b"
+        mismatch_calls = [
+            c for c in spy.warning.call_args_list if c.args[0] == "sleep_llm_config_mismatch"
+        ]
+        assert len(mismatch_calls) == 2
+        assert all(c.kwargs["winner"] == "env" for c in mismatch_calls)
+
+    async def test_no_warn_when_db_and_env_agree(self, monkeypatch):
+        monkeypatch.setenv("SLEEP_LLM_PROVIDER", "self_hosted")
+        monkeypatch.delenv("SLEEP_LLM_MODEL", raising=False)
+        spy = self._warn_spy(monkeypatch)
+
+        config = await NeuralMemoryConfig.from_db(self._db({"sleep_llm_provider": "self_hosted"}))
+
+        assert config.sleep_llm_provider == "self_hosted"
+        assert not [
+            c for c in spy.warning.call_args_list if c.args[0] == "sleep_llm_config_mismatch"
+        ]
+
+    async def test_no_warn_for_legacy_ollama_db_row_vs_coerced_env(self, monkeypatch):
+        # A pre-#1160 DB row 'ollama' and env 'self_hosted' are the SAME
+        # provider after __post_init__ coercion — the mismatch check must
+        # canonicalize the DB side or it false-positives (Copilot, PR #1186).
+        monkeypatch.setenv("SLEEP_LLM_PROVIDER", "self_hosted")
+        monkeypatch.delenv("SLEEP_LLM_MODEL", raising=False)
+        spy = self._warn_spy(monkeypatch)
+
+        with pytest.warns(UserWarning, match="SLEEP_LLM_PROVIDER=ollama is retired"):
+            config = await NeuralMemoryConfig.from_db(self._db({"sleep_llm_provider": "ollama"}))
+
+        assert config.sleep_llm_provider == "self_hosted"
+        assert not [
+            c for c in spy.warning.call_args_list if c.args[0] == "sleep_llm_config_mismatch"
+        ]
+
+    async def test_db_wins_silently_when_env_unset(self, monkeypatch):
+        monkeypatch.delenv("SLEEP_LLM_PROVIDER", raising=False)
+        monkeypatch.delenv("SLEEP_LLM_MODEL", raising=False)
+        spy = self._warn_spy(monkeypatch)
+
+        config = await NeuralMemoryConfig.from_db(
+            self._db({"sleep_llm_provider": "openai", "sleep_llm_model": "gpt-5-nano"})
+        )
+
+        assert config.sleep_llm_provider == "openai"
+        assert config.sleep_llm_model == "gpt-5-nano"
+        assert not [
+            c for c in spy.warning.call_args_list if c.args[0] == "sleep_llm_config_mismatch"
+        ]
+
+    async def test_force_env_is_noop_when_env_unset(self, monkeypatch):
+        # FORCE_ENV only pins values the operator explicitly set — with the
+        # env var absent the DB row must still win (defaults are not "env").
+        monkeypatch.delenv("SLEEP_LLM_PROVIDER", raising=False)
+        monkeypatch.delenv("SLEEP_LLM_MODEL", raising=False)
+        monkeypatch.setenv("SLEEP_LLM_FORCE_ENV", "1")
+        spy = self._warn_spy(monkeypatch)
+
+        config = await NeuralMemoryConfig.from_db(self._db({"sleep_llm_provider": "openai"}))
+
+        assert config.sleep_llm_provider == "openai"
+        assert not [
+            c for c in spy.warning.call_args_list if c.args[0] == "sleep_llm_config_mismatch"
+        ]
