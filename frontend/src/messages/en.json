@@ -2834,6 +2834,7 @@
       "status": {
         "running": "Running",
         "completed": "Completed",
+        "degraded": "Degraded",
         "failed": "Failed",
         "cancelled": "Cancelled",
         "rolled_back": "Rolled back"

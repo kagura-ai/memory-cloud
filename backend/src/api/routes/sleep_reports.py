@@ -111,7 +111,7 @@ class SleepReportDetailResponse(BaseModel):
 # Shared validation
 # ============================================================================
 
-_VALID_STATUSES = {"running", "completed", "failed", "cancelled", "rolled_back"}
+_VALID_STATUSES = {"running", "completed", "degraded", "failed", "cancelled", "rolled_back"}
 
 
 def _validate_status(status_filter: str | None) -> None:

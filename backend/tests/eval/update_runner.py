@@ -178,6 +178,7 @@ async def _run_mc_sleep(db: Any, owner: str, ws_id: Any, ctx_id: Any) -> dict[st
 # per-field try/except loop is easy to audit against ``models.sleep.SleepReport``.
 _SLEEP_REPORT_FIELDS: tuple[str, ...] = (
     "status",
+    "llm_call_failures",  # #1183: first-class judge-failure count
     "memories_processed",
     "edges_created",
     "memories_merged",

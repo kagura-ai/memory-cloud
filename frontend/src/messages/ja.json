@@ -2834,6 +2834,7 @@
       "status": {
         "running": "実行中",
         "completed": "完了",
+        "degraded": "一部失敗",
         "failed": "失敗",
         "cancelled": "キャンセル",
         "rolled_back": "ロールバック済み"
