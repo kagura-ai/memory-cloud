@@ -120,7 +120,11 @@ def _split_oversize_cluster(
     stays within ``max_size``. The tightest duplicates coalesce first, every
     component stays judgeable in one LLM batch, and skipped cross-component
     pairs are re-candidates next run (post-merge, the landscape shrinks).
-    Deterministic: ties break on the stringified pair ids.
+    Deterministic: pair endpoints are CANONICALIZED (str-ascending) before
+    ties break on the stringified ids — ``_find_similar_pairs`` emits
+    ``(memory.id, hit_id)`` in Qdrant-iteration orientation, so sorting on
+    the raw orientation would make equal-score splits vary run-to-run
+    (Copilot, PR #1188).
 
     Args:
         cluster: member ids of one oversize union-find cluster.
@@ -136,7 +140,11 @@ def _split_oversize_cluster(
         other edges, and same-component skips are never counted).
     """
     internal = sorted(
-        (p for p in pairs if p[0] in cluster and p[1] in cluster),
+        (
+            (*sorted((p[0], p[1]), key=str), p[2])
+            for p in pairs
+            if p[0] in cluster and p[1] in cluster
+        ),
         key=lambda p: (-p[2], str(p[0]), str(p[1])),
     )
 

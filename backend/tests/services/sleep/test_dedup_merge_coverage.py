@@ -619,11 +619,12 @@ class TestExecuteOrchestration:
 
         assert result.details["oversize_clusters"] == 1
         assert result.details["oversize_max_size"] == n
-        # 12 members at cap 5 on a COMPLETE equal-score graph: the greedy
-        # walk always fills components to capacity before starting new ones
-        # (every node pair has an edge, so a below-cap component always finds
-        # a mergeable partner while one exists) → deterministically (5,5,2),
-        # i.e. exactly 3 subclusters regardless of UUID tie-break order.
+        # 12 members at cap 5 on a COMPLETE equal-score graph: with canonical
+        # (str-ascending) pair orientation the tie-break walk is lexicographic
+        # — the str-smallest node's edges come first, so its component fills
+        # to capacity (5), then the next-smallest unmerged node fills the
+        # second (5), leaving the final pair (2) → deterministically (5,5,2),
+        # exactly 3 subclusters for ANY concrete uuid values.
         assert result.details["split_subclusters"] == 3
         assert result.details["merged"] > 0
         assert result.details["deferred_pairs"] > 0
@@ -953,3 +954,19 @@ class TestSplitOversizeCluster:
 
         assert subclusters == []
         assert skipped == 0
+
+    def test_split_is_orientation_independent(self):
+        """_find_similar_pairs emits (memory.id, hit_id) in Qdrant-iteration
+        orientation — the SAME logical pair set with flipped orientations
+        must produce the SAME split (Copilot, PR #1188)."""
+        from services.sleep.dedup_merge import _split_oversize_cluster
+
+        ids = [uuid4() for _ in range(8)]
+        pairs = [(ids[i], ids[j], 0.95) for i in range(len(ids)) for j in range(i + 1, len(ids))]
+        flipped = [(b, a, s) for a, b, s in pairs]
+
+        subclusters_fwd, skipped_fwd = _split_oversize_cluster(set(ids), pairs, max_size=3)
+        subclusters_rev, skipped_rev = _split_oversize_cluster(set(ids), flipped, max_size=3)
+
+        assert {frozenset(s) for s in subclusters_fwd} == {frozenset(s) for s in subclusters_rev}
+        assert skipped_fwd == skipped_rev
