@@ -160,6 +160,20 @@ class TestOwnerProvisionedMint:
         r = client.post(MINT_URL, json={"name": "k", "expires_days": 30})
         assert r.status_code == 403
 
+    def test_admin_target_403_names_role_without_enum_repr(self, client, owner_gate, monkeypatch):
+        # Regression for #1180: the REAL service returns WorkspaceRole enum
+        # members, but the string mocks above masked the ``{target_role!r}``
+        # repr leak — pass the actual enum and pin the client-facing message.
+        from auth.workspace_roles import WorkspaceRole
+
+        _override(_api_key_owner())
+        _mock_member_service(monkeypatch, target_role=WorkspaceRole.ADMIN)
+        r = client.post(MINT_URL, json={"name": "k", "expires_days": 30})
+        assert r.status_code == 403
+        message = r.json()["message"]
+        assert "role='admin'" in message
+        assert "<WorkspaceRole" not in message
+
     def test_missing_expires_days_400(self, client, owner_gate, monkeypatch):
         _override(_api_key_owner())
         _mock_member_service(monkeypatch, target_role="member")
