@@ -9,8 +9,12 @@ import time
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, ClassVar
 
+from utils.logger import get_logger
+
 if TYPE_CHECKING:
     from sqlalchemy.ext.asyncio import AsyncSession
+
+logger = get_logger(__name__)
 
 # Cache TTL in seconds (5 minutes)
 _CONFIG_CACHE_TTL = 300
@@ -595,11 +599,69 @@ class NeuralMemoryConfig:
         )
 
     @classmethod
+    def _resolve_sleep_llm(cls, configs: dict, base_config: "NeuralMemoryConfig") -> dict[str, str]:
+        """Resolve the Sleep LLM provider/model pair from DB rows vs env (#1182).
+
+        A ``neural_config`` DB row wins over the container's ``SLEEP_LLM_*``
+        env by default — but that override used to be silent, so a stale row
+        could point the Sleep judge at a dead endpoint with zero signal
+        (week1-derisk Day-5: every judge call failed while config looked
+        healthy). When BOTH sources are explicitly set and disagree, WARN with
+        both values and the winner. ``SLEEP_LLM_FORCE_ENV=1`` pins env over DB
+        for this pair without requiring surgery on the table.
+
+        Args:
+            configs: key → typed value mapping read from ``neural_config``.
+            base_config: env-resolved config (``from_env()`` output; its
+                values are the env vars where set, else the dataclass
+                defaults — already ollama→self_hosted coerced).
+
+        Returns:
+            Mapping with resolved ``sleep_llm_provider`` / ``sleep_llm_model``.
+        """
+        import os
+
+        force_env = os.getenv("SLEEP_LLM_FORCE_ENV", "").strip().lower() in ("1", "true", "yes")
+        resolved: dict[str, str] = {}
+        for cfg_key, env_var, env_value in (
+            ("sleep_llm_provider", "SLEEP_LLM_PROVIDER", base_config.sleep_llm_provider),
+            ("sleep_llm_model", "SLEEP_LLM_MODEL", base_config.sleep_llm_model),
+        ):
+            db_value = configs.get(cfg_key)
+            if db_value is None:
+                resolved[cfg_key] = env_value
+                continue
+            env_is_set = os.getenv(env_var) is not None
+            use_env = force_env and env_is_set
+            if env_is_set and str(db_value) != env_value:
+                logger.warning(
+                    "sleep_llm_config_mismatch",
+                    key=cfg_key,
+                    db_value=str(db_value),
+                    env_value=env_value,
+                    winner="env" if use_env else "db",
+                    force_env=force_env,
+                    hint=(
+                        "neural_config DB row differs from the container env; "
+                        "DB wins by default — set SLEEP_LLM_FORCE_ENV=1 or "
+                        "update/delete the row to resolve the drift"
+                    ),
+                )
+            resolved[cfg_key] = env_value if use_env else str(db_value)
+        return resolved
+
+    @classmethod
     async def from_db(cls, db: "AsyncSession") -> "NeuralMemoryConfig":
         """Load configuration from database with fallback to defaults.
 
         Issue #107: Database-driven configuration for admin management.
         Uses class-level cache with 5-minute TTL to avoid repeated DB queries.
+
+        Precedence: a ``neural_config`` DB row wins over the corresponding env
+        var; env (via :meth:`from_env`) fills everything the DB doesn't set.
+        For the Sleep LLM pair (``SLEEP_LLM_PROVIDER`` / ``SLEEP_LLM_MODEL``)
+        a DB-vs-env mismatch is WARN-logged, and ``SLEEP_LLM_FORCE_ENV=1``
+        flips the precedence to env for exactly that pair (#1182).
 
         Args:
             db: AsyncSession for database access
@@ -622,6 +684,8 @@ class NeuralMemoryConfig:
 
         # Start with env-based config (which has all defaults)
         base_config = cls.from_env()
+
+        sleep_llm = cls._resolve_sleep_llm(configs, base_config)
 
         # Override with DB values where available
         config = cls(
@@ -742,8 +806,8 @@ class NeuralMemoryConfig:
             sleep_enabled=base_config.sleep_enabled,  # Feature flag (env-only)
             sleep_cron_hour=base_config.sleep_cron_hour,  # Schedule (env-only)
             sleep_cron_minute=base_config.sleep_cron_minute,  # Schedule (env-only)
-            sleep_llm_provider=configs.get("sleep_llm_provider", base_config.sleep_llm_provider),
-            sleep_llm_model=configs.get("sleep_llm_model", base_config.sleep_llm_model),
+            sleep_llm_provider=sleep_llm["sleep_llm_provider"],
+            sleep_llm_model=sleep_llm["sleep_llm_model"],
             sleep_max_memories_per_run=configs.get(
                 "sleep_max_memories_per_run", base_config.sleep_max_memories_per_run
             ),
