@@ -152,8 +152,14 @@ async def _require_downgrade_target(
     """
     target_role = await MemberCredentialsService(db).get_workspace_role(user_id, workspace_id)
     if target_role not in (WorkspaceRole.MEMBER, WorkspaceRole.VIEWER):
+        # repr() of a StrEnum member is "<WorkspaceRole.ADMIN: 'admin'>" — format
+        # the .value so the API message reads role='admin' (#1180). getattr keeps
+        # the not-a-member None case rendering as role=None.
         raise AuthorizationError(
-            message=f"{action_desc} member/viewer targets, not role={target_role!r}."
+            message=(
+                f"{action_desc} member/viewer targets, "
+                f"not role={getattr(target_role, 'value', target_role)!r}."
+            )
         )
 
 

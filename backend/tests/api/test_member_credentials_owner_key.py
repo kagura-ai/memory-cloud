@@ -160,6 +160,28 @@ class TestOwnerProvisionedMint:
         r = client.post(MINT_URL, json={"name": "k", "expires_days": 30})
         assert r.status_code == 403
 
+    def test_403_message_formats_enum_value_not_repr(self, client, owner_gate, monkeypatch):
+        # The real service returns a WorkspaceRole StrEnum member; {!r} on it
+        # leaked "<WorkspaceRole.ADMIN: 'admin'>" to API clients (#1180).
+        from auth.workspace_roles import WorkspaceRole
+
+        _override(_api_key_owner())
+        _mock_member_service(monkeypatch, target_role=WorkspaceRole.ADMIN)
+        r = client.post(MINT_URL, json={"name": "k", "expires_days": 30})
+        assert r.status_code == 403
+        message = r.json()["message"]
+        assert "role='admin'" in message
+        assert "<WorkspaceRole" not in message
+
+    def test_403_message_renders_none_for_non_member(self, client, owner_gate, monkeypatch):
+        # get_workspace_role returns None when the target is not a workspace
+        # member — the .value formatting must not break that case (#1180).
+        _override(_api_key_owner())
+        _mock_member_service(monkeypatch, target_role=None)
+        r = client.post(MINT_URL, json={"name": "k", "expires_days": 30})
+        assert r.status_code == 403
+        assert "role=None" in r.json()["message"]
+
     def test_missing_expires_days_400(self, client, owner_gate, monkeypatch):
         _override(_api_key_owner())
         _mock_member_service(monkeypatch, target_role="member")
