@@ -107,6 +107,9 @@ class ConsolidationPhase:
         self.llm_service = llm_service
         self.memory_repo = MemoryRepository(db)
         self.collection_name = collection_name or "kagura_memories"
+        # #1183: judge-failure counter (init here so the LLM judge helper can
+        # be unit-tested without execute()).
+        self._llm_failures: int = 0
 
     async def execute(
         self,

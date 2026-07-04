@@ -24,6 +24,7 @@ Revises: e53_1160_self_hosted_provider
 """
 
 import sqlalchemy as sa
+
 from alembic import op
 
 # revision identifiers

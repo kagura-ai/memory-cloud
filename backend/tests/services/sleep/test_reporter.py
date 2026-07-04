@@ -172,3 +172,104 @@ class TestSleepReporter:
         assert report.status == "failed"
         assert report.completed_at is not None
         assert report.error_message == "Something went wrong"
+
+
+class TestRunStatusGrading:
+    """#1183: complete_report grades runs by judge-LLM health.
+
+    A fully non-functional judge (every call raised) used to report
+    status='completed' — indistinguishable from a healthy run without
+    parsing per-phase JSON (week1-derisk Day-5: llm_call_failures=5/5
+    under ok=true).
+    """
+
+    @pytest.fixture
+    def reporter(self):
+        db = AsyncMock()
+        db.add = MagicMock()
+        return SleepReporter(db)
+
+    @staticmethod
+    def _breakdown(calls: int):
+        from services.sleep.reporter import LLMCallBreakdown
+
+        return LLMCallBreakdown(provider="self_hosted", model="qwen3.5:9b", calls=calls)
+
+    @pytest.mark.asyncio
+    async def test_total_judge_failure_grades_failed(self, reporter):
+        report = MagicMock()
+        report.id = uuid4()
+        results = [
+            PhaseResult(phase_name="edge_discovery", llm_calls_used=3, llm_call_failures=3),
+            PhaseResult(phase_name="dedup_merge", llm_calls_used=2, llm_call_failures=2),
+        ]
+
+        await reporter.complete_report(report, results)
+
+        assert report.status == "failed"
+        assert "llm_judge_total_failure" in report.error_message
+        assert report.llm_call_failures == 5
+
+    @pytest.mark.asyncio
+    async def test_partial_judge_failure_grades_degraded(self, reporter):
+        report = MagicMock()
+        report.id = uuid4()
+        results = [
+            PhaseResult(
+                phase_name="edge_discovery",
+                llm_calls_used=3,
+                llm_call_failures=1,
+                llm_breakdown=[self._breakdown(calls=2)],
+            ),
+        ]
+
+        await reporter.complete_report(report, results)
+
+        assert report.status == "degraded"
+        assert report.llm_call_failures == 1
+
+    @pytest.mark.asyncio
+    async def test_no_failures_grades_completed(self, reporter):
+        report = MagicMock()
+        report.id = uuid4()
+        results = [
+            PhaseResult(
+                phase_name="edge_discovery",
+                llm_calls_used=2,
+                llm_breakdown=[self._breakdown(calls=2)],
+            ),
+        ]
+
+        await reporter.complete_report(report, results)
+
+        assert report.status == "completed"
+        assert report.llm_call_failures == 0
+
+    @pytest.mark.asyncio
+    async def test_no_llm_work_at_all_grades_completed(self, reporter):
+        # Zero attempts is NOT a failure — e.g. no candidates, or LLM off.
+        report = MagicMock()
+        report.id = uuid4()
+        results = [PhaseResult(phase_name="reindex", memories_processed=4)]
+
+        await reporter.complete_report(report, results)
+
+        assert report.status == "completed"
+        assert report.llm_call_failures == 0
+
+    @pytest.mark.asyncio
+    async def test_phase_data_carries_llm_call_failures(self, reporter):
+        report = MagicMock()
+        report.id = uuid4()
+        results = [
+            PhaseResult(
+                phase_name="dedup_merge",
+                llm_calls_used=1,
+                llm_call_failures=1,
+                details={"merged": 0},
+            ),
+        ]
+
+        await reporter.complete_report(report, results)
+
+        assert report.dedup_result["llm_call_failures"] == 1

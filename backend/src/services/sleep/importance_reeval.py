@@ -68,6 +68,9 @@ class ImportanceReevalPhase:
         self.db = db
         self.llm_service = llm_service
         self.collection_name = collection_name
+        # #1183: judge-failure counter (init here so ``_evaluate_batch`` can
+        # be unit-tested without execute()).
+        self._llm_failures: int = 0
 
     async def execute(
         self,

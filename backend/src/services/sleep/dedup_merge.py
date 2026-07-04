@@ -118,6 +118,9 @@ class DedupMergePhase:
         # ``_find_similar_pairs`` can be unit-tested without execute()).
         self._embedding_calls_used: int = 0
         self._embedding_tokens_used: int = 0
+        # #1183: judge-failure counter (init here so ``_llm_judge`` can be
+        # unit-tested without execute()).
+        self._llm_failures: int = 0
 
     async def execute(
         self,
