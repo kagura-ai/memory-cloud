@@ -633,7 +633,17 @@ class NeuralMemoryConfig:
                 continue
             env_is_set = os.getenv(env_var) is not None
             use_env = force_env and env_is_set
-            if env_is_set and str(db_value) != env_value:
+            # Compare CANONICAL values: ``env_value`` (from base_config) is
+            # already ollama→self_hosted coerced by __post_init__, so a legacy
+            # 'ollama' DB row must be canonicalized the same way or the
+            # comparison would WARN a mismatch even though the effective
+            # provider is identical after construction (Copilot, PR #1186).
+            # Assignment keeps the RAW value — __post_init__ still owns the
+            # legacy coercion + its dedicated deprecation warning.
+            db_cmp = str(db_value)
+            if cfg_key == "sleep_llm_provider" and db_cmp == "ollama":
+                db_cmp = "self_hosted"
+            if env_is_set and db_cmp != env_value:
                 logger.warning(
                     "sleep_llm_config_mismatch",
                     key=cfg_key,

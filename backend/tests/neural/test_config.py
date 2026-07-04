@@ -436,6 +436,22 @@ class TestFromDbSleepLLMPrecedence:
             c for c in spy.warning.call_args_list if c.args[0] == "sleep_llm_config_mismatch"
         ]
 
+    async def test_no_warn_for_legacy_ollama_db_row_vs_coerced_env(self, monkeypatch):
+        # A pre-#1160 DB row 'ollama' and env 'self_hosted' are the SAME
+        # provider after __post_init__ coercion — the mismatch check must
+        # canonicalize the DB side or it false-positives (Copilot, PR #1186).
+        monkeypatch.setenv("SLEEP_LLM_PROVIDER", "self_hosted")
+        monkeypatch.delenv("SLEEP_LLM_MODEL", raising=False)
+        spy = self._warn_spy(monkeypatch)
+
+        with pytest.warns(UserWarning, match="SLEEP_LLM_PROVIDER=ollama is retired"):
+            config = await NeuralMemoryConfig.from_db(self._db({"sleep_llm_provider": "ollama"}))
+
+        assert config.sleep_llm_provider == "self_hosted"
+        assert not [
+            c for c in spy.warning.call_args_list if c.args[0] == "sleep_llm_config_mismatch"
+        ]
+
     async def test_db_wins_silently_when_env_unset(self, monkeypatch):
         monkeypatch.delenv("SLEEP_LLM_PROVIDER", raising=False)
         monkeypatch.delenv("SLEEP_LLM_MODEL", raising=False)
