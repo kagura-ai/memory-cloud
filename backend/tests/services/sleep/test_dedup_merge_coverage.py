@@ -619,10 +619,12 @@ class TestExecuteOrchestration:
 
         assert result.details["oversize_clusters"] == 1
         assert result.details["oversize_max_size"] == n
-        # 12 members at cap 5: any terminal partition has pairwise component
-        # sums > 5, i.e. (5,5,2)/(5,4,3)/(4,4,4) → 3, or (3,3,3,3) → 4.
-        # The point is MULTIPLE judgeable subclusters, never zero.
-        assert result.details["split_subclusters"] in (3, 4)
+        # 12 members at cap 5 on a COMPLETE equal-score graph: the greedy
+        # walk always fills components to capacity before starting new ones
+        # (every node pair has an edge, so a below-cap component always finds
+        # a mergeable partner while one exists) → deterministically (5,5,2),
+        # i.e. exactly 3 subclusters regardless of UUID tie-break order.
+        assert result.details["split_subclusters"] == 3
         assert result.details["merged"] > 0
         assert result.details["deferred_pairs"] > 0
 

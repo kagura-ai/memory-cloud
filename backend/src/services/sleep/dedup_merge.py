@@ -129,8 +129,11 @@ def _split_oversize_cluster(
         max_size: per-subcluster member cap (defaults to MAX_CLUSTER_SIZE).
 
     Returns:
-        (subclusters with >= 2 members, count of internal pairs skipped by
-        the size cap — i.e. candidate pairs left unjudged this run).
+        (subclusters with >= 2 members, count of union attempts blocked by
+        the size cap — an order-of-magnitude PROXY for candidate pairs left
+        unjudged this run, not an exact count of final cross-subcluster
+        edges: an early cap-blocked pair may still end up same-component via
+        other edges, and same-component skips are never counted).
     """
     internal = sorted(
         (p for p in pairs if p[0] in cluster and p[1] in cluster),
@@ -260,6 +263,9 @@ class DedupMergePhase:
             subclusters, skipped = _split_oversize_cluster(big, pairs)
             split_subclusters += len(subclusters)
             deferred_pairs += skipped
+            # Appended AFTER the normal-size clusters deliberately: under
+            # budget exhaustion the pre-existing cluster set keeps priority
+            # and mega-cluster subclusters only consume the margin.
             processable.extend(subclusters)
 
         if oversize:
@@ -336,8 +342,9 @@ class DedupMergePhase:
             "oversize_clusters": len(oversize),
             "oversize_max_size": max((len(c) for c in oversize), default=0),
             "split_subclusters": split_subclusters,
-            # Candidate pairs left unjudged this run by the size cap —
-            # distinguishes "0 merges: nothing matched" from "0 merges:
+            # Cap-blocked union attempts — a PROXY for candidate volume left
+            # unjudged this run (see _split_oversize_cluster docstring).
+            # Distinguishes "0 merges: nothing matched" from "0 merges:
             # work was deferred".
             "deferred_pairs": deferred_pairs,
             "merged": merged_count,
