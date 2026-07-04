@@ -38,6 +38,8 @@ def _report_to_summary(report: Any) -> dict[str, Any]:
         "memories_promoted": report.memories_promoted,
         "llm_calls_made": report.llm_calls_made,
         "llm_tokens_used": report.llm_tokens_used,
+        # #1183: magnitude behind a 'degraded'/'failed' grading.
+        "llm_call_failures": report.llm_call_failures,
     }
 
 
@@ -286,10 +288,13 @@ async def handle_rollback_sleep_run(
             if perm_error:
                 return perm_error
 
-            if report.status != "completed":
+            # #1183: 'degraded' runs (partial judge failures) still executed
+            # real merges/promotions — they must stay rollbackable.
+            if report.status not in ("completed", "degraded"):
                 return _error_response(
                     "invalid_status",
-                    f"Can only rollback 'completed' reports. Current status: '{report.status}'.",
+                    "Can only rollback 'completed' or 'degraded' reports. "
+                    f"Current status: '{report.status}'.",
                 )
 
             # Fetch actions in reverse order

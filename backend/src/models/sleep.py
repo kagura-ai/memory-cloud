@@ -56,7 +56,9 @@ class SleepReport(Base):
         context_id: Target context
         started_at: Execution start time
         completed_at: Execution end time
-        status: running / completed / failed / cancelled
+        status: running / completed / degraded / failed / cancelled / rolled_back
+            (#1183: 'degraded' = finished with partial judge-LLM failures;
+            total judge failure is graded 'failed')
         edge_discovery_result: Phase 1 results (JSON)
         dedup_result: Phase 2 results (JSON)
         importance_result: Phase 3 results (JSON)
@@ -71,6 +73,7 @@ class SleepReport(Base):
         memories_promoted: Working -> Persistent promotions
         memories_flagged: Memories flagged for review
         error_message: Error details if failed
+        llm_call_failures: Judge-LLM calls that raised, across all phases (#1183)
     """
 
     __tablename__ = "sleep_reports"
@@ -177,9 +180,18 @@ class SleepReport(Base):
     # Error tracking
     error_message: Mapped[str | None] = mapped_column(Text, nullable=True)
 
+    # #1183: judge-LLM calls that raised across all phases. Backs the
+    # degraded/failed status grading in ``SleepReporter.complete_report`` and
+    # lets dashboards aggregate judge health without parsing per-phase JSON.
+    llm_call_failures: Mapped[int] = mapped_column(
+        Integer, nullable=False, default=0, server_default="0"
+    )
+
     __table_args__ = (
+        # 'degraded' (#1183): run finished but SOME judge-LLM calls failed.
+        # Total judge failure grades as 'failed' (see reporter.complete_report).
         CheckConstraint(
-            "status IN ('running', 'completed', 'failed', 'cancelled', 'rolled_back')",
+            "status IN ('running', 'completed', 'degraded', 'failed', 'cancelled', 'rolled_back')",
             name="valid_sleep_report_status",
         ),
         # #523 cost-grade dimensions

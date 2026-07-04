@@ -118,6 +118,9 @@ class DedupMergePhase:
         # ``_find_similar_pairs`` can be unit-tested without execute()).
         self._embedding_calls_used: int = 0
         self._embedding_tokens_used: int = 0
+        # #1183: judge-failure counter (init here so ``_llm_judge`` can be
+        # unit-tested without execute()).
+        self._llm_failures: int = 0
 
     async def execute(
         self,
@@ -145,6 +148,8 @@ class DedupMergePhase:
         result = PhaseResult(phase_name="dedup_merge")
         llm_calls_before = budget.llm_calls_used
         self._tokens_used = 0
+        # #1183: judge calls that raised (feeds run-status grading).
+        self._llm_failures = 0
         # #471: per-(provider, model) accumulator (lazy-init).
         self._llm_breakdown: LLMCallBreakdown | None = None
         # #475: reset embedding accumulators between sleep cycles.
@@ -251,10 +256,12 @@ class DedupMergePhase:
             "clusters": len(processable),
             "deferred_clusters": len(deferred),
             "merged": merged_count,
+            "llm_call_failures": self._llm_failures,  # #1183
         }
 
         result.llm_calls_used = budget.llm_calls_used - llm_calls_before
         result.tokens_used = self._tokens_used
+        result.llm_call_failures = self._llm_failures  # #1183
         # #471: attach per-(provider, model) breakdown for child-row write.
         if self._llm_breakdown is not None:
             result.llm_breakdown = [self._llm_breakdown]
@@ -454,6 +461,7 @@ class DedupMergePhase:
             return self._parse_dedup_response(llm_resp.parsed, label_to_id)
 
         except Exception as e:
+            self._llm_failures += 1  # #1183
             logger.warning("dedup_llm_judge_failed", error=str(e))
             return []
 

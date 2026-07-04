@@ -63,6 +63,10 @@ class SleepReportSummary(TZAwareBaseModel):
     memories_flagged: int
     llm_calls_made: int
     llm_tokens_used: int
+    # #1183: judge-LLM calls that raised across all phases — the magnitude
+    # behind a 'degraded'/'failed' grading, exposed top-level so dashboards
+    # don't have to parse per-phase JSON blobs.
+    llm_call_failures: int = 0
 
 
 class SleepReportDetail(SleepReportSummary):
@@ -111,7 +115,7 @@ class SleepReportDetailResponse(BaseModel):
 # Shared validation
 # ============================================================================
 
-_VALID_STATUSES = {"running", "completed", "failed", "cancelled", "rolled_back"}
+_VALID_STATUSES = {"running", "completed", "degraded", "failed", "cancelled", "rolled_back"}
 
 
 def _validate_status(status_filter: str | None) -> None:

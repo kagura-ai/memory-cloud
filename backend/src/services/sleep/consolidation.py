@@ -107,6 +107,9 @@ class ConsolidationPhase:
         self.llm_service = llm_service
         self.memory_repo = MemoryRepository(db)
         self.collection_name = collection_name or "kagura_memories"
+        # #1183: judge-failure counter (init here so the LLM judge helper can
+        # be unit-tested without execute()).
+        self._llm_failures: int = 0
 
     async def execute(
         self,
@@ -123,6 +126,8 @@ class ConsolidationPhase:
         result = PhaseResult(phase_name="consolidation")
         llm_calls_before = budget.llm_calls_used
         self._tokens_used = 0
+        # #1183: judge calls that raised (feeds run-status grading).
+        self._llm_failures = 0
         # #471: per-(provider, model) accumulator (lazy-init).
         self._llm_breakdown: LLMCallBreakdown | None = None
 
@@ -295,6 +300,7 @@ class ConsolidationPhase:
         result.memories_processed = len(working)
         result.llm_calls_used = budget.llm_calls_used - llm_calls_before
         result.tokens_used = self._tokens_used
+        result.llm_call_failures = self._llm_failures  # #1183
         # #471: attach per-(provider, model) breakdown.
         if self._llm_breakdown is not None:
             result.llm_breakdown = [self._llm_breakdown]
@@ -305,6 +311,7 @@ class ConsolidationPhase:
             "borderline": len(borderline),
             "llm_promoted": llm_promoted,
             "llm_archived": llm_archived,
+            "llm_call_failures": self._llm_failures,  # #1183
         }
 
         logger.info(
@@ -417,6 +424,7 @@ class ConsolidationPhase:
             self._tokens_used += llm_resp.total_tokens
             self._llm_breakdown = accumulate_llm_response(self._llm_breakdown, llm_resp)
         except Exception as e:
+            self._llm_failures += 1  # #1183
             logger.warning("consolidation_llm_failed", error=str(e))
             return {}
 

@@ -134,6 +134,12 @@ class PhaseResult:
     memories_processed: int = 0
     changed_memory_ids: set[UUID] = field(default_factory=set)
     details: dict | None = None
+    # #1183: judge-LLM calls that raised (complete_json failed). First-class so
+    # the reporter can grade the RUN (completed/degraded/failed) without
+    # spelunking per-phase details dicts. Counts failures only — successful
+    # calls are ``sum(b.calls for b in llm_breakdown)`` (breakdown accumulates
+    # inside the try block, after the response parsed).
+    llm_call_failures: int = 0
     # #471: cost-grade fields.
     llm_breakdown: list[LLMCallBreakdown] = field(default_factory=list)
     embedding_provider: str | None = None
@@ -268,7 +274,32 @@ class SleepReporter:
            ``embedding_calls_made``) — populated as the sum of child rows
            for back-compat with existing dashboards / log analyzers.
         """
-        report.status = "completed"
+        # #1183: grade the run by judge-LLM health instead of blanket
+        # "completed". A fully non-functional judge (every call raised — e.g.
+        # a stale neural_config row pointing at a dead endpoint, see #1182)
+        # used to be indistinguishable from a healthy run at the status level;
+        # week1-derisk Day-5 shipped llm_call_failures=5/5 under ok=true.
+        #   failed    — judge calls were attempted and ALL of them raised.
+        #   degraded  — some judge calls raised, some succeeded.
+        #   completed — no judge failures (including runs with no LLM work).
+        # The tallies are RUN-WIDE, which is sound because all phases share
+        # one (sleep_llm_provider, sleep_llm_model) today — a dead judge
+        # config fails every phase uniformly (the Day-5 shape). If per-phase
+        # LLM configs ever land, a single-phase total outage would grade only
+        # 'degraded' here; per-phase counts stay visible in each phase blob's
+        # details.llm_call_failures.
+        judge_failures = sum(r.llm_call_failures for r in phase_results)
+        judge_successes = sum(b.calls for r in phase_results for b in r.llm_breakdown)
+        if judge_failures > 0 and judge_successes == 0:
+            report.status = "failed"
+            report.error_message = (
+                f"llm_judge_total_failure: {judge_failures} judge call(s) attempted, 0 succeeded"
+            )
+        elif judge_failures > 0:
+            report.status = "degraded"
+        else:
+            report.status = "completed"
+        report.llm_call_failures = judge_failures
         report.completed_at = utcnow()
 
         # Single pass over phase_results: write child rows + per-phase
@@ -343,6 +374,7 @@ class SleepReporter:
                 "skip_reason": result.skip_reason,
                 "error": result.error,
                 "llm_calls": result.llm_calls_used,
+                "llm_call_failures": result.llm_call_failures,  # #1183
                 "memories_processed": result.memories_processed,
                 "details": result.details,
                 "llm_breakdown": [
@@ -396,7 +428,9 @@ class SleepReporter:
         logger.info(
             "sleep_report_completed",
             report_id=str(report.id),
+            status=report.status,
             llm_calls=total_llm_calls,
+            llm_call_failures=judge_failures,
             tokens=total_tokens,
             embedding_tokens=embedding_tokens_total,
             memories=total_memories,

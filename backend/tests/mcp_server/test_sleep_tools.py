@@ -46,6 +46,7 @@ class TestGetSleepHistory:
         r.memories_promoted = 5
         r.llm_calls_made = 4
         r.llm_tokens_used = 1200
+        r.llm_call_failures = 0  # #1183
         return r
 
     def _setup_history_mocks(self, reports):
@@ -142,6 +143,7 @@ class TestGetSleepReport:
         r.memories_flagged = 0
         r.llm_calls_made = 2
         r.llm_tokens_used = 500
+        r.llm_call_failures = 0  # #1183
         r.embedding_calls_made = 0
         r.error_message = None
         r.edge_discovery_result = {"success": True}

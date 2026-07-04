@@ -503,6 +503,7 @@ class EdgeDiscoveryPhase:
         result.memories_processed = len(sampled)
         result.llm_calls_used = budget.llm_calls_used - llm_calls_before
         result.tokens_used = self._tokens_used
+        result.llm_call_failures = agg.failures  # #1183: feeds run-status grading
         # #471: attach per-(provider, model) breakdown for child-row write.
         if self._llm_breakdown is not None:
             result.llm_breakdown = [self._llm_breakdown]
