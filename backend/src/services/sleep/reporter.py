@@ -282,6 +282,12 @@ class SleepReporter:
         #   failed    — judge calls were attempted and ALL of them raised.
         #   degraded  — some judge calls raised, some succeeded.
         #   completed — no judge failures (including runs with no LLM work).
+        # The tallies are RUN-WIDE, which is sound because all phases share
+        # one (sleep_llm_provider, sleep_llm_model) today — a dead judge
+        # config fails every phase uniformly (the Day-5 shape). If per-phase
+        # LLM configs ever land, a single-phase total outage would grade only
+        # 'degraded' here; per-phase counts stay visible in each phase blob's
+        # details.llm_call_failures.
         judge_failures = sum(r.llm_call_failures for r in phase_results)
         judge_successes = sum(b.calls for r in phase_results for b in r.llm_breakdown)
         if judge_failures > 0 and judge_successes == 0:

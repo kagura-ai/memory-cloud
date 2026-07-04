@@ -38,6 +38,8 @@ def _report_to_summary(report: Any) -> dict[str, Any]:
         "memories_promoted": report.memories_promoted,
         "llm_calls_made": report.llm_calls_made,
         "llm_tokens_used": report.llm_tokens_used,
+        # #1183: magnitude behind a 'degraded'/'failed' grading.
+        "llm_call_failures": report.llm_call_failures,
     }
 
 

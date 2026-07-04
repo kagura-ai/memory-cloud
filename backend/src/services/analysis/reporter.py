@@ -395,6 +395,11 @@ async def persist_results(
             "labeling_failures": quality["labeling_failures"],
         },
         llm_breakdown=breakdowns,
+        # #1183: a cluster whose every fallback model raised (ClusterLabel.failed)
+        # is a judge failure — without this the sibling row always grades
+        # 'completed' even when labeling failed for ALL clusters, reproducing
+        # the exact masking bug #1183 closes for the Sleep phases.
+        llm_call_failures=quality["labeling_failures"],
     )
     await sleep_reporter.complete_report(sleep_report, [phase_result])
 

@@ -1284,7 +1284,7 @@ Returns: {status, report: {report_id, context_id, status, started_at, completed_
         },
         {
             "name": "rollback_sleep_run",
-            "description": """Rollback all actions from a completed Sleep Maintenance run.
+            "description": """Rollback all actions from a finished Sleep Maintenance run.
 
 Reverses each recorded action in order:
 - create_edge → deletes the edge
@@ -1293,8 +1293,10 @@ Reverses each recorded action in order:
 - promote → reverts scope back to 'working'
 - archive → restores the deleted memory and re-embeds it
 
-Only works on reports with status 'completed'. After rollback, the
-report is marked 'rolled_back' to prevent double rollback.
+Only works on reports with status 'completed' or 'degraded' (#1183: a
+degraded run — partial judge-LLM failures — still executed real merges
+and stays rollbackable). After rollback, the report is marked
+'rolled_back' to prevent double rollback.
 
 ⚠️ This is a destructive operation — use with care.
 Requires action recording (reports created before this feature have no actions to rollback).
