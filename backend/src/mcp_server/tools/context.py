@@ -219,6 +219,36 @@ async def handle_get_context_info(
     return _error_response("internal_error", "Database session unavailable")
 
 
+def _validate_context_field_lengths(args: dict[str, Any]) -> list[TextContent] | None:
+    """Enforce the shared context metadata caps on the MCP write path (#1193).
+
+    The REST surface has always enforced these via Pydantic; the MCP tools
+    only DOCUMENTED them, so connector-written values could exceed the REST
+    cap — after which every save from the web settings UI 422'd on a field
+    the user never touched. One source of truth: config.constants.
+    """
+    from config.constants import (
+        CONTEXT_DESCRIPTION_MAX_LENGTH,
+        CONTEXT_SUMMARY_MAX_LENGTH,
+        CONTEXT_USAGE_GUIDE_MAX_LENGTH,
+    )
+
+    limits = {
+        "description": CONTEXT_DESCRIPTION_MAX_LENGTH,
+        "summary": CONTEXT_SUMMARY_MAX_LENGTH,
+        "usage_guide": CONTEXT_USAGE_GUIDE_MAX_LENGTH,
+    }
+    for field_name, cap in limits.items():
+        value = args.get(field_name)
+        if isinstance(value, str) and len(value) > cap:
+            return _error_response(
+                "field_too_long",
+                f"{field_name} exceeds the {cap}-character limit (got {len(value)}).",
+                help=f"Shorten {field_name} to at most {cap} characters.",
+            )
+    return None
+
+
 async def handle_create_context(
     args: dict[str, Any], user_id: str, workspace_id: UUID | None
 ) -> list[TextContent]:
@@ -229,6 +259,10 @@ async def handle_create_context(
             "Missing required field: name",
             help="Provide a context name (lowercase alphanumeric + hyphen/underscore).",
         )
+
+    length_error = _validate_context_field_lengths(args)
+    if length_error:
+        return length_error
 
     from db.base import get_db
 
@@ -348,6 +382,10 @@ async def handle_update_context(
             "Missing required field: context_id",
             help="Use list_contexts() to find context IDs.",
         )
+
+    length_error = _validate_context_field_lengths(args)
+    if length_error:
+        return length_error
 
     from db.base import get_db
 

@@ -51,6 +51,7 @@ import {
   Moon,
 } from "lucide-react";
 import { useToast } from "@/hooks/use-toast";
+import { ApiError } from "@/lib/api/base";
 import { getContext, updateContext } from "@/lib/api/contexts";
 import { getWorkspaceUsageCurrent } from "@/lib/api/workspaces";
 import type { SleepContextsUsage } from "@/lib/api/usage";
@@ -162,20 +163,39 @@ export function SettingsTabPanel({
         resource_id = resourceId.trim();
       }
 
-      const payload: Parameters<typeof updateContext>[1] = {
-        display_name: displayName.trim(),
-        description: description.trim(),
-        summary: summary.trim(),
-        usage_guide: usageGuide.trim(),
-        is_private: isPrivate,
-        is_public: isPublic,
-        resource_id: resource_id,
-      };
+      // #1193: send ONLY changed fields (all ContextUpdate fields are
+      // optional). Re-submitting untouched fields made the whole save fail
+      // validation when a legacy value exceeded the current cap (e.g. an
+      // MCP-written summary), blocking unrelated edits like sleep_mode.
+      const payload: Parameters<typeof updateContext>[1] = {};
+      if (displayName.trim() !== (context.display_name ?? "")) {
+        payload.display_name = displayName.trim();
+      }
+      if (description.trim() !== (context.description ?? "")) {
+        payload.description = description.trim();
+      }
+      if (summary.trim() !== (context.summary ?? "")) {
+        payload.summary = summary.trim();
+      }
+      if (usageGuide.trim() !== (context.usage_guide ?? "")) {
+        payload.usage_guide = usageGuide.trim();
+      }
+      if (isPrivate !== context.is_private) {
+        payload.is_private = isPrivate;
+      }
+      if (isPublic !== context.is_public) {
+        payload.is_public = isPublic;
+      }
+      if (resource_id !== undefined) {
+        payload.resource_id = resource_id;
+      }
       if (isOwner && sleepMode !== context.sleep_mode) {
         payload.sleep_mode = sleepMode;
       }
 
-      await updateContext(context.id, payload);
+      if (Object.keys(payload).length > 0) {
+        await updateContext(context.id, payload);
+      }
 
       toast({
         title: t("savedTitle"),
@@ -183,9 +203,27 @@ export function SettingsTabPanel({
       });
       await refreshContext();
     } catch (err: unknown) {
+      // #1193: surface WHICH field failed validation — "Request validation
+      // failed" alone is undiagnosable from the toast.
+      let description =
+        err instanceof Error ? err.message : t("saveFailedDesc");
+      if (err instanceof ApiError) {
+        // 422s carry {loc,msg,type}[] here (aliased from details.errors at
+        // the transport layer); the declared string type covers legacy shapes.
+        const fieldErrors = err.details?.detail as unknown;
+        if (Array.isArray(fieldErrors) && fieldErrors.length > 0) {
+          const first = fieldErrors[0] as { loc?: unknown[]; msg?: string };
+          const field = Array.isArray(first.loc)
+            ? String(first.loc[first.loc.length - 1])
+            : "";
+          if (first.msg) {
+            description = `${description} — ${field ? `${field}: ` : ""}${first.msg}`;
+          }
+        }
+      }
       toast({
         title: t("saveFailedTitle"),
-        description: err instanceof Error ? err.message : t("saveFailedDesc"),
+        description,
         variant: "destructive",
         duration: 6000,
       });

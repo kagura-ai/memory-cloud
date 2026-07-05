@@ -11,6 +11,21 @@ All constants are grouped by category with clear documentation.
 APP_VERSION = "0.43.0"
 
 # ============================================================================
+# Context Field Limits (#1193)
+# ============================================================================
+# Single source of truth for context metadata length caps — enforced
+# IDENTICALLY on the REST surface (api/routes/contexts.py ContextCreate/
+# ContextUpdate) and the MCP surface (mcp_server tools create_context/
+# update_context). Before #1193 the MCP path only documented caps without
+# enforcing them, so MCP-written data could exceed the REST cap and brick
+# every subsequent save from the web settings UI (422 on untouched fields).
+# summary is 2000 (not 500): it is an LLM-oriented field and MCP-written
+# summaries beyond 500 chars already exist in production.
+CONTEXT_DESCRIPTION_MAX_LENGTH = 500
+CONTEXT_SUMMARY_MAX_LENGTH = 2000
+CONTEXT_USAGE_GUIDE_MAX_LENGTH = 2000
+
+# ============================================================================
 # Memory Content Limits
 # ============================================================================
 

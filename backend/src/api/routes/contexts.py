@@ -21,6 +21,11 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from auth.dependencies import APIKeyOrSessionUser, SessionUser, get_current_user
 from auth.workspace_roles import ContextRole, WorkspaceRole
+from config.constants import (
+    CONTEXT_DESCRIPTION_MAX_LENGTH,
+    CONTEXT_SUMMARY_MAX_LENGTH,
+    CONTEXT_USAGE_GUIDE_MAX_LENGTH,
+)
 from db.base import get_db
 from models.api_base import TZAwareBaseModel
 from models.schemas import ContextExportResponse, RelatedTagItem
@@ -125,17 +130,17 @@ class ContextCreate(BaseModel):
     )
     description: str | None = Field(
         None,
-        max_length=500,
+        max_length=CONTEXT_DESCRIPTION_MAX_LENGTH,
         description="Optional context description",
     )
     summary: str | None = Field(
         None,
-        max_length=500,
-        description="LLM-oriented context summary (200-500 chars)",
+        max_length=CONTEXT_SUMMARY_MAX_LENGTH,
+        description="LLM-oriented context summary",
     )
     usage_guide: str | None = Field(
         None,
-        max_length=2000,
+        max_length=CONTEXT_USAGE_GUIDE_MAX_LENGTH,
         description="LLM-oriented memory usage guidelines",
     )
     embedding_model: str | None = Field(
@@ -158,17 +163,17 @@ class ContextUpdate(BaseModel):
     )
     description: str | None = Field(
         None,
-        max_length=500,
+        max_length=CONTEXT_DESCRIPTION_MAX_LENGTH,
         description="Updated context description",
     )
     summary: str | None = Field(
         None,
-        max_length=500,
+        max_length=CONTEXT_SUMMARY_MAX_LENGTH,
         description="Updated context summary",
     )
     usage_guide: str | None = Field(
         None,
-        max_length=2000,
+        max_length=CONTEXT_USAGE_GUIDE_MAX_LENGTH,
         description="Updated usage guidelines",
     )
     is_private: bool | None = Field(

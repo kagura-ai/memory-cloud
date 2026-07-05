@@ -385,3 +385,60 @@ describe("SettingsTabPanel — skip-mode confirmation dialog", () => {
     expect(screen.queryByText("sleepModeSkipTitle")).not.toBeInTheDocument();
   });
 });
+
+// ---------- Dirty-field-only save (#1193) ------------------------------------
+
+describe("SettingsTabPanel — dirty-field-only save (#1193)", () => {
+  it("sends ONLY the changed field on save", async () => {
+    mockUpdateContext.mockResolvedValue(undefined);
+    mockGetContext.mockResolvedValue(makeContext());
+
+    render(
+      <SettingsTabPanel
+        contextId={CTX_ID}
+        context={makeContext()}
+        onContextUpdated={noop}
+      />,
+    );
+
+    fireEvent.change(screen.getByDisplayValue("Demo Context"), {
+      target: { value: "Renamed" },
+    });
+    fireEvent.click(await screen.findByRole("button", { name: /saveChanges/ }));
+
+    await waitFor(() => expect(mockUpdateContext).toHaveBeenCalledTimes(1));
+    expect(mockUpdateContext).toHaveBeenCalledWith(CTX_ID, {
+      display_name: "Renamed",
+    });
+  });
+
+  it("does NOT re-send an untouched over-cap legacy summary", async () => {
+    // Regression pin for the prod incident: an MCP-written 516-char summary
+    // made EVERY save 422 because the panel re-submitted all fields. With
+    // dirty-only payloads the oversized untouched summary stays out.
+    const longSummary = "x".repeat(600);
+    mockUpdateContext.mockResolvedValue(undefined);
+    mockGetContext.mockResolvedValue(makeContext({ summary: longSummary }));
+
+    render(
+      <SettingsTabPanel
+        contextId={CTX_ID}
+        context={makeContext({ summary: longSummary })}
+        onContextUpdated={noop}
+      />,
+    );
+
+    fireEvent.change(screen.getByDisplayValue("Demo Context"), {
+      target: { value: "Renamed" },
+    });
+    fireEvent.click(await screen.findByRole("button", { name: /saveChanges/ }));
+
+    await waitFor(() => expect(mockUpdateContext).toHaveBeenCalledTimes(1));
+    const payload = mockUpdateContext.mock.calls[0][1] as Record<
+      string,
+      unknown
+    >;
+    expect(payload).not.toHaveProperty("summary");
+    expect(payload).toEqual({ display_name: "Renamed" });
+  });
+});
