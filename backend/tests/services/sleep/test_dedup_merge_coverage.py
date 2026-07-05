@@ -571,9 +571,11 @@ class TestExecuteOrchestration:
         # No LLM tokens on the rule path.
         assert result.llm_calls_used == 0
 
-    async def test_deferred_oversized_cluster_not_processed(self, dedup_phase):
-        """A 6-member fully-connected cluster exceeds MAX_CLUSTER_SIZE → deferred,
-        zero merges, deferred_clusters counted."""
+    async def test_oversized_cluster_split_and_partially_processed(self, dedup_phase):
+        """#1184: a 6-member chained cluster exceeds MAX_CLUSTER_SIZE — instead
+        of wholesale deferral it is re-split into <=5-member subclusters, the
+        rule path merges within them, and the observability keys expose the
+        oversize volume + pairs left unjudged."""
         mems = [_make_memory(importance=0.5) for _ in range(MAX_CLUSTER_SIZE + 1)]
         config = _make_config(provider="")
         budget = SleepBudget()
@@ -586,10 +588,46 @@ class TestExecuteOrchestration:
 
         result = await dedup_phase.execute(config, "u", "ws", "ctx", budget)
 
-        assert result.details["deferred_clusters"] == 1
-        assert result.details["clusters"] == 0  # nothing processable
-        assert result.details["merged"] == 0
-        dedup_phase._execute_merge.assert_not_called()
+        assert result.details["oversize_clusters"] == 1
+        assert result.details["deferred_clusters"] == 1  # legacy key: original count
+        assert result.details["oversize_max_size"] == MAX_CLUSTER_SIZE + 1
+        # 6 chained members at cap 5: equal scores tie-break on random UUIDs,
+        # so the terminal partition is (5,1), (4,2) or (3,3) — 1 or 2
+        # judgeable subclusters, and always exactly one blocked chain edge.
+        assert result.details["split_subclusters"] in (1, 2)
+        assert result.details["clusters"] == result.details["split_subclusters"]
+        assert result.details["deferred_pairs"] == 1
+        # Partial progress: merges happen INSIDE the subcluster (0.99 >= auto).
+        assert result.details["merged"] > 0
+        dedup_phase._execute_merge.assert_awaited()
+
+    async def test_mega_cluster_yields_multiple_subclusters(self, dedup_phase):
+        """#1184 Day-5 shape: ALL memories pairwise-similar → one mega-cluster;
+        splitting must yield multiple judgeable subclusters, not zero."""
+        n = 12
+        mems = [_make_memory(importance=0.5) for _ in range(n)]
+        config = _make_config(provider="")
+        budget = SleepBudget()
+
+        dedup_phase._fetch_active_memories = AsyncMock(return_value=mems)
+        # Fully-connected candidate graph (all pairs above threshold).
+        pairs = [(mems[i].id, mems[j].id, 0.99) for i in range(n) for j in range(i + 1, n)]
+        dedup_phase._find_similar_pairs = AsyncMock(return_value=pairs)
+        dedup_phase._execute_merge = AsyncMock()
+
+        result = await dedup_phase.execute(config, "u", "ws", "ctx", budget)
+
+        assert result.details["oversize_clusters"] == 1
+        assert result.details["oversize_max_size"] == n
+        # 12 members at cap 5 on a COMPLETE equal-score graph: with canonical
+        # (str-ascending) pair orientation the tie-break walk is lexicographic
+        # — the str-smallest node's edges come first, so its component fills
+        # to capacity (5), then the next-smallest unmerged node fills the
+        # second (5), leaving the final pair (2) → deterministically (5,5,2),
+        # exactly 3 subclusters for ANY concrete uuid values.
+        assert result.details["split_subclusters"] == 3
+        assert result.details["merged"] > 0
+        assert result.details["deferred_pairs"] > 0
 
     async def test_budget_exhaustion_breaks_cluster_loop(self, dedup_phase):
         """With LLM enabled and zero budget, the can_afford guard breaks before
@@ -839,3 +877,96 @@ class TestFetchActiveMemoriesRealDB:
         ids = {m.id for m in rows}
         assert in_scope.id in ids
         assert wrong_ws.id not in ids  # filtered out by workspace_id (line 296)
+
+
+# ---------------------------------------------------------------------------
+# _split_oversize_cluster (#1184)
+# ---------------------------------------------------------------------------
+
+
+class TestSplitOversizeCluster:
+    """Deterministic unit tests for the capacity-capped greedy split."""
+
+    def test_prefers_highest_similarity_pairs(self):
+        """With distinct scores the strongest pairs coalesce first: a 6-node
+        chain whose weakest link is in the middle splits exactly there."""
+        from services.sleep.dedup_merge import _split_oversize_cluster
+
+        ids = [uuid4() for _ in range(6)]
+        # Chain scores: strong at the ends, weakest in the middle (0.921).
+        scores = [0.99, 0.98, 0.921, 0.97, 0.96]
+        pairs = [(ids[i], ids[i + 1], scores[i]) for i in range(5)]
+
+        subclusters, skipped = _split_oversize_cluster(set(ids), pairs, max_size=3)
+
+        # Strong halves {0,1,2} and {3,4,5} form; the weak middle link is
+        # the only one blocked by the cap.
+        as_sets = sorted(subclusters, key=len)
+        assert {frozenset(s) for s in as_sets} == {
+            frozenset(ids[:3]),
+            frozenset(ids[3:]),
+        }
+        assert skipped == 1
+
+    def test_every_subcluster_within_cap(self):
+        from services.sleep.dedup_merge import _split_oversize_cluster
+
+        ids = [uuid4() for _ in range(23)]
+        # Fully-connected with distinct descending scores for determinism.
+        pairs = []
+        score = 0.999
+        for i in range(len(ids)):
+            for j in range(i + 1, len(ids)):
+                pairs.append((ids[i], ids[j], score))
+                score -= 0.0001
+        subclusters, skipped = _split_oversize_cluster(set(ids), pairs, max_size=5)
+
+        assert all(2 <= len(s) <= 5 for s in subclusters)
+        # Every member lands in some subcluster or is a leftover singleton;
+        # no member appears twice.
+        seen = [m for s in subclusters for m in s]
+        assert len(seen) == len(set(seen))
+        assert skipped > 0
+
+    def test_pairs_outside_cluster_ignored(self):
+        from services.sleep.dedup_merge import _split_oversize_cluster
+
+        inside = [uuid4() for _ in range(3)]
+        outsider = uuid4()
+        pairs = [
+            (inside[0], inside[1], 0.99),
+            (inside[1], inside[2], 0.98),
+            (inside[0], outsider, 1.0),  # must be ignored
+        ]
+        subclusters, skipped = _split_oversize_cluster(set(inside), pairs, max_size=5)
+
+        assert subclusters == [set(inside)]
+        assert skipped == 0
+        assert outsider not in subclusters[0]
+
+    def test_no_internal_pairs_yields_no_subclusters(self):
+        """Degenerate guard: a cluster with no internal pair edges (cannot
+        happen from union-find output, but the function must not crash)."""
+        from services.sleep.dedup_merge import _split_oversize_cluster
+
+        ids = {uuid4(), uuid4()}
+        subclusters, skipped = _split_oversize_cluster(ids, [], max_size=5)
+
+        assert subclusters == []
+        assert skipped == 0
+
+    def test_split_is_orientation_independent(self):
+        """_find_similar_pairs emits (memory.id, hit_id) in Qdrant-iteration
+        orientation — the SAME logical pair set with flipped orientations
+        must produce the SAME split (Copilot, PR #1188)."""
+        from services.sleep.dedup_merge import _split_oversize_cluster
+
+        ids = [uuid4() for _ in range(8)]
+        pairs = [(ids[i], ids[j], 0.95) for i in range(len(ids)) for j in range(i + 1, len(ids))]
+        flipped = [(b, a, s) for a, b, s in pairs]
+
+        subclusters_fwd, skipped_fwd = _split_oversize_cluster(set(ids), pairs, max_size=3)
+        subclusters_rev, skipped_rev = _split_oversize_cluster(set(ids), flipped, max_size=3)
+
+        assert {frozenset(s) for s in subclusters_fwd} == {frozenset(s) for s in subclusters_rev}
+        assert skipped_fwd == skipped_rev

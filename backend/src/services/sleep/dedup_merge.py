@@ -5,14 +5,18 @@ clustering and optional LLM judgment.
 
 Algorithm:
 1. For each memory, find high-similarity neighbors in Qdrant (>= threshold)
-2. Build candidate pairs, cluster with Union-Find (cap cluster size at 5)
+2. Build candidate pairs, cluster with Union-Find (cap cluster size at 5);
+   oversize clusters are re-split into <=5-member subclusters by descending
+   pair similarity (#1184) instead of deferred wholesale
 3. LLM on: batch judgment (merge/keep_both)
 4. LLM off: similarity >= 0.98 → auto-merge, else → flag
 5. Merge: keep winner, soft-delete losers, transfer edges, merge tags
 
 Academic notes:
 - Union-Find transitivity: A~B + B~C clusters all three even if A~C is low.
-  Cluster size cap (5) + LLM second gate mitigate runaway merges.
+  Cluster size cap (5) + LLM second gate mitigate runaway merges. Templated
+  corpora collapse into one mega-cluster (Day-5: 782 pairs → 1 cluster);
+  capacity-capped greedy agglomeration (#1184) restores partial progress.
 - Positional bias: batch order is shuffled before LLM calls.
 - ID hallucination: short labels (A, B, C) used in prompts, mapped back to UUIDs.
 """
@@ -97,6 +101,77 @@ class UnionFind:
             root = self.find(x)
             groups.setdefault(root, set()).add(x)
         return list(groups.values())
+
+
+def _split_oversize_cluster(
+    cluster: set[UUID],
+    pairs: list[tuple[UUID, UUID, float]],
+    max_size: int = MAX_CLUSTER_SIZE,
+) -> tuple[list[set[UUID]], int]:
+    """Split an oversize union-find cluster into judgeable subclusters (#1184).
+
+    Templated corpora (daily standups, status logs) push cross-unit similarity
+    over the candidate threshold, union-find collapses everything into one
+    mega-cluster (Day-5 eval: 782 pairs → 1 cluster), and the old wholesale
+    deferral disabled dedup for exactly the corpora that need it most.
+
+    Greedy capacity-capped agglomeration: walk the cluster's internal pairs in
+    DESCENDING similarity and union two components only while the merged size
+    stays within ``max_size``. The tightest duplicates coalesce first, every
+    component stays judgeable in one LLM batch, and skipped cross-component
+    pairs are re-candidates next run (post-merge, the landscape shrinks).
+    Deterministic: pair endpoints are CANONICALIZED (str-ascending) before
+    ties break on the stringified ids — ``_find_similar_pairs`` emits
+    ``(memory.id, hit_id)`` in Qdrant-iteration orientation, so sorting on
+    the raw orientation would make equal-score splits vary run-to-run
+    (Copilot, PR #1188).
+
+    Args:
+        cluster: member ids of one oversize union-find cluster.
+        pairs: ALL candidate pairs from the run; only pairs internal to
+            ``cluster`` are considered.
+        max_size: per-subcluster member cap (defaults to MAX_CLUSTER_SIZE).
+
+    Returns:
+        (subclusters with >= 2 members, count of union attempts blocked by
+        the size cap — an order-of-magnitude PROXY for candidate pairs left
+        unjudged this run, not an exact count of final cross-subcluster
+        edges: an early cap-blocked pair may still end up same-component via
+        other edges, and same-component skips are never counted).
+    """
+    internal = sorted(
+        (
+            (*sorted((p[0], p[1]), key=str), p[2])
+            for p in pairs
+            if p[0] in cluster and p[1] in cluster
+        ),
+        key=lambda p: (-p[2], str(p[0]), str(p[1])),
+    )
+
+    parent: dict[UUID, UUID] = {m: m for m in cluster}
+    comp_size: dict[UUID, int] = dict.fromkeys(cluster, 1)
+
+    def find(x: UUID) -> UUID:
+        while parent[x] != x:
+            parent[x] = parent[parent[x]]
+            x = parent[x]
+        return x
+
+    skipped_pairs = 0
+    for id_a, id_b, _score in internal:
+        root_a, root_b = find(id_a), find(id_b)
+        if root_a == root_b:
+            continue
+        if comp_size[root_a] + comp_size[root_b] > max_size:
+            skipped_pairs += 1
+            continue
+        parent[root_b] = root_a
+        comp_size[root_a] += comp_size[root_b]
+
+    groups: dict[UUID, set[UUID]] = {}
+    for member in cluster:
+        groups.setdefault(find(member), set()).add(member)
+    return [g for g in groups.values() if len(g) >= 2], skipped_pairs
 
 
 class DedupMergePhase:
@@ -188,13 +263,31 @@ class DedupMergePhase:
         clusters = uf.clusters()
         # Filter to clusters with 2+ members, cap at MAX_CLUSTER_SIZE
         processable = [c for c in clusters if 2 <= len(c) <= MAX_CLUSTER_SIZE]
-        deferred = [c for c in clusters if len(c) > MAX_CLUSTER_SIZE]
+        oversize = [c for c in clusters if len(c) > MAX_CLUSTER_SIZE]
 
-        if deferred:
+        # #1184: oversize clusters used to be deferred WHOLESALE — on a
+        # templated corpus everything union-finds into one mega-cluster and
+        # dedup goes structurally inert ("0 merges" indistinguishable from
+        # "nothing to merge"). Split them into judgeable subclusters instead;
+        # cross-subcluster pairs are counted as deferred, not silently lost.
+        split_subclusters = 0
+        deferred_pairs = 0
+        for big in oversize:
+            subclusters, skipped = _split_oversize_cluster(big, pairs)
+            split_subclusters += len(subclusters)
+            deferred_pairs += skipped
+            # Appended AFTER the normal-size clusters deliberately: under
+            # budget exhaustion the pre-existing cluster set keeps priority
+            # and mega-cluster subclusters only consume the margin.
+            processable.extend(subclusters)
+
+        if oversize:
             logger.info(
-                "dedup_clusters_deferred",
-                count=len(deferred),
-                sizes=[len(c) for c in deferred],
+                "dedup_oversize_clusters_split",
+                count=len(oversize),
+                sizes=[len(c) for c in oversize],
+                split_subclusters=split_subclusters,
+                deferred_pairs=deferred_pairs,
             )
 
         # Step 4: Process each cluster
@@ -254,7 +347,19 @@ class DedupMergePhase:
         result.details = {
             "candidates": len(pairs),
             "clusters": len(processable),
-            "deferred_clusters": len(deferred),
+            # #1184: 'deferred_clusters' now counts ORIGINAL oversize clusters
+            # (kept under its pre-split key for narrative/reader continuity);
+            # their members are re-clustered into judgeable subclusters below
+            # rather than skipped wholesale.
+            "deferred_clusters": len(oversize),
+            "oversize_clusters": len(oversize),
+            "oversize_max_size": max((len(c) for c in oversize), default=0),
+            "split_subclusters": split_subclusters,
+            # Cap-blocked union attempts — a PROXY for candidate volume left
+            # unjudged this run (see _split_oversize_cluster docstring).
+            # Distinguishes "0 merges: nothing matched" from "0 merges:
+            # work was deferred".
+            "deferred_pairs": deferred_pairs,
             "merged": merged_count,
             "llm_call_failures": self._llm_failures,  # #1183
         }
