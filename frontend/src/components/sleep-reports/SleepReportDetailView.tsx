@@ -20,6 +20,7 @@ import {
 import { Button } from "@/components/ui/button";
 import {
   ArrowLeft,
+  AlertTriangle,
   CheckCircle2,
   XCircle,
   MinusCircle,
@@ -30,6 +31,7 @@ import {
   TrendingUp,
   Sparkles,
 } from "lucide-react";
+import { Alert, AlertDescription } from "@/components/ui/alert";
 import {
   formatDateTime,
   formatDuration,
@@ -37,6 +39,7 @@ import {
 } from "@/lib/utils/datetime";
 import {
   buildHeadline,
+  buildJudgeFailureNote,
   buildPhaseNarrative,
   type PhaseName,
 } from "@/lib/utils/sleep-narrative";
@@ -165,6 +168,20 @@ export function SleepReportDetailView({
           />
         )}
 
+        {report.status === "degraded" && (
+          // #1183/#1190: degraded = run finished but SOME judge-LLM calls
+          // failed. Informational (not an error) — an ErrorBanner would
+          // overstate it, but badge-only understates it.
+          <Alert className="border-yellow-300 bg-yellow-50 text-yellow-800 dark:border-yellow-700 dark:bg-yellow-900/20 dark:text-yellow-300 [&>svg]:text-yellow-600 dark:[&>svg]:text-yellow-400">
+            <AlertTriangle className="h-4 w-4" />
+            <AlertDescription>
+              {t("detail.narrative.runDegraded", {
+                count: report.llm_call_failures ?? 0,
+              })}
+            </AlertDescription>
+          </Alert>
+        )}
+
         <div className="p-6 bg-white dark:bg-gray-900 rounded-lg border border-gray-200 dark:border-gray-700">
           <div className="flex items-start justify-between gap-4 flex-wrap">
             <div className="flex items-center gap-3">
@@ -223,6 +240,7 @@ export function SleepReportDetailView({
           <CardContent className="space-y-2">
             {phaseResults.map(({ key, result }) => {
               const narrative = buildPhaseNarrative(key, result);
+              const judgeNote = buildJudgeFailureNote(result);
               return (
                 <details
                   key={key}
@@ -237,6 +255,11 @@ export function SleepReportDetailView({
                       {narrative && (
                         <div className="text-xs text-gray-500 dark:text-gray-400 truncate">
                           {t(narrative.key, narrative.values)}
+                        </div>
+                      )}
+                      {judgeNote && (
+                        <div className="text-xs text-yellow-700 dark:text-yellow-400 truncate">
+                          {t(judgeNote.key, judgeNote.values)}
                         </div>
                       )}
                     </div>

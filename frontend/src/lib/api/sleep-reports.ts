@@ -32,6 +32,10 @@ export interface SleepReportSummary {
   memories_flagged: number;
   llm_calls_made: number;
   llm_tokens_used: number;
+  // #1183: judge-LLM calls that raised across all phases — the magnitude
+  // behind a 'degraded'/'failed' grading. Optional: reports written before
+  // v0.43.0 lack the column in older cached payloads.
+  llm_call_failures?: number;
 }
 
 export interface PhaseResult {
@@ -40,6 +44,9 @@ export interface PhaseResult {
   skip_reason: string | null;
   error: string | null;
   llm_calls: number;
+  // #1183: judge calls that raised in THIS phase. Absent on pre-v0.43.0
+  // report blobs (JSONB written by older reporters).
+  llm_call_failures?: number;
   memories_processed: number;
   details: Record<string, unknown> | null;
 }

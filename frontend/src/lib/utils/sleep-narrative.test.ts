@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
   buildHeadline,
+  buildJudgeFailureNote,
   buildPhaseNarrative,
   type NarrativePhaseResult,
 } from "./sleep-narrative";
@@ -173,6 +174,46 @@ describe("buildPhaseNarrative", () => {
       const n = buildPhaseNarrative("dedup", phase({ details: {} }));
       expect(n?.key).toBe("detail.narrative.phases.dedup.empty");
     });
+
+    it("uses successWithSplit when oversize clusters were split (#1190)", () => {
+      const n = buildPhaseNarrative(
+        "dedup",
+        phase({
+          details: {
+            candidates: 782,
+            merged: 4,
+            clusters: 3,
+            deferred_clusters: 1,
+            oversize_clusters: 1,
+            oversize_max_size: 40,
+            split_subclusters: 3,
+            deferred_pairs: 120,
+          },
+        }),
+      );
+      expect(n?.key).toBe("detail.narrative.phases.dedup.successWithSplit");
+      expect(n?.values.count).toBe(782);
+      expect(n?.values.merged).toBe(4);
+      expect(n?.values.oversize).toBe(1);
+      expect(n?.values.subclusters).toBe(3);
+      expect(n?.values.deferredPairs).toBe(120);
+    });
+
+    it("legacy pre-v0.43.0 blob (deferred_clusters only) keeps plain success", () => {
+      // No split happened on those runs — "split into 0 batches" would lie.
+      const n = buildPhaseNarrative(
+        "dedup",
+        phase({
+          details: {
+            candidates: 12,
+            merged: 0,
+            clusters: 0,
+            deferred_clusters: 2,
+          },
+        }),
+      );
+      expect(n?.key).toBe("detail.narrative.phases.dedup.success");
+    });
   });
 
   describe("importance", () => {
@@ -254,5 +295,25 @@ describe("buildPhaseNarrative", () => {
       );
       expect(n?.values.failed).toBe(0);
     });
+  });
+});
+
+describe("buildJudgeFailureNote", () => {
+  it("returns null for a null result", () => {
+    expect(buildJudgeFailureNote(null)).toBeNull();
+  });
+
+  it("returns null when the field is absent (pre-v0.43.0 blob)", () => {
+    expect(buildJudgeFailureNote(phase())).toBeNull();
+  });
+
+  it("returns null when zero calls failed", () => {
+    expect(buildJudgeFailureNote(phase({ llm_call_failures: 0 }))).toBeNull();
+  });
+
+  it("builds the note with the failure count", () => {
+    const n = buildJudgeFailureNote(phase({ llm_call_failures: 5 }));
+    expect(n?.key).toBe("detail.narrative.judgeFailures");
+    expect(n?.values.count).toBe(5);
   });
 });
