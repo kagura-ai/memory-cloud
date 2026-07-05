@@ -3470,7 +3470,7 @@
     "templateHelp": "または以下のフィールドを手動でカスタマイズしてください。",
     "summaryLabel": "サマリー（AI向け）",
     "summaryPlaceholder": "このコンテキストの目的の簡単な説明（200-500文字）",
-    "summaryHelp": "AIがこのコンテキストの目的を理解するのに役立ちます。{count}/500",
+    "summaryHelp": "AIがこのコンテキストの目的を理解するのに役立ちます。{count}/2000",
     "usageGuideLabel": "使用ガイド（AI向け）",
     "usageGuidePlaceholder": "AIがこのコンテキストでメモリーをどう使用すべきかのガイドライン...",
     "usageGuideHelp": "AIがメモリーを保存・取得する方法の指示。{count}/2000",

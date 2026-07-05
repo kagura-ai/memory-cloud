@@ -470,7 +470,9 @@ export function SettingsTabPanel({
                   setSummary(e.target.value);
                   markDirty();
                 }}
-                maxLength={500}
+                // #1193: matches CONTEXT_SUMMARY_MAX_LENGTH (raised 500→2000
+                // to legitimize MCP-written summaries).
+                maxLength={2000}
                 rows={3}
               />
               <p className="text-sm text-muted-foreground">

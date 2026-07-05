@@ -3470,7 +3470,7 @@
     "templateHelp": "Or customize the fields below manually.",
     "summaryLabel": "Summary (for AI)",
     "summaryPlaceholder": "Brief description of this context's purpose (200-500 chars)",
-    "summaryHelp": "Helps AI understand the purpose of this context. {count}/500",
+    "summaryHelp": "Helps AI understand the purpose of this context. {count}/2000",
     "usageGuideLabel": "Usage Guide (for AI)",
     "usageGuidePlaceholder": "Guidelines for how AI should use memories in this context...",
     "usageGuideHelp": "Instructions for AI on how to store and retrieve memories. {count}/2000",
