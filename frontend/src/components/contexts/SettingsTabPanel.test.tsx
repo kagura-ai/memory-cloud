@@ -441,4 +441,31 @@ describe("SettingsTabPanel — dirty-field-only save (#1193)", () => {
     expect(payload).not.toHaveProperty("summary");
     expect(payload).toEqual({ display_name: "Renamed" });
   });
+
+  it("edit-then-revert save is a no-op: no request, no refresh (#1194 review)", async () => {
+    // isDirty is a one-way flag, so the save bar stays visible after a
+    // revert — the empty payload must short-circuit instead of firing a
+    // request and a misleading "Saved" toast.
+    render(
+      <SettingsTabPanel
+        contextId={CTX_ID}
+        context={makeContext()}
+        onContextUpdated={noop}
+      />,
+    );
+
+    const input = screen.getByDisplayValue("Demo Context");
+    fireEvent.change(input, { target: { value: "Renamed" } });
+    fireEvent.change(input, { target: { value: "Demo Context" } });
+    fireEvent.click(await screen.findByRole("button", { name: /saveChanges/ }));
+
+    await waitFor(() => {
+      // Save bar clears (isDirty reset) without any network activity.
+      expect(
+        screen.queryByRole("button", { name: /saveChanges/ }),
+      ).not.toBeInTheDocument();
+    });
+    expect(mockUpdateContext).not.toHaveBeenCalled();
+    expect(mockGetContext).not.toHaveBeenCalled();
+  });
 });

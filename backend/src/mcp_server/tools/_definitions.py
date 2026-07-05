@@ -985,17 +985,26 @@ Returns: {status, message, context_id, context_name, context_display_name, conte
                     "description": {
                         "type": "string",
                         "maxLength": CONTEXT_DESCRIPTION_MAX_LENGTH,
-                        "description": "Optional description of the context's purpose (max 500 chars).",
+                        "description": (
+                            "Optional description of the context's purpose "
+                            f"(max {CONTEXT_DESCRIPTION_MAX_LENGTH} chars)."
+                        ),
                     },
                     "summary": {
                         "type": "string",
                         "maxLength": CONTEXT_SUMMARY_MAX_LENGTH,
-                        "description": "LLM-oriented summary (max 2000 chars). Helps AI understand context purpose.",
+                        "description": (
+                            f"LLM-oriented summary (max {CONTEXT_SUMMARY_MAX_LENGTH} chars). "
+                            "Helps AI understand context purpose."
+                        ),
                     },
                     "usage_guide": {
                         "type": "string",
                         "maxLength": CONTEXT_USAGE_GUIDE_MAX_LENGTH,
-                        "description": "LLM-oriented memory usage guidelines for this context (max 2000 chars).",
+                        "description": (
+                            "LLM-oriented memory usage guidelines for this context "
+                            f"(max {CONTEXT_USAGE_GUIDE_MAX_LENGTH} chars)."
+                        ),
                     },
                     "is_private": {
                         "type": "boolean",
@@ -1040,17 +1049,25 @@ Returns: {status, message, updated_fields, context_id, context_name, context_dis
                     "description": {
                         "type": "string",
                         "maxLength": CONTEXT_DESCRIPTION_MAX_LENGTH,
-                        "description": "Updated context description (max 500 chars).",
+                        "description": (
+                            f"Updated context description (max {CONTEXT_DESCRIPTION_MAX_LENGTH} chars)."
+                        ),
                     },
                     "summary": {
                         "type": "string",
                         "maxLength": CONTEXT_SUMMARY_MAX_LENGTH,
-                        "description": "Updated LLM-oriented summary (max 2000 chars). Helps AI understand context purpose.",
+                        "description": (
+                            f"Updated LLM-oriented summary (max {CONTEXT_SUMMARY_MAX_LENGTH} chars). "
+                            "Helps AI understand context purpose."
+                        ),
                     },
                     "usage_guide": {
                         "type": "string",
                         "maxLength": CONTEXT_USAGE_GUIDE_MAX_LENGTH,
-                        "description": "Updated LLM-oriented usage guidelines (max 2000 chars). Instructions for how AI should use memories in this context.",
+                        "description": (
+                            f"Updated LLM-oriented usage guidelines (max {CONTEXT_USAGE_GUIDE_MAX_LENGTH} chars). "
+                            "Instructions for how AI should use memories in this context."
+                        ),
                     },
                     "resource_id": {
                         "type": "string",

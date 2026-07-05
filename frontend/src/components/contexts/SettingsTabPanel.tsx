@@ -193,9 +193,19 @@ export function SettingsTabPanel({
         payload.sleep_mode = sleepMode;
       }
 
-      if (Object.keys(payload).length > 0) {
-        await updateContext(context.id, payload);
+      if (Object.keys(payload).length === 0) {
+        // Everything was reverted to the original values — a true no-op.
+        // Skip the request AND the refresh, clear the sticky save bar, and
+        // say "no changes" instead of a misleading "Saved" (PR #1194 review).
+        setIsDirty(false);
+        toast({
+          title: t("noChangesTitle"),
+          description: t("noChangesDesc"),
+        });
+        return;
       }
+
+      await updateContext(context.id, payload);
 
       toast({
         title: t("savedTitle"),
