@@ -2877,6 +2877,7 @@
           "headlineNoContext": "{processed} 件のメモリを処理: マージ {merged} / エッジ {edges} / 昇格 {promoted} / 要確認 {flagged}",
           "headlineDeletedContext": "(削除済みコンテキスト) — {processed} 件のメモリを処理: マージ {merged} / エッジ {edges} / 昇格 {promoted} / 要確認 {flagged}",
           "runFailed": "実行に失敗しました: {error}",
+          "runDegraded": "一部失敗: judge LLM 呼び出し {count} 件が失敗しました — マージ・重要度の判定が不完全な可能性があります。下のフェーズ結果を確認してください。",
           "skippedNoReason": "スキップされました",
           "skippedUnknown": "スキップ: {reason}",
           "skipReasons": {
@@ -2885,6 +2886,7 @@
             "sleepMode": "スキップ: sleep モードが {mode}"
           },
           "failed": "失敗: {error}",
+          "judgeFailures": "このフェーズで judge LLM 呼び出し {count} 件が失敗",
           "phases": {
             "edgeDiscovery": {
               "success": "サンプル {sampled} 件から {count} 件のエッジを追加",
@@ -2892,6 +2894,7 @@
             },
             "dedup": {
               "success": "重複候補 {count} ペアを検出 → {merged} 件マージ",
+              "successWithSplit": "重複候補 {count} ペアを検出 → {merged} 件マージ・大型クラスタ {oversize} 件を {subclusters} バッチに分割、{deferredPairs} ペアは次回に持ち越し",
               "empty": "重複候補は見つかりませんでした"
             },
             "importance": {

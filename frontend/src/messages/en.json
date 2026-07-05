@@ -2877,6 +2877,7 @@
           "headlineNoContext": "Processed {processed, plural, one {# memory} other {# memories}}: {merged} merged, {edges} edges, {promoted} promoted, {flagged} flagged",
           "headlineDeletedContext": "(deleted context) — processed {processed, plural, one {# memory} other {# memories}}: {merged} merged, {edges} edges, {promoted} promoted, {flagged} flagged",
           "runFailed": "Run failed: {error}",
+          "runDegraded": "Run degraded: {count, plural, one {# judge LLM call} other {# judge LLM calls}} failed — merge/importance judgments may be incomplete. Check the phase results below.",
           "skippedNoReason": "Skipped",
           "skippedUnknown": "Skipped: {reason}",
           "skipReasons": {
@@ -2885,6 +2886,7 @@
             "sleepMode": "Skipped: sleep mode is {mode}"
           },
           "failed": "Failed: {error}",
+          "judgeFailures": "{count, plural, one {# judge LLM call} other {# judge LLM calls}} failed in this phase",
           "phases": {
             "edgeDiscovery": {
               "success": "Added {count, plural, one {# edge} other {# edges}} across {sampled, plural, one {# sampled memory} other {# sampled memories}}",
@@ -2892,6 +2894,7 @@
             },
             "dedup": {
               "success": "Detected {count, plural, one {# duplicate pair} other {# duplicate pairs}} → {merged} merged",
+              "successWithSplit": "Detected {count, plural, one {# duplicate pair} other {# duplicate pairs}} → {merged} merged · {oversize, plural, one {# oversize cluster} other {# oversize clusters}} split into {subclusters, plural, one {# batch} other {# batches}}, {deferredPairs, plural, one {# pair} other {# pairs}} deferred to the next run",
               "empty": "No duplicate candidates found"
             },
             "importance": {

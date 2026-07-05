@@ -10,17 +10,16 @@
  */
 
 export type PhaseName =
-  | "edgeDiscovery"
-  | "dedup"
-  | "importance"
-  | "consolidation"
-  | "reindex";
+  "edgeDiscovery" | "dedup" | "importance" | "consolidation" | "reindex";
 
 export interface NarrativePhaseResult {
   success: boolean;
   skipped: boolean;
   skip_reason: string | null;
   error: string | null;
+  // #1183: judge calls that raised in this phase. Optional — pre-v0.43.0
+  // report blobs don't carry it.
+  llm_call_failures?: number;
   details: Record<string, unknown> | null;
 }
 
@@ -171,13 +170,34 @@ export function buildPhaseNarrative(
       const candidates = num(d, "candidates") ?? 0;
       const merged = num(d, "merged") ?? 0;
       const clusters = num(d, "clusters") ?? 0;
-      const deferred = num(d, "deferred_clusters") ?? 0;
+      // #1184: oversize mega-clusters are split into judgeable subclusters;
+      // report the split + the deferred (unjudged) pair volume so "0 merges
+      // because everything was deferred" is visible. Keyed on the NEW
+      // `oversize_clusters` only — pre-v0.43.0 blobs carry the legacy
+      // `deferred_clusters` (wholesale deferral, no split happened), and
+      // rendering "split into 0 batches" for those would be a lie; they
+      // keep the plain success line.
+      const oversize = num(d, "oversize_clusters") ?? 0;
+      const subclusters = num(d, "split_subclusters") ?? 0;
+      const deferredPairs = num(d, "deferred_pairs") ?? 0;
       if (candidates === 0 && merged === 0) {
         return { key: "detail.narrative.phases.dedup.empty", values: {} };
       }
+      if (oversize > 0) {
+        return {
+          key: "detail.narrative.phases.dedup.successWithSplit",
+          values: {
+            count: candidates,
+            merged,
+            oversize,
+            subclusters,
+            deferredPairs,
+          },
+        };
+      }
       return {
         key: "detail.narrative.phases.dedup.success",
-        values: { count: candidates, merged, clusters, deferred },
+        values: { count: candidates, merged, clusters },
       };
     }
     case "importance": {
@@ -242,4 +262,24 @@ export function buildPhaseNarrative(
       };
     }
   }
+}
+
+/**
+ * Build the judge-failure sub-note for a phase card (#1183 / #1190).
+ *
+ * A phase whose judge-LLM calls partially failed still renders a plain
+ * success narrative; this companion note surfaces the failure count so a
+ * `degraded` run is explainable at the phase level. Returns null when the
+ * phase was not run, the field is absent (pre-v0.43.0 blobs), or no calls
+ * failed.
+ */
+export function buildJudgeFailureNote(
+  result: NarrativePhaseResult | null,
+): Narrative | null {
+  const failures = result?.llm_call_failures;
+  if (typeof failures !== "number" || failures <= 0) return null;
+  return {
+    key: "detail.narrative.judgeFailures",
+    values: { count: failures },
+  };
 }
