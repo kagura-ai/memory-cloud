@@ -172,7 +172,13 @@ export function SleepReportDetailView({
           // #1183/#1190: degraded = run finished but SOME judge-LLM calls
           // failed. Informational (not an error) — an ErrorBanner would
           // overstate it, but badge-only understates it.
-          <Alert className="border-yellow-300 bg-yellow-50 text-yellow-800 dark:border-yellow-700 dark:bg-yellow-900/20 dark:text-yellow-300 [&>svg]:text-yellow-600 dark:[&>svg]:text-yellow-400">
+          <Alert
+            // Informational, not an error — role="status" (polite) instead of
+            // the Alert default role="alert" (assertive) so screen readers
+            // don't announce it with error urgency (#1190 review).
+            role="status"
+            className="border-yellow-300 bg-yellow-50 text-yellow-800 dark:border-yellow-700 dark:bg-yellow-900/20 dark:text-yellow-300 [&>svg]:text-yellow-600 dark:[&>svg]:text-yellow-400"
+          >
             <AlertTriangle className="h-4 w-4" />
             <AlertDescription>
               {t("detail.narrative.runDegraded", {
