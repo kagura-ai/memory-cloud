@@ -3,6 +3,12 @@
 Extracted from tools.py for modularity (Issue #7).
 """
 
+from config.constants import (
+    CONTEXT_DESCRIPTION_MAX_LENGTH,
+    CONTEXT_SUMMARY_MAX_LENGTH,
+    CONTEXT_USAGE_GUIDE_MAX_LENGTH,
+)
+
 
 def get_tool_definitions() -> list[dict]:
     """Get static tool definitions for HTTP transport.
@@ -978,15 +984,27 @@ Returns: {status, message, context_id, context_name, context_display_name, conte
                     },
                     "description": {
                         "type": "string",
-                        "description": "Optional description of the context's purpose.",
+                        "maxLength": CONTEXT_DESCRIPTION_MAX_LENGTH,
+                        "description": (
+                            "Optional description of the context's purpose "
+                            f"(max {CONTEXT_DESCRIPTION_MAX_LENGTH} chars)."
+                        ),
                     },
                     "summary": {
                         "type": "string",
-                        "description": "LLM-oriented summary (200-500 chars). Helps AI understand context purpose.",
+                        "maxLength": CONTEXT_SUMMARY_MAX_LENGTH,
+                        "description": (
+                            f"LLM-oriented summary (max {CONTEXT_SUMMARY_MAX_LENGTH} chars). "
+                            "Helps AI understand context purpose."
+                        ),
                     },
                     "usage_guide": {
                         "type": "string",
-                        "description": "LLM-oriented memory usage guidelines for this context.",
+                        "maxLength": CONTEXT_USAGE_GUIDE_MAX_LENGTH,
+                        "description": (
+                            "LLM-oriented memory usage guidelines for this context "
+                            f"(max {CONTEXT_USAGE_GUIDE_MAX_LENGTH} chars)."
+                        ),
                     },
                     "is_private": {
                         "type": "boolean",
@@ -1030,15 +1048,26 @@ Returns: {status, message, updated_fields, context_id, context_name, context_dis
                     },
                     "description": {
                         "type": "string",
-                        "description": "Updated context description (max 500 chars).",
+                        "maxLength": CONTEXT_DESCRIPTION_MAX_LENGTH,
+                        "description": (
+                            f"Updated context description (max {CONTEXT_DESCRIPTION_MAX_LENGTH} chars)."
+                        ),
                     },
                     "summary": {
                         "type": "string",
-                        "description": "Updated LLM-oriented summary (max 500 chars). Helps AI understand context purpose.",
+                        "maxLength": CONTEXT_SUMMARY_MAX_LENGTH,
+                        "description": (
+                            f"Updated LLM-oriented summary (max {CONTEXT_SUMMARY_MAX_LENGTH} chars). "
+                            "Helps AI understand context purpose."
+                        ),
                     },
                     "usage_guide": {
                         "type": "string",
-                        "description": "Updated LLM-oriented usage guidelines (max 2000 chars). Instructions for how AI should use memories in this context.",
+                        "maxLength": CONTEXT_USAGE_GUIDE_MAX_LENGTH,
+                        "description": (
+                            f"Updated LLM-oriented usage guidelines (max {CONTEXT_USAGE_GUIDE_MAX_LENGTH} chars). "
+                            "Instructions for how AI should use memories in this context."
+                        ),
                     },
                     "resource_id": {
                         "type": "string",

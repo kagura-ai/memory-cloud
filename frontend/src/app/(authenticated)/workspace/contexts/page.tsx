@@ -648,11 +648,12 @@ export default function ContextsPage() {
                 placeholder={t("summaryPlaceholder")}
                 value={newContextSummary}
                 onChange={(e) => setNewContextSummary(e.target.value)}
-                maxLength={500}
+                // #1193: matches CONTEXT_SUMMARY_MAX_LENGTH (500→2000).
+                maxLength={2000}
                 rows={2}
               />
               <p className={cn(typography.caption, colors.text.muted)}>
-                {t("summaryHelp")} {newContextSummary.length}/500
+                {t("summaryHelp")} {newContextSummary.length}/2000
               </p>
             </div>
 

@@ -25,6 +25,10 @@ from auth.programmatic_workspace_auth import (
     authorize_workspace_management,
 )
 from auth.workspace_roles import WorkspaceRole
+from config.constants import (
+    CONTEXT_SUMMARY_MAX_LENGTH,
+    CONTEXT_USAGE_GUIDE_MAX_LENGTH,
+)
 from db.base import get_db
 from models.api_base import TZAwareBaseModel
 from models.auth import Context, ExternalAPIKey, User, Workspace
@@ -61,8 +65,10 @@ class WorkspaceCreate(BaseModel):
     description: str | None = None
     # Issue #169: Default context settings
     default_context_name: str | None = Field(None, pattern=r"^[a-z0-9_-]+$", max_length=100)
-    default_context_summary: str | None = Field(None, max_length=500)
-    default_context_usage_guide: str | None = Field(None, max_length=2000)
+    # #1193: same caps as every other Context.summary/usage_guide write path
+    # (single source of truth in config.constants).
+    default_context_summary: str | None = Field(None, max_length=CONTEXT_SUMMARY_MAX_LENGTH)
+    default_context_usage_guide: str | None = Field(None, max_length=CONTEXT_USAGE_GUIDE_MAX_LENGTH)
     default_context_embedding_model: str | None = Field(
         None, pattern=r"^(text-embedding-3-small|text-embedding-3-large)$"
     )
