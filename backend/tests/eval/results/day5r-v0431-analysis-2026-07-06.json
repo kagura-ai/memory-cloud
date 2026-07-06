@@ -1,0 +1,141 @@
+{
+  "run_date": "2026-07-06",
+  "experiment": "day5-update-correctness",
+  "seed": 20260703,
+  "n_resamples": 10000,
+  "alpha": 0.05,
+  "delta_update": 0.15,
+  "k": 10,
+  "run_labels": [
+    "day5r-v0431-run0",
+    "day5r-v0431-run1",
+    "day5r-v0431-run2"
+  ],
+  "inferential_run": "day5r-v0431-run0",
+  "h4": {
+    "n_complete_pairs": 19,
+    "mean": 0.4737,
+    "ci_low": 0.2632,
+    "ci_high": 0.6842,
+    "pass": true,
+    "underpowered": true
+  },
+  "decomposition": {
+    "vanilla_rag": {
+      "n": 50,
+      "counts": {
+        "current_over_stale": 27,
+        "stale_over_current": 23,
+        "current_only": 0,
+        "stale_only": 0,
+        "neither": 0
+      },
+      "rates": {
+        "current_over_stale": 0.54,
+        "stale_over_current": 0.46,
+        "current_only": 0.0,
+        "stale_only": 0.0,
+        "neither": 0.0
+      }
+    },
+    "mc_update": {
+      "n": 50,
+      "counts": {
+        "current_over_stale": 19,
+        "stale_over_current": 0,
+        "current_only": 25,
+        "stale_only": 5,
+        "neither": 1
+      },
+      "rates": {
+        "current_over_stale": 0.38,
+        "stale_over_current": 0.0,
+        "current_only": 0.5,
+        "stale_only": 0.1,
+        "neither": 0.02
+      }
+    },
+    "mc_prod": {
+      "n": 50,
+      "counts": {
+        "current_over_stale": 19,
+        "stale_over_current": 0,
+        "current_only": 25,
+        "stale_only": 5,
+        "neither": 1
+      },
+      "rates": {
+        "current_over_stale": 0.38,
+        "stale_over_current": 0.0,
+        "current_only": 0.5,
+        "stale_only": 0.1,
+        "neither": 0.02
+      }
+    }
+  },
+  "supporting": {
+    "update_success_at_10": {
+      "vanilla_rag": {
+        "mean": 0.54,
+        "n": 50
+      },
+      "mc_update": {
+        "mean": 0.88,
+        "n": 50
+      },
+      "mc_prod": {
+        "mean": 0.88,
+        "n": 50
+      }
+    },
+    "vs_vanilla_rag": {
+      "mc_update": {
+        "mean": 0.34,
+        "ci_low": 0.2,
+        "ci_high": 0.48,
+        "n": 50
+      },
+      "mc_prod": {
+        "mean": 0.34,
+        "ci_low": 0.2,
+        "ci_high": 0.48,
+        "n": 50
+      }
+    }
+  },
+  "sigma_d": 0.513,
+  "achieved_power": {
+    "delta": 0.15,
+    "n": 19,
+    "power": 0.2465
+  },
+  "across_runs": {
+    "gated_conditional_mean_diff": {
+      "min": 0.3913,
+      "median": 0.4737,
+      "max": 0.5
+    },
+    "update_success_at_10": {
+      "vanilla_rag": {
+        "min": 0.54,
+        "median": 0.54,
+        "max": 0.54
+      },
+      "mc_update": {
+        "min": 0.8,
+        "median": 0.84,
+        "max": 0.88
+      },
+      "mc_prod": {
+        "min": 0.8,
+        "median": 0.84,
+        "max": 0.88
+      }
+    }
+  },
+  "design_notes": [
+    "D1: gated arms differ ONLY in update machinery -- vanilla_rag (sleep_mode=skip, reinforce_enabled=False, neural off, search_mode=semantic) vs mc_update (sleep_mode=full, one Sleep full pass w/ judge-LLM as configured, reinforce_enabled=True, search_mode=semantic); mc_prod (hybrid + neural, production posture) is supporting only, scored after mc_update so its Hebbian writes cannot contaminate the gated pass.",
+    "D3: longitudinal simulation -- every stale (-v1) memory's created_at/updated_at backdated 30 days in BOTH contexts before scoring; a seconds-apart ingest would make every recency mechanism inert by construction.",
+    "D4: gated conditional = complete pairs (both arms' outcome in {current_over_stale, stale_over_current}); diffs = mc_update_correct - vanilla_rag_correct, paired BCa (10k resamples, seed 20260703) on the mean diff; pass = ci_low > 0 AND mean >= delta_update (0.15); underpowered if complete pairs < 25; dedup removal of the stale doc lands in current_only ('update-by-removal') -- reported, not gated."
+  ]
+}

@@ -1,0 +1,1094 @@
+{
+  "run_date": "2026-07-06",
+  "experiment": "day5-update-correctness",
+  "label": "day5r-v0431-run1",
+  "corpus_path": "fixtures/update_slice.yaml",
+  "content_sha256": "68181b5f8589cd646c58702dde44f22fda15a75b73ec1d735448053ca3d9725e",
+  "embedding_model": "qwen3-embedding:0.6b",
+  "embedding_dimensions": 1024,
+  "k": 10,
+  "backdate_days": 30,
+  "judge_model": "qwen3.5-9b",
+  "sleep_summary": {
+    "ran": true,
+    "ok": false,
+    "status": "degraded",
+    "llm_call_failures": 4,
+    "memories_processed": 360,
+    "edges_created": 0,
+    "memories_merged": 34,
+    "memories_promoted": 86,
+    "memories_flagged": 96,
+    "error_message": null,
+    "edge_discovery_result": {
+      "success": true,
+      "skipped": false,
+      "skip_reason": null,
+      "error": null,
+      "llm_calls": 0,
+      "llm_call_failures": 0,
+      "memories_processed": 30,
+      "details": {
+        "sampled": 30,
+        "candidates": 36,
+        "filtered": 36,
+        "edges_created": 0,
+        "llm_accepted": 0,
+        "llm_rejected": 0,
+        "llm_call_failures": 0,
+        "auto_accepted": 0,
+        "edge_type_dist": {},
+        "avg_confidence": 0.0,
+        "median_confidence": 0.0,
+        "p25_confidence": 0.0,
+        "p75_confidence": 0.0,
+        "confidence_n": 0,
+        "confidence_imputed": 0,
+        "confidence_histogram": {
+          "0.0-0.5": 0,
+          "0.5-0.7": 0,
+          "0.7-0.85": 0,
+          "0.85-1.0": 0
+        },
+        "avg_confidence_rejected": 0.0,
+        "median_confidence_rejected": 0.0,
+        "p25_confidence_rejected": 0.0,
+        "p75_confidence_rejected": 0.0,
+        "confidence_n_rejected": 0,
+        "confidence_imputed_rejected": 0,
+        "confidence_histogram_rejected": {
+          "0.0-0.5": 0,
+          "0.5-0.7": 0,
+          "0.7-0.85": 0,
+          "0.85-1.0": 0
+        },
+        "llm_model": "qwen3.5-9b",
+        "prompt_revision": "v3"
+      },
+      "llm_breakdown": [],
+      "embedding_calls": 30,
+      "embedding_tokens": 0
+    },
+    "dedup_result": {
+      "success": true,
+      "skipped": false,
+      "skip_reason": null,
+      "error": null,
+      "llm_calls": 27,
+      "llm_call_failures": 4,
+      "memories_processed": 130,
+      "details": {
+        "candidates": 782,
+        "clusters": 31,
+        "deferred_clusters": 1,
+        "oversize_clusters": 1,
+        "oversize_max_size": 130,
+        "split_subclusters": 31,
+        "deferred_pairs": 583,
+        "merged": 34,
+        "llm_call_failures": 4
+      },
+      "llm_breakdown": [
+        {
+          "provider": "self_hosted",
+          "model": "qwen3.5-9b",
+          "input_tokens": 26264,
+          "output_tokens": 14575,
+          "cached_input_tokens": 0,
+          "calls": 27
+        }
+      ],
+      "embedding_calls": 130,
+      "embedding_tokens": 0
+    },
+    "importance_result": {
+      "success": true,
+      "skipped": false,
+      "skip_reason": null,
+      "error": null,
+      "llm_calls": 2,
+      "llm_call_failures": 0,
+      "memories_processed": 16,
+      "details": {
+        "candidates": 16,
+        "updated": 16,
+        "alpha": 0.3,
+        "llm_call_failures": 0
+      },
+      "llm_breakdown": [
+        {
+          "provider": "self_hosted",
+          "model": "qwen3.5-9b",
+          "input_tokens": 2731,
+          "output_tokens": 877,
+          "cached_input_tokens": 0,
+          "calls": 2
+        }
+      ],
+      "embedding_calls": 0,
+      "embedding_tokens": 0
+    },
+    "consolidation_result": {
+      "success": true,
+      "skipped": false,
+      "skip_reason": null,
+      "error": null,
+      "llm_calls": 20,
+      "llm_call_failures": 0,
+      "memories_processed": 96,
+      "details": {
+        "working_count": 96,
+        "rule_promoted": 0,
+        "rule_deleted": 0,
+        "borderline": 96,
+        "llm_promoted": 86,
+        "llm_archived": 6,
+        "llm_call_failures": 0
+      },
+      "llm_breakdown": [
+        {
+          "provider": "self_hosted",
+          "model": "qwen3.5-9b",
+          "input_tokens": 19699,
+          "output_tokens": 5409,
+          "cached_input_tokens": 0,
+          "calls": 20
+        }
+      ],
+      "embedding_calls": 0,
+      "embedding_tokens": 0
+    },
+    "reindex_result": {
+      "success": true,
+      "skipped": false,
+      "skip_reason": null,
+      "error": null,
+      "llm_calls": 0,
+      "llm_call_failures": 0,
+      "memories_processed": 88,
+      "details": {
+        "reindexed": 88,
+        "failed": 0,
+        "failed_ids": []
+      },
+      "llm_breakdown": [],
+      "embedding_calls": 88,
+      "embedding_tokens": 0
+    },
+    "llm_call_failures_total": 4
+  },
+  "arms": {
+    "vanilla_rag": {
+      "per_query": [
+        {
+          "query_id": "q-u01",
+          "outcome": "current_over_stale",
+          "current_rank": 1,
+          "stale_rank": 2
+        },
+        {
+          "query_id": "q-u02",
+          "outcome": "stale_over_current",
+          "current_rank": 2,
+          "stale_rank": 1
+        },
+        {
+          "query_id": "q-u03",
+          "outcome": "stale_over_current",
+          "current_rank": 2,
+          "stale_rank": 1
+        },
+        {
+          "query_id": "q-u04",
+          "outcome": "current_over_stale",
+          "current_rank": 1,
+          "stale_rank": 2
+        },
+        {
+          "query_id": "q-u05",
+          "outcome": "current_over_stale",
+          "current_rank": 1,
+          "stale_rank": 2
+        },
+        {
+          "query_id": "q-u06",
+          "outcome": "stale_over_current",
+          "current_rank": 2,
+          "stale_rank": 1
+        },
+        {
+          "query_id": "q-u07",
+          "outcome": "stale_over_current",
+          "current_rank": 2,
+          "stale_rank": 1
+        },
+        {
+          "query_id": "q-u08",
+          "outcome": "current_over_stale",
+          "current_rank": 1,
+          "stale_rank": 2
+        },
+        {
+          "query_id": "q-u09",
+          "outcome": "current_over_stale",
+          "current_rank": 1,
+          "stale_rank": 2
+        },
+        {
+          "query_id": "q-u10",
+          "outcome": "current_over_stale",
+          "current_rank": 1,
+          "stale_rank": 2
+        },
+        {
+          "query_id": "q-u11",
+          "outcome": "stale_over_current",
+          "current_rank": 2,
+          "stale_rank": 1
+        },
+        {
+          "query_id": "q-u12",
+          "outcome": "current_over_stale",
+          "current_rank": 1,
+          "stale_rank": 2
+        },
+        {
+          "query_id": "q-u13",
+          "outcome": "current_over_stale",
+          "current_rank": 1,
+          "stale_rank": 2
+        },
+        {
+          "query_id": "q-u14",
+          "outcome": "current_over_stale",
+          "current_rank": 1,
+          "stale_rank": 2
+        },
+        {
+          "query_id": "q-u15",
+          "outcome": "current_over_stale",
+          "current_rank": 1,
+          "stale_rank": 2
+        },
+        {
+          "query_id": "q-u16",
+          "outcome": "stale_over_current",
+          "current_rank": 2,
+          "stale_rank": 1
+        },
+        {
+          "query_id": "q-u17",
+          "outcome": "stale_over_current",
+          "current_rank": 2,
+          "stale_rank": 1
+        },
+        {
+          "query_id": "q-u18",
+          "outcome": "stale_over_current",
+          "current_rank": 2,
+          "stale_rank": 1
+        },
+        {
+          "query_id": "q-u19",
+          "outcome": "current_over_stale",
+          "current_rank": 1,
+          "stale_rank": 2
+        },
+        {
+          "query_id": "q-u20",
+          "outcome": "stale_over_current",
+          "current_rank": 2,
+          "stale_rank": 1
+        },
+        {
+          "query_id": "q-u21",
+          "outcome": "current_over_stale",
+          "current_rank": 1,
+          "stale_rank": 2
+        },
+        {
+          "query_id": "q-u22",
+          "outcome": "current_over_stale",
+          "current_rank": 1,
+          "stale_rank": 2
+        },
+        {
+          "query_id": "q-u23",
+          "outcome": "stale_over_current",
+          "current_rank": 2,
+          "stale_rank": 1
+        },
+        {
+          "query_id": "q-u24",
+          "outcome": "current_over_stale",
+          "current_rank": 1,
+          "stale_rank": 2
+        },
+        {
+          "query_id": "q-u25",
+          "outcome": "current_over_stale",
+          "current_rank": 1,
+          "stale_rank": 2
+        },
+        {
+          "query_id": "q-u26",
+          "outcome": "current_over_stale",
+          "current_rank": 1,
+          "stale_rank": 2
+        },
+        {
+          "query_id": "q-u27",
+          "outcome": "stale_over_current",
+          "current_rank": 2,
+          "stale_rank": 1
+        },
+        {
+          "query_id": "q-u28",
+          "outcome": "stale_over_current",
+          "current_rank": 2,
+          "stale_rank": 1
+        },
+        {
+          "query_id": "q-u29",
+          "outcome": "stale_over_current",
+          "current_rank": 2,
+          "stale_rank": 1
+        },
+        {
+          "query_id": "q-u30",
+          "outcome": "current_over_stale",
+          "current_rank": 1,
+          "stale_rank": 2
+        },
+        {
+          "query_id": "q-u31",
+          "outcome": "stale_over_current",
+          "current_rank": 2,
+          "stale_rank": 1
+        },
+        {
+          "query_id": "q-u32",
+          "outcome": "stale_over_current",
+          "current_rank": 2,
+          "stale_rank": 1
+        },
+        {
+          "query_id": "q-u33",
+          "outcome": "current_over_stale",
+          "current_rank": 1,
+          "stale_rank": 2
+        },
+        {
+          "query_id": "q-u34",
+          "outcome": "current_over_stale",
+          "current_rank": 1,
+          "stale_rank": 2
+        },
+        {
+          "query_id": "q-u35",
+          "outcome": "stale_over_current",
+          "current_rank": 2,
+          "stale_rank": 1
+        },
+        {
+          "query_id": "q-u36",
+          "outcome": "stale_over_current",
+          "current_rank": 2,
+          "stale_rank": 1
+        },
+        {
+          "query_id": "q-u37",
+          "outcome": "stale_over_current",
+          "current_rank": 2,
+          "stale_rank": 1
+        },
+        {
+          "query_id": "q-u38",
+          "outcome": "stale_over_current",
+          "current_rank": 2,
+          "stale_rank": 1
+        },
+        {
+          "query_id": "q-u39",
+          "outcome": "stale_over_current",
+          "current_rank": 2,
+          "stale_rank": 1
+        },
+        {
+          "query_id": "q-u40",
+          "outcome": "stale_over_current",
+          "current_rank": 2,
+          "stale_rank": 1
+        },
+        {
+          "query_id": "q-u41",
+          "outcome": "current_over_stale",
+          "current_rank": 1,
+          "stale_rank": 2
+        },
+        {
+          "query_id": "q-u42",
+          "outcome": "stale_over_current",
+          "current_rank": 2,
+          "stale_rank": 1
+        },
+        {
+          "query_id": "q-u43",
+          "outcome": "current_over_stale",
+          "current_rank": 1,
+          "stale_rank": 2
+        },
+        {
+          "query_id": "q-u44",
+          "outcome": "current_over_stale",
+          "current_rank": 1,
+          "stale_rank": 2
+        },
+        {
+          "query_id": "q-u45",
+          "outcome": "current_over_stale",
+          "current_rank": 1,
+          "stale_rank": 2
+        },
+        {
+          "query_id": "q-u46",
+          "outcome": "stale_over_current",
+          "current_rank": 2,
+          "stale_rank": 1
+        },
+        {
+          "query_id": "q-u47",
+          "outcome": "current_over_stale",
+          "current_rank": 1,
+          "stale_rank": 2
+        },
+        {
+          "query_id": "q-u48",
+          "outcome": "current_over_stale",
+          "current_rank": 1,
+          "stale_rank": 2
+        },
+        {
+          "query_id": "q-u49",
+          "outcome": "current_over_stale",
+          "current_rank": 1,
+          "stale_rank": 2
+        },
+        {
+          "query_id": "q-u50",
+          "outcome": "current_over_stale",
+          "current_rank": 1,
+          "stale_rank": 2
+        }
+      ]
+    },
+    "mc_update": {
+      "per_query": [
+        {
+          "query_id": "q-u01",
+          "outcome": "current_over_stale",
+          "current_rank": 1,
+          "stale_rank": 2
+        },
+        {
+          "query_id": "q-u02",
+          "outcome": "current_over_stale",
+          "current_rank": 1,
+          "stale_rank": 2
+        },
+        {
+          "query_id": "q-u03",
+          "outcome": "current_only",
+          "current_rank": 1,
+          "stale_rank": null
+        },
+        {
+          "query_id": "q-u04",
+          "outcome": "neither",
+          "current_rank": null,
+          "stale_rank": null
+        },
+        {
+          "query_id": "q-u05",
+          "outcome": "neither",
+          "current_rank": null,
+          "stale_rank": null
+        },
+        {
+          "query_id": "q-u06",
+          "outcome": "current_only",
+          "current_rank": 1,
+          "stale_rank": null
+        },
+        {
+          "query_id": "q-u07",
+          "outcome": "current_over_stale",
+          "current_rank": 1,
+          "stale_rank": 2
+        },
+        {
+          "query_id": "q-u08",
+          "outcome": "current_only",
+          "current_rank": 1,
+          "stale_rank": null
+        },
+        {
+          "query_id": "q-u09",
+          "outcome": "current_only",
+          "current_rank": 1,
+          "stale_rank": null
+        },
+        {
+          "query_id": "q-u10",
+          "outcome": "current_only",
+          "current_rank": 1,
+          "stale_rank": null
+        },
+        {
+          "query_id": "q-u11",
+          "outcome": "stale_only",
+          "current_rank": null,
+          "stale_rank": 1
+        },
+        {
+          "query_id": "q-u12",
+          "outcome": "current_only",
+          "current_rank": 1,
+          "stale_rank": null
+        },
+        {
+          "query_id": "q-u13",
+          "outcome": "stale_only",
+          "current_rank": null,
+          "stale_rank": 1
+        },
+        {
+          "query_id": "q-u14",
+          "outcome": "current_only",
+          "current_rank": 1,
+          "stale_rank": null
+        },
+        {
+          "query_id": "q-u15",
+          "outcome": "current_only",
+          "current_rank": 1,
+          "stale_rank": null
+        },
+        {
+          "query_id": "q-u16",
+          "outcome": "current_only",
+          "current_rank": 1,
+          "stale_rank": null
+        },
+        {
+          "query_id": "q-u17",
+          "outcome": "stale_only",
+          "current_rank": null,
+          "stale_rank": 1
+        },
+        {
+          "query_id": "q-u18",
+          "outcome": "stale_only",
+          "current_rank": null,
+          "stale_rank": 1
+        },
+        {
+          "query_id": "q-u19",
+          "outcome": "current_only",
+          "current_rank": 1,
+          "stale_rank": null
+        },
+        {
+          "query_id": "q-u20",
+          "outcome": "current_over_stale",
+          "current_rank": 1,
+          "stale_rank": 2
+        },
+        {
+          "query_id": "q-u21",
+          "outcome": "current_over_stale",
+          "current_rank": 1,
+          "stale_rank": 2
+        },
+        {
+          "query_id": "q-u22",
+          "outcome": "current_only",
+          "current_rank": 1,
+          "stale_rank": null
+        },
+        {
+          "query_id": "q-u23",
+          "outcome": "current_only",
+          "current_rank": 1,
+          "stale_rank": null
+        },
+        {
+          "query_id": "q-u24",
+          "outcome": "current_over_stale",
+          "current_rank": 1,
+          "stale_rank": 2
+        },
+        {
+          "query_id": "q-u25",
+          "outcome": "current_only",
+          "current_rank": 1,
+          "stale_rank": null
+        },
+        {
+          "query_id": "q-u26",
+          "outcome": "current_over_stale",
+          "current_rank": 1,
+          "stale_rank": 2
+        },
+        {
+          "query_id": "q-u27",
+          "outcome": "current_only",
+          "current_rank": 1,
+          "stale_rank": null
+        },
+        {
+          "query_id": "q-u28",
+          "outcome": "current_only",
+          "current_rank": 1,
+          "stale_rank": null
+        },
+        {
+          "query_id": "q-u29",
+          "outcome": "current_only",
+          "current_rank": 1,
+          "stale_rank": null
+        },
+        {
+          "query_id": "q-u30",
+          "outcome": "current_only",
+          "current_rank": 1,
+          "stale_rank": null
+        },
+        {
+          "query_id": "q-u31",
+          "outcome": "current_over_stale",
+          "current_rank": 1,
+          "stale_rank": 2
+        },
+        {
+          "query_id": "q-u32",
+          "outcome": "current_only",
+          "current_rank": 1,
+          "stale_rank": null
+        },
+        {
+          "query_id": "q-u33",
+          "outcome": "stale_only",
+          "current_rank": null,
+          "stale_rank": 1
+        },
+        {
+          "query_id": "q-u34",
+          "outcome": "current_over_stale",
+          "current_rank": 1,
+          "stale_rank": 2
+        },
+        {
+          "query_id": "q-u35",
+          "outcome": "current_over_stale",
+          "current_rank": 1,
+          "stale_rank": 2
+        },
+        {
+          "query_id": "q-u36",
+          "outcome": "current_over_stale",
+          "current_rank": 1,
+          "stale_rank": 2
+        },
+        {
+          "query_id": "q-u37",
+          "outcome": "current_only",
+          "current_rank": 1,
+          "stale_rank": null
+        },
+        {
+          "query_id": "q-u38",
+          "outcome": "current_only",
+          "current_rank": 1,
+          "stale_rank": null
+        },
+        {
+          "query_id": "q-u39",
+          "outcome": "current_only",
+          "current_rank": 1,
+          "stale_rank": null
+        },
+        {
+          "query_id": "q-u40",
+          "outcome": "stale_over_current",
+          "current_rank": 2,
+          "stale_rank": 1
+        },
+        {
+          "query_id": "q-u41",
+          "outcome": "current_only",
+          "current_rank": 1,
+          "stale_rank": null
+        },
+        {
+          "query_id": "q-u42",
+          "outcome": "current_only",
+          "current_rank": 1,
+          "stale_rank": null
+        },
+        {
+          "query_id": "q-u43",
+          "outcome": "current_only",
+          "current_rank": 1,
+          "stale_rank": null
+        },
+        {
+          "query_id": "q-u44",
+          "outcome": "current_only",
+          "current_rank": 1,
+          "stale_rank": null
+        },
+        {
+          "query_id": "q-u45",
+          "outcome": "current_only",
+          "current_rank": 1,
+          "stale_rank": null
+        },
+        {
+          "query_id": "q-u46",
+          "outcome": "current_only",
+          "current_rank": 1,
+          "stale_rank": null
+        },
+        {
+          "query_id": "q-u47",
+          "outcome": "current_only",
+          "current_rank": 1,
+          "stale_rank": null
+        },
+        {
+          "query_id": "q-u48",
+          "outcome": "current_only",
+          "current_rank": 1,
+          "stale_rank": null
+        },
+        {
+          "query_id": "q-u49",
+          "outcome": "current_only",
+          "current_rank": 1,
+          "stale_rank": null
+        },
+        {
+          "query_id": "q-u50",
+          "outcome": "current_only",
+          "current_rank": 1,
+          "stale_rank": null
+        }
+      ]
+    },
+    "mc_prod": {
+      "per_query": [
+        {
+          "query_id": "q-u01",
+          "outcome": "current_over_stale",
+          "current_rank": 1,
+          "stale_rank": 2
+        },
+        {
+          "query_id": "q-u02",
+          "outcome": "current_over_stale",
+          "current_rank": 1,
+          "stale_rank": 2
+        },
+        {
+          "query_id": "q-u03",
+          "outcome": "current_only",
+          "current_rank": 3,
+          "stale_rank": null
+        },
+        {
+          "query_id": "q-u04",
+          "outcome": "neither",
+          "current_rank": null,
+          "stale_rank": null
+        },
+        {
+          "query_id": "q-u05",
+          "outcome": "neither",
+          "current_rank": null,
+          "stale_rank": null
+        },
+        {
+          "query_id": "q-u06",
+          "outcome": "current_only",
+          "current_rank": 1,
+          "stale_rank": null
+        },
+        {
+          "query_id": "q-u07",
+          "outcome": "current_over_stale",
+          "current_rank": 1,
+          "stale_rank": 2
+        },
+        {
+          "query_id": "q-u08",
+          "outcome": "current_only",
+          "current_rank": 1,
+          "stale_rank": null
+        },
+        {
+          "query_id": "q-u09",
+          "outcome": "current_only",
+          "current_rank": 1,
+          "stale_rank": null
+        },
+        {
+          "query_id": "q-u10",
+          "outcome": "current_only",
+          "current_rank": 1,
+          "stale_rank": null
+        },
+        {
+          "query_id": "q-u11",
+          "outcome": "stale_only",
+          "current_rank": null,
+          "stale_rank": 1
+        },
+        {
+          "query_id": "q-u12",
+          "outcome": "current_only",
+          "current_rank": 2,
+          "stale_rank": null
+        },
+        {
+          "query_id": "q-u13",
+          "outcome": "stale_only",
+          "current_rank": null,
+          "stale_rank": 1
+        },
+        {
+          "query_id": "q-u14",
+          "outcome": "current_only",
+          "current_rank": 2,
+          "stale_rank": null
+        },
+        {
+          "query_id": "q-u15",
+          "outcome": "current_only",
+          "current_rank": 3,
+          "stale_rank": null
+        },
+        {
+          "query_id": "q-u16",
+          "outcome": "current_only",
+          "current_rank": 2,
+          "stale_rank": null
+        },
+        {
+          "query_id": "q-u17",
+          "outcome": "stale_only",
+          "current_rank": null,
+          "stale_rank": 1
+        },
+        {
+          "query_id": "q-u18",
+          "outcome": "stale_only",
+          "current_rank": null,
+          "stale_rank": 2
+        },
+        {
+          "query_id": "q-u19",
+          "outcome": "current_only",
+          "current_rank": 1,
+          "stale_rank": null
+        },
+        {
+          "query_id": "q-u20",
+          "outcome": "current_over_stale",
+          "current_rank": 1,
+          "stale_rank": 2
+        },
+        {
+          "query_id": "q-u21",
+          "outcome": "current_over_stale",
+          "current_rank": 1,
+          "stale_rank": 2
+        },
+        {
+          "query_id": "q-u22",
+          "outcome": "current_only",
+          "current_rank": 1,
+          "stale_rank": null
+        },
+        {
+          "query_id": "q-u23",
+          "outcome": "current_only",
+          "current_rank": 1,
+          "stale_rank": null
+        },
+        {
+          "query_id": "q-u24",
+          "outcome": "current_over_stale",
+          "current_rank": 1,
+          "stale_rank": 2
+        },
+        {
+          "query_id": "q-u25",
+          "outcome": "current_only",
+          "current_rank": 2,
+          "stale_rank": null
+        },
+        {
+          "query_id": "q-u26",
+          "outcome": "current_over_stale",
+          "current_rank": 1,
+          "stale_rank": 2
+        },
+        {
+          "query_id": "q-u27",
+          "outcome": "current_only",
+          "current_rank": 3,
+          "stale_rank": null
+        },
+        {
+          "query_id": "q-u28",
+          "outcome": "current_only",
+          "current_rank": 1,
+          "stale_rank": null
+        },
+        {
+          "query_id": "q-u29",
+          "outcome": "current_only",
+          "current_rank": 1,
+          "stale_rank": null
+        },
+        {
+          "query_id": "q-u30",
+          "outcome": "current_only",
+          "current_rank": 1,
+          "stale_rank": null
+        },
+        {
+          "query_id": "q-u31",
+          "outcome": "current_over_stale",
+          "current_rank": 1,
+          "stale_rank": 2
+        },
+        {
+          "query_id": "q-u32",
+          "outcome": "current_only",
+          "current_rank": 1,
+          "stale_rank": null
+        },
+        {
+          "query_id": "q-u33",
+          "outcome": "stale_only",
+          "current_rank": null,
+          "stale_rank": 1
+        },
+        {
+          "query_id": "q-u34",
+          "outcome": "current_over_stale",
+          "current_rank": 1,
+          "stale_rank": 2
+        },
+        {
+          "query_id": "q-u35",
+          "outcome": "current_over_stale",
+          "current_rank": 2,
+          "stale_rank": 3
+        },
+        {
+          "query_id": "q-u36",
+          "outcome": "current_over_stale",
+          "current_rank": 1,
+          "stale_rank": 2
+        },
+        {
+          "query_id": "q-u37",
+          "outcome": "current_only",
+          "current_rank": 1,
+          "stale_rank": null
+        },
+        {
+          "query_id": "q-u38",
+          "outcome": "current_only",
+          "current_rank": 2,
+          "stale_rank": null
+        },
+        {
+          "query_id": "q-u39",
+          "outcome": "current_only",
+          "current_rank": 1,
+          "stale_rank": null
+        },
+        {
+          "query_id": "q-u40",
+          "outcome": "stale_over_current",
+          "current_rank": 3,
+          "stale_rank": 2
+        },
+        {
+          "query_id": "q-u41",
+          "outcome": "current_only",
+          "current_rank": 1,
+          "stale_rank": null
+        },
+        {
+          "query_id": "q-u42",
+          "outcome": "current_only",
+          "current_rank": 3,
+          "stale_rank": null
+        },
+        {
+          "query_id": "q-u43",
+          "outcome": "current_only",
+          "current_rank": 1,
+          "stale_rank": null
+        },
+        {
+          "query_id": "q-u44",
+          "outcome": "current_only",
+          "current_rank": 1,
+          "stale_rank": null
+        },
+        {
+          "query_id": "q-u45",
+          "outcome": "current_only",
+          "current_rank": 1,
+          "stale_rank": null
+        },
+        {
+          "query_id": "q-u46",
+          "outcome": "current_only",
+          "current_rank": 1,
+          "stale_rank": null
+        },
+        {
+          "query_id": "q-u47",
+          "outcome": "current_only",
+          "current_rank": 1,
+          "stale_rank": null
+        },
+        {
+          "query_id": "q-u48",
+          "outcome": "current_only",
+          "current_rank": 1,
+          "stale_rank": null
+        },
+        {
+          "query_id": "q-u49",
+          "outcome": "current_only",
+          "current_rank": 1,
+          "stale_rank": null
+        },
+        {
+          "query_id": "q-u50",
+          "outcome": "current_only",
+          "current_rank": 1,
+          "stale_rank": null
+        }
+      ]
+    }
+  }
+}
