@@ -85,15 +85,19 @@ class ActivationSpreader:
                 for nid, act in seed_activations.items()
             ]
 
+        # Clamp seeds to [0,1] ONCE up front (#1197): seeds feed ActivationState
+        # at the end of spread() AND are the hop-0 source activations, so an
+        # out-of-range seed must be capped in both roles — clamping only the
+        # stored value would let the raw seed still drive downstream propagation.
+        clamped_seeds = {nid: _clamp01(act) for nid, act in seed_activations.items()}
+
         # Initialize activation map
         # Format: {node_id: {"activation": float, "hop": int, "source": str}}
-        # Seed values feed ActivationState at the end of spread(), so clamp
-        # them to [0,1] here for the same reason (#1197).
         all_activations: dict[str, dict[str, Any]] = {}
-        for nid, act in seed_activations.items():
-            all_activations[nid] = {"activation": _clamp01(act), "hop": 0, "source": None}
+        for nid, act in clamped_seeds.items():
+            all_activations[nid] = {"activation": act, "hop": 0, "source": None}
 
-        current_layer = seed_activations.copy()
+        current_layer = clamped_seeds.copy()
 
         # Propagate for max_hops iterations
         for hop in range(1, max_hops + 1):
@@ -177,13 +181,13 @@ class ActivationSpreader:
                 # GDPR compliance: user_id filtering now handled at SQL level
                 # (NeuralEdgeRepository filters by user_id)
 
-                # Calculate propagated activation
-                # activation(dst) = activation(src) * decay * weight(src→dst)
-                # Clamp to [0, 1] (#1197): weight can exceed 1.0 (up to
-                # weight_max=3.0), so the raw product can too — but activation
-                # is a [0, 1] quantity by contract. This is the value that
-                # feeds ActivationState (via all_activations below), so this is
-                # where the crash is sealed.
+                # Per-edge contribution: activation(src) * decay * weight(src→dst)
+                # (summed across paths into next_layer below; see the module Σ
+                # formula). Clamp to [0, 1] (#1197): weight can exceed 1.0 (up to
+                # weight_max=3.0), so the raw product can too — but activation is
+                # a [0, 1] quantity by contract. This clamped per-edge value is
+                # what feeds ActivationState (via all_activations below), so this
+                # is where the crash is sealed.
                 propagated_activation = _clamp01(src_activation * self.config.spread_decay * weight)
 
                 # Check threshold

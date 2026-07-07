@@ -290,3 +290,21 @@ class TestActivationClampedToUnitInterval:
 
         seed_result = next(r for r in results if r.node_id == n1)
         assert seed_result.activation == pytest.approx(1.0)
+
+    @pytest.mark.asyncio
+    async def test_out_of_range_seed_clamped_as_propagation_source(self, mock_graph, node_ids):
+        """The clamped seed must also drive DOWNSTREAM propagation, not just its
+        own stored value: an out-of-range seed whose product stays in range
+        (so _clamp01 is a per-edge no-op) must still propagate as if it were 1.0
+        — otherwise behaviour would depend on the invalid input magnitude."""
+        spreader = ActivationSpreader(mock_graph, self._config())
+        n1, n2 = node_ids["node1"], node_ids["node2"]
+        mock_graph.edge_repo.get_outgoing_edges = AsyncMock(
+            return_value=[MagicMock(dst_id=n2, weight=0.9)]
+        )
+
+        results = await spreader.spread({n1: 1.5}, max_hops=1)
+
+        n2_result = next(r for r in results if r.node_id == n2)
+        # Clamped seed 1.0 * 0.6 * 0.9 = 0.54 (NOT the raw 1.5 * 0.6 * 0.9 = 0.81).
+        assert n2_result.activation == pytest.approx(0.54)
