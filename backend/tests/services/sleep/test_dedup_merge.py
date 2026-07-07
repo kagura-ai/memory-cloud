@@ -3,6 +3,7 @@
 Issue #101: Union-Find clustering, LLM judgment, merge execution.
 """
 
+from datetime import datetime
 from unittest.mock import AsyncMock, MagicMock, patch
 from uuid import uuid4
 
@@ -195,6 +196,39 @@ class TestRuleBasedJudge:
         decisions = phase._rule_based_judge([mem_a, mem_b], pair_scores)
 
         assert len(decisions) == 0
+
+    def test_equal_importance_newer_wins(self):
+        """#1195: at equal importance the NEWER memory wins, not cluster order."""
+        phase = DedupMergePhase.__new__(DedupMergePhase)
+
+        older = _make_memory(importance=0.5)
+        older.created_at = datetime(2026, 6, 1)
+        newer = _make_memory(importance=0.5)
+        newer.created_at = datetime(2026, 7, 1)
+        pair_scores = {tuple(sorted([older.id, newer.id], key=str)): 0.99}
+
+        # older first in cluster order — the pre-#1195 tie-break picked it
+        decisions = phase._rule_based_judge([older, newer], pair_scores)
+
+        assert decisions == [(newer.id, older.id)]
+
+    def test_equal_importance_edited_memory_wins(self):
+        """#1198 review: recency is max(created_at, updated_at) — an in-place
+        edited memory (old created_at, new updated_at) must beat a
+        later-created stale duplicate."""
+        phase = DedupMergePhase.__new__(DedupMergePhase)
+
+        edited = _make_memory(importance=0.5)
+        edited.created_at = datetime(2026, 6, 1)
+        edited.updated_at = datetime(2026, 7, 15)
+        stale_dup = _make_memory(importance=0.5)
+        stale_dup.created_at = datetime(2026, 7, 1)
+        stale_dup.updated_at = datetime(2026, 7, 1)
+        pair_scores = {tuple(sorted([edited.id, stale_dup.id], key=str)): 0.99}
+
+        decisions = phase._rule_based_judge([edited, stale_dup], pair_scores)
+
+        assert decisions == [(edited.id, stale_dup.id)]
 
 
 class TestParseDedupResponse:

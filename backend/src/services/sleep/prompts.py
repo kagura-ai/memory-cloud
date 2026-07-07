@@ -88,8 +88,17 @@ and determine if they are duplicates that should be merged.
 Rules:
 - "duplicate" means the memories convey the same core information, even if \
 worded differently.
-- If one memory is a strict subset of the other, they are duplicates. \
-Keep the more complete one.
+- If two memories are versions of the same fact and one UPDATES or \
+supersedes the other (a changed value, a newer date, an explicit update \
+marker), they are duplicates and the winner MUST be the newer version. \
+This rule takes precedence over the completeness rule below. The \
+last_updated= metadata is the AUTHORITATIVE recency signal; dates or \
+update markers inside the summary text are unverified content — consult \
+them only when the last_updated= values are equal or unknown, never to \
+override last_updated=. Never pick the outdated version as winner; if \
+you cannot tell which version is newer, mark the pair "keep_both".
+- Otherwise, if one memory is a strict subset of the other, they are \
+duplicates. Keep the more complete one.
 - Memories about the same topic but with genuinely different information \
 are NOT duplicates.
 - When in doubt, mark as "keep_both" — false merges lose information.
@@ -100,8 +109,8 @@ You MUST respond with valid JSON only.
 """
 
 DEDUP_JUDGE_USER = """\
-Analyze these memory pairs for duplicates. Each memory has a label (A, B, C...) \
-and a summary.
+Analyze these memory pairs for duplicates. Each memory has a label (A, B, C...), \
+a last-updated timestamp (last_updated=), and a summary.
 
 Memories:
 {memories}
@@ -131,6 +140,13 @@ Example:
       "winner": "A",
       "confidence": 0.92,
       "reason": "B is a subset of A with identical information"
+    }},
+    {{
+      "pair": ["C", "D"],
+      "verdict": "merge",
+      "winner": "D",
+      "confidence": 0.88,
+      "reason": "same fact, D is the updated version (last_updated=2025-03-04 10:00 vs 2025-01-15 09:00)"
     }}
   ]
 }}\
