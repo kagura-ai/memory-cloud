@@ -24,6 +24,22 @@ from .models import ActivationState
 logger = logging.getLogger(__name__)
 
 
+def _clamp01(value: float) -> float:
+    """Clamp an activation to the [0, 1] contract (#1197).
+
+    Edge weights are Hebbian association strengths clipped only to
+    ``config.weight_max`` (default 3.0) — they are NOT probabilities — so a
+    reinforced-edge product ``src * spread_decay * weight`` can exceed 1.0.
+    ``ActivationState`` hard-requires [0, 1], so the spreader clamps at every
+    point a raw activation ENTERS an ``ActivationState``: the per-edge
+    propagated value and the seed passthrough. The clamp only ever pulls a
+    would-crash (>1) value down to 1.0 — it never changes an in-range value, so
+    retrieval ranking is untouched. The validator itself is kept a strict raise
+    on purpose (the last line of defence, not a silent clamp).
+    """
+    return max(0.0, min(1.0, value))
+
+
 class ActivationSpreader:
     """Activation spreading manager for graph-based associative retrieval."""
 
@@ -60,19 +76,28 @@ class ActivationSpreader:
         max_hops = max_hops if max_hops is not None else self.config.spread_hops
 
         if max_hops == 0:
-            # No spreading, return only seed nodes
+            # No spreading, return only seed nodes. Clamp the seed too (#1197):
+            # seed_activations is a documented [0,1] precondition but callers
+            # aren't validated, and an out-of-range seed would hit the same
+            # hard ActivationState guard.
             return [
-                ActivationState(node_id=nid, activation=act, hop=0)
+                ActivationState(node_id=nid, activation=_clamp01(act), hop=0)
                 for nid, act in seed_activations.items()
             ]
+
+        # Clamp seeds to [0,1] ONCE up front (#1197): seeds feed ActivationState
+        # at the end of spread() AND are the hop-0 source activations, so an
+        # out-of-range seed must be capped in both roles — clamping only the
+        # stored value would let the raw seed still drive downstream propagation.
+        clamped_seeds = {nid: _clamp01(act) for nid, act in seed_activations.items()}
 
         # Initialize activation map
         # Format: {node_id: {"activation": float, "hop": int, "source": str}}
         all_activations: dict[str, dict[str, Any]] = {}
-        for nid, act in seed_activations.items():
+        for nid, act in clamped_seeds.items():
             all_activations[nid] = {"activation": act, "hop": 0, "source": None}
 
-        current_layer = seed_activations.copy()
+        current_layer = clamped_seeds.copy()
 
         # Propagate for max_hops iterations
         for hop in range(1, max_hops + 1):
@@ -156,15 +181,25 @@ class ActivationSpreader:
                 # GDPR compliance: user_id filtering now handled at SQL level
                 # (NeuralEdgeRepository filters by user_id)
 
-                # Calculate propagated activation
-                # activation(dst) += activation(src) * decay * weight(src→dst)
-                propagated_activation = src_activation * self.config.spread_decay * weight
+                # Per-edge contribution: activation(src) * decay * weight(src→dst)
+                # (summed across paths into next_layer below; see the module Σ
+                # formula). Clamp to [0, 1] (#1197): weight can exceed 1.0 (up to
+                # weight_max=3.0), so the raw product can too — but activation is
+                # a [0, 1] quantity by contract. This clamped per-edge value is
+                # what feeds ActivationState (via all_activations below), so this
+                # is where the crash is sealed.
+                propagated_activation = _clamp01(src_activation * self.config.spread_decay * weight)
 
                 # Check threshold
                 if propagated_activation < self.config.spread_threshold:
                     continue
 
-                # Accumulate activation (sum from multiple paths)
+                # Accumulate activation (sum from multiple paths). Deliberately
+                # NOT clamped: next_layer never becomes an ActivationState (only
+                # the per-edge propagated value above does), so it cannot crash.
+                # Clamping the sum here would shrink deep fan-in propagation and
+                # change non-crashing retrieval results — a ranking change that
+                # does not belong in a crash fix (#1197 review).
                 next_layer[dst_id] += propagated_activation
 
                 # Update global activation map (keep max activation)
