@@ -411,14 +411,18 @@ class TestLLMJudgeRecency:
     judged pairs because it never saw timestamps and had no update-pair winner
     rule. The prompt must carry created_at and an explicit newer-wins rule."""
 
-    async def test_prompt_includes_created_at(self, dedup_phase):
+    async def test_prompt_includes_last_updated(self, dedup_phase):
         # Summaries deliberately carry NO dates: the asserts below must be
-        # satisfiable only by the trusted created= metadata rendering
+        # satisfiable only by the trusted last_updated= metadata rendering
         # (PR #1198 review: a date in the summary would mask a dropped field).
+        # mem_b was edited in place (created_at preserved, updated_at bumped):
+        # the prompt must show max(created_at, updated_at), minute precision.
         mem_a = _make_memory(summary="deploy target is blue")
-        mem_a.created_at = datetime(2026, 6, 1)
+        mem_a.created_at = datetime(2026, 6, 1, 9, 0)
+        mem_a.updated_at = datetime(2026, 6, 1, 9, 0)
         mem_b = _make_memory(summary="deploy target is green")
-        mem_b.created_at = datetime(2026, 7, 1)
+        mem_b.created_at = datetime(2026, 6, 15, 8, 0)
+        mem_b.updated_at = datetime(2026, 7, 1, 15, 30)
         scores = {tuple(sorted([mem_a.id, mem_b.id], key=str)): 0.96}
         dedup_phase.llm_service.complete_json = AsyncMock(
             return_value=_make_llm_response({"judgments": []})
@@ -431,8 +435,8 @@ class TestLLMJudgeRecency:
         )
 
         prompt = dedup_phase.llm_service.complete_json.call_args.kwargs["prompt"]
-        assert "created=2026-06-01" in prompt
-        assert "created=2026-07-01" in prompt
+        assert "last_updated=2026-06-01 09:00" in prompt
+        assert "last_updated=2026-07-01 15:30" in prompt
 
     def test_system_prompt_has_newer_wins_rule(self):
         from services.sleep.prompts import DEDUP_JUDGE_SYSTEM
@@ -440,6 +444,33 @@ class TestLLMJudgeRecency:
         text = DEDUP_JUDGE_SYSTEM.lower()
         assert "newer" in text
         assert "winner" in text
+        assert "last_updated" in text
+
+    async def test_llm_winner_overridden_when_older(self, dedup_phase):
+        """#1198 review: the LLM's winner choice is prompt-guided only; a
+        deterministic post-check must flip any decision whose winner is
+        strictly older than its loser (the #1195 failure the prompt cannot
+        guarantee away)."""
+        mem_old = _make_memory(summary="deploy target is blue")
+        mem_old.created_at = datetime(2026, 6, 1, 9, 0)
+        mem_old.updated_at = datetime(2026, 6, 1, 9, 0)
+        mem_new = _make_memory(summary="deploy target is green")
+        mem_new.created_at = datetime(2026, 7, 1, 15, 30)
+        mem_new.updated_at = datetime(2026, 7, 1, 15, 30)
+        scores = {tuple(sorted([mem_old.id, mem_new.id], key=str)): 0.96}
+        # Labels are assigned in cluster order: mem_old=A, mem_new=B.
+        # The LLM (wrongly) picks the OLDER memory as winner.
+        parsed = {"judgments": [{"pair": ["A", "B"], "verdict": "merge", "winner": "A"}]}
+        dedup_phase.llm_service.complete_json = AsyncMock(return_value=_make_llm_response(parsed))
+        dedup_phase._tokens_used = 0
+        dedup_phase._llm_breakdown = None
+
+        decisions = await dedup_phase._judge_cluster(
+            [mem_old, mem_new], scores, True, "u", "ctx", "ws", SleepBudget(), _make_config()
+        )
+
+        assert decisions == [(mem_new.id, mem_old.id)]
+        assert dedup_phase._winner_overrides == 1
 
 
 # ---------------------------------------------------------------------------

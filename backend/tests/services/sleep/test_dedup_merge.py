@@ -212,6 +212,24 @@ class TestRuleBasedJudge:
 
         assert decisions == [(newer.id, older.id)]
 
+    def test_equal_importance_edited_memory_wins(self):
+        """#1198 review: recency is max(created_at, updated_at) — an in-place
+        edited memory (old created_at, new updated_at) must beat a
+        later-created stale duplicate."""
+        phase = DedupMergePhase.__new__(DedupMergePhase)
+
+        edited = _make_memory(importance=0.5)
+        edited.created_at = datetime(2026, 6, 1)
+        edited.updated_at = datetime(2026, 7, 15)
+        stale_dup = _make_memory(importance=0.5)
+        stale_dup.created_at = datetime(2026, 7, 1)
+        stale_dup.updated_at = datetime(2026, 7, 1)
+        pair_scores = {tuple(sorted([edited.id, stale_dup.id], key=str)): 0.99}
+
+        decisions = phase._rule_based_judge([edited, stale_dup], pair_scores)
+
+        assert decisions == [(edited.id, stale_dup.id)]
+
 
 class TestParseDedupResponse:
     """Test LLM response parsing with ID validation."""

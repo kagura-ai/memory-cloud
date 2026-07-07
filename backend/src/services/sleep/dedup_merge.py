@@ -197,6 +197,9 @@ class DedupMergePhase:
         # #1183: judge-failure counter (init here so ``_llm_judge`` can be
         # unit-tested without execute()).
         self._llm_failures: int = 0
+        # #1195/#1198: newer-wins override counter (init here so
+        # ``_judge_cluster`` can be unit-tested without execute()).
+        self._winner_overrides: int = 0
 
     async def execute(
         self,
@@ -226,6 +229,9 @@ class DedupMergePhase:
         self._tokens_used = 0
         # #1183: judge calls that raised (feeds run-status grading).
         self._llm_failures = 0
+        # #1195/#1198: LLM winner choices flipped by the deterministic
+        # newer-wins post-check (each one is a judge misjudgment caught).
+        self._winner_overrides = 0
         # #471: per-(provider, model) accumulator (lazy-init).
         self._llm_breakdown: LLMCallBreakdown | None = None
         # #475: reset embedding accumulators between sleep cycles.
@@ -363,6 +369,10 @@ class DedupMergePhase:
             "deferred_pairs": deferred_pairs,
             "merged": merged_count,
             "llm_call_failures": self._llm_failures,  # #1183
+            # #1195/#1198: LLM winner picks flipped by the deterministic
+            # newer-wins post-check — a direct measure of residual judge
+            # misdirection the prompt alone would have let through.
+            "winner_overrides": self._winner_overrides,
         }
 
         result.llm_calls_used = budget.llm_calls_used - llm_calls_before
@@ -496,6 +506,10 @@ class DedupMergePhase:
                 budget,
                 config,
             )
+            # #1195/#1198: the LLM's winner is prompt-guided only — enforce
+            # newer-wins deterministically (rule-based path is correct by
+            # construction and needs no post-check).
+            decisions = self._enforce_newer_wins(decisions, cluster_memories)
         else:
             # Rule-based fallback
             decisions = self._rule_based_judge(cluster_memories, pair_scores)
@@ -525,16 +539,18 @@ class DedupMergePhase:
         mems_shuffled = [s[1] for s in shuffled]
 
         # Format memories. The summary is untrusted (issue #919) — wrap it so an
-        # embedded instruction cannot steer the merge judgment. created= is
+        # embedded instruction cannot steer the merge judgment. last_updated= is
         # trusted DB metadata and stays OUTSIDE the wrapper: the judge needs it
         # to pick the newer version of an updated fact as winner (#1195).
+        # Minute precision so same-day update pairs stay orderable; max of
+        # created_at/updated_at so in-place edits count as recency (#1198).
         memory_lines = []
         for label, mem in zip(labels_shuffled, mems_shuffled, strict=True):
-            created = getattr(mem, "created_at", None)
-            created_s = f"{created:%Y-%m-%d}" if isinstance(created, datetime) else "unknown"
+            recency = self._recency_key(mem)
+            recency_s = f"{recency:%Y-%m-%d %H:%M}" if recency else "unknown"
             memory_lines.append(
                 f"[{label}] type={mem.type}, importance={mem.importance:.2f}, "
-                f"created={created_s}\n"
+                f"last_updated={recency_s}\n"
                 f"    summary:\n{wrap_untrusted_content(mem.summary)}"
             )
 
@@ -613,11 +629,56 @@ class DedupMergePhase:
         return decisions
 
     @staticmethod
-    def _is_newer(candidate: Memory, other: Memory) -> bool:
-        """True iff both carry datetime ``created_at`` and candidate is newer."""
-        c = getattr(candidate, "created_at", None)
-        o = getattr(other, "created_at", None)
-        return isinstance(c, datetime) and isinstance(o, datetime) and c > o
+    def _recency_key(mem: Memory) -> datetime | None:
+        """Last time this memory's content was current: max(created_at,
+        updated_at) over whichever are real datetimes, else None.
+
+        created_at alone is WRONG for recency (#1198 review): an in-place
+        edit preserves created_at and bumps updated_at, so the row holding
+        the current fact can carry the older created_at.
+        """
+        stamps = [
+            v
+            for v in (getattr(mem, "created_at", None), getattr(mem, "updated_at", None))
+            if isinstance(v, datetime)
+        ]
+        return max(stamps) if stamps else None
+
+    @classmethod
+    def _is_newer(cls, candidate: Memory, other: Memory) -> bool:
+        """True iff both carry a recency key and candidate's is strictly newer."""
+        c = cls._recency_key(candidate)
+        o = cls._recency_key(other)
+        return c is not None and o is not None and c > o
+
+    def _enforce_newer_wins(
+        self,
+        decisions: list[tuple[UUID, UUID]],
+        cluster_memories: list[Memory],
+    ) -> list[tuple[UUID, UUID]]:
+        """Deterministic post-check on LLM merge decisions (#1195/#1198).
+
+        The prompt asks for newer-wins but cannot guarantee it — the judge
+        picked the older memory in 10-18% of update pairs in the Day-5 eval.
+        The duplicate verdict is trusted; the direction is enforced: any
+        decision whose winner is strictly older than its loser is flipped.
+        """
+        id_to_mem = {m.id: m for m in cluster_memories}
+        corrected: list[tuple[UUID, UUID]] = []
+        for winner_id, loser_id in decisions:
+            winner = id_to_mem.get(winner_id)
+            loser = id_to_mem.get(loser_id)
+            if winner is not None and loser is not None and self._is_newer(loser, winner):
+                self._winner_overrides += 1
+                logger.warning(
+                    "dedup_winner_overridden",
+                    llm_winner_id=str(winner_id),
+                    enforced_winner_id=str(loser_id),
+                )
+                corrected.append((loser_id, winner_id))
+            else:
+                corrected.append((winner_id, loser_id))
+        return corrected
 
     def _rule_based_judge(
         self,
@@ -638,6 +699,9 @@ class DedupMergePhase:
                     # Keep the one with higher importance; at equal importance
                     # the NEWER memory wins (#1195 — was: arbitrary cluster
                     # order, which could delete the updated version of a fact).
+                    # Residual: at equal importance AND identical recency keys
+                    # (or missing timestamps) the tie still falls to cluster
+                    # order — acceptable, both versions carry the same stamp.
                     mem_a = id_to_mem[id_a]
                     mem_b = id_to_mem[id_b]
                     if mem_a.importance > mem_b.importance:
