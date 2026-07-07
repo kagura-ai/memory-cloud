@@ -68,6 +68,18 @@ class TestActivationState:
         assert state.hop == 1
         assert state.source_node_id == "n1"
 
+    def test_activation_above_one_rejected(self):
+        """#1197: the [0,1] guard stays a HARD guard, never a silent clamp —
+        the fix lives in the spreader (which must not produce >1 in the first
+        place), so any future overshoot reaching this dataclass must still
+        surface loudly here."""
+        with pytest.raises(ValueError, match="activation must be in"):
+            ActivationState(node_id="n", activation=1.004)
+
+    def test_activation_below_zero_rejected(self):
+        with pytest.raises(ValueError, match="activation must be in"):
+            ActivationState(node_id="n", activation=-0.1)
+
 
 class TestNeuralMemoryNode:
     """Test NeuralMemoryNode dataclass."""
