@@ -12,6 +12,7 @@ audit rows, rule-based end-to-end merge).
 Target module: ``services.sleep.dedup_merge``.
 """
 
+from datetime import datetime
 from unittest.mock import AsyncMock, MagicMock, patch
 from uuid import uuid4
 
@@ -398,6 +399,44 @@ class TestLLMJudge:
         assert decisions == []
         assert budget.llm_calls_used == 0  # no consume on the failure path
         assert dedup_phase._tokens_used == 0
+
+
+# ---------------------------------------------------------------------------
+# #1195 — winner selection must see and prefer recency
+# ---------------------------------------------------------------------------
+
+
+class TestLLMJudgeRecency:
+    """#1195: the judge deleted the NEWER fact of an update pair in 10-18% of
+    judged pairs because it never saw timestamps and had no update-pair winner
+    rule. The prompt must carry created_at and an explicit newer-wins rule."""
+
+    async def test_prompt_includes_created_at(self, dedup_phase):
+        mem_a = _make_memory(summary="deploy target is blue")
+        mem_a.created_at = datetime(2026, 6, 1)
+        mem_b = _make_memory(summary="deploy target is green (updated 2026-07-01)")
+        mem_b.created_at = datetime(2026, 7, 1)
+        scores = {tuple(sorted([mem_a.id, mem_b.id], key=str)): 0.96}
+        dedup_phase.llm_service.complete_json = AsyncMock(
+            return_value=_make_llm_response({"judgments": []})
+        )
+        dedup_phase._tokens_used = 0
+        dedup_phase._llm_breakdown = None
+
+        await dedup_phase._llm_judge(
+            [mem_a, mem_b], scores, "u", "ctx", "ws", SleepBudget(), _make_config()
+        )
+
+        prompt = dedup_phase.llm_service.complete_json.call_args.kwargs["prompt"]
+        assert "2026-06-01" in prompt
+        assert "2026-07-01" in prompt
+
+    def test_system_prompt_has_newer_wins_rule(self):
+        from services.sleep.prompts import DEDUP_JUDGE_SYSTEM
+
+        text = DEDUP_JUDGE_SYSTEM.lower()
+        assert "newer" in text
+        assert "winner" in text
 
 
 # ---------------------------------------------------------------------------

@@ -3,6 +3,7 @@
 Issue #101: Union-Find clustering, LLM judgment, merge execution.
 """
 
+from datetime import datetime
 from unittest.mock import AsyncMock, MagicMock, patch
 from uuid import uuid4
 
@@ -195,6 +196,21 @@ class TestRuleBasedJudge:
         decisions = phase._rule_based_judge([mem_a, mem_b], pair_scores)
 
         assert len(decisions) == 0
+
+    def test_equal_importance_newer_wins(self):
+        """#1195: at equal importance the NEWER memory wins, not cluster order."""
+        phase = DedupMergePhase.__new__(DedupMergePhase)
+
+        older = _make_memory(importance=0.5)
+        older.created_at = datetime(2026, 6, 1)
+        newer = _make_memory(importance=0.5)
+        newer.created_at = datetime(2026, 7, 1)
+        pair_scores = {tuple(sorted([older.id, newer.id], key=str)): 0.99}
+
+        # older first in cluster order — the pre-#1195 tie-break picked it
+        decisions = phase._rule_based_judge([older, newer], pair_scores)
+
+        assert decisions == [(newer.id, older.id)]
 
 
 class TestParseDedupResponse:

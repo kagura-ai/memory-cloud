@@ -25,6 +25,7 @@ from __future__ import annotations
 
 import random
 import string
+from datetime import datetime
 from typing import TYPE_CHECKING
 from uuid import UUID
 
@@ -524,11 +525,16 @@ class DedupMergePhase:
         mems_shuffled = [s[1] for s in shuffled]
 
         # Format memories. The summary is untrusted (issue #919) — wrap it so an
-        # embedded instruction cannot steer the merge judgment.
+        # embedded instruction cannot steer the merge judgment. created= is
+        # trusted DB metadata and stays OUTSIDE the wrapper: the judge needs it
+        # to pick the newer version of an updated fact as winner (#1195).
         memory_lines = []
         for label, mem in zip(labels_shuffled, mems_shuffled, strict=True):
+            created = getattr(mem, "created_at", None)
+            created_s = f"{created:%Y-%m-%d}" if isinstance(created, datetime) else "unknown"
             memory_lines.append(
-                f"[{label}] type={mem.type}, importance={mem.importance:.2f}\n"
+                f"[{label}] type={mem.type}, importance={mem.importance:.2f}, "
+                f"created={created_s}\n"
                 f"    summary:\n{wrap_untrusted_content(mem.summary)}"
             )
 
@@ -606,6 +612,13 @@ class DedupMergePhase:
 
         return decisions
 
+    @staticmethod
+    def _is_newer(candidate: Memory, other: Memory) -> bool:
+        """True iff both carry datetime ``created_at`` and candidate is newer."""
+        c = getattr(candidate, "created_at", None)
+        o = getattr(other, "created_at", None)
+        return isinstance(c, datetime) and isinstance(o, datetime) and c > o
+
     def _rule_based_judge(
         self,
         cluster_memories: list[Memory],
@@ -622,13 +635,19 @@ class DedupMergePhase:
                 key = (sorted_ids[0], sorted_ids[1])
                 score = pair_scores.get(key, 0.0)
                 if score >= AUTO_MERGE_THRESHOLD:
-                    # Keep the one with higher importance or more content
+                    # Keep the one with higher importance; at equal importance
+                    # the NEWER memory wins (#1195 — was: arbitrary cluster
+                    # order, which could delete the updated version of a fact).
                     mem_a = id_to_mem[id_a]
                     mem_b = id_to_mem[id_b]
-                    if mem_a.importance >= mem_b.importance:
+                    if mem_a.importance > mem_b.importance:
                         decisions.append((id_a, id_b))
-                    else:
+                    elif mem_b.importance > mem_a.importance:
                         decisions.append((id_b, id_a))
+                    elif self._is_newer(mem_b, mem_a):
+                        decisions.append((id_b, id_a))
+                    else:
+                        decisions.append((id_a, id_b))
 
         return decisions
 

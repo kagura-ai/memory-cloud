@@ -90,6 +90,11 @@ Rules:
 worded differently.
 - If one memory is a strict subset of the other, they are duplicates. \
 Keep the more complete one.
+- If two memories are versions of the same fact and one UPDATES or \
+supersedes the other (a changed value, a newer date, an explicit update \
+marker), they are duplicates and the winner MUST be the newer version — \
+judge by the created= metadata and any dates or update markers in the \
+text. Never pick the outdated version as winner.
 - Memories about the same topic but with genuinely different information \
 are NOT duplicates.
 - When in doubt, mark as "keep_both" — false merges lose information.
@@ -100,8 +105,8 @@ You MUST respond with valid JSON only.
 """
 
 DEDUP_JUDGE_USER = """\
-Analyze these memory pairs for duplicates. Each memory has a label (A, B, C...) \
-and a summary.
+Analyze these memory pairs for duplicates. Each memory has a label (A, B, C...), \
+a creation date (created=), and a summary.
 
 Memories:
 {memories}
