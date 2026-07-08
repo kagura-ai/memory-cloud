@@ -183,7 +183,19 @@ async def undo_merge_action(
         sa_update(Memory).where(Memory.id == loser_id).values(deleted_at=None, deleted_by=None)
     )
 
+    # Resolve workspace_id — required by add_memory_to_qdrant. Mirrors the
+    # run-level rollback's Context fallback: workspace-less reports exist,
+    # and the shared-helper promise is that the two restore paths never
+    # drift (a bare "" would hard-raise inside the Qdrant layer).
     ws_id = str(report.workspace_id) if report.workspace_id else ""
+    if not ws_id and report.context_id:
+        from models.auth import Context
+
+        ctx_ws = (
+            await db.execute(select(Context.workspace_id).where(Context.id == report.context_id))
+        ).scalar_one_or_none()
+        if ctx_ws:
+            ws_id = str(ctx_ws)
     ctx_id = str(report.context_id) if report.context_id else ""
     embedding_svc = EmbeddingService(db, model=embedding_model)
     await re_embed_memory_to_qdrant(

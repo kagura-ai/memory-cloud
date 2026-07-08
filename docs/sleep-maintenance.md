@@ -208,7 +208,7 @@ Restored memories are re-embedded back into Qdrant. On full success the report m
 
 ### Per-merge undo (#1209)
 
-`rollback_sleep_run` reverses a whole run; the correction loop for a single bad merge is `POST /admin/sleep/actions/{action_id}/undo-merge` — it restores just that merge's loser (row **and** Qdrant vector) and appends an `undo_merge` action to the same report, so the merge's full history (merge → undo) reads out of one audit log. Self-scoped like the manual trigger. Error contract: `404` unknown/unowned action, `409` already restored (or deleted by something other than sleep), `410` the loser was purged by the retention window (`sleep_merge_retention_days`) — reversibility is bounded by the declared window, and the bound is named, never silent.
+`rollback_sleep_run` reverses a whole run; the correction loop for a single bad merge is `POST /admin/sleep/actions/{action_id}/undo-merge` — it restores just that merge's loser (row **and** Qdrant vector) and appends an `undo_merge` action to the same report, so the merge's full history (merge → undo) reads out of one audit log. Self-scoped like the manual trigger. Error contract: `400` the action is not a dedup merge, `404` unknown/unowned action, `409` already restored (or deleted by something other than sleep), `410` the loser was purged by the retention window (`sleep_merge_retention_days`) — reversibility is bounded by the declared window, and the bound is named, never silent.
 
 ## Admin UI
 

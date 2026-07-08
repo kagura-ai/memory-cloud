@@ -348,6 +348,7 @@ _UNDO_ERROR_STATUS = {
     response_model=UndoMergeResponse,
     summary="Undo one dedup merge (restore the merged-away memory)",
     responses={
+        400: {"description": "The action is not a dedup merge."},
         404: {"description": "Action not found or not owned by the caller."},
         409: {"description": "Memory already restored, or deleted by something else."},
         410: {

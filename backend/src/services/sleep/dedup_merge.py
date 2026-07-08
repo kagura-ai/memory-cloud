@@ -644,6 +644,11 @@ class DedupMergePhase:
         self._ensure_audit_state()
         decisions: list[tuple[UUID, UUID]] = []
         judgments = response.get("judgments", [])
+        # #1209: dedupe judgments by canonical pair — a malformed response
+        # listing the same pair twice (same or reversed order) would
+        # double-merge AND cross-contaminate the audit metadata when the
+        # winner rules re-key a flipped decision.
+        seen_pairs: set[tuple[UUID, UUID]] = set()
 
         for j in judgments:
             if j.get("verdict") != "merge":
@@ -669,6 +674,14 @@ class DedupMergePhase:
 
             loser_label = pair[0] if pair[1] == winner_label else pair[1]
             decision = (label_to_id[winner_label], label_to_id[loser_label])
+            canonical = tuple(sorted(decision, key=str))
+            if canonical in seen_pairs:
+                logger.warning(
+                    "dedup_duplicate_judgment_skipped",
+                    pair=[str(decision[0]), str(decision[1])],
+                )
+                continue
+            seen_pairs.add(canonical)
             decisions.append(decision)
 
             reason = j.get("reason")

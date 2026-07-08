@@ -59,7 +59,11 @@ async def test_purges_and_audits_batch_summary() -> None:
     )
 
     assert result.skipped is False
-    assert result.memories_processed == 3
+    # Purged dead rows must NOT consume the shared per-run budget — the
+    # orchestrator feeds memories_processed into budget.consume, and a
+    # first-enable backlog purge would otherwise starve the live-memory
+    # phases (importance_reeval / consolidation) that run after this one.
+    assert result.memories_processed == 0
     assert result.details["purged"] == 3
     assert result.details["retention_days"] == 30
 

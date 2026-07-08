@@ -92,9 +92,28 @@ class MergeRetentionPhase:
             }
             return result
 
-        await self.db.execute(delete(Memory).where(Memory.id.in_(ids)))
+        # Re-assert the full purge predicate in the DELETE itself (not just
+        # the ids): a concurrent per-merge undo commits in its own session,
+        # and a bare id-DELETE under READ COMMITTED would hard-delete the
+        # memory the admin just restored (TOCTOU between our SELECT and this
+        # DELETE). With the predicate repeated, a restored row (deleted_at
+        # IS NULL) no longer matches and survives.
+        await self.db.execute(
+            delete(Memory).where(
+                Memory.id.in_(ids),
+                Memory.deleted_by == _MERGE_DELETED_BY,
+                Memory.deleted_at.is_not(None),
+                Memory.deleted_at < cutoff,
+            )
+        )
 
-        result.memories_processed = len(ids)
+        # Deliberately NOT counted into memories_processed: the orchestrator
+        # consumes the shared per-run budget from that field, and purging an
+        # unbounded historical backlog of dead rows must not starve the
+        # live-memory phases (importance_reeval / consolidation) that run
+        # after this one. The purge volume is reported in details + the
+        # batch audit action instead.
+        result.memories_processed = 0
         result.details = {
             "purged": len(ids),
             "retention_days": retention_days,
