@@ -2749,6 +2749,7 @@
         "sleep_dedup_enabled": "重複排除/マージフェーズを有効化",
         "sleep_dedup_similarity_threshold": "重複検出のコサイン類似度しきい値",
         "sleep_merge_retention_days": "マージ敗者のパージ猶予日数（0 = 永久保持）",
+        "sleep_dedup_supersede_enabled": "dedupシャドウモード：敗者を削除せず supersedes エッジを記録",
         "sleep_edge_discovery_enabled": "エッジ発見フェーズを有効化",
         "sleep_edge_discovery_sample_size": "エッジ発見 1 回あたりのサンプルメモリ数",
         "sleep_importance_reeval_enabled": "重要度再評価フェーズを有効化"

@@ -196,6 +196,11 @@ Returns: {status, memory_id, scope, context_id, context_name, context_display_na
                         "items": {"type": "string"},
                         "description": "Explicit links by source_uri (resolved to memory_id at remember time). Unresolved URIs are silently skipped — the plugin can retry later when the target memory exists.",
                     },
+                    "supersedes": {
+                        "type": "string",
+                        "format": "uuid",
+                        "description": "Memory ID this new memory supersedes (#1208). The old memory is SHADOWED out of default recall — not deleted: it stays reachable via recall(include_superseded=true) and explore(), and deleting the supersedes edge restores it fully. Use when storing the updated version of a fact you previously remembered.",
+                    },
                 },
             },
         },
@@ -366,6 +371,10 @@ Returns: {status, results: [{memory_id, summary, context_summary, type, importan
                     "include_explore_hints": {
                         "type": "boolean",
                         "description": "Include up to 3 explore_hints in the response suggesting good seed memories for a follow-up explore() call (default: false). Set to true when the user is exploring a topic broadly or asks 'what else is related?' — the hints bridge recall (precision search) and explore (graph discovery) without mixing their scoring. Each hint includes a memory_id and a reason (top_result, high_centrality, or unexplored_neighbor).",
+                    },
+                    "include_superseded": {
+                        "type": "boolean",
+                        "description": "Include memories shadowed by a supersedes edge (#1208, default: false). Superseded (outdated) versions of facts are demoted out of results by default; true returns them annotated with superseded_by for audit/history purposes.",
                     },
                 },
             },
@@ -688,8 +697,10 @@ Returns: {status, edge: {source_id, target_id, edge_type, weight, confidence, cr
                             "learned_from",
                             "continues_from",
                             "references_file",
+                            "supersedes",
+                            "contradicts",
                         ],
-                        "description": "Type of relationship (default: 'related_to').",
+                        "description": "Type of relationship (default: 'related_to'). #1208: 'supersedes' (src = newer memory, dst = the outdated one it replaces — dst is shadowed out of default recall while src lives) and 'contradicts' (both sides stay visible, annotated — contradiction never hides).",
                         "default": "related_to",
                     },
                     "weight": {
@@ -754,6 +765,8 @@ Returns: {status, edge: {source_id, target_id, edge_type, weight, confidence, cr
                             "learned_from",
                             "continues_from",
                             "references_file",
+                            "supersedes",
+                            "contradicts",
                         ],
                         "description": "New edge type.",
                     },

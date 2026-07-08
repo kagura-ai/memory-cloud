@@ -117,6 +117,14 @@ class RememberRequest(BaseModel):
         default=None,
         description="Explicit links by source_uri (resolved at remember time, unresolved silently skipped)",
     )
+    # #1208: fact succession — this new memory supersedes an existing one.
+    # Creates a supersedes edge (src=new, dst=old, origin='declared'); the old
+    # memory is shadowed out of default recall but never deleted (reachable
+    # via include_superseded / explore; deleting the edge restores it fully).
+    supersedes: UUID | None = Field(
+        default=None,
+        description="Memory ID this new memory supersedes (old one is shadowed, not deleted)",
+    )
 
     @field_validator("summary")
     @classmethod
@@ -181,6 +189,12 @@ class RecallRequest(BaseModel):
         default=False,
         description="Include up to 3 explore_hints in response suggesting good seeds for explore()",
     )
+    # #1208: shadowed (superseded) memories are demoted out of results by
+    # default; true returns them annotated with superseded_by for audit.
+    include_superseded: bool = Field(
+        default=False,
+        description="Include memories shadowed by a supersedes edge (annotated with superseded_by)",
+    )
 
 
 class MemoryResponse(TZAwareBaseModel):
@@ -207,6 +221,13 @@ class MemoryResponse(TZAwareBaseModel):
     # memory would otherwise raise a Pydantic ValidationError. The *request*
     # schema (RememberRequest) intentionally omits it — the forge guard.
     source_type: Literal["file", "url", "vault", "api", "manual", "connector"] | None = None
+    # #1208: fact-succession annotations. superseded_by is set only when the
+    # memory is shadowed AND include_superseded=true opted it back into the
+    # results (default recall filters shadowed memories out entirely).
+    # contradicts lists memories linked by a contradicts edge (either
+    # direction) — contradiction never hides, it annotates both sides.
+    superseded_by: UUID | None = None
+    contradicts: list[UUID] = Field(default_factory=list)
 
     class Config:
         from_attributes = True

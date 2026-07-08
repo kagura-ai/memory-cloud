@@ -1183,7 +1183,11 @@ class MemoryService:
         the memory creation. Forward references (source_uri not yet in DB)
         are silently skipped.
         """
-        if not request.linked_memory_ids and not request.linked_source_uris:
+        if (
+            not request.linked_memory_ids
+            and not request.linked_source_uris
+            and not getattr(request, "supersedes", None)
+        ):
             return
 
         if not workspace_id or not context_id:
@@ -1262,6 +1266,43 @@ class MemoryService:
                         origin=EDGE_ORIGIN_DECLARED,
                     )
                     created += 1
+
+            # #1208: fact succession. src = this new memory (superseding),
+            # dst = the predecessor (superseded → shadowed out of default
+            # recall). Same-scope + active-target validation as direct links;
+            # the predecessor is never mutated — visibility is the edge's job.
+            supersedes_target = getattr(request, "supersedes", None)
+            if supersedes_target and supersedes_target != memory_id:
+                from models.memory import EDGE_TYPE_SUPERSEDES
+
+                result = await self.db.execute(
+                    select(Memory.id).where(
+                        Memory.id == supersedes_target,
+                        Memory.user_id == user_id,
+                        Memory.workspace_id == UUID(workspace_id),
+                        Memory.context_id == UUID(context_id),
+                        Memory.deleted_at.is_(None),
+                    )
+                )
+                if result.scalar_one_or_none() is not None:
+                    await edge_repo.create_edge_if_absent(
+                        user_id=user_id,
+                        src_id=memory_id,
+                        dst_id=supersedes_target,
+                        edge_type=EDGE_TYPE_SUPERSEDES,
+                        weight=1.0,
+                        confidence=1.0,
+                        workspace_id=workspace_id,
+                        context_id=context_id,
+                        origin=EDGE_ORIGIN_DECLARED,
+                    )
+                    created += 1
+                else:
+                    logger.warning(
+                        "supersedes_target_not_found",
+                        memory_id=str(memory_id),
+                        target_id=str(supersedes_target),
+                    )
 
             if created > 0:
                 await self.db.commit()
@@ -1533,6 +1574,100 @@ class MemoryService:
             "zero_adoption_in_topk": sum(1 for mid in order_after[:k] if mid in zero_adoption_ids),
             "topk": min(k, len(order_after)),
         }
+
+    async def _apply_supersede_shadowing(
+        self,
+        search_results: list[dict],
+        memories: dict,
+        *,
+        user_id: str,
+        include_superseded: bool,
+    ) -> tuple[dict[UUID, UUID], dict[UUID, list[UUID]]]:
+        """#1208: demote superseded memories out of the candidate pool.
+
+        Direction convention (models/memory.py): a ``supersedes`` edge points
+        src = superseding (newer) → dst = superseded (older). A candidate that
+        is the dst of a **live** edge — one whose superseding src memory still
+        exists and is not soft-deleted — is shadowed:
+
+        - default: removed from ``search_results`` IN PLACE (before the
+          re-rank and the top-k slice, so the slice stays full);
+        - ``include_superseded=True``: kept, and the returned shadow map lets
+          the caller annotate it with ``superseded_by``.
+
+        The liveness JOIN is the self-healing property: edge memory refs are
+        bare UUIDs (no FK), so a deleted superseder must stop shadowing —
+        deleting the edge OR the superseder restores full visibility.
+
+        ``contradicts`` edges NEVER hide anything: both sides of every edge
+        touching a candidate are collected into the returned contradiction
+        map for annotation (resolution is an arbitration problem).
+
+        Fail-open: shadowing is an enhancement on the read path — any error
+        preserves the original results (a query bug must not blank recall).
+
+        Returns:
+            (shadow_map dst→src, contradiction_map memory→[opponents]).
+        """
+        try:
+            from sqlalchemy import or_
+            from sqlalchemy.orm import aliased
+
+            from models.memory import (
+                EDGE_TYPE_CONTRADICTS,
+                EDGE_TYPE_SUPERSEDES,
+                NeuralMemoryEdge,
+            )
+
+            candidate_ids = {memories[r["id"]].id for r in search_results if r["id"] in memories}
+            if not candidate_ids:
+                return {}, {}
+
+            superseder = aliased(Memory)
+            rows = await self.db.execute(
+                select(NeuralMemoryEdge.dst_id, NeuralMemoryEdge.src_id)
+                .join(superseder, superseder.id == NeuralMemoryEdge.src_id)
+                .where(
+                    NeuralMemoryEdge.user_id == user_id,
+                    NeuralMemoryEdge.edge_type == EDGE_TYPE_SUPERSEDES,
+                    NeuralMemoryEdge.dst_id.in_(candidate_ids),
+                    superseder.deleted_at.is_(None),
+                )
+            )
+            shadow_map: dict[UUID, UUID] = dict(rows.all())
+
+            c_rows = await self.db.execute(
+                select(NeuralMemoryEdge.src_id, NeuralMemoryEdge.dst_id).where(
+                    NeuralMemoryEdge.user_id == user_id,
+                    NeuralMemoryEdge.edge_type == EDGE_TYPE_CONTRADICTS,
+                    or_(
+                        NeuralMemoryEdge.src_id.in_(candidate_ids),
+                        NeuralMemoryEdge.dst_id.in_(candidate_ids),
+                    ),
+                )
+            )
+            contradiction_map: dict[UUID, list[UUID]] = {}
+            for src, dst in c_rows.all():
+                contradiction_map.setdefault(src, []).append(dst)
+                contradiction_map.setdefault(dst, []).append(src)
+
+            if shadow_map and not include_superseded:
+                before = len(search_results)
+                search_results[:] = [
+                    r
+                    for r in search_results
+                    if r["id"] not in memories or memories[r["id"]].id not in shadow_map
+                ]
+                logger.info(
+                    "supersede_shadowing_applied",
+                    shadowed=before - len(search_results),
+                    candidates=before,
+                )
+
+            return shadow_map, contradiction_map
+        except Exception as e:
+            logger.warning("supersede_shadowing_failed", error=str(e))
+            return {}, {}
 
     async def _maybe_reinforce_rerank(
         self,
@@ -1956,6 +2091,19 @@ class MemoryService:
         # recall uses pure hybrid search scores (no UnifiedScorer).
         # Hebbian learning still runs to build the graph for explore().
 
+        # #1208: supersede shadowing — memories that are the dst of a LIVE
+        # supersedes edge are demoted out of the candidate pool BEFORE the
+        # re-rank and the top-k slice (so shadowing never leaves the slice
+        # short). include_superseded=true keeps them, annotated. This is the
+        # non-destructive counterpart of dedup's update-by-removal: the truth
+        # is shadowed, not gone.
+        shadow_map, contradiction_map = await self._apply_supersede_shadowing(
+            search_results,
+            memories,
+            user_id=user_id,
+            include_superseded=request.include_superseded,
+        )
+
         # Issue #1048: bounded reinforce re-rank (adoption + retrieval feedback),
         # config-gated per-context (default ON since #1207), single-context only. Reorders the
         # candidate pool BEFORE the top-k slice below; uses only reference_count +
@@ -2007,6 +2155,11 @@ class MemoryService:
                     score=search_result.get("hybrid_score", search_result["score"]),
                     source_uri=memory.source_uri,
                     source_type=memory.source_type,
+                    # #1208: succession annotations. superseded_by is only
+                    # non-None under include_superseded=true (default recall
+                    # filtered shadowed memories out of search_results above).
+                    superseded_by=shadow_map.get(memory.id),
+                    contradicts=contradiction_map.get(memory.id, []),
                 )
             )
 

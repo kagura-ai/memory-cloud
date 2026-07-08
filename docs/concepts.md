@@ -135,6 +135,32 @@ enable them per context with `update_search_config`
 monitoring telemetry. (Rare legacy contexts that never got a config row
 adopt the new default the first time the row is materialized.)
 
+## Fact Succession (supersedes / contradicts)
+
+When a fact changes, the worst thing a memory system can do is delete the old
+version (the truth is gone) or keep returning it (the truth is buried). Since
+#1208 Kagura models succession **non-destructively** with two typed relations:
+
+- **`supersedes`** — `src` is the newer memory, `dst` the outdated one it
+  replaces. A memory that is the dst of a live supersedes edge is
+  **shadowed**: default `recall()` demotes it out of results, but it is never
+  deleted — `recall(include_superseded=true)` returns it annotated with
+  `superseded_by`, `explore()` still reaches it, and deleting the edge (or
+  the superseding memory) restores full visibility. Create it by storing the
+  updated fact with `remember(..., supersedes=<old_memory_id>)`, or
+  explicitly with `create_edge(edge_type="supersedes")`.
+- **`contradicts`** — two memories disagree and neither is known to be
+  current. Contradiction **never hides** either side: both surface in recall
+  annotated with the opposing memory ids. Resolving a contradiction is an
+  arbitration decision (yours or a future judge's), not a deletion.
+
+Sleep's dedup phase can also record succession instead of removing
+duplicates: with `sleep_dedup_supersede_enabled` (default **off** —
+update-by-removal remains the default), a judged merge creates a
+`supersedes` edge (origin `semantic`) and leaves the loser
+alive-but-shadowed. Neither type is LLM-emittable by edge discovery — the
+sleep judge cannot invent supersession.
+
 ## Neural Memory
 
 **Neural Memory** creates automatic relationships between memories using brain-inspired algorithms.

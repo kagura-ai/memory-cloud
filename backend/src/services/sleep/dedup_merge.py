@@ -272,6 +272,22 @@ class DedupMergePhase:
             result.details = {"message": "no_duplicate_candidates"}
             return result
 
+        # #1208: in shadow mode losers stay active, so already-settled pairs
+        # (a supersedes edge exists between them) would be re-judged every
+        # run — filter them out before clustering. Remove mode is untouched
+        # (soft-deleted losers never reach _fetch_active_memories).
+        settled_pairs_skipped = 0
+        if getattr(config, "sleep_dedup_supersede_enabled", False):
+            pairs, settled_pairs_skipped = await self._filter_already_superseded_pairs(
+                pairs, user_id
+            )
+            if not pairs:
+                result.details = {
+                    "message": "all_candidates_already_superseded",
+                    "settled_pairs_skipped": settled_pairs_skipped,
+                }
+                return result
+
         # Step 3: Cluster with Union-Find
         uf = UnionFind()
         for id_a, id_b, _score in pairs:
@@ -331,17 +347,33 @@ class DedupMergePhase:
                 config,
             )
 
+            # #1208: shadow-mode merges record a supersedes edge and leave the
+            # loser alive-but-shadowed instead of soft-deleting it — the
+            # non-destructive counterpart of update-by-removal. Default OFF
+            # preserves the pre-#1208 removal behavior byte-identically.
+            shadow_mode = bool(getattr(config, "sleep_dedup_supersede_enabled", False))
+
             for winner_id, loser_id in merge_decisions:
                 winner = memory_map.get(winner_id)
                 loser = memory_map.get(loser_id)
-                await self._execute_merge(
-                    winner,
-                    loser,
-                    user_id,
-                    workspace_id,
-                    context_id,
-                )
-                result.changed_memory_ids.add(winner_id)
+                if shadow_mode:
+                    await self._execute_shadow_merge(
+                        winner,
+                        loser,
+                        user_id,
+                        workspace_id,
+                        context_id,
+                    )
+                    # Nothing on either row changed — no reindex needed.
+                else:
+                    await self._execute_merge(
+                        winner,
+                        loser,
+                        user_id,
+                        workspace_id,
+                        context_id,
+                    )
+                    result.changed_memory_ids.add(winner_id)
                 merged_count += 1
                 if reporter and report_id and winner and loser:
                     pair_key = tuple(sorted([winner_id, loser_id], key=str))
@@ -376,6 +408,8 @@ class DedupMergePhase:
                             "loser_recency": (
                                 f"{loser_recency:%Y-%m-%d %H:%M}" if loser_recency else None
                             ),
+                            # #1208: how this merge disposed of the loser.
+                            "mode": "shadow" if shadow_mode else "remove",
                         },
                     )
 
@@ -398,6 +432,9 @@ class DedupMergePhase:
             # work was deferred".
             "deferred_pairs": deferred_pairs,
             "merged": merged_count,
+            # #1208: pairs skipped because a supersedes edge already settled
+            # them (shadow mode only; always 0 in remove mode).
+            "settled_pairs_skipped": settled_pairs_skipped,
             "llm_call_failures": self._llm_failures,  # #1183
             # #1195/#1198: LLM winner picks flipped by the deterministic
             # winner rules — a direct measure of residual judge misdirection
@@ -856,6 +893,82 @@ class DedupMergePhase:
                     }
 
         return decisions
+
+    async def _execute_shadow_merge(
+        self,
+        winner: Memory | None,
+        loser: Memory | None,
+        user_id: str,
+        workspace_id: str | None,
+        context_id: str | None,
+    ) -> None:
+        """#1208 shadow-mode merge: record succession, mutate nothing.
+
+        Creates a ``supersedes`` edge (src=winner, dst=loser,
+        origin='semantic' — machine-inferred by the dedup judge, not
+        user-asserted). The loser row, vector, tags and edges are all left
+        untouched: recall shadows it out by the edge alone, so deleting the
+        edge restores full visibility. Idempotent via create_edge_if_absent —
+        re-judging the same pair on a later run is a no-op (and
+        already-superseded pairs are filtered out before judging to avoid
+        burning judge budget on settled pairs).
+        """
+        if not winner or not loser:
+            return
+        from models.memory import EDGE_ORIGIN_SEMANTIC, EDGE_TYPE_SUPERSEDES
+
+        await self.edge_repo.create_edge_if_absent(
+            user_id=user_id,
+            src_id=winner.id,
+            dst_id=loser.id,
+            edge_type=EDGE_TYPE_SUPERSEDES,
+            weight=1.0,
+            confidence=1.0,
+            workspace_id=workspace_id,
+            context_id=context_id,
+            origin=EDGE_ORIGIN_SEMANTIC,
+        )
+        logger.info(
+            "dedup_shadow_merge",
+            winner_id=str(winner.id),
+            loser_id=str(loser.id),
+        )
+
+    async def _filter_already_superseded_pairs(
+        self,
+        pairs: list[tuple[UUID, UUID, float]],
+        user_id: str,
+    ) -> tuple[list[tuple[UUID, UUID, float]], int]:
+        """#1208: drop candidate pairs already linked by a supersedes edge.
+
+        In shadow mode the loser stays active, so the same near-duplicate
+        pair would be re-detected and re-judged on EVERY sleep run — burning
+        LLM budget on pairs whose succession is already settled. Filtering
+        is direction-agnostic (either orientation settles the pair).
+
+        Returns:
+            (remaining pairs, count of pairs skipped as already settled).
+        """
+        if not pairs:
+            return pairs, 0
+        from models.memory import EDGE_TYPE_SUPERSEDES, NeuralMemoryEdge
+
+        all_ids = {mid for a, b, _ in pairs for mid in (a, b)}
+        rows = await self.db.execute(
+            select(NeuralMemoryEdge.src_id, NeuralMemoryEdge.dst_id).where(
+                NeuralMemoryEdge.user_id == user_id,
+                NeuralMemoryEdge.edge_type == EDGE_TYPE_SUPERSEDES,
+                NeuralMemoryEdge.src_id.in_(all_ids),
+                NeuralMemoryEdge.dst_id.in_(all_ids),
+            )
+        )
+        settled = {tuple(sorted((src, dst), key=str)) for src, dst in rows.all()}
+        if not settled:
+            return pairs, 0
+        remaining = [
+            (a, b, s) for a, b, s in pairs if tuple(sorted((a, b), key=str)) not in settled
+        ]
+        return remaining, len(pairs) - len(remaining)
 
     async def _execute_merge(
         self,

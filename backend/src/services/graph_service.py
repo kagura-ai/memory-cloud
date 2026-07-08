@@ -17,11 +17,13 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from models.memory import (
     _ALL_EDGE_ORIGINS,
     EDGE_TYPE_CONTINUES_FROM,
+    EDGE_TYPE_CONTRADICTS,
     EDGE_TYPE_DEPENDS_ON,
     EDGE_TYPE_LEARNED_FROM,
     EDGE_TYPE_NEURAL_ASSOCIATION,
     EDGE_TYPE_REFERENCES_FILE,
     EDGE_TYPE_RELATED_TO,
+    EDGE_TYPE_SUPERSEDES,
 )
 from repositories.neural_edge import NeuralEdgeRepository
 from utils.datetime import to_utc_iso
@@ -96,6 +98,10 @@ class GraphService:
             EDGE_TYPE_LEARNED_FROM,
             EDGE_TYPE_CONTINUES_FROM,
             EDGE_TYPE_REFERENCES_FILE,
+            # #1208: fact-succession relations (src = superseding, dst =
+            # superseded; contradicts never hides).
+            EDGE_TYPE_SUPERSEDES,
+            EDGE_TYPE_CONTRADICTS,
         }
     )
 

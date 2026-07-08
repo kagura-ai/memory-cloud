@@ -57,6 +57,7 @@ async def handle_remember(
         source_type=args.get("source_type"),
         linked_memory_ids=args.get("linked_memory_ids"),
         linked_source_uris=args.get("linked_source_uris"),
+        supersedes=args.get("supersedes"),  # #1208
     )
 
     start_time = time.time()
@@ -435,6 +436,7 @@ async def handle_recall(
         filters=args.get("filters"),
         search_mode=args.get("search_mode", "hybrid"),
         include_explore_hints=args.get("include_explore_hints", False),
+        include_superseded=args.get("include_superseded", False),  # #1208
     )
 
     start_time = time.time()
@@ -538,6 +540,11 @@ async def handle_recall(
                     # (null if never edited) — an old value means the fact may be stale.
                     "created_at": to_utc_iso(r.created_at),
                     "updated_at": to_utc_iso(r.updated_at),
+                    # #1208: fact-succession annotations. superseded_by is only
+                    # non-null under include_superseded=true; contradicts lists
+                    # opposing memories (never hidden, both sides annotated).
+                    "superseded_by": str(r.superseded_by) if r.superseded_by else None,
+                    "contradicts": [str(c) for c in r.contradicts],
                 }
                 for r in result.results
             ]
