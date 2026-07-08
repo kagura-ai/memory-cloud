@@ -456,7 +456,15 @@ async def _score_arm(
     search_mode: str,
 ) -> dict[str, Any]:
     """Recall every query with ``search_mode`` and compute the metric block."""
+    import os
+
     from models.schemas import RecallRequest
+
+    # #1213: production-arm scoring must never see the graph-boost experiment
+    # (an operator-exported env would silently contaminate the frozen-corpus
+    # baselines the CI gates compare against).
+    prev_boost = os.environ.get("KAGURA_GRAPH_BOOST_ENABLED")
+    os.environ["KAGURA_GRAPH_BOOST_ENABLED"] = "false"
 
     # Per-query rankings, grouped by bucket.
     per_bucket_rankings: dict[str, list[tuple[list[str], set[str]]]] = {b: [] for b in BUCKETS}
@@ -480,6 +488,14 @@ async def _score_arm(
         all_retrieved_sources.extend(
             docs_by_id[d].source for d in ranked_docs[:_RECALL_K] if d in docs_by_id
         )
+
+    # Restore-on-success is deliberate (no try/finally): an exception aborts
+    # the whole eval run, and leaving the env pinned to "false" is the
+    # default-off safe state.
+    if prev_boost is None:
+        os.environ.pop("KAGURA_GRAPH_BOOST_ENABLED", None)
+    else:
+        os.environ["KAGURA_GRAPH_BOOST_ENABLED"] = prev_boost
 
     result: dict[str, Any] = {
         "overall": _bucket_metrics(all_rankings),

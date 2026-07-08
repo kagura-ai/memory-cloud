@@ -187,6 +187,10 @@ async def _run_reinforce_arms(
 
     prev_neural = os.environ.get("ENABLE_NEURAL_MEMORY")
     os.environ["ENABLE_NEURAL_MEMORY"] = "false"
+    # #1213: the graph-boost experiment must never contaminate the reinforce
+    # arms (an operator-exported env would otherwise leak into this cohort).
+    prev_boost = os.environ.get("KAGURA_GRAPH_BOOST_ENABLED")
+    os.environ["KAGURA_GRAPH_BOOST_ENABLED"] = "false"
     try:
         await _seed_adoption(svc, ctx_id, owner, adopted_mem_ids)
 
@@ -206,6 +210,10 @@ async def _run_reinforce_arms(
             os.environ.pop("ENABLE_NEURAL_MEMORY", None)
         else:
             os.environ["ENABLE_NEURAL_MEMORY"] = prev_neural
+        if prev_boost is None:
+            os.environ.pop("KAGURA_GRAPH_BOOST_ENABLED", None)
+        else:
+            os.environ["KAGURA_GRAPH_BOOST_ENABLED"] = prev_boost
 
     gate = evaluate_reinforce_gate(off, on, thresholds=GateThresholds())
     # Vacuous-pass guard (#1084): a neutered reinforce_enabled toggle (config not
