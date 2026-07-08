@@ -1784,6 +1784,7 @@ class MemoryService:
         search_results: list[dict],
         memories: dict,
         context_id: UUID | None,
+        user_id: str | None,
         top_k: int | None = None,
     ) -> None:
         """#1213: bounded multiplicative graph term over the hybrid top-k.
@@ -1807,7 +1808,7 @@ class MemoryService:
         preserves the ranking).
         """
         enabled, max_boost = self._graph_boost_settings()
-        if not enabled or context_id is None or len(search_results) < 2:
+        if not enabled or context_id is None or user_id is None or len(search_results) < 2:
             return
         try:
             from sqlalchemy import select
@@ -1829,6 +1830,11 @@ class MemoryService:
                     NeuralMemoryEdge.src_id, NeuralMemoryEdge.dst_id, NeuralMemoryEdge.weight
                 ).where(
                     NeuralMemoryEdge.context_id == context_id,
+                    # Per-user scope, same discipline as activation.py: in a
+                    # shared context another member's co-activation history
+                    # (forgeable by deliberate co-recall) must not move THIS
+                    # caller's ranking (gate2/CSO).
+                    NeuralMemoryEdge.user_id == user_id,
                     NeuralMemoryEdge.origin == "hebbian",
                     NeuralMemoryEdge.src_id.in_(cand_ids),
                     NeuralMemoryEdge.dst_id.in_(cand_ids),
@@ -2353,6 +2359,7 @@ class MemoryService:
             search_results,
             memories,
             current_context_id if not context_ids else None,
+            user_id,
             top_k=request.k,
         )
 

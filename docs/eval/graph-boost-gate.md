@@ -25,6 +25,12 @@ artifact) built into the gate as kill-shots.
 - Composes with the reinforce re-rank via the `_rerank_factor` stamp
   (bounded × bounded stays bounded).
 - Fail-safe: any failure preserves the original ranking.
+- Per-user edge scope (same discipline as `activation.py`): only the
+  CALLER's own co-activation history moves their ranking — in a shared
+  context, another member's (forgeable-by-co-recall) hebbian edges cannot.
+- The env flag is deployment-global, not per-context: enable it only on
+  single-tenant / eval-rig deployments. Per-context graduation (a config
+  column) is exactly what the gate below decides.
 
 ## The gate (pre-declared, deterministic)
 
@@ -33,12 +39,19 @@ CIs (`stats.paired_bca_ci`, 10k resamples, seed 1213):
 
 | Contract | Condition | On failure |
 |---|---|---|
+| powered | n_probes ≥ 50 (`MIN_PROBES`) | `underpowered` — deltas reported, ship refused |
 | beats no-graph | boosted_real − unboosted: BCa CI low > 0 (companion probes) | `no_effect` — valid close, not shipped |
-| beats placebo | boosted_real − boosted_on_rewired: BCa CI low > 0 | `density_artifact` — does NOT ship even though it beat no-graph |
+| beats placebo | boosted_real − boosted_on_rewired: BCa CI low > 0 for EVERY pre-declared rewire seed (42/43/44) | `density_artifact` — does NOT ship even though it beat no-graph |
 | non-inferiority | non-graph-query P@5 delta ≥ −0.01 (pre-declared ε) | `regression` — vetoes even a winner (fusion-dilution lesson) |
 
-`ship` requires all three. Verdicts are recorded either way in the results
+`ship` requires all four. Verdicts are recorded either way in the results
 JSON — a clean "does not beat placebo" is a valid close per the issue.
+
+The runner uses the frozen **kagura_l** corpus (300 docs, 60 multi-gold
+cross-source probes) — not the 5-probe golden corpus, which is below the
+inferential floor. The placebo rewires **only the hebbian edges** (the boost
+reads only hebbian; rewiring semantic/declared edges too would make the null
+model inconsistent with the mechanism under test).
 
 ## Running it
 
@@ -51,7 +64,15 @@ The runner (`tests/eval/graph_boost_runner.py`) builds one warm graph
 (provisional τ → replay → sleep, the placebo_runner procedure), measures the
 four arms with `ENABLE_NEURAL_MEMORY=false` (no Hebbian writes between
 paired arms), swaps in a degree-preserving rewired graph for the placebo arm
-(seed 42) and restores the snapshot afterwards.
+(one measurement per pre-declared rewire seed) and restores the snapshot
+afterwards.
+
+**Known limitation (pre-declared)**: the non-inferiority slice is the
+corpus's replay queries — the same queries the warm build replayed, so the
+boost re-ranks exactly their co-activated results. That slice is
+leaky-optimistic, not conservative. A pass here is necessary but NOT
+sufficient; the frozen held-out retrieval slice is the honest
+non-inferiority check before any per-context graduation.
 
 ## Cohort protection
 

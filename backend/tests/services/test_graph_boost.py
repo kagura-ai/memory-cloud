@@ -55,7 +55,7 @@ class TestOffPath:
         results, memories = _pool(0.9, 0.8, 0.7)
         before = [r["id"] for r in results]
 
-        await svc._maybe_graph_boost(results, memories, _CTX, top_k=3)
+        await svc._maybe_graph_boost(results, memories, _CTX, "u1", top_k=3)
 
         assert [r["id"] for r in results] == before
         svc.db.execute.assert_not_called()
@@ -66,7 +66,7 @@ class TestOffPath:
         monkeypatch.setenv("KAGURA_GRAPH_BOOST_ENABLED", "false")
         svc = _service()
         results, memories = _pool(0.9, 0.8)
-        await svc._maybe_graph_boost(results, memories, _CTX, top_k=2)
+        await svc._maybe_graph_boost(results, memories, _CTX, "u1", top_k=2)
         svc.db.execute.assert_not_called()
 
     @pytest.mark.asyncio
@@ -74,7 +74,16 @@ class TestOffPath:
         monkeypatch.setenv("KAGURA_GRAPH_BOOST_ENABLED", "true")
         svc = _service()
         results, memories = _pool(0.9, 0.8)
-        await svc._maybe_graph_boost(results, memories, None, top_k=2)
+        await svc._maybe_graph_boost(results, memories, None, "u1", top_k=2)
+        svc.db.execute.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_missing_user_id_is_noop(self, monkeypatch) -> None:
+        """Per-user scope (gate2/CSO): no caller identity, no boost."""
+        monkeypatch.setenv("KAGURA_GRAPH_BOOST_ENABLED", "true")
+        svc = _service()
+        results, memories = _pool(0.9, 0.8)
+        await svc._maybe_graph_boost(results, memories, _CTX, None, top_k=2)
         svc.db.execute.assert_not_called()
 
 
@@ -89,7 +98,7 @@ class TestBoost:
         # r1 <-> r2 edge: r1 and r2 each get conn=2.0 (max), r0 isolated.
         svc = _service(edge_rows=[(_mid(memories, "r1"), _mid(memories, "r2"), 2.0)])
 
-        await svc._maybe_graph_boost(results, memories, _CTX, top_k=3)
+        await svc._maybe_graph_boost(results, memories, _CTX, "u1", top_k=3)
 
         # r1: 0.88 * 1.15 = 1.012 > r0: 0.90 * 1.0 — overtakes.
         # r2: 0.5 * 1.15 = 0.575 < 0.90 — the cap keeps it below the leader.
@@ -101,7 +110,7 @@ class TestBoost:
         results, memories = _pool(0.9, 0.8)
         svc = _service(edge_rows=[(_mid(memories, "r0"), _mid(memories, "r1"), 1.0)])
 
-        await svc._maybe_graph_boost(results, memories, _CTX, top_k=2)
+        await svc._maybe_graph_boost(results, memories, _CTX, "u1", top_k=2)
 
         # Both connected equally -> both factor 1+b -> order unchanged, and
         # the stamp records the applied factor.
@@ -114,7 +123,7 @@ class TestBoost:
         svc = _service(edge_rows=[])
         results, memories = _pool(0.9, 0.8)
 
-        await svc._maybe_graph_boost(results, memories, _CTX, top_k=2)
+        await svc._maybe_graph_boost(results, memories, _CTX, "u1", top_k=2)
 
         assert [r["id"] for r in results] == ["r0", "r1"]
         assert all("_rerank_factor" not in r for r in results)
@@ -132,7 +141,7 @@ class TestBoost:
         # No edges at all would return early — give r1 a weak edge to r2.
         svc = _service(edge_rows=[(_mid(memories, "r1"), _mid(memories, "r2"), 1.0)])
 
-        await svc._maybe_graph_boost(results, memories, _CTX, top_k=3)
+        await svc._maybe_graph_boost(results, memories, _CTX, "u1", top_k=3)
 
         # adjusted: r0 = 0.90*0.85 = 0.765; r1 = 0.88*1.0*1.15 = 1.012;
         #           r2 = 0.86*1.15*1.15 ≈ 1.137 → order r2, r1, r0.
@@ -164,6 +173,6 @@ class TestFailSafe:
         svc = _service(execute_error=RuntimeError("edges table on fire"))
         results, memories = _pool(0.9, 0.8, 0.7)
 
-        await svc._maybe_graph_boost(results, memories, _CTX, top_k=3)
+        await svc._maybe_graph_boost(results, memories, _CTX, "u1", top_k=3)
 
         assert [r["id"] for r in results] == ["r0", "r1", "r2"]

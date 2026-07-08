@@ -40,10 +40,17 @@ NON_INFERIORITY_EPSILON = 0.01
 #: BCa resamples (matches the eval program's inferential runs).
 BCA_RESAMPLES = 10_000
 
+#: Minimum paired companion probes for an INFERENTIAL ship decision — the
+#: same floor placebo_runner documents as "underpowered, directional only".
+#: Below it the gate reports the deltas but refuses to render "ship"
+#: (gate2/CAIO: n=5 golden-corpus probes must not drive a BCa ship call).
+MIN_PROBES = 50
+
 GATE_SHIP = "ship"
 GATE_DENSITY_ARTIFACT = "density_artifact"
 GATE_NO_EFFECT = "no_effect"
 GATE_REGRESSION = "regression"
+GATE_UNDERPOWERED = "underpowered"
 
 
 def per_query_deltas(arm_a: Sequence[Ranking], arm_b: Sequence[Ranking], k: int) -> list[float]:
@@ -69,7 +76,7 @@ def evaluate_gate(
     *,
     boosted_real: Sequence[Ranking],
     unboosted: Sequence[Ranking],
-    boosted_rewired: Sequence[Ranking],
+    boosted_rewired_arms: dict[int, Sequence[Ranking]],
     nongraph_boosted: Sequence[Ranking],
     nongraph_unboosted: Sequence[Ranking],
     seed: int,
@@ -79,8 +86,11 @@ def evaluate_gate(
     Args:
         boosted_real: Companion queries, graph boost ON, real warm graph.
         unboosted: Same queries, boost OFF (paired).
-        boosted_rewired: Same queries, boost ON, degree-matched rewired graph
-            (paired).
+        boosted_rewired_arms: Same queries, boost ON, one degree-matched
+            HEBBIAN rewiring per pre-declared rewire seed (paired). The
+            beats-placebo contract must hold against EVERY rewiring — the
+            hardest null wins (gate2/CAIO: a single sparse-graph rewiring is
+            not a robust null).
         nongraph_boosted / nongraph_unboosted: Held-out non-graph queries,
             boost ON vs OFF (paired) — the fusion-dilution check.
         seed: Bootstrap seed (pre-declared in the run config).
@@ -96,11 +106,19 @@ def evaluate_gate(
         n_resamples=BCA_RESAMPLES,
         seed=seed,
     )
-    vs_placebo = paired_bca_ci(
-        per_query_deltas(boosted_real, boosted_rewired, PRIMARY_K),
-        n_resamples=BCA_RESAMPLES,
-        seed=seed,
-    )
+    if not boosted_rewired_arms:
+        raise ValueError("boosted_rewired_arms must contain at least one rewiring")
+    vs_placebo_by_seed = {
+        rewire_seed: paired_bca_ci(
+            per_query_deltas(boosted_real, arm, PRIMARY_K),
+            n_resamples=BCA_RESAMPLES,
+            seed=seed,
+        )
+        for rewire_seed, arm in boosted_rewired_arms.items()
+    }
+    # The binding placebo comparison is the WORST case: the rewiring the
+    # boost beats least.
+    vs_placebo = min(vs_placebo_by_seed.values(), key=lambda ci: ci["ci_low"])
     nongraph_delta = round(
         mean_precision_at_k(nongraph_boosted, PRIMARY_K)
         - mean_precision_at_k(nongraph_unboosted, PRIMARY_K),
@@ -108,10 +126,13 @@ def evaluate_gate(
     )
 
     beats_unboosted = vs_unboosted["ci_low"] > 0.0
-    beats_placebo = vs_placebo["ci_low"] > 0.0
+    beats_placebo = all(ci["ci_low"] > 0.0 for ci in vs_placebo_by_seed.values())
     non_inferior = nongraph_delta >= -NON_INFERIORITY_EPSILON
+    powered = len(boosted_real) >= MIN_PROBES
 
-    if not non_inferior:
+    if not powered:
+        verdict = GATE_UNDERPOWERED
+    elif not non_inferior:
         verdict = GATE_REGRESSION
     elif beats_unboosted and beats_placebo:
         verdict = GATE_SHIP
@@ -125,10 +146,13 @@ def evaluate_gate(
         "arms": {
             "boosted_real": arm_metrics(boosted_real),
             "unboosted": arm_metrics(unboosted),
-            "boosted_rewired": arm_metrics(boosted_rewired),
+            "boosted_rewired": {
+                str(rs): arm_metrics(arm) for rs, arm in boosted_rewired_arms.items()
+            },
         },
         "vs_unboosted": vs_unboosted,
         "vs_placebo": vs_placebo,
+        "vs_placebo_by_seed": {str(rs): ci for rs, ci in vs_placebo_by_seed.items()},
         "nongraph": {
             "boosted_p@5": round(mean_precision_at_k(nongraph_boosted, PRIMARY_K), 4),
             "unboosted_p@5": round(mean_precision_at_k(nongraph_unboosted, PRIMARY_K), 4),
@@ -137,6 +161,8 @@ def evaluate_gate(
             "non_inferior": non_inferior,
         },
         "contracts": {
+            "powered": powered,
+            "min_probes": MIN_PROBES,
             "beats_unboosted": beats_unboosted,
             "beats_placebo": beats_placebo,
             "non_inferior": non_inferior,

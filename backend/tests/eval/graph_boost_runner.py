@@ -42,11 +42,16 @@ from tests.eval.runner import _ingest_corpus, _teardown
 from tests.eval.tools.corpus import load_corpus
 
 _RESULTS_DIR = Path(__file__).resolve().parent / "results"
+#: The frozen kagura_l corpus (300 docs, 60 multi-gold cross-source probes) —
+#: NOT the 5-probe golden corpus: the gate's BCa ship decision needs
+#: n >= graph_boost_gate.MIN_PROBES (gate2/CAIO).
+_CORPUS_PATH = Path(__file__).resolve().parent / "fixtures" / "kagura_l.yaml"
 _RECALL_K = 10
 #: Pre-declared bootstrap seed for the gate's BCa intervals.
 _GATE_SEED = 1213
-#: Rewire seed (one committed rewiring — the gate is inferential, not a sweep).
-_REWIRE_SEED = 42
+#: Pre-declared rewire seeds: the beats-placebo contract must hold against
+#: EVERY rewiring (sparse graphs make any single rewiring a weak null).
+_REWIRE_SEEDS = (42, 43, 44)
 
 
 @contextmanager
@@ -95,7 +100,7 @@ async def run_graph_boost_eval(write: bool = True, run_date: str | None = None) 
     from services.memory_service import MemoryService
     from tests.eval._provisioning import provision_eval_context
 
-    corpus = load_corpus()
+    corpus = load_corpus(_CORPUS_PATH)
     plan = build_replay_plan(corpus, MODE_EXCLUDE_PROBES)
 
     async for db in get_db():
@@ -121,7 +126,7 @@ async def run_graph_boost_eval(write: bool = True, run_date: str | None = None) 
         "date": run_date or date.today().isoformat(),
         "corpus": corpus.meta,
         "gate_seed": _GATE_SEED,
-        "rewire_seed": _REWIRE_SEED,
+        "rewire_seeds": list(_REWIRE_SEEDS),
         "recall_k": _RECALL_K,
         "graph_boost_max": os.getenv("KAGURA_GRAPH_BOOST_MAX", "0.15"),
     }
@@ -158,10 +163,16 @@ async def _measure_arms(svc, db, corpus, plan, id_map, owner, ctx, ws) -> dict[s
                 svc, nongraph_queries, id_map, owner, ctx.id, ws.id
             )
 
-        # --- placebo arm: degree-preserving rewire, measure, restore ---------
+        # --- placebo arms: rewire ONLY the hebbian edges (the boost reads
+        # only hebbian — rewiring semantic/declared edges too would make the
+        # null model inconsistent with the mechanism under test), one
+        # rewiring per pre-declared seed, snapshot restored afterwards.
         snapshot = await _snapshot_edges(db, ctx.id)
-        rewire_swaps = 0
-        if len(snapshot) >= 2:
+        hebbian_rows = [r for r in snapshot if r["origin"] == "hebbian"]
+        other_rows = [r for r in snapshot if r["origin"] != "hebbian"]
+        boosted_rewired_arms: dict[int, Any] = {}
+        rewire_swaps_by_seed: dict[int, int] = {}
+        if len(hebbian_rows) >= 2:
             edges = [
                 Edge(
                     str(r["src_id"]),
@@ -171,38 +182,40 @@ async def _measure_arms(svc, db, corpus, plan, id_map, owner, ctx, ws) -> dict[s
                     r["confidence"],
                     r["edge_type"],
                 )
-                for r in snapshot
+                for r in hebbian_rows
             ]
-            rewired, rewire_swaps = degree_preserving_rewire_with_stats(edges, seed=_REWIRE_SEED)
-            rewired_rows = [
-                {
-                    "src_id": UUID(e.src),
-                    "dst_id": UUID(e.dst),
-                    "weight": e.weight,
-                    "confidence": e.confidence,
-                    "edge_type": e.edge_type,
-                    "origin": e.origin,
-                    "user_id": owner,
-                    "workspace_id": ws.id,
-                    "context_id": ctx.id,
-                }
-                for e in rewired
-            ]
-            await _replace_edges(db, ctx.id, rewired_rows)
             try:
-                with _env("KAGURA_GRAPH_BOOST_ENABLED", "true"):
-                    boosted_rewired = await _recall_rankings(
-                        svc, probe_queries, id_map, owner, ctx.id, ws.id
-                    )
+                for rewire_seed in _REWIRE_SEEDS:
+                    rewired, swaps = degree_preserving_rewire_with_stats(edges, seed=rewire_seed)
+                    rewire_swaps_by_seed[rewire_seed] = swaps
+                    rewired_rows = other_rows + [
+                        {
+                            "src_id": UUID(e.src),
+                            "dst_id": UUID(e.dst),
+                            "weight": e.weight,
+                            "confidence": e.confidence,
+                            "edge_type": e.edge_type,
+                            "origin": e.origin,
+                            "user_id": owner,
+                            "workspace_id": ws.id,
+                            "context_id": ctx.id,
+                        }
+                        for e in rewired
+                    ]
+                    await _replace_edges(db, ctx.id, rewired_rows)
+                    with _env("KAGURA_GRAPH_BOOST_ENABLED", "true"):
+                        boosted_rewired_arms[rewire_seed] = await _recall_rankings(
+                            svc, probe_queries, id_map, owner, ctx.id, ws.id
+                        )
             finally:
                 await _replace_edges(db, ctx.id, snapshot)
         else:
-            boosted_rewired = unboosted
+            boosted_rewired_arms = dict.fromkeys(_REWIRE_SEEDS, unboosted)
 
     gate = evaluate_gate(
         boosted_real=boosted_real,
         unboosted=unboosted,
-        boosted_rewired=boosted_rewired,
+        boosted_rewired_arms=boosted_rewired_arms,
         nongraph_boosted=nongraph_on,
         nongraph_unboosted=nongraph_off,
         seed=_GATE_SEED,
@@ -212,10 +225,20 @@ async def _measure_arms(svc, db, corpus, plan, id_map, owner, ctx, ws) -> dict[s
             "tau": tau_info,
             "replayed_queries": replayed,
             "sleep": sleep_info,
-            "edge_snapshot": {"n": len(snapshot), "rewire_swaps_done": rewire_swaps},
+            "edge_snapshot": {
+                "n": len(snapshot),
+                "n_hebbian": len(hebbian_rows),
+                "rewire_swaps_by_seed": rewire_swaps_by_seed,
+            },
         },
         "n_probes": len(probe_queries),
         "n_nongraph": len(nongraph_queries),
+        # gate2/CAIO: the non-inferiority slice is the corpus's replay
+        # queries — the SAME queries the warm build replayed, so the boost
+        # re-ranks exactly their co-activated results. Leaky-optimistic, not
+        # conservative; the frozen held-out retrieval slice is the honest
+        # follow-up before any per-context graduation.
+        "nongraph_slice": "replay_queries (leaky-optimistic; see docs/eval/graph-boost-gate.md)",
         "gate": gate,
     }
 
