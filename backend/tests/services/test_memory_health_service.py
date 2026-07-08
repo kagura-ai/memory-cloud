@@ -67,6 +67,23 @@ class TestConsolidationGrading:
         )
         assert section["status"] == STATUS_WARN
 
+    def test_latest_degraded_is_warn_not_fail(self) -> None:
+        """A degraded LATEST run is partial judge death — WARN, never FAIL."""
+        section = MemoryHealthService._grade_consolidation(
+            [_report(status="degraded", failures=1), _report()],
+            {"count": 0, "oldest_days": None},
+        )
+        assert section["status"] == STATUS_WARN
+
+    def test_backlog_at_threshold_is_ok_just_over_warns(self) -> None:
+        """The 90-day backlog threshold is strict (>): 90d ok, 91d warn."""
+        at = MemoryHealthService._grade_consolidation([_report()], {"count": 10, "oldest_days": 90})
+        over = MemoryHealthService._grade_consolidation(
+            [_report()], {"count": 10, "oldest_days": 91}
+        )
+        assert at["status"] == STATUS_OK
+        assert over["status"] == STATUS_WARN
+
     def test_deferred_pairs_warn(self) -> None:
         section = MemoryHealthService._grade_consolidation(
             [_report(deferred=12)], {"count": 0, "oldest_days": None}
