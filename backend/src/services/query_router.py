@@ -46,6 +46,11 @@ MIN_SCRIPT_CHARS = 4
 # A keyword-signal query with at least this many natural-language tokens left
 # after removing the signal spans is "genuinely mixed" → hybrid.
 MIXED_NATURAL_TOKEN_THRESHOLD = 4
+# Classification reads at most this many characters. Routing signals live at
+# the front of real queries, and the bound makes the remainder-stripping loop
+# (O(matches × length)) constant-bounded — an attacker-sized query cannot
+# turn the hot-path classifier into an algorithmic-DoS vector (gate2/CSO).
+CLASSIFY_MAX_CHARS = 2000
 
 # Single-quote literals must be whitespace-delimited on both sides so
 # apostrophes in ordinary English (contractions, possessives — "what's the
@@ -120,7 +125,7 @@ def classify_query(query: str) -> QueryRoute:
         QueryRoute with the chosen lane, rule-hit reasons, and loggable
         numeric features (no query text).
     """
-    text = query.strip()
+    text = query[:CLASSIFY_MAX_CHARS].strip()
 
     quoted = _QUOTED_LITERAL.findall(text)
     exact_ids: list[str] = []

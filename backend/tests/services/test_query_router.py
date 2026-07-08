@@ -9,6 +9,7 @@ substantial natural language → hybrid, everything else → semantic.
 import time
 
 from services.query_router import (
+    CLASSIFY_MAX_CHARS,
     LANE_HYBRID,
     LANE_KEYWORD,
     LANE_SEMANTIC,
@@ -113,6 +114,54 @@ class TestRemainderStripping:
         route = classify_query("check services.memory_service.py and services.context_service.py")
         assert route.lane == LANE_KEYWORD
         assert route.features["natural_tokens"] < 4
+
+
+class TestScriptCoverage:
+    """Gate2/QA: katakana-only and EN+JA mixed queries."""
+
+    def test_katakana_only_routes_semantic(self) -> None:
+        # Katakana carries embedding-friendly content words — only HIRAGANA
+        # dominance triggers the Sudachi keyword lane.
+        route = classify_query("コンピューターのメモリーアーキテクチャ")
+        assert route.lane == LANE_SEMANTIC
+        assert route.features["hiragana_ratio"] <= 0.5
+
+    def test_mixed_en_ja_natural_routes_semantic(self) -> None:
+        assert classify_query("Kagura の recall 品質を改善する方法").lane == LANE_SEMANTIC
+
+
+class TestMixedThresholdBoundary:
+    """Gate2/QA: the natural_tokens >= 4 boundary, pinned exactly."""
+
+    def test_three_natural_tokens_routes_keyword(self) -> None:
+        route = classify_query("resolve_context_routing alpha beta gamma")
+        assert route.features["natural_tokens"] == 3
+        assert route.lane == LANE_KEYWORD
+
+    def test_four_natural_tokens_routes_hybrid(self) -> None:
+        route = classify_query("resolve_context_routing alpha beta gamma delta")
+        assert route.features["natural_tokens"] == 4
+        assert route.lane == LANE_HYBRID
+
+
+class TestAdversarialBound:
+    """Gate2/CSO: the remainder-stripping loop is O(matches x length) — the
+    CLASSIFY_MAX_CHARS truncation must keep pathological match-dense input
+    bounded regardless of raw query size."""
+
+    def test_match_dense_megaquery_stays_bounded(self) -> None:
+        q = "a_a " * 100_000  # 400k chars, one snake_case match per 4 chars
+        start = time.perf_counter()
+        route = classify_query(q)
+        elapsed = time.perf_counter() - start
+        assert route.lane == LANE_KEYWORD
+        assert elapsed < 0.05, f"adversarial query took {elapsed * 1000:.1f} ms"
+
+    def test_truncation_is_deterministic(self) -> None:
+        q = "x" * (CLASSIFY_MAX_CHARS + 500) + " resolve_context_routing"
+        assert classify_query(q) == classify_query(q)
+        # the signal beyond the bound is invisible by design
+        assert classify_query(q).features["code_symbol_hits"] == 0
 
 
 class TestSemanticDefault:

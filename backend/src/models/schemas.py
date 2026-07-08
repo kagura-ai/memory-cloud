@@ -176,7 +176,10 @@ class RecallRequest(BaseModel):
         }
     """
 
-    query: str = Field(..., min_length=1, description="検索クエリ")
+    # #1212 gate2/CSO: bounded so oversized payloads 422 at the schema instead
+    # of reaching the embedding call / BM25 / classifier. 8000 chars leaves
+    # ample room for HyDE-style hypothetical-answer queries.
+    query: str = Field(..., min_length=1, max_length=8000, description="検索クエリ")
     k: int = Field(default=5, ge=1, le=100, description="返却結果数")
     use_rerank: bool = Field(default=False, description="Reranking (Voyage/Cohere)を使用")
     filters: dict | None = Field(default=None, description="オプショナルフィルタ")

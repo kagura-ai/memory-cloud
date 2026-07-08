@@ -141,6 +141,26 @@ class TestActive:
             )
 
 
+class TestNeverNone:
+    """Gate2/QA: the resolver's return is a concrete mode string on every
+    (requested x routing_mode x config-presence) branch — None can never
+    leak into SearchService.hybrid_search's mode validation."""
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("requested", [None, "hybrid", "semantic", "keyword"])
+    @pytest.mark.parametrize("routing_mode", [None, "off", "log_only", "active"])
+    async def test_all_branches_return_concrete_mode(
+        self, requested: str | None, routing_mode: str | None
+    ) -> None:
+        with _patch_config(routing_mode):
+            mode = await _service()._resolve_search_mode(
+                _request(search_mode=requested), _CTX, cross_context=False
+            )
+        assert mode in ("hybrid", "semantic", "keyword")
+        if requested is not None:
+            assert mode == requested
+
+
 class TestFailOpenAndScope:
     @pytest.mark.asyncio
     async def test_cross_context_skips_routing_and_config_read(self) -> None:
