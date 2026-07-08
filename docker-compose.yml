@@ -39,6 +39,14 @@ services:
   qdrant:
     image: qdrant/qdrant:v1.15.0
     container_name: kagura-qdrant
+    # Qdrant 1.15 opens many files per segment; under eval-scale ingest/delete
+    # churn the default container nofile limit is exhausted (EMFILE crash-loop
+    # at actix worker startup, os error 24 — observed 2026-07-08 on a GB10 rig
+    # after the collection grew to 8 segments). 65536 gives ample headroom.
+    ulimits:
+      nofile:
+        soft: 65536
+        hard: 65536
     ports:
       - "6333:6333"
       - "6334:6334"
