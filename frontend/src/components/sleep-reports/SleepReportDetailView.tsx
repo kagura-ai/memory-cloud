@@ -43,7 +43,10 @@ import {
   buildPhaseNarrative,
   type PhaseName,
 } from "@/lib/utils/sleep-narrative";
-import { getSleepStatusColor } from "@/lib/sleep-report";
+import {
+  getSleepStatusColor,
+  formatUserPartitionLabel,
+} from "@/lib/sleep-report";
 import type { SleepReportDetailResponse } from "@/lib/api/sleep-reports";
 
 function PhaseResultJson({ result }: { result: object }): React.ReactElement {
@@ -370,6 +373,17 @@ export function SleepReportDetailView({
                     {t("detail.userId")}
                   </dt>
                   <dd className="font-mono break-all">{report.user_id}</dd>
+                </div>
+                <div>
+                  <dt className="text-gray-500 dark:text-gray-400">
+                    {t("detail.userEmail")}
+                  </dt>
+                  <dd className="break-all">
+                    {formatUserPartitionLabel(
+                      report.user_email,
+                      report.user_id,
+                    )}
+                  </dd>
                 </div>
                 <div>
                   <dt className="text-gray-500 dark:text-gray-400">

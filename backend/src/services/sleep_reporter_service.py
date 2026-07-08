@@ -16,7 +16,7 @@ from uuid import UUID
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from models.auth import Context
+from models.auth import Context, User
 from models.sleep import SleepAction, SleepReport
 from utils.logger import get_logger
 
@@ -164,3 +164,38 @@ class SleepReporterService:
         if ctx_deleted_at is not None:
             return None, True
         return ctx_display_name or ctx_name, False
+
+    # ------------------------------------------------------------------
+    # User identity resolution helper (#1201)
+    # ------------------------------------------------------------------
+
+    async def resolve_user_labels(self, user_ids: set[str]) -> dict[str, str]:
+        """Batch-resolve ``user_id → email`` for Sleep report rows.
+
+        Issue #1201: Sleep runs per ``(user_id, workspace_id, context_id)``
+        partition, so a workspace-scoped list can show the same context name on
+        multiple rows (one per member / connector identity). Resolving the
+        owning user's email lets the UI tell those rows apart.
+
+        The join key is ``User.user_id`` (the OAuth ``sub`` claim, a String) —
+        NOT ``User.id`` (an Integer autoincrement PK). ``sleep_reports.user_id``
+        stores the ``sub`` claim, so it matches ``User.user_id``.
+
+        One query, no N+1 — mirrors ``resolve_context_names``.
+
+        Returns:
+            Map of ``user_id → email`` for ids that resolve to a ``users`` row.
+            Ids with no matching user (e.g. connector/service identities that
+            wrote memories) are OMITTED from the map, so the caller can fall
+            back to a shortened id in the UI rather than rendering a bare UUID.
+        """
+        labels: dict[str, str] = {}
+        if not user_ids:
+            return labels
+
+        result = await self.db.execute(
+            select(User.user_id, User.email).where(User.user_id.in_(user_ids))
+        )
+        for uid, email in result.all():
+            labels[uid] = email
+        return labels
