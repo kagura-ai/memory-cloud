@@ -1367,8 +1367,10 @@ class TestReinforceFactor:
 
 
 class TestReinforceRerank:
-    """Issue #1048: _maybe_reinforce_rerank is config-gated (default OFF) and only
-    reorders the relevance-filtered pool within the bound."""
+    """Issue #1048: _maybe_reinforce_rerank is config-gated and only reorders the
+    relevance-filtered pool within the bound. (#1207: the per-context default is
+    now ON for new/materialized config rows; a stored explicit ``false`` opts
+    out — each test below pins the gate state via an explicit mock config.)"""
 
     @pytest.mark.asyncio
     async def test_noop_when_disabled(self):

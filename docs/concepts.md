@@ -102,6 +102,37 @@ When you search with `recall()`, Kagura uses **Hybrid Search** combining two app
 - Use **tag filters** for precision: `filters={"tags": ["python"]}`
 - Use **importance filters**: `filters={"importance": {"gte": 0.8}}`
 
+## The Update Kernel (reinforce recency re-rank)
+
+When a stored fact has been superseded — you remembered "the deploy target is
+staging" last month and "the deploy target is prod" yesterday — the most
+valuable thing a memory system can do is rank the **current** version above the
+stale one. Kagura's measured answer to this is the **reinforce re-rank**
+(#1048): a deterministic, LLM-free adjustment applied to the hybrid top-k
+before results are returned.
+
+Each candidate's score is multiplied by a factor bounded to
+`[1 − max_boost, 1 + max_boost]` (default `max_boost = 0.15`), combining:
+
+- **cold-start recency** — a day-scaled prior (`recency_tau_days`, default 14)
+  that favors newer memories that haven't yet earned adoption signal;
+- **adoption** — deliberate `reference()` calls (log-capped);
+- **retrieval feedback** — explicit helpful/unhelpful verdicts.
+
+Because the factor is bounded, semantic relevance always dominates: the
+re-rank reorders close calls, it cannot resurrect an irrelevant result. It is
+fail-safe — any error preserves the original hybrid ranking.
+
+This mechanism is the system's best-measured behavior: a pre-registered,
+placebo-controlled evaluation attributed a **+0.36 update-correctness lift
+over vanilla RAG (BCa 95% [0.24, 0.50])** entirely to it. Since #1207 it is
+**enabled by default**: newly created contexts start on, and contexts that
+never touched the setting adopt the default lazily on their next recall.
+Only a stored explicit `reinforce_enabled: false` opts out — set it per
+context with `update_search_config` (see
+`docs/eval/reinforce-rollout-gate.md` for the per-context graduation
+procedure and the `reinforce_rerank_applied` monitoring telemetry).
+
 ## Neural Memory
 
 **Neural Memory** creates automatic relationships between memories using brain-inspired algorithms.

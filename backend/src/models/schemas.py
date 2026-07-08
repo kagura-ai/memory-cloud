@@ -860,8 +860,10 @@ class ContextSearchConfigResponse(TZAwareBaseModel):
     embedding_model: str = Field(..., description="Embedding model (immutable)")
     embedding_dimensions: int = Field(..., description="Vector dimensions (immutable)")
     # Issue #1048: surfaced so GET reflects what update_search_config set.
+    # Issue #1207: default aligned with the ORM default (new contexts start ON);
+    # inert in practice — from_attributes always populates from the row.
     reinforce_enabled: bool = Field(
-        default=False, description="Bounded adoption+feedback recall re-rank enabled"
+        default=True, description="Bounded adoption+feedback recall re-rank enabled"
     )
     reinforce_max_boost: float = Field(
         default=0.15, description="Bound on the reinforce adjustment (factor in [1-b, 1+b])"
@@ -893,8 +895,12 @@ class ContextSearchConfigUpdate(BaseModel):
     reranker_model: str = Field(..., description="Provider-specific model name")
     # Issue #1048: optional (default-preserving) so existing REST callers that omit
     # them are unaffected; the MCP handler always round-trips current values.
+    # Issue #1207: the repository applies model_dump(exclude_unset=True), so these
+    # defaults are never written on partial updates — an omitted field can never
+    # flip an explicit opt-out. Default aligned with the new ORM default anyway
+    # to avoid confusion (pinned by tests/test_reinforce_default_on.py).
     reinforce_enabled: bool = Field(
-        default=False,
+        default=True,
         description="Enable the bounded adoption+feedback recall re-rank",
     )
     reinforce_max_boost: float = Field(

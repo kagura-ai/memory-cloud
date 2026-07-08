@@ -2,8 +2,10 @@
 
 Tier-C companion to the #344 static harness (``runner.py``) and the #969
 compounding harness (``replay_runner.py``). The bounded reinforce re-rank (#1048)
-ships **default-OFF**; this module defines the gate that decides whether enabling
-it on a context is safe — the eval the rollout (#1069) is gated on:
+is **default-ON since #1207** (new/materialized config rows start enabled; only a
+stored explicit ``false`` opts out); this module defines the gate that decides
+whether enabling it on an explicitly-opted-out context is safe — the eval the
+rollout (#1069) was gated on:
 
 - **current-fact** queries (the canonical answer has been adopted + confirmed
   helpful) must **improve** — that is the whole point of reinforce;

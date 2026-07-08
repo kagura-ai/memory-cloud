@@ -10,8 +10,10 @@ Protocol (one ingested corpus, one A/B flip — only the config changes):
     ingest reinforce_corpus
       → seed adoption (reference_count) + net-helpful feedback on the canonical
         current-fact docs (meta.adopted_docs)
-      → OFF arm: reinforce disabled (default) → score current_fact / rare + the
-        zero-adoption surfacing rate
+      → OFF arm: reinforce pinned OFF explicitly (#1207 made a materialized
+        config row default to enabled, and recall materializes the row via
+        create_or_get — so "no row yet" no longer means OFF) → score
+        current_fact / rare + the zero-adoption surfacing rate
       → flip ContextSearchConfig.reinforce_enabled = true
       → ON arm: score the same queries again
       → evaluate_reinforce_gate(off, on)  → results/reinforce-<date>.json
@@ -188,8 +190,12 @@ async def _run_reinforce_arms(
     try:
         await _seed_adoption(svc, ctx_id, owner, adopted_mem_ids)
 
-        # OFF arm: reinforce disabled by default (no config row → byte-identical
-        # to pre-#1048). Score before any config row exists.
+        # OFF arm: pin reinforce OFF explicitly. The recall path materializes
+        # the config row via create_or_get (search_service._get_search_config),
+        # and since #1207 a materialized row defaults to ENABLED — relying on
+        # "no config row yet" would silently score the OFF arm with the
+        # re-rank active.
+        await _set_reinforce(svc.db, ctx_id, enabled=False, max_boost=_MAX_BOOST)
         off = await _score_reinforce_arm(svc, corpus, id_map, owner, ctx_id, ws_id, adopted_docs)
 
         # Flip reinforce ON for the same context + same seeded signal.
