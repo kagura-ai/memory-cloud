@@ -343,6 +343,16 @@ def main(argv: list[str] | None = None) -> int:
 
     code = exit_code_for(entries, args.mode)
     breaches = [e["name"] for e in entries if e["status"] == "breach"]
+
+    # Advisory-mode breaches exit 0, so the workflow cannot see them in the
+    # exit code — expose a dedicated `breach` step output so the auto-issue
+    # step can still notify ("breaches must not rely on someone watching the
+    # Actions tab" — the workflow's own visibility contract).
+    step_output = os.environ.get("GITHUB_OUTPUT")
+    if step_output:
+        with open(step_output, "a", encoding="utf-8") as fh:
+            fh.write(f"breach={'true' if breaches else 'false'}\n")
+
     if breaches:
         print(
             f"ci-gates: {len(breaches)} contract breach(es): {', '.join(breaches)}"

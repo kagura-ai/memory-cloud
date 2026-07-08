@@ -222,6 +222,35 @@ def test_main_unknown_require_slice_is_infra() -> None:
     assert code == EXIT_INFRA
 
 
+def test_main_writes_breach_output_even_in_advisory_mode(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Advisory breaches exit 0, so the workflow reads the `breach` step
+    output to keep the visibility contract (auto-issue) during the soak week."""
+    results = _load_archived()
+    for q in results["arms"]["mc_update"]["per_query"][:3]:
+        q["outcome"] = "stale_only"
+        q["current_rank"] = None
+        q["stale_rank"] = 1
+    breached_file = tmp_path / "breached.json"
+    breached_file.write_text(json.dumps(results), encoding="utf-8")
+    gh_output = tmp_path / "gh_output"
+    monkeypatch.setenv("GITHUB_OUTPUT", str(gh_output))
+
+    code = main(
+        ["--baseline", str(_BASELINE), "--update", str(breached_file), "--mode", "advisory"]
+    )
+    assert code == EXIT_PASS  # advisory never fails the run...
+    assert "breach=true" in gh_output.read_text(encoding="utf-8")  # ...but says so
+
+    gh_output.unlink()
+    code = main(
+        ["--baseline", str(_BASELINE), "--update", str(_ARCHIVED_RUN), "--mode", "advisory"]
+    )
+    assert code == EXIT_PASS
+    assert "breach=false" in gh_output.read_text(encoding="utf-8")
+
+
 def test_render_summary_is_markdown_table() -> None:
     entries = evaluate_contracts(_load_baseline(), update_results=_load_archived())
     text = render_summary(entries)

@@ -28,9 +28,10 @@ on:
   workflow_dispatch:
     inputs:
       mode:
-        description: "Gate mode (overrides the EVAL_GATES_MODE repo variable)"
+        description: "Gate mode (use-repo-var honors the EVAL_GATES_MODE repo variable — the UI preselects the first choice, so the sentinel must come first or manual re-runs of a blocking breach would silently evaluate as advisory)"
         type: choice
-        options: [advisory, blocking]
+        options: [use-repo-var, advisory, blocking]
+        default: use-repo-var
         required: false
 
 concurrency:
@@ -154,16 +155,15 @@ jobs:
         if: steps.check.outputs.ok == 'true'
         run: |
           cd backend
-          BEFORE=$(ls tests/eval/results/*.json 2>/dev/null | sort || true)
+          rm -f tests/eval/results/ci-nightly-retrieval-*.json
           for attempt in 1 2; do
-            if PYTHONPATH=src:. python -m tests.eval.runner; then
+            if PYTHONPATH=src:. python -m tests.eval.runner --label ci-nightly-retrieval; then
               break
             fi
             echo "::warning::retrieval runner failed (attempt $attempt)"
             sleep 30
           done
-          AFTER=$(ls tests/eval/results/*.json 2>/dev/null | sort || true)
-          RESULT=$(comm -13 <(echo "$BEFORE") <(echo "$AFTER") | head -1 || true)
+          RESULT=$(ls -t tests/eval/results/ci-nightly-retrieval-*.json 2>/dev/null | head -1 || true)
           echo "result=$RESULT" >> "$GITHUB_OUTPUT"
 
       - name: Evaluate contracts
@@ -174,7 +174,10 @@ jobs:
         env:
           UPDATE_RESULT: ${{ steps.update.outputs.result }}
           RETRIEVAL_RESULT: ${{ steps.retrieval.outputs.result }}
-          GATE_MODE: ${{ github.event.inputs.mode || vars.EVAL_GATES_MODE || 'advisory' }}
+          # use-repo-var (the dispatch default) falls through to the repo
+          # variable, which falls through to advisory. Schedule events have no
+          # inputs (null-safe: the != comparison is false, chain falls through).
+          GATE_MODE: ${{ (github.event.inputs.mode != 'use-repo-var' && github.event.inputs.mode) || vars.EVAL_GATES_MODE || 'advisory' }}
         run: |
           cd backend
           # --require makes a crashed runner (no results file) INFRA — a
@@ -204,19 +207,27 @@ jobs:
           retention-days: 90
 
       - name: File or update tracking issue on breach/infra
+        # Fires on: hard failure (blocking breach or unexpected error), gate
+        # INFRA, or an ADVISORY breach (exit 0 but breach output true) — the
+        # visibility contract: breaches never rely on someone watching the
+        # Actions tab, even during the advisory soak week.
         if: >-
           always() && steps.check.outputs.ok == 'true' &&
-          (failure() || steps.gates.outputs.infra == 'true')
+          (failure() || steps.gates.outputs.infra == 'true' ||
+           steps.gates.outputs.breach == 'true')
         uses: actions/github-script@v7
         env:
           GATES_EXIT_CODE: ${{ steps.gates.outputs.exit_code }}
+          GATES_BREACH: ${{ steps.gates.outputs.breach }}
         with:
           script: |
-            // Only a gates exit code of 1 is a contract breach; every other
-            // failure (pip/qdrant/migrations/runner crash, gate INFRA) is an
-            // infrastructure problem and must not be reported as a product
-            // regression ("never a false red").
-            const breach = process.env.GATES_EXIT_CODE === '1';
+            // A contract breach (blocking exit 1, or advisory breach=true) is
+            // labeled eval-regression; every other failure (pip/qdrant/
+            // migrations/runner crash, gate INFRA) is an infrastructure
+            // problem and must not be reported as a product regression
+            // ("never a false red").
+            const breach = process.env.GATES_EXIT_CODE === '1'
+              || process.env.GATES_BREACH === 'true';
             const label = breach ? 'eval-regression' : 'eval-infra';
             const title = breach
               ? 'eval-nightly: contract breach'
