@@ -51,7 +51,7 @@ const GraphTabPanel = dynamic(
     })),
   { ssr: false },
 );
-// Issue #497: analyses tab — lazy-loaded so the broadlistening bundle
+// Issue #497: analyses tab — lazy-loaded so the Memory Analysis bundle
 // (recharts placeholder + scatter SVG + modal) stays out of the
 // non-owner sessions even though the tab itself is owner-gated upstream.
 const AnalysesTabPanel = dynamic(

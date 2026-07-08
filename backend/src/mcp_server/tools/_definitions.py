@@ -1656,12 +1656,12 @@ Returns: {status, report_id, rollback_summary: {edges_deleted, merges_reversed, 
             },
         },
         # ====================================================================
-        # Memory Broadlistening Analysis Tools (Issue #496)
+        # Memory Analysis Tools (Issue #496)
         # ====================================================================
         {
             "name": "analyze_context",
             "description": (
-                "Start a memory broadlistening analysis run on a context, "
+                "Start a Memory Analysis run on a context, "
                 "or preview the cost when ``dry_run=true``. The analysis "
                 "clusters memories into themes (kouchou-ai-style UMAP + "
                 "KMeans + LLM labeling) and exposes them via "

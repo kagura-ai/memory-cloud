@@ -1,5 +1,5 @@
 /**
- * Memory Broadlistening Analyses API Client (Issue #497)
+ * Memory Analysis API Client (Issue #497)
  *
  * Wraps the REST surface from #496 plus the cluster + position
  * endpoints added in #497 (extending the run-level reads with the

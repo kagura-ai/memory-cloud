@@ -1,4 +1,4 @@
-"""Async task entry point for broadlistening analysis runs.
+"""Async task entry point for Memory Analysis runs.
 
 Mirrors ``backend/src/tasks/sleep_tasks.py``'s shape but does NOT
 register an APScheduler cron job — analysis is on-demand only.
@@ -41,7 +41,7 @@ logger = get_logger(__name__)
 
 
 async def run_analysis_task(analysis_id: UUID) -> None:
-    """Run the broadlistening pipeline for one ``memory_analyses`` row.
+    """Run the Memory Analysis pipeline for one ``memory_analyses`` row.
 
     Args:
         analysis_id: The UUID of the row already at status='running'.

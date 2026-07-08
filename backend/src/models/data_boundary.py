@@ -48,7 +48,7 @@ DERIVED_MOAT_TABLES: frozenset[str] = frozenset(
         "sleep_reports",  # Sleep consolidation phase results
         "sleep_actions",  # individual consolidation decisions
         "hub_tag_cache",  # computed tag co-occurrence hubs
-        "memory_analyses",  # Broadlistening analysis runs
+        "memory_analyses",  # Memory Analysis runs
         "memory_analysis_assignments",  # memory→cluster assignments
         "memory_analysis_clusters",  # computed cluster structure
         "retrieval_feedback",  # learning signal (content-reuse policy: feedback only)

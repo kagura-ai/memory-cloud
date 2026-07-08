@@ -203,7 +203,7 @@ def _build_registry() -> dict[str, Any]:
         "get_resource_impact": handle_get_resource_impact,
         "get_resource_schema": handle_get_resource_schema,
         "list_resource_tokens": handle_list_resource_tokens,
-        # Issue #496: Memory Broadlistening — 5 tools sharing the same
+        # Issue #496: Memory Analysis — 5 tools sharing the same
         # 4-stage gate chain as REST /api/v1/contexts/{id}/analyses.
         "analyze_context": handle_analyze_context,
         "get_analysis": handle_get_analysis,

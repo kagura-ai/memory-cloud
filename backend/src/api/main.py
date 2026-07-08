@@ -206,7 +206,7 @@ openapi_tags = [
     {
         "name": "analyses",
         "description": (
-            "Memory Broadlistening analysis runs. REST companion to the "
+            "Memory Analysis runs. REST companion to the "
             "5 MCP tools (analyze_context / get_analysis / list_analyses "
             "/ get_active_analysis / get_cluster). Behind a 4-stage gate: "
             "workspace owner + Pro tier + per-day quota + workspace allowlist."
@@ -498,7 +498,7 @@ from api.routes import (  # noqa: E402
     admin_signup_gate,  # Issue #358: admin-configurable signup gate
     admin_sleep,  # Issue #247: Manual Sleep Maintenance trigger
     agent_state,  # Issue #906: REST surface for the agent session-state lane
-    analyses,  # Issue #496: Memory Broadlistening API endpoints
+    analyses,  # Issue #496: Memory Analysis API endpoints
     api_keys,
     attachments,  # Issue #330 → deprecated by #555 (returns HTTP 410 Gone)
     auth,
@@ -603,7 +603,7 @@ app.include_router(sleep_reports.router, prefix="/api/v1")
 # Cost Aggregation routes (Issue #472 - admin cross-workspace + workspace-scoped)
 app.include_router(cost_aggregation.router, prefix="/api/v1")
 
-# Memory Broadlistening API (Issue #496 - 4-stage gate + 6 endpoints)
+# Memory Analysis API (Issue #496 - 4-stage gate + 6 endpoints)
 app.include_router(analyses.router, prefix="/api/v1")
 
 # Admin Sleep trigger (Issue #247 - Manual Sleep Maintenance trigger)

@@ -1,4 +1,4 @@
-"""Memory Broadlistening API routes (Issue #496).
+"""Memory Analysis API routes (Issue #496).
 
 REST surface for the analysis pipeline (#495 backend) sitting behind the
 4-stage gate composed in ``auth.analysis_gates``:
@@ -382,7 +382,7 @@ async def preview_analysis(
     "",
     response_model=AnalysisStartResponse,
     status_code=status.HTTP_202_ACCEPTED,
-    summary="Start a memory broadlistening analysis run",
+    summary="Start a Memory Analysis run",
 )
 async def start_analysis(
     context_id: UUID,

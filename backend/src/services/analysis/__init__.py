@@ -1,4 +1,4 @@
-"""Memory Broadlistening pipeline (Issue #495 / umbrella #493).
+"""Memory Analysis pipeline (Issue #495 / umbrella #493).
 
 B2 of the v0.15.0 atomic split. The pipeline pulls existing Qdrant
 embeddings, clusters them on **high-dimensional** vectors (NOT the

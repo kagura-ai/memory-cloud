@@ -1,4 +1,4 @@
-"""Pure allowlist primitive for the Memory Broadlistening kill switch.
+"""Pure allowlist primitive for the Memory Analysis kill switch.
 
 Split out of ``auth.analysis_gates`` (PR #538 / #497 review) so callers
 that only need the membership check (e.g. ``api.routes.workspaces``

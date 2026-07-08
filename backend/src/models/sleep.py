@@ -28,7 +28,7 @@ from db.base import Base
 # Allowed values for the sleep_reports cost-grade dimensions (#523).
 # Mirror the ``LLM_PRICING_UNIT_TYPES`` pattern: the DB CHECK constraint is
 # the source of truth, these tuples exist for service-layer validation and
-# are imported by future call sites (#495 broadlistening pipeline) to
+# are imported by future call sites (#495 Memory Analysis pipeline) to
 # validate inputs cleanly with ValueError rather than IntegrityError.
 # Keep in sync with the ``valid_sleep_report_source`` /
 # ``valid_sleep_report_paid_by`` CHECK strings in ``SleepReport.__table_args__``
@@ -352,7 +352,7 @@ class SleepReportLLMUsage(Base):
         # phase name slips in via reporter changes — same defensive pattern
         # as ``valid_sleep_report_status`` on ``sleep_reports``.
         # ``cluster_labeling`` was added by the d07_495 migration for the
-        # broadlistening pipeline (#495); the model CHECK must list the
+        # Memory Analysis pipeline (#495); the model CHECK must list the
         # SAME values as the migration, otherwise tests using
         # ``Base.metadata.create_all`` (rather than alembic) build a table
         # with the stricter old CHECK and analysis inserts fail.

@@ -564,7 +564,7 @@ class Settings(BaseSettings):
         ),
     )
 
-    # Memory Broadlistening allowlist (Issue #496) — kill switch.
+    # Memory Analysis allowlist (Issue #496) — kill switch.
     # Empty (default) → feature 403 globally. Comma-separated UUIDs → only listed
     # workspaces can run analyses. Env: ANALYSIS_ENABLED_WORKSPACE_IDS.
     # Production deploy starts empty; ops adds the kagura-dev workspace UUID first

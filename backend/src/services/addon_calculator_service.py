@@ -31,7 +31,7 @@ ADDON_UNIT_VALUES = {
     "extra_public_quota": 500,  # calls/day per unit
     "extra_members": 5,  # members per unit
     "extra_contexts": 5,  # contexts per unit
-    "extra_analysis_runs": 1,  # Issue #494: +1 broadlistening run/day per unit
+    "extra_analysis_runs": 1,  # Issue #494: +1 Memory Analysis run/day per unit
     "extra_sleep_contexts": 1,  # Issue #560: +1 sleep-enabled context per unit (PRO-only)
     "extra_connectors": 1,  # Spec 2026-06-02: +1 ai-worker connector seat per unit
 }

@@ -3694,7 +3694,7 @@
   "analyses": {
     "tabLabel": "分析",
     "header": {
-      "title": "メタ分析",
+      "title": "メモリー分析",
       "subtitle": "クラスタ俯瞰で memory の地形を見る · Owner のみ"
     },
     "actions": {
@@ -3827,7 +3827,7 @@
       },
       "notEnabled": {
         "title": "この workspace では Analyses はまだ有効化されていません",
-        "description": "メタ分析は v1 ロールアウト中、選定された workspace に限定されています。アクセスをご希望の場合はお問い合わせください。"
+        "description": "メモリー分析は v1 ロールアウト中、選定された workspace に限定されています。アクセスをご希望の場合はお問い合わせください。"
       },
       "loadFailed": "Analyses の読み込みに失敗しました — 接続を確認してください。"
     }

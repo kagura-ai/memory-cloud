@@ -99,7 +99,7 @@ class WorkspaceResponse(BaseModel):
     context_count: int
     created_at: str
     current_user_role: str | None = None  # Current user's role in this workspace
-    analyses_enabled: bool = False  # Memory broadlistening allowlist (#497)
+    analyses_enabled: bool = False  # Memory Analysis allowlist (#497)
 
     class Config:
         from_attributes = True

@@ -57,7 +57,7 @@ class PlanLimits(BaseModel):
 
 
 class AnalysisUsage(BaseModel):
-    """Memory broadlistening daily quota usage (Issue #496).
+    """Memory Analysis daily quota usage (Issue #496).
 
     Mirrors the response detail shape of the 429 quota-exceeded body
     so the dashboard, the new-analysis modal (#497), and the gate
@@ -140,7 +140,7 @@ class CurrentUsage(BaseModel):
     analysis: AnalysisUsage | None = Field(
         default=None,
         description=(
-            "Memory broadlistening daily quota stats (Issue #496). "
+            "Memory Analysis daily quota stats (Issue #496). "
             "NULL when the caller has no current workspace selected."
         ),
     )

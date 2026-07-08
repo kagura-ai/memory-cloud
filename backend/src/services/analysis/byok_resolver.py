@@ -115,7 +115,7 @@ async def assert_openai_byok_key_available(
         raise ValidationError(
             "OpenAI API key not configured for this workspace. "
             "Configure a workspace OpenAI key in External Keys settings "
-            "before running broadlistening analysis.",
+            "before running Memory Analysis.",
             field="byok",
             provider="openai",
             workspace_id=str(workspace_uuid),

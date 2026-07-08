@@ -69,7 +69,7 @@ link topology and its user-set initial weight are user-authored data.
 | `sleep_reports` | Per-phase Sleep results (`edge_discovery_result`, `dedup_result`, `importance_result`, `consolidation_result`, `reindex_result`) | Consolidation history; each run builds on prior structure |
 | `sleep_actions` | Individual consolidation decisions (merges, promotions, flags) | Same |
 | `hub_tag_cache` | Computed tag co-occurrence hubs (`hub_tags`, `threshold_used`) | Recomputed nightly from observed tag usage |
-| `memory_analyses` / `memory_analysis_assignments` / `memory_analysis_clusters` | Broadlistening cluster structure | Computed structure over the corpus |
+| `memory_analyses` / `memory_analysis_assignments` / `memory_analysis_clusters` | Memory Analysis cluster structure | Computed structure over the corpus |
 | `retrieval_feedback` | Recall feedback signal (#888) | The only sanctioned learning input under the content-reuse policy |
 | `bm25_idf_drift_log` | Corpus-derived index statistics | Tracks how the lexical index adapts to the corpus |
 

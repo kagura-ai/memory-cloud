@@ -1,4 +1,4 @@
-"""Memory Broadlistening access gates (Issue #496).
+"""Memory Analysis access gates (Issue #496).
 
 Composes the 4 access gates that every analysis-mutating endpoint
 (REST + MCP) must pass through, in this order:

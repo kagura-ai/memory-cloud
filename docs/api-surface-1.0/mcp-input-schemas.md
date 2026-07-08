@@ -348,7 +348,7 @@ List resource-token metadata for the workspace (owner/admin; no plaintext tokens
 
 ### analyze_context
 
-Start (or dry-run cost-preview) a broadlistening analysis run that clusters a context's memories into themes.
+Start (or dry-run cost-preview) a Memory Analysis run that clusters a context's memories into themes.
 
 - **Required**: `context_id` — string ⚠ missing `format: "uuid"` — the analysis bundle (analyze_context, list_analyses, get_active_analysis), feedback, set_state, get_state all drop the uuid format annotation that the rest of the surface carries on context_id
 - **Optional**:

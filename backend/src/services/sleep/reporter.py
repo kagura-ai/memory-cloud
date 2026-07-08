@@ -197,7 +197,7 @@ class SleepReporter:
 
         The ``source`` and ``paid_by`` keyword arguments default to the
         scheduler-driven sleep run shape so existing callers receive the
-        same behavior. Issue #495 broadlistening overrides them at its
+        same behavior. Issue #495 Memory Analysis overrides them at its
         own call site with ``source='analysis'`` / ``paid_by='byok'``.
 
         Raises:

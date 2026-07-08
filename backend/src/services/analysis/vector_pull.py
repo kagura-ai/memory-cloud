@@ -87,7 +87,7 @@ class EmbeddingMismatchError(ValidationError):
         super().__init__(
             message=(
                 "Memories in scope use multiple embedding models "
-                f"({embedding_models}); broadlistening cannot cluster "
+                f"({embedding_models}); Memory Analysis cannot cluster "
                 "across models. Filter to a single model or reindex."
             ),
             field="embedding_models",
