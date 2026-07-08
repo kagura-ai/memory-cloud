@@ -98,7 +98,7 @@ def evaluate_gate(
     Returns:
         JSON-shaped verdict: per-arm metrics, both BCa intervals, the
         non-inferiority delta, and ``verdict`` in {ship, density_artifact,
-        no_effect, regression}. A clean "does not beat placebo, not shipped"
+        no_effect, regression, underpowered}. A clean "does not beat placebo, not shipped"
         is a valid close (the issue's acceptance wording).
     """
     vs_unboosted = paired_bca_ci(
