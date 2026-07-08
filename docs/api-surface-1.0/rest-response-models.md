@@ -1302,7 +1302,7 @@ Notes:
 - `public_calls_per_week: int` — optional (default `0`)
 
 ### AnalysisUsage (BaseModel, L59)
-> Memory broadlistening daily quota usage (Issue #496).
+> Memory Analysis daily quota usage (Issue #496).
 - `used_today: int` — optional (default `0`)
 - `limit_today: int` — optional (default `0`)
 - `addon_bonus: int` — optional (default `0`)

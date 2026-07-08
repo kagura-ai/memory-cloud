@@ -25,7 +25,7 @@ export type CostAggregationPeriod = (typeof COST_AGGREGATION_PERIODS)[number];
 /**
  * Source classification for a cost row. Mirrors the DB enum on
  * ``sleep_reports.source`` (#523): scheduler-driven sleep runs vs
- * on-demand broadlistening analysis.
+ * on-demand Memory Analysis.
  */
 export const COST_SOURCES = ["sleep", "analysis"] as const;
 export type CostSource = (typeof COST_SOURCES)[number];

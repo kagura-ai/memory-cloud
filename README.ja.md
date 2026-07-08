@@ -61,7 +61,7 @@
 | **AI Reranking** | セルフホスト (Ollama/vLLM — ローカル・無料)、Voyage AI、Cohere — cross-encoder reranker で精度向上 |
 | **Neural Memory Graph** | Hebbian 学習がバックグラウンドで知識グラフを構築。`explore()` がそれを辿り偶発的発見を提供 |
 | **Agent Memory Substrate** | 単なる知識ストアを超えて — delivery mode (pin / 時刻トリガ)、サーバー署名の trust boundary、agent state レーン、retrieval feedback シグナル。自律エージェントのループに必要なプリミティブ群 |
-| **50 の MCP ツール** | Memory、Agent Substrate、Neural edges、Contexts、Tags、Files (R2)、Analyses (broadlistening)、Resources、Secrets、Sleep Maintenance、Usage、API-Key Bindings |
+| **50 の MCP ツール** | Memory、Agent Substrate、Neural edges、Contexts、Tags、Files (R2)、Analyses (メモリー分析)、Resources、Secrets、Sleep Maintenance、Usage、API-Key Bindings |
 | **マルチプロバイダ** | 埋め込みに OpenAI かセルフホスト (Ollama、vLLM — ローカル・非公開・コストゼロ) |
 | **チーム対応** | Workspace、RBAC、context 分離、共有メモリ |
 | **Web UI** | Next.js ダッシュボード — context、検索設定、メンバー管理 |
@@ -355,7 +355,7 @@ curl -X POST -H "Authorization: Bearer kagura_{your_key}" \
 | `get_file_download_url` | ファイルへの presigned GET URL 発行 | Viewer+ |
 | `delete_file` | ファイルオブジェクトのソフト削除 | Member+ |
 
-### Analyses — Broadlistening (5)
+### Analyses — メモリー分析 (5)
 
 メモリを UMAP + KMeans + LLM ラベリング (kouchou-ai 方式) で大規模クラスタリング。質的分析用途。
 

@@ -82,7 +82,7 @@ class PlanTier:
     public_calls_per_day: int = 0  # Issue #238: Public REST API quota
     public_calls_per_week: int = 0  # Issue #238: Public REST API quota
     bound_public_calls_per_minute: int = 0  # Issue #626: per-key bucket for bound public keys
-    analysis_runs_per_day: int = 0  # Issue #494: Memory Broadlistening analyses/day
+    analysis_runs_per_day: int = 0  # Issue #494: Memory Analysis runs/day
     storage_limit_bytes: int = 0  # Issue #485: File-storage hard cap per workspace
     sleep_enabled_contexts_limit: int = 0  # Issue #560: Sleep-mode contexts cap (PRO-only)
     # Issue #709: Per-workspace BYOK embedding spend cap (USD). ``None`` means
@@ -173,7 +173,7 @@ PLAN_PRO = PlanTier(
     public_calls_per_day=1000,
     public_calls_per_week=5000,
     bound_public_calls_per_minute=100,  # Issue #626: per-key bucket (PRO only)
-    analysis_runs_per_day=3,  # Issue #494: Memory Broadlistening (Pro only; FREE/BASIC=0)
+    analysis_runs_per_day=3,  # Issue #494: Memory Analysis (Pro only; FREE/BASIC=0)
     storage_limit_bytes=10 * 1024 * 1024 * 1024,  # Issue #485: 10 GiB
     sleep_enabled_contexts_limit=3,  # Issue #560: Sleep mode (Pro only; FREE/BASIC=0)
     embedding_daily_cap_usd=10.0,  # Issue #709: PRO ceiling, conservative
@@ -186,7 +186,7 @@ PLAN_PRO = PlanTier(
             "team_invitations",  # Issue #165: Team collaboration
             "shared_contexts",  # Issue #165: Shared contexts with role-based access
             "public_contexts",  # Issue #238: Public contexts
-            "memory_analysis",  # Issue #496: Memory Broadlistening
+            "memory_analysis",  # Issue #496: Memory Analysis
             "managed_embeddings",  # Issue #1030: platform-managed embeddings (M/L)
             "secret_store",  # Issue #1128: zero-knowledge secret store (all tiers)
         }
@@ -208,7 +208,7 @@ FEATURE_MIN_PLANS: dict[str, str] = {
     "team_invitations": "pro",  # Issue #165: Team collaboration requires Pro
     "shared_contexts": "pro",  # Issue #165: Shared contexts require Pro
     "public_contexts": "pro",  # Issue #242: Public contexts require PRO only
-    "memory_analysis": "pro",  # Issue #496: Memory Broadlistening (Pro only; FREE/BASIC=0)
+    "memory_analysis": "pro",  # Issue #496: Memory Analysis (Pro only; FREE/BASIC=0)
     "managed_embeddings": "basic",  # Issue #1030: platform-managed embeddings (M/L; FREE=BYOK/self-hosted)
 }
 

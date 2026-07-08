@@ -28,7 +28,7 @@
     --chart-3: 197 37% 44%;
     --chart-4: 43 74% 56%;
     --chart-5: 27 87% 57%;
-    /* Issue #497 (broadlistening cluster palette).
+    /* Issue #497 (Memory Analysis cluster palette).
      * chart-3/4/5 lightness was nudged from the prior 24%/66%/67%
      * values so the small (2.5px radius) scatter dots stay legible
      * against the grey grid background — chart-3 too dark, chart-4/5
@@ -108,7 +108,7 @@
 }
 
 @layer utilities {
-  /* Memory broadlistening scatter focus mode (#497).
+  /* Memory Analysis scatter focus mode (#497).
    * The cluster-layer transitions + parent-state-driven dim live here
    * because Tailwind utility classes cannot express
    * ``.scatter.focused .cluster-layer:not(.is-focused)`` without a

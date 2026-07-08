@@ -1523,7 +1523,7 @@ class Workspace(Base):
     embedding_monthly_cap_usd: Mapped[Decimal | None] = mapped_column(Numeric(10, 6), nullable=True)
 
     # Issue #494: per-workspace default + quality model selection for
-    # Memory Broadlistening analyses. Both nullable — analysis is gated
+    # Memory Analysis. Both nullable — analysis is gated
     # by a separate allowlist; until a workspace is opted-in there's no
     # need for a model choice. SET NULL on llm_pricing delete so a
     # pricing row removal does not cascade into the workspace.
@@ -1608,7 +1608,7 @@ class Workspace(Base):
 
     @property
     def effective_analysis_runs_per_day(self) -> int:
-        """Memory Broadlistening analysis runs/day: plan tier base + addon (Issue #494).
+        """Memory Analysis runs/day: plan tier base + addon (Issue #494).
 
         FREE and BASIC have ``analysis_runs_per_day == 0``. Access is also
         gated by ``auth.analysis_gates.require_pro_tier`` which checks the

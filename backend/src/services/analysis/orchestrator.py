@@ -238,7 +238,7 @@ async def _resolve_pricing_row(db: AsyncSession, model_id: int | None) -> tuple[
 
 
 class AnalysisOrchestrator:
-    """Coordinator for one broadlistening run.
+    """Coordinator for one Memory Analysis run.
 
     Usage from ``tasks/analysis_tasks.py``:
 

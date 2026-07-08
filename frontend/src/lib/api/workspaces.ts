@@ -23,7 +23,7 @@ export interface Workspace {
   created_at: string;
   current_user_role?: string | null; // Current user's role in this workspace
   /**
-   * Memory broadlistening allowlist gate (#497). True iff this workspace
+   * Memory Analysis allowlist gate (#497). True iff this workspace
    * is in ANALYSIS_ENABLED_WORKSPACE_IDS on the server. The other 3 gates
    * (Pro tier / BYOK / quota) are evaluated lazily on the actual API call;
    * this flag exists purely so the UI can hide the analyses tab + kebab

@@ -1,4 +1,4 @@
-"""SQLAlchemy models for Memory Broadlistening analyses.
+"""SQLAlchemy models for Memory Analysis.
 
 Issue #494 (umbrella #493): persistence layer for memory clustering
 analyses. v1 is flat + snapshot-only — one ``memory_analyses`` row per
@@ -60,7 +60,7 @@ def _check_in_sql(column: str, values: tuple[str, ...]) -> str:
 
 
 class MemoryAnalysis(Base):
-    """One broadlistening run over a context's memories.
+    """One Memory Analysis run over a context's memories.
 
     Attributes:
         id: UUID primary key

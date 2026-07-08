@@ -61,7 +61,7 @@ Most AI memory tools are just vector databases with a chat wrapper. Kagura is di
 | **AI Reranking** | Self-hosted (Ollama/vLLM — local, free), Voyage AI, or Cohere — cross-encoder reranking for precision |
 | **Neural Memory Graph** | Hebbian learning builds a knowledge graph in the background. `explore()` traverses it for serendipitous discovery. |
 | **Agent Memory Substrate** | Beyond a knowledge store: delivery modes (pinned / time-triggered), a server-stamped trust boundary, an agent state lane, and a retrieval-feedback signal — the primitives an autonomous agent loop needs. |
-| **50 MCP Tools** | Memory, Agent Substrate, Neural edges, Contexts, Tags, Files (R2), Analyses (broadlistening), Resources, Secrets, Sleep Maintenance, Usage, API-Key Bindings |
+| **50 MCP Tools** | Memory, Agent Substrate, Neural edges, Contexts, Tags, Files (R2), Analyses (Memory Analysis), Resources, Secrets, Sleep Maintenance, Usage, API-Key Bindings |
 | **Multi-Provider** | OpenAI or self-hosted (Ollama, vLLM — local, private, zero cost) for embeddings |
 | **Team Ready** | Workspaces, RBAC, context isolation, shared memory |
 | **Web UI** | Next.js dashboard — contexts, search settings, member management |
@@ -480,7 +480,7 @@ The primitives an autonomous agent loop needs beyond a knowledge store — see [
 | `get_file_download_url` | Issue presigned GET URL for a file | Viewer+ |
 | `delete_file` | Soft-delete a file object | Member+ |
 
-### Analyses — Broadlistening (5)
+### Analyses — Memory Analysis (5)
 
 Cluster memories into themes (kouchou-ai-style UMAP + KMeans + LLM labeling) for large-scale qualitative analysis.
 

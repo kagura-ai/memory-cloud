@@ -3696,7 +3696,7 @@
   "analyses": {
     "tabLabel": "Analyses",
     "header": {
-      "title": "Meta Analysis",
+      "title": "Memory Analysis",
       "subtitle": "Survey the shape of your memories with cluster overview · Owner only"
     },
     "actions": {
@@ -3829,7 +3829,7 @@
       },
       "notEnabled": {
         "title": "Analyses are not yet enabled for this workspace",
-        "description": "Meta analysis is gated to selected workspaces during the v1 rollout. Reach out if you would like access."
+        "description": "Memory Analysis is gated to selected workspaces during the v1 rollout. Reach out if you would like access."
       },
       "loadFailed": "Failed to load analyses — check connection and try again."
     }

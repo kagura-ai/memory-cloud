@@ -1,4 +1,4 @@
-"""MCP tool handlers for memory broadlistening analyses (Issue #496).
+"""MCP tool handlers for Memory Analysis (Issue #496).
 
 Five tools that mirror the REST endpoints in
 ``api/routes/analyses.py`` — same gate chain, same data flow, same
