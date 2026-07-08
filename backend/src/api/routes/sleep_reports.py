@@ -83,6 +83,8 @@ class SleepReportDetail(SleepReportSummary):
     error_message: str | None
     edge_discovery_result: dict[str, Any] | None
     dedup_result: dict[str, Any] | None
+    # #1209: merge_retention phase (purge window); None on pre-#1209 reports.
+    merge_retention_result: dict[str, Any] | None = None
     importance_result: dict[str, Any] | None
     consolidation_result: dict[str, Any] | None
     reindex_result: dict[str, Any] | None

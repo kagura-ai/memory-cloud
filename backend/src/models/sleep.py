@@ -61,6 +61,7 @@ class SleepReport(Base):
             total judge failure is graded 'failed')
         edge_discovery_result: Phase 1 results (JSON)
         dedup_result: Phase 2 results (JSON)
+        merge_retention_result: Phase 2.5 results (JSON, #1209)
         importance_result: Phase 3 results (JSON)
         consolidation_result: Phase 4 results (JSON)
         reindex_result: Phase 5 results (JSON)
@@ -108,6 +109,8 @@ class SleepReport(Base):
     # Per-phase results (JSON)
     edge_discovery_result: Mapped[dict[str, Any] | None] = mapped_column(JSON, nullable=True)
     dedup_result: Mapped[dict[str, Any] | None] = mapped_column(JSON, nullable=True)
+    # #1209: merge_retention phase (purge window) results.
+    merge_retention_result: Mapped[dict[str, Any] | None] = mapped_column(JSON, nullable=True)
     importance_result: Mapped[dict[str, Any] | None] = mapped_column(JSON, nullable=True)
     consolidation_result: Mapped[dict[str, Any] | None] = mapped_column(JSON, nullable=True)
     reindex_result: Mapped[dict[str, Any] | None] = mapped_column(JSON, nullable=True)

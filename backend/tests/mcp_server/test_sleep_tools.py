@@ -151,6 +151,7 @@ class TestGetSleepReport:
         r.importance_result = None
         r.consolidation_result = None
         r.reindex_result = None
+        r.merge_retention_result = None  # #1209
         return r
 
     def _mock_action(self, phase="edge_discovery", action_type="create_edge"):

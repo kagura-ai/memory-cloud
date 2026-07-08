@@ -27,6 +27,7 @@ from services.sleep.consolidation import ConsolidationPhase
 from services.sleep.dedup_merge import DedupMergePhase
 from services.sleep.edge_discovery import EdgeDiscoveryPhase
 from services.sleep.importance_reeval import ImportanceReevalPhase
+from services.sleep.merge_retention import MergeRetentionPhase
 from services.sleep.reindex import ReindexPhase
 from services.sleep.reporter import PhaseResult, SleepBudget, SleepReporter
 from utils.datetime import utcnow
@@ -35,7 +36,15 @@ from utils.logger import get_logger
 logger = get_logger(__name__)
 
 # Phase sets for each sleep mode
-FULL_PHASES = {"edge_discovery", "dedup_merge", "importance_reeval", "consolidation"}
+# #1209: merge_retention runs right after dedup_merge in full mode — it is
+# the declared (default-disabled) purge window for merge losers.
+FULL_PHASES = {
+    "edge_discovery",
+    "dedup_merge",
+    "merge_retention",
+    "importance_reeval",
+    "consolidation",
+}
 EDGES_ONLY_PHASES = {"edge_discovery"}
 
 
@@ -117,6 +126,7 @@ class SleepOrchestrator:
         phases = [
             ("edge_discovery", lambda: EdgeDiscoveryPhase(self.db, self.llm_service, em, cn)),
             ("dedup_merge", lambda: DedupMergePhase(self.db, self.llm_service, em, cn)),
+            ("merge_retention", lambda: MergeRetentionPhase(self.db)),
             ("importance_reeval", lambda: ImportanceReevalPhase(self.db, self.llm_service, cn)),
             ("consolidation", lambda: ConsolidationPhase(self.db, self.llm_service, cn)),
         ]
