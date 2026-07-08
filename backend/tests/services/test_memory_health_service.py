@@ -7,7 +7,8 @@ class), and healthy inputs grade ok. FAIL fires only on deterministic facts;
 degradation signals produce WARN (a false FAIL erodes dashboard trust).
 """
 
-from unittest.mock import AsyncMock, patch
+from types import SimpleNamespace
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
@@ -153,6 +154,40 @@ class TestRetrievalGrading:
             active_memories=0,
         )
         assert section["status"] == STATUS_OK
+
+
+class TestFetchSleepWindowDefaults:
+    @pytest.mark.asyncio
+    async def test_pre_existing_reports_without_detail_keys_default_to_zero(self) -> None:
+        """Reports written before #1198/#1184 added the detail keys (or with
+        dedup_result=None) must flatten to zeros, not raise."""
+        legacy_none = SimpleNamespace(
+            status="completed",
+            llm_call_failures=None,
+            memories_merged=None,
+            dedup_result=None,
+            started_at=None,
+        )
+        legacy_no_details = SimpleNamespace(
+            status="completed",
+            llm_call_failures=0,
+            memories_merged=1,
+            dedup_result={"merged": 1},
+            started_at=None,
+        )
+        result = MagicMock()
+        result.scalars.return_value.all.return_value = [legacy_none, legacy_no_details]
+        db = AsyncMock()
+        db.execute = AsyncMock(return_value=result)
+
+        window = await MemoryHealthService(db)._fetch_sleep_window("u1")
+
+        assert len(window) == 2
+        for row in window:
+            assert row["llm_call_failures"] == 0
+            assert row["winner_overrides"] == 0
+            assert row["deferred_pairs"] == 0
+            assert row["oversize_clusters"] == 0
 
 
 class TestBuildReport:
