@@ -1583,7 +1583,6 @@ class MemoryService:
             "topk": min(k, len(order_after)),
         }
 
-<<<<<<< HEAD
     async def _apply_supersede_shadowing(
         self,
         search_results: list[dict],
@@ -1687,7 +1686,7 @@ class MemoryService:
         except Exception as e:
             logger.warning("supersede_shadowing_failed", error=str(e))
             return {}, {}
-=======
+
     async def _resolve_search_mode(
         self,
         request: RecallRequest,
@@ -1757,7 +1756,6 @@ class MemoryService:
             features=route.features,
         )
         return effective_mode
->>>>>>> 61a3a17 (feat(search): query-intent retrieval router, experiment-gated (#1212))
 
     async def _maybe_reinforce_rerank(
         self,
@@ -2662,6 +2660,9 @@ class MemoryService:
         # Case 2: Delete by query (search and delete)
         elif request.query:
             # Search for matching memories
+            # #1212: pin the historical mode explicitly — the query router
+            # must never decide the candidate set of a DESTRUCTIVE operation
+            # (an explicit search_mode always wins, in every routing_mode).
             recall_request = RecallRequest(
                 query=request.query,
                 k=request.k,
@@ -2671,6 +2672,7 @@ class MemoryService:
                 # default shadowing would hide them from this search and
                 # make forget(query=...) silently skip them.
                 include_superseded=True,
+                search_mode="hybrid",
             )
 
             # Issue #82: Pass project ID to recall

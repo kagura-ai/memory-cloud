@@ -563,7 +563,10 @@ class ForgetRequest(BaseModel):
     """Request schema for forget() API."""
 
     memory_id: UUID | None = Field(default=None, description="削除するメモリID")
-    query: str | None = Field(default=None, description="削除する検索クエリ")
+    # #1212: bounded to match RecallRequest.query — forget-by-query builds an
+    # internal RecallRequest, so an unbounded query here would surface as an
+    # unhandled 500 deep inside the service instead of a 422 at the schema.
+    query: str | None = Field(default=None, max_length=8000, description="削除する検索クエリ")
     k: int = Field(default=10, ge=1, le=100, description="削除する結果数（query指定時）")
 
 
