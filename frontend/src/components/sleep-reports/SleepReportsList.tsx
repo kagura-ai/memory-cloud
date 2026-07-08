@@ -35,6 +35,7 @@ import { ApiError } from "@/lib/api";
 import { formatRelativeTime } from "@/lib/utils/datetime";
 import {
   getSleepStatusColor,
+  formatUserPartitionLabel,
   SLEEP_STATUS_OPTIONS,
   type SleepStatus,
 } from "@/lib/sleep-report";
@@ -129,8 +130,7 @@ export function SleepReportsList({
       const apiErr = err instanceof ApiError ? err : null;
       if (apiErr?.status === 409) {
         const runningReportId = apiErr.details?.running_report_id as
-          | string
-          | undefined;
+          string | undefined;
         toast({
           title: t("messages.runConflict"),
           description: runningReportId ? (
@@ -275,6 +275,7 @@ export function SleepReportsList({
                 <TableRow>
                   <TableHead>{t("table.startedAt")}</TableHead>
                   <TableHead>{t("table.context")}</TableHead>
+                  <TableHead>{t("table.user")}</TableHead>
                   <TableHead>{t("table.status")}</TableHead>
                   <TableHead className="text-right">
                     {t("table.memoriesProcessed")}
@@ -304,6 +305,12 @@ export function SleepReportsList({
                     </TableCell>
                     <TableCell className="text-sm">
                       {report.context_name ?? "—"}
+                    </TableCell>
+                    <TableCell className="text-sm whitespace-nowrap">
+                      {formatUserPartitionLabel(
+                        report.user_email,
+                        report.user_id,
+                      )}
                     </TableCell>
                     <TableCell>
                       <span

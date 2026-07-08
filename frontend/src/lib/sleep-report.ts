@@ -15,6 +15,23 @@ export const SLEEP_STATUS_OPTIONS: SleepStatus[] = [
   "rolled_back",
 ];
 
+/**
+ * #1201: label for the user partition a Sleep run belongs to.
+ *
+ * Sleep runs per (user_id, workspace_id, context_id), so a workspace-scoped
+ * list can show the same context on multiple rows. Prefer the resolved email;
+ * fall back to a shortened user_id when the backend could not resolve it (a
+ * connector/service identity absent from the users table) so the row is still
+ * distinguishable without dumping a full opaque id.
+ */
+export function formatUserPartitionLabel(
+  userEmail: string | null | undefined,
+  userId: string,
+): string {
+  if (userEmail) return userEmail;
+  return `uid:${userId.slice(0, 8)}`;
+}
+
 export function getSleepStatusColor(status: SleepStatus): string {
   switch (status) {
     case "completed":

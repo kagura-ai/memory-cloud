@@ -53,6 +53,12 @@ class SleepReportSummary(TZAwareBaseModel):
     workspace_id: UUID | None
     context_id: UUID | None
     context_name: str | None = None
+    # #1201: email of the user whose partition this run belongs to. Sleep runs
+    # per (user_id, workspace_id, context_id), so a workspace-scoped list can
+    # show the same context on multiple rows; this disambiguates them. None
+    # when the user_id is a non-human/connector identity absent from ``users``
+    # (the frontend falls back to a shortened user_id).
+    user_email: str | None = None
     status: str
     started_at: datetime
     completed_at: datetime | None
@@ -169,6 +175,14 @@ async def list_sleep_reports(
     for r in reports:
         r.context_name = ctx_map.get(r.context_id) if r.context_id else None  # type: ignore[attr-defined]
 
+    # #1201: batch-resolve user_id → email so same-named contexts on different
+    # partitions are distinguishable. None → the frontend falls back to a
+    # shortened user_id.
+    user_ids = {r.user_id for r in reports}  # type: ignore[misc]
+    uid_map = await service.resolve_user_labels(user_ids)
+    for r in reports:
+        r.user_email = uid_map.get(r.user_id)  # type: ignore[attr-defined]
+
     return SleepReportListResponse(
         reports=[SleepReportSummary.model_validate(r, from_attributes=True) for r in reports],
         total=total,
@@ -208,6 +222,9 @@ async def get_sleep_report_detail(
 
     report.context_name = context_name  # type: ignore[attr-defined]
     report.context_deleted = context_deleted  # type: ignore[attr-defined]
+    # #1201: resolve the owning user's email (None → frontend fallback).
+    uid_map = await service.resolve_user_labels({report.user_id})
+    report.user_email = uid_map.get(report.user_id)  # type: ignore[attr-defined]
     report_detail = SleepReportDetail.model_validate(report, from_attributes=True)
 
     return SleepReportDetailResponse(
@@ -290,6 +307,14 @@ async def workspace_list_sleep_reports(
     for r in reports:
         r.context_name = ctx_map.get(r.context_id) if r.context_id else None  # type: ignore[attr-defined]
 
+    # #1201: batch-resolve user_id → email so same-named contexts on different
+    # partitions are distinguishable. None → the frontend falls back to a
+    # shortened user_id.
+    user_ids = {r.user_id for r in reports}  # type: ignore[misc]
+    uid_map = await service.resolve_user_labels(user_ids)
+    for r in reports:
+        r.user_email = uid_map.get(r.user_id)  # type: ignore[attr-defined]
+
     return SleepReportListResponse(
         reports=[SleepReportSummary.model_validate(r, from_attributes=True) for r in reports],
         total=total,
@@ -337,6 +362,9 @@ async def workspace_get_sleep_report_detail(
 
     report.context_name = context_name  # type: ignore[attr-defined]
     report.context_deleted = context_deleted  # type: ignore[attr-defined]
+    # #1201: resolve the owning user's email (None → frontend fallback).
+    uid_map = await service.resolve_user_labels({report.user_id})
+    report.user_email = uid_map.get(report.user_id)  # type: ignore[attr-defined]
     report_detail = SleepReportDetail.model_validate(report, from_attributes=True)
 
     return SleepReportDetailResponse(

@@ -2823,6 +2823,7 @@
       "table": {
         "startedAt": "Started",
         "context": "Context",
+        "user": "User",
         "status": "Status",
         "memoriesProcessed": "Memories",
         "edgesCreated": "Edges",
@@ -2844,6 +2845,7 @@
         "actionLog": "Action Log ({count})",
         "reportId": "Report ID",
         "userId": "User ID",
+        "userEmail": "User",
         "contextId": "Context ID",
         "workspaceId": "Workspace ID",
         "startedAt": "Started at",

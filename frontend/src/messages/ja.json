@@ -2823,6 +2823,7 @@
       "table": {
         "startedAt": "開始時刻",
         "context": "コンテキスト",
+        "user": "ユーザー",
         "status": "ステータス",
         "memoriesProcessed": "処理メモリ数",
         "edgesCreated": "作成エッジ数",
@@ -2844,6 +2845,7 @@
         "actionLog": "アクションログ ({count})",
         "reportId": "レポート ID",
         "userId": "ユーザー ID",
+        "userEmail": "ユーザー",
         "contextId": "コンテキスト ID",
         "workspaceId": "ワークスペース ID",
         "startedAt": "開始時刻",

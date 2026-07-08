@@ -76,6 +76,13 @@ def _make_mock_context(
     return ctx
 
 
+def _user_result(rows=(("local:admin", "admin@test.com"),)):
+    """Mock result for the #1201 batch ``user_id → email`` query."""
+    r = MagicMock()
+    r.all.return_value = list(rows)
+    return r
+
+
 def _make_mock_action(phase: str = "edge_discovery", action_type: str = "create_edge"):
     a = MagicMock()
     a.id = 1
@@ -126,7 +133,7 @@ class TestListSleepReports:
         # Call 3: batch context query → .all()=[(id, name, display_name, deleted_at)]
         ctx_result = MagicMock()
         ctx_result.all.return_value = [(ctx.id, ctx.name, ctx.display_name, ctx.deleted_at)]
-        mock_db.execute.side_effect = [count_result, list_result, ctx_result]
+        mock_db.execute.side_effect = [count_result, list_result, ctx_result, _user_result()]
 
         _install_overrides(mock_db)
 
@@ -141,6 +148,7 @@ class TestListSleepReports:
         assert data["reports"][0]["started_at"].endswith("Z")
         # Verify context_name is resolved via batch lookup
         assert data["reports"][0]["context_name"] == "Kagura Dev"
+        assert data["reports"][0]["user_email"] == "admin@test.com"
 
     def test_filters_by_status(self, client):
         ctx = _make_mock_context()
@@ -153,7 +161,7 @@ class TestListSleepReports:
         ]
         ctx_result = MagicMock()
         ctx_result.all.return_value = [(ctx.id, ctx.name, ctx.display_name, ctx.deleted_at)]
-        mock_db.execute.side_effect = [count_result, list_result, ctx_result]
+        mock_db.execute.side_effect = [count_result, list_result, ctx_result, _user_result()]
 
         _install_overrides(mock_db)
 
@@ -214,8 +222,8 @@ class TestListSleepReports:
         count_result.scalar.return_value = 1
         list_result = MagicMock()
         list_result.scalars.return_value.all.return_value = reports
-        # No context query because all context_ids are None
-        mock_db.execute.side_effect = [count_result, list_result]
+        # No context batch query (all context_ids None); then the user query.
+        mock_db.execute.side_effect = [count_result, list_result, _user_result()]
 
         _install_overrides(mock_db)
 
@@ -223,8 +231,8 @@ class TestListSleepReports:
         assert response.status_code == 200
         data = response.json()
         assert data["reports"][0]["context_name"] is None
-        # Only 2 DB calls: count + list (no context batch query)
-        assert mock_db.execute.call_count == 2
+        # 3 DB calls: count + list + user resolution (context batch skipped)
+        assert mock_db.execute.call_count == 3
 
     def test_list_context_name_falls_back_to_name(self, client):
         """When display_name is None, context_name should fall back to name."""
@@ -238,7 +246,7 @@ class TestListSleepReports:
         list_result.scalars.return_value.all.return_value = reports
         ctx_result = MagicMock()
         ctx_result.all.return_value = [(ctx.id, ctx.name, ctx.display_name, ctx.deleted_at)]
-        mock_db.execute.side_effect = [count_result, list_result, ctx_result]
+        mock_db.execute.side_effect = [count_result, list_result, ctx_result, _user_result()]
 
         _install_overrides(mock_db)
 
@@ -258,15 +266,15 @@ class TestListSleepReports:
         list_result.scalars.return_value.all.return_value = reports
         ctx_result = MagicMock()
         ctx_result.all.return_value = [(ctx.id, ctx.name, ctx.display_name, ctx.deleted_at)]
-        mock_db.execute.side_effect = [count_result, list_result, ctx_result]
+        mock_db.execute.side_effect = [count_result, list_result, ctx_result, _user_result()]
 
         _install_overrides(mock_db)
 
         response = client.get("/api/v1/admin/sleep-reports")
         assert response.status_code == 200
         assert response.json()["reports"][0]["context_name"] is None
-        # 3 DB calls: count + list + context batch query (deleted path exercised)
-        assert mock_db.execute.call_count == 3
+        # 4 DB calls: count + list + context batch + user resolution
+        assert mock_db.execute.call_count == 4
 
     def test_list_context_name_none_when_context_row_missing(self, client):
         """Reports referencing a non-existent context should have context_name=None."""
@@ -279,7 +287,7 @@ class TestListSleepReports:
         list_result.scalars.return_value.all.return_value = reports
         ctx_result = MagicMock()
         ctx_result.all.return_value = []  # No matching context
-        mock_db.execute.side_effect = [count_result, list_result, ctx_result]
+        mock_db.execute.side_effect = [count_result, list_result, ctx_result, _user_result()]
 
         _install_overrides(mock_db)
 
@@ -310,7 +318,7 @@ class TestGetSleepReportDetail:
         # 1. service.get_report_detail: SleepReport query → report_result
         # 2. service.get_report_detail: SleepAction query → actions_result
         # 3. service.resolve_context_name: Context query → ctx_result
-        mock_db.execute.side_effect = [report_result, actions_result, ctx_result]
+        mock_db.execute.side_effect = [report_result, actions_result, ctx_result, _user_result()]
 
         _install_overrides(mock_db)
 
@@ -321,6 +329,7 @@ class TestGetSleepReportDetail:
         assert data["report"]["memories_processed"] == 7
         assert data["report"]["context_name"] == "Kagura Dev"
         assert data["report"]["context_deleted"] is False
+        assert data["report"]["user_email"] == "admin@test.com"
         # Verify Z suffix on both report and action timestamps
         assert data["report"]["started_at"].endswith("Z")
         assert data["actions"][0]["created_at"].endswith("Z")
@@ -338,7 +347,7 @@ class TestGetSleepReportDetail:
         ctx_result.one_or_none.return_value = (ctx.name, ctx.display_name, ctx.deleted_at)
         actions_result = MagicMock()
         actions_result.scalars.return_value.all.return_value = []
-        mock_db.execute.side_effect = [report_result, actions_result, ctx_result]
+        mock_db.execute.side_effect = [report_result, actions_result, ctx_result, _user_result()]
 
         _install_overrides(mock_db)
 
@@ -359,7 +368,7 @@ class TestGetSleepReportDetail:
         ctx_result.one_or_none.return_value = (ctx.name, ctx.display_name, ctx.deleted_at)
         actions_result = MagicMock()
         actions_result.scalars.return_value.all.return_value = []
-        mock_db.execute.side_effect = [report_result, actions_result, ctx_result]
+        mock_db.execute.side_effect = [report_result, actions_result, ctx_result, _user_result()]
 
         _install_overrides(mock_db)
 
@@ -379,7 +388,7 @@ class TestGetSleepReportDetail:
         ctx_result.one_or_none.return_value = None
         actions_result = MagicMock()
         actions_result.scalars.return_value.all.return_value = []
-        mock_db.execute.side_effect = [report_result, actions_result, ctx_result]
+        mock_db.execute.side_effect = [report_result, actions_result, ctx_result, _user_result()]
 
         _install_overrides(mock_db)
 
@@ -397,8 +406,8 @@ class TestGetSleepReportDetail:
         report_result.scalar_one_or_none.return_value = report
         actions_result = MagicMock()
         actions_result.scalars.return_value.all.return_value = []
-        # No Context query because context_id is None
-        mock_db.execute.side_effect = [report_result, actions_result]
+        # No Context query (context_id None); then the user query.
+        mock_db.execute.side_effect = [report_result, actions_result, _user_result()]
 
         _install_overrides(mock_db)
 
@@ -441,7 +450,7 @@ class TestGetSleepReportDetail:
         ctx_result.one_or_none.return_value = (ctx.name, ctx.display_name, ctx.deleted_at)
         actions_result = MagicMock()
         actions_result.scalars.return_value.all.return_value = []
-        mock_db.execute.side_effect = [report_result, actions_result, ctx_result]
+        mock_db.execute.side_effect = [report_result, actions_result, ctx_result, _user_result()]
 
         _install_overrides(mock_db)
 

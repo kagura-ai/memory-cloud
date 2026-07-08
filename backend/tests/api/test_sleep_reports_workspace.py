@@ -78,6 +78,13 @@ def _make_mock_action():
     return a
 
 
+def _user_result(rows=(("local:owner", "owner@test.com"),)):
+    """Mock result for the #1201 batch ``user_id → email`` query."""
+    r = MagicMock()
+    r.all.return_value = list(rows)
+    return r
+
+
 @pytest.fixture
 def client(monkeypatch):
     """TestClient that exposes monkeypatch + auto-clears overrides."""
@@ -162,8 +169,8 @@ class TestWorkspaceListSleepReports:
         count_result.scalar.return_value = 3
         list_result = MagicMock()
         list_result.scalars.return_value.all.return_value = reports
-        # No context query because all context_ids are None
-        mock_db.execute.side_effect = [count_result, list_result]
+        # No context query (all context_ids None); then the batch user query.
+        mock_db.execute.side_effect = [count_result, list_result, _user_result()]
 
         _install_workspace_overrides(client, user=_owner_user(), db_mock=mock_db)
 
@@ -212,7 +219,7 @@ class TestWorkspaceListSleepReports:
         count_result.scalar.return_value = 1
         list_result = MagicMock()
         list_result.scalars.return_value.all.return_value = reports
-        mock_db.execute.side_effect = [count_result, list_result]
+        mock_db.execute.side_effect = [count_result, list_result, _user_result()]
 
         _install_workspace_overrides(client, user=_owner_user(), db_mock=mock_db)
 
@@ -241,6 +248,50 @@ class TestWorkspaceListSleepReports:
         assert data["offset"] == 50
         assert data["total"] == 100
 
+    def test_list_includes_user_email(self, client):
+        """#1201: each row carries the owning user's email so same-named
+        contexts on different partitions are distinguishable."""
+        report = _make_mock_report()  # user_id = "local:owner"
+
+        mock_db = AsyncMock()
+        count_result = MagicMock()
+        count_result.scalar.return_value = 1
+        list_result = MagicMock()
+        list_result.scalars.return_value.all.return_value = [report]
+        # No context query (context_id None); then the batch user resolution.
+        user_result = MagicMock()
+        user_result.all.return_value = [("local:owner", "owner@test.com")]
+        mock_db.execute.side_effect = [count_result, list_result, user_result]
+
+        _install_workspace_overrides(client, user=_owner_user(), db_mock=mock_db)
+
+        response = client.get(f"/api/v1/workspaces/{_WORKSPACE_ID}/sleep-reports")
+        assert response.status_code == 200
+        data = response.json()
+        assert data["reports"][0]["user_email"] == "owner@test.com"
+
+    def test_list_user_email_null_when_unresolved(self, client):
+        """A connector/non-human user_id with no users row → user_email is null,
+        letting the frontend fall back to a shortened id."""
+        report = _make_mock_report()
+        report.user_id = "connector:worker"
+
+        mock_db = AsyncMock()
+        count_result = MagicMock()
+        count_result.scalar.return_value = 1
+        list_result = MagicMock()
+        list_result.scalars.return_value.all.return_value = [report]
+        user_result = MagicMock()
+        user_result.all.return_value = []  # not in users table
+        mock_db.execute.side_effect = [count_result, list_result, user_result]
+
+        _install_workspace_overrides(client, user=_owner_user(), db_mock=mock_db)
+
+        response = client.get(f"/api/v1/workspaces/{_WORKSPACE_ID}/sleep-reports")
+        assert response.status_code == 200
+        data = response.json()
+        assert data["reports"][0]["user_email"] is None
+
 
 # ============================================================================
 # Workspace detail route
@@ -259,8 +310,8 @@ class TestWorkspaceGetSleepReportDetail:
         report_result.scalar_one_or_none.return_value = report
         actions_result = MagicMock()
         actions_result.scalars.return_value.all.return_value = actions
-        # No context query because context_id is None
-        mock_db.execute.side_effect = [report_result, actions_result]
+        # No context query (context_id None); then the user query.
+        mock_db.execute.side_effect = [report_result, actions_result, _user_result()]
 
         _install_workspace_overrides(client, user=_owner_user(), db_mock=mock_db)
 
@@ -269,6 +320,28 @@ class TestWorkspaceGetSleepReportDetail:
         data = response.json()
         assert data["action_count"] == 1
         assert data["report"]["memories_processed"] == 7
+
+    def test_detail_includes_user_email(self, client):
+        """#1201: detail view also carries the owning user's email."""
+        report = _make_mock_report()  # user_id = "local:owner", context_id None
+        actions = [_make_mock_action()]
+
+        mock_db = AsyncMock()
+        report_result = MagicMock()
+        report_result.scalar_one_or_none.return_value = report
+        actions_result = MagicMock()
+        actions_result.scalars.return_value.all.return_value = actions
+        # report + actions; context skipped (context_id None); then user resolution.
+        user_result = MagicMock()
+        user_result.all.return_value = [("local:owner", "owner@test.com")]
+        mock_db.execute.side_effect = [report_result, actions_result, user_result]
+
+        _install_workspace_overrides(client, user=_owner_user(), db_mock=mock_db)
+
+        response = client.get(f"/api/v1/workspaces/{_WORKSPACE_ID}/sleep-reports/{report.id}")
+        assert response.status_code == 200
+        data = response.json()
+        assert data["report"]["user_email"] == "owner@test.com"
 
     def test_report_from_other_workspace_returns_404(self, client):
         """Cross-workspace report probe returns 404 (not 403) — CWE-639 uniform disclosure."""
