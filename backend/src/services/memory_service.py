@@ -1580,7 +1580,6 @@ class MemoryService:
         search_results: list[dict],
         memories: dict,
         *,
-        user_id: str,
         include_superseded: bool,
     ) -> tuple[dict[UUID, UUID], dict[UUID, list[UUID]]]:
         """#1208: demote superseded memories out of the candidate pool.
@@ -1624,11 +1623,17 @@ class MemoryService:
                 return {}, {}
 
             superseder = aliased(Memory)
+            # Deliberately NOT scoped to the calling user: in a shared
+            # context, member B's supersedes edge must shadow the stale fact
+            # for member A too — otherwise stale-fact suppression fails in
+            # exactly the team setting it matters most. Safe because
+            # candidate_ids are already visibility-scoped by the recall
+            # upstream, memory UUIDs are globally unique, and edge creation
+            # validates both endpoints exist in the creator's own context.
             rows = await self.db.execute(
                 select(NeuralMemoryEdge.dst_id, NeuralMemoryEdge.src_id)
                 .join(superseder, superseder.id == NeuralMemoryEdge.src_id)
                 .where(
-                    NeuralMemoryEdge.user_id == user_id,
                     NeuralMemoryEdge.edge_type == EDGE_TYPE_SUPERSEDES,
                     NeuralMemoryEdge.dst_id.in_(candidate_ids),
                     superseder.deleted_at.is_(None),
@@ -1638,7 +1643,6 @@ class MemoryService:
 
             c_rows = await self.db.execute(
                 select(NeuralMemoryEdge.src_id, NeuralMemoryEdge.dst_id).where(
-                    NeuralMemoryEdge.user_id == user_id,
                     NeuralMemoryEdge.edge_type == EDGE_TYPE_CONTRADICTS,
                     or_(
                         NeuralMemoryEdge.src_id.in_(candidate_ids),
@@ -2100,7 +2104,6 @@ class MemoryService:
         shadow_map, contradiction_map = await self._apply_supersede_shadowing(
             search_results,
             memories,
-            user_id=user_id,
             include_superseded=request.include_superseded,
         )
 

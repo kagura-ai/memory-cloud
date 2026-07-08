@@ -55,7 +55,7 @@ async def test_shadowed_memory_filtered_out_by_default() -> None:
     svc = _service_with_edges([(old_id, new_id)], [])
 
     shadow_map, contradiction_map = await svc._apply_supersede_shadowing(
-        search_results, memories, user_id="u", include_superseded=False
+        search_results, memories, include_superseded=False
     )
 
     assert shadow_map == {old_id: new_id}
@@ -71,7 +71,7 @@ async def test_include_superseded_keeps_and_annotates() -> None:
     svc = _service_with_edges([(old_id, new_id)], [])
 
     shadow_map, _ = await svc._apply_supersede_shadowing(
-        search_results, memories, user_id="u", include_superseded=True
+        search_results, memories, include_superseded=True
     )
 
     assert shadow_map == {old_id: new_id}
@@ -89,7 +89,7 @@ async def test_dead_superseder_stops_shadowing() -> None:
     svc = _service_with_edges([], [])
 
     shadow_map, _ = await svc._apply_supersede_shadowing(
-        search_results, memories, user_id="u", include_superseded=False
+        search_results, memories, include_superseded=False
     )
 
     assert shadow_map == {}
@@ -107,7 +107,7 @@ async def test_contradicts_never_hides_annotates_both_sides() -> None:
     svc = _service_with_edges([], [(a_id, b_id)])
 
     shadow_map, contradiction_map = await svc._apply_supersede_shadowing(
-        search_results, memories, user_id="u", include_superseded=False
+        search_results, memories, include_superseded=False
     )
 
     assert shadow_map == {}
@@ -128,7 +128,7 @@ async def test_over_supersede_placebo_unlinked_memories_untouched() -> None:
     svc = _service_with_edges([(shadowed_id, superseder)], [])
 
     shadow_map, _ = await svc._apply_supersede_shadowing(
-        search_results, memories, user_id="u", include_superseded=False
+        search_results, memories, include_superseded=False
     )
 
     assert set(shadow_map) == {shadowed_id}
@@ -147,7 +147,7 @@ async def test_fail_open_on_query_error() -> None:
     svc.db = db
 
     shadow_map, contradiction_map = await svc._apply_supersede_shadowing(
-        search_results, memories, user_id="u", include_superseded=False
+        search_results, memories, include_superseded=False
     )
 
     assert shadow_map == {} and contradiction_map == {}
@@ -158,9 +158,7 @@ async def test_fail_open_on_query_error() -> None:
 async def test_empty_candidates_short_circuits() -> None:
     svc = MemoryService(MagicMock())
     svc.db = AsyncMock()
-    shadow_map, _ = await svc._apply_supersede_shadowing(
-        [], {}, user_id="u", include_superseded=False
-    )
+    shadow_map, _ = await svc._apply_supersede_shadowing([], {}, include_superseded=False)
     assert shadow_map == {}
     svc.db.execute.assert_not_awaited()
 
