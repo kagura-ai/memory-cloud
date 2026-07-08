@@ -74,6 +74,8 @@ def _cfg():
     c.reinforce_enabled = False
     c.reinforce_max_boost = Decimal("0.15")
     c.reinforce_require_host_arbitration = False
+    # #1212: pin so the MagicMock attribute doesn't fail Pydantic validation.
+    c.routing_mode = "off"
     return c
 
 

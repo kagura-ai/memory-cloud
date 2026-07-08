@@ -57,6 +57,45 @@ class TestSearchConfigValidation:
                 reranker_model="rerank-2",
             )
 
+    def test_routing_mode_default_off(self):
+        """#1212: omitting routing_mode leaves it at 'off' (and unset, so the
+        repository's exclude_unset update does not touch the column)."""
+        config = ContextSearchConfigUpdate(
+            semantic_weight=0.6,
+            bm25_weight=0.4,
+            fetch_factor=3,
+            use_rerank=False,
+            reranker_provider="voyage",
+            reranker_model="rerank-2",
+        )
+        assert config.routing_mode == "off"
+        assert "routing_mode" not in config.model_dump(exclude_unset=True)
+
+    def test_routing_mode_accepts_all_gate_values(self):
+        for mode in ("off", "log_only", "active"):
+            config = ContextSearchConfigUpdate(
+                semantic_weight=0.6,
+                bm25_weight=0.4,
+                fetch_factor=3,
+                use_rerank=False,
+                reranker_provider="voyage",
+                reranker_model="rerank-2",
+                routing_mode=mode,
+            )
+            assert config.routing_mode == mode
+
+    def test_routing_mode_rejects_unknown_value(self):
+        with pytest.raises(ValidationError):
+            ContextSearchConfigUpdate(
+                semantic_weight=0.6,
+                bm25_weight=0.4,
+                fetch_factor=3,
+                use_rerank=False,
+                reranker_provider="voyage",
+                reranker_model="rerank-2",
+                routing_mode="always",
+            )
+
     def test_invalid_reranker_model_for_provider(self):
         with pytest.raises(ValidationError, match="Invalid model"):
             ContextSearchConfigUpdate(

@@ -434,7 +434,10 @@ async def handle_recall(
         k=args.get("k", 5),
         use_rerank=args.get("use_rerank", False),
         filters=args.get("filters"),
-        search_mode=args.get("search_mode", "hybrid"),
+        # #1212: pass None through when the caller omitted search_mode so the
+        # query router can act on contexts with routing_mode='active';
+        # MemoryService resolves None to "hybrid" everywhere else.
+        search_mode=args.get("search_mode"),
         include_explore_hints=args.get("include_explore_hints", False),
         include_superseded=args.get("include_superseded", False),  # #1208
     )

@@ -462,7 +462,7 @@ The primitives an autonomous agent loop needs beyond a knowledge store — see [
 | `update_context` | Update context settings (summary, usage guide, resource_id, is_public) | Editor+ |
 | `delete_context` | Delete a context and all its memories | Owner/Admin |
 | `merge_contexts` | Merge memories from source context into target context | Owner/Admin |
-| `update_search_config` | Tune hybrid search weights and reranker settings per context | Editor+ |
+| `update_search_config` | Tune hybrid search weights, reranker settings, and query-intent routing (`routing_mode`) per context | Editor+ |
 
 ### Tags (1)
 

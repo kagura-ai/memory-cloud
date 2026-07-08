@@ -62,6 +62,7 @@ from repositories.memory import MemoryRepository
 from services.context_routing import resolve_collection_name
 from services.context_service import ContextService
 from services.embedding_service import EmbeddingService
+from services.query_router import classify_query
 from services.search_service import SearchService
 from utils.datetime import to_utc_iso, utcnow
 from utils.exceptions import (
@@ -1582,6 +1583,7 @@ class MemoryService:
             "topk": min(k, len(order_after)),
         }
 
+<<<<<<< HEAD
     async def _apply_supersede_shadowing(
         self,
         search_results: list[dict],
@@ -1685,6 +1687,77 @@ class MemoryService:
         except Exception as e:
             logger.warning("supersede_shadowing_failed", error=str(e))
             return {}, {}
+=======
+    async def _resolve_search_mode(
+        self,
+        request: RecallRequest,
+        context_id: UUID,
+        *,
+        cross_context: bool,
+    ) -> str:
+        """#1212: resolve the effective search mode, optionally via the router.
+
+        Resolution order:
+
+        1. An explicitly passed ``search_mode`` ALWAYS wins (router never
+           overrides a caller's choice, in any routing_mode).
+        2. ``routing_mode='active'`` and no explicit mode → the classifier's
+           lane.
+        3. Otherwise → ``"hybrid"`` (the historical default).
+
+        In ``log_only`` and ``active`` the decision is stamped into telemetry
+        (``query_router_decision`` — numeric features only, never query text).
+        Cross-context recalls skip routing entirely: the config is
+        per-context and a mixed set has no single answer. The config read is
+        READ-ONLY (``get_by_context``, never ``create_or_get``) and
+        fail-open, mirroring the reinforce re-rank discipline: a config read
+        failure must never break recall.
+
+        Args:
+            request: The recall request (``search_mode`` may be None).
+            context_id: The single target context.
+            cross_context: True for multi-context recalls (routing skipped).
+
+        Returns:
+            The effective search mode ("hybrid" | "semantic" | "keyword").
+        """
+        requested_mode = request.search_mode
+        default_mode = requested_mode or "hybrid"
+        if cross_context:
+            return default_mode
+
+        try:
+            from repositories.config_repository import ContextSearchConfigRepository
+
+            config = await ContextSearchConfigRepository(self.db).get_by_context(context_id)
+        except Exception as exc:
+            logger.warning(
+                "query_router_config_read_failed",
+                context_id=str(context_id),
+                error=str(exc),
+            )
+            return default_mode
+
+        routing_mode = getattr(config, "routing_mode", None) if config else None
+        if routing_mode not in ("log_only", "active"):
+            return default_mode
+
+        route = classify_query(request.query)
+        applied = routing_mode == "active" and requested_mode is None
+        effective_mode = route.lane if applied else default_mode
+        logger.info(
+            "query_router_decision",
+            context_id=str(context_id),
+            routing_mode=routing_mode,
+            decided_lane=route.lane,
+            applied=applied,
+            requested_mode=requested_mode,
+            effective_mode=effective_mode,
+            reasons=list(route.reasons),
+            features=route.features,
+        )
+        return effective_mode
+>>>>>>> 61a3a17 (feat(search): query-intent retrieval router, experiment-gated (#1212))
 
     async def _maybe_reinforce_rerank(
         self,
@@ -1891,6 +1964,16 @@ class MemoryService:
         search_context_id: str | list[str] = str(current_context_id)
         if context_ids:
             search_context_id = [str(cid) for cid in context_ids]
+
+        # #1212: resolve the effective search mode exactly once, before any
+        # downstream read of request.search_mode (BYOK charge gate, hybrid
+        # search, neural checks). After this line it is always a concrete
+        # mode string; None (caller omitted it) never flows further.
+        request.search_mode = await self._resolve_search_mode(
+            request,
+            current_context_id,
+            cross_context=bool(context_ids),
+        )
 
         # Issue #496: ``analysis_cluster`` filter pre-resolves the cluster's
         # memory_ids so we can both (a) short-circuit empty clusters before
