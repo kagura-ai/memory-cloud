@@ -147,6 +147,7 @@
     "quotas": "Quotas & Limits",
     "neuralConfig": "Neural Config",
     "sleepReports": "Sleep Reports",
+    "memoryHealth": "Memory Health",
     "cost": "Cost",
     "environment": "Environment",
     "systemAdmin": "System Admin",
@@ -2806,6 +2807,12 @@
         "noWorkspaceSelected": "No workspace is currently selected. Create or select a workspace to view its cost aggregation.",
         "unknown": "Unknown error while loading cost aggregation."
       }
+    },
+    "memoryHealth": {
+      "title": "Memory Health",
+      "description": "Consolidated self-diagnosis: consolidation, graph, and retrieval signals with ok/warn/fail grading",
+      "refresh": "Refresh",
+      "overall": "Overall"
     },
     "sleepReports": {
       "title": "Sleep Reports",

@@ -493,6 +493,7 @@ for _exc_cls in (
 
 from api.routes import (  # noqa: E402
     admin,
+    admin_memory_health,  # Issue #1211: consolidated memory-health report
     admin_neural,  # Issue #406: Manual kNN calibration recalibrate trigger
     admin_plans,
     admin_signup_gate,  # Issue #358: admin-configurable signup gate
@@ -608,6 +609,9 @@ app.include_router(analyses.router, prefix="/api/v1")
 
 # Admin Sleep trigger (Issue #247 - Manual Sleep Maintenance trigger)
 app.include_router(admin_sleep.router, prefix="/api/v1")
+
+# Consolidated memory-health report (Issue #1211)
+app.include_router(admin_memory_health.router, prefix="/api/v1")
 
 # Admin Neural calibrate trigger (Issue #406 Phase B - Manual kNN recalibration)
 app.include_router(admin_neural.router, prefix="/api/v1")

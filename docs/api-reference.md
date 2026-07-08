@@ -934,6 +934,14 @@ Admin endpoints require `system_admin` or `workspace_admin` role.
 
 See [Sleep Maintenance](sleep-maintenance.md) for the full Sleep cycle design, `sleep_mode`, and rollback semantics.
 
+### Memory Health
+
+| Endpoint                          | Purpose                                                       |
+|-----------------------------------|---------------------------------------------------------------|
+| `GET /api/v1/admin/memory-health` | Consolidated self-diagnosis report — consolidation / graph / retrieval sections graded `ok`/`warn`/`fail` from Sleep telemetry, graph invariants, and usage stats. Self-scoped (the calling admin's data partition). |
+
+See [Memory Health Report](ops/memory-health-report.md) for every metric and threshold.
+
 ### Neural Config
 
 Sleep and Neural Memory tuning knobs (LLM provider, budgets, per-phase toggles, reranker weights) are persisted in `neural_config` and exposed under `/api/v1/admin/neural-config`. The fields are editable from the admin UI's Neural Config page.

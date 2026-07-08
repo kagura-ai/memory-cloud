@@ -147,6 +147,7 @@
     "quotas": "クォータ・制限",
     "neuralConfig": "ニューラル設定",
     "sleepReports": "Sleep レポート",
+    "memoryHealth": "メモリーヘルス",
     "cost": "コスト",
     "environment": "環境設定",
     "systemAdmin": "システム管理",
@@ -2806,6 +2807,12 @@
         "noWorkspaceSelected": "workspace が選択されていません。workspace を作成または選択してからコスト集計を確認してください。",
         "unknown": "コスト集計の読み込み中に不明なエラーが発生しました。"
       }
+    },
+    "memoryHealth": {
+      "title": "メモリーヘルス",
+      "description": "統合セルフ診断：consolidation / graph / retrieval のシグナルを ok/warn/fail で判定",
+      "refresh": "更新",
+      "overall": "総合"
     },
     "sleepReports": {
       "title": "Sleep レポート",
