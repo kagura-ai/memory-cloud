@@ -7,11 +7,13 @@ ships **default-on for newly created contexts** since #1207
 program attributed the update-correctness headline, +0.36 over vanilla RAG
 BCa 95% [0.24, 0.50], entirely to this re-rank's cold-start recency prior).
 Contexts created **before** #1207 keep their stored setting — the flip rewrites
-no rows — and legacy contexts without a config row adopt the new default
-lazily (recall materializes the config row via `create_or_get`), so only a
-stored explicit `false` opts out. This document defines the **eval gate** that
-decides whether enabling it on a pre-existing, explicitly-opted-out context is
-safe, and the **staged rollout + monitoring** procedure that gate feeds.
+no rows, and since config rows are auto-stamped at context creation (and were
+materialized by any past recall) under the old `false` default, **pre-existing
+contexts stay off after the upgrade**. Only the rare legacy context that never
+got a config row adopts the new default lazily when recall materializes the
+row. This document defines the **eval gate** that decides whether enabling the
+re-rank on such a pre-existing context is safe, and the **staged rollout +
+monitoring** procedure that gate feeds.
 
 The principle (from the milestone): *trust before integration*. Reinforce only
 goes live where an eval shows it helps the canonical answers **without** burying

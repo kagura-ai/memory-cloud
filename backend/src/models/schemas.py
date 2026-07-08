@@ -441,7 +441,13 @@ class ReferenceResponse(TZAwareBaseModel):
 
 
 class ExportedSearchConfig(BaseModel):
-    """Per-context search configuration in a portability export (Issue #950)."""
+    """Per-context search configuration in a portability export (Issue #950).
+
+    #1207: reinforce settings are exported so an explicit opt-out survives the
+    portability boundary — without them, re-creating an exported context would
+    silently pick up the new default-on. Defaults mirror the current ORM
+    defaults so pre-#1207 export documents (which lack these keys) still parse.
+    """
 
     semantic_weight: float
     bm25_weight: float
@@ -451,6 +457,9 @@ class ExportedSearchConfig(BaseModel):
     reranker_model: str | None
     embedding_model: str
     embedding_dimensions: int
+    reinforce_enabled: bool = True
+    reinforce_max_boost: float = 0.15
+    reinforce_require_host_arbitration: bool = False
 
 
 class ExportedMemory(TZAwareBaseModel):

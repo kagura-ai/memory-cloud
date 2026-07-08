@@ -9,13 +9,16 @@ discovering a flag, so the per-context default flips to ON.
 This migration changes ONLY the DDL default (``ALTER COLUMN … SET
 DEFAULT``). It deliberately does NOT rewrite existing rows:
 
-- contexts with an explicit ``reinforce_enabled=false`` keep their opt-out;
+- contexts with a stored ``reinforce_enabled=false`` keep it — note this is
+  the COMMON case for pre-#1207 contexts, because config rows are
+  auto-stamped at context creation (and materialized by any past recall's
+  ``create_or_get``) under the old ``false`` default, so pre-existing
+  contexts stay off after the upgrade;
 - contexts enabled during the Phase-C graduation keep ``true``;
-- legacy contexts without a ``context_search_configs`` row adopt the new
-  default lazily — the search path materializes the row via
-  ``create_or_get`` on their next recall — so effectively every context
-  without a stored ``false`` converges to ON. This lazy adoption is the
-  recorded #1207 decision (only an explicit stored opt-out is honored).
+- the rare legacy context without a ``context_search_configs`` row adopts
+  the new default lazily — the search path materializes the row via
+  ``create_or_get`` on its next recall. This lazy adoption is the recorded
+  #1207 decision.
 
 Blue-green safe: the previous app version inserts rows with an explicit
 Python-side ``default=False`` value, so it is unaffected by the DDL

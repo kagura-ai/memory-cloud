@@ -103,10 +103,12 @@ class ContextSearchConfig(Base):
     # kagura-memory-eval program attributed the update-correctness headline
     # (+0.36 conditional lift over vanilla RAG, BCa 95% [0.24, 0.50]) entirely
     # to this bounded, LLM-free, fail-safe re-rank, so fresh contexts get it
-    # without discovering a flag. Existing rows are NOT rewritten (explicit
-    # opt-outs stand). Contexts without a config row adopt the default lazily:
-    # the search path materializes the row via create_or_get on their next
-    # recall — only a stored ``false`` opts out.
+    # without discovering a flag. Existing rows are NOT rewritten — and since
+    # rows are auto-stamped at context creation (and by any past recall's
+    # create_or_get) under the old default, pre-#1207 contexts hold a stored
+    # ``false`` and stay off until enabled via update_search_config. Only the
+    # rare row-less legacy context adopts the new default lazily when the
+    # search path materializes its row.
     # ``reinforce_max_boost`` bounds the per-result multiplicative adjustment
     # to [1-boost, 1+boost] so semantic relevance always dominates (the
     # re-rank only reorders the relevance-filtered candidate pool).

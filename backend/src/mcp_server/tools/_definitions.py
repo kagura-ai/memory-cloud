@@ -1213,7 +1213,7 @@ Returns: {status, message, context_id, config: {semantic_weight, bm25_weight, fe
                     },
                     "reinforce_enabled": {
                         "type": "boolean",
-                        "description": "Enable the bounded adoption+feedback recall re-rank — memories that are deliberately referenced (adopted) and marked helpful gain a small, bounded standing boost; never-adopted recent memories keep a cold-start prior so they still surface. On by default since #1207 (the eval-proven update kernel); only a stored explicit false opts out. Does not override semantic relevance.",
+                        "description": "Enable the bounded adoption+feedback recall re-rank — memories that are deliberately referenced (adopted) and marked helpful gain a small, bounded standing boost; never-adopted recent memories keep a cold-start prior so they still surface. Contexts created since #1207 start enabled (the eval-proven update kernel); contexts created earlier keep their stored setting (typically false under the old default) — set true here to enable them. Does not override semantic relevance.",
                     },
                     "reinforce_max_boost": {
                         "type": "number",

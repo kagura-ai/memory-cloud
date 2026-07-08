@@ -125,13 +125,15 @@ fail-safe — any error preserves the original hybrid ranking.
 
 This mechanism is the system's best-measured behavior: a pre-registered,
 placebo-controlled evaluation attributed a **+0.36 update-correctness lift
-over vanilla RAG (BCa 95% [0.24, 0.50])** entirely to it. Since #1207 it is
-**enabled by default**: newly created contexts start on, and contexts that
-never touched the setting adopt the default lazily on their next recall.
-Only a stored explicit `reinforce_enabled: false` opts out — set it per
-context with `update_search_config` (see
-`docs/eval/reinforce-rollout-gate.md` for the per-context graduation
-procedure and the `reinforce_rerank_applied` monitoring telemetry).
+over vanilla RAG (BCa 95% [0.24, 0.50])** entirely to it. Since #1207,
+**newly created contexts start with it enabled**. Contexts created before
+#1207 keep their stored setting — under the old default that stored value is
+typically `false`, so pre-existing contexts do **not** flip on upgrade;
+enable them per context with `update_search_config`
+(`reinforce_enabled: true`), guided by the graduation procedure in
+`docs/eval/reinforce-rollout-gate.md` and the `reinforce_rerank_applied`
+monitoring telemetry. (Rare legacy contexts that never got a config row
+adopt the new default the first time the row is materialized.)
 
 ## Neural Memory
 
