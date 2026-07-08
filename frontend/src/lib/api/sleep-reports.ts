@@ -22,10 +22,12 @@ export interface SleepReportSummary {
   workspace_id: string | null;
   context_id: string | null;
   context_name: string | null;
-  // #1201: email of the user whose partition this run belongs to. null when the
-  // user_id is a non-human/connector identity absent from the users table — the
-  // UI falls back to a shortened user_id (see formatUserPartitionLabel).
-  user_email?: string | null;
+  // #1201: email of the user whose partition this run belongs to. Always present
+  // on the wire (computed fresh per response, mirroring context_name — hence
+  // required, not optional). null when the user_id is a non-human/connector
+  // identity absent from the users table — the UI then falls back to a shortened
+  // user_id (see formatUserPartitionLabel).
+  user_email: string | null;
   status: SleepStatus;
   started_at: string;
   completed_at: string | null;
