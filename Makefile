@@ -174,6 +174,21 @@ eval-placebo:
 	@echo "Writes backend/tests/eval/results/placebo-<date>.json — real run only, never fabricated."
 	cd $(BACKEND_DIR) && KAGURA_EVAL_LIVE=1 PYTHONPATH=src:. python -m tests.eval.placebo_runner
 
+.PHONY: eval-update
+eval-update:
+	@echo "Running live update-correctness eval (H4 update-slice, needs the stack: make up)..."
+	@echo "Writes backend/tests/eval/results/update-<date>.json — real run only, never fabricated."
+	cd $(BACKEND_DIR) && KAGURA_EVAL_LIVE=1 PYTHONPATH=src:. python -m tests.eval.update_runner --corpus tests/eval/fixtures/update_slice.yaml --label update
+
+.PHONY: eval-ci-gates
+eval-ci-gates:
+	@echo "Evaluating #1210 eval contracts against the newest update results JSON..."
+	@echo "Exit codes: 0=pass, 1=contract breach, 3=measurement unavailable (infra)."
+	cd $(BACKEND_DIR) && PYTHONPATH=src:. python -m tests.eval.ci_gates \
+		--baseline tests/eval/fixtures/ci_baseline.json \
+		--require update \
+		--update "$$(ls -t tests/eval/results/update-*.json 2>/dev/null | head -1)"
+
 .PHONY: eval-reinforce
 eval-reinforce:
 	@echo "Running live reinforce ON-vs-OFF rollout gate (Issue #1069, needs the stack: make up)..."
