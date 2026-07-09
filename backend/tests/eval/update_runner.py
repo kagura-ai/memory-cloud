@@ -432,8 +432,10 @@ async def run_update_eval(
             daily_api_limit=10_000_000,
             weekly_api_limit=50_000_000,
         )
-        # ctx_vr: exactly runner.py's stamp, sleep_mode/reinforce_enabled left
-        # at their defaults ("skip" / False) — the Vanilla RAG baseline.
+        # ctx_vr: exactly runner.py's stamp, sleep_mode left at its default
+        # ("skip") and reinforce_enabled pinned False EXPLICITLY — the Vanilla
+        # RAG baseline. #1207 flipped the column default to true, so the VR
+        # arm can no longer rely on the model default staying off.
         ctx_vr = Context(
             id=uuid4(),
             workspace_id=ws.id,
@@ -466,6 +468,7 @@ async def run_update_eval(
                 reranker_model="qwen3-reranker-4b",
                 embedding_model=emb_model,
                 embedding_dimensions=emb_dims,
+                reinforce_enabled=False,
             )
         )
         db.add(

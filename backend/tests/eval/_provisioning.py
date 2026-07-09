@@ -92,6 +92,11 @@ async def provision_eval_context(
             reranker_model="qwen3-reranker-4b",
             embedding_model=emb_model,
             embedding_dimensions=emb_dims,
+            # #1207 flipped the product default to enabled; the eval stamp pins
+            # it OFF so retrieval arms stay byte-comparable with the frozen
+            # protocol and archived results. Runners that measure the re-rank
+            # itself flip it explicitly (reinforce_runner._set_reinforce).
+            reinforce_enabled=False,
         )
     )
     await db.flush()

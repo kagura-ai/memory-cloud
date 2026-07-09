@@ -153,6 +153,13 @@ class ContextSearchConfigRepository:
             use_rerank=False,
             reranker_provider="voyage",
             reranker_model="rerank-2",
+            # #1207: reset converges reinforce to the documented defaults too.
+            # These must be passed explicitly — update() applies
+            # exclude_unset, so omitting them would leave stored values
+            # behind and "reset to defaults" would not mean defaults.
+            reinforce_enabled=True,
+            reinforce_max_boost=0.15,
+            reinforce_require_host_arbitration=False,
         )
 
         config = await self.update(context_id, defaults)

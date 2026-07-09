@@ -122,9 +122,11 @@ class TestRunReinforceArms:
             svc, corpus, id_map, "owner", uuid4(), uuid4(), "2026-06-26", write=False
         )
 
-        # Seed first, OFF arm scored while reinforce is still off, THEN flip on,
-        # THEN score the ON arm — the A/B is honest only in this order.
-        assert order == ["seed", "score", "set_reinforce=True", "score"]
+        # Seed first, pin reinforce OFF explicitly (#1207: a lazily-materialized
+        # config row defaults to enabled, so "not flipped yet" no longer means
+        # off), score the OFF arm, THEN flip on, THEN score the ON arm — the
+        # A/B is honest only in this order.
+        assert order == ["seed", "set_reinforce=False", "score", "set_reinforce=True", "score"]
         assert results["gate"]["passed"] is True
         assert results["off"]["zero_adoption_surfacing_rate"] == 0.50
         assert results["on"]["populations"][POPULATION_CURRENT_FACT]["mrr@10"] == 0.88

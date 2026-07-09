@@ -1544,8 +1544,11 @@ class MemoryService:
         """Issue #1048: bounded, config-gated recall re-rank by adoption + feedback.
 
         No-op unless the context's ``ContextSearchConfig.reinforce_enabled`` is set
-        (default OFF → recall ranking is byte-identical to pre-#1048). Single-context
-        only — a per-context config/feedback set can't govern a cross-context pool.
+        (#1207: ON by default for config rows created since then — including rows
+        lazily materialized by the search path's ``create_or_get`` — with a stored
+        ``false`` as the opt-out; pre-#1207 rows keep their stored value).
+        Single-context only — a per-context config/feedback set can't govern a
+        cross-context pool.
         Re-sorts ``search_results`` IN PLACE by ``hybrid_score * _reinforce_factor``.
 
         Issue #1069: when the re-rank fires it emits a ``reinforce_rerank_applied``
@@ -1563,9 +1566,12 @@ class MemoryService:
         try:
             from repositories.config_repository import ContextSearchConfigRepository
 
-            # READ-ONLY lookup — recall must not create/commit a config row mid-flow
-            # (create_or_get would INSERT+COMMIT for a context with no config yet,
-            # adding a side effect to the read path). No config row → reinforce off.
+            # READ-ONLY lookup — this helper must not create/commit a config row
+            # (create_or_get would INSERT+COMMIT, adding a side effect here). In
+            # practice hybrid_search's _get_search_config has usually materialized
+            # the row earlier in this same recall (with the #1207 default), so the
+            # cfg-None branch is a fail-safe for genuinely row-less states (e.g.
+            # that materialization failed), not a legacy-context opt-out.
             cfg = await ContextSearchConfigRepository(self.db).get_by_context(context_id)
             if cfg is None or not getattr(cfg, "reinforce_enabled", False):
                 return
@@ -1951,7 +1957,7 @@ class MemoryService:
         # Hebbian learning still runs to build the graph for explore().
 
         # Issue #1048: bounded reinforce re-rank (adoption + retrieval feedback),
-        # config-gated per-context (default OFF), single-context only. Reorders the
+        # config-gated per-context (default ON since #1207), single-context only. Reorders the
         # candidate pool BEFORE the top-k slice below; uses only reference_count +
         # feedback + importance + recency — never graph signals (respects #120).
         await self._maybe_reinforce_rerank(

@@ -153,6 +153,27 @@ async def _run_mode(corpus: Corpus, plan: ReplayPlan) -> dict[str, Any]:
         await db.flush()
         db.add(ctx)
         db.add(WorkspaceMember(workspace_id=ws.id, user_id=owner, role=WorkspaceRole.OWNER))
+        # Pin reinforce OFF for the recall control lane (#1207). Pre-#1207 this
+        # row was materialized lazily by the first recall with reinforce_enabled
+        # =False; the default flip would now materialize it ENABLED, letting the
+        # re-rank contaminate the flat-by-design recall lane. The embedding
+        # stamp is settings-derived like _provisioning's, so creating the row
+        # BEFORE ingest cannot re-route embedding on non-default rigs.
+        from config.constants import EMBEDDING_MODEL_REGISTRY
+        from config.settings import get_settings
+        from models.config import ContextSearchConfig
+
+        settings = get_settings()
+        emb_model = settings.embedding_model
+        emb_dims = EMBEDDING_MODEL_REGISTRY.get(emb_model, (settings.embedding_dimensions, ""))[0]
+        db.add(
+            ContextSearchConfig(
+                context_id=ctx.id,
+                embedding_model=emb_model,
+                embedding_dimensions=emb_dims,
+                reinforce_enabled=False,
+            )
+        )
         await db.flush()
         await db.commit()
 

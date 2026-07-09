@@ -413,6 +413,9 @@ class ContextService:
                 reranker_model=cfg.reranker_model,
                 embedding_model=cfg.embedding_model,
                 embedding_dimensions=cfg.embedding_dimensions,
+                reinforce_enabled=cfg.reinforce_enabled,
+                reinforce_max_boost=float(cfg.reinforce_max_boost),
+                reinforce_require_host_arbitration=cfg.reinforce_require_host_arbitration,
             )
             if cfg is not None
             else None

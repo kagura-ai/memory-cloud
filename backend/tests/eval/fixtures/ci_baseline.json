@@ -1,0 +1,20 @@
+{
+  "_meta": {
+    "issue": "#1210",
+    "governance": "Update this file ONLY via a normal PR that justifies the intentional behavior change and links the issue that caused it. CI must never rewrite this file — auto-updating a baseline teaches the gate to accept regressions as the new normal.",
+    "sources": {
+      "update": "Archived campaign runs results/day5-update-run0..2-2026-07-03.json (mc_update update_success@10 = 0.92, vanilla 0.56) and the v0.43.1 dedup replication results/day5r-v0431-run0..2-2026-07-06.json (mc 0.88/0.84/0.80) — the floor is the minimum observed across archived judged runs; the vanilla band brackets the no-update-path coin flip (0.54-0.56 observed).",
+      "retrieval": "results/2026-06-10.json golden-corpus production-arm baseline (overall p@5 0.2133); the floor allows ~0.03 embedding-provider jitter."
+    }
+  },
+  "update": {
+    "k": 10,
+    "mc_update_success_min": 0.8,
+    "vr_update_success_band": [0.3, 0.78],
+    "stale_only_max": 0,
+    "llm_call_failures_max": 0
+  },
+  "retrieval": {
+    "overall_p5_min": 0.18
+  }
+}
