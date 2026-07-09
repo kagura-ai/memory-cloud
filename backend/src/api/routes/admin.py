@@ -1692,6 +1692,11 @@ async def recover_context(
             context_id=PyUUID(context_id),
             embedding_model=settings.embedding_model,
             embedding_dimensions=settings.embedding_dimensions,
+            # #1207: the lost row's setting is unknowable from Qdrant, so
+            # recovery pins the non-ranking-modifying value rather than the
+            # new-context default (recall ordering must not change as a side
+            # effect of disaster recovery). Re-enable via update_search_config.
+            reinforce_enabled=False,
         )
         db.add(new_config)
         await db.flush()

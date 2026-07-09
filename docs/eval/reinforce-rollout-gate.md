@@ -2,9 +2,18 @@
 
 The bounded **reinforce** recall re-rank (#1048) — adoption (`reference_count`,
 #1046) + retrieval feedback (#888) gently nudge a memory's recall standing —
-ships **default-off** per context (`ContextSearchConfig.reinforce_enabled`). This
-document defines the **eval gate** that decides whether enabling it on a context
-is safe, and the **staged rollout + monitoring** procedure that gate feeds.
+ships **default-on for newly created contexts** since #1207
+(`ContextSearchConfig.reinforce_enabled`; the pre-registered kagura-memory-eval
+program attributed the update-correctness headline, +0.36 over vanilla RAG
+BCa 95% [0.24, 0.50], entirely to this re-rank's cold-start recency prior).
+Contexts created **before** #1207 keep their stored setting — the flip rewrites
+no rows, and since config rows are auto-stamped at context creation (and were
+materialized by any past recall) under the old `false` default, **pre-existing
+contexts stay off after the upgrade**. Only the rare legacy context that never
+got a config row adopts the new default lazily when recall materializes the
+row. This document defines the **eval gate** that decides whether enabling the
+re-rank on such a pre-existing context is safe, and the **staged rollout +
+monitoring** procedure that gate feeds.
 
 The principle (from the milestone): *trust before integration*. Reinforce only
 goes live where an eval shows it helps the canonical answers **without** burying
@@ -58,7 +67,9 @@ only** (never fabricated) and **exits non-zero if the gate FAILS**. The harness:
 1. ingests `fixtures/reinforce_corpus.yaml` (15 memory docs, 10 queries × 2 populations);
 2. seeds adoption (`reference()` ×5) + net-helpful feedback (×3) on the canonical
    `meta.adopted_docs` — the rare docs stay untouched (zero-adoption);
-3. scores the **OFF** arm (default, no config row);
+3. scores the **OFF** arm (reinforce pinned off explicitly — since #1207 a
+   lazily-materialized config row defaults to enabled, so the runner can no
+   longer rely on "no config row yet");
 4. flips `reinforce_enabled = true`, `reinforce_max_boost = 0.15`;
 5. scores the **ON** arm and evaluates the gate.
 
@@ -76,8 +87,11 @@ the seed→OFF→ON→gate orchestration is pinned DB-free with fakes
 3. **Enable** via REST `PUT /api/v1/contexts/{id}/search-config`
    (`reinforce_enabled: true`) or the `update_search_config` MCP tool.
 4. **Monitor** the telemetry below; **disable** on regression.
-5. **Graduate** context-by-context. There is **no** blanket default-on
-   (out of scope, and would cross the #120 recall/explore boundary debate).
+5. **Graduate** context-by-context. There is **no** blanket rewrite of
+   pre-existing contexts. (#1207 later flipped the default for *newly created*
+   contexts on the strength of the pre-registered update-correctness eval;
+   the graduation procedure above remains the path for contexts that predate
+   it or that were explicitly opted out.)
 
 ## Monitoring (telemetry, #1069)
 
@@ -98,7 +112,9 @@ eval corpus, the log proves it still holds on live traffic.
 
 ## Out of scope
 
-- Blanket default-on across all contexts.
+- Blanket rewrite of pre-existing contexts' stored setting. (The *default for
+  new contexts* flipped to on in #1207 — evidence-driven, not blanket: existing
+  rows and explicit opt-outs are untouched.)
 - Tuning the bounded design or the #120 boundary (separate follow-up if the
   bounded nudge proves insufficient once felt in production).
 - The forge-resistance of the signal for untrusted autonomous agents — that is

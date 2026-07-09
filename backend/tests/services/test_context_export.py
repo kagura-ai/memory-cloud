@@ -68,6 +68,12 @@ def _cfg():
     c.reranker_model = "rerank-2"
     c.embedding_model = "text-embedding-3-small"
     c.embedding_dimensions = 512
+    # #1207: real attribute values (bare MagicMock attrs would be silently
+    # coerced by pydantic to True/1.0, making assertions vacuous). False
+    # mirrors an explicit opt-out that must survive the portability boundary.
+    c.reinforce_enabled = False
+    c.reinforce_max_boost = Decimal("0.15")
+    c.reinforce_require_host_arbitration = False
     return c
 
 
@@ -112,6 +118,11 @@ async def test_export_private_context_is_creator_scoped_and_serializes():
     assert out.search_config is not None
     assert out.search_config.semantic_weight == 0.6
     assert out.search_config.embedding_dimensions == 512
+    # #1207: an explicit opt-out must survive export — without these fields a
+    # re-created context would silently pick up the new default-on.
+    assert out.search_config.reinforce_enabled is False
+    assert out.search_config.reinforce_max_boost == 0.15
+    assert out.search_config.reinforce_require_host_arbitration is False
 
     # Private context => the memory query MUST carry a user_id (creator) filter
     # alongside context_id + the soft-delete guard.
