@@ -310,3 +310,83 @@ async def trigger_sleep_run(
             mode="json"
         ),
     )
+
+
+# ============================================================================
+# Per-merge undo (#1209)
+# ============================================================================
+
+
+class UndoMergeResponse(BaseModel):
+    """200 response for POST /admin/sleep/actions/{action_id}/undo-merge.
+
+    Attributes:
+        restored_memory_id: The merge loser brought back into recall.
+        winner_id: The merge winner (unchanged by the undo).
+        report_id: The sleep report whose audit log records both the merge
+            and this undo.
+        undone_action_id: The original merge action that was undone.
+    """
+
+    restored_memory_id: str
+    winner_id: str | None
+    report_id: str
+    undone_action_id: int
+
+
+_UNDO_ERROR_STATUS = {
+    "action_not_found": 404,
+    "memory_purged": 410,
+    "already_restored": 409,
+    "not_a_merge": 400,
+    "not_merge_deleted": 409,
+}
+
+
+@router.post(
+    "/actions/{action_id}/undo-merge",
+    response_model=UndoMergeResponse,
+    summary="Undo one dedup merge (restore the merged-away memory)",
+    responses={
+        400: {"description": "The action is not a dedup merge."},
+        404: {"description": "Action not found or not owned by the caller."},
+        409: {"description": "Memory already restored, or deleted by something else."},
+        410: {
+            "description": "The merge loser was hard-deleted by the retention "
+            "policy (sleep_merge_retention_days) — no longer restorable."
+        },
+    },
+)
+async def undo_merge(
+    action_id: int,
+    admin: AdminUser,
+    db: AsyncSession = Depends(get_db),
+) -> UndoMergeResponse:
+    """Restore the loser of ONE dedup merge — row and Qdrant vector (#1209).
+
+    Self-scoped like the manual sleep trigger: the merge's report must belong
+    to the calling admin. The undo is itself audited as an ``undo_merge``
+    action on the same sleep report, so the merge's full history reads out of
+    one audit log. Reversibility is bounded by the declared retention window;
+    a purged loser returns 410 with the setting named.
+    """
+    from services.sleep.undo import UndoMergeError, undo_merge_action
+
+    user_id = admin.get("user_id")
+    if not user_id:
+        raise MemoryCloudException(
+            message="Admin user id missing from session.",
+            status_code=500,
+            error_code="SLEEP-001",
+        )
+
+    try:
+        summary = await undo_merge_action(db, action_id, acting_user_id=user_id)
+    except UndoMergeError as exc:
+        raise MemoryCloudException(
+            message=exc.message,
+            status_code=_UNDO_ERROR_STATUS.get(exc.code, 400),
+            error_code=f"SLEEP-UNDO-{exc.code}",
+        ) from exc
+
+    return UndoMergeResponse(**summary)

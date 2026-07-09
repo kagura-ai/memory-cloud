@@ -62,6 +62,7 @@ def _make_mock_report(
     r.importance_result = None
     r.consolidation_result = {"success": True}
     r.reindex_result = {"success": True}
+    r.merge_retention_result = None  # #1209
     return r
 
 

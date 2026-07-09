@@ -26,7 +26,7 @@ from __future__ import annotations
 import random
 import string
 from datetime import datetime
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 from uuid import UUID
 
 if TYPE_CHECKING:
@@ -200,6 +200,13 @@ class DedupMergePhase:
         # #1195/#1198: newer-wins override counter (init here so
         # ``_judge_cluster`` can be unit-tested without execute()).
         self._winner_overrides: int = 0
+        # #1209: per-reason override breakdown ("recency" | "source") and
+        # per-decision audit metadata (merge_reason from the judge, override
+        # info), keyed by the FINAL (winner_id, loser_id). Kept beside the
+        # tuple-shaped decision lists so the public decision shape — which
+        # existing tests and call sites rely on — stays unchanged.
+        self._override_reasons: dict[str, int] = {}
+        self._decision_meta: dict[tuple[UUID, UUID], dict[str, Any]] = {}
 
     async def execute(
         self,
@@ -232,6 +239,9 @@ class DedupMergePhase:
         # #1195/#1198: LLM winner choices flipped by the deterministic
         # newer-wins post-check (each one is a judge misjudgment caught).
         self._winner_overrides = 0
+        # #1209: reset the per-reason breakdown + per-decision audit metadata.
+        self._override_reasons = {}
+        self._decision_meta = {}
         # #471: per-(provider, model) accumulator (lazy-init).
         self._llm_breakdown: LLMCallBreakdown | None = None
         # #475: reset embedding accumulators between sleep cycles.
@@ -335,6 +345,14 @@ class DedupMergePhase:
                 merged_count += 1
                 if reporter and report_id and winner and loser:
                     pair_key = tuple(sorted([winner_id, loser_id], key=str))
+                    # #1209: every merge is explainable and its inputs are
+                    # snapshotted — merge_reason (judge rationale or rule id),
+                    # override info (recency/source), and both sides'
+                    # provenance + recency keys, proving what the decision
+                    # (judge + deterministic rules) actually saw.
+                    meta = self._decision_meta.get((winner_id, loser_id), {})
+                    winner_recency = self._recency_key(winner)
+                    loser_recency = self._recency_key(loser)
                     await reporter.add_action(
                         report_id=report_id,
                         phase="dedup_merge",
@@ -346,6 +364,18 @@ class DedupMergePhase:
                             "winner_tags": list(winner.tags or []),
                             "loser_tags": list(loser.tags or []),
                             "loser_summary": (loser.summary or "")[:200],
+                            "merge_reason": meta.get("merge_reason", "unspecified"),
+                            "judge_confidence": meta.get("judge_confidence"),
+                            "winner_override": "override_reason" in meta,
+                            "override_reason": meta.get("override_reason"),
+                            "winner_source": getattr(winner, "source_type", None),
+                            "loser_source": getattr(loser, "source_type", None),
+                            "winner_recency": (
+                                f"{winner_recency:%Y-%m-%d %H:%M}" if winner_recency else None
+                            ),
+                            "loser_recency": (
+                                f"{loser_recency:%Y-%m-%d %H:%M}" if loser_recency else None
+                            ),
                         },
                     )
 
@@ -370,9 +400,11 @@ class DedupMergePhase:
             "merged": merged_count,
             "llm_call_failures": self._llm_failures,  # #1183
             # #1195/#1198: LLM winner picks flipped by the deterministic
-            # newer-wins post-check — a direct measure of residual judge
-            # misdirection the prompt alone would have let through.
+            # winner rules — a direct measure of residual judge misdirection
+            # the prompt alone would have let through.
             "winner_overrides": self._winner_overrides,
+            # #1209: per-rule breakdown ("recency" | "source") of the above.
+            "winner_override_reasons": dict(self._override_reasons),
         }
 
         result.llm_calls_used = budget.llm_calls_used - llm_calls_before
@@ -506,10 +538,11 @@ class DedupMergePhase:
                 budget,
                 config,
             )
-            # #1195/#1198: the LLM's winner is prompt-guided only — enforce
-            # newer-wins deterministically (rule-based path is correct by
-            # construction and needs no post-check).
-            decisions = self._enforce_newer_wins(decisions, cluster_memories)
+            # #1195/#1198/#1209: the LLM's winner is prompt-guided only —
+            # enforce newer-wins + the equal-recency source tie-break
+            # deterministically (rule-based path is correct by construction
+            # and needs no post-check).
+            decisions = self._enforce_winner_rules(decisions, cluster_memories)
         else:
             # Rule-based fallback
             decisions = self._rule_based_judge(cluster_memories, pair_scores)
@@ -544,13 +577,17 @@ class DedupMergePhase:
         # to pick the newer version of an updated fact as winner (#1195).
         # Minute precision so same-day update pairs stay orderable; max of
         # created_at/updated_at so in-place edits count as recency (#1198).
+        # source= is trusted #887 server-stamped provenance (#1209): the judge
+        # sees which side is human-authored ('manual') vs ingested, and the
+        # deterministic source tie-break is verifiable against it post-hoc.
         memory_lines = []
         for label, mem in zip(labels_shuffled, mems_shuffled, strict=True):
             recency = self._recency_key(mem)
             recency_s = f"{recency:%Y-%m-%d %H:%M}" if recency else "unknown"
+            source_s = getattr(mem, "source_type", None) or "unknown"
             memory_lines.append(
                 f"[{label}] type={mem.type}, importance={mem.importance:.2f}, "
-                f"last_updated={recency_s}\n"
+                f"last_updated={recency_s}, source={source_s}\n"
                 f"    summary:\n{wrap_untrusted_content(mem.summary)}"
             )
 
@@ -597,9 +634,21 @@ class DedupMergePhase:
         response: dict,
         label_to_id: dict[str, UUID],
     ) -> list[tuple[UUID, UUID]]:
-        """Parse LLM dedup response, validating all labels."""
+        """Parse LLM dedup response, validating all labels.
+
+        #1209: the judge's per-judgment ``reason`` (already part of the JSON
+        schema, previously discarded) is captured into ``_decision_meta`` so
+        every merge action is explainable in the audit log. Parsed leniently —
+        a missing/odd reason never invalidates an otherwise valid judgment.
+        """
+        self._ensure_audit_state()
         decisions: list[tuple[UUID, UUID]] = []
         judgments = response.get("judgments", [])
+        # #1209: dedupe judgments by canonical pair — a malformed response
+        # listing the same pair twice (same or reversed order) would
+        # double-merge AND cross-contaminate the audit metadata when the
+        # winner rules re-key a flipped decision.
+        seen_pairs: set[tuple[UUID, UUID]] = set()
 
         for j in judgments:
             if j.get("verdict") != "merge":
@@ -624,7 +673,25 @@ class DedupMergePhase:
                 continue
 
             loser_label = pair[0] if pair[1] == winner_label else pair[1]
-            decisions.append((label_to_id[winner_label], label_to_id[loser_label]))
+            decision = (label_to_id[winner_label], label_to_id[loser_label])
+            canonical = tuple(sorted(decision, key=str))
+            if canonical in seen_pairs:
+                logger.warning(
+                    "dedup_duplicate_judgment_skipped",
+                    pair=[str(decision[0]), str(decision[1])],
+                )
+                continue
+            seen_pairs.add(canonical)
+            decisions.append(decision)
+
+            reason = j.get("reason")
+            confidence = j.get("confidence")
+            self._decision_meta[decision] = {
+                "merge_reason": (str(reason)[:300] if reason else "unspecified"),
+                "judge_confidence": (
+                    float(confidence) if isinstance(confidence, (int, float)) else None
+                ),
+            }
 
         return decisions
 
@@ -651,30 +718,98 @@ class DedupMergePhase:
         o = cls._recency_key(other)
         return c is not None and o is not None and c > o
 
-    def _enforce_newer_wins(
+    @staticmethod
+    def _is_user_authored(mem: Memory) -> bool:
+        """#1209: 'manual' provenance = human-authored (#887 source_type)."""
+        return getattr(mem, "source_type", None) == "manual"
+
+    def _ensure_audit_state(self) -> None:
+        """Lazy-init the #1209 audit state.
+
+        Several unit tests construct the phase via ``__new__`` (bypassing
+        ``__init__``) to call individual judge methods — the audit state must
+        not make those methods construction-order dependent.
+        """
+        if not hasattr(self, "_decision_meta"):
+            self._decision_meta = {}
+        if not hasattr(self, "_override_reasons"):
+            self._override_reasons = {}
+        if not hasattr(self, "_winner_overrides"):
+            self._winner_overrides = 0
+
+    def _record_override(
+        self,
+        original: tuple[UUID, UUID],
+        flipped: tuple[UUID, UUID],
+        reason: str,
+    ) -> None:
+        """Count an override and re-key the decision's audit metadata."""
+        self._ensure_audit_state()
+        self._winner_overrides += 1
+        self._override_reasons[reason] = self._override_reasons.get(reason, 0) + 1
+        meta = self._decision_meta.pop(original, {})
+        meta["override_reason"] = reason
+        self._decision_meta[flipped] = meta
+        logger.warning(
+            "dedup_winner_overridden",
+            llm_winner_id=str(original[0]),
+            enforced_winner_id=str(flipped[0]),
+            override_reason=reason,
+        )
+
+    @classmethod
+    def _recency_minute(cls, mem: Memory) -> datetime | None:
+        """Recency key truncated to the minute — the precision the judge saw.
+
+        The prompt renders ``last_updated=`` at minute precision, so the
+        deterministic rules compare at the same precision: sub-minute deltas
+        are write-ordering noise, not a recency signal, and must neither
+        trigger the newer-wins flip nor defeat the source tie-break (#1209).
+        """
+        key = cls._recency_key(mem)
+        return key.replace(second=0, microsecond=0) if key else None
+
+    def _enforce_winner_rules(
         self,
         decisions: list[tuple[UUID, UUID]],
         cluster_memories: list[Memory],
     ) -> list[tuple[UUID, UUID]]:
-        """Deterministic post-check on LLM merge decisions (#1195/#1198).
+        """Deterministic post-checks on LLM merge decisions (#1195/#1198/#1209).
 
-        The prompt asks for newer-wins but cannot guarantee it — the judge
+        The prompt asks for these rules but cannot guarantee them — the judge
         picked the older memory in 10-18% of update pairs in the Day-5 eval.
-        The duplicate verdict is trusted; the direction is enforced: any
-        decision whose winner is strictly older than its loser is flipped.
+        The duplicate verdict is trusted; the direction is enforced, in order,
+        at MINUTE precision (matching the ``last_updated=`` signal the judge
+        was shown):
+
+        1. **Newer wins** (#1198): a winner strictly older (by minute) than
+           its loser is flipped ("recency" override).
+        2. **Human-authored wins at equal recency** (#1209): when the
+           minute-precision recency keys are EQUAL (including both-unknown),
+           a non-manual winner never deletes a manual (human-authored, #887
+           provenance) loser — the "trusted over ingested" tie-break.
+           Recency stays primary: this rule never fires when one side is
+           strictly newer ("source" override).
         """
         id_to_mem = {m.id: m for m in cluster_memories}
         corrected: list[tuple[UUID, UUID]] = []
         for winner_id, loser_id in decisions:
             winner = id_to_mem.get(winner_id)
             loser = id_to_mem.get(loser_id)
-            if winner is not None and loser is not None and self._is_newer(loser, winner):
-                self._winner_overrides += 1
-                logger.warning(
-                    "dedup_winner_overridden",
-                    llm_winner_id=str(winner_id),
-                    enforced_winner_id=str(loser_id),
-                )
+            if winner is None or loser is None:
+                corrected.append((winner_id, loser_id))
+                continue
+            winner_key = self._recency_minute(winner)
+            loser_key = self._recency_minute(loser)
+            if winner_key is not None and loser_key is not None and loser_key > winner_key:
+                self._record_override((winner_id, loser_id), (loser_id, winner_id), "recency")
+                corrected.append((loser_id, winner_id))
+            elif (
+                winner_key == loser_key
+                and self._is_user_authored(loser)
+                and not self._is_user_authored(winner)
+            ):
+                self._record_override((winner_id, loser_id), (loser_id, winner_id), "source")
                 corrected.append((loser_id, winner_id))
             else:
                 corrected.append((winner_id, loser_id))
@@ -686,6 +821,7 @@ class DedupMergePhase:
         pair_scores: dict[tuple[UUID, UUID], float],
     ) -> list[tuple[UUID, UUID]]:
         """Rule-based dedup: auto-merge only at very high similarity."""
+        self._ensure_audit_state()
         decisions: list[tuple[UUID, UUID]] = []
         ids = [m.id for m in cluster_memories]
         id_to_mem = {m.id: m for m in cluster_memories}
@@ -705,13 +841,19 @@ class DedupMergePhase:
                     mem_a = id_to_mem[id_a]
                     mem_b = id_to_mem[id_b]
                     if mem_a.importance > mem_b.importance:
-                        decisions.append((id_a, id_b))
+                        decision = (id_a, id_b)
                     elif mem_b.importance > mem_a.importance:
-                        decisions.append((id_b, id_a))
+                        decision = (id_b, id_a)
                     elif self._is_newer(mem_b, mem_a):
-                        decisions.append((id_b, id_a))
+                        decision = (id_b, id_a)
                     else:
-                        decisions.append((id_a, id_b))
+                        decision = (id_a, id_b)
+                    decisions.append(decision)
+                    # #1209: rule-path merges are explainable too.
+                    self._decision_meta[decision] = {
+                        "merge_reason": f"rule:cosine>={AUTO_MERGE_THRESHOLD}",
+                        "judge_confidence": None,
+                    }
 
         return decisions
 

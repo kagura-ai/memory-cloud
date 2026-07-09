@@ -56,6 +56,7 @@ def _report_to_detail(report: Any) -> dict[str, Any]:
             "importance_result": report.importance_result,
             "consolidation_result": report.consolidation_result,
             "reindex_result": report.reindex_result,
+            "merge_retention_result": report.merge_retention_result,
         }
     )
     return summary
@@ -95,34 +96,21 @@ async def _re_embed_to_qdrant(
     context_id: str,
     collection_name: str,
 ) -> None:
-    """Re-embed a restored memory back into Qdrant."""
-    from db.qdrant import add_memory_to_qdrant
+    """Re-embed a restored memory back into Qdrant.
 
-    vector = await embedding_svc.embed(
-        memory.summary or "",
-        user_id=user_id,
-        context_id=context_id,
-        workspace_id=workspace_id,
-    )
-    payload = {
-        "user_id": user_id,
-        "summary": memory.summary,
-        "context_summary": memory.context_summary or "",
-        "type": memory.type,
-        "importance": memory.importance,
-        "scope": memory.scope,
-        "tags": memory.tags or [],
-        "created_at": (memory.created_at.isoformat() + "Z" if memory.created_at else None),
-        "updated_at": (memory.updated_at.isoformat() + "Z" if memory.updated_at else None),
-    }
-    await add_memory_to_qdrant(
-        user_id=user_id,
-        memory_id=memory.id,
-        vector=vector,
-        payload=payload,
-        workspace_id=workspace_id,
-        context_id=context_id,
-        collection_name=collection_name,
+    #1209: thin wrapper over the shared restore helper in
+    ``services.sleep.undo`` so run-level rollback and per-merge undo cannot
+    drift in how they rebuild the vector.
+    """
+    from services.sleep.undo import re_embed_memory_to_qdrant
+
+    await re_embed_memory_to_qdrant(
+        memory,
+        user_id,
+        embedding_svc,
+        workspace_id,
+        context_id,
+        collection_name,
     )
 
 
@@ -379,7 +367,7 @@ async def handle_rollback_sleep_run(
 
                     elif action.action_type == "merge":
                         if action.target_id:
-                            await db.execute(
+                            restore_result = await db.execute(
                                 sa_update(Memory)
                                 .where(
                                     Memory.id == action.target_id,
@@ -388,7 +376,19 @@ async def handle_rollback_sleep_run(
                                 .values(deleted_at=None, deleted_by=None)
                             )
                             loser = memory_cache.get(action.target_id)
-                            if loser:
+                            # #1209: a loser hard-deleted by the merge
+                            # retention window matches 0 rows — record it as
+                            # an error instead of a phantom "reversed" (the
+                            # per-merge undo path returns 410 for the same
+                            # state; run-level rollback must not report a
+                            # restore that never happened).
+                            if restore_result.rowcount == 0 or loser is None:
+                                rollback_summary["errors"].append(
+                                    f"merge loser {action.target_id} not restorable — "
+                                    "purged by the retention policy "
+                                    "(sleep_merge_retention_days)"
+                                )
+                            else:
                                 await _re_embed_to_qdrant(
                                     loser,
                                     user_id,
@@ -397,7 +397,7 @@ async def handle_rollback_sleep_run(
                                     ctx_id_str,
                                     collection_name,
                                 )
-                            rollback_summary["merges_reversed"] += 1
+                                rollback_summary["merges_reversed"] += 1
 
                     elif action.action_type == "update_importance":
                         details = action.details or {}

@@ -253,6 +253,10 @@ class NeuralMemoryConfig:
     sleep_max_llm_calls_per_run: int = 50  # LLM call budget per run
     sleep_dedup_enabled: bool = True  # Phase 2 on/off
     sleep_dedup_similarity_threshold: float = 0.92  # Cosine similarity for dedup
+    # #1209: merge-loser retention window in days. 0 = disabled = retain
+    # forever (pre-#1209 behavior). When > 0 the merge_retention phase
+    # hard-deletes losers past the window; undo/rollback only work inside it.
+    sleep_merge_retention_days: int = 0
     sleep_edge_discovery_enabled: bool = True  # Phase 1 on/off
     sleep_edge_discovery_sample_size: int = 30  # Memories sampled per run
     sleep_importance_reeval_enabled: bool = True  # Phase 3 on/off
@@ -458,6 +462,11 @@ class NeuralMemoryConfig:
                 f"sleep_dedup_similarity_threshold must be in [0.5, 1.0], "
                 f"got {self.sleep_dedup_similarity_threshold}"
             )
+        if self.sleep_merge_retention_days < 0:
+            raise ValueError(
+                f"sleep_merge_retention_days must be >= 0 (0 = retain forever), "
+                f"got {self.sleep_merge_retention_days}"
+            )
         if not self.sleep_edge_discovery_sample_size > 0:
             raise ValueError(
                 f"sleep_edge_discovery_sample_size must be positive, "
@@ -593,6 +602,7 @@ class NeuralMemoryConfig:
             sleep_max_llm_calls_per_run=get_int("SLEEP_MAX_LLM_CALLS_PER_RUN", 50),
             sleep_dedup_enabled=get_bool("SLEEP_DEDUP_ENABLED", True),
             sleep_dedup_similarity_threshold=get_float("SLEEP_DEDUP_SIMILARITY_THRESHOLD", 0.92),
+            sleep_merge_retention_days=get_int("SLEEP_MERGE_RETENTION_DAYS", 0),
             sleep_edge_discovery_enabled=get_bool("SLEEP_EDGE_DISCOVERY_ENABLED", True),
             sleep_edge_discovery_sample_size=get_int("SLEEP_EDGE_DISCOVERY_SAMPLE_SIZE", 30),
             sleep_importance_reeval_enabled=get_bool("SLEEP_IMPORTANCE_REEVAL_ENABLED", True),
@@ -828,6 +838,10 @@ class NeuralMemoryConfig:
             sleep_dedup_similarity_threshold=configs.get(
                 "sleep_dedup_similarity_threshold",
                 base_config.sleep_dedup_similarity_threshold,
+            ),
+            sleep_merge_retention_days=configs.get(
+                "sleep_merge_retention_days",
+                base_config.sleep_merge_retention_days,
             ),
             sleep_edge_discovery_enabled=configs.get(
                 "sleep_edge_discovery_enabled", base_config.sleep_edge_discovery_enabled

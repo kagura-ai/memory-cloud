@@ -59,9 +59,19 @@ Finds missing edges between related memories using medium-similarity Qdrant sear
 
 Detects and merges duplicate memories by clustering high-similarity neighbors.
 
-- **Algorithm**: per-memory high-similarity search → build candidate pairs → Union-Find clustering (cluster size capped at 5 to prevent runaway merges) → LLM batch judgment (`merge` / `keep_both`) in LLM mode, or auto-merge at similarity ≥ 0.98 in non-LLM mode → keep winner, soft-delete losers, transfer edges, merge tags.
+- **Algorithm**: per-memory high-similarity search → build candidate pairs → Union-Find clustering (cluster size capped at 5 to prevent runaway merges) → LLM batch judgment (`merge` / `keep_both`) in LLM mode, or auto-merge at similarity ≥ 0.98 in non-LLM mode → deterministic winner rules → keep winner, soft-delete losers, transfer edges, merge tags.
+- **Deterministic winner rules** (applied to every LLM decision; the duplicate verdict is trusted, the direction is enforced): **newer wins** (#1198 — the recency-aware veto that closed the stale-deletion failure mode found at 10–18% in the eval program), and at **equal recency, human-authored wins** (#1209 — a `source_type='manual'` memory never loses to ingested content on a tie). Overrides are counted in the report (`winner_overrides`, with a per-rule `winner_override_reasons` breakdown).
+- **Audit** (#1209): every merge writes a `sleep_actions` entry carrying `merge_reason` (the judge's rationale, or the rule id on the non-LLM path), override info, both sides' `source_type` provenance and recency keys — every merge is explainable and its decision inputs are snapshotted.
 - **LLM**: yes (optional).
-- **Side effects**: soft-deletes losers in PostgreSQL and removes them from Qdrant.
+- **Side effects**: soft-deletes losers in PostgreSQL and removes them from Qdrant (vectors are rebuilt on undo/rollback).
+
+### Phase 2.5 — Merge Retention (#1209)
+
+Hard-deletes merge losers whose soft-deletion is older than the declared retention window — destructive deletion as an explicit, telemetered second step, never a side effect of the merge itself.
+
+- **Default**: `sleep_merge_retention_days = 0` — **disabled, retain forever**. Merges stay reversible indefinitely unless an operator declares a window.
+- **When enabled**: losers past the window are purged and the run records one batch-summary `purge` action (`purged`, `retention_days`, `cutoff`). Per-merge undo and run rollback are only possible **inside** the window; the undo API returns 410 naming this setting once a loser is purged.
+- **LLM**: no.
 
 ### Phase 3 — Importance Re-evaluation
 
@@ -196,6 +206,10 @@ running  →  completed | failed | cancelled | rolled_back
 
 Restored memories are re-embedded back into Qdrant. On full success the report moves to `rolled_back`; if any action fails to reverse, the report is marked `failed` and the partial state is recorded in the audit log.
 
+### Per-merge undo (#1209)
+
+`rollback_sleep_run` reverses a whole run; the correction loop for a single bad merge is `POST /admin/sleep/actions/{action_id}/undo-merge` — it restores just that merge's loser (row **and** Qdrant vector) and appends an `undo_merge` action to the same report, so the merge's full history (merge → undo) reads out of one audit log. Self-scoped like the manual trigger. Error contract: `400` the action is not a dedup merge, `404` unknown/unowned action, `409` already restored (or deleted by something other than sleep), `410` the loser was purged by the retention window (`sleep_merge_retention_days`) — reversibility is bounded by the declared window, and the bound is named, never silent.
+
 ## Admin UI
 
 - **Sleep Reports list + detail** — `frontend/src/app/(authenticated)/admin/sleep-reports/` renders the `/admin/sleep-reports` REST endpoints as a browsable report explorer with per-action drilldown.
@@ -212,6 +226,7 @@ All Sleep-specific settings live under the Sleep category of Neural Config (`bac
 | `sleep_max_memories_per_run`  | Upper bound on memories touched per context per run.           |
 | `sleep_max_llm_calls_per_run` | Upper bound on LLM calls per context per run (budget cap).     |
 | `sleep_dedup_enabled`         | Master toggle for Phase 2.                                     |
+| `sleep_merge_retention_days`  | Merge-loser purge window (#1209). `0` = retain forever.        |
 | `sleep_edge_discovery_enabled`| Master toggle for Phase 1.                                     |
 | `sleep_importance_reeval_enabled` | Master toggle for Phase 3.                                 |
 | `sleep_consolidation_enabled` | Master toggle for Phase 4.                                     |

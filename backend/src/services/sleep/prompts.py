@@ -99,9 +99,17 @@ override last_updated=. Never pick the outdated version as winner; if \
 you cannot tell which version is newer, mark the pair "keep_both".
 - Otherwise, if one memory is a strict subset of the other, they are \
 duplicates. Keep the more complete one.
+- When the last_updated= values are EQUAL and the memories are otherwise \
+tied, prefer the human-authored version as winner: source=manual is \
+server-stamped provenance (a person wrote it); other source= values are \
+ingested content. Never let an ingested duplicate delete a human-authored \
+memory on a tie. Recency still takes precedence: a strictly newer ingested \
+version beats an older manual one.
 - Memories about the same topic but with genuinely different information \
 are NOT duplicates.
 - When in doubt, mark as "keep_both" — false merges lose information.
+- Always fill "reason" with a brief, specific justification for the \
+verdict and winner choice — it is persisted to the merge audit log.
 
 You MUST respond with valid JSON only.
 
@@ -110,7 +118,8 @@ You MUST respond with valid JSON only.
 
 DEDUP_JUDGE_USER = """\
 Analyze these memory pairs for duplicates. Each memory has a label (A, B, C...), \
-a last-updated timestamp (last_updated=), and a summary.
+a last-updated timestamp (last_updated=), a provenance marker (source=), and a \
+summary.
 
 Memories:
 {memories}

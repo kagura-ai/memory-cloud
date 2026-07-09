@@ -398,6 +398,8 @@ class SleepReporter:
                 report.edge_discovery_result = phase_data
             elif result.phase_name == "dedup_merge":
                 report.dedup_result = phase_data
+            elif result.phase_name == "merge_retention":
+                report.merge_retention_result = phase_data
             elif result.phase_name == "importance_reeval":
                 report.importance_result = phase_data
             elif result.phase_name == "consolidation":

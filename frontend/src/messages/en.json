@@ -2747,6 +2747,7 @@
         "sleep_max_llm_calls_per_run": "Max LLM API calls per sleep run",
         "sleep_dedup_enabled": "Enable dedup/merge phase",
         "sleep_dedup_similarity_threshold": "Cosine similarity threshold for duplicate detection",
+        "sleep_merge_retention_days": "Merge-loser purge window in days (0 = retain forever)",
         "sleep_edge_discovery_enabled": "Enable edge discovery phase",
         "sleep_edge_discovery_sample_size": "Number of memories to sample per edge discovery run",
         "sleep_importance_reeval_enabled": "Enable importance re-evaluation phase"
