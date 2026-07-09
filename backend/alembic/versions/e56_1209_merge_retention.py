@@ -25,7 +25,7 @@ from alembic import op
 
 # revision identifiers
 revision = "e56_1209_merge_retention"
-down_revision = "e54_1183_sleep_status_degraded"
+down_revision = "e55_1207_reinforce_default_on"
 branch_labels = None
 depends_on = None
 
