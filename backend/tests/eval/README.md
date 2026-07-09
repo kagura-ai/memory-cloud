@@ -21,13 +21,47 @@ An **offline harness** for detecting hybrid-search (dense + BM25) retrieval-qual
 | `tools/stratify.py` | Difficulty stratification (IDF-spec, BM25-rank, corpus-overlap) | ✅ (`test_stratification.py`) |
 | `test_corpus_schema.py` | Structural contract (buckets, labels, sources) | ✅ |
 | `compounding.py` | Pure #969 experiment logic: replay plan, companion-recovery metric, lift table, gate audit | ✅ (`test_compounding.py`) |
-| `test_retrieval_quality.py` + `runner.py` | **Live** multi-arm P@5/MRR/nDCG measurement → `results/<date>.json` | ❌ skip-guarded |
+| `test_retrieval_quality.py` + `runner.py` | **Live** multi-arm P@5/MRR/nDCG measurement → `results/<date>.json` | 🌙 nightly (`eval-nightly.yml`) |
 | `test_compounding_live.py` + `replay_runner.py` | **Live** cold→replay→warm compounding experiment (#969) → `results/compounding-<date>.json` | ❌ skip-guarded |
+| `update_runner.py` | **Live** H4 update-correctness experiment (update-slice) → `results/<label>-<date>.json` | 🌙 nightly (`eval-nightly.yml`) |
+| `ci_gates.py` + `fixtures/ci_baseline.json` | #1210 contract gates over live results (claims → contracts) | ✅ (`test_ci_gates.py`) + 🌙 nightly |
 
 The deterministic layer (everything but the live rows) is pure token analysis and
-runs in normal CI. The live measurements need Postgres + Qdrant + Redis + an
-embedding provider + Sudachi, which is **not currently CI-realistic** (#336
-unscheduled), so they are skip-guarded behind `KAGURA_EVAL_LIVE=1`.
+runs in normal CI (`backend-unit`). The live measurements need Postgres + Qdrant +
+Redis + an embedding provider + Sudachi; since #1210 the update-slice and
+retrieval slices run **nightly** via `.github/workflows/eval-nightly.yml`
+(secret-gated on `OPENAI_API_KEY`; fork clones and secret-less runs exit neutral).
+Locally they remain skip-guarded behind `KAGURA_EVAL_LIVE=1`.
+
+## Claims → contracts (#1210)
+
+Every headline number from the eval program is a standing contract the nightly
+workflow re-measures. Defined in `ci_gates.py`, bounded by
+`fixtures/ci_baseline.json`:
+
+| Contract | Bound | Why |
+|---|---|---|
+| `update.stale_only_zero` | 0 | the #1195 failure mode (judged merge deletes the CURRENT fact) stays extinct; hard even with a flaky judge — the #1198 veto is deterministic |
+| `update.mc_update_success_floor` | ≥ 0.80 | headline metric floor = min across archived judged runs |
+| `update.vr_sanity_band` | [0.30, 0.78] | the no-update-path vanilla arm stays a coin flip; drift = broken harness/corpus |
+| `update.llm_call_failures_zero` | 0 | silent judge death (#1177) cannot hide behind a green run |
+| `retrieval.overall_p5_floor` | ≥ 0.18 | golden-corpus drift signal with embedding-jitter margin |
+
+Rules:
+
+- **Three-value gate**: PASS (0) / BREACH (1, the only red) / INFRA (3 —
+  measurement unavailable; the workflow warns and files an `eval-infra` issue
+  instead of a false red).
+- **Staged promotion** (#336 pattern): gate mode comes from the
+  `EVAL_GATES_MODE` repo variable — `advisory` (report only) for the first
+  soak week, flip to `blocking` once flakiness < 1%.
+- **Baseline governance**: `fixtures/ci_baseline.json` is updated ONLY via a
+  normal PR that justifies the intentional change and links its issue. CI
+  never rewrites the baseline — auto-updating teaches the gate to accept
+  regressions as the new normal.
+- Breaches/infra auto-file (or comment on) a tracking issue labeled
+  `eval-regression` / `eval-infra` — nightly failures must not depend on
+  someone watching the Actions tab.
 
 ## Running
 
@@ -38,6 +72,12 @@ cd backend && pytest tests/eval/ -m "not asyncio" -q   # all deterministic gates
 
 # Live retrieval measurement (needs the stack up: make up):
 make eval-retrieval              # sets KAGURA_EVAL_LIVE=1, writes results/<date>.json
+
+# Live update-correctness measurement (needs the stack up: make up):
+make eval-update                 # writes results/update-<date>.json
+
+# Contract gates over the newest update results (0=pass 1=breach 3=infra):
+make eval-ci-gates
 
 # Live compounding experiment (#969, needs the stack up: make up):
 make eval-compounding            # writes results/compounding-<date>.json

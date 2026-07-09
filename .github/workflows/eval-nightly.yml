@@ -1,0 +1,251 @@
+# Nightly eval contract gates (#1210) — claims become contracts.
+#
+# The kagura-memory-eval program's headline numbers (update_success@10,
+# stale_only 0 post-#1198) were protected by nothing but memory. This
+# workflow re-measures them on the frozen corpora every night and fails
+# on contract breach (see backend/tests/eval/ci_gates.py for the contract
+# definitions and backend/tests/eval/fixtures/ci_baseline.json for the
+# pinned baseline + its governance rule).
+#
+# Design (gate1/COO, #1210):
+# - Secret-gated: needs OPENAI_API_KEY (embeddings + a small Sleep judge).
+#   Scheduled runs on main have repo secrets; fork PRs never trigger this
+#   workflow. Without the secret the run exits neutral with a notice.
+# - Three-value gate: PASS / BREACH (red) / INFRA (measurement unavailable —
+#   warn + file an infra issue, never a false red).
+# - Staged promotion (#336 pattern): the gate mode comes from the repo
+#   variable EVAL_GATES_MODE (advisory | blocking), default advisory for the
+#   first soak week. Flip the variable to "blocking" after flakiness < 1%.
+# - Failure visibility: breaches/infra auto-file (or comment on) a tracking
+#   issue — scheduled failures must not rely on someone watching the Actions
+#   tab.
+
+name: eval-nightly
+
+on:
+  schedule:
+    - cron: "17 17 * * *" # 02:17 JST
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: "Gate mode (use-repo-var honors the EVAL_GATES_MODE repo variable — the UI preselects the first choice, so the sentinel must come first or manual re-runs of a blocking breach would silently evaluate as advisory)"
+        type: choice
+        options: [use-repo-var, advisory, blocking]
+        default: use-repo-var
+        required: false
+
+concurrency:
+  group: eval-nightly
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+  issues: write
+
+jobs:
+  eval-nightly:
+    # Fork clones inherit the schedule; never run (or burn minutes) there.
+    if: github.repository == 'kagura-ai/memory-cloud'
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    services:
+      postgres:
+        image: postgres:15-alpine
+        env:
+          POSTGRES_USER: kagura
+          POSTGRES_PASSWORD: kagura_dev_password
+          POSTGRES_DB: kagura_eval
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U kagura -d kagura_eval"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+      redis:
+        image: redis:7-alpine
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+      qdrant:
+        # No --health-cmd: the qdrant image ships no shell utilities usable
+        # for container-side health probes; the "Wait for Qdrant" step below
+        # polls /readyz from the host instead.
+        image: qdrant/qdrant:v1.15.0
+        ports:
+          - 6333:6333
+
+    env:
+      DATABASE_URL: postgresql+asyncpg://kagura:kagura_dev_password@localhost:5432/kagura_eval
+      QDRANT_URL: http://localhost:6333
+      REDIS_URL: redis://localhost:6379
+      OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+      EMBEDDING_MODEL: text-embedding-3-small
+      EMBEDDING_DIMENSIONS: "512"
+      SLEEP_LLM_PROVIDER: openai
+      # Small judge tier; override via repo variable without editing the workflow.
+      SLEEP_LLM_MODEL: ${{ vars.EVAL_SLEEP_LLM_MODEL || 'gpt-5-nano' }}
+      KAGURA_EVAL_LIVE: "1"
+
+    steps:
+      - name: Check secrets
+        id: check
+        run: |
+          if [ -z "$OPENAI_API_KEY" ]; then
+            echo "::notice::OPENAI_API_KEY not available — eval-nightly skipped (secret-gated)."
+            echo "ok=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "ok=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - uses: actions/checkout@v4
+        if: steps.check.outputs.ok == 'true'
+
+      - uses: actions/setup-python@v5
+        if: steps.check.outputs.ok == 'true'
+        with:
+          python-version: "3.11"
+          cache: pip
+          cache-dependency-path: backend/pyproject.toml
+
+      - name: Install dependencies
+        if: steps.check.outputs.ok == 'true'
+        run: cd backend && pip install -e ".[dev]"
+
+      - name: Wait for Qdrant
+        if: steps.check.outputs.ok == 'true'
+        run: |
+          for i in $(seq 1 30); do
+            if curl -fs http://localhost:6333/readyz >/dev/null; then
+              echo "qdrant up"; exit 0
+            fi
+            sleep 2
+          done
+          echo "Qdrant did not become ready within 60s" >&2
+          exit 1
+
+      - name: Run migrations
+        if: steps.check.outputs.ok == 'true'
+        run: cd backend && alembic upgrade head
+
+      - name: Run update-slice eval (retry once on infra failure)
+        id: update
+        if: steps.check.outputs.ok == 'true'
+        run: |
+          cd backend
+          rm -f tests/eval/results/ci-nightly-update-*.json
+          for attempt in 1 2; do
+            if PYTHONPATH=src:. python -m tests.eval.update_runner \
+                --corpus tests/eval/fixtures/update_slice.yaml \
+                --label ci-nightly-update; then
+              break
+            fi
+            echo "::warning::update-slice runner failed (attempt $attempt)"
+            sleep 30
+          done
+          RESULT=$(ls -t tests/eval/results/ci-nightly-update-*.json 2>/dev/null | head -1 || true)
+          echo "result=$RESULT" >> "$GITHUB_OUTPUT"
+
+      - name: Run retrieval eval (retry once on infra failure)
+        id: retrieval
+        if: steps.check.outputs.ok == 'true'
+        run: |
+          cd backend
+          rm -f tests/eval/results/ci-nightly-retrieval-*.json
+          for attempt in 1 2; do
+            if PYTHONPATH=src:. python -m tests.eval.runner --label ci-nightly-retrieval; then
+              break
+            fi
+            echo "::warning::retrieval runner failed (attempt $attempt)"
+            sleep 30
+          done
+          RESULT=$(ls -t tests/eval/results/ci-nightly-retrieval-*.json 2>/dev/null | head -1 || true)
+          echo "result=$RESULT" >> "$GITHUB_OUTPUT"
+
+      - name: Evaluate contracts
+        id: gates
+        if: steps.check.outputs.ok == 'true'
+        # Step outputs are bound via env (never interpolated into the script
+        # body) so a maliciously named file under results/ cannot inject shell.
+        env:
+          UPDATE_RESULT: ${{ steps.update.outputs.result }}
+          RETRIEVAL_RESULT: ${{ steps.retrieval.outputs.result }}
+          # use-repo-var (the dispatch default) falls through to the repo
+          # variable, which falls through to advisory. Schedule events have no
+          # inputs (null-safe: the != comparison is false, chain falls through).
+          GATE_MODE: ${{ (github.event.inputs.mode != 'use-repo-var' && github.event.inputs.mode) || vars.EVAL_GATES_MODE || 'advisory' }}
+        run: |
+          cd backend
+          # --require makes a crashed runner (no results file) INFRA — a
+          # missing slice must never yield a shortened-but-green table.
+          ARGS=(--baseline tests/eval/fixtures/ci_baseline.json --mode "$GATE_MODE" --require update,retrieval)
+          [ -n "$UPDATE_RESULT" ] && ARGS+=(--update "$UPDATE_RESULT")
+          [ -n "$RETRIEVAL_RESULT" ] && ARGS+=(--retrieval "$RETRIEVAL_RESULT")
+          set +e
+          PYTHONPATH=src:. python -m tests.eval.ci_gates "${ARGS[@]}"
+          CODE=$?
+          set -e
+          echo "exit_code=$CODE" >> "$GITHUB_OUTPUT"
+          if [ "$CODE" -eq 3 ]; then
+            echo "::warning::eval measurement unavailable (INFRA) — contracts not evaluated"
+            echo "infra=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          exit "$CODE"
+
+      - name: Upload results artifact
+        if: always() && steps.check.outputs.ok == 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: eval-nightly-results
+          path: backend/tests/eval/results/ci-nightly-*.json
+          if-no-files-found: ignore
+          retention-days: 90
+
+      - name: File or update tracking issue on breach/infra
+        # Fires on: hard failure (blocking breach or unexpected error), gate
+        # INFRA, or an ADVISORY breach (exit 0 but breach output true) — the
+        # visibility contract: breaches never rely on someone watching the
+        # Actions tab, even during the advisory soak week.
+        if: >-
+          always() && steps.check.outputs.ok == 'true' &&
+          (failure() || steps.gates.outputs.infra == 'true' ||
+           steps.gates.outputs.breach == 'true')
+        uses: actions/github-script@v7
+        env:
+          GATES_EXIT_CODE: ${{ steps.gates.outputs.exit_code }}
+          GATES_BREACH: ${{ steps.gates.outputs.breach }}
+        with:
+          script: |
+            // A contract breach (blocking exit 1, or advisory breach=true) is
+            // labeled eval-regression; every other failure (pip/qdrant/
+            // migrations/runner crash, gate INFRA) is an infrastructure
+            // problem and must not be reported as a product regression
+            // ("never a false red").
+            const breach = process.env.GATES_EXIT_CODE === '1'
+              || process.env.GATES_BREACH === 'true';
+            const label = breach ? 'eval-regression' : 'eval-infra';
+            const title = breach
+              ? 'eval-nightly: contract breach'
+              : 'eval-nightly: measurement unavailable (infra)';
+            const runUrl = `${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}`;
+            const body = `Scheduled eval run: ${runUrl}\n\nSee the run's step summary for the contract table (#1210).`;
+            const existing = await github.rest.issues.listForRepo({
+              owner: context.repo.owner, repo: context.repo.repo,
+              state: 'open', labels: label, per_page: 1,
+            });
+            if (existing.data.length > 0) {
+              await github.rest.issues.createComment({
+                owner: context.repo.owner, repo: context.repo.repo,
+                issue_number: existing.data[0].number, body,
+              });
+            } else {
+              await github.rest.issues.create({
+                owner: context.repo.owner, repo: context.repo.repo,
+                title, body, labels: [label],
+              });
+            }
