@@ -45,6 +45,7 @@ import {
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
 import {
+  Activity,
   Brain,
   Key,
   Settings,
@@ -253,6 +254,13 @@ const navigationGroups: NavGroup[] = [
         nameKey: "sleepReports",
         href: "/admin/sleep-reports",
         icon: Moon,
+        requiredRole: Role.ADMIN,
+      },
+      {
+        // Issue #1211: consolidated memory-health report
+        nameKey: "memoryHealth",
+        href: "/admin/memory-health",
+        icon: Activity,
         requiredRole: Role.ADMIN,
       },
       {
