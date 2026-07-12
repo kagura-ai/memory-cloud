@@ -6,16 +6,15 @@ Existing rows and new rows both land on 'off' — zero behavior change at
 migration time; the router only runs on contexts an operator opts in.
 
 MIGRATION COORDINATION (v0.45.0): e55 (#1215), e56 (#1217), e57 (#1218) and
-this e58 ALL chain from e54 on their respective unmerged branches. Whichever
-PR merges later MUST bump ``down_revision`` to the then-current head (e.g. if
-e55/e56/e57 merge first, this becomes ``down_revision = "e57_1208_..."``).
-Alembic fails loudly on multiple heads, so a miss cannot ship silently.
+this e58 ALL chained from e54 on their respective branches. e55/e56/e57
+merged first, so this revision was re-chained onto e57 (the then-current
+head) at merge time, per the plan in epic #1214.
 
 Blue-green safety: ADD COLUMN with a server_default is metadata-only on
 PG 11+ (no table rewrite); old app code never references the column.
 
 Revision ID: e58_1212_routing_mode
-Revises: e54_1183_sleep_status_degraded
+Revises: e57_1208_supersedes_contradicts
 """
 
 import sqlalchemy as sa
@@ -24,7 +23,7 @@ from alembic import op
 
 # revision identifiers
 revision = "e58_1212_routing_mode"
-down_revision = "e54_1183_sleep_status_degraded"
+down_revision = "e57_1208_supersedes_contradicts"
 branch_labels = None
 depends_on = None
 
