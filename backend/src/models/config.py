@@ -15,15 +15,25 @@ from sqlalchemy import (
     Boolean,
     CheckConstraint,
     DateTime,
+    Float,
     ForeignKey,
+    Index,
     Integer,
     String,
+    text,
 )
 from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.orm import Mapped, mapped_column
 from sqlalchemy.sql import func
 
 from db.base import Base
+
+# Router calibration vocabulary (#1220). Buckets are the classifier's lane
+# decisions; arms are the retrieval strategies measured against each bucket.
+ROUTER_CALIBRATION_BUCKETS = ("keyword", "semantic", "hybrid")
+ROUTER_CALIBRATION_ARMS = ("keyword", "semantic", "hybrid", "routed")
+ROUTER_CALIBRATION_SOURCE_FROZEN = "frozen_corpus"
+ROUTER_CALIBRATION_SOURCE_LIVE = "live_traffic"
 
 
 class ConfigOverride(Base):
@@ -187,5 +197,111 @@ class ContextSearchConfig(Base):
             f"use_rerank={self.use_rerank}, "
             f"provider={self.reranker_provider}, "
             f"model={self.reranker_model}"
+            f")>"
+        )
+
+
+class RouterCalibration(Base):
+    """Per-bucket router arm performance (#1220 stage 4).
+
+    One row = one (bucket, arm) measurement: how one retrieval strategy
+    performed on the queries the classifier routes to one lane. Rows with
+    ``context_id IS NULL`` are the fleet defaults measured on the frozen
+    eval corpus (written by ``tests.eval.router_gate_runner``); rows with a
+    ``context_id`` let managed-cloud tuning diverge per context from
+    live-traffic measurements without touching the self-host defaults —
+    the same NULL-vs-non-NULL keying as ``embedding_calibrations``.
+
+    Attributes:
+        id: Primary key.
+        context_id: Context scope; NULL = fleet default (frozen corpus).
+        bucket: Classifier lane the measured queries were routed to.
+        arm: Retrieval strategy measured on that bucket.
+        p_at_5: Mean P@5 of the arm on the bucket.
+        mrr_at_10: MRR@10 of the arm on the bucket.
+        n_queries: Number of queries behind the measurement.
+        source: Where the measurement came from (frozen_corpus | live_traffic).
+        sampled_at: When the measurement was taken.
+    """
+
+    __tablename__ = "router_calibrations"
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), primary_key=True, server_default=text("gen_random_uuid()")
+    )
+    context_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("contexts.id", ondelete="CASCADE"),
+        nullable=True,
+        index=True,
+    )
+    bucket: Mapped[str] = mapped_column(String(16), nullable=False)
+    arm: Mapped[str] = mapped_column(String(16), nullable=False)
+    p_at_5: Mapped[float] = mapped_column(Float, nullable=False)
+    mrr_at_10: Mapped[float] = mapped_column(Float, nullable=False)
+    n_queries: Mapped[int] = mapped_column(Integer, nullable=False)
+    source: Mapped[str] = mapped_column(
+        String(20), nullable=False, server_default=ROUTER_CALIBRATION_SOURCE_FROZEN
+    )
+    sampled_at: Mapped[datetime] = mapped_column(TIMESTAMP(timezone=True), nullable=False)
+
+    __table_args__ = (
+        CheckConstraint(
+            "bucket IN ('keyword', 'semantic', 'hybrid')",
+            name="router_calibrations_bucket_check",
+        ),
+        CheckConstraint(
+            "arm IN ('keyword', 'semantic', 'hybrid', 'routed')",
+            name="router_calibrations_arm_check",
+        ),
+        CheckConstraint(
+            "source IN ('frozen_corpus', 'live_traffic')",
+            name="router_calibrations_source_check",
+        ),
+        CheckConstraint(
+            "p_at_5 >= 0.0 AND p_at_5 <= 1.0",
+            name="router_calibrations_p_at_5_range",
+        ),
+        CheckConstraint(
+            "mrr_at_10 >= 0.0 AND mrr_at_10 <= 1.0",
+            name="router_calibrations_mrr_range",
+        ),
+        CheckConstraint(
+            "n_queries >= 0",
+            name="router_calibrations_nonneg_n",
+        ),
+        # One measurement per (scope, bucket, arm, source): partial-unique
+        # split on NULL context (the embedding_calibrations pattern —
+        # Postgres unique treats NULLs as distinct, so the global scope
+        # needs its own predicate index).
+        Index(
+            "uq_router_calibration_global",
+            "bucket",
+            "arm",
+            "source",
+            unique=True,
+            postgresql_where=text("context_id IS NULL"),
+        ),
+        Index(
+            "uq_router_calibration_context",
+            "context_id",
+            "bucket",
+            "arm",
+            "source",
+            unique=True,
+            postgresql_where=text("context_id IS NOT NULL"),
+        ),
+    )
+
+    def __repr__(self) -> str:
+        """String representation."""
+        return (
+            f"<RouterCalibration("
+            f"context_id={self.context_id}, "
+            f"bucket={self.bucket}, "
+            f"arm={self.arm}, "
+            f"p@5={self.p_at_5}, "
+            f"n={self.n_queries}, "
+            f"source={self.source}"
             f")>"
         )

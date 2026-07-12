@@ -193,7 +193,10 @@ character-class counting, sub-millisecond): set `routing_mode` via
 The router does not become the default until it clears the stage-3 calibration
 gate on the frozen eval corpus (beat semantic-only overall AND beat the
 strongest single component on each routed bucket) — the same bar fixed-weight
-hybrid failed.
+hybrid failed. The gate is runnable: `make eval-router-gate` measures the
+lane arms, applies the pre-declared contracts, and persists per-bucket arm
+performance to the `router_calibrations` store (see
+`docs/eval/router-calibration-gate.md`, #1220).
 
 ## Neural Memory
 
