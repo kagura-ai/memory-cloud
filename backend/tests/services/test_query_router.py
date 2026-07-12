@@ -108,6 +108,21 @@ class TestApostropheSafety:
         assert route.lane == LANE_KEYWORD
         assert "quoted_literal" in route.reasons
 
+    def test_punctuation_adjacent_single_quote_literal_detected(self) -> None:
+        """Parity with the double-quote branch: trailing punctuation or
+        wrapping parens must not hide a single-quoted literal (code review,
+        PR #1221)."""
+        route = classify_query("what is 'foo bar'?")
+        assert route.features["quoted_literals"] == 1
+        assert classify_query("('foo bar')").features["quoted_literals"] == 1
+
+    def test_possessive_before_quote_still_safe(self) -> None:
+        """The word-boundary guard keeps the anti-hijack property: letters
+        touching an apostrophe never open a literal."""
+        route = classify_query("the users' and coaches' union schedule planning")
+        assert route.features["quoted_literals"] == 0
+        assert route.lane == LANE_SEMANTIC
+
 
 class TestRemainderStripping:
     """Inner-review regression: longest-span-first stripping — snake_case

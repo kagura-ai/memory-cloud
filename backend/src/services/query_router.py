@@ -52,12 +52,14 @@ MIXED_NATURAL_TOKEN_THRESHOLD = 4
 # turn the hot-path classifier into an algorithmic-DoS vector (gate2/CSO).
 CLASSIFY_MAX_CHARS = 2000
 
-# Single-quote literals must be whitespace-delimited on both sides so
-# apostrophes in ordinary English (contractions, possessives — "what's the
-# user's role") never read as an opening quote and hijack the semantic lane.
-# (?<!\S) = "not preceded by a non-space": matches at position 0 and after
-# whitespace, without the alternation-embedded ^ CodeQL flags as unmatchable.
-_QUOTED_LITERAL = re.compile(r'"[^"]{2,}"' r"|(?<!\S)'[^']{2,}'(?=\s|$)" r"|`[^`]{2,}`")
+# Single-quote literals must not butt against a word character on either
+# side, so apostrophes in ordinary English (contractions, possessives —
+# "what's the user's role") never read as an opening quote and hijack the
+# semantic lane. Word-boundary-style assertions (not whitespace-only) keep
+# punctuation-adjacent literals detectable — "what is 'foo bar'?" and
+# "('foo bar')" count like their double-quote twins. No embedded ^ (CodeQL
+# flags an alternation-embedded start-anchor as unmatchable).
+_QUOTED_LITERAL = re.compile(r'"[^"]{2,}"' r"|(?<![\w'])'[^']{2,}'(?![\w'])" r"|`[^`]{2,}`")
 _EXACT_ID_PATTERNS = (
     # UUID
     re.compile(r"\b[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}\b"),
