@@ -36,8 +36,12 @@ class TestEnvContextManager:
     def test_restores_on_exception(self) -> None:
         os.environ["GB_TEST_KEY"] = "prior"
         try:
-            with pytest.raises(RuntimeError), _env("GB_TEST_KEY", "inner"):
-                raise RuntimeError("boom")
+            # Nested (not comma-combined) so static analysis models
+            # pytest.raises swallowing the exception — the trailing assert
+            # was flagged unreachable under the combined form (CodeQL).
+            with pytest.raises(RuntimeError):
+                with _env("GB_TEST_KEY", "inner"):
+                    raise RuntimeError("boom")
             assert os.environ["GB_TEST_KEY"] == "prior"
         finally:
             os.environ.pop("GB_TEST_KEY", None)

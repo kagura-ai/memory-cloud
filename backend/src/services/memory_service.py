@@ -1815,9 +1815,19 @@ class MemoryService:
 
             from models.memory import NeuralMemoryEdge
 
+            # The experiment is defined over the hybrid top-k SLICE, not the
+            # expanded candidate pool (recall over-fetches k*4 when neural is
+            # on): boosting the whole pool would let pool-only items ride
+            # into the visible slice — a different experiment than the one
+            # the eval program measured — and inflate the edge-query size.
+            limit = len(search_results) if top_k is None else min(top_k, len(search_results))
+            scoped = search_results[:limit]
+            if len(scoped) < 2:
+                return
+
             cand_ids = []
             seen: set = set()
-            for r in search_results:
+            for r in scoped:
                 mem = memories.get(r["id"])
                 if mem is not None and mem.id not in seen:
                     seen.add(mem.id)
@@ -1867,16 +1877,18 @@ class MemoryService:
                 g = factors.get(sid, 1.0) if sid is not None else 1.0
                 return base * r.get("_rerank_factor", 1.0) * g
 
-            order_before = [x for x in (_sid(r) for r in search_results) if x is not None]
-            search_results.sort(key=_adjusted, reverse=True)
-            for r in search_results:
+            # Sort and stamp ONLY the top-k slice; items past the slice keep
+            # their original order (they are outside the experiment).
+            order_before = [x for x in (_sid(r) for r in scoped) if x is not None]
+            scoped.sort(key=_adjusted, reverse=True)
+            for r in scoped:
                 sid = _sid(r)
                 if sid is not None:
                     r["_rerank_factor"] = r.get("_rerank_factor", 1.0) * factors.get(sid, 1.0)
-            order_after = [x for x in (_sid(r) for r in search_results) if x is not None]
+            search_results[:limit] = scoped
+            order_after = [x for x in (_sid(r) for r in scoped) if x is not None]
 
             try:
-                k = top_k if top_k is not None else len(order_after)
                 logger.info(
                     "graph_boost_applied",
                     context_id=str(context_id),
@@ -1884,7 +1896,7 @@ class MemoryService:
                     candidates=len(cand_ids),
                     connected=len(conn),
                     max_conn=round(max_conn, 4),
-                    reordered_topk=order_before[:k] != order_after[:k],
+                    reordered_topk=order_before != order_after,
                 )
             except Exception:  # noqa: BLE001 - telemetry must not break recall
                 logger.warning("graph_boost_telemetry_failed", context_id=str(context_id))

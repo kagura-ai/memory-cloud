@@ -105,6 +105,31 @@ class TestBoost:
         assert [r["id"] for r in results] == ["r1", "r0", "r2"]
 
     @pytest.mark.asyncio
+    async def test_boost_scoped_to_topk_slice(self, monkeypatch) -> None:
+        """The experiment is defined over the hybrid top-k slice: items in
+        the expanded candidate pool beyond top_k are neither queried, nor
+        boosted, nor reordered (Copilot, PR #1222)."""
+        monkeypatch.setenv("KAGURA_GRAPH_BOOST_ENABLED", "true")
+        monkeypatch.setenv("KAGURA_GRAPH_BOOST_MAX", "0.15")
+        results, memories = _pool(0.90, 0.88, 0.87, 0.86)
+        # Edge connects r1 with the POOL-ONLY item r3 (outside top_k=2):
+        # r3 must not enter the slice, and its edge must not be counted.
+        svc = _service(
+            edge_rows=[(_mid(memories, "r1"), _mid(memories, "r3"), 2.0)],
+        )
+
+        await svc._maybe_graph_boost(results, memories, _CTX, "u1", top_k=2)
+
+        # Pool items past the slice keep their original positions.
+        assert [r["id"] for r in results][2:] == ["r2", "r3"]
+        assert "_rerank_factor" not in results[3]
+        # The edge query was scoped to the slice's candidate ids only.
+        query = svc.db.execute.call_args.args[0]
+        assert str(_mid(memories, "r3")) not in str(
+            query.compile(compile_kwargs={"literal_binds": True})
+        )
+
+    @pytest.mark.asyncio
     async def test_isolated_candidates_keep_factor_one(self, monkeypatch) -> None:
         monkeypatch.setenv("KAGURA_GRAPH_BOOST_ENABLED", "true")
         results, memories = _pool(0.9, 0.8)
