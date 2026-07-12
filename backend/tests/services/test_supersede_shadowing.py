@@ -171,12 +171,14 @@ class TestShadowMergeMode:
     async def test_shadow_merge_creates_edge_and_mutates_nothing(self) -> None:
         phase = DedupMergePhase(MagicMock(), MagicMock())
         phase.edge_repo = MagicMock()
-        phase.edge_repo.create_edge_if_absent = AsyncMock()
+        # Upsert, not create-if-absent: a pre-existing edge between the pair
+        # (unique_edge ignores edge_type) must be retyped to supersedes.
+        phase.edge_repo.create_or_update_edge = AsyncMock()
         winner, loser = _mem(uuid4()), _mem(uuid4())
 
         await phase._execute_shadow_merge(winner, loser, "u", None, None)
 
-        kwargs = phase.edge_repo.create_edge_if_absent.await_args.kwargs
+        kwargs = phase.edge_repo.create_or_update_edge.await_args.kwargs
         assert kwargs["src_id"] == winner.id  # src = superseding (winner)
         assert kwargs["dst_id"] == loser.id  # dst = superseded (loser)
         assert kwargs["edge_type"] == "supersedes"

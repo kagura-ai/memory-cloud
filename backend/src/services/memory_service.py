@@ -1285,7 +1285,13 @@ class MemoryService:
                     )
                 )
                 if result.scalar_one_or_none() is not None:
-                    await edge_repo.create_edge_if_absent(
+                    # Upsert, not create-if-absent: unique_edge is keyed on
+                    # (user, src, dst) regardless of edge_type, so a plain
+                    # declared link created earlier in this same request
+                    # (linked_memory_ids naming the same target) would make
+                    # an if-absent insert silently drop the succession the
+                    # caller explicitly asked for.
+                    await edge_repo.create_or_update_edge(
                         user_id=user_id,
                         src_id=memory_id,
                         dst_id=supersedes_target,
@@ -1295,6 +1301,7 @@ class MemoryService:
                         workspace_id=workspace_id,
                         context_id=context_id,
                         origin=EDGE_ORIGIN_DECLARED,
+                        return_fresh_edge=False,
                     )
                     created += 1
                 else:
@@ -1630,6 +1637,11 @@ class MemoryService:
             # candidate_ids are already visibility-scoped by the recall
             # upstream, memory UUIDs are globally unique, and edge creation
             # validates both endpoints exist in the creator's own context.
+            # Ordered so the NEWEST superseder wins when multiple live
+            # supersedes edges target the same dst (allowed by the schema):
+            # dict() keeps the last row per key, so ascending created_at
+            # (id as tiebreak) makes the annotation deterministic instead
+            # of flapping with row order between runs.
             rows = await self.db.execute(
                 select(NeuralMemoryEdge.dst_id, NeuralMemoryEdge.src_id)
                 .join(superseder, superseder.id == NeuralMemoryEdge.src_id)
@@ -1638,6 +1650,7 @@ class MemoryService:
                     NeuralMemoryEdge.dst_id.in_(candidate_ids),
                     superseder.deleted_at.is_(None),
                 )
+                .order_by(superseder.created_at.asc(), superseder.id.asc())
             )
             shadow_map: dict[UUID, UUID] = dict(rows.all())
 

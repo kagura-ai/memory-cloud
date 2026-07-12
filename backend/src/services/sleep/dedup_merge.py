@@ -908,16 +908,22 @@ class DedupMergePhase:
         origin='semantic' — machine-inferred by the dedup judge, not
         user-asserted). The loser row, vector, tags and edges are all left
         untouched: recall shadows it out by the edge alone, so deleting the
-        edge restores full visibility. Idempotent via create_edge_if_absent —
-        re-judging the same pair on a later run is a no-op (and
-        already-superseded pairs are filtered out before judging to avoid
-        burning judge budget on settled pairs).
+        edge restores full visibility. Upserts via create_or_update_edge:
+        ``unique_edge`` is keyed on (user, src, dst) regardless of edge_type,
+        so a pre-existing edge between the pair (e.g. a Hebbian association
+        between near-duplicates — the common case) must be retyped to
+        ``supersedes``, not silently left as-is while the action is audited
+        as mode=shadow. A pre-existing origin='declared' row keeps its
+        origin (sticky-origin CASE in the upsert). Idempotent —
+        re-judging the same pair on a later run converges to the same row
+        (and already-superseded pairs are filtered out before judging to
+        avoid burning judge budget on settled pairs).
         """
         if not winner or not loser:
             return
         from models.memory import EDGE_ORIGIN_SEMANTIC, EDGE_TYPE_SUPERSEDES
 
-        await self.edge_repo.create_edge_if_absent(
+        await self.edge_repo.create_or_update_edge(
             user_id=user_id,
             src_id=winner.id,
             dst_id=loser.id,
@@ -927,6 +933,7 @@ class DedupMergePhase:
             workspace_id=workspace_id,
             context_id=context_id,
             origin=EDGE_ORIGIN_SEMANTIC,
+            return_fresh_edge=False,
         )
         logger.info(
             "dedup_shadow_merge",
