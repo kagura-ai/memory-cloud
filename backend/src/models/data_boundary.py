@@ -44,6 +44,7 @@ DERIVED_MOAT_TABLES: frozenset[str] = frozenset(
         "neural_memory_edges",  # Hebbian/semantic edge weights + origin
         "graph_memory",  # legacy NetworkX graph JSON storage
         "embedding_calibrations",  # similarity percentile calibration (p25–p99)
+        "router_calibrations",  # per-bucket router arm performance (#1220)
         "neural_config",  # neural tuning parameters
         "sleep_reports",  # Sleep consolidation phase results
         "sleep_actions",  # individual consolidation decisions

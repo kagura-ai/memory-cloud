@@ -2,14 +2,21 @@
 
 This module provides database access for context-level search and reranker settings.
 Issue #130: Context-scoped Search & Reranker Settings UI
+Issue #1220: Per-context router calibration store (stage 4)
 """
 
+from datetime import datetime  # noqa: TC003 - runtime annotation in upsert()
 from uuid import UUID
 
-from sqlalchemy import select
+from sqlalchemy import select, text
+from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from models.config import ContextSearchConfig
+from models.config import (
+    ROUTER_CALIBRATION_SOURCE_FROZEN,
+    ContextSearchConfig,
+    RouterCalibration,
+)
 from models.schemas import ContextSearchConfigUpdate
 from utils.logger import get_logger
 
@@ -189,3 +196,101 @@ class ContextSearchConfigRepository:
 
         logger.info("config_deleted", context_id=str(context_id))
         return True
+
+
+class RouterCalibrationRepository:
+    """Repository for per-bucket router arm performance (#1220 stage 4).
+
+    Rows with ``context_id IS NULL`` are the fleet defaults (frozen-corpus
+    gate runs); per-context rows let managed-cloud tuning diverge without
+    touching the self-host defaults.
+    """
+
+    def __init__(self, db: AsyncSession):
+        """Initialize repository with database session.
+
+        Args:
+            db: Async SQLAlchemy session
+        """
+        self.db = db
+
+    async def upsert(
+        self,
+        *,
+        bucket: str,
+        arm: str,
+        p_at_5: float,
+        mrr_at_10: float,
+        n_queries: int,
+        sampled_at: datetime,
+        context_id: UUID | None = None,
+        source: str = ROUTER_CALIBRATION_SOURCE_FROZEN,
+    ) -> RouterCalibration:
+        """Insert or refresh one (scope, bucket, arm, source) measurement.
+
+        ON CONFLICT targets the partial-unique index matching the scope
+        (global vs per-context), so re-running a gate refreshes the row
+        instead of failing or duplicating.
+
+        Returns:
+            The stored RouterCalibration row.
+        """
+        stmt = (
+            pg_insert(RouterCalibration)
+            .values(
+                context_id=context_id,
+                bucket=bucket,
+                arm=arm,
+                p_at_5=p_at_5,
+                mrr_at_10=mrr_at_10,
+                n_queries=n_queries,
+                source=source,
+                sampled_at=sampled_at,
+            )
+            .on_conflict_do_update(
+                index_elements=(
+                    ["bucket", "arm", "source"]
+                    if context_id is None
+                    else ["context_id", "bucket", "arm", "source"]
+                ),
+                index_where=text(
+                    "context_id IS NULL" if context_id is None else "context_id IS NOT NULL"
+                ),
+                set_={
+                    "p_at_5": p_at_5,
+                    "mrr_at_10": mrr_at_10,
+                    "n_queries": n_queries,
+                    "sampled_at": sampled_at,
+                },
+            )
+            .returning(RouterCalibration)
+        )
+        result = await self.db.execute(stmt)
+        row = result.scalar_one()
+        logger.debug(
+            "router_calibration_upserted",
+            context_id=str(context_id) if context_id else None,
+            bucket=bucket,
+            arm=arm,
+            source=source,
+        )
+        return row
+
+    async def get_for_context(self, context_id: UUID | None) -> list[RouterCalibration]:
+        """Calibration rows for a context, falling back to the fleet defaults.
+
+        Returns the context's own rows when any exist, else the global
+        (``context_id IS NULL``) rows. Never mixes scopes — a partially
+        calibrated context should read as its own coherent measurement set.
+        """
+        if context_id is not None:
+            result = await self.db.execute(
+                select(RouterCalibration).where(RouterCalibration.context_id == context_id)
+            )
+            rows = list(result.scalars().all())
+            if rows:
+                return rows
+        result = await self.db.execute(
+            select(RouterCalibration).where(RouterCalibration.context_id.is_(None))
+        )
+        return list(result.scalars().all())

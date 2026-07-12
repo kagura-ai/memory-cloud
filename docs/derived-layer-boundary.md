@@ -65,6 +65,7 @@ link topology and its user-set initial weight are user-authored data.
 | `neural_memory_edges` | Hebbian (`origin='hebbian'`) and semantic (`origin='semantic'`) edge `weight`, `origin`, `confidence`, `edge_metadata` | Strengthened by co-recall, decayed nightly; encodes how *this* context is actually used |
 | `graph_memory` | Legacy NetworkX graph JSON | Same learned graph, earlier storage format |
 | `embedding_calibrations` | Top-k similarity percentiles (`p25`–`p99`), sample size, TTL | Recalibrated as the corpus grows; tunes seeding thresholds per workspace |
+| `router_calibrations` | Per-bucket router arm performance (P@5, MRR@10 per lane × strategy, #1220) | Re-measured per gate run / live traffic; lets per-context routing tuning diverge from fleet defaults |
 | `neural_config` | Neural tuning parameters | Operator/learned tuning of the learning loop itself |
 | `sleep_reports` | Per-phase Sleep results (`edge_discovery_result`, `dedup_result`, `importance_result`, `consolidation_result`, `reindex_result`) | Consolidation history; each run builds on prior structure |
 | `sleep_actions` | Individual consolidation decisions (merges, promotions, flags) | Same |

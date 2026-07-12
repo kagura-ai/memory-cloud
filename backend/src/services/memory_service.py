@@ -13,6 +13,7 @@ import hashlib
 import math
 import statistics
 from datetime import datetime
+from typing import Any
 from uuid import UUID, uuid4
 
 from sqlalchemy import and_, or_, select
@@ -1693,6 +1694,7 @@ class MemoryService:
         context_id: UUID,
         *,
         cross_context: bool,
+        config: Any = None,
     ) -> str:
         """#1212: resolve the effective search mode, optionally via the router.
 
@@ -1700,10 +1702,10 @@ class MemoryService:
 
         1. An explicitly passed ``search_mode`` ALWAYS wins (router never
            overrides a caller's choice, in any routing_mode) — and returns
-           immediately, skipping the config read and classification: no DB
-           round-trip or classify/log work on the hot path when the outcome
-           is already decided. Router telemetry therefore covers only the
-           calls the router could actually influence (search_mode omitted).
+           immediately, skipping classification: no classify/log work on the
+           hot path when the outcome is already decided. Router telemetry
+           therefore covers only the calls the router could actually
+           influence (search_mode omitted).
         2. ``routing_mode='active'`` and no explicit mode → the classifier's
            lane.
         3. Otherwise → ``"hybrid"`` (the historical default).
@@ -1711,15 +1713,17 @@ class MemoryService:
         In ``log_only`` and ``active`` the decision is stamped into telemetry
         (``query_router_decision`` — numeric features only, never query text).
         Cross-context recalls skip routing entirely: the config is
-        per-context and a mixed set has no single answer. The config read is
-        READ-ONLY (``get_by_context``, never ``create_or_get``) and
-        fail-open, mirroring the reinforce re-rank discipline: a config read
-        failure must never break recall.
+        per-context and a mixed set has no single answer. This method issues
+        NO DB read (#1220 advisor rec): ``recall()`` prefetches the config
+        row once (read-only, fail-open) and threads it here and into the
+        reinforce re-rank — a missing/unfetched row simply means routing
+        off, exactly the pre-prefetch behavior.
 
         Args:
             request: The recall request (``search_mode`` may be None).
             context_id: The single target context.
             cross_context: True for multi-context recalls (routing skipped).
+            config: The prefetched ContextSearchConfig row (or None).
 
         Returns:
             The effective search mode ("hybrid" | "semantic" | "keyword").
@@ -1727,18 +1731,6 @@ class MemoryService:
         requested_mode = request.search_mode
         default_mode = requested_mode or "hybrid"
         if cross_context or requested_mode is not None:
-            return default_mode
-
-        try:
-            from repositories.config_repository import ContextSearchConfigRepository
-
-            config = await ContextSearchConfigRepository(self.db).get_by_context(context_id)
-        except Exception as exc:
-            logger.warning(
-                "query_router_config_read_failed",
-                context_id=str(context_id),
-                error=str(exc),
-            )
             return default_mode
 
         routing_mode = getattr(config, "routing_mode", None) if config else None
@@ -1915,6 +1907,7 @@ class MemoryService:
         memories: dict,
         context_id: UUID | None,
         top_k: int | None = None,
+        config: Any = None,
     ) -> None:
         """Issue #1048: bounded, config-gated recall re-rank by adoption + feedback.
 
@@ -1931,6 +1924,13 @@ class MemoryService:
         staged rollout is monitorable. ``top_k`` is the user-visible slice the
         telemetry measures the zero-adoption surfacing rate over (the caller passes
         ``request.k``); ``None`` falls back to the whole candidate pool.
+
+        #1220 (advisor rec): ``config`` is the row ``recall()`` prefetched at
+        the top of the call — passing it skips this helper's own SELECT.
+        ``None`` falls back to a local read: the prefetch happens BEFORE
+        hybrid_search's ``create_or_get`` materializes a fresh context's row,
+        so a row-less-at-prefetch context must be re-read here to keep the
+        first-ever recall's re-rank behavior unchanged.
         """
         if context_id is None or len(search_results) < 2:
             return
@@ -1939,15 +1939,17 @@ class MemoryService:
         # original hybrid ranking is preserved (fail-safe, mirrors the spend-cap
         # fail-open philosophy).
         try:
-            from repositories.config_repository import ContextSearchConfigRepository
+            cfg = config
+            if cfg is None:
+                from repositories.config_repository import ContextSearchConfigRepository
 
-            # READ-ONLY lookup — this helper must not create/commit a config row
-            # (create_or_get would INSERT+COMMIT, adding a side effect here). In
-            # practice hybrid_search's _get_search_config has usually materialized
-            # the row earlier in this same recall (with the #1207 default), so the
-            # cfg-None branch is a fail-safe for genuinely row-less states (e.g.
-            # that materialization failed), not a legacy-context opt-out.
-            cfg = await ContextSearchConfigRepository(self.db).get_by_context(context_id)
+                # READ-ONLY lookup — this helper must not create/commit a config
+                # row (create_or_get would INSERT+COMMIT, adding a side effect
+                # here). In practice hybrid_search's _get_search_config has
+                # usually materialized the row earlier in this same recall (with
+                # the #1207 default), so the cfg-None branch is a fail-safe for
+                # genuinely row-less states, not a legacy-context opt-out.
+                cfg = await ContextSearchConfigRepository(self.db).get_by_context(context_id)
             if cfg is None or not getattr(cfg, "reinforce_enabled", False):
                 return
             max_boost = float(cfg.reinforce_max_boost)
@@ -2122,14 +2124,42 @@ class MemoryService:
         if context_ids:
             search_context_id = [str(cid) for cid in context_ids]
 
+        # #1220 (advisor rec): ONE read-only config fetch threads into both
+        # the router below and the reinforce re-rank later — previously each
+        # issued its own get_by_context SELECT per recall (the #341 class of
+        # duplicated hot-path reads). Fail-open: a config read failure must
+        # never break recall (None = routing off; reinforce re-reads).
+        search_config = None
+        if not context_ids:
+            try:
+                from repositories.config_repository import ContextSearchConfigRepository
+
+                search_config = await ContextSearchConfigRepository(self.db).get_by_context(
+                    current_context_id
+                )
+            except Exception as exc:
+                logger.warning(
+                    "search_config_prefetch_failed",
+                    context_id=str(current_context_id),
+                    error=str(exc),
+                )
+
         # #1212: resolve the effective search mode exactly once, before any
         # downstream read of request.search_mode (BYOK charge gate, hybrid
         # search, neural checks). After this line it is always a concrete
         # mode string; None (caller omitted it) never flows further.
-        request.search_mode = await self._resolve_search_mode(
-            request,
-            current_context_id,
-            cross_context=bool(context_ids),
+        # #1220 (advisor rec): model_copy instead of in-place mutation — a
+        # caller that reuses one RecallRequest across calls must never see
+        # its search_mode silently rewritten.
+        request = request.model_copy(
+            update={
+                "search_mode": await self._resolve_search_mode(
+                    request,
+                    current_context_id,
+                    cross_context=bool(context_ids),
+                    config=search_config,
+                )
+            }
         )
 
         # Issue #496: ``analysis_cluster`` filter pre-resolves the cluster's
@@ -2369,6 +2399,10 @@ class MemoryService:
             memories,
             current_context_id if not context_ids else None,
             top_k=request.k,
+            # #1220: the row prefetched at the top of recall(); None (fresh
+            # context — materialized by hybrid_search after the prefetch)
+            # falls back to the helper's own read.
+            config=search_config,
         )
         # #1213: placebo-gated graph-boost experiment (env flag, default off —
         # bit-identical when off). Runs after reinforce and composes with it
