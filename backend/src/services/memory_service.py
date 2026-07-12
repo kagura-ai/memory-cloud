@@ -1770,11 +1770,17 @@ class MemoryService:
         (e55-e58 already coordinate), and per-context graduation only happens
         if the placebo gate (tests/eval/graph_boost_gate.py) passes.
         """
+        import math
         import os
 
         enabled = os.getenv("KAGURA_GRAPH_BOOST_ENABLED", "").lower() in ("1", "true")
         try:
             max_boost = float(os.getenv("KAGURA_GRAPH_BOOST_MAX", "0.15"))
+            # float() accepts "nan"/"inf" without raising — "nan" would
+            # otherwise clamp to 0.0 and silently disable the experiment
+            # while telemetry still reports it applied.
+            if not math.isfinite(max_boost):
+                max_boost = 0.15
         except ValueError:
             max_boost = 0.15
         return enabled, max(0.0, min(max_boost, 0.5))

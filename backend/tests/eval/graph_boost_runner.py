@@ -30,7 +30,7 @@ from typing import Any
 from uuid import UUID
 
 from tests.eval.compounding import MODE_EXCLUDE_PROBES, build_replay_plan
-from tests.eval.graph_boost_gate import evaluate_gate
+from tests.eval.graph_boost_gate import GATE_UNDERPOWERED, evaluate_gate
 from tests.eval.placebo import Edge, degree_preserving_rewire_with_stats
 from tests.eval.placebo_runner import (
     _replace_edges,
@@ -220,6 +220,20 @@ async def _measure_arms(svc, db, corpus, plan, id_map, owner, ctx, ws) -> dict[s
         nongraph_unboosted=nongraph_off,
         seed=_GATE_SEED,
     )
+    # < 2 hebbian edges cannot be degree-matched-rewired, so the placebo
+    # arms above fell back to the unboosted rankings: "beats placebo" then
+    # degenerates into "beats unboosted" — no real null. Such a run must
+    # never render "ship" (the density artifact is exactly what the placebo
+    # exists to catch).
+    gate["placebo_valid"] = len(hebbian_rows) >= 2
+    if not gate["placebo_valid"] and gate.get("ships"):
+        gate["verdict"] = GATE_UNDERPOWERED
+        gate["ships"] = False
+        gate["underpowered_reason"] = (
+            "hebbian graph too sparse (<2 edges) for a degree-matched "
+            "rewiring — the placebo arm was the unboosted ranking, not a "
+            "genuine null"
+        )
     return {
         "warm_build": {
             "tau": tau_info,
