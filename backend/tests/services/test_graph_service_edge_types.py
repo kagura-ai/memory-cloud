@@ -40,11 +40,13 @@ import pytest
 from models.memory import (
     EDGE_ORIGIN_DECLARED,
     EDGE_TYPE_CONTINUES_FROM,
+    EDGE_TYPE_CONTRADICTS,
     EDGE_TYPE_DEPENDS_ON,
     EDGE_TYPE_LEARNED_FROM,
     EDGE_TYPE_NEURAL_ASSOCIATION,
     EDGE_TYPE_REFERENCES_FILE,
     EDGE_TYPE_RELATED_TO,
+    EDGE_TYPE_SUPERSEDES,
 )
 from services.graph_service import GraphService
 
@@ -67,6 +69,9 @@ def test_edge_types_matches_constants() -> None:
             EDGE_TYPE_LEARNED_FROM,
             EDGE_TYPE_CONTINUES_FROM,
             EDGE_TYPE_REFERENCES_FILE,
+            # #1208: fact-succession relations.
+            EDGE_TYPE_SUPERSEDES,
+            EDGE_TYPE_CONTRADICTS,
         }
     )
 

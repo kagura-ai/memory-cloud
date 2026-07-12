@@ -61,6 +61,7 @@ def _make_config(dedup_enabled=True, threshold=0.92, provider="openai", model="g
     config = MagicMock()
     config.sleep_dedup_enabled = dedup_enabled
     config.sleep_dedup_similarity_threshold = threshold
+    config.sleep_dedup_supersede_enabled = False  # #1208: remove mode (default)
     config.sleep_llm_provider = provider
     config.sleep_llm_model = model
     config.sleep_max_memories_per_run = 500

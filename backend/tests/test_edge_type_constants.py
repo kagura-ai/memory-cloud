@@ -24,11 +24,13 @@ from mcp_server.tools.edge import VALID_EDGE_TYPES
 from models.memory import (
     _ALL_EDGE_TYPES,
     EDGE_TYPE_CONTINUES_FROM,
+    EDGE_TYPE_CONTRADICTS,
     EDGE_TYPE_DEPENDS_ON,
     EDGE_TYPE_LEARNED_FROM,
     EDGE_TYPE_NEURAL_ASSOCIATION,
     EDGE_TYPE_REFERENCES_FILE,
     EDGE_TYPE_RELATED_TO,
+    EDGE_TYPE_SUPERSEDES,
 )
 from services.graph_service import GraphService
 from services.sleep.edge_discovery import LLM_EMITTABLE_EDGE_TYPES
@@ -49,6 +51,8 @@ def test_valid_edge_types_matches_constants() -> None:
             EDGE_TYPE_LEARNED_FROM,
             EDGE_TYPE_CONTINUES_FROM,
             EDGE_TYPE_REFERENCES_FILE,
+            EDGE_TYPE_SUPERSEDES,
+            EDGE_TYPE_CONTRADICTS,
         }
     )
 
@@ -115,7 +119,8 @@ def test_valid_edge_type_check_constraint_matches_migration_literal() -> None:
 
     expected = (
         "edge_type IN ('neural_association', 'related_to', 'depends_on', "
-        "'learned_from', 'continues_from', 'references_file')"
+        "'learned_from', 'continues_from', 'references_file', "
+        "'supersedes', 'contradicts')"
     )
 
     valid_edge_type_check = next(

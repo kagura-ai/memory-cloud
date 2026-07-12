@@ -25,11 +25,13 @@ from mcp_server.tools._helpers import (
 from models.memory import (
     EDGE_ORIGIN_DECLARED,
     EDGE_TYPE_CONTINUES_FROM,
+    EDGE_TYPE_CONTRADICTS,
     EDGE_TYPE_DEPENDS_ON,
     EDGE_TYPE_LEARNED_FROM,
     EDGE_TYPE_NEURAL_ASSOCIATION,
     EDGE_TYPE_REFERENCES_FILE,
     EDGE_TYPE_RELATED_TO,
+    EDGE_TYPE_SUPERSEDES,
 )
 
 # Issue #461 / #741 / #782: full set of edge_types accepted by the DB CHECK
@@ -50,6 +52,12 @@ from models.memory import (
 #     does not extend to GraphService.add_edge — that path is the internal
 #     Hebbian-default writer and callers wanting a non-Hebbian origin must
 #     pass it explicitly via the optional `origin=` parameter (#782).
+#   - supersedes / contradicts (#1208): fact-succession relations. Direction
+#     convention: src = superseding (newer), dst = superseded (older) — a
+#     memory that is the dst of a live supersedes edge is shadowed out of
+#     recall (include_superseded=true opts back in); contradicts never hides.
+#     NOT in LLM_EMITTABLE_EDGE_TYPES (the sleep judge must not invent
+#     supersession); origin='declared' when asserted via this MCP path.
 # Provenance for what was previously edge_type='semantic_similarity' /
 # 'declared_link' / 'tag_cooccurrence' now lives on `origin` and
 # `edge_metadata['source']` (see migration `e20_741` docstring).
@@ -61,6 +69,8 @@ VALID_EDGE_TYPES = frozenset(
         EDGE_TYPE_LEARNED_FROM,
         EDGE_TYPE_CONTINUES_FROM,
         EDGE_TYPE_REFERENCES_FILE,
+        EDGE_TYPE_SUPERSEDES,
+        EDGE_TYPE_CONTRADICTS,
     }
 )
 

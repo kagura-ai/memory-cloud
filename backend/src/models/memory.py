@@ -528,6 +528,21 @@ EDGE_TYPE_LEARNED_FROM = "learned_from"
 #   - references_file: structural reference from a chat memory to a file overview
 EDGE_TYPE_CONTINUES_FROM = "continues_from"
 EDGE_TYPE_REFERENCES_FILE = "references_file"
+# Issue #1208: fact-succession relations (the non-destructive update path the
+# kagura-memory-eval program found missing — update-by-removal was the only
+# mechanism). Direction convention, load-bearing for recall shadowing:
+#   src = the SUPERSEDING (newer/current) memory
+#   dst = the SUPERSEDED (older/stale) memory
+# A memory that is the dst of a supersedes edge is "shadowed": recall demotes
+# it out of results (opt back in with include_superseded=true) as long as the
+# superseding src is still alive — a deleted superseder stops shadowing
+# (self-healing JOIN in the shadow query; edge refs are bare UUIDs, no FK).
+# 'contradicts' NEVER hides either side — recall annotates both (resolution
+# is an arbitration problem, not a deletion problem). Deliberately NOT in
+# edge_discovery's LLM_EMITTABLE_EDGE_TYPES: the sleep judge must not invent
+# supersession (structural over-supersede prevention).
+EDGE_TYPE_SUPERSEDES = "supersedes"
+EDGE_TYPE_CONTRADICTS = "contradicts"
 
 # Issue #509 (Phase B of #461): registration-order tuple used to derive the
 # ``valid_edge_type`` CHECK constraint string in ``NeuralMemoryEdge.__table_args__``.
@@ -545,6 +560,9 @@ _ALL_EDGE_TYPES: tuple[str, ...] = (
     EDGE_TYPE_LEARNED_FROM,
     EDGE_TYPE_CONTINUES_FROM,
     EDGE_TYPE_REFERENCES_FILE,
+    # #1208: appended (never reordered) per the byte-identity rule above.
+    EDGE_TYPE_SUPERSEDES,
+    EDGE_TYPE_CONTRADICTS,
 )
 
 # Edge origin discriminator (Issue #722).

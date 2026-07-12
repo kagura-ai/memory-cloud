@@ -339,10 +339,16 @@ async def handle_rollback_sleep_run(
                     ws_id = str(ctx_ws)
             embedding_svc = EmbeddingService(db, model=embedding_model)
 
-            # Pre-fetch all memories that need re-embedding (merge/archive)
+            # Pre-fetch all memories that need re-embedding (merge/archive).
+            # #1208: shadow-mode merges never deleted the loser's vector, so
+            # they need no re-embed — their undo is deleting the edge below.
             re_embed_ids: set[UUID] = set()
             for a in actions:
-                if a.action_type == "merge" and a.target_id:
+                if (
+                    a.action_type == "merge"
+                    and a.target_id
+                    and (a.details or {}).get("mode") != "shadow"
+                ):
                     re_embed_ids.add(a.target_id)
                 elif a.action_type == "archive" and a.memory_id:
                     re_embed_ids.add(a.memory_id)
@@ -367,37 +373,67 @@ async def handle_rollback_sleep_run(
 
                     elif action.action_type == "merge":
                         if action.target_id:
-                            restore_result = await db.execute(
-                                sa_update(Memory)
-                                .where(
-                                    Memory.id == action.target_id,
-                                    Memory.user_id == user_id,
-                                )
-                                .values(deleted_at=None, deleted_by=None)
-                            )
-                            loser = memory_cache.get(action.target_id)
-                            # #1209: a loser hard-deleted by the merge
-                            # retention window matches 0 rows — record it as
-                            # an error instead of a phantom "reversed" (the
-                            # per-merge undo path returns 410 for the same
-                            # state; run-level rollback must not report a
-                            # restore that never happened).
-                            if restore_result.rowcount == 0 or loser is None:
-                                rollback_summary["errors"].append(
-                                    f"merge loser {action.target_id} not restorable — "
-                                    "purged by the retention policy "
-                                    "(sleep_merge_retention_days)"
-                                )
+                            if (action.details or {}).get("mode") == "shadow":
+                                # #1208 shadow-mode merge: the loser was never
+                                # deleted — undoing the merge means reverting
+                                # the supersedes edge (winner=memory_id →
+                                # loser=target_id): restore the pre-merge
+                                # edge from the prior_edge snapshot, or
+                                # verified-delete it when the merge created
+                                # the edge. Shared helper with per-merge undo
+                                # so the two paths cannot drift.
+                                if action.memory_id:
+                                    from services.sleep.undo import (
+                                        revert_shadow_merge_edge,
+                                    )
+
+                                    reverted = await revert_shadow_merge_edge(
+                                        db,
+                                        user_id=user_id,
+                                        winner_id=action.memory_id,
+                                        loser_id=action.target_id,
+                                        prior_edge=(action.details or {}).get("prior_edge"),
+                                    )
+                                    if reverted:
+                                        rollback_summary["merges_reversed"] += 1
+                                    else:
+                                        logger.warning(
+                                            "shadow_merge_rollback_edge_mismatch",
+                                            src_id=str(action.memory_id),
+                                            dst_id=str(action.target_id),
+                                        )
                             else:
-                                await _re_embed_to_qdrant(
-                                    loser,
-                                    user_id,
-                                    embedding_svc,
-                                    ws_id,
-                                    ctx_id_str,
-                                    collection_name,
+                                restore_result = await db.execute(
+                                    sa_update(Memory)
+                                    .where(
+                                        Memory.id == action.target_id,
+                                        Memory.user_id == user_id,
+                                    )
+                                    .values(deleted_at=None, deleted_by=None)
                                 )
-                                rollback_summary["merges_reversed"] += 1
+                                loser = memory_cache.get(action.target_id)
+                                # #1209: a loser hard-deleted by the merge
+                                # retention window matches 0 rows — record it
+                                # as an error instead of a phantom "reversed"
+                                # (the per-merge undo path returns 410 for the
+                                # same state; run-level rollback must not
+                                # report a restore that never happened).
+                                if restore_result.rowcount == 0 or loser is None:
+                                    rollback_summary["errors"].append(
+                                        f"merge loser {action.target_id} not restorable — "
+                                        "purged by the retention policy "
+                                        "(sleep_merge_retention_days)"
+                                    )
+                                else:
+                                    await _re_embed_to_qdrant(
+                                        loser,
+                                        user_id,
+                                        embedding_svc,
+                                        ws_id,
+                                        ctx_id_str,
+                                        collection_name,
+                                    )
+                                    rollback_summary["merges_reversed"] += 1
 
                     elif action.action_type == "update_importance":
                         details = action.details or {}
