@@ -123,3 +123,92 @@ async def test_happy_path_restores_reembeds_and_audits() -> None:
     assert added.details["undone_action_id"] == 42
     assert added.details["undone_by"] == "admin-user"
     db.commit.assert_awaited_once()
+
+
+# ------------------------------------------------------------ shadow merges
+
+
+def _shadow_action(prior_edge=None) -> MagicMock:
+    action = _action()
+    action.details = {"mode": "shadow", "prior_edge": prior_edge}
+    return action
+
+
+def _shadow_db(first_row, revert_rowcount: int) -> AsyncMock:
+    """AsyncMock db: 1st execute -> (action, report) join, 2nd -> the edge
+    revert (UPDATE restore or verified DELETE) with the given rowcount."""
+    db = AsyncMock()
+    join_result = MagicMock()
+    join_result.first.return_value = first_row
+    revert_result = MagicMock()
+    revert_result.rowcount = revert_rowcount
+    db.execute.side_effect = [join_result, revert_result]
+    db.add = MagicMock()
+    return db
+
+
+@pytest.mark.asyncio
+async def test_shadow_undo_deletes_created_edge_and_audits() -> None:
+    """#1208: a shadow merge never deleted the loser — undo means removing
+    the supersedes edge, audited as undo_merge with mode=shadow."""
+    action = _shadow_action(prior_edge=None)
+    db = _shadow_db((action, _report()), revert_rowcount=1)
+
+    summary = await undo_merge_action(db, 42, acting_user_id="admin-user")
+
+    assert summary["restored_memory_id"] == str(action.target_id)
+    assert summary["undone_action_id"] == 42
+    added = db.add.call_args.args[0]
+    assert added.action_type == "undo_merge"
+    assert added.details["mode"] == "shadow"
+    db.commit.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_shadow_undo_restores_prior_edge_state() -> None:
+    """When the shadow merge retyped a pre-existing edge, undo must issue an
+    UPDATE restoring the snapshot, not a DELETE (the association survives)."""
+    from sqlalchemy.sql.dml import Update
+
+    prior = {
+        "edge_type": "neural_association",
+        "origin": "hebbian",
+        "weight": 0.4,
+        "confidence": 0.9,
+        "edge_metadata": None,
+    }
+    action = _shadow_action(prior_edge=prior)
+    db = _shadow_db((action, _report()), revert_rowcount=1)
+
+    await undo_merge_action(db, 42, acting_user_id="admin-user")
+
+    revert_stmt = db.execute.call_args_list[1].args[0]
+    assert isinstance(revert_stmt, Update)
+
+
+@pytest.mark.asyncio
+async def test_shadow_undo_without_snapshot_deletes() -> None:
+    """No snapshot means the merge CREATED the edge — undo deletes it."""
+    from sqlalchemy.sql.dml import Delete
+
+    action = _shadow_action(prior_edge=None)
+    db = _shadow_db((action, _report()), revert_rowcount=1)
+
+    await undo_merge_action(db, 42, acting_user_id="admin-user")
+
+    revert_stmt = db.execute.call_args_list[1].args[0]
+    assert isinstance(revert_stmt, Delete)
+
+
+@pytest.mark.asyncio
+async def test_shadow_undo_gone_edge_is_already_restored() -> None:
+    """Edge already gone (or retyped by a later writer) → stable error,
+    nothing audited."""
+    action = _shadow_action(prior_edge=None)
+    db = _shadow_db((action, _report()), revert_rowcount=0)
+
+    with pytest.raises(UndoMergeError) as exc:
+        await undo_merge_action(db, 42, acting_user_id="admin-user")
+
+    assert exc.value.code == "already_restored"
+    db.add.assert_not_called()

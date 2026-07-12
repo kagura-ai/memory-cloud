@@ -2584,6 +2584,10 @@ class MemoryService:
                 k=request.k,
                 use_rerank=False,  # No reranking for delete
                 filters=None,
+                # #1208: superseded memories must stay deletable by query —
+                # default shadowing would hide them from this search and
+                # make forget(query=...) silently skip them.
+                include_superseded=True,
             )
 
             # Issue #82: Pass project ID to recall

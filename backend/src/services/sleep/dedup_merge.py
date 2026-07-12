@@ -356,8 +356,9 @@ class DedupMergePhase:
             for winner_id, loser_id in merge_decisions:
                 winner = memory_map.get(winner_id)
                 loser = memory_map.get(loser_id)
+                prior_edge: dict[str, Any] | None = None
                 if shadow_mode:
-                    await self._execute_shadow_merge(
+                    prior_edge = await self._execute_shadow_merge(
                         winner,
                         loser,
                         user_id,
@@ -408,8 +409,11 @@ class DedupMergePhase:
                             "loser_recency": (
                                 f"{loser_recency:%Y-%m-%d %H:%M}" if loser_recency else None
                             ),
-                            # #1208: how this merge disposed of the loser.
+                            # #1208: how this merge disposed of the loser,
+                            # plus the pre-merge state of any edge the shadow
+                            # upsert retyped — undo restores it from here.
                             "mode": "shadow" if shadow_mode else "remove",
+                            **({"prior_edge": prior_edge} if shadow_mode else {}),
                         },
                     )
 
@@ -901,14 +905,14 @@ class DedupMergePhase:
         user_id: str,
         workspace_id: str | None,
         context_id: str | None,
-    ) -> None:
+    ) -> dict[str, Any] | None:
         """#1208 shadow-mode merge: record succession, mutate nothing.
 
         Creates a ``supersedes`` edge (src=winner, dst=loser,
         origin='semantic' — machine-inferred by the dedup judge, not
         user-asserted). The loser row, vector, tags and edges are all left
-        untouched: recall shadows it out by the edge alone, so deleting the
-        edge restores full visibility. Upserts via create_or_update_edge:
+        untouched: recall shadows it out by the edge alone, so undoing the
+        merge restores full visibility. Upserts via create_or_update_edge:
         ``unique_edge`` is keyed on (user, src, dst) regardless of edge_type,
         so a pre-existing edge between the pair (e.g. a Hebbian association
         between near-duplicates — the common case) must be retyped to
@@ -918,10 +922,30 @@ class DedupMergePhase:
         re-judging the same pair on a later run converges to the same row
         (and already-superseded pairs are filtered out before judging to
         avoid burning judge budget on settled pairs).
+
+        Returns:
+            Snapshot of the pre-merge edge state (type/origin/weight/
+            confidence/metadata) when the upsert retyped an existing
+            non-supersedes edge, else None. The caller stamps it into the
+            merge action's details as ``prior_edge`` so undo/rollback can
+            RESTORE the original association instead of deleting the row.
         """
         if not winner or not loser:
-            return
+            return None
         from models.memory import EDGE_ORIGIN_SEMANTIC, EDGE_TYPE_SUPERSEDES
+
+        prior = await self.edge_repo.get_edge(
+            user_id, winner.id, loser.id, workspace_id, context_id
+        )
+        prior_edge: dict[str, Any] | None = None
+        if prior is not None and prior.edge_type != EDGE_TYPE_SUPERSEDES:
+            prior_edge = {
+                "edge_type": prior.edge_type,
+                "origin": prior.origin,
+                "weight": prior.weight,
+                "confidence": prior.confidence,
+                "edge_metadata": prior.edge_metadata,
+            }
 
         await self.edge_repo.create_or_update_edge(
             user_id=user_id,
@@ -939,7 +963,9 @@ class DedupMergePhase:
             "dedup_shadow_merge",
             winner_id=str(winner.id),
             loser_id=str(loser.id),
+            retyped_prior_edge=prior_edge is not None,
         )
+        return prior_edge
 
     async def _filter_already_superseded_pairs(
         self,

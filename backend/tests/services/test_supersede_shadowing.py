@@ -17,6 +17,7 @@ Pins the non-destructive update path:
    already-settled pairs are filtered before judging.
 """
 
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 from uuid import uuid4
 
@@ -173,16 +174,66 @@ class TestShadowMergeMode:
         phase.edge_repo = MagicMock()
         # Upsert, not create-if-absent: a pre-existing edge between the pair
         # (unique_edge ignores edge_type) must be retyped to supersedes.
+        phase.edge_repo.get_edge = AsyncMock(return_value=None)
         phase.edge_repo.create_or_update_edge = AsyncMock()
         winner, loser = _mem(uuid4()), _mem(uuid4())
 
-        await phase._execute_shadow_merge(winner, loser, "u", None, None)
+        prior = await phase._execute_shadow_merge(winner, loser, "u", None, None)
 
         kwargs = phase.edge_repo.create_or_update_edge.await_args.kwargs
         assert kwargs["src_id"] == winner.id  # src = superseding (winner)
         assert kwargs["dst_id"] == loser.id  # dst = superseded (loser)
         assert kwargs["edge_type"] == "supersedes"
         assert kwargs["origin"] == "semantic"  # machine-inferred, not declared
+        assert prior is None  # no pre-existing edge → nothing to snapshot
+
+    @pytest.mark.asyncio
+    async def test_shadow_merge_snapshots_retyped_prior_edge(self) -> None:
+        """The upsert retypes a pre-existing (e.g. Hebbian) edge — its
+        pre-merge state must come back as a snapshot so undo can RESTORE
+        the association instead of deleting the row."""
+        phase = DedupMergePhase(MagicMock(), MagicMock())
+        phase.edge_repo = MagicMock()
+        existing = SimpleNamespace(
+            edge_type="neural_association",
+            origin="hebbian",
+            weight=0.4,
+            confidence=0.9,
+            edge_metadata={"source": "tag_cooccurrence"},
+        )
+        phase.edge_repo.get_edge = AsyncMock(return_value=existing)
+        phase.edge_repo.create_or_update_edge = AsyncMock()
+
+        prior = await phase._execute_shadow_merge(_mem(uuid4()), _mem(uuid4()), "u", None, None)
+
+        assert prior == {
+            "edge_type": "neural_association",
+            "origin": "hebbian",
+            "weight": 0.4,
+            "confidence": 0.9,
+            "edge_metadata": {"source": "tag_cooccurrence"},
+        }
+
+    @pytest.mark.asyncio
+    async def test_shadow_merge_existing_supersedes_not_snapshotted(self) -> None:
+        """Re-judging an already-shadowed pair must not snapshot the
+        supersedes edge itself as 'prior' (undo would then 'restore'
+        supersedes — a no-op disguised as a revert)."""
+        phase = DedupMergePhase(MagicMock(), MagicMock())
+        phase.edge_repo = MagicMock()
+        existing = SimpleNamespace(
+            edge_type="supersedes",
+            origin="semantic",
+            weight=1.0,
+            confidence=1.0,
+            edge_metadata=None,
+        )
+        phase.edge_repo.get_edge = AsyncMock(return_value=existing)
+        phase.edge_repo.create_or_update_edge = AsyncMock()
+
+        prior = await phase._execute_shadow_merge(_mem(uuid4()), _mem(uuid4()), "u", None, None)
+
+        assert prior is None
 
     @pytest.mark.asyncio
     async def test_settled_pairs_filtered_before_judging(self) -> None:

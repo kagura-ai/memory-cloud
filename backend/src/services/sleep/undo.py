@@ -22,9 +22,72 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from models.memory import Memory
 from models.sleep import SleepAction, SleepReport
+from utils.datetime import utcnow
 from utils.logger import get_logger
 
 logger = get_logger(__name__)
+
+
+async def revert_shadow_merge_edge(
+    db: AsyncSession,
+    *,
+    user_id: str,
+    winner_id: UUID,
+    loser_id: UUID,
+    prior_edge: dict[str, Any] | None,
+) -> bool:
+    """Undo ONE shadow-mode merge's supersedes edge (#1208).
+
+    Shared by run-level rollback and per-merge undo so the two paths cannot
+    drift. The shadow merge upserted ``supersedes`` over whatever edge
+    existed between (winner, loser); undoing it means:
+
+    - ``prior_edge`` snapshot present → restore the pre-merge edge state
+      (type/origin/weight/confidence/metadata) with a direct UPDATE — an
+      upsert cannot do this because the sticky-origin CASE refuses to
+      downgrade a non-hebbian origin back to hebbian.
+    - no snapshot (the merge CREATED the edge) → delete it, but only after
+      verifying it still is a ``supersedes`` edge: ``unique_edge`` is keyed
+      on (user, src, dst) regardless of edge_type, so a blind delete could
+      remove an unrelated association written since.
+
+    Returns:
+        True if an edge was restored or deleted; False if nothing matched
+        (the shadow merge was already undone, or the edge was retyped by a
+        later writer).
+    """
+    from sqlalchemy import delete as sa_delete
+
+    from models.memory import EDGE_TYPE_SUPERSEDES, NeuralMemoryEdge
+
+    if prior_edge:
+        result = await db.execute(
+            sa_update(NeuralMemoryEdge)
+            .where(
+                NeuralMemoryEdge.user_id == user_id,
+                NeuralMemoryEdge.src_id == winner_id,
+                NeuralMemoryEdge.dst_id == loser_id,
+                NeuralMemoryEdge.edge_type == EDGE_TYPE_SUPERSEDES,
+            )
+            .values(
+                edge_type=prior_edge.get("edge_type") or "neural_association",
+                origin=prior_edge.get("origin") or "hebbian",
+                weight=prior_edge.get("weight", 0.0),
+                confidence=prior_edge.get("confidence", 1.0),
+                edge_metadata=prior_edge.get("edge_metadata"),
+                last_updated=utcnow(),
+            )
+        )
+    else:
+        result = await db.execute(
+            sa_delete(NeuralMemoryEdge).where(
+                NeuralMemoryEdge.user_id == user_id,
+                NeuralMemoryEdge.src_id == winner_id,
+                NeuralMemoryEdge.dst_id == loser_id,
+                NeuralMemoryEdge.edge_type == EDGE_TYPE_SUPERSEDES,
+            )
+        )
+    return (result.rowcount or 0) > 0
 
 
 class UndoMergeError(Exception):
@@ -155,6 +218,55 @@ async def undo_merge_action(
     winner_id = action.memory_id
     if loser_id is None:
         raise UndoMergeError("not_a_merge", f"Sleep action {action_id} records no merge loser.")
+
+    # #1208 shadow-mode merge: the loser was never deleted, so the restore
+    # path below (deleted_at checks + re-embed) does not apply — undo means
+    # reverting the supersedes edge (winner → loser) instead.
+    if (action.details or {}).get("mode") == "shadow":
+        if winner_id is None:
+            raise UndoMergeError(
+                "not_a_merge", f"Sleep action {action_id} records no shadow-merge winner."
+            )
+        reverted = await revert_shadow_merge_edge(
+            db,
+            user_id=report.user_id,
+            winner_id=winner_id,
+            loser_id=loser_id,
+            prior_edge=(action.details or {}).get("prior_edge"),
+        )
+        if not reverted:
+            raise UndoMergeError(
+                "already_restored",
+                f"No supersedes edge {winner_id} → {loser_id} exists — this shadow "
+                "merge was already undone, or the edge was since retyped.",
+            )
+        undo_action = SleepAction(
+            report_id=action.report_id,
+            phase="dedup_merge",
+            action_type="undo_merge",
+            memory_id=loser_id,
+            target_id=winner_id,
+            details={
+                "undone_action_id": action.id,
+                "undone_by": acting_user_id,
+                "mode": "shadow",
+            },
+        )
+        db.add(undo_action)
+        await db.commit()
+        logger.info(
+            "dedup_shadow_merge_undone",
+            action_id=action_id,
+            unshadowed_memory_id=str(loser_id),
+            winner_id=str(winner_id),
+            report_id=str(action.report_id),
+        )
+        return {
+            "restored_memory_id": str(loser_id),
+            "winner_id": str(winner_id),
+            "report_id": str(action.report_id),
+            "undone_action_id": action.id,
+        }
 
     mem_result = await db.execute(select(Memory).where(Memory.id == loser_id))
     loser = mem_result.scalar_one_or_none()

@@ -375,44 +375,32 @@ async def handle_rollback_sleep_run(
                         if action.target_id:
                             if (action.details or {}).get("mode") == "shadow":
                                 # #1208 shadow-mode merge: the loser was never
-                                # deleted — undoing the merge means deleting
+                                # deleted — undoing the merge means reverting
                                 # the supersedes edge (winner=memory_id →
-                                # loser=target_id), which restores the loser's
-                                # visibility in default recall. Verify the
-                                # edge really is supersedes before deleting:
-                                # unique_edge is keyed on (user, src, dst)
-                                # regardless of edge_type, so blind deletion
-                                # could remove an unrelated association.
+                                # loser=target_id): restore the pre-merge
+                                # edge from the prior_edge snapshot, or
+                                # verified-delete it when the merge created
+                                # the edge. Shared helper with per-merge undo
+                                # so the two paths cannot drift.
                                 if action.memory_id:
-                                    from models.memory import EDGE_TYPE_SUPERSEDES
-
-                                    existing = await edge_repo.get_edge(
-                                        user_id=user_id,
-                                        src_id=action.memory_id,
-                                        dst_id=action.target_id,
-                                        workspace_id=ws_id or None,
-                                        context_id=ctx_id_str or None,
+                                    from services.sleep.undo import (
+                                        revert_shadow_merge_edge,
                                     )
-                                    if (
-                                        existing is not None
-                                        and existing.edge_type == EDGE_TYPE_SUPERSEDES
-                                    ):
-                                        await edge_repo.delete_edge(
-                                            user_id=user_id,
-                                            src_id=action.memory_id,
-                                            dst_id=action.target_id,
-                                            workspace_id=ws_id or None,
-                                            context_id=ctx_id_str or None,
-                                        )
+
+                                    reverted = await revert_shadow_merge_edge(
+                                        db,
+                                        user_id=user_id,
+                                        winner_id=action.memory_id,
+                                        loser_id=action.target_id,
+                                        prior_edge=(action.details or {}).get("prior_edge"),
+                                    )
+                                    if reverted:
                                         rollback_summary["merges_reversed"] += 1
                                     else:
                                         logger.warning(
                                             "shadow_merge_rollback_edge_mismatch",
                                             src_id=str(action.memory_id),
                                             dst_id=str(action.target_id),
-                                            found_type=(
-                                                existing.edge_type if existing else None
-                                            ),
                                         )
                             else:
                                 restore_result = await db.execute(
