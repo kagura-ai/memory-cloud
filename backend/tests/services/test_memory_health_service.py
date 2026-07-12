@@ -195,52 +195,46 @@ class TestGraphGrading:
         always look cold — the heuristic is skipped there, never a false WARN."""
         section = MemoryHealthService._grade_graph(
             _healthy_graph(total_edges=0, edges_by_origin={}, active_memories=100),
-            cold_check=False,
+            heuristics=False,
         )
         assert section["status"] == STATUS_OK
 
-    def test_weight_violation_still_fails_without_cold_check(self) -> None:
-        """Disabling the heuristic must not disable the invariant."""
+    def test_weight_violation_still_fails_without_heuristics(self) -> None:
+        """Disabling the heuristics must not disable the invariant."""
         section = MemoryHealthService._grade_graph(
-            _healthy_graph(weight_violations=1), cold_check=False
+            _healthy_graph(weight_violations=1), heuristics=False
         )
         assert section["status"] == STATUS_FAIL
+
+
+_POSTURE_ON = {"has_config": True, "reinforce_enabled": True, "use_rerank": False}
+_POSTURE_OFF = {"has_config": False, "reinforce_enabled": False, "use_rerank": False}
 
 
 class TestRetrievalGrading:
     def test_active_usage_is_ok(self) -> None:
         section = MemoryHealthService._grade_retrieval(
-            {"recall": 42, "remember": 10},
-            {"contexts_with_config": 1, "reinforce_enabled": 1, "use_rerank": 0},
-            active_memories=100,
+            {"recall": 42, "remember": 10}, _POSTURE_ON, active_memories=100
         )
         assert section["status"] == STATUS_OK
         assert section["metrics"]["recall_calls"] == 42
+        assert section["metrics"]["has_config"] is True
 
     def test_write_only_store_warns(self) -> None:
         section = MemoryHealthService._grade_retrieval(
-            {"remember": 5},
-            {"contexts_with_config": 1, "reinforce_enabled": 1, "use_rerank": 0},
-            active_memories=50,
+            {"remember": 5}, _POSTURE_ON, active_memories=50
         )
         assert section["status"] == STATUS_WARN
         note = next(n for n in section["notes"] if n["code"] == "write_only_store")
         assert note["params"]["active_memories"] == 50
 
     def test_empty_store_is_ok(self) -> None:
-        section = MemoryHealthService._grade_retrieval(
-            {},
-            {"contexts_with_config": 0, "reinforce_enabled": 0, "use_rerank": 0},
-            active_memories=0,
-        )
+        section = MemoryHealthService._grade_retrieval({}, _POSTURE_OFF, active_memories=0)
         assert section["status"] == STATUS_OK
 
     def test_write_only_check_disabled_for_unattributed_scope(self) -> None:
         section = MemoryHealthService._grade_retrieval(
-            {"remember": 5},
-            {"contexts_with_config": 0, "reinforce_enabled": 0, "use_rerank": 0},
-            active_memories=50,
-            write_only_check=False,
+            {"remember": 5}, _POSTURE_OFF, active_memories=50, heuristics=False
         )
         assert section["status"] == STATUS_OK
 
@@ -256,10 +250,7 @@ class TestScopeIsolation:
                 _CTX_B: _healthy_graph(),
             },
             usage={_CTX_A: {"recall": 1}, _CTX_B: {"recall": 9}},
-            postures={
-                _CTX_A: {"contexts_with_config": 1, "reinforce_enabled": 1, "use_rerank": 0},
-                _CTX_B: {"contexts_with_config": 1, "reinforce_enabled": 1, "use_rerank": 0},
-            },
+            postures={_CTX_A: dict(_POSTURE_ON), _CTX_B: dict(_POSTURE_ON)},
         )
 
     def test_warn_in_context_a_does_not_change_context_b(self) -> None:
@@ -410,9 +401,10 @@ class TestBuildBreakdown:
 class TestBuildContextReport:
     @pytest.mark.asyncio
     async def test_unowned_context_returns_none(self) -> None:
+        """Ownership is a single-row lookup — un-owned (or soft-deleted, or
+        unknown) resolves to None and the route maps that to a uniform 404."""
         svc = MemoryHealthService(AsyncMock())
-        p1, p2 = _patched(svc, contexts=[(_CTX_A, "A")], signals=_signals())
-        with p1, p2:
+        with patch.object(svc, "_resolve_owned_context", new=AsyncMock(return_value=None)):
             report = await svc.build_context_report("admin-user", _CTX_B)
         assert report is None
 
@@ -424,8 +416,10 @@ class TestBuildContextReport:
             graphs={_CTX_A: _healthy_graph()},
             usage={_CTX_A: {"recall": 2}},
         )
-        p1, p2 = _patched(svc, contexts=[(_CTX_A, "Context A")], signals=signals)
-        with p1, p2:
+        with (
+            patch.object(svc, "_resolve_owned_context", new=AsyncMock(return_value="Context A")),
+            patch.object(svc, "_fetch_signals", new=AsyncMock(return_value=signals)) as fetched,
+        ):
             report = await svc.build_context_report("admin-user", _CTX_A)
 
         assert report is not None
@@ -434,6 +428,8 @@ class TestBuildContextReport:
         assert report["overall_status"] == STATUS_FAIL
         assert set(report["sections"]) == {"consolidation", "graph", "retrieval"}
         assert report["sections"]["consolidation"]["notes"][0]["code"] == "latest_sleep_failed"
+        # The detail path narrows every fetch to the one scope.
+        assert fetched.await_args.kwargs.get("scope") == _CTX_A
 
     @pytest.mark.asyncio
     async def test_unattributed_scope_needs_no_ownership(self) -> None:
@@ -446,3 +442,64 @@ class TestBuildContextReport:
         assert report["context_id"] is None
         assert report["context_name"] is None
         assert report["overall_status"] == STATUS_OK
+
+
+class TestFoldOrphanScopes:
+    """Signals under a non-owned scope (soft-deleted context, shared context
+    created by another member) fold into the unattributed bucket — never
+    silently dropped (dropping would hide a Phase-1 WARN/FAIL)."""
+
+    def test_orphan_windows_and_graphs_fold_into_unattributed(self) -> None:
+        orphan = uuid.uuid4()
+        signals = _signals(
+            windows={orphan: [_report(status="failed")]},
+            graphs={orphan: _healthy_graph(weight_violations=2)},
+            usage={orphan: {"recall": 3}},
+            backlogs={orphan: {"count": 5, "oldest_days": 120}},
+        )
+
+        folded = MemoryHealthService._fold_orphan_scopes(signals, owned_ids={_CTX_A})
+
+        assert orphan not in folded["windows"]
+        assert folded["windows"][None][0]["status"] == "failed"
+        assert folded["graphs"][None]["weight_violations"] == 2
+        assert folded["usage"][None] == {"recall": 3}
+        assert folded["backlogs"][None] == {"count": 5, "oldest_days": 120}
+
+    def test_orphans_merge_with_existing_null_bucket(self) -> None:
+        orphan = uuid.uuid4()
+        signals = _signals(
+            backlogs={
+                None: {"count": 1, "oldest_days": 30},
+                orphan: {"count": 2, "oldest_days": 200},
+            },
+            usage={None: {"recall": 1}, orphan: {"recall": 2, "remember": 4}},
+        )
+
+        folded = MemoryHealthService._fold_orphan_scopes(signals, owned_ids=set())
+
+        assert folded["backlogs"][None] == {"count": 3, "oldest_days": 200}
+        assert folded["usage"][None] == {"recall": 3, "remember": 4}
+
+    def test_owned_scopes_are_untouched(self) -> None:
+        signals = _signals(windows={_CTX_A: [_report()]}, usage={_CTX_A: {"recall": 1}})
+
+        folded = MemoryHealthService._fold_orphan_scopes(signals, owned_ids={_CTX_A})
+
+        assert set(folded["windows"]) == {_CTX_A}
+        assert set(folded["usage"]) == {_CTX_A}
+
+    @pytest.mark.asyncio
+    async def test_orphan_fail_surfaces_as_unattributed_breakdown_entry(self) -> None:
+        """The end-to-end guarantee: a deterministic FAIL living in a
+        non-owned scope must flip the page-level overall, not vanish."""
+        svc = MemoryHealthService(AsyncMock())
+        orphan = uuid.uuid4()
+        signals = _signals(graphs={orphan: _healthy_graph(weight_violations=1)})
+        p1, p2 = _patched(svc, contexts=[(_CTX_A, "A")], signals=signals)
+        with p1, p2:
+            breakdown = await svc.build_breakdown("admin-user")
+
+        assert breakdown["overall_status"] == STATUS_FAIL
+        unattributed = next(e for e in breakdown["contexts"] if e["context_id"] is None)
+        assert unattributed["sections"]["graph"] == STATUS_FAIL

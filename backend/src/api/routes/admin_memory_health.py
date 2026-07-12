@@ -19,7 +19,7 @@ Phase 3.
 from __future__ import annotations
 
 import uuid
-from typing import Any, Literal
+from typing import Annotated, Any, Literal
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel, Field
@@ -112,15 +112,17 @@ class MemoryHealthDetailResponse(BaseModel):
 )
 async def get_memory_health(
     admin: AdminUser,
-    context_id: str | None = Query(
-        default=None,
-        description=(
-            "Omit for the per-context breakdown. Pass a context UUID for that "
-            "context's 3-section detail (must be owned by the caller — "
-            "otherwise 404), or the sentinel 'unattributed' for signals "
-            "recorded without a context."
+    context_id: Annotated[
+        uuid.UUID | Literal["unattributed"] | None,
+        Query(
+            description=(
+                "Omit for the per-context breakdown. Pass a context UUID for "
+                "that context's 3-section detail (must be owned by the caller "
+                "— otherwise 404), or the sentinel 'unattributed' for signals "
+                "recorded without a context."
+            ),
         ),
-    ),
+    ] = None,
     db: AsyncSession = Depends(get_db),
 ) -> MemoryHealthBreakdownResponse | MemoryHealthDetailResponse:
     """Build the thresholded health document(s) for the calling admin.
@@ -145,17 +147,9 @@ async def get_memory_health(
         breakdown = await service.build_breakdown(user_id)
         return MemoryHealthBreakdownResponse(**breakdown)
 
-    scope: uuid.UUID | None
-    if context_id == UNATTRIBUTED_SCOPE:
-        scope = None
-    else:
-        try:
-            scope = uuid.UUID(context_id)
-        except ValueError as exc:
-            raise HTTPException(
-                status_code=422,
-                detail="context_id must be a UUID or 'unattributed'",
-            ) from exc
+    # FastAPI already validated the param shape (UUID | 'unattributed'):
+    # anything else got the standard 422 body before reaching here.
+    scope = None if context_id == UNATTRIBUTED_SCOPE else context_id
 
     report = await service.build_context_report(user_id, scope)
     if report is None:

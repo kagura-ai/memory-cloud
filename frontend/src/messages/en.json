@@ -2831,7 +2831,7 @@
       },
       "notes": {
         "latest_sleep_failed": "The latest sleep run failed — total judge failure. Check the sleep LLM configuration.",
-        "judge_failures": "{count} judge failure(s) across {degraded_runs} degraded run(s) in the window — a partially dead judge grades 'degraded', never silently 'completed'.",
+        "judge_failures": "Judge failures in the window: {count} (degraded runs: {degraded_runs}) — a partially dead judge grades 'degraded', never silently 'completed'.",
         "failed_runs_recovered": "{count} failed sleep run(s) in the window — the latest run recovered, but recent instability is worth a look.",
         "deferred_pairs": "{count} candidate pair(s) deferred unjudged (cluster caps) — dedup may be structurally behind.",
         "merge_backlog_old": "The oldest merge loser is {oldest_days}d old (over {threshold_days}d) — consider a retention window.",

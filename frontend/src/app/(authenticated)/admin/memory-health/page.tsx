@@ -12,7 +12,7 @@
  * docs/ops/memory-health-report.md). Admin-only, self-scoped.
  */
 
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { useTranslations } from "next-intl";
 import { Activity } from "lucide-react";
 import { ErrorBanner } from "@/components/common/ErrorBanner";
@@ -57,19 +57,6 @@ type DetailResponse = {
 /** Query-param value selecting the context-less signal bucket. */
 const UNATTRIBUTED_SCOPE = "unattributed";
 
-/** Backend note codes with a message-catalog entry. Anything else renders
- * the generic fallback — never a crash, never a blank note. */
-const KNOWN_NOTE_CODES = new Set([
-  "latest_sleep_failed",
-  "judge_failures",
-  "failed_runs_recovered",
-  "deferred_pairs",
-  "merge_backlog_old",
-  "edge_weight_violations",
-  "cold_graph",
-  "write_only_store",
-]);
-
 const STATUS_STYLES: Record<string, string> = {
   ok: "bg-green-100 text-green-800 dark:bg-green-900 dark:text-green-200",
   warn: "bg-yellow-100 text-yellow-800 dark:bg-yellow-900 dark:text-yellow-200",
@@ -88,6 +75,13 @@ const SECTION_LABEL_KEYS: Record<string, string> = {
   retrieval: "sections.retrieval",
 };
 
+type Translator = ReturnType<typeof useTranslations>;
+
+function sectionLabel(t: Translator, name: string): string {
+  const key = SECTION_LABEL_KEYS[name];
+  return key ? t(key) : name;
+}
+
 function StatusBadge({ status }: { status: string }) {
   const t = useTranslations("admin.memoryHealth");
   const labelKey = STATUS_LABEL_KEYS[status];
@@ -105,7 +99,9 @@ function StatusBadge({ status }: { status: string }) {
 
 function NoteText({ note }: { note: HealthNote }) {
   const t = useTranslations("admin.memoryHealth");
-  if (!KNOWN_NOTE_CODES.has(note.code)) {
+  // The message catalog is the single source of known note codes — an
+  // unknown code renders the generic fallback (never crash, never blank).
+  if (!t.has(`notes.${note.code}`)) {
     return <>{t("notes.unknown", { code: note.code })}</>;
   }
   return <>{t(`notes.${note.code}`, note.params as Record<string, string | number>)}</>;
@@ -116,9 +112,7 @@ function SectionCard({ name, section }: { name: string; section: HealthSection }
   return (
     <div className="rounded-lg border p-4">
       <div className="mb-2 flex items-center justify-between">
-        <h2 className="font-semibold">
-          {SECTION_LABEL_KEYS[name] ? t(SECTION_LABEL_KEYS[name]) : name}
-        </h2>
+        <h2 className="font-semibold">{sectionLabel(t, name)}</h2>
         <StatusBadge status={section.status} />
       </div>
       {section.notes.length > 0 && (
@@ -134,7 +128,7 @@ function SectionCard({ name, section }: { name: string; section: HealthSection }
         <tbody>
           {Object.entries(section.metrics).map(([key, value]) => (
             <tr key={key} className="border-t align-top">
-              <td className="w-1/2 break-all py-1 pr-2 font-mono text-muted-foreground">{key}</td>
+              <td className="w-1/2 py-1 pr-2 font-mono text-muted-foreground">{key}</td>
               {/* break-all: a long unbroken value (e.g. a JSON object) wraps
                   inside its own cell instead of overlaying the neighbor. */}
               <td className="w-1/2 break-all py-1 text-right font-mono">
@@ -160,57 +154,58 @@ export default function AdminMemoryHealthPage() {
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
 
-  const loadBreakdown = useCallback(async () => {
-    setLoading(true);
-    setError(null);
-    try {
-      const data = await apiClient.get<BreakdownResponse>("/api/v1/admin/memory-health");
-      setBreakdown(data);
-    } catch (err) {
-      setError(err instanceof Error ? err.message : String(err));
-    } finally {
-      setLoading(false);
-    }
-  }, []);
+  // Monotonic request sequence: a response only lands if no newer request
+  // (or back-navigation) superseded it — otherwise a slow detail fetch for
+  // context A would overwrite the view after the user moved to context B.
+  const requestSeq = useRef(0);
 
-  const loadDetail = useCallback(async (scope: string) => {
+  const load = useCallback(async (scope: string | null) => {
+    const seq = ++requestSeq.current;
     setLoading(true);
     setError(null);
     try {
-      const data = await apiClient.get<DetailResponse>(
-        `/api/v1/admin/memory-health?context_id=${encodeURIComponent(scope)}`,
-      );
-      setDetail(data);
+      if (scope === null) {
+        const data = await apiClient.get<BreakdownResponse>("/api/v1/admin/memory-health");
+        if (seq !== requestSeq.current) return;
+        setBreakdown(data);
+      } else {
+        const data = await apiClient.get<DetailResponse>(
+          `/api/v1/admin/memory-health?context_id=${encodeURIComponent(scope)}`,
+        );
+        if (seq !== requestSeq.current) return;
+        setDetail(data);
+      }
     } catch (err) {
+      if (seq !== requestSeq.current) return;
       setError(err instanceof Error ? err.message : String(err));
     } finally {
-      setLoading(false);
+      if (seq === requestSeq.current) setLoading(false);
     }
   }, []);
 
   useEffect(() => {
-    void loadBreakdown();
-  }, [loadBreakdown]);
+    void load(null);
+  }, [load]);
 
   const openDetail = (entry: ContextEntry) => {
     const scope = entry.context_id ?? UNATTRIBUTED_SCOPE;
     setSelectedScope(scope);
     setDetail(null);
-    void loadDetail(scope);
+    void load(scope);
   };
 
   const backToList = () => {
+    // Invalidate any in-flight detail fetch and show the retained breakdown
+    // instantly — the refresh button covers wanting fresh data.
+    requestSeq.current += 1;
     setSelectedScope(null);
     setDetail(null);
-    void loadBreakdown();
+    setError(null);
+    setLoading(false);
   };
 
   const refresh = () => {
-    if (selectedScope) {
-      void loadDetail(selectedScope);
-    } else {
-      void loadBreakdown();
-    }
+    void load(selectedScope);
   };
 
   const inDetailView = selectedScope !== null;

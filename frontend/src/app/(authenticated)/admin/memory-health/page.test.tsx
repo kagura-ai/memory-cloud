@@ -32,12 +32,18 @@ vi.mock("@/lib/api", async (importOriginal) => {
 });
 
 // Stable translator: `key` or `key:{json}` so param interpolation is visible.
-const stableTranslator = (key: string, values?: Record<string, unknown>) => {
-  if (values && Object.keys(values).length > 0) {
-    return `${key}:${JSON.stringify(values)}`;
-  }
-  return key;
-};
+// `.has` mirrors the real message catalog for the note codes under test —
+// the page treats the catalog as the single source of known codes.
+const CATALOG_NOTE_KEYS = new Set(["notes.judge_failures", "notes.unknown"]);
+const stableTranslator = Object.assign(
+  (key: string, values?: Record<string, unknown>) => {
+    if (values && Object.keys(values).length > 0) {
+      return `${key}:${JSON.stringify(values)}`;
+    }
+    return key;
+  },
+  { has: (key: string) => !key.startsWith("notes.") || CATALOG_NOTE_KEYS.has(key) },
+);
 
 vi.mock("next-intl", () => ({
   useTranslations: (_namespace: string) => stableTranslator,

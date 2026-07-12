@@ -19,13 +19,15 @@ warning always names the context it came from.
   detailed document for that single context. Ownership is validated
   (`created_by` = caller, not deleted); anything else is a uniform 404.
 - `GET /api/v1/admin/memory-health?context_id=unattributed` — the detail
-  document for signals recorded **without** a context (account-wide sleep
-  runs, cross-context recalls, legacy rows). These surface as an explicit
-  "unattributed" breakdown entry instead of being silently dropped —
-  dropping them would hide Phase-1 warnings behind the new grouping. The
-  unattributed entry skips the cold-graph and write-only heuristics (edges
-  always carry a context, and cross-context recalls land here, so both
-  would be noise) while still grading real facts like failed sleep runs.
+  document for signals that do not belong to an owned, live context:
+  recorded **without** a `context_id` (account-wide sleep runs, legacy
+  rows), or under a **soft-deleted** context, or under a **shared context
+  created by another member**. These fold into one explicit "unattributed"
+  breakdown entry instead of being silently dropped — dropping them would
+  hide Phase-1 warnings behind the new grouping. The unattributed entry
+  skips the cold-graph and write-only heuristics (it mixes scopes, so both
+  would be noise) while still grading deterministic facts like failed
+  sleep runs and edge-weight violations.
 
 Everything stays self-scoped (the calling admin's own data partition, same
 discipline as the manual sleep trigger). Workspace-level rollup across
@@ -51,7 +53,10 @@ with drill-down into the per-context detail.
 
 ### consolidation
 
-Window: the 20 most recent Sleep reports **per context**.
+Window: the 20 most recent Sleep reports **per context**, bounded to the
+last **180 days**. The recency bound keeps the window scan cheap as history
+grows and stops ancient failures in sparse contexts from resurfacing as
+eternal WARNs (the Phase-1 account-wide window had already aged them out).
 
 | Condition | Grade | Note code | Rationale |
 |---|---|---|---|
@@ -86,9 +91,14 @@ attributed per context.
 | Zero `recall()` calls with > 0 active memories | warn | `write_only_store` | The store is write-only — memory exists but nothing reads it. Skipped for the unattributed entry. |
 
 Metrics: `recall_calls`, `recall_upcoming_calls`, `remember_calls`,
-`explore_calls`, `window_days`, plus config posture
-(`contexts_with_config`, `reinforce_enabled`, `use_rerank` — 0/1 flags per
-context).
+`explore_calls`, `window_days`, plus config posture (`has_config`,
+`reinforce_enabled`, `use_rerank` — booleans per context).
+
+Attribution caveat: a cross-context `recall(context_ids=[...])` is logged
+under the **first** listed context only, so read activity on the other
+listed contexts is invisible to this section. A `write_only_store` WARN on
+a context that is only read via cross-context recall is a known false
+positive until usage logging attributes every listed context.
 
 ## Structured notes (#1225)
 
