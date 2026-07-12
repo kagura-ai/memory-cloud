@@ -31,20 +31,20 @@ Mirrors e25_782: downgrade remaps ``supersedes``/``contradicts`` to
 are gone; re-upgrading does not split them back out), then narrows the
 CHECK. Offline-downgrade recommended, same concurrency contract as e25.
 
-NOTE (merge coordination): this branch forks from main at e54, in parallel
-with e55 (#1207) and e56 (#1209). Whichever PRs merge later must re-chain
-``down_revision`` onto the then-current head (one line each) — merging in
-parallel as-is leaves alembic with multiple heads.
+NOTE (merge coordination): this branch forked from main at e54, in parallel
+with e55 (#1207) and e56 (#1209). Both merged first, so this revision was
+re-chained onto e56 (the then-current head) at merge time, per the plan in
+epic #1214.
 
 Revision ID: e57_1208_supersedes_contradicts
-Revises: e54_1183_sleep_status_degraded
+Revises: e56_1209_merge_retention
 """
 
 from alembic import op
 
 # revision identifiers
 revision = "e57_1208_supersedes_contradicts"
-down_revision = "e54_1183_sleep_status_degraded"
+down_revision = "e56_1209_merge_retention"
 branch_labels = None
 depends_on = None
 
