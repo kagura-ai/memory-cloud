@@ -55,7 +55,9 @@ CLASSIFY_MAX_CHARS = 2000
 # Single-quote literals must be whitespace-delimited on both sides so
 # apostrophes in ordinary English (contractions, possessives — "what's the
 # user's role") never read as an opening quote and hijack the semantic lane.
-_QUOTED_LITERAL = re.compile(r'"[^"]{2,}"' r"|(?:^|(?<=\s))'[^']{2,}'(?=\s|$)" r"|`[^`]{2,}`")
+# (?<!\S) = "not preceded by a non-space": matches at position 0 and after
+# whitespace, without the alternation-embedded ^ CodeQL flags as unmatchable.
+_QUOTED_LITERAL = re.compile(r'"[^"]{2,}"' r"|(?<!\S)'[^']{2,}'(?=\s|$)" r"|`[^`]{2,}`")
 _EXACT_ID_PATTERNS = (
     # UUID
     re.compile(r"\b[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}\b"),

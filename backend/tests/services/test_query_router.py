@@ -6,7 +6,10 @@ and the rule table from the issue — exact-ID / quoted-literal / code-symbol
 substantial natural language → hybrid, everything else → semantic.
 """
 
+import os
 import time
+
+import pytest
 
 from services.query_router import (
     CLASSIFY_MAX_CHARS,
@@ -190,6 +193,11 @@ class TestContract:
         route = classify_query("anything")
         assert isinstance(route, QueryRoute)
 
+    @pytest.mark.skipif(
+        os.getenv("RUN_PERF_TESTS") != "1",
+        reason="wall-clock assertion is flaky on shared CI runners; "
+        "opt in with RUN_PERF_TESTS=1 (same pattern as test_edge_invariant_perf)",
+    )
     def test_sub_millisecond_average(self) -> None:
         """Acceptance: sub-ms per call. Pinned loosely (0.5 ms avg over a
         long adversarial query) so CI jitter cannot flake it."""

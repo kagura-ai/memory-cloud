@@ -1699,7 +1699,11 @@ class MemoryService:
         Resolution order:
 
         1. An explicitly passed ``search_mode`` ALWAYS wins (router never
-           overrides a caller's choice, in any routing_mode).
+           overrides a caller's choice, in any routing_mode) — and returns
+           immediately, skipping the config read and classification: no DB
+           round-trip or classify/log work on the hot path when the outcome
+           is already decided. Router telemetry therefore covers only the
+           calls the router could actually influence (search_mode omitted).
         2. ``routing_mode='active'`` and no explicit mode → the classifier's
            lane.
         3. Otherwise → ``"hybrid"`` (the historical default).
@@ -1722,7 +1726,7 @@ class MemoryService:
         """
         requested_mode = request.search_mode
         default_mode = requested_mode or "hybrid"
-        if cross_context:
+        if cross_context or requested_mode is not None:
             return default_mode
 
         try:

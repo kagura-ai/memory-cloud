@@ -171,6 +171,19 @@ class TestFailOpenAndScope:
         repo_cls.assert_not_called()
 
     @pytest.mark.asyncio
+    async def test_explicit_mode_skips_config_read_and_classification(self) -> None:
+        """An explicit search_mode is guaranteed to win, so the resolver
+        must return immediately — no config round-trip, no classify/log
+        work on the hot path (Copilot, PR #1221)."""
+        repo_cls = MagicMock()
+        with patch("repositories.config_repository.ContextSearchConfigRepository", repo_cls):
+            mode = await _service()._resolve_search_mode(
+                _request(search_mode="keyword"), _CTX, cross_context=False
+            )
+        assert mode == "keyword"
+        repo_cls.assert_not_called()
+
+    @pytest.mark.asyncio
     async def test_config_read_failure_fails_open(self) -> None:
         repo = MagicMock()
         repo.get_by_context = AsyncMock(side_effect=RuntimeError("db down"))
