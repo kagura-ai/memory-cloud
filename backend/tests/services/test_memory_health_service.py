@@ -106,6 +106,17 @@ class TestConsolidationGrading:
         assert section["status"] == STATUS_WARN
         assert any("#1184" in n for n in section["notes"])
 
+    def test_deferred_note_survives_coexisting_warn(self) -> None:
+        """Every non-ok contribution gets a note — a judge-failure WARN must
+        not swallow the orthogonal deferred-pairs (#1184) explanation."""
+        section = MemoryHealthService._grade_consolidation(
+            [_report(status="degraded", failures=2, deferred=12)],
+            {"count": 0, "oldest_days": None},
+        )
+        assert section["status"] == STATUS_WARN
+        assert any("#1183" in n for n in section["notes"])
+        assert any("#1184" in n for n in section["notes"])
+
     def test_old_merge_backlog_warns_and_names_retention(self) -> None:
         section = MemoryHealthService._grade_consolidation(
             [_report()], {"count": 500, "oldest_days": 120}

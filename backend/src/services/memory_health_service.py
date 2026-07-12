@@ -186,7 +186,9 @@ class MemoryHealthService:
             .where(
                 UsageStats.user_id == user_id,
                 UsageStats.created_at >= since,
-                UsageStats.endpoint.in_(["mcp:recall", "mcp:remember", "mcp:explore"]),
+                UsageStats.endpoint.in_(
+                    ["mcp:recall", "mcp:recall_upcoming", "mcp:remember", "mcp:explore"]
+                ),
             )
             .group_by(UsageStats.endpoint)
         )
@@ -204,7 +206,7 @@ class MemoryHealthService:
             )
             .select_from(ContextSearchConfig)
             .join(Context, Context.id == ContextSearchConfig.context_id)
-            .where(Context.created_by == user_id)
+            .where(Context.created_by == user_id, Context.deleted_at.is_(None))
         )
         total, reinforce_on, rerank_on = rows.one()
         return {
@@ -250,8 +252,8 @@ class MemoryHealthService:
                     f"{failed} failed sleep run(s) in the window — the latest "
                     "run recovered, but recent instability is worth a look"
                 )
-        if deferred > 0 and status == STATUS_OK:
-            status = STATUS_WARN
+        if deferred > 0:
+            status = _worst([status, STATUS_WARN])
             notes.append(
                 f"{deferred} candidate pair(s) deferred unjudged (cluster caps) — "
                 "dedup may be structurally behind (#1184 class)"
@@ -317,8 +319,9 @@ class MemoryHealthService:
         notes: list[str] = []
         status = STATUS_OK
         recalls = usage.get("recall", 0)
+        recall_upcoming = usage.get("recall_upcoming", 0)
 
-        if recalls == 0 and active_memories > 0:
+        if recalls + recall_upcoming == 0 and active_memories > 0:
             status = STATUS_WARN
             notes.append(
                 f"no recall() calls in the last {_USAGE_WINDOW_DAYS}d despite "
@@ -331,6 +334,7 @@ class MemoryHealthService:
             "metrics": {
                 "window_days": _USAGE_WINDOW_DAYS,
                 "recall_calls": recalls,
+                "recall_upcoming_calls": recall_upcoming,
                 "remember_calls": usage.get("remember", 0),
                 "explore_calls": usage.get("explore", 0),
                 **posture,

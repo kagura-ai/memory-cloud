@@ -125,7 +125,7 @@ export default function AdminMemoryHealthPage() {
                 {section.notes.length > 0 && (
                   <ul className="mb-3 list-disc space-y-1 pl-4 text-xs text-muted-foreground">
                     {section.notes.map((note, i) => (
-                      <li key={`${i}-${note.slice(0, 24)}`}>{note}</li>
+                      <li key={i}>{note}</li>
                     ))}
                   </ul>
                 )}
