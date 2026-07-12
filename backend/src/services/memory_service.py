@@ -1761,6 +1761,154 @@ class MemoryService:
         )
         return effective_mode
 
+    @staticmethod
+    def _graph_boost_settings() -> tuple[bool, float]:
+        """#1213: env-gated experiment flag (read per call, like the eval pins).
+
+        An env flag — not a ContextSearchConfig column — because this is a
+        flagged EXPERIMENT: it must not mint a fifth parallel migration head
+        (e55-e58 already coordinate), and per-context graduation only happens
+        if the placebo gate (tests/eval/graph_boost_gate.py) passes.
+        """
+        import math
+        import os
+
+        enabled = os.getenv("KAGURA_GRAPH_BOOST_ENABLED", "").lower() in ("1", "true")
+        try:
+            max_boost = float(os.getenv("KAGURA_GRAPH_BOOST_MAX", "0.15"))
+            # float() accepts "nan"/"inf" without raising — "nan" would
+            # otherwise clamp to 0.0 and silently disable the experiment
+            # while telemetry still reports it applied.
+            if not math.isfinite(max_boost):
+                max_boost = 0.15
+        except ValueError:
+            max_boost = 0.15
+        return enabled, max(0.0, min(max_boost, 0.5))
+
+    async def _maybe_graph_boost(
+        self,
+        search_results: list[dict],
+        memories: dict,
+        context_id: UUID | None,
+        user_id: str | None,
+        top_k: int | None = None,
+    ) -> None:
+        """#1213: bounded multiplicative graph term over the hybrid top-k.
+
+        Placebo-gated EXPERIMENT (default off; when off, recall is
+        bit-identical: no edge query, no reorder). When
+        ``KAGURA_GRAPH_BOOST_ENABLED`` is set, each candidate score is
+        multiplied by ``1 + b * conn/max_conn`` where ``conn`` is the summed
+        weight of its hebbian edges to OTHER candidates in the same pool —
+        the warm co-activation companion structure the eval program measured
+        (+0.20 recovery over a degree-matched rewiring). Boost-only
+        ([1, 1+b]); isolated candidates keep factor 1.0.
+        Multiplicative-with-cap, NOT additive score fusion — the F1 hybrid
+        null showed fixed additive fusion dilutes precision.
+
+        Hebbian origin only: boosting on ``semantic`` edges would
+        double-count the vector similarity already in the base score, and
+        ``declared`` edges are unmeasured. Composes with the reinforce
+        re-rank via the ``_rerank_factor`` stamp (a product of two bounded
+        factors stays bounded). Single-context only; fail-safe (any failure
+        preserves the ranking).
+        """
+        enabled, max_boost = self._graph_boost_settings()
+        if not enabled or context_id is None or user_id is None or len(search_results) < 2:
+            return
+        try:
+            from sqlalchemy import select
+
+            from models.memory import NeuralMemoryEdge
+
+            # The experiment is defined over the hybrid top-k SLICE, not the
+            # expanded candidate pool (recall over-fetches k*4 when neural is
+            # on): boosting the whole pool would let pool-only items ride
+            # into the visible slice — a different experiment than the one
+            # the eval program measured — and inflate the edge-query size.
+            limit = len(search_results) if top_k is None else min(top_k, len(search_results))
+            scoped = search_results[:limit]
+            if len(scoped) < 2:
+                return
+
+            cand_ids = []
+            seen: set = set()
+            for r in scoped:
+                mem = memories.get(r["id"])
+                if mem is not None and mem.id not in seen:
+                    seen.add(mem.id)
+                    cand_ids.append(mem.id)
+            if len(cand_ids) < 2:
+                return
+
+            rows = await self.db.execute(
+                select(
+                    NeuralMemoryEdge.src_id, NeuralMemoryEdge.dst_id, NeuralMemoryEdge.weight
+                ).where(
+                    NeuralMemoryEdge.context_id == context_id,
+                    # Per-user scope, same discipline as activation.py: in a
+                    # shared context another member's co-activation history
+                    # (forgeable by deliberate co-recall) must not move THIS
+                    # caller's ranking (gate2/CSO).
+                    NeuralMemoryEdge.user_id == user_id,
+                    NeuralMemoryEdge.origin == "hebbian",
+                    NeuralMemoryEdge.src_id.in_(cand_ids),
+                    NeuralMemoryEdge.dst_id.in_(cand_ids),
+                    NeuralMemoryEdge.src_id != NeuralMemoryEdge.dst_id,
+                )
+            )
+            conn: dict[str, float] = {}
+            for src_id, dst_id, weight in rows.all():
+                w = float(weight or 0.0)
+                conn[str(src_id)] = conn.get(str(src_id), 0.0) + w
+                conn[str(dst_id)] = conn.get(str(dst_id), 0.0) + w
+            max_conn = max(conn.values(), default=0.0)
+            if max_conn <= 0.0:
+                return
+
+            def _sid(r: dict) -> str | None:
+                mem = memories.get(r["id"])
+                return str(mem.id) if mem is not None else None
+
+            factors: dict[str, float] = {
+                sid: 1.0 + max_boost * (conn.get(sid, 0.0) / max_conn)
+                for sid in (str(c) for c in cand_ids)
+            }
+
+            def _adjusted(r: dict) -> float:
+                base = r.get("hybrid_score")
+                if base is None:
+                    base = r.get("score") or 0.0
+                sid = _sid(r)
+                g = factors.get(sid, 1.0) if sid is not None else 1.0
+                return base * r.get("_rerank_factor", 1.0) * g
+
+            # Sort and stamp ONLY the top-k slice; items past the slice keep
+            # their original order (they are outside the experiment).
+            order_before = [x for x in (_sid(r) for r in scoped) if x is not None]
+            scoped.sort(key=_adjusted, reverse=True)
+            for r in scoped:
+                sid = _sid(r)
+                if sid is not None:
+                    r["_rerank_factor"] = r.get("_rerank_factor", 1.0) * factors.get(sid, 1.0)
+            search_results[:limit] = scoped
+            order_after = [x for x in (_sid(r) for r in scoped) if x is not None]
+
+            try:
+                logger.info(
+                    "graph_boost_applied",
+                    context_id=str(context_id),
+                    max_boost=round(max_boost, 4),
+                    candidates=len(cand_ids),
+                    connected=len(conn),
+                    max_conn=round(max_conn, 4),
+                    reordered_topk=order_before != order_after,
+                )
+            except Exception:  # noqa: BLE001 - telemetry must not break recall
+                logger.warning("graph_boost_telemetry_failed", context_id=str(context_id))
+        except Exception as exc:  # noqa: BLE001 - experiment must never break recall
+            logger.warning("graph_boost_skipped", context_id=str(context_id), error=str(exc))
+
     async def _maybe_reinforce_rerank(
         self,
         search_results: list[dict],
@@ -1855,6 +2003,13 @@ class MemoryService:
                     base = r.get("score") or 0.0
                 sid = _sid(r)
                 return base * (factors.get(sid, 1.0) if sid is not None else 1.0)
+
+            # #1213: stamp the factor so any later bounded re-ranker (e.g. the
+            # graph-boost experiment) composes multiplicatively instead of
+            # re-sorting by the raw base and silently erasing this re-rank.
+            for r in search_results:
+                sid = _sid(r)
+                r["_rerank_factor"] = factors.get(sid, 1.0) if sid is not None else 1.0
 
             order_before = [s for s in (_sid(r) for r in search_results) if s is not None]
             search_results.sort(key=_adjusted, reverse=True)
@@ -2213,6 +2368,16 @@ class MemoryService:
             search_results,
             memories,
             current_context_id if not context_ids else None,
+            top_k=request.k,
+        )
+        # #1213: placebo-gated graph-boost experiment (env flag, default off —
+        # bit-identical when off). Runs after reinforce and composes with it
+        # via the _rerank_factor stamp.
+        await self._maybe_graph_boost(
+            search_results,
+            memories,
+            current_context_id if not context_ids else None,
+            user_id,
             top_k=request.k,
         )
 

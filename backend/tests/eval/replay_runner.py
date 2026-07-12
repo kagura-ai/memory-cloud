@@ -293,10 +293,15 @@ async def _checkpoint(
 
     prev_neural = os.environ.get("ENABLE_NEURAL_MEMORY")
     os.environ["ENABLE_NEURAL_MEMORY"] = "false"
+    # #1213: pin the graph-boost experiment off — this arm measures the
+    # production ranking, and an operator-exported env must not leak in.
+    prev_boost = os.environ.get("KAGURA_GRAPH_BOOST_ENABLED")
+    os.environ["KAGURA_GRAPH_BOOST_ENABLED"] = "false"
     try:
         arm = await _score_arm(svc, corpus, docs_by_id, id_map, owner, ctx.id, ws.id, "hybrid")
     finally:
         _restore_env("ENABLE_NEURAL_MEMORY", prev_neural)
+        _restore_env("KAGURA_GRAPH_BOOST_ENABLED", prev_boost)
 
     return {
         "graph_lane": graph_lane,
@@ -369,6 +374,10 @@ async def _replay(svc: Any, corpus: Corpus, plan: ReplayPlan, owner: str, ctx: A
     queries_by_id = {q.id: q for q in corpus.queries}
     prev_neural = os.environ.get("ENABLE_NEURAL_MEMORY")
     os.environ["ENABLE_NEURAL_MEMORY"] = "true"
+    # #1213: warm-build replay must form edges from the UNBOOSTED production
+    # ranking — pin the graph-boost experiment off during replay too.
+    prev_boost = os.environ.get("KAGURA_GRAPH_BOOST_ENABLED")
+    os.environ["KAGURA_GRAPH_BOOST_ENABLED"] = "false"
     recalls = 0
     try:
         for _ in range(plan.rounds):
@@ -386,6 +395,7 @@ async def _replay(svc: Any, corpus: Corpus, plan: ReplayPlan, owner: str, ctx: A
                 recalls += 1
     finally:
         _restore_env("ENABLE_NEURAL_MEMORY", prev_neural)
+        _restore_env("KAGURA_GRAPH_BOOST_ENABLED", prev_boost)
     return recalls
 
 
