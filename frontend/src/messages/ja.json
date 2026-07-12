@@ -2812,7 +2812,18 @@
       "title": "メモリーヘルス",
       "description": "統合セルフ診断：consolidation / graph / retrieval のシグナルを ok/warn/fail で判定",
       "refresh": "更新",
-      "overall": "総合"
+      "overall": "総合",
+      "emptyValue": "—",
+      "status": {
+        "ok": "正常",
+        "warn": "警告",
+        "fail": "異常"
+      },
+      "sections": {
+        "consolidation": "統合（consolidation）",
+        "graph": "グラフ（graph）",
+        "retrieval": "検索（retrieval）"
+      }
     },
     "sleepReports": {
       "title": "Sleep レポート",

@@ -236,13 +236,20 @@ class MemoryHealthService:
                 "latest sleep run FAILED (total judge failure — the #1177 class); "
                 "check the sleep LLM configuration"
             )
-        elif total_failures > 0 or degraded > 0:
-            status = STATUS_WARN
-            notes.append(
-                f"judge failures in the window: {total_failures} across "
-                f"{degraded} degraded run(s) — a partially dead judge grades "
-                "'degraded', never silently 'completed' (#1183)"
-            )
+        else:
+            if total_failures > 0 or degraded > 0:
+                status = STATUS_WARN
+                notes.append(
+                    f"judge failures in the window: {total_failures} across "
+                    f"{degraded} degraded run(s) — a partially dead judge grades "
+                    "'degraded', never silently 'completed' (#1183)"
+                )
+            if failed > 0:
+                status = STATUS_WARN
+                notes.append(
+                    f"{failed} failed sleep run(s) in the window — the latest "
+                    "run recovered, but recent instability is worth a look"
+                )
         if deferred > 0 and status == STATUS_OK:
             status = STATUS_WARN
             notes.append(

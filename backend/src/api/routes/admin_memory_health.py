@@ -9,7 +9,7 @@ eval program. Self-scoped like the manual sleep trigger (Phase 1).
 
 from __future__ import annotations
 
-from typing import Any
+from typing import Any, Literal
 
 from fastapi import APIRouter, Depends
 from pydantic import BaseModel
@@ -26,6 +26,9 @@ logger = get_logger(__name__)
 router = APIRouter(prefix="/admin/memory-health", tags=["admin-memory-health"])
 
 
+HealthStatus = Literal["ok", "warn", "fail"]
+
+
 class MemoryHealthSection(BaseModel):
     """One graded health section.
 
@@ -35,7 +38,7 @@ class MemoryHealthSection(BaseModel):
         notes: Human-readable explanations for every non-ok contribution.
     """
 
-    status: str
+    status: HealthStatus
     metrics: dict[str, Any]
     notes: list[str]
 
@@ -44,7 +47,7 @@ class MemoryHealthResponse(BaseModel):
     """200 response for GET /admin/memory-health."""
 
     generated_at: str
-    overall_status: str
+    overall_status: HealthStatus
     sections: dict[str, MemoryHealthSection]
 
 

@@ -76,6 +76,20 @@ class TestConsolidationGrading:
         )
         assert section["status"] == STATUS_WARN
 
+    def test_past_failed_run_with_recovered_latest_is_warn(self) -> None:
+        """A failed run in the window must not hide behind a recovered latest.
+
+        No llm_call_failures and no degraded runs on the failed row (total
+        judge death records status only) — the failed status itself carries
+        the WARN.
+        """
+        section = MemoryHealthService._grade_consolidation(
+            [_report(), _report(status="failed")],
+            {"count": 0, "oldest_days": None},
+        )
+        assert section["status"] == STATUS_WARN
+        assert any("failed sleep run" in n for n in section["notes"])
+
     def test_backlog_at_threshold_is_ok_just_over_warns(self) -> None:
         """The 90-day backlog threshold is strict (>): 90d ok, 91d warn."""
         at = MemoryHealthService._grade_consolidation([_report()], {"count": 10, "oldest_days": 90})

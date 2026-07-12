@@ -32,7 +32,21 @@ const STATUS_STYLES: Record<string, string> = {
   fail: "bg-red-100 text-red-800 dark:bg-red-900 dark:text-red-200",
 };
 
+const STATUS_LABEL_KEYS: Record<string, string> = {
+  ok: "status.ok",
+  warn: "status.warn",
+  fail: "status.fail",
+};
+
+const SECTION_LABEL_KEYS: Record<string, string> = {
+  consolidation: "sections.consolidation",
+  graph: "sections.graph",
+  retrieval: "sections.retrieval",
+};
+
 function StatusBadge({ status }: { status: string }) {
+  const t = useTranslations("admin.memoryHealth");
+  const labelKey = STATUS_LABEL_KEYS[status];
   return (
     <span
       className={`inline-block rounded px-2 py-0.5 text-xs font-semibold uppercase ${
@@ -40,7 +54,7 @@ function StatusBadge({ status }: { status: string }) {
       }`}
       data-testid={`status-${status}`}
     >
-      {status}
+      {labelKey ? t(labelKey) : status}
     </span>
   );
 }
@@ -103,13 +117,15 @@ export default function AdminMemoryHealthPage() {
             {Object.entries(report.sections).map(([name, section]) => (
               <div key={name} className="rounded-lg border p-4">
                 <div className="mb-2 flex items-center justify-between">
-                  <h2 className="font-semibold capitalize">{name}</h2>
+                  <h2 className="font-semibold capitalize">
+                    {SECTION_LABEL_KEYS[name] ? t(SECTION_LABEL_KEYS[name]) : name}
+                  </h2>
                   <StatusBadge status={section.status} />
                 </div>
                 {section.notes.length > 0 && (
                   <ul className="mb-3 list-disc space-y-1 pl-4 text-xs text-muted-foreground">
-                    {section.notes.map((note) => (
-                      <li key={note}>{note}</li>
+                    {section.notes.map((note, i) => (
+                      <li key={`${i}-${note.slice(0, 24)}`}>{note}</li>
                     ))}
                   </ul>
                 )}
@@ -122,7 +138,7 @@ export default function AdminMemoryHealthPage() {
                         </td>
                         <td className="py-1 text-right font-mono">
                           {value === null
-                            ? "—"
+                            ? t("emptyValue")
                             : typeof value === "object"
                               ? JSON.stringify(value)
                               : String(value)}

@@ -2812,7 +2812,18 @@
       "title": "Memory Health",
       "description": "Consolidated self-diagnosis: consolidation, graph, and retrieval signals with ok/warn/fail grading",
       "refresh": "Refresh",
-      "overall": "Overall"
+      "overall": "Overall",
+      "emptyValue": "—",
+      "status": {
+        "ok": "OK",
+        "warn": "Warn",
+        "fail": "Fail"
+      },
+      "sections": {
+        "consolidation": "Consolidation",
+        "graph": "Graph",
+        "retrieval": "Retrieval"
+      }
     },
     "sleepReports": {
       "title": "Sleep Reports",
