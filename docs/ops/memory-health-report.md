@@ -1,18 +1,40 @@
-# Memory Health Report (#1211)
+# Memory Health Report (#1211, #1225)
 
 `GET /api/v1/admin/memory-health` assembles the signals the system already
 emits — Sleep reports, graph invariants, usage stats, search-config posture —
-into one thresholded self-diagnosis document. The motivating failure class:
+into thresholded self-diagnosis documents. The motivating failure class:
 memory bugs that manifest as *plausible successes* (`sleep_summary.ok=true`
 while every judge call failed, #1177). Each section grades `ok | warn | fail`;
-`overall_status` is the worst section.
+each document's `overall_status` is the worst section.
 
-Scope (Phase 1): self-scoped — the report covers the calling admin's own data
-partition, same discipline as the manual sleep trigger. Label-free signals
-only; gold-label rates (`stale_only`, P@k) belong to the eval CI gates
+Scoping (#1225, Phase 2): the report is broken down **per context**, so a
+warning always names the context it came from.
+
+- `GET /api/v1/admin/memory-health` — the breakdown: one graded entry per
+  owned context (`context_id`, display name, `overall_status`, per-section
+  statuses). No metric is summed across contexts; the page-level
+  `overall_status` is the worst entry. A user with zero contexts gets `ok`
+  with an empty list.
+- `GET /api/v1/admin/memory-health?context_id=<uuid>` — the 3-section
+  detailed document for that single context. Ownership is validated
+  (`created_by` = caller, not deleted); anything else is a uniform 404.
+- `GET /api/v1/admin/memory-health?context_id=unattributed` — the detail
+  document for signals recorded **without** a context (account-wide sleep
+  runs, cross-context recalls, legacy rows). These surface as an explicit
+  "unattributed" breakdown entry instead of being silently dropped —
+  dropping them would hide Phase-1 warnings behind the new grouping. The
+  unattributed entry skips the cold-graph and write-only heuristics (edges
+  always carry a context, and cross-context recalls land here, so both
+  would be noise) while still grading real facts like failed sleep runs.
+
+Everything stays self-scoped (the calling admin's own data partition, same
+discipline as the manual sleep trigger). Workspace-level rollup across
+members is deliberately Phase 3. Label-free signals only; gold-label rates
+(`stale_only`, P@k) belong to the eval CI gates
 ([eval README](../../backend/tests/eval/README.md), #1210).
 
-Web UI: **Admin → Memory Health** renders the same document.
+Web UI: **Admin → Memory Health** renders the breakdown as a status list
+with drill-down into the per-context detail.
 
 ## Grading philosophy
 
@@ -21,20 +43,24 @@ Web UI: **Admin → Memory Health** renders the same document.
 - **WARN** covers degradation signals worth a look but not proof of breakage.
 - Signals that exist only in logs (e.g. `reinforce_rerank_applied`) are
   excluded until persisted — never rendered as "pending".
+- **Isolation contract** (#1225): grading reads only the target context's
+  rows — a WARN-producing signal in context A cannot change context B's
+  grade (pinned by tests).
 
 ## Sections, metrics, thresholds
 
 ### consolidation
 
-Window: the 20 most recent Sleep reports for the user.
+Window: the 20 most recent Sleep reports **per context**.
 
-| Condition | Grade | Rationale |
-|---|---|---|
-| Latest sleep run `status=failed` | **fail** | Total judge death — the #1177 class. |
-| Any `llm_call_failures > 0` or `degraded` run in the window | warn | Partial judge death grades `degraded`, never a silent `completed` (#1183). |
-| `deferred_pairs > 0` in the window | warn | Cluster caps deferring candidate pairs unjudged — dedup may be structurally behind (#1184 class). |
-| Oldest `sleep_maintenance` soft-deleted merge loser > 90 days | warn | Backlog suggests a retention window is wanted (`sleep_merge_retention_days`, #1209). |
-| No sleep runs at all | ok | Sleep is opt-in (#558); absence is not failure. |
+| Condition | Grade | Note code | Rationale |
+|---|---|---|---|
+| Latest sleep run `status=failed` | **fail** | `latest_sleep_failed` | Total judge death — the #1177 class. |
+| Any `llm_call_failures > 0` or `degraded` run in the window | warn | `judge_failures` | Partial judge death grades `degraded`, never a silent `completed` (#1183). |
+| A `failed` run in the window with a recovered latest | warn | `failed_runs_recovered` | Recent instability is worth a look even after recovery. |
+| `deferred_pairs > 0` in the window | warn | `deferred_pairs` | Cluster caps deferring candidate pairs unjudged — dedup may be structurally behind (#1184 class). |
+| Oldest `sleep_maintenance` soft-deleted merge loser > 90 days | warn | `merge_backlog_old` | Backlog suggests a retention window is wanted (`sleep_merge_retention_days`, #1209). |
+| No sleep runs at all | ok | — | Sleep is opt-in (#558); absence is not failure. |
 
 Metrics: `reports_in_window`, `latest_status`, `llm_call_failures`,
 `degraded_runs`, `failed_runs`, `winner_overrides`, `deferred_pairs`,
@@ -42,25 +68,51 @@ Metrics: `reports_in_window`, `latest_status`, `llm_call_failures`,
 
 ### graph
 
-| Condition | Grade | Rationale |
-|---|---|---|
-| Any edge weight outside `[0.0, 3.0]` | **fail** | Deterministic invariant violation — the #1197 unclamped-accumulation class. |
-| Zero edges with ≥ 25 active memories | warn | The graph never warmed; check edge-formation gates / `sleep_mode`. |
+| Condition | Grade | Note code | Rationale |
+|---|---|---|---|
+| Any edge weight outside `[0.0, 3.0]` | **fail** | `edge_weight_violations` | Deterministic invariant violation — the #1197 unclamped-accumulation class. |
+| Zero edges with ≥ 25 active memories | warn | `cold_graph` | The graph never warmed; check edge-formation gates / `sleep_mode`. Skipped for the unattributed entry. |
 
 Metrics: `edges_by_origin` (hebbian / semantic / declared), `total_edges`,
 `weight_violations`, `active_memories`, `edges_per_memory`.
 
 ### retrieval
 
-Window: 7 days of `mcp:recall` / `mcp:remember` / `mcp:explore` usage.
+Window: 7 days of `mcp:recall` / `mcp:remember` / `mcp:explore` usage,
+attributed per context.
 
-| Condition | Grade | Rationale |
-|---|---|---|
-| Zero `recall()` calls with > 0 active memories | warn | The store is write-only — memory exists but nothing reads it. |
+| Condition | Grade | Note code | Rationale |
+|---|---|---|---|
+| Zero `recall()` calls with > 0 active memories | warn | `write_only_store` | The store is write-only — memory exists but nothing reads it. Skipped for the unattributed entry. |
 
-Metrics: `recall_calls`, `remember_calls`, `explore_calls`, `window_days`,
-plus config posture (`contexts_with_config`, `reinforce_enabled`,
-`use_rerank`).
+Metrics: `recall_calls`, `recall_upcoming_calls`, `remember_calls`,
+`explore_calls`, `window_days`, plus config posture
+(`contexts_with_config`, `reinforce_enabled`, `use_rerank` — 0/1 flags per
+context).
+
+## Structured notes (#1225)
+
+Section notes are structured records — `{"code": "<note_code>", "params":
+{...}}` — not prose. The frontend maps codes to localized strings
+(`en.json` / `ja.json` under `admin.memoryHealth.notes`) and interpolates
+the params; an unknown code renders a generic localized fallback (never a
+crash, never a blank). GitHub issue references never appear in the payload
+or the rendered UI — the note-code → design-rationale mapping in the tables
+above is the deep link for operators.
+
+| Note code | Params |
+|---|---|
+| `latest_sleep_failed` | — |
+| `judge_failures` | `count`, `degraded_runs` |
+| `failed_runs_recovered` | `count` |
+| `deferred_pairs` | `count` |
+| `merge_backlog_old` | `oldest_days`, `threshold_days` |
+| `edge_weight_violations` | `count`, `min`, `max` |
+| `cold_graph` | `active_memories` |
+| `write_only_store` | `window_days`, `active_memories` |
+
+Adding a note code is a three-place change: the service emits it, both
+message catalogs localize it, and the table above documents it.
 
 ## Relationship to the eval CI gates (#1210)
 

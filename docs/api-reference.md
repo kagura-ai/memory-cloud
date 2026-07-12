@@ -938,7 +938,8 @@ See [Sleep Maintenance](sleep-maintenance.md) for the full Sleep cycle design, `
 
 | Endpoint                          | Purpose                                                       |
 |-----------------------------------|---------------------------------------------------------------|
-| `GET /api/v1/admin/memory-health` | Consolidated self-diagnosis report — consolidation / graph / retrieval sections graded `ok`/`warn`/`fail` from Sleep telemetry, graph invariants, and usage stats. Self-scoped (the calling admin's data partition). |
+| `GET /api/v1/admin/memory-health` | Per-context self-diagnosis breakdown — one graded entry per owned context (consolidation / graph / retrieval statuses, `ok`/`warn`/`fail`) from Sleep telemetry, graph invariants, and usage stats. Self-scoped (the calling admin's data partition). |
+| `GET /api/v1/admin/memory-health?context_id=<uuid>` | The 3-section detail document for one owned context (un-owned → 404). `context_id=unattributed` targets signals recorded without a context. |
 
 See [Memory Health Report](ops/memory-health-report.md) for every metric and threshold.
 

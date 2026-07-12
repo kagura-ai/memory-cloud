@@ -2811,9 +2811,13 @@
     },
     "memoryHealth": {
       "title": "Memory Health",
-      "description": "Consolidated self-diagnosis: consolidation, graph, and retrieval signals with ok/warn/fail grading",
+      "description": "Per-context self-diagnosis: consolidation, graph, and retrieval signals with ok/warn/fail grading",
       "refresh": "Refresh",
       "overall": "Overall",
+      "back": "Back to contexts",
+      "unattributed": "Unattributed (no context)",
+      "emptyTitle": "Nothing to grade yet",
+      "emptyDescription": "Health entries appear here once you have contexts or recorded signals.",
       "emptyValue": "—",
       "status": {
         "ok": "OK",
@@ -2824,6 +2828,17 @@
         "consolidation": "Consolidation",
         "graph": "Graph",
         "retrieval": "Retrieval"
+      },
+      "notes": {
+        "latest_sleep_failed": "The latest sleep run failed — total judge failure. Check the sleep LLM configuration.",
+        "judge_failures": "{count} judge failure(s) across {degraded_runs} degraded run(s) in the window — a partially dead judge grades 'degraded', never silently 'completed'.",
+        "failed_runs_recovered": "{count} failed sleep run(s) in the window — the latest run recovered, but recent instability is worth a look.",
+        "deferred_pairs": "{count} candidate pair(s) deferred unjudged (cluster caps) — dedup may be structurally behind.",
+        "merge_backlog_old": "The oldest merge loser is {oldest_days}d old (over {threshold_days}d) — consider a retention window.",
+        "edge_weight_violations": "{count} edge(s) outside the weight bounds [{min}, {max}] — an unclamped-accumulation bug.",
+        "cold_graph": "{active_memories} active memories but zero edges — the graph never warmed. Check edge-formation gates and the sleep mode.",
+        "write_only_store": "No recall calls in the last {window_days}d despite {active_memories} active memories — the store is write-only right now.",
+        "unknown": "Unrecognized health note (code: {code})."
       }
     },
     "sleepReports": {
