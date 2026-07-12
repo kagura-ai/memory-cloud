@@ -176,14 +176,24 @@ class RecallRequest(BaseModel):
         }
     """
 
-    query: str = Field(..., min_length=1, description="検索クエリ")
+    # #1212 gate2/CSO: bounded so oversized payloads 422 at the schema instead
+    # of reaching the embedding call / BM25 / classifier. 8000 chars leaves
+    # ample room for HyDE-style hypothetical-answer queries.
+    query: str = Field(..., min_length=1, max_length=8000, description="検索クエリ")
     k: int = Field(default=5, ge=1, le=100, description="返却結果数")
     use_rerank: bool = Field(default=False, description="Reranking (Voyage/Cohere)を使用")
     filters: dict | None = Field(default=None, description="オプショナルフィルタ")
-    search_mode: str = Field(
-        default="hybrid",
+    # #1212: None means "caller did not specify". MemoryService.recall resolves
+    # it to "hybrid" — or, when the context opts into routing_mode='active', to
+    # the query-router's lane. An explicitly passed search_mode ALWAYS wins.
+    search_mode: str | None = Field(
+        default=None,
         pattern="^(hybrid|semantic|keyword)$",
-        description="Search mode: hybrid (default), semantic (vector only), keyword (BM25 only)",
+        description=(
+            "Search mode: hybrid (default when omitted), semantic (vector only), "
+            "keyword (BM25 only). Omit to allow query-intent routing on contexts "
+            "with routing_mode='active' (#1212)."
+        ),
     )
     include_explore_hints: bool = Field(
         default=False,
@@ -481,6 +491,8 @@ class ExportedSearchConfig(BaseModel):
     reinforce_enabled: bool = True
     reinforce_max_boost: float = 0.15
     reinforce_require_host_arbitration: bool = False
+    # #1212: default keeps pre-routing exports parseable.
+    routing_mode: str = "off"
 
 
 class ExportedMemory(TZAwareBaseModel):
@@ -551,7 +563,10 @@ class ForgetRequest(BaseModel):
     """Request schema for forget() API."""
 
     memory_id: UUID | None = Field(default=None, description="削除するメモリID")
-    query: str | None = Field(default=None, description="削除する検索クエリ")
+    # #1212: bounded to match RecallRequest.query — forget-by-query builds an
+    # internal RecallRequest, so an unbounded query here would surface as an
+    # unhandled 500 deep inside the service instead of a 422 at the schema.
+    query: str | None = Field(default=None, max_length=8000, description="削除する検索クエリ")
     k: int = Field(default=10, ge=1, le=100, description="削除する結果数（query指定時）")
 
 
@@ -902,6 +917,11 @@ class ContextSearchConfigResponse(TZAwareBaseModel):
     reinforce_require_host_arbitration: bool = Field(
         default=False, description="Count only host-arbitrated (provenance='host') feedback"
     )
+    # Issue #1212: query-intent router experiment gate.
+    routing_mode: str = Field(
+        default="off",
+        description="Query-intent router: off | log_only (telemetry only) | active (opt-in)",
+    )
     created_at: datetime
     updated_at: datetime
 
@@ -943,6 +963,14 @@ class ContextSearchConfigUpdate(BaseModel):
         default=False,
         description="Forge-resistant mode — only host-arbitrated feedback "
         "(provenance='host') moves ranking; an untrusted agent's self-feedback is ignored",
+    )
+    # Issue #1212: optional (default-preserving via exclude_unset in the repo)
+    # so existing REST callers that omit it are unaffected.
+    routing_mode: str = Field(
+        default="off",
+        pattern="^(off|log_only|active)$",
+        description="Query-intent router: off | log_only (stamp telemetry, zero "
+        "ranking change) | active (routed lane used only when search_mode is omitted)",
     )
 
     @model_validator(mode="after")

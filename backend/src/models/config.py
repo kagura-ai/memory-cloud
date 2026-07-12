@@ -130,6 +130,17 @@ class ContextSearchConfig(Base):
         Boolean, nullable=False, server_default="false", default=False
     )
 
+    # Issue #1212: query-intent retrieval router (experiment-gated).
+    # 'off' (default): router never runs. 'log_only': classifier decision is
+    # stamped into recall telemetry with ZERO ranking change. 'active': the
+    # routed lane is used ONLY when the caller did not pass search_mode
+    # explicitly (an explicit search_mode always wins). The default stays
+    # 'off' until the stage-3 calibration gate (frozen 300-doc corpus) shows
+    # the router beating semantic-only — the same bar hybrid failed (#1212).
+    routing_mode: Mapped[str] = mapped_column(
+        String(10), nullable=False, server_default="off", default="off"
+    )
+
     # Timestamps
     created_at: Mapped[datetime] = mapped_column(
         TIMESTAMP(timezone=True), server_default=func.now(), nullable=False
@@ -158,6 +169,10 @@ class ContextSearchConfig(Base):
         CheckConstraint(
             "reranker_provider IN ('voyage', 'cohere', 'self_hosted')",
             name="reranker_provider_check",
+        ),
+        CheckConstraint(
+            "routing_mode IN ('off', 'log_only', 'active')",
+            name="routing_mode_check",
         ),
     )
 

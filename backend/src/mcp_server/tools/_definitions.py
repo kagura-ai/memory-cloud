@@ -1189,7 +1189,7 @@ Examples:
 
 Weights must sum to 1.0.
 
-Returns: {status, message, context_id, config: {semantic_weight, bm25_weight, fetch_factor, use_rerank, reranker_provider, reranker_model, reinforce_enabled, reinforce_max_boost, reinforce_require_host_arbitration}}. semantic_weight + bm25_weight must sum to 1.0.""",
+Returns: {status, message, context_id, config: {semantic_weight, bm25_weight, fetch_factor, use_rerank, reranker_provider, reranker_model, reinforce_enabled, reinforce_max_boost, reinforce_require_host_arbitration, routing_mode}}. semantic_weight + bm25_weight must sum to 1.0.""",
             "inputSchema": {
                 "type": "object",
                 "required": ["context_id"],
@@ -1235,6 +1235,11 @@ Returns: {status, message, context_id, config: {semantic_weight, bm25_weight, fe
                     "reinforce_require_host_arbitration": {
                         "type": "boolean",
                         "description": "Forge-resistant mode. When true, the reinforce re-rank counts ONLY host-arbitrated feedback (an independent verdict), so an untrusted agent's self-emitted feedback(helpful=True) cannot manufacture its own ranking boost. Off by default. Enable on contexts exposed to untrusted autonomous agents.",
+                    },
+                    "routing_mode": {
+                        "type": "string",
+                        "enum": ["off", "log_only", "active"],
+                        "description": "Query-intent retrieval router (#1212). 'off' (default): never runs. 'log_only': stamps the classifier's lane decision into telemetry with zero ranking change — enable this first to measure the traffic mix. 'active': recall() calls that OMIT search_mode use the routed lane (exact-ID/quoted/code-symbol/hiragana-dominant → keyword, mixed → hybrid, else semantic); an explicit search_mode always wins.",
                     },
                 },
             },

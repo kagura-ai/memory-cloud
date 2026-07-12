@@ -83,6 +83,8 @@ async def handle_update_search_config(
                     "reinforce_require_host_arbitration",
                     config.reinforce_require_host_arbitration,
                 ),
+                # Issue #1212: query-intent router gate (round-trip current value).
+                "routing_mode": args.get("routing_mode", config.routing_mode),
             }
 
             # Validate via Pydantic (same as REST API)
@@ -124,6 +126,7 @@ async def handle_update_search_config(
                                 "reinforce_require_host_arbitration": (
                                     config.reinforce_require_host_arbitration
                                 ),
+                                "routing_mode": config.routing_mode,
                             },
                         }
                     ),

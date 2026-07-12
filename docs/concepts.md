@@ -161,6 +161,40 @@ update-by-removal remains the default), a judged merge creates a
 alive-but-shadowed. Neither type is LLM-emittable by edge discovery — the
 sleep judge cannot invent supersession.
 
+### Choosing a lane: search_mode and per-workload guidance
+
+`recall()` accepts `search_mode`: `hybrid` (default), `semantic` (vector only),
+or `keyword` (BM25 only, no embedding call). The pre-registered eval program
+(300-doc frozen corpus) found that fixed-weight hybrid fusion does **not** beat
+its own semantic component overall — but the per-bucket picture is
+design-consistent:
+
+| Your query traffic looks like… | Best lane |
+|---|---|
+| Exact IDs, error codes, commit SHAs, quoted literals, code symbols | `keyword` |
+| Hiragana-heavy Japanese (embedding models struggle here) | `keyword` (Sudachi tokenization) |
+| Natural-language questions, cross-source "what did we decide" queries | `semantic` |
+| Genuinely mixed (a symbol + a real question around it) | `hybrid` |
+
+### Query-intent routing (experiment-gated, #1212)
+
+Instead of making every caller pick a lane, a context can opt into a
+**deterministic query router** (no LLM on the hot path — regex and
+character-class counting, sub-millisecond): set `routing_mode` via
+`update_search_config`:
+
+- `off` (default) — router never runs.
+- `log_only` — the classifier's lane decision is stamped into telemetry
+  (`query_router_decision`, numeric features only — never query text) with
+  **zero ranking change**. Enable this first to measure your real traffic mix.
+- `active` — `recall()` calls that **omit** `search_mode` use the routed lane.
+  An explicitly passed `search_mode` always wins, in every mode.
+
+The router does not become the default until it clears the stage-3 calibration
+gate on the frozen eval corpus (beat semantic-only overall AND beat the
+strongest single component on each routed bucket) — the same bar fixed-weight
+hybrid failed.
+
 ## Neural Memory
 
 **Neural Memory** creates automatic relationships between memories using brain-inspired algorithms.
