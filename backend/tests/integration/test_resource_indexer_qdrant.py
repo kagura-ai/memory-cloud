@@ -39,8 +39,6 @@ from qdrant_client.http.exceptions import UnexpectedResponse
 from qdrant_client.models import (
     Distance,
     Modifier,
-    NamedSparseVector,
-    NamedVector,
     PointStruct,
     SparseVector,
     SparseVectorParams,
@@ -243,14 +241,12 @@ class TestResourceIndexerSparseBM25:
         # self-contained; production uses build_query_sparse_vector but the
         # token space is the same.
         q_indices, q_values = build_resource_sparse_vector(content)
-        hits = qdrant_client.search(
+        hits = qdrant_client.query_points(
             collection_name=named_vector_collection,
-            query_vector=NamedSparseVector(
-                name=KAGURA_MEMORIES_BM25_VECTOR_NAME,
-                vector=SparseVector(indices=q_indices, values=q_values),
-            ),
+            query=SparseVector(indices=q_indices, values=q_values),
+            using=KAGURA_MEMORIES_BM25_VECTOR_NAME,
             limit=10,
-        )
+        ).points
         assert any(h.id == point_id for h in hits), (
             "AC2: bm25-only search must surface resource points"
         )
@@ -273,14 +269,12 @@ class TestResourceIndexerSparseBM25:
             with_bm25=False,
         )
 
-        dense_hits = qdrant_client.search(
+        dense_hits = qdrant_client.query_points(
             collection_name=named_vector_collection,
-            query_vector=NamedVector(
-                name=KAGURA_MEMORIES_VECTOR_NAME,
-                vector=[0.1] * _EMBEDDING_DIM,
-            ),
+            query=[0.1] * _EMBEDDING_DIM,
+            using=KAGURA_MEMORIES_VECTOR_NAME,
             limit=10,
-        )
+        ).points
         assert any(h.id == point_id for h in dense_hits), (
             "AC3: legacy dense-only points must remain searchable via dense vector"
         )
@@ -289,14 +283,12 @@ class TestResourceIndexerSparseBM25:
         # without a sparse vector contribute zero to sparse retrieval, which
         # is the contract that makes the migration window safe.
         q_indices, q_values = build_resource_sparse_vector("legacy point without bm25")
-        sparse_hits = qdrant_client.search(
+        sparse_hits = qdrant_client.query_points(
             collection_name=named_vector_collection,
-            query_vector=NamedSparseVector(
-                name=KAGURA_MEMORIES_BM25_VECTOR_NAME,
-                vector=SparseVector(indices=q_indices, values=q_values),
-            ),
+            query=SparseVector(indices=q_indices, values=q_values),
+            using=KAGURA_MEMORIES_BM25_VECTOR_NAME,
             limit=10,
-        )
+        ).points
         assert all(h.id != point_id for h in sparse_hits), (
             "Sparse-vectorless points must not appear in bm25-only search results"
         )
@@ -437,14 +429,12 @@ class TestMemoryWriteSparseBM25:
         # the token space (the hash index space) is identical so presence
         # assertions hold regardless of which encoder we use here.
         q_indices, q_values = _build_memory_sparse_vector(content)
-        hits = qdrant_client.search(
+        hits = qdrant_client.query_points(
             collection_name=named_vector_collection,
-            query_vector=NamedSparseVector(
-                name=KAGURA_MEMORIES_BM25_VECTOR_NAME,
-                vector=SparseVector(indices=q_indices, values=q_values),
-            ),
+            query=SparseVector(indices=q_indices, values=q_values),
+            using=KAGURA_MEMORIES_BM25_VECTOR_NAME,
             limit=10,
-        )
+        ).points
         assert any(h.id == point_id for h in hits), (
             "AC2: bm25-only search must surface memory points"
         )
@@ -465,14 +455,12 @@ class TestMemoryWriteSparseBM25:
         )
         _wait_for_point(qdrant_client, named_vector_collection, point_id)
 
-        dense_hits = qdrant_client.search(
+        dense_hits = qdrant_client.query_points(
             collection_name=named_vector_collection,
-            query_vector=NamedVector(
-                name=KAGURA_MEMORIES_VECTOR_NAME,
-                vector=[0.1] * _EMBEDDING_DIM,
-            ),
+            query=[0.1] * _EMBEDDING_DIM,
+            using=KAGURA_MEMORIES_VECTOR_NAME,
             limit=10,
-        )
+        ).points
         assert any(h.id == point_id for h in dense_hits), (
             "AC3: sparse-omitted memories must remain searchable via dense vector"
         )
@@ -481,14 +469,12 @@ class TestMemoryWriteSparseBM25:
         # memories without a sparse vector contribute zero to sparse
         # retrieval, which is the contract that makes reindex/restore safe.
         q_indices, q_values = _build_memory_sparse_vector(content)
-        sparse_hits = qdrant_client.search(
+        sparse_hits = qdrant_client.query_points(
             collection_name=named_vector_collection,
-            query_vector=NamedSparseVector(
-                name=KAGURA_MEMORIES_BM25_VECTOR_NAME,
-                vector=SparseVector(indices=q_indices, values=q_values),
-            ),
+            query=SparseVector(indices=q_indices, values=q_values),
+            using=KAGURA_MEMORIES_BM25_VECTOR_NAME,
             limit=10,
-        )
+        ).points
         assert all(h.id != point_id for h in sparse_hits), (
             "Sparse-vectorless memories must not appear in bm25-only search results"
         )
