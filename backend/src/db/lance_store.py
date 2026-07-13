@@ -462,7 +462,7 @@ class LanceVectorStore:
         except Exception as e:
             raise QdrantError(f"LanceDB semantic search failed: {e}") from e
 
-        return [
+        results = [
             {
                 "id": row["id"],
                 # .metric("cosine") above makes _distance a cosine distance in
@@ -476,6 +476,12 @@ class LanceVectorStore:
             }
             for row in rows
         ]
+        # #1229: parity with the Qdrant path — LanceDB has no server-side
+        # score_threshold, so enforce the same contract post-hoc.
+        score_threshold = filters.get("score_threshold") if filters else None
+        if score_threshold is not None:
+            results = [r for r in results if r["score"] >= score_threshold]
+        return results
 
     async def search_fulltext(
         self,
