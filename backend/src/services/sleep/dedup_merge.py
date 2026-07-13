@@ -382,19 +382,24 @@ class DedupMergePhase:
                 tuple[UUID, UUID, Memory | None, Memory | None, dict[str, Any] | None]
             ] = []
             for winner_id, loser_id in merge_decisions:
-                # #1229 (run 6): union-find clusters chain transitively, so
-                # the judge can nominate two members with NO direct
-                # similarity edge — run 6 merged pairs whose true pairwise
-                # cosine was 0.43-0.66 under a 0.92 threshold, destroying
-                # distinct facts (update.stale_only_zero breach). Only pairs
-                # ``_find_similar_pairs`` actually emitted (>= threshold) are
-                # merge-eligible; the judge chooses among them, never beyond.
-                if tuple(sorted([winner_id, loser_id], key=str)) not in pair_scores:
+                # #1229 (runs 6-7): union-find clusters chain transitively
+                # AND candidate generation can regress (the score_threshold
+                # filter was silently dropped for years), so the judge can
+                # nominate pairs whose true pairwise cosine is far below the
+                # threshold — observed 0.43-0.66 under 0.92 — destroying
+                # distinct facts (update.stale_only_zero breach). Eligibility
+                # is deterministic and judged on the SCORE, not membership:
+                # a merge executes only when the pair's direct similarity
+                # meets the configured threshold.
+                pair_similarity = pair_scores.get(tuple(sorted([winner_id, loser_id], key=str)))
+                if pair_similarity is None or pair_similarity < threshold:
                     merge_guarded_count += 1
                     logger.warning(
-                        "dedup_merge_vetoed_no_direct_edge",
+                        "dedup_merge_vetoed_below_threshold",
                         winner_id=str(winner_id),
                         loser_id=str(loser_id),
+                        pair_similarity=pair_similarity,
+                        threshold=threshold,
                     )
                     continue
                 winner = memory_map.get(winner_id)

@@ -502,6 +502,21 @@ class TestSearchMemoriesQdrant:
         with pytest.raises(QdrantError, match="Search failed"):
             await search_memories_qdrant(UID, [0.1], WS, CTX)
 
+    async def test_score_threshold_reaches_query_points(self, mock_client):
+        """#1229: filters={'score_threshold': X} must reach query_points as
+        its kwarg — _build_search_filter only builds payload conditions and
+        silently dropped it, so dedup/edge-discovery candidate thresholds
+        never applied (every top-10 neighbor became a candidate pair)."""
+        mock_client.query_points.return_value = SimpleNamespace(points=[])
+        await search_memories_qdrant(UID, [0.1], WS, CTX, filters={"score_threshold": 0.92})
+        assert mock_client.query_points.await_args.kwargs["score_threshold"] == 0.92
+
+    async def test_no_score_threshold_by_default(self, mock_client):
+        """Without the filter key, query_points gets score_threshold=None."""
+        mock_client.query_points.return_value = SimpleNamespace(points=[])
+        await search_memories_qdrant(UID, [0.1], WS, CTX)
+        assert mock_client.query_points.await_args.kwargs["score_threshold"] is None
+
 
 # ===========================================================================
 # update_memory_payload_in_qdrant

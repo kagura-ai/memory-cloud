@@ -499,6 +499,11 @@ async def search_memories_qdrant(
         workspace_id, context_id, user_id, is_shared_context, filters
     )
 
+    # #1229: score_threshold is a query_points kwarg, not a payload condition —
+    # _build_search_filter used to drop it silently, so dedup/edge-discovery
+    # candidate thresholds never applied (every top-k neighbor qualified).
+    score_threshold = filters.get("score_threshold") if filters else None
+
     try:
         # Issue #16: Named vector for semantic search
         results = await client.query_points(
@@ -507,6 +512,7 @@ async def search_memories_qdrant(
             using=KAGURA_MEMORIES_VECTOR_NAME,
             limit=limit,
             query_filter=qdrant_filter,
+            score_threshold=score_threshold,
             with_vectors=[KAGURA_MEMORIES_VECTOR_NAME] if include_vectors else False,
         )
 

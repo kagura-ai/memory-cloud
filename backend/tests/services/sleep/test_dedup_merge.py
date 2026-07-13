@@ -601,6 +601,28 @@ class TestCrossPairMergeVeto:
         assert {winner.id, loser.id} == {mem_a.id, mem_b.id}
 
     @pytest.mark.asyncio
+    async def test_below_threshold_direct_pair_is_vetoed(self, dedup_phase):
+        """#1229 (run-7): the veto must judge the SCORE, not mere membership
+        in the candidate list — when candidate generation regresses (the
+        score_threshold filter was silently dropped for years), sub-threshold
+        pairs flow in as 'direct edges' and membership alone waves them
+        through."""
+        config = _make_config(threshold=0.92)
+        mem_a = _make_memory(summary="fact A")
+        mem_b = _make_memory(summary="unrelated fact B")
+        dedup_phase._fetch_active_memories = AsyncMock(return_value=[mem_a, mem_b])
+        # Direct pair, but far below threshold — run 7 observed 0.49-0.57.
+        dedup_phase._find_similar_pairs = AsyncMock(return_value=[(mem_a.id, mem_b.id, 0.57)])
+        dedup_phase._execute_merge = AsyncMock()
+        dedup_phase._judge_cluster = AsyncMock(return_value=[(mem_a.id, mem_b.id)])
+
+        result = await dedup_phase.execute(config, "user-1", "ws-1", "ctx-1", SleepBudget())
+
+        assert result.details["merged"] == 0
+        assert result.details["llm_merge_guarded"] == 1
+        dedup_phase._execute_merge.assert_not_awaited()
+
+    @pytest.mark.asyncio
     async def test_shadow_mode_merge_without_direct_edge_is_vetoed(self, dedup_phase):
         """#1208 shadow mode is equally destructive for recall (the loser is
         hidden by the supersedes edge) — the veto must cover it too."""
