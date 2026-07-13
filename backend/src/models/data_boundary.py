@@ -81,6 +81,10 @@ OPERATIONAL_TABLES: frozenset[str] = frozenset(
         "context_search_configs",
         "plan_changes",
         "usage_stats",
+        # #1228: diagnostic read-attribution for cross-context recall —
+        # usage telemetry like usage_stats (no user content, no learned
+        # structure; erased with the user, cascades with the context).
+        "context_read_attributions",
         "audit_logs",
         "erasure_requests",
         "signup_allowlist",
