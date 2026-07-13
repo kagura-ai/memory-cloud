@@ -61,6 +61,17 @@ logger = get_logger(__name__)
 # Larger clusters are deferred to the next sleep cycle.
 MAX_CLUSTER_SIZE = 5
 
+
+def _fmt_minute(dt: datetime | None) -> str | None:
+    """Minute-precision recency string, defined once (#1198/#1209/#1229).
+
+    The audit's winner/loser recency must stay byte-comparable with the
+    ``last_updated=`` the judge prompt shows — one shared formatter keeps
+    the post-hoc verification honest.
+    """
+    return f"{dt:%Y-%m-%d %H:%M}" if dt else None
+
+
 # Similarity threshold for auto-merge without LLM (LLM-off mode)
 AUTO_MERGE_THRESHOLD = 0.98
 
@@ -363,34 +374,29 @@ class DedupMergePhase:
             # onupdate=func.now(), expiring attributes on the shared
             # in-session instances — a later read would attempt a
             # synchronous refresh, raising MissingGreenlet under the async
-            # engine and killing the whole phase.
-            audits: dict[tuple[UUID, UUID], dict[str, Any]] = {}
-            if reporter and report_id:
-                for winner_id, loser_id in merge_decisions:
-                    winner = memory_map.get(winner_id)
-                    loser = memory_map.get(loser_id)
-                    if not winner or not loser:
-                        continue
-                    winner_recency = self._recency_key(winner)
-                    loser_recency = self._recency_key(loser)
-                    audits[(winner_id, loser_id)] = {
+            # engine and killing the whole phase. Pass 1 builds an ordered
+            # work list so each snapshot is structurally paired with its
+            # merge — no keyed lookup to fall out of sync.
+            merge_jobs: list[
+                tuple[UUID, UUID, Memory | None, Memory | None, dict[str, Any] | None]
+            ] = []
+            for winner_id, loser_id in merge_decisions:
+                winner = memory_map.get(winner_id)
+                loser = memory_map.get(loser_id)
+                audit: dict[str, Any] | None = None
+                if reporter and report_id and winner and loser:
+                    audit = {
                         "winner_tags": list(winner.tags or []),
                         "loser_tags": list(loser.tags or []),
                         "loser_summary": (loser.summary or "")[:200],
                         "winner_source": getattr(winner, "source_type", None),
                         "loser_source": getattr(loser, "source_type", None),
-                        "winner_recency": (
-                            f"{winner_recency:%Y-%m-%d %H:%M}" if winner_recency else None
-                        ),
-                        "loser_recency": (
-                            f"{loser_recency:%Y-%m-%d %H:%M}" if loser_recency else None
-                        ),
+                        "winner_recency": _fmt_minute(self._recency_key(winner)),
+                        "loser_recency": _fmt_minute(self._recency_key(loser)),
                     }
+                merge_jobs.append((winner_id, loser_id, winner, loser, audit))
 
-            for winner_id, loser_id in merge_decisions:
-                winner = memory_map.get(winner_id)
-                loser = memory_map.get(loser_id)
-                audit = audits.get((winner_id, loser_id))
+            for winner_id, loser_id, winner, loser, audit in merge_jobs:
                 prior_edge: dict[str, Any] | None = None
                 if shadow_mode:
                     prior_edge = await self._execute_shadow_merge(
@@ -648,7 +654,7 @@ class DedupMergePhase:
         memory_lines = []
         for label, mem in zip(labels_shuffled, mems_shuffled, strict=True):
             recency = self._recency_key(mem)
-            recency_s = f"{recency:%Y-%m-%d %H:%M}" if recency else "unknown"
+            recency_s = _fmt_minute(recency) or "unknown"
             source_s = getattr(mem, "source_type", None) or "unknown"
             memory_lines.append(
                 f"[{label}] type={mem.type}, importance={mem.importance:.2f}, "

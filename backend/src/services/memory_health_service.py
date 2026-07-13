@@ -550,11 +550,17 @@ class MemoryHealthService:
             status = STATUS_FAIL
             notes.append(_note("latest_sleep_failed"))
         else:
-            if total_failures > 0 or degraded > 0:
+            if total_failures > 0:
                 # A partially dead judge grades 'degraded', never silently
                 # 'completed' (#1183).
                 status = STATUS_WARN
                 notes.append(_note("judge_failures", count=total_failures, degraded_runs=degraded))
+            elif degraded > 0:
+                # #1229: a run can now grade 'degraded' from a phase crash
+                # with a perfectly healthy judge — blaming the judge here
+                # sent operators to the wrong config. Distinct note code.
+                status = STATUS_WARN
+                notes.append(_note("degraded_runs", count=degraded))
             if failed > 0:
                 # The latest run recovered, but recent instability is worth a look.
                 status = STATUS_WARN

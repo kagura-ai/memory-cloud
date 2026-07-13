@@ -97,6 +97,23 @@ def _adoption_delete_cutoff() -> datetime | None:
     return cutoff
 
 
+def _archival_eligible(memory: Memory, age_days: int, cutoff: datetime | None) -> bool:
+    """Deterministic archival eligibility (#1049/#1229), defined once.
+
+    The rule path ANDs this with the isolation check; the LLM path refuses
+    any archive verdict that fails it — eligibility is never the judge's
+    call, so the two paths cannot drift apart (#1229: the LLM path used to
+    bypass all three gates, archiving memories written minutes earlier and
+    violating the #1049 cutoff-unset RELEASE BLOCKER guarantee).
+    """
+    return (
+        age_days >= ARCHIVE_MIN_AGE_DAYS
+        and (memory.reference_count or 0) == 0
+        and cutoff is not None
+        and memory.created_at >= cutoff
+    )
+
+
 class ConsolidationPhase:
     """Consolidate working memories with optional LLM judgment."""
 
@@ -187,12 +204,8 @@ class ConsolidationPhase:
             # Archival now gates on adoption==0, AND is grandfathered: only memories
             # created at/after the cutoff are eligible (RELEASE BLOCKER — see
             # ``_adoption_delete_cutoff``). cutoff=None → no adoption-based deletion.
-            should_delete = (
-                age_days >= ARCHIVE_MIN_AGE_DAYS
-                and adoption == 0
-                and (not neural_metrics or neural_metrics["is_isolated"])
-                and adoption_delete_cutoff is not None
-                and memory.created_at >= adoption_delete_cutoff
+            should_delete = _archival_eligible(memory, age_days, adoption_delete_cutoff) and (
+                not neural_metrics or neural_metrics["is_isolated"]
             )
 
             if should_promote:
@@ -280,20 +293,9 @@ class ConsolidationPhase:
                         )
                     elif action == "archive":
                         # #1229: the LLM only chooses AMONG deterministically
-                        # archival-eligible candidates — eligibility itself
-                        # (min-age, zero adoption, the #1049 grandfather
-                        # cutoff) is never the judge's call. Without this
-                        # guard a memory written minutes earlier could be
-                        # archived by the same night's run, and the #1049
-                        # "no archival when the cutoff is unset" RELEASE
-                        # BLOCKER guarantee was silently bypassed by the
-                        # LLM path (the rule path above always enforced it).
-                        if (
-                            mem_age_days < ARCHIVE_MIN_AGE_DAYS
-                            or (mem.reference_count or 0) > 0
-                            or adoption_delete_cutoff is None
-                            or mem.created_at < adoption_delete_cutoff
-                        ):
+                        # archival-eligible candidates (shared predicate with
+                        # the rule path above — see _archival_eligible).
+                        if not _archival_eligible(mem, mem_age_days, adoption_delete_cutoff):
                             llm_archive_guarded += 1
                             logger.info(
                                 "consolidation_llm_archive_guarded",

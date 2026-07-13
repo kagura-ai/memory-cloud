@@ -9,12 +9,16 @@ from uuid import uuid4
 import pytest
 
 from services.sleep.orchestrator import SleepOrchestrator
-from services.sleep.reporter import PhaseResult
+from services.sleep.reporter import PhaseResult, SleepBudget
 
 
 @pytest.fixture
 def mock_db():
-    return AsyncMock()
+    db = AsyncMock()
+    # #1229: begin_nested() is a sync call returning an async context
+    # manager (each phase runs inside its own SAVEPOINT).
+    db.begin_nested = MagicMock(return_value=AsyncMock())
+    return db
 
 
 def _make_config():
@@ -349,14 +353,23 @@ class TestGetSleepModeFallback:
         assert await orchestrator._get_sleep_mode(str(uuid4())) == "edges_only"
 
 
-class TestPhaseFailureSessionRecovery:
-    """#1229: a phase failure that dies mid-flush invalidates the session's
-    transaction — without a rollback, every later phase AND the report
-    write raise PendingRollbackError, so one crashed phase silently killed
-    the rest of the run. _run_phase rolls back only when the session is
-    actually invalidated; a plain exception keeps earlier phases' pending
-    work intact as before.
+class TestPhaseFailureIsolation:
+    """#1229: every phase runs inside its own SAVEPOINT (begin_nested), so a
+    phase that dies mid-flush (or aborts the DB transaction with a direct
+    statement error) rolls back ONLY its own pending work. The SleepReport
+    row, earlier phases' work, and the outer transaction survive — a
+    session-level rollback here would discard the flushed report row
+    (scheduler path) or expire the pre-committed report instance (manual
+    path), cascading FK violations / MissingGreenlet through the rest of
+    the run.
     """
+
+    @staticmethod
+    def _db_with_nested():
+        db = AsyncMock()
+        # begin_nested() is a sync call returning an async context manager.
+        db.begin_nested = MagicMock(return_value=AsyncMock())
+        return db
 
     def _orchestrator(self, db):
         with (
@@ -377,11 +390,9 @@ class TestPhaseFailureSessionRecovery:
         return phase
 
     @pytest.mark.asyncio
-    async def test_invalidated_session_is_rolled_back(self):
-        db = AsyncMock()
-        db.is_active = False  # flush failure invalidated the transaction
+    async def test_failed_phase_is_contained_by_its_savepoint(self):
+        db = self._db_with_nested()
         orch = self._orchestrator(db)
-        from services.sleep.reporter import SleepBudget
 
         result = await orch._run_phase(
             "dedup_merge",
@@ -395,20 +406,22 @@ class TestPhaseFailureSessionRecovery:
         )
 
         assert result.success is False
-        db.rollback.assert_awaited_once()
+        assert "died mid-flush" in (result.error or "")
+        db.begin_nested.assert_called_once()
+        # No session-level rollback: that would discard the report row and
+        # earlier phases' pending work along with the failed phase's.
+        db.rollback.assert_not_awaited()
 
     @pytest.mark.asyncio
-    async def test_healthy_session_is_not_rolled_back(self):
-        """A plain phase exception must NOT discard earlier phases' pending
-        work — rollback only fires on an invalidated session."""
-        db = AsyncMock()
-        db.is_active = True
+    async def test_successful_phase_runs_inside_a_savepoint(self):
+        db = self._db_with_nested()
         orch = self._orchestrator(db)
-        from services.sleep.reporter import SleepBudget
+        phase = AsyncMock()
+        phase.execute = AsyncMock(return_value=PhaseResult(phase_name="dedup_merge"))
 
         result = await orch._run_phase(
             "dedup_merge",
-            self._failing_phase(),
+            phase,
             _make_config(),
             "user-1",
             None,
@@ -417,5 +430,6 @@ class TestPhaseFailureSessionRecovery:
             uuid4(),
         )
 
-        assert result.success is False
+        assert result.success is True
+        db.begin_nested.assert_called_once()
         db.rollback.assert_not_awaited()

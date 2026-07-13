@@ -2832,6 +2832,7 @@
       "notes": {
         "latest_sleep_failed": "直近の Sleep 実行が失敗しました — judge が全滅しています。Sleep の LLM 設定を確認してください。",
         "judge_failures": "ウィンドウ内の judge 失敗: {count} 件（degraded 実行: {degraded_runs} 件）— 部分的に停止した judge は 'degraded' と判定され、静かに 'completed' にはなりません。",
+        "degraded_runs": "judge 失敗なしの degraded 実行が {count} 件 — メンテナンスフェーズがクラッシュしています。実行の error message を確認してください。",
         "failed_runs_recovered": "ウィンドウ内に {count} 件の失敗した Sleep 実行 — 直近は回復していますが、最近の不安定さは確認する価値があります。",
         "deferred_pairs": "{count} 件の候補ペアが未判定のまま繰り延べ（クラスタ上限）— dedup が構造的に追いついていない可能性があります。",
         "merge_backlog_old": "最古のマージ敗者が {oldest_days} 日前のものです（{threshold_days} 日超）— 保持期間の設定を検討してください。",
@@ -2915,6 +2916,7 @@
           "headlineDeletedContext": "(削除済みコンテキスト) — {processed} 件のメモリを処理: マージ {merged} / エッジ {edges} / 昇格 {promoted} / 要確認 {flagged}",
           "runFailed": "実行に失敗しました: {error}",
           "runDegraded": "一部失敗: judge LLM 呼び出し {count} 件が失敗しました — マージ・重要度の判定が不完全な可能性があります。下のフェーズ結果を確認してください。",
+          "runDegradedPhase": "一部失敗: {error} — 残りのフェーズは完了しています。下のフェーズ結果を確認してください。",
           "skippedNoReason": "スキップされました",
           "skippedUnknown": "スキップ: {reason}",
           "skipReasons": {

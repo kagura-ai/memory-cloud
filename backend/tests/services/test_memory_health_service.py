@@ -92,6 +92,19 @@ class TestConsolidationGrading:
         )
         assert section["status"] == STATUS_WARN
 
+    def test_degraded_without_judge_failures_uses_degraded_runs_note(self) -> None:
+        """#1229: a phase crash grades the run 'degraded' with a healthy
+        judge — the note must not blame the judge (distinct code)."""
+        section = MemoryHealthService._grade_consolidation(
+            [_report(), _report(status="degraded", failures=0)],
+            {"count": 0, "oldest_days": None},
+        )
+        assert section["status"] == STATUS_WARN
+        assert "degraded_runs" in _codes(section)
+        assert "judge_failures" not in _codes(section)
+        note = next(n for n in section["notes"] if n["code"] == "degraded_runs")
+        assert note["params"] == {"count": 1}
+
     def test_latest_degraded_is_warn_not_fail(self) -> None:
         """A degraded LATEST run is partial judge death — WARN, never FAIL."""
         section = MemoryHealthService._grade_consolidation(

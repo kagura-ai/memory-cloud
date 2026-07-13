@@ -203,15 +203,26 @@ class SleepOrchestrator:
             )
 
         try:
-            result = await phase.execute(
-                config,
-                user_id,
-                workspace_id,
-                context_id,
-                budget,
-                reporter=self.reporter,
-                report_id=report_id,
-            )
+            # #1229: every phase runs inside its own SAVEPOINT. A phase that
+            # dies mid-flush used to invalidate the WHOLE shared transaction
+            # — every later phase and the report write then failed with
+            # PendingRollbackError, so one crashed phase silently killed the
+            # rest of the run. Rolling back to the savepoint (which the
+            # context manager does on exception) discards ONLY the failed
+            # phase's pending work: the SleepReport row, earlier phases'
+            # work, and the outer transaction all stay intact — including
+            # for direct statement errors that abort the DB transaction
+            # without tripping a flush (savepoints restore those too).
+            async with self.db.begin_nested():
+                result = await phase.execute(
+                    config,
+                    user_id,
+                    workspace_id,
+                    context_id,
+                    budget,
+                    reporter=self.reporter,
+                    report_id=report_id,
+                )
             logger.info(
                 "sleep_phase_completed",
                 phase=name,
@@ -229,19 +240,6 @@ class SleepOrchestrator:
                 error=str(e),
                 exc_info=True,
             )
-            # #1229: a failure during flush invalidates the transaction —
-            # without a rollback, every later phase AND the report write
-            # itself die with PendingRollbackError ("This Session's
-            # transaction has been rolled back..."). Roll back only when
-            # the session is actually invalidated: a plain phase exception
-            # keeps earlier phases' pending work intact as before.
-            if not self.db.is_active:
-                logger.warning(
-                    "sleep_phase_failure_invalidated_session",
-                    phase=name,
-                    note="rolling back so remaining phases run on a clean session",
-                )
-                await self.db.rollback()
             return PhaseResult(
                 phase_name=name,
                 success=False,

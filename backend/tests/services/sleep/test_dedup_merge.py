@@ -393,22 +393,20 @@ def _make_sealable_memory(*, created_at, updated_at, importance=0.5):
 
     class _Sealable:
         def __init__(self):
-            d = object.__getattribute__(self, "__dict__")
-            d.update(
-                id=uuid4(),
-                summary="test summary",
-                type="note",
-                importance=importance,
-                tags=["tag-a"],
-                access_count=1,
-                source_type="manual",
-                created_at=created_at,
-                updated_at=updated_at,
-                _sealed=False,
-            )
+            # Plain assignments are fine — only reads are intercepted below.
+            self.id = uuid4()
+            self.summary = "test summary"
+            self.type = "note"
+            self.importance = importance
+            self.tags = ["tag-a"]
+            self.access_count = 1
+            self.source_type = "manual"
+            self.created_at = created_at
+            self.updated_at = updated_at
+            self._sealed = False
 
         def seal(self):
-            object.__getattribute__(self, "__dict__")["_sealed"] = True
+            self._sealed = True
 
         def __getattribute__(self, name):
             d = object.__getattribute__(self, "__dict__")
@@ -425,6 +423,13 @@ def _make_sealable_memory(*, created_at, updated_at, importance=0.5):
             return object.__getattribute__(self, name)
 
     return _Sealable()
+
+
+async def _seal_both(w, l_, *args, **kwargs):  # noqa: ANN002, ANN003
+    """Mocked _execute_merge side effect: seals both rows so any later
+    attribute read models the post-merge expired-refresh crash (#1229)."""
+    w.seal()
+    l_.seal()
 
 
 class TestMergeAuditSnapshot:
@@ -451,10 +456,6 @@ class TestMergeAuditSnapshot:
 
         dedup_phase._fetch_active_memories = AsyncMock(return_value=[winner, loser])
         dedup_phase._find_similar_pairs = AsyncMock(return_value=[(winner.id, loser.id, 0.99)])
-
-        async def _seal_both(w, l_, *args, **kwargs):  # noqa: ANN002, ANN003
-            w.seal()
-            l_.seal()
 
         dedup_phase._execute_merge = AsyncMock(side_effect=_seal_both)
         reporter = AsyncMock()
@@ -501,10 +502,6 @@ class TestMergeAuditSnapshot:
                 (winner.id, loser_b.id, 0.99),
             ]
         )
-
-        async def _seal_both(w, l_, *args, **kwargs):  # noqa: ANN002, ANN003
-            w.seal()
-            l_.seal()
 
         dedup_phase._execute_merge = AsyncMock(side_effect=_seal_both)
         reporter = AsyncMock()

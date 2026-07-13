@@ -206,8 +206,11 @@ class TestLLMBorderlinePath:
     @pytest.mark.asyncio
     async def test_llm_archive_connected_memory_is_protected(self):
         # Graph present and the node is NOT isolated → bridge protection: the
-        # LLM "archive" verdict must be vetoed.
-        mem = _make_memory()
+        # LLM "archive" verdict must be vetoed. #1229: the memory must be
+        # deterministically archival-eligible (age >= 30d, cutoff opted-in)
+        # or the eligibility guard short-circuits before the isolation veto
+        # is ever exercised (this test was briefly vacuous).
+        mem = _make_memory(age_days=40)
         phase, llm = _build_phase([mem])
         llm.complete_json = AsyncMock(
             return_value=_make_llm_response([{"label": "A", "action": "archive"}])
@@ -220,9 +223,14 @@ class TestLLMBorderlinePath:
             "is_isolated": False,
         }
         result, _, _ = await _run_with_graph(
-            phase, total_edges=5, node_metrics=connected, config=_make_config()
+            phase,
+            total_edges=5,
+            node_metrics=connected,
+            cutoff=utcnow() - timedelta(days=365),
+            config=_make_config(),
         )
 
+        assert result.details["llm_archive_guarded"] == 0
         assert result.details["llm_archived"] == 0
         phase.memory_repo.delete.assert_not_called()
 
