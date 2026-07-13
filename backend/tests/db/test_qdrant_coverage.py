@@ -502,6 +502,30 @@ class TestSearchMemoriesQdrant:
         with pytest.raises(QdrantError, match="Search failed"):
             await search_memories_qdrant(UID, [0.1], WS, CTX)
 
+    async def test_score_threshold_reaches_query_points(self, mock_client):
+        """#1229: filters={'score_threshold': X} must reach query_points as
+        its kwarg — _build_search_filter only builds payload conditions and
+        silently dropped it, so dedup/edge-discovery candidate thresholds
+        never applied (every top-10 neighbor became a candidate pair)."""
+        mock_client.query_points.return_value = SimpleNamespace(points=[])
+        await search_memories_qdrant(UID, [0.1], WS, CTX, filters={"score_threshold": 0.92})
+        assert mock_client.query_points.await_args.kwargs["score_threshold"] == 0.92
+
+    async def test_no_score_threshold_by_default(self, mock_client):
+        """Without the filter key, query_points gets score_threshold=None."""
+        mock_client.query_points.return_value = SimpleNamespace(points=[])
+        await search_memories_qdrant(UID, [0.1], WS, CTX)
+        assert mock_client.query_points.await_args.kwargs["score_threshold"] is None
+
+    @pytest.mark.parametrize("bad", ["0.9", True, {"gte": 0.5}, [0.9], 1.5, -1.5])
+    async def test_invalid_score_threshold_is_a_value_error(self, mock_client, bad):
+        """#1229 review: filters is free-form user input on the public recall
+        API — junk score_threshold must map to ValueError (4xx, matching the
+        importance-range convention), never a QdrantError 5xx."""
+        with pytest.raises(ValueError, match="score_threshold"):
+            await search_memories_qdrant(UID, [0.1], WS, CTX, filters={"score_threshold": bad})
+        mock_client.query_points.assert_not_awaited()
+
 
 # ===========================================================================
 # update_memory_payload_in_qdrant

@@ -159,7 +159,11 @@ export function SleepReportDetailView({
       />
 
       <div className="space-y-6">
-        {(report.status === "failed" || report.error_message) && (
+        {/* #1229: gate the failure banner on status alone — degraded runs
+            now carry error_message too (phase_failure: <phase>), and a red
+            "Run failed" banner beside a Degraded badge is two contradictory
+            verdicts for one event (one channel per error class). */}
+        {report.status === "failed" && (
           <ErrorBanner
             error={
               report.error_message
@@ -184,9 +188,16 @@ export function SleepReportDetailView({
           >
             <AlertTriangle className="h-4 w-4" />
             <AlertDescription>
-              {t("detail.narrative.runDegraded", {
-                count: report.llm_call_failures ?? 0,
-              })}
+              {/* #1229: a degraded run can now come from a phase crash with a
+                  healthy judge — show the recorded cause instead of a
+                  misleading "0 judge LLM calls failed". */}
+              {report.error_message
+                ? t("detail.narrative.runDegradedPhase", {
+                    error: report.error_message,
+                  })
+                : t("detail.narrative.runDegraded", {
+                    count: report.llm_call_failures ?? 0,
+                  })}
             </AlertDescription>
           </Alert>
         )}

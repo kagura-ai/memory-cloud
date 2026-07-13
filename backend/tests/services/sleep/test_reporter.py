@@ -273,3 +273,65 @@ class TestRunStatusGrading:
         await reporter.complete_report(report, results)
 
         assert report.dedup_result["llm_call_failures"] == 1
+
+
+class TestPhaseFailureGrading:
+    """#1229: a phase that raised (success=False) must degrade the run.
+
+    The dedup phase died with MissingGreenlet on its first merge while the
+    run still graded 'completed' (0 judge failures, because the crash
+    happened before any judge call) — a failed stage hiding behind a green
+    run, the exact plausible-success shape #1177/#1183 exist to prevent.
+    """
+
+    @pytest.fixture
+    def reporter(self):
+        db = AsyncMock()
+        db.add = MagicMock()
+        return SleepReporter(db)
+
+    @pytest.mark.asyncio
+    async def test_phase_hard_failure_grades_degraded(self, reporter):
+        report = MagicMock()
+        report.id = uuid4()
+        report.error_message = None
+        results = [
+            PhaseResult(phase_name="edge_discovery"),
+            PhaseResult(
+                phase_name="dedup_merge",
+                success=False,
+                error="greenlet_spawn has not been called; ...",
+            ),
+        ]
+
+        await reporter.complete_report(report, results)
+
+        assert report.status == "degraded"
+        assert "dedup_merge" in report.error_message
+
+    @pytest.mark.asyncio
+    async def test_phase_failure_never_upgrades_a_failed_run(self, reporter):
+        """Total judge death stays 'failed' even with phase failures."""
+        report = MagicMock()
+        report.id = uuid4()
+        results = [
+            PhaseResult(phase_name="edge_discovery", llm_calls_used=3, llm_call_failures=3),
+            PhaseResult(phase_name="dedup_merge", success=False, error="boom"),
+        ]
+
+        await reporter.complete_report(report, results)
+
+        assert report.status == "failed"
+
+    @pytest.mark.asyncio
+    async def test_all_phases_ok_still_completed(self, reporter):
+        report = MagicMock()
+        report.id = uuid4()
+        results = [
+            PhaseResult(phase_name="edge_discovery"),
+            PhaseResult(phase_name="dedup_merge"),
+        ]
+
+        await reporter.complete_report(report, results)
+
+        assert report.status == "completed"

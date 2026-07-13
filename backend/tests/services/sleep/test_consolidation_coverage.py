@@ -186,8 +186,12 @@ class TestLLMBorderlinePath:
         assert result.llm_calls_used == 1
 
     @pytest.mark.asyncio
-    async def test_llm_archive_isolated_deletes(self):
-        # No graph (total_edges=0) → neural is None → isolation guard passes.
+    async def test_llm_archive_fresh_memory_is_guarded(self):
+        # #1229: a fresh borderline memory (age 10d, cutoff unset) is not
+        # deterministically archival-eligible — the LLM's "archive" verdict
+        # is refused, never a deletion. (Pre-#1229 this test asserted the
+        # LLM could delete it — the exact hazard that ate the eval's
+        # freshly-ingested current docs.)
         mem = _make_memory()
         phase, llm = _build_phase([mem])
         llm.complete_json = AsyncMock(
@@ -195,14 +199,18 @@ class TestLLMBorderlinePath:
         )
         result, _, _ = await _run_with_graph(phase, total_edges=0, config=_make_config())
 
-        assert result.details["llm_archived"] == 1
-        phase.memory_repo.delete.assert_awaited_once_with(mem.id)
+        assert result.details["llm_archived"] == 0
+        assert result.details["llm_archive_guarded"] == 1
+        phase.memory_repo.delete.assert_not_called()
 
     @pytest.mark.asyncio
     async def test_llm_archive_connected_memory_is_protected(self):
         # Graph present and the node is NOT isolated → bridge protection: the
-        # LLM "archive" verdict must be vetoed.
-        mem = _make_memory()
+        # LLM "archive" verdict must be vetoed. #1229: the memory must be
+        # deterministically archival-eligible (age >= 30d, cutoff opted-in)
+        # or the eligibility guard short-circuits before the isolation veto
+        # is ever exercised (this test was briefly vacuous).
+        mem = _make_memory(age_days=40)
         phase, llm = _build_phase([mem])
         llm.complete_json = AsyncMock(
             return_value=_make_llm_response([{"label": "A", "action": "archive"}])
@@ -215,20 +223,35 @@ class TestLLMBorderlinePath:
             "is_isolated": False,
         }
         result, _, _ = await _run_with_graph(
-            phase, total_edges=5, node_metrics=connected, config=_make_config()
+            phase,
+            total_edges=5,
+            node_metrics=connected,
+            cutoff=utcnow() - timedelta(days=365),
+            config=_make_config(),
         )
 
+        assert result.details["llm_archive_guarded"] == 0
         assert result.details["llm_archived"] == 0
         phase.memory_repo.delete.assert_not_called()
 
     @pytest.mark.asyncio
     async def test_llm_archive_isolated_with_graph_deletes(self):
-        # Graph present but the node IS isolated → archive proceeds.
-        mem = _make_memory()
+        # #1229: the LLM archive lane survives only for memories that were
+        # NOT rule-deletable at rule time (connected then) but read as
+        # isolated by the LLM-path re-check — deterministic eligibility
+        # (age/adoption/cutoff) still holds, so the verdict proceeds.
+        mem = _make_memory(age_days=40)
         phase, llm = _build_phase([mem])
         llm.complete_json = AsyncMock(
             return_value=_make_llm_response([{"label": "A", "action": "archive"}])
         )
+        connected = {
+            "centrality": 0.1,
+            "edge_count": 1,
+            "avg_edge_weight": 0.2,
+            "is_hub_node": False,
+            "is_isolated": False,
+        }
         isolated = {
             "centrality": 0.0,
             "edge_count": 0,
@@ -236,10 +259,23 @@ class TestLLMBorderlinePath:
             "is_hub_node": False,
             "is_isolated": True,
         }
-        result, _, _ = await _run_with_graph(
-            phase, total_edges=5, node_metrics=isolated, config=_make_config()
-        )
+        config = _make_config()
+        budget = SleepBudget()
+        graph = MagicMock()
+        graph.stats = AsyncMock(return_value={"total_edges": 5})
+        graph.get_node_metrics = AsyncMock(side_effect=[connected, isolated])
+        cutoff = utcnow() - timedelta(days=365)
+        with (
+            patch("services.sleep.consolidation.GraphService", return_value=graph),
+            patch(
+                "services.sleep.consolidation.delete_memory_from_qdrant",
+                new_callable=AsyncMock,
+            ),
+            patch("services.sleep.consolidation._adoption_delete_cutoff", return_value=cutoff),
+        ):
+            result = await phase.execute(config, "user-1", "ws-1", "ctx-1", budget)
 
+        assert result.details["llm_archive_guarded"] == 0
         assert result.details["llm_archived"] == 1
         phase.memory_repo.delete.assert_awaited_once_with(mem.id)
 

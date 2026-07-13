@@ -177,6 +177,26 @@ def _build_date_filter_conditions(filters: dict[str, Any]) -> list[FieldConditio
     return conditions
 
 
+def extract_score_threshold(filters: dict[str, Any] | None) -> float | None:
+    """Extract and validate ``filters["score_threshold"]`` (#1229).
+
+    A similarity floor for the SEMANTIC leg only — BM25 scores are not
+    cosine similarities, so fulltext search ignores the key. ``filters`` is
+    free-form user input on the public recall API, so a non-numeric or
+    out-of-range value raises ValueError (→ 4xx, matching the
+    importance-range convention) instead of surfacing as a 5xx downstream.
+    """
+    if not filters or "score_threshold" not in filters:
+        return None
+    value = filters["score_threshold"]
+    if isinstance(value, bool) or not isinstance(value, int | float):
+        raise ValueError(f"Invalid score_threshold: {value!r} (expected a number in [-1, 1])")
+    value = float(value)
+    if not -1.0 <= value <= 1.0:
+        raise ValueError(f"Invalid score_threshold: {value!r} (expected a number in [-1, 1])")
+    return value
+
+
 def _build_search_filter(
     workspace_id: str,
     context_id: str | list[str],
@@ -499,6 +519,12 @@ async def search_memories_qdrant(
         workspace_id, context_id, user_id, is_shared_context, filters
     )
 
+    # #1229: score_threshold is a query_points kwarg, not a payload condition —
+    # _build_search_filter used to drop it silently, so dedup/edge-discovery
+    # candidate thresholds never applied (every top-k neighbor qualified).
+    # Validated outside the try so junk user input maps to 4xx, not 5xx.
+    score_threshold = extract_score_threshold(filters)
+
     try:
         # Issue #16: Named vector for semantic search
         results = await client.query_points(
@@ -507,6 +533,7 @@ async def search_memories_qdrant(
             using=KAGURA_MEMORIES_VECTOR_NAME,
             limit=limit,
             query_filter=qdrant_filter,
+            score_threshold=score_threshold,
             with_vectors=[KAGURA_MEMORIES_VECTOR_NAME] if include_vectors else False,
         )
 

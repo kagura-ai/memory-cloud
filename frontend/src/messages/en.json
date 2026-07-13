@@ -2832,6 +2832,7 @@
       "notes": {
         "latest_sleep_failed": "The latest sleep run failed — total judge failure. Check the sleep LLM configuration.",
         "judge_failures": "Judge failures in the window: {count} (degraded runs: {degraded_runs}) — a partially dead judge grades 'degraded', never silently 'completed'.",
+        "degraded_runs": "{count} degraded run(s) without judge failures — a maintenance phase crashed; check the run's error message.",
         "failed_runs_recovered": "{count} failed sleep run(s) in the window — the latest run recovered, but recent instability is worth a look.",
         "deferred_pairs": "{count} candidate pair(s) deferred unjudged (cluster caps) — dedup may be structurally behind.",
         "merge_backlog_old": "The oldest merge loser is {oldest_days}d old (over {threshold_days}d) — consider a retention window.",
@@ -2915,6 +2916,7 @@
           "headlineDeletedContext": "(deleted context) — processed {processed, plural, one {# memory} other {# memories}}: {merged} merged, {edges} edges, {promoted} promoted, {flagged} flagged",
           "runFailed": "Run failed: {error}",
           "runDegraded": "Run degraded: {count, plural, one {# judge LLM call} other {# judge LLM calls}} failed — merge/importance judgments may be incomplete. Check the phase results below.",
+          "runDegradedPhase": "Run degraded: {error} — the remaining phases completed. Check the phase results below.",
           "skippedNoReason": "Skipped",
           "skippedUnknown": "Skipped: {reason}",
           "skipReasons": {

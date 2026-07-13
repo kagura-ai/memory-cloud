@@ -203,15 +203,26 @@ class SleepOrchestrator:
             )
 
         try:
-            result = await phase.execute(
-                config,
-                user_id,
-                workspace_id,
-                context_id,
-                budget,
-                reporter=self.reporter,
-                report_id=report_id,
-            )
+            # #1229: every phase runs inside its own SAVEPOINT. A phase that
+            # dies mid-flush used to invalidate the WHOLE shared transaction
+            # — every later phase and the report write then failed with
+            # PendingRollbackError, so one crashed phase silently killed the
+            # rest of the run. Rolling back to the savepoint (which the
+            # context manager does on exception) discards ONLY the failed
+            # phase's pending work: the SleepReport row, earlier phases'
+            # work, and the outer transaction all stay intact — including
+            # for direct statement errors that abort the DB transaction
+            # without tripping a flush (savepoints restore those too).
+            async with self.db.begin_nested():
+                result = await phase.execute(
+                    config,
+                    user_id,
+                    workspace_id,
+                    context_id,
+                    budget,
+                    reporter=self.reporter,
+                    report_id=report_id,
+                )
             logger.info(
                 "sleep_phase_completed",
                 phase=name,

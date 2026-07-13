@@ -180,3 +180,64 @@ def test_shared_context_keeps_metadata_filters():
     assert "user_id" not in where
     assert "array_has(tags, 'x')" in where
     assert "scope = 'persistent'" in where
+
+
+# -- #1229: score_threshold parity with the Qdrant path ----------------------
+class _StubQuery:
+    def __init__(self, rows):
+        self._rows = rows
+
+    def metric(self, _name):
+        return self
+
+    def where(self, _clause, prefilter=True):
+        return self
+
+    def limit(self, _n):
+        return self
+
+    def to_list(self):
+        return self._rows
+
+
+class _StubTable:
+    def __init__(self, rows):
+        self._rows = rows
+
+    def search(self, _vector, vector_column_name="vector"):
+        return _StubQuery(self._rows)
+
+
+@pytest.mark.asyncio
+async def test_search_semantic_enforces_score_threshold():
+    """#1229: LanceDB has no server-side score_threshold; the same
+    filters={'score_threshold': X} contract as the Qdrant path must be
+    enforced post-hoc (score = 1 - cosine _distance)."""
+    from db.lance_store import LanceVectorStore
+
+    store = LanceVectorStore.__new__(LanceVectorStore)
+    rows = [
+        {"id": "hi", "_distance": 0.05, "payload_json": "{}"},  # score 0.95
+        {"id": "lo", "_distance": 0.45, "payload_json": "{}"},  # score 0.55
+    ]
+    store._open = lambda _name, dim=0: _StubTable(rows)
+
+    out = await store.search_semantic(USER, [0.1], WS, CTX, filters={"score_threshold": 0.92})
+    assert [r["id"] for r in out] == ["hi"]
+
+    out_nofilter = await store.search_semantic(USER, [0.1], WS, CTX)
+    assert [r["id"] for r in out_nofilter] == ["hi", "lo"]
+
+
+@pytest.mark.asyncio
+async def test_search_semantic_invalid_score_threshold_is_a_value_error():
+    """#1229 review: junk score_threshold from the free-form recall filters
+    must raise ValueError before any table access (4xx, not a bare
+    TypeError 500)."""
+    from db.lance_store import LanceVectorStore
+
+    store = LanceVectorStore.__new__(LanceVectorStore)
+    store._open = lambda _name, dim=0: _StubTable([])
+
+    with pytest.raises(ValueError, match="score_threshold"):
+        await store.search_semantic(USER, [0.1], WS, CTX, filters={"score_threshold": "0.92"})

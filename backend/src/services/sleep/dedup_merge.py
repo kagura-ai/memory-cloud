@@ -61,6 +61,17 @@ logger = get_logger(__name__)
 # Larger clusters are deferred to the next sleep cycle.
 MAX_CLUSTER_SIZE = 5
 
+
+def _fmt_minute(dt: datetime | None) -> str | None:
+    """Minute-precision recency string, defined once (#1198/#1209/#1229).
+
+    The audit's winner/loser recency must stay byte-comparable with the
+    ``last_updated=`` the judge prompt shows — one shared formatter keeps
+    the post-hoc verification honest.
+    """
+    return f"{dt:%Y-%m-%d %H:%M}" if dt else None
+
+
 # Similarity threshold for auto-merge without LLM (LLM-off mode)
 AUTO_MERGE_THRESHOLD = 0.98
 
@@ -327,6 +338,7 @@ class DedupMergePhase:
         memory_map = {m.id: m for m in memories}
         pair_scores = {tuple(sorted([a, b], key=str)): s for a, b, s in pairs}
         merged_count = 0
+        merge_guarded_count = 0
 
         for cluster in processable:
             if not budget.can_afford(llm_calls=1 if llm_enabled else 0):
@@ -353,9 +365,59 @@ class DedupMergePhase:
             # preserves the pre-#1208 removal behavior byte-identically.
             shadow_mode = bool(getattr(config, "sleep_dedup_supersede_enabled", False))
 
+            # #1209/#1229: every merge is explainable and its inputs are
+            # snapshotted — merge_reason (judge rationale or rule id),
+            # override info (recency/source), and both sides' provenance +
+            # recency keys, proving what the decision (judge + deterministic
+            # rules) actually saw. The snapshots MUST all be taken BEFORE
+            # ANY merge in the cluster executes (#1229): decisions share
+            # members (one winner, several losers), and a merge UPDATE fires
+            # onupdate=func.now(), expiring attributes on the shared
+            # in-session instances — a later read would attempt a
+            # synchronous refresh, raising MissingGreenlet under the async
+            # engine and killing the whole phase. Pass 1 builds an ordered
+            # work list so each snapshot is structurally paired with its
+            # merge — no keyed lookup to fall out of sync.
+            merge_jobs: list[
+                tuple[UUID, UUID, Memory | None, Memory | None, dict[str, Any] | None]
+            ] = []
             for winner_id, loser_id in merge_decisions:
+                # #1229 (runs 6-7): union-find clusters chain transitively
+                # AND candidate generation can regress (the score_threshold
+                # filter was silently dropped for years), so the judge can
+                # nominate pairs whose true pairwise cosine is far below the
+                # threshold — observed 0.43-0.66 under 0.92 — destroying
+                # distinct facts (update.stale_only_zero breach). Eligibility
+                # is deterministic and judged on the SCORE, not membership:
+                # a merge executes only when the pair's direct similarity
+                # meets the configured threshold.
+                pair_similarity = pair_scores.get(tuple(sorted([winner_id, loser_id], key=str)))
+                if pair_similarity is None or pair_similarity < threshold:
+                    merge_guarded_count += 1
+                    logger.warning(
+                        "dedup_merge_vetoed_below_threshold",
+                        winner_id=str(winner_id),
+                        loser_id=str(loser_id),
+                        pair_similarity=pair_similarity,
+                        threshold=threshold,
+                    )
+                    continue
                 winner = memory_map.get(winner_id)
                 loser = memory_map.get(loser_id)
+                audit: dict[str, Any] | None = None
+                if reporter and report_id and winner and loser:
+                    audit = {
+                        "winner_tags": list(winner.tags or []),
+                        "loser_tags": list(loser.tags or []),
+                        "loser_summary": (loser.summary or "")[:200],
+                        "winner_source": getattr(winner, "source_type", None),
+                        "loser_source": getattr(loser, "source_type", None),
+                        "winner_recency": _fmt_minute(self._recency_key(winner)),
+                        "loser_recency": _fmt_minute(self._recency_key(loser)),
+                    }
+                merge_jobs.append((winner_id, loser_id, winner, loser, audit))
+
+            for winner_id, loser_id, winner, loser, audit in merge_jobs:
                 prior_edge: dict[str, Any] | None = None
                 if shadow_mode:
                     prior_edge = await self._execute_shadow_merge(
@@ -376,16 +438,9 @@ class DedupMergePhase:
                     )
                     result.changed_memory_ids.add(winner_id)
                 merged_count += 1
-                if reporter and report_id and winner and loser:
+                if audit is not None:
                     pair_key = tuple(sorted([winner_id, loser_id], key=str))
-                    # #1209: every merge is explainable and its inputs are
-                    # snapshotted — merge_reason (judge rationale or rule id),
-                    # override info (recency/source), and both sides'
-                    # provenance + recency keys, proving what the decision
-                    # (judge + deterministic rules) actually saw.
                     meta = self._decision_meta.get((winner_id, loser_id), {})
-                    winner_recency = self._recency_key(winner)
-                    loser_recency = self._recency_key(loser)
                     await reporter.add_action(
                         report_id=report_id,
                         phase="dedup_merge",
@@ -394,21 +449,17 @@ class DedupMergePhase:
                         target_id=loser_id,
                         details={
                             "similarity": pair_scores.get(pair_key, 0.0),
-                            "winner_tags": list(winner.tags or []),
-                            "loser_tags": list(loser.tags or []),
-                            "loser_summary": (loser.summary or "")[:200],
+                            "winner_tags": audit["winner_tags"],
+                            "loser_tags": audit["loser_tags"],
+                            "loser_summary": audit["loser_summary"],
                             "merge_reason": meta.get("merge_reason", "unspecified"),
                             "judge_confidence": meta.get("judge_confidence"),
                             "winner_override": "override_reason" in meta,
                             "override_reason": meta.get("override_reason"),
-                            "winner_source": getattr(winner, "source_type", None),
-                            "loser_source": getattr(loser, "source_type", None),
-                            "winner_recency": (
-                                f"{winner_recency:%Y-%m-%d %H:%M}" if winner_recency else None
-                            ),
-                            "loser_recency": (
-                                f"{loser_recency:%Y-%m-%d %H:%M}" if loser_recency else None
-                            ),
+                            "winner_source": audit["winner_source"],
+                            "loser_source": audit["loser_source"],
+                            "winner_recency": audit["winner_recency"],
+                            "loser_recency": audit["loser_recency"],
                             # #1208: how this merge disposed of the loser,
                             # plus the pre-merge state of any edge the shadow
                             # upsert retyped — undo restores it from here.
@@ -440,6 +491,9 @@ class DedupMergePhase:
             # them (shadow mode only; always 0 in remove mode).
             "settled_pairs_skipped": settled_pairs_skipped,
             "llm_call_failures": self._llm_failures,  # #1183
+            # #1229: judge merge picks vetoed for lacking a direct
+            # >=threshold pair edge (transitive-chain cross-merges).
+            "llm_merge_guarded": merge_guarded_count,
             # #1195/#1198: LLM winner picks flipped by the deterministic
             # winner rules — a direct measure of residual judge misdirection
             # the prompt alone would have let through.
@@ -624,7 +678,7 @@ class DedupMergePhase:
         memory_lines = []
         for label, mem in zip(labels_shuffled, mems_shuffled, strict=True):
             recency = self._recency_key(mem)
-            recency_s = f"{recency:%Y-%m-%d %H:%M}" if recency else "unknown"
+            recency_s = _fmt_minute(recency) or "unknown"
             source_s = getattr(mem, "source_type", None) or "unknown"
             memory_lines.append(
                 f"[{label}] type={mem.type}, importance={mem.importance:.2f}, "

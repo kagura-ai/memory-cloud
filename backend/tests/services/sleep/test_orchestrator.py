@@ -9,12 +9,16 @@ from uuid import uuid4
 import pytest
 
 from services.sleep.orchestrator import SleepOrchestrator
-from services.sleep.reporter import PhaseResult
+from services.sleep.reporter import PhaseResult, SleepBudget
 
 
 @pytest.fixture
 def mock_db():
-    return AsyncMock()
+    db = AsyncMock()
+    # #1229: begin_nested() is a sync call returning an async context
+    # manager (each phase runs inside its own SAVEPOINT).
+    db.begin_nested = MagicMock(return_value=AsyncMock())
+    return db
 
 
 def _make_config():
@@ -347,3 +351,85 @@ class TestGetSleepModeFallback:
         result.scalar_one_or_none = MagicMock(return_value=ctx)
         mock_db.execute = AsyncMock(return_value=result)
         assert await orchestrator._get_sleep_mode(str(uuid4())) == "edges_only"
+
+
+class TestPhaseFailureIsolation:
+    """#1229: every phase runs inside its own SAVEPOINT (begin_nested), so a
+    phase that dies mid-flush (or aborts the DB transaction with a direct
+    statement error) rolls back ONLY its own pending work. The SleepReport
+    row, earlier phases' work, and the outer transaction survive — a
+    session-level rollback here would discard the flushed report row
+    (scheduler path) or expire the pre-committed report instance (manual
+    path), cascading FK violations / MissingGreenlet through the rest of
+    the run.
+    """
+
+    @staticmethod
+    def _db_with_nested():
+        db = AsyncMock()
+        # begin_nested() is a sync call returning an async context manager.
+        db.begin_nested = MagicMock(return_value=AsyncMock())
+        return db
+
+    def _orchestrator(self, db):
+        with (
+            patch("services.sleep.orchestrator.LLMService"),
+            patch("services.sleep.orchestrator.SleepReporter"),
+            patch("services.sleep.orchestrator.EdgeDiscoveryPhase"),
+            patch("services.sleep.orchestrator.DedupMergePhase"),
+            patch("services.sleep.orchestrator.ImportanceReevalPhase"),
+            patch("services.sleep.orchestrator.ConsolidationPhase"),
+            patch("services.sleep.orchestrator.ReindexPhase"),
+        ):
+            return SleepOrchestrator(db)
+
+    @staticmethod
+    def _failing_phase():
+        phase = AsyncMock()
+        phase.execute = AsyncMock(side_effect=RuntimeError("died mid-flush"))
+        return phase
+
+    @pytest.mark.asyncio
+    async def test_failed_phase_is_contained_by_its_savepoint(self):
+        db = self._db_with_nested()
+        orch = self._orchestrator(db)
+
+        result = await orch._run_phase(
+            "dedup_merge",
+            self._failing_phase(),
+            _make_config(),
+            "user-1",
+            None,
+            None,
+            SleepBudget(),
+            uuid4(),
+        )
+
+        assert result.success is False
+        assert "died mid-flush" in (result.error or "")
+        db.begin_nested.assert_called_once()
+        # No session-level rollback: that would discard the report row and
+        # earlier phases' pending work along with the failed phase's.
+        db.rollback.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_successful_phase_runs_inside_a_savepoint(self):
+        db = self._db_with_nested()
+        orch = self._orchestrator(db)
+        phase = AsyncMock()
+        phase.execute = AsyncMock(return_value=PhaseResult(phase_name="dedup_merge"))
+
+        result = await orch._run_phase(
+            "dedup_merge",
+            phase,
+            _make_config(),
+            "user-1",
+            None,
+            None,
+            SleepBudget(),
+            uuid4(),
+        )
+
+        assert result.success is True
+        db.begin_nested.assert_called_once()
+        db.rollback.assert_not_awaited()

@@ -416,3 +416,88 @@ class TestNeuralMetricsUnderIsolation:
         _assert_graph_service_isolation(mock_graph_service)
         graph.get_node_metrics.assert_awaited()
         assert graph.get_node_metrics.await_count == 1
+
+
+class TestLLMArchivalEligibilityGuard:
+    """#1229: the LLM may only archive memories the deterministic rule path
+    COULD have archived — eligibility (min-age, zero adoption, the #1049
+    grandfather cutoff) is not the judge's call. Without the guard, a memory
+    written minutes earlier could be archived by the same night's sleep run
+    (the eval's v2-current docs were eaten exactly this way), and the #1049
+    "no archival when the cutoff is unset" RELEASE BLOCKER guarantee was
+    silently bypassed by the LLM path.
+    """
+
+    async def _run_llm_archive(self, phase, memory, *, cutoff):
+        phase._fetch_working_memories = AsyncMock(return_value=[memory])
+        phase.memory_repo.promote_to_persistent = AsyncMock()
+        phase.memory_repo.delete = AsyncMock()
+        phase._llm_judge_batch = AsyncMock(return_value={memory.id: "archive"})
+        config = _make_config()  # LLM on
+        budget = SleepBudget()
+        with (
+            patch("services.sleep.consolidation.GraphService") as GS,
+            patch(
+                "services.sleep.consolidation.delete_memory_from_qdrant",
+                new_callable=AsyncMock,
+            ),
+            patch(
+                "services.sleep.consolidation._adoption_delete_cutoff",
+                return_value=cutoff,
+            ),
+        ):
+            GS.return_value.stats = AsyncMock(return_value={"total_edges": 0})
+            return await phase.execute(config, "user-1", "ws-1", "ctx-1", budget)
+
+    @pytest.mark.asyncio
+    async def test_llm_cannot_archive_fresh_memory(self, consolidation_phase):
+        """A memory written today is not archival-eligible, whatever the
+        LLM says — min-age is deterministic."""
+        mem = _make_working_memory(age_days=0)
+        cutoff = utcnow() - timedelta(days=365)
+
+        result = await self._run_llm_archive(consolidation_phase, mem, cutoff=cutoff)
+
+        consolidation_phase.memory_repo.delete.assert_not_awaited()
+        assert result.details["llm_archived"] == 0
+        assert result.details["llm_archive_guarded"] == 1
+
+    @pytest.mark.asyncio
+    async def test_llm_cannot_archive_when_cutoff_unset(self, consolidation_phase):
+        """#1049 RELEASE BLOCKER: cutoff unset → NO archival at all. The LLM
+        path must honor it like the rule path does."""
+        mem = _make_working_memory(age_days=40)
+
+        result = await self._run_llm_archive(consolidation_phase, mem, cutoff=None)
+
+        consolidation_phase.memory_repo.delete.assert_not_awaited()
+        assert result.details["llm_archived"] == 0
+        assert result.details["llm_archive_guarded"] == 1
+
+    @pytest.mark.asyncio
+    async def test_llm_cannot_archive_pre_cutoff_memory(self, consolidation_phase):
+        """Grandfathered rows (created before the cutoff) stay un-archivable."""
+        mem = _make_working_memory(age_days=40)
+        cutoff = utcnow() - timedelta(days=10)  # memory pre-dates the cutoff
+
+        result = await self._run_llm_archive(consolidation_phase, mem, cutoff=cutoff)
+
+        consolidation_phase.memory_repo.delete.assert_not_awaited()
+        assert result.details["llm_archive_guarded"] == 1
+
+    @pytest.mark.asyncio
+    async def test_eligible_memory_is_still_archived_by_the_rule_path(self, consolidation_phase):
+        """The guard must not block legitimate archival end-to-end: an old,
+        unadopted, post-cutoff, isolated memory is deleted — by the
+        deterministic RULE path, before the LLM is ever consulted. With the
+        eligibility guard in place, the LLM archive verdict only survives
+        for the residual case where isolation changed between the rule pass
+        and the LLM re-check (covered in test_consolidation_coverage)."""
+        mem = _make_working_memory(age_days=40)
+        cutoff = utcnow() - timedelta(days=365)
+
+        result = await self._run_llm_archive(consolidation_phase, mem, cutoff=cutoff)
+
+        consolidation_phase.memory_repo.delete.assert_awaited_once_with(mem.id)
+        assert result.details["rule_deleted"] == 1
+        assert result.details["llm_archive_guarded"] == 0
