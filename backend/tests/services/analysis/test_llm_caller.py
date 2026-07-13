@@ -163,3 +163,48 @@ def test_filter_hallucinated_ids_all_hallucinated() -> None:
     """All candidates outside the requested set returns empty list."""
     requested = frozenset({"id-1"})
     assert filter_hallucinated_ids(["id-evil-1", "id-evil-2"], requested) == []
+
+
+@pytest.mark.asyncio
+async def test_calls_pass_strict_byok_flag() -> None:
+    """#1242: the analysis wrapper is the paid-feature path — every
+    ``complete_json`` call must request strict BYOK resolution so a
+    mid-run key removal cannot fall back to the platform env key."""
+    llm_service = AsyncMock()
+    llm_service.complete_json = AsyncMock(return_value=_ok_response("gpt-5-nano"))
+
+    await call_with_fallback(
+        llm_service,
+        user_id="u1",
+        workspace_id="w1",
+        context_id=None,
+        system_prompt="sys",
+        prompt="p",
+    )
+
+    for call in llm_service.complete_json.call_args_list:
+        assert call.kwargs.get("disallow_env_fallback") is True
+
+
+@pytest.mark.asyncio
+async def test_configuration_error_propagates_without_fallback() -> None:
+    """#1242: ConfigurationError (BYOK row gone mid-run) is NOT an
+    upstream provider failure — it must escape immediately and fail the
+    run, not burn the remaining fallback-chain attempts."""
+    from utils.exceptions import ConfigurationError
+
+    llm_service = AsyncMock()
+    llm_service.complete_json = AsyncMock(
+        side_effect=ConfigurationError("openai API key not configured (BYOK required)")
+    )
+
+    with pytest.raises(ConfigurationError):
+        await call_with_fallback(
+            llm_service,
+            user_id="u1",
+            workspace_id="w1",
+            context_id=None,
+            system_prompt="sys",
+            prompt="p",
+        )
+    assert llm_service.complete_json.call_count == 1
