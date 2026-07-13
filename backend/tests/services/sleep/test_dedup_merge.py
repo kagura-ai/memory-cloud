@@ -561,8 +561,10 @@ class TestCrossPairMergeVeto:
     Duskmoor standup"), destroying distinct facts and breaching
     update.stale_only_zero.
 
-    Contract: a merge decision may only execute when the pair has a direct
-    >=threshold edge among this run's candidate pairs. Eligibility is
+    Contract: a merge decision may only execute when the pair's direct
+    pairwise similarity is >=threshold — since #1231 the score comes from
+    the candidate pairs OR an on-demand cosine over this run's cached
+    summary vectors when the candidate cap missed the pair. Eligibility is
     deterministic; the LLM only chooses among eligible pairs.
     """
 
@@ -733,6 +735,16 @@ class TestDenseClusterDirectCheck:
     async def test_missing_pair_with_high_direct_cosine_is_rescued(self, dedup_phase):
         config = _make_config(threshold=0.92)
         mem_a, _b, mem_c = self._phase_with_missing_edge(dedup_phase, direct_cosine=0.95)
+        # Snapshot pair_scores AT judge time: the dict is shared and the
+        # merge loop's defense-in-depth backfill mutates it later, so
+        # asserting on await_args.args[1] post-hoc would be vacuous.
+        scores_seen_by_judge: dict = {}
+
+        async def _judge_and_snapshot(_cluster_memories, pair_scores_arg, *_a, **_k):
+            scores_seen_by_judge.update(pair_scores_arg)
+            return [(mem_a.id, mem_c.id)]
+
+        dedup_phase._judge_cluster = AsyncMock(side_effect=_judge_and_snapshot)
 
         result = await dedup_phase.execute(config, "user-1", "ws-1", "ctx-1", SleepBudget())
 
@@ -743,10 +755,9 @@ class TestDenseClusterDirectCheck:
         assert result.details["llm_merge_unverifiable"] == 0
         dedup_phase._execute_merge.assert_awaited_once()
         # Pre-fill runs BEFORE judging: the judge (LLM prompt / rule path)
-        # is shown the true cosine, not the 0.0 missing-pair fallback.
-        judged_pair_scores = dedup_phase._judge_cluster.await_args.args[1]
+        # was shown the true cosine, not the 0.0 missing-pair fallback.
         key = tuple(sorted([mem_a.id, mem_c.id], key=str))
-        assert judged_pair_scores[key] == pytest.approx(0.95)
+        assert scores_seen_by_judge[key] == pytest.approx(0.95)
 
     @pytest.mark.asyncio
     async def test_prefill_lets_rule_based_judge_auto_merge_missing_pair(self, dedup_phase):
@@ -939,4 +950,18 @@ class TestDirectPairSimilarity:
     def test_dimension_mismatch_returns_none(self, dedup_phase):
         a, b = uuid4(), uuid4()
         dedup_phase._summary_vectors = {a: [1.0, 0.0, 0.0], b: [1.0, 0.0]}
+        assert dedup_phase._direct_pair_similarity(a, b) is None
+
+    def test_nan_component_returns_none(self, dedup_phase):
+        """A NaN component (degraded embedding provider) must not fail
+        OPEN: cos=NaN makes `NaN < threshold` False, which would wave the
+        merge through with an unknowable score and write NaN into the
+        audit JSON. Non-finite → None → unverifiable veto."""
+        a, b = uuid4(), uuid4()
+        dedup_phase._summary_vectors = {a: [math.nan, 1.0], b: [1.0, 0.0]}
+        assert dedup_phase._direct_pair_similarity(a, b) is None
+
+    def test_inf_component_returns_none(self, dedup_phase):
+        a, b = uuid4(), uuid4()
+        dedup_phase._summary_vectors = {a: [math.inf, 0.0], b: [1.0, 0.0]}
         assert dedup_phase._direct_pair_similarity(a, b) is None

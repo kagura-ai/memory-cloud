@@ -742,7 +742,13 @@ class DedupMergePhase:
             norm_b_sq += y * y
         if norm_a_sq == 0.0 or norm_b_sq == 0.0:
             return None
-        return dot / math.sqrt(norm_a_sq * norm_b_sq)
+        similarity = dot / math.sqrt(norm_a_sq * norm_b_sq)
+        # A NaN/inf component (degraded embedding provider) propagates to a
+        # NaN similarity, and `NaN < threshold` is False — the veto would
+        # fail OPEN. Treat non-finite as unverifiable instead.
+        if not math.isfinite(similarity):
+            return None
+        return similarity
 
     async def _judge_cluster(
         self,
@@ -1167,6 +1173,13 @@ class DedupMergePhase:
         pair would be re-detected and re-judged on EVERY sleep run — burning
         LLM budget on pairs whose succession is already settled. Filtering
         is direction-agnostic (either orientation settles the pair).
+
+        Side effect (#1232): records the settled pair keys in
+        ``self._settled_pair_keys`` — the merge loop's settled guard reads
+        it to skip judge re-nominations. Tests that stub this method with a
+        passthrough leave the record empty, silently disabling that guard;
+        include settled pairs only via the real method (or set the
+        attribute explicitly).
 
         Returns:
             (remaining pairs, count of pairs skipped as already settled).
