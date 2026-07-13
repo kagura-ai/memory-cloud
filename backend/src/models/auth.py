@@ -1224,6 +1224,44 @@ class UsageStats(Base):
     )
 
 
+class ContextReadAttribution(Base):
+    """Diagnostic read-attribution for cross-context recall (#1228).
+
+    A cross-context ``recall(context_ids=[A, B, ...])`` bills ONE quota
+    unit — the single ``UsageStats`` row logged under the primary context
+    (A). Read activity on the other listed contexts is recorded here, one
+    row per ADDITIONAL context, so per-context read visibility (the
+    memory-health retrieval grading) sees them.
+
+    Deliberately a separate table, not extra ``UsageStats`` rows: every
+    ``UsageStats`` consumer counts rows for quota/billing/analytics, and a
+    marker-based scheme would tax each of them (7 call sites today, every
+    future one) with a "remember to exclude" filter. Attribution rows are
+    structurally invisible to them by construction.
+
+    ``context_id`` cascades on context deletion (unlike ``UsageStats``'
+    SET NULL): an attribution row for a deleted context carries no
+    diagnostic value, while billing rows must survive for audit.
+    """
+
+    __tablename__ = "context_read_attributions"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    user_id: Mapped[str] = mapped_column(String(255), nullable=False)
+    context_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("contexts.id", ondelete="CASCADE"), nullable=False
+    )
+    endpoint: Mapped[str] = mapped_column(String(255), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime, nullable=False, default=func.now())
+
+    __table_args__ = (
+        # The memory-health usage window scans (user_id, created_at) and
+        # groups by context_id — one covering index serves both shapes.
+        Index("idx_context_read_attr_user_created", "user_id", "created_at"),
+        Index("idx_context_read_attr_context", "context_id"),
+    )
+
+
 # ============================================================================
 # Context-based Multi-Collection (Issue #82 → #160: renamed from Project)
 # ============================================================================

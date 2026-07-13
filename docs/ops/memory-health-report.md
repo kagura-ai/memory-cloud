@@ -95,11 +95,13 @@ Metrics: `recall_calls`, `recall_upcoming_calls`, `remember_calls`,
 `explore_calls`, `window_days`, plus config posture (`has_config`,
 `reinforce_enabled`, `use_rerank` — booleans per context).
 
-Attribution caveat: a cross-context `recall(context_ids=[...])` is logged
-under the **first** listed context only, so read activity on the other
-listed contexts is invisible to this section. A `write_only_store` WARN on
-a context that is only read via cross-context recall is a known false
-positive until usage logging attributes every listed context.
+Attribution (#1228): a cross-context `recall(context_ids=[...])` bills one
+quota unit — the `usage_stats` row under the **first** listed context —
+and records a diagnostic `context_read_attributions` row for every other
+listed context. This section merges both sources, so a context read only
+via cross-context recall counts as read activity and no longer
+false-WARNs `write_only_store`. Attribution rows are diagnostic only:
+quota and workspace usage analytics never count them.
 
 ## Structured notes (#1225)
 

@@ -45,7 +45,7 @@ from typing import Any
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from models.auth import Context, UsageStats
+from models.auth import Context, ContextReadAttribution, UsageStats
 from models.config import ContextSearchConfig
 from models.memory import Memory, NeuralMemoryEdge
 from models.sleep import SleepReport
@@ -472,20 +472,18 @@ class MemoryHealthService:
     ) -> dict[uuid.UUID | None, dict[str, int]]:
         """MCP tool call counts per context over the usage window.
 
-        Attribution caveat: a cross-context recall(context_ids=[...]) is
-        logged under the FIRST listed context, so read activity on the other
-        listed contexts is invisible here. A write_only_store WARN on a
-        context that is only read via cross-context recall is a known false
-        positive until usage logging attributes all listed contexts
-        (documented in docs/ops/memory-health-report.md).
+        #1228: a cross-context recall(context_ids=[...]) bills one unit
+        (the UsageStats row under the FIRST listed context); reads on the
+        other listed contexts arrive as context_read_attributions rows and
+        are merged in here — a context read only via cross-context recall
+        no longer false-WARNs write_only_store.
         """
         since = utcnow() - timedelta(days=_USAGE_WINDOW_DAYS)
+        watched_endpoints = ["mcp:recall", "mcp:recall_upcoming", "mcp:remember", "mcp:explore"]
         conditions = [
             UsageStats.user_id == user_id,
             UsageStats.created_at >= since,
-            UsageStats.endpoint.in_(
-                ["mcp:recall", "mcp:recall_upcoming", "mcp:remember", "mcp:explore"]
-            ),
+            UsageStats.endpoint.in_(watched_endpoints),
         ]
         if scope is not _ALL:
             conditions.append(UsageStats.context_id == scope)
@@ -501,6 +499,26 @@ class MemoryHealthService:
         usage: dict[uuid.UUID | None, dict[str, int]] = defaultdict(dict)
         for context_id, endpoint, count in rows.all():
             usage[context_id][endpoint.removeprefix("mcp:")] = int(count)
+
+        attr_conditions = [
+            ContextReadAttribution.user_id == user_id,
+            ContextReadAttribution.created_at >= since,
+            ContextReadAttribution.endpoint.in_(watched_endpoints),
+        ]
+        if scope is not _ALL:
+            attr_conditions.append(ContextReadAttribution.context_id == scope)
+        attr_rows = await self.db.execute(
+            select(
+                ContextReadAttribution.context_id,
+                ContextReadAttribution.endpoint,
+                func.count(ContextReadAttribution.id),
+            )
+            .where(*attr_conditions)
+            .group_by(ContextReadAttribution.context_id, ContextReadAttribution.endpoint)
+        )
+        for context_id, endpoint, count in attr_rows.all():
+            key = endpoint.removeprefix("mcp:")
+            usage[context_id][key] = usage[context_id].get(key, 0) + int(count)
         return dict(usage)
 
     async def _fetch_config_postures(

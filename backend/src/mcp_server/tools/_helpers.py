@@ -468,6 +468,8 @@ async def _log_tool_usage(
     status_code: int,
     context_id: UUID | str | None = None,
     workspace_id: UUID | None = None,
+    *,
+    attributed_context_ids: list[UUID] | None = None,
 ) -> None:
     """Log tool usage metrics.
 
@@ -479,6 +481,12 @@ async def _log_tool_usage(
         status_code: HTTP-style status code (200=success, 500=error)
         context_id: Context ID (optional)
         workspace_id: Workspace ID (optional)
+        attributed_context_ids: #1228 — ADDITIONAL contexts read by this
+            call (cross-context recall lists several but bills one unit).
+            Each gets a diagnostic row in context_read_attributions,
+            structurally invisible to UsageStats row-count consumers
+            (quota, workspace analytics); the memory-health retrieval
+            grading merges them into per-context read counts.
     """
     from db.base import get_db
     from utils.usage_logger import log_usage
@@ -498,5 +506,20 @@ async def _log_tool_usage(
                 context_id=str(context_id) if context_id else None,
                 workspace_id=str(workspace_id) if workspace_id else None,
             )
+            if attributed_context_ids:
+                from models.auth import ContextReadAttribution
+                from utils.datetime import utcnow
+
+                now = utcnow()
+                for cid in attributed_context_ids:
+                    log_db.add(
+                        ContextReadAttribution(
+                            user_id=user_id,
+                            context_id=cid,
+                            endpoint=f"mcp:{tool_name}",
+                            created_at=now,
+                        )
+                    )
+                await log_db.commit()
     except Exception as e:
         logger.warning("tool_usage_log_failed: tool=%s error=%s", tool_name, str(e))

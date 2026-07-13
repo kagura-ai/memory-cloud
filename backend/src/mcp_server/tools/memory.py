@@ -558,7 +558,17 @@ async def handle_recall(
             ]
 
             await _log_tool_usage(
-                db, user_id, "recall", start_time, 200, current_context_id, workspace_id
+                db,
+                user_id,
+                "recall",
+                start_time,
+                200,
+                current_context_id,
+                workspace_id,
+                # #1228: the primary context carries the billable UsageStats
+                # row; the other listed contexts get diagnostic attribution
+                # rows so per-context read visibility sees them.
+                attributed_context_ids=(cross_context_ids[1:] if cross_context_ids else None),
             )
             await db.commit()
 
