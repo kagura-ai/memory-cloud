@@ -929,3 +929,28 @@ def test_get_session_manager_returns_module_state(monkeypatch):
 
     monkeypatch.setattr(auth_module, "_session_manager", None)
     assert auth_module.get_session_manager() is None
+
+
+class TestDeletePostgresSweep:
+    """#1228: the per-user Postgres sweep must include the diagnostic
+    context_read_attributions table — attribution rows where the erased
+    user read a context in ANOTHER user's workspace survive the
+    workspace-cascade deletion, so the user_id sweep is the only
+    mechanism removing them on GDPR erasure."""
+
+    @pytest.mark.asyncio
+    async def test_sweep_covers_context_read_attributions(self):
+        from models.auth import ContextReadAttribution
+
+        svc = _service()
+        svc._count_and_delete = AsyncMock(return_value=3)
+        svc._pseudonymize_field = AsyncMock(return_value=0)
+        svc.db.delete = AsyncMock()
+        svc.db.commit = AsyncMock()
+        target = _user()
+
+        counts = await svc._delete_postgres(target)
+
+        assert counts["context_read_attributions"] == 3
+        swept_models = [call.args[0] for call in svc._count_and_delete.await_args_list]
+        assert ContextReadAttribution in swept_models

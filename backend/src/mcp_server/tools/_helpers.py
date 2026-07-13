@@ -496,7 +496,7 @@ async def _log_tool_usage(
         # Use independent session: log_usage() calls db.commit() internally,
         # which would prematurely commit the handler's transaction if shared.
         async for log_db in get_db():
-            await log_usage(
+            billable_row_written = await log_usage(
                 db=log_db,
                 user_id=user_id,
                 endpoint=f"mcp:{tool_name}",
@@ -506,7 +506,11 @@ async def _log_tool_usage(
                 context_id=str(context_id) if context_id else None,
                 workspace_id=str(workspace_id) if workspace_id else None,
             )
-            if attributed_context_ids:
+            # #1228: attribution rows only make sense alongside the billable
+            # row — log_usage swallows its own failure, and writing the
+            # secondaries without the primary would count reads on the
+            # listed contexts while the primary's read stays invisible.
+            if billable_row_written and attributed_context_ids:
                 from models.auth import ContextReadAttribution
                 from utils.datetime import utcnow
 

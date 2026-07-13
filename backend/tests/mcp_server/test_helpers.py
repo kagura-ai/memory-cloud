@@ -202,3 +202,31 @@ class TestLogToolUsageAttribution:
 
         log_usage_mock.assert_awaited_once()
         session.add.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_no_attribution_when_billable_row_failed(self):
+        """#1228 review: log_usage swallows its own insert failure — if the
+        billable UsageStats row was NOT written, attribution rows must not
+        be written either, or reads count on the secondaries while the
+        primary's read is invisible (the mirror image of the false-WARN
+        this table exists to fix)."""
+        session, fake_get_db = self._fake_db_env()
+        log_usage_mock = AsyncMock(return_value=False)
+
+        with (
+            patch("db.base.get_db", new=fake_get_db),
+            patch("utils.usage_logger.log_usage", new=log_usage_mock),
+        ):
+            await _log_tool_usage(
+                AsyncMock(),
+                "user-1",
+                "recall",
+                time.time(),
+                200,
+                uuid4(),
+                None,
+                attributed_context_ids=[uuid4()],
+            )
+
+        log_usage_mock.assert_awaited_once()
+        session.add.assert_not_called()

@@ -28,6 +28,10 @@ from utils.exceptions import NotFoundException
 
 logger = logging.getLogger(__name__)
 
+# #1228: server-side cap for cross-context recall — MUST stay in sync with
+# the recall inputSchema's context_ids maxItems in _definitions.py.
+MAX_CROSS_CONTEXT_IDS = 20
+
 
 async def handle_remember(
     args: dict[str, Any], user_id: str, workspace_id: UUID | None
@@ -454,10 +458,25 @@ async def handle_recall(
             cross_context_ids: list[UUID] | None = None
 
             if isinstance(context_ids_arg, list) and context_ids_arg:
+                # #1228 review: enforce the inputSchema's maxItems server-side
+                # (the schema is advisory for non-validating clients) — a
+                # single billable call must not fan out into unbounded
+                # permission resolves and attribution rows.
+                if len(context_ids_arg) > MAX_CROSS_CONTEXT_IDS:
+                    return _error_response(
+                        "too_many_context_ids",
+                        f"context_ids accepts at most {MAX_CROSS_CONTEXT_IDS} entries.",
+                    )
                 # Multi-context mode. Use _resolve_context_for_read so deny
                 # reasons (private non-creator, not a workspace member, etc.)
                 # surface as a uniform context_not_found (CWE-639 / OWASP A01).
-                cross_context_ids = [_resolve_context_id(cid) for cid in context_ids_arg]
+                # Order-preserving dedup (#1228 review): duplicated ids would
+                # each burn a permission resolve and write an attribution row
+                # (including one for the primary itself), inflating the
+                # per-context read counts the attribution table exists to fix.
+                cross_context_ids = list(
+                    dict.fromkeys(_resolve_context_id(cid) for cid in context_ids_arg)
+                )
                 current_context_id = cross_context_ids[0]
                 current_context = await _resolve_context_for_read(db, user_id, current_context_id)
                 # #708 H3: all contexts must belong to the same workspace —

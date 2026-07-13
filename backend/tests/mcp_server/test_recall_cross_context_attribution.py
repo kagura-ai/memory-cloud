@@ -105,3 +105,44 @@ async def test_single_context_recall_attributes_nothing():
     call = log_tool_usage.await_args
     assert call.args[5] == ctx_a
     assert not call.kwargs.get("attributed_context_ids")
+
+
+@pytest.mark.asyncio
+async def test_duplicate_context_ids_are_deduplicated():
+    """#1228 review: duplicated ids would each burn a permission resolve and
+    write an attribution row — recall(context_ids=[A, B, A, B]) must
+    attribute B exactly once and never attribute the primary A."""
+    ctx_a, ctx_b = uuid4(), uuid4()
+    log_tool_usage = AsyncMock()
+
+    with _patched(log_tool_usage):
+        result = await handle_recall(
+            {"query": "q", "context_ids": [str(ctx_a), str(ctx_b), str(ctx_a), str(ctx_b)]},
+            user_id="u1",
+            workspace_id=None,
+        )
+
+    payload = json.loads(result[0].text)
+    assert payload["status"] == "success"
+    call = log_tool_usage.await_args
+    assert call.args[5] == ctx_a
+    assert call.kwargs["attributed_context_ids"] == [ctx_b]
+
+
+@pytest.mark.asyncio
+async def test_context_ids_capped_at_schema_max():
+    """#1228 review: the inputSchema's maxItems:20 is advisory for
+    non-validating clients — the handler must enforce it server-side so a
+    single billable call cannot write unbounded attribution rows."""
+    ids = [str(uuid4()) for _ in range(21)]
+    log_tool_usage = AsyncMock()
+
+    with _patched(log_tool_usage):
+        result = await handle_recall(
+            {"query": "q", "context_ids": ids}, user_id="u1", workspace_id=None
+        )
+
+    payload = json.loads(result[0].text)
+    assert payload["status"] == "error"
+    assert payload["error"] == "too_many_context_ids"
+    log_tool_usage.assert_not_awaited()

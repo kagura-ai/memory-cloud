@@ -24,7 +24,7 @@ async def log_usage(
     context_id: str | None = None,  # Bugfix: Add context_id for stats tracking
     workspace_id: str | None = None,  # Bugfix: Add workspace_id for stats tracking
     api_key_id: int | None = None,  # Issue #626: per-key attribution
-) -> None:
+) -> bool:
     """Log API or MCP tool usage to usage_stats table.
 
     This function is used by both:
@@ -50,6 +50,12 @@ async def log_usage(
 
         # MCP tool (from handler)
         await log_usage(db, user_id, "mcp:recall", "MCP", 200, 80)
+
+    Returns:
+        True when the row was written; False when the insert failed (the
+        error is logged and swallowed — logging must never break the main
+        flow, but callers chaining dependent writes, e.g. #1228 attribution
+        rows, need the signal).
     """
     try:
         # Use utcnow() for timezone-naive datetime (matches DB schema)
@@ -79,6 +85,7 @@ async def log_usage(
             status=status_code,
             response_time_ms=response_time_ms,
         )
+        return True
 
     except Exception as e:
         await db.rollback()
@@ -89,3 +96,4 @@ async def log_usage(
             endpoint=endpoint,
         )
         # Don't raise - logging should not break the main flow
+        return False
