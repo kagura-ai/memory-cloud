@@ -227,3 +227,17 @@ async def test_search_semantic_enforces_score_threshold():
 
     out_nofilter = await store.search_semantic(USER, [0.1], WS, CTX)
     assert [r["id"] for r in out_nofilter] == ["hi", "lo"]
+
+
+@pytest.mark.asyncio
+async def test_search_semantic_invalid_score_threshold_is_a_value_error():
+    """#1229 review: junk score_threshold from the free-form recall filters
+    must raise ValueError before any table access (4xx, not a bare
+    TypeError 500)."""
+    from db.lance_store import LanceVectorStore
+
+    store = LanceVectorStore.__new__(LanceVectorStore)
+    store._open = lambda _name, dim=0: _StubTable([])
+
+    with pytest.raises(ValueError, match="score_threshold"):
+        await store.search_semantic(USER, [0.1], WS, CTX, filters={"score_threshold": "0.92"})

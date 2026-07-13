@@ -45,6 +45,7 @@ from datetime import UTC
 from typing import TYPE_CHECKING, Any
 from uuid import UUID
 
+from db.qdrant import extract_score_threshold
 from utils.datetime import parse_iso8601_to_aware, to_utc_iso
 from utils.exceptions import QdrantError
 from utils.logger import get_logger
@@ -445,6 +446,9 @@ class LanceVectorStore:
                 f"Got workspace_id={workspace_id}, context_id={context_id}, user_id={user_id}"
             )
         where = build_lance_filter(workspace_id, context_id, user_id, is_shared_context, filters)
+        # #1229: validated here (outside the QdrantError-wrapping try) so junk
+        # user input maps to 4xx, not a bare TypeError at the comparison below.
+        score_threshold = extract_score_threshold(filters)
 
         def _run() -> list[dict]:
             tbl = self._open(collection_name)
@@ -478,7 +482,6 @@ class LanceVectorStore:
         ]
         # #1229: parity with the Qdrant path — LanceDB has no server-side
         # score_threshold, so enforce the same contract post-hoc.
-        score_threshold = filters.get("score_threshold") if filters else None
         if score_threshold is not None:
             results = [r for r in results if r["score"] >= score_threshold]
         return results
