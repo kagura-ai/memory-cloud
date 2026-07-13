@@ -15,8 +15,13 @@ Attribution rows are structurally invisible to them by construction.
 Blue-green safety: pure CREATE TABLE — no existing table or app code is
 touched; old app code never references the table.
 
-Revision ID: e60_1228_context_read_attributions
+Revision ID: e60_1228_read_attributions
 Revises: e59_1220_router_calibrations
+
+Note: revision IDs must stay <= 32 chars — ``alembic_version.version_num``
+is varchar(32), and a longer ID fails the version-table UPDATE at upgrade
+time (StringDataRightTruncationError; caught by the migration round-trip
+test on this very revision's first draft).
 """
 
 import sqlalchemy as sa
@@ -25,7 +30,7 @@ from sqlalchemy.dialects.postgresql import UUID
 from alembic import op
 
 # revision identifiers
-revision = "e60_1228_context_read_attributions"
+revision = "e60_1228_read_attributions"
 down_revision = "e59_1220_router_calibrations"
 branch_labels = None
 depends_on = None
