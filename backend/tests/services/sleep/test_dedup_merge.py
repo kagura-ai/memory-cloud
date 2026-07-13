@@ -371,6 +371,33 @@ class TestDedupMergeEmbeddingInstrumentation:
         assert dedup_phase._embedding_calls_used == 1
         assert dedup_phase._embedding_tokens_used == 0
 
+    @pytest.mark.asyncio
+    async def test_find_similar_pairs_populates_summary_vector_cache(self, dedup_phase):
+        """#1231: the on-demand direct check reads ``_summary_vectors``;
+        ``_find_similar_pairs`` must reset the cache, populate it for every
+        successful embed, and omit failed ones (fail-closed upstream)."""
+        ok = _make_memory(summary="alpha")
+        bad = _make_memory(summary="beta")
+
+        async def _embed(text, **_kwargs):
+            if text == "beta":
+                raise RuntimeError("provider down")
+            return ([0.1] * 768, 75)
+
+        dedup_phase.embedding_service.embed_with_usage = AsyncMock(side_effect=_embed)
+        # Stale entry from a previous population must not survive the reset.
+        dedup_phase._summary_vectors = {uuid4(): [9.9]}
+
+        with patch(
+            "services.sleep.dedup_merge.search_memories_qdrant",
+            AsyncMock(return_value=[]),
+        ):
+            await dedup_phase._find_similar_pairs(
+                [ok, bad], "user-1", "ws-1", "ctx-1", threshold=0.92
+            )
+
+        assert dedup_phase._summary_vectors == {ok.id: [0.1] * 768}
+
 
 # ============================================================================
 # #1229: merge audit must snapshot fields BEFORE the merge executes
@@ -705,7 +732,7 @@ class TestDenseClusterDirectCheck:
     @pytest.mark.asyncio
     async def test_missing_pair_with_high_direct_cosine_is_rescued(self, dedup_phase):
         config = _make_config(threshold=0.92)
-        self._phase_with_missing_edge(dedup_phase, direct_cosine=0.95)
+        mem_a, _b, mem_c = self._phase_with_missing_edge(dedup_phase, direct_cosine=0.95)
 
         result = await dedup_phase.execute(config, "user-1", "ws-1", "ctx-1", SleepBudget())
 
@@ -715,6 +742,46 @@ class TestDenseClusterDirectCheck:
         assert result.details["llm_merge_guarded"] == 0
         assert result.details["llm_merge_unverifiable"] == 0
         dedup_phase._execute_merge.assert_awaited_once()
+        # Pre-fill runs BEFORE judging: the judge (LLM prompt / rule path)
+        # is shown the true cosine, not the 0.0 missing-pair fallback.
+        judged_pair_scores = dedup_phase._judge_cluster.await_args.args[1]
+        key = tuple(sorted([mem_a.id, mem_c.id], key=str))
+        assert judged_pair_scores[key] == pytest.approx(0.95)
+
+    @pytest.mark.asyncio
+    async def test_prefill_lets_rule_based_judge_auto_merge_missing_pair(self, dedup_phase):
+        """#1231 non-LLM path: ``_rule_based_judge`` reads pair_scores
+        directly, so a saturated-away pair used to default to 0.0 and could
+        never reach AUTO_MERGE_THRESHOLD. The per-cluster pre-fill supplies
+        the true cosine before judging."""
+        config = _make_config(provider="")  # rule-based judge
+        newer = datetime(2026, 7, 1, 12, 0)
+        older = datetime(2026, 6, 1, 12, 0)
+        mem_a = _make_memory(summary="dup 1", importance=0.9)
+        mem_b = _make_memory(summary="dup 2", importance=0.6)
+        mem_c = _make_memory(summary="dup 3", importance=0.5)
+        for m in (mem_a, mem_b, mem_c):
+            m.created_at = older
+            m.updated_at = None
+        mem_a.updated_at = newer
+        dedup_phase._fetch_active_memories = AsyncMock(return_value=[mem_a, mem_b, mem_c])
+        # Saturated discovery: (a, c) is missing despite true cosine 1.0.
+        dedup_phase._find_similar_pairs = AsyncMock(
+            return_value=[
+                (mem_a.id, mem_b.id, 0.99),
+                (mem_b.id, mem_c.id, 0.99),
+            ]
+        )
+        dedup_phase._summary_vectors = {m.id: [1.0, 0.0] for m in (mem_a, mem_b, mem_c)}
+        dedup_phase._execute_merge = AsyncMock()
+
+        result = await dedup_phase.execute(config, "user-1", "ws-1", "ctx-1", SleepBudget())
+
+        # All three pairs auto-merge at >=0.98, including the backfilled one.
+        assert result.details["merged"] == 3
+        assert result.details["llm_merge_rescued"] == 1
+        assert result.details["llm_merge_guarded"] == 0
+        assert result.details["llm_merge_unverifiable"] == 0
 
     @pytest.mark.asyncio
     async def test_rescued_merge_audit_records_computed_similarity(self, dedup_phase):
@@ -781,6 +848,60 @@ class TestDenseClusterDirectCheck:
         # absent from pair_scores → rescued by the direct check.
         assert result.details["llm_merge_rescued"] == 6
         assert dedup_phase._execute_merge.await_count == 9
+
+
+class TestSettledPairRenomination:
+    """#1232: shadow mode strips already-settled pairs (existing supersedes
+    edge) from the candidate list BEFORE pair_scores is built, but members
+    can still co-cluster via third parties and the judge may re-nominate
+    the settled pair. The skip is correct — but it must be counted under
+    its own key (``settled_decisions_skipped``), not ``llm_merge_guarded``,
+    and #1231's on-demand direct check must NOT rescue it into a re-merge:
+    in shadow mode that would re-write audit rows every run and corrupt
+    undo (the re-merge takes no prior_edge snapshot, so rolling back the
+    later run deletes the edge the first run legitimately created).
+    """
+
+    @pytest.mark.asyncio
+    async def test_settled_renomination_skipped_not_guarded_not_rescued(self, dedup_phase, mock_db):
+        config = _make_config()
+        config.sleep_dedup_supersede_enabled = True
+        mem_a = _make_memory(summary="fact v2")
+        mem_b = _make_memory(summary="fact v1")
+        mem_c = _make_memory(summary="fact v1.5")
+        dedup_phase._fetch_active_memories = AsyncMock(return_value=[mem_a, mem_b, mem_c])
+        # a-b is already settled; discovery still surfaces it plus the
+        # third-party chains that re-cluster a and b through c.
+        dedup_phase._find_similar_pairs = AsyncMock(
+            return_value=[
+                (mem_a.id, mem_b.id, 0.95),
+                (mem_a.id, mem_c.id, 0.95),
+                (mem_b.id, mem_c.id, 0.95),
+            ]
+        )
+        # All three embedded: the direct check COULD compute cos(a, b)=1.0 —
+        # the settled guard must fire before any rescue.
+        dedup_phase._summary_vectors = {m.id: [1.0, 0.0] for m in (mem_a, mem_b, mem_c)}
+        # Real _filter_already_superseded_pairs runs: the supersedes-edge
+        # query returns the settled (a, b) row.
+        edge_rows = MagicMock()
+        edge_rows.all.return_value = [(mem_a.id, mem_b.id)]
+        mock_db.execute.return_value = edge_rows
+        dedup_phase._execute_shadow_merge = AsyncMock()
+        dedup_phase._execute_merge = AsyncMock()
+        dedup_phase._judge_cluster = AsyncMock(return_value=[(mem_a.id, mem_b.id)])
+
+        result = await dedup_phase.execute(config, "user-1", "ws-1", "ctx-1", SleepBudget())
+
+        assert result.success is True
+        assert result.details["merged"] == 0
+        assert result.details["settled_pairs_skipped"] == 1  # candidate filter
+        assert result.details["settled_decisions_skipped"] == 1  # judge veto
+        assert result.details["llm_merge_guarded"] == 0
+        assert result.details["llm_merge_rescued"] == 0
+        assert result.details["llm_merge_unverifiable"] == 0
+        dedup_phase._execute_shadow_merge.assert_not_awaited()
+        dedup_phase._execute_merge.assert_not_awaited()
 
 
 class TestDirectPairSimilarity:
