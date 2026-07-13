@@ -79,6 +79,45 @@ class CostEstimate:
     breakdown: dict[str, int]
 
 
+def assert_run_size_within_cap(memory_count: int) -> None:
+    """Reject a run that would exceed ``ANALYSIS_MAX_MEMORY_COUNT`` (#1244).
+
+    The pipeline materializes every matching vector into one in-RAM
+    matrix and runs UMAP/KMeans inside the API process (the Option B
+    analysis-worker externalization is not yet implemented), so run
+    size directly bounds API-container memory/CPU — without a cap, one
+    202-accepted request on a large context can OOM the multi-tenant
+    API.
+
+    Shared by REST ``/preview`` + ``POST /analyses`` and MCP
+    ``analyze_context`` (both dry_run and real start), with a
+    defense-in-depth re-check in ``vector_pull`` after the filtered
+    set is known. v1 counts the FULL context — same semantics as the
+    preview count, which ignores filters to stay under the 200 ms
+    modal budget — so a filtered run on an over-cap context is
+    rejected conservatively. Filter-aware counting is a v1.5
+    follow-up.
+
+    Raises:
+        ValidationError: 422 naming both the limit and the actual
+            count so the client can render a actionable message.
+    """
+    from config.settings import get_settings
+    from utils.exceptions import ValidationError
+
+    cap = int(get_settings().analysis_max_memory_count)
+    if memory_count > cap:
+        raise ValidationError(
+            f"Context has {memory_count} memories, exceeding the per-run "
+            f"analysis cap of {cap}. Narrow the context (split it, or "
+            f"archive old memories) or — on self-host — raise "
+            f"ANALYSIS_MAX_MEMORY_COUNT.",
+            field="memory_count",
+            memory_count=memory_count,
+            limit=cap,
+        )
+
+
 def estimate_cost(memory_count: int, *, model_id: str = DEFAULT_MODEL_ID) -> CostEstimate:
     """Compute the pre-flight estimate for a memory_count-sized run.
 

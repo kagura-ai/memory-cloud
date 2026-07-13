@@ -118,6 +118,24 @@ class TestPreview:
         assert body["estimated_cost_cents"] >= 1
         assert "input_tokens" in body["breakdown"]
 
+    def test_preview_rejects_over_cap_context(self, client, db_mock, monkeypatch):
+        """#1244: preview 422s (naming the limit) instead of quoting a
+        price for a run that start would refuse."""
+        from config.settings import get_settings
+
+        monkeypatch.setattr(get_settings(), "analysis_max_memory_count", 50)
+        db_mock.execute.side_effect = [
+            _scalar_one(_TEST_CONTEXT_ID),  # Context boundary
+            _scalar_one(51),  # count_context_memories → over cap
+        ]
+        response = client.post(
+            f"/api/v1/contexts/{_TEST_CONTEXT_ID}/analyses/preview",
+            json={},
+        )
+        assert response.status_code == 422, response.text
+        assert "50" in response.text
+        assert "51" in response.text
+
 
 # ============================================================================
 # POST / (start)
@@ -128,8 +146,12 @@ class TestStartRun:
     def test_returns_202_with_run_id_on_success(self, client, db_mock):
         run_id = uuid4()
         started_at = datetime(2026, 5, 2, 0, 0, 0)
-        # Boundary check passes; orchestrator stub returns a fake row.
-        db_mock.execute.side_effect = [_scalar_one(_TEST_CONTEXT_ID)]
+        # Boundary check passes; #1244 cap count under the limit;
+        # orchestrator stub returns a fake row.
+        db_mock.execute.side_effect = [
+            _scalar_one(_TEST_CONTEXT_ID),
+            _scalar_one(100),  # count_context_memories (run-size cap)
+        ]
 
         fake_analysis = MagicMock(id=run_id, status="running", started_at=started_at)
         with (
@@ -157,6 +179,26 @@ class TestStartRun:
             json={},
         )
         assert response.status_code == 404
+
+    def test_start_rejects_over_cap_before_creating_run(self, client, db_mock, monkeypatch):
+        """#1244: over-cap context → 422 BEFORE orchestrator.start()
+        creates any row (no quota slot consumed, no running row)."""
+        from config.settings import get_settings
+
+        monkeypatch.setattr(get_settings(), "analysis_max_memory_count", 50)
+        db_mock.execute.side_effect = [
+            _scalar_one(_TEST_CONTEXT_ID),  # Context boundary
+            _scalar_one(51),  # count_context_memories → over cap
+        ]
+        with patch("api.routes.analyses.AnalysisOrchestrator") as orch_cls:
+            orch_cls.return_value.start = AsyncMock()
+            response = client.post(
+                f"/api/v1/contexts/{_TEST_CONTEXT_ID}/analyses",
+                json={},
+            )
+        assert response.status_code == 422, response.text
+        assert "50" in response.text
+        orch_cls.return_value.start.assert_not_called()
 
 
 # ============================================================================
