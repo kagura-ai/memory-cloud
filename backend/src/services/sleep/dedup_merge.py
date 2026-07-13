@@ -23,6 +23,7 @@ Academic notes:
 
 from __future__ import annotations
 
+import math
 import random
 import string
 from datetime import datetime
@@ -218,6 +219,12 @@ class DedupMergePhase:
         # existing tests and call sites rely on — stays unchanged.
         self._override_reasons: dict[str, int] = {}
         self._decision_meta: dict[tuple[UUID, UUID], dict[str, Any]] = {}
+        # #1231: per-run summary-vector cache filled by
+        # ``_find_similar_pairs`` (init here so the veto's on-demand direct
+        # check can be unit-tested without execute()). Keyed by memory id;
+        # missing entries mean the embed failed and the pair stays
+        # unverifiable (fail-closed).
+        self._summary_vectors: dict[UUID, list[float]] = {}
 
     async def execute(
         self,
@@ -339,6 +346,8 @@ class DedupMergePhase:
         pair_scores = {tuple(sorted([a, b], key=str)): s for a, b, s in pairs}
         merged_count = 0
         merge_guarded_count = 0
+        merge_rescued_count = 0
+        merge_unverifiable_count = 0
 
         for cluster in processable:
             if not budget.can_afford(llm_calls=1 if llm_enabled else 0):
@@ -391,8 +400,40 @@ class DedupMergePhase:
                 # is deterministic and judged on the SCORE, not membership:
                 # a merge executes only when the pair's direct similarity
                 # meets the configured threshold.
-                pair_similarity = pair_scores.get(tuple(sorted([winner_id, loser_id], key=str)))
-                if pair_similarity is None or pair_similarity < threshold:
+                pair_key = tuple(sorted([winner_id, loser_id], key=str))
+                pair_similarity = pair_scores.get(pair_key)
+                rescued = False
+                if pair_similarity is None:
+                    # #1231: dense clusters (>10 mutual near-duplicates)
+                    # saturate the top-10 neighbor search, so a genuinely
+                    # >=threshold pair can be missing from pair_scores while
+                    # union-find still chains its members. The principle is
+                    # unchanged — judge the SCORE — so compute the direct
+                    # cosine on demand from this run's cached summary
+                    # vectors (zero extra embedding/Qdrant calls, identical
+                    # score definition on every backend) instead of vetoing
+                    # a legitimate merge.
+                    pair_similarity = self._direct_pair_similarity(winner_id, loser_id)
+                    if pair_similarity is not None:
+                        # Backfill so the audit record carries the true
+                        # score instead of the 0.0 fallback.
+                        pair_scores[pair_key] = pair_similarity
+                        rescued = pair_similarity >= threshold
+                if pair_similarity is None:
+                    # Fail-closed, but distinct from a genuine sub-threshold
+                    # veto: without vectors the score is unknowable this
+                    # run, and folding these into llm_merge_guarded would
+                    # dilute the cross-merge signal that counter exists to
+                    # expose (#1231).
+                    merge_unverifiable_count += 1
+                    logger.warning(
+                        "dedup_merge_vetoed_vector_unavailable",
+                        winner_id=str(winner_id),
+                        loser_id=str(loser_id),
+                        threshold=threshold,
+                    )
+                    continue
+                if pair_similarity < threshold:
                     merge_guarded_count += 1
                     logger.warning(
                         "dedup_merge_vetoed_below_threshold",
@@ -402,6 +443,15 @@ class DedupMergePhase:
                         threshold=threshold,
                     )
                     continue
+                if rescued:
+                    merge_rescued_count += 1
+                    logger.info(
+                        "dedup_merge_rescued_by_direct_check",
+                        winner_id=str(winner_id),
+                        loser_id=str(loser_id),
+                        pair_similarity=pair_similarity,
+                        threshold=threshold,
+                    )
                 winner = memory_map.get(winner_id)
                 loser = memory_map.get(loser_id)
                 audit: dict[str, Any] | None = None
@@ -491,9 +541,19 @@ class DedupMergePhase:
             # them (shadow mode only; always 0 in remove mode).
             "settled_pairs_skipped": settled_pairs_skipped,
             "llm_call_failures": self._llm_failures,  # #1183
-            # #1229: judge merge picks vetoed for lacking a direct
-            # >=threshold pair edge (transitive-chain cross-merges).
+            # #1229: judge merge picks vetoed because the pair's direct
+            # similarity is below threshold (transitive-chain cross-merges).
+            # Since #1231 this is a pure sub-threshold signal: pairs missing
+            # from the candidate list get an on-demand direct check first.
             "llm_merge_guarded": merge_guarded_count,
+            # #1231: judge picks missing from the candidate list whose
+            # on-demand direct cosine met the threshold — merges the top-10
+            # candidate cap used to false-positive veto.
+            "llm_merge_rescued": merge_rescued_count,
+            # #1231: vetoes where no direct score could be computed (vector
+            # unavailable — embed failed). Fail-closed, kept out of
+            # llm_merge_guarded so that counter stays sub-threshold-only.
+            "llm_merge_unverifiable": merge_unverifiable_count,
             # #1195/#1198: LLM winner picks flipped by the deterministic
             # winner rules — a direct measure of residual judge misdirection
             # the prompt alone would have let through.
@@ -566,6 +626,10 @@ class DedupMergePhase:
         pairs: list[tuple[UUID, UUID, float]] = []
         seen: set[tuple[UUID, UUID]] = set()
         memory_ids = {m.id for m in memories}
+        # #1231: cache every successfully embedded vector for the veto's
+        # on-demand direct check. Reset here (not in execute()) so the
+        # cache's lifecycle matches the candidate search that fills it.
+        self._summary_vectors = {}
 
         for memory in memories:
             try:
@@ -577,6 +641,7 @@ class DedupMergePhase:
                 )
                 self._embedding_calls_used += 1
                 self._embedding_tokens_used += tokens
+                self._summary_vectors[memory.id] = vector
 
                 results = await search_memories_qdrant(
                     user_id=user_id,
@@ -608,6 +673,34 @@ class DedupMergePhase:
                 )
 
         return pairs
+
+    def _direct_pair_similarity(self, id_a: UUID, id_b: UUID) -> float | None:
+        """Cosine similarity from this run's cached summary vectors (#1231).
+
+        Used when a judge-nominated pair is missing from ``pair_scores``
+        (the top-10 neighbor cap saturates in dense duplicate clusters).
+        The vectors come from the same embeddings ``_find_similar_pairs``
+        already computed, so the score definition matches Qdrant's cosine
+        exactly and no extra embedding or search calls are made.
+
+        Returns None when either vector is unavailable (embed failed) or
+        degenerate (zero norm, dimension mismatch) — the caller stays
+        fail-closed and vetoes.
+        """
+        vec_a = self._summary_vectors.get(id_a)
+        vec_b = self._summary_vectors.get(id_b)
+        if vec_a is None or vec_b is None or len(vec_a) != len(vec_b):
+            return None
+        dot = 0.0
+        norm_a_sq = 0.0
+        norm_b_sq = 0.0
+        for x, y in zip(vec_a, vec_b, strict=True):
+            dot += x * y
+            norm_a_sq += x * x
+            norm_b_sq += y * y
+        if norm_a_sq == 0.0 or norm_b_sq == 0.0:
+            return None
+        return dot / math.sqrt(norm_a_sq * norm_b_sq)
 
     async def _judge_cluster(
         self,

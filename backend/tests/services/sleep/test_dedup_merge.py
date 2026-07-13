@@ -3,9 +3,10 @@
 Issue #101: Union-Find clustering, LLM judgment, merge execution.
 """
 
+import math
 from datetime import datetime
 from unittest.mock import AsyncMock, MagicMock, patch
-from uuid import uuid4
+from uuid import UUID, uuid4
 
 import pytest
 
@@ -538,8 +539,15 @@ class TestCrossPairMergeVeto:
     deterministic; the LLM only chooses among eligible pairs.
     """
 
-    def _phase_with_chain(self, dedup_phase):
-        """Three memories where a-b and b-c are direct pairs but a-c is not."""
+    def _phase_with_chain(self, dedup_phase, *, chain_cosine=0.55):
+        """Three memories where a-b and b-c are direct pairs but a-c is not.
+
+        Seeds the per-run summary-vector cache the way ``_find_similar_pairs``
+        does in production (#1231): every processed memory has a vector, so
+        the missing a-c edge gets an on-demand direct cosine (``chain_cosine``,
+        default inside run 6's observed 0.43-0.66 band) instead of a blind
+        membership veto.
+        """
         mem_a = _make_memory(summary="fact A")
         mem_b = _make_memory(summary="fact A (near-dup)")
         mem_c = _make_memory(summary="fact C, transitively chained")
@@ -550,14 +558,22 @@ class TestCrossPairMergeVeto:
                 (mem_b.id, mem_c.id, 0.93),
             ]
         )
+        dedup_phase._summary_vectors = {
+            mem_a.id: [1.0, 0.0],
+            mem_b.id: [0.93, math.sqrt(1 - 0.93**2)],
+            mem_c.id: [chain_cosine, math.sqrt(1 - chain_cosine**2)],
+        }
         dedup_phase._execute_merge = AsyncMock()
         return mem_a, mem_b, mem_c
 
     @pytest.mark.asyncio
     async def test_merge_without_direct_edge_is_vetoed(self, dedup_phase):
+        """Run 6's failure: the judge picks the transitive-only pair whose
+        true cosine (0.43-0.66) is far below the 0.92 threshold. Since #1231
+        the missing edge is resolved by an on-demand direct cosine — the
+        sub-threshold veto still fires, judged on the computed SCORE."""
         config = _make_config()
         mem_a, _mem_b, mem_c = self._phase_with_chain(dedup_phase)
-        # Judge picks the transitive-only pair — exactly run 6's failure.
         dedup_phase._judge_cluster = AsyncMock(return_value=[(mem_a.id, mem_c.id)])
         reporter = AsyncMock()
 
@@ -568,6 +584,8 @@ class TestCrossPairMergeVeto:
         assert result.success is True
         assert result.details["merged"] == 0
         assert result.details["llm_merge_guarded"] == 1
+        assert result.details["llm_merge_rescued"] == 0
+        assert result.details["llm_merge_unverifiable"] == 0
         dedup_phase._execute_merge.assert_not_awaited()
         reporter.add_action.assert_not_awaited()
 
@@ -596,6 +614,7 @@ class TestCrossPairMergeVeto:
 
         assert result.details["merged"] == 1
         assert result.details["llm_merge_guarded"] == 1
+        assert result.details["llm_merge_rescued"] == 0
         # The surviving merge is the direct pair, not the transitive one.
         (winner, loser, *_rest), _ = dedup_phase._execute_merge.await_args
         assert {winner.id, loser.id} == {mem_a.id, mem_b.id}
@@ -642,3 +661,161 @@ class TestCrossPairMergeVeto:
         assert result.details["merged"] == 0
         assert result.details["llm_merge_guarded"] == 1
         dedup_phase._execute_shadow_merge.assert_not_awaited()
+
+
+class TestDenseClusterDirectCheck:
+    """#1231: ``_find_similar_pairs`` caps its neighbor search at limit=10,
+    so in a dense cluster (>10 mutual near-duplicates — templated corpora
+    like daily standup notes) a genuinely >=threshold pair can be absent
+    from ``pair_scores`` while union-find still chains its members. The
+    #1229 veto used to fire on the missing edge and block a legitimate
+    merge.
+
+    Contract: eligibility is still judged on the SCORE, never on
+    membership — a missing edge gets an on-demand direct cosine computed
+    from this run's cached summary vectors (zero extra embedding/Qdrant
+    calls). Vetoes with no computable score stay fail-closed but are
+    counted separately (``llm_merge_unverifiable``) so
+    ``llm_merge_guarded`` stays a pure sub-threshold signal; rescued
+    merges surface as ``llm_merge_rescued``.
+    """
+
+    def _phase_with_missing_edge(self, dedup_phase, *, direct_cosine):
+        """a-b and b-c are candidate pairs; a-c is judge-nominated but
+        missing from pair_scores, with cos(a, c) == direct_cosine."""
+        mem_a = _make_memory(summary="standup note 1")
+        mem_b = _make_memory(summary="standup note 2")
+        mem_c = _make_memory(summary="standup note 3")
+        dedup_phase._fetch_active_memories = AsyncMock(return_value=[mem_a, mem_b, mem_c])
+        dedup_phase._find_similar_pairs = AsyncMock(
+            return_value=[
+                (mem_a.id, mem_b.id, 0.95),
+                (mem_b.id, mem_c.id, 0.95),
+            ]
+        )
+        dedup_phase._summary_vectors = {
+            mem_a.id: [1.0, 0.0],
+            mem_b.id: [0.95, math.sqrt(1 - 0.95**2)],
+            mem_c.id: [direct_cosine, math.sqrt(1 - direct_cosine**2)],
+        }
+        dedup_phase._execute_merge = AsyncMock()
+        dedup_phase._judge_cluster = AsyncMock(return_value=[(mem_a.id, mem_c.id)])
+        return mem_a, mem_b, mem_c
+
+    @pytest.mark.asyncio
+    async def test_missing_pair_with_high_direct_cosine_is_rescued(self, dedup_phase):
+        config = _make_config(threshold=0.92)
+        self._phase_with_missing_edge(dedup_phase, direct_cosine=0.95)
+
+        result = await dedup_phase.execute(config, "user-1", "ws-1", "ctx-1", SleepBudget())
+
+        assert result.success is True
+        assert result.details["merged"] == 1
+        assert result.details["llm_merge_rescued"] == 1
+        assert result.details["llm_merge_guarded"] == 0
+        assert result.details["llm_merge_unverifiable"] == 0
+        dedup_phase._execute_merge.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_rescued_merge_audit_records_computed_similarity(self, dedup_phase):
+        """The on-demand score is backfilled into pair_scores so the audit
+        record carries the true similarity, not the 0.0 fallback."""
+        config = _make_config(threshold=0.92)
+        self._phase_with_missing_edge(dedup_phase, direct_cosine=0.95)
+        reporter = AsyncMock()
+
+        result = await dedup_phase.execute(
+            config, "user-1", "ws-1", "ctx-1", SleepBudget(), reporter=reporter, report_id=uuid4()
+        )
+
+        assert result.details["merged"] == 1
+        details = reporter.add_action.await_args.kwargs["details"]
+        assert details["similarity"] == pytest.approx(0.95)
+
+    @pytest.mark.asyncio
+    async def test_missing_pair_without_vectors_stays_fail_closed(self, dedup_phase):
+        """No vectors (embed failed) → the score is unknowable this run:
+        veto, but counted as unverifiable, NOT as a sub-threshold guard."""
+        config = _make_config(threshold=0.92)
+        self._phase_with_missing_edge(dedup_phase, direct_cosine=0.95)
+        dedup_phase._summary_vectors = {}
+
+        result = await dedup_phase.execute(config, "user-1", "ws-1", "ctx-1", SleepBudget())
+
+        assert result.details["merged"] == 0
+        assert result.details["llm_merge_unverifiable"] == 1
+        assert result.details["llm_merge_guarded"] == 0
+        assert result.details["llm_merge_rescued"] == 0
+        dedup_phase._execute_merge.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_dense_cluster_every_judge_merge_executes(self, dedup_phase):
+        """AC regression: >10 members, all mutual near-duplicates; the
+        saturated candidate search only surfaces chain neighbors, yet every
+        judge-proposed merge executes — no false-positive vetoes."""
+        config = _make_config(threshold=0.92)
+        # UUID(int=i) stringifies in index order → deterministic split.
+        mems = [_make_memory(memory_id=UUID(int=i), summary=f"standup {i}") for i in range(12)]
+        dedup_phase._fetch_active_memories = AsyncMock(return_value=mems)
+        # Saturated discovery: each memory only surfaces its chain neighbor.
+        chain = [(mems[i].id, mems[i + 1].id, 0.99) for i in range(11)]
+        dedup_phase._find_similar_pairs = AsyncMock(return_value=chain)
+        # All 12 are true near-duplicates of one fact: identical vectors.
+        dedup_phase._summary_vectors = {m.id: [1.0, 0.0] for m in mems}
+        dedup_phase._execute_merge = AsyncMock()
+
+        async def _nominate_star(cluster_memories, *_args, **_kwargs):
+            ordered = sorted(cluster_memories, key=lambda m: str(m.id))
+            return [(ordered[0].id, m.id) for m in ordered[1:]]
+
+        dedup_phase._judge_cluster = AsyncMock(side_effect=_nominate_star)
+
+        result = await dedup_phase.execute(config, "user-1", "ws-1", "ctx-1", SleepBudget())
+
+        # MAX_CLUSTER_SIZE=5 splits the 12-chain into {0-4}, {5-9}, {10,11}:
+        # 4 + 4 + 1 star nominations, all of which execute.
+        assert result.details["merged"] == 9
+        assert result.details["llm_merge_guarded"] == 0
+        assert result.details["llm_merge_unverifiable"] == 0
+        # Off-chain nominations (0,2),(0,3),(0,4),(5,7),(5,8),(5,9) are
+        # absent from pair_scores → rescued by the direct check.
+        assert result.details["llm_merge_rescued"] == 6
+        assert dedup_phase._execute_merge.await_count == 9
+
+
+class TestDirectPairSimilarity:
+    """#1231: the on-demand cosine used when a judge-nominated pair is
+    missing from pair_scores. Fail-closed: any unavailable or degenerate
+    input returns None (the caller vetoes), never a fabricated score."""
+
+    def test_identical_vectors_score_one(self, dedup_phase):
+        a, b = uuid4(), uuid4()
+        dedup_phase._summary_vectors = {a: [0.6, 0.8], b: [0.6, 0.8]}
+        assert dedup_phase._direct_pair_similarity(a, b) == pytest.approx(1.0)
+
+    def test_orthogonal_vectors_score_zero(self, dedup_phase):
+        a, b = uuid4(), uuid4()
+        dedup_phase._summary_vectors = {a: [1.0, 0.0], b: [0.0, 1.0]}
+        assert dedup_phase._direct_pair_similarity(a, b) == pytest.approx(0.0)
+
+    def test_unnormalized_vectors_use_full_cosine(self, dedup_phase):
+        """Defensive: do not assume unit-norm embeddings — compute
+        dot/(|a||b|) so the score matches Qdrant's cosine definition."""
+        a, b = uuid4(), uuid4()
+        dedup_phase._summary_vectors = {a: [2.0, 0.0], b: [0.5, 0.0]}
+        assert dedup_phase._direct_pair_similarity(a, b) == pytest.approx(1.0)
+
+    def test_missing_vector_returns_none(self, dedup_phase):
+        a, b = uuid4(), uuid4()
+        dedup_phase._summary_vectors = {a: [1.0, 0.0]}
+        assert dedup_phase._direct_pair_similarity(a, b) is None
+
+    def test_zero_norm_returns_none(self, dedup_phase):
+        a, b = uuid4(), uuid4()
+        dedup_phase._summary_vectors = {a: [0.0, 0.0], b: [1.0, 0.0]}
+        assert dedup_phase._direct_pair_similarity(a, b) is None
+
+    def test_dimension_mismatch_returns_none(self, dedup_phase):
+        a, b = uuid4(), uuid4()
+        dedup_phase._summary_vectors = {a: [1.0, 0.0, 0.0], b: [1.0, 0.0]}
+        assert dedup_phase._direct_pair_similarity(a, b) is None
