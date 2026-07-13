@@ -294,7 +294,7 @@ async def handle_analyze_context(
                 AnalysisOrchestrator,
                 AnalysisParams,
             )
-            from tasks.analysis_tasks import run_analysis_task
+            from tasks.analysis_tasks import register_run_task, run_analysis_task
 
             params = AnalysisParams(
                 from_dt=None,
@@ -332,6 +332,9 @@ async def handle_analyze_context(
             task = asyncio.create_task(run_analysis_task(analysis.id))
             _BACKGROUND_TASKS.add(task)
             task.add_done_callback(_log_background_task_result)
+            # #1241: register by run_id so the REST DELETE soft-cancel can
+            # stop MCP-started compute too.
+            register_run_task(analysis.id, task)
 
             await _log_tool_usage(
                 db,

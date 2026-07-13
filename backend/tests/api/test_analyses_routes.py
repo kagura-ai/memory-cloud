@@ -404,7 +404,6 @@ class TestListRunPositions:
 
 class TestCancelRun:
     def test_soft_cancels_running_run(self, client, db_mock):
-        db_mock.execute.side_effect = [_scalar_one(_TEST_CONTEXT_ID)]
         run_id = uuid4()
         fake_run = MagicMock(
             id=run_id,
@@ -420,9 +419,20 @@ class TestCancelRun:
             error=None,
             cancellation_reason=None,
         )
-        with patch(
-            "services.analysis.query_service.get_analysis",
-            AsyncMock(return_value=fake_run),
+        # Two executes: context boundary, then the #1241 locked re-fetch.
+        db_mock.execute.side_effect = [
+            _scalar_one(_TEST_CONTEXT_ID),
+            _scalar_one(fake_run),
+        ]
+        with (
+            patch(
+                "services.analysis.query_service.get_analysis",
+                AsyncMock(return_value=fake_run),
+            ),
+            patch(
+                "api.routes.analyses.cancel_run_task",
+                return_value=True,
+            ) as mock_cancel,
         ):
             response = client.delete(f"/api/v1/contexts/{_TEST_CONTEXT_ID}/analyses/{run_id}")
         assert response.status_code == 200, response.text
@@ -431,6 +441,64 @@ class TestCancelRun:
         assert body["cancellation_reason"] == "user"
         assert fake_run.status == "cancelled"
         assert fake_run.cancellation_reason == "user"
+        # #1241: a confirmed cancel also stops the in-process compute.
+        mock_cancel.assert_called_once_with(run_id)
+
+    def test_cancel_lost_race_returns_actual_terminal_state(self, client, db_mock):
+        """#1241: if persist_results wins the row lock and commits
+        'succeeded' first, the locked re-check must NOT flip the run to
+        cancelled (and must not cancel the finished task) — the response
+        reports the actual terminal state.
+        """
+        run_id = uuid4()
+        stale_run = MagicMock(
+            id=run_id,
+            workspace_id=_TEST_WORKSPACE_ID,
+            context_id=_TEST_CONTEXT_ID,
+            status="running",  # stale pre-lock read
+            triggered_by=_TEST_USER_ID,
+            started_at=datetime(2026, 5, 2),
+            finished_at=None,
+            input_count=10,
+            cost_estimated_cents=5,
+            cost_actual_cents=None,
+            error=None,
+            cancellation_reason=None,
+        )
+        locked_run = MagicMock(
+            id=run_id,
+            workspace_id=_TEST_WORKSPACE_ID,
+            context_id=_TEST_CONTEXT_ID,
+            status="succeeded",  # persist won the lock
+            triggered_by=_TEST_USER_ID,
+            started_at=datetime(2026, 5, 2),
+            finished_at=datetime(2026, 5, 2),
+            input_count=10,
+            cost_estimated_cents=5,
+            cost_actual_cents=4,
+            error=None,
+            cancellation_reason=None,
+        )
+        db_mock.execute.side_effect = [
+            _scalar_one(_TEST_CONTEXT_ID),
+            _scalar_one(locked_run),
+        ]
+        with (
+            patch(
+                "services.analysis.query_service.get_analysis",
+                AsyncMock(return_value=stale_run),
+            ),
+            patch(
+                "api.routes.analyses.cancel_run_task",
+                return_value=True,
+            ) as mock_cancel,
+        ):
+            response = client.delete(f"/api/v1/contexts/{_TEST_CONTEXT_ID}/analyses/{run_id}")
+        assert response.status_code == 200, response.text
+        body = response.json()
+        assert body["status"] == "succeeded"
+        assert locked_run.status == "succeeded"
+        mock_cancel.assert_not_called()
 
     def test_idempotent_when_already_terminal(self, client, db_mock):
         """Already-succeeded runs return 200 with current state, no flip."""

@@ -723,3 +723,54 @@ class TestClusterLabelDataclass:
         )
         with pytest.raises(AttributeError):
             cl.label = "y"  # type: ignore[misc]
+
+
+# --------------------------------------------------------------------------- #
+# #1241 — sibling cancellation on unexpected labeling errors
+# --------------------------------------------------------------------------- #
+class TestLabelClustersSiblingCancellation:
+    @pytest.mark.asyncio
+    async def test_unexpected_error_cancels_sibling_tasks(self, monkeypatch) -> None:
+        """#1241: when one labeling task raises something other than
+        ``AnalysisLLMUpstreamError`` (e.g. ConfigurationError from a
+        mid-run BYOK key removal), the run fails — the remaining tasks
+        must be CANCELLED, not left running paid LLM calls in the
+        background ("Task exception was never retrieved" orphans).
+        """
+        import asyncio
+
+        cancelled: dict[int, bool] = {}
+
+        async def fake_label_one(*, cluster_index, **kwargs):
+            if cluster_index == 0:
+                await asyncio.sleep(0.01)
+                raise RuntimeError("unexpected labeling failure")
+            try:
+                await asyncio.sleep(30)
+            except asyncio.CancelledError:
+                cancelled[cluster_index] = True
+                raise
+            return ClusterLabel(
+                cluster_index=cluster_index,
+                label="never",
+                description="",
+                label_confidence=0.5,
+                representative_memory_ids=[],
+                breakdown=None,
+            )
+
+        monkeypatch.setattr(labeler, "_label_one_cluster", fake_label_one)
+
+        memories = [_mem(), _mem()]
+        with pytest.raises(RuntimeError, match="unexpected labeling failure"):
+            await label_clusters(
+                cluster_labels=np.array([0, 1]),
+                centroids=np.zeros((2, 4)),
+                embeddings=np.ones((2, 4)),
+                memories=memories,
+                user_id="u1",
+                workspace_id="ws",
+                context_id="ctx",
+            )
+
+        assert cancelled.get(1) is True, "sibling task was not cancelled"
