@@ -205,6 +205,11 @@ export default function AdminMemoryHealthPage() {
         setError(null);
         setLoading(false);
       } else {
+        // Deep-link → back: no retained list, fetch it. Clear the stale
+        // detail too — leaving it set would paint the PREVIOUS context's
+        // sections for one frame on the next drill-down (the clearing
+        // effect only runs post-commit, after the browser painted).
+        setDetail(null);
         void load(null);
       }
     } else {

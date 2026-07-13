@@ -32,6 +32,13 @@ export function useContextScopeParam(): readonly [string | null, (scope: string 
 
   const setScope = useCallback(
     (next: string | null) => {
+      // Same-value no-op: router.push commits in a transition, so a fast
+      // double-click can land before the first navigation renders — without
+      // this guard it pushes a duplicate identical history entry and the
+      // first browser Back press appears dead.
+      if (next === searchParams.get(CONTEXT_SCOPE_PARAM)) {
+        return;
+      }
       const params = new URLSearchParams(searchParams.toString());
       if (next) {
         params.set(CONTEXT_SCOPE_PARAM, next);
