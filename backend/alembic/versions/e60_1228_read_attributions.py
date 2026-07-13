@@ -49,12 +49,11 @@ def upgrade() -> None:
             nullable=False,
         ),
         sa.Column("endpoint", sa.String(255), nullable=False),
-        sa.Column(
-            "created_at",
-            sa.DateTime(),
-            nullable=False,
-            server_default=sa.text("now()"),
-        ),
+        # No server_default: the writer (_log_tool_usage) always supplies
+        # created_at explicitly, and the model's client-side default keeps
+        # create_all/alembic parity (the drift gate flags a server default
+        # that exists on only one side).
+        sa.Column("created_at", sa.DateTime(), nullable=False),
     )
     op.create_index(
         "idx_context_read_attr_user_created",
