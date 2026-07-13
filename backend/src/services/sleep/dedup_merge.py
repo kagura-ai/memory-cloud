@@ -23,6 +23,7 @@ Academic notes:
 
 from __future__ import annotations
 
+import math
 import random
 import string
 from datetime import datetime
@@ -218,6 +219,17 @@ class DedupMergePhase:
         # existing tests and call sites rely on — stays unchanged.
         self._override_reasons: dict[str, int] = {}
         self._decision_meta: dict[tuple[UUID, UUID], dict[str, Any]] = {}
+        # #1231: per-run summary-vector cache filled by
+        # ``_find_similar_pairs`` (init here so the veto's on-demand direct
+        # check can be unit-tested without execute()). Keyed by memory id;
+        # missing entries mean the embed failed and the pair stays
+        # unverifiable (fail-closed).
+        self._summary_vectors: dict[UUID, list[float]] = {}
+        # #1232: pair keys already settled by a supersedes edge, recorded
+        # by ``_filter_already_superseded_pairs`` (shadow mode only). The
+        # judge can re-nominate these via third-party co-clustering; they
+        # must be skipped — never guarded, never rescued into a re-merge.
+        self._settled_pair_keys: set[tuple[UUID, UUID]] = set()
 
     async def execute(
         self,
@@ -258,6 +270,8 @@ class DedupMergePhase:
         # #475: reset embedding accumulators between sleep cycles.
         self._embedding_calls_used = 0
         self._embedding_tokens_used = 0
+        # #1232: reset the settled-pair record between sleep cycles.
+        self._settled_pair_keys = set()
 
         if not config.sleep_dedup_enabled:
             result.skipped = True
@@ -339,6 +353,13 @@ class DedupMergePhase:
         pair_scores = {tuple(sorted([a, b], key=str)): s for a, b, s in pairs}
         merged_count = 0
         merge_guarded_count = 0
+        merge_rescued_count = 0
+        merge_unverifiable_count = 0
+        settled_skipped_count = 0
+        # #1231: pair keys whose score came from the on-demand direct check
+        # rather than candidate discovery — merges on these are "rescues"
+        # the top-10 candidate cap would previously have vetoed.
+        backfilled_keys: set[tuple[UUID, UUID]] = set()
 
         for cluster in processable:
             if not budget.can_afford(llm_calls=1 if llm_enabled else 0):
@@ -347,6 +368,25 @@ class DedupMergePhase:
             cluster_memories = [memory_map[mid] for mid in cluster if mid in memory_map]
             if len(cluster_memories) < 2:
                 continue
+
+            # #1231: complete the in-cluster pairwise scores BEFORE judging.
+            # The per-memory top-10 neighbor search saturates in dense
+            # duplicate clusters, so genuinely >=threshold pairs can be
+            # missing from pair_scores — the LLM judge would be shown 0.0
+            # (biasing keep_both) and the rule-based path could never
+            # nominate them. Clusters are capped at MAX_CLUSTER_SIZE, so
+            # this is at most C(5,2)=10 local cosines over vectors already
+            # embedded during discovery. Settled pairs (#1208/#1232) stay
+            # unscored on purpose: their succession is already recorded.
+            for i, mem_x in enumerate(cluster_memories):
+                for mem_y in cluster_memories[i + 1 :]:
+                    key = tuple(sorted([mem_x.id, mem_y.id], key=str))
+                    if key in pair_scores or key in self._settled_pair_keys:
+                        continue
+                    direct = self._direct_pair_similarity(mem_x.id, mem_y.id)
+                    if direct is not None:
+                        pair_scores[key] = direct
+                        backfilled_keys.add(key)
 
             merge_decisions = await self._judge_cluster(
                 cluster_memories,
@@ -391,8 +431,48 @@ class DedupMergePhase:
                 # is deterministic and judged on the SCORE, not membership:
                 # a merge executes only when the pair's direct similarity
                 # meets the configured threshold.
-                pair_similarity = pair_scores.get(tuple(sorted([winner_id, loser_id], key=str)))
-                if pair_similarity is None or pair_similarity < threshold:
+                pair_key = tuple(sorted([winner_id, loser_id], key=str))
+                if pair_key in self._settled_pair_keys:
+                    # #1232: a supersedes edge already settles this pair —
+                    # the judge re-nominated it because members co-cluster
+                    # via third parties. Skipping is correct, but it is
+                    # neither a sub-threshold guard nor unverifiable;
+                    # executing would re-merge (re-writing audit rows and
+                    # breaking undo's prior_edge snapshot) on every run.
+                    settled_skipped_count += 1
+                    logger.debug(
+                        "dedup_merge_skipped_already_settled",
+                        winner_id=str(winner_id),
+                        loser_id=str(loser_id),
+                    )
+                    continue
+                pair_similarity = pair_scores.get(pair_key)
+                if pair_similarity is None:
+                    # #1231 defense-in-depth: the per-cluster pre-fill above
+                    # normally leaves only vector-unavailable pairs
+                    # unscored, but judge nominations outside the cluster's
+                    # member list would land here too.
+                    pair_similarity = self._direct_pair_similarity(winner_id, loser_id)
+                    if pair_similarity is not None:
+                        # Backfill so the audit record carries the true
+                        # score instead of the 0.0 fallback.
+                        pair_scores[pair_key] = pair_similarity
+                        backfilled_keys.add(pair_key)
+                if pair_similarity is None:
+                    # Fail-closed, but distinct from a genuine sub-threshold
+                    # veto: without vectors the score is unknowable this
+                    # run, and folding these into llm_merge_guarded would
+                    # dilute the cross-merge signal that counter exists to
+                    # expose (#1231).
+                    merge_unverifiable_count += 1
+                    logger.warning(
+                        "dedup_merge_vetoed_vector_unavailable",
+                        winner_id=str(winner_id),
+                        loser_id=str(loser_id),
+                        threshold=threshold,
+                    )
+                    continue
+                if pair_similarity < threshold:
                     merge_guarded_count += 1
                     logger.warning(
                         "dedup_merge_vetoed_below_threshold",
@@ -402,6 +482,15 @@ class DedupMergePhase:
                         threshold=threshold,
                     )
                     continue
+                if pair_key in backfilled_keys:
+                    merge_rescued_count += 1
+                    logger.info(
+                        "dedup_merge_rescued_by_direct_check",
+                        winner_id=str(winner_id),
+                        loser_id=str(loser_id),
+                        pair_similarity=pair_similarity,
+                        threshold=threshold,
+                    )
                 winner = memory_map.get(winner_id)
                 loser = memory_map.get(loser_id)
                 audit: dict[str, Any] | None = None
@@ -491,9 +580,22 @@ class DedupMergePhase:
             # them (shadow mode only; always 0 in remove mode).
             "settled_pairs_skipped": settled_pairs_skipped,
             "llm_call_failures": self._llm_failures,  # #1183
-            # #1229: judge merge picks vetoed for lacking a direct
-            # >=threshold pair edge (transitive-chain cross-merges).
+            # #1229: judge merge picks vetoed because the pair's direct
+            # similarity is below threshold (transitive-chain cross-merges).
+            # Since #1231 this is a pure sub-threshold signal: pairs missing
+            # from the candidate list get an on-demand direct check first.
             "llm_merge_guarded": merge_guarded_count,
+            # #1231: judge picks missing from the candidate list whose
+            # on-demand direct cosine met the threshold — merges the top-10
+            # candidate cap used to false-positive veto.
+            "llm_merge_rescued": merge_rescued_count,
+            # #1231: vetoes where no direct score could be computed (vector
+            # unavailable — embed failed). Fail-closed, kept out of
+            # llm_merge_guarded so that counter stays sub-threshold-only.
+            "llm_merge_unverifiable": merge_unverifiable_count,
+            # #1232: judge re-nominations of pairs a supersedes edge already
+            # settled (shadow mode) — skipped, never guarded/rescued.
+            "settled_decisions_skipped": settled_skipped_count,
             # #1195/#1198: LLM winner picks flipped by the deterministic
             # winner rules — a direct measure of residual judge misdirection
             # the prompt alone would have let through.
@@ -566,6 +668,10 @@ class DedupMergePhase:
         pairs: list[tuple[UUID, UUID, float]] = []
         seen: set[tuple[UUID, UUID]] = set()
         memory_ids = {m.id for m in memories}
+        # #1231: cache every successfully embedded vector for the veto's
+        # on-demand direct check. Reset here (not in execute()) so the
+        # cache's lifecycle matches the candidate search that fills it.
+        self._summary_vectors = {}
 
         for memory in memories:
             try:
@@ -577,6 +683,7 @@ class DedupMergePhase:
                 )
                 self._embedding_calls_used += 1
                 self._embedding_tokens_used += tokens
+                self._summary_vectors[memory.id] = vector
 
                 results = await search_memories_qdrant(
                     user_id=user_id,
@@ -608,6 +715,40 @@ class DedupMergePhase:
                 )
 
         return pairs
+
+    def _direct_pair_similarity(self, id_a: UUID, id_b: UUID) -> float | None:
+        """Cosine similarity from this run's cached summary vectors (#1231).
+
+        Used when a judge-nominated pair is missing from ``pair_scores``
+        (the top-10 neighbor cap saturates in dense duplicate clusters).
+        The vectors come from the same embeddings ``_find_similar_pairs``
+        already computed, so the score definition matches Qdrant's cosine
+        exactly and no extra embedding or search calls are made.
+
+        Returns None when either vector is unavailable (embed failed) or
+        degenerate (zero norm, dimension mismatch) — the caller stays
+        fail-closed and vetoes.
+        """
+        vec_a = self._summary_vectors.get(id_a)
+        vec_b = self._summary_vectors.get(id_b)
+        if vec_a is None or vec_b is None or len(vec_a) != len(vec_b):
+            return None
+        dot = 0.0
+        norm_a_sq = 0.0
+        norm_b_sq = 0.0
+        for x, y in zip(vec_a, vec_b, strict=True):
+            dot += x * y
+            norm_a_sq += x * x
+            norm_b_sq += y * y
+        if norm_a_sq == 0.0 or norm_b_sq == 0.0:
+            return None
+        similarity = dot / math.sqrt(norm_a_sq * norm_b_sq)
+        # A NaN/inf component (degraded embedding provider) propagates to a
+        # NaN similarity, and `NaN < threshold` is False — the veto would
+        # fail OPEN. Treat non-finite as unverifiable instead.
+        if not math.isfinite(similarity):
+            return None
+        return similarity
 
     async def _judge_cluster(
         self,
@@ -1033,6 +1174,13 @@ class DedupMergePhase:
         LLM budget on pairs whose succession is already settled. Filtering
         is direction-agnostic (either orientation settles the pair).
 
+        Side effect (#1232): records the settled pair keys in
+        ``self._settled_pair_keys`` — the merge loop's settled guard reads
+        it to skip judge re-nominations. Tests that stub this method with a
+        passthrough leave the record empty, silently disabling that guard;
+        include settled pairs only via the real method (or set the
+        attribute explicitly).
+
         Returns:
             (remaining pairs, count of pairs skipped as already settled).
         """
@@ -1050,6 +1198,11 @@ class DedupMergePhase:
             )
         )
         settled = {tuple(sorted((src, dst), key=str)) for src, dst in rows.all()}
+        # #1232: remember WHICH pairs are settled, not just how many were
+        # filtered — the judge can re-nominate a settled pair via
+        # third-party co-clustering, and the merge loop must recognize it
+        # (skip; do not count as guarded, do not rescue into a re-merge).
+        self._settled_pair_keys = settled
         if not settled:
             return pairs, 0
         remaining = [
