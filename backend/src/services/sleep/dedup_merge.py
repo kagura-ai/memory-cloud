@@ -338,6 +338,7 @@ class DedupMergePhase:
         memory_map = {m.id: m for m in memories}
         pair_scores = {tuple(sorted([a, b], key=str)): s for a, b, s in pairs}
         merged_count = 0
+        merge_guarded_count = 0
 
         for cluster in processable:
             if not budget.can_afford(llm_calls=1 if llm_enabled else 0):
@@ -381,6 +382,21 @@ class DedupMergePhase:
                 tuple[UUID, UUID, Memory | None, Memory | None, dict[str, Any] | None]
             ] = []
             for winner_id, loser_id in merge_decisions:
+                # #1229 (run 6): union-find clusters chain transitively, so
+                # the judge can nominate two members with NO direct
+                # similarity edge — run 6 merged pairs whose true pairwise
+                # cosine was 0.43-0.66 under a 0.92 threshold, destroying
+                # distinct facts (update.stale_only_zero breach). Only pairs
+                # ``_find_similar_pairs`` actually emitted (>= threshold) are
+                # merge-eligible; the judge chooses among them, never beyond.
+                if tuple(sorted([winner_id, loser_id], key=str)) not in pair_scores:
+                    merge_guarded_count += 1
+                    logger.warning(
+                        "dedup_merge_vetoed_no_direct_edge",
+                        winner_id=str(winner_id),
+                        loser_id=str(loser_id),
+                    )
+                    continue
                 winner = memory_map.get(winner_id)
                 loser = memory_map.get(loser_id)
                 audit: dict[str, Any] | None = None
@@ -470,6 +486,9 @@ class DedupMergePhase:
             # them (shadow mode only; always 0 in remove mode).
             "settled_pairs_skipped": settled_pairs_skipped,
             "llm_call_failures": self._llm_failures,  # #1183
+            # #1229: judge merge picks vetoed for lacking a direct
+            # >=threshold pair edge (transitive-chain cross-merges).
+            "llm_merge_guarded": merge_guarded_count,
             # #1195/#1198: LLM winner picks flipped by the deterministic
             # winner rules — a direct measure of residual judge misdirection
             # the prompt alone would have let through.

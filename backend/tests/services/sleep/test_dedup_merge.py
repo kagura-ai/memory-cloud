@@ -523,3 +523,100 @@ class TestMergeAuditSnapshot:
             details = call.kwargs["details"]
             assert details["winner_recency"] == f"{newest:%Y-%m-%d %H:%M}"
             assert details["loser_recency"] == f"{older:%Y-%m-%d %H:%M}"
+
+
+class TestCrossPairMergeVeto:
+    """#1229 (run-6 residual): union-find clusters chain transitively, so the
+    judge can nominate a (winner, loser) pair that has NO direct similarity
+    edge — run 6 merged pairs whose true pairwise cosine was 0.43-0.66 under
+    a 0.92 threshold (e.g. "Falcon Guild standup" absorbed into "Team
+    Duskmoor standup"), destroying distinct facts and breaching
+    update.stale_only_zero.
+
+    Contract: a merge decision may only execute when the pair has a direct
+    >=threshold edge among this run's candidate pairs. Eligibility is
+    deterministic; the LLM only chooses among eligible pairs.
+    """
+
+    def _phase_with_chain(self, dedup_phase):
+        """Three memories where a-b and b-c are direct pairs but a-c is not."""
+        mem_a = _make_memory(summary="fact A")
+        mem_b = _make_memory(summary="fact A (near-dup)")
+        mem_c = _make_memory(summary="fact C, transitively chained")
+        dedup_phase._fetch_active_memories = AsyncMock(return_value=[mem_a, mem_b, mem_c])
+        dedup_phase._find_similar_pairs = AsyncMock(
+            return_value=[
+                (mem_a.id, mem_b.id, 0.93),
+                (mem_b.id, mem_c.id, 0.93),
+            ]
+        )
+        dedup_phase._execute_merge = AsyncMock()
+        return mem_a, mem_b, mem_c
+
+    @pytest.mark.asyncio
+    async def test_merge_without_direct_edge_is_vetoed(self, dedup_phase):
+        config = _make_config()
+        mem_a, _mem_b, mem_c = self._phase_with_chain(dedup_phase)
+        # Judge picks the transitive-only pair — exactly run 6's failure.
+        dedup_phase._judge_cluster = AsyncMock(return_value=[(mem_a.id, mem_c.id)])
+        reporter = AsyncMock()
+
+        result = await dedup_phase.execute(
+            config, "user-1", "ws-1", "ctx-1", SleepBudget(), reporter=reporter, report_id=uuid4()
+        )
+
+        assert result.success is True
+        assert result.details["merged"] == 0
+        assert result.details["llm_merge_guarded"] == 1
+        dedup_phase._execute_merge.assert_not_awaited()
+        reporter.add_action.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_direct_edge_merge_still_executes(self, dedup_phase):
+        config = _make_config()
+        mem_a, mem_b, _mem_c = self._phase_with_chain(dedup_phase)
+        dedup_phase._judge_cluster = AsyncMock(return_value=[(mem_a.id, mem_b.id)])
+
+        result = await dedup_phase.execute(config, "user-1", "ws-1", "ctx-1", SleepBudget())
+
+        assert result.success is True
+        assert result.details["merged"] == 1
+        assert result.details["llm_merge_guarded"] == 0
+        dedup_phase._execute_merge.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_mixed_decisions_veto_only_the_edgeless_pair(self, dedup_phase):
+        config = _make_config()
+        mem_a, mem_b, mem_c = self._phase_with_chain(dedup_phase)
+        dedup_phase._judge_cluster = AsyncMock(
+            return_value=[(mem_a.id, mem_c.id), (mem_a.id, mem_b.id)]
+        )
+
+        result = await dedup_phase.execute(config, "user-1", "ws-1", "ctx-1", SleepBudget())
+
+        assert result.details["merged"] == 1
+        assert result.details["llm_merge_guarded"] == 1
+        # The surviving merge is the direct pair, not the transitive one.
+        (winner, loser, *_rest), _kwargs = dedup_phase._execute_merge.await_args
+        assert {winner.id, loser.id} == {mem_a.id, mem_b.id}
+
+    @pytest.mark.asyncio
+    async def test_shadow_mode_merge_without_direct_edge_is_vetoed(self, dedup_phase):
+        """#1208 shadow mode is equally destructive for recall (the loser is
+        hidden by the supersedes edge) — the veto must cover it too."""
+        config = _make_config()
+        config.sleep_dedup_supersede_enabled = True
+        mem_a, _mem_b, mem_c = self._phase_with_chain(dedup_phase)
+        # Shadow mode pre-filters already-settled pairs via the DB; pass
+        # everything through — the veto under test sits downstream of it.
+        dedup_phase._filter_already_superseded_pairs = AsyncMock(
+            side_effect=lambda pairs, _user: (pairs, 0)
+        )
+        dedup_phase._execute_shadow_merge = AsyncMock()
+        dedup_phase._judge_cluster = AsyncMock(return_value=[(mem_a.id, mem_c.id)])
+
+        result = await dedup_phase.execute(config, "user-1", "ws-1", "ctx-1", SleepBudget())
+
+        assert result.details["merged"] == 0
+        assert result.details["llm_merge_guarded"] == 1
+        dedup_phase._execute_shadow_merge.assert_not_awaited()
