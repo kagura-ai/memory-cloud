@@ -225,7 +225,7 @@ Conflating "recently co-recalled" with "content-similar" causes edge survival to
 Edge `origin` and `Memory.scope` (`working` / `persistent`) are **two independent axes** managed by different subsystems:
 
 - **`origin`** controls *edge* lifetime — see the table above.
-- **`scope`** controls *memory node* lifetime — `working` memories are promoted to `persistent` (or archived) by the Sleep Consolidation phase based on access patterns and LLM judgment. See [Sleep Maintenance](sleep-maintenance.md).
+- **`scope`** controls *memory node* lifetime — `working` memories are promoted to `persistent` (or archived) by the Sleep Consolidation phase. Promotion is decided by adoption-gated rules plus LLM judgment for borderline cases; archival is exclusively the deterministic rule path's job — the LLM judge decides `promote` vs `keep` only (#1233). See [Sleep Maintenance](sleep-maintenance.md).
 
 Hebbian edges supply *signal* to consolidation (a working memory that gets reinforced via co-recall is more likely to be promoted), but Hebbian learning itself does not look at `scope` — `HebbianLearner.queue_update` creates edges between any co-activated pair regardless of whether the endpoints are `working` or `persistent`. In the neuroscience analogy, this is a two-level consolidation: edge consolidation (Hebbian → Semantic) and node consolidation (working → persistent) happen on different timescales and via different mechanisms.
 

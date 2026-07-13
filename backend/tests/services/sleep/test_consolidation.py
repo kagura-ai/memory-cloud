@@ -218,53 +218,87 @@ class TestAdoptionArchivalGrandfather:
 
 
 class TestLLMJudgeParsing:
-    """Test LLM response parsing for consolidation."""
+    """Parse contract of ``_llm_judge_batch`` — exercised through the REAL
+    parser (#1233 replaced inline simulations that could silently drift
+    from production)."""
 
-    def test_valid_promote_response(self):
-        id_a = uuid4()
-        label_to_id = {"A": id_a}
+    async def _parse(self, consolidation_phase, memory, decisions):
+        resp = MagicMock()
+        resp.parsed = {"decisions": decisions}
+        resp.total_tokens = 10
+        consolidation_phase.llm_service.complete_json = AsyncMock(return_value=resp)
+        return await consolidation_phase._llm_judge_batch(
+            [memory], "user-1", "ctx-1", "ws-1", SleepBudget(), _make_config()
+        )
 
-        response = {
-            "decisions": [{"label": "A", "action": "promote", "reason": "durable knowledge"}]
-        }
+    @pytest.mark.asyncio
+    async def test_valid_promote_response(self, consolidation_phase):
+        mem = _make_working_memory()
+        decisions = await self._parse(
+            consolidation_phase,
+            mem,
+            [{"label": "A", "action": "promote", "reason": "durable knowledge"}],
+        )
+        assert decisions == {mem.id: "promote"}
 
-        # Simulate parsing logic
-        decisions = {}
-        for item in response.get("decisions", []):
-            label = item.get("label")
-            action = item.get("action")
-            if label in label_to_id and action in ("promote", "keep", "archive"):
-                decisions[label_to_id[label]] = action
+    @pytest.mark.asyncio
+    async def test_valid_keep_response(self, consolidation_phase):
+        mem = _make_working_memory()
+        decisions = await self._parse(
+            consolidation_phase,
+            mem,
+            [{"label": "A", "action": "keep", "reason": "uncertain"}],
+        )
+        assert decisions == {mem.id: "keep"}
 
-        assert decisions[id_a] == "promote"
+    @pytest.mark.asyncio
+    async def test_archive_action_dropped_at_parse(self, consolidation_phase):
+        """#1233: 'archive' is no longer offered to the judge — a response
+        that uses it anyway is dropped at parse. The execute()-side
+        ``_archival_eligible`` guard stays as the defensive backstop."""
+        mem = _make_working_memory()
+        decisions = await self._parse(
+            consolidation_phase,
+            mem,
+            [{"label": "A", "action": "archive", "reason": "stale"}],
+        )
+        assert decisions == {}
 
-    def test_invalid_action_ignored(self):
-        label_to_id = {"A": uuid4()}
+    @pytest.mark.asyncio
+    async def test_invalid_action_ignored(self, consolidation_phase):
+        mem = _make_working_memory()
+        decisions = await self._parse(
+            consolidation_phase,
+            mem,
+            [{"label": "A", "action": "destroy", "reason": "bad action"}],
+        )
+        assert decisions == {}
 
-        response = {"decisions": [{"label": "A", "action": "destroy", "reason": "bad action"}]}
+    @pytest.mark.asyncio
+    async def test_invalid_label_ignored(self, consolidation_phase):
+        mem = _make_working_memory()
+        decisions = await self._parse(
+            consolidation_phase,
+            mem,
+            [{"label": "Z", "action": "promote", "reason": "hallucinated"}],
+        )
+        assert decisions == {}
 
-        decisions = {}
-        for item in response.get("decisions", []):
-            label = item.get("label")
-            action = item.get("action")
-            if label in label_to_id and action in ("promote", "keep", "archive"):
-                decisions[label_to_id[label]] = action
 
-        assert len(decisions) == 0
+class TestConsolidationPromptContract:
+    """#1233: the judge prompt no longer offers the dead 'archive' action —
+    rule-path archival is deterministic and the judge's archive picks were
+    either redundant or guarded out, wasting tokens and probability mass."""
 
-    def test_invalid_label_ignored(self):
-        label_to_id = {"A": uuid4()}
+    def test_prompt_no_longer_offers_archive(self):
+        from services.sleep.prompts import (
+            CONSOLIDATION_JUDGE_SYSTEM,
+            CONSOLIDATION_JUDGE_USER,
+        )
 
-        response = {"decisions": [{"label": "Z", "action": "promote", "reason": "hallucinated"}]}
-
-        decisions = {}
-        for item in response.get("decisions", []):
-            label = item.get("label")
-            action = item.get("action")
-            if label in label_to_id and action in ("promote", "keep", "archive"):
-                decisions[label_to_id[label]] = action
-
-        assert len(decisions) == 0
+        assert '"archive"' not in CONSOLIDATION_JUDGE_USER
+        assert '"promote" | "keep"' in CONSOLIDATION_JUDGE_USER
+        assert "archive" not in CONSOLIDATION_JUDGE_SYSTEM.lower()
 
 
 def _isolation_memory(*, importance, access_count, age_days, reference_count=0):

@@ -87,6 +87,7 @@ Adjusts memory importance using LLM scoring combined with EMA smoothing.
 Promotes, keeps, or archives working memories based on fast-path rules plus LLM judgment for borderline cases.
 
 - **Algorithm**: rule-based fast path for clear-cut `promote` / `archive` decisions (no LLM) → LLM judgment only for borderline cases → bridge-node protection (never delete memories with high graph centrality).
+- **Judge actions** (#1233): the LLM judge decides `promote` vs `keep` only. Archival is exclusively the deterministic rule path's job (`_archival_eligible` + isolation, which runs *before* the judge) — the judge's `archive` option was removed because its picks were always either redundant or guarded out (#1229), wasting prompt tokens and probability mass. The eligibility guard remains in code as a defensive backstop; `llm_archive_guarded` stays in the report vocabulary (expected 0).
 - **LLM**: yes (optional — in non-LLM mode, behavior matches the legacy `consolidation_task`).
 - **Replaces**: the pre-Sleep rule-only `consolidation_task`.
 

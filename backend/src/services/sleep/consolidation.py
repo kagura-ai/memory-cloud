@@ -4,7 +4,7 @@ Issue #103: Replace rule-based consolidation with LLM-augmented version.
 
 Migrates logic from neural_tasks.py:consolidation_task (lines 92-225):
 - Fast path: existing rules for clear-cut cases (no LLM needed)
-- Borderline: LLM decides promote/keep/archive
+- Borderline: LLM decides promote/keep (#1233: archival is rule-path only)
 - LLM off: identical behavior to legacy consolidation_task
 - Bridge node protection: never delete memories with high centrality
 
@@ -127,6 +127,10 @@ class ConsolidationPhase:
         # #1183: judge-failure counter (init here so the LLM judge helper can
         # be unit-tested without execute()).
         self._llm_failures: int = 0
+        # #1233: token/breakdown accumulators too — same rationale (the
+        # dedup phase established the pattern in #475).
+        self._tokens_used: int = 0
+        self._llm_breakdown: LLMCallBreakdown | None = None
 
     async def execute(
         self,
@@ -292,6 +296,11 @@ class ConsolidationPhase:
                             mem.reference_count or 0,
                         )
                     elif action == "archive":
+                        # #1233: unreachable via _llm_judge_batch (the prompt
+                        # no longer offers "archive" and the parser rejects
+                        # it) — kept as a defensive backstop so any future
+                        # decision source still cannot archive an ineligible
+                        # memory.
                         # #1229: the LLM only chooses AMONG deterministically
                         # archival-eligible candidates (shared predicate with
                         # the rule path above — see _archival_eligible).
@@ -420,7 +429,8 @@ class ConsolidationPhase:
     ) -> dict[UUID, str]:
         """Use LLM to judge borderline working memories.
 
-        Returns {memory_id: "promote"|"keep"|"archive"}.
+        Returns {memory_id: "promote"|"keep"} — "archive" is not offered
+        (#1233): rule-path archival is deterministic and already ran.
         """
         labels = list(string.ascii_uppercase[: len(batch)])
         label_to_id = dict(zip(labels, [m.id for m in batch], strict=True))
@@ -429,7 +439,7 @@ class ConsolidationPhase:
         random.shuffle(items)
 
         # The summary is untrusted (issue #919) — wrap it so an embedded
-        # instruction cannot steer the consolidation (promote/keep/archive) judgment.
+        # instruction cannot steer the consolidation (promote/keep) judgment.
         memory_lines = []
         for label, mem in items:
             age_days = (utcnow() - mem.created_at).days
@@ -459,14 +469,28 @@ class ConsolidationPhase:
             logger.warning("consolidation_llm_failed", error=str(e))
             return {}
 
-        # Parse with label validation
+        # Parse with label validation. #1233: "archive" is no longer offered
+        # (rule-path archival is deterministic and runs before the judge),
+        # so it is rejected here like any other invalid action; the
+        # execute()-side _archival_eligible guard remains as a defensive
+        # backstop should an archive decision ever reach it again.
         decisions: dict[UUID, str] = {}
         for item in llm_resp.parsed.get("decisions", []):
             label = item.get("label")
             action = item.get("action")
             if label not in label_to_id:
                 continue
-            if action not in ("promote", "keep", "archive"):
+            if action not in ("promote", "keep"):
+                # #1233 review: "archive" is retired, but a judge that still
+                # emits it signals schema drift (model change, stale
+                # provider-side prompt cache) — surface it, or llm_promoted
+                # quietly collapses with nothing tying it to the cause.
+                if action == "archive":
+                    logger.info(
+                        "consolidation_judge_returned_retired_action",
+                        action=action,
+                        label=str(label),
+                    )
                 continue
             decisions[label_to_id[label]] = action
 

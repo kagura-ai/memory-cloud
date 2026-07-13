@@ -186,12 +186,14 @@ class TestLLMBorderlinePath:
         assert result.llm_calls_used == 1
 
     @pytest.mark.asyncio
-    async def test_llm_archive_fresh_memory_is_guarded(self):
-        # #1229: a fresh borderline memory (age 10d, cutoff unset) is not
-        # deterministically archival-eligible — the LLM's "archive" verdict
-        # is refused, never a deletion. (Pre-#1229 this test asserted the
-        # LLM could delete it — the exact hazard that ate the eval's
-        # freshly-ingested current docs.)
+    async def test_llm_archive_response_dropped_at_parse(self):
+        # #1233: "archive" is no longer offered to the judge — an LLM
+        # response that uses it anyway is dropped at PARSE, so nothing is
+        # deleted and nothing is guarded (the guard counter only moves for
+        # decisions that reach the execute loop, which parse now prevents).
+        # Pre-#1229 this test asserted the LLM could delete a fresh memory;
+        # #1229 turned that into a guarded refusal; #1233 removes the
+        # option at the source.
         mem = _make_memory()
         phase, llm = _build_phase([mem])
         llm.complete_json = AsyncMock(
@@ -200,21 +202,22 @@ class TestLLMBorderlinePath:
         result, _, _ = await _run_with_graph(phase, total_edges=0, config=_make_config())
 
         assert result.details["llm_archived"] == 0
-        assert result.details["llm_archive_guarded"] == 1
+        assert result.details["llm_archive_guarded"] == 0
         phase.memory_repo.delete.assert_not_called()
 
     @pytest.mark.asyncio
     async def test_llm_archive_connected_memory_is_protected(self):
-        # Graph present and the node is NOT isolated → bridge protection: the
-        # LLM "archive" verdict must be vetoed. #1229: the memory must be
+        # Graph present and the node is NOT isolated → bridge protection: an
+        # "archive" decision must be vetoed. #1229: the memory must be
         # deterministically archival-eligible (age >= 30d, cutoff opted-in)
         # or the eligibility guard short-circuits before the isolation veto
-        # is ever exercised (this test was briefly vacuous).
+        # is ever exercised. #1233 review: the parser now drops "archive",
+        # so this must bypass it (mock _llm_judge_batch) like the other
+        # backstop tests — routing through complete_json made it vacuous
+        # (mutation-confirmed: removing the isolation veto stayed green).
         mem = _make_memory(age_days=40)
         phase, llm = _build_phase([mem])
-        llm.complete_json = AsyncMock(
-            return_value=_make_llm_response([{"label": "A", "action": "archive"}])
-        )
+        phase._llm_judge_batch = AsyncMock(return_value={mem.id: "archive"})
         connected = {
             "centrality": 0.1,
             "edge_count": 1,
@@ -235,16 +238,16 @@ class TestLLMBorderlinePath:
         phase.memory_repo.delete.assert_not_called()
 
     @pytest.mark.asyncio
-    async def test_llm_archive_isolated_with_graph_deletes(self):
-        # #1229: the LLM archive lane survives only for memories that were
-        # NOT rule-deletable at rule time (connected then) but read as
-        # isolated by the LLM-path re-check — deterministic eligibility
-        # (age/adoption/cutoff) still holds, so the verdict proceeds.
+    async def test_archive_backstop_still_deletes_eligible_isolated(self):
+        # #1233: the parse path can no longer emit "archive", but the
+        # execute()-side lane is kept as a defensive backstop for any
+        # future decision source. Bypass the parser (mock _llm_judge_batch
+        # directly) to pin the backstop's behavior: deterministic
+        # eligibility (age/adoption/cutoff) + isolation still required,
+        # and an eligible isolated memory is deleted.
         mem = _make_memory(age_days=40)
         phase, llm = _build_phase([mem])
-        llm.complete_json = AsyncMock(
-            return_value=_make_llm_response([{"label": "A", "action": "archive"}])
-        )
+        phase._llm_judge_batch = AsyncMock(return_value={mem.id: "archive"})
         connected = {
             "centrality": 0.1,
             "edge_count": 1,
@@ -366,7 +369,7 @@ class TestLLMJudgeBatch:
                 return_value=_make_llm_response(
                     [
                         {"label": "A", "action": "promote"},
-                        {"label": "B", "action": "archive"},
+                        {"label": "B", "action": "keep"},
                     ]
                 )
             )
@@ -375,7 +378,7 @@ class TestLLMJudgeBatch:
 
         # No shuffle → label A is mems[0], B is mems[1].
         assert decisions[mems[0].id] == "promote"
-        assert decisions[mems[1].id] == "archive"
+        assert decisions[mems[1].id] == "keep"
         assert budget.llm_calls_used == 1
         assert phase._tokens_used == 42
 
