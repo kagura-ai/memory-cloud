@@ -1,6 +1,6 @@
 [project]
 name = "kagura-memory-cloud"
-version = "0.45.0"
+version = "0.46.0"
 description = "Universal AI Memory Platform - Remote MCP Server + Web Management UI"
 readme = "README.md"
 requires-python = ">=3.11"
