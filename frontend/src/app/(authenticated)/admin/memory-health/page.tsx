@@ -18,6 +18,7 @@ import { Activity } from "lucide-react";
 import { ErrorBanner } from "@/components/common/ErrorBanner";
 import { CardLoadingState, TableLoadingState } from "@/components/common/LoadingState";
 import { EmptyState } from "@/components/ui/empty-state";
+import { useContextScopeParam } from "@/hooks/useContextScopeParam";
 import { apiClient } from "@/lib/api";
 
 type HealthStatus = "ok" | "warn" | "fail";
@@ -148,9 +149,11 @@ function SectionCard({ name, section }: { name: string; section: HealthSection }
 
 export default function AdminMemoryHealthPage() {
   const t = useTranslations("admin.memoryHealth");
+  // #1227: the selected scope lives in the URL (?context_id=<uuid|unattributed>)
+  // so deep links, refresh, and browser back/forward all address the view.
+  const [selectedScope, setSelectedScope] = useContextScopeParam();
   const [breakdown, setBreakdown] = useState<BreakdownResponse | null>(null);
   const [detail, setDetail] = useState<DetailResponse | null>(null);
-  const [selectedScope, setSelectedScope] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
 
@@ -158,6 +161,10 @@ export default function AdminMemoryHealthPage() {
   // (or back-navigation) superseded it — otherwise a slow detail fetch for
   // context A would overwrite the view after the user moved to context B.
   const requestSeq = useRef(0);
+  // Mirror of `breakdown` for the scope effect below: back-navigation must
+  // read "is a list retained?" without re-running the effect when the
+  // breakdown response lands.
+  const breakdownRef = useRef<BreakdownResponse | null>(null);
 
   const load = useCallback(async (scope: string | null) => {
     const seq = ++requestSeq.current;
@@ -167,6 +174,7 @@ export default function AdminMemoryHealthPage() {
       if (scope === null) {
         const data = await apiClient.get<BreakdownResponse>("/api/v1/admin/memory-health");
         if (seq !== requestSeq.current) return;
+        breakdownRef.current = data;
         setBreakdown(data);
       } else {
         const data = await apiClient.get<DetailResponse>(
@@ -183,25 +191,34 @@ export default function AdminMemoryHealthPage() {
     }
   }, []);
 
+  // The URL is the single navigation source (#1227): this effect covers
+  // first mount (list or deep-linked detail), drill-down clicks, the
+  // in-page back button, and browser back/forward alike.
   useEffect(() => {
-    void load(null);
-  }, [load]);
+    if (selectedScope === null) {
+      if (breakdownRef.current) {
+        // Back-navigation with a retained breakdown: invalidate any
+        // in-flight detail fetch and show the kept list instantly — the
+        // refresh button covers wanting fresh data.
+        requestSeq.current += 1;
+        setDetail(null);
+        setError(null);
+        setLoading(false);
+      } else {
+        void load(null);
+      }
+    } else {
+      setDetail(null);
+      void load(selectedScope);
+    }
+  }, [selectedScope, load]);
 
   const openDetail = (entry: ContextEntry) => {
-    const scope = entry.context_id ?? UNATTRIBUTED_SCOPE;
-    setSelectedScope(scope);
-    setDetail(null);
-    void load(scope);
+    setSelectedScope(entry.context_id ?? UNATTRIBUTED_SCOPE);
   };
 
   const backToList = () => {
-    // Invalidate any in-flight detail fetch and show the retained breakdown
-    // instantly — the refresh button covers wanting fresh data.
-    requestSeq.current += 1;
     setSelectedScope(null);
-    setDetail(null);
-    setError(null);
-    setLoading(false);
   };
 
   const refresh = () => {
