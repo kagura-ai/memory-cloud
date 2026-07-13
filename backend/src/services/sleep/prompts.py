@@ -306,19 +306,19 @@ Promotion criteria:
 - The information is likely to be useful beyond the current session
 - The memory is well-formed and self-contained
 
-Archive criteria:
-- The memory is purely ephemeral (session state, temporary debugging)
-- The information has been superseded by newer memories
-- The memory is poorly formed or lacks actionable content
-
 When uncertain, prefer "keep" — premature promotion clutters long-term memory, \
-but premature archival loses information permanently.
+and a kept memory can always be promoted on a later pass.
 
 You MUST respond with valid JSON only.
 
 {INJECTION_RESISTANCE_DIRECTIVE}\
 """
 
+# #1233: the judge decides promote vs keep ONLY. Deletion is not on the
+# menu: rule-path archival is deterministic (_archival_eligible + isolation,
+# see consolidation.py) and runs before the judge, so an LLM archive pick
+# was always either redundant or guarded out — dead tokens and wasted
+# probability mass.
 CONSOLIDATION_JUDGE_USER = """\
 Evaluate these working memories for consolidation.
 
@@ -330,7 +330,7 @@ Respond with this exact JSON schema:
   "decisions": [
     {{
       "label": "A",
-      "action": "promote" | "keep" | "archive",
+      "action": "promote" | "keep",
       "reason": "brief justification"
     }}
   ]
