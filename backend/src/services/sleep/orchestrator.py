@@ -229,6 +229,19 @@ class SleepOrchestrator:
                 error=str(e),
                 exc_info=True,
             )
+            # #1229: a failure during flush invalidates the transaction —
+            # without a rollback, every later phase AND the report write
+            # itself die with PendingRollbackError ("This Session's
+            # transaction has been rolled back..."). Roll back only when
+            # the session is actually invalidated: a plain phase exception
+            # keeps earlier phases' pending work intact as before.
+            if not self.db.is_active:
+                logger.warning(
+                    "sleep_phase_failure_invalidated_session",
+                    phase=name,
+                    note="rolling back so remaining phases run on a clean session",
+                )
+                await self.db.rollback()
             return PhaseResult(
                 phase_name=name,
                 success=False,

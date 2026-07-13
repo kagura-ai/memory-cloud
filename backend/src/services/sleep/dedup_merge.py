@@ -353,25 +353,27 @@ class DedupMergePhase:
             # preserves the pre-#1208 removal behavior byte-identically.
             shadow_mode = bool(getattr(config, "sleep_dedup_supersede_enabled", False))
 
-            for winner_id, loser_id in merge_decisions:
-                winner = memory_map.get(winner_id)
-                loser = memory_map.get(loser_id)
-                # #1209/#1229: every merge is explainable and its inputs are
-                # snapshotted — merge_reason (judge rationale or rule id),
-                # override info (recency/source), and both sides' provenance
-                # + recency keys, proving what the decision (judge +
-                # deterministic rules) actually saw. The snapshot MUST be
-                # taken BEFORE the merge executes (#1229): the loser's
-                # soft-delete UPDATE fires onupdate=func.now(), expiring
-                # updated_at on the in-session instance, and a post-merge
-                # read would attempt a synchronous refresh — MissingGreenlet
-                # under the async engine, killing the phase on its first
-                # merge decision.
-                audit: dict[str, Any] | None = None
-                if reporter and report_id and winner and loser:
+            # #1209/#1229: every merge is explainable and its inputs are
+            # snapshotted — merge_reason (judge rationale or rule id),
+            # override info (recency/source), and both sides' provenance +
+            # recency keys, proving what the decision (judge + deterministic
+            # rules) actually saw. The snapshots MUST all be taken BEFORE
+            # ANY merge in the cluster executes (#1229): decisions share
+            # members (one winner, several losers), and a merge UPDATE fires
+            # onupdate=func.now(), expiring attributes on the shared
+            # in-session instances — a later read would attempt a
+            # synchronous refresh, raising MissingGreenlet under the async
+            # engine and killing the whole phase.
+            audits: dict[tuple[UUID, UUID], dict[str, Any]] = {}
+            if reporter and report_id:
+                for winner_id, loser_id in merge_decisions:
+                    winner = memory_map.get(winner_id)
+                    loser = memory_map.get(loser_id)
+                    if not winner or not loser:
+                        continue
                     winner_recency = self._recency_key(winner)
                     loser_recency = self._recency_key(loser)
-                    audit = {
+                    audits[(winner_id, loser_id)] = {
                         "winner_tags": list(winner.tags or []),
                         "loser_tags": list(loser.tags or []),
                         "loser_summary": (loser.summary or "")[:200],
@@ -384,6 +386,11 @@ class DedupMergePhase:
                             f"{loser_recency:%Y-%m-%d %H:%M}" if loser_recency else None
                         ),
                     }
+
+            for winner_id, loser_id in merge_decisions:
+                winner = memory_map.get(winner_id)
+                loser = memory_map.get(loser_id)
+                audit = audits.get((winner_id, loser_id))
                 prior_edge: dict[str, Any] | None = None
                 if shadow_mode:
                     prior_edge = await self._execute_shadow_merge(

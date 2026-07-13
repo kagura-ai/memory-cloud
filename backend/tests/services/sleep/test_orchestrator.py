@@ -347,3 +347,75 @@ class TestGetSleepModeFallback:
         result.scalar_one_or_none = MagicMock(return_value=ctx)
         mock_db.execute = AsyncMock(return_value=result)
         assert await orchestrator._get_sleep_mode(str(uuid4())) == "edges_only"
+
+
+class TestPhaseFailureSessionRecovery:
+    """#1229: a phase failure that dies mid-flush invalidates the session's
+    transaction — without a rollback, every later phase AND the report
+    write raise PendingRollbackError, so one crashed phase silently killed
+    the rest of the run. _run_phase rolls back only when the session is
+    actually invalidated; a plain exception keeps earlier phases' pending
+    work intact as before.
+    """
+
+    def _orchestrator(self, db):
+        with (
+            patch("services.sleep.orchestrator.LLMService"),
+            patch("services.sleep.orchestrator.SleepReporter"),
+            patch("services.sleep.orchestrator.EdgeDiscoveryPhase"),
+            patch("services.sleep.orchestrator.DedupMergePhase"),
+            patch("services.sleep.orchestrator.ImportanceReevalPhase"),
+            patch("services.sleep.orchestrator.ConsolidationPhase"),
+            patch("services.sleep.orchestrator.ReindexPhase"),
+        ):
+            return SleepOrchestrator(db)
+
+    @staticmethod
+    def _failing_phase():
+        phase = AsyncMock()
+        phase.execute = AsyncMock(side_effect=RuntimeError("died mid-flush"))
+        return phase
+
+    @pytest.mark.asyncio
+    async def test_invalidated_session_is_rolled_back(self):
+        db = AsyncMock()
+        db.is_active = False  # flush failure invalidated the transaction
+        orch = self._orchestrator(db)
+        from services.sleep.reporter import SleepBudget
+
+        result = await orch._run_phase(
+            "dedup_merge",
+            self._failing_phase(),
+            _make_config(),
+            "user-1",
+            None,
+            None,
+            SleepBudget(),
+            uuid4(),
+        )
+
+        assert result.success is False
+        db.rollback.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_healthy_session_is_not_rolled_back(self):
+        """A plain phase exception must NOT discard earlier phases' pending
+        work — rollback only fires on an invalidated session."""
+        db = AsyncMock()
+        db.is_active = True
+        orch = self._orchestrator(db)
+        from services.sleep.reporter import SleepBudget
+
+        result = await orch._run_phase(
+            "dedup_merge",
+            self._failing_phase(),
+            _make_config(),
+            "user-1",
+            None,
+            None,
+            SleepBudget(),
+            uuid4(),
+        )
+
+        assert result.success is False
+        db.rollback.assert_not_awaited()

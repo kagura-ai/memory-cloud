@@ -479,3 +479,50 @@ class TestMergeAuditSnapshot:
         assert details["winner_tags"] == ["tag-a"]
         assert details["loser_summary"] == "test summary"
         assert details["mode"] == "remove"
+
+    @pytest.mark.asyncio
+    async def test_shared_winner_across_decisions_snapshots_before_any_merge(self, dedup_phase):
+        """#1229 (second crash site): decisions in one cluster share the
+        winner; the FIRST merge's UPDATE expires attributes on that shared
+        instance, so the SECOND decision's snapshot must already be taken.
+        All audits are collected before any merge executes."""
+        config = _make_config(provider="")
+        budget = SleepBudget()
+        newest = datetime(2026, 7, 1, 12, 0)
+        older = datetime(2026, 6, 1, 12, 0)
+        winner = _make_sealable_memory(created_at=newest, updated_at=newest)
+        loser_a = _make_sealable_memory(created_at=older, updated_at=None)
+        loser_b = _make_sealable_memory(created_at=older, updated_at=None)
+
+        dedup_phase._fetch_active_memories = AsyncMock(return_value=[winner, loser_a, loser_b])
+        dedup_phase._find_similar_pairs = AsyncMock(
+            return_value=[
+                (winner.id, loser_a.id, 0.99),
+                (winner.id, loser_b.id, 0.99),
+            ]
+        )
+
+        async def _seal_both(w, l_, *args, **kwargs):  # noqa: ANN002, ANN003
+            w.seal()
+            l_.seal()
+
+        dedup_phase._execute_merge = AsyncMock(side_effect=_seal_both)
+        reporter = AsyncMock()
+
+        result = await dedup_phase.execute(
+            config,
+            "user-1",
+            "ws-1",
+            "ctx-1",
+            budget,
+            reporter=reporter,
+            report_id=uuid4(),
+        )
+
+        assert result.success is True
+        assert result.details["merged"] == 2
+        assert reporter.add_action.await_count == 2
+        for call in reporter.add_action.await_args_list:
+            details = call.kwargs["details"]
+            assert details["winner_recency"] == f"{newest:%Y-%m-%d %H:%M}"
+            assert details["loser_recency"] == f"{older:%Y-%m-%d %H:%M}"
