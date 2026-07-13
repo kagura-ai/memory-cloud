@@ -114,7 +114,7 @@ above is the deep link for operators.
 | Note code | Params |
 |---|---|
 | `latest_sleep_failed` | — |
-| `judge_failures` | `count`, `degraded_runs` |
+| `judge_failures` | `count`, `degraded_runs` (only runs whose own judge failed — phase-crash degraded runs are counted by `degraded_runs` instead) |
 | `degraded_runs` | `count` |
 | `failed_runs_recovered` | `count` |
 | `deferred_pairs` | `count` |

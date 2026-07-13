@@ -105,6 +105,27 @@ class TestConsolidationGrading:
         note = next(n for n in section["notes"] if n["code"] == "degraded_runs")
         assert note["params"] == {"count": 1}
 
+    def test_judge_failures_and_phase_degraded_are_independent_notes(self) -> None:
+        """PR #1230 review: the two conditions are independent per the docs
+        table — a window can hold BOTH a judge-failure degraded run and a
+        phase-crash degraded run. The old elif hid the phase crash behind
+        the judge note, and the judge note counted ALL degraded runs."""
+        section = MemoryHealthService._grade_consolidation(
+            [
+                _report(status="degraded", failures=2),
+                _report(status="degraded", failures=0),
+            ],
+            {"count": 0, "oldest_days": None},
+        )
+        assert section["status"] == STATUS_WARN
+        assert "judge_failures" in _codes(section)
+        assert "degraded_runs" in _codes(section)
+        jf = next(n for n in section["notes"] if n["code"] == "judge_failures")
+        # Only the run whose judge actually failed — not the phase-crash one.
+        assert jf["params"] == {"count": 2, "degraded_runs": 1}
+        dr = next(n for n in section["notes"] if n["code"] == "degraded_runs")
+        assert dr["params"] == {"count": 1}
+
     def test_latest_degraded_is_warn_not_fail(self) -> None:
         """A degraded LATEST run is partial judge death — WARN, never FAIL."""
         section = MemoryHealthService._grade_consolidation(

@@ -597,7 +597,7 @@ class TestCrossPairMergeVeto:
         assert result.details["merged"] == 1
         assert result.details["llm_merge_guarded"] == 1
         # The surviving merge is the direct pair, not the transitive one.
-        (winner, loser, *_rest), _kwargs = dedup_phase._execute_merge.await_args
+        (winner, loser, *_rest), _ = dedup_phase._execute_merge.await_args
         assert {winner.id, loser.id} == {mem_a.id, mem_b.id}
 
     @pytest.mark.asyncio
