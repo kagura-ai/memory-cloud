@@ -356,6 +356,34 @@ class DedupMergePhase:
             for winner_id, loser_id in merge_decisions:
                 winner = memory_map.get(winner_id)
                 loser = memory_map.get(loser_id)
+                # #1209/#1229: every merge is explainable and its inputs are
+                # snapshotted — merge_reason (judge rationale or rule id),
+                # override info (recency/source), and both sides' provenance
+                # + recency keys, proving what the decision (judge +
+                # deterministic rules) actually saw. The snapshot MUST be
+                # taken BEFORE the merge executes (#1229): the loser's
+                # soft-delete UPDATE fires onupdate=func.now(), expiring
+                # updated_at on the in-session instance, and a post-merge
+                # read would attempt a synchronous refresh — MissingGreenlet
+                # under the async engine, killing the phase on its first
+                # merge decision.
+                audit: dict[str, Any] | None = None
+                if reporter and report_id and winner and loser:
+                    winner_recency = self._recency_key(winner)
+                    loser_recency = self._recency_key(loser)
+                    audit = {
+                        "winner_tags": list(winner.tags or []),
+                        "loser_tags": list(loser.tags or []),
+                        "loser_summary": (loser.summary or "")[:200],
+                        "winner_source": getattr(winner, "source_type", None),
+                        "loser_source": getattr(loser, "source_type", None),
+                        "winner_recency": (
+                            f"{winner_recency:%Y-%m-%d %H:%M}" if winner_recency else None
+                        ),
+                        "loser_recency": (
+                            f"{loser_recency:%Y-%m-%d %H:%M}" if loser_recency else None
+                        ),
+                    }
                 prior_edge: dict[str, Any] | None = None
                 if shadow_mode:
                     prior_edge = await self._execute_shadow_merge(
@@ -376,16 +404,9 @@ class DedupMergePhase:
                     )
                     result.changed_memory_ids.add(winner_id)
                 merged_count += 1
-                if reporter and report_id and winner and loser:
+                if audit is not None:
                     pair_key = tuple(sorted([winner_id, loser_id], key=str))
-                    # #1209: every merge is explainable and its inputs are
-                    # snapshotted — merge_reason (judge rationale or rule id),
-                    # override info (recency/source), and both sides'
-                    # provenance + recency keys, proving what the decision
-                    # (judge + deterministic rules) actually saw.
                     meta = self._decision_meta.get((winner_id, loser_id), {})
-                    winner_recency = self._recency_key(winner)
-                    loser_recency = self._recency_key(loser)
                     await reporter.add_action(
                         report_id=report_id,
                         phase="dedup_merge",
@@ -394,21 +415,17 @@ class DedupMergePhase:
                         target_id=loser_id,
                         details={
                             "similarity": pair_scores.get(pair_key, 0.0),
-                            "winner_tags": list(winner.tags or []),
-                            "loser_tags": list(loser.tags or []),
-                            "loser_summary": (loser.summary or "")[:200],
+                            "winner_tags": audit["winner_tags"],
+                            "loser_tags": audit["loser_tags"],
+                            "loser_summary": audit["loser_summary"],
                             "merge_reason": meta.get("merge_reason", "unspecified"),
                             "judge_confidence": meta.get("judge_confidence"),
                             "winner_override": "override_reason" in meta,
                             "override_reason": meta.get("override_reason"),
-                            "winner_source": getattr(winner, "source_type", None),
-                            "loser_source": getattr(loser, "source_type", None),
-                            "winner_recency": (
-                                f"{winner_recency:%Y-%m-%d %H:%M}" if winner_recency else None
-                            ),
-                            "loser_recency": (
-                                f"{loser_recency:%Y-%m-%d %H:%M}" if loser_recency else None
-                            ),
+                            "winner_source": audit["winner_source"],
+                            "loser_source": audit["loser_source"],
+                            "winner_recency": audit["winner_recency"],
+                            "loser_recency": audit["loser_recency"],
                             # #1208: how this merge disposed of the loser,
                             # plus the pre-merge state of any edge the shadow
                             # upsert retyped — undo restores it from here.

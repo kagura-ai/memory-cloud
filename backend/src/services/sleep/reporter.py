@@ -290,13 +290,21 @@ class SleepReporter:
         # details.llm_call_failures.
         judge_failures = sum(r.llm_call_failures for r in phase_results)
         judge_successes = sum(b.calls for r in phase_results for b in r.llm_breakdown)
+        # #1229: a phase that raised (success=False) must never hide behind
+        # a green run — the dedup phase once died on its first merge with 0
+        # judge failures and the run still graded 'completed', letting the
+        # unmerged near-dup pairs leak into consolidation. A hard phase
+        # failure is at least 'degraded'; it never upgrades a 'failed' run.
+        failed_phases = [r.phase_name for r in phase_results if not r.success]
         if judge_failures > 0 and judge_successes == 0:
             report.status = "failed"
             report.error_message = (
                 f"llm_judge_total_failure: {judge_failures} judge call(s) attempted, 0 succeeded"
             )
-        elif judge_failures > 0:
+        elif judge_failures > 0 or failed_phases:
             report.status = "degraded"
+            if failed_phases and not report.error_message:
+                report.error_message = f"phase_failure: {', '.join(failed_phases)}"
         else:
             report.status = "completed"
         report.llm_call_failures = judge_failures

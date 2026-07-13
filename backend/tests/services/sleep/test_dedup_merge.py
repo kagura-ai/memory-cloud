@@ -369,3 +369,113 @@ class TestDedupMergeEmbeddingInstrumentation:
 
         assert dedup_phase._embedding_calls_used == 1
         assert dedup_phase._embedding_tokens_used == 0
+
+
+# ============================================================================
+# #1229: merge audit must snapshot fields BEFORE the merge executes
+# ============================================================================
+
+
+class _PostMergeAccess(RuntimeError):
+    """Stand-in for sqlalchemy MissingGreenlet: reading an expired attribute
+    after the merge UPDATE triggers a synchronous refresh under the async
+    engine. Deliberately NOT AttributeError — getattr(..., default) must not
+    swallow it (the real MissingGreenlet is not swallowed either)."""
+
+
+def _make_sealable_memory(*, created_at, updated_at, importance=0.5):
+    """A Memory stand-in whose data attributes raise after ``seal()``.
+
+    Models the #1229 failure: the loser's soft-delete UPDATE fires
+    ``onupdate=func.now()``, expiring ``updated_at`` on the in-session
+    instance; any later read attempts a sync refresh → MissingGreenlet.
+    """
+
+    class _Sealable:
+        def __init__(self):
+            d = object.__getattribute__(self, "__dict__")
+            d.update(
+                id=uuid4(),
+                summary="test summary",
+                type="note",
+                importance=importance,
+                tags=["tag-a"],
+                access_count=1,
+                source_type="manual",
+                created_at=created_at,
+                updated_at=updated_at,
+                _sealed=False,
+            )
+
+        def seal(self):
+            object.__getattribute__(self, "__dict__")["_sealed"] = True
+
+        def __getattribute__(self, name):
+            d = object.__getattribute__(self, "__dict__")
+            if d.get("_sealed") and name in (
+                "created_at",
+                "updated_at",
+                "tags",
+                "summary",
+                "source_type",
+                "type",
+                "importance",
+            ):
+                raise _PostMergeAccess(f"post-merge attribute access: {name}")
+            return object.__getattribute__(self, name)
+
+    return _Sealable()
+
+
+class TestMergeAuditSnapshot:
+    """#1229: dedup died on its first merge because the audit block read
+    ``loser`` attributes AFTER ``_execute_merge`` soft-deleted the row —
+    ``onupdate=func.now()`` expires ``updated_at``, and the resulting sync
+    refresh raises MissingGreenlet under the async engine. The whole phase
+    then failed (success=false) while the run still graded 'completed',
+    and the unmerged near-dup pairs leaked into consolidation (stale_only=12).
+
+    Contract: every audit field is snapshotted from the PRE-merge state
+    (what the decision actually saw — the #1209 intent), and no
+    winner/loser attribute is read after the merge executes.
+    """
+
+    @pytest.mark.asyncio
+    async def test_no_attribute_reads_after_merge(self, dedup_phase):
+        config = _make_config(provider="")  # rule-based judge — no LLM needed
+        budget = SleepBudget()
+        newer = datetime(2026, 7, 1, 12, 0)
+        older = datetime(2026, 6, 1, 12, 0)
+        winner = _make_sealable_memory(created_at=newer, updated_at=newer)
+        loser = _make_sealable_memory(created_at=older, updated_at=None)
+
+        dedup_phase._fetch_active_memories = AsyncMock(return_value=[winner, loser])
+        dedup_phase._find_similar_pairs = AsyncMock(return_value=[(winner.id, loser.id, 0.99)])
+
+        async def _seal_both(w, l_, *args, **kwargs):  # noqa: ANN002, ANN003
+            w.seal()
+            l_.seal()
+
+        dedup_phase._execute_merge = AsyncMock(side_effect=_seal_both)
+        reporter = AsyncMock()
+
+        result = await dedup_phase.execute(
+            config,
+            "user-1",
+            "ws-1",
+            "ctx-1",
+            budget,
+            reporter=reporter,
+            report_id=uuid4(),
+        )
+
+        assert result.success is True
+        assert result.details["merged"] == 1
+        details = reporter.add_action.await_args.kwargs["details"]
+        # Pre-merge snapshot: the loser's recency is its created_at (its
+        # updated_at was None before the merge bumped it).
+        assert details["loser_recency"] == f"{older:%Y-%m-%d %H:%M}"
+        assert details["winner_recency"] == f"{newer:%Y-%m-%d %H:%M}"
+        assert details["winner_tags"] == ["tag-a"]
+        assert details["loser_summary"] == "test summary"
+        assert details["mode"] == "remove"
