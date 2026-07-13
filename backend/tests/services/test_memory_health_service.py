@@ -537,3 +537,66 @@ class TestFoldOrphanScopes:
         assert breakdown["overall_status"] == STATUS_FAIL
         unattributed = next(e for e in breakdown["contexts"] if e["context_id"] is None)
         assert unattributed["sections"]["graph"] == STATUS_FAIL
+
+
+class TestFetchUsageCountsAttribution:
+    """#1228: cross-context recall attribution rows (the separate
+    context_read_attributions table) must merge into the per-context usage
+    counts so a context read ONLY via cross-context recall stops
+    false-WARNing write_only_store — the exact false-WARN class the
+    grading philosophy forbids."""
+
+    def _db_with_result_sets(self, usage_rows, attribution_rows):
+        db = AsyncMock()
+        first, second = MagicMock(), MagicMock()
+        first.all.return_value = usage_rows
+        second.all.return_value = attribution_rows
+        db.execute = AsyncMock(side_effect=[first, second])
+        return db
+
+    @pytest.mark.asyncio
+    async def test_attribution_rows_merge_into_usage_counts(self) -> None:
+        db = self._db_with_result_sets(
+            usage_rows=[(_CTX_A, "mcp:recall", 4), (_CTX_B, "mcp:remember", 5)],
+            attribution_rows=[(_CTX_B, "mcp:recall", 3)],
+        )
+        svc = MemoryHealthService(db)
+
+        usage = await svc._fetch_usage_counts("user-1")
+
+        assert usage[_CTX_A] == {"recall": 4}
+        # B keeps its own writes AND gains the attributed reads.
+        assert usage[_CTX_B] == {"remember": 5, "recall": 3}
+
+    @pytest.mark.asyncio
+    async def test_same_context_and_endpoint_counts_sum(self) -> None:
+        """A context that is BOTH the primary of some calls and attributed
+        in others sums the two sources, never overwrites."""
+        db = self._db_with_result_sets(
+            usage_rows=[(_CTX_A, "mcp:recall", 4)],
+            attribution_rows=[(_CTX_A, "mcp:recall", 2)],
+        )
+        svc = MemoryHealthService(db)
+
+        usage = await svc._fetch_usage_counts("user-1")
+
+        assert usage[_CTX_A] == {"recall": 6}
+
+    @pytest.mark.asyncio
+    async def test_attributed_only_context_no_longer_warns_write_only(self) -> None:
+        """AC pin (#1228): active memories + reads arriving exclusively via
+        cross-context recall attribution → retrieval grades OK, not
+        write_only_store."""
+        db = self._db_with_result_sets(
+            usage_rows=[],
+            attribution_rows=[(_CTX_B, "mcp:recall", 3)],
+        )
+        svc = MemoryHealthService(db)
+
+        usage = await svc._fetch_usage_counts("user-1")
+        section = MemoryHealthService._grade_retrieval(
+            usage.get(_CTX_B, {}), _POSTURE_ON, active_memories=50
+        )
+
+        assert section["status"] == STATUS_OK
+        assert "write_only_store" not in _codes(section)

@@ -1,6 +1,8 @@
 """Tests for MCP tool helper functions."""
 
 import json
+import time
+from unittest.mock import AsyncMock, MagicMock, patch
 from uuid import UUID, uuid4
 
 import pytest
@@ -8,6 +10,7 @@ import pytest
 from mcp_server.tools._helpers import (
     _context_response_fields,
     _error_response,
+    _log_tool_usage,
     _resolve_context_id,
     _success_response,
     _validate_memory_id,
@@ -134,3 +137,96 @@ class TestValidateMemoryId:
         assert error is not None
         data = json.loads(error[0].text)
         assert data["error"] == "invalid_memory_id_format"
+
+
+class TestLogToolUsageAttribution:
+    """#1228: cross-context recall bills ONE quota unit (the single
+    UsageStats row under the primary context) but must record diagnostic
+    read-attribution rows for every ADDITIONAL listed context in the
+    separate context_read_attributions table — structurally invisible to
+    every UsageStats row-count consumer (quota, workspace analytics)."""
+
+    def _fake_db_env(self):
+        session = AsyncMock()
+        session.add = MagicMock()  # sync method on AsyncSession
+
+        async def fake_get_db():
+            yield session
+
+        return session, fake_get_db
+
+    @pytest.mark.asyncio
+    async def test_attribution_rows_written_for_additional_contexts(self):
+        session, fake_get_db = self._fake_db_env()
+        primary, extra_1, extra_2 = uuid4(), uuid4(), uuid4()
+        log_usage_mock = AsyncMock()
+
+        with (
+            patch("db.base.get_db", new=fake_get_db),
+            patch("utils.usage_logger.log_usage", new=log_usage_mock),
+        ):
+            await _log_tool_usage(
+                AsyncMock(),
+                "user-1",
+                "recall",
+                time.time(),
+                200,
+                primary,
+                None,
+                attributed_context_ids=[extra_1, extra_2],
+            )
+
+        # Exactly ONE billable UsageStats row, under the primary context.
+        log_usage_mock.assert_awaited_once()
+        assert log_usage_mock.await_args.kwargs["context_id"] == str(primary)
+        # One attribution row per ADDITIONAL context, none for the primary.
+        added = [call.args[0] for call in session.add.call_args_list]
+        assert len(added) == 2
+        assert {row.context_id for row in added} == {extra_1, extra_2}
+        assert all(row.endpoint == "mcp:recall" for row in added)
+        assert all(row.user_id == "user-1" for row in added)
+        session.commit.assert_awaited()
+
+    @pytest.mark.asyncio
+    async def test_no_attribution_rows_by_default(self):
+        """Single-context calls (the overwhelming majority) are unchanged:
+        one UsageStats row, zero attribution rows."""
+        session, fake_get_db = self._fake_db_env()
+        log_usage_mock = AsyncMock()
+
+        with (
+            patch("db.base.get_db", new=fake_get_db),
+            patch("utils.usage_logger.log_usage", new=log_usage_mock),
+        ):
+            await _log_tool_usage(AsyncMock(), "user-1", "recall", time.time(), 200, uuid4(), None)
+
+        log_usage_mock.assert_awaited_once()
+        session.add.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_no_attribution_when_billable_row_failed(self):
+        """#1228 review: log_usage swallows its own insert failure — if the
+        billable UsageStats row was NOT written, attribution rows must not
+        be written either, or reads count on the secondaries while the
+        primary's read is invisible (the mirror image of the false-WARN
+        this table exists to fix)."""
+        session, fake_get_db = self._fake_db_env()
+        log_usage_mock = AsyncMock(return_value=False)
+
+        with (
+            patch("db.base.get_db", new=fake_get_db),
+            patch("utils.usage_logger.log_usage", new=log_usage_mock),
+        ):
+            await _log_tool_usage(
+                AsyncMock(),
+                "user-1",
+                "recall",
+                time.time(),
+                200,
+                uuid4(),
+                None,
+                attributed_context_ids=[uuid4()],
+            )
+
+        log_usage_mock.assert_awaited_once()
+        session.add.assert_not_called()

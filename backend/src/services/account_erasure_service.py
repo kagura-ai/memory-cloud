@@ -962,7 +962,7 @@ class AccountErasureService:
         """
         # Optional model imports so the service doesn't crash if a model
         # is renamed/removed in a future refactor.
-        from models.auth import PlanChange, UsageStats
+        from models.auth import ContextReadAttribution, PlanChange, UsageStats
         from models.memory import GraphMemory
 
         user_id = target.user_id
@@ -990,6 +990,12 @@ class AccountErasureService:
         )
         counts["usage_stats"] = await self._count_and_delete(
             UsageStats, UsageStats.user_id == user_id
+        )
+        # #1228: diagnostic cross-context read attributions are per-user
+        # data too (context_id FK cascades on context deletion, but the
+        # user sweep must not rely on that).
+        counts["context_read_attributions"] = await self._count_and_delete(
+            ContextReadAttribution, ContextReadAttribution.user_id == user_id
         )
 
         # Workspace memberships and invitations.
