@@ -207,16 +207,17 @@ class TestLLMBorderlinePath:
 
     @pytest.mark.asyncio
     async def test_llm_archive_connected_memory_is_protected(self):
-        # Graph present and the node is NOT isolated → bridge protection: the
-        # LLM "archive" verdict must be vetoed. #1229: the memory must be
+        # Graph present and the node is NOT isolated → bridge protection: an
+        # "archive" decision must be vetoed. #1229: the memory must be
         # deterministically archival-eligible (age >= 30d, cutoff opted-in)
         # or the eligibility guard short-circuits before the isolation veto
-        # is ever exercised (this test was briefly vacuous).
+        # is ever exercised. #1233 review: the parser now drops "archive",
+        # so this must bypass it (mock _llm_judge_batch) like the other
+        # backstop tests — routing through complete_json made it vacuous
+        # (mutation-confirmed: removing the isolation veto stayed green).
         mem = _make_memory(age_days=40)
         phase, llm = _build_phase([mem])
-        llm.complete_json = AsyncMock(
-            return_value=_make_llm_response([{"label": "A", "action": "archive"}])
-        )
+        phase._llm_judge_batch = AsyncMock(return_value={mem.id: "archive"})
         connected = {
             "centrality": 0.1,
             "edge_count": 1,

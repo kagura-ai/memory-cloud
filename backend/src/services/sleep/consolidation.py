@@ -4,7 +4,7 @@ Issue #103: Replace rule-based consolidation with LLM-augmented version.
 
 Migrates logic from neural_tasks.py:consolidation_task (lines 92-225):
 - Fast path: existing rules for clear-cut cases (no LLM needed)
-- Borderline: LLM decides promote/keep/archive
+- Borderline: LLM decides promote/keep (#1233: archival is rule-path only)
 - LLM off: identical behavior to legacy consolidation_task
 - Bridge node protection: never delete memories with high centrality
 
@@ -481,6 +481,16 @@ class ConsolidationPhase:
             if label not in label_to_id:
                 continue
             if action not in ("promote", "keep"):
+                # #1233 review: "archive" is retired, but a judge that still
+                # emits it signals schema drift (model change, stale
+                # provider-side prompt cache) — surface it, or llm_promoted
+                # quietly collapses with nothing tying it to the cause.
+                if action == "archive":
+                    logger.info(
+                        "consolidation_judge_returned_retired_action",
+                        action=action,
+                        label=str(label),
+                    )
                 continue
             decisions[label_to_id[label]] = action
 
