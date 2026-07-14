@@ -303,9 +303,11 @@ async def persist_results(
     n_clusters = len(cluster_results)
 
     # #1246: enforce the labeler's documented failure contract BEFORE any
-    # row is written (and before any SQL — the session has no open
-    # transaction here, so the orchestrator's failure path starts clean).
-    # Without this a run whose every cluster failed labeling persisted as
+    # row is written. Runs AFTER the #1241 locked cancel guard by design:
+    # a concurrent user cancel wins over the threshold failure, and the
+    # raise reaches the orchestrator's failure path whose persist_failure
+    # re-checks cancellation under the same lock. Without this check a
+    # run whose every cluster failed labeling persisted as
     # ``status='succeeded'`` with ``label_confidence=0.0`` — an
     # unqualified success built entirely of "(unlabeled)" rows, with the
     # daily-quota slot consumed and no error surfaced.
