@@ -299,13 +299,7 @@ class AgentBootstrapService:
             "context": context_block,
             "instructions": instructions,
             "components": components,
-            "correlation": {
-                "agent_id": str(agent.id),
-                "session_id": params.session_id,
-                # P0-4 (#1277) populates trace/span from the correlation lane.
-                "trace_id": None,
-                "span_id": None,
-            },
+            "correlation": self._correlation_block(agent, params),
             "generated_at": to_utc_iso(utcnow()),
         }
 
@@ -333,6 +327,24 @@ class AgentBootstrapService:
         except Exception as exc:  # fail-soft per component; savepoint rolled back
             logger.error(f"bootstrap_component_failed: {name}: {exc}", exc_info=True)
             return {"status": STATUS_ERROR, "error": "component_error"}
+
+    def _correlation_block(self, agent: Any, params: BootstrapParams) -> dict[str, Any]:
+        """Build the correlation block, populating trace/span from the P0-4
+        (#1277) per-request correlation context when present.
+
+        ``session_id`` prefers the explicit bootstrap arg (functional input),
+        falling back to the baggage-derived session id.
+        """
+        from api.correlation import get_correlation
+
+        corr = get_correlation()
+        return {
+            "agent_id": str(agent.id),
+            "session_id": params.session_id or (corr.session_id if corr else None),
+            "run_id": corr.run_id if corr else None,
+            "trace_id": corr.trace_id if corr else None,
+            "span_id": corr.span_id if corr else None,
+        }
 
     async def audit_on_behalf_of(
         self, *, agent: Any, principal: BootstrapPrincipal, session_id: str | None

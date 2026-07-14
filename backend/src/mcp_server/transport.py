@@ -426,6 +426,26 @@ async def mcp_asgi_app(scope: Scope, receive: Receive, send: Send) -> None:
 
         set_mcp_key_workspace_scope(api_key_workspace_id)
 
+        # RFC-0002 P0-4 (#1277): parse W3C traceparent + baggage into the
+        # per-request correlation contextvar at the same auth seam (sibling of
+        # the #963 key-workspace scope). Advisory-only — never fails the
+        # request; missing/invalid headers → server-generated trace/span.
+        from api.correlation import build_correlation_from_headers, set_correlation
+
+        def _hdr(name: bytes) -> str | None:
+            raw = headers.get(name)
+            return raw.decode("utf-8", "replace") if isinstance(raw, bytes) else raw
+
+        try:
+            set_correlation(
+                build_correlation_from_headers(
+                    traceparent=_hdr(b"traceparent"),
+                    baggage=_hdr(b"baggage"),
+                )
+            )
+        except Exception:  # pragma: no cover - defensive; correlation is advisory
+            set_correlation(None)
+
         # Issue #169: For workspace-scoped API keys, use workspace_id from key; otherwise get from user
         if api_key_workspace_id:
             workspace_id = api_key_workspace_id
