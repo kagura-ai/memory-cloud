@@ -271,6 +271,46 @@ async def _resolve_context_for_read(
         ) from exc
 
 
+def _touch_context_last_used(context: Any) -> bool:
+    """Throttled touch of ``Context.last_used_at`` (Issue #1257).
+
+    ``last_used_at`` feeds the ``list_contexts`` recency sort but was never
+    written after row creation, so it was effectively ``created_at``. Memory
+    operations (remember/recall/reference) call this on the Context row they
+    already resolved; the assignment rides the handler's existing
+    ``db.commit()`` — no extra SELECT, no extra flush.
+
+    Same hot-row reasoning as the api_keys throttle (#947): skip while the
+    stored timestamp is fresher than the window, and guard the assignment
+    itself (not just a flush) so a throttled call leaves the session clean.
+
+    tz note: this column is ``DateTime(timezone=True)`` — one of the few AWARE
+    columns (see .claude/rules/backend.md) — so the touch must write an aware
+    UTC value; ``list_contexts`` sorts against an aware ``_UTC_MIN`` sentinel
+    and a naive write would ``TypeError`` that sort. A naive stored value
+    (e.g. a direct-SQL backfill) is normalized to UTC rather than crashing.
+
+    Args:
+        context: Resolved ORM ``Context``, attached to the handler's session.
+
+    Returns:
+        True if the timestamp was written, False if throttled.
+    """
+    from datetime import UTC, datetime, timedelta
+
+    from config.settings import get_settings
+
+    now = datetime.now(UTC)
+    last = context.last_used_at
+    if last is not None and last.tzinfo is None:
+        last = last.replace(tzinfo=UTC)
+    throttle = timedelta(seconds=get_settings().context_last_used_throttle_seconds)
+    if last is None or now - last >= throttle:
+        context.last_used_at = now
+        return True
+    return False
+
+
 def _resolve_context_id(arg_context_id: str) -> UUID:
     """Parse and return context_id from tool argument.
 

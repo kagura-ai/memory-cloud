@@ -20,6 +20,7 @@ from mcp_server.tools._helpers import (
     _resolve_context,
     _resolve_context_for_read,
     _resolve_context_id,
+    _touch_context_last_used,
     _validate_memory_id,
     execute_with_timeout,
 )
@@ -76,6 +77,9 @@ async def handle_remember(
                 return perm_error
 
             current_context = await _resolve_context(db, user_id, current_context_id)
+            # #1257: memory ops mark the context as used (throttled write,
+            # persisted by the db.commit() below).
+            _touch_context_last_used(current_context)
 
             service = MemoryService(db)
             result = await execute_with_timeout(
@@ -508,6 +512,9 @@ async def handle_recall(
                             "All contexts in cross-context recall must share the "
                             "same privacy setting (all shared or all private).",
                         )
+                    # #1257: every listed context counts as used, not just the
+                    # billable primary (throttled; rides the commit below).
+                    _touch_context_last_used(cross_ctx)
 
                 # Validate all contexts use the same embedding model
                 from repositories.config_repository import ContextSearchConfigRepository
@@ -532,6 +539,10 @@ async def handle_recall(
                     )
                 current_context_id = _resolve_context_id(args["context_id"])
                 current_context = await _resolve_context_for_read(db, user_id, current_context_id)
+
+            # #1257: recall marks the (primary) context as used — throttled
+            # write, persisted by the db.commit() below.
+            _touch_context_last_used(current_context)
 
             service = MemoryService(db)
             result = await execute_with_timeout(
@@ -747,7 +758,10 @@ async def handle_reference(
             # Issue #708 bundle: migrate read paths to the CWE-639-uniform
             # resolver so deny reasons (private non-creator, not a workspace
             # member, etc.) cannot be distinguished by callers.
-            await _resolve_context_for_read(db, user_id, current_context_id)
+            current_context = await _resolve_context_for_read(db, user_id, current_context_id)
+            # #1257: reference marks the context as used (throttled write,
+            # persisted by the db.commit() below).
+            _touch_context_last_used(current_context)
 
             service = MemoryService(db)
             try:

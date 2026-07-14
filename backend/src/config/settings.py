@@ -107,6 +107,15 @@ class Settings(BaseSettings):
         default=60,
         description="Min seconds between api_keys.last_used_at writes per key (Issue #947)",
     )
+    # Issue #1257: same pattern for contexts.last_used_at — memory operations
+    # (remember/recall/reference) mark the context as used so the list_contexts
+    # recency sort means something, but a context row is hotter than an API key
+    # row (every memory op in the workspace hits it), so the write is throttled
+    # to at most one per context per window.
+    context_last_used_throttle_seconds: int = Field(
+        default=60,
+        description="Min seconds between contexts.last_used_at writes per context (Issue #1257)",
+    )
     # ai-worker (kagura-chat-bridge) service auth. The worker presents this
     # as a Bearer token to GET /api/v1/workers/config (Spec 2026-06-02). Empty
     # disables the worker config endpoint (fail-closed). Use: openssl rand -hex 32.
