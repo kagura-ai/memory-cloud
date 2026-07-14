@@ -2,14 +2,17 @@
 
 - **Status**: Signed off (gating design for P0-5 implementation)
 - **Issue**: [#1260](https://github.com/kagura-ai/memory-cloud/issues/1260) — gating item F3 of RFC-0002
-  (Agent Memory & Context Control Plane; RFC text maintained locally, lands in
-  `docs/rfc/0002-agent-memory-context-control-plane.md` when published)
+  (Agent Memory & Context Control Plane; RFC text maintained locally and currently
+  unpublished — it would land at `docs/rfc/0002-agent-memory-context-control-plane.md`;
+  this document is self-contained and does not require it)
 - **Consumers**: implementers of P0-5 (`memory_access_events` migration + audit writer),
   the CSO review record for the deny-logging layer, ops (retention escalation, F7)
-- **Depends on**: [Agent Registry & Context Bindings](agent-registry-and-bindings.md)
-  (F1, #1258 — that design doc lands with the #1258 PR; the link resolves once it merges)
+- **Depends on**: the Agent Registry & Context Bindings sign-off
+  (`docs/design/agent-registry-and-bindings.md`, F1,
+  [#1258](https://github.com/kagura-ai/memory-cloud/issues/1258) — lands with the #1258 PR)
   for the agent/binding vocabulary; the session/run/trace correlation design
-  (F4, RFC-0002) for the semantics of the correlation columns this table stores
+  (F4, [#1261](https://github.com/kagura-ai/memory-cloud/issues/1261)) for the semantics of
+  the correlation columns this table stores
 
 `MemoryAccessEvent` (`memory_access_events`) is the append-only audit row for the eight
 memory operations performed under verified agent identity: **recall / reference / remember /
@@ -63,7 +66,7 @@ append-only (extension = additive migration), following the append-only-tuple co
 | `update` | `MemoryService.update_memory` / `_update_in_place` |
 | `forget` | `MemoryService.forget` (soft-delete path) |
 | `load_pinned` | `MemoryService.load_pinned` |
-| `bootstrap` | the bootstrap composition service (P0-3; see the [bootstrap contract sign-off](agent-bootstrap-contract.md) — F2, #1259; that doc lands with the #1259 PR, so the link resolves once it merges) |
+| `bootstrap` | the bootstrap composition service (P0-3; see the bootstrap contract sign-off, `docs/design/agent-bootstrap-contract.md` — F2, [#1259](https://github.com/kagura-ai/memory-cloud/issues/1259); lands with the #1259 PR) |
 | `feedback` | `FeedbackService.record_feedback` (`backend/src/services/feedback_service.py`) — the same service whose non-agent-callable `record_host_feedback` seam the gateway integration uses |
 
 Composition semantics: because instrumentation lives in the chokepoints,
@@ -101,8 +104,10 @@ byte-identically from module-level Python tuples per the house drift-pin convent
 
 ```sql
 CREATE TABLE memory_access_events (
-    id                 BIGSERIAL PRIMARY KEY,        -- house pattern for append-only logs (secrets.py:349);
-                                                     -- doubles as keyset cursor (resource_events.py:16-19)
+    id                 BIGSERIAL PRIMARY KEY,        -- house pattern for append-only logs
+                                                     -- (SecretAccessLog, backend/src/models/secrets.py);
+                                                     -- doubles as keyset cursor
+                                                     -- (backend/src/services/resource_events.py)
     occurred_at        TIMESTAMP NOT NULL DEFAULT now(),  -- naive UTC (repo convention)
     -- identifiers only; NO foreign keys (rows outlive agents/contexts/keys)
     workspace_id       UUID NOT NULL,
