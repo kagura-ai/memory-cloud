@@ -837,3 +837,81 @@ class TestStartIntegrityErrorStructuredDiagnostics:
                     user_id="u1",
                     params=AnalysisParams(),
                 )
+
+
+class TestRunLabelingThresholdContract:
+    @pytest.mark.asyncio
+    async def test_threshold_exceeded_marks_run_failed_with_cause(self, db_session) -> None:
+        """#1246 end-to-end contract: ClusterLabelingThresholdExceeded from
+        the persist stage must land the run at status='failed' with the
+        cause in memory_analyses.error — a future refactor that 'handles'
+        the exception softly would leave threshold-failed runs stuck at
+        'running' with a green suite.
+        """
+        from services.analysis.labeler import ClusterLabelingThresholdExceeded
+
+        service = AnalysisOrchestrator(db_session)
+        ws_id = uuid4()
+        ctx_id = uuid4()
+        await _seed_workspace_context(db_session, ws_id, ctx_id)
+        pricing = await _seed_pricing(db_session)
+        analysis = MemoryAnalysis(
+            workspace_id=ws_id,
+            context_id=ctx_id,
+            triggered_by="u1",
+            model_id=pricing.id,
+            model_snapshot={"model": "gpt-5-nano"},
+            embedding_model="em",
+            params={},
+            input_count=0,
+            status="running",
+            paid_by="byok",
+        )
+        db_session.add(analysis)
+        await db_session.flush()
+
+        fake_pull = MagicMock()
+        fake_pull.memories = [MagicMock(), MagicMock()]
+        fake_pull.embeddings = [[0.1]]
+        fake_pull.embedding_model = "test-model"
+        threshold_error = ClusterLabelingThresholdExceeded(
+            "Cluster labeling failed for 2/2 labelable clusters "
+            "(more than MAX_CLUSTER_FAILURE_RATIO=0.5)."
+        )
+
+        with (
+            patch(
+                "services.analysis.orchestrator.pull_memories_with_vectors",
+                new=AsyncMock(return_value=fake_pull),
+            ),
+            patch(
+                "services.analysis.orchestrator.cluster_high_dim",
+                return_value=MagicMock(
+                    labels=[],
+                    centroids=[],
+                    n_clusters=0,
+                    silhouette=0.0,
+                    size_variance=0.0,
+                    outlier_ratio=0.0,
+                ),
+            ),
+            patch("services.analysis.orchestrator.project_to_2d", return_value=[]),
+            patch(
+                "services.analysis.orchestrator.estimate_cost",
+                return_value=MagicMock(estimated_cost_cents=42),
+            ),
+            patch(
+                "services.analysis.orchestrator.analysis_labeler.label_clusters",
+                new=AsyncMock(return_value=[]),
+            ),
+            patch(
+                "services.analysis.orchestrator.persist_results",
+                new=AsyncMock(side_effect=threshold_error),
+            ),
+        ):
+            with pytest.raises(ClusterLabelingThresholdExceeded):
+                await service.run(analysis_id=analysis.id)
+
+        await db_session.refresh(analysis)
+        assert analysis.status == "failed"
+        assert "MAX_CLUSTER_FAILURE_RATIO" in (analysis.error or "")
