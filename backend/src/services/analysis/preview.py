@@ -107,11 +107,15 @@ def assert_run_size_within_cap(memory_count: int) -> None:
 
     cap = int(get_settings().analysis_max_memory_count)
     if memory_count > cap:
+        # Copilot review: phrased as the RUN's memory count, not "the
+        # context has" — the vector_pull defense-in-depth re-check calls
+        # this with the FILTERED match count, where context-sized wording
+        # would be misleading.
         raise ValidationError(
-            f"Context has {memory_count} memories, exceeding the per-run "
-            f"analysis cap of {cap}. Narrow the context (split it, or "
-            f"archive old memories) or — on self-host — raise "
-            f"ANALYSIS_MAX_MEMORY_COUNT.",
+            f"This analysis run would include {memory_count} memories, "
+            f"exceeding the per-run analysis cap of {cap}. Narrow the "
+            f"scope (filters, split the context, or archive old memories) "
+            f"or — on self-host — raise ANALYSIS_MAX_MEMORY_COUNT.",
             field="memory_count",
             memory_count=memory_count,
             limit=cap,
