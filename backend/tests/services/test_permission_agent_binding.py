@@ -147,6 +147,21 @@ class TestEnumerationIntersection:
         assert result == contexts
         instance.readable_context_ids.assert_not_awaited()
 
+    @pytest.mark.asyncio
+    async def test_unknown_mode_fails_closed_intersects(self):
+        """code-review: an unrecognized enforcement_mode must fail CLOSED
+        (intersect), matching evaluate_context_access which denies on a
+        non-shadow mode — the two paths must not disagree."""
+        set_agent_scope(AgentScope(agent_id=AGENT_ID, enforcement_mode="future_mode"))
+        perm = _perm()
+        contexts = self._contexts()
+        perm._get_accessible_contexts_rbac = AsyncMock(return_value=contexts)
+        patcher, instance = _patch_binding_service(True, "allowed")
+        instance.readable_context_ids = AsyncMock(return_value={contexts[1].id})
+        with patcher:
+            result = await perm.get_accessible_contexts("u", WORKSPACE_ID)
+        assert result == [contexts[1]]
+
 
 class TestMcpWritePathGate:
     @pytest.mark.asyncio

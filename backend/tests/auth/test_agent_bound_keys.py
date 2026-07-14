@@ -205,3 +205,21 @@ class TestAgentScopePropagation:
         set_agent_scope(AgentScope(agent_id=AGENT_ID, enforcement_mode="enforce"))
         set_agent_scope_from_verified(None)
         assert get_agent_scope() is None
+
+    def test_agent_id_without_mode_fails_closed_to_enforce(self):
+        """code-review hardening: an agent-bound key (agent_id set) with a
+        missing enforcement_mode is an anomaly — it must default to enforce
+        (fail-closed, default-deny with no bindings), never clear the scope
+        into unrestricted member access."""
+        verified = VerifiedKey(
+            id=1,
+            user_id="u",
+            workspace_id=WORKSPACE_ID,
+            bound_context_id=None,
+            key_prefix="kagura_test_pref",
+            agent_id=AGENT_ID,
+            agent_enforcement_mode=None,
+        )
+        set_agent_scope_from_verified(verified)
+        scope = get_agent_scope()
+        assert scope == AgentScope(agent_id=AGENT_ID, enforcement_mode="enforce")

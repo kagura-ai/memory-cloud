@@ -84,33 +84,18 @@ def _service(execute_results: list | None = None) -> AgentBindingService:
 
 
 class TestTypeArrayValidation:
+    """#1275 code-review: the type/source filter columns are provisioned but
+    per-type enforcement is deferred to a follow-up. To avoid a fail-open
+    (a silently-ignored restriction), CRUD accepts only NULL for now."""
+
     def test_null_means_unrestricted(self):
         assert _validate_type_array(None, "allowed_memory_types") is None
 
-    def test_empty_list_means_deny_all(self):
-        assert _validate_type_array([], "allowed_memory_types") == []
-
-    def test_memory_types_are_open_vocabulary(self):
-        assert _validate_type_array(["learning", "メモ"], "allowed_memory_types") == [
-            "learning",
-            "メモ",
-        ]
-
-    def test_source_types_checked_against_canonical_set(self):
-        with pytest.raises(ValidationError):
-            _validate_type_array(["not-a-source-type"], "allowed_source_types")
-
-    def test_known_source_types_pass(self):
-        from models.memory import _ALL_SOURCE_TYPES
-
-        assert _validate_type_array(list(_ALL_SOURCE_TYPES[:2]), "allowed_source_types") == list(
-            _ALL_SOURCE_TYPES[:2]
-        )
-
-    @pytest.mark.parametrize("bad", ["str", 42, [1], [""], [None]])
-    def test_malformed_arrays_rejected(self, bad):
-        with pytest.raises(ValidationError):
-            _validate_type_array(bad, "allowed_memory_types")
+    @pytest.mark.parametrize("reserved", [[], ["learning"], ["file"], ["a", "b"], "str", 42])
+    @pytest.mark.parametrize("field", ["allowed_memory_types", "allowed_source_types"])
+    def test_non_null_rejected_as_reserved(self, reserved, field):
+        with pytest.raises(ValidationError, match="reserved"):
+            _validate_type_array(reserved, field)
 
 
 # ---------------------------------------------------------------------------

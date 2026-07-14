@@ -52,38 +52,29 @@ AUDIT_BINDING_UPDATED = "agent_binding_updated"
 AUDIT_BINDING_DELETED = "agent_binding_deleted"
 
 _ARRAY_FIELDS = ("allowed_memory_types", "allowed_source_types")
-_ARRAY_VALUE_MAX_LEN = {"allowed_memory_types": 50, "allowed_source_types": 20}
-_ARRAY_MAX_ITEMS = 100
 
 
 def _validate_type_array(value: Any, field: str) -> list[str] | None:
-    """Validate a NULL-vs-[] typed filter array.
+    """Validate a type/source filter array — RESERVED, enforcement deferred.
 
-    ``None`` = unrestricted, ``[]`` = deny-all (fixed semantics — deliberately
-    NOT the role-dependent ``allowed_context_ids`` asymmetry). Memory types
-    are an open vocabulary; ``allowed_source_types`` values are checked
-    against the canonical ``memories.source_type`` set.
+    The ``allowed_memory_types`` / ``allowed_source_types`` columns are
+    forward-provisioned in the F1 DDL, but per-memory type/source enforcement
+    is materially larger than the context-level binding gate (it must filter
+    each recall/reference/write by the memory's own type) and lands in a
+    follow-up (#1281). To avoid a **fail-open** — an admin setting a restriction
+    that is silently ignored, a false sense of containment — CRUD rejects any
+    non-NULL value for now. ``NULL`` (= all types, the P0-2-enforced value) is
+    the only accepted value. Code-review of #1275. (Same "provisioned-but-
+    reserved" posture as ``write_policy='staged'``.)
     """
     if value is None:
         return None
-    if not isinstance(value, list) or not all(isinstance(v, str) and v for v in value):
-        raise ValidationError(f"'{field}' must be null or a list of non-empty strings", field=field)
-    if len(value) > _ARRAY_MAX_ITEMS:
-        raise ValidationError(f"'{field}' must have at most {_ARRAY_MAX_ITEMS} items", field=field)
-    max_len = _ARRAY_VALUE_MAX_LEN[field]
-    if any(len(v) > max_len for v in value):
-        raise ValidationError(f"'{field}' values must be at most {max_len} characters", field=field)
-    if field == "allowed_source_types":
-        from models.memory import _ALL_SOURCE_TYPES
-
-        unknown = sorted(set(value) - set(_ALL_SOURCE_TYPES))
-        if unknown:
-            raise ValidationError(
-                f"'{field}' contains unknown source types: {unknown} "
-                f"(valid: {list(_ALL_SOURCE_TYPES)})",
-                field=field,
-            )
-    return value
+    raise ValidationError(
+        f"'{field}' is reserved: per-type binding filters are provisioned but "
+        "not yet enforced — set it to null (all types) for now. Type/source "
+        "filtering ships in a follow-up (#1281).",
+        field=field,
+    )
 
 
 def _validate_write_policy(value: Any) -> str:

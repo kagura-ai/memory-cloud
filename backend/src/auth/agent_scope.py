@@ -60,7 +60,18 @@ def set_agent_scope_from_verified(verified: Any) -> None:
     """
     agent_id = getattr(verified, "agent_id", None)
     mode = getattr(verified, "agent_enforcement_mode", None)
-    if verified is None or agent_id is None or mode is None:
+    if verified is None or agent_id is None:
+        # Not an agent-bound credential — clear any stale scope.
         set_agent_scope(None)
         return
+    if mode is None:
+        # An agent-bound key (agent_id set) with no enforcement_mode is an
+        # anomaly — verify_key only sets agent_id for an ACTIVE agent whose
+        # mode is a NOT-NULL/CHECK-constrained column, so this can only arise
+        # from a bug, partial select, or test double. Fail CLOSED: default to
+        # ``enforce``, which with no bindings is default-deny — never silently
+        # widen the key to full member scope (code-review hardening).
+        from models.agent import AGENT_ENFORCEMENT_ENFORCE
+
+        mode = AGENT_ENFORCEMENT_ENFORCE
     set_agent_scope(AgentScope(agent_id=agent_id, enforcement_mode=mode))

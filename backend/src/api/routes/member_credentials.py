@@ -14,6 +14,7 @@ Endpoints:
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from auth.api_keys import APIKeyManager, apply_zero_knowledge_hide
@@ -273,6 +274,17 @@ async def _owner_provisioned_mint(
         )
     except ValueError as e:
         raise BadRequestError(message=str(e)) from e
+    except IntegrityError as e:
+        # Issue #1275: a concurrent agent hard-delete between create_key's
+        # active-agent check and the INSERT flush violates the api_keys.agent_id
+        # FK. Fail-closed (no key minted), but surface it as a clean 400 rather
+        # than letting the SQLAlchemy handler map it to a 503/500 (code-review).
+        await db.rollback()
+        raise BadRequestError(
+            message="Agent binding is no longer valid (the agent may have been "
+            "deleted or suspended concurrently). Retry the mint.",
+            error_code="AGENT-001",
+        ) from e
 
 
 @router.get("/{user_id}/credentials", response_model=MemberCredentialsResponse)

@@ -749,10 +749,18 @@ class PermissionService:
         contexts = await self._get_accessible_contexts_rbac(user_id, workspace_id)
 
         from auth.agent_scope import get_agent_scope
-        from models.agent import AGENT_ENFORCEMENT_ENFORCE
+        from models.agent import AGENT_ENFORCEMENT_SHADOW
 
         scope = get_agent_scope()
-        if scope is None or scope.enforcement_mode != AGENT_ENFORCEMENT_ENFORCE or not contexts:
+        if scope is None or not contexts:
+            return contexts
+        # shadow is the only mode that keeps the full membership view (the
+        # enforcement ramp — would_deny is logged, not applied). enforce AND
+        # any unexpected mode fall through to the intersection so an
+        # unrecognized enforcement_mode fails CLOSED, matching
+        # evaluate_context_access which denies on a non-shadow mode
+        # (code-review: the two paths must not disagree).
+        if scope.enforcement_mode == AGENT_ENFORCEMENT_SHADOW:
             return contexts
 
         from services.agent_binding_service import AgentBindingService
