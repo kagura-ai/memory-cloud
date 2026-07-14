@@ -49,7 +49,7 @@ from uuid import UUID
 from zoneinfo import ZoneInfo
 
 from fastapi import Depends, HTTPException
-from sqlalchemy import and_, func, select
+from sqlalchemy import and_, func, select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 # Re-exported from ``auth.analysis_allowlist`` so existing callers
@@ -141,15 +141,6 @@ async def check_memory_analysis_quota(
             f"Workspace {workspace_id} disappeared mid-request — gate cannot evaluate quota"
         )
 
-    count_stmt = select(func.count(MemoryAnalysis.id)).where(
-        and_(
-            MemoryAnalysis.workspace_id == workspace_id,
-            MemoryAnalysis.started_at >= day_start_utc,
-            MemoryAnalysis.started_at < day_end_utc,
-        )
-    )
-    used_today = int((await db.execute(count_stmt)).scalar() or 0)
-
     effective = await EffectiveQuotaService(db).get_effective_quotas(workspace_id)
     limit_today = int(effective["analysis_runs_per_day"])
     # Refresh the workspace row AFTER ``get_effective_quotas`` runs —
@@ -160,6 +151,35 @@ async def check_memory_analysis_quota(
     # producing an inconsistent body. Issue #496 Copilot review.
     await db.refresh(workspace_row)
     addon_bonus = int(workspace_row.addon_analysis_bonus or 0)
+
+    # #1240: serialize concurrent quota evaluations per workspace.
+    # ``pg_advisory_xact_lock`` holds until this transaction ends — the
+    # SAME transaction later INSERTs the ``memory_analyses`` row in
+    # ``orchestrator.start()`` (FastAPI dependency caching / the MCP
+    # handler share one session per request), so a racing second request
+    # blocks HERE until the first request's row is committed and its
+    # COUNT below sees it. Without the lock, N concurrent starts all
+    # read the pre-insert count and exceed the daily cap. Load-bearing
+    # invariant: NOTHING between this lock and the post-INSERT commit
+    # may commit the session (a commit releases an xact lock) —
+    # ``get_effective_quotas`` is a pure read since #570 and runs before
+    # the lock anyway; keep any future recalc/commit paths above this
+    # line. Same precedent as ``connector_provisioning.py``'s
+    # provisioning lock.
+    await db.execute(
+        text("SELECT pg_advisory_xact_lock(hashtextextended(:key, 0))").bindparams(
+            key=f"memory_analysis_quota:{workspace_id}"
+        )
+    )
+
+    count_stmt = select(func.count(MemoryAnalysis.id)).where(
+        and_(
+            MemoryAnalysis.workspace_id == workspace_id,
+            MemoryAnalysis.started_at >= day_start_utc,
+            MemoryAnalysis.started_at < day_end_utc,
+        )
+    )
+    used_today = int((await db.execute(count_stmt)).scalar() or 0)
 
     if used_today >= limit_today:
         # day_end_utc is naive UTC; reformat with caller tz for the

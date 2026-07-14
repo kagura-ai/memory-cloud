@@ -46,8 +46,10 @@ import umap  # noqa: F401
 from sklearn.cluster import KMeans  # noqa: F401
 from sklearn.metrics import silhouette_score  # noqa: F401
 from sqlalchemy import and_, select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from db.constraint_names import integrity_error_constraint_name
 from models.analysis import (
     MEMORY_ANALYSIS_PAID_BY_VALUES,
     MEMORY_ANALYSIS_STATUSES,
@@ -160,6 +162,33 @@ def _params_iso_to_naive_utc(s: str | None, *, end_of_day: bool = False) -> date
     if end_of_day and len(s) == 10 and "T" not in s:
         dt = dt + timedelta(days=1)
     return dt
+
+
+def _validate_date_params(params: AnalysisParams) -> None:
+    """Reject malformed ``from``/``to`` BEFORE any row is created (#1240).
+
+    Runs the exact parser ``run()`` will use (``_params_iso_to_naive_utc``)
+    on the serialized params, so start-time acceptance and run-time parsing
+    cannot diverge. REST already rejects at the Pydantic boundary
+    (``AnalysisPreviewRequest._validate_iso8601``); this guard covers MCP —
+    which delivers raw strings via ``AnalysisParams.extra`` — and any future
+    entrypoint. Without it a malformed date raises in ``run()`` AFTER the
+    ``memory_analyses`` row is INSERTed at status='running', stranding the
+    run: the quota slot stays consumed and the idempotency guard 409-blocks
+    every future run on the context.
+    """
+    jsonb = params.to_jsonb()
+    for key, end_of_day in (("from", False), ("to", True)):
+        value = jsonb.get(key)
+        try:
+            _params_iso_to_naive_utc(value, end_of_day=end_of_day)
+        except (ValueError, TypeError) as e:
+            raise ValidationError(
+                f"Invalid ISO-8601 datetime for {key!r}: {value!r}. "
+                "Expected forms: date-only '2026-05-02', '2026-05-02T00:00:00Z', "
+                "'2026-05-02T09:00:00+09:00', or naive 'YYYY-MM-DDTHH:MM:SS'.",
+                field=key,
+            ) from e
 
 
 async def _resolve_pricing_row(db: AsyncSession, model_id: int | None) -> tuple[LLMPricing, dict]:
@@ -281,6 +310,8 @@ class AnalysisOrchestrator:
         caller can ``await db.commit()`` and return ``analysis.id``
         in the 202 response.
         """
+        _validate_date_params(params)
+
         await assert_openai_byok_key_available(
             self.db,
             workspace_id=workspace_id,
@@ -328,7 +359,41 @@ class AnalysisOrchestrator:
             status=_STATUS_RUNNING,
         )
         self.db.add(analysis)
-        await self.db.flush()
+        try:
+            await self.db.flush()
+        except IntegrityError as exc:
+            # Only the partial unique index means "lost the race with a
+            # concurrent start" — other IntegrityErrors (e.g. the contexts
+            # CASCADE FK after a mid-request context delete, or the
+            # llm_pricing RESTRICT FK) are NOT a conflicting run and must
+            # not be translated to a 409 telling the user to wait for a
+            # run that does not exist. Re-raise those for the generic
+            # 500 path. Structured diagnostics first (asyncpg/psycopg via
+            # the shared helper); message substring only as the fallback
+            # for wrapper shapes without them — so an unusual driver
+            # chain degrades to the old behavior, never to a wrong 409.
+            constraint = integrity_error_constraint_name(exc)
+            if constraint is not None:
+                is_running_race = constraint == "uq_memory_analyses_one_running"
+            else:
+                is_running_race = "uq_memory_analyses_one_running" in str(exc.orig)
+            if not is_running_race:
+                raise
+            # Lost the race with a concurrent start: the partial unique
+            # index ``uq_memory_analyses_one_running`` rejected a second
+            # 'running' row for this (workspace, context) — the SELECT
+            # guard above is check-then-insert and cannot see a row the
+            # racing transaction has not committed yet (#1240). Roll back
+            # so the session is usable, then surface the same 409 the
+            # guard raises, with the winner's run_id when visible.
+            await self.db.rollback()
+            prior = (await self.db.execute(running_stmt)).scalar_one_or_none()
+            raise ConflictError(
+                "An analysis run is already in progress"
+                + (f" (run_id={prior.id})" if prior is not None else "")
+                + ". Wait for it to finish or cancel.",
+                run_id=str(prior.id) if prior is not None else None,
+            ) from exc
         logger.info(
             "analysis_run_started",
             analysis_id=str(analysis.id),
@@ -358,18 +423,23 @@ class AnalysisOrchestrator:
             )
 
         params_jsonb = dict(analysis.params or {})
-        # Normalize tz-aware ISO strings to NAIVE UTC so the filter
-        # binds cleanly against ``Memory.created_at`` (TIMESTAMP WITHOUT
-        # TIME ZONE — naive UTC by repo convention #489). API callers
-        # may submit either tz-aware (e.g. "...+09:00") or naive ISO
-        # strings; both routes converge here.
-        from_dt = _params_iso_to_naive_utc(params_jsonb.get("from"))
-        # ``to`` is inclusive at the day level for date-only inputs — see
-        # _params_iso_to_naive_utc / #820. Datetimes with time components
-        # stay exclusive so callers needing precision are not surprised.
-        to_dt = _params_iso_to_naive_utc(params_jsonb.get("to"), end_of_day=True)
 
         try:
+            # Normalize tz-aware ISO strings to NAIVE UTC so the filter
+            # binds cleanly against ``Memory.created_at`` (TIMESTAMP WITHOUT
+            # TIME ZONE — naive UTC by repo convention #489). API callers
+            # may submit either tz-aware (e.g. "...+09:00") or naive ISO
+            # strings; both routes converge here. ``start()`` validates
+            # these pre-INSERT (#1240); parsing INSIDE the try keeps a
+            # malformed value on a pre-#1240 row from stranding the run
+            # at 'running' — it lands in ``_mark_failed`` like any other
+            # stage failure.
+            from_dt = _params_iso_to_naive_utc(params_jsonb.get("from"))
+            # ``to`` is inclusive at the day level for date-only inputs — see
+            # _params_iso_to_naive_utc / #820. Datetimes with time components
+            # stay exclusive so callers needing precision are not surprised.
+            to_dt = _params_iso_to_naive_utc(params_jsonb.get("to"), end_of_day=True)
+
             # Stage [C] — pull memories + their existing Qdrant vectors.
             # This is the LAST DB-using step before compute. After it
             # we commit the read-side state and release the connection
@@ -508,7 +578,24 @@ class AnalysisOrchestrator:
         ``persist_results``' caller-managed try/except. We commit the
         status update separately so ``status='failed'`` is observable
         to the API caller polling the run row.
+
+        Failures raised OUTSIDE that try (vector_pull's SELECT, the
+        mid-run commit, the locale fetch) can leave the session's
+        transaction in a failed state; roll back FIRST so
+        ``persist_failure``'s refresh/UPDATE runs on a clean
+        transaction. Without this the refresh raises
+        ``PendingRollbackError`` and the row is stranded at
+        status='running' — permanently 409-blocking the context via
+        the idempotency guard (#1240).
         """
+        try:
+            await self.db.rollback()
+        except Exception:
+            logger.warning(
+                "analysis_mark_failed_rollback_error",
+                analysis_id=str(analysis.id),
+                exc_info=True,
+            )
         try:
             await persist_failure(self.db, analysis=analysis, error_message=error_message)
             await self.db.commit()

@@ -165,6 +165,20 @@ class MemoryAnalysis(Base):
             "context_id",
             "started_at",
         ),
+        # #1240: DB-enforced one-running-run invariant. The orchestrator's
+        # SELECT-then-INSERT idempotency guard is a check-then-insert race —
+        # two concurrent start() calls can both pass the SELECT before either
+        # flushes. This partial unique index makes the loser's INSERT fail
+        # with IntegrityError, which start() translates to the same 409
+        # ConflictError the guard raises. Terminal rows (succeeded/failed/
+        # cancelled) accumulate freely — only 'running' participates.
+        Index(
+            "uq_memory_analyses_one_running",
+            "workspace_id",
+            "context_id",
+            unique=True,
+            postgresql_where=text("status = 'running'"),
+        ),
     )
 
     def __repr__(self) -> str:

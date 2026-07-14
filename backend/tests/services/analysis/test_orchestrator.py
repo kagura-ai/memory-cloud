@@ -13,7 +13,8 @@ from uuid import uuid4
 
 import pytest
 import pytest_asyncio
-from sqlalchemy import text
+from sqlalchemy import func, select, text
+from sqlalchemy.exc import IntegrityError
 
 from models.analysis import MemoryAnalysis
 from models.auth import Context, Workspace
@@ -510,3 +511,329 @@ class TestMarkFailed:
         mock_persist.assert_awaited_once_with(
             db_session, analysis=analysis, error_message="it broke"
         )
+
+    @pytest.mark.asyncio
+    async def test_mark_failed_recovers_poisoned_session(self, db_session) -> None:
+        """#1240: a DBAPIError mid-run leaves the session transaction in a
+        failed state. ``_mark_failed`` must roll back FIRST — without that,
+        ``persist_failure``'s ``db.refresh()`` raises PendingRollbackError
+        and the row is stranded at status='running' forever.
+        """
+        ws_id = uuid4()
+        ctx_id = uuid4()
+        await _seed_workspace_context(db_session, ws_id, ctx_id)
+        pricing = await _seed_pricing(db_session)
+        analysis = MemoryAnalysis(
+            workspace_id=ws_id,
+            context_id=ctx_id,
+            triggered_by="u1",
+            model_id=pricing.id,
+            model_snapshot={},
+            embedding_model="em",
+            params={},
+            input_count=0,
+            status="running",
+            paid_by="byok",
+        )
+        db_session.add(analysis)
+        await db_session.commit()
+
+        # Poison the transaction the way a mid-run DB error does: the
+        # failed statement leaves the tx aborted until a rollback.
+        with pytest.raises(Exception, match="division by zero"):
+            await db_session.execute(text("SELECT 1/0"))
+
+        service = AnalysisOrchestrator(db_session)
+        await service._mark_failed(analysis, "boom after poisoned tx")
+
+        await db_session.refresh(analysis)
+        assert analysis.status == "failed"
+        assert "boom after poisoned tx" in (analysis.error or "")
+
+
+# ---------------------------------------------------------------------------
+# #1240 — start-time date validation (shared with run()'s parser)
+# ---------------------------------------------------------------------------
+
+
+class TestStartValidatesDateParams:
+    """Malformed from/to must be rejected BEFORE any row is INSERTed.
+
+    The MCP path delivers raw strings via ``AnalysisParams.extra`` —
+    without start-time validation they explode in ``run()`` after the
+    row exists at status='running' (quota slot consumed, context
+    409-blocked by the idempotency guard). #1240.
+    """
+
+    async def _count_rows(self, db_session, ws_id) -> int:
+        result = await db_session.execute(
+            select(func.count(MemoryAnalysis.id)).where(MemoryAnalysis.workspace_id == ws_id)
+        )
+        return int(result.scalar() or 0)
+
+    @pytest.mark.asyncio
+    async def test_malformed_from_rejected_before_insert(self, db_session) -> None:
+        service = AnalysisOrchestrator(db_session)
+        ws_id = uuid4()
+        ctx_id = uuid4()
+        await _seed_workspace_context(db_session, ws_id, ctx_id)
+        await _seed_pricing(db_session)
+
+        with patch(
+            "services.analysis.orchestrator.assert_openai_byok_key_available",
+            return_value=None,
+        ):
+            with pytest.raises(ValidationError, match="ISO-8601"):
+                await service.start(
+                    workspace_id=ws_id,
+                    context_id=ctx_id,
+                    user_id="u1",
+                    params=AnalysisParams(extra={"from": "not-a-date"}),
+                )
+        assert await self._count_rows(db_session, ws_id) == 0
+
+    @pytest.mark.asyncio
+    async def test_malformed_to_rejected_before_insert(self, db_session) -> None:
+        service = AnalysisOrchestrator(db_session)
+        ws_id = uuid4()
+        ctx_id = uuid4()
+        await _seed_workspace_context(db_session, ws_id, ctx_id)
+        await _seed_pricing(db_session)
+
+        with patch(
+            "services.analysis.orchestrator.assert_openai_byok_key_available",
+            return_value=None,
+        ):
+            with pytest.raises(ValidationError, match="ISO-8601"):
+                await service.start(
+                    workspace_id=ws_id,
+                    context_id=ctx_id,
+                    user_id="u1",
+                    params=AnalysisParams(extra={"to": "2026-13-99"}),
+                )
+        assert await self._count_rows(db_session, ws_id) == 0
+
+    @pytest.mark.asyncio
+    async def test_valid_extra_date_strings_accepted(self, db_session) -> None:
+        """Valid MCP-shaped raw strings still start a run (no regression)."""
+        service = AnalysisOrchestrator(db_session)
+        ws_id = uuid4()
+        ctx_id = uuid4()
+        await _seed_workspace_context(db_session, ws_id, ctx_id)
+        row = LLMPricing(
+            provider="openai",
+            model="gpt-5-nano",
+            unit_type="input_tokens",
+            price_per_unit="0.001",
+            currency="USD",
+            effective_from=datetime(2024, 1, 1),
+        )
+        db_session.add(row)
+        await db_session.flush()
+
+        with patch(
+            "services.analysis.orchestrator.assert_openai_byok_key_available",
+            return_value=None,
+        ):
+            analysis = await service.start(
+                workspace_id=ws_id,
+                context_id=ctx_id,
+                user_id="u1",
+                params=AnalysisParams(
+                    extra={"from": "2026-05-01", "to": "2026-05-28T23:59:59+09:00"}
+                ),
+            )
+        assert analysis.status == "running"
+
+
+# ---------------------------------------------------------------------------
+# #1240 — one-running-run invariant enforced by the DB, not just a SELECT
+# ---------------------------------------------------------------------------
+
+
+def _make_running_row(ws_id, ctx_id, pricing_id, status="running") -> MemoryAnalysis:
+    return MemoryAnalysis(
+        workspace_id=ws_id,
+        context_id=ctx_id,
+        triggered_by="u1",
+        model_id=pricing_id,
+        model_snapshot={},
+        embedding_model="em",
+        params={},
+        input_count=0,
+        status=status,
+        paid_by="byok",
+    )
+
+
+class TestOneRunningPartialUniqueIndex:
+    @pytest.mark.asyncio
+    async def test_second_running_insert_blocked_by_index(self, db_session) -> None:
+        """The partial unique index rejects a second 'running' row even
+        when the SELECT-then-INSERT guard was raced past (#1240 TOCTOU).
+        """
+        ws_id = uuid4()
+        ctx_id = uuid4()
+        await _seed_workspace_context(db_session, ws_id, ctx_id)
+        pricing = await _seed_pricing(db_session)
+
+        db_session.add(_make_running_row(ws_id, ctx_id, pricing.id))
+        await db_session.flush()
+        db_session.add(_make_running_row(ws_id, ctx_id, pricing.id))
+        with pytest.raises(IntegrityError, match="uq_memory_analyses_one_running"):
+            await db_session.flush()
+        await db_session.rollback()
+
+    @pytest.mark.asyncio
+    async def test_terminal_rows_not_blocked(self, db_session) -> None:
+        """Only 'running' participates in the partial index — history rows
+        (succeeded/failed/cancelled) may accumulate freely.
+        """
+        ws_id = uuid4()
+        ctx_id = uuid4()
+        await _seed_workspace_context(db_session, ws_id, ctx_id)
+        pricing = await _seed_pricing(db_session)
+
+        db_session.add(_make_running_row(ws_id, ctx_id, pricing.id, status="succeeded"))
+        db_session.add(_make_running_row(ws_id, ctx_id, pricing.id, status="succeeded"))
+        db_session.add(_make_running_row(ws_id, ctx_id, pricing.id, status="failed"))
+        db_session.add(_make_running_row(ws_id, ctx_id, pricing.id, status="running"))
+        await db_session.flush()
+
+    @pytest.mark.asyncio
+    async def test_start_translates_integrity_error_to_conflict(
+        self, db_session, monkeypatch
+    ) -> None:
+        """When start() loses the race at flush time (unique violation),
+        the caller sees the same 409 ConflictError as the SELECT guard.
+        """
+        service = AnalysisOrchestrator(db_session)
+        ws_id = uuid4()
+        ctx_id = uuid4()
+        await _seed_workspace_context(db_session, ws_id, ctx_id)
+        row = LLMPricing(
+            provider="openai",
+            model="gpt-5-nano",
+            unit_type="input_tokens",
+            price_per_unit="0.001",
+            currency="USD",
+            effective_from=datetime(2024, 1, 1),
+        )
+        db_session.add(row)
+        await db_session.flush()
+
+        async def racing_flush(*args, **kwargs):
+            raise IntegrityError(
+                "INSERT INTO memory_analyses ...",
+                {},
+                Exception(
+                    "duplicate key value violates unique constraint "
+                    '"uq_memory_analyses_one_running"'
+                ),
+            )
+
+        monkeypatch.setattr(db_session, "flush", racing_flush)
+        with patch(
+            "services.analysis.orchestrator.assert_openai_byok_key_available",
+            return_value=None,
+        ):
+            with pytest.raises(ConflictError, match="already in progress"):
+                await service.start(
+                    workspace_id=ws_id,
+                    context_id=ctx_id,
+                    user_id="u1",
+                    params=AnalysisParams(),
+                )
+
+
+class TestStartIntegrityErrorScoping:
+    @pytest.mark.asyncio
+    async def test_foreign_key_integrity_error_not_translated_to_conflict(
+        self, db_session, monkeypatch
+    ) -> None:
+        """#1240 review: only the one-running unique index means "lost the
+        race". An FK violation (context deleted mid-request, pricing row
+        gone) must NOT become a 409 telling the user to wait for a run
+        that does not exist — it re-raises for the generic 500 path.
+        """
+        service = AnalysisOrchestrator(db_session)
+        ws_id = uuid4()
+        ctx_id = uuid4()
+        await _seed_workspace_context(db_session, ws_id, ctx_id)
+        row = LLMPricing(
+            provider="openai",
+            model="gpt-5-nano",
+            unit_type="input_tokens",
+            price_per_unit="0.001",
+            currency="USD",
+            effective_from=datetime(2024, 1, 1),
+        )
+        db_session.add(row)
+        await db_session.flush()
+
+        async def fk_violating_flush(*args, **kwargs):
+            raise IntegrityError(
+                "INSERT INTO memory_analyses ...",
+                {},
+                Exception(
+                    'insert or update on table "memory_analyses" violates '
+                    'foreign key constraint "memory_analyses_context_id_fkey"'
+                ),
+            )
+
+        monkeypatch.setattr(db_session, "flush", fk_violating_flush)
+        with patch(
+            "services.analysis.orchestrator.assert_openai_byok_key_available",
+            return_value=None,
+        ):
+            with pytest.raises(IntegrityError):
+                await service.start(
+                    workspace_id=ws_id,
+                    context_id=ctx_id,
+                    user_id="u1",
+                    params=AnalysisParams(),
+                )
+
+
+class TestStartIntegrityErrorStructuredDiagnostics:
+    @pytest.mark.asyncio
+    async def test_structured_constraint_name_translates_to_conflict(
+        self, db_session, monkeypatch
+    ) -> None:
+        """Copilot review (#1249): the asyncpg/psycopg structured path —
+        ``orig.constraint_name`` — must drive the 409 translation without
+        relying on message-substring matching."""
+        service = AnalysisOrchestrator(db_session)
+        ws_id = uuid4()
+        ctx_id = uuid4()
+        await _seed_workspace_context(db_session, ws_id, ctx_id)
+        row = LLMPricing(
+            provider="openai",
+            model="gpt-5-nano",
+            unit_type="input_tokens",
+            price_per_unit="0.001",
+            currency="USD",
+            effective_from=datetime(2024, 1, 1),
+        )
+        db_session.add(row)
+        await db_session.flush()
+
+        orig = MagicMock()
+        orig.constraint_name = "uq_memory_analyses_one_running"
+        orig.__str__ = lambda self: "unique violation (message deliberately nameless)"
+
+        async def racing_flush(*args, **kwargs):
+            raise IntegrityError("INSERT INTO memory_analyses ...", {}, orig)
+
+        monkeypatch.setattr(db_session, "flush", racing_flush)
+        with patch(
+            "services.analysis.orchestrator.assert_openai_byok_key_available",
+            return_value=None,
+        ):
+            with pytest.raises(ConflictError, match="already in progress"):
+                await service.start(
+                    workspace_id=ws_id,
+                    context_id=ctx_id,
+                    user_id="u1",
+                    params=AnalysisParams(),
+                )
