@@ -39,11 +39,9 @@ logger = logging.getLogger(__name__)
 # Resource ID format: lowercase alphanumeric + underscore + hyphen
 _RESOURCE_ID_PATTERN = re.compile(r"^[a-z0-9_-]+$")
 
-# Max payload size per event (100KB) — single source in the shared ingest
-# service (Issue #1255).
-_MAX_PAYLOAD_SIZE_BYTES = resource_ingest_service.MAX_PAYLOAD_SIZE_BYTES
-
-# Max events per batch
+# Max events per batch — single source in the shared ingest service
+# (Issue #1255); the per-event payload-size cap lives there too
+# (resource_ingest_service.MAX_PAYLOAD_SIZE_BYTES).
 _MAX_BATCH_SIZE = resource_ingest_service.MAX_BATCH_SIZE
 
 
