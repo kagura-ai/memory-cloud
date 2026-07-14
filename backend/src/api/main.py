@@ -299,6 +299,15 @@ from api.middleware.request_logger import RequestLoggingMiddleware  # noqa: E402
 app.add_middleware(RequestLoggingMiddleware)
 logger.info("request_logging_middleware_registered")
 
+# Correlation Middleware (RFC-0002 P0-4, Issue #1277)
+# Parses W3C traceparent + baggage into the per-request correlation contextvar
+# for audit/usage stamping. Added last so it runs outermost (the correlation
+# context is available to every inner layer, including the request logger).
+from api.middleware.correlation import CorrelationMiddleware  # noqa: E402
+
+app.add_middleware(CorrelationMiddleware)
+logger.info("correlation_middleware_registered")
+
 
 # ============================================================================
 # Exception Handlers
