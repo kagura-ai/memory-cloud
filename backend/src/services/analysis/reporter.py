@@ -309,11 +309,18 @@ async def persist_results(
     # ``status='succeeded'`` with ``label_confidence=0.0`` — an
     # unqualified success built entirely of "(unlabeled)" rows, with the
     # daily-quota slot consumed and no error surfaced.
+    #
+    # The DENOMINATOR is the LABELABLE cluster count — "(empty)"
+    # sentinels never attempt labeling and cannot fail, so counting
+    # them would dilute the ratio on degenerate embeddings (KMeans can
+    # leave most clusters empty) until a run whose every real cluster
+    # failed still slipped through as a success.
     labeling_failures = sum(1 for cl in cluster_results if cl.failed)
-    if n_clusters > 0 and (labeling_failures / n_clusters) > MAX_CLUSTER_FAILURE_RATIO:
+    labelable = sum(1 for cl in cluster_results if not cl.empty)
+    if labelable > 0 and (labeling_failures / labelable) > MAX_CLUSTER_FAILURE_RATIO:
         raise ClusterLabelingThresholdExceeded(
-            f"Cluster labeling failed for {labeling_failures}/{n_clusters} clusters "
-            f"(more than MAX_CLUSTER_FAILURE_RATIO={MAX_CLUSTER_FAILURE_RATIO}). "
+            f"Cluster labeling failed for {labeling_failures}/{labelable} labelable "
+            f"clusters (more than MAX_CLUSTER_FAILURE_RATIO={MAX_CLUSTER_FAILURE_RATIO}). "
             "Check the workspace BYOK key and the provider status; the run is "
             "marked failed instead of persisting mostly-unlabeled clusters."
         )

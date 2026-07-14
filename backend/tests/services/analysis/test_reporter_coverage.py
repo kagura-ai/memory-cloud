@@ -1091,3 +1091,73 @@ class TestLabelingFailureThreshold:
         )
         assert inputs.analysis.status == "succeeded"
         assert inputs.analysis.quality["labeling_failures"] == 1
+
+
+class TestLabelingFailureThresholdEmptyClusters:
+    """#1246 review: '(empty)' sentinels are un-labelable and must not
+    dilute the failure-ratio denominator — on degenerate embeddings
+    KMeans leaves most clusters empty, and a run whose every REAL
+    cluster failed would otherwise persist as a hollow success.
+    """
+
+    @pytest.mark.asyncio
+    async def test_empties_do_not_dilute_the_ratio(
+        self, db_session, fixture_workspace_id, fixture_context_id, fixture_pricing
+    ):
+        from services.analysis.labeler import ClusterLabelingThresholdExceeded
+
+        analysis = await _make_analysis(
+            db_session,
+            workspace_id=fixture_workspace_id,
+            context_id=fixture_context_id,
+            pricing=fixture_pricing,
+        )
+        mem = await _make_db_memory(
+            db_session, workspace_id=fixture_workspace_id, context_id=fixture_context_id
+        )
+        memories = [
+            MemoryRecord(
+                id=mem.id,
+                type="note",
+                summary="m",
+                tags=[],
+                importance=0.5,
+                created_at=datetime(2026, 1, 1),
+            )
+        ]
+        # 9 empty sentinels + 1 REAL cluster that failed labeling:
+        # old ratio 1/10 = 0.1 (hollow success); new ratio 1/1 = 1.0.
+        cluster_results = [
+            ClusterLabel(
+                cluster_index=i,
+                label="(empty)",
+                description="No memories were assigned to this cluster.",
+                label_confidence=0.0,
+                representative_memory_ids=[],
+                breakdown=None,
+                failed=False,
+                empty=True,
+            )
+            for i in range(9)
+        ] + [_cluster_label(cluster_index=9, label="(unlabeled)", failed=True, breakdown=None)]
+        inputs = PersistInputs(
+            analysis=analysis,
+            memories=memories,
+            embeddings=np.zeros((1, 4)),
+            cluster_labels=np.array([9]),
+            coords_2d=np.array([[0.0, 0.0]]),
+            cluster_results=cluster_results,
+            silhouette=0.0,
+            size_variance=0.0,
+            outlier_ratio=0.0,
+            window_from=None,
+            window_to=None,
+        )
+        with pytest.raises(ClusterLabelingThresholdExceeded, match="1/1"):
+            await persist_results(
+                db_session,
+                inputs=inputs,
+                user_id="rep_user",
+                workspace_id=str(fixture_workspace_id),
+                context_id=str(fixture_context_id),
+            )

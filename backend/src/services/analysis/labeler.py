@@ -120,8 +120,15 @@ class ClusterLabel:
             cluster row is still written (with empty label) so the
             persistence transaction stays atomic; the reporter aborts
             the persist (run marked failed) only when strictly more
-            than ``MAX_CLUSTER_FAILURE_RATIO`` of clusters fail
-            (#1246).
+            than ``MAX_CLUSTER_FAILURE_RATIO`` of LABELABLE clusters
+            fail (#1246).
+        empty: True for the ``_empty_cluster_label`` sentinel — the
+            cluster had no members, so no labeling was attempted.
+            Excluded from the #1246 failure-ratio DENOMINATOR: on
+            degenerate embeddings KMeans can leave most clusters empty,
+            and counting those un-labelable sentinels would dilute the
+            ratio until a run whose every REAL cluster failed still
+            persisted as an unqualified success.
     """
 
     cluster_index: int
@@ -131,6 +138,7 @@ class ClusterLabel:
     representative_memory_ids: list[str]
     breakdown: LLMCallBreakdown | None
     failed: bool = False
+    empty: bool = False
 
 
 def _select_representatives(
@@ -375,6 +383,7 @@ async def _empty_cluster_label(cluster_index: int) -> ClusterLabel:
         representative_memory_ids=[],
         breakdown=None,
         failed=False,
+        empty=True,
     )
 
 
