@@ -840,3 +840,40 @@ class TestPullEdges:
         assert result.embeddings.shape == (5, 2)
         # Alignment preserved across batches.
         np.testing.assert_array_equal(result.embeddings[3], [3.0, 0.0])
+
+
+# ===========================================================================
+# #1244 — run-size cap defense in depth
+# ===========================================================================
+
+
+class TestRunSizeCapDefense:
+    @pytest.mark.asyncio
+    async def test_filtered_set_over_cap_raises_before_qdrant(
+        self, db_session, workspace_id, context_id, patch_qdrant, monkeypatch
+    ):
+        """#1244: the cap re-check fires on the filtered set BEFORE any
+        Qdrant vector is fetched or the embedding matrix materializes —
+        a pre-cap row (or an entrypoint that skipped the pre-flight)
+        fails the run instead of OOMing the API container.
+        """
+        from config.settings import get_settings
+        from utils.exceptions import ValidationError
+
+        m1 = await _make_memory(db_session, workspace_id=workspace_id, context_id=context_id)
+        m2 = await _make_memory(db_session, workspace_id=workspace_id, context_id=context_id)
+        client = patch_qdrant(
+            {
+                str(m1.id): [0.1, 0.2, 0.3, 0.4],
+                str(m2.id): [0.2, 0.3, 0.4, 0.5],
+            }
+        )
+        monkeypatch.setattr(get_settings(), "analysis_max_memory_count", 1)
+
+        with pytest.raises(ValidationError, match="cap of 1"):
+            await vector_pull.pull_memories_with_vectors(
+                db_session,
+                workspace_id=workspace_id,
+                context_id=context_id,
+            )
+        assert client.retrieve_calls == [], "Qdrant was queried despite the cap rejection"

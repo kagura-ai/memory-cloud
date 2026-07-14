@@ -265,11 +265,21 @@ async def handle_analyze_context(
                 # Preview path — same memory count semantics as REST /preview
                 # (delegates to ``query_service.count_context_memories``).
                 from services.analysis import query_service
-                from services.analysis.preview import DEFAULT_MODEL_ID, estimate_cost
+                from services.analysis.preview import (
+                    DEFAULT_MODEL_ID,
+                    assert_run_size_within_cap,
+                    estimate_cost,
+                )
 
                 memory_count = await query_service.count_context_memories(
                     db, workspace_id=workspace_id, context_id=context_id
                 )
+                # #1244: run-size cap — same rejection the real start
+                # returns, so dry_run callers see it before confirming.
+                try:
+                    assert_run_size_within_cap(memory_count)
+                except ValidationError as cap_exc:
+                    return _gate_error_response(cap_exc)
                 estimate = estimate_cost(memory_count, model_id=DEFAULT_MODEL_ID)
                 await _log_tool_usage(
                     db,
@@ -290,11 +300,24 @@ async def handle_analyze_context(
                 )
 
             # Real run — orchestrator.start() + commit + create_task.
+            from services.analysis import query_service
             from services.analysis.orchestrator import (
                 AnalysisOrchestrator,
                 AnalysisParams,
             )
+            from services.analysis.preview import assert_run_size_within_cap
             from tasks.analysis_tasks import register_run_task, run_analysis_task
+
+            # #1244: run-size cap — reject BEFORE any row is created.
+            # Same full-context count semantics as the dry_run path;
+            # vector_pull re-checks the filtered set as defense in depth.
+            memory_count = await query_service.count_context_memories(
+                db, workspace_id=workspace_id, context_id=context_id
+            )
+            try:
+                assert_run_size_within_cap(memory_count)
+            except ValidationError as cap_exc:
+                return _gate_error_response(cap_exc)
 
             params = AnalysisParams(
                 from_dt=None,

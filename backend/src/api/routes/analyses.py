@@ -45,7 +45,11 @@ from models.analysis import MEMORY_ANALYSIS_CANCELLATION_REASONS, MEMORY_ANALYSI
 from models.api_base import TZAwareBaseModel
 from services.analysis import query_service
 from services.analysis.orchestrator import AnalysisOrchestrator, AnalysisParams
-from services.analysis.preview import DEFAULT_MODEL_ID, estimate_cost
+from services.analysis.preview import (
+    DEFAULT_MODEL_ID,
+    assert_run_size_within_cap,
+    estimate_cost,
+)
 from tasks.analysis_tasks import cancel_run_task, register_run_task, run_analysis_task
 from utils.exceptions import ConflictError, ValidationError
 from utils.logger import get_logger
@@ -362,6 +366,9 @@ async def preview_analysis(
         workspace_id=workspace_id,
         context_id=context_id,
     )
+    # #1244: run-size cap — surface the rejection at preview time so the
+    # user is not shown a price for a run that start would refuse.
+    assert_run_size_within_cap(memory_count)
     # v1 only supports the default model in the cost estimator;
     # body.model_id is forward-compat scaffolding (preview.py:73-77).
     estimate = estimate_cost(memory_count, model_id=DEFAULT_MODEL_ID)
@@ -399,6 +406,10 @@ async def start_analysis(
 
     Error mapping (delegated to global handler via custom exceptions):
 
+    - 422 ValidationError — context exceeds the #1244 run-size cap
+      (checked BEFORE the idempotency guard, so an over-cap context
+      with a run already in flight gets 422, not the 409+run_id hint;
+      cancel/poll that run via the list endpoint).
     - 409 ConflictError  — a prior run is still ``running`` for the
       same (workspace, context). Body carries the existing run_id.
     - 422 ValidationError — BYOK key missing (orchestrator's
@@ -406,6 +417,17 @@ async def start_analysis(
     """
     user_id, workspace_id, _tz = access
     await _verify_context_in_workspace(db, workspace_id=workspace_id, context_id=context_id)
+
+    # #1244: run-size cap — reject BEFORE any row is created (422 names
+    # the limit and the context's count). Same full-context count
+    # semantics as /preview; vector_pull re-checks the filtered set as
+    # defense in depth.
+    memory_count = await query_service.count_context_memories(
+        db,
+        workspace_id=workspace_id,
+        context_id=context_id,
+    )
+    assert_run_size_within_cap(memory_count)
 
     params = _params_from_body(body)
     orchestrator = AnalysisOrchestrator(db)

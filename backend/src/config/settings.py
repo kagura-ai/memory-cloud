@@ -596,6 +596,27 @@ class Settings(BaseSettings):
             s.strip().lower() for s in self.analysis_enabled_workspace_ids.split(",") if s.strip()
         ]
 
+    # Memory Analysis run-size cap (Issue #1244).
+    # The pipeline materializes every matching vector into one in-RAM numpy
+    # matrix and runs UMAP/KMeans inside the API process (the Option B
+    # analysis-worker externalization is not yet implemented), so run size
+    # directly bounds API-container memory/CPU. Default 10_000 = the
+    # basic-tier memory_limit (plan_tiers.py); ~10k × 3072 dims × 4 B
+    # ≈ 123 MB float32 plus UMAP's kNN working set — tolerable for one run,
+    # and the #1240 one-running-run index plus the 3/day quota bound
+    # concurrency. Env: ANALYSIS_MAX_MEMORY_COUNT.
+    analysis_max_memory_count: int = Field(
+        default=10_000,
+        ge=1,
+        description=(
+            "Hard cap on memories per Memory Analysis run. Contexts above "
+            "this are rejected at preview and start (422 naming the limit). "
+            "Self-host operators with larger containers may raise it. "
+            "Must be >= 1 — a zero/negative value would brick the feature "
+            "at runtime with a misleading message, so it fails at boot."
+        ),
+    )
+
     # BM25 IDF Drift (Issue #343, #378)
     bm25_drift_cron_enabled: bool = Field(
         default=False,
