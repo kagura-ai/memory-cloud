@@ -55,6 +55,7 @@ def db_mock():
     m.execute = AsyncMock()
     m.commit = AsyncMock()
     m.rollback = AsyncMock()
+    m.refresh = AsyncMock()
     return m
 
 
@@ -419,11 +420,7 @@ class TestCancelRun:
             error=None,
             cancellation_reason=None,
         )
-        # Two executes: context boundary, then the #1241 locked re-fetch.
-        db_mock.execute.side_effect = [
-            _scalar_one(_TEST_CONTEXT_ID),
-            _scalar_one(fake_run),
-        ]
+        db_mock.execute.side_effect = [_scalar_one(_TEST_CONTEXT_ID)]
         with (
             patch(
                 "services.analysis.query_service.get_analysis",
@@ -441,6 +438,11 @@ class TestCancelRun:
         assert body["cancellation_reason"] == "user"
         assert fake_run.status == "cancelled"
         assert fake_run.cancellation_reason == "user"
+        # #1241: the locked re-check MUST be refresh(with_for_update=True) —
+        # a plain locked SELECT would return the identity-mapped instance
+        # with STALE attributes (see services/workspace_locks.py) and the
+        # lock-loser would clobber the winner's committed terminal state.
+        db_mock.refresh.assert_awaited_once_with(fake_run, with_for_update=True)
         # #1241: a confirmed cancel also stops the in-process compute.
         mock_cancel.assert_called_once_with(run_id)
 
@@ -465,24 +467,17 @@ class TestCancelRun:
             error=None,
             cancellation_reason=None,
         )
-        locked_run = MagicMock(
-            id=run_id,
-            workspace_id=_TEST_WORKSPACE_ID,
-            context_id=_TEST_CONTEXT_ID,
-            status="succeeded",  # persist won the lock
-            triggered_by=_TEST_USER_ID,
-            started_at=datetime(2026, 5, 2),
-            finished_at=datetime(2026, 5, 2),
-            input_count=10,
-            cost_estimated_cents=5,
-            cost_actual_cents=4,
-            error=None,
-            cancellation_reason=None,
-        )
-        db_mock.execute.side_effect = [
-            _scalar_one(_TEST_CONTEXT_ID),
-            _scalar_one(locked_run),
-        ]
+        db_mock.execute.side_effect = [_scalar_one(_TEST_CONTEXT_ID)]
+
+        async def _refresh_reveals_success(instance, **kwargs):
+            # Simulates the locked repopulating read: persist_results won
+            # the lock and committed 'succeeded' — refresh(with_for_update)
+            # overwrites the stale in-memory 'running'.
+            instance.status = "succeeded"
+            instance.finished_at = datetime(2026, 5, 2)
+            instance.cost_actual_cents = 4
+
+        db_mock.refresh = AsyncMock(side_effect=_refresh_reveals_success)
         with (
             patch(
                 "services.analysis.query_service.get_analysis",
@@ -497,8 +492,41 @@ class TestCancelRun:
         assert response.status_code == 200, response.text
         body = response.json()
         assert body["status"] == "succeeded"
-        assert locked_run.status == "succeeded"
+        assert stale_run.status == "succeeded"
+        assert stale_run.cancellation_reason is None  # never clobbered
         mock_cancel.assert_not_called()
+
+    def test_cancel_hard_deleted_run_returns_404(self, client, db_mock):
+        """#1241: the run row vanished (context/workspace CASCADE) between
+        the initial read and the locked refresh — 404, not a 200 with a
+        stale 'running' body implying the cancel is still possible."""
+        from sqlalchemy.orm.exc import ObjectDeletedError
+
+        run_id = uuid4()
+        stale_run = MagicMock(
+            id=run_id,
+            workspace_id=_TEST_WORKSPACE_ID,
+            context_id=_TEST_CONTEXT_ID,
+            status="running",
+            triggered_by=_TEST_USER_ID,
+            started_at=datetime(2026, 5, 2),
+            finished_at=None,
+            input_count=10,
+            cost_estimated_cents=5,
+            cost_actual_cents=None,
+            error=None,
+            cancellation_reason=None,
+        )
+        db_mock.execute.side_effect = [_scalar_one(_TEST_CONTEXT_ID)]
+        db_mock.refresh = AsyncMock(
+            side_effect=ObjectDeletedError(MagicMock(), "row deleted by CASCADE")
+        )
+        with patch(
+            "services.analysis.query_service.get_analysis",
+            AsyncMock(return_value=stale_run),
+        ):
+            response = client.delete(f"/api/v1/contexts/{_TEST_CONTEXT_ID}/analyses/{run_id}")
+        assert response.status_code == 404, response.text
 
     def test_idempotent_when_already_terminal(self, client, db_mock):
         """Already-succeeded runs return 200 with current state, no flip."""

@@ -36,16 +36,12 @@ from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 from pydantic import BaseModel, Field, field_validator
-from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm.exc import ObjectDeletedError
 
 from auth.analysis_gates import AnalysisReadAccess, AnalysisWriteAccess
 from db.base import get_db
-from models.analysis import (
-    MEMORY_ANALYSIS_CANCELLATION_REASONS,
-    MEMORY_ANALYSIS_STATUSES,
-    MemoryAnalysis,
-)
+from models.analysis import MEMORY_ANALYSIS_CANCELLATION_REASONS, MEMORY_ANALYSIS_STATUSES
 from models.api_base import TZAwareBaseModel
 from services.analysis import query_service
 from services.analysis.orchestrator import AnalysisOrchestrator, AnalysisParams
@@ -681,19 +677,32 @@ async def cancel_run(
         # eliminating the refresh-then-write window where a cancel was
         # silently overwritten by 'succeeded' (leaving a contradictory
         # cancellation_reason on a succeeded row).
-        locked = (
-            await db.execute(
-                select(MemoryAnalysis).where(MemoryAnalysis.id == row.id).with_for_update()
-            )
-        ).scalar_one_or_none()
-        if locked is not None and locked.status == _STATUS_RUNNING:
-            locked.status = _STATUS_CANCELLED
-            locked.cancellation_reason = _CANCEL_REASON_USER
+        #
+        # ``refresh(with_for_update=True)`` — NOT a plain locked SELECT.
+        # ``get_analysis`` above loaded this row into the session's
+        # identity map; a ``select(...).with_for_update()`` would take
+        # the DB lock but hand back the cached instance with its STALE
+        # attributes (the load-bearing gotcha documented in
+        # services/workspace_locks.py), so the lock-loser would still
+        # see 'running' and clobber the winner's committed terminal
+        # state. ``refresh`` always repopulates from the locked read —
+        # same protocol as reporter.py's persist guards.
+        try:
+            await db.refresh(row, with_for_update=True)
+        except ObjectDeletedError:
+            # Hard-deleted between the reads (context/workspace CASCADE)
+            # — same disclosure shape as the initial lookup miss.
+            raise HTTPException(
+                status_code=404, detail=f"Analysis run {run_id} not found"
+            ) from None
+        if row.status == _STATUS_RUNNING:
+            row.status = _STATUS_CANCELLED
+            row.cancellation_reason = _CANCEL_REASON_USER
             # finished_at is naive UTC — utcnow() returns naive UTC by
             # repo convention.
             from utils.datetime import utcnow
 
-            locked.finished_at = utcnow()
+            row.finished_at = utcnow()
             # Commit FIRST — releases the row lock so the background
             # task's own persist path can proceed and observe
             # 'cancelled' instead of deadlocking on the cancel.
@@ -713,8 +722,6 @@ async def cancel_run(
                 run_id=str(run_id),
                 cancelled_in_process=cancelled_in_process,
             )
-        if locked is not None:
-            row = locked
     # else: already terminal → return current state without flipping anything.
 
     return AnalysisCancelResponse.model_validate(row)

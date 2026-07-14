@@ -1074,6 +1074,47 @@ class ContextService:
             )
         )
 
+        # #1241/#1243: cancel any in-flight analysis run for this context.
+        # Deleting a context is the strongest "stop everything" signal a
+        # user can send — without this, the background pipeline kept
+        # charging the workspace's BYOK key for minutes and then persisted
+        # a full result set for a context that no longer exists (invisible
+        # to every reader after #1243's liveness join). Flipping the row
+        # makes the reporter's locked cancel guard skip the persist;
+        # cancel_run_task stops the in-process compute (best-effort — see
+        # tasks/analysis_tasks.py for the multi-worker caveat).
+        from models.analysis import MemoryAnalysis
+
+        running_analyses = list(
+            (
+                await self.db.execute(
+                    select(MemoryAnalysis).where(
+                        and_(
+                            MemoryAnalysis.workspace_id == context.workspace_id,
+                            MemoryAnalysis.context_id == context.id,
+                            MemoryAnalysis.status == "running",
+                        )
+                    )
+                )
+            )
+            .scalars()
+            .all()
+        )
+        for run in running_analyses:
+            run.status = "cancelled"
+            run.cancellation_reason = "context_deleted"
+            run.finished_at = utcnow()
+        if running_analyses:
+            from tasks.analysis_tasks import cancel_run_task
+
+            for run in running_analyses:
+                cancel_run_task(run.id)
+            logger.info(
+                "context_delete_cancelled_running_analyses",
+                context_id=str(context.id),
+                cancelled_run_ids=[str(r.id) for r in running_analyses],
+            )
+
         # Issue #84: Soft-delete context record (previously hard-deleted)
         context.deleted_at = utcnow()
         context.deleted_by = user_id
