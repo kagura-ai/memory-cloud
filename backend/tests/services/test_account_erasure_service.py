@@ -954,3 +954,29 @@ class TestDeletePostgresSweep:
         assert counts["context_read_attributions"] == 3
         swept_models = [call.args[0] for call in svc._count_and_delete.await_args_list]
         assert ContextReadAttribution in swept_models
+
+    @pytest.mark.asyncio
+    async def test_sweep_pseudonymizes_surviving_agents(self):
+        """#1274 (RFC-0002 P0-1): agents.owner_user_id must be pseudonymized
+        for erased subjects whose registry rows survive (agents in co-owned,
+        transferred workspaces — sole-owner workspaces cascade the rows away
+        before this step)."""
+        from models.agent import Agent
+
+        svc = _service()
+        svc._count_and_delete = AsyncMock(return_value=0)
+        svc._pseudonymize_field = AsyncMock(return_value=2)
+        svc.db.delete = AsyncMock()
+        svc.db.commit = AsyncMock()
+        target = _user()
+
+        counts = await svc._delete_postgres(target)
+
+        assert counts["agents_pseudonymized"] == 2
+        pseudonymized = [call.args[0] for call in svc._pseudonymize_field.await_args_list]
+        assert Agent in pseudonymized
+        agent_call = next(
+            call for call in svc._pseudonymize_field.await_args_list if call.args[0] is Agent
+        )
+        assert agent_call.args[1] is Agent.owner_user_id
+        assert agent_call.args[2] == target.user_id

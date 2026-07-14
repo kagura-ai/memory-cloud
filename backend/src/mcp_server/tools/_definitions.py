@@ -2125,6 +2125,153 @@ Returns: {status, key, value, found}. found is false (value null) when the key i
                 "required": ["context_id"],
             },
         },
+        # Issue #1274 (RFC-0002 P0-1): Agent Registry — owner/admin-gated CRUD
+        # over the workspace-scoped agents table. Agents are resources, not
+        # principals: enforcement attaches to member keys in P0-2.
+        {
+            "name": "register_agent",
+            "description": """Register an AI agent in the workspace Agent Registry (owner/admin only, Issue #1274).
+
+An agent is a workspace-scoped registry entry (name unique per workspace) that
+anchors context bindings, agent-bound credentials, bootstrap, and audit
+correlation (RFC-0002). It is a resource, NOT a principal — it never
+authenticates by itself. New agents start with status='active' and
+enforcement_mode='enforce'.
+
+Returns: {status, agent: {id, name, status, enforcement_mode, ...}}.""",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "name": {
+                        "type": "string",
+                        "description": "Workspace-unique agent name (max 255 chars).",
+                    },
+                    "description": {
+                        "type": "string",
+                        "description": "Optional free-text description (max 10000 chars).",
+                    },
+                    "framework": {
+                        "type": "string",
+                        "description": "Optional framework tag, e.g. 'claude-code', 'langgraph' (max 100 chars).",
+                    },
+                    "environment": {
+                        "type": "string",
+                        "description": "Optional deployment environment, e.g. 'production', 'staging' (max 100 chars).",
+                    },
+                    "version": {
+                        "type": "string",
+                        "description": "Optional agent build/prompt version (max 100 chars).",
+                    },
+                },
+                "required": ["name"],
+            },
+        },
+        {
+            "name": "list_agents",
+            "readOnly": True,
+            "description": """List the workspace's registered agents (owner/admin only, Issue #1274).
+
+Returns every Agent Registry row in the active workspace, newest first,
+including status (active|suspended|retired) and enforcement_mode
+(shadow|enforce).
+
+Returns: {status, agents: [...], count}.""",
+            "inputSchema": {
+                "type": "object",
+                "properties": {},
+            },
+        },
+        {
+            "name": "get_agent",
+            "readOnly": True,
+            "description": """Fetch one registered agent by id (owner/admin only, Issue #1274).
+
+Returns: {status, agent: {id, name, status, enforcement_mode, ...}}.""",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "agent_id": {
+                        "type": "string",
+                        "format": "uuid",
+                        "description": "Agent UUID from register_agent/list_agents.",
+                    },
+                },
+                "required": ["agent_id"],
+            },
+        },
+        {
+            "name": "update_agent",
+            "description": """Update a registered agent, including lifecycle transitions (owner/admin only, Issue #1274).
+
+status is the fail-closed kill switch: 'suspended'/'retired' agents cause
+every key bound to them to be rejected at verify time (P0-2). Setting
+enforcement_mode from 'enforce' to 'shadow' is an audited privilege-widening
+event (bindings stop being enforced and are only logged).
+
+Returns: {status, agent, changed: [field, ...]}.""",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "agent_id": {
+                        "type": "string",
+                        "format": "uuid",
+                        "description": "Agent UUID to update.",
+                    },
+                    "name": {
+                        "type": "string",
+                        "description": "New workspace-unique name (max 255 chars).",
+                    },
+                    "description": {
+                        "type": "string",
+                        "description": "New description; null clears it (max 10000 chars).",
+                    },
+                    "framework": {
+                        "type": "string",
+                        "description": "New framework tag; null clears it (max 100 chars).",
+                    },
+                    "environment": {
+                        "type": "string",
+                        "description": "New environment; null clears it (max 100 chars).",
+                    },
+                    "version": {
+                        "type": "string",
+                        "description": "New version; null clears it (max 100 chars).",
+                    },
+                    "status": {
+                        "type": "string",
+                        "enum": ["active", "suspended", "retired"],
+                        "description": "Lifecycle kill switch (fail-closed for bound keys).",
+                    },
+                    "enforcement_mode": {
+                        "type": "string",
+                        "enum": ["shadow", "enforce"],
+                        "description": "Binding enforcement ramp; enforce→shadow is audited as widening.",
+                    },
+                },
+                "required": ["agent_id"],
+            },
+        },
+        {
+            "name": "delete_agent",
+            "description": """Hard-delete an Agent Registry row (owner/admin only, Issue #1274).
+
+Prefer update_agent(status='retired') for operational retirement — delete is
+permanent and (from P0-2 on) cascades every API key bound to the agent
+(fail-closed).
+
+Returns: {status, deleted, agent_id}.""",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "agent_id": {
+                        "type": "string",
+                        "format": "uuid",
+                        "description": "Agent UUID to delete.",
+                    },
+                },
+                "required": ["agent_id"],
+            },
+        },
         # Issue #1128: zero-knowledge secret store. The server stores opaque age
         # ciphertext + public recipient keys only and NEVER decrypts. Encryption
         # and decryption happen client-side (the `kagura secret` CLI / SDK).

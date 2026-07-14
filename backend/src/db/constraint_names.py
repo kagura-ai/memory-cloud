@@ -44,6 +44,14 @@ EXTERNAL_API_KEYS_WORKSPACE_PROVIDER_ENABLED_UNIQUE = (
 # keys with the same key_name in one workspace). Created by migration a99.
 EXTERNAL_API_KEYS_WORKSPACE_KEY_NAME_UNIQUE = "uq_external_api_keys_workspace_key_name"
 
+# Issue #1274: unique index on agents (workspace_id, name). Created by
+# migration e63 + mirrored in models.agent.Agent.__table_args__. Used by
+# AgentRegistryService (create / rename) to close the duplicate-check→insert
+# TOCTOU race: concurrent registration of the same name loses the race at
+# flush, and the IntegrityError is mapped to the same ConflictError (409)
+# the pre-check produces; other IntegrityErrors propagate unchanged.
+AGENTS_WORKSPACE_NAME_UNIQUE = "uq_agents_workspace_name"
+
 
 def integrity_error_constraint_name(error: IntegrityError) -> str | None:
     """Return the PostgreSQL constraint name for ``error``, or ``None``.

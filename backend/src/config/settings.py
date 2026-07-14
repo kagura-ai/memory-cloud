@@ -116,6 +116,22 @@ class Settings(BaseSettings):
         default=60,
         description="Min seconds between contexts.last_used_at writes per context (Issue #1257)",
     )
+    # Issue #1274 (RFC-0002 P0-1): same pattern for agents.last_seen_at — the
+    # correlation/verify paths (P0-2/P0-4) mark the agent as seen, but a hot
+    # agent authenticates on every tool call, so the write is throttled to at
+    # most one per agent per window.
+    agent_last_seen_throttle_seconds: int = Field(
+        default=60,
+        description="Min seconds between agents.last_seen_at writes per agent (Issue #1274)",
+    )
+    # Issue #1274: registry rows are cheap control-plane metadata, so the cap
+    # is an anti-abuse guard (unbounded enumeration surface), not a plan knob.
+    # Applies to all plans; raise per deployment if a tenant legitimately runs
+    # a larger agent fleet.
+    max_agents_per_workspace: int = Field(
+        default=100,
+        description="Max registered agents per workspace (Issue #1274)",
+    )
     # ai-worker (kagura-chat-bridge) service auth. The worker presents this
     # as a Bearer token to GET /api/v1/workers/config (Spec 2026-06-02). Empty
     # disables the worker config endpoint (fail-closed). Use: openssl rand -hex 32.

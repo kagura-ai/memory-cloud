@@ -59,6 +59,11 @@ DERIVED_MOAT_TABLES: frozenset[str] = frozenset(
 
 OPERATIONAL_TABLES: frozenset[str] = frozenset(
     {
+        # Agent Registry (#1274, RFC-0002 P0-1) — control-plane metadata about
+        # agent deployments (kill switch, enforcement mode); no user knowledge
+        # content, no learned structure. Governed by the auth/security regime +
+        # GDPR erasure (workspace cascade + owner_user_id pseudonymization).
+        "agents",
         "users",
         "user_oauth_providers",
         "oauth_authorization_codes",
