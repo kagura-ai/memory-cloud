@@ -361,6 +361,15 @@ class AnalysisOrchestrator:
         try:
             await self.db.flush()
         except IntegrityError as exc:
+            # Only the partial unique index means "lost the race with a
+            # concurrent start" — other IntegrityErrors (e.g. the contexts
+            # CASCADE FK after a mid-request context delete, or the
+            # llm_pricing RESTRICT FK) are NOT a conflicting run and must
+            # not be translated to a 409 telling the user to wait for a
+            # run that does not exist. Re-raise those for the generic
+            # 500 path.
+            if "uq_memory_analyses_one_running" not in str(exc.orig):
+                raise
             # Lost the race with a concurrent start: the partial unique
             # index ``uq_memory_analyses_one_running`` rejected a second
             # 'running' row for this (workspace, context) — the SELECT

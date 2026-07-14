@@ -845,3 +845,54 @@ class TestCheckMemoryAnalysisAccessMcp:
                 require_quota=False,
             )
         assert exc.value.status_code == 403
+
+
+# ---------------------------------------------------------------------------
+# #1240 — the quota gate serializes concurrent evaluations per workspace
+# ---------------------------------------------------------------------------
+
+
+class TestQuotaAdvisoryLock:
+    @pytest.mark.asyncio
+    async def test_quota_check_acquires_advisory_xact_lock(self, db_session, pro_workspace):
+        """#1240: the gate MUST hold a pg advisory xact lock through the
+        quota COUNT — this is the whole fix for the concurrent-start
+        quota over-admission race (the partial unique index only guards
+        same-context duplicates, not the per-workspace daily cap).
+        Deleting the lock statement makes this fail.
+        """
+        from sqlalchemy import text as sql_text
+
+        from auth.analysis_gates import check_memory_analysis_quota
+
+        before = int(
+            (
+                await db_session.execute(
+                    sql_text(
+                        "SELECT count(*) FROM pg_locks "
+                        "WHERE locktype = 'advisory' AND pid = pg_backend_pid()"
+                    )
+                )
+            ).scalar()
+            or 0
+        )
+        await check_memory_analysis_quota(
+            db_session,
+            workspace_id=pro_workspace.id,
+            user_timezone="UTC",
+        )
+        # The xact lock is held until this transaction ends, so it must
+        # be visible from within the same (still-open) transaction.
+        after = int(
+            (
+                await db_session.execute(
+                    sql_text(
+                        "SELECT count(*) FROM pg_locks "
+                        "WHERE locktype = 'advisory' AND pid = pg_backend_pid()"
+                    )
+                )
+            ).scalar()
+            or 0
+        )
+        assert after > before, "quota gate did not acquire the advisory xact lock"
+        await db_session.rollback()

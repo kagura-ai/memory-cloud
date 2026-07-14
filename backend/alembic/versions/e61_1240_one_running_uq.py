@@ -15,8 +15,16 @@ but the NEWEST running row per pair as failed first — the older ones are by
 definition abandoned (a genuinely live run would have refused to start while
 they were running).
 
-Blue-green safety: additive index + a data repair on rows old app code only
-ever reads by id or lists; old app code keeps working unchanged.
+Blue-green safety: additive index + a data repair. Two residual windows
+while OLD app code still serves traffic (both self-heal, neither corrupts):
+
+1. Old code can commit a fresh duplicate 'running' pair between the repair
+   UPDATE's snapshot and the index build — CREATE UNIQUE INDEX then fails
+   and the migration transaction rolls back; RE-RUNNING the deploy repairs
+   the new duplicate and succeeds.
+2. Once the index exists, old code losing the start race surfaces a raw
+   IntegrityError (500) instead of the new code's 409 translation — a
+   correct rejection with a rougher status code, gone after cutover.
 
 Revision ID: e61_1240_one_running_uq
 Revises: e60_1228_read_attributions

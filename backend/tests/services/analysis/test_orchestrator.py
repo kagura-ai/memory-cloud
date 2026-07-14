@@ -744,3 +744,52 @@ class TestOneRunningPartialUniqueIndex:
                     user_id="u1",
                     params=AnalysisParams(),
                 )
+
+
+class TestStartIntegrityErrorScoping:
+    @pytest.mark.asyncio
+    async def test_foreign_key_integrity_error_not_translated_to_conflict(
+        self, db_session, monkeypatch
+    ) -> None:
+        """#1240 review: only the one-running unique index means "lost the
+        race". An FK violation (context deleted mid-request, pricing row
+        gone) must NOT become a 409 telling the user to wait for a run
+        that does not exist — it re-raises for the generic 500 path.
+        """
+        service = AnalysisOrchestrator(db_session)
+        ws_id = uuid4()
+        ctx_id = uuid4()
+        await _seed_workspace_context(db_session, ws_id, ctx_id)
+        row = LLMPricing(
+            provider="openai",
+            model="gpt-5-nano",
+            unit_type="input_tokens",
+            price_per_unit="0.001",
+            currency="USD",
+            effective_from=datetime(2024, 1, 1),
+        )
+        db_session.add(row)
+        await db_session.flush()
+
+        async def fk_violating_flush(*args, **kwargs):
+            raise IntegrityError(
+                "INSERT INTO memory_analyses ...",
+                {},
+                Exception(
+                    'insert or update on table "memory_analyses" violates '
+                    'foreign key constraint "memory_analyses_context_id_fkey"'
+                ),
+            )
+
+        monkeypatch.setattr(db_session, "flush", fk_violating_flush)
+        with patch(
+            "services.analysis.orchestrator.assert_openai_byok_key_available",
+            return_value=None,
+        ):
+            with pytest.raises(IntegrityError):
+                await service.start(
+                    workspace_id=ws_id,
+                    context_id=ctx_id,
+                    user_id="u1",
+                    params=AnalysisParams(),
+                )

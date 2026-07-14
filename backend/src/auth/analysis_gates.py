@@ -159,11 +159,13 @@ async def check_memory_analysis_quota(
     # handler share one session per request), so a racing second request
     # blocks HERE until the first request's row is committed and its
     # COUNT below sees it. Without the lock, N concurrent starts all
-    # read the pre-insert count and exceed the daily cap. Taken AFTER
-    # ``get_effective_quotas``: that service may commit internally when
-    # it recalculates addon columns, which would release an
-    # earlier-acquired xact lock. Same precedent as
-    # ``connector_provisioning.py``'s provisioning lock.
+    # read the pre-insert count and exceed the daily cap. Load-bearing
+    # invariant: NOTHING between this lock and the post-INSERT commit
+    # may commit the session (a commit releases an xact lock) —
+    # ``get_effective_quotas`` is a pure read since #570 and runs before
+    # the lock anyway; keep any future recalc/commit paths above this
+    # line. Same precedent as ``connector_provisioning.py``'s
+    # provisioning lock.
     await db.execute(
         text("SELECT pg_advisory_xact_lock(hashtextextended(:key, 0))").bindparams(
             key=f"memory_analysis_quota:{workspace_id}"
