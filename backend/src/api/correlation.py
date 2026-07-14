@@ -88,6 +88,11 @@ def validate_correlation_token(value: Any) -> str | None:
     Charset ``[A-Za-z0-9._-]``, length ≤128 (design F4). Invalid = dropped
     (advisory data, never a request failure).
     """
+    if value is None:
+        # Absent baggage key (bag.get(...) -> None) is the overwhelmingly common
+        # case, not an anomaly — drop silently. Only a *present* malformed value
+        # warrants the structured drop warning below (Copilot review, #1277).
+        return None
     if not isinstance(value, str) or not value or len(value) > _CORRELATION_TOKEN_MAX_LEN:
         # Structured warning on drop (design F4 §validation) — advisory, never
         # a request failure. Never log the token verbatim (it may, despite the

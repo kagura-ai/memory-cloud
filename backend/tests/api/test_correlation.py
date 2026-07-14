@@ -10,7 +10,7 @@ claims reach only a keyed-hash metadata field, never the agent_id column.
 from __future__ import annotations
 
 import uuid
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
@@ -77,6 +77,24 @@ class TestTokenValidation:
     @pytest.mark.parametrize("bad", [None, "", "x" * 129, "has space", "sess/1", "sess:1", 42])
     def test_invalid_dropped(self, bad):
         assert validate_correlation_token(bad) is None
+
+    def test_absent_value_is_silent(self):
+        # None = absent baggage key (bag.get -> None), the common case: no warn
+        # (Copilot review, #1277 — was spamming correlation_token_dropped).
+        import api.correlation as mod
+
+        with patch.object(mod.logger, "warning") as warn:
+            assert validate_correlation_token(None) is None
+        warn.assert_not_called()
+
+    @pytest.mark.parametrize("bad", ["", "x" * 129, "has space", 42])
+    def test_present_malformed_still_warns(self, bad):
+        # A *present* malformed value must still emit the structured drop warning.
+        import api.correlation as mod
+
+        with patch.object(mod.logger, "warning") as warn:
+            assert validate_correlation_token(bad) is None
+        warn.assert_called_once()
 
 
 class TestBuild:
