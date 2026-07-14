@@ -36,7 +36,9 @@ def _patched(log_tool_usage: AsyncMock):
     async def mock_get_db():
         yield AsyncMock()
 
-    shared_context = MagicMock()
+    # last_used_at must be a real sentinel (not a MagicMock attribute): #1257
+    # touches the resolved context's timestamp with datetime math.
+    shared_context = MagicMock(last_used_at=None)
 
     service = MagicMock()
     service.recall = AsyncMock(return_value=_recall_result())

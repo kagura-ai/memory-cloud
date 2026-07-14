@@ -9,11 +9,13 @@ import logging
 import time
 from collections.abc import Coroutine
 from contextvars import ContextVar
+from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING, Any
 from uuid import UUID
 
 from mcp.types import TextContent
 
+from config.settings import get_settings
 from mcp_server.tools._constants import T, get_tool_timeout
 
 if TYPE_CHECKING:
@@ -269,6 +271,68 @@ async def _resolve_context_for_read(
             context_id,
             "Context not found or you don't have access to it.",
         ) from exc
+
+
+async def _touch_context_last_used(db: "AsyncSession", context: Any) -> bool:
+    """Throttled touch of ``Context.last_used_at`` (Issue #1257).
+
+    ``last_used_at`` feeds the ``list_contexts`` recency sort but was never
+    written after row creation, so it was effectively ``created_at``. Memory
+    operations call this on the Context row they already resolved. Same
+    hot-row reasoning as the api_keys throttle (#947): the in-memory precheck
+    against the loaded row costs no query at all while the stored timestamp is
+    fresher than the window.
+
+    CONTRACT — call this immediately before the handler's ``db.commit()``, and
+    when touching several contexts in one request, in ascending ``id`` order:
+
+    - The write is a single guarded Core UPDATE, not a dirty ORM attribute.
+      A dirty attribute would be autoflushed into the service pipeline (row
+      lock held across embedding/Qdrant I/O), persisted by any collaborator
+      that commits the shared session mid-request (e.g.
+      ``ContextSearchConfigRepository.create_or_get``), and would fire
+      ``Context.updated_at``'s ``onupdate=func.now()``. Executing at commit
+      time bounds the row lock to one round-trip and keeps error paths clean.
+    - ``updated_at`` is pinned to itself in SET so the column-level
+      ``onupdate`` does NOT fire — a recall must not rewrite the context's
+      "last modified" timestamp shown in the REST API.
+    - The WHERE clause re-checks the throttle so two concurrent requests that
+      both pass the in-memory precheck race safely (second one matches 0 rows).
+    - Ascending-id ordering across multiple touches keeps concurrent
+      overlapping cross-context recalls deadlock-free.
+
+    tz note: this column is ``DateTime(timezone=True)`` — one of the few AWARE
+    columns (see .claude/rules/backend.md) — so the touch writes an aware UTC
+    value; ``list_contexts`` sorts against an aware ``_UTC_MIN`` sentinel. A
+    naive stored value (nullable legacy data / direct-SQL writes) is
+    normalized to UTC rather than crashing the precheck.
+
+    Args:
+        db: The handler's session (the UPDATE rides its next commit).
+        context: Resolved ORM ``Context`` (only ``id``/``last_used_at`` read).
+
+    Returns:
+        True if the guarded UPDATE was issued, False if throttled.
+    """
+    now = datetime.now(UTC)
+    last = context.last_used_at
+    if last is not None and last.tzinfo is None:
+        last = last.replace(tzinfo=UTC)
+    throttle = timedelta(seconds=get_settings().context_last_used_throttle_seconds)
+    if last is not None and now - last < throttle:
+        return False
+
+    from sqlalchemy import or_, update
+
+    from models.auth import Context
+
+    await db.execute(
+        update(Context)
+        .where(Context.id == context.id)
+        .where(or_(Context.last_used_at.is_(None), Context.last_used_at <= now - throttle))
+        .values(last_used_at=now, updated_at=Context.updated_at)
+    )
+    return True
 
 
 def _resolve_context_id(arg_context_id: str) -> UUID:

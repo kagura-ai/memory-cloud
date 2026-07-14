@@ -20,6 +20,7 @@ from mcp_server.tools._helpers import (
     _resolve_context,
     _resolve_context_for_read,
     _resolve_context_id,
+    _touch_context_last_used,
     _validate_memory_id,
     execute_with_timeout,
 )
@@ -92,6 +93,9 @@ async def handle_remember(
             await _log_tool_usage(
                 db, user_id, "remember", start_time, 200, current_context_id, workspace_id
             )
+            # #1257: memory ops mark the context as used (guarded UPDATE at
+            # commit time — see the helper's contract).
+            await _touch_context_last_used(db, current_context)
             await db.commit()
 
             return [
@@ -194,6 +198,9 @@ async def handle_update_memory(
             await _log_tool_usage(
                 db, user_id, "update_memory", start_time, 200, current_context_id, workspace_id
             )
+            # #1257 review: update_memory is a memory op too — a context kept
+            # alive purely by external_id upserts must not sort as never-used.
+            await _touch_context_last_used(db, current_context)
             await db.commit()
 
             return [
@@ -456,6 +463,10 @@ async def handle_recall(
             # Issue #81: Cross-context recall — context_ids overrides context_id
             context_ids_arg = args.get("context_ids")
             cross_context_ids: list[UUID] | None = None
+            # #1257: every context read by this call gets its last_used_at
+            # touched — but only at commit time on the success path (see the
+            # helper's contract), so collect the resolved rows here.
+            secondary_contexts: list[Any] = []
 
             if isinstance(context_ids_arg, list) and context_ids_arg:
                 # #1228 review: enforce the inputSchema's maxItems server-side
@@ -508,6 +519,7 @@ async def handle_recall(
                             "All contexts in cross-context recall must share the "
                             "same privacy setting (all shared or all private).",
                         )
+                    secondary_contexts.append(cross_ctx)
 
                 # Validate all contexts use the same embedding model
                 from repositories.config_repository import ContextSearchConfigRepository
@@ -589,6 +601,13 @@ async def handle_recall(
                 # rows so per-context read visibility sees them.
                 attributed_context_ids=(cross_context_ids[1:] if cross_context_ids else None),
             )
+            # #1257: mark every recalled context as used. Ascending-id order
+            # keeps concurrent overlapping cross-context recalls deadlock-free
+            # (see the helper's contract).
+            for touch_ctx in sorted(
+                [current_context, *secondary_contexts], key=lambda c: str(c.id)
+            ):
+                await _touch_context_last_used(db, touch_ctx)
             await db.commit()
 
             response_data: dict[str, Any] = {
@@ -696,6 +715,9 @@ async def handle_forget(
             await _log_tool_usage(
                 db, user_id, "forget", start_time, 200, current_context_id, workspace_id
             )
+            # #1257 review: forget is a memory op too — deletion-only
+            # maintenance still counts as using the context.
+            await _touch_context_last_used(db, current_context)
             await db.commit()
 
             return [
@@ -747,7 +769,7 @@ async def handle_reference(
             # Issue #708 bundle: migrate read paths to the CWE-639-uniform
             # resolver so deny reasons (private non-creator, not a workspace
             # member, etc.) cannot be distinguished by callers.
-            await _resolve_context_for_read(db, user_id, current_context_id)
+            current_context = await _resolve_context_for_read(db, user_id, current_context_id)
 
             service = MemoryService(db)
             try:
@@ -791,6 +813,9 @@ async def handle_reference(
             await _log_tool_usage(
                 db, user_id, "reference", start_time, 200, current_context_id, workspace_id
             )
+            # #1257: reference marks the context as used (guarded UPDATE at
+            # commit time; the memory_not_found return above never touches).
+            await _touch_context_last_used(db, current_context)
             await db.commit()
 
             return [

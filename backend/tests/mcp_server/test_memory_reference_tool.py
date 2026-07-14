@@ -70,7 +70,12 @@ async def test_reference_surfaces_links_scope_provenance():
     with ExitStack() as stack:
         stack.enter_context(patch("db.base.get_db", new=gen))
         stack.enter_context(
-            patch("mcp_server.tools.memory._resolve_context_for_read", new=AsyncMock())
+            # last_used_at must be a real sentinel (not a MagicMock attribute):
+            # #1257 touches the resolved context's timestamp with datetime math.
+            patch(
+                "mcp_server.tools.memory._resolve_context_for_read",
+                new=AsyncMock(return_value=MagicMock(last_used_at=None)),
+            )
         )
         stack.enter_context(patch("mcp_server.tools.memory._log_tool_usage", new=AsyncMock()))
         stack.enter_context(patch("services.memory_service.MemoryService", return_value=svc))
