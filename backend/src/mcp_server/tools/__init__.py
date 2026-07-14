@@ -59,6 +59,12 @@ _TOOLS_WITHOUT_CONTEXT_ID = frozenset(
         "secret_get",
         "secret_list",
         "secret_revoke_grant",
+        # Issue #1274: Agent Registry — workspace-scoped, uses agent_id.
+        "register_agent",
+        "list_agents",
+        "get_agent",
+        "update_agent",
+        "delete_agent",
     }
 )
 
@@ -95,6 +101,10 @@ _RATE_LIMIT_EXEMPT_TOOLS = frozenset(
         "secret_get",
         "secret_list",
         "secret_revoke_grant",
+        # Issue #1274: read-only registry introspection (owner/admin-gated;
+        # no embedding/LLM cost).
+        "list_agents",
+        "get_agent",
     }
 )
 
@@ -109,6 +119,13 @@ _TOOL_REGISTRY: dict[str, Any] | None = None
 
 def _build_registry() -> dict[str, Any]:
     """Build tool name → handler mapping."""
+    from mcp_server.tools.agent_registry import (
+        handle_delete_agent,
+        handle_get_agent,
+        handle_list_agents,
+        handle_register_agent,
+        handle_update_agent,
+    )
     from mcp_server.tools.analysis import (
         handle_analyze_context,
         handle_get_active_analysis,
@@ -223,6 +240,13 @@ def _build_registry() -> dict[str, Any]:
         "secret_get": handle_secret_get,
         "secret_list": handle_secret_list,
         "secret_revoke_grant": handle_secret_revoke_grant,
+        # Issue #1274 (RFC-0002 P0-1): Agent Registry — owner/admin-gated CRUD
+        # sharing AgentRegistryService with REST /api/v1/agents.
+        "register_agent": handle_register_agent,
+        "list_agents": handle_list_agents,
+        "get_agent": handle_get_agent,
+        "update_agent": handle_update_agent,
+        "delete_agent": handle_delete_agent,
     }
 
 

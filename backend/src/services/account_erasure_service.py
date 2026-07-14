@@ -45,6 +45,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from config.settings import get_settings
 from db.qdrant import delete_user_points
 from db.redis import clear_co_activations, clear_user_rate_limits, get_redis_client
+from models.agent import Agent
 from models.auth import (
     APIKey,
     AuditLog,
@@ -1019,6 +1020,14 @@ class AccountErasureService:
         # contexts/memories/edges/etc.
         counts["workspaces"] = await self._count_and_delete(
             Workspace, Workspace.owner_user_id == user_id
+        )
+
+        # Pseudonymize agents.owner_user_id (#1274, RFC-0002 P0-1) AFTER the
+        # workspace cascade so the count reflects only survivors — agents in
+        # co-owned (transferred) workspaces whose rows outlive the erased
+        # subject. Same legal-retention posture as plan_changes.changed_by.
+        counts["agents_pseudonymized"] = await self._pseudonymize_field(
+            Agent, Agent.owner_user_id, user_id
         )
 
         # Finally the user row itself.

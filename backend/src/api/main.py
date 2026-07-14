@@ -499,6 +499,7 @@ from api.routes import (  # noqa: E402
     admin_signup_gate,  # Issue #358: admin-configurable signup gate
     admin_sleep,  # Issue #247: Manual Sleep Maintenance trigger
     agent_state,  # Issue #906: REST surface for the agent session-state lane
+    agents,  # Issue #1274: Agent Registry CRUD (RFC-0002 P0-1)
     analyses,  # Issue #496: Memory Analysis API endpoints
     api_keys,
     attachments,  # Issue #330 → deprecated by #555 (returns HTTP 410 Gone)
@@ -570,6 +571,10 @@ app.include_router(share_keys.recall_router, prefix="/api/v1")
 
 # Issue #1128: zero-knowledge secret store (owner/admin management + member fetch).
 app.include_router(secrets.router, prefix="/api/v1")
+
+# Issue #1274 (RFC-0002 P0-1): Agent Registry — owner/admin-gated CRUD over
+# the workspace-scoped agents table (kill switch + enforcement ramp).
+app.include_router(agents.router, prefix="/api/v1")
 
 # Admin routes (Issue #43 - User management and system-wide stats)
 app.include_router(admin.router, prefix="/api/v1")
