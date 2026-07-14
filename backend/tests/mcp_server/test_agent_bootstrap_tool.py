@@ -63,6 +63,7 @@ def _enter(stack, *, principal_error=None, envelope=None):
             "correlation": {},
         }
     )
+    svc.audit_on_behalf_of = AsyncMock()
     stack.enter_context(
         patch("services.agent_bootstrap_service.AgentBootstrapService", return_value=svc)
     )

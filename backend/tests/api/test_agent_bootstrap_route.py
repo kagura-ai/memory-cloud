@@ -55,6 +55,7 @@ def _svc(monkeypatch, *, principal_error=None, context_error=None, envelope=None
     inst.build_envelope = AsyncMock(
         return_value=envelope or {"status": "success", "degraded": False, "components": {}}
     )
+    inst.audit_on_behalf_of = AsyncMock()
     monkeypatch.setattr(
         "services.agent_bootstrap_service.AgentBootstrapService",
         MagicMock(return_value=inst),
@@ -65,9 +66,7 @@ def _svc(monkeypatch, *, principal_error=None, context_error=None, envelope=None
 @pytest.mark.asyncio
 async def test_success_returns_envelope(db, monkeypatch):
     _svc(monkeypatch)
-    result = await agent_bootstrap(
-        agent_id=AGENT_ID, body=BootstrapRequest(), user=USER, db=db
-    )
+    result = await agent_bootstrap(agent_id=AGENT_ID, body=BootstrapRequest(), user=USER, db=db)
     assert result["status"] == "success"
     db.commit.assert_awaited_once()
 

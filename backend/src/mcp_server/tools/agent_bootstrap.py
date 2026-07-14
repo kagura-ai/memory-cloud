@@ -118,6 +118,12 @@ async def handle_get_agent_bootstrap(
                 operation_name="get_agent_bootstrap",
             )
 
+            # #1276: record an operator (owner/admin) "on behalf of" bootstrap
+            # so it cannot masquerade as the agent's own activity (no-op for
+            # agent-bound calls). Committed atomically with the usage row.
+            await service.audit_on_behalf_of(
+                agent=agent, principal=principal, session_id=params.session_id
+            )
             await _log_tool_usage(
                 db, user_id, "get_agent_bootstrap", start_time, 200, context.id, workspace_id
             )

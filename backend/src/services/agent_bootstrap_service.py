@@ -314,13 +314,58 @@ class AgentBootstrapService:
     # ------------------------------------------------------------------
 
     async def _component(self, name: str, fn: Any) -> dict[str, Any]:
-        """Run one component fail-soft: {status: ok, ...} or {status: error}."""
+        """Run one component fail-soft: {status: ok, ...} or {status: error}.
+
+        Each component runs inside a SAVEPOINT (``begin_nested``): a genuine
+        Postgres-level error in one component (lock timeout, transient blip)
+        rolls back ONLY that component's partial work and leaves the shared
+        session usable, so the remaining components — and the final commit —
+        do not hit ``PendingRollbackError``. Without the savepoint, a single
+        component's DB error would poison the transaction and deny the agent
+        everything, defeating the fail-soft design (the ``get_db()``
+        auto-commit trap; inner code review). The #1255 per-event SAVEPOINT
+        pattern.
+        """
         try:
-            body = await fn()
+            async with self.db.begin_nested():
+                body = await fn()
             return {"status": STATUS_OK, **body}
-        except Exception as exc:  # fail-soft per component
+        except Exception as exc:  # fail-soft per component; savepoint rolled back
             logger.error(f"bootstrap_component_failed: {name}: {exc}", exc_info=True)
             return {"status": STATUS_ERROR, "error": "component_error"}
+
+    async def audit_on_behalf_of(
+        self, *, agent: Any, principal: BootstrapPrincipal, session_id: str | None
+    ) -> None:
+        """Write the on-behalf-of audit row for an operator bootstrap (#1276).
+
+        F2 normative: a non-agent (owner/admin) credential bootstrapping an
+        agent MUST record ``on_behalf_of`` + ``principal_type`` so operator
+        activity is distinguishable from the agent's own and cannot masquerade
+        as it. No-op for agent-bound calls (``on_behalf_of`` is None — the
+        activity IS the agent's, covered by usage + correlation). Added to the
+        session but NOT committed — the caller commits atomically.
+        """
+        if not principal.on_behalf_of:
+            return
+        from services.agent_registry_service import (
+            AUDIT_AGENT_BOOTSTRAP_ON_BEHALF,
+            add_agent_audit_row,
+        )
+
+        add_agent_audit_row(
+            self.db,
+            actor_user_id=principal.user_id,
+            actor_email=None,
+            action=AUDIT_AGENT_BOOTSTRAP_ON_BEHALF,
+            agent_id=agent.id,
+            workspace_id=principal.workspace_id,
+            metadata={
+                "principal_type": principal.principal_type,
+                "on_behalf_of": principal.on_behalf_of,
+                "session_id": session_id,
+            },
+        )
 
     async def _context_and_instructions(self, context: Any) -> tuple[dict[str, Any], str]:
         from sqlalchemy import select

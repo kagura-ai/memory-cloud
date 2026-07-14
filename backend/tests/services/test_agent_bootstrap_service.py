@@ -265,9 +265,61 @@ class TestContextResolution:
         assert e.value.code == "context_not_found"
 
 
+class TestAuditOnBehalfOf:
+    """#1276 code-review: operator (owner/admin) bootstraps MUST persist an
+    on_behalf_of audit row; agent-bound calls must not."""
+
+    @pytest.mark.asyncio
+    async def test_operator_bootstrap_writes_audit_row(self):
+        db = MagicMock()
+        svc = AgentBootstrapService(db)
+        principal = BootstrapPrincipal(
+            user_id="op",
+            workspace_id=WORKSPACE_ID,
+            principal_type="owner",
+            on_behalf_of="op",
+        )
+        recorder = MagicMock()
+        with patch("services.agent_registry_service.add_agent_audit_row", new=recorder):
+            await svc.audit_on_behalf_of(agent=_agent(), principal=principal, session_id="s1")
+        recorder.assert_called_once()
+        kwargs = recorder.call_args.kwargs
+        assert kwargs["action"] == "agent_bootstrap_on_behalf_of"
+        assert kwargs["metadata"]["on_behalf_of"] == "op"
+        assert kwargs["metadata"]["principal_type"] == "owner"
+
+    @pytest.mark.asyncio
+    async def test_agent_bootstrap_writes_no_audit_row(self):
+        db = MagicMock()
+        svc = AgentBootstrapService(db)
+        principal = BootstrapPrincipal(
+            user_id="u", workspace_id=WORKSPACE_ID, principal_type="agent"
+        )
+        recorder = MagicMock()
+        with patch("services.agent_registry_service.add_agent_audit_row", new=recorder):
+            await svc.audit_on_behalf_of(agent=_agent(), principal=principal, session_id=None)
+        recorder.assert_not_called()
+
+
 # ---------------------------------------------------------------------------
 # Envelope composition + fail-soft
 # ---------------------------------------------------------------------------
+
+
+def _savepoint_db() -> MagicMock:
+    """A db mock whose begin_nested() is a working async context manager,
+    so _component's per-component SAVEPOINT wrapper runs under test."""
+
+    class _SP:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *exc):
+            return False
+
+    db = MagicMock()
+    db.begin_nested = MagicMock(side_effect=lambda: _SP())
+    return db
 
 
 class TestEnvelope:
@@ -305,7 +357,7 @@ class TestEnvelope:
     async def test_query_absent_recall_skipped(self):
         import contextlib
 
-        svc = AgentBootstrapService(MagicMock())
+        svc = AgentBootstrapService(_savepoint_db())
         with contextlib.ExitStack() as stack:
             self._patch_components(stack)
             stack.enter_context(
@@ -325,7 +377,7 @@ class TestEnvelope:
     async def test_query_present_but_rate_limited_degrades_recall_only(self):
         import contextlib
 
-        svc = AgentBootstrapService(MagicMock())
+        svc = AgentBootstrapService(_savepoint_db())
         with contextlib.ExitStack() as stack:
             self._patch_components(stack)
             stack.enter_context(
@@ -347,7 +399,7 @@ class TestEnvelope:
     async def test_component_error_sets_degraded_but_others_return(self):
         import contextlib
 
-        svc = AgentBootstrapService(MagicMock())
+        svc = AgentBootstrapService(_savepoint_db())
         with contextlib.ExitStack() as stack:
             stack.enter_context(
                 patch.object(
@@ -391,7 +443,7 @@ class TestEnvelope:
     async def test_include_selector_limits_components(self):
         import contextlib
 
-        svc = AgentBootstrapService(MagicMock())
+        svc = AgentBootstrapService(_savepoint_db())
         with contextlib.ExitStack() as stack:
             self._patch_components(stack)
             stack.enter_context(

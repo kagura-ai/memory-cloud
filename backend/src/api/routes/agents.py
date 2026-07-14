@@ -575,5 +575,8 @@ async def agent_bootstrap(
         principal=principal,
         recall_metered=recall_metered,
     )
+    # #1276: record an operator (owner/admin) "on behalf of" bootstrap so it
+    # cannot masquerade as the agent's own activity (no-op for agent-bound).
+    await service.audit_on_behalf_of(agent=agent, principal=principal, session_id=params.session_id)
     await db.commit()
     return envelope
