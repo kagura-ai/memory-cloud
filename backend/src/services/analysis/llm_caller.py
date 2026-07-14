@@ -157,6 +157,12 @@ async def call_with_fallback(
                 provider="openai",
                 temperature=temperature,
                 max_tokens=max_tokens,
+                # #1242 strict BYOK: analysis is a paid feature — a BYOK
+                # key deleted mid-run must fail the run (ConfigurationError
+                # is not an LLMServiceError, so it escapes the fallback
+                # loop below immediately), never resolve the platform
+                # OPENAI_API_KEY env credential.
+                disallow_env_fallback=True,
             )
             return CallResult(parsed=response.parsed, response=response)
         except LLMServiceError as e:

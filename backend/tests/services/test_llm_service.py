@@ -301,3 +301,107 @@ class TestGetProvider:
         """Test unknown provider raises ConfigurationError."""
         with pytest.raises(ConfigurationError, match="Unknown LLM provider"):
             await llm_service._get_provider("user-1", "unknown")
+
+
+class TestStrictByokKeyResolution:
+    """#1242: ``disallow_env_fallback`` — strict BYOK for paid features.
+
+    The analysis labeling path requires an explicit BYOK row; the
+    ``OPENAI_API_KEY`` env var is the platform embedding credential on
+    managed SaaS, so falling back to it mid-run silently shifts BYOK
+    costs onto the platform. Mirrors the embedding-path mechanism
+    (``EmbeddingService`` #708/#1030).
+    """
+
+    @pytest.mark.asyncio
+    async def test_env_fallback_used_by_default(self, llm_service, monkeypatch):
+        """Self-host/dev contract unchanged: default resolution still
+        honors the env var when no BYOK row exists."""
+        monkeypatch.setenv("OPENAI_API_KEY", "sk-env-test-1242")
+        key = await llm_service._get_user_api_key("u1", "openai")
+        assert key == "sk-env-test-1242"
+
+    @pytest.mark.asyncio
+    async def test_disallow_env_fallback_raises_despite_env(self, llm_service, monkeypatch):
+        """Strict mode: no BYOK row → ConfigurationError even when the
+        env var is set — and the key material never leaks into the
+        error message."""
+        monkeypatch.setenv("OPENAI_API_KEY", "sk-env-test-1242")
+        with pytest.raises(ConfigurationError) as excinfo:
+            await llm_service._get_user_api_key("u1", "openai", disallow_env_fallback=True)
+        assert "sk-env-test-1242" not in str(excinfo.value)
+        assert "BYOK" in str(excinfo.value)
+
+    @pytest.mark.asyncio
+    async def test_disallow_env_fallback_with_workspace_but_no_row(
+        self, llm_service, mock_db, monkeypatch
+    ):
+        """Strict mode with a workspace that has no enabled key: the
+        DB lookup misses and the env var must still be skipped."""
+        from unittest.mock import MagicMock
+        from uuid import uuid4
+
+        monkeypatch.setenv("OPENAI_API_KEY", "sk-env-test-1242")
+        result = MagicMock()
+        result.scalar_one_or_none = MagicMock(return_value=None)
+        mock_db.execute = AsyncMock(return_value=result)
+        with pytest.raises(ConfigurationError):
+            await llm_service._get_user_api_key(
+                "u1", "openai", workspace_id=str(uuid4()), disallow_env_fallback=True
+            )
+
+    @pytest.mark.asyncio
+    async def test_disallow_env_fallback_still_resolves_db_key(
+        self, llm_service, mock_db, monkeypatch
+    ):
+        """Strict mode disables ONLY the env fallback — an enabled BYOK
+        row resolves exactly as before."""
+        from unittest.mock import MagicMock
+        from uuid import uuid4
+
+        monkeypatch.setenv("OPENAI_API_KEY", "sk-env-test-1242")
+        entry = MagicMock(encrypted_value="encrypted-blob")
+        result = MagicMock()
+        result.scalar_one_or_none = MagicMock(return_value=entry)
+        mock_db.execute = AsyncMock(return_value=result)
+
+        fake_encryptor = MagicMock()
+        fake_encryptor.decrypt = MagicMock(return_value="sk-db-key")
+        with patch("services.llm_service.get_encryptor", return_value=fake_encryptor):
+            key = await llm_service._get_user_api_key(
+                "u1", "openai", workspace_id=str(uuid4()), disallow_env_fallback=True
+            )
+        assert key == "sk-db-key"
+
+    @pytest.mark.asyncio
+    async def test_complete_json_threads_flag_to_provider_resolution(self, llm_service):
+        """``complete_json(disallow_env_fallback=True)`` must reach
+        ``_get_provider`` — the flag is useless if it stops at the
+        public surface."""
+        provider = AsyncMock()
+        provider.complete_json = AsyncMock(return_value=_make_provider_response('{"ok": true}'))
+        llm_service._get_provider = AsyncMock(return_value=provider)
+
+        await llm_service.complete_json(
+            "u1",
+            "prompt",
+            workspace_id="ws",
+            disallow_env_fallback=True,
+        )
+        assert llm_service._get_provider.call_args.kwargs.get("disallow_env_fallback") is True
+
+    @pytest.mark.asyncio
+    async def test_get_provider_forwards_strict_flag_to_key_resolution(
+        self, llm_service, monkeypatch
+    ):
+        """#1242 chain link 2: ``_get_provider`` must forward the flag to
+        the REAL ``_get_user_api_key`` — the complete_json-level test
+        mocks _get_provider away, so without this test a refactor that
+        drops the kwarg re-enables the platform env fallback silently.
+        """
+        monkeypatch.setenv("OPENAI_API_KEY", "sk-env-test-1242")
+        with pytest.raises(ConfigurationError):
+            await llm_service._get_provider("u1", "openai", disallow_env_fallback=True)
+        # Default mode still resolves the env key end-to-end.
+        provider = await llm_service._get_provider("u1", "openai")
+        assert provider is not None

@@ -70,7 +70,11 @@ async def assert_openai_byok_key_available(
     No env-var fallback is honored here. The analysis path requires
     an explicit BYOK row; ``OPENAI_API_KEY`` env-var is only the
     legacy dev fallback in ``LLMService`` and is not appropriate
-    for a paid feature.
+    for a paid feature. Since #1242 the actual labeling calls enforce
+    the same contract at call time (``call_with_fallback`` passes
+    ``disallow_env_fallback=True`` through ``complete_json``), so a
+    BYOK key deleted AFTER this pre-flight fails the run instead of
+    silently resolving the platform env credential.
 
     Args:
         db: AsyncSession bound to the request transaction.

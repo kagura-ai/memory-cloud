@@ -121,6 +121,7 @@ class LLMService:
         provider: str | None = None,
         temperature: float = 0.1,
         max_tokens: int = 1024,
+        disallow_env_fallback: bool = False,
     ) -> LLMResponse:
         """Call LLM with JSON mode and return cost-grade response.
 
@@ -134,6 +135,14 @@ class LLMService:
             provider: LLM provider (default: from config)
             temperature: Sampling temperature
             max_tokens: Max response tokens
+            disallow_env_fallback: #1242 strict BYOK. When True, key
+                resolution requires an enabled ``external_api_keys``
+                row — the env-var fallback (the platform credential on
+                managed SaaS) is skipped and a missing row raises
+                ``ConfigurationError``. Paid features (Memory Analysis
+                labeling) set this so a mid-run BYOK key removal fails
+                the run instead of silently billing the platform key.
+                Mirrors ``EmbeddingService``'s flag (#708/#1030).
 
         Returns:
             LLMResponse — parsed JSON + per-class token counts +
@@ -141,12 +150,17 @@ class LLMService:
 
         Raises:
             LLMServiceError: On API error or JSON parse failure after retry
+            ConfigurationError: No resolvable API key for the provider.
         """
         resolved_model = model or os.getenv("SLEEP_LLM_MODEL", "gpt-5-nano")
         resolved_provider = provider or os.getenv("SLEEP_LLM_PROVIDER", "openai")
 
         provider_instance = await self._get_provider(
-            user_id, resolved_provider, context_id, workspace_id
+            user_id,
+            resolved_provider,
+            context_id,
+            workspace_id,
+            disallow_env_fallback=disallow_env_fallback,
         )
 
         # First attempt
@@ -353,8 +367,16 @@ class LLMService:
         provider_name: str,
         context_id: str | None = None,
         workspace_id: str | None = None,
+        *,
+        disallow_env_fallback: bool = False,
     ) -> LLMProvider:
-        """Instantiate the correct LLM provider with resolved API key."""
+        """Instantiate the correct LLM provider with resolved API key.
+
+        ``disallow_env_fallback`` (#1242) applies to API-key providers
+        only — the ``self_hosted`` branch resolves a base URL, not
+        billable key material, so its env/settings fallback is
+        deliberately exempt.
+        """
         provider_cls = _PROVIDERS.get(provider_name)
         if provider_cls is None:
             raise ConfigurationError(
@@ -390,7 +412,13 @@ class LLMService:
                 self._last_self_hosted_base_url = base_url
             return self._self_hosted_provider
 
-        api_key = await self._get_user_api_key(user_id, provider_name, context_id, workspace_id)
+        api_key = await self._get_user_api_key(
+            user_id,
+            provider_name,
+            context_id,
+            workspace_id,
+            disallow_env_fallback=disallow_env_fallback,
+        )
         return provider_cls(api_key)
 
     async def _get_user_api_key(
@@ -399,6 +427,8 @@ class LLMService:
         provider: str,
         context_id: str | None = None,
         workspace_id: str | None = None,
+        *,
+        disallow_env_fallback: bool = False,
     ) -> str:
         """Resolve the API key for the calling user's workspace context.
 
@@ -410,19 +440,24 @@ class LLMService:
         2. Workspace-scoped key (workspace_id matches AND context_id IS NULL)
         3. Provider-specific environment variable (e.g., OPENAI_API_KEY,
            ANTHROPIC_API_KEY, GOOGLE_API_KEY, SELF_HOSTED_BASE_URL, OLLAMA_API_KEY)
-           — development fallback only
+           — development / self-host fallback. Skipped entirely when
+           ``disallow_env_fallback`` is True (#1242): on managed SaaS the
+           env var is the platform's own credential, and a paid BYOK
+           feature must never bill it.
 
         Args:
             user_id: Caller's user ID — logged for audit, NOT used as a filter.
             provider: Provider name (e.g. ``"openai"``, ``"anthropic"``).
             context_id: Optional context UUID.
             workspace_id: Workspace UUID; when omitted the DB lookup is skipped.
+            disallow_env_fallback: Require a DB (BYOK) key; see above.
 
         Returns:
             Decrypted API key.
 
         Raises:
-            ConfigurationError: If neither a DB key nor an env var is available.
+            ConfigurationError: If neither a DB key nor an env var is
+                available — or, in strict mode, no DB key exists.
         """
         from uuid import UUID
 
@@ -467,6 +502,35 @@ class LLMService:
                 workspace_id=workspace_id,
             )
             return api_key
+
+        # #1242 strict BYOK: a paid feature must fail here, BEFORE the env
+        # fallback below — os.getenv would silently resolve the platform's
+        # own credential on managed SaaS while the ledger attributes the
+        # spend to the user's key (paid_by='byok' is a source-fixed label).
+        if disallow_env_fallback:
+            logger.info(
+                "llm_api_key_env_fallback_disallowed",
+                provider=provider,
+                user_id=user_id,
+                workspace_id=workspace_id,
+                context_id=context_id,
+            )
+            if workspace_id:
+                raise ConfigurationError(
+                    f"No enabled {provider} BYOK key found for this workspace. "
+                    "This feature requires an explicit BYOK key (env-var fallback "
+                    "is disabled for paid features); add one under Integrations "
+                    "> External Keys."
+                )
+            # No workspace_id → the DB lookup above was skipped entirely.
+            # Telling the user to add a key would misdirect debugging: the
+            # bug is the CALLER omitting workspace_id in strict mode.
+            raise ConfigurationError(
+                f"{provider} BYOK key resolution requires a workspace_id, but "
+                "none was provided by the caller (strict mode skips the "
+                "env-var fallback). This is a calling-code bug, not a "
+                "missing-key configuration issue."
+            )
 
         # Environment fallback — provider-specific env var first, then generic
         env_var_map = {
