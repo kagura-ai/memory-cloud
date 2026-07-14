@@ -26,7 +26,7 @@ allow/deny of agent *actions* belongs to an external gateway/runtime.
 
 1. **Agents are workspace-scoped resources, not principals.** An agent never authenticates by
    itself; its credential is an existing owner-provisioned, workspace-scoped member API key
-   (`backend/src/auth/member_credentials.py`) that gains a nullable `agent_id` pointer. No
+   (`backend/src/api/routes/member_credentials.py`) that gains a nullable `agent_id` pointer. No
    `service_accounts` principal table, no per-agent OAuth clients, no parallel `agent_keys`
    scoping — the registry builds *on* workspace RBAC + `allowed_context_ids` + member keys and
    must never become a second authorization system.
