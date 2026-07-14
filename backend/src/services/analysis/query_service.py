@@ -132,6 +132,41 @@ async def verify_context_in_workspace(
     return result.scalar_one_or_none() is not None
 
 
+def _live_run_boundary_stmt(run_id: UUID, workspace_id: UUID):
+    """Boundary SELECT shared by every run_id-keyed reader (#1243).
+
+    Matches iff the run exists, belongs to ``workspace_id``, AND its
+    parent context is alive. The Context-liveness join makes deleted-
+    context runs structurally invisible to ALL callers: REST already
+    404s at its URL-context boundary check, but the run_id-keyed MCP
+    tools (``get_analysis`` / ``get_cluster``) reach these readers with
+    no context in hand — without the join they served LLM-derived
+    labels, descriptions and property_stats of soft-deleted contexts
+    indefinitely. Enforcing it in the query keeps the invariant out of
+    per-handler checklists (same principle as #1228's schema
+    separation: structural invisibility beats remember-to-exclude).
+    """
+    from models.auth import Context
+
+    return (
+        select(MemoryAnalysis.id)
+        .join(Context, Context.id == MemoryAnalysis.context_id)
+        .where(
+            and_(
+                MemoryAnalysis.id == run_id,
+                MemoryAnalysis.workspace_id == workspace_id,
+                # Copilot review: also pin the CONTEXT's workspace — the
+                # run row's workspace_id alone would treat a run whose
+                # context_id drifted into another workspace (partial
+                # corruption / bad backfill) as live. Matches
+                # verify_context_in_workspace's predicate set.
+                Context.workspace_id == workspace_id,
+                Context.deleted_at.is_(None),
+            )
+        )
+    )
+
+
 async def count_context_memories(
     db: AsyncSession,
     *,
@@ -169,14 +204,24 @@ async def get_analysis(
 ) -> MemoryAnalysis | None:
     """Fetch one run by id, scoped to ``workspace_id``.
 
-    Returns None if the run does not exist OR belongs to a different
-    workspace — callers convert None into 404 at the API layer so the
-    "exists but not yours" path does not leak existence.
+    Returns None if the run does not exist, belongs to a different
+    workspace, OR its parent context has been soft-deleted (#1243) —
+    callers convert None into 404 at the API layer so the "exists but
+    not yours" and "existed but deleted" paths do not leak existence.
     """
-    stmt = select(MemoryAnalysis).where(
-        and_(
-            MemoryAnalysis.id == run_id,
-            MemoryAnalysis.workspace_id == workspace_id,
+    from models.auth import Context
+
+    stmt = (
+        select(MemoryAnalysis)
+        .join(Context, Context.id == MemoryAnalysis.context_id)
+        .where(
+            and_(
+                MemoryAnalysis.id == run_id,
+                MemoryAnalysis.workspace_id == workspace_id,
+                # Same context-workspace pin as _live_run_boundary_stmt.
+                Context.workspace_id == workspace_id,
+                Context.deleted_at.is_(None),
+            )
         )
     )
     return (await db.execute(stmt)).scalar_one_or_none()
@@ -317,14 +362,7 @@ async def get_cluster(
     # Tenant + run validity in a single query — joins ``memory_analyses``
     # to enforce workspace_id boundary before paying for the cluster lookup.
     boundary = (
-        await db.execute(
-            select(MemoryAnalysis.id).where(
-                and_(
-                    MemoryAnalysis.id == run_id,
-                    MemoryAnalysis.workspace_id == workspace_id,
-                )
-            )
-        )
+        await db.execute(_live_run_boundary_stmt(run_id, workspace_id))
     ).scalar_one_or_none()
     if boundary is None:
         return None
@@ -476,14 +514,7 @@ async def list_clusters(
       so no pagination is offered.
     """
     boundary = (
-        await db.execute(
-            select(MemoryAnalysis.id).where(
-                and_(
-                    MemoryAnalysis.id == run_id,
-                    MemoryAnalysis.workspace_id == workspace_id,
-                )
-            )
-        )
+        await db.execute(_live_run_boundary_stmt(run_id, workspace_id))
     ).scalar_one_or_none()
     if boundary is None:
         return None
@@ -526,14 +557,7 @@ async def list_positions(
     - ``list[dict]`` of ``{memory_id, x, y, cluster_index}`` otherwise.
     """
     boundary = (
-        await db.execute(
-            select(MemoryAnalysis.id).where(
-                and_(
-                    MemoryAnalysis.id == run_id,
-                    MemoryAnalysis.workspace_id == workspace_id,
-                )
-            )
-        )
+        await db.execute(_live_run_boundary_stmt(run_id, workspace_id))
     ).scalar_one_or_none()
     if boundary is None:
         return None
@@ -620,14 +644,7 @@ async def get_memory_ids_in_cluster(
     # BEFORE resolving the cluster_index (so a stolen run_id from a
     # foreign workspace is indistinguishable from a typo).
     boundary = (
-        await db.execute(
-            select(MemoryAnalysis.id).where(
-                and_(
-                    MemoryAnalysis.id == run_id,
-                    MemoryAnalysis.workspace_id == workspace_id,
-                )
-            )
-        )
+        await db.execute(_live_run_boundary_stmt(run_id, workspace_id))
     ).scalar_one_or_none()
     if boundary is None:
         return None
