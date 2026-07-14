@@ -585,6 +585,8 @@ async def handle_list_contexts(
 
             from datetime import UTC, datetime
 
+            from utils.datetime import to_utc_iso
+
             # ``Context.last_used_at`` is declared as ``DateTime(timezone=True)``
             # (see models/auth.py) — populated values are aware. Use an aware
             # UTC sentinel so the ``None`` branch sorts consistently; mixing a
@@ -620,7 +622,10 @@ async def handle_list_contexts(
                     "summary": ctx.summary,
                     "is_private": ctx.is_private,
                     "is_locked": ctx.is_locked,
-                    "last_used_at": ctx.last_used_at.isoformat() if ctx.last_used_at else None,
+                    # #1257 made this live data; Z-suffix per backend.md (raw
+                    # .isoformat() rendered '+00:00', unlike every other
+                    # timestamp on the MCP surface, e.g. tags[].last_used_at).
+                    "last_used_at": to_utc_iso(ctx.last_used_at),
                     "embedding_model": cfg.embedding_model if cfg else _settings2.embedding_model,
                 }
                 if include_stats:
