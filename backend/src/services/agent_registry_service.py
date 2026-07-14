@@ -244,7 +244,7 @@ class AgentRegistryService:
             version=clean_version,
         )
         self.db.add(agent)
-        await self.db.flush()
+        await self._flush_mapping_duplicate_name(clean_name)
         return agent
 
     async def update_agent(
@@ -297,8 +297,36 @@ class AgentRegistryService:
                 raise ValidationError(f"Unknown agent field: '{field}'", field=field)
 
         if changes:
-            await self.db.flush()
+            await self._flush_mapping_duplicate_name(agent.name)
         return changes
+
+    async def _flush_mapping_duplicate_name(self, name: str) -> None:
+        """Flush, mapping a ``uq_agents_workspace_name`` race to ConflictError.
+
+        The pre-insert duplicate SELECT and the flush are not atomic
+        (TOCTOU): concurrent registration of the same name — e.g. replicas
+        of one agent self-registering on startup — loses the race at flush
+        with an IntegrityError that would otherwise surface as a misleading
+        503 (REST) or a raw driver string (MCP). Same posture as
+        ``setup_resource`` / ``external_keys``: recognize the constraint BY
+        NAME via db.constraint_names and re-raise as the same 409 the
+        pre-check produces; any other IntegrityError propagates unchanged.
+        """
+        from sqlalchemy.exc import IntegrityError
+
+        from db.constraint_names import (
+            AGENTS_WORKSPACE_NAME_UNIQUE,
+            integrity_error_constraint_name,
+        )
+
+        try:
+            await self.db.flush()
+        except IntegrityError as exc:
+            if integrity_error_constraint_name(exc) == AGENTS_WORKSPACE_NAME_UNIQUE:
+                raise ConflictError(
+                    f"Agent '{name}' already exists in this workspace.",
+                ) from exc
+            raise
 
     async def delete_agent(self, agent: Agent) -> None:
         """Hard-delete a registry row (admin operation).

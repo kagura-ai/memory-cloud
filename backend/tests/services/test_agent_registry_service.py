@@ -154,6 +154,46 @@ class TestCreateAgent:
                 framework="x" * 101,
             )
 
+    @pytest.mark.asyncio
+    async def test_flush_race_on_unique_name_maps_to_conflict(self):
+        """TOCTOU loser at flush gets the same 409 as the pre-check.
+
+        The pre-insert SELECT and the flush are not atomic; a concurrent
+        registration of the same name fires uq_agents_workspace_name at
+        flush. The IntegrityError must map to ConflictError — not leak as a
+        503 (REST) or a raw driver string (MCP).
+        """
+        from sqlalchemy.exc import IntegrityError
+
+        orig = Exception("duplicate key")
+        orig.constraint_name = "uq_agents_workspace_name"  # type: ignore[attr-defined]  # asyncpg shape
+        service = _service_with_mocks(
+            get_agent_by_name=AsyncMock(return_value=None),
+            count_agents=AsyncMock(return_value=0),
+        )
+        service.db.flush = AsyncMock(side_effect=IntegrityError("INSERT INTO agents ...", {}, orig))
+        with pytest.raises(ConflictError):
+            await service.create_agent(
+                workspace_id=WORKSPACE_ID, name="ci-bot", owner_user_id="user-1"
+            )
+
+    @pytest.mark.asyncio
+    async def test_flush_unrelated_integrity_error_propagates(self):
+        """Only the named constraint maps to 409; other IntegrityErrors stay raw."""
+        from sqlalchemy.exc import IntegrityError
+
+        orig = Exception("fk violation")
+        orig.constraint_name = "agents_workspace_id_fkey"  # type: ignore[attr-defined]
+        service = _service_with_mocks(
+            get_agent_by_name=AsyncMock(return_value=None),
+            count_agents=AsyncMock(return_value=0),
+        )
+        service.db.flush = AsyncMock(side_effect=IntegrityError("INSERT INTO agents ...", {}, orig))
+        with pytest.raises(IntegrityError):
+            await service.create_agent(
+                workspace_id=WORKSPACE_ID, name="ci-bot", owner_user_id="user-1"
+            )
+
 
 # ---------------------------------------------------------------------------
 # update_agent transitions
