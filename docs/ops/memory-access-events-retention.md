@@ -58,7 +58,7 @@ cited by RFC line number.
 | D22 — append-only trigger with a narrow carve-out | A `BEFORE UPDATE OR DELETE` trigger blocks all DELETEs and blocks any UPDATE touching a column other than `user_id`, `session_id`, `run_id`, `event_metadata`. The carve-out exists solely so GDPR/APPI erasure can pseudonymize and scrub. No HMAC chain in P0. | trigger tier: `secret_access_log_append_only` + `secret_access_log_no_truncate` in `backend/alembic/versions/e50_1128_secret_store.py` |
 | D23 — erasure = pseudonymize-and-keep | Account erasure never deletes audit rows; it rewrites `user_id` (salted hash via `audit_pseudo_salt`), pseudonymizes `session_id`/`run_id`, and scrubs `event_metadata`. | `_pseudonymize_field` / `_pseudonymize_audit_logs` in `backend/src/services/account_erasure_service.py`; `audit_pseudo_salt` in `backend/src/config/settings.py` |
 | D21 — no FKs; the trail survives entity deletion | Rows outlive agents/contexts/keys, so nothing cascades; the table joins the erasure story explicitly instead. | survives-deletion posture: `SecretAccessLog` in `backend/src/models/secrets.py` |
-| D24 — writer is fail-open in P0 | The event writer runs on an independent session and swallows failures with a structured warning. Consequence for this plan: brief maintenance locks degrade audit coverage, not user-facing requests. | posture: `backend/src/services/llm_call_log_writer.py` |
+| D24 — writer is fail-open in P0 | The event writer runs on an independent session and swallows write failures with a structured warning (validation errors still raise). Consequence for this plan: brief maintenance locks degrade audit coverage, not user-facing requests. | closest posture precedent: `backend/src/services/llm_call_log_writer.py` — it swallows write failures with a structured warning when callers pass `fail_on_error=False` (validation errors always raise) and uses an injected session; the P0-5 writer strengthens this to always-fail-open on an independent session per D24 |
 
 ## Escalation trigger (normative)
 
@@ -83,20 +83,24 @@ cited by RFC line number.
 ## Measurement plan
 
 Run monthly (first business day), from the month the P0-5 writer goes live. All queries are
-read-only and cheap on the shipped indexes (`idx_mae_occurred`,
-`idx_mae_workspace_occurred`, `idx_mae_agent_occurred`). `occurred_at` is naive UTC by repo
-convention; sessions run with `timezone=UTC` (engine-enforced), so `now()` comparisons are
-correct.
+read-only and assume the indexes the F3 sign-off (#1260) defines for the P0-5 migration
+(`idx_mae_occurred`, `idx_mae_workspace_occurred`, `idx_mae_agent_occurred` — they ship
+with the table, not before). `occurred_at` is naive UTC by repo convention; sessions run
+with `timezone=UTC` (engine-enforced), so `now()` comparisons are correct.
 
 ```sql
--- 1. Estimated total rows (cheap; refreshed by autovacuum/ANALYZE)
+-- 1. Estimated total rows (cheap; refreshed by autovacuum/ANALYZE).
+--    Schema-qualified regclass avoids hitting a same-named relation in
+--    another schema on deployments with a non-default search_path.
 SELECT reltuples::bigint AS estimated_rows
-FROM pg_class WHERE relname = 'memory_access_events';
+FROM pg_class WHERE oid = 'public.memory_access_events'::regclass;
 
 -- 2. On-disk footprint (heap + indexes + TOAST)
-SELECT pg_size_pretty(pg_total_relation_size('memory_access_events')) AS total_size;
+SELECT pg_size_pretty(pg_total_relation_size('public.memory_access_events')) AS total_size;
 
--- 3. Trailing 30-day insert rate and naive projection to the 100M line
+-- 3. Trailing 30-day insert rate and naive projection to the 100M line.
+--    GREATEST(0, ...) clamps the remaining-row count so the projection
+--    reads 0 (crossed) instead of going negative past the threshold.
 WITH rate AS (
   SELECT count(*) / 30.0 AS rows_per_day
   FROM memory_access_events
@@ -104,8 +108,8 @@ WITH rate AS (
 )
 SELECT rows_per_day::bigint AS rows_per_day,
        CASE WHEN rows_per_day > 0 THEN
-         ((100000000 - (SELECT reltuples FROM pg_class
-                        WHERE relname = 'memory_access_events'))
+         (GREATEST(0, 100000000 - (SELECT reltuples FROM pg_class
+                                   WHERE oid = 'public.memory_access_events'::regclass))
           / rows_per_day)::int
        END AS days_to_100m
 FROM rate;
@@ -312,10 +316,11 @@ is re-opened. Concretely, before flipping the setting:
   `postgresql_partition_by` so `create_all` matches the parent, but the swap-produced
   historical partition and the month children exist only on the alembic side — call this out
   in the escalation issue rather than discovering it in CI.
-- The table keeps its public name `memory_access_events` through the swap, so its
-  data-boundary classification (`OPERATIONAL_TABLES` in `backend/src/models/data_boundary.py`,
-  enforced by `backend/tests/test_derived_layer_boundary.py`) and the erasure wiring stay
-  valid without changes.
+- The table keeps its public name `memory_access_events` through the swap, so the
+  data-boundary classification and erasure wiring — which the P0-5 creating PR adds
+  (`OPERATIONAL_TABLES` in `backend/src/models/data_boundary.py`, enforced by
+  `backend/tests/test_derived_layer_boundary.py`; the table is not yet in the registry
+  today) — stay valid through the escalation without changes.
 
 ## Sign-off checklist (maps to #1264)
 
