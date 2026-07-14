@@ -309,6 +309,16 @@ class MemoryAnalysisAssignment(Base):
             "analysis_id",
             "cluster_id",
         ),
+        # #1245: leading-column index for the memories FK. The PK is
+        # (analysis_id, memory_id) — useless for a memory_id-only lookup —
+        # so every hard DELETE of a memories row (sleep merge-retention
+        # purge, admin user purge, resource re-indexing) fired the
+        # ON DELETE CASCADE RI trigger as a full sequential scan of this
+        # table, once per deleted row.
+        Index(
+            "idx_memory_analysis_assignments_memory",
+            "memory_id",
+        ),
     )
 
     def __repr__(self) -> str:

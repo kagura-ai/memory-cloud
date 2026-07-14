@@ -587,3 +587,25 @@ class TestDeletedContextInvisibility:
             )
             is None
         )
+
+
+# ===========================================================================
+# #1245 — memory_id FK-cascade index parity pin
+# ===========================================================================
+
+
+class TestAssignmentMemoryIdIndex:
+    def test_memory_id_leading_index_declared(self):
+        """#1245: the memories FK needs a leading-column index — the PK
+        (analysis_id, memory_id) cannot serve the RI trigger's
+        memory_id-only DELETE lookup. Pins model-side parity with
+        migration e62 (create_all-vs-alembic drift gate).
+        """
+        names = {idx.name for idx in MemoryAnalysisAssignment.__table__.indexes}
+        assert "idx_memory_analysis_assignments_memory" in names
+        idx = next(
+            i
+            for i in MemoryAnalysisAssignment.__table__.indexes
+            if i.name == "idx_memory_analysis_assignments_memory"
+        )
+        assert [c.name for c in idx.columns] == ["memory_id"]
