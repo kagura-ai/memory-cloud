@@ -32,7 +32,13 @@ class TestRunSizeCap:
         assert "50" in message, "configured limit missing from the error"
 
     def test_default_cap_matches_documented_value(self) -> None:
-        """Pins the documented default (basic-tier memory_limit, see
+        """Pins the DECLARED default (basic-tier memory_limit, see
         settings.py rationale) so a silent change shows up in review.
+        Reads the field default, not the env-loaded singleton — a
+        self-host operator who set ANALYSIS_MAX_MEMORY_COUNT (as the
+        feature's own docs suggest) must not get a spurious failure
+        from make test-local.
         """
-        assert get_settings().analysis_max_memory_count == 10_000
+        from config.settings import Settings
+
+        assert Settings.model_fields["analysis_max_memory_count"].default == 10_000

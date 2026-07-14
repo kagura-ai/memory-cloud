@@ -43,7 +43,7 @@ from typing import Any
 from uuid import UUID
 
 import numpy as np
-from sqlalchemy import and_, select
+from sqlalchemy import and_, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from db.qdrant import (
@@ -216,6 +216,26 @@ async def pull_memories_with_vectors(
         .where(and_(*conditions))
         .order_by(Memory.created_at)
     )
+    # #1244: defense-in-depth run-size cap on the FILTERED set, checked
+    # via a COUNT probe BEFORE the row fetch — the guard must bound the
+    # SQL materialization itself, not just the downstream Qdrant fetch
+    # and numpy matrix. (A pre-cap 1M-memory context would otherwise
+    # load every row's metadata into RAM before being rejected.) The
+    # API/MCP entrypoints already reject over-cap contexts pre-start
+    # (full-context count); this re-check covers rows created before the
+    # cap existed and any future entrypoint that forgets the pre-flight.
+    # Raising here lands in the orchestrator's failure path (run marked
+    # 'failed' with this message) instead of OOMing the API container.
+    from services.analysis.preview import assert_run_size_within_cap
+
+    matched_count = int(
+        (
+            await db.execute(select(func.count()).select_from(Memory).where(and_(*conditions)))
+        ).scalar()
+        or 0
+    )
+    assert_run_size_within_cap(matched_count)
+
     memory_rows = list((await db.execute(stmt)).all())
 
     if not memory_rows:
@@ -223,17 +243,6 @@ async def pull_memories_with_vectors(
             "No memories matched the analysis filters; refusing to start an "
             "empty run. The API layer should pre-flight this and surface 422."
         )
-
-    # #1244: defense-in-depth run-size cap on the FILTERED set, before any
-    # Qdrant vector is fetched or the embedding matrix is materialized.
-    # The API/MCP entrypoints already reject over-cap contexts pre-start
-    # (full-context count); this re-check covers rows created before the
-    # cap existed and any future entrypoint that forgets the pre-flight.
-    # Raising here lands in the orchestrator's failure path (run marked
-    # 'failed' with this message) instead of OOMing the API container.
-    from services.analysis.preview import assert_run_size_within_cap
-
-    assert_run_size_within_cap(len(memory_rows))
 
     # 3. Pull vectors from Qdrant in semaphore-bounded parallel batches.
     #    ``retrieve`` (point-id lookup) is preferred over ``scroll`` because

@@ -406,6 +406,10 @@ async def start_analysis(
 
     Error mapping (delegated to global handler via custom exceptions):
 
+    - 422 ValidationError — context exceeds the #1244 run-size cap
+      (checked BEFORE the idempotency guard, so an over-cap context
+      with a run already in flight gets 422, not the 409+run_id hint;
+      cancel/poll that run via the list endpoint).
     - 409 ConflictError  — a prior run is still ``running`` for the
       same (workspace, context). Body carries the existing run_id.
     - 422 ValidationError — BYOK key missing (orchestrator's

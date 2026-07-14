@@ -607,10 +607,13 @@ class Settings(BaseSettings):
     # concurrency. Env: ANALYSIS_MAX_MEMORY_COUNT.
     analysis_max_memory_count: int = Field(
         default=10_000,
+        ge=1,
         description=(
             "Hard cap on memories per Memory Analysis run. Contexts above "
             "this are rejected at preview and start (422 naming the limit). "
-            "Self-host operators with larger containers may raise it."
+            "Self-host operators with larger containers may raise it. "
+            "Must be >= 1 — a zero/negative value would brick the feature "
+            "at runtime with a misleading message, so it fails at boot."
         ),
     )
 
