@@ -39,7 +39,7 @@ def _svc(monkeypatch, *, principal_error=None, context_error=None, envelope=None
     else:
         inst.resolve_principal_and_agent = AsyncMock(
             return_value=(
-                SimpleNamespace(workspace_id=WORKSPACE_ID),
+                SimpleNamespace(workspace_id=WORKSPACE_ID, user_id="u", metadata={}),
                 SimpleNamespace(id=AGENT_ID, name="ci-bot", workspace_id=WORKSPACE_ID),
             )
         )

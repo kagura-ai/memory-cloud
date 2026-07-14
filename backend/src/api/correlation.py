@@ -61,6 +61,9 @@ class CorrelationContext:
     # ``agent_id`` column + policy_decision happens once the credential
     # identity is known (resolve_agent_correlation).
     agent_claim: str | None = None
+    # 'mcp' | 'rest' — the request surface, set at the transport/middleware
+    # seam so service-layer audit emission (#1278) is surface-invariant.
+    surface: str = "rest"
 
 
 _correlation: ContextVar[CorrelationContext | None] = ContextVar("correlation", default=None)
@@ -163,6 +166,7 @@ def build_correlation_from_headers(
     *,
     traceparent: str | None,
     baggage: str | None,
+    surface: str = "rest",
 ) -> CorrelationContext:
     """Assemble the per-request CorrelationContext from raw headers.
 
@@ -190,6 +194,7 @@ def build_correlation_from_headers(
         session_id=session_id,
         run_id=run_id,
         agent_claim=agent_claim,
+        surface=surface,
     )
 
 

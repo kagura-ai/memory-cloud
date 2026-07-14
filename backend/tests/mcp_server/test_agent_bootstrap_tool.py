@@ -43,7 +43,7 @@ def _enter(stack, *, principal_error=None, envelope=None):
     else:
         svc.resolve_principal_and_agent = AsyncMock(
             return_value=(
-                SimpleNamespace(workspace_id=WORKSPACE_ID),
+                SimpleNamespace(workspace_id=WORKSPACE_ID, user_id="u", metadata={}),
                 SimpleNamespace(id=AGENT_ID, name="ci-bot", workspace_id=WORKSPACE_ID),
             )
         )

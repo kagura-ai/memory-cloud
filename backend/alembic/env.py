@@ -12,6 +12,7 @@ from sqlalchemy import pool
 from sqlalchemy.ext.asyncio import async_engine_from_config
 
 import models.agent  # noqa: F401  # Issue #1274: Agent Registry (RFC-0002 P0-1)
+import models.memory_access_event  # noqa: F401  # Issue #1278: agent access audit (P0-5)
 import models.analysis  # noqa: F401  # Issue #494: Memory Broadlistening tables
 import models.auth  # noqa: F401
 import models.config  # noqa: F401

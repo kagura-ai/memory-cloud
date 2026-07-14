@@ -101,6 +101,24 @@ class FeedbackService:
         self.db.add(row)
         await self.db.commit()
         await self.db.refresh(row)
+
+        # #1278: append-only audit (no-op unless verified agent identity). Only
+        # the public (agent) path is audited; record_host_feedback is the
+        # gateway seam, not agent activity.
+        if provenance == FEEDBACK_PROVENANCE_AGENT:
+            from services.memory_access_event_writer import emit_memory_access_event
+
+            ws = (
+                await self.db.execute(select(Memory.workspace_id).where(Memory.id == memory_id))
+            ).scalar_one_or_none()
+            await emit_memory_access_event(
+                operation="feedback",
+                outcome="success",
+                workspace_id=ws,
+                user_id=user_id,
+                context_id=context_id,
+                memory_id=memory_id,
+            )
         return row
 
     async def record_host_feedback(

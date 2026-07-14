@@ -2767,6 +2767,18 @@ class MemoryService:
                 cap=effective_cap,
             )
 
+        # #1278: append-only audit (no-op unless verified agent identity).
+        from services.memory_access_event_writer import emit_memory_access_event
+
+        await emit_memory_access_event(
+            operation="load_pinned",
+            outcome="success",
+            workspace_id=UUID(workspace_id_str),
+            user_id=user_id,
+            context_id=UUID(context_id_str),
+            result_count=len(rows),
+        )
+
         return LoadPinnedResponse(
             memories=[
                 PinnedMemoryItem(
