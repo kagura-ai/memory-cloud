@@ -56,6 +56,14 @@ async def authenticate_mcp_request(
         >>> user_id, context_id, workspace_id = await authenticate_mcp_request("Bearer api_key_...")
         >>> # Returns: ("user_12345", None, UUID("...")) for workspace-scoped API key
     """
+    # Issue #1275: reset the per-request agent scope BEFORE any auth branch —
+    # session/OAuth paths never carry an agent binding, and the API-key branch
+    # (auth.dependencies.verify_api_key) re-sets it when the key is
+    # agent-bound. Defense in depth against a stale scope in reused contexts.
+    from auth.agent_scope import set_agent_scope
+
+    set_agent_scope(None)
+
     # Try session cookie first (Issue #155: Claude Web UI support)
     # Issue #245: context_id is no longer returned from auth (now required in tool args)
     if not authorization_header and cookie_header:

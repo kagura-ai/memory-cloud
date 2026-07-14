@@ -73,3 +73,52 @@ def test_agents_is_classified_operational() -> None:
     from models.data_boundary import OPERATIONAL_TABLES
 
     assert "agents" in OPERATIONAL_TABLES
+
+
+def test_all_binding_write_policies_tuple_matches_constants() -> None:
+    """Registration order is fixed (deny, direct); 'staged' is reserved for P1."""
+    from models.agent import (
+        _ALL_BINDING_WRITE_POLICIES,
+        BINDING_WRITE_POLICY_DENY,
+        BINDING_WRITE_POLICY_DIRECT,
+    )
+
+    assert _ALL_BINDING_WRITE_POLICIES == (
+        BINDING_WRITE_POLICY_DENY,
+        BINDING_WRITE_POLICY_DIRECT,
+    )
+    assert BINDING_WRITE_POLICY_DENY == "deny"
+    assert BINDING_WRITE_POLICY_DIRECT == "direct"
+
+
+def test_valid_binding_write_policy_check_matches_migration_literal() -> None:
+    """``valid_binding_write_policy`` CHECK text is byte-identical to e64."""
+    from models.agent import AgentContextBinding
+
+    expected = "write_policy IN ('deny', 'direct')"
+    check = next(
+        c
+        for c in AgentContextBinding.__table_args__
+        if getattr(c, "name", None) == "valid_binding_write_policy"
+    )
+    assert check.sqltext.text == expected
+
+
+def test_agent_context_bindings_is_classified_operational() -> None:
+    """#1275 two-sided closure: the creating PR classifies the table."""
+    from models.data_boundary import OPERATIONAL_TABLES
+
+    assert "agent_context_bindings" in OPERATIONAL_TABLES
+
+
+def test_api_keys_agent_exclusion_check_matches_migration_literal() -> None:
+    """``ck_api_keys_agent_public_exclusion`` matches the e65 literal."""
+    from models.auth import APIKey
+
+    expected = "agent_id IS NULL OR bound_context_id IS NULL"
+    check = next(
+        c
+        for c in APIKey.__table_args__
+        if getattr(c, "name", None) == "ck_api_keys_agent_public_exclusion"
+    )
+    assert check.sqltext.text == expected

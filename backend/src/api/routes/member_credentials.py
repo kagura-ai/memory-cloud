@@ -221,6 +221,10 @@ async def _owner_provisioned_mint(
             workspace_id=workspace_id,
             expires_days=data.expires_days,
             auto_hide_minutes=0,  # visibility_expires_at = now
+            # Issue #1275: optional agent binding. Mint-time gates (agent
+            # exists, same workspace, active) live in create_key and surface
+            # as ValueError → 400 below.
+            agent_id=data.agent_id,
         )
         # Force-hide immediately so plaintext is never re-revealed via GET, and
         # null the encrypted-at-rest copy too (Migration-035 zero-knowledge). The
@@ -245,6 +249,9 @@ async def _owner_provisioned_mint(
             metadata={
                 "minted_key_prefix": new_key.key_prefix,  # the MINTED key
                 "expires_days": data.expires_days,
+                # Issue #1275: record the agent binding in the existing audit
+                # metadata (design contract: "Mint records agent_id").
+                **({"agent_id": str(data.agent_id)} if data.agent_id else {}),
             },
         )
         await db.commit()
@@ -572,6 +579,15 @@ async def create_api_key(
     if data.expires_days is not None:
         raise BadRequestError(
             message="expires_days is only supported for owner-provisioned keys "
+            "(via a workspace-owner API key), not session self-mint."
+        )
+
+    # Issue #1275: agent binding is owner-provisioned-only — agent workloads
+    # authenticate with provisioned service-member keys, never with a session
+    # user's self-minted key. Reject explicitly (same posture as expires_days).
+    if data.agent_id is not None:
+        raise BadRequestError(
+            message="agent_id is only supported for owner-provisioned keys "
             "(via a workspace-owner API key), not session self-mint."
         )
 

@@ -401,7 +401,51 @@ class PermissionService:
             )
             raise NotFoundException("Context", str(context_id))
 
+        # Issue #1275 (RFC-0002 P0-2): purely subtractive agent-binding
+        # intersection — applied strictly AFTER every existing gate passed, so
+        # it can only remove access. No-op for non-agent credentials (scope is
+        # None). ``required_role`` semantics: viewer = read helper default;
+        # writers pass admin/owner. WorkspaceRole is a StrEnum, so the
+        # comparison holds for both str and enum callers.
+        access = "read" if required_role == WorkspaceRole.VIEWER else "write"
+        await self._apply_agent_binding_filter(context_id, access=access, user_id=user_id)
+
         return context
+
+    async def _apply_agent_binding_filter(
+        self, context_id: UUID, *, access: str, user_id: str
+    ) -> None:
+        """Deny with the uniform 404 when the agent binding subtracts access.
+
+        Reads the per-request agent scope (#1275, set at API-key verify for
+        agent-bound keys only) and evaluates the binding intersection. Both
+        read and write denies surface as ``context_not_found`` — confirming
+        the context exists but is write-forbidden would leak the CWE-639
+        signal the uniform-404 posture removes. Shadow-mode violations are
+        logged and allowed (``would_deny``, the enforcement ramp).
+        """
+        from auth.agent_scope import get_agent_scope
+
+        scope = get_agent_scope()
+        if scope is None:
+            return
+
+        from services.agent_binding_service import AgentBindingService
+
+        allowed, decision = await AgentBindingService(self.db).evaluate_context_access(
+            scope, context_id, access
+        )
+        if not allowed:
+            logger.warning(
+                "context_access_denied",
+                reason="agent_binding",
+                decision=decision,
+                access=access,
+                context_id=str(context_id),
+                agent_id=str(scope.agent_id),
+                user_id=user_id,
+            )
+            raise NotFoundException("Context", str(context_id))
 
     async def check_workspace_owner(self, user_id: str, workspace_id: UUID) -> WorkspaceMember:
         """Check if user is workspace owner.
@@ -471,6 +515,12 @@ class PermissionService:
         2. Workspace viewer → Read-only access (bypass context membership)
         3. Workspace member → Requires explicit context membership
 
+        Issue #1275 (RFC-0002 P0-2): after the RBAC decision allows, the
+        purely subtractive agent-binding intersection is applied for
+        agent-bound credentials (no-op otherwise). A binding deny — read OR
+        write — surfaces as the uniform ``context_not_found`` 404 per the
+        design contract, not a 403 that would confirm existence.
+
         Args:
             user_id: User ID
             context_id: Context ID
@@ -483,12 +533,39 @@ class PermissionService:
             ContextMember row keeps its own role.
 
         Raises:
-            NotFoundException: 404 if the context does not exist.
+            NotFoundException: 404 if the context does not exist, or the
+                agent binding subtracts access (#1275).
             AuthorizationError: 403 if user doesn't have required access.
                 Message is the uniform ``"Insufficient permissions"`` —
                 per-deny-path messages were intentionally stripped to remove
                 a CWE-639 enumeration vector. Use structured logs / sentry
                 breadcrumbs for the deny reason.
+        """
+        context, effective_role = await self._check_context_access_rbac(
+            user_id, context_id, required_role
+        )
+
+        # ContextRole is a str-comparable enum here only via its value set;
+        # normalize the same way the RBAC core does.
+        required = (
+            required_role if isinstance(required_role, ContextRole) else ContextRole(required_role)
+        )
+        access = "read" if required == ContextRole.VIEWER else "write"
+        await self._apply_agent_binding_filter(context_id, access=access, user_id=user_id)
+
+        return context, effective_role
+
+    async def _check_context_access_rbac(
+        self,
+        user_id: str,
+        context_id: UUID,
+        required_role: ContextRole | str = ContextRole.VIEWER,
+    ) -> tuple[Context, ContextRole]:
+        """The pre-#1275 RBAC decision core of ``check_context_access``.
+
+        Kept verbatim so the binding intersection is a strict wrapper — the
+        backward-compat matrix's "byte-for-byte unchanged without agent_id"
+        guarantee reduces to "this method did not change".
         """
         from sqlalchemy import select
 
@@ -656,6 +733,12 @@ class PermissionService:
         hid every shared context from viewers (UX-visible: contexts list
         was empty for viewer even when shared contexts existed).
 
+        Issue #1275 (RFC-0002 P0-2): for ``enforce``-mode agent credentials
+        the enumeration surface is intersected with the agent's binding read
+        set — a membership-driven listing must not disclose contexts the
+        binding subtracts. ``shadow``-mode agents keep the full membership
+        view (the enforcement ramp changes nothing observable).
+
         Args:
             user_id: User ID
             workspace_id: Workspace ID
@@ -663,6 +746,26 @@ class PermissionService:
         Returns:
             List of accessible contexts
         """
+        contexts = await self._get_accessible_contexts_rbac(user_id, workspace_id)
+
+        from auth.agent_scope import get_agent_scope
+        from models.agent import AGENT_ENFORCEMENT_ENFORCE
+
+        scope = get_agent_scope()
+        if scope is None or scope.enforcement_mode != AGENT_ENFORCEMENT_ENFORCE or not contexts:
+            return contexts
+
+        from services.agent_binding_service import AgentBindingService
+
+        readable = await AgentBindingService(self.db).readable_context_ids(scope.agent_id)
+        return [c for c in contexts if c.id in readable]
+
+    async def _get_accessible_contexts_rbac(
+        self,
+        user_id: str,
+        workspace_id: UUID,
+    ) -> list[Context]:
+        """The pre-#1275 membership-driven listing (see get_accessible_contexts)."""
         from sqlalchemy import select
 
         # Check workspace membership (viewer is the floor — the per-role

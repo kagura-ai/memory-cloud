@@ -225,6 +225,34 @@ async def _resolve_context(
         )
         raise _ContextNotFoundError(context_id, "Context not found or you don't have access to it.")
 
+    # Issue #1275 (RFC-0002 P0-2): subtractive agent-binding WRITE gate for the
+    # MCP write tools (remember / update_memory / forget resolve via this
+    # helper). The read path inherits the same filter from
+    # resolve_context_for_workspace_read. Applied strictly last, so it can
+    # only remove access; no-op unless the request authenticated with an
+    # agent-bound key. Deny is the same uniform context_not_found shape.
+    from auth.agent_scope import get_agent_scope
+
+    scope = get_agent_scope()
+    if scope is not None:
+        from services.agent_binding_service import ACCESS_WRITE, AgentBindingService
+
+        allowed, decision = await AgentBindingService(db).evaluate_context_access(
+            scope, context_id, ACCESS_WRITE
+        )
+        if not allowed:
+            logger.warning(
+                "context_write_denied: reason=agent_binding decision=%s context_id=%s "
+                "agent_id=%s user_id=%s",
+                decision,
+                str(context_id),
+                str(scope.agent_id),
+                user_id,
+            )
+            raise _ContextNotFoundError(
+                context_id, "Context not found or you don't have access to it."
+            )
+
     return context
 
 

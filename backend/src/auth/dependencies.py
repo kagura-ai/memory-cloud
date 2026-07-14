@@ -261,6 +261,12 @@ async def verify_api_key(api_key: str) -> VerifiedKey | None:
                 await db.commit()
             except Exception as commit_err:
                 logger.warning("api_key_last_used_commit_failed", error=str(commit_err))
+            # Issue #1275: surface the verified agent binding (if any) to the
+            # per-request scope so the context chokepoints can apply the
+            # subtractive binding intersection. No-op (clears) for unbound keys.
+            from auth.agent_scope import set_agent_scope_from_verified
+
+            set_agent_scope_from_verified(verified)
             return verified
     except Exception:
         # Silent failure - return None on any error
@@ -399,6 +405,11 @@ async def verify_api_key_user(
                 "they are only valid on /api/v1/public/{context_id}/* endpoints"
             ),
         )
+
+    # Issue #1275: record the verified agent binding for the chokepoints.
+    from auth.agent_scope import set_agent_scope_from_verified
+
+    set_agent_scope_from_verified(result)
 
     return await _build_api_key_user_dict(
         result.user_id, result.workspace_id, db, api_key_prefix=result.key_prefix
@@ -558,6 +569,11 @@ async def get_user_from_api_key_or_session(
                         "they are only valid on /api/v1/public/{context_id}/* endpoints"
                     ),
                 )
+            # Issue #1275: record the verified agent binding for the chokepoints.
+            from auth.agent_scope import set_agent_scope_from_verified
+
+            set_agent_scope_from_verified(result)
+
             return await _build_api_key_user_dict(
                 result.user_id, result.workspace_id, db, api_key_prefix=result.key_prefix
             )

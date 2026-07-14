@@ -64,6 +64,10 @@ OPERATIONAL_TABLES: frozenset[str] = frozenset(
         # content, no learned structure. Governed by the auth/security regime +
         # GDPR erasure (workspace cascade + owner_user_id pseudonymization).
         "agents",
+        # Subtractive agent scoping rows (#1275, RFC-0002 P0-2) — authorization
+        # plumbing like context_members; cascades with agent/context, created_by
+        # pseudonymized on erasure.
+        "agent_context_bindings",
         "users",
         "user_oauth_providers",
         "oauth_authorization_codes",

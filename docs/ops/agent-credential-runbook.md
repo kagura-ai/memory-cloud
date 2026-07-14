@@ -12,10 +12,12 @@
 
 This runbook covers the full operational lifecycle of a **workload credential** — the API key
 an agent process authenticates with — as the system exists **today**. Everything in the
-numbered procedures is shipped, verified behavior. Blocks marked **[P0-2]** describe what
-changes when agent-bound keys (`api_keys.agent_id`) land; blocks marked **[P0-3]** describe
-the bootstrap contract (F2, #1259); blocks marked **[P1]** describe the deferred DLP item.
-None of the marked blocks are implemented yet.
+numbered procedures is shipped, verified behavior. Blocks marked **[P0-2]** describe
+agent-bound keys (`api_keys.agent_id`) — **shipped with #1275**: mint accepts `agent_id`
+(owner-provisioned path only), verify rejects keys whose agent is `suspended`/`retired`, and
+the fleet kill switch in section 6 is live. Blocks marked **[P0-3]** describe the bootstrap
+contract (F2, #1259); blocks marked **[P1]** describe the deferred DLP item — those two are
+not implemented yet.
 
 ## Scope and non-goals
 

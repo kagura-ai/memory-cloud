@@ -45,7 +45,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from config.settings import get_settings
 from db.qdrant import delete_user_points
 from db.redis import clear_co_activations, clear_user_rate_limits, get_redis_client
-from models.agent import Agent
+from models.agent import Agent, AgentContextBinding
 from models.auth import (
     APIKey,
     AuditLog,
@@ -1028,6 +1028,13 @@ class AccountErasureService:
         # subject. Same legal-retention posture as plan_changes.changed_by.
         counts["agents_pseudonymized"] = await self._pseudonymize_field(
             Agent, Agent.owner_user_id, user_id
+        )
+
+        # Same for agent_context_bindings.created_by (#1275, RFC-0002 P0-2):
+        # binding rows cascade with their agent/context, but bindings authored
+        # by the erased subject on surviving agents must drop the personal link.
+        counts["agent_bindings_pseudonymized"] = await self._pseudonymize_field(
+            AgentContextBinding, AgentContextBinding.created_by, user_id
         )
 
         # Finally the user row itself.

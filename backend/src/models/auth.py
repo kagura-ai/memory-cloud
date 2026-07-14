@@ -312,6 +312,19 @@ class APIKey(Base):
         nullable=True,
     )
 
+    # Issue #1275 (RFC-0002 P0-2): agent-bound member key. ON DELETE CASCADE,
+    # not SET NULL — SET NULL would silently widen a dead agent's keys back to
+    # full member scope (privilege escalation by deletion); CASCADE is also
+    # what the account-erasure workspace hard-delete path relies on. Mutually
+    # exclusive with bound_context_id (CHECK below). Key↔agent workspace
+    # consistency is enforced at mint time in the service layer and
+    # re-asserted defensively at verify.
+    agent_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("agents.id", ondelete="CASCADE"),
+        nullable=True,
+    )
+
     # Timestamps
     created_at: Mapped[datetime] = mapped_column(
         DateTime, nullable=False, server_default=func.now()
@@ -333,9 +346,23 @@ class APIKey(Base):
         Index("idx_revoked", "revoked_at"),
         Index("idx_expires", "expires_at"),
         Index("idx_api_keys_bound_context_id", "bound_context_id"),
+        # Issue #1275: partial index over only the agent-bound rows so the
+        # verify-path agent lookup and per-agent key listings stay
+        # proportional to bound keys, not the table.
+        Index(
+            "idx_api_keys_agent",
+            "agent_id",
+            postgresql_where=text("agent_id IS NOT NULL"),
+        ),
         CheckConstraint(
             "bound_context_id IS NULL OR workspace_id IS NULL",
             name="ck_api_keys_binding_workspace_exclusion",
+        ),
+        # Issue #1275: agent binding and public binding are mutually
+        # exclusive, extending the exclusion precedent above.
+        CheckConstraint(
+            "agent_id IS NULL OR bound_context_id IS NULL",
+            name="ck_api_keys_agent_public_exclusion",
         ),
     )
 

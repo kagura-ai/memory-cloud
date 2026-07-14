@@ -275,3 +275,205 @@ async def delete_agent(
     )
     await service.delete_agent(agent)
     await db.commit()
+
+
+# ============================================================================
+# Context bindings (RFC-0002 P0-2, Issue #1275)
+# ============================================================================
+
+
+class BindingCreate(BaseModel):
+    """Request model for binding an agent to a context (subtractive scoping)."""
+
+    context_id: UUID
+    can_read: bool = True
+    write_policy: Literal["deny", "direct"] = "deny"
+    is_default: bool = Field(False, description="Bootstrap default binding (max one per agent)")
+    allowed_memory_types: list[str] | None = Field(None, description="NULL = all types; [] = none")
+    allowed_source_types: list[str] | None = Field(
+        None, description="Values from the memories.source_type set; NULL = all; [] = none"
+    )
+
+
+class BindingUpdate(BaseModel):
+    """Partial binding update (``context_id`` is immutable — recreate to re-target)."""
+
+    can_read: bool | None = None
+    write_policy: Literal["deny", "direct"] | None = None
+    is_default: bool | None = None
+    allowed_memory_types: list[str] | None = None
+    allowed_source_types: list[str] | None = None
+
+
+class BindingResponse(TZAwareBaseModel):
+    """Response model for one binding row."""
+
+    id: UUID
+    agent_id: UUID
+    context_id: UUID
+    can_read: bool
+    write_policy: str
+    is_default: bool
+    allowed_memory_types: list[str] | None = None
+    allowed_source_types: list[str] | None = None
+    created_by: str
+    created_at: datetime
+    updated_at: datetime
+
+    model_config = {"from_attributes": True}
+
+
+class BindingListResponse(BaseModel):
+    """Response model for an agent's binding listing."""
+
+    bindings: list[BindingResponse]
+    count: int
+
+
+def _binding_service(db: AsyncSession):
+    from services.agent_binding_service import AgentBindingService
+
+    return AgentBindingService(db)
+
+
+@router.post(
+    "/{agent_id}/bindings", response_model=BindingResponse, status_code=status.HTTP_201_CREATED
+)
+async def create_agent_binding(
+    agent_id: UUID,
+    data: BindingCreate,
+    user: dict = Depends(require_workspace_admin),
+    db: AsyncSession = Depends(get_db),
+) -> Any:
+    """Bind an agent to a context (owner/admin only, purely subtractive)."""
+    from services.agent_binding_service import AUDIT_BINDING_CREATED
+
+    user_id, email, workspace_id, metadata = _actor(user)
+    agent = await _get_agent_or_404(AgentRegistryService(db), workspace_id, agent_id)
+
+    binding = await _binding_service(db).create_binding(
+        agent=agent,
+        context_id=data.context_id,
+        created_by=user_id,
+        can_read=data.can_read,
+        write_policy=data.write_policy,
+        is_default=data.is_default,
+        allowed_memory_types=data.allowed_memory_types,
+        allowed_source_types=data.allowed_source_types,
+    )
+    add_agent_audit_row(
+        db,
+        actor_user_id=user_id,
+        actor_email=email,
+        action=AUDIT_BINDING_CREATED,
+        agent_id=agent.id,
+        workspace_id=workspace_id,
+        metadata={
+            **metadata,
+            "agent_name": agent.name,
+            "context_id": str(data.context_id),
+            "binding_id": str(binding.id),
+            "can_read": binding.can_read,
+            "write_policy": binding.write_policy,
+            "is_default": binding.is_default,
+        },
+    )
+    await db.commit()
+    await db.refresh(binding)
+    return binding
+
+
+@router.get("/{agent_id}/bindings", response_model=BindingListResponse)
+async def list_agent_bindings(
+    agent_id: UUID,
+    user: dict = Depends(require_workspace_admin),
+    db: AsyncSession = Depends(get_db),
+) -> Any:
+    """List an agent's context bindings (owner/admin only)."""
+    _, _, workspace_id, _ = _actor(user)
+    agent = await _get_agent_or_404(AgentRegistryService(db), workspace_id, agent_id)
+    bindings = await _binding_service(db).list_bindings(agent)
+    return BindingListResponse(
+        bindings=[BindingResponse.model_validate(b) for b in bindings],
+        count=len(bindings),
+    )
+
+
+@router.patch("/{agent_id}/bindings/{binding_id}", response_model=BindingResponse)
+async def update_agent_binding(
+    agent_id: UUID,
+    binding_id: UUID,
+    data: BindingUpdate,
+    user: dict = Depends(require_workspace_admin),
+    db: AsyncSession = Depends(get_db),
+) -> Any:
+    """Partially update a binding (owner/admin only)."""
+    from services.agent_binding_service import AUDIT_BINDING_UPDATED
+
+    user_id, email, workspace_id, metadata = _actor(user)
+    service = _binding_service(db)
+    agent = await _get_agent_or_404(AgentRegistryService(db), workspace_id, agent_id)
+    binding = await service.get_binding(agent, binding_id)
+    if binding is None:
+        raise NotFoundException("Binding")
+
+    updates = data.model_dump(exclude_unset=True)
+    for non_nullable in ("can_read", "write_policy", "is_default"):
+        if non_nullable in updates and updates[non_nullable] is None:
+            raise ValidationError(f"'{non_nullable}' cannot be null.", field=non_nullable)
+
+    changes = await service.update_binding(binding, updates)
+    if changes:
+        add_agent_audit_row(
+            db,
+            actor_user_id=user_id,
+            actor_email=email,
+            action=AUDIT_BINDING_UPDATED,
+            agent_id=agent.id,
+            workspace_id=workspace_id,
+            metadata={
+                **metadata,
+                "agent_name": agent.name,
+                "context_id": str(binding.context_id),
+                "binding_id": str(binding.id),
+                "changes": changes,
+            },
+        )
+        await db.commit()
+        await db.refresh(binding)
+    return binding
+
+
+@router.delete("/{agent_id}/bindings/{binding_id}", status_code=status.HTTP_204_NO_CONTENT)
+async def delete_agent_binding(
+    agent_id: UUID,
+    binding_id: UUID,
+    user: dict = Depends(require_workspace_admin),
+    db: AsyncSession = Depends(get_db),
+) -> None:
+    """Delete a binding (owner/admin only) — the agent loses that context."""
+    from services.agent_binding_service import AUDIT_BINDING_DELETED
+
+    user_id, email, workspace_id, metadata = _actor(user)
+    service = _binding_service(db)
+    agent = await _get_agent_or_404(AgentRegistryService(db), workspace_id, agent_id)
+    binding = await service.get_binding(agent, binding_id)
+    if binding is None:
+        raise NotFoundException("Binding")
+
+    add_agent_audit_row(
+        db,
+        actor_user_id=user_id,
+        actor_email=email,
+        action=AUDIT_BINDING_DELETED,
+        agent_id=agent.id,
+        workspace_id=workspace_id,
+        metadata={
+            **metadata,
+            "agent_name": agent.name,
+            "context_id": str(binding.context_id),
+            "binding_id": str(binding.id),
+        },
+    )
+    await service.delete_binding(binding)
+    await db.commit()
