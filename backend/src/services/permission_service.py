@@ -896,6 +896,7 @@ class PermissionService:
         memory_user_id: MemoryAuthorId,
         workspace_id: UUID,
         context_id: UUID,
+        access: str = "read",
     ) -> bool:
         """Check if user can access a memory based on workspace membership and context privacy.
 
@@ -903,18 +904,38 @@ class PermissionService:
         1. Private context (is_private=true): Only creator can access
         2. Shared context (is_private=false): Workspace members can access
 
+        Issue #1275 (RFC-0002 P0-2): this is the memory-id-addressed access
+        chokepoint (reference / update / forget-by-id / explore authorize the
+        memory's *own* stored ``context_id`` here). After the base RBAC
+        decision allows, the purely subtractive agent-binding intersection is
+        applied for agent-bound credentials, so a binding-denied context is
+        unreachable even by memory_id. Callers on a WRITE path (update /
+        forget) MUST pass ``access="write"`` so a ``can_read``-only binding
+        cannot be used to mutate. No-op for non-agent credentials.
+
         Args:
             user_id: Requesting user ID
             memory_user_id: Memory creator's user ID
             workspace_id: Workspace ID
             context_id: Context ID
+            access: ``"read"`` (default) or ``"write"`` — the binding gate.
 
         Returns:
             True if user can access, False otherwise
         """
-        # Owner can always access their own memories
+
+        async def _binding_ok() -> bool:
+            # The subtractive agent-binding gate applies to EVERY caller,
+            # including the memory owner (an agent bound-denied to a context
+            # must not reach its own memories there via memory_id).
+            from services.agent_binding_service import agent_binding_permits
+
+            return await agent_binding_permits(self.db, context_id, access)
+
+        # Owner can always access their own memories (RBAC), but the binding
+        # still subtracts.
         if user_id == memory_user_id:
-            return True
+            return await _binding_ok()
 
         # Check if context is shared
         from services.context_service import ContextService
@@ -926,5 +947,7 @@ class PermissionService:
             # Private context: only creator can access
             return False
 
-        # Shared context: check workspace membership
-        return await self.is_workspace_member(user_id, workspace_id)
+        # Shared context: check workspace membership, then the binding.
+        if not await self.is_workspace_member(user_id, workspace_id):
+            return False
+        return await _binding_ok()

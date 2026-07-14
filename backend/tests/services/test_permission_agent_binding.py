@@ -177,3 +177,97 @@ class TestMcpWritePathGate:
             result = await _resolve_context(MagicMock(), "u", context.id)
         assert result is context
         instance.evaluate_context_access.assert_not_awaited()
+
+
+class TestCanAccessMemoryBindingGate:
+    """#1275: can_access_memory is the memory-id-addressed chokepoint —
+    binding subtracts even for the memory owner, honors the access kind, and
+    shadow mode proceeds."""
+
+    @pytest.mark.asyncio
+    async def test_no_scope_owner_unchanged(self):
+        perm = _perm()
+        patcher, instance = _patch_binding_service(False, "binding_denied")
+        with patcher:
+            ok = await perm.can_access_memory(
+                user_id="u", memory_user_id="u", workspace_id=WORKSPACE_ID, context_id=uuid.uuid4()
+            )
+        assert ok is True
+        instance.evaluate_context_access.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_owner_still_subtracted_by_binding(self):
+        set_agent_scope(AgentScope(agent_id=AGENT_ID, enforcement_mode="enforce"))
+        perm = _perm()
+        patcher, _ = _patch_binding_service(False, "binding_denied")
+        with patcher:
+            ok = await perm.can_access_memory(
+                user_id="u", memory_user_id="u", workspace_id=WORKSPACE_ID, context_id=uuid.uuid4()
+            )
+        # Owner passes RBAC but the binding denies — the agent cannot reach
+        # even its own memory in a bound-denied context.
+        assert ok is False
+
+    @pytest.mark.asyncio
+    async def test_write_access_kind_forwarded(self):
+        set_agent_scope(AgentScope(agent_id=AGENT_ID, enforcement_mode="enforce"))
+        perm = _perm()
+        patcher, instance = _patch_binding_service(True, "allowed")
+        with patcher:
+            await perm.can_access_memory(
+                user_id="u",
+                memory_user_id="u",
+                workspace_id=WORKSPACE_ID,
+                context_id=uuid.uuid4(),
+                access="write",
+            )
+        assert instance.evaluate_context_access.await_args.args[2] == "write"
+
+    @pytest.mark.asyncio
+    async def test_shadow_would_deny_permits(self):
+        set_agent_scope(AgentScope(agent_id=AGENT_ID, enforcement_mode="shadow"))
+        perm = _perm()
+        patcher, _ = _patch_binding_service(True, "would_deny")
+        with patcher:
+            ok = await perm.can_access_memory(
+                user_id="u", memory_user_id="u", workspace_id=WORKSPACE_ID, context_id=uuid.uuid4()
+            )
+        assert ok is True
+
+
+class TestMemoryServiceDeclaredContextGate:
+    """#1275: MemoryService._get_context_isolation_params applies the binding
+    gate on the declared-context write/read path (remember / recall / forget)."""
+
+    def _service(self, context):
+        from services.memory_service import MemoryService
+
+        svc = MemoryService.__new__(MemoryService)
+        svc.db = MagicMock()
+        svc.context_service = MagicMock(get_context=AsyncMock(return_value=context))
+        return svc
+
+    @pytest.mark.asyncio
+    async def test_no_scope_passes(self):
+        context = SimpleNamespace(id=uuid.uuid4(), workspace_id=WORKSPACE_ID)
+        svc = self._service(context)
+        patcher, instance = _patch_binding_service(False, "binding_denied")
+        with patcher:
+            ctx, ws, cid = await svc._get_context_isolation_params("u", context.id, access="write")
+        assert ctx is context
+        instance.evaluate_context_access.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_write_binding_deny_raises_context_404(self):
+        set_agent_scope(AgentScope(agent_id=AGENT_ID, enforcement_mode="enforce"))
+        context = SimpleNamespace(id=uuid.uuid4(), workspace_id=WORKSPACE_ID)
+        svc = self._service(context)
+        patcher, _ = _patch_binding_service(False, "binding_denied")
+        with patcher, pytest.raises(NotFoundException):
+            await svc._get_context_isolation_params("u", context.id, access="write")
+
+    @pytest.mark.asyncio
+    async def test_none_context_short_circuits(self):
+        svc = self._service(None)
+        result = await svc._get_context_isolation_params("u", None, access="write")
+        assert result == (None, None, None)

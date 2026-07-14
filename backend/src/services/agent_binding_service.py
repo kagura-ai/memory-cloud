@@ -95,6 +95,31 @@ def _validate_write_policy(value: Any) -> str:
     return value
 
 
+async def agent_binding_permits(db: AsyncSession, context_id: uuid.UUID, access: str) -> bool:
+    """Reusable subtractive gate for the per-request agent scope.
+
+    Returns True when the request is not an agent credential (scope None) or
+    the binding allows / shadow-permits the access; False only on a hard
+    ``binding_denied``. This is the single lever the memory-access chokepoints
+    (``PermissionService.can_access_memory`` for memory-id-addressed ops,
+    ``MemoryService._get_context_isolation_params`` for the declared-context
+    write/read path) call so agent-bound REST **and** MCP requests get the
+    same intersection the context-resolution chokepoints already apply —
+    closing the "MemoryService authorizes via its own RBAC path, not the
+    named chokepoint" gap (Copilot/inner review of #1275). No-op cost for
+    every non-agent credential (one contextvar read).
+    """
+    from auth.agent_scope import get_agent_scope
+
+    scope = get_agent_scope()
+    if scope is None:
+        return True
+    allowed, _decision = await AgentBindingService(db).evaluate_context_access(
+        scope, context_id, access
+    )
+    return allowed
+
+
 class AgentBindingService:
     """CRUD + subtractive evaluation over ``agent_context_bindings``."""
 
