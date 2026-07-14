@@ -515,11 +515,21 @@ class LLMService:
                 workspace_id=workspace_id,
                 context_id=context_id,
             )
+            if workspace_id:
+                raise ConfigurationError(
+                    f"No enabled {provider} BYOK key found for this workspace. "
+                    "This feature requires an explicit BYOK key (env-var fallback "
+                    "is disabled for paid features); add one under Integrations "
+                    "> External Keys."
+                )
+            # No workspace_id → the DB lookup above was skipped entirely.
+            # Telling the user to add a key would misdirect debugging: the
+            # bug is the CALLER omitting workspace_id in strict mode.
             raise ConfigurationError(
-                f"No enabled {provider} BYOK key found for this workspace. "
-                "This feature requires an explicit BYOK key (env-var fallback "
-                "is disabled for paid features); add one under Integrations "
-                "> External Keys."
+                f"{provider} BYOK key resolution requires a workspace_id, but "
+                "none was provided by the caller (strict mode skips the "
+                "env-var fallback). This is a calling-code bug, not a "
+                "missing-key configuration issue."
             )
 
         # Environment fallback — provider-specific env var first, then generic

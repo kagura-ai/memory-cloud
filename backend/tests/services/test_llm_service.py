@@ -389,3 +389,19 @@ class TestStrictByokKeyResolution:
             disallow_env_fallback=True,
         )
         assert llm_service._get_provider.call_args.kwargs.get("disallow_env_fallback") is True
+
+    @pytest.mark.asyncio
+    async def test_get_provider_forwards_strict_flag_to_key_resolution(
+        self, llm_service, monkeypatch
+    ):
+        """#1242 chain link 2: ``_get_provider`` must forward the flag to
+        the REAL ``_get_user_api_key`` — the complete_json-level test
+        mocks _get_provider away, so without this test a refactor that
+        drops the kwarg re-enables the platform env fallback silently.
+        """
+        monkeypatch.setenv("OPENAI_API_KEY", "sk-env-test-1242")
+        with pytest.raises(ConfigurationError):
+            await llm_service._get_provider("u1", "openai", disallow_env_fallback=True)
+        # Default mode still resolves the env key end-to-end.
+        provider = await llm_service._get_provider("u1", "openai")
+        assert provider is not None
