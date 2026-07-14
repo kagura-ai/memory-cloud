@@ -155,6 +155,12 @@ def _live_run_boundary_stmt(run_id: UUID, workspace_id: UUID):
             and_(
                 MemoryAnalysis.id == run_id,
                 MemoryAnalysis.workspace_id == workspace_id,
+                # Copilot review: also pin the CONTEXT's workspace — the
+                # run row's workspace_id alone would treat a run whose
+                # context_id drifted into another workspace (partial
+                # corruption / bad backfill) as live. Matches
+                # verify_context_in_workspace's predicate set.
+                Context.workspace_id == workspace_id,
                 Context.deleted_at.is_(None),
             )
         )
@@ -212,6 +218,8 @@ async def get_analysis(
             and_(
                 MemoryAnalysis.id == run_id,
                 MemoryAnalysis.workspace_id == workspace_id,
+                # Same context-workspace pin as _live_run_boundary_stmt.
+                Context.workspace_id == workspace_id,
                 Context.deleted_at.is_(None),
             )
         )
