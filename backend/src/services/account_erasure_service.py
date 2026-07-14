@@ -1037,6 +1037,15 @@ class AccountErasureService:
             AgentContextBinding, AgentContextBinding.created_by, user_id
         )
 
+        # memory_access_events (#1278, RFC-0002 P0-5): no-FK append-only audit
+        # rows survive entity deletion, so the subject's rows must be
+        # pseudonymized + scrubbed here. The append-only trigger permits UPDATE
+        # ONLY of the carve-out columns (user_id, session_id, run_id,
+        # event_metadata) — this single statement touches exactly those.
+        counts["memory_access_events_pseudonymized"] = await self._erase_memory_access_events(
+            user_id
+        )
+
         # Finally the user row itself.
         await self.db.delete(target)
         await self.db.commit()
@@ -1053,6 +1062,45 @@ class AccountErasureService:
         result = cast(
             CursorResult[Any],
             await self.db.execute(delete(model).where(where_clause)),
+        )
+        return result.rowcount or 0
+
+    async def _erase_memory_access_events(self, user_id: str) -> int:
+        """Pseudonymize + scrub the erased subject's memory_access_events rows.
+
+        One UPDATE touching ONLY the append-only carve-out columns
+        (user_id, session_id, run_id, event_metadata), so the append-only
+        trigger permits it:
+
+        - ``user_id`` → salted-SHA256 pseudonym (keeps the row's non-personal
+          audit shape while breaking the personal-data link, same lane as
+          plan_changes/audit_logs);
+        - ``session_id`` / ``run_id`` → NULL scrubbed. These are opaque
+          per-session correlation tokens with no post-erasure analytical value,
+          and because a contract is not a control (a client may have embedded a
+          name despite the MUST-NOT), a definitive NULL is stronger than a
+          hash and needs no pgcrypto;
+        - ``event_metadata`` → redacted marker (the "opaque tokens" contract is
+          not trusted to keep PII out of client-controlled JSONB — the
+          llm_call_log lesson).
+
+        Rows keep their non-personal audit value.
+        """
+        from models.memory_access_event import MemoryAccessEvent
+
+        pseudonym = sha256_hex(user_id, salt=_audit_salt())
+        result = cast(
+            CursorResult[Any],
+            await self.db.execute(
+                update(MemoryAccessEvent)
+                .where(MemoryAccessEvent.user_id == user_id)
+                .values(
+                    user_id=pseudonym,
+                    session_id=None,
+                    run_id=None,
+                    event_metadata={"redacted": "erased_subject"},
+                )
+            ),
         )
         return result.rowcount or 0
 

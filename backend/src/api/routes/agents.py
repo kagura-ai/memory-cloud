@@ -579,4 +579,17 @@ async def agent_bootstrap(
     # cannot masquerade as the agent's own activity (no-op for agent-bound).
     await service.audit_on_behalf_of(agent=agent, principal=principal, session_id=params.session_id)
     await db.commit()
+
+    # #1278: append-only audit row (independent session, fail-open, no-op
+    # unless the request carries verified agent identity).
+    from services.memory_access_event_writer import emit_memory_access_event
+
+    await emit_memory_access_event(
+        operation="bootstrap",
+        outcome="partial" if envelope.get("degraded") else "success",
+        workspace_id=principal.workspace_id,
+        user_id=principal.user_id,
+        context_id=context.id,
+        policy_decision=principal.metadata.get("policy_decision"),
+    )
     return envelope

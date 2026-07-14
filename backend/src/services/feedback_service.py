@@ -77,16 +77,20 @@ class FeedbackService:
                 f"invalid feedback provenance {provenance!r}; "
                 f"expected one of {_ALL_FEEDBACK_PROVENANCES}"
             )
-        exists = (
+        # Fetch workspace_id alongside the existence check so the audit emission
+        # below reuses it instead of a second round-trip (Copilot review, #1278).
+        # `.one_or_none()` on a Row disambiguates "no row" from "row with NULL
+        # workspace_id" (a bare scalar_one_or_none would conflate them).
+        existing = (
             await self.db.execute(
-                select(Memory.id).where(
+                select(Memory.id, Memory.workspace_id).where(
                     Memory.id == memory_id,
                     Memory.context_id == context_id,
                     Memory.deleted_at.is_(None),
                 )
             )
-        ).scalar_one_or_none()
-        if exists is None:
+        ).one_or_none()
+        if existing is None:
             raise NotFoundException("Memory")
 
         row = RetrievalFeedback(
@@ -101,6 +105,21 @@ class FeedbackService:
         self.db.add(row)
         await self.db.commit()
         await self.db.refresh(row)
+
+        # #1278: append-only audit (no-op unless verified agent identity). Only
+        # the public (agent) path is audited; record_host_feedback is the
+        # gateway seam, not agent activity.
+        if provenance == FEEDBACK_PROVENANCE_AGENT:
+            from services.memory_access_event_writer import emit_memory_access_event
+
+            await emit_memory_access_event(
+                operation="feedback",
+                outcome="success",
+                workspace_id=existing.workspace_id,
+                user_id=user_id,
+                context_id=context_id,
+                memory_id=memory_id,
+            )
         return row
 
     async def record_host_feedback(

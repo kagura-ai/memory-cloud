@@ -980,3 +980,36 @@ class TestDeletePostgresSweep:
         )
         assert agent_call.args[1] is Agent.owner_user_id
         assert agent_call.args[2] == target.user_id
+
+
+class TestMemoryAccessEventsErasure:
+    """#1278: the erased subject's memory_access_events rows are pseudonymized
+    + scrubbed in ONE carve-out UPDATE (user_id pseudonym, session_id/run_id
+    NULL, event_metadata redacted)."""
+
+    @pytest.mark.asyncio
+    async def test_erasure_pseudonymizes_and_scrubs(self):
+
+        svc = _service()
+        svc._count_and_delete = AsyncMock(return_value=0)
+        svc._pseudonymize_field = AsyncMock(return_value=0)
+        svc.db.delete = AsyncMock()
+        svc.db.commit = AsyncMock()
+        captured = {}
+
+        async def _exec(stmt):
+            captured["stmt"] = stmt
+            return SimpleNamespace(rowcount=4)
+
+        svc.db.execute = AsyncMock(side_effect=_exec)
+        target = _user()
+
+        count = await svc._erase_memory_access_events(target.user_id)
+        assert count == 4
+        # A single UPDATE on memory_access_events touching only carve-out cols.
+        compiled = str(captured["stmt"]).lower()
+        assert "update memory_access_events" in compiled
+        params = captured["stmt"].compile().params
+        assert params["user_id"] != target.user_id  # pseudonymized
+        assert params["session_id"] is None
+        assert params["run_id"] is None

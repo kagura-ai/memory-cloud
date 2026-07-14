@@ -68,6 +68,11 @@ OPERATIONAL_TABLES: frozenset[str] = frozenset(
         # plumbing like context_members; cascades with agent/context, created_by
         # pseudonymized on erasure.
         "agent_context_bindings",
+        # Append-only agent memory-access audit (#1278, RFC-0002 P0-5) — audit
+        # plumbing (no user knowledge, no learned structure); no FK (survives
+        # entity deletion); user_id/session_id/run_id/event_metadata
+        # pseudonymized+scrubbed on erasure via the append-only carve-out.
+        "memory_access_events",
         "users",
         "user_oauth_providers",
         "oauth_authorization_codes",

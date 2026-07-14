@@ -441,6 +441,7 @@ async def mcp_asgi_app(scope: Scope, receive: Receive, send: Send) -> None:
                 build_correlation_from_headers(
                     traceparent=_hdr(b"traceparent"),
                     baggage=_hdr(b"baggage"),
+                    surface="mcp",
                 )
             )
         except Exception:  # pragma: no cover - defensive; correlation is advisory
