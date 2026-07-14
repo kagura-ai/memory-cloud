@@ -17,6 +17,7 @@ setting-gated and separately reviewed.
 
 from __future__ import annotations
 
+from contextlib import aclosing
 from typing import Any
 from uuid import UUID
 
@@ -90,32 +91,38 @@ async def record_memory_access_event(
     from models.memory_access_event import MemoryAccessEvent
 
     try:
-        async for db in get_db():
-            db.add(
-                MemoryAccessEvent(
-                    workspace_id=workspace_id,
-                    context_id=context_id,
-                    user_id=user_id,
-                    principal_type=principal_type,
-                    api_key_prefix=api_key_prefix,
-                    agent_id=agent_id,
-                    session_id=session_id,
-                    run_id=run_id,
-                    trace_id=trace_id,
-                    span_id=span_id,
-                    surface=surface,
-                    operation=operation,
-                    outcome=outcome,
-                    policy_decision=policy_decision,
-                    memory_id=memory_id,
-                    result_count=result_count,
-                    latency_ms=latency_ms,
-                    query_hash=query_hash,
-                    event_metadata=event_metadata,
+        # aclosing() forces get_db()'s post-yield teardown (session.close) to run
+        # synchronously HERE, inside this try/except. A bare early `return`/`break`
+        # out of `async for` defers async-generator finalization to GC, so a
+        # teardown error would escape the fail-open guard and surface as an
+        # unretrieved finalizer exception instead (Copilot review, #1278).
+        async with aclosing(get_db()) as gen:
+            async for db in gen:
+                db.add(
+                    MemoryAccessEvent(
+                        workspace_id=workspace_id,
+                        context_id=context_id,
+                        user_id=user_id,
+                        principal_type=principal_type,
+                        api_key_prefix=api_key_prefix,
+                        agent_id=agent_id,
+                        session_id=session_id,
+                        run_id=run_id,
+                        trace_id=trace_id,
+                        span_id=span_id,
+                        surface=surface,
+                        operation=operation,
+                        outcome=outcome,
+                        policy_decision=policy_decision,
+                        memory_id=memory_id,
+                        result_count=result_count,
+                        latency_ms=latency_ms,
+                        query_hash=query_hash,
+                        event_metadata=event_metadata,
+                    )
                 )
-            )
-            await db.commit()
-            return
+                await db.commit()
+                break
     except Exception as exc:  # fail-open — never break the caller's path
         logger.warning(
             "memory_access_event_write_failed",
