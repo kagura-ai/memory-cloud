@@ -49,6 +49,7 @@ from sqlalchemy import and_, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from db.constraint_names import integrity_error_constraint_name
 from models.analysis import (
     MEMORY_ANALYSIS_PAID_BY_VALUES,
     MEMORY_ANALYSIS_STATUSES,
@@ -184,7 +185,7 @@ def _validate_date_params(params: AnalysisParams) -> None:
         except (ValueError, TypeError) as e:
             raise ValidationError(
                 f"Invalid ISO-8601 datetime for {key!r}: {value!r}. "
-                "Expected forms: '2026-05-02T00:00:00Z', "
+                "Expected forms: date-only '2026-05-02', '2026-05-02T00:00:00Z', "
                 "'2026-05-02T09:00:00+09:00', or naive 'YYYY-MM-DDTHH:MM:SS'.",
                 field=key,
             ) from e
@@ -367,8 +368,16 @@ class AnalysisOrchestrator:
             # llm_pricing RESTRICT FK) are NOT a conflicting run and must
             # not be translated to a 409 telling the user to wait for a
             # run that does not exist. Re-raise those for the generic
-            # 500 path.
-            if "uq_memory_analyses_one_running" not in str(exc.orig):
+            # 500 path. Structured diagnostics first (asyncpg/psycopg via
+            # the shared helper); message substring only as the fallback
+            # for wrapper shapes without them — so an unusual driver
+            # chain degrades to the old behavior, never to a wrong 409.
+            constraint = integrity_error_constraint_name(exc)
+            if constraint is not None:
+                is_running_race = constraint == "uq_memory_analyses_one_running"
+            else:
+                is_running_race = "uq_memory_analyses_one_running" in str(exc.orig)
+            if not is_running_race:
                 raise
             # Lost the race with a concurrent start: the partial unique
             # index ``uq_memory_analyses_one_running`` rejected a second

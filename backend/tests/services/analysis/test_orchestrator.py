@@ -793,3 +793,47 @@ class TestStartIntegrityErrorScoping:
                     user_id="u1",
                     params=AnalysisParams(),
                 )
+
+
+class TestStartIntegrityErrorStructuredDiagnostics:
+    @pytest.mark.asyncio
+    async def test_structured_constraint_name_translates_to_conflict(
+        self, db_session, monkeypatch
+    ) -> None:
+        """Copilot review (#1249): the asyncpg/psycopg structured path —
+        ``orig.constraint_name`` — must drive the 409 translation without
+        relying on message-substring matching."""
+        service = AnalysisOrchestrator(db_session)
+        ws_id = uuid4()
+        ctx_id = uuid4()
+        await _seed_workspace_context(db_session, ws_id, ctx_id)
+        row = LLMPricing(
+            provider="openai",
+            model="gpt-5-nano",
+            unit_type="input_tokens",
+            price_per_unit="0.001",
+            currency="USD",
+            effective_from=datetime(2024, 1, 1),
+        )
+        db_session.add(row)
+        await db_session.flush()
+
+        orig = MagicMock()
+        orig.constraint_name = "uq_memory_analyses_one_running"
+        orig.__str__ = lambda self: "unique violation (message deliberately nameless)"
+
+        async def racing_flush(*args, **kwargs):
+            raise IntegrityError("INSERT INTO memory_analyses ...", {}, orig)
+
+        monkeypatch.setattr(db_session, "flush", racing_flush)
+        with patch(
+            "services.analysis.orchestrator.assert_openai_byok_key_available",
+            return_value=None,
+        ):
+            with pytest.raises(ConflictError, match="already in progress"):
+                await service.start(
+                    workspace_id=ws_id,
+                    context_id=ctx_id,
+                    user_id="u1",
+                    params=AnalysisParams(),
+                )
