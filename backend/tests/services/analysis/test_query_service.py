@@ -450,3 +450,140 @@ async def test_get_cluster_limit_clamped_to_max(
     assert page is not None
     assert page["memories"] == []
     assert page["next_cursor"] is None
+
+
+# ===========================================================================
+# #1243 — deleted-context runs are structurally invisible
+# ===========================================================================
+
+
+async def _soft_delete_context(db_session, context_id: UUID) -> None:
+    from models.auth import Context
+
+    ctx = await db_session.get(Context, context_id)
+    ctx.deleted_at = utcnow()
+    await db_session.flush()
+
+
+class TestDeletedContextInvisibility:
+    """#1243: every run_id-keyed reader must treat runs of a soft-deleted
+    context as nonexistent. The MCP tools (get_analysis / get_cluster)
+    reach these readers with only a run_id in hand — REST 404s at its
+    URL-context boundary check, but MCP had no equivalent, so LLM-derived
+    labels/descriptions/property_stats of deleted contexts stayed
+    readable indefinitely.
+    """
+
+    @pytest.mark.asyncio
+    async def test_get_analysis_none_after_context_soft_delete(
+        self, db_session, fixture_workspace_id, fixture_context_id, fixture_pricing
+    ):
+        run = await _make_run(
+            db_session,
+            workspace_id=fixture_workspace_id,
+            context_id=fixture_context_id,
+            pricing=fixture_pricing,
+        )
+        assert (
+            await query_service.get_analysis(
+                db_session, workspace_id=fixture_workspace_id, run_id=run.id
+            )
+            is not None
+        )
+        await _soft_delete_context(db_session, fixture_context_id)
+        assert (
+            await query_service.get_analysis(
+                db_session, workspace_id=fixture_workspace_id, run_id=run.id
+            )
+            is None
+        )
+
+    @pytest.mark.asyncio
+    async def test_get_cluster_none_after_context_soft_delete(
+        self, db_session, fixture_workspace_id, fixture_context_id, fixture_pricing
+    ):
+        run = await _make_run(
+            db_session,
+            workspace_id=fixture_workspace_id,
+            context_id=fixture_context_id,
+            pricing=fixture_pricing,
+        )
+        await _make_cluster(db_session, run=run, cluster_index=0)
+        assert (
+            await query_service.get_cluster(
+                db_session,
+                workspace_id=fixture_workspace_id,
+                run_id=run.id,
+                cluster_index=0,
+            )
+            is not None
+        )
+        await _soft_delete_context(db_session, fixture_context_id)
+        assert (
+            await query_service.get_cluster(
+                db_session,
+                workspace_id=fixture_workspace_id,
+                run_id=run.id,
+                cluster_index=0,
+            )
+            is None
+        )
+
+    @pytest.mark.asyncio
+    async def test_list_clusters_none_after_context_soft_delete(
+        self, db_session, fixture_workspace_id, fixture_context_id, fixture_pricing
+    ):
+        run = await _make_run(
+            db_session,
+            workspace_id=fixture_workspace_id,
+            context_id=fixture_context_id,
+            pricing=fixture_pricing,
+        )
+        await _make_cluster(db_session, run=run, cluster_index=0)
+        await _soft_delete_context(db_session, fixture_context_id)
+        assert (
+            await query_service.list_clusters(
+                db_session, workspace_id=fixture_workspace_id, run_id=run.id
+            )
+            is None
+        )
+
+    @pytest.mark.asyncio
+    async def test_list_positions_none_after_context_soft_delete(
+        self, db_session, fixture_workspace_id, fixture_context_id, fixture_pricing
+    ):
+        run = await _make_run(
+            db_session,
+            workspace_id=fixture_workspace_id,
+            context_id=fixture_context_id,
+            pricing=fixture_pricing,
+        )
+        await _soft_delete_context(db_session, fixture_context_id)
+        assert (
+            await query_service.list_positions(
+                db_session, workspace_id=fixture_workspace_id, run_id=run.id
+            )
+            is None
+        )
+
+    @pytest.mark.asyncio
+    async def test_get_memory_ids_in_cluster_none_after_context_soft_delete(
+        self, db_session, fixture_workspace_id, fixture_context_id, fixture_pricing
+    ):
+        run = await _make_run(
+            db_session,
+            workspace_id=fixture_workspace_id,
+            context_id=fixture_context_id,
+            pricing=fixture_pricing,
+        )
+        await _make_cluster(db_session, run=run, cluster_index=0)
+        await _soft_delete_context(db_session, fixture_context_id)
+        assert (
+            await query_service.get_memory_ids_in_cluster(
+                db_session,
+                workspace_id=fixture_workspace_id,
+                run_id=run.id,
+                cluster_index=0,
+            )
+            is None
+        )
