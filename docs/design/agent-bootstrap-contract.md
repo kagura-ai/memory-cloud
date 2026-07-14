@@ -76,6 +76,11 @@ Schema-audit requirement (from #990): before freezing the schema, audit the hand
 top-level `args.get()` keys against the declared `properties` — a read-but-undeclared param
 under `additionalProperties: false` freezes a wrong contract.
 
+**When `query` is absent, the `recall` component reports `"status": "skipped"`** — the server
+never fabricates a recall query. This holds even when `include` explicitly names `recall`:
+an `include=["recall"]` call without `query` returns a skipped recall component, not an
+error.
+
 **Default-context resolution.** If `context_id` is omitted, the server resolves the agent's
 default binding — the row with `is_default = true`, or the agent's sole binding when exactly
 one exists. If the agent has multiple bindings and no default, the call fails with
@@ -97,7 +102,8 @@ one exists. If the agent has multiple bindings and no default, the call fails wi
     "binding": { "context_id": "…", "is_default": true }
   },
   "context": { /* byte-compatible with get_context_info's context block */ },
-  "instructions": "<usage_guide + standard instructions markdown>",
+  "instructions": "<context usage_guide, then the standard instructions constant, concatenated
+                    in that order with a blank-line separator — the get_context_info precedent>",
   "components": {
     "pinned":   { "status": "ok", "memories": [ /* load_pinned rows */ ],
                   "total_available": 12, "truncated": false, "cap": 100 },
@@ -113,10 +119,16 @@ one exists. If the agent has multiple bindings and no default, the call fails wi
 ```
 
 **Component sub-envelopes are byte-compatible with the standalone primitives' response
-shapes** (`load_pinned` → `{memories, total_available, truncated, cap}`; `recall_upcoming` →
-`{results}`; keyless `get_state` → `{states, count}`). Clients reuse one parser per primitive
-whether they call it directly or via bootstrap. A flattened bespoke bundle schema was
-rejected (dual maintenance on every primitive change).
+shapes, plus additive bootstrap metadata.** The primitive's response fields appear unchanged
+inside the sub-envelope (`load_pinned` → `{memories, total_available, truncated, cap}`;
+`recall_upcoming` → its handler's response fields including `results`; keyless `get_state` →
+`{states, count}`), so clients reuse one parser per primitive whether they call it directly
+or via bootstrap. Bootstrap-only fields (`status`, `query_hash`, `k`, `trust_filter`, `from`,
+`until`) are additive metadata alongside the primitive fields, never replacements. The
+component-level `status` vocabulary is `ok | error | skipped` (per-component health); the
+**top-level** `status` stays `"success"` per the house envelope convention — the two fields
+are different layers, not an inconsistency. A flattened bespoke bundle schema was rejected
+(dual maintenance on every primitive change).
 
 ## Identity rule (normative)
 
