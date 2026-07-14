@@ -11,7 +11,6 @@ Provides 5 tools for managing resources via MCP:
 - list_resource_tokens: List tokens for a resource
 """
 
-import json
 import logging
 import re
 import time
@@ -20,6 +19,7 @@ from uuid import UUID
 
 from mcp.types import TextContent
 
+import services.resource_ingest_service as resource_ingest_service
 from mcp_server.tools._helpers import (
     _check_viewer_permission,
     _error_response,
@@ -27,6 +27,7 @@ from mcp_server.tools._helpers import (
     _log_tool_usage,
     _success_response,
 )
+from services.resource_ingest_service import IngestItemError
 from services.resource_quota_service import (
     check_event_quota,
     resolve_workspace_event_quota_per_hour,
@@ -38,11 +39,60 @@ logger = logging.getLogger(__name__)
 # Resource ID format: lowercase alphanumeric + underscore + hyphen
 _RESOURCE_ID_PATTERN = re.compile(r"^[a-z0-9_-]+$")
 
-# Max payload size per event (100KB)
-_MAX_PAYLOAD_SIZE_BYTES = 100_000
+# Max events per batch — single source in the shared ingest service
+# (Issue #1255); the per-event payload-size cap lives there too
+# (resource_ingest_service.MAX_PAYLOAD_SIZE_BYTES).
+_MAX_BATCH_SIZE = resource_ingest_service.MAX_BATCH_SIZE
 
-# Max events per batch
-_MAX_BATCH_SIZE = 100
+
+def _format_batch_item_error(err: IngestItemError) -> dict:
+    """Render a structured batch item error in the historic MCP wire shape.
+
+    Strings are byte-compatible with the pre-#1255 in-handler messages.
+    Only the idempotency-validation error carries a ``doc_id`` field (the
+    duplicate messages embed the doc_id in the string instead) — preserved
+    from the original envelope.
+    """
+    svc = resource_ingest_service
+    kind = err.kind
+    doc_id_field = False
+    if kind == svc.KIND_NOT_AN_OBJECT:
+        message = "event must be an object"
+    elif kind == svc.KIND_INVALID_OP:
+        message = f"Invalid op: {err.detail.get('op')}"
+    elif kind == svc.KIND_MISSING_DOC_ID:
+        message = "Missing doc_id"
+    elif kind == svc.KIND_PAYLOAD_REQUIRED:
+        message = "payload required for upsert"
+    elif kind == svc.KIND_VERSION_NOT_INT:
+        message = "version must be an integer"
+    elif kind == svc.KIND_VERSION_TOO_SMALL_UPSERT:
+        message = "version >= 1 required for upsert"
+    elif kind == svc.KIND_PAYLOAD_TOO_LARGE:
+        message = f"Payload too large: {err.detail['payload_size']} bytes (max {err.detail['max']})"
+    elif kind == svc.KIND_IMPORTANCE_NOT_NUMBER:
+        message = "importance must be a number"
+    elif kind == svc.KIND_IMPORTANCE_OUT_OF_RANGE:
+        message = "importance must be between 0.0 and 1.0"
+    elif kind == svc.KIND_PAYLOAD_NOT_NULL_DELETE:
+        message = "payload must be null for delete"
+    elif kind == svc.KIND_VERSION_TOO_SMALL:
+        message = "version must be >= 1"
+    elif kind == svc.KIND_IDEMPOTENCY_INVALID:
+        message = err.detail["message"]
+        doc_id_field = True
+    elif kind == svc.KIND_DUPLICATE_VERSION:
+        message = f"Duplicate version for doc_id={err.doc_id}"
+    elif kind == svc.KIND_DUPLICATE_IDEMPOTENCY:
+        message = "Duplicate idempotency_key"
+    elif kind == svc.KIND_CONSTRAINT_VIOLATION:
+        message = "Unable to ingest event due to a constraint violation"
+    else:  # KIND_UNEXPECTED — previously failed the whole call; now per-item.
+        message = "Unexpected error ingesting event"
+    out: dict[str, Any] = {"index": err.index, "error": message}
+    if doc_id_field:
+        out["doc_id"] = err.doc_id
+    return out
 
 
 # ============================================================================
@@ -546,104 +596,16 @@ async def handle_ingest_events(
                     retry_after_seconds=quota_err.retry_after,
                 )
 
+            # Domain validation + persistence via the shared service
+            # (Issue #1255). The MCP surface relies on the service for all
+            # per-item validation; wire strings are rendered locally by
+            # _format_batch_item_error to stay byte-compatible.
+            valid_events, validation_errors = resource_ingest_service.validate_events(events)
+
             created_ids: list[int] = []
-            errors: list[dict] = []
-            valid_events: list[dict[str, Any]] = []
-
-            for i, event_data in enumerate(events):
-                if not isinstance(event_data, dict):
-                    errors.append({"index": i, "error": "event must be an object"})
-                    continue
-                op = event_data.get("op")
-                doc_id = event_data.get("doc_id")
-
-                # Basic validation
-                if op not in ("upsert", "delete"):
-                    errors.append({"index": i, "error": f"Invalid op: {op}"})
-                    continue
-                if not doc_id:
-                    errors.append({"index": i, "error": "Missing doc_id"})
-                    continue
-
-                payload = event_data.get("payload")
-                version = None
-
-                # Upsert requires payload and version >= 1
-                if op == "upsert":
-                    if not payload:
-                        errors.append({"index": i, "error": "payload required for upsert"})
-                        continue
-                    version = event_data.get("version")
-                    try:
-                        version = int(version) if version is not None else None
-                    except (ValueError, TypeError):
-                        errors.append({"index": i, "error": "version must be an integer"})
-                        continue
-                    if version is None or version < 1:
-                        errors.append({"index": i, "error": "version >= 1 required for upsert"})
-                        continue
-
-                # Payload size check
-                if payload:
-                    payload_size = len(json.dumps(payload).encode("utf-8"))
-                    if payload_size > _MAX_PAYLOAD_SIZE_BYTES:
-                        errors.append(
-                            {
-                                "index": i,
-                                "error": f"Payload too large: {payload_size} bytes "
-                                f"(max {_MAX_PAYLOAD_SIZE_BYTES})",
-                            }
-                        )
-                        continue
-
-                # Validate importance range
-                importance = event_data.get("importance", 0.6)
-                try:
-                    importance = float(importance)
-                except (ValueError, TypeError):
-                    errors.append({"index": i, "error": "importance must be a number"})
-                    continue
-                if importance < 0.0 or importance > 1.0:
-                    errors.append({"index": i, "error": "importance must be between 0.0 and 1.0"})
-                    continue
-
-                # Delete validation: payload must be null, version (if provided) must be >= 1
-                if op == "delete":
-                    if payload is not None:
-                        errors.append({"index": i, "error": "payload must be null for delete"})
-                        continue
-                    version = event_data.get("version")
-                    if version is not None:
-                        try:
-                            version = int(version)
-                        except (ValueError, TypeError):
-                            errors.append({"index": i, "error": "version must be an integer"})
-                            continue
-                        if version < 1:
-                            errors.append({"index": i, "error": "version must be >= 1"})
-                            continue
-
-                valid_events.append(
-                    {
-                        "index": i,
-                        "op": op,
-                        "doc_id": doc_id,
-                        "version": version,
-                        "payload": payload if op == "upsert" else None,
-                        "idempotency_key": event_data.get("idempotency_key"),
-                        "event_metadata": event_data.get("event_metadata", {}),
-                        "importance": importance,
-                    }
-                )
+            persist_errors: list[IngestItemError] = []
 
             if valid_events:
-                from services.connector_provisioning import (
-                    get_connector_id_for_resource_pk,
-                    validate_connector_idempotency_key,
-                )
-                from services.resource_lookup import resolve_resource_pk
-                from utils.exceptions import ValidationError
-
                 # Resolve resources.id once per batch via the shared chokepoint
                 # (Issue #390 Phase 2). If the Resource entity row does not
                 # exist, ingest cannot safely proceed — the before_insert
@@ -652,95 +614,45 @@ async def handle_ingest_events(
                 # as generic "constraint violation" strings. Reject the batch
                 # up front with an actionable error so the caller knows to run
                 # ``setup_resource`` or ``setup_connector`` first.
-                resource_pk = await resolve_resource_pk(db, workspace_id, resource_id)
+                resource_pk = await resource_ingest_service.resolve_authoritative_resource_pk(
+                    db, workspace_id=workspace_id, resource_id=resource_id
+                )
                 if resource_pk is None:
                     return _error_response(
                         "resource_not_found",
                         f"Resource '{resource_id}' has no backing entity row in your workspace.",
                         help="Run setup_resource() or setup_connector() first to bind the resource.",
                     )
-                connector_id = await get_connector_id_for_resource_pk(db, resource_pk)
 
-                # Process events
-                from sqlalchemy.exc import IntegrityError
-
-                from db.constraint_names import (
-                    RESOURCE_EVENTS_IDEMPOTENCY_UNIQUE,
-                    RESOURCE_EVENTS_UPSERT_UNIQUE,
-                    integrity_error_constraint_name,
-                )
-                from models.resource import ResourceEvent
-
-            for event_data in valid_events:
-                i = event_data["index"]
-                doc_id = event_data["doc_id"]
-                try:
-                    validate_connector_idempotency_key(
-                        connector_id=connector_id,
-                        idempotency_key=event_data["idempotency_key"],
-                    )
-                except ValidationError as ve:
-                    errors.append({"index": i, "doc_id": doc_id, "error": ve.message})
-                    continue
-
-                event = ResourceEvent(
+                result = await resource_ingest_service.persist_events(
+                    db,
                     resource_id=resource_id,
                     resource_pk=resource_pk,
-                    op=event_data["op"],
-                    doc_id=doc_id,
-                    version=event_data["version"],
-                    payload=event_data["payload"],
-                    idempotency_key=event_data["idempotency_key"],
-                    event_metadata=event_data["event_metadata"],
-                    importance=event_data["importance"],
+                    events=valid_events,
                 )
+                created_ids = result.created_ids
+                persist_errors = result.errors
 
-                try:
-                    async with db.begin_nested():
-                        db.add(event)
-                        await db.flush()
-                    created_ids.append(event.id)
-                except IntegrityError as ie:
-                    constraint = integrity_error_constraint_name(ie)
-                    if constraint == RESOURCE_EVENTS_UPSERT_UNIQUE:
-                        errors.append(
-                            {
-                                "index": i,
-                                "error": f"Duplicate version for doc_id={doc_id}",
-                            }
-                        )
-                    elif constraint == RESOURCE_EVENTS_IDEMPOTENCY_UNIQUE:
-                        errors.append(
-                            {
-                                "index": i,
-                                "error": "Duplicate idempotency_key",
-                            }
-                        )
-                    else:
-                        # Do not leak raw DB constraint details to clients;
-                        # log the constraint name for triage instead.
-                        logger.warning(
-                            "ingest_events integrity error: resource_id=%s index=%s doc_id=%s constraint=%s",
-                            resource_id,
-                            i,
-                            doc_id,
-                            constraint,
-                            exc_info=ie,
-                        )
-                        errors.append(
-                            {
-                                "index": i,
-                                "error": "Unable to ingest event due to a constraint violation",
-                            }
-                        )
-                    continue
+            # Historic MCP ordering: validation errors first (pass 1), then
+            # persistence errors (pass 2).
+            errors = [
+                _format_batch_item_error(err) for err in [*validation_errors, *persist_errors]
+            ]
 
-            # Schedule indexer if any events were created
-            if created_ids:
-                from api.routes.resource_ingest import _schedule_indexer_for_resource
+            # Commit + post-commit indexer boundary (shared service). The
+            # scheduler is injected so the service never imports from the
+            # adapter layer; this lazy import mirrors the pre-refactor MCP
+            # path and keeps the routes module as the helper's single home
+            # (it also serves the REST single-event path).
+            from api.routes.resource_ingest import _schedule_indexer_for_resource
 
-                await _schedule_indexer_for_resource(db, workspace_id, resource_id)
-                await db.commit()
+            await resource_ingest_service.finalize_batch(
+                db,
+                workspace_id=workspace_id,
+                resource_id=resource_id,
+                created_ids=created_ids,
+                schedule_indexer=_schedule_indexer_for_resource,
+            )
 
             await _log_tool_usage(
                 db,
