@@ -399,3 +399,58 @@ class TestGetMemberCredentialsNonMember:
 
         r = client.get(LIST_URL)
         assert r.status_code == 404, r.text
+
+
+class TestAgentBoundMint:
+    """RFC-0002 P0-2 (#1275): owner-provisioned mint accepts agent_id."""
+
+    def test_agent_id_plumbed_and_audited(self, client, owner_gate, monkeypatch):
+        fake_db = _override(_api_key_owner())
+        _mock_member_service(monkeypatch, target_role="member")
+        mgr, _ = _mock_manager(monkeypatch)
+        agent_id = uuid.uuid4()
+
+        r = client.post(
+            MINT_URL,
+            json={"name": "agent-key", "expires_days": 30, "agent_id": str(agent_id)},
+        )
+
+        assert r.status_code == 201, r.text
+        assert mgr.create_key.await_args.kwargs["agent_id"] == agent_id
+        from models.auth import AuditLog
+
+        audit_rows = [
+            c.args[0] for c in fake_db.add.call_args_list if isinstance(c.args[0], AuditLog)
+        ]
+        assert audit_rows[0].user_metadata["agent_id"] == str(agent_id)
+
+    def test_mint_gate_valueerror_maps_to_400(self, client, owner_gate, monkeypatch):
+        """create_key's mint gates (unknown agent / cross-workspace / non-active)
+        raise ValueError, which the route maps to a clean 400."""
+        _override(_api_key_owner())
+        _mock_member_service(monkeypatch, target_role="member")
+        mgr, _ = _mock_manager(monkeypatch)
+        mgr.create_key = AsyncMock(side_effect=ValueError("agent and key workspace mismatch"))
+
+        r = client.post(
+            MINT_URL,
+            json={"name": "k", "expires_days": 30, "agent_id": str(uuid.uuid4())},
+        )
+
+        assert r.status_code == 400
+
+    def test_session_self_mint_rejects_agent_id(self, client, monkeypatch):
+        """agent_id is owner-provisioned-only — session self-mint 400s
+        (same posture as expires_days)."""
+        _override(
+            {
+                "user_id": "target-user",
+                "sub": "target-user",  # session principal marker
+                "email": "t@example.com",
+                "role": "user",
+                "current_workspace_id": _WS,
+            }
+        )
+        r = client.post(MINT_URL, json={"name": "k", "agent_id": str(uuid.uuid4())})
+        assert r.status_code == 400
+        assert "owner-provisioned" in r.json()["message"]

@@ -27,7 +27,7 @@ def _payload(result):
     return json.loads(result[0].text)
 
 
-def _enter(stack, *, service, resolve_raises=None, viewer_error=None):
+def _enter(stack, *, service, resolve_raises=None, viewer_error=None, binding_permits=True):
     """Enter the standard patch set and return the mocked service."""
 
     async def gen():
@@ -40,6 +40,15 @@ def _enter(stack, *, service, resolve_raises=None, viewer_error=None):
         patch(
             "mcp_server.tools.state._check_viewer_permission",
             new=AsyncMock(return_value=viewer_error),
+        )
+    )
+    # #1275: set_state applies the WRITE binding gate. Default permits (no
+    # agent scope); tests pass binding_permits=False to simulate a
+    # write-denied agent binding.
+    stack.enter_context(
+        patch(
+            "services.agent_binding_service.agent_binding_permits",
+            new=AsyncMock(return_value=binding_permits),
         )
     )
     stack.enter_context(
@@ -103,6 +112,22 @@ class TestSetState:
                 workspace_id=uuid4(),
             )
         assert _payload(result)["error"] == "validation_error"
+        svc.set_state.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_write_denied_agent_binding_blocks_set_state(self):
+        """#1275 code-review: set_state is a WRITE — a read-only-bound agent
+        (write_policy='deny') must be blocked with the uniform
+        context_not_found, not slip through the read-side gate."""
+        svc = MagicMock(set_state=AsyncMock())
+        with ExitStack() as stack:
+            _enter(stack, service=svc, binding_permits=False)
+            result = await handle_set_state(
+                args={"context_id": CTX, "key": "k", "value": 1},
+                user_id="u",
+                workspace_id=uuid4(),
+            )
+        assert _payload(result)["error"] == "context_not_found"
         svc.set_state.assert_not_called()
 
     @pytest.mark.asyncio

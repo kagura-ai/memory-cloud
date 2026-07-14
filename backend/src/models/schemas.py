@@ -1426,6 +1426,12 @@ class CreateAPIKeyRequest(BaseModel):
     # 400 if omitted for the programmatic path); session self-mint leaves it None
     # (unchanged — no expiry, as today). 1–3650 days mirrors /api/v1/config/api-keys.
     expires_days: int | None = Field(default=None, ge=1, le=3650)
+    # Issue #1275 (RFC-0002 P0-2): bind the minted key to a registered agent.
+    # Owner-provisioned path only (the route rejects it on session self-mint);
+    # the agent must belong to the same workspace and be active (mint-time
+    # gates in APIKeyManager.create_key). Mutually exclusive with
+    # bound_context_id.
+    agent_id: UUID | None = None
 
 
 class RegenerateAPIKeyResponse(BaseModel):

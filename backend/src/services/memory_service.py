@@ -159,26 +159,43 @@ class MemoryService:
         self.context_service = ContextService(db)
 
     async def _get_context_isolation_params(
-        self, user_id: str, context_id: UUID | None
+        self, user_id: str, context_id: UUID | None, *, access: str = "read"
     ) -> tuple[Context | None, str | None, str | None]:
         """Extract workspace_id and context_id for 3-level isolation (performance optimization).
 
         Single Collection Migration: Helper to avoid duplicate context fetches.
 
+        Issue #1275 (RFC-0002 P0-2): this resolves the *declared* context for
+        the remember (write) / recall (read) / forget-by-context (write)
+        paths — a route that does not pass through
+        ``PermissionService.resolve_context_for_workspace_read``. Apply the
+        same subtractive agent-binding gate here so agent-bound REST/MCP
+        requests cannot write into (or read from) a binding-denied context via
+        these paths. Callers on a WRITE path MUST pass ``access="write"``.
+        No-op for non-agent credentials; deny raises the uniform
+        ``NotFoundException("Context")`` matching ``get_context``.
+
         Args:
             user_id: User ID
             context_id: Context ID
+            access: ``"read"`` (default) or ``"write"`` — the binding gate.
 
         Returns:
             Tuple of (context_object, workspace_id_str, context_id_str)
 
         Raises:
-            NotFoundException: If context not found
+            NotFoundException: If context not found or the binding denies it.
         """
         if not context_id:
             return None, None, None
 
         context = await self.context_service.get_context(user_id, context_id)
+
+        from services.agent_binding_service import agent_binding_permits
+
+        if not await agent_binding_permits(self.db, context_id, access):
+            raise NotFoundException("Context", str(context_id))
+
         return context, str(context.workspace_id), str(context_id)
 
     @staticmethod
@@ -295,9 +312,11 @@ class MemoryService:
                 current_workspace_id, raise_on_exceeded=True
             )
 
-        # Single Collection Migration: Extract isolation params (optimized)
+        # Single Collection Migration: Extract isolation params (optimized).
+        # Issue #1275: remember is a WRITE — gate the declared context against
+        # the agent binding (no-op for non-agent credentials).
         context, workspace_id_str, context_id_str = await self._get_context_isolation_params(
-            user_id, current_context_id
+            user_id, current_context_id, access="write"
         )
 
         # Validate required parameters
@@ -499,6 +518,7 @@ class MemoryService:
             memory_user_id=MemoryAuthorId(memory.user_id),
             workspace_id=memory.workspace_id,
             context_id=memory.context_id,
+            access="write",  # #1275: WRITE path — can_read-only binding must not permit mutation
         )
         if not can_access:
             raise NotFoundException("Memory", str(request.memory_id))
@@ -686,6 +706,7 @@ class MemoryService:
             memory_user_id=MemoryAuthorId(memory.user_id),
             workspace_id=memory.workspace_id,
             context_id=memory.context_id,
+            access="write",  # #1275: WRITE path — can_read-only binding must not permit mutation
         )
         if not can_access:
             raise NotFoundException("Memory", str(memory_id))
@@ -2782,9 +2803,11 @@ class MemoryService:
         Returns:
             ForgetResponse with deleted count and IDs
         """
-        # Single Collection Migration: Extract isolation params (optimized)
+        # Single Collection Migration: Extract isolation params (optimized).
+        # Issue #1275: forget is a WRITE — gate the declared context against
+        # the agent binding (no-op for non-agent credentials).
         context, workspace_id_str, context_id_str = await self._get_context_isolation_params(
-            user_id, current_context_id
+            user_id, current_context_id, access="write"
         )
 
         deleted_ids = []
@@ -2803,6 +2826,7 @@ class MemoryService:
                     memory_user_id=MemoryAuthorId(memory.user_id),
                     workspace_id=memory.workspace_id,
                     context_id=memory.context_id,
+                    access="write",  # #1275: WRITE path — can_read-only binding must not permit mutation
                 )
 
                 if not can_access:

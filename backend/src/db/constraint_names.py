@@ -52,6 +52,13 @@ EXTERNAL_API_KEYS_WORKSPACE_KEY_NAME_UNIQUE = "uq_external_api_keys_workspace_ke
 # the pre-check produces; other IntegrityErrors propagate unchanged.
 AGENTS_WORKSPACE_NAME_UNIQUE = "uq_agents_workspace_name"
 
+# Issue #1275: agent_context_bindings unique indexes (migration e64 +
+# models.agent.AgentContextBinding.__table_args__). Same TOCTOU posture as
+# above — AgentBindingService maps flush-time races on these names to the
+# 409 the pre-checks produce.
+AGENT_CTX_BINDING_UNIQUE = "uq_agent_ctx_binding"
+AGENT_CTX_BINDING_DEFAULT_UNIQUE = "uq_agent_ctx_binding_default"
+
 
 def integrity_error_constraint_name(error: IntegrityError) -> str | None:
     """Return the PostgreSQL constraint name for ``error``, or ``None``.

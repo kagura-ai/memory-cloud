@@ -302,3 +302,176 @@ class TestPartialUniqueIndexRace:
         service = AccountErasureService(db_session)
         with pytest.raises(ErasureAlreadyInProgressError):
             await service.request_self_service_erasure(user_id=target_user_id)
+
+
+# ---------------------------------------------------------------------------
+# RFC-0002 P0-2 (#1275): agent registry / binding / agent-bound key CASCADE
+# ---------------------------------------------------------------------------
+
+
+@pytest_asyncio.fixture
+async def agent_erasure_scenario(db_session: AsyncSession):
+    """The F1 sign-off erasure scenario (docs/design/agent-registry-and-bindings.md).
+
+    Validates the CASCADE ordering the design doc's ON DELETE CASCADE choice
+    exists for: the workspace hard-delete must take the agent, BOTH
+    agent-bound key rows (including a soft-revoked forensics row — the shape
+    a RESTRICT FK would abort a legally mandated erasure on), and the binding
+    row with it.
+
+    Deviation from the doc's literal step 2: a lingering service *member*
+    would (correctly) trip the pre-existing WorkspaceTransferRequiredError
+    guard before the hard-delete path is reachable, so the key rows here
+    belong to a departed service identity whose membership row is already
+    gone while its (revoked/live) key rows linger — exactly the retention
+    shape that motivates CASCADE over RESTRICT.
+    """
+    from models.agent import Agent, AgentContextBinding
+    from models.auth import Context
+
+    target_user_id = f"agent_owner_{uuid4().hex[:8]}"
+    target_email = f"agent-owner-{uuid4().hex[:6]}@example.com"
+    member_user_id = f"svc_member_{uuid4().hex[:8]}"
+
+    target = User(
+        email=target_email,
+        user_id=target_user_id,
+        name="Agent Owner",
+        role="user",
+        is_initial_admin=False,
+        auth_method="oauth",
+        auth_provider="google",
+    )
+    db_session.add(target)
+    await db_session.flush()
+
+    workspace = Workspace(
+        id=uuid4(),
+        name=f"ws-agent-{uuid4().hex[:8]}",
+        plan_name="free",
+        owner_user_id=target_user_id,
+        daily_api_limit=500,
+        weekly_api_limit=2500,
+    )
+    db_session.add(workspace)
+    await db_session.flush()
+
+    # Sole membership: the owner only. A lingering non-admin member would
+    # trip WorkspaceTransferRequiredError before the hard-delete path (the
+    # cascade under test) is reachable — see fixture docstring.
+    db_session.add(
+        WorkspaceMember(
+            workspace_id=workspace.id,
+            user_id=target_user_id,
+            role=WorkspaceRole.OWNER,
+        )
+    )
+
+    agent = Agent(
+        workspace_id=workspace.id,
+        name="erasure-ci-agent",
+        owner_user_id=target_user_id,
+    )
+    db_session.add(agent)
+    await db_session.flush()
+
+    context = Context(
+        id=uuid4(),
+        workspace_id=workspace.id,
+        name=f"ctx-{uuid4().hex[:8]}",
+        created_by=target_user_id,
+    )
+    db_session.add(context)
+    await db_session.flush()
+
+    binding = AgentContextBinding(
+        agent_id=agent.id,
+        context_id=context.id,
+        can_read=True,
+        write_policy="direct",
+        is_default=True,
+        created_by=target_user_id,
+    )
+    db_session.add(binding)
+
+    # K: live agent-bound member key (owner-provisioned shape: member user,
+    # workspace-scoped, mandatory expiry semantics are a route concern).
+    key_live = APIKey(
+        key_hash=sha256_hex(f"kagura_agent_{uuid4().hex}"),
+        key_prefix="kagura_agent_xx",
+        name="agent-key-live",
+        user_id=member_user_id,
+        workspace_id=workspace.id,
+        agent_id=agent.id,
+    )
+    # K2: soft-revoked agent-bound key — the forensics-retained row shape.
+    from utils.datetime import utcnow
+
+    key_revoked = APIKey(
+        key_hash=sha256_hex(f"kagura_agent_{uuid4().hex}"),
+        key_prefix="kagura_agent_yy",
+        name="agent-key-revoked",
+        user_id=member_user_id,
+        workspace_id=workspace.id,
+        agent_id=agent.id,
+        revoked_at=utcnow().replace(tzinfo=None),
+    )
+    db_session.add_all([key_live, key_revoked])
+    await db_session.commit()
+
+    yield {
+        "target_user_id": target_user_id,
+        "workspace_id": workspace.id,
+        "agent_id": agent.id,
+        "context_id": context.id,
+        "binding_id": binding.id,
+        "key_live_id": key_live.id,
+        "key_revoked_id": key_revoked.id,
+    }
+
+
+class TestAgentErasureCascade:
+    """F1 sign-off scenario: workspace hard-delete cascades the agent lane."""
+
+    @pytest.mark.asyncio
+    async def test_sole_owner_erasure_cascades_agents_keys_bindings(
+        self,
+        db_session: AsyncSession,
+        agent_erasure_scenario,
+        patched_external_stores,
+    ):
+        from models.agent import Agent, AgentContextBinding
+
+        s = agent_erasure_scenario
+        service = AccountErasureService(db_session)
+
+        request = await service.admin_force_erase(
+            target_user_id=s["target_user_id"],
+            initiator_user_id="admin-runner",
+            reason_code=REASON_USER_REQUEST_VIA_SUPPORT,
+            reason_detail="integration test (RFC-0002 F1 scenario)",
+        )
+        # Completed without FK violations.
+        assert request.status == STATUS_COMPLETE
+
+        # Sole-owner workspace was hard-deleted...
+        result = await db_session.execute(
+            select(Workspace).where(Workspace.id == s["workspace_id"])
+        )
+        assert result.scalar_one_or_none() is None
+
+        # ...and the cascade took the agent, BOTH keys (incl. the
+        # soft-revoked forensics row — the shape RESTRICT would trip on),
+        # and the binding with it. No orphans remain.
+        result = await db_session.execute(select(Agent).where(Agent.id == s["agent_id"]))
+        assert result.scalar_one_or_none() is None
+
+        result = await db_session.execute(
+            select(APIKey).where(APIKey.id.in_([s["key_live_id"], s["key_revoked_id"]]))
+        )
+        assert result.scalars().all() == []
+
+        result = await db_session.execute(
+            select(AgentContextBinding).where(AgentContextBinding.id == s["binding_id"])
+        )
+        assert result.scalar_one_or_none() is None

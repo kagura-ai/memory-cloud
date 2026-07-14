@@ -52,6 +52,14 @@ class VerifiedKey(NamedTuple):
             authenticated principal (``api_key_prefix``) so audit trails for
             programmatic member-management actions attribute the specific
             acting key, not just the owner user_id.
+        agent_id: Issue #1275 (RFC-0002 P0-2): the agent this key is bound
+            to, already verified ``active`` (suspended/retired agents are
+            rejected at verify time — fail-closed kill switch). None for
+            unbound keys.
+        agent_enforcement_mode: The bound agent's ``enforcement_mode``
+            (``shadow`` | ``enforce``), read in the same verify-time lookup
+            so the binding chokepoints need no second agents query. None for
+            unbound keys.
     """
 
     id: int
@@ -59,6 +67,8 @@ class VerifiedKey(NamedTuple):
     workspace_id: UUID | None
     bound_context_id: UUID | None
     key_prefix: str | None = None
+    agent_id: UUID | None = None
+    agent_enforcement_mode: str | None = None
 
 
 def apply_zero_knowledge_hide(key: APIKey) -> None:
@@ -114,6 +124,7 @@ class APIKeyManager:
         workspace_id: UUID | None = None,
         bound_context_id: UUID | None = None,
         auto_hide_minutes: int = 10,
+        agent_id: UUID | None = None,
     ) -> tuple[str, APIKey]:
         """Create a new API key.
 
@@ -135,6 +146,13 @@ class APIKeyManager:
                 (Issue #626). The context must satisfy ``is_public=True`` at
                 creation time. Mutually exclusive with ``workspace_id``.
             auto_hide_minutes: Minutes until key is auto-hidden (default: 10)
+            agent_id: Issue #1275 (RFC-0002 P0-2): bind the key to a
+                registered agent. Requires ``workspace_id`` (an agent-bound
+                key with the global-key shape is rejected at mint) and the
+                agent MUST belong to the same workspace — PostgreSQL cannot
+                express this cross-table invariant in a CHECK, so it is
+                enforced here and re-asserted defensively at verify. Mutually
+                exclusive with ``bound_context_id``.
 
         Returns:
             ``(plaintext_key, new_api_key_row)`` — the plaintext is only ever
@@ -143,13 +161,43 @@ class APIKeyManager:
 
         Raises:
             ValueError: If name already exists for user, if both scoping
-                params are supplied, or if the bound context is not public.
+                params are supplied, if the bound context is not public, or
+                if the agent binding is malformed (missing/mismatched
+                workspace, unknown agent, or a non-active agent).
         """
         if workspace_id is not None and bound_context_id is not None:
             raise ValueError(
                 "workspace_id and bound_context_id are mutually exclusive — "
                 "a key cannot be both workspace-scoped and public-bound"
             )
+
+        # Issue #1275: agent-bound mint gates. Fail-closed at mint so an
+        # invalid binding never reaches the verify path.
+        if agent_id is not None:
+            if bound_context_id is not None:
+                raise ValueError(
+                    "agent_id and bound_context_id are mutually exclusive — "
+                    "a key cannot be both agent-bound and public-bound"
+                )
+            if workspace_id is None:
+                raise ValueError(
+                    "agent-bound keys must be workspace-scoped — a global key cannot carry agent_id"
+                )
+            from models.agent import AGENT_STATUS_ACTIVE, Agent
+
+            agent_result = await self.db.execute(select(Agent).where(Agent.id == agent_id))
+            agent = agent_result.scalar_one_or_none()
+            if agent is None:
+                raise ValueError(f"Agent {agent_id} not found")
+            if agent.workspace_id != workspace_id:
+                raise ValueError(
+                    "agent and key workspace mismatch — the agent must belong "
+                    "to the key's workspace"
+                )
+            if agent.status != AGENT_STATUS_ACTIVE:
+                raise ValueError(
+                    f"agent is '{agent.status}' — keys can only be minted for active agents"
+                )
 
         # Validate the bound context exists and is public at creation time.
         # Subsequent flips of context.is_public are handled at request time
@@ -213,6 +261,7 @@ class APIKeyManager:
             user_id=user_id,
             workspace_id=workspace_id,  # Issue #169
             bound_context_id=bound_context_id,  # Issue #626
+            agent_id=agent_id,  # Issue #1275
             expires_at=expires_at,
             visibility_expires_at=visibility_expires_at,  # Migration 034
             plaintext_encrypted=plaintext_encrypted,  # Migration 035
@@ -227,6 +276,7 @@ class APIKeyManager:
             user_id=user_id,
             workspace_id=str(workspace_id) if workspace_id else None,
             bound_context_id=str(bound_context_id) if bound_context_id else None,
+            agent_id=str(agent_id) if agent_id else None,
         )
 
         return api_key, new_key
@@ -276,6 +326,44 @@ class APIKeyManager:
             if utcnow() > key_record.expires_at:
                 return None
 
+        # Issue #1275 (RFC-0002 P0-2): agent-bound key gates. Only bound keys
+        # pay the extra agents SELECT — unbound keys (every credential
+        # existing before P0-2) stay byte-for-byte on the pre-#1275 path.
+        agent_enforcement_mode: str | None = None
+        if key_record.agent_id is not None:
+            from models.agent import AGENT_STATUS_ACTIVE, Agent
+
+            agent_result = await self.db.execute(
+                select(Agent).where(Agent.id == key_record.agent_id)
+            )
+            agent = agent_result.scalar_one_or_none()
+            # Fail-closed kill switch: a suspended/retired (or somehow
+            # missing) agent invalidates every key bound to it — one row
+            # update beats revoking N keys.
+            if agent is None or agent.status != AGENT_STATUS_ACTIVE:
+                logger.warning(
+                    "api_key_rejected_agent_kill_switch",
+                    key_prefix=key_record.key_prefix,
+                    agent_id=str(key_record.agent_id),
+                    agent_status=agent.status if agent else "missing",
+                )
+                return None
+            # Defensive re-assert of the mint-time invariant (PostgreSQL
+            # cannot express the cross-table workspace equality in a CHECK).
+            if agent.workspace_id != key_record.workspace_id:
+                logger.warning(
+                    "api_key_rejected_agent_workspace_mismatch",
+                    key_prefix=key_record.key_prefix,
+                    agent_id=str(agent.id),
+                )
+                return None
+            agent_enforcement_mode = agent.enforcement_mode
+
+            # Agent liveness signal — throttled like last_used_at below.
+            from services.agent_registry_service import AgentRegistryService
+
+            await AgentRegistryService(self.db).touch_last_seen(agent.id)
+
         # Update last_used_at — throttled (#947). This runs on EVERY auth (one
         # per MCP tool call), so writing the row each time is hot-row
         # write-amplification. Skip the write while the stored timestamp is
@@ -295,6 +383,8 @@ class APIKeyManager:
             workspace_id=key_record.workspace_id,
             bound_context_id=key_record.bound_context_id,
             key_prefix=key_record.key_prefix,
+            agent_id=key_record.agent_id,
+            agent_enforcement_mode=agent_enforcement_mode,
         )
 
     async def list_keys(

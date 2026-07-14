@@ -2272,6 +2272,141 @@ Returns: {status, deleted, agent_id}.""",
                 "required": ["agent_id"],
             },
         },
+        # Issue #1275 (RFC-0002 P0-2): subtractive context bindings for
+        # registered agents. A binding can only REMOVE access the underlying
+        # member credential already has — never grant.
+        {
+            "name": "bind_agent_context",
+            "description": """Bind an agent to a context — purely subtractive scoping (owner/admin only, Issue #1275).
+
+The effective permission for an agent-bound request is the existing RBAC
+decision ∩ binding: can_read gates reads, write_policy ('deny'|'direct')
+gates writes. Under enforcement_mode='enforce', contexts WITHOUT a binding
+row are denied for the agent (default-deny); under 'shadow', violations are
+only logged. NULL type filters = unrestricted; [] = deny-all.
+
+Returns: {status, binding: {id, context_id, can_read, write_policy, is_default, ...}}.""",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "agent_id": {
+                        "type": "string",
+                        "format": "uuid",
+                        "description": "Agent UUID from register_agent/list_agents.",
+                    },
+                    "context_id": {
+                        "type": "string",
+                        "format": "uuid",
+                        "description": "Context to bind (must belong to the agent's workspace).",
+                    },
+                    "can_read": {
+                        "type": "boolean",
+                        "description": "Whether the agent may read this context (default: true).",
+                    },
+                    "write_policy": {
+                        "type": "string",
+                        "enum": ["deny", "direct"],
+                        "description": "Write gate (default: 'deny'). 'staged' is reserved for a later phase.",
+                    },
+                    "is_default": {
+                        "type": "boolean",
+                        "description": "Mark as the agent's bootstrap default binding (max one per agent).",
+                    },
+                    "allowed_memory_types": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": "Optional memory-type filter. Omit/null = all types; [] = none.",
+                    },
+                    "allowed_source_types": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": "Optional source-type filter (memories.source_type values). Omit/null = all; [] = none.",
+                    },
+                },
+                "required": ["agent_id", "context_id"],
+            },
+        },
+        {
+            "name": "list_agent_bindings",
+            "readOnly": True,
+            "description": """List an agent's context bindings (owner/admin only, Issue #1275).
+
+Returns: {status, bindings: [...], count}.""",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "agent_id": {
+                        "type": "string",
+                        "format": "uuid",
+                        "description": "Agent UUID.",
+                    },
+                },
+                "required": ["agent_id"],
+            },
+        },
+        {
+            "name": "update_agent_binding",
+            "description": """Update a binding's scoping fields (owner/admin only, Issue #1275).
+
+context_id is immutable — unbind and re-bind to re-target. Changes are
+audited with old→new values.
+
+Returns: {status, binding, changed: [field, ...]}.""",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "agent_id": {
+                        "type": "string",
+                        "format": "uuid",
+                        "description": "Agent UUID.",
+                    },
+                    "binding_id": {
+                        "type": "string",
+                        "format": "uuid",
+                        "description": "Binding UUID from list_agent_bindings.",
+                    },
+                    "can_read": {"type": "boolean"},
+                    "write_policy": {"type": "string", "enum": ["deny", "direct"]},
+                    "is_default": {"type": "boolean"},
+                    "allowed_memory_types": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": "null = all types; [] = none.",
+                    },
+                    "allowed_source_types": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": "null = all; [] = none.",
+                    },
+                },
+                "required": ["agent_id", "binding_id"],
+            },
+        },
+        {
+            "name": "unbind_agent_context",
+            "description": """Delete a binding — the agent loses that context (owner/admin only, Issue #1275).
+
+Under enforcement_mode='enforce' the agent's requests against the unbound
+context are denied afterwards (uniform context_not_found).
+
+Returns: {status, deleted, binding_id}.""",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "agent_id": {
+                        "type": "string",
+                        "format": "uuid",
+                        "description": "Agent UUID.",
+                    },
+                    "binding_id": {
+                        "type": "string",
+                        "format": "uuid",
+                        "description": "Binding UUID to delete.",
+                    },
+                },
+                "required": ["agent_id", "binding_id"],
+            },
+        },
         # Issue #1128: zero-knowledge secret store. The server stores opaque age
         # ciphertext + public recipient keys only and NEVER decrypts. Encryption
         # and decryption happen client-side (the `kagura secret` CLI / SDK).

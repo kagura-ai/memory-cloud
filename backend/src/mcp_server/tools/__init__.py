@@ -65,6 +65,13 @@ _TOOLS_WITHOUT_CONTEXT_ID = frozenset(
         "get_agent",
         "update_agent",
         "delete_agent",
+        # Issue #1275: binding CRUD — bind's context_id is a binding TARGET
+        # selector (like describe_binding), not a memory-context to resolve;
+        # the handlers validate presence themselves.
+        "bind_agent_context",
+        "list_agent_bindings",
+        "update_agent_binding",
+        "unbind_agent_context",
     }
 )
 
@@ -105,6 +112,8 @@ _RATE_LIMIT_EXEMPT_TOOLS = frozenset(
         # no embedding/LLM cost).
         "list_agents",
         "get_agent",
+        # Issue #1275: read-only binding listing.
+        "list_agent_bindings",
     }
 )
 
@@ -120,11 +129,15 @@ _TOOL_REGISTRY: dict[str, Any] | None = None
 def _build_registry() -> dict[str, Any]:
     """Build tool name → handler mapping."""
     from mcp_server.tools.agent_registry import (
+        handle_bind_agent_context,
         handle_delete_agent,
         handle_get_agent,
+        handle_list_agent_bindings,
         handle_list_agents,
         handle_register_agent,
+        handle_unbind_agent_context,
         handle_update_agent,
+        handle_update_agent_binding,
     )
     from mcp_server.tools.analysis import (
         handle_analyze_context,
@@ -247,6 +260,11 @@ def _build_registry() -> dict[str, Any]:
         "get_agent": handle_get_agent,
         "update_agent": handle_update_agent,
         "delete_agent": handle_delete_agent,
+        # Issue #1275 (RFC-0002 P0-2): subtractive context bindings.
+        "bind_agent_context": handle_bind_agent_context,
+        "list_agent_bindings": handle_list_agent_bindings,
+        "update_agent_binding": handle_update_agent_binding,
+        "unbind_agent_context": handle_unbind_agent_context,
     }
 
 
