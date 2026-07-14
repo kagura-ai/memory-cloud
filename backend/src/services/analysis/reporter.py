@@ -278,6 +278,24 @@ async def persist_results(
     coords_2d = inputs.coords_2d
     cluster_results = inputs.cluster_results
 
+    # 0. Cancellation guard FIRST, under a row lock (#1241). The guard
+    #    used to run after the cluster/assignment flush — its early
+    #    ``return`` was then followed by the orchestrator's commit, so a
+    #    cancelled run permanently kept its cluster rows (served forever
+    #    by /clusters, /positions and MCP get_cluster, none of which
+    #    filter by status). ``with_for_update`` serializes against the
+    #    DELETE handler's own locked re-check: whichever side takes the
+    #    lock first decides the terminal state, and the loser observes
+    #    it after commit instead of overwriting it.
+    await db.refresh(analysis, with_for_update=True)
+    if analysis.status == _STATUS_CANCELLED:
+        logger.info(
+            "analysis_persist_skipped_due_to_cancel",
+            analysis_id=str(analysis.id),
+            cancellation_reason=analysis.cancellation_reason,
+        )
+        return
+
     n_clusters = len(cluster_results)
     members_by_idx = _index_members_by_cluster(cluster_labels_arr, n_clusters)
 
@@ -349,21 +367,12 @@ async def persist_results(
 
     # 4. Update the memory_analyses row. embedding_model was set by
     #    the orchestrator before this transaction opened — we only
-    #    finalize the run-level fields here.
-    #    First, refresh from DB to detect a concurrent soft-cancel
-    #    (DELETE /analyses/{run_id} flipped status to 'cancelled' in a
-    #    separate session while compute was running). Without this
-    #    guard the stale ORM instance would overwrite the cancellation
-    #    on flush — silent data loss for the cancellation_reason
-    #    audit trail. Issue #496 Copilot review.
-    await db.refresh(analysis)
-    if analysis.status == _STATUS_CANCELLED:
-        logger.info(
-            "analysis_persist_skipped_due_to_cancel",
-            analysis_id=str(analysis.id),
-            cancellation_reason=analysis.cancellation_reason,
-        )
-        return
+    #    finalize the run-level fields here. A concurrent soft-cancel
+    #    cannot slip in at this point: the row has been locked since
+    #    the step-0 ``with_for_update`` refresh, so the DELETE
+    #    handler's own locked re-check blocks until this transaction
+    #    commits (#1241; supersedes the #496 refresh-then-write guard
+    #    that raced in the window between refresh and commit).
     cost_actual_cents = _compute_actual_cost_cents(totals, dict(analysis.model_snapshot or {}))
     analysis.status = _STATUS_SUCCEEDED
     analysis.finished_at = utcnow()
@@ -433,8 +442,11 @@ async def persist_failure(
     # from DB so a concurrent DELETE soft-cancel is not silently flipped
     # to ``failed``. The compute exception is still recorded in the log
     # below; we just avoid corrupting the status + cancellation_reason
-    # audit trail. Issue #496 Copilot review.
-    await db.refresh(analysis)
+    # audit trail. Issue #496 Copilot review; #1241 upgraded the refresh
+    # to a row lock so a cancel committing between refresh and commit
+    # can no longer be overwritten (same protocol as ``persist_results``
+    # and the DELETE handler).
+    await db.refresh(analysis, with_for_update=True)
     if analysis.status == _STATUS_CANCELLED:
         logger.info(
             "analysis_persist_failure_skipped_due_to_cancel",

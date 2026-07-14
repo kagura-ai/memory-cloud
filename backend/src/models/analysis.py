@@ -50,8 +50,11 @@ MEMORY_ANALYSIS_PAID_BY_VALUES: tuple[str, ...] = ("byok", "platform")
 # Issue #496: ``cancellation_reason`` enum-style values populated when
 # a run is soft-cancelled. Free-form for v1 (no DB CHECK), but the
 # tuple is the canonical taxonomy so route + MCP code share spelling.
+# ``context_deleted`` (#1241): the run's context was soft-deleted while
+# the run was in flight — deletion is the strongest stop signal, so the
+# run is cancelled rather than left billing BYOK for an invisible result.
 # Future taxonomy may add ``"timeout" / "admin" / "cost_cap"``.
-MEMORY_ANALYSIS_CANCELLATION_REASONS: tuple[str, ...] = ("user",)
+MEMORY_ANALYSIS_CANCELLATION_REASONS: tuple[str, ...] = ("user", "context_deleted")
 
 
 def _check_in_sql(column: str, values: tuple[str, ...]) -> str:

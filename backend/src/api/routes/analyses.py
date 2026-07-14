@@ -37,6 +37,7 @@ from uuid import UUID
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 from pydantic import BaseModel, Field, field_validator
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm.exc import ObjectDeletedError
 
 from auth.analysis_gates import AnalysisReadAccess, AnalysisWriteAccess
 from db.base import get_db
@@ -45,7 +46,7 @@ from models.api_base import TZAwareBaseModel
 from services.analysis import query_service
 from services.analysis.orchestrator import AnalysisOrchestrator, AnalysisParams
 from services.analysis.preview import DEFAULT_MODEL_ID, estimate_cost
-from tasks.analysis_tasks import run_analysis_task
+from tasks.analysis_tasks import cancel_run_task, register_run_task, run_analysis_task
 from utils.exceptions import ConflictError, ValidationError
 from utils.logger import get_logger
 
@@ -431,6 +432,8 @@ async def start_analysis(
     task = asyncio.create_task(run_analysis_task(analysis.id))
     _BACKGROUND_TASKS.add(task)
     task.add_done_callback(_log_background_task_result)
+    # #1241: register by run_id so DELETE can cancel the compute too.
+    register_run_task(analysis.id, task)
 
     logger.info(
         "analysis_run_kicked_off",
@@ -667,24 +670,58 @@ async def cancel_run(
         raise HTTPException(status_code=404, detail=f"Analysis run {run_id} not found")
 
     if row.status == _STATUS_RUNNING:
-        # Mark cancelled. Background task may still be mid-stage; it
-        # will complete and persist its own status update which the
-        # reporter will treat as a no-op since cancellation_reason is
-        # already set (status='cancelled' wins over the late update).
-        row.status = _STATUS_CANCELLED
-        row.cancellation_reason = _CANCEL_REASON_USER
-        # finished_at is naive UTC — utcnow() returns naive UTC by
-        # repo convention.
-        from utils.datetime import utcnow
+        # #1241: re-read under a row lock and re-check. The reporter's
+        # terminal writes (persist_results / persist_failure) take the
+        # same lock before deciding, so whichever side wins the lock
+        # decides the terminal state and the loser observes it —
+        # eliminating the refresh-then-write window where a cancel was
+        # silently overwritten by 'succeeded' (leaving a contradictory
+        # cancellation_reason on a succeeded row).
+        #
+        # ``refresh(with_for_update=True)`` — NOT a plain locked SELECT.
+        # ``get_analysis`` above loaded this row into the session's
+        # identity map; a ``select(...).with_for_update()`` would take
+        # the DB lock but hand back the cached instance with its STALE
+        # attributes (the load-bearing gotcha documented in
+        # services/workspace_locks.py), so the lock-loser would still
+        # see 'running' and clobber the winner's committed terminal
+        # state. ``refresh`` always repopulates from the locked read —
+        # same protocol as reporter.py's persist guards.
+        try:
+            await db.refresh(row, with_for_update=True)
+        except ObjectDeletedError:
+            # Hard-deleted between the reads (context/workspace CASCADE)
+            # — same disclosure shape as the initial lookup miss.
+            raise HTTPException(
+                status_code=404, detail=f"Analysis run {run_id} not found"
+            ) from None
+        if row.status == _STATUS_RUNNING:
+            row.status = _STATUS_CANCELLED
+            row.cancellation_reason = _CANCEL_REASON_USER
+            # finished_at is naive UTC — utcnow() returns naive UTC by
+            # repo convention.
+            from utils.datetime import utcnow
 
-        row.finished_at = utcnow()
-        await db.commit()
-        logger.info(
-            "analysis_run_cancelled",
-            run_id=str(run_id),
-            workspace_id=str(workspace_id),
-            context_id=str(context_id),
-        )
+            row.finished_at = utcnow()
+            # Commit FIRST — releases the row lock so the background
+            # task's own persist path can proceed and observe
+            # 'cancelled' instead of deadlocking on the cancel.
+            await db.commit()
+            logger.info(
+                "analysis_run_cancelled",
+                run_id=str(run_id),
+                workspace_id=str(workspace_id),
+                context_id=str(context_id),
+            )
+            # #1241: a confirmed cancel also stops the compute (and its
+            # BYOK spend). Best-effort — see tasks/analysis_tasks.py for
+            # the multi-worker caveat.
+            cancelled_in_process = cancel_run_task(run_id)
+            logger.info(
+                "analysis_run_compute_cancel",
+                run_id=str(run_id),
+                cancelled_in_process=cancelled_in_process,
+            )
     # else: already terminal → return current state without flipping anything.
 
     return AnalysisCancelResponse.model_validate(row)

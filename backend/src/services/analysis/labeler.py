@@ -313,7 +313,23 @@ async def label_clusters(
             )
         )
 
-    results = await asyncio.gather(*tasks)
+    try:
+        results = await asyncio.gather(*tasks)
+    except BaseException:
+        # #1241: plain gather() re-raises the first failure but leaves the
+        # sibling tasks RUNNING — each would keep making paid BYOK LLM
+        # calls for a run that is already failing (or being cancelled),
+        # then surface as "Task exception was never retrieved" orphans.
+        # Cancel the siblings and wait for settlement so no labeling task
+        # outlives the run. (``AnalysisLLMUpstreamError`` never reaches
+        # here — ``_label_one_cluster`` converts it to a failed
+        # ClusterLabel; this path is for unexpected errors such as
+        # ConfigurationError from a mid-run BYOK key removal, and for
+        # cancellation of the run task itself.)
+        for t in tasks:
+            t.cancel()
+        await asyncio.gather(*tasks, return_exceptions=True)
+        raise
     results.sort(key=lambda r: r.cluster_index)
 
     failed = sum(1 for r in results if r.failed)

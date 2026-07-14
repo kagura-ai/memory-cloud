@@ -15,6 +15,7 @@ from uuid import UUID
 from sqlalchemy import and_, delete, func, select
 from sqlalchemy.engine import CursorResult
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm.exc import ObjectDeletedError
 
 from auth.workspace_roles import WorkspaceRole
 from config.settings import get_settings
@@ -1073,6 +1074,64 @@ class ContextService:
                 )
             )
         )
+
+        # #1241/#1243: cancel any in-flight analysis run for this context.
+        # Deleting a context is the strongest "stop everything" signal a
+        # user can send — without this, the background pipeline kept
+        # charging the workspace's BYOK key for minutes and then persisted
+        # a full result set for a context that no longer exists (invisible
+        # to every reader after #1243's liveness join). Flipping the row
+        # makes the reporter's locked cancel guard skip the persist;
+        # cancel_run_task stops the in-process compute (best-effort — see
+        # tasks/analysis_tasks.py for the multi-worker caveat).
+        from models.analysis import MemoryAnalysis
+
+        running_analyses = list(
+            (
+                await self.db.execute(
+                    select(MemoryAnalysis).where(
+                        and_(
+                            MemoryAnalysis.workspace_id == context.workspace_id,
+                            MemoryAnalysis.context_id == context.id,
+                            MemoryAnalysis.status == "running",
+                        )
+                    )
+                )
+            )
+            .scalars()
+            .all()
+        )
+        cancelled_runs = []
+        for run in running_analyses:
+            # Copilot review (#1250): re-check under the same row lock the
+            # reporter's terminal writes take. The unlocked SELECT above is
+            # check-then-act — persist_results could commit 'succeeded'
+            # between it and this write, and a plain attribute flip on the
+            # identity-mapped instance would clobber that committed state.
+            # ``refresh(with_for_update=True)`` repopulates under the lock;
+            # skip runs that reached a terminal state while we waited.
+            try:
+                await self.db.refresh(run, with_for_update=True)
+            except ObjectDeletedError:
+                # Hard-deleted while we waited (workspace CASCADE) —
+                # nothing left to cancel.
+                continue
+            if run.status != "running":
+                continue
+            run.status = "cancelled"
+            run.cancellation_reason = "context_deleted"
+            run.finished_at = utcnow()
+            cancelled_runs.append(run)
+        if cancelled_runs:
+            from tasks.analysis_tasks import cancel_run_task
+
+            for run in cancelled_runs:
+                cancel_run_task(run.id)
+            logger.info(
+                "context_delete_cancelled_running_analyses",
+                context_id=str(context.id),
+                cancelled_run_ids=[str(r.id) for r in cancelled_runs],
+            )
 
         # Issue #84: Soft-delete context record (previously hard-deleted)
         context.deleted_at = utcnow()

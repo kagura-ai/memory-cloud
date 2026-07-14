@@ -687,6 +687,85 @@ class TestPersistResults:
         )
         assert report is None
 
+    async def test_cancelled_run_leaves_no_cluster_or_assignment_rows(
+        self, db_session, fixture_workspace_id, fixture_context_id, fixture_pricing
+    ):
+        """#1241: the cancel guard must run BEFORE any cluster/assignment
+        write. The guard's early ``return`` is followed by the orchestrator's
+        ``commit`` — anything already flushed at that point would be
+        permanently committed for a cancelled run and served forever by
+        the /clusters, /positions and MCP get_cluster readers.
+        """
+        analysis = await _make_analysis(
+            db_session,
+            workspace_id=fixture_workspace_id,
+            context_id=fixture_context_id,
+            pricing=fixture_pricing,
+        )
+        mem = await _make_db_memory(
+            db_session, workspace_id=fixture_workspace_id, context_id=fixture_context_id
+        )
+        memories = [
+            MemoryRecord(
+                id=mem.id,
+                type="note",
+                summary="m",
+                tags=[],
+                importance=0.5,
+                created_at=datetime(2026, 1, 1),
+            )
+        ]
+        inputs = PersistInputs(
+            analysis=analysis,
+            memories=memories,
+            embeddings=np.zeros((1, 4)),
+            cluster_labels=np.array([0]),
+            coords_2d=np.array([[0.0, 0.0]]),
+            cluster_results=[_cluster_label(cluster_index=0, breakdown=None)],
+            silhouette=0.0,
+            size_variance=0.0,
+            outlier_ratio=0.0,
+            window_from=None,
+            window_to=None,
+        )
+
+        analysis.status = "cancelled"
+        analysis.cancellation_reason = "user"
+        await db_session.flush()
+
+        await persist_results(
+            db_session,
+            inputs=inputs,
+            user_id="rep_user",
+            workspace_id=str(fixture_workspace_id),
+            context_id=str(fixture_context_id),
+        )
+
+        clusters = (
+            (
+                await db_session.execute(
+                    select(MemoryAnalysisCluster).where(
+                        MemoryAnalysisCluster.analysis_id == analysis.id
+                    )
+                )
+            )
+            .scalars()
+            .all()
+        )
+        assignments = (
+            (
+                await db_session.execute(
+                    select(MemoryAnalysisAssignment).where(
+                        MemoryAnalysisAssignment.analysis_id == analysis.id
+                    )
+                )
+            )
+            .scalars()
+            .all()
+        )
+        assert clusters == []
+        assert assignments == []
+
     async def test_failed_cluster_excluded_from_label_confidence(
         self, db_session, fixture_workspace_id, fixture_context_id, fixture_pricing
     ):
