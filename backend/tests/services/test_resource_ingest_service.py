@@ -54,6 +54,15 @@ class TestValidateEvents:
         assert errors == []
         assert valid[0].version == 5
 
+    def test_delete_with_empty_dict_payload_normalized(self):
+        # REST's Pydantic gate always accepted `payload: {}` on delete
+        # (truthiness check) and the old REST loop inserted it; the service
+        # keeps that acceptance and normalizes the payload to None. The old
+        # MCP path rejected `{}` and is deliberately relaxed to match.
+        valid, errors = validate_events([{"op": "delete", "doc_id": "d1", "payload": {}}])
+        assert errors == []
+        assert valid[0].payload is None
+
     @pytest.mark.parametrize(
         ("event", "kind"),
         [

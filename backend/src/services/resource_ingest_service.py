@@ -180,7 +180,13 @@ def validate_events(
                 continue
 
         if op == "delete":
-            if payload is not None:
+            # Truthiness, not `is not None`: an explicit empty-dict payload on
+            # a delete is normalized to None (`payload if op == "upsert"` below
+            # already drops it). The REST surface always accepted `payload: {}`
+            # (its Pydantic validator uses truthiness), so rejecting it here
+            # would regress REST behavior; the MCP surface previously rejected
+            # it and is relaxed to match (#1255 equivalence).
+            if payload:
                 errors.append(
                     IngestItemError(index=i, kind=KIND_PAYLOAD_NOT_NULL_DELETE, doc_id=doc_id)
                 )
@@ -386,6 +392,12 @@ async def finalize_batch(
     scheduled before commit — this is the single, clearly defined boundary
     #1255 asks for). The indexer is scheduled only when at least one event was
     created.
+
+    Conscious trade-off: if indexer scheduling (or the second commit) fails
+    after the first commit, the event rows stay durable while the caller sees
+    an error — the pre-refactor MCP path rolled the whole batch back in that
+    case. Recovery is the offset-based IndexerState catch-up on the next
+    successful ingest for the resource.
     """
     await db.commit()
 
