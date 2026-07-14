@@ -16,6 +16,7 @@ from sqlalchemy import or_, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
+import services.resource_ingest_service as resource_ingest_service
 from auth.resource_tokens import ResourceTokenManager
 from db.base import get_db
 from db.constraint_names import (
@@ -36,6 +37,7 @@ from services.connector_provisioning import (
     validate_connector_idempotency_key,
 )
 from services.permission_service import PermissionService
+from services.resource_ingest_service import IngestItemError
 from services.resource_lookup import resolve_resource_pk
 from services.resource_quota_service import check_event_quota
 from utils.datetime import utcnow
@@ -46,8 +48,35 @@ logger = get_logger(__name__)
 
 router = APIRouter(prefix="/resources", tags=["resource-ingest"])
 
-# Maximum payload size (100KB)
-MAX_PAYLOAD_SIZE_BYTES = 100_000
+# Maximum payload size (100KB) — single source in the shared ingest service
+# (Issue #1255); the single-event path below reads the same constant.
+MAX_PAYLOAD_SIZE_BYTES = resource_ingest_service.MAX_PAYLOAD_SIZE_BYTES
+
+
+def _format_batch_item_error(err: IngestItemError) -> dict:
+    """Render a structured batch item error in the historic REST wire shape.
+
+    The strings are byte-compatible with the pre-#1255 in-handler messages;
+    every REST item error carries ``doc_id``.
+    """
+    kind = err.kind
+    if kind == resource_ingest_service.KIND_PAYLOAD_TOO_LARGE:
+        message = f"Payload too large: {err.detail['payload_size']} bytes"
+    elif kind == resource_ingest_service.KIND_IDEMPOTENCY_INVALID:
+        message = err.detail["message"]
+    elif kind == resource_ingest_service.KIND_DUPLICATE_VERSION:
+        message = f"Duplicate version {err.detail['version']}"
+    elif kind == resource_ingest_service.KIND_DUPLICATE_IDEMPOTENCY:
+        message = "Duplicate idempotency key"
+    elif kind == resource_ingest_service.KIND_CONSTRAINT_VIOLATION:
+        message = "Database constraint violation"
+    elif kind == resource_ingest_service.KIND_UNEXPECTED:
+        message = err.detail["message"]
+    else:
+        # Validation kinds are unreachable on this surface (Pydantic already
+        # rejected the request with 422); keep a defensive generic message.
+        message = "Invalid event"
+    return {"index": err.index, "doc_id": err.doc_id, "error": message}
 
 
 # ============================================================================
@@ -542,7 +571,6 @@ async def ingest_batch(
     """
     # Context is resolved and workspace-verified in the dependency — always non-None here.
     token_record, quota_per_hour, context = auth
-    connector_id = await get_connector_id_for_resource_pk(db, token_record.resource_pk)
 
     logger.info(
         "resource_batch_ingest_started",
@@ -551,132 +579,50 @@ async def ingest_batch(
     )
 
     # 1. Validate batch size (already enforced by Pydantic, but double-check)
-    if len(request.events) > 100:
-        raise ValidationError("Batch size exceeds maximum (100 events)")
+    if len(request.events) > resource_ingest_service.MAX_BATCH_SIZE:
+        raise ValidationError(
+            f"Batch size exceeds maximum ({resource_ingest_service.MAX_BATCH_SIZE} events)"
+        )
 
-    # 2. Check quota for entire batch (workspace-scoped counter shared with MCP)
+    # 2. Check quota for entire batch (workspace-scoped counter shared with MCP).
+    #    The token dependency already resolved the effective per-hour quota;
+    #    RateLimitError propagates as the existing 429 contract.
     await check_event_quota(
         resource_id, context.workspace_id, quota_per_hour, count=len(request.events)
     )
 
-    # 3. Process events
-    created_ids: list[int] = []
-    errors: list[dict] = []
+    # 3. Domain validation + persistence via the shared service (Issue #1255).
+    #    Inputs are Pydantic-validated, so the validation pass only adds the
+    #    byte-accurate payload-size check; the token carries the authoritative
+    #    resource_pk, so no slug re-resolution is needed on this surface.
+    valid_events, validation_errors = resource_ingest_service.validate_events(
+        [event_req.model_dump() for event_req in request.events]
+    )
+    result = await resource_ingest_service.persist_events(
+        db,
+        resource_id=resource_id,
+        resource_pk=token_record.resource_pk,
+        events=valid_events,
+    )
 
-    for idx, event_req in enumerate(request.events):
-        try:
-            # Validate payload size
-            if event_req.payload:
-                import json
+    # Historic REST ordering: item errors sorted by event index (validation
+    # and persistence failures interleaved in a single sequential loop).
+    errors = [
+        _format_batch_item_error(err)
+        for err in sorted([*validation_errors, *result.errors], key=lambda e: e.index)
+    ]
+    created_ids = result.created_ids
 
-                payload_size = len(json.dumps(event_req.payload))
-                if payload_size > MAX_PAYLOAD_SIZE_BYTES:
-                    errors.append(
-                        {
-                            "index": idx,
-                            "doc_id": event_req.doc_id,
-                            "error": f"Payload too large: {payload_size} bytes",
-                        }
-                    )
-                    continue
+    # 4. Commit + post-commit indexer boundary (shared service).
+    await resource_ingest_service.finalize_batch(
+        db,
+        workspace_id=context.workspace_id,
+        resource_id=resource_id,
+        created_ids=created_ids,
+    )
 
-            try:
-                validate_connector_idempotency_key(
-                    connector_id=connector_id,
-                    idempotency_key=event_req.idempotency_key,
-                )
-            except ValidationError as e:
-                errors.append({"index": idx, "doc_id": event_req.doc_id, "error": e.message})
-                continue
-
-            # Create event — see single-ingest path for the resource_pk rationale.
-            event = ResourceEvent(
-                resource_id=resource_id,
-                resource_pk=token_record.resource_pk,
-                op=event_req.op,
-                doc_id=event_req.doc_id,
-                version=event_req.version,
-                payload=event_req.payload,
-                idempotency_key=event_req.idempotency_key,
-                event_metadata=event_req.event_metadata,
-                importance=event_req.importance
-                if event_req.importance is not None
-                else 0.6,  # Issue #262
-            )
-
-            # SAVEPOINT per event so an IntegrityError on one row does not
-            # abort the outer transaction and break partial-success for the
-            # sibling events. Mirrors the MCP batch path in
-            # ``mcp_server/tools/resource.py``.
-            async with db.begin_nested():
-                db.add(event)
-                await db.flush()
-            created_ids.append(event.id)
-
-        except IntegrityError as e:
-            constraint = integrity_error_constraint_name(e)
-
-            if constraint == RESOURCE_EVENTS_UPSERT_UNIQUE:
-                logger.debug(
-                    "duplicate_version_skipped",
-                    doc_id=event_req.doc_id,
-                    version=event_req.version,
-                )
-                errors.append(
-                    {
-                        "index": idx,
-                        "doc_id": event_req.doc_id,
-                        "error": f"Duplicate version {event_req.version}",
-                    }
-                )
-
-            elif constraint == RESOURCE_EVENTS_IDEMPOTENCY_UNIQUE:
-                logger.debug("duplicate_idempotency_key_skipped", key=event_req.idempotency_key)
-                errors.append(
-                    {
-                        "index": idx,
-                        "doc_id": event_req.doc_id,
-                        "error": "Duplicate idempotency key",
-                    }
-                )
-
-            else:
-                # Batch keeps partial-success: log + per-item error,
-                # do not re-raise (would abort sibling events).
-                logger.error(
-                    "batch_event_integrity_error_unhandled",
-                    index=idx,
-                    constraint=constraint,
-                    error=str(e),
-                )
-                errors.append(
-                    {
-                        "index": idx,
-                        "doc_id": event_req.doc_id,
-                        "error": "Database constraint violation",
-                    }
-                )
-
-        except Exception as e:
-            logger.error("batch_event_unexpected_error", index=idx, error=str(e))
-            errors.append(
-                {
-                    "index": idx,
-                    "doc_id": event_req.doc_id,
-                    "error": str(e),
-                }
-            )
-
-    # 4. Commit all successfully created events
-    # NOTE: Batch ingest uses partial-success model (some events can fail while others succeed)
-    # This is intentional for resilience. If atomic behavior is needed, use individual requests.
-    await db.commit()
-
-    # 5. Schedule indexer run
     if created_ids:
-        await _schedule_indexer_for_resource(db, context.workspace_id, resource_id)
-
-        # 6. Log usage statistics (Issue #242)
+        # 5. Log usage statistics (Issue #242)
         from utils.usage_logger import log_usage
 
         await log_usage(
