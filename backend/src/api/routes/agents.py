@@ -118,11 +118,18 @@ class AgentListResponse(BaseModel):
 
 
 def _actor(user: dict) -> tuple[str, str | None, UUID, dict[str, Any]]:
-    """Extract (user_id, email, workspace_id, audit-base-metadata) from auth."""
+    """Extract (user_id, email, workspace_id, audit-base-metadata) from auth.
+
+    ``via`` discriminates on the ``api_key_workspace_id`` KEY (present on
+    every API-key principal dict, including global keys where its value is
+    None) rather than on ``api_key_prefix`` truthiness — a programmatic call
+    whose prefix did not surface must still be attributed as ``api_key``,
+    not misclassified as ``session`` (Copilot review, PR #1279).
+    """
     user_id = user["user_id"]
     workspace_id = UUID(str(user["current_workspace_id"]))
     metadata: dict[str, Any] = {
-        "via": "api_key" if user.get("api_key_prefix") else "session",
+        "via": "api_key" if "api_key_workspace_id" in user else "session",
     }
     if user.get("api_key_prefix"):
         metadata["key_prefix"] = user["api_key_prefix"]

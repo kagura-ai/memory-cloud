@@ -111,13 +111,32 @@ class TestRegisterAgent:
     @pytest.mark.asyncio
     async def test_api_key_actor_records_prefix(self, db, service, audit):
         service.create_agent.return_value = _fake_agent()
-        user = {**MOCK_USER, "api_key_prefix": "km_test_prefix"}
+        user = {
+            **MOCK_USER,
+            "api_key_workspace_id": WORKSPACE_ID,
+            "api_key_prefix": "km_test_prefix",
+        }
 
         await register_agent(data=AgentCreate(name="ci-bot"), user=user, db=db)
 
         metadata = audit.call_args.kwargs["metadata"]
         assert metadata["via"] == "api_key"
         assert metadata["key_prefix"] == "km_test_prefix"
+
+    @pytest.mark.asyncio
+    async def test_api_key_actor_without_prefix_still_api_key(self, db, service, audit):
+        """A programmatic principal whose prefix did not surface must not be
+        misclassified as session (Copilot review, PR #1279) — the
+        api_key_workspace_id KEY (present even when None, i.e. global keys)
+        is the discriminator."""
+        service.create_agent.return_value = _fake_agent()
+        user = {**MOCK_USER, "api_key_workspace_id": None}
+
+        await register_agent(data=AgentCreate(name="ci-bot"), user=user, db=db)
+
+        metadata = audit.call_args.kwargs["metadata"]
+        assert metadata["via"] == "api_key"
+        assert "key_prefix" not in metadata
 
 
 class TestGetAndList:
