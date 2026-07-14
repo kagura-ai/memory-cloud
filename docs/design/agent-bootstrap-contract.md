@@ -6,8 +6,9 @@
   `docs/rfc/0002-agent-memory-context-control-plane.md` when published)
 - **Consumers**: implementers of P0-3 (`get_agent_bootstrap` MCP tool + REST companion),
   SDK maintainers (parity follow-up)
-- **Depends on**: [Agent Registry & Context Bindings](agent-registry-and-bindings.md) (F1, #1258)
-  for agent/binding resolution
+- **Depends on**: [Agent Registry & Context Bindings](agent-registry-and-bindings.md)
+  (F1, [#1258](https://github.com/kagura-ai/memory-cloud/issues/1258) — that design doc
+  lands with the #1258 PR; the link resolves once it merges) for agent/binding resolution
 
 `get_agent_bootstrap` is the single session-start call that rehydrates an agent's cognitive
 state: context metadata and usage guide, always-load pinned memories, a trusted-only semantic
