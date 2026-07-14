@@ -944,3 +944,150 @@ class TestPersistFailure:
         assert analysis.status == "cancelled"
         assert analysis.error is None
         assert analysis.cancellation_reason == "user"
+
+
+# ===========================================================================
+# #1246 — labeling-failure threshold (MAX_CLUSTER_FAILURE_RATIO)
+# ===========================================================================
+
+
+class TestLabelingFailureThreshold:
+    """#1246: a run where MORE than MAX_CLUSTER_FAILURE_RATIO of clusters
+    failed labeling must not persist as an unqualified 'succeeded' —
+    the docstring contract referenced a constant that never existed.
+    """
+
+    async def _inputs_with_failures(
+        self,
+        db_session,
+        workspace_id,
+        context_id,
+        pricing,
+        *,
+        failed_flags: list[bool],
+    ) -> PersistInputs:
+        analysis = await _make_analysis(
+            db_session,
+            workspace_id=workspace_id,
+            context_id=context_id,
+            pricing=pricing,
+        )
+        n = len(failed_flags)
+        mems = [
+            await _make_db_memory(db_session, workspace_id=workspace_id, context_id=context_id)
+            for _ in range(n)
+        ]
+        memories = [
+            MemoryRecord(
+                id=m.id,
+                type="note",
+                summary="m",
+                tags=[],
+                importance=0.5,
+                created_at=datetime(2026, 1, 1),
+            )
+            for m in mems
+        ]
+        cluster_results = [
+            _cluster_label(
+                cluster_index=i,
+                label="(unlabeled)" if failed else f"cluster-{i}",
+                label_confidence=0.0 if failed else 0.9,
+                failed=failed,
+                breakdown=None,
+            )
+            for i, failed in enumerate(failed_flags)
+        ]
+        return PersistInputs(
+            analysis=analysis,
+            memories=memories,
+            embeddings=np.zeros((n, 4)),
+            cluster_labels=np.array(list(range(n))),
+            coords_2d=np.zeros((n, 2)),
+            cluster_results=cluster_results,
+            silhouette=0.0,
+            size_variance=0.0,
+            outlier_ratio=0.0,
+            window_from=None,
+            window_to=None,
+        )
+
+    @pytest.mark.asyncio
+    async def test_all_clusters_failed_raises_and_persists_nothing(
+        self, db_session, fixture_workspace_id, fixture_context_id, fixture_pricing
+    ):
+        from services.analysis.labeler import ClusterLabelingThresholdExceeded
+
+        inputs = await self._inputs_with_failures(
+            db_session,
+            fixture_workspace_id,
+            fixture_context_id,
+            fixture_pricing,
+            failed_flags=[True, True],
+        )
+        with pytest.raises(ClusterLabelingThresholdExceeded, match="2/2"):
+            await persist_results(
+                db_session,
+                inputs=inputs,
+                user_id="rep_user",
+                workspace_id=str(fixture_workspace_id),
+                context_id=str(fixture_context_id),
+            )
+        clusters = (
+            (
+                await db_session.execute(
+                    select(MemoryAnalysisCluster).where(
+                        MemoryAnalysisCluster.analysis_id == inputs.analysis.id
+                    )
+                )
+            )
+            .scalars()
+            .all()
+        )
+        assert clusters == []
+
+    @pytest.mark.asyncio
+    async def test_more_than_half_failed_raises(
+        self, db_session, fixture_workspace_id, fixture_context_id, fixture_pricing
+    ):
+        from services.analysis.labeler import ClusterLabelingThresholdExceeded
+
+        inputs = await self._inputs_with_failures(
+            db_session,
+            fixture_workspace_id,
+            fixture_context_id,
+            fixture_pricing,
+            failed_flags=[True, True, False],
+        )
+        with pytest.raises(ClusterLabelingThresholdExceeded, match="2/3"):
+            await persist_results(
+                db_session,
+                inputs=inputs,
+                user_id="rep_user",
+                workspace_id=str(fixture_workspace_id),
+                context_id=str(fixture_context_id),
+            )
+
+    @pytest.mark.asyncio
+    async def test_exactly_half_failed_still_succeeds(
+        self, db_session, fixture_workspace_id, fixture_context_id, fixture_pricing
+    ):
+        """Exactly-half is a (degraded but real) success: half the
+        clusters carry usable labels and quality.labeling_failures
+        surfaces the rest."""
+        inputs = await self._inputs_with_failures(
+            db_session,
+            fixture_workspace_id,
+            fixture_context_id,
+            fixture_pricing,
+            failed_flags=[True, False],
+        )
+        await persist_results(
+            db_session,
+            inputs=inputs,
+            user_id="rep_user",
+            workspace_id=str(fixture_workspace_id),
+            context_id=str(fixture_context_id),
+        )
+        assert inputs.analysis.status == "succeeded"
+        assert inputs.analysis.quality["labeling_failures"] == 1

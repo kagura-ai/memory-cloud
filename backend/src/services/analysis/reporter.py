@@ -46,7 +46,11 @@ from models.analysis import (
     MemoryAnalysisCluster,
 )
 from models.sleep import SLEEP_REPORT_PAID_BY_VALUES, SLEEP_REPORT_SOURCES
-from services.analysis.labeler import ClusterLabel
+from services.analysis.labeler import (
+    MAX_CLUSTER_FAILURE_RATIO,
+    ClusterLabel,
+    ClusterLabelingThresholdExceeded,
+)
 from services.analysis.property_stats import (
     MemoryFacets,
     aggregate_cluster_stats,
@@ -297,6 +301,23 @@ async def persist_results(
         return
 
     n_clusters = len(cluster_results)
+
+    # #1246: enforce the labeler's documented failure contract BEFORE any
+    # row is written (and before any SQL — the session has no open
+    # transaction here, so the orchestrator's failure path starts clean).
+    # Without this a run whose every cluster failed labeling persisted as
+    # ``status='succeeded'`` with ``label_confidence=0.0`` — an
+    # unqualified success built entirely of "(unlabeled)" rows, with the
+    # daily-quota slot consumed and no error surfaced.
+    labeling_failures = sum(1 for cl in cluster_results if cl.failed)
+    if n_clusters > 0 and (labeling_failures / n_clusters) > MAX_CLUSTER_FAILURE_RATIO:
+        raise ClusterLabelingThresholdExceeded(
+            f"Cluster labeling failed for {labeling_failures}/{n_clusters} clusters "
+            f"(more than MAX_CLUSTER_FAILURE_RATIO={MAX_CLUSTER_FAILURE_RATIO}). "
+            "Check the workspace BYOK key and the provider status; the run is "
+            "marked failed instead of persisting mostly-unlabeled clusters."
+        )
+
     members_by_idx = _index_members_by_cluster(cluster_labels_arr, n_clusters)
 
     # 1. Cluster rows. We generate UUIDs client-side so the assignment
@@ -362,7 +383,9 @@ async def persist_results(
         "label_confidence": avg_label_confidence,
         "n_clusters": n_clusters,
         "n_memories": len(memories),
-        "labeling_failures": sum(1 for cl in cluster_results if cl.failed),
+        # Below the #1246 threshold by construction — the guard at the
+        # top of this function raised otherwise.
+        "labeling_failures": labeling_failures,
     }
 
     # 4. Update the memory_analyses row. embedding_model was set by
