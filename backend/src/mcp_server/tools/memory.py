@@ -261,22 +261,18 @@ async def handle_recall_upcoming(
     if "context_id" not in args:
         return _error_response("missing_fields", "Missing required field: context_id")
 
-    from sqlalchemy import select
-
     from db.base import get_db
-    from models.memory import Memory
+    from services.time_memory import clamp_upcoming_k, query_upcoming_time_memories
     from utils.time_trigger import TriggerValidationError, parse_query_bound
 
     # Validate inputs up front (before opening a DB session) so a malformed
     # argument is a structured validation_error, not an unhandled crash.
+    # #1276: the coerce+clamp is hoisted into the shared time_memory helper so
+    # the tool and get_agent_bootstrap share one implementation.
     try:
-        raw_k = args.get("k", 20)
-        k = int(raw_k)
+        k = clamp_upcoming_k(args.get("k", 20))
     except (TypeError, ValueError):
         return _error_response("validation_error", f"k must be an integer, got {args.get('k')!r}")
-    # Clamp into [1, 100]: a missing lower bound let k<=0 through as LIMIT 0
-    # (always empty) or LIMIT -1 (no cap, bypassing the 100 ceiling).
-    k = max(1, min(k, 100))
 
     try:
         # Re-normalize bounds to fixed-width ISO (and resolve 'now') so the
@@ -296,31 +292,9 @@ async def handle_recall_upcoming(
             # A01), mirroring handle_recall.
             current_context = await _resolve_context_for_read(db, user_id, current_context_id)
 
-            query = (
-                select(Memory)
-                .where(Memory.deleted_at.is_(None))
-                .where(Memory.type == "time")
-                .where(Memory.context_id == current_context_id)
+            results = await query_upcoming_time_memories(
+                db, current_context_id, q_from=q_from, q_until=q_until, k=k
             )
-            # Window overlap: stored [trigger_from, trigger_until] overlaps the
-            # query window [q_from, q_until] iff trigger_until >= q_from AND
-            # trigger_from <= q_until.
-            if q_from is not None:
-                query = query.where(Memory.trigger_until >= q_from)
-            if q_until is not None:
-                query = query.where(Memory.trigger_from <= q_until)
-            query = query.order_by(Memory.trigger_from.asc()).limit(k)
-
-            rows = (await db.execute(query)).scalars().all()
-            results = [
-                {
-                    "memory_id": str(m.id),
-                    "summary": m.summary,
-                    "type": m.type,
-                    "details": m.details,
-                }
-                for m in rows
-            ]
             await _log_tool_usage(
                 db, user_id, "recall_upcoming", start_time, 200, current_context_id, workspace_id
             )

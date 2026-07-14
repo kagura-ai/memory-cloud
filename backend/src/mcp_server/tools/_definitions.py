@@ -2407,6 +2407,68 @@ Returns: {status, deleted, binding_id}.""",
                 "required": ["agent_id", "binding_id"],
             },
         },
+        # Issue #1276 (RFC-0002 P0-3): session-start bootstrap composition.
+        {
+            "name": "get_agent_bootstrap",
+            "readOnly": True,
+            "description": """Rehydrate an agent's cognitive state at session start (Issue #1276).
+
+ONE call that composes existing primitives: context guide + always-load pinned
+memories + a trusted-only recall (only when `query` is supplied) + upcoming
+time memories + the agent-state lane. Pure composition — bounds, ordering, and
+trust filtering are inherited from the standalone tools, not re-specified.
+
+`agent_id` is REQUIRED. If `context_id` is omitted the agent's default binding
+is used. Each component is fail-soft: a failing component reports
+{status: error} while the rest return, with top-level `degraded: true`.
+
+Returns: {status, degraded, agent, context, instructions, components:{pinned,
+recall,upcoming,state,policy}, correlation, generated_at}.""",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "agent_id": {
+                        "type": "string",
+                        "format": "uuid",
+                        "description": "REQUIRED. Agent UUID from the registry.",
+                    },
+                    "context_id": {
+                        "type": "string",
+                        "format": "uuid",
+                        "description": "Optional; defaults to the agent's default binding.",
+                    },
+                    "session_id": {
+                        "type": "string",
+                        "description": "Optional opaque correlation id (<=128 chars, [A-Za-z0-9._-]).",
+                    },
+                    "query": {
+                        "type": "string",
+                        "description": "Optional (<=1024 chars). Enables the trusted-only recall component; omit to skip recall.",
+                    },
+                    "recall_k": {
+                        "type": "integer",
+                        "description": "Optional; forwarded to recall's k validation.",
+                    },
+                    "pinned_cap": {
+                        "type": "integer",
+                        "description": "Optional; clamped by load_pinned to [1, 1000].",
+                    },
+                    "upcoming_until": {
+                        "type": "string",
+                        "description": "Optional ISO upper bound for upcoming time memories ('from' is always now).",
+                    },
+                    "include": {
+                        "type": "array",
+                        "items": {
+                            "type": "string",
+                            "enum": ["pinned", "recall", "upcoming", "state", "policy"],
+                        },
+                        "description": "Optional component selector; default all.",
+                    },
+                },
+                "required": ["agent_id"],
+            },
+        },
         # Issue #1128: zero-knowledge secret store. The server stores opaque age
         # ciphertext + public recipient keys only and NEVER decrypts. Encryption
         # and decryption happen client-side (the `kagura secret` CLI / SDK).

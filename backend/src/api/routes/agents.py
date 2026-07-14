@@ -22,7 +22,7 @@ from fastapi import APIRouter, Depends, status
 from pydantic import BaseModel, Field
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from auth.dependencies import require_workspace_admin
+from auth.dependencies import APIKeyOrSessionUser, require_workspace_admin
 from db.base import get_db
 from models.agent import Agent
 from models.api_base import TZAwareBaseModel
@@ -477,3 +477,103 @@ async def delete_agent_binding(
     )
     await service.delete_binding(binding)
     await db.commit()
+
+
+# ============================================================================
+# Bootstrap companion (RFC-0002 P0-3, Issue #1276)
+# ============================================================================
+
+
+class BootstrapRequest(BaseModel):
+    """Body for POST /api/v1/agents/{agent_id}/bootstrap (agent_id from path).
+
+    POST-for-read follows the POST /api/v1/memory/pinned precedent.
+    """
+
+    context_id: UUID | None = None
+    session_id: str | None = Field(None, max_length=128)
+    query: str | None = Field(None, max_length=1024)
+    recall_k: int | None = None
+    pinned_cap: int | None = None
+    upcoming_until: str | None = None
+    include: list[Literal["pinned", "recall", "upcoming", "state", "policy"]] | None = None
+
+
+@router.post("/{agent_id}/bootstrap")
+async def agent_bootstrap(
+    agent_id: UUID,
+    body: BootstrapRequest,
+    user: APIKeyOrSessionUser,
+    db: AsyncSession = Depends(get_db),
+) -> Any:
+    """Rehydrate an agent's cognitive state at session start (#1276).
+
+    Auth is ``APIKeyOrSessionUser``; the per-request agent scope (set at
+    API-key verify for agent-bound keys) drives the identity rule inside the
+    service. Component failures are fail-soft; identity/authorization failures
+    are total and fail-closed with the uniform ``agent_not_found`` /
+    ``context_not_found`` shapes.
+    """
+    from auth.agent_scope import get_agent_scope
+    from services.agent_bootstrap_service import (
+        AgentBootstrapService,
+        BootstrapError,
+        BootstrapParams,
+        parse_include,
+    )
+    from utils.exceptions import BadRequestError, NotFoundException
+
+    try:
+        params = BootstrapParams(
+            agent_id=agent_id,
+            context_id=body.context_id,
+            session_id=body.session_id,
+            query=body.query or None,
+            recall_k=body.recall_k,
+            pinned_cap=body.pinned_cap,
+            upcoming_until=body.upcoming_until,
+            include=parse_include(body.include),
+        )
+    except BootstrapError as e:
+        raise BadRequestError(message=e.message, error_code=e.code.upper()) from e
+
+    service = AgentBootstrapService(db)
+    try:
+        principal, agent = await service.resolve_principal_and_agent(
+            requested_agent_id=agent_id, user=user, agent_scope=get_agent_scope()
+        )
+        context, binding_info = await service.resolve_context(
+            agent=agent, params=params, principal=principal
+        )
+    except BootstrapError as e:
+        await db.rollback()
+        if e.code in ("agent_not_found", "context_not_found"):
+            # Uniform 404 (CWE-639) — nonexistent and not-yours are the same.
+            raise NotFoundException("Agent" if e.code == "agent_not_found" else "Context") from e
+        raise BadRequestError(message=e.message, error_code=e.code.upper()) from e
+
+    # REST recall metering: the recall component runs under the caller's plan
+    # limits; a query-carrying bootstrap that trips the limit degrades that
+    # component to rate_limited while the cheap components still return.
+    recall_metered = False
+    if params.query is not None and principal.workspace_id is not None:
+        from services.quota_service import QuotaService
+
+        try:
+            allowed, _used, _limit = await QuotaService(db).check_mcp_rate_limit(
+                principal.workspace_id
+            )
+            recall_metered = not allowed
+        except Exception:
+            recall_metered = False
+
+    envelope = await service.build_envelope(
+        agent=agent,
+        context=context,
+        binding_info=binding_info,
+        params=params,
+        principal=principal,
+        recall_metered=recall_metered,
+    )
+    await db.commit()
+    return envelope

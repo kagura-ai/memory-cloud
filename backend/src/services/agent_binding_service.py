@@ -138,6 +138,22 @@ class AgentBindingService:
         )
         return result.scalar_one_or_none()
 
+    async def get_binding_for_context(
+        self, agent_id: uuid.UUID, context_id: uuid.UUID
+    ) -> AgentContextBinding | None:
+        """Fetch the binding row for one (agent, context) pair, or None.
+
+        Used by bootstrap (#1276) to read the ``is_default`` descriptor of an
+        explicitly-supplied ``context_id``.
+        """
+        result = await self.db.execute(
+            select(AgentContextBinding).where(
+                AgentContextBinding.agent_id == agent_id,
+                AgentContextBinding.context_id == context_id,
+            )
+        )
+        return result.scalar_one_or_none()
+
     async def create_binding(
         self,
         *,
@@ -360,3 +376,46 @@ class AgentBindingService:
             )
         )
         return set(result.scalars().all())
+
+    async def resolve_default_binding(
+        self, agent_id: uuid.UUID
+    ) -> tuple[AgentContextBinding | None, str]:
+        """Resolve the agent's default binding for bootstrap (#1276, F2).
+
+        Returns ``(binding, outcome)`` where outcome ∈
+        {``"default"``, ``"sole"``, ``"none"``, ``"ambiguous"``}:
+
+        - the row with ``is_default = true`` (``"default"``), else
+        - the agent's SOLE binding when exactly one exists (``"sole"``), else
+        - ``(None, "none")`` when the agent has no bindings, or
+        - ``(None, "ambiguous")`` when it has ≥2 bindings and no default.
+
+        The caller maps ``none``/``ambiguous`` to ``context_id_required``
+        WITHOUT enumerating bindings (no existence oracle — F2 normative).
+        """
+        default_result = await self.db.execute(
+            select(AgentContextBinding).where(
+                AgentContextBinding.agent_id == agent_id,
+                AgentContextBinding.is_default.is_(True),
+            )
+        )
+        default = default_result.scalar_one_or_none()
+        if default is not None:
+            return default, "default"
+
+        rows = (
+            (
+                await self.db.execute(
+                    select(AgentContextBinding)
+                    .where(AgentContextBinding.agent_id == agent_id)
+                    .limit(2)
+                )
+            )
+            .scalars()
+            .all()
+        )
+        if len(rows) == 1:
+            return rows[0], "sole"
+        if len(rows) == 0:
+            return None, "none"
+        return None, "ambiguous"

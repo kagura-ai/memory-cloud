@@ -72,6 +72,9 @@ _TOOLS_WITHOUT_CONTEXT_ID = frozenset(
         "list_agent_bindings",
         "update_agent_binding",
         "unbind_agent_context",
+        # Issue #1276: bootstrap — context_id is OPTIONAL (defaults to the
+        # agent's default binding); resolution happens in the handler.
+        "get_agent_bootstrap",
     }
 )
 
@@ -114,6 +117,11 @@ _RATE_LIMIT_EXEMPT_TOOLS = frozenset(
         "get_agent",
         # Issue #1275: read-only binding listing.
         "list_agent_bindings",
+        # Issue #1276: bootstrap is a session-start read that MUST stay callable
+        # when rate-limited (like get_context_info / load_pinned). Exempt at the
+        # TOOL level; a query-CARRYING call still meters its recall component
+        # under the normal accounting inside the handler (query-less = free).
+        "get_agent_bootstrap",
     }
 )
 
@@ -128,6 +136,7 @@ _TOOL_REGISTRY: dict[str, Any] | None = None
 
 def _build_registry() -> dict[str, Any]:
     """Build tool name → handler mapping."""
+    from mcp_server.tools.agent_bootstrap import handle_get_agent_bootstrap
     from mcp_server.tools.agent_registry import (
         handle_bind_agent_context,
         handle_delete_agent,
@@ -265,6 +274,8 @@ def _build_registry() -> dict[str, Any]:
         "list_agent_bindings": handle_list_agent_bindings,
         "update_agent_binding": handle_update_agent_binding,
         "unbind_agent_context": handle_unbind_agent_context,
+        # Issue #1276 (RFC-0002 P0-3): session-start bootstrap composition.
+        "get_agent_bootstrap": handle_get_agent_bootstrap,
     }
 
 
