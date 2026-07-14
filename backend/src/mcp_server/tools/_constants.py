@@ -24,6 +24,7 @@ TOOL_TIMEOUTS: dict[str, float] = {
     "reference": _get_timeout("reference", 10.0),
     "explore": _get_timeout("explore", 45.0),
     "get_context_info": _get_timeout("get_context_info", 15.0),
+    "get_agent_bootstrap": _get_timeout("get_agent_bootstrap", 15.0),  # #1276 (RFC-0002 P0-3)
     "list_contexts": _get_timeout("list_contexts", 10.0),
     "list_tags": _get_timeout("list_tags", 10.0),  # Issue #614
     "create_context": _get_timeout("create_context", 15.0),

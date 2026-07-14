@@ -54,6 +54,10 @@ AUDIT_AGENT_REGISTERED = "agent_registered"
 AUDIT_AGENT_UPDATED = "agent_updated"
 AUDIT_AGENT_ENFORCEMENT_WIDENED = "agent_enforcement_widened"
 AUDIT_AGENT_DELETED = "agent_deleted"
+# Issue #1276: an owner/admin operator bootstrapping an agent "on behalf of"
+# (non-agent credential) — recorded so operator activity is distinguishable
+# from the agent's own and cannot masquerade as it (F2 normative).
+AUDIT_AGENT_BOOTSTRAP_ON_BEHALF = "agent_bootstrap_on_behalf_of"
 
 
 def validate_agent_name(name: Any) -> str:
