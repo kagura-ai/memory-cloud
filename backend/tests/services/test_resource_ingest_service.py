@@ -63,6 +63,15 @@ class TestValidateEvents:
         assert errors == []
         assert valid[0].payload is None
 
+    @pytest.mark.parametrize("bad_payload", [[], "", 0, False, [1], "x"])
+    def test_delete_with_non_dict_payload_rejected(self, bad_payload):
+        # Only None or {} is accepted for delete; falsy-but-non-null shapes
+        # must not slip through a bare truthiness check (Copilot finding on
+        # PR #1268).
+        valid, errors = validate_events([{"op": "delete", "doc_id": "d1", "payload": bad_payload}])
+        assert valid == []
+        assert errors[0].kind == svc.KIND_PAYLOAD_NOT_NULL_DELETE
+
     @pytest.mark.parametrize(
         ("event", "kind"),
         [
@@ -299,19 +308,27 @@ class TestFinalizeBatch:
         async def _schedule(db_, ws, rid):
             calls.append("schedule")
 
-        with patch("api.routes.resource_ingest._schedule_indexer_for_resource", new=_schedule):
-            await svc.finalize_batch(db, workspace_id=uuid4(), resource_id="res1", created_ids=[1])
+        await svc.finalize_batch(
+            db,
+            workspace_id=uuid4(),
+            resource_id="res1",
+            created_ids=[1],
+            schedule_indexer=_schedule,
+        )
         assert calls == ["commit", "schedule", "commit"]
 
     @pytest.mark.asyncio
     async def test_no_indexer_when_nothing_created(self):
         db = AsyncMock()
         db.commit = AsyncMock()
-        with patch(
-            "api.routes.resource_ingest._schedule_indexer_for_resource",
-            new=AsyncMock(),
-        ) as mock_schedule:
-            await svc.finalize_batch(db, workspace_id=uuid4(), resource_id="res1", created_ids=[])
+        mock_schedule = AsyncMock()
+        await svc.finalize_batch(
+            db,
+            workspace_id=uuid4(),
+            resource_id="res1",
+            created_ids=[],
+            schedule_indexer=mock_schedule,
+        )
         mock_schedule.assert_not_awaited()
         db.commit.assert_awaited_once()
 
@@ -384,6 +401,14 @@ class TestAdapterErrorFormatting:
             svc.KIND_CONSTRAINT_VIOLATION: (
                 {"constraint": "x"},
                 "Unable to ingest event due to a constraint violation",
+                False,
+            ),
+            # New wire string on this surface: a per-event unexpected failure
+            # previously aborted the whole MCP call; the generic message must
+            # never leak exception text.
+            svc.KIND_UNEXPECTED: (
+                {"message": "boom"},
+                "Unexpected error ingesting event",
                 False,
             ),
         }

@@ -25,6 +25,7 @@ Design notes:
 from __future__ import annotations
 
 import json
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from typing import Any
 from uuid import UUID
@@ -180,13 +181,14 @@ def validate_events(
                 continue
 
         if op == "delete":
-            # Truthiness, not `is not None`: an explicit empty-dict payload on
-            # a delete is normalized to None (`payload if op == "upsert"` below
-            # already drops it). The REST surface always accepted `payload: {}`
-            # (its Pydantic validator uses truthiness), so rejecting it here
-            # would regress REST behavior; the MCP surface previously rejected
-            # it and is relaxed to match (#1255 equivalence).
-            if payload:
+            # Exactly None or {} is accepted; {} is normalized to None
+            # (`payload if op == "upsert"` below drops it). The REST surface
+            # always accepted `payload: {}` (its Pydantic validator uses
+            # truthiness), so rejecting it here would regress REST behavior;
+            # the MCP surface previously rejected it and is relaxed to match
+            # (#1255 equivalence). Other falsy-but-non-null shapes ([], "", 0)
+            # stay rejected — bare truthiness would silently accept them.
+            if payload is not None and payload != {}:
                 errors.append(
                     IngestItemError(index=i, kind=KIND_PAYLOAD_NOT_NULL_DELETE, doc_id=doc_id)
                 )
@@ -382,6 +384,7 @@ async def finalize_batch(
     workspace_id: UUID,
     resource_id: str,
     created_ids: list[int],
+    schedule_indexer: Callable[[AsyncSession, UUID, str], Awaitable[None]],
 ) -> None:
     """Commit the batch, then schedule the indexer from the post-commit boundary.
 
@@ -393,6 +396,11 @@ async def finalize_batch(
     #1255 asks for). The indexer is scheduled only when at least one event was
     created.
 
+    ``schedule_indexer`` is injected by the adapter (both surfaces pass the
+    routes module's ``_schedule_indexer_for_resource``, which is also used by
+    the single-event path) so this service never imports from the adapter
+    layer.
+
     Conscious trade-off: if indexer scheduling (or the second commit) fails
     after the first commit, the event rows stay durable while the caller sees
     an error — the pre-refactor MCP path rolled the whole batch back in that
@@ -402,11 +410,5 @@ async def finalize_batch(
     await db.commit()
 
     if created_ids:
-        # Lazy import from the routes module: it is the single home of the
-        # scheduling helper (also used by the single-event path) and the
-        # established patch target in the test suite. Moving it is out of
-        # scope for #1255 ("no broad cleanup of unrelated Resource tools").
-        from api.routes.resource_ingest import _schedule_indexer_for_resource
-
-        await _schedule_indexer_for_resource(db, workspace_id, resource_id)
+        await schedule_indexer(db, workspace_id, resource_id)
         await db.commit()

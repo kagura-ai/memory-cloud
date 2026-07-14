@@ -613,12 +613,14 @@ async def ingest_batch(
     ]
     created_ids = result.created_ids
 
-    # 4. Commit + post-commit indexer boundary (shared service).
+    # 4. Commit + post-commit indexer boundary (shared service). The scheduler
+    #    is injected so the service never imports from this adapter layer.
     await resource_ingest_service.finalize_batch(
         db,
         workspace_id=context.workspace_id,
         resource_id=resource_id,
         created_ids=created_ids,
+        schedule_indexer=_schedule_indexer_for_resource,
     )
 
     if created_ids:

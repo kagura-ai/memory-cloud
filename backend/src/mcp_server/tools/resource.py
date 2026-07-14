@@ -639,12 +639,19 @@ async def handle_ingest_events(
                 _format_batch_item_error(err) for err in [*validation_errors, *persist_errors]
             ]
 
-            # Commit + post-commit indexer boundary (shared service).
+            # Commit + post-commit indexer boundary (shared service). The
+            # scheduler is injected so the service never imports from the
+            # adapter layer; this lazy import mirrors the pre-refactor MCP
+            # path and keeps the routes module as the helper's single home
+            # (it also serves the REST single-event path).
+            from api.routes.resource_ingest import _schedule_indexer_for_resource
+
             await resource_ingest_service.finalize_batch(
                 db,
                 workspace_id=workspace_id,
                 resource_id=resource_id,
                 created_ids=created_ids,
+                schedule_indexer=_schedule_indexer_for_resource,
             )
 
             await _log_tool_usage(
