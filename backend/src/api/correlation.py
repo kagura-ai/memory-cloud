@@ -25,6 +25,10 @@ from dataclasses import dataclass
 from typing import Any
 from uuid import UUID
 
+from utils.logger import get_logger
+
+logger = get_logger(__name__)
+
 # OTel GenAI baggage keys (published attribute names; vendor key for run).
 BAGGAGE_AGENT_ID = "gen_ai.agent.id"
 BAGGAGE_SESSION_ID = "gen_ai.conversation.id"
@@ -82,8 +86,18 @@ def validate_correlation_token(value: Any) -> str | None:
     (advisory data, never a request failure).
     """
     if not isinstance(value, str) or not value or len(value) > _CORRELATION_TOKEN_MAX_LEN:
+        # Structured warning on drop (design F4 §validation) — advisory, never
+        # a request failure. Never log the token verbatim (it may, despite the
+        # opacity contract, carry client PII); log only its length/type.
+        logger.warning(
+            "correlation_token_dropped",
+            reason="length_or_type",
+            length=len(value) if isinstance(value, str) else None,
+            value_type=type(value).__name__,
+        )
         return None
     if not _CORRELATION_TOKEN_RE.match(value):
+        logger.warning("correlation_token_dropped", reason="charset", length=len(value))
         return None
     return value
 
@@ -97,9 +111,14 @@ def parse_traceparent(header: str | None) -> tuple[str, str] | None:
         return None
     m = _TRACEPARENT_RE.match(header.strip())
     if not m:
+        # Advisory: a malformed traceparent (e.g. from a misconfigured proxy)
+        # is dropped and the server generates its own ids — but log it so the
+        # misconfiguration is diagnosable (design F4 §validation).
+        logger.warning("traceparent_invalid", reason="malformed")
         return None
     trace_id, span_id = m.group("trace_id"), m.group("span_id")
     if trace_id == "0" * 32 or span_id == "0" * 16:
+        logger.warning("traceparent_invalid", reason="all_zero_id")
         return None
     return trace_id, span_id
 
@@ -193,11 +212,9 @@ def _hash_claim(claim: str) -> str:
     from config.settings import get_settings
     from utils.hashing import hmac_sha256_hex
 
-    settings = get_settings()
-    key = getattr(settings, "audit_hmac_key", None) or getattr(
-        settings, "api_key_secret", "kagura-audit"
-    )
-    return hmac_sha256_hex(claim, key)
+    # audit_hmac_key is a required Settings field with a non-empty default —
+    # use it directly (utils.hashing's contract: never a hard-coded constant).
+    return hmac_sha256_hex(claim, get_settings().audit_hmac_key)
 
 
 async def verify_baggage_agent_claim(
