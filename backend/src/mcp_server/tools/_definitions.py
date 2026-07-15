@@ -2283,7 +2283,9 @@ The effective permission for an agent-bound request is the existing RBAC
 decision ∩ binding: can_read gates reads, write_policy ('deny'|'direct')
 gates writes. Under enforcement_mode='enforce', contexts WITHOUT a binding
 row are denied for the agent (default-deny); under 'shadow', violations are
-only logged. Type filters are reserved for Issue #1286; omit them for now.
+only logged. Per-memory type/source filters (#1299): null = unrestricted,
+[] = deny-all, else each read row must match the arrays (enforce-mode only;
+shadow records would_deny without filtering).
 
 Returns: {status, binding: {id, context_id, can_read, write_policy, is_default, ...}}.""",
             "inputSchema": {
@@ -2315,12 +2317,12 @@ Returns: {status, binding: {id, context_id, can_read, write_policy, is_default, 
                     "allowed_memory_types": {
                         "type": "array",
                         "items": {"type": "string"},
-                        "description": "Reserved for #1286. Omit/null is the only accepted value until per-memory enforcement ships.",
+                        "description": "Per-memory type filter (#1299): omit/null = all types, [] = deny-all, else the memory types this binding may read.",
                     },
                     "allowed_source_types": {
                         "type": "array",
                         "items": {"type": "string"},
-                        "description": "Reserved for #1286. Omit/null is the only accepted value until per-memory enforcement ships.",
+                        "description": "Per-memory source filter (#1299): omit/null = all sources, [] = deny-all, else values from the memories.source_type set.",
                     },
                 },
                 "required": ["agent_id", "context_id"],
@@ -2371,12 +2373,12 @@ Returns: {status, binding, changed: [field, ...]}.""",
                     "allowed_memory_types": {
                         "type": "array",
                         "items": {"type": "string"},
-                        "description": "Reserved for #1286; only null is currently accepted.",
+                        "description": "Per-memory type filter (#1299): null = all types, [] = deny-all.",
                     },
                     "allowed_source_types": {
                         "type": "array",
                         "items": {"type": "string"},
-                        "description": "Reserved for #1286; only null is currently accepted.",
+                        "description": "Per-memory source filter (#1299): null = all sources, [] = deny-all.",
                     },
                 },
                 "required": ["agent_id", "binding_id"],

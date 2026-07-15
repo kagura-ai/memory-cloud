@@ -399,6 +399,10 @@ async def handle_bind_agent_context(
                 "can_read": binding.can_read,
                 "write_policy": binding.write_policy,
                 "is_default": binding.is_default,
+                # #1299: the filter arrays are behavior-bearing now — audit
+                # them at create (update audits them via the changes dict).
+                "allowed_memory_types": binding.allowed_memory_types,
+                "allowed_source_types": binding.allowed_source_types,
             },
         )
         await db.commit()
