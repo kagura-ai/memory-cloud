@@ -159,15 +159,20 @@ class MemoryService:
         self.context_service = ContextService(db)
 
     async def _get_context_isolation_params(
-        self, user_id: str, context_id: UUID | None, *, access: str = "read"
+        self,
+        user_id: str,
+        context_id: UUID | None,
+        *,
+        access: str = "read",
+        key_workspace_id: UUID | None = None,
     ) -> tuple[Context | None, str | None, str | None]:
         """Extract workspace_id and context_id for 3-level isolation (performance optimization).
 
         Single Collection Migration: Helper to avoid duplicate context fetches.
 
         Issue #1275 (RFC-0002 P0-2): this resolves the *declared* context for
-        the remember (write) / recall (read) / forget-by-context (write)
-        paths — a route that does not pass through
+        the remember (write) / load_pinned (read) / forget-by-context (write)
+        paths — routes that do not pass through
         ``PermissionService.resolve_context_for_workspace_read``. Apply the
         same subtractive agent-binding gate here so agent-bound REST/MCP
         requests cannot write into (or read from) a binding-denied context via
@@ -175,21 +180,39 @@ class MemoryService:
         No-op for non-agent credentials; deny raises the uniform
         ``NotFoundException("Context")`` matching ``get_context``.
 
+        Issue #963 / #1281 item 2: also confine a workspace-scoped API key to
+        its own workspace here. ``context_service.get_context`` authorizes on
+        membership in the context's owning workspace — necessary but not
+        sufficient for a workspace-scoped key whose holder is *also* a member of
+        another workspace (they could otherwise pass a foreign ``context_id`` and,
+        for remember, have the row stamped into that foreign workspace). REST
+        passes ``key_workspace_id=user["api_key_workspace_id"]`` (the PURE key
+        scope — None unless a workspace-scoped key was used); mismatch raises the
+        same uniform ``NotFoundException``. Mirrors the MCP-path
+        ``_resolve_context`` confinement. No-op for OAuth/session/global-key
+        callers (scope None), so it never over-confines them.
+
         Args:
             user_id: User ID
             context_id: Context ID
             access: ``"read"`` (default) or ``"write"`` — the binding gate.
+            key_workspace_id: Pure API-key workspace scope for #963 confinement,
+                or ``None`` to skip it.
 
         Returns:
             Tuple of (context_object, workspace_id_str, context_id_str)
 
         Raises:
-            NotFoundException: If context not found or the binding denies it.
+            NotFoundException: If context not found, key-workspace-confined, or
+                the binding denies it.
         """
         if not context_id:
             return None, None, None
 
         context = await self.context_service.get_context(user_id, context_id)
+
+        if key_workspace_id is not None and context.workspace_id != key_workspace_id:
+            raise NotFoundException("Context", str(context_id))
 
         from services.agent_binding_service import agent_binding_permits
 
@@ -272,6 +295,7 @@ class MemoryService:
         client: str = "unknown",
         current_context_id: UUID | None = None,
         current_workspace_id: UUID | None = None,  # NEW: Workspace ID (Issue #146)
+        key_workspace_id: UUID | None = None,  # Issue #963/#1281: pure key scope
     ) -> RememberResponse:
         """Store new memory.
 
@@ -316,7 +340,7 @@ class MemoryService:
         # Issue #1275: remember is a WRITE — gate the declared context against
         # the agent binding (no-op for non-agent credentials).
         context, workspace_id_str, context_id_str = await self._get_context_isolation_params(
-            user_id, current_context_id, access="write"
+            user_id, current_context_id, access="write", key_workspace_id=key_workspace_id
         )
 
         # Validate required parameters
@@ -2724,6 +2748,7 @@ class MemoryService:
         current_context_id: UUID | None = None,
         current_workspace_id: UUID | None = None,
         cap: int | str | None = None,
+        key_workspace_id: UUID | None = None,  # Issue #963/#1281: pure key scope
     ) -> LoadPinnedResponse:
         """Deterministically load a context's always-delivery memories (#886).
 
@@ -2747,7 +2772,7 @@ class MemoryService:
         from config.settings import get_settings
 
         context, workspace_id_str, context_id_str = await self._get_context_isolation_params(
-            user_id, current_context_id
+            user_id, current_context_id, key_workspace_id=key_workspace_id
         )
         if not workspace_id_str or not context_id_str:
             raise ValueError("load_pinned() requires current_context_id")
@@ -2802,6 +2827,7 @@ class MemoryService:
         request: ForgetRequest,
         user_id: str,
         current_context_id: UUID | None = None,
+        key_workspace_id: UUID | None = None,  # Issue #963/#1281: pure key scope
     ) -> ForgetResponse:
         """Delete memory (single or multiple via query).
 
@@ -2819,7 +2845,7 @@ class MemoryService:
         # Issue #1275: forget is a WRITE — gate the declared context against
         # the agent binding (no-op for non-agent credentials).
         context, workspace_id_str, context_id_str = await self._get_context_isolation_params(
-            user_id, current_context_id, access="write"
+            user_id, current_context_id, access="write", key_workspace_id=key_workspace_id
         )
 
         deleted_ids = []
