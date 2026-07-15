@@ -305,6 +305,15 @@ async def _verify_context_in_workspace(
     ):
         raise HTTPException(status_code=404, detail=f"Context {context_id} not found")
 
+    # #1281 item 5: subtractive agent-binding gate (REST parity with the MCP
+    # analysis surface). Contains an agent-bound credential to its bound
+    # contexts even when the underlying role is broad; no-op for non-agent
+    # credentials; deny is the same uniform 404 (no existence leak).
+    from services.agent_binding_service import agent_binding_permits
+
+    if not await agent_binding_permits(db, context_id, "read"):
+        raise HTTPException(status_code=404, detail=f"Context {context_id} not found")
+
 
 def _params_from_body(body: AnalysisPreviewRequest) -> AnalysisParams:
     """Convert a request body to the orchestrator's ``AnalysisParams``.

@@ -125,6 +125,21 @@ async def _verify_context_in_workspace_mcp(
             f"Context {context_id} not found or you don't have access to it.",
             context_id=str(context_id),
         )
+
+    # #1281 item 5: subtractive agent-binding gate on the analysis surfaces
+    # (analyze_context / get_cluster / get_analysis all funnel through here).
+    # The workspace boundary above is necessary but not sufficient for an
+    # agent-bound credential — the binding must contain it to its bound
+    # contexts even when the underlying role is broad. No-op for non-agent
+    # credentials; deny is the same uniform context_not_found shape (no leak).
+    from services.agent_binding_service import agent_binding_permits
+
+    if not await agent_binding_permits(db, context_id, "read"):
+        return _error_response(
+            "context_not_found",
+            f"Context {context_id} not found or you don't have access to it.",
+            context_id=str(context_id),
+        )
     return None
 
 
