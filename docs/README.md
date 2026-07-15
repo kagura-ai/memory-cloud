@@ -12,6 +12,10 @@
 - [Architecture](architecture.md) — System design, data flow, and tech stack (incl. **LLM Knowledge Base 5-layer mapping**)
 - [API Reference](api-reference.md) — REST API endpoints, authentication, request/response examples
 - [Derived-Layer Boundary](derived-layer-boundary.md) — Design rule: raw memories are exportable, the derived/learned layer is the moat (table classification + feature-review checklist)
+- [Agent Registry & Context Bindings](design/agent-registry-and-bindings.md) — Implemented v0.49.0-preview registry, agent-bound key, and subtractive binding contract
+- [`get_agent_bootstrap` Contract](design/agent-bootstrap-contract.md) — Implemented composed session-start bundle and fail-soft component contract
+- [Agent Correlation Design](design/agent-otel-correlation.md) — Implemented W3C session/run/trace mapping and verified identity precedence (v0.49.0 preview)
+- [`memory_access_events` Design](design/memory-access-events.md) — Implemented append-only agent audit schema/writer and current emission coverage
 
 ## Guides
 
@@ -21,3 +25,5 @@
 - [Sleep Maintenance](sleep-maintenance.md) — Background 6-phase cleanup cycle, sleep_mode, observability, and rollback (the **Compile / Enhance** consolidation layer)
 - [Deployment](deployment.md) — Production deployment with Caddy reverse proxy (incl. the embedded LanceDB **"Kagura Lite"** backend, preview)
 - [Troubleshooting](troubleshooting.md) — Environment-specific setup fixes (e.g. WSL2 + Claude Code MCP OAuth callback)
+- [Agent Credential Runbook](ops/agent-credential-runbook.md) — Mint, rotate, revoke, expire, and kill-switch agent-bound workload keys
+- [`memory_access_events` Retention Plan](ops/memory-access-events-retention.md) — Capacity triggers and partitioning/retention plan for the live audit table

@@ -1,18 +1,19 @@
 # Design sign-off: `memory_access_events` schema + deny-logging review (RFC-0002 F3)
 
-- **Status**: Signed off (gating design for P0-5 implementation)
+- **Status**: Implemented by [#1278](https://github.com/kagura-ai/memory-cloud/issues/1278) / PR #1284; remaining operation emission and deny capture are tracked by [#1286](https://github.com/kagura-ai/memory-cloud/issues/1286)
 - **Issue**: [#1260](https://github.com/kagura-ai/memory-cloud/issues/1260) — gating item F3 of RFC-0002
   (Agent Memory & Context Control Plane; RFC text maintained locally and currently
   unpublished — it would land at `docs/rfc/0002-agent-memory-context-control-plane.md`;
   this document is self-contained and does not require it)
-- **Consumers**: implementers of P0-5 (`memory_access_events` migration + audit writer),
+- **Consumers**: maintainers of P0-5 (`memory_access_events` migration + audit writer),
   the CSO review record for the deny-logging layer, ops (retention escalation, F7)
 - **Depends on**: the Agent Registry & Context Bindings sign-off
   (`docs/design/agent-registry-and-bindings.md`, F1,
-  [#1258](https://github.com/kagura-ai/memory-cloud/issues/1258) — lands with the #1258 PR)
+  [#1258](https://github.com/kagura-ai/memory-cloud/issues/1258), implemented by #1274/#1275)
   for the agent/binding vocabulary; the session/run/trace correlation design
-  (F4, [#1261](https://github.com/kagura-ai/memory-cloud/issues/1261)) for the semantics of
-  the correlation columns this table stores
+  (F4, [#1261](https://github.com/kagura-ai/memory-cloud/issues/1261), implemented by
+  [#1277](https://github.com/kagura-ai/memory-cloud/issues/1277)) for the semantics of the
+  correlation columns this table stores
 
 `MemoryAccessEvent` (`memory_access_events`) is the append-only audit row for the eight
 memory operations performed under verified agent identity: **recall / reference / remember /
@@ -21,6 +22,10 @@ latency, policy decision, and keyed (HMAC) hashes — **never** raw prompts, ret
 content, secrets, or PII. This document restates every RFC-0002 decision the schema depends
 on (D20–D25, D29, D34) so it is self-contained, records the CSO review of the deny-logging
 layer, and settles the one question RFC-0002 deferred to F3 (the deny-capture layer).
+
+The v0.49.0 implementation emits bootstrap, load-pinned, feedback, recall, reference, and
+remember events. The schema already reserves all eight operations; `update`/`forget`
+emission plus denied/`would_deny` persistence remain in #1286.
 
 ## Scope and non-goals
 
@@ -66,7 +71,7 @@ append-only (extension = additive migration), following the append-only-tuple co
 | `update` | `MemoryService.update_memory` / `_update_in_place` |
 | `forget` | `MemoryService.forget` (soft-delete path) |
 | `load_pinned` | `MemoryService.load_pinned` |
-| `bootstrap` | the bootstrap composition service (P0-3; see the bootstrap contract sign-off, `docs/design/agent-bootstrap-contract.md` — F2, [#1259](https://github.com/kagura-ai/memory-cloud/issues/1259); lands with the #1259 PR) |
+| `bootstrap` | `AgentBootstrapService` (P0-3, implemented by #1276; see `docs/design/agent-bootstrap-contract.md` — F2, [#1259](https://github.com/kagura-ai/memory-cloud/issues/1259)) |
 | `feedback` | `FeedbackService.record_feedback` (`backend/src/services/feedback_service.py`) — the same service whose non-agent-callable `record_host_feedback` seam the gateway integration uses |
 
 Composition semantics: because instrumentation lives in the chokepoints,
@@ -171,10 +176,10 @@ Schema notes:
   of the P1 unbound-traffic extension).
 - For recall, up to 32 result `memory_ids` go in `event_metadata` under the 4 KB cap;
   identifiers are permitted payload, content is not.
-- **Migration reality**: RFC-0002's sketch names an older head; the repo's current alembic
-  head is `e62_1245_assign_mem_idx` (`backend/alembic/versions/e62_1245_assign_mem_idx.py`).
-  The P0-5 migration chains from whatever the head is at implementation time (revision id
-  ≤ 32 chars, linear chain, symmetric downgrade), is additive-only (blue-green safe), and
+- **Migration reality**: RFC-0002's sketch names an older head. F1/P0-2 landed as
+  `e63_1274_agents` → `e64_1275_agent_bindings` → `e65_1275_api_keys_agent`; P0-5 landed as
+  `e66_1278_memory_access_events`, followed by the `e67_1281_agent_key_workspace` invariant.
+  The P0-5 migration is additive-only (blue-green safe), has a symmetric downgrade, and
   the ORM model is imported in both `models/__init__.py` and `alembic/env.py` so it passes
   both integration gates (`backend/tests/integration/test_alembic_migrations.py` round-trip
   and `backend/tests/integration/test_create_all_vs_alembic_drift.py`).

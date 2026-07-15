@@ -1,8 +1,40 @@
 # Changelog
 
-Release notes are published on [GitHub Releases](https://github.com/kagura-ai/memory-cloud/releases).
+Release notes are published on [GitHub Releases](https://github.com/kagura-ai/memory-cloud/releases),
+which is the canonical source for the complete release history. This file highlights the current
+release train and preserves selected historical development notes.
 
 ## [Unreleased]
+
+## [v0.49.0](https://github.com/kagura-ai/memory-cloud/releases/tag/v0.49.0) — 2026-07-15
+
+### Added
+- **Agent Registry** ([#1274](https://github.com/kagura-ai/memory-cloud/issues/1274)): workspace-scoped agent identities and lifecycle APIs/MCP tools.
+- **Agent↔context bindings and agent-bound API keys** ([#1275](https://github.com/kagura-ai/memory-cloud/issues/1275)): subtractive context access policy for agent credentials.
+- **Agent bootstrap** ([#1276](https://github.com/kagura-ai/memory-cloud/issues/1276)): `get_agent_bootstrap` returns the effective context envelope for an agent.
+- **Agent correlation** ([#1277](https://github.com/kagura-ai/memory-cloud/issues/1277)): W3C `traceparent`/baggage parsing on REST and MCP, verified identity precedence, and correlated bootstrap envelopes. Correlation is observability only; server-side OTel span export remains a P1 non-goal.
+- **Agent memory audit** ([#1278](https://github.com/kagura-ai/memory-cloud/issues/1278)): append-only, trigger-enforced `memory_access_events` storage with a fail-open independent writer, HMAC-keyed query hashes, erasure handling, and emission for bootstrap, load-pinned, feedback, recall, reference, and remember operations.
+
+### Changed
+- **Agent control-plane hardening** ([#1281](https://github.com/kagura-ai/memory-cloud/issues/1281)): confined REST memory calls to the API key's workspace, added the agent-key workspace database invariant, reset REST agent scope defensively, fixed bootstrap cap/validation/error mapping, and applied subtractive agent bindings to analysis surfaces.
+- **Memory Analysis hardening** ([#1247](https://github.com/kagura-ai/memory-cloud/issues/1247)): generic MCP error envelopes, stable `(started_at, id)` keyset pagination, and accounting for failed-but-billed LLM attempts. The connection-pool item was explicitly waived pending a broader `LLMService` refactor.
+
+### Notes
+- This is an additive release with no breaking REST or MCP changes. Agent enforcement remains opt-in and defaults to `shadow`.
+- Per-memory type/source binding filters remain fail-closed and accept only `null`. Audit emission for `update`/`forget`, binding deny/`would_deny` persistence, and identity-precedence contract follow-ups continue in [#1286](https://github.com/kagura-ai/memory-cloud/issues/1286).
+
+## [v0.48.0](https://github.com/kagura-ai/memory-cloud/releases/tag/v0.48.0) — 2026-07-14
+
+### Changed
+- REST and MCP batch resource ingestion now share `ResourceIngestService`, including identical UTF-8 byte-size accounting and validation behavior ([#1255](https://github.com/kagura-ai/memory-cloud/issues/1255)).
+- Added implementation-ready Agent Memory & Context Control Plane design, operations, and evaluation documents ([#1258](https://github.com/kagura-ai/memory-cloud/issues/1258)–[#1264](https://github.com/kagura-ai/memory-cloud/issues/1264)). These documents define the v0.49.0 delivery plan; they did not by themselves ship the control plane.
+
+## [v0.47.0](https://github.com/kagura-ai/memory-cloud/releases/tag/v0.47.0) — 2026-07-14
+
+### Fixed
+- Hardened memory analysis runs with a configurable memory-count cap (`ANALYSIS_MAX_MEMORY_COUNT`, default 10,000), failure when more than half of cluster-label calls fail, all-or-nothing cancellation, strict BYOK enforcement, soft-deleted-context invisibility, and race-safe run creation/assignment handling ([milestone](https://github.com/kagura-ai/memory-cloud/milestone/78)).
+
+## Historical development notes (pre-v0.16.0)
 
 ### Added
 - **Embedded LanceDB vector backend — "Kagura Lite" (preview)**: a feature-flagged, in-process vector store for single-process self-hosted / CLI / desktop / edge deployments that want to avoid running a separate Qdrant server. Set `KAGURA_VECTOR_BACKEND=lance` (default `qdrant` is unchanged — the new path is a single `is None` branch in `db/qdrant.py`, zero behavior change for the server). New `db/vector_store.py` introduces a `VectorStore` Protocol + cached backend selector; `db/lance_store.py` implements `LanceVectorStore`. Japanese stays owned by the existing Sudachi pipeline (lemmas + readings + synonym/hiragana augmentation) feeding a weighted `search_text` FTS column, so recall behavior matches the Qdrant path without relying on LanceDB's native CJK tokenizer; hybrid 60/40 fusion stays in `services/search_service.py`. Isolation is a single-quote-escaped, UUID-validated SQL pre-filter (`build_lance_filter`). LanceDB is an **optional** dependency (`pip install '.[lite]'`) — the default install is unchanged. **Preview limitations**: `copy_context_points`, cross-collection GDPR `delete_user_points`, and the admin BM25-drift scroll raise `NotImplementedError` under this backend; the server (multi-process + nightly Sleep writer) deployment should stay on Qdrant since LanceDB writes are single-process. Unit-tested: backend selector + the security-critical filter/escaping builder (LanceDB-independent). **Post-merge hardening (max code-review follow-up):** semantic search now sets `.metric("cosine")` explicitly (LanceDB defaulted to L2 → wrong/negative similarity scores that broke confidence/absence detection); all writes serialized under the store lock (LanceDB is single-writer even in-process); embedding dimension tracked per-collection (multi-model variants no longer collide); date-range filters normalized to canonical UTC (offset-aware, validated); FTS + scalar indexes rebuilt lazily after the first write; importance-range consistency validated (4xx parity with Qdrant); reads/deletes on a not-yet-created collection return empty instead of erroring.

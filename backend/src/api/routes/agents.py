@@ -289,9 +289,13 @@ class BindingCreate(BaseModel):
     can_read: bool = True
     write_policy: Literal["deny", "direct"] = "deny"
     is_default: bool = Field(False, description="Bootstrap default binding (max one per agent)")
-    allowed_memory_types: list[str] | None = Field(None, description="NULL = all types; [] = none")
+    allowed_memory_types: list[str] | None = Field(
+        None,
+        description="Reserved for #1286; only null is accepted until per-memory enforcement ships",
+    )
     allowed_source_types: list[str] | None = Field(
-        None, description="Values from the memories.source_type set; NULL = all; [] = none"
+        None,
+        description="Reserved for #1286; only null is accepted until per-memory enforcement ships",
     )
 
 
@@ -301,8 +305,12 @@ class BindingUpdate(BaseModel):
     can_read: bool | None = None
     write_policy: Literal["deny", "direct"] | None = None
     is_default: bool | None = None
-    allowed_memory_types: list[str] | None = None
-    allowed_source_types: list[str] | None = None
+    allowed_memory_types: list[str] | None = Field(
+        None, description="Reserved for #1286; only null is currently accepted"
+    )
+    allowed_source_types: list[str] | None = Field(
+        None, description="Reserved for #1286; only null is currently accepted"
+    )
 
 
 class BindingResponse(TZAwareBaseModel):

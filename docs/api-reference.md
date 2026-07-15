@@ -6,7 +6,7 @@ Kagura Memory Cloud provides both REST APIs and MCP (Model Context Protocol) too
 
 - **REST API Base URL**: `http://localhost:8080/api/v1`
 - **MCP Server Endpoint**: `http://localhost:8080/mcp/w/{WORKSPACE_ID}` (Streamable HTTP transport)
-- **OpenAPI Specification**: [openapi.json](../api/openapi.json)
+- **OpenAPI Specification**: `http://localhost:8080/openapi.json`
 
 ## Authentication
 
@@ -240,7 +240,7 @@ curl -X POST http://localhost:8080/api/v1/memory/remember \
 2. **Context object**: `{"paper_id": "rag-2024", "section": "intro"}`
 3. **Context overlap**: Mention related sections in `context_summary`
 
-See [Chunking Guide](/docs/chunking-guide.md) for comprehensive examples and anti-patterns.
+See [Chunking Guide](chunking-guide.md) for comprehensive examples and anti-patterns.
 
 ---
 
@@ -564,6 +564,29 @@ Soft-delete a context. The context row is marked deleted (sets `deleted_at`) so 
 
 ---
 
+## Agent Control Plane APIs (v0.49.0 preview)
+
+Agents are workspace-scoped registry resources, not principals. Registry and binding mutations require workspace `Owner` or `Admin`. Agent-bound member keys keep their existing RBAC ceiling; bindings are purely subtractive.
+
+| Endpoint | Purpose |
+|---|---|
+| `POST /api/v1/agents` | Register an agent (`active`, `enforce` by default) |
+| `GET /api/v1/agents` | List registered agents |
+| `GET /api/v1/agents/{agent_id}` | Get one agent |
+| `PATCH /api/v1/agents/{agent_id}` | Update metadata, lifecycle status, or enforcement mode |
+| `DELETE /api/v1/agents/{agent_id}` | Permanently delete the agent and cascade agent-bound keys; prefer `status="retired"` operationally |
+| `POST /api/v1/agents/{agent_id}/bindings` | Add a context binding |
+| `GET /api/v1/agents/{agent_id}/bindings` | List bindings |
+| `PATCH /api/v1/agents/{agent_id}/bindings/{binding_id}` | Update read/write/default policy |
+| `DELETE /api/v1/agents/{agent_id}/bindings/{binding_id}` | Remove a binding |
+| `POST /api/v1/agents/{agent_id}/bootstrap` | Compose context guide, pinned, optional trusted recall, upcoming, and state for session start |
+
+Owner-provisioned member keys are minted through `POST /api/v1/workspaces/{workspace_id}/members/{user_id}/credentials/api-keys`; supplying `agent_id` attaches the registered agent. Agent-bound keys for `suspended` or `retired` agents fail verification. In `enforce` mode, requests to unbound contexts use the same not-found shape as inaccessible contexts.
+
+> **Preview boundary:** `allowed_memory_types` and `allowed_source_types` are forward-provisioned fields, but non-`null` values are rejected fail-closed until the per-memory enforcement work in [#1286](https://github.com/kagura-ai/memory-cloud/issues/1286) lands. REST and MCP accept W3C `traceparent` and baggage keys `gen_ai.agent.id`, `gen_ai.conversation.id` (or `session.id`), and `kagura.agent.run.id`; invalid advisory values are dropped and credential-bound agent identity always wins. Server-side span export is not part of P0. The append-only `memory_access_events` table and writer ship in v0.49.0 with bootstrap, load-pinned, feedback, recall, reference, and remember emission; `update`/`forget` and deny capture remain in #1286.
+
+---
+
 ## Agent State APIs
 
 A per-context key→value scratch lane for autonomous agent loops (current task, plan step, cursor). Stored in a dedicated `agent_states` table — **structurally excluded from `recall()`** so it never pollutes semantic search. Part of the [Agent Memory Substrate](concepts.md#agent-memory-substrate). Reads require `Viewer`; writes require `Editor`.
@@ -633,6 +656,38 @@ Record an explicit, attributable signal on whether a recalled memory was helpful
 | `note` | string | No | Free-text rationale (max 2000 chars) |
 
 **Response:** `201 Created` — `{ "feedback_id": "<uuid>", "memory_id": "<uuid>", "helpful": true }`
+
+---
+
+## Memory Analysis APIs
+
+Memory Analysis clusters a context with UMAP + KMeans and labels clusters with the workspace owner's BYOK provider. It requires workspace `Owner`, Pro plan access, the configured allowlist/quota gates, and an active BYOK key.
+
+| Endpoint | Purpose |
+|---|---|
+| `POST /api/v1/contexts/{context_id}/analyses/preview` | Estimate count/cost and validate the run without creating it |
+| `POST /api/v1/contexts/{context_id}/analyses` | Start a run (`202 Accepted`) |
+| `GET /api/v1/contexts/{context_id}/analyses` | List runs with cursor pagination |
+| `GET /api/v1/contexts/{context_id}/analyses/active` | Return the most recent succeeded run |
+| `GET /api/v1/contexts/{context_id}/analyses/{run_id}` | Get one run |
+| `GET /api/v1/contexts/{context_id}/analyses/{run_id}/clusters` | List cluster summaries |
+| `GET /api/v1/contexts/{context_id}/analyses/{run_id}/positions` | List per-memory 2D positions |
+| `DELETE /api/v1/contexts/{context_id}/analyses/{run_id}` | Cancel a running analysis |
+
+`ANALYSIS_MAX_MEMORY_COUNT` defaults to 10,000 and is enforced by preview, start, and the pre-materialization count probe. Since v0.47.0, cancellation is all-or-nothing and stops in-flight labeling, deleted-context runs are invisible across REST and MCP, the labeling path disallows platform-key fallback, and a run fails when more than `MAX_CLUSTER_FAILURE_RATIO` (0.5) of labelable clusters fail.
+
+---
+
+## Resource Ingest APIs
+
+| Endpoint | Purpose / authentication |
+|---|---|
+| `POST /api/v1/resources/{resource_id}/events` | Ingest one event with a resource token |
+| `POST /api/v1/resources/{resource_id}/events/batch` | Ingest up to 100 events with partial-success semantics and a resource token |
+| `GET /api/v1/resources` | List resources visible to the authenticated workspace principal |
+| `GET /api/v1/resources/{resource_id}/events` | Inspect a resource's event history |
+
+Since v0.48.0, the REST batch endpoint and MCP `ingest_events` delegate to the same `ResourceIngestService`. Authentication and wire envelopes remain surface-specific, while quota, authoritative Resource resolution, UTF-8 byte-size validation, per-event SAVEPOINT handling, constraint mapping, commit behavior, and post-commit indexer scheduling share one implementation.
 
 ---
 
@@ -951,7 +1006,7 @@ Sleep and Neural Memory tuning knobs (LLM provider, budgets, per-phase toggles, 
 
 ## MCP Tools
 
-Kagura Memory Cloud provides 50 MCP tools for AI assistants across 12 categories (Memory, Agent Substrate, Neural Edges, Contexts, Tags, Files / R2, Analyses, Resources, Secrets, Sleep Maintenance, Usage, API-Key Bindings). See [README › MCP Tools](../README.md#mcp-tools) for the full table with required roles. The examples below illustrate the most commonly used tools; every other tool shares the same JSON-RPC call shape.
+Kagura Memory Cloud provides 60 MCP tools for AI assistants across 13 categories (Memory, Agent Substrate, Agent Control Plane, Neural Edges, Contexts, Tags, Files / R2, Analyses, Resources, Secrets, Sleep Maintenance, Usage, API-Key Bindings). See [README › MCP Tools](../README.md#mcp-tools) for the full table with required roles. The examples below illustrate the most commonly used tools; every other tool shares the same JSON-RPC call shape.
 
 ### 1. remember
 
@@ -1126,6 +1181,16 @@ Record whether a recalled memory was helpful (read-adjacent; any `Viewer` may ca
 }
 ```
 
+### Agent Control Plane tools (preview)
+
+| Tool | Purpose |
+|---|---|
+| `register_agent` / `list_agents` / `get_agent` / `update_agent` / `delete_agent` | Workspace Agent Registry CRUD (Owner/Admin) |
+| `bind_agent_context` / `list_agent_bindings` / `update_agent_binding` / `unbind_agent_context` | Purely subtractive context policy (Owner/Admin) |
+| `get_agent_bootstrap` | Fail-soft composition of context guide + pinned + optional trusted recall + upcoming + state; identity and authorization fail closed |
+
+The control-plane tools use the same JSON-RPC shape as the examples above. Their REST companions and the current preview limitations are documented in [Agent Control Plane APIs](#agent-control-plane-apis-v0490-preview).
+
 ---
 
 ## Rate Limits
@@ -1162,7 +1227,7 @@ All errors follow this format:
 
 - **Python SDK**: [`kagura-memory-python-sdk`](https://github.com/kagura-ai/kagura-memory-python-sdk) — `KaguraClient` (sync HTTP client) and `KaguraAgent` (LLM agent integration). Supports OAuth2 device flow via `kagura auth login` against the pre-seeded `kagura-cli` public client.
 - **JavaScript SDK**: Planned
-- **Example Code**: [GitHub Repository](https://github.com/kagura-ai/memory-cloud/tree/main/examples)
+- **Example Code**: [README Quick Start](../README.md#quick-start) and the [Python SDK](https://github.com/kagura-ai/kagura-memory-python-sdk)
 
 ---
 
@@ -1170,4 +1235,4 @@ All errors follow this format:
 
 - **GitHub Issues**: [Report bugs](https://github.com/kagura-ai/memory-cloud/issues)
 - **Documentation**: [http://localhost:8080/docs](http://localhost:8080/docs)
-- **OpenAPI Spec**: [openapi.json](../api/openapi.json)
+- **OpenAPI Spec**: `http://localhost:8080/openapi.json`

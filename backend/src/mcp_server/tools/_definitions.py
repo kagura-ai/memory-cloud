@@ -2283,7 +2283,7 @@ The effective permission for an agent-bound request is the existing RBAC
 decision ∩ binding: can_read gates reads, write_policy ('deny'|'direct')
 gates writes. Under enforcement_mode='enforce', contexts WITHOUT a binding
 row are denied for the agent (default-deny); under 'shadow', violations are
-only logged. NULL type filters = unrestricted; [] = deny-all.
+only logged. Type filters are reserved for Issue #1286; omit them for now.
 
 Returns: {status, binding: {id, context_id, can_read, write_policy, is_default, ...}}.""",
             "inputSchema": {
@@ -2315,12 +2315,12 @@ Returns: {status, binding: {id, context_id, can_read, write_policy, is_default, 
                     "allowed_memory_types": {
                         "type": "array",
                         "items": {"type": "string"},
-                        "description": "Optional memory-type filter. Omit/null = all types; [] = none.",
+                        "description": "Reserved for #1286. Omit/null is the only accepted value until per-memory enforcement ships.",
                     },
                     "allowed_source_types": {
                         "type": "array",
                         "items": {"type": "string"},
-                        "description": "Optional source-type filter (memories.source_type values). Omit/null = all; [] = none.",
+                        "description": "Reserved for #1286. Omit/null is the only accepted value until per-memory enforcement ships.",
                     },
                 },
                 "required": ["agent_id", "context_id"],
@@ -2371,12 +2371,12 @@ Returns: {status, binding, changed: [field, ...]}.""",
                     "allowed_memory_types": {
                         "type": "array",
                         "items": {"type": "string"},
-                        "description": "null = all types; [] = none.",
+                        "description": "Reserved for #1286; only null is currently accepted.",
                     },
                     "allowed_source_types": {
                         "type": "array",
                         "items": {"type": "string"},
-                        "description": "null = all; [] = none.",
+                        "description": "Reserved for #1286; only null is currently accepted.",
                     },
                 },
                 "required": ["agent_id", "binding_id"],
@@ -2591,7 +2591,7 @@ Returns: {status, name, rotation_needed: true}.""",
         },
     ]
     # Pre-1.0 schema policy (#990): every tool inputSchema is strict — no
-    # undeclared top-level parameters. Applied centrally here so all 50 tools
+    # undeclared top-level parameters. Applied centrally here so all tools
     # stay uniform and any new tool inherits the policy automatically. This is
     # advisory (handlers read args defensively via ``.get`` and never
     # Pydantic-validate), so it tightens the client-facing contract without

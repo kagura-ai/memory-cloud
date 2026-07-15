@@ -1,10 +1,10 @@
 # Design sign-off: OTel GenAI attribute mapping for agent correlation (RFC-0002 F4)
 
-- **Status**: Signed off (gating design for P0-4 implementation)
+- **Status**: Implemented by [#1277](https://github.com/kagura-ai/memory-cloud/issues/1277) / PR #1283; audit persistence shipped in [#1278](https://github.com/kagura-ai/memory-cloud/issues/1278), with identity-contract follow-up in [#1286](https://github.com/kagura-ai/memory-cloud/issues/1286) and the vendor attribute gap in [#1285](https://github.com/kagura-ai/memory-cloud/issues/1285)
 - **Issue**: [#1261](https://github.com/kagura-ai/memory-cloud/issues/1261) — gating item F4 of RFC-0002
   (Agent Memory & Context Control Plane; RFC text maintained locally, lands in
   `docs/rfc/0002-agent-memory-context-control-plane.md` when published)
-- **Consumers**: implementers of P0-4 (correlation parsing + identity precedence) and P0-5
+- **Consumers**: maintainers of P0-4 (correlation parsing + identity precedence) and P0-5
   (`memory_access_events` correlation columns), operators joining Kagura audit rows against
   their own tracing backend, SDK maintainers
 - **Depends on**: Agent Registry & Context Bindings (F1, #1258) for agent identity and
@@ -110,11 +110,10 @@ just telemetry.
 
 The credential-derived identity is the only *authenticated* agent identity. Per the Agent
 Registry design (F1, #1258), an agent's credential is an ordinary workspace-scoped member API
-key that gains a nullable `agent_id` binding; verification surfaces it on the authenticated
-principal. (Current tree: `VerifiedKey` in `backend/src/auth/api_keys.py` carries no
-`agent_id` field yet — the NamedTuple was explicitly designed for additive attribution
-shapes, and F1/P0-2 adds the field alongside the `api_keys.agent_id` column. The
-owner-provisioned mint flow it extends is `backend/src/api/routes/member_credentials.py`.)
+key with a nullable `agent_id` binding. P0-2 is implemented: `VerifiedKey` in
+`backend/src/auth/api_keys.py` carries `agent_id`, and verification surfaces it through the
+per-request `AgentScope`. The owner-provisioned mint flow is
+`backend/src/api/routes/member_credentials.py`.
 
 **Precedence order**:
 
@@ -213,13 +212,13 @@ guidance), with an explicit migration obligation:
 ## Repo reality notes (descriptive)
 
 - The RFC's DDL sketches reference migration ids `e61_*` chaining from head
-  `e60_1228_read_attributions`; both are stale against the current tree. The repo's alembic
-  head is `e62_1245_assign_mem_idx`
-  (`backend/alembic/versions/e62_1245_assign_mem_idx.py`), and `e61_`/`e62_` prefixes are
-  already taken. New migrations chain from the current head at implementation time; nothing
-  in this design depends on a specific revision id.
-- There is no OTel/`traceparent`/baggage handling anywhere in `backend/src` today; P0-4
-  introduces it at the two seams named above (MCP transport auth point, REST middleware).
+  `e60_1228_read_attributions`; both are stale. F1/P0-2 landed as `e63`/`e64`/`e65`.
+  P0-4 required no migration: `api/correlation.py` plus REST correlation middleware and the
+  MCP transport auth seam populate a request-local context. P0-5 persists the correlation
+  columns on `memory_access_events` via migration `e66_1278_memory_access_events`.
+- P0-4 accepts W3C `traceparent` and baggage on both transports, validates/drops advisory
+  correlation tokens, generates missing trace/span IDs, and applies credential-first identity
+  precedence. It intentionally emits no OTel spans and materializes no session/run table.
 
 ## Sign-off checklist (maps to #1261)
 

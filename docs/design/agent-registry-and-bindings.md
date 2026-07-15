@@ -1,10 +1,10 @@
 # Design sign-off: Agent Registry & Context Bindings (RFC-0002 F1)
 
-- **Status**: Signed off (gating design for P0-1 / P0-2 implementation)
+- **Status**: Implemented by [#1274](https://github.com/kagura-ai/memory-cloud/issues/1274) / [#1275](https://github.com/kagura-ai/memory-cloud/issues/1275); type/source filter enforcement remains tracked by [#1286](https://github.com/kagura-ai/memory-cloud/issues/1286)
 - **Issue**: [#1258](https://github.com/kagura-ai/memory-cloud/issues/1258) — gating item F1 of RFC-0002
   (Agent Memory & Context Control Plane; RFC text maintained locally, lands in
   `docs/rfc/0002-agent-memory-context-control-plane.md` when published)
-- **Consumers**: implementers of P0-1 (Agent Registry) and P0-2 (bindings + agent-scoped
+- **Consumers**: maintainers and integrators of P0-1 (Agent Registry) and P0-2 (bindings + agent-scoped
   credentials), reviewers of the corresponding migrations
 
 This document freezes the DDL, the migration plan, the backward-compatibility matrix, and
@@ -154,11 +154,10 @@ CREATE INDEX CONCURRENTLY idx_api_keys_agent ON api_keys (agent_id) WHERE agent_
 
 ## Migration plan (normative)
 
-**Revision naming.** The RFC sketch cited `e61_*` chaining from `e60_1228_read_attributions`;
-the e-series has since advanced (current head: `e62_1245_assign_mem_idx`). The F1 migrations
-chain from **the current head at implementation time** using the next free `eNN_<issue>_<slug>`
-identifiers (revision ids ≤ 32 chars, linear chain, symmetric downgrades — follow
-`backend/alembic/versions/e35_889_agent_state.py` as the additive-table precedent).
+**Revision naming.** The RFC sketch cited `e61_*` chaining from `e60_1228_read_attributions`.
+The implementation landed as `e63_1274_agents`, `e64_1275_agent_bindings`, and
+`e65_1275_api_keys_agent`. Follow-ups chain from the actual current head using the next free
+`eNN_<issue>_<slug>` identifier (revision ids ≤ 32 chars, linear chain, symmetric downgrades).
 
 **Two distinct migration classes**, shipped as separate revisions:
 
@@ -186,7 +185,7 @@ Additional requirements:
 | Caller / credential | Before | After (Phase A: schema only) | After (Phase B: enforcement live) |
 |---|---|---|---|
 | REST/MCP request, key without `agent_id` (every credential existing today) | current behavior | **byte-for-byte unchanged** | **byte-for-byte unchanged** |
-| Key with `agent_id`, agent `enforce`, context **has** binding row | n/a | n/a | existing RBAC decision ∩ binding (`can_read`, `write_policy`, type/source filters) |
+| Key with `agent_id`, agent `enforce`, context **has** binding row | n/a | n/a | existing RBAC decision ∩ context-level binding (`can_read`, `write_policy`). Type/source filters are schema-reserved but non-`NULL` values are rejected until #1286 lands |
 | Key with `agent_id`, agent `enforce`, context has **no** binding row | n/a | n/a | denied — uniform `context_not_found` (default-deny applies **only to newly bound agents**) |
 | Key with `agent_id`, agent `shadow` | n/a | n/a | legacy semantics; violations recorded as `would_deny` audit rows |
 | Key with `agent_id`, agent `suspended`/`retired` | n/a | n/a | rejected at verify time (fail-closed kill switch) |

@@ -1,11 +1,11 @@
 # Ops runbook: agent workload credentials — mint / rotate / revoke (RFC-0002 F5)
 
-- **Status**: Signed off (gating ops runbook for P0-2 general availability)
+- **Status**: Operational for P0-2/P0-3 (implemented by #1275/#1276); P1 DLP remains deferred
 - **Issue**: [#1262](https://github.com/kagura-ai/memory-cloud/issues/1262) — gating item F5 of RFC-0002
   (Agent Memory & Context Control Plane; RFC text maintained locally, lands in
   `docs/rfc/0002-agent-memory-context-control-plane.md` when published)
 - **Consumers**: operators of production/self-hosted deployments; workspace owners
-  provisioning credentials for agent workloads; implementers of P0-2 (agent-bound keys)
+  provisioning credentials for agent workloads; maintainers of P0-2 (agent-bound keys)
 - **Depends on**: the owner-provisioned member-key flow (#1165, **shipped** —
   `backend/src/api/routes/member_credentials.py`); the Agent Registry & Context Bindings
   design (F1, #1258, `docs/design/agent-registry-and-bindings.md`) for the [P0-2] deltas only
@@ -16,8 +16,8 @@ numbered procedures is shipped, verified behavior. Blocks marked **[P0-2]** desc
 agent-bound keys (`api_keys.agent_id`) — **shipped with #1275**: mint accepts `agent_id`
 (owner-provisioned path only), verify rejects keys whose agent is `suspended`/`retired`, and
 the fleet kill switch in section 6 is live. Blocks marked **[P0-3]** describe the bootstrap
-contract (F2, #1259); blocks marked **[P1]** describe the deferred DLP item — those two are
-not implemented yet.
+contract (F2, #1259), shipped with #1276. Blocks marked **[P1]** describe the deferred DLP
+item, which is not implemented yet.
 
 ## Scope and non-goals
 
@@ -43,7 +43,8 @@ not implemented yet.
 
 ## Workload identity model (current reality, restated from RFC-0002)
 
-A workload identity today is the composition of two existing rows — no new tables:
+A workload identity is built on the existing member/key principal model, with an optional
+Agent Registry attachment:
 
 1. A `workspace_members` row with role `member` or `viewer`, optionally narrowed by
    `allowed_context_ids` (enforced for member/viewer reads in
@@ -53,6 +54,9 @@ A workload identity today is the composition of two existing rows — no new tab
    form `kagura_<random>` (`API_KEY_PREFIX`, `backend/src/auth/api_keys.py`); only the SHA-256
    hash is stored for verification, and the non-secret 16-character `key_prefix` is the
    identifier used in audit rows and logs.
+3. For an agent workload, an `agents` registry row plus optional `agent_context_bindings`.
+   The member key carries `api_keys.agent_id`; the binding can only subtract from the member's
+   existing RBAC/context access.
 
 The three guarantees this runbook leans on, all implemented in
 `backend/src/api/routes/member_credentials.py`:
@@ -69,14 +73,13 @@ The three guarantees this runbook leans on, all implemented in
   (`plaintext_encrypted`) nulled. The plaintext exists **only** in the single 201 response.
   There is no re-reveal path; a fumbled response means revoke + re-mint.
 
-> **[P0-2]** RFC-0002 adds exactly one column and one verify-time consequence:
+> **[P0-2]** RFC-0002 added exactly one key column and its verify-time consequence:
 > `api_keys.agent_id` (nullable FK → `agents.id`, `ON DELETE CASCADE`, mutually exclusive
 > with `bound_context_id` via CHECK), and verification that rejects keys whose agent is
 > `suspended`/`retired`. The mint service additionally validates
 > `agents.workspace_id == api_keys.workspace_id`. The credential *lifecycle* in this runbook
-> is unchanged by RFC-0002. Migration note: the RFC's sketch revision ids are stale — the
-> repo's alembic head is `e62_1245_assign_mem_idx`; new migrations chain from the current
-> head at implementation time.
+> is unchanged by RFC-0002. The implementation migrations are `e63_1274_agents`,
+> `e64_1275_agent_bindings`, and `e65_1275_api_keys_agent`.
 
 ## Conventions used in examples
 
@@ -397,7 +400,7 @@ uploaded as memory sources.
 
 **Why this is a hard rule and not hygiene advice:** memories are a *retrieval surface*.
 Anything stored as memory content is embedded, indexed, and replayed into model context by
-`recall` and (P0-3) the bootstrap bundle — across sessions, and to every principal with read
+`recall` and the P0-3 bootstrap bundle — across sessions, and to every principal with read
 access to the context. A secret written as a memory is a secret published to the context's
 entire read set, with derived copies (vector points, caches) that outlive a single delete.
 
@@ -405,8 +408,9 @@ entire read set, with derived copies (vector points, caches) that outlive a sing
 
 - **P0 (now): write-path guidance.** The `remember`/`update_memory` tool descriptions state
   the rule. Compliance is on the writer.
-- **[P0-3]: bootstrap restatement.** The bootstrap `instructions` block will restate the
-  rule to every agent at session start (F2 design, #1259 — not yet implemented).
+- **[P0-3]: bootstrap restatement.** The implemented bootstrap `instructions` block includes
+  `KAGURA_MEMORY_INSTRUCTIONS`, which restates the no-secrets rule at every session start
+  (F2 design #1259; implementation #1276).
 - **[P1]: server-side DLP.** Secret-pattern screening at the write path (`kagura_` key
   prefixes, PEM headers, JWT shapes) is the designated P1 item. Until it lands, nothing
   server-side stops a determined or confused writer — which is why the response procedure
