@@ -922,6 +922,8 @@ class PermissionService:
         access: str = "read",
         operation: str | None = None,
         memory_id: UUID | None = None,
+        memory_type: str | None = None,
+        memory_source_type: str | None = None,
     ) -> bool:
         """Check if user can access a memory based on workspace membership and context privacy.
 
@@ -956,6 +958,11 @@ class PermissionService:
                 ``None`` (no emission) for callers outside that vocabulary.
             memory_id: The requested memory id — rides ``event_metadata`` as
                 an unverified claim on deny rows.
+            memory_type: The fetched row's own ``type`` (#1299) — read-lane
+                callers thread it so the binding's per-memory type filter
+                applies; write-lane callers leave it ``None``.
+            memory_source_type: The fetched row's own ``source_type`` (#1299),
+                same threading rule.
 
         Returns:
             True if user can access, False otherwise
@@ -974,6 +981,8 @@ class PermissionService:
                 operation=operation,
                 user_id=str(user_id),
                 requested_memory_id=memory_id,
+                memory_type=memory_type,
+                memory_source_type=memory_source_type,
             )
 
         async def _emit_rbac_denied() -> None:

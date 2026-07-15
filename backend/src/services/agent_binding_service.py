@@ -224,6 +224,86 @@ async def emit_row_filter_would_deny(
     )
 
 
+async def filter_memory_rows_by_binding(
+    db: AsyncSession,
+    rows: list[Any],
+    *,
+    operation: str | None,
+    user_id: str | None,
+) -> tuple[list[Any], int]:
+    """Apply the per-memory type/source binding filter to fetched rows (#1299).
+
+    The shared row-materialization lever for every read lane that returns a
+    SET of memory rows (recall candidates, load_pinned, explore neighbors,
+    declared-link refs, the upcoming time lane) — placing it at the service
+    layer is what gives REST and MCP the same behavior by construction
+    (#1291/#1292). Rows only need ``id`` / ``context_id`` / ``type`` /
+    ``source_type`` attributes. One bulk binding SELECT per call, never
+    per-row.
+
+    Returns ``(kept_rows, denied_count)``:
+
+    - **Non-agent credential**: structural no-op (one contextvar read, no
+      query).
+    - **Enforce**: denied rows are dropped — subtractive; the request still
+      succeeds, so no deny row is written here (the caller threads
+      ``denied_count`` onto its success emission).
+    - **Shadow**: rows are returned UNCHANGED (the enforcement ramp must
+      change nothing observable) and ``denied_count`` is 0; when
+      ``operation`` is threaded (MAE vocabulary) each affected context lands
+      ONE ``would_deny`` aggregate row. Outside the vocabulary (explore,
+      time lane) it stays log-only.
+    """
+    from auth.agent_scope import get_agent_scope
+
+    scope = get_agent_scope()
+    if scope is None or not rows:
+        return list(rows), 0
+    filters = await binding_row_filters_for_contexts(db, scope, [row.context_id for row in rows])
+    if not filters:
+        return list(rows), 0
+
+    kept: list[Any] = []
+    denied_by_context: dict[uuid.UUID, list[uuid.UUID]] = {}
+    for row in rows:
+        row_filter = filters.get(row.context_id)
+        if row_filter is None or row_filter.permits(row.type, row.source_type):
+            kept.append(row)
+        else:
+            denied_by_context.setdefault(row.context_id, []).append(row.id)
+    if not denied_by_context:
+        return kept, 0
+
+    denied_total = sum(len(ids) for ids in denied_by_context.values())
+    if scope.enforcement_mode == AGENT_ENFORCEMENT_SHADOW:
+        logger.warning(
+            "agent_binding_row_filter_would_deny",
+            agent_id=str(scope.agent_id),
+            operation=operation,
+            denied_count=denied_total,
+            context_count=len(denied_by_context),
+        )
+        if operation is not None and user_id is not None:
+            for ctx_id, memory_ids in denied_by_context.items():
+                await emit_row_filter_would_deny(
+                    scope,
+                    operation=operation,
+                    user_id=user_id,
+                    context_id=ctx_id,
+                    denied_memory_ids=memory_ids,
+                )
+        return list(rows), 0
+
+    logger.warning(
+        "agent_binding_row_filter_denied",
+        agent_id=str(scope.agent_id),
+        operation=operation,
+        denied_count=denied_total,
+        context_count=len(denied_by_context),
+    )
+    return kept, denied_total
+
+
 def _validate_write_policy(value: Any) -> str:
     if value not in _ALL_BINDING_WRITE_POLICIES:
         raise ValidationError(

@@ -657,6 +657,141 @@ class TestEvaluateContextAccessRowFilter:
         emit.assert_not_awaited()
 
 
+class TestFilterMemoryRowsByBinding:
+    """#1299: the shared row-materialization lever for read lanes that return
+    memory-row sets (recall candidates, load_pinned, explore neighbors,
+    declared-link refs, the upcoming time lane)."""
+
+    @staticmethod
+    def _row(ctx, mtype="note", source="manual"):
+        from types import SimpleNamespace
+
+        return SimpleNamespace(id=uuid.uuid4(), context_id=ctx, type=mtype, source_type=source)
+
+    def _db_with_bindings(self, bindings):
+        db = MagicMock()
+        scalars = MagicMock(all=MagicMock(return_value=bindings))
+        db.execute = AsyncMock(return_value=MagicMock(scalars=MagicMock(return_value=scalars)))
+        return db
+
+    @pytest.mark.asyncio
+    async def test_non_agent_credential_is_structural_noop(self):
+        from auth.agent_scope import set_agent_scope
+        from services.agent_binding_service import filter_memory_rows_by_binding
+
+        set_agent_scope(None)
+        db = MagicMock()
+        db.execute = AsyncMock()
+        rows = [self._row(uuid.uuid4())]
+        kept, denied = await filter_memory_rows_by_binding(
+            db, rows, operation="recall", user_id="u"
+        )
+        assert kept == rows
+        assert denied == 0
+        db.execute.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_enforce_drops_denied_rows_per_context(self):
+        from auth.agent_scope import set_agent_scope
+        from services.agent_binding_service import filter_memory_rows_by_binding
+
+        ctx_a, ctx_b = uuid.uuid4(), uuid.uuid4()
+        set_agent_scope(_scope(mode="enforce", workspace_id=uuid.uuid4()))
+        try:
+            db = self._db_with_bindings([_binding(context_id=ctx_a, allowed_memory_types=["note"])])
+            note_a = self._row(ctx_a, "note")
+            time_a = self._row(ctx_a, "time")
+            time_b = self._row(ctx_b, "time")  # ctx_b unrestricted
+            with patch(
+                "services.memory_access_event_writer.emit_memory_access_event", AsyncMock()
+            ) as emit:
+                kept, denied = await filter_memory_rows_by_binding(
+                    db, [note_a, time_a, time_b], operation="recall", user_id="u"
+                )
+            assert kept == [note_a, time_b]
+            assert denied == 1
+            # Enforce-mode row filtering is not a request deny — no deny row;
+            # the count rides the operation's success emission at the caller.
+            emit.assert_not_awaited()
+        finally:
+            set_agent_scope(None)
+
+    @pytest.mark.asyncio
+    async def test_shadow_keeps_rows_and_emits_per_context_aggregate(self):
+        from auth.agent_scope import set_agent_scope
+        from services.agent_binding_service import filter_memory_rows_by_binding
+
+        ctx_a, ctx_b = uuid.uuid4(), uuid.uuid4()
+        set_agent_scope(_scope(mode="shadow", workspace_id=uuid.uuid4()))
+        try:
+            db = self._db_with_bindings(
+                [
+                    _binding(context_id=ctx_a, allowed_memory_types=["note"]),
+                    _binding(context_id=ctx_b, allowed_source_types=["manual"]),
+                ]
+            )
+            rows = [
+                self._row(ctx_a, "time"),
+                self._row(ctx_a, "decision"),
+                self._row(ctx_b, "note", source="connector"),
+            ]
+            with patch(
+                "services.agent_binding_service.emit_row_filter_would_deny", AsyncMock()
+            ) as emit:
+                kept, denied = await filter_memory_rows_by_binding(
+                    db, rows, operation="recall", user_id="u"
+                )
+            assert kept == rows  # shadow changes nothing observable
+            assert denied == 0
+            assert emit.await_count == 2  # one aggregate per affected context
+            by_ctx = {c.kwargs["context_id"]: c.kwargs for c in emit.await_args_list}
+            assert len(by_ctx[ctx_a]["denied_memory_ids"]) == 2
+            assert len(by_ctx[ctx_b]["denied_memory_ids"]) == 1
+        finally:
+            set_agent_scope(None)
+
+    @pytest.mark.asyncio
+    async def test_shadow_outside_mae_vocabulary_stays_log_only(self):
+        # explore / time lane: operation=None → no emission, rows kept.
+        from auth.agent_scope import set_agent_scope
+        from services.agent_binding_service import filter_memory_rows_by_binding
+
+        ctx = uuid.uuid4()
+        set_agent_scope(_scope(mode="shadow", workspace_id=uuid.uuid4()))
+        try:
+            db = self._db_with_bindings([_binding(context_id=ctx, allowed_memory_types=[])])
+            rows = [self._row(ctx)]
+            with patch(
+                "services.agent_binding_service.emit_row_filter_would_deny", AsyncMock()
+            ) as emit:
+                kept, denied = await filter_memory_rows_by_binding(
+                    db, rows, operation=None, user_id=None
+                )
+            assert kept == rows
+            assert denied == 0
+            emit.assert_not_awaited()
+        finally:
+            set_agent_scope(None)
+
+    @pytest.mark.asyncio
+    async def test_unrestricted_bindings_no_filtering(self):
+        from auth.agent_scope import set_agent_scope
+        from services.agent_binding_service import filter_memory_rows_by_binding
+
+        ctx = uuid.uuid4()
+        set_agent_scope(_scope(mode="enforce", workspace_id=uuid.uuid4()))
+        try:
+            db = self._db_with_bindings([_binding(context_id=ctx)])  # arrays NULL
+            rows = [self._row(ctx, "anything", source="connector")]
+            kept, denied = await filter_memory_rows_by_binding(
+                db, rows, operation="recall", user_id="u"
+            )
+            assert kept == rows
+            assert denied == 0
+        finally:
+            set_agent_scope(None)
+
+
 class TestEmitRowFilterWouldDeny:
     """#1299: the shadow-mode aggregate for row-level filtering — ONE row per
     (operation, context) with counts + a capped id list, never one per row."""

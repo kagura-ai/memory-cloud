@@ -82,6 +82,16 @@ async def query_upcoming_time_memories(
     query = query.order_by(Memory.trigger_from.asc()).limit(k)
 
     rows = (await db.execute(query)).scalars().all()
+
+    # #1299: per-memory type/source binding filter — the upcoming lane
+    # returns memory rows to agent credentials (standalone recall_upcoming +
+    # the bootstrap upcoming component), so the same subtractive rule as
+    # recall applies. Log-only in shadow ("recall_upcoming" is outside the
+    # MAE operation vocabulary). May underfill k — enforcement is
+    # subtractive, never backfilled.
+    from services.agent_binding_service import filter_memory_rows_by_binding
+
+    kept_rows, _ = await filter_memory_rows_by_binding(db, list(rows), operation=None, user_id=None)
     return [
         {
             "memory_id": str(m.id),
@@ -89,5 +99,5 @@ async def query_upcoming_time_memories(
             "type": m.type,
             "details": m.details,
         }
-        for m in rows
+        for m in kept_rows
     ]
