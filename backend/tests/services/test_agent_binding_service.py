@@ -22,8 +22,12 @@ from services.agent_binding_service import (
     DECISION_ALLOWED,
     DECISION_BINDING_DENIED,
     DECISION_WOULD_DENY,
+    ROW_FILTER_KIND,
     AgentBindingService,
+    BindingRowFilter,
     _validate_type_array,
+    binding_row_filters_for_contexts,
+    emit_row_filter_would_deny,
 )
 from utils.exceptions import ConflictError, NotFoundException, ValidationError
 
@@ -86,18 +90,135 @@ def _service(execute_results: list | None = None) -> AgentBindingService:
 
 
 class TestTypeArrayValidation:
-    """#1275 code-review: the type/source filter columns are provisioned but
-    per-type enforcement is deferred to a follow-up. To avoid a fail-open
-    (a silently-ignored restriction), CRUD accepts only NULL for now."""
+    """#1299: the #1275 reserved-rejection is lifted — CRUD now accepts real
+    filter arrays. NULL = unrestricted, [] = deny-all. Memory types are an
+    open vocabulary (structural validation only, String(50)); source types
+    validate against the full ``_ALL_SOURCE_TYPES`` set (including the
+    server-stamped ``connector``)."""
 
     def test_null_means_unrestricted(self):
         assert _validate_type_array(None, "allowed_memory_types") is None
+        assert _validate_type_array(None, "allowed_source_types") is None
 
-    @pytest.mark.parametrize("reserved", [[], ["learning"], ["file"], ["a", "b"], "str", 42])
     @pytest.mark.parametrize("field", ["allowed_memory_types", "allowed_source_types"])
-    def test_non_null_rejected_as_reserved(self, reserved, field):
-        with pytest.raises(ValidationError, match="reserved"):
-            _validate_type_array(reserved, field)
+    def test_empty_list_means_deny_all(self, field):
+        assert _validate_type_array([], field) == []
+
+    def test_memory_types_accept_open_vocabulary(self):
+        assert _validate_type_array(["note", "time", "bug-fix"], "allowed_memory_types") == [
+            "note",
+            "time",
+            "bug-fix",
+        ]
+
+    def test_source_types_accept_full_vocabulary_including_connector(self):
+        # 'connector' is server-stamped (clients cannot send it on remember),
+        # but stored rows carry it — the filter vocabulary is all six values.
+        assert _validate_type_array(
+            ["file", "url", "vault", "api", "manual", "connector"], "allowed_source_types"
+        ) == ["file", "url", "vault", "api", "manual", "connector"]
+
+    def test_source_types_reject_unknown_value(self):
+        with pytest.raises(ValidationError, match="allowed_source_types"):
+            _validate_type_array(["bogus"], "allowed_source_types")
+
+    @pytest.mark.parametrize("bad", ["str", 42, {"a": 1}])
+    @pytest.mark.parametrize("field", ["allowed_memory_types", "allowed_source_types"])
+    def test_non_list_rejected(self, bad, field):
+        with pytest.raises(ValidationError):
+            _validate_type_array(bad, field)
+
+    @pytest.mark.parametrize("bad_element", [42, None, "", "   "])
+    def test_non_string_or_blank_element_rejected(self, bad_element):
+        with pytest.raises(ValidationError):
+            _validate_type_array([bad_element], "allowed_memory_types")
+
+    def test_memory_type_element_over_column_width_rejected(self):
+        # ARRAY(String(50)) — reject at validation instead of a DB-layer 500.
+        with pytest.raises(ValidationError):
+            _validate_type_array(["x" * 51], "allowed_memory_types")
+
+    def test_duplicate_elements_rejected(self):
+        with pytest.raises(ValidationError, match="duplicate"):
+            _validate_type_array(["note", "note"], "allowed_memory_types")
+
+
+class TestBindingRowFilter:
+    """#1299: the per-memory row filter derived from a binding's type/source
+    arrays. NULL = unrestricted, [] = deny-all; membership otherwise. The
+    empty-set case MUST NOT be truthiness-collapsed into 'unrestricted'."""
+
+    def test_no_arrays_means_no_filter(self):
+        f = BindingRowFilter.from_binding(_binding())
+        assert f is None
+
+    def test_null_arrays_unrestricted_when_other_set(self):
+        f = BindingRowFilter.from_binding(_binding(allowed_memory_types=["note"]))
+        assert f is not None
+        assert f.permits("note", "manual") is True
+        assert f.permits("note", "connector") is True  # source unrestricted
+
+    def test_type_membership(self):
+        f = BindingRowFilter.from_binding(_binding(allowed_memory_types=["note", "time"]))
+        assert f.permits("time", "manual") is True
+        assert f.permits("decision", "manual") is False
+
+    def test_source_membership(self):
+        f = BindingRowFilter.from_binding(_binding(allowed_source_types=["manual", "api"]))
+        assert f.permits("note", "api") is True
+        assert f.permits("note", "connector") is False
+
+    def test_empty_array_denies_all_not_falsy(self):
+        # [] = deny-all is normative — a truthiness check would fail open.
+        f = BindingRowFilter.from_binding(_binding(allowed_memory_types=[]))
+        assert f is not None
+        assert f.permits("note", "manual") is False
+        assert f.permits("anything", "manual") is False
+
+    def test_both_arrays_must_pass(self):
+        f = BindingRowFilter.from_binding(
+            _binding(allowed_memory_types=["note"], allowed_source_types=["manual"])
+        )
+        assert f.permits("note", "manual") is True
+        assert f.permits("note", "api") is False
+        assert f.permits("time", "manual") is False
+
+    def test_missing_row_value_fails_closed_against_restricted_array(self):
+        f = BindingRowFilter.from_binding(_binding(allowed_memory_types=["note"]))
+        assert f.permits(None, "manual") is False
+
+
+class TestBindingRowFiltersForContexts:
+    """#1299: bulk fetch of row filters for the recall/explore candidate
+    contexts — one SELECT, entries only for bindings that actually restrict."""
+
+    @pytest.mark.asyncio
+    async def test_returns_filters_only_for_restricting_bindings(self):
+        ctx_restricted = uuid.uuid4()
+        ctx_unrestricted = uuid.uuid4()
+        rows = [
+            _binding(context_id=ctx_restricted, allowed_memory_types=["note"]),
+            _binding(context_id=ctx_unrestricted),  # both arrays NULL — omitted
+        ]
+        db = MagicMock()
+        scalars = MagicMock()
+        scalars.all = MagicMock(return_value=rows)
+        db.execute = AsyncMock(return_value=MagicMock(scalars=MagicMock(return_value=scalars)))
+        scope = _scope()
+
+        filters = await binding_row_filters_for_contexts(
+            db, scope, [ctx_restricted, ctx_unrestricted]
+        )
+        assert set(filters) == {ctx_restricted}
+        assert filters[ctx_restricted].permits("note", "manual") is True
+        assert filters[ctx_restricted].permits("time", "manual") is False
+
+    @pytest.mark.asyncio
+    async def test_empty_context_list_short_circuits(self):
+        db = MagicMock()
+        db.execute = AsyncMock()
+        assert await binding_row_filters_for_contexts(db, _scope(), []) == {}
+        db.execute.assert_not_awaited()
 
 
 # ---------------------------------------------------------------------------
@@ -426,3 +547,176 @@ class TestDenyCaptureEmission:
             assert kw["requested_memory_id"] == mid
         finally:
             set_agent_scope(None)
+
+
+# ---------------------------------------------------------------------------
+# Per-memory type/source row filter on evaluate_context_access (#1299)
+# ---------------------------------------------------------------------------
+
+
+class TestEvaluateContextAccessRowFilter:
+    """#1299: when the caller threads the memory row's own type/source_type,
+    the evaluation applies the binding's per-memory filter AFTER the
+    context-level decision. Enforce fail → binding_denied (same uniform deny
+    the caller already maps); shadow fail → would_deny, request proceeds.
+    Row-filter emissions carry filter_kind='type_source' so audit analysis
+    (and the writer dedup key) can tell them from context-level decisions."""
+
+    async def _evaluate(self, binding, scope, **kw):
+        service = _service(execute_results=[binding])
+        ctx = uuid.uuid4()
+        with patch(
+            "services.memory_access_event_writer.emit_memory_access_event", AsyncMock()
+        ) as emit:
+            result = await service.evaluate_context_access(scope, ctx, ACCESS_READ, **kw)
+        return result, emit
+
+    @pytest.mark.asyncio
+    async def test_enforce_type_mismatch_denies(self):
+        (allowed, decision), emit = await self._evaluate(
+            _binding(can_read=True, allowed_memory_types=["note"]),
+            _scope(mode="enforce", workspace_id=uuid.uuid4()),
+            operation="reference",
+            user_id="caller",
+            memory_type="time",
+            memory_source_type="manual",
+        )
+        assert (allowed, decision) == (False, DECISION_BINDING_DENIED)
+        kw = emit.await_args.kwargs
+        assert kw["outcome"] == "denied"
+        assert kw["policy_decision"] == DECISION_BINDING_DENIED
+        assert kw["extra_metadata"]["filter_kind"] == ROW_FILTER_KIND
+
+    @pytest.mark.asyncio
+    async def test_enforce_match_allows_without_emission(self):
+        (allowed, decision), emit = await self._evaluate(
+            _binding(can_read=True, allowed_memory_types=["note"], allowed_source_types=["manual"]),
+            _scope(mode="enforce", workspace_id=uuid.uuid4()),
+            operation="reference",
+            user_id="caller",
+            memory_type="note",
+            memory_source_type="manual",
+        )
+        assert (allowed, decision) == (True, DECISION_ALLOWED)
+        emit.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_shadow_type_mismatch_would_deny_and_proceeds(self):
+        (allowed, decision), emit = await self._evaluate(
+            _binding(can_read=True, allowed_source_types=["manual"]),
+            _scope(mode="shadow", workspace_id=uuid.uuid4()),
+            operation="reference",
+            user_id="caller",
+            memory_type="note",
+            memory_source_type="connector",
+        )
+        assert (allowed, decision) == (True, DECISION_WOULD_DENY)
+        kw = emit.await_args.kwargs
+        assert kw["outcome"] == "success"
+        assert kw["policy_decision"] == DECISION_WOULD_DENY
+        assert kw["extra_metadata"]["filter_kind"] == ROW_FILTER_KIND
+
+    @pytest.mark.asyncio
+    async def test_context_level_deny_wins_without_filter_kind(self):
+        # can_read=False denies at context level BEFORE the row filter — the
+        # emission must NOT claim a row-filter cause.
+        (allowed, decision), emit = await self._evaluate(
+            _binding(can_read=False, allowed_memory_types=["note"]),
+            _scope(mode="enforce", workspace_id=uuid.uuid4()),
+            operation="reference",
+            user_id="caller",
+            memory_type="note",
+            memory_source_type="manual",
+        )
+        assert (allowed, decision) == (False, DECISION_BINDING_DENIED)
+        assert "filter_kind" not in emit.await_args.kwargs["extra_metadata"]
+
+    @pytest.mark.asyncio
+    async def test_empty_array_denies_every_row(self):
+        (allowed, decision), _ = await self._evaluate(
+            _binding(can_read=True, allowed_memory_types=[]),
+            _scope(mode="enforce", workspace_id=uuid.uuid4()),
+            operation="reference",
+            user_id="caller",
+            memory_type="note",
+            memory_source_type="manual",
+        )
+        assert (allowed, decision) == (False, DECISION_BINDING_DENIED)
+
+    @pytest.mark.asyncio
+    async def test_no_row_params_keeps_context_only_semantics(self):
+        # Callers that do not thread the row (context resolution, write
+        # lane) get the pre-#1299 context-level evaluation, byte-for-byte.
+        (allowed, decision), emit = await self._evaluate(
+            _binding(can_read=True, allowed_memory_types=[]),
+            _scope(mode="enforce", workspace_id=uuid.uuid4()),
+            operation="recall",
+            user_id="caller",
+        )
+        assert (allowed, decision) == (True, DECISION_ALLOWED)
+        emit.assert_not_awaited()
+
+
+class TestEmitRowFilterWouldDeny:
+    """#1299: the shadow-mode aggregate for row-level filtering — ONE row per
+    (operation, context) with counts + a capped id list, never one per row."""
+
+    @pytest.mark.asyncio
+    async def test_aggregate_row_shape(self):
+        ws = uuid.uuid4()
+        ctx = uuid.uuid4()
+        ids = [uuid.uuid4() for _ in range(3)]
+        with patch(
+            "services.memory_access_event_writer.emit_memory_access_event", AsyncMock()
+        ) as emit:
+            await emit_row_filter_would_deny(
+                _scope(mode="shadow", workspace_id=ws),
+                operation="recall",
+                user_id="caller",
+                context_id=ctx,
+                denied_memory_ids=ids,
+            )
+        kw = emit.await_args.kwargs
+        assert kw["operation"] == "recall"
+        assert kw["outcome"] == "success"
+        assert kw["policy_decision"] == DECISION_WOULD_DENY
+        assert kw["workspace_id"] == ws
+        meta = kw["extra_metadata"]
+        assert meta["requested_context_id"] == str(ctx)
+        assert meta["access"] == ACCESS_READ
+        assert meta["filter_kind"] == ROW_FILTER_KIND
+        assert meta["would_deny_count"] == 3
+        assert meta["memory_ids"] == [str(i) for i in ids]
+
+    @pytest.mark.asyncio
+    async def test_id_list_capped_for_metadata_size(self):
+        from services.memory_access_event_writer import MAX_METADATA_MEMORY_IDS
+
+        ids = [uuid.uuid4() for _ in range(MAX_METADATA_MEMORY_IDS + 8)]
+        with patch(
+            "services.memory_access_event_writer.emit_memory_access_event", AsyncMock()
+        ) as emit:
+            await emit_row_filter_would_deny(
+                _scope(mode="shadow", workspace_id=uuid.uuid4()),
+                operation="recall",
+                user_id="caller",
+                context_id=uuid.uuid4(),
+                denied_memory_ids=ids,
+            )
+        meta = emit.await_args.kwargs["extra_metadata"]
+        assert meta["would_deny_count"] == MAX_METADATA_MEMORY_IDS + 8
+        assert len(meta["memory_ids"]) == MAX_METADATA_MEMORY_IDS
+
+    @pytest.mark.asyncio
+    async def test_empty_denied_list_no_emission(self):
+        with patch(
+            "services.memory_access_event_writer.emit_memory_access_event", AsyncMock()
+        ) as emit:
+            await emit_row_filter_would_deny(
+                _scope(mode="shadow", workspace_id=uuid.uuid4()),
+                operation="recall",
+                user_id="caller",
+                context_id=uuid.uuid4(),
+                denied_memory_ids=[],
+            )
+        emit.assert_not_awaited()
