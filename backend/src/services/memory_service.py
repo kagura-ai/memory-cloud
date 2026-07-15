@@ -2807,6 +2807,7 @@ class MemoryService:
         current_workspace_id: UUID | None = None,
         cap: int | str | None = None,
         key_workspace_id: UUID | None = None,  # Issue #963/#1281: pure key scope
+        trusted_only: bool = False,
     ) -> LoadPinnedResponse:
         """Deterministically load a context's always-delivery memories (#886).
 
@@ -2823,6 +2824,10 @@ class MemoryService:
             current_context_id: Bound context (the always-load set is per-context).
             current_workspace_id: Bound workspace (isolation scope).
             cap: Optional override for the hard cap (defaults to settings).
+            trusted_only: #1293 — when set (the agent-bootstrap pinned lane),
+                apply the recall trusted-tier gate so external/connector-origin
+                rows never establish behaviour at session start. Left False for
+                the user-initiated standalone ``load_pinned`` surface.
 
         Returns:
             LoadPinnedResponse with the bounded ordered set + truncation flags.
@@ -2838,7 +2843,7 @@ class MemoryService:
         effective_cap = self._clamp_pinned_cap(cap, get_settings().pinned_load_cap)
 
         rows, total = await self.memory_repo.list_pinned(
-            UUID(workspace_id_str), UUID(context_id_str), effective_cap
+            UUID(workspace_id_str), UUID(context_id_str), effective_cap, trusted_only=trusted_only
         )
         truncated = total > effective_cap
         if truncated:

@@ -428,6 +428,9 @@ class AgentBootstrapService:
             # no-op). None → load_pinned applies its default clamp; a set value
             # is clamped to [1, _PINNED_LOAD_CAP_MAX] by _clamp_pinned_cap.
             cap=pinned_cap,
+            # #1293: pinned is behaviour-establishing — trusted-tier only, parity
+            # with the recall lane's filters={"trust_tier": "trusted"}.
+            trusted_only=True,
         )
         return {
             "memories": [
@@ -516,7 +519,14 @@ class AgentBootstrapService:
         q_from = parse_query_bound("now")
         q_until = parse_query_bound(params.upcoming_until) if params.upcoming_until else None
         results = await query_upcoming_time_memories(
-            self.db, context.id, q_from=q_from, q_until=q_until, k=20
+            # #1293: the time-memory lane is behaviour-establishing too — apply
+            # the same trusted-tier gate as pinned/recall.
+            self.db,
+            context.id,
+            q_from=q_from,
+            q_until=q_until,
+            k=20,
+            trusted_only=True,
         )
         return {"results": results, "from": q_from, "until": q_until}
 

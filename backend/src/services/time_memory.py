@@ -41,6 +41,7 @@ async def query_upcoming_time_memories(
     q_from: str | None,
     q_until: str | None,
     k: int,
+    trusted_only: bool = False,
 ) -> list[dict[str, Any]]:
     """Return the context's Time Memories whose window overlaps ``[q_from, q_until]``.
 
@@ -50,8 +51,15 @@ async def query_upcoming_time_memories(
     lexical comparison equals a chronological one. Soonest-first, capped at
     ``k``. Result rows are byte-compatible with the ``recall_upcoming`` handler
     (``memory_id`` / ``summary`` / ``type`` / ``details``).
+
+    When ``trusted_only`` is set (the bootstrap upcoming lane, #1293), apply the
+    same trusted-tier gate the recall lane uses so an external/connector-origin
+    time memory cannot establish behaviour at session start (OWASP LLM01/LLM03).
+    The standalone ``recall_upcoming`` tool leaves it ``False`` — a user-initiated
+    read is not the injection surface bootstrap is.
     """
-    from models.memory import Memory
+    from models.auth import CONTEXT_TRUST_TIER_TRUSTED, Context
+    from models.memory import SOURCE_TYPE_CONNECTOR, Memory
 
     query = (
         select(Memory)
@@ -59,6 +67,12 @@ async def query_upcoming_time_memories(
         .where(Memory.type == "time")
         .where(Memory.context_id == context_id)
     )
+    if trusted_only:
+        query = query.where(
+            Memory.context_id.in_(
+                select(Context.id).where(Context.trust_tier == CONTEXT_TRUST_TIER_TRUSTED)
+            )
+        ).where(Memory.source_type != SOURCE_TYPE_CONNECTOR)
     # Window overlap: stored [trigger_from, trigger_until] overlaps the query
     # window [q_from, q_until] iff trigger_until >= q_from AND trigger_from <= q_until.
     if q_from is not None:
