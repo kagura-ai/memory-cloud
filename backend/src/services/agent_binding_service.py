@@ -346,7 +346,6 @@ class AgentBindingService:
         operation: str | None = None,
         user_id: str | None = None,
         requested_memory_id: uuid.UUID | None = None,
-        emit_would_deny: bool = True,
     ) -> tuple[bool, str]:
         """Evaluate the binding intersection for one context.
 
@@ -365,10 +364,11 @@ class AgentBindingService:
         proceeds; the row is the shadow→enforce ramp signal). The requested
         identifiers ride ``event_metadata`` as claims (the authoritative
         ``context_id`` / ``memory_id`` columns stay NULL) and ``workspace_id``
-        is the CREDENTIAL scope. ``emit_would_deny=False`` is for pre-gates
-        whose request re-hits a service-layer gate (the MCP write path):
-        the downstream gate emits the single shadow row; a hard deny stops
-        the request at the pre-gate, so that is always emitted here.
+        is the CREDENTIAL scope. When several gates evaluate the SAME denied
+        context in one request (pre-gate + service gate), the writer's
+        request-scoped dedup collapses the shadow rows to one — every gate
+        may emit unconditionally. Hard denies stop the request, so only one
+        gate can ever reach its emission.
         """
         result = await self.db.execute(
             select(AgentContextBinding).where(
@@ -400,16 +400,15 @@ class AgentBindingService:
                 access=access,
                 bound=binding is not None,
             )
-            if emit_would_deny:
-                await self._emit_decision(
-                    scope,
-                    context_id,
-                    access,
-                    DECISION_WOULD_DENY,
-                    operation=operation,
-                    user_id=user_id,
-                    requested_memory_id=requested_memory_id,
-                )
+            await self._emit_decision(
+                scope,
+                context_id,
+                access,
+                DECISION_WOULD_DENY,
+                operation=operation,
+                user_id=user_id,
+                requested_memory_id=requested_memory_id,
+            )
             return True, DECISION_WOULD_DENY
 
         logger.warning(

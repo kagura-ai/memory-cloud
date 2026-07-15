@@ -1822,7 +1822,7 @@ class TestAccessEventEmission:
             patch(
                 "services.permission_service.PermissionService.can_access_memory",
                 AsyncMock(return_value=True),
-            ),
+            ) as can_access,
             patch("services.memory_service.resolve_collection_name", AsyncMock(return_value="c")),
             patch("services.memory_service.update_memory_payload_in_qdrant", AsyncMock()),
             patch(
@@ -1842,6 +1842,11 @@ class TestAccessEventEmission:
         assert kw["context_id"] == ctx
         assert kw["memory_id"] == mid
         assert kw["user_id"] == "caller"
+        # #1286 deny-capture audit identity must reach the permission gate —
+        # dropping it silently reverts deny rows for this op to log-only.
+        perm_kw = can_access.await_args.kwargs
+        assert perm_kw["operation"] == "update"
+        assert perm_kw["memory_id"] == mid
 
     @pytest.mark.asyncio
     async def test_patch_memory_emits_update_event(self):
@@ -1889,7 +1894,7 @@ class TestAccessEventEmission:
             patch(
                 "services.permission_service.PermissionService.can_access_memory",
                 AsyncMock(return_value=True),
-            ),
+            ) as can_access,
             patch("services.memory_service.resolve_collection_name", AsyncMock(return_value="c")),
             patch("services.memory_service.delete_memory_from_qdrant", AsyncMock()),
             patch("repositories.neural_edge.NeuralEdgeRepository") as edge_cls,
@@ -1909,6 +1914,10 @@ class TestAccessEventEmission:
         assert kw["context_id"] == ctx
         assert kw["memory_id"] == mid
         assert kw["result_count"] == 1
+        # #1286 deny-capture audit identity must reach the permission gate.
+        perm_kw = can_access.await_args.kwargs
+        assert perm_kw["operation"] == "forget"
+        assert perm_kw["memory_id"] == mid
 
     @pytest.mark.asyncio
     async def test_forget_with_declared_context_uses_helper_workspace(self):
@@ -1965,3 +1974,44 @@ class TestAccessEventEmission:
 
         assert res.deleted_count == 0
         emit.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_forget_by_query_multi_row_metadata_contract(self):
+        # #1286 review finding: plural deletes must NOT stamp a single
+        # authoritative memory_id — the ids ride event_metadata (capped at
+        # MAX_METADATA_MEMORY_IDS) with result_count carrying the total.
+        from types import SimpleNamespace
+
+        service = MemoryService(MagicMock())
+        ws, ctx = uuid4(), uuid4()
+        ids = [uuid4(), uuid4()]
+        rows = {mid: self._memory_row(ws, ctx, mid) for mid in ids}
+        service.context_service.get_context = AsyncMock(
+            return_value=MagicMock(id=ctx, workspace_id=ws)
+        )
+        service.recall = AsyncMock(
+            return_value=SimpleNamespace(results=[SimpleNamespace(memory_id=m) for m in ids])
+        )
+        service.memory_repo.get = AsyncMock(side_effect=lambda m: rows.get(m))
+        service.memory_repo.update = AsyncMock()
+        service.db.commit = AsyncMock()
+
+        with (
+            patch("services.memory_service.resolve_collection_name", AsyncMock(return_value="c")),
+            patch("services.memory_service.delete_memory_from_qdrant", AsyncMock()),
+            patch("repositories.neural_edge.NeuralEdgeRepository") as edge_cls,
+            patch(
+                "services.memory_access_event_writer.emit_memory_access_event", AsyncMock()
+            ) as emit,
+        ):
+            edge_cls.return_value.delete_node_edges = AsyncMock(return_value=0)
+            res = await service.forget(
+                ForgetRequest(query="q", k=10), "caller", current_context_id=ctx
+            )
+
+        assert res.deleted_count == 2
+        emit.assert_awaited_once()
+        kw = emit.await_args.kwargs
+        assert kw["memory_id"] is None  # plural: no single authoritative id
+        assert kw["result_count"] == 2
+        assert kw["extra_metadata"]["memory_ids"] == [str(m) for m in ids]

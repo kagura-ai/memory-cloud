@@ -347,36 +347,20 @@ class TestDenyCaptureEmission:
         assert kw["workspace_id"] == ws
 
     @pytest.mark.asyncio
-    async def test_shadow_emission_suppressed_for_pre_gate(self):
-        # The MCP pre-gate (_resolve_context) passes emit_would_deny=False:
-        # the service-layer gate re-evaluates the same request and emits the
-        # single shadow row — no double-counting on the MCP face.
+    async def test_shadow_emits_unconditionally_dedup_is_writer_side(self):
+        # Every gate (pre-gates included) emits its would_deny; when several
+        # gates evaluate the SAME denied context in one request, the writer's
+        # request-scoped dedup collapses the rows to one — no per-call-site
+        # suppression flags (pinned in test_memory_access_event_writer).
         (allowed, decision), emit, _ = await self._evaluate(
             None,
             _scope(mode="shadow", workspace_id=uuid.uuid4()),
             ACCESS_WRITE,
             operation="remember",
             user_id="caller",
-            emit_would_deny=False,
         )
         assert (allowed, decision) == (True, DECISION_WOULD_DENY)
-        emit.assert_not_awaited()
-
-    @pytest.mark.asyncio
-    async def test_hard_deny_emits_even_when_would_deny_suppressed(self):
-        # A hard deny STOPS the request at the pre-gate — the service-layer
-        # gate is never reached, so the pre-gate must emit it.
-        (allowed, decision), emit, _ = await self._evaluate(
-            None,
-            _scope(mode="enforce", workspace_id=uuid.uuid4()),
-            ACCESS_WRITE,
-            operation="remember",
-            user_id="caller",
-            emit_would_deny=False,
-        )
-        assert (allowed, decision) == (False, DECISION_BINDING_DENIED)
         emit.assert_awaited_once()
-        assert emit.await_args.kwargs["outcome"] == "denied"
 
     @pytest.mark.asyncio
     async def test_no_emission_without_operation(self):

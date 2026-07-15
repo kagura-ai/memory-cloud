@@ -521,13 +521,14 @@ class TestCanAccessMemoryDenyCapture:
 
 
 class TestMcpPreGateDenyCapture:
-    """#1286 item 2 (P0-5): the MCP write pre-gate threads audit identity
-    into the binding evaluation with emit_would_deny=False — the service
-    layer re-evaluates and emits the single shadow row; the pre-gate is
-    responsible only for the hard deny that stops the request here."""
+    """#1286 item 2 (P0-5): the MCP pre-gates thread audit identity into the
+    binding evaluation. Every gate emits unconditionally; the writer's
+    request-scoped dedup collapses duplicate shadow rows (pinned in
+    test_memory_access_event_writer) — a hard deny stops the request at the
+    pre-gate, so its emission is the only record."""
 
     @pytest.mark.asyncio
-    async def test_resolve_context_threads_operation_with_would_deny_suppressed(self):
+    async def test_write_pre_gate_threads_operation(self):
         from mcp_server.tools._helpers import _ContextNotFoundError, _resolve_context
 
         set_agent_scope(
@@ -545,4 +546,40 @@ class TestMcpPreGateDenyCapture:
         kw = instance.evaluate_context_access.await_args.kwargs
         assert kw["operation"] == "remember"
         assert kw["user_id"] == "u"
-        assert kw["emit_would_deny"] is False
+
+    @pytest.mark.asyncio
+    async def test_read_pre_gate_threads_operation(self):
+        # The MCP READ face: recall/load_pinned/reference/feedback resolve via
+        # _resolve_context_for_read -> resolve_context_for_workspace_read.
+        # Without this threading, an enforce-mode read deny raises the uniform
+        # 404 BEFORE any service-layer gate and leaves no audit row (the
+        # #1291/#1292 parity class, caught by the pre-ship review).
+        from mcp_server.tools._helpers import _ContextNotFoundError, _resolve_context_for_read
+
+        with (
+            patch(
+                "services.permission_service.PermissionService.resolve_context_for_workspace_read",
+                AsyncMock(side_effect=NotFoundException("Context", "x")),
+            ) as resolve,
+            pytest.raises(_ContextNotFoundError),
+        ):
+            await _resolve_context_for_read(MagicMock(), "u", uuid.uuid4(), operation="recall")
+        assert resolve.await_args.kwargs["operation"] == "recall"
+
+    @pytest.mark.asyncio
+    async def test_binding_filter_threads_operation_into_evaluation(self):
+        # resolve_context_for_workspace_read / check_context_access forward
+        # operation into _apply_agent_binding_filter -> evaluate_context_access
+        # so the deny at this chokepoint persists its row.
+        set_agent_scope(
+            AgentScope(agent_id=AGENT_ID, enforcement_mode="enforce", workspace_id=uuid.uuid4())
+        )
+        perm = _perm()
+        patcher, instance = _patch_binding_service(False, "binding_denied")
+        with patcher, pytest.raises(NotFoundException):
+            await perm._apply_agent_binding_filter(
+                uuid.uuid4(), access="read", user_id="u", operation="recall"
+            )
+        kw = instance.evaluate_context_access.await_args.kwargs
+        assert kw["operation"] == "recall"
+        assert kw["user_id"] == "u"

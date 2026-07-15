@@ -17,7 +17,7 @@ independent session, which the teardown cleans up by workspace_id.
 from __future__ import annotations
 
 import uuid
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, patch
 
 import pytest
 import pytest_asyncio
@@ -134,10 +134,20 @@ async def env(db_session):
         "mem_unbound": mem_unbound.id,
     }
 
-    # The audit writer commits on an independent session — clean those rows up.
+    # The audit writer commits on an independent session — clean those rows
+    # up. memory_access_events is append-only by trigger (e66), so test
+    # cleanup must disable the user triggers for the DELETE (table owner
+    # privilege; the trigger exists to stop application-path mutation, not
+    # test-harness residue removal). Rollback first: a test that ended in a
+    # raised NotFoundException may have left the session tx aborted.
+    from sqlalchemy import text
+
+    await db_session.rollback()
+    await db_session.execute(text("ALTER TABLE memory_access_events DISABLE TRIGGER USER"))
     await db_session.execute(
         delete(MemoryAccessEvent).where(MemoryAccessEvent.workspace_id == ws_id)
     )
+    await db_session.execute(text("ALTER TABLE memory_access_events ENABLE TRIGGER USER"))
     await db_session.commit()
 
 
@@ -259,9 +269,7 @@ async def _mae_rows(db_session, ws_id):
 async def test_enforce_deny_persists_binding_denied_row(env, db_session):
     # The uniform 404 stays the response; the durable record is the new part.
     set_agent_scope(
-        AgentScope(
-            agent_id=env["agent"].id, enforcement_mode="enforce", workspace_id=env["ws_id"]
-        )
+        AgentScope(agent_id=env["agent"].id, enforcement_mode="enforce", workspace_id=env["ws_id"])
     )
     svc = _svc(db_session, found_memory_ids=[env["mem_unbound"]])
     with pytest.raises(NotFoundException):
@@ -291,9 +299,7 @@ async def test_shadow_would_deny_persists_ramp_row_and_proceeds(env, db_session)
     # Shadow mode: the request proceeds AND leaves the would_deny ramp signal
     # — exactly one (no double-count), alongside the normal success row.
     set_agent_scope(
-        AgentScope(
-            agent_id=env["agent"].id, enforcement_mode="shadow", workspace_id=env["ws_id"]
-        )
+        AgentScope(agent_id=env["agent"].id, enforcement_mode="shadow", workspace_id=env["ws_id"])
     )
     svc = _svc(db_session, found_memory_ids=[env["mem_unbound"]])
     resp = await svc.recall(
@@ -324,9 +330,7 @@ async def test_forget_by_id_silent_deny_leaves_its_only_record(env, db_session):
     from models.schemas import ForgetRequest
 
     set_agent_scope(
-        AgentScope(
-            agent_id=env["agent"].id, enforcement_mode="enforce", workspace_id=env["ws_id"]
-        )
+        AgentScope(agent_id=env["agent"].id, enforcement_mode="enforce", workspace_id=env["ws_id"])
     )
     svc = MemoryService(db_session)
     resp = await svc.forget(ForgetRequest(memory_id=env["mem_unbound"]), env["uid"])
@@ -342,3 +346,57 @@ async def test_forget_by_id_silent_deny_leaves_its_only_record(env, db_session):
     assert row.event_metadata["requested_memory_id"] == str(env["mem_unbound"])
     # No success row — the delete never happened.
     assert not [r for r in rows if r.operation == "forget" and r.outcome == "success"]
+
+
+@pytest.mark.asyncio(loop_scope="session")
+async def test_shadow_forget_by_id_declared_context_single_would_deny(env, db_session):
+    # Review finding (#1286): forget-by-id WITH a declared context traverses
+    # TWO service-layer binding gates (declared-context isolation params +
+    # can_access_memory) — the writer's request-scoped dedup must collapse
+    # the shadow signal to exactly one would_deny row, or the shadow→enforce
+    # ramp metric double-counts every such request.
+    from models.schemas import ForgetRequest
+
+    set_agent_scope(
+        AgentScope(agent_id=env["agent"].id, enforcement_mode="shadow", workspace_id=env["ws_id"])
+    )
+    svc = MemoryService(db_session)
+    with patch("services.memory_service.delete_memory_from_qdrant", AsyncMock()):
+        resp = await svc.forget(
+            ForgetRequest(memory_id=env["mem_unbound"]),
+            env["uid"],
+            current_context_id=env["ctx_unbound"],
+        )
+    assert resp.deleted_count == 1  # shadow proceeds
+
+    rows = await _mae_rows(db_session, env["ws_id"])
+    ramp = [r for r in rows if r.policy_decision == "would_deny" and r.operation == "forget"]
+    assert len(ramp) == 1, f"expected the single deduped shadow row, got {len(ramp)}"
+    # The destructive write itself is also audited (success row).
+    assert [r for r in rows if r.operation == "forget" and r.outcome == "success"]
+
+
+@pytest.mark.asyncio(loop_scope="session")
+async def test_read_pre_gate_enforce_deny_persists_row(env, db_session):
+    # Review finding (#1286, the #1291/#1292 parity class): the MCP read face
+    # resolves via resolve_context_for_workspace_read, whose binding filter
+    # raises the uniform 404 BEFORE any service-layer gate — with operation
+    # threaded it must persist the denied row itself.
+    from services.permission_service import PermissionService
+
+    set_agent_scope(
+        AgentScope(agent_id=env["agent"].id, enforcement_mode="enforce", workspace_id=env["ws_id"])
+    )
+    with pytest.raises(NotFoundException):
+        await PermissionService(db_session).resolve_context_for_workspace_read(
+            user_id=env["uid"], context_id=env["ctx_unbound"], operation="recall"
+        )
+
+    rows = await _mae_rows(db_session, env["ws_id"])
+    denied = [r for r in rows if r.outcome == "denied"]
+    assert len(denied) == 1
+    assert denied[0].operation == "recall"
+    assert denied[0].policy_decision == "binding_denied"
+    assert denied[0].workspace_id == env["ws_id"]
+    assert denied[0].context_id is None
+    assert denied[0].event_metadata["requested_context_id"] == str(env["ctx_unbound"])

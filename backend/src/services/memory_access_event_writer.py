@@ -18,6 +18,7 @@ setting-gated and separately reviewed.
 from __future__ import annotations
 
 from contextlib import aclosing
+from contextvars import ContextVar
 from typing import Any
 from uuid import UUID
 
@@ -28,6 +29,20 @@ logger = get_logger(__name__)
 # Max recall result memory_ids stored in event_metadata (identifiers only,
 # content never; under the 4 KB cap).
 MAX_METADATA_MEMORY_IDS = 32
+
+# #1286 (P0-5): request-scoped dedup for shadow ``would_deny`` rows. One
+# request can legitimately traverse several binding gates that evaluate the
+# SAME denied context (MCP pre-gate → declared-context isolation gate →
+# memory-id gate); without dedup the shadow→enforce ramp metric double-counts.
+# Keyed on (operation, requested_context_id, access) so DISTINCT contexts
+# evaluated in one request (e.g. update's declared context vs the memory's
+# own) still land their own rows. Task-context isolation gives each ASGI
+# request a fresh empty set — the same per-request guarantee AgentScope
+# relies on. Hard denies are never deduped: they stop the request, so only
+# one gate can ever emit.
+_would_deny_emitted: ContextVar[frozenset[tuple[str, str | None, str | None]]] = ContextVar(
+    "mae_would_deny_emitted", default=frozenset()
+)
 
 
 def _validate_enums(
@@ -184,6 +199,20 @@ async def emit_memory_access_event(
         query_hash = hmac_sha256_hex(query, get_settings().audit_hmac_key)
 
     metadata = dict(extra_metadata) if extra_metadata else None
+
+    # #1286 (P0-5): collapse per-request duplicate shadow rows (see the
+    # ``_would_deny_emitted`` contract above). Vocabulary literal matches
+    # MAE_POLICY_DECISIONS / AgentBindingService.DECISION_WOULD_DENY.
+    if policy_decision == "would_deny":
+        key = (
+            operation,
+            (metadata or {}).get("requested_context_id"),
+            (metadata or {}).get("access"),
+        )
+        seen = _would_deny_emitted.get()
+        if key in seen:
+            return
+        _would_deny_emitted.set(seen | {key})
 
     await record_memory_access_event(
         workspace_id=workspace_id,

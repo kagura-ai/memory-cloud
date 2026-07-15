@@ -87,7 +87,9 @@ async def record_feedback(
     try:
         # Read-adjacent: VIEWER may rate recall. Uniform 404 on unreachable
         # context (IDOR guard), same posture as the other context-scoped routes.
-        await perm.check_context_access(user_id, context_id, required_role=ContextRole.VIEWER)
+        await perm.check_context_access(
+            user_id, context_id, required_role=ContextRole.VIEWER, operation="feedback"
+        )
         row = await service.record_feedback(
             context_id=context_id,
             memory_id=body.memory_id,

@@ -201,3 +201,83 @@ class TestEmitGate:
                 operation="recall", outcome="success", workspace_id=None, user_id="u"
             )
         recorder.assert_not_awaited()
+
+
+class TestWouldDenyDedup:
+    """#1286 (P0-5): request-scoped dedup for shadow would_deny rows.
+
+    Several binding gates can evaluate the SAME denied context in one request
+    (MCP pre-gate → declared-context isolation gate → memory-id gate); the
+    writer collapses those to one row, keyed on
+    (operation, requested_context_id, access). Distinct keys still land their
+    own rows, and hard denies are never deduped. Task-context isolation gives
+    every request (and every test) a fresh set.
+    """
+
+    @staticmethod
+    def _scope():
+        return SimpleNamespace(agent_id=AGENT_ID, workspace_id=WORKSPACE_ID)
+
+    async def _emit(self, recorder, *, policy, ctx, access="write", operation="forget"):
+        with (
+            patch("auth.agent_scope.get_agent_scope", return_value=self._scope()),
+            patch("api.correlation.get_correlation", return_value=None),
+            patch("services.memory_access_event_writer.record_memory_access_event", new=recorder),
+        ):
+            await emit_memory_access_event(
+                operation=operation,
+                outcome="success" if policy == "would_deny" else "denied",
+                workspace_id=WORKSPACE_ID,
+                user_id="u",
+                policy_decision=policy,
+                extra_metadata={"requested_context_id": ctx, "access": access},
+            )
+
+    @pytest.mark.asyncio
+    async def test_same_key_second_would_deny_skipped(self):
+        recorder = AsyncMock()
+        ctx = str(uuid.uuid4())
+        await self._emit(recorder, policy="would_deny", ctx=ctx)
+        await self._emit(recorder, policy="would_deny", ctx=ctx)
+        assert recorder.await_count == 1
+
+    @pytest.mark.asyncio
+    async def test_distinct_context_lands_own_row(self):
+        # update's declared context vs the memory's own context are DISTINCT
+        # shadow signals — both must persist.
+        recorder = AsyncMock()
+        await self._emit(recorder, policy="would_deny", ctx=str(uuid.uuid4()))
+        await self._emit(recorder, policy="would_deny", ctx=str(uuid.uuid4()))
+        assert recorder.await_count == 2
+
+    @pytest.mark.asyncio
+    async def test_distinct_operation_lands_own_row(self):
+        recorder = AsyncMock()
+        ctx = str(uuid.uuid4())
+        await self._emit(recorder, policy="would_deny", ctx=ctx, operation="remember")
+        await self._emit(recorder, policy="would_deny", ctx=ctx, operation="forget")
+        assert recorder.await_count == 2
+
+    @pytest.mark.asyncio
+    async def test_hard_denies_never_deduped(self):
+        recorder = AsyncMock()
+        ctx = str(uuid.uuid4())
+        await self._emit(recorder, policy="binding_denied", ctx=ctx)
+        await self._emit(recorder, policy="binding_denied", ctx=ctx)
+        assert recorder.await_count == 2
+
+    @pytest.mark.asyncio
+    async def test_fresh_task_context_resets(self):
+        # Each request runs in its own task context — the dedup set never
+        # leaks across requests (same isolation guarantee AgentScope uses).
+        import asyncio
+
+        recorder = AsyncMock()
+        ctx = str(uuid.uuid4())
+
+        async def _one_request():
+            await self._emit(recorder, policy="would_deny", ctx=ctx)
+
+        await asyncio.create_task(_one_request())
+        await asyncio.create_task(_one_request())
+        assert recorder.await_count == 2

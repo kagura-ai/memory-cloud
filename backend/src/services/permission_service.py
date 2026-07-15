@@ -245,6 +245,7 @@ class PermissionService:
         *,
         required_role: WorkspaceRole | str = WorkspaceRole.VIEWER,
         key_workspace_id: UUID | None = None,
+        operation: str | None = None,
     ) -> Context:
         """Resolve a ``context_id`` to a Context the caller can read, with uniform 404.
 
@@ -408,12 +409,14 @@ class PermissionService:
         # writers pass admin/owner. WorkspaceRole is a StrEnum, so the
         # comparison holds for both str and enum callers.
         access = "read" if required_role == WorkspaceRole.VIEWER else "write"
-        await self._apply_agent_binding_filter(context_id, access=access, user_id=user_id)
+        await self._apply_agent_binding_filter(
+            context_id, access=access, user_id=user_id, operation=operation
+        )
 
         return context
 
     async def _apply_agent_binding_filter(
-        self, context_id: UUID, *, access: str, user_id: str
+        self, context_id: UUID, *, access: str, user_id: str, operation: str | None = None
     ) -> None:
         """Deny with the uniform 404 when the agent binding subtracts access.
 
@@ -423,6 +426,14 @@ class PermissionService:
         the context exists but is write-forbidden would leak the CWE-639
         signal the uniform-404 posture removes. Shadow-mode violations are
         logged and allowed (``would_deny``, the enforcement ramp).
+
+        #1286 (P0-5): ``operation`` threads MAE audit identity into the
+        evaluation so denies at THIS chokepoint persist — for the MCP read
+        tools this is the pre-gate that raises before any service-layer gate
+        runs, so without it enforce-mode read denies leave no audit row on
+        the MCP face (the #1291/#1292 parity class). ``None`` (callers
+        outside the MAE vocabulary — context CRUD/metadata reads) keeps the
+        log-only behavior.
         """
         from auth.agent_scope import get_agent_scope
 
@@ -433,7 +444,7 @@ class PermissionService:
         from services.agent_binding_service import AgentBindingService
 
         allowed, decision = await AgentBindingService(self.db).evaluate_context_access(
-            scope, context_id, access
+            scope, context_id, access, operation=operation, user_id=user_id
         )
         if not allowed:
             logger.warning(
@@ -507,6 +518,8 @@ class PermissionService:
         user_id: str,
         context_id: UUID,
         required_role: ContextRole | str = ContextRole.VIEWER,
+        *,
+        operation: str | None = None,
     ) -> tuple[Context, ContextRole]:
         """Check if user has required context access.
 
@@ -551,7 +564,9 @@ class PermissionService:
             required_role if isinstance(required_role, ContextRole) else ContextRole(required_role)
         )
         access = "read" if required == ContextRole.VIEWER else "write"
-        await self._apply_agent_binding_filter(context_id, access=access, user_id=user_id)
+        await self._apply_agent_binding_filter(
+            context_id, access=access, user_id=user_id, operation=operation
+        )
 
         return context, effective_role
 
