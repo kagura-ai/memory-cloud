@@ -108,6 +108,9 @@ class MemoryAccessEvent(Base):
     # unbound-traffic extension).
     agent_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), nullable=True)
     session_id: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    # run_id is carried on the wire as the vendor attribute ``kagura.agent.run.id``
+    # (OTel GenAI semconv has no standard run/execution-id yet). The column is
+    # name-agnostic; upstream-tracking + additive migration obligation: #1285.
     run_id: Mapped[str | None] = mapped_column(String(128), nullable=True)
     trace_id: Mapped[str | None] = mapped_column(String(32), nullable=True)
     span_id: Mapped[str | None] = mapped_column(String(16), nullable=True)

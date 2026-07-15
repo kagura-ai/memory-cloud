@@ -91,3 +91,17 @@ async def test_context_id_required_is_400(db, monkeypatch):
     _svc(monkeypatch, context_error=("context_id_required", "context_id is required."))
     with pytest.raises(BadRequestError):
         await agent_bootstrap(agent_id=AGENT_ID, body=BootstrapRequest(), user=USER, db=db)
+
+
+@pytest.mark.asyncio
+async def test_bad_session_id_charset_is_400(db, monkeypatch):
+    # #1281 item 6: REST reuses validate_session_id, so a value that passes the
+    # Pydantic max_length but violates [A-Za-z0-9._-] is a 400, not silently kept.
+    _svc(monkeypatch)
+    with pytest.raises(BadRequestError):
+        await agent_bootstrap(
+            agent_id=AGENT_ID,
+            body=BootstrapRequest(session_id="has space"),
+            user=USER,
+            db=db,
+        )

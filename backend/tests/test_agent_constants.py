@@ -122,3 +122,16 @@ def test_api_keys_agent_exclusion_check_matches_migration_literal() -> None:
         if getattr(c, "name", None) == "ck_api_keys_agent_public_exclusion"
     )
     assert check.sqltext.text == expected
+
+
+def test_api_keys_agent_requires_workspace_check_matches_migration_literal() -> None:
+    """``ck_api_keys_agent_requires_workspace`` matches the e67 literal (#1281)."""
+    from models.auth import APIKey
+
+    expected = "agent_id IS NULL OR workspace_id IS NOT NULL"
+    check = next(
+        c
+        for c in APIKey.__table_args__
+        if getattr(c, "name", None) == "ck_api_keys_agent_requires_workspace"
+    )
+    assert check.sqltext.text == expected

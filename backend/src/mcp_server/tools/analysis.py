@@ -125,6 +125,21 @@ async def _verify_context_in_workspace_mcp(
             f"Context {context_id} not found or you don't have access to it.",
             context_id=str(context_id),
         )
+
+    # #1281 item 5: subtractive agent-binding gate on the analysis surfaces
+    # (analyze_context / get_cluster / get_analysis all funnel through here).
+    # The workspace boundary above is necessary but not sufficient for an
+    # agent-bound credential — the binding must contain it to its bound
+    # contexts even when the underlying role is broad. No-op for non-agent
+    # credentials; deny is the same uniform context_not_found shape (no leak).
+    from services.agent_binding_service import agent_binding_permits
+
+    if not await agent_binding_permits(db, context_id, "read"):
+        return _error_response(
+            "context_not_found",
+            f"Context {context_id} not found or you don't have access to it.",
+            context_id=str(context_id),
+        )
     return None
 
 
@@ -433,6 +448,22 @@ async def handle_get_analysis(
                     f"Analysis run {run_id} not found.",
                     run_id=str(run_id),
                 )
+            # #1281 item 5: this handler is run_id-addressed (no context_id in
+            # args), so the shared _verify_context_in_workspace_mcp gate doesn't
+            # run. Gate on the run's own context_id (already loaded on the row;
+            # agent_binding_permits is a no-op contextvar read for non-agent
+            # creds). Deny → the same uniform run_not_found (no existence leak).
+            from services.agent_binding_service import agent_binding_permits
+
+            if not await agent_binding_permits(db, row.context_id, "read"):
+                await _log_tool_usage(
+                    db, user_id, "get_analysis", start_time, 404, workspace_id=workspace_id
+                )
+                return _error_response(
+                    "run_not_found",
+                    f"Analysis run {run_id} not found.",
+                    run_id=str(run_id),
+                )
             await _log_tool_usage(
                 db, user_id, "get_analysis", start_time, 200, workspace_id=workspace_id
             )
@@ -655,7 +686,35 @@ async def handle_get_cluster(
             except Exception as gate_exc:
                 return _gate_error_response(gate_exc)
 
+            # #1281 item 5: run_id-addressed handler — an agent-bound credential
+            # must be contained to its bound contexts even here. Resolve the
+            # run's context_id and gate (only when a scope is present, to avoid
+            # the extra lookup on the non-agent drill-down path). Deny → the same
+            # uniform cluster_not_found shape (no existence leak).
+            from auth.agent_scope import get_agent_scope
             from services.analysis import query_service
+
+            if get_agent_scope() is not None:
+                from services.agent_binding_service import agent_binding_permits
+
+                run_row = await query_service.get_analysis(
+                    db, workspace_id=workspace_id, run_id=run_id
+                )
+                if run_row is None or not await agent_binding_permits(
+                    db, run_row.context_id, "read"
+                ):
+                    await _log_tool_usage(
+                        db, user_id, "get_cluster", start_time, 404, workspace_id=workspace_id
+                    )
+                    return _error_response(
+                        "cluster_not_found",
+                        (
+                            f"Cluster #{cluster_index} not found in run {run_id} "
+                            "(or run not in your workspace)."
+                        ),
+                        run_id=str(run_id),
+                        cluster_index=cluster_index,
+                    )
 
             cluster = await query_service.get_cluster(
                 db,

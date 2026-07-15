@@ -520,6 +520,8 @@ async def agent_bootstrap(
         BootstrapError,
         BootstrapParams,
         parse_include,
+        validate_query,
+        validate_session_id,
     )
     from utils.exceptions import BadRequestError, NotFoundException
 
@@ -527,8 +529,12 @@ async def agent_bootstrap(
         params = BootstrapParams(
             agent_id=agent_id,
             context_id=body.context_id,
-            session_id=body.session_id,
-            query=body.query or None,
+            # #1281 item 6: reuse the shared MCP validators so the REST surface
+            # enforces the same session_id charset ([A-Za-z0-9._-]) and query
+            # limits as the tool contract — Pydantic max_length alone let spaces
+            # and other chars through. Both raise BootstrapError (caught below).
+            session_id=validate_session_id(body.session_id),
+            query=validate_query(body.query),
             recall_k=body.recall_k,
             pinned_cap=body.pinned_cap,
             upcoming_until=body.upcoming_until,

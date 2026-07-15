@@ -1013,6 +1013,68 @@ class TestForget:
         assert response.memory_ids == []
 
 
+class TestGetContextIsolationParamsKeyWorkspaceConfinement:
+    """Issue #963/#1281 item 2: pure API-key workspace-scope confinement on the
+    declared-context path (remember / load_pinned / forget), mirroring the MCP
+    _resolve_context check."""
+
+    @pytest.fixture
+    def service(self):
+        return MemoryService(MagicMock())
+
+    @staticmethod
+    def _ctx(ws_id):
+        c = MagicMock()
+        c.workspace_id = ws_id
+        return c
+
+    @pytest.mark.asyncio
+    async def test_foreign_key_scope_denies_as_not_found(self, service):
+        # Workspace-scoped key (key_ws) declaring a context owned by another
+        # workspace (ctx_ws) the member also belongs to → uniform NotFound.
+        from utils.exceptions import NotFoundException
+
+        key_ws, ctx_ws, ctx_id = uuid4(), uuid4(), uuid4()
+        service.context_service.get_context = AsyncMock(return_value=self._ctx(ctx_ws))
+        with patch(
+            "services.agent_binding_service.agent_binding_permits",
+            new=AsyncMock(return_value=True),
+        ):
+            with pytest.raises(NotFoundException):
+                await service._get_context_isolation_params(
+                    "u", ctx_id, access="write", key_workspace_id=key_ws
+                )
+
+    @pytest.mark.asyncio
+    async def test_matching_key_scope_allows(self, service):
+        ws, ctx_id = uuid4(), uuid4()
+        service.context_service.get_context = AsyncMock(return_value=self._ctx(ws))
+        with patch(
+            "services.agent_binding_service.agent_binding_permits",
+            new=AsyncMock(return_value=True),
+        ):
+            _ctx, ws_str, cid_str = await service._get_context_isolation_params(
+                "u", ctx_id, access="write", key_workspace_id=ws
+            )
+        assert ws_str == str(ws)
+        assert cid_str == str(ctx_id)
+
+    @pytest.mark.asyncio
+    async def test_no_key_scope_skips_confinement(self, service):
+        # OAuth/session/global-key: scope None → a foreign workspace is NOT
+        # confined here (over-confinement guard).
+        ctx_ws, ctx_id = uuid4(), uuid4()
+        service.context_service.get_context = AsyncMock(return_value=self._ctx(ctx_ws))
+        with patch(
+            "services.agent_binding_service.agent_binding_permits",
+            new=AsyncMock(return_value=True),
+        ):
+            _ctx, ws_str, _cid = await service._get_context_isolation_params(
+                "u", ctx_id, key_workspace_id=None
+            )
+        assert ws_str == str(ctx_ws)
+
+
 class TestExploreHints:
     """Test explore_hints generation in recall (Issue #216)."""
 

@@ -103,6 +103,23 @@ class TestDispatch:
             )
         assert _payload(result)["error"] == "agent_not_found"
 
+    @pytest.mark.parametrize(
+        "code,expected_status", [("invalid_arguments", 400), ("agent_not_found", 404)]
+    )
+    @pytest.mark.asyncio
+    async def test_bootstrap_error_status_code_mapping(self, code, expected_status):
+        # #1281 item 6: usage_stats records 400 for client-argument errors and
+        # 404 for not-found / authorization denials (was 404 for all).
+        with ExitStack() as stack:
+            _enter(stack, principal_error=(code, "x"))
+            log = AsyncMock()
+            stack.enter_context(patch("mcp_server.tools.agent_bootstrap._log_tool_usage", new=log))
+            await handle_get_agent_bootstrap(
+                args={"agent_id": str(AGENT_ID)}, user_id="u", workspace_id=WORKSPACE_ID
+            )
+        # _log_tool_usage(db, user_id, tool, start_time, status_code, None, workspace_id)
+        assert log.await_args.args[4] == expected_status
+
     @pytest.mark.asyncio
     async def test_success_returns_envelope(self):
         with ExitStack() as stack:

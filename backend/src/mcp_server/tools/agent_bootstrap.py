@@ -146,8 +146,13 @@ async def handle_get_agent_bootstrap(
 
         except BootstrapError as e:
             await db.rollback()
+            # #1281 item 6: distinguish client-argument errors (400) from
+            # not-found / authorization denials (404) in usage_stats so analytics
+            # can tell them apart. The caller still gets the uniform
+            # _error_response(code) either way (no disclosure change).
+            status_code = 404 if e.code in ("agent_not_found", "context_not_found") else 400
             await _log_tool_usage(
-                db, user_id, "get_agent_bootstrap", start_time, 404, None, workspace_id
+                db, user_id, "get_agent_bootstrap", start_time, status_code, None, workspace_id
             )
             return _error_response(e.code, e.message)
         except Exception as e:  # pragma: no cover - defensive

@@ -111,6 +111,13 @@ async def get_current_user(request: Request) -> dict:
         async def get_me(user: dict = Depends(get_current_user)):
             return user
     """
+    # Issue #1281 item 3: symmetric agent-scope reset (mirrors the MCP transport
+    # and get_user_from_api_key_or_session). Session auth never carries an agent
+    # scope; make that explicit and stale-proof.
+    from auth.agent_scope import set_agent_scope
+
+    set_agent_scope(None)
+
     # SessionMiddleware sets request.state.user if logged in
     if not hasattr(request.state, "user") or request.state.user is None:
         logger.warning("unauthorized_access_attempt", path=request.url.path)
@@ -512,6 +519,16 @@ async def get_user_from_api_key_or_session(
             context_id = user.get("current_context_id")
             return await save_memory(user["user_id"], context_id, ...)
     """
+    # Issue #1281 item 3: reset the per-request agent scope up-front, symmetric
+    # with the MCP transport (mcp_server/auth.py sets it None before auth). ASGI
+    # already isolates the contextvar per request, so this is defense-in-depth —
+    # it guarantees a non-agent credential (OAuth/session/global key) never
+    # observes a stale scope even if that isolation assumption breaks. The
+    # agent-key branch below re-sets it via set_agent_scope_from_verified.
+    from auth.agent_scope import set_agent_scope
+
+    set_agent_scope(None)
+
     # Priority 0: OAuth Bearer. The prefix check skips the OAuth DB
     # lookup for ``kagura_*`` API keys (and vice versa), so each Bearer
     # request hits only one of the two stores.

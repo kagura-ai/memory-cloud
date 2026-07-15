@@ -56,6 +56,24 @@ async def test_load_pinned_route_passes_context_and_cap_through():
 
 
 @pytest.mark.asyncio
+async def test_load_pinned_route_forwards_pure_api_key_workspace_scope():
+    """Issue #963/#1281 item 2: the route forwards the PURE key scope
+    (api_key_workspace_id), NOT current_workspace_id, as key_workspace_id — the
+    distinction that avoids over-confining OAuth/session/global-key callers."""
+    svc = AsyncMock()
+    svc.load_pinned = AsyncMock(return_value=_response())
+    key_ws = uuid4()
+    user = {"user_id": "u1", "current_workspace_id": uuid4(), "api_key_workspace_id": key_ws}
+    req = LoadPinnedRequest(context_id=str(uuid4()), cap=10)
+
+    await load_pinned(request=req, user=user, memory_service=svc)
+
+    kwargs = svc.load_pinned.await_args.kwargs
+    assert kwargs["key_workspace_id"] == key_ws
+    assert kwargs["key_workspace_id"] != user["current_workspace_id"]
+
+
+@pytest.mark.asyncio
 async def test_load_pinned_route_rejects_malformed_context_id_with_422():
     """A non-UUID context_id is a 422, not a DB DataError → 503 (finding #3)."""
     svc = AsyncMock()

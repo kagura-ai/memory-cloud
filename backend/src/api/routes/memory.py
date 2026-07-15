@@ -121,6 +121,9 @@ async def remember(
             client=user.get("client", "web"),
             current_context_id=context_id,
             current_workspace_id=user.get("current_workspace_id"),  # NEW: Issue #146
+            # Issue #963/#1281 item 2: confine a workspace-scoped key to its own
+            # workspace (pure key scope; None for OAuth/session/global-key).
+            key_workspace_id=user.get("api_key_workspace_id"),
         )
     except ValueError as e:
         # MemoryService raises ValueError as its "bad request" signal (e.g. an
@@ -279,6 +282,8 @@ async def load_pinned(
             current_context_id=context_uuid,
             current_workspace_id=user.get("current_workspace_id"),
             cap=request.cap,
+            # Issue #963/#1281 item 2: pure key scope (None unless workspace-scoped key).
+            key_workspace_id=user.get("api_key_workspace_id"),
         )
     except ValueError as e:
         raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=str(e)) from e
@@ -376,6 +381,10 @@ async def forget(
         request,
         user_id=user["user_id"],
         current_context_id=None,  # Issue #246: current_context_id removed
+        # Issue #963/#1281 item 2: pure key scope. Inert while current_context_id
+        # is None (the isolation helper short-circuits), wired for symmetry so the
+        # confinement holds the moment forget regains a declared context.
+        key_workspace_id=user.get("api_key_workspace_id"),
     )
 
     return result
