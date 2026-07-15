@@ -469,6 +469,18 @@ class MemoryService:
                 functools.partial(_log_embedding_task_result, memory_id=str(memory_id))
             )
 
+            # #1278/#1281 item 7: audit the write (no-op unless verified agent).
+            from services.memory_access_event_writer import emit_memory_access_event
+
+            await emit_memory_access_event(
+                operation="remember",
+                outcome="success",
+                workspace_id=UUID(workspace_id_str),
+                user_id=user_id,
+                context_id=UUID(context_id_str),
+                memory_id=memory_id,
+            )
+
             return RememberResponse(memory_id=memory_id, scope=memory.scope)
 
         except Exception as e:
@@ -1068,6 +1080,19 @@ class MemoryService:
         await self.db.commit()
 
         logger.info("memory_referenced", memory_id=str(memory_id), user_id=user_id)
+
+        # #1278/#1281 item 7: audit the Layer-3 adoption read (no-op unless
+        # verified agent identity).
+        from services.memory_access_event_writer import emit_memory_access_event
+
+        await emit_memory_access_event(
+            operation="reference",
+            outcome="success",
+            workspace_id=memory.workspace_id,
+            user_id=user_id,
+            context_id=memory.context_id,
+            memory_id=memory_id,
+        )
 
         # Issue #440: Fetch declared_link references for the dialog References
         # section. The edge invariant (`_validate_edge_context_invariant` in
@@ -2733,6 +2758,21 @@ class MemoryService:
             for r in search_results
             if r.get("semantic_score_raw") is not None
         ]
+        # #1278/#1281 item 7: audit the recall (no-op unless verified agent
+        # identity). result_count + a keyed hash of the query; raw query never
+        # stored. effective_workspace_id is the #708-aware search workspace.
+        from services.memory_access_event_writer import emit_memory_access_event
+
+        await emit_memory_access_event(
+            operation="recall",
+            outcome="success",
+            workspace_id=effective_workspace_id,
+            user_id=user_id,
+            context_id=current_context_id,
+            result_count=len(responses),
+            query=request.query,
+        )
+
         return RecallResponse(
             results=responses,
             related_tags=related_tags,

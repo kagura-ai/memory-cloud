@@ -167,6 +167,29 @@ class TestEmitGate:
         assert kwargs["result_count"] == 3
 
     @pytest.mark.asyncio
+    async def test_query_is_hashed_never_stored_raw(self):
+        # #1281 item 7: emit hashes the raw query with the audit key; the row
+        # writer only ever receives query_hash, never the raw text.
+        recorder = AsyncMock()
+        scope = SimpleNamespace(agent_id=AGENT_ID, enforcement_mode="enforce")
+        with (
+            patch("auth.agent_scope.get_agent_scope", return_value=scope),
+            patch("api.correlation.get_correlation", return_value=None),
+            patch("services.memory_access_event_writer.record_memory_access_event", new=recorder),
+        ):
+            await emit_memory_access_event(
+                operation="recall",
+                outcome="success",
+                workspace_id=WORKSPACE_ID,
+                user_id="u",
+                query="secret query text",
+            )
+        kwargs = recorder.await_args.kwargs
+        assert "query" not in kwargs  # raw query never forwarded to the row writer
+        assert kwargs["query_hash"] and kwargs["query_hash"] != "secret query text"
+        assert len(kwargs["query_hash"]) == 64  # HMAC-SHA256 hex
+
+    @pytest.mark.asyncio
     async def test_missing_workspace_is_noop(self):
         recorder = AsyncMock()
         scope = SimpleNamespace(agent_id=AGENT_ID, enforcement_mode="enforce")

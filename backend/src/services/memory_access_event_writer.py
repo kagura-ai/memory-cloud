@@ -143,6 +143,7 @@ async def emit_memory_access_event(
     memory_id: UUID | None = None,
     result_count: int | None = None,
     latency_ms: int | None = None,
+    query: str | None = None,
     query_hash: str | None = None,
     policy_decision: str | None = None,
     extra_metadata: dict[str, Any] | None = None,
@@ -154,6 +155,10 @@ async def emit_memory_access_event(
     Early-returns (no write, one contextvar read) when the request carries no
     verified agent identity — the backward-compat no-hot-path-write guarantee
     for legacy traffic. Fail-open end to end.
+
+    ``query``: raw query text — hashed here (HMAC-SHA256, dedicated audit key)
+    into ``query_hash``; the raw text is NEVER stored. Passing a pre-hashed
+    ``query_hash`` instead is also honored (``query`` wins if both are given).
     """
     from auth.agent_scope import get_agent_scope
 
@@ -170,6 +175,13 @@ async def emit_memory_access_event(
 
     corr = get_correlation()
     surface = corr.surface if corr else "rest"
+
+    # Hash the raw query with the dedicated audit key; never store it verbatim.
+    if query:
+        from config.settings import get_settings
+        from utils.hashing import hmac_sha256_hex
+
+        query_hash = hmac_sha256_hex(query, get_settings().audit_hmac_key)
 
     metadata = dict(extra_metadata) if extra_metadata else None
 
