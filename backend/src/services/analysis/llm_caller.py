@@ -94,10 +94,37 @@ class CallResult:
     actually produced the response — the labeler uses this to write
     one ``LLMCallBreakdown`` per (provider, model) pair into
     ``sleep_report_llm_usage``.
+
+    ``prior_usages`` (#1247) carries the token usage of any EARLIER
+    fallback-chain attempts that failed but still burned paid tokens
+    (e.g. a model that returned unparseable JSON on both its internal
+    tries). The labeler folds these into the cost breakdown so
+    ``cost_actual_cents`` reflects every billed call, not just the
+    winning response — otherwise a run that fell through to the fallback
+    model under-reports by up to one full model's spend per cluster.
     """
 
     parsed: dict[str, Any]
     response: LLMResponse
+    prior_usages: tuple[LLMResponse, ...] = ()
+
+
+def _billed_usage_from_error(exc: LLMServiceError) -> LLMResponse | None:
+    """Return the billed token usage of a failed LLM attempt, if any.
+
+    A fallback-chain attempt can fail *after* the provider round-trip
+    completed and consumed paid tokens (e.g. the model returned
+    unparseable JSON on both internal tries). When the raised
+    ``LLMServiceError`` carries the usage of that completed call via a
+    ``response`` attribute (an ``LLMResponse``), we surface it so the
+    caller can bill it. Returns ``None`` when the attempt spent no
+    billable tokens (a transport error before any completion) or when the
+    error does not expose usage — accumulation then simply skips it.
+    """
+    candidate = getattr(exc, "response", None)
+    if isinstance(candidate, LLMResponse):
+        return candidate
+    return None
 
 
 async def call_with_fallback(
@@ -145,6 +172,9 @@ async def call_with_fallback(
             'attempted_models': [...]}``.
     """
     last_error: LLMServiceError | None = None
+    # #1247: token usage of failed-but-billed earlier attempts, folded into
+    # the cost breakdown by the labeler so paid tokens are never dropped.
+    prior_usages: list[LLMResponse] = []
     for model in fallback_chain:
         try:
             response = await llm_service.complete_json(
@@ -164,7 +194,11 @@ async def call_with_fallback(
                 # OPENAI_API_KEY env credential.
                 disallow_env_fallback=True,
             )
-            return CallResult(parsed=response.parsed, response=response)
+            return CallResult(
+                parsed=response.parsed,
+                response=response,
+                prior_usages=tuple(prior_usages),
+            )
         except LLMServiceError as e:
             logger.warning(
                 "analysis_llm_call_failed",
@@ -172,6 +206,13 @@ async def call_with_fallback(
                 error=str(e),
             )
             last_error = e
+            # #1247: a failed attempt may still have consumed paid tokens
+            # (the provider call completed but its output failed to parse).
+            # Capture that usage when the error exposes it so cost
+            # accounting sums ALL billed calls, not just the winner.
+            billed = _billed_usage_from_error(e)
+            if billed is not None:
+                prior_usages.append(billed)
 
     raise AnalysisLLMUpstreamError(
         message=(

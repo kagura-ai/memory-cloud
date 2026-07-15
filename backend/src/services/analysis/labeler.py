@@ -269,6 +269,18 @@ async def _label_one_cluster(
         label_confidence = 0.0
 
     breakdown = accumulate_llm_response(None, result.response)
+    # #1247: fold in paid tokens burned by any earlier fallback-chain
+    # attempts that failed (e.g. a model whose output failed to parse) so
+    # cost_actual_cents reflects EVERY billed call, not just the winner.
+    # Keyed by the winning (provider, model); the reporter aggregates all
+    # cluster breakdowns under the run's frozen rate, so summing tokens
+    # here is what the cost ledger needs.
+    for prior in result.prior_usages:
+        breakdown.add_call(
+            input_tokens=prior.input_tokens,
+            output_tokens=prior.output_tokens,
+            cached_input_tokens=prior.cached_input_tokens,
+        )
 
     return ClusterLabel(
         cluster_index=cluster_index,
