@@ -286,3 +286,88 @@ class TestMemoryServiceDeclaredContextGate:
         svc = self._service(None)
         result = await svc._get_context_isolation_params("u", None, access="write")
         assert result == (None, None, None)
+
+
+class TestMemoryServiceRecallGate:
+    """#1291: MemoryService.recall() applies the subtractive agent-binding gate
+    at the SERVICE layer. The MCP recall handler gates via
+    ``_resolve_context_for_read``, but the REST ``/memory/recall`` route calls
+    ``recall()`` directly — so before this fix an agent-bound key could read a
+    binding-denied context via REST. The gate must live in recall() itself."""
+
+    def _svc(self):
+        from services.memory_service import MemoryService
+
+        svc = MemoryService.__new__(MemoryService)
+        svc.db = MagicMock()
+        return svc
+
+    @pytest.mark.asyncio
+    async def test_enforce_binding_deny_raises_context_404(self):
+        from models.schemas import RecallRequest
+
+        set_agent_scope(AgentScope(agent_id=AGENT_ID, enforcement_mode="enforce"))
+        svc = self._svc()
+        patcher, _ = _patch_binding_service(False, "binding_denied")
+        with patcher, pytest.raises(NotFoundException):
+            await svc.recall(
+                RecallRequest(query="q"),
+                user_id="u",
+                current_context_id=uuid.uuid4(),
+                current_workspace_id=uuid.uuid4(),
+            )
+
+    @pytest.mark.asyncio
+    async def test_cross_context_gate_checks_every_entry_not_just_first(self):
+        # A denied context in the SECOND slot must still 404 — proves the gate
+        # loops over the whole #81 cross-context list, not only the head.
+        from models.schemas import RecallRequest
+
+        allowed_id, denied_id = uuid.uuid4(), uuid.uuid4()
+
+        async def _permits(_db, cid, _access):
+            return cid != denied_id
+
+        svc = self._svc()
+        with (
+            patch(
+                "services.agent_binding_service.agent_binding_permits",
+                new=AsyncMock(side_effect=_permits),
+            ),
+            pytest.raises(NotFoundException),
+        ):
+            await svc.recall(
+                RecallRequest(query="q"),
+                user_id="u",
+                current_context_id=allowed_id,
+                current_workspace_id=uuid.uuid4(),
+                context_ids=[allowed_id, denied_id],
+            )
+
+    @pytest.mark.asyncio
+    async def test_permitted_is_noop_and_execution_continues(self):
+        # When the binding permits (or there is no agent scope), the gate must
+        # NOT raise and recall proceeds — proven by reaching the next service
+        # call (_resolve_search_mode), which we stub to raise a sentinel.
+        from models.schemas import RecallRequest
+        from services.memory_service import MemoryService
+
+        svc = self._svc()
+        with (
+            patch(
+                "services.agent_binding_service.agent_binding_permits",
+                new=AsyncMock(return_value=True),
+            ),
+            patch.object(
+                MemoryService,
+                "_resolve_search_mode",
+                new=AsyncMock(side_effect=RuntimeError("past-the-gate")),
+            ),
+            pytest.raises(RuntimeError, match="past-the-gate"),
+        ):
+            await svc.recall(
+                RecallRequest(query="q"),
+                user_id="u",
+                current_context_id=uuid.uuid4(),
+                current_workspace_id=uuid.uuid4(),
+            )
