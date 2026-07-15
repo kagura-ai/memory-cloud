@@ -6,6 +6,15 @@ release train and preserves selected historical development notes.
 
 ## [Unreleased]
 
+## [v0.50.0](https://github.com/kagura-ai/memory-cloud/releases/tag/v0.50.0) — 2026-07-15
+
+### Fixed
+- **Bootstrap trusted-tier gate** ([#1293](https://github.com/kagura-ai/memory-cloud/issues/1293)): the agent bootstrap `pinned` and upcoming-time-memory lanes now apply the same trusted-only filter as the recall lane, so external/connector-origin memories can no longer establish agent behaviour at session start (OWASP LLM01/LLM03). The user-initiated standalone `load_pinned` / `recall_upcoming` tools are unchanged.
+- **Per-transition agent audit rows** ([#1294](https://github.com/kagura-ai/memory-cloud/issues/1294)): a combined status + enforcement `PATCH /api/v1/agents/{id}` now emits one audit row per governed transition instead of collapsing them, so the status kill-switch and the enforcement change are each first-class in the structured audit columns. REST and MCP share one helper, closing the drift that let both surfaces carry the bug.
+
+### Tests
+- **Agent access-control E2E regression** ([#1295](https://github.com/kagura-ai/memory-cloud/issues/1295)): DB-backed end-to-end coverage for the [#1291](https://github.com/kagura-ai/memory-cloud/issues/1291) subtractive agent-binding recall gate.
+
 ## [v0.49.0](https://github.com/kagura-ai/memory-cloud/releases/tag/v0.49.0) — 2026-07-15
 
 ### Added
