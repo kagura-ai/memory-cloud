@@ -206,6 +206,132 @@ class TestPrecedence:
         assert res.correlation_conflict is True
 
 
+class TestUnboundExplicitArgConformance:
+    """#1286 item 1 — F4 Rule 5 conformance for an explicit arg on an
+    agent-unbound credential.
+
+    "Explicit wins" is candidate precedence over baggage, NOT a verification
+    exemption: the explicit arg still passes the Rule-2 same-member predicate
+    before reaching ``agent_id``. The keyed-hash slot always records the
+    highest-precedence *unverified* claim — so on a verified conflict it is
+    the disagreeing baggage claim that gets hashed, and on verifier-False it
+    is the (unverified) explicit arg itself.
+    """
+
+    @pytest.mark.asyncio
+    async def test_unbound_explicit_arg_unverified_hashed_only(self, monkeypatch):
+        # The case PR #1283's review flagged as unpinned: the verifier says NO
+        # to the explicit arg — it must never reach agent_id (fail-secure).
+        from api.correlation import _hash_claim
+
+        monkeypatch.setattr(
+            "api.correlation.verify_baggage_agent_claim",
+            AsyncMock(return_value=False),
+        )
+        res = await resolve_agent_correlation(
+            MagicMock(),
+            credential_agent_id=None,
+            explicit_agent_id=OTHER_AGENT,
+            member_user_id="m",
+            workspace_id=WORKSPACE_ID,
+        )
+        assert res.agent_id is None  # never reaches the column
+        assert res.policy_decision is None
+        assert res.unverified_agent_claim_hash == _hash_claim(str(OTHER_AGENT))
+        assert res.correlation_conflict is False
+
+    @pytest.mark.asyncio
+    async def test_unbound_explicit_only_verified_stamps_unbound(self, monkeypatch):
+        # Verified explicit arg on an unbound credential carries the same
+        # 'unbound' stamp as a verified baggage claim (Rule 2's stamp).
+        monkeypatch.setattr(
+            "api.correlation.verify_baggage_agent_claim",
+            AsyncMock(return_value=True),
+        )
+        res = await resolve_agent_correlation(
+            MagicMock(),
+            credential_agent_id=None,
+            explicit_agent_id=OTHER_AGENT,
+            member_user_id="m",
+            workspace_id=WORKSPACE_ID,
+        )
+        assert res.agent_id == OTHER_AGENT
+        assert res.policy_decision == POLICY_DECISION_UNBOUND
+        assert res.unverified_agent_claim_hash is None
+        assert res.correlation_conflict is False
+
+    @pytest.mark.asyncio
+    async def test_unbound_verified_conflict_hashes_disagreeing_baggage(self, monkeypatch):
+        # On a verified conflict the losing baggage claim must not vanish
+        # into a bare boolean — it is the unverified claim, so it is hashed.
+        from api.correlation import _hash_claim
+
+        monkeypatch.setattr(
+            "api.correlation.verify_baggage_agent_claim",
+            AsyncMock(return_value=True),
+        )
+        baggage_claim = str(uuid.uuid4())
+        corr = CorrelationContext(trace_id="t", span_id="s", agent_claim=baggage_claim)
+        res = await resolve_agent_correlation(
+            MagicMock(),
+            credential_agent_id=None,
+            explicit_agent_id=OTHER_AGENT,
+            member_user_id="m",
+            workspace_id=WORKSPACE_ID,
+            correlation=corr,
+        )
+        assert res.agent_id == OTHER_AGENT
+        assert res.policy_decision == POLICY_DECISION_UNBOUND
+        assert res.unverified_agent_claim_hash == _hash_claim(baggage_claim)
+        assert res.correlation_conflict is True
+
+    @pytest.mark.asyncio
+    async def test_unbound_unverified_conflict_hashes_explicit_arg(self, monkeypatch):
+        # Verifier-False on conflict: nothing verified, so the hash slot keeps
+        # the highest-precedence unverified claim (the explicit arg — same
+        # shadowing the credential-bound path applies); baggage disagreement
+        # is evidenced by correlation_conflict.
+        from api.correlation import _hash_claim
+
+        monkeypatch.setattr(
+            "api.correlation.verify_baggage_agent_claim",
+            AsyncMock(return_value=False),
+        )
+        corr = CorrelationContext(trace_id="t", span_id="s", agent_claim=str(uuid.uuid4()))
+        res = await resolve_agent_correlation(
+            MagicMock(),
+            credential_agent_id=None,
+            explicit_agent_id=OTHER_AGENT,
+            member_user_id="m",
+            workspace_id=WORKSPACE_ID,
+            correlation=corr,
+        )
+        assert res.agent_id is None
+        assert res.policy_decision is None
+        assert res.unverified_agent_claim_hash == _hash_claim(str(OTHER_AGENT))
+        assert res.correlation_conflict is True
+
+    @pytest.mark.asyncio
+    async def test_guard_path_hashes_explicit_over_baggage(self):
+        # Unverifiable request shape (no member/workspace): every claim is
+        # unverified — the explicit arg must not be dropped without a trace.
+        from api.correlation import _hash_claim
+
+        corr = CorrelationContext(trace_id="t", span_id="s", agent_claim=str(uuid.uuid4()))
+        res = await resolve_agent_correlation(
+            MagicMock(),
+            credential_agent_id=None,
+            explicit_agent_id=OTHER_AGENT,
+            member_user_id=None,
+            workspace_id=None,
+            correlation=corr,
+        )
+        assert res.agent_id is None
+        assert res.policy_decision is None
+        assert res.unverified_agent_claim_hash == _hash_claim(str(OTHER_AGENT))
+        assert res.correlation_conflict is True
+
+
 class TestVerifyPredicate:
     @pytest.mark.asyncio
     async def test_verifies_only_same_member_bound_agent(self):

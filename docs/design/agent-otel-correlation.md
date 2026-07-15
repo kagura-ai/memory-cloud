@@ -128,15 +128,16 @@ with the following hard rules:
    (`event_metadata.unverified_agent_claim`, as a keyed hash — see below) with the audit
    row's `agent_id` taken from the credential. A claim is **never precedence-resolved in
    favor of the claim** against the credential.
-2. **Baggage claims are verified before being trusted in audit rows.** This verified-claim
+2. **Claims are verified before being trusted in audit rows.** This verified-claim
    path applies **only when the authenticated credential carries no `api_keys.agent_id`
    binding**; when the credential is agent-bound, Rule 1 controls unconditionally and a
    disagreeing claim is never written to `agent_id`, regardless of any same-member binding of
-   the claimed agent. For an agent-unbound credential, the verification predicate is precise:
-   a baggage `gen_ai.agent.id` claim verifies **iff** the claimed agent is bound, via
-   `api_keys.agent_id`, to the same member row as the authenticated credential. A verified
-   claim may populate the audit row's `agent_id` column; because the credential itself is
-   bound to no agent, such rows are stamped `policy_decision='unbound'` so the
+   the claimed agent. For an agent-unbound credential, the verification predicate is precise
+   and gates **every** unbound-path candidate — the explicit bootstrap arg exactly like a
+   baggage `gen_ai.agent.id` claim: the candidate verifies **iff** the claimed agent is
+   bound, via `api_keys.agent_id`, to the same member row as the authenticated credential. A
+   verified candidate may populate the audit row's `agent_id` column; because the credential
+   itself is bound to no agent, such rows are stamped `policy_decision='unbound'` so the
    attribution-without-containment state is explicit in every row, never implied.
 3. **An unverified claim never reaches the `agent_id` column.** The request proceeds
    unchanged (correlation is advisory; rejecting requests on bad headers would let a
@@ -152,8 +153,16 @@ with the following hard rules:
    keeps such rows distinguishable from credential-verified attribution.
 4. **Only `get_agent_bootstrap`'s explicit `agent_id` hard-fails** on mismatch (uniform
    `agent_not_found`), because there it is a functional input, not telemetry.
-5. **Credentials not bound to any agent**: if an explicit `agent_id` disagrees with baggage,
-   the explicit value wins and the event records `correlation_conflict: true` in metadata.
+5. **Credentials not bound to any agent**: if an explicit `agent_id` disagrees with a
+   baggage claim, the explicit value wins the **candidate slot** (precedence per the order
+   above) and the event records `correlation_conflict: true` in metadata. Winning precedence
+   is **not** a verification exemption (clarified by #1286; the pre-clarification wording
+   was ambiguously readable as "trusted directly"): the explicit candidate is still verified
+   per Rule 2 before reaching `agent_id`, and is stamped `policy_decision='unbound'` when it
+   does. The keyed-hash slot (Rule 3) records the highest-precedence *unverified* claim: on
+   a verified conflict that is the losing baggage claim; on verification failure it is the
+   explicit candidate itself, which never reaches `agent_id` — with `correlation_conflict`
+   preserved in both shapes.
 
 ## Vendor-attribute gap: `kagura.agent.run.id`
 

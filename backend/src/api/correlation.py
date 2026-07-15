@@ -13,8 +13,11 @@ advisory: nothing here grants or denies access. Invalid values are dropped
 generation so every audit row is correlatable.
 
 Identity precedence (normative): credential-bound ``agent_id`` (verified key)
-> explicit bootstrap arg > baggage claim. A claim never outranks a credential
-— see :func:`resolve_agent_correlation`.
+> explicit bootstrap arg > baggage claim. A claim never outranks a credential,
+and winning precedence is never a verification exemption — on an agent-unbound
+credential the winning candidate (explicit arg included) still passes the
+Rule-2 same-member predicate before reaching ``agent_id``. See
+:func:`resolve_agent_correlation`.
 """
 
 from __future__ import annotations
@@ -35,8 +38,9 @@ BAGGAGE_SESSION_ID = "gen_ai.conversation.id"
 BAGGAGE_SESSION_ID_ALIAS = "session.id"
 BAGGAGE_RUN_ID = "kagura.agent.run.id"
 
-# policy_decision stamped on rows whose agent_id came from a *verified baggage
-# claim* on an agent-UNBOUND credential (attribution without containment).
+# policy_decision stamped on rows whose agent_id came from a *verified claim*
+# (explicit arg or baggage) on an agent-UNBOUND credential (attribution
+# without containment).
 POLICY_DECISION_UNBOUND = "unbound"
 
 _CORRELATION_TOKEN_MAX_LEN = 128
@@ -283,10 +287,13 @@ async def resolve_agent_correlation(
       ``unverified_agent_claim`` — never precedence-resolved in favor of the
       claim.
     - **Agent-unbound credential** (Rules 2/5): an explicit arg wins over
-      baggage (``correlation_conflict`` when they disagree); a baggage claim is
-      trusted into ``agent_id`` IFF :func:`verify_baggage_agent_claim` passes,
-      and such rows are stamped ``policy_decision='unbound'``. An unverified
-      claim is keyed-hashed only.
+      baggage as the *candidate* (``correlation_conflict`` when they
+      disagree) — precedence, not a verification exemption: the winning
+      candidate (explicit arg or baggage claim) is trusted into ``agent_id``
+      IFF :func:`verify_baggage_agent_claim` passes, and such rows are
+      stamped ``policy_decision='unbound'``. The keyed-hash slot records the
+      highest-precedence *unverified* claim: the candidate itself on
+      verifier-False, or the losing baggage claim on a verified conflict.
     """
     baggage_claim_raw = correlation.agent_claim if correlation else None
 
@@ -305,25 +312,26 @@ async def resolve_agent_correlation(
         )
 
     # --- Agent-unbound credential. ---------------------------------------
-    if member_user_id is None or workspace_id is None:
-        # Cannot verify anything — keep any raw claim as a hash only.
-        return ResolvedAgentCorrelation(
-            agent_id=None,
-            policy_decision=None,
-            unverified_agent_claim_hash=_hash_claim(baggage_claim_raw)
-            if baggage_claim_raw
-            else None,
-            correlation_conflict=False,
-        )
-
-    # Rule 5: explicit arg wins over baggage; conflict flagged when they differ.
+    # Conflict is a pure fact of the two inputs — computed before any guard
+    # so every unbound-path row carries it.
     conflict = bool(
         explicit_agent_id is not None
         and baggage_claim_raw
         and baggage_claim_raw != str(explicit_agent_id)
     )
+    # Rule 5: the explicit arg wins the *candidate* slot over baggage.
     candidate = explicit_agent_id
     candidate_raw = str(explicit_agent_id) if explicit_agent_id is not None else baggage_claim_raw
+
+    if member_user_id is None or workspace_id is None:
+        # Cannot verify anything — keep the highest-precedence raw claim as
+        # a hash only (explicit arg shadows baggage, as on the bound path).
+        return ResolvedAgentCorrelation(
+            agent_id=None,
+            policy_decision=None,
+            unverified_agent_claim_hash=_hash_claim(candidate_raw) if candidate_raw else None,
+            correlation_conflict=conflict,
+        )
 
     if candidate is None:
         # Only a baggage claim — parse it to a UUID.
@@ -340,11 +348,15 @@ async def resolve_agent_correlation(
         db, claimed_agent_id=candidate, member_user_id=member_user_id, workspace_id=workspace_id
     )
     if verified:
-        # Attribution without containment — stamp 'unbound'.
+        # Attribution without containment — stamp 'unbound'. On a conflict
+        # the losing baggage claim is the unverified one: hash it rather
+        # than dropping it to a bare boolean (#1286 item 1).
         return ResolvedAgentCorrelation(
             agent_id=candidate,
             policy_decision=POLICY_DECISION_UNBOUND,
-            unverified_agent_claim_hash=None,
+            unverified_agent_claim_hash=_hash_claim(baggage_claim_raw)
+            if conflict and baggage_claim_raw
+            else None,
             correlation_conflict=conflict,
         )
     # Rule 3: unverified claim never reaches agent_id — keyed hash only.
