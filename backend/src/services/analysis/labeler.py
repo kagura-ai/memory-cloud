@@ -36,6 +36,28 @@ its own session via ``_get_session_factory()``. SQLAlchemy 2.x
 session, and ``LLMService.complete_json`` performs a DB lookup
 (``_get_user_api_key`` resolving the BYOK key) inside its coroutine
 frame.
+
+**#1247 pooled-connection hold — WAIVED (documented rationale).** The
+per-task session's pooled connection stays borrowed across the LLM HTTP
+round-trip, so at ``Semaphore(8)`` up to 8 of the pool's 15 connections
+(``pool_size=5 + max_overflow=10``) are held for the duration of the
+labeling call. Releasing the connection before the HTTP call is NOT
+safely achievable within the analysis subsystem: the ONLY DB access in
+this coroutine is the BYOK key SELECT, and it happens *inside* the shared
+``LLMService.complete_json`` (via ``_get_provider`` → ``_get_user_api_key``),
+which couples that read to the HTTP call with no public seam to split
+them; and ``_label_one_cluster`` itself performs NO post-call DB write
+(persistence happens later in ``reporter`` on the orchestrator's shared
+session), so the "read → release → HTTP → re-acquire to persist" shape
+does not apply here. A correct fix requires either refactoring the
+cross-cutting ``LLMService`` (out of scope — it also serves the sleep
+subsystem) to expose pre-resolved-key / connection-releasing call paths,
+or reimplementing its provider-call + retry/JSON-parse/usage logic inside
+this module (risky duplication for a low-severity finding). The hold is
+bounded: at most 8 concurrent borrows (< 15-connection capacity), each
+lasting one labeling call (seconds, ``max_tokens=1024``), not the whole
+run. Tracked with the v1.5 ``LLMService`` ``fallback_chain`` work already
+noted in ``llm_caller.py``.
 """
 
 from __future__ import annotations
@@ -223,6 +245,12 @@ async def _label_one_cluster(
         # so concurrent BYOK lookups don't race the orchestrator's
         # shared session. The connection pool (size=5 + max_overflow=10)
         # comfortably absorbs 8 concurrent borrowed connections.
+        #
+        # #1247 (WAIVED): this connection stays borrowed across the LLM
+        # HTTP call. Releasing it first is not safely in-scope here — the
+        # BYOK read lives inside the shared LLMService.complete_json and
+        # there is no post-call DB write to re-acquire for. Full rationale
+        # in the module docstring ("#1247 pooled-connection hold").
         session_factory = _get_session_factory()
         async with session_factory() as task_session:
             task_llm_service = LLMService(task_session)
