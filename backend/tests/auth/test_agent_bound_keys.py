@@ -206,6 +206,23 @@ class TestAgentScopePropagation:
         set_agent_scope_from_verified(None)
         assert get_agent_scope() is None
 
+    @pytest.mark.asyncio
+    async def test_session_entry_resets_stale_scope(self):
+        # Issue #1281 item 3: a session request must never observe a stale agent
+        # scope left in the contextvar; the REST entry resets it up-front,
+        # symmetric with the MCP transport.
+        from types import SimpleNamespace
+
+        from auth.dependencies import get_current_user
+
+        set_agent_scope(AgentScope(agent_id=AGENT_ID, enforcement_mode="enforce"))
+        request = SimpleNamespace(
+            state=SimpleNamespace(user={"user_id": "u"}),
+            url=SimpleNamespace(path="/x"),
+        )
+        await get_current_user(request)
+        assert get_agent_scope() is None
+
     def test_agent_id_without_mode_fails_closed_to_enforce(self):
         """code-review hardening: an agent-bound key (agent_id set) with a
         missing enforcement_mode is an anomaly — it must default to enforce
