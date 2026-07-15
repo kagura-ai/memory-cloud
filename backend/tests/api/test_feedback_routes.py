@@ -54,7 +54,12 @@ async def test_record_feedback_success_uses_read_gate(service, perm, context_id,
     assert resp.memory_id == memory_id
     assert resp.helpful is True
     perm.check_context_access.assert_awaited_once_with(
-        "test_user", context_id, required_role=ContextRole.VIEWER
+        "test_user",
+        context_id,
+        required_role=ContextRole.VIEWER,
+        # #1286 (P0-5): deny-capture audit identity — a binding/rbac deny at
+        # this gate persists an operation="feedback" row.
+        operation="feedback",
     )
     # user_id is taken from the authenticated principal, not the body.
     service.record_feedback.assert_awaited_once()

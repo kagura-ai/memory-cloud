@@ -73,7 +73,7 @@ async def handle_feedback(
             return _error_response("invalid_context_id_format", str(exc))
         try:
             # Read-adjacent: verify the caller can reach the context (IDOR guard).
-            await _resolve_context_for_read(db, user_id, context_id)
+            await _resolve_context_for_read(db, user_id, context_id, operation="feedback")
         except _ContextNotFoundError as exc:
             return exc.to_response()
 

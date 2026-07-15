@@ -245,6 +245,7 @@ class PermissionService:
         *,
         required_role: WorkspaceRole | str = WorkspaceRole.VIEWER,
         key_workspace_id: UUID | None = None,
+        operation: str | None = None,
     ) -> Context:
         """Resolve a ``context_id`` to a Context the caller can read, with uniform 404.
 
@@ -408,12 +409,14 @@ class PermissionService:
         # writers pass admin/owner. WorkspaceRole is a StrEnum, so the
         # comparison holds for both str and enum callers.
         access = "read" if required_role == WorkspaceRole.VIEWER else "write"
-        await self._apply_agent_binding_filter(context_id, access=access, user_id=user_id)
+        await self._apply_agent_binding_filter(
+            context_id, access=access, user_id=user_id, operation=operation
+        )
 
         return context
 
     async def _apply_agent_binding_filter(
-        self, context_id: UUID, *, access: str, user_id: str
+        self, context_id: UUID, *, access: str, user_id: str, operation: str | None = None
     ) -> None:
         """Deny with the uniform 404 when the agent binding subtracts access.
 
@@ -423,6 +426,14 @@ class PermissionService:
         the context exists but is write-forbidden would leak the CWE-639
         signal the uniform-404 posture removes. Shadow-mode violations are
         logged and allowed (``would_deny``, the enforcement ramp).
+
+        #1286 (P0-5): ``operation`` threads MAE audit identity into the
+        evaluation so denies at THIS chokepoint persist — for the MCP read
+        tools this is the pre-gate that raises before any service-layer gate
+        runs, so without it enforce-mode read denies leave no audit row on
+        the MCP face (the #1291/#1292 parity class). ``None`` (callers
+        outside the MAE vocabulary — context CRUD/metadata reads) keeps the
+        log-only behavior.
         """
         from auth.agent_scope import get_agent_scope
 
@@ -433,7 +444,7 @@ class PermissionService:
         from services.agent_binding_service import AgentBindingService
 
         allowed, decision = await AgentBindingService(self.db).evaluate_context_access(
-            scope, context_id, access
+            scope, context_id, access, operation=operation, user_id=user_id
         )
         if not allowed:
             logger.warning(
@@ -507,6 +518,8 @@ class PermissionService:
         user_id: str,
         context_id: UUID,
         required_role: ContextRole | str = ContextRole.VIEWER,
+        *,
+        operation: str | None = None,
     ) -> tuple[Context, ContextRole]:
         """Check if user has required context access.
 
@@ -551,7 +564,9 @@ class PermissionService:
             required_role if isinstance(required_role, ContextRole) else ContextRole(required_role)
         )
         access = "read" if required == ContextRole.VIEWER else "write"
-        await self._apply_agent_binding_filter(context_id, access=access, user_id=user_id)
+        await self._apply_agent_binding_filter(
+            context_id, access=access, user_id=user_id, operation=operation
+        )
 
         return context, effective_role
 
@@ -905,6 +920,8 @@ class PermissionService:
         workspace_id: UUID,
         context_id: UUID,
         access: str = "read",
+        operation: str | None = None,
+        memory_id: UUID | None = None,
     ) -> bool:
         """Check if user can access a memory based on workspace membership and context privacy.
 
@@ -921,12 +938,24 @@ class PermissionService:
         forget) MUST pass ``access="write"`` so a ``can_read``-only binding
         cannot be used to mutate. No-op for non-agent credentials.
 
+        #1286 item 2 (P0-5): ``operation`` / ``memory_id`` are the
+        audit-identity passthrough. The binding-shaped deny is persisted
+        inside the binding evaluation; the rbac-shaped branches below stamp
+        ``policy_decision='rbac_denied'`` themselves — this is the one
+        chokepoint where the two deny causes collapse into a single bool, so
+        the emission is what keeps them distinguishable in audit. No-op for
+        non-agent traffic and for un-threaded callers.
+
         Args:
             user_id: Requesting user ID
             memory_user_id: Memory creator's user ID
             workspace_id: Workspace ID
             context_id: Context ID
             access: ``"read"`` (default) or ``"write"`` — the binding gate.
+            operation: MAE operation vocabulary value for deny capture, or
+                ``None`` (no emission) for callers outside that vocabulary.
+            memory_id: The requested memory id — rides ``event_metadata`` as
+                an unverified claim on deny rows.
 
         Returns:
             True if user can access, False otherwise
@@ -938,7 +967,45 @@ class PermissionService:
             # must not reach its own memories there via memory_id).
             from services.agent_binding_service import agent_binding_permits
 
-            return await agent_binding_permits(self.db, context_id, access)
+            return await agent_binding_permits(
+                self.db,
+                context_id,
+                access,
+                operation=operation,
+                user_id=str(user_id),
+                requested_memory_id=memory_id,
+            )
+
+        async def _emit_rbac_denied() -> None:
+            # #1286 item 2 (P0-5): persist the rbac-shaped deny for agent
+            # traffic. workspace_id = the CREDENTIAL scope (never the
+            # memory's workspace param — that is derived from the requested,
+            # unverified identifier); requested ids ride event_metadata.
+            if operation is None:
+                return
+            from auth.agent_scope import get_agent_scope
+
+            scope = get_agent_scope()
+            if scope is None:
+                # D34: only verified-agent traffic is audited.
+                return
+            from services.agent_binding_service import DECISION_RBAC_DENIED
+            from services.memory_access_event_writer import emit_memory_access_event
+
+            metadata: dict[str, str] = {
+                "requested_context_id": str(context_id),
+                "access": access,
+            }
+            if memory_id is not None:
+                metadata["requested_memory_id"] = str(memory_id)
+            await emit_memory_access_event(
+                operation=operation,
+                outcome="denied",
+                workspace_id=scope.workspace_id,
+                user_id=str(user_id),
+                policy_decision=DECISION_RBAC_DENIED,
+                extra_metadata=metadata,
+            )
 
         # Owner can always access their own memories (RBAC), but the binding
         # still subtracts.
@@ -953,9 +1020,11 @@ class PermissionService:
 
         if not is_shared:
             # Private context: only creator can access
+            await _emit_rbac_denied()
             return False
 
         # Shared context: check workspace membership, then the binding.
         if not await self.is_workspace_member(user_id, workspace_id):
+            await _emit_rbac_denied()
             return False
         return await _binding_ok()

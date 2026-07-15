@@ -177,6 +177,8 @@ async def _resolve_context(
     db: "AsyncSession",
     user_id: str,
     context_id: UUID,
+    *,
+    operation: str | None = None,
 ) -> Any:
     """Resolve and validate context access.
 
@@ -184,6 +186,10 @@ async def _resolve_context(
         db: Database session
         user_id: User ID
         context_id: Context UUID
+        operation: MAE operation vocabulary value for #1286 deny capture
+            (threaded by the memory write tools: remember / update / forget).
+            ``None`` for callers outside that vocabulary — their binding
+            denies stay log-only here.
 
     Returns:
         Context object
@@ -237,8 +243,18 @@ async def _resolve_context(
     if scope is not None:
         from services.agent_binding_service import ACCESS_WRITE, AgentBindingService
 
+        # #1286 (P0-5): deny capture. In shadow mode the request proceeds
+        # into the service-layer gates, which may re-evaluate the same
+        # context — the writer's request-scoped dedup collapses those shadow
+        # rows to one, so this pre-gate emits unconditionally. A hard deny
+        # stops the request HERE (the service gate is never reached), so its
+        # emission is load-bearing.
         allowed, decision = await AgentBindingService(db).evaluate_context_access(
-            scope, context_id, ACCESS_WRITE
+            scope,
+            context_id,
+            ACCESS_WRITE,
+            operation=operation,
+            user_id=user_id,
         )
         if not allowed:
             logger.warning(
@@ -262,6 +278,7 @@ async def _resolve_context_for_read(
     context_id: UUID,
     *,
     required_role: str = "viewer",
+    operation: str | None = None,
 ) -> Any:
     """Resolve a context_id to a Context the caller can read, MCP-flavored.
 
@@ -288,11 +305,16 @@ async def _resolve_context_for_read(
     from utils.exceptions import NotFoundException
 
     try:
+        # #1286 (P0-5): ``operation`` threads MAE audit identity into the
+        # binding filter so an enforce-mode hard deny at THIS pre-gate — which
+        # stops the request before any service-layer gate — still persists
+        # its denied row (the MCP read face of the #1291/#1292 parity lesson).
         return await PermissionService(db).resolve_context_for_workspace_read(
             user_id=user_id,
             context_id=context_id,
             required_role=required_role,
             key_workspace_id=_mcp_key_workspace_scope.get(),
+            operation=operation,
         )
     except NotFoundException as exc:
         raise _ContextNotFoundError(

@@ -41,6 +41,10 @@ logger = get_logger(__name__)
 DECISION_ALLOWED = "allowed"
 DECISION_BINDING_DENIED = "binding_denied"
 DECISION_WOULD_DENY = "would_deny"
+# #1286 (P0-5): an RBAC-shaped deny observed on the binding-evaluation path
+# (can_access_memory collapses RBAC and binding into one bool — the rbac
+# branches stamp this so the two deny causes stay distinguishable in audit).
+DECISION_RBAC_DENIED = "rbac_denied"
 
 # Access kinds the chokepoints evaluate.
 ACCESS_READ = "read"
@@ -61,18 +65,19 @@ def _validate_type_array(value: Any, field: str) -> list[str] | None:
     forward-provisioned in the F1 DDL, but per-memory type/source enforcement
     is materially larger than the context-level binding gate (it must filter
     each recall/reference/write by the memory's own type) and lands in a
-    follow-up (#1281). To avoid a **fail-open** — an admin setting a restriction
-    that is silently ignored, a false sense of containment — CRUD rejects any
-    non-NULL value for now. ``NULL`` (= all types, the P0-2-enforced value) is
-    the only accepted value. Code-review of #1275. (Same "provisioned-but-
-    reserved" posture as ``write_policy='staged'``.)
+    follow-up (#1299, split out of #1286 and deferred to P1). To avoid a
+    **fail-open** — an admin setting a restriction that is silently ignored, a
+    false sense of containment — CRUD rejects any non-NULL value for now.
+    ``NULL`` (= all types, the P0-2-enforced value) is the only accepted
+    value. Code-review of #1275. (Same "provisioned-but-reserved" posture as
+    ``write_policy='staged'``.)
     """
     if value is None:
         return None
     raise ValidationError(
         f"'{field}' is reserved: per-type binding filters are provisioned but "
         "not yet enforced — set it to null (all types) for now. Type/source "
-        "filtering ships in a follow-up (#1281).",
+        "filtering ships in a follow-up (#1299).",
         field=field,
     )
 
@@ -86,7 +91,15 @@ def _validate_write_policy(value: Any) -> str:
     return value
 
 
-async def agent_binding_permits(db: AsyncSession, context_id: uuid.UUID, access: str) -> bool:
+async def agent_binding_permits(
+    db: AsyncSession,
+    context_id: uuid.UUID,
+    access: str,
+    *,
+    operation: str | None = None,
+    user_id: str | None = None,
+    requested_memory_id: uuid.UUID | None = None,
+) -> bool:
     """Reusable subtractive gate for the per-request agent scope.
 
     Returns True when the request is not an agent credential (scope None) or
@@ -99,6 +112,11 @@ async def agent_binding_permits(db: AsyncSession, context_id: uuid.UUID, access:
     closing the "MemoryService authorizes via its own RBAC path, not the
     named chokepoint" gap (Copilot/inner review of #1275). No-op cost for
     every non-agent credential (one contextvar read).
+
+    #1286 (P0-5): ``operation`` / ``user_id`` / ``requested_memory_id`` are
+    the audit-identity passthrough — when a memory-op caller threads them,
+    the evaluation persists its deny decisions to ``memory_access_events``
+    (see :meth:`AgentBindingService.evaluate_context_access`).
     """
     from auth.agent_scope import get_agent_scope
 
@@ -106,7 +124,12 @@ async def agent_binding_permits(db: AsyncSession, context_id: uuid.UUID, access:
     if scope is None:
         return True
     allowed, _decision = await AgentBindingService(db).evaluate_context_access(
-        scope, context_id, access
+        scope,
+        context_id,
+        access,
+        operation=operation,
+        user_id=user_id,
+        requested_memory_id=requested_memory_id,
     )
     return allowed
 
@@ -315,7 +338,14 @@ class AgentBindingService:
     # ------------------------------------------------------------------
 
     async def evaluate_context_access(
-        self, scope: AgentScope, context_id: uuid.UUID, access: str
+        self,
+        scope: AgentScope,
+        context_id: uuid.UUID,
+        access: str,
+        *,
+        operation: str | None = None,
+        user_id: str | None = None,
+        requested_memory_id: uuid.UUID | None = None,
     ) -> tuple[bool, str]:
         """Evaluate the binding intersection for one context.
 
@@ -325,6 +355,20 @@ class AgentBindingService:
         legacy semantics (the migration ramp) — callers MUST treat it as
         allowed. This function can only subtract: it is called strictly AFTER
         the existing RBAC decision allowed the request.
+
+        #1286 (P0-5) deny capture: when the caller threads audit identity
+        (``operation`` + ``user_id``), the decision is persisted to
+        ``memory_access_events`` — a hard deny as ``outcome='denied'`` /
+        ``policy_decision='binding_denied'``; a shadow would-deny as
+        ``outcome='success'`` / ``policy_decision='would_deny'`` (the request
+        proceeds; the row is the shadow→enforce ramp signal). The requested
+        identifiers ride ``event_metadata`` as claims (the authoritative
+        ``context_id`` / ``memory_id`` columns stay NULL) and ``workspace_id``
+        is the CREDENTIAL scope. When several gates evaluate the SAME denied
+        context in one request (pre-gate + service gate), the writer's
+        request-scoped dedup collapses the shadow rows to one — every gate
+        may emit unconditionally. Hard denies stop the request, so only one
+        gate can ever reach its emission.
         """
         result = await self.db.execute(
             select(AgentContextBinding).where(
@@ -347,14 +391,23 @@ class AgentBindingService:
             return True, DECISION_ALLOWED
 
         if scope.enforcement_mode == AGENT_ENFORCEMENT_SHADOW:
-            # Shadow ramp: proceed, but record the violation. The durable
-            # would_deny row lands in memory_access_events with P0-5 (#1278).
+            # Shadow ramp: proceed, but record the violation (#1286 item 2 —
+            # the durable would_deny row this log line used to promise).
             logger.warning(
                 "agent_binding_would_deny",
                 agent_id=str(scope.agent_id),
                 context_id=str(context_id),
                 access=access,
                 bound=binding is not None,
+            )
+            await self._emit_decision(
+                scope,
+                context_id,
+                access,
+                DECISION_WOULD_DENY,
+                operation=operation,
+                user_id=user_id,
+                requested_memory_id=requested_memory_id,
             )
             return True, DECISION_WOULD_DENY
 
@@ -365,7 +418,55 @@ class AgentBindingService:
             access=access,
             bound=binding is not None,
         )
+        await self._emit_decision(
+            scope,
+            context_id,
+            access,
+            DECISION_BINDING_DENIED,
+            operation=operation,
+            user_id=user_id,
+            requested_memory_id=requested_memory_id,
+        )
         return False, DECISION_BINDING_DENIED
+
+    async def _emit_decision(
+        self,
+        scope: AgentScope,
+        context_id: uuid.UUID,
+        access: str,
+        decision: str,
+        *,
+        operation: str | None,
+        user_id: str | None,
+        requested_memory_id: uuid.UUID | None,
+    ) -> None:
+        """Persist a deny/would-deny decision (#1286 item 2, P0-5).
+
+        No-op unless the caller threaded audit identity — un-threaded
+        chokepoints (enumeration surfaces, non-memory ops outside the MAE
+        vocabulary) keep the log-only behavior. The writer is fail-open on
+        its own independent session, so this can never break the request.
+        """
+        if operation is None or user_id is None:
+            return
+        from services.memory_access_event_writer import emit_memory_access_event
+
+        metadata: dict[str, str] = {
+            "requested_context_id": str(context_id),
+            "access": access,
+        }
+        if requested_memory_id is not None:
+            metadata["requested_memory_id"] = str(requested_memory_id)
+        await emit_memory_access_event(
+            operation=operation,
+            # Shadow proceeds — the request outcome IS success; the ramp
+            # signal rides policy_decision.
+            outcome="denied" if decision == DECISION_BINDING_DENIED else "success",
+            workspace_id=scope.workspace_id,
+            user_id=user_id,
+            policy_decision=decision,
+            extra_metadata=metadata,
+        )
 
     async def readable_context_ids(self, agent_id: uuid.UUID) -> set[uuid.UUID]:
         """The agent's read set — for enumeration-surface intersection."""
