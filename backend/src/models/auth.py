@@ -364,6 +364,13 @@ class APIKey(Base):
             "agent_id IS NULL OR bound_context_id IS NULL",
             name="ck_api_keys_agent_public_exclusion",
         ),
+        # Issue #1281 item 4: an agent-bound member key is always
+        # workspace-scoped. Enforced at mint + re-asserted at verify; this
+        # single-table CHECK makes it a structural DB guarantee (migration e67).
+        CheckConstraint(
+            "agent_id IS NULL OR workspace_id IS NOT NULL",
+            name="ck_api_keys_agent_requires_workspace",
+        ),
     )
 
     def __repr__(self) -> str:
