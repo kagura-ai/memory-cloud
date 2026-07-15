@@ -31,11 +31,11 @@ Karpathy's pattern describes any "living knowledge base" as 5 layers. Kagura's i
                               ↓
 ┌──────────────────────┬──────────────────────────────────────┐
 │   MCP Server (HTTP)  │          REST API (FastAPI)          │
-│  - 50 MCP Tools      │  - Memory CRUD                       │
+│  - 60 MCP Tools      │  - Memory CRUD                       │
 │    (memory / agent   │  - OAuth2 endpoints                  │
-│     substrate / edges│  - API Key management                │
-│     / contexts / tags│  - Agent state + feedback lanes      │
-│     / files /analyses│  - Resource Ingest API               │
+│     substrate/control│  - API Key + Agent management        │
+│     / edges / context│  - Agent state + feedback lanes      │
+│     / files / analysis│ - Resource Ingest API               │
 │     / resources /    │  - Admin: sleep-reports, neural cfg  │
 │     sleep / usage)   │                                      │
 │  - Session Mgmt      │                                      │
@@ -48,6 +48,7 @@ Karpathy's pattern describes any "living knowledge base" as 5 layers. Kagura's i
 │  GraphService │ NeuralMemoryEngine │ WorkspaceService       │
 │  PermissionService │ SleepService │ LLMService              │
 │  ResourceIndexer │ ContextService │ QuotaService            │
+│  AgentRegistry │ AgentBinding │ AgentBootstrap              │
 └─────────────────────────────────────────────────────────────┘
                               ↓
 ┌─────────────────────────────────────────────────────────────┐
@@ -273,6 +274,17 @@ The feedback signal is the prerequisite for a future Eval→Skill self-update lo
 
 Connectors provisioned via `setup_connector` (#910 / #911) seed a canonical chat **resource schema** at registration: a single `text` field (fulltext+vector indexed) holding the ai-worker's per-message LLM summary. Lineage (`source_uri` / memory details) stays in `event_metadata`, not the payload. Defined in `ConnectorProvisioningService` (`backend/src/services/connector_provisioning.py`).
 
+## Agent Memory & Context Control Plane (v0.49.0 preview)
+
+The control plane extends workspace RBAC rather than creating a second principal system:
+
+1. `agents` registers a workload inside one workspace. The row is a resource, not a credential.
+2. An owner-provisioned member key may point to the agent through nullable `api_keys.agent_id`. Verification rejects keys for `suspended` or `retired` agents.
+3. `agent_context_bindings` narrows the underlying member/RBAC decision. In `enforce` mode, only bound contexts survive the intersection; in `shadow` mode the legacy permission result remains active while violations are observed.
+4. `get_agent_bootstrap` resolves the agent and binding, then composes existing context/pinned/recall/upcoming/state services. It does not introduce a parallel retrieval or ranking path.
+
+Registry, context-level bindings, bootstrap, transport correlation, and the append-only `memory_access_events` audit foundation are implemented. REST middleware and the MCP authentication seam parse W3C `traceparent`/baggage into a request-local correlation context; credential-bound identity has precedence, and missing trace/span IDs are generated server-side. This is observability plumbing, not an authorization input or server-side span exporter. Type/source filters are forward-provisioned but reject non-`null` values until per-memory enforcement lands. The audit writer currently covers bootstrap, load-pinned, feedback, recall, reference, and remember; filters, `update`/`forget` emission, and deny persistence continue in [#1286](https://github.com/kagura-ai/memory-cloud/issues/1286).
+
 ## Database Design
 
 ### PostgreSQL Tables
@@ -281,10 +293,12 @@ Tables are grouped by domain. The authoritative list lives in `backend/src/model
 
 **Identity & access**
 - **users** — User accounts
-- **api_keys** — API key management (SHA256 hashed)
+- **api_keys** — API key management (SHA256 hashed); optional `agent_id` binds an owner-provisioned member key to a registered agent
 - **external_api_keys** — OpenAI/Cohere keys (Fernet encrypted)
 - **oauth_clients** / **oauth_authorization_codes** / **oauth_tokens** — OAuth2 server
 - **audit_logs** — Security-relevant audit trail
+- **agents** — Workspace-scoped agent registry with lifecycle (`active | suspended | retired`) and binding enforcement mode (`shadow | enforce`)
+- **agent_context_bindings** — Purely subtractive per-agent context read/write/default policy; type/source columns are reserved and reject non-`null` values pending #1286
 
 **Workspaces & contexts** (top-level tenancy)
 - **workspaces** — Top-level organizational unit (team / project owner)
@@ -297,7 +311,7 @@ Tables are grouped by domain. The authoritative list lives in `backend/src/model
 
 **Memories & graph**
 - **memories** — 3-layer memory storage. Carries server-stamped `source_type` (provenance) and `delivery_mode` (`on_recall` / `always` / `on_trigger`)
-- **attachments** — Small files (≤5 MB) stored **inline as PostgreSQL `BYTEA`**, linked to a memory (Issue #330). Distinct from R2 object storage — see *File storage* below and the [Object Storage (R2)](#object-storage-r2) section
+- **attachments** — Legacy small-file rows (≤5 MB) stored inline as PostgreSQL `BYTEA`. The public `/api/v1/attachments/*` routes are deprecated and return `410 Gone`; new uploads use `file_objects` in R2
 - **neural_memory_edges** — Primary Hebbian edge storage (workspace + context scoped)
 - **graph_memory** — Legacy NetworkX JSON (read paths still reference it; new writes go to `neural_memory_edges`)
 
@@ -312,6 +326,8 @@ Tables are grouped by domain. The authoritative list lives in `backend/src/model
 - **resource_schemas** — Versioned schemas declared per Resource
 - **indexer_state** — Per-(resource, context) indexer cursor + error metrics
 - **resource_tokens** — Per-Resource ingest tokens (workspace-scoped)
+
+Since v0.48.0, REST and MCP batch ingest are thin adapters over `ResourceIngestService`. Quota, identity resolution, UTF-8 byte-size validation, per-event SAVEPOINT handling, partial-success semantics, commit behavior, and post-commit scheduling therefore have one implementation on both surfaces.
 
 **File storage (R2 object storage)** (Issue #485 — see [Object Storage (R2)](#object-storage-r2))
 - **file_objects** — One row per uploaded file held in Cloudflare R2. `status` ∈ `reserved | uploaded | failed` (`CHECK`); `storage_backend` is `r2`-only (`CHECK valid_file_storage_backend`); `storage_key` = `{workspace_id}/{sha256[:2]}/{sha256}`. A partial-unique index dedups *active* files per `(workspace_id, lower(sha256))` (excludes soft-deleted and `failed` rows). **This — not `attachments` — is the R2-backed path**; `attachments` is inline Postgres BYTEA.
@@ -422,6 +438,8 @@ Authorization is **workspace-scoped RBAC**. Every authenticated request is resol
 **Context-level privacy**:
 - **Private** (`is_private=true`): Only the creator can access
 - **Shared** (`is_private=false`): All workspace members with the appropriate role
+
+**Agent-bound credentials** add a subtractive layer after the existing RBAC decision. `enforce` mode intersects access with `agent_context_bindings`; `shadow` mode records the would-deny result without narrowing access. Requests made with keys that have no `agent_id` are unchanged.
 
 All checks funnel through `PermissionService` in `backend/src/services/permission_service.py`; clients never supply a raw `workspace_id` without server-side verification.
 

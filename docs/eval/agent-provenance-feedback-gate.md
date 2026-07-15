@@ -78,8 +78,8 @@ They are settable per context via the `update_search_config` MCP tool
 `PUT /api/v1/contexts/{context_id}/search-config`
 (`backend/src/api/routes/context_search_config.py`). Consequently, a "reinforcement-default
 flip" under this gate means a **column-default change plus migration**, not an env-var change;
-new migrations chain from the repository's current alembic head (`e62_1245_assign_mem_idx`) at
-implementation time — not from any revision id sketched in RFC drafts.
+new migrations chain from the repository's actual head at implementation time — not from any
+revision id sketched in RFC drafts. F1/P0-2 already occupies `e63`/`e64`/`e65`.
 
 ## Restated RFC-0002 decisions this gate depends on
 
@@ -96,8 +96,8 @@ Restated here so the document is self-contained (the RFC is maintained locally a
   rejected for P0 because bootstrap reads genuinely influence behavior and a lane-specific
   carve-out would fork recall semantics.
 - **Bootstrap purity (Decision D11)** — the designed `get_agent_bootstrap` recall component
-  (`docs/design/agent-bootstrap-contract.md`, F2 sign-off, #1259 — pending merge at time of
-  writing) is a pure composition over the normal recall chokepoint: it deliberately keeps
+  (`docs/design/agent-bootstrap-contract.md`, F2 sign-off, #1259; implemented by #1276) is a
+  pure composition over the normal recall chokepoint: it deliberately keeps
   recall's counter and reinforcement side effects, because bootstrap reads influence behavior
   and should reinforce.
 - **Threat model T5 residual (forged feedback)** — with arbitration OFF (the default),
@@ -143,9 +143,9 @@ semantics).
 
 - Exposing a public transport for `record_host_feedback` (own design; the seam exists at the
   service layer and the harness can call it in-process).
-- The P1 fleet dashboard and per-agent feedback-anomaly views (they consume the planned
-  `memory_access_events` audit table, which is **not yet in the tree**; this gate is designed
-  to run without it, using harness-local attribution).
+- The P1 fleet dashboard and per-agent feedback-anomaly views. The `memory_access_events`
+  table is in the tree as of v0.49.0, but those visualization surfaces remain out of scope;
+  this gate continues to run with harness-local attribution.
 - Tuning the bounded-boost design or the recall/explore signal boundary (#120).
 - Content-level screening of in-tier poisoning (server-side DLP; P1, separate). Arbitration
   protects **ranking**, not content — poisoning containment remains `trust_tier` plus

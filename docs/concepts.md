@@ -309,14 +309,26 @@ An agent loop needs durable, *exact-match* scratch state (current task, plan ste
 
 See [Architecture › Agent Memory Substrate](architecture.md#agent-memory-substrate-lanes) for the table-level design and how these lanes sit beside `memories`.
 
+## Agent Memory & Context Control Plane (preview)
+
+The control plane is a separate layer over the Agent Memory Substrate. The substrate defines *what an agent can load and retain*; the control plane identifies an agent workload, narrows its existing workspace permissions, and assembles a safe session-start bundle.
+
+- **Agent Registry** — `agents` rows are workspace-scoped resources, not authentication principals. `active | suspended | retired` is a fail-closed lifecycle switch; `shadow | enforce` controls whether binding violations are observed or denied.
+- **Agent-bound member keys** — an owner-provisioned member key may carry `api_keys.agent_id`. It still authenticates as the member and keeps the same RBAC ceiling.
+- **Subtractive context bindings** — `agent_context_bindings` computes effective access as existing RBAC ∩ binding. A binding can never grant access. In `enforce` mode, an unbound context is denied with the same not-found shape used for inaccessible contexts.
+- **Composed bootstrap** — `get_agent_bootstrap` combines the context guide, pinned memories, an optional trusted-only recall, upcoming time memories, and agent state. Components fail softly; identity and authorization fail closed.
+
+The v0.49.0 milestone shipped the registry, context-level bindings, agent-bound keys, bootstrap, W3C Trace Context/baggage correlation, and the append-only `memory_access_events` foundation. Correlation is observability, never authorization; credential-bound identity outranks explicit/bootstrap and baggage claims. Per-memory type/source filters remain reserved and reject non-`null` values; audit emission currently covers bootstrap, load-pinned, feedback, recall, reference, and remember. Filter enforcement, `update`/`forget` emission, and deny persistence continue in [#1286](https://github.com/kagura-ai/memory-cloud/issues/1286). See the [F1 binding design](design/agent-registry-and-bindings.md), [F2 bootstrap contract](design/agent-bootstrap-contract.md), and [F4 correlation design](design/agent-otel-correlation.md).
+
 ## MCP Tools
 
-Kagura Memory Cloud exposes 50 tools via the [Model Context Protocol (MCP)](https://modelcontextprotocol.io/), grouped into 12 categories:
+Kagura Memory Cloud exposes 60 tools via the [Model Context Protocol (MCP)](https://modelcontextprotocol.io/), grouped into 13 categories:
 
 | Category | Tools | Purpose |
 |----------|-------|---------|
 | Memory | 6 | `remember`, `recall`, `reference`, `update_memory`, `forget`, `explore` — store / search / discover memories |
 | Agent Substrate | 5 | `load_pinned`, `recall_upcoming`, `set_state`, `get_state`, `feedback` — delivery-mode-aware retrieval, agent state lane, feedback signal (see [Agent Memory Substrate](#agent-memory-substrate)) |
+| Agent Control Plane (preview) | 10 | `register_agent`, `list_agents`, `get_agent`, `update_agent`, `delete_agent`, `bind_agent_context`, `list_agent_bindings`, `update_agent_binding`, `unbind_agent_context`, `get_agent_bootstrap` — registry, subtractive scoping, and session bootstrap |
 | Neural Edges | 4 | `list_edges`, `create_edge`, `update_edge`, `delete_edge` — manage the Hebbian graph manually |
 | Contexts | 7 | `get_context_info`, `list_contexts`, `create_context`, `update_context`, `delete_context`, `merge_contexts`, `update_search_config` |
 | Tags | 1 | `list_tags` — tag vocabulary discovery for alignment before `remember`/`recall` |

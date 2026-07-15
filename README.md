@@ -61,7 +61,8 @@ Most AI memory tools are just vector databases with a chat wrapper. Kagura is di
 | **AI Reranking** | Self-hosted (Ollama/vLLM — local, free), Voyage AI, or Cohere — cross-encoder reranking for precision |
 | **Neural Memory Graph** | Hebbian learning builds a knowledge graph in the background. `explore()` traverses it for serendipitous discovery. |
 | **Agent Memory Substrate** | Beyond a knowledge store: delivery modes (pinned / time-triggered), a server-stamped trust boundary, an agent state lane, and a retrieval-feedback signal — the primitives an autonomous agent loop needs. |
-| **50 MCP Tools** | Memory, Agent Substrate, Neural edges, Contexts, Tags, Files (R2), Analyses (Memory Analysis), Resources, Secrets, Sleep Maintenance, Usage, API-Key Bindings |
+| **Agent Control Plane (preview)** | Workspace-scoped Agent Registry, subtractive context bindings, agent-bound member keys, lifecycle kill switches, and one-call session bootstrap. Introduced in v0.49.0. |
+| **60 MCP Tools** | Memory, Agent Substrate, Agent Control Plane, Neural edges, Contexts, Tags, Files (R2), Analyses (Memory Analysis), Resources, Secrets, Sleep Maintenance, Usage, API-Key Bindings |
 | **Multi-Provider** | OpenAI or self-hosted (Ollama, vLLM — local, private, zero cost) for embeddings |
 | **Team Ready** | Workspaces, RBAC, context isolation, shared memory |
 | **Web UI** | Next.js dashboard — contexts, search settings, member management |
@@ -418,7 +419,7 @@ curl -X POST -H "Authorization: Bearer kagura_{your_key}" \
 
 ## MCP Tools
 
-50 tools across 12 categories. Workspace roles: **Owner** > Admin > Member > **Viewer** (read-only). Context roles: **Owner** > Editor > Viewer. Private contexts are visible only to the creator. Members may be restricted to specific contexts via allowlist.
+60 tools across 13 categories. Workspace roles: **Owner** > Admin > Member > **Viewer** (read-only). Context roles: **Owner** > Editor > Viewer. Private contexts are visible only to the creator. Members may be restricted to specific contexts via allowlist.
 
 ### Memory (6)
 
@@ -442,6 +443,25 @@ The primitives an autonomous agent loop needs beyond a knowledge store — see [
 | `set_state` | Upsert agent scratch state (key→value, optional TTL; excluded from recall) | Editor+ |
 | `get_state` | Read one state key, or list all live state for a context | Viewer+ |
 | `feedback` | Record whether a recalled memory was helpful (append-only signal) | Viewer+ |
+
+### Agent Control Plane (10, preview)
+
+The v0.49.0 control plane builds on existing workspace RBAC: agents are registry resources, not principals, and context bindings can only remove access from an agent-bound member key. Registry, bindings, composed bootstrap, W3C Trace Context/baggage correlation, and the append-only audit foundation are implemented.
+
+| Tool | Description | Required Role |
+|------|------------|---------------|
+| `register_agent` | Register a workspace-scoped agent | Owner/Admin |
+| `list_agents` | List registered agents and lifecycle/enforcement status | Owner/Admin |
+| `get_agent` | Get one registered agent | Owner/Admin |
+| `update_agent` | Update metadata, `status`, or `enforcement_mode` | Owner/Admin |
+| `delete_agent` | Permanently delete an agent and its bound keys; prefer `status="retired"` operationally | Owner/Admin |
+| `bind_agent_context` | Add a purely subtractive context binding | Owner/Admin |
+| `list_agent_bindings` | List an agent's context bindings | Owner/Admin |
+| `update_agent_binding` | Update read/write/default binding policy | Owner/Admin |
+| `unbind_agent_context` | Remove a binding (default-deny in enforce mode) | Owner/Admin |
+| `get_agent_bootstrap` | Compose context guide + pinned + optional trusted recall + upcoming + state for session start | Agent-bound key or Owner/Admin |
+
+> **Preview boundary:** per-memory type/source filters are schema-reserved and fail closed by accepting only `null`. `traceparent` plus W3C baggage correlation for `agent_id` / `session_id` / `run_id` is implemented, but server-side span export remains out of scope for P0. `memory_access_events` is live for bootstrap, load-pinned, feedback, recall, reference, and remember; `update`/`forget` emission and deny/`would_deny` persistence remain tracked in [#1286](https://github.com/kagura-ai/memory-cloud/issues/1286).
 
 ### Neural Edges (4)
 
@@ -491,6 +511,8 @@ Cluster memories into themes (kouchou-ai-style UMAP + KMeans + LLM labeling) for
 | `get_analysis` | Get a completed analysis (clusters, labels, stats) | Owner |
 | `get_active_analysis` | Get the in-flight analysis for a context (if any) | Owner |
 | `get_cluster` | Drill into a single cluster's member memories | Owner |
+
+Analysis runs are capped by `ANALYSIS_MAX_MEMORY_COUNT` (default 10,000; preview and start reject larger contexts). Since v0.47.0, cancellation is all-or-nothing, deleted-context runs are invisible on both REST and MCP, strict BYOK labeling never falls back to the platform key, and runs fail when more than half of labelable clusters fail labeling.
 
 ### Resources — External Data Ingestion (6)
 
@@ -544,7 +566,10 @@ In addition to MCP tools, a full REST API is available:
 
 - **Memory**: remember, recall, reference, forget, explore (`/api/v1/memory/*`)
 - **Contexts**: CRUD, search settings (`/api/v1/contexts/*`)
-- **Attachments**: File upload/download for memories (`/api/v1/attachments/*`, 5MB limit)
+- **Agents (preview)**: Registry, context bindings, and composed bootstrap (`/api/v1/agents/*`)
+- **Files**: Presigned upload/download backed by R2 (`/api/v1/files/*`, up to 100 MiB); legacy `/api/v1/attachments/*` routes return `410 Gone`
+- **Analyses**: Memory Analysis preview/start/read/cancel (`/api/v1/analyses/*`)
+- **Resources**: External event ingestion and resource inspection (`/api/v1/resources/*`)
 - **Workspaces**: Management, members, invitations (`/api/v1/workspaces/*`)
 - **Admin**: Users, plan management, neural config (`/api/v1/admin/*`)
 - **Secrets**: Zero-knowledge secret store — ciphertext-only, server never decrypts (`/api/v1/config/secrets/*`)

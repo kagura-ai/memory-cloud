@@ -61,7 +61,8 @@
 | **AI Reranking** | セルフホスト (Ollama/vLLM — ローカル・無料)、Voyage AI、Cohere — cross-encoder reranker で精度向上 |
 | **Neural Memory Graph** | Hebbian 学習がバックグラウンドで知識グラフを構築。`explore()` がそれを辿り偶発的発見を提供 |
 | **Agent Memory Substrate** | 単なる知識ストアを超えて — delivery mode (pin / 時刻トリガ)、サーバー署名の trust boundary、agent state レーン、retrieval feedback シグナル。自律エージェントのループに必要なプリミティブ群 |
-| **50 の MCP ツール** | Memory、Agent Substrate、Neural edges、Contexts、Tags、Files (R2)、Analyses (メモリー分析)、Resources、Secrets、Sleep Maintenance、Usage、API-Key Bindings |
+| **Agent Control Plane (preview)** | Workspace スコープの Agent Registry、減算的な context binding、agent-bound member key、ライフサイクル kill switch、1 呼出の session bootstrap。v0.49.0 で導入 |
+| **60 の MCP ツール** | Memory、Agent Substrate、Agent Control Plane、Neural edges、Contexts、Tags、Files (R2)、Analyses (メモリー分析)、Resources、Secrets、Sleep Maintenance、Usage、API-Key Bindings |
 | **マルチプロバイダ** | 埋め込みに OpenAI かセルフホスト (Ollama、vLLM — ローカル・非公開・コストゼロ) |
 | **チーム対応** | Workspace、RBAC、context 分離、共有メモリ |
 | **Web UI** | Next.js ダッシュボード — context、検索設定、メンバー管理 |
@@ -293,7 +294,7 @@ curl -X POST -H "Authorization: Bearer kagura_{your_key}" \
 
 ## MCP ツール
 
-12 カテゴリ・全 50 ツール。Workspace ロール: **Owner** > Admin > Member > **Viewer** (read-only)。Context ロール: **Owner** > Editor > Viewer。Private context は作成者のみ閲覧可。Member を特定 context に allowlist で制限可能。
+13 カテゴリ・全 60 ツール。Workspace ロール: **Owner** > Admin > Member > **Viewer** (read-only)。Context ロール: **Owner** > Editor > Viewer。Private context は作成者のみ閲覧可。Member を特定 context に allowlist で制限可能。
 
 ### Memory (6)
 
@@ -318,6 +319,25 @@ curl -X POST -H "Authorization: Bearer kagura_{your_key}" \
 | `get_state` | state を 1 件取得、または context の全 live state を列挙 | Viewer+ |
 | `feedback` | recall したメモリが有用だったかを記録 (append-only シグナル) | Viewer+ |
 
+### Agent Control Plane (10、preview)
+
+v0.49.0 の control plane は既存の workspace RBAC を土台にする。Agent は principal ではなく registry resource であり、context binding は agent-bound member key の権限を減らすことしかできない。Registry、binding、composed bootstrap、W3C Trace Context / baggage correlation、append-only audit 基盤は実装済み。
+
+| ツール | 説明 | 必要ロール |
+|--------|------|------------|
+| `register_agent` | workspace スコープの agent を登録 | Owner/Admin |
+| `list_agents` | 登録 agent と lifecycle/enforcement status を列挙 | Owner/Admin |
+| `get_agent` | agent を 1 件取得 | Owner/Admin |
+| `update_agent` | metadata、`status`、`enforcement_mode` を更新 | Owner/Admin |
+| `delete_agent` | agent と bound key を恒久削除。運用上は `status="retired"` を推奨 | Owner/Admin |
+| `bind_agent_context` | 減算的な context binding を追加 | Owner/Admin |
+| `list_agent_bindings` | agent の context binding 一覧 | Owner/Admin |
+| `update_agent_binding` | read/write/default binding policy を更新 | Owner/Admin |
+| `unbind_agent_context` | binding を削除 (enforce mode では default-deny) | Owner/Admin |
+| `get_agent_bootstrap` | session start 用に context guide + pinned + 任意の trusted recall + upcoming + state を合成 | Agent-bound key または Owner/Admin |
+
+> **Preview 境界:** memory type/source 単位の filter は schema 予約済みで、fail-closed として `null` のみ受け付ける。`traceparent` と W3C baggage による `agent_id` / `session_id` / `run_id` correlation は実装済みだが、server-side span export は P0 の対象外。`memory_access_events` は bootstrap、load-pinned、feedback、recall、reference、remember で稼働し、`update`/`forget` emission と deny/`would_deny` 永続化は [#1286](https://github.com/kagura-ai/memory-cloud/issues/1286) で継続する。
+
 ### Neural Edges (4)
 
 | ツール | 説明 | 必要ロール |
@@ -337,7 +357,7 @@ curl -X POST -H "Authorization: Bearer kagura_{your_key}" \
 | `update_context` | context 設定更新 (summary、usage guide、resource_id、is_public) | Editor+ |
 | `delete_context` | context とその全メモリを削除 | Owner/Admin |
 | `merge_contexts` | source context から target context へメモリを統合 | Owner/Admin |
-| `update_search_config` | context 単位で hybrid search 重みと reranker 設定を調整 | Editor+ |
+| `update_search_config` | context 単位で hybrid search 重み、reranker、query-intent routing (`routing_mode`) を調整 | Editor+ |
 
 ### Tags (1)
 
@@ -366,6 +386,8 @@ curl -X POST -H "Authorization: Bearer kagura_{your_key}" \
 | `get_analysis` | 完了済み分析 (クラスタ、ラベル、統計) 取得 | Owner |
 | `get_active_analysis` | 実行中分析の取得 (あれば) | Owner |
 | `get_cluster` | 単一クラスタの所属メモリを drilldown | Owner |
+
+分析 run は `ANALYSIS_MAX_MEMORY_COUNT` (既定 10,000、preview/start の両方で超過を拒否) で上限を持つ。v0.47.0 以降、cancel は all-or-nothing、削除済み context の run は REST/MCP の双方で不可視、strict BYOK labeling は platform key へ fallback せず、labeling 対象 cluster の過半数が失敗した run は `failed` になる。
 
 ### Resources — 外部データ取り込み (6)
 
@@ -419,7 +441,10 @@ MCP ツールに加えてフル REST API を提供:
 
 - **Memory**: remember、recall、reference、forget、explore (`/api/v1/memory/*`)
 - **Contexts**: CRUD、検索設定 (`/api/v1/contexts/*`)
-- **Attachments**: メモリ添付ファイル (`/api/v1/attachments/*`、5MB 上限)
+- **Agents (preview)**: Registry、context binding、composed bootstrap (`/api/v1/agents/*`)
+- **Files**: R2 の presigned upload/download (`/api/v1/files/*`、最大 100 MiB)。旧 `/api/v1/attachments/*` は `410 Gone`
+- **Analyses**: メモリー分析の preview/start/read/cancel (`/api/v1/analyses/*`)
+- **Resources**: 外部 event 取込と resource 参照 (`/api/v1/resources/*`)
 - **Workspaces**: 管理、メンバー、招待 (`/api/v1/workspaces/*`)
 - **Admin**: ユーザ、プラン管理、neural config (`/api/v1/admin/*`)
 - **Secrets**: ゼロ知識シークレットストア — ciphertext のみ、サーバーは復号しない (`/api/v1/config/secrets/*`)

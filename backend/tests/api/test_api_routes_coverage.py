@@ -4,6 +4,7 @@ Tests API endpoints with mocked auth to exercise route handler code paths.
 Issue #14: Increase unit test coverage.
 """
 
+import re
 from unittest.mock import MagicMock
 from uuid import uuid4
 
@@ -56,6 +57,7 @@ class TestHealthEndpoints:
         """Root endpoint returns project info."""
         response = client.get("/")
         assert response.status_code == 200
+        assert response.json()["version"] == app.version
 
     def test_health(self, client):
         """Health endpoint returns ok."""
@@ -138,11 +140,32 @@ class TestSystemEndpoints:
         with TestClient(app, raise_server_exceptions=False) as c:
             yield c
 
-    def test_system_openapi_tags(self, client):
-        """OpenAPI schema has proper tags."""
-        response = client.get("/openapi.json")
-        data = response.json()
+    def test_system_openapi_tags(self):
+        """Every operation uses a declared, kebab-case OpenAPI tag."""
+        data = app.openapi()
         assert len(data["paths"]) > 0
+
+        declared_tags = [tag["name"] for tag in data.get("tags", [])]
+        assert len(declared_tags) == len(set(declared_tags)), "Duplicate OpenAPI tags"
+
+        http_methods = {"get", "post", "put", "patch", "delete", "options", "head", "trace"}
+        used_tags: set[str] = set()
+        untagged_operations: list[str] = []
+        for path, path_item in data["paths"].items():
+            for method, operation in path_item.items():
+                if method.lower() not in http_methods:
+                    continue
+                tags = operation.get("tags", [])
+                if not tags:
+                    untagged_operations.append(f"{method.upper()} {path}")
+                used_tags.update(tags)
+
+        assert not untagged_operations, f"Untagged OpenAPI operations: {untagged_operations}"
+        undeclared_tags = sorted(used_tags - set(declared_tags))
+        assert not undeclared_tags, f"Undeclared OpenAPI tags: {undeclared_tags}"
+        assert all(re.fullmatch(r"[a-z0-9]+(?:-[a-z0-9]+)*", tag) for tag in declared_tags), (
+            "OpenAPI tags must use kebab-case"
+        )
 
     def test_system_routes_no_500(self, client):
         """System endpoints should not return 500."""

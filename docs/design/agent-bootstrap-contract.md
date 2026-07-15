@@ -1,14 +1,15 @@
 # Design sign-off: `get_agent_bootstrap` composed contract (RFC-0002 F2)
 
-- **Status**: Signed off (gating design for P0-3 implementation)
+- **Status**: Implemented by [#1276](https://github.com/kagura-ai/memory-cloud/issues/1276) / PR #1282; pinned-cap, REST validation, and MCP error-mapping hardening shipped in [#1281](https://github.com/kagura-ai/memory-cloud/issues/1281)
 - **Issue**: [#1259](https://github.com/kagura-ai/memory-cloud/issues/1259) — gating item F2 of RFC-0002
   (Agent Memory & Context Control Plane; RFC text maintained locally, lands in
   `docs/rfc/0002-agent-memory-context-control-plane.md` when published)
-- **Consumers**: implementers of P0-3 (`get_agent_bootstrap` MCP tool + REST companion),
+- **Consumers**: maintainers and integrators of P0-3 (`get_agent_bootstrap` MCP tool + REST companion),
   SDK maintainers (parity follow-up)
 - **Depends on**: [Agent Registry & Context Bindings](agent-registry-and-bindings.md)
-  (F1, [#1258](https://github.com/kagura-ai/memory-cloud/issues/1258) — that design doc
-  lands with the #1258 PR; the link resolves once it merges) for agent/binding resolution
+  (F1, [#1258](https://github.com/kagura-ai/memory-cloud/issues/1258), implemented by
+  [#1274](https://github.com/kagura-ai/memory-cloud/issues/1274) and
+  [#1275](https://github.com/kagura-ai/memory-cloud/issues/1275)) for agent/binding resolution
 
 `get_agent_bootstrap` is the single session-start call that rehydrates an agent's cognitive
 state: context metadata and usage guide, always-load pinned memories, a trusted-only semantic
@@ -186,8 +187,8 @@ are different layers, not an inconsistency. A flattened bespoke bundle schema wa
 ## Cross-repo follow-up (implementation checklist)
 
 - `kagura-memory-python-sdk`: the `kagura-mcp` proxy forwards `/mcp` transparently (new tool
-  auto-exposed, no change needed), but `client.py`/`cli.py` are per-tool explicit — file an
-  SDK parity follow-up for `get_agent_bootstrap` when P0-3 lands.
+  auto-exposed, no change needed), but `client.py`/`cli.py` are per-tool explicit. The SDK
+  parity follow-up for `get_agent_bootstrap` is still pending and must be filed separately.
 
 ## Sign-off checklist (maps to #1259)
 

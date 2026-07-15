@@ -6,9 +6,11 @@ Verify MCP tools work correctly by executing them in sequence against temporary 
 Exercises the core memory/edge/context/tag/analysis/sleep tools, the **agent-memory-substrate**
 lane (`delivery_mode` pinning + `load_pinned`, the agent session-state lane, retrieval `feedback`,
 and the `trust_tier` recall filter), and owner-scoped binding introspection.
+When the caller is a workspace owner/admin, it also exercises the v0.49 Agent Control Plane
+(registry, context bindings, and bootstrap composition).
 Optionally exercises PRO-only resource rows (setup_resource, ingest_events, get_resource_impact, get_resource_schema, list_resource_tokens, plus delete_context cleanup) if the workspace has a PRO plan.
 
-The canonical tool registry is `backend/src/mcp_server/tools/__init__.py` (**50 tools**). The
+The canonical definitions are `backend/src/mcp_server/tools/_definitions.py` (**60 tools**). The
 **Coverage cross-check** section near the end mirrors that registry so the "all MCP tools" claim
 stays honest — every registered tool is either exercised here or listed there with a reason. This
 is a live runbook, not a pytest suite, so the cross-check is a manual reconciliation step: when a
@@ -348,7 +350,52 @@ delete_context(context_id=<resource_context_id>)
 -> Verify: success response (resource context soft-deleted)
 ```
 
-### 7.9. Connector tools (gated-skip)
+### 7.9. Agent Control Plane tools (owner/admin only)
+
+**Pre-check:** These tools require the workspace owner/admin role. If the caller lacks that role,
+skip this section and record "Agent Control Plane skipped — owner/admin required" in the report.
+Type filters are intentionally omitted because they remain reserved until
+[#1281](https://github.com/kagura-ai/memory-cloud/issues/1281).
+
+```
+register_agent(name="smoke-test-agent-{unix_timestamp}", description="Temporary MCP smoke-test agent", framework="codex", environment="test", version="smoke-1")
+-> Verify: returns an active agent with enforcement_mode="enforce"
+-> Save returned agent.id as agent_id
+
+list_agents()
+-> Verify: agents contains agent_id
+
+get_agent(agent_id=<agent_id>)
+-> Verify: returns the registered agent
+
+bind_agent_context(agent_id=<agent_id>, context_id=..., can_read=true, write_policy="deny", is_default=true)
+-> Verify: returns a default binding for the test context
+-> Save returned binding.id as agent_binding_id
+
+list_agent_bindings(agent_id=<agent_id>)
+-> Verify: bindings contains agent_binding_id
+
+update_agent_binding(agent_id=<agent_id>, binding_id=<agent_binding_id>, write_policy="direct")
+-> Verify: changed includes write_policy and binding.write_policy="direct"
+
+get_agent_bootstrap(agent_id=<agent_id>, query="MCP smoke test")
+-> Verify: returns the default context and component results; degraded may be true only with an explained component error
+
+update_agent(agent_id=<agent_id>, version="smoke-2")
+-> Verify: changed includes version and agent.version="smoke-2"
+
+unbind_agent_context(agent_id=<agent_id>, binding_id=<agent_binding_id>)
+-> Verify: deleted=true
+
+delete_agent(agent_id=<agent_id>)
+-> Verify: deleted=true
+```
+
+If this section fails partway through, cleanup retries `unbind_agent_context` when a binding was
+created and `delete_agent` when an agent was created. Treat an already-deleted/not-found result as
+successful cleanup.
+
+### 7.10. Connector tools (gated-skip)
 
 `setup_connector` provisions an external connector (Slack/Discord/Teams) and requires platform
 credentials plus a real connector target, so it is **not** exercised inline (it would create
@@ -362,11 +409,18 @@ setup_connector — SKIP (documented)
 
 ### Cleanup
 
-Unpin and delete the pinned memory first (so delivery_mode="always" state does not survive the run),
-then tear down the remaining artifacts. The agent-state entry (set_state) needs no explicit delete —
-it is removed with its context below and also expires via its TTL.
+Remove any remaining Agent Control Plane artifacts, then unpin and delete the pinned memory (so
+delivery_mode="always" state does not survive the run) and tear down the remaining artifacts. The
+agent-state entry (set_state) needs no explicit delete — it is removed with its context below and
+also expires via its TTL.
 
 ```
+unbind_agent_context(agent_id=<agent_id>, binding_id=<agent_binding_id>)
+-> Run only if Agent Control Plane cleanup did not already remove the binding
+
+delete_agent(agent_id=<agent_id>)
+-> Run only if Agent Control Plane cleanup did not already remove the agent
+
 update_memory(memory_id=<pinned_memory_id>, context_id=..., delivery_mode="on_recall")
 -> Verify: success response (pinned memory unpinned — no longer deterministically loaded)
 
@@ -386,16 +440,16 @@ delete_context(context_id=...)
 ### 8. Coverage cross-check (anti-drift)
 
 Reconcile this skill against the canonical registry so the "all MCP tools" claim cannot silently
-rot. The source of truth is `backend/src/mcp_server/tools/__init__.py` (**50 tools**). Every
-registered tool must be in exactly one column below. **If `tools/__init__.py` and this table
+rot. The source of truth is `backend/src/mcp_server/tools/_definitions.py` (**60 tools**). Every
+registered tool must be in exactly one column below. **If `_definitions.py` and this table
 disagree, the skill is out of date — add a row (or a documented exclusion) before merging.**
 
-Optional live assertion: count the keys in the registry and confirm it equals 50 (the number this
+Optional live assertion: count the named definitions and confirm it equals 60 (the number this
 table is built for); if it differs, a tool was added/removed and this skill needs updating:
 
 ```
-grep -cE '^\s*"[a-z_]+"\s*:\s*handle_' backend/src/mcp_server/tools/__init__.py
--> Verify: equals 50 (else: reconcile this section with the registry)
+grep -cE '^\s*"name"\s*:\s*"[a-z_]+"' backend/src/mcp_server/tools/_definitions.py
+-> Verify: equals 60 (else: reconcile this section with the definitions)
 ```
 
 **Exercised inline (33 core tools):** list_contexts, create_context, get_context_info,
@@ -405,6 +459,10 @@ feedback, set_state, get_state, reference, explore, update_memory, forget, list_
 update_edge, delete_edge, list_tags, list_my_bindings, describe_binding, merge_contexts, get_usage,
 list_analyses, get_active_analysis, get_analysis, get_cluster, get_sleep_history, get_sleep_report,
 rollback_sleep_run, delete_context.
+
+**Exercised with owner/admin role, else SKIP (10 tools):** register_agent, list_agents,
+get_agent, update_agent, delete_agent, bind_agent_context, list_agent_bindings,
+update_agent_binding, unbind_agent_context, get_agent_bootstrap.
 
 **Exercised only on PRO plan, else SKIP (5 tools):** setup_resource, ingest_events,
 get_resource_impact, get_resource_schema, list_resource_tokens.
@@ -426,8 +484,8 @@ get_resource_impact, get_resource_schema, list_resource_tokens.
 | `secret_list` | Owner/admin metadata listing; grouped with the secret-store flow. |
 | `secret_revoke_grant` | Operates on an existing grant produced by `secret_put`. |
 
-33 + 5 + 12 = **50** — the full registry. The gap between "exercised inline" and the registry is
-**only** the 5 PRO-gated rows (run when PRO) and the 12 documented exclusions above.
+33 + 10 + 5 + 12 = **60** — the full registry. The conditional rows are the 10 owner/admin Agent
+Control Plane tools and 5 PRO-gated resource tools; the remaining 12 are documented exclusions.
 
 ### 9. Report
 
@@ -485,6 +543,16 @@ Print a summary table (numbers are illustrative; the executed order follows the 
 | 45 | delete_context | Soft-delete merge target and its memories | PASS/FAIL |
 | 46 | forget | Delete memory 2 | PASS/FAIL |
 | 47 | delete_context | Delete source context (+ its agent-state) | PASS/FAIL |
+| A1 | register_agent | Register temporary agent (owner/admin only) | PASS/FAIL/SKIP |
+| A2 | list_agents | List registry and find temporary agent (owner/admin only) | PASS/FAIL/SKIP |
+| A3 | get_agent | Get temporary agent (owner/admin only) | PASS/FAIL/SKIP |
+| A4 | bind_agent_context | Bind test context as default (owner/admin only) | PASS/FAIL/SKIP |
+| A5 | list_agent_bindings | List bindings (owner/admin only) | PASS/FAIL/SKIP |
+| A6 | update_agent_binding | Set write_policy=direct (owner/admin only) | PASS/FAIL/SKIP |
+| A7 | get_agent_bootstrap | Compose default-context bootstrap (owner/admin only) | PASS/FAIL/SKIP |
+| A8 | update_agent | Update agent version (owner/admin only) | PASS/FAIL/SKIP |
+| A9 | unbind_agent_context | Remove temporary binding (owner/admin only) | PASS/FAIL/SKIP |
+| A10 | delete_agent | Delete temporary agent (owner/admin only) | PASS/FAIL/SKIP |
 | P1 | setup_resource | Create resource context + token (PRO only) | PASS/FAIL/SKIP |
 | P2 | ingest_events | Batch ingest 2 test events (PRO only) | PASS/FAIL/SKIP |
 | P3 | get_resource_impact | Get resource stats (PRO only) | PASS/FAIL/SKIP |
@@ -492,21 +560,24 @@ Print a summary table (numbers are illustrative; the executed order follows the 
 | P5 | list_resource_tokens | List tokens for resource (PRO only) | PASS/FAIL/SKIP |
 | P6 | delete_context | Delete resource context (PRO only) | PASS/FAIL/SKIP |
 
-**Result: N/47 core rows passed** (+ N/6 PRO resource rows passed, or SKIP if not PRO)
+**Result: N/47 core rows passed** (+ N/10 Agent Control Plane rows and N/6 PRO resource rows
+passed, or SKIP when the corresponding gate is unavailable)
 
 Note: the 47 rows are test *steps*, not distinct tools — several tools (remember, recall,
 update_memory, forget, delete_context, list_edges, list_tags) are exercised in multiple rows.
-Distinct-tool coverage is reconciled in the Coverage cross-check (33 core + 5 PRO + 12 documented-skip = 50).
+Distinct-tool coverage is reconciled in the Coverage cross-check
+(33 core + 10 owner/admin + 5 PRO + 12 documented-skip = 60).
 
 Test context: smoke-test-{timestamp} (cleaned up)
 
 Documented exclusions / gated-skip (see Coverage cross-check) — not counted as FAIL:
 - analyze_context (billing + BYOK + owner + Pro-tier)
+- Agent Control Plane tools may be role-gated (owner/admin); if skipped, list A1–A10 as SKIP
 - setup_connector (external connector credentials + live target)
 - File tools: init_file_upload, complete_file_upload, get_file_download_url, delete_file, list_files (multipart S3/R2)
 - Secret tools: secret_register_pubkey, secret_put, secret_get, secret_list, secret_revoke_grant (zero-knowledge: age keypairs + owner approval + ciphertext)
 
-Registry reconciliation: 33 core + 5 PRO + 12 documented-skip = 50 tools in tools/__init__.py.
+Registry reconciliation: 33 core + 10 owner/admin + 5 PRO + 12 documented-skip = 60 tools in _definitions.py.
 ```
 
 If any step fails:

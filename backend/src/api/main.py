@@ -134,6 +134,8 @@ async def lifespan(app: FastAPI):
 openapi_tags = [
     # Authentication & Users
     {"name": "authentication", "description": "OAuth2 login and session management"},
+    {"name": "google-oauth2", "description": "Google OAuth2 login and callback flow"},
+    {"name": "github-oauth2", "description": "GitHub OAuth2 login and callback flow"},
     {"name": "users", "description": "User profile and settings"},
     {
         "name": "account-erasure",
@@ -142,12 +144,31 @@ openapi_tags = [
             "(Issue #360). Session-only auth (no API keys)."
         ),
     },
+    {
+        "name": "account-linking",
+        "description": "Link, unlink, and list external login providers for the current account",
+    },
+    {
+        "name": "me-oauth",
+        "description": "Refresh the current user's OAuth-backed session credentials",
+    },
     # Workspace
     {"name": "workspace", "description": "Workspace dashboard and stats"},
     {"name": "workspaces", "description": "Workspace CRUD operations"},
     {"name": "workspace-plan", "description": "Workspace plan management (self-service)"},
     {"name": "invitations", "description": "Team member invitations"},
     {"name": "member-credentials", "description": "API key and OAuth credential management"},
+    {
+        "name": "agents",
+        "description": (
+            "Agent Control Plane preview: workspace Agent Registry, subtractive context "
+            "bindings, and composed session bootstrap"
+        ),
+    },
+    {
+        "name": "billing-handoff",
+        "description": "Create a signed handoff from Memory Cloud to the external billing service",
+    },
     # Memory & Search
     {"name": "contexts", "description": "Context management"},
     {"name": "context-search-config", "description": "Per-context search settings"},
@@ -189,12 +210,17 @@ openapi_tags = [
     },
     # Integrations
     {"name": "api-keys", "description": "MCP API key management"},
+    {
+        "name": "share-keys",
+        "description": "Share-key lifecycle, public recall, and share-session inspection",
+    },
     {"name": "oauth2-server", "description": "OAuth2 client management"},
     {"name": "external-keys", "description": "External API keys (OpenAI, Cohere, etc.)"},
     {
         "name": "secrets",
         "description": "Zero-knowledge secret store (age ciphertext; server never decrypts)",
     },
+    {"name": "resources", "description": "Resource listing and event-history inspection"},
     {"name": "resource-tokens", "description": "Resource token management"},
     {"name": "resource-ingest", "description": "External data ingestion API"},
     {"name": "resource-schema", "description": "Resource schema registry"},
@@ -202,6 +228,14 @@ openapi_tags = [
     {
         "name": "workspace-connectors",
         "description": "ai-worker chat-ingest connector provisioning",
+    },
+    {
+        "name": "connectors",
+        "description": "External connector installation and callback flows (currently Slack)",
+    },
+    {
+        "name": "workers",
+        "description": "Authenticated connector-worker runtime configuration",
     },
     {
         "name": "analyses",
@@ -218,13 +252,26 @@ openapi_tags = [
     # Admin
     {"name": "admin", "description": "Admin: user management and system stats"},
     {"name": "admin-plans", "description": "Admin: plan tier and quota management"},
+    {
+        "name": "admin-memory-health",
+        "description": "Admin: per-context memory health diagnosis and signal breakdown",
+    },
+    {"name": "admin-neural", "description": "Admin: trigger Neural Memory recalibration"},
+    {
+        "name": "admin-signup-gate",
+        "description": "Admin: signup-gate configuration and allowlist management",
+    },
+    {
+        "name": "admin-sleep",
+        "description": "Admin: manually run Sleep Maintenance and undo individual merges",
+    },
     {"name": "neural-config", "description": "Admin: neural memory configuration"},
     {
         "name": "sleep-reports",
         "description": "Admin: Sleep Maintenance execution reports and audit log",
     },
     {
-        "name": "bm25-drift (preview)",
+        "name": "bm25-drift",
         "description": (
             "Admin: BM25 IDF drift observability (Issue #343). "
             "Cron is disabled by default and scheduled for production "
@@ -233,6 +280,10 @@ openapi_tags = [
         ),
     },
     {"name": "system-admins", "description": "Admin: system administrator management"},
+    {
+        "name": "internal-billing",
+        "description": "Internal service-authenticated plan and downgrade-eligibility endpoints",
+    },
     # System
     {"name": "config", "description": "Environment configuration management (admin)"},
     {"name": "system", "description": "System health and info"},
@@ -790,24 +841,24 @@ async def serve_openapi_spec():
     return JSONResponse(app.openapi())
 
 
-@app.get("/")
+@app.get("/", tags=["system"])
 async def root():
     """Root endpoint."""
     return {
         "name": "Kagura Memory Cloud",
-        "version": "0.1.0",
+        "version": APP_VERSION,
         "description": "Remote MCP Server + Web Management",
         "status": "ok",
     }
 
 
-@app.get("/health")
+@app.get("/health", tags=["system"])
 async def health():
     """Health check endpoint (liveness probe — always fast)."""
     return {"status": "ok"}
 
 
-@app.get("/readiness")
+@app.get("/readiness", tags=["system"])
 async def readiness():
     """Readiness probe for blue-green deploy.
 

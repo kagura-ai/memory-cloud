@@ -1,12 +1,12 @@
 # Ops plan: `memory_access_events` retention and partitioning (RFC-0002 F7)
 
-- **Status**: Signed off (gating ops plan for the first `memory_access_events` retention
-  escalation)
+- **Status**: Operational baseline since v0.49.0; governs the first `memory_access_events`
+  retention escalation
 - **Issue**: [#1264](https://github.com/kagura-ai/memory-cloud/issues/1264) — gating item F7 of
   RFC-0002 (Agent Memory & Context Control Plane; RFC text maintained locally, lands in
   `docs/rfc/0002-agent-memory-context-control-plane.md` when published)
 - **Consumers**: operators of production deployments (measurement cadence + escalation
-  execution), implementers of the escalation migration, P0-5 implementers (F3, #1260 — the
+  execution), implementers of the escalation migration, P0-5 maintainers (F3, #1260 — the
   model-docstring trigger note, the no-TRUNCATE trigger, and the erasure carve-out shape are
   inputs to the schema sign-off)
 - **Depends on**: MemoryAccessEvent schema sign-off (F3, #1260) for the canonical table and
@@ -22,6 +22,10 @@ things now, so that nothing is improvised at escalation time: it **fixes the esc
 trigger** (with a soft threshold that makes it actionable), **fixes the measurement plan**
 operators run until the trigger, and **fixes the decision structure** — criteria, a
 provisional default (monthly range partitioning), and the evidence that would flip it.
+
+The v0.49.0 writer currently emits bootstrap, load-pinned, feedback, recall, reference, and
+remember. The table already accepts all eight operation values; `update`/`forget` emission
+and deny persistence remain tracked by #1286 and do not change this retention policy.
 
 ## Scope and non-goals
 
@@ -304,11 +308,10 @@ is re-opened. Concretely, before flipping the setting:
 ## Migration reality notes
 
 - The RFC sketch's revision-id guidance ("chain from head `e60_1228_read_attributions` as
-  `e61_*`/`e62_*`") is stale against the current tree: the repo's alembic head is already
-  `e62_1245_assign_mem_idx` (`backend/alembic/versions/e62_1245_assign_mem_idx.py`). Both the
-  P0-5 table-creation migration and, later, the escalation migration chain from whatever head
-  exists at their implementation time — revision ids ≤ 32 chars, linear chain, symmetric
-  downgrade.
+  `e61_*`/`e62_*`") is stale. F1/P0-2 landed as `e63`/`e64`/`e65`, P0-5 landed as
+  `e66_1278_memory_access_events`, and the agent-key invariant followed as `e67`. A later
+  escalation migration chains from the then-current head — revision ids ≤ 32 chars, linear
+  chain, symmetric downgrade.
 - Both integration gates must pass for every migration in this lane:
   `backend/tests/integration/test_alembic_migrations.py` (round-trip incl. `downgrade -1`) and
   `backend/tests/integration/test_create_all_vs_alembic_drift.py`. The partitioned shape will
@@ -317,10 +320,10 @@ is re-opened. Concretely, before flipping the setting:
   historical partition and the month children exist only on the alembic side — call this out
   in the escalation issue rather than discovering it in CI.
 - The table keeps its public name `memory_access_events` through the swap, so the
-  data-boundary classification and erasure wiring — which the P0-5 creating PR adds
+  data-boundary classification and erasure wiring added by #1278
   (`OPERATIONAL_TABLES` in `backend/src/models/data_boundary.py`, enforced by
-  `backend/tests/test_derived_layer_boundary.py`; the table is not yet in the registry
-  today) — stay valid through the escalation without changes.
+  `backend/tests/test_derived_layer_boundary.py`) stay valid through the escalation without
+  changes.
 
 ## Sign-off checklist (maps to #1264)
 

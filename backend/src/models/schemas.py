@@ -141,7 +141,8 @@ class RememberRequest(BaseModel):
             logger.warning(
                 f"Summary length ({length} chars) exceeds recommended 250 chars. "
                 f"Consider splitting into multiple semantic memories for better search quality. "
-                f"See docs: /docs/chunking-guide.md"
+                "See docs: https://github.com/kagura-ai/memory-cloud/blob/main/"
+                "docs/chunking-guide.md"
             )
         elif length < 50:
             logger.info(
