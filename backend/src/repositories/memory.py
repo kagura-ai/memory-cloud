@@ -7,7 +7,8 @@ from uuid import UUID
 from sqlalchemy import and_, desc, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from models.memory import DELIVERY_MODE_ALWAYS, Memory
+from models.auth import CONTEXT_TRUST_TIER_TRUSTED, Context
+from models.memory import DELIVERY_MODE_ALWAYS, SOURCE_TYPE_CONNECTOR, Memory
 from repositories.base import BaseRepository
 from utils.datetime import utcnow
 from utils.exceptions import NotFoundException
@@ -309,7 +310,7 @@ class MemoryRepository(BaseRepository[Memory]):
     )
 
     async def list_pinned(
-        self, workspace_id: UUID, context_id: UUID, limit: int
+        self, workspace_id: UUID, context_id: UUID, limit: int, *, trusted_only: bool = False
     ) -> tuple[list, int]:
         """Deterministic always-load set for a context (Issue #886).
 
@@ -335,12 +336,24 @@ class MemoryRepository(BaseRepository[Memory]):
         Returns:
             ``(rows, total)`` — the bounded ordered partial rows and full count.
         """
-        conditions = (
+        conditions = [
             Memory.workspace_id == workspace_id,
             Memory.context_id == context_id,
             Memory.delivery_mode == DELIVERY_MODE_ALWAYS,
             Memory.deleted_at.is_(None),
-        )
+        ]
+        if trusted_only:
+            # #1293: the bootstrap pinned lane is behaviour-establishing (OWASP
+            # LLM01/LLM03, F2 invariant 3), so it must not surface the
+            # external/connector-origin rows the recall lane already drops.
+            # Mirror recall()'s two-part gate exactly: context-level trust signal
+            # (connector contexts = 'external') + row-level defense-in-depth.
+            conditions.append(
+                Memory.context_id.in_(
+                    select(Context.id).where(Context.trust_tier == CONTEXT_TRUST_TIER_TRUSTED)
+                )
+            )
+            conditions.append(Memory.source_type != SOURCE_TYPE_CONNECTOR)
         # Fetch limit+1 so the common (untruncated) case needs a single query:
         # if we get <= limit rows, that count IS the exact total. Only when the
         # probe row appears (set exceeds the cap) do we pay for a COUNT to report

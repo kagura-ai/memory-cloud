@@ -367,6 +367,29 @@ class TestEnvelope:
         assert load_pinned.await_args.kwargs["cap"] == 7
 
     @pytest.mark.asyncio
+    async def test_pinned_requests_trusted_only(self):
+        # #1293: the behaviour-establishing pinned lane must ask load_pinned for
+        # the trusted-only set (parity with the recall lane's trust_tier filter).
+        svc = AgentBootstrapService(MagicMock())
+        load_pinned = AsyncMock(
+            return_value=SimpleNamespace(memories=[], total_available=0, truncated=False, cap=100)
+        )
+        with patch("services.memory_service.MemoryService") as ms_cls:
+            ms_cls.return_value.load_pinned = load_pinned
+            await svc._pinned(_context(), self._principal(), None)
+        assert load_pinned.await_args.kwargs["trusted_only"] is True
+
+    @pytest.mark.asyncio
+    async def test_upcoming_requests_trusted_only(self):
+        # #1293: the time-memory lane is behaviour-establishing too — it must
+        # pass trusted_only through to the shared upcoming query.
+        svc = AgentBootstrapService(MagicMock())
+        upcoming = AsyncMock(return_value=[])
+        with patch("services.time_memory.query_upcoming_time_memories", new=upcoming):
+            await svc._upcoming(_context(), BootstrapParams(agent_id=AGENT_ID))
+        assert upcoming.await_args.kwargs["trusted_only"] is True
+
+    @pytest.mark.asyncio
     async def test_query_absent_recall_skipped(self):
         import contextlib
 
