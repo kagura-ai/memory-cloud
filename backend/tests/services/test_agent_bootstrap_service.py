@@ -354,6 +354,19 @@ class TestEnvelope:
             )
 
     @pytest.mark.asyncio
+    async def test_pinned_forwards_cap_override(self):
+        # #1281 item 6: pinned_cap must reach load_pinned (was a silent no-op
+        # that always passed cap=None regardless of the caller's override).
+        svc = AgentBootstrapService(MagicMock())
+        load_pinned = AsyncMock(
+            return_value=SimpleNamespace(memories=[], total_available=0, truncated=False, cap=7)
+        )
+        with patch("services.memory_service.MemoryService") as ms_cls:
+            ms_cls.return_value.load_pinned = load_pinned
+            await svc._pinned(_context(), self._principal(), 7)
+        assert load_pinned.await_args.kwargs["cap"] == 7
+
+    @pytest.mark.asyncio
     async def test_query_absent_recall_skipped(self):
         import contextlib
 

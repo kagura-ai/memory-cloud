@@ -271,7 +271,7 @@ class AgentBootstrapService:
 
         if "pinned" in include:
             components["pinned"] = await self._component(
-                "pinned", lambda: self._pinned(context, principal)
+                "pinned", lambda: self._pinned(context, principal, params.pinned_cap)
             )
         if "recall" in include:
             components["recall"] = await self._recall_component(
@@ -415,14 +415,19 @@ class AgentBootstrapService:
         instructions = f"{usage_guide}\n\n{KAGURA_MEMORY_INSTRUCTIONS}"
         return context_block, instructions
 
-    async def _pinned(self, context: Any, principal: BootstrapPrincipal) -> dict[str, Any]:
+    async def _pinned(
+        self, context: Any, principal: BootstrapPrincipal, pinned_cap: int | None = None
+    ) -> dict[str, Any]:
         from services.memory_service import MemoryService
 
         result = await MemoryService(self.db).load_pinned(
             user_id=principal.user_id,
             current_context_id=context.id,
             current_workspace_id=principal.workspace_id,
-            cap=None,  # inherit the load_pinned default clamp
+            # #1281 item 6: honor the caller's pinned_cap override (was a silent
+            # no-op). None → load_pinned applies its default clamp; a set value
+            # is clamped to [1, _PINNED_LOAD_CAP_MAX] by _clamp_pinned_cap.
+            cap=pinned_cap,
         )
         return {
             "memories": [
