@@ -76,7 +76,9 @@ async def handle_remember(
             if perm_error:
                 return perm_error
 
-            current_context = await _resolve_context(db, user_id, current_context_id)
+            current_context = await _resolve_context(
+                db, user_id, current_context_id, operation="remember"
+            )
 
             service = MemoryService(db)
             result = await execute_with_timeout(
@@ -181,7 +183,9 @@ async def handle_update_memory(
             if perm_error:
                 return perm_error
 
-            current_context = await _resolve_context(db, user_id, current_context_id)
+            current_context = await _resolve_context(
+                db, user_id, current_context_id, operation="update"
+            )
 
             service = MemoryService(db)
             result = await execute_with_timeout(
@@ -674,7 +678,9 @@ async def handle_forget(
             if perm_error:
                 return perm_error
 
-            current_context = await _resolve_context(db, user_id, current_context_id)
+            current_context = await _resolve_context(
+                db, user_id, current_context_id, operation="forget"
+            )
 
             service = MemoryService(db)
             result = await execute_with_timeout(

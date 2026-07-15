@@ -177,6 +177,8 @@ async def _resolve_context(
     db: "AsyncSession",
     user_id: str,
     context_id: UUID,
+    *,
+    operation: str | None = None,
 ) -> Any:
     """Resolve and validate context access.
 
@@ -184,6 +186,10 @@ async def _resolve_context(
         db: Database session
         user_id: User ID
         context_id: Context UUID
+        operation: MAE operation vocabulary value for #1286 deny capture
+            (threaded by the memory write tools: remember / update / forget).
+            ``None`` for callers outside that vocabulary — their binding
+            denies stay log-only here.
 
     Returns:
         Context object
@@ -237,8 +243,18 @@ async def _resolve_context(
     if scope is not None:
         from services.agent_binding_service import ACCESS_WRITE, AgentBindingService
 
+        # #1286 (P0-5): emit_would_deny=False — this is a PRE-gate; in shadow
+        # mode the request proceeds into the service-layer gate (isolation
+        # params / can_access_memory), which re-evaluates and emits the
+        # single would_deny row. A hard deny stops the request HERE, so the
+        # evaluation emits it (the service gate is never reached).
         allowed, decision = await AgentBindingService(db).evaluate_context_access(
-            scope, context_id, ACCESS_WRITE
+            scope,
+            context_id,
+            ACCESS_WRITE,
+            operation=operation,
+            user_id=user_id,
+            emit_would_deny=False,
         )
         if not allowed:
             logger.warning(

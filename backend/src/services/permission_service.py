@@ -905,6 +905,8 @@ class PermissionService:
         workspace_id: UUID,
         context_id: UUID,
         access: str = "read",
+        operation: str | None = None,
+        memory_id: UUID | None = None,
     ) -> bool:
         """Check if user can access a memory based on workspace membership and context privacy.
 
@@ -921,12 +923,24 @@ class PermissionService:
         forget) MUST pass ``access="write"`` so a ``can_read``-only binding
         cannot be used to mutate. No-op for non-agent credentials.
 
+        #1286 item 2 (P0-5): ``operation`` / ``memory_id`` are the
+        audit-identity passthrough. The binding-shaped deny is persisted
+        inside the binding evaluation; the rbac-shaped branches below stamp
+        ``policy_decision='rbac_denied'`` themselves — this is the one
+        chokepoint where the two deny causes collapse into a single bool, so
+        the emission is what keeps them distinguishable in audit. No-op for
+        non-agent traffic and for un-threaded callers.
+
         Args:
             user_id: Requesting user ID
             memory_user_id: Memory creator's user ID
             workspace_id: Workspace ID
             context_id: Context ID
             access: ``"read"`` (default) or ``"write"`` — the binding gate.
+            operation: MAE operation vocabulary value for deny capture, or
+                ``None`` (no emission) for callers outside that vocabulary.
+            memory_id: The requested memory id — rides ``event_metadata`` as
+                an unverified claim on deny rows.
 
         Returns:
             True if user can access, False otherwise
@@ -938,7 +952,45 @@ class PermissionService:
             # must not reach its own memories there via memory_id).
             from services.agent_binding_service import agent_binding_permits
 
-            return await agent_binding_permits(self.db, context_id, access)
+            return await agent_binding_permits(
+                self.db,
+                context_id,
+                access,
+                operation=operation,
+                user_id=str(user_id),
+                requested_memory_id=memory_id,
+            )
+
+        async def _emit_rbac_denied() -> None:
+            # #1286 item 2 (P0-5): persist the rbac-shaped deny for agent
+            # traffic. workspace_id = the CREDENTIAL scope (never the
+            # memory's workspace param — that is derived from the requested,
+            # unverified identifier); requested ids ride event_metadata.
+            if operation is None:
+                return
+            from auth.agent_scope import get_agent_scope
+
+            scope = get_agent_scope()
+            if scope is None:
+                # D34: only verified-agent traffic is audited.
+                return
+            from services.agent_binding_service import DECISION_RBAC_DENIED
+            from services.memory_access_event_writer import emit_memory_access_event
+
+            metadata: dict[str, str] = {
+                "requested_context_id": str(context_id),
+                "access": access,
+            }
+            if memory_id is not None:
+                metadata["requested_memory_id"] = str(memory_id)
+            await emit_memory_access_event(
+                operation=operation,
+                outcome="denied",
+                workspace_id=scope.workspace_id,
+                user_id=str(user_id),
+                policy_decision=DECISION_RBAC_DENIED,
+                extra_metadata=metadata,
+            )
 
         # Owner can always access their own memories (RBAC), but the binding
         # still subtracts.
@@ -953,9 +1005,11 @@ class PermissionService:
 
         if not is_shared:
             # Private context: only creator can access
+            await _emit_rbac_denied()
             return False
 
         # Shared context: check workspace membership, then the binding.
         if not await self.is_workspace_member(user_id, workspace_id):
+            await _emit_rbac_denied()
             return False
         return await _binding_ok()

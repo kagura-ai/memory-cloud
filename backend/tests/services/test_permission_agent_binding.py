@@ -325,7 +325,7 @@ class TestMemoryServiceRecallGate:
 
         allowed_id, denied_id = uuid.uuid4(), uuid.uuid4()
 
-        async def _permits(_db, cid, _access):
+        async def _permits(_db, cid, _access, **_audit_kw):  # #1286 passthrough
             return cid != denied_id
 
         svc = self._svc()
@@ -371,3 +371,178 @@ class TestMemoryServiceRecallGate:
                 current_context_id=uuid.uuid4(),
                 current_workspace_id=uuid.uuid4(),
             )
+
+
+class TestCanAccessMemoryDenyCapture:
+    """#1286 item 2 (P0-5): rbac-shaped denials at the memory-id chokepoint
+    persist policy_decision='rbac_denied' rows for agent traffic. The
+    binding-shaped denial is emitted inside the binding evaluation itself
+    (pinned in test_agent_binding_service) — here we pin that the audit
+    identity (operation / requested memory_id) is THREADED through to it."""
+
+    @pytest.mark.asyncio
+    async def test_private_context_rbac_deny_emits_rbac_denied(self):
+        ws = uuid.uuid4()
+        set_agent_scope(AgentScope(agent_id=AGENT_ID, enforcement_mode="enforce", workspace_id=ws))
+        perm = _perm()
+        ctx, mid = uuid.uuid4(), uuid.uuid4()
+        with (
+            patch(
+                "services.context_service.ContextService.is_context_shared",
+                AsyncMock(return_value=False),
+            ),
+            patch(
+                "services.memory_access_event_writer.emit_memory_access_event", AsyncMock()
+            ) as emit,
+        ):
+            ok = await perm.can_access_memory(
+                user_id="caller",
+                memory_user_id="author",
+                workspace_id=WORKSPACE_ID,
+                context_id=ctx,
+                operation="reference",
+                memory_id=mid,
+            )
+        assert ok is False
+        emit.assert_awaited_once()
+        kw = emit.await_args.kwargs
+        assert kw["operation"] == "reference"
+        assert kw["outcome"] == "denied"
+        assert kw["policy_decision"] == "rbac_denied"
+        # Credential scope — never the memory's workspace param.
+        assert kw["workspace_id"] == ws
+        assert kw["user_id"] == "caller"
+        assert kw["extra_metadata"]["requested_context_id"] == str(ctx)
+        assert kw["extra_metadata"]["requested_memory_id"] == str(mid)
+        assert kw.get("context_id") is None
+        assert kw.get("memory_id") is None
+
+    @pytest.mark.asyncio
+    async def test_non_member_rbac_deny_emits_rbac_denied(self):
+        ws = uuid.uuid4()
+        set_agent_scope(AgentScope(agent_id=AGENT_ID, enforcement_mode="enforce", workspace_id=ws))
+        perm = _perm()
+        perm.is_workspace_member = AsyncMock(return_value=False)
+        with (
+            patch(
+                "services.context_service.ContextService.is_context_shared",
+                AsyncMock(return_value=True),
+            ),
+            patch(
+                "services.memory_access_event_writer.emit_memory_access_event", AsyncMock()
+            ) as emit,
+        ):
+            ok = await perm.can_access_memory(
+                user_id="caller",
+                memory_user_id="author",
+                workspace_id=WORKSPACE_ID,
+                context_id=uuid.uuid4(),
+                operation="update",
+                memory_id=uuid.uuid4(),
+            )
+        assert ok is False
+        emit.assert_awaited_once()
+        assert emit.await_args.kwargs["policy_decision"] == "rbac_denied"
+
+    @pytest.mark.asyncio
+    async def test_non_agent_rbac_deny_emits_nothing(self):
+        # No agent scope (session / plain member key) → D34: only verified
+        # agent traffic is audited.
+        perm = _perm()
+        with (
+            patch(
+                "services.context_service.ContextService.is_context_shared",
+                AsyncMock(return_value=False),
+            ),
+            patch(
+                "services.memory_access_event_writer.emit_memory_access_event", AsyncMock()
+            ) as emit,
+        ):
+            ok = await perm.can_access_memory(
+                user_id="caller",
+                memory_user_id="author",
+                workspace_id=WORKSPACE_ID,
+                context_id=uuid.uuid4(),
+                operation="reference",
+                memory_id=uuid.uuid4(),
+            )
+        assert ok is False
+        emit.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_no_operation_rbac_deny_emits_nothing(self):
+        # Un-threaded callers (explore — not in the MAE vocabulary yet) keep
+        # the pre-#1286 shape: deny without a row.
+        set_agent_scope(
+            AgentScope(agent_id=AGENT_ID, enforcement_mode="enforce", workspace_id=uuid.uuid4())
+        )
+        perm = _perm()
+        with (
+            patch(
+                "services.context_service.ContextService.is_context_shared",
+                AsyncMock(return_value=False),
+            ),
+            patch(
+                "services.memory_access_event_writer.emit_memory_access_event", AsyncMock()
+            ) as emit,
+        ):
+            ok = await perm.can_access_memory(
+                user_id="caller",
+                memory_user_id="author",
+                workspace_id=WORKSPACE_ID,
+                context_id=uuid.uuid4(),
+            )
+        assert ok is False
+        emit.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_audit_identity_threaded_to_binding_gate(self):
+        set_agent_scope(
+            AgentScope(agent_id=AGENT_ID, enforcement_mode="enforce", workspace_id=uuid.uuid4())
+        )
+        perm = _perm()
+        mid = uuid.uuid4()
+        patcher, instance = _patch_binding_service(False, "binding_denied")
+        with patcher:
+            ok = await perm.can_access_memory(
+                user_id="caller",
+                memory_user_id="caller",
+                workspace_id=WORKSPACE_ID,
+                context_id=uuid.uuid4(),
+                access="write",
+                operation="forget",
+                memory_id=mid,
+            )
+        assert ok is False
+        kw = instance.evaluate_context_access.await_args.kwargs
+        assert kw["operation"] == "forget"
+        assert kw["user_id"] == "caller"
+        assert kw["requested_memory_id"] == mid
+
+
+class TestMcpPreGateDenyCapture:
+    """#1286 item 2 (P0-5): the MCP write pre-gate threads audit identity
+    into the binding evaluation with emit_would_deny=False — the service
+    layer re-evaluates and emits the single shadow row; the pre-gate is
+    responsible only for the hard deny that stops the request here."""
+
+    @pytest.mark.asyncio
+    async def test_resolve_context_threads_operation_with_would_deny_suppressed(self):
+        from mcp_server.tools._helpers import _ContextNotFoundError, _resolve_context
+
+        set_agent_scope(
+            AgentScope(agent_id=AGENT_ID, enforcement_mode="enforce", workspace_id=uuid.uuid4())
+        )
+        context = SimpleNamespace(id=uuid.uuid4(), workspace_id=WORKSPACE_ID)
+        service = MagicMock(get_context=AsyncMock(return_value=context))
+        patcher, instance = _patch_binding_service(False, "binding_denied")
+        with (
+            patch("services.context_service.ContextService", return_value=service),
+            patcher,
+            pytest.raises(_ContextNotFoundError),
+        ):
+            await _resolve_context(MagicMock(), "u", context.id, operation="remember")
+        kw = instance.evaluate_context_access.await_args.kwargs
+        assert kw["operation"] == "remember"
+        assert kw["user_id"] == "u"
+        assert kw["emit_would_deny"] is False

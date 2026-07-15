@@ -10,7 +10,7 @@ migration/drift/cascade coverage lives in the integration gates.
 from __future__ import annotations
 
 import uuid
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
@@ -59,8 +59,10 @@ def _binding(**overrides) -> AgentContextBinding:
     return AgentContextBinding(**defaults)
 
 
-def _scope(agent_id=None, mode="enforce") -> AgentScope:
-    return AgentScope(agent_id=agent_id or uuid.uuid4(), enforcement_mode=mode)
+def _scope(agent_id=None, mode="enforce", workspace_id=None) -> AgentScope:
+    return AgentScope(
+        agent_id=agent_id or uuid.uuid4(), enforcement_mode=mode, workspace_id=workspace_id
+    )
 
 
 def _service(execute_results: list | None = None) -> AgentBindingService:
@@ -275,3 +277,168 @@ class TestReadableContextIds:
         db.execute = AsyncMock(return_value=MagicMock(scalars=MagicMock(return_value=scalars)))
         service = AgentBindingService(db)
         assert await service.readable_context_ids(uuid.uuid4()) == set(ids)
+
+
+# ---------------------------------------------------------------------------
+# Deny capture (#1286 item 2, P0-5)
+# ---------------------------------------------------------------------------
+
+
+class TestDenyCaptureEmission:
+    """The binding-evaluation path persists its deny decisions to
+    memory_access_events when the caller threads audit identity (operation +
+    user_id). Hard deny → outcome='denied' / policy='binding_denied'; shadow
+    → outcome='success' / policy='would_deny'. The requested identifiers ride
+    event_metadata as claims — the authoritative context_id / memory_id
+    columns stay NULL — and workspace_id is the CREDENTIAL scope
+    (AgentScope.workspace_id), never the requested one."""
+
+    async def _evaluate(self, binding, scope, access, ctx=None, **kw):
+        service = _service(execute_results=[binding])
+        ctx = ctx or uuid.uuid4()
+        with patch(
+            "services.memory_access_event_writer.emit_memory_access_event", AsyncMock()
+        ) as emit:
+            result = await service.evaluate_context_access(scope, ctx, access, **kw)
+        return result, emit, ctx
+
+    @pytest.mark.asyncio
+    async def test_enforce_deny_emits_denied_row(self):
+        ws = uuid.uuid4()
+        (allowed, decision), emit, ctx = await self._evaluate(
+            None,
+            _scope(mode="enforce", workspace_id=ws),
+            ACCESS_READ,
+            operation="recall",
+            user_id="caller",
+        )
+        assert (allowed, decision) == (False, DECISION_BINDING_DENIED)
+        emit.assert_awaited_once()
+        kw = emit.await_args.kwargs
+        assert kw["operation"] == "recall"
+        assert kw["outcome"] == "denied"
+        assert kw["policy_decision"] == DECISION_BINDING_DENIED
+        assert kw["workspace_id"] == ws
+        assert kw["user_id"] == "caller"
+        assert kw["extra_metadata"]["requested_context_id"] == str(ctx)
+        assert kw["extra_metadata"]["access"] == ACCESS_READ
+        # The requested identifier never lands in the authoritative column.
+        assert kw.get("context_id") is None
+        assert kw.get("memory_id") is None
+
+    @pytest.mark.asyncio
+    async def test_shadow_would_deny_emits_success_row(self):
+        ws = uuid.uuid4()
+        (allowed, decision), emit, _ = await self._evaluate(
+            None,
+            _scope(mode="shadow", workspace_id=ws),
+            ACCESS_READ,
+            operation="recall",
+            user_id="caller",
+        )
+        assert (allowed, decision) == (True, DECISION_WOULD_DENY)
+        emit.assert_awaited_once()
+        kw = emit.await_args.kwargs
+        # The request PROCEEDS in shadow — the outcome is success; the
+        # would-deny signal rides policy_decision (the shadow→enforce ramp
+        # analysis key).
+        assert kw["outcome"] == "success"
+        assert kw["policy_decision"] == DECISION_WOULD_DENY
+        assert kw["workspace_id"] == ws
+
+    @pytest.mark.asyncio
+    async def test_shadow_emission_suppressed_for_pre_gate(self):
+        # The MCP pre-gate (_resolve_context) passes emit_would_deny=False:
+        # the service-layer gate re-evaluates the same request and emits the
+        # single shadow row — no double-counting on the MCP face.
+        (allowed, decision), emit, _ = await self._evaluate(
+            None,
+            _scope(mode="shadow", workspace_id=uuid.uuid4()),
+            ACCESS_WRITE,
+            operation="remember",
+            user_id="caller",
+            emit_would_deny=False,
+        )
+        assert (allowed, decision) == (True, DECISION_WOULD_DENY)
+        emit.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_hard_deny_emits_even_when_would_deny_suppressed(self):
+        # A hard deny STOPS the request at the pre-gate — the service-layer
+        # gate is never reached, so the pre-gate must emit it.
+        (allowed, decision), emit, _ = await self._evaluate(
+            None,
+            _scope(mode="enforce", workspace_id=uuid.uuid4()),
+            ACCESS_WRITE,
+            operation="remember",
+            user_id="caller",
+            emit_would_deny=False,
+        )
+        assert (allowed, decision) == (False, DECISION_BINDING_DENIED)
+        emit.assert_awaited_once()
+        assert emit.await_args.kwargs["outcome"] == "denied"
+
+    @pytest.mark.asyncio
+    async def test_no_emission_without_operation(self):
+        # Callers that have not threaded audit identity (non-memory ops,
+        # enumeration surfaces) keep the pre-#1286 behavior: log only.
+        (allowed, _), emit, _ = await self._evaluate(
+            None, _scope(mode="enforce", workspace_id=uuid.uuid4()), ACCESS_READ
+        )
+        assert allowed is False
+        emit.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_allowed_no_emission(self):
+        (allowed, _), emit, _ = await self._evaluate(
+            _binding(can_read=True),
+            _scope(mode="enforce", workspace_id=uuid.uuid4()),
+            ACCESS_READ,
+            operation="recall",
+            user_id="caller",
+        )
+        assert allowed is True
+        emit.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_requested_memory_id_rides_metadata(self):
+        mid = uuid.uuid4()
+        (_, _), emit, _ = await self._evaluate(
+            None,
+            _scope(mode="enforce", workspace_id=uuid.uuid4()),
+            ACCESS_WRITE,
+            operation="forget",
+            user_id="caller",
+            requested_memory_id=mid,
+        )
+        kw = emit.await_args.kwargs
+        assert kw["extra_metadata"]["requested_memory_id"] == str(mid)
+        assert kw.get("memory_id") is None
+
+    @pytest.mark.asyncio
+    async def test_agent_binding_permits_threads_audit_kwargs(self):
+        from auth.agent_scope import set_agent_scope
+        from services.agent_binding_service import agent_binding_permits
+
+        set_agent_scope(_scope(mode="enforce", workspace_id=uuid.uuid4()))
+        try:
+            with patch(
+                "services.agent_binding_service.AgentBindingService.evaluate_context_access",
+                AsyncMock(return_value=(False, DECISION_BINDING_DENIED)),
+            ) as ev:
+                mid = uuid.uuid4()
+                ok = await agent_binding_permits(
+                    MagicMock(),
+                    uuid.uuid4(),
+                    ACCESS_READ,
+                    operation="reference",
+                    user_id="caller",
+                    requested_memory_id=mid,
+                )
+            assert ok is False
+            kw = ev.await_args.kwargs
+            assert kw["operation"] == "reference"
+            assert kw["user_id"] == "caller"
+            assert kw["requested_memory_id"] == mid
+        finally:
+            set_agent_scope(None)

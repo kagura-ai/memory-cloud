@@ -165,6 +165,7 @@ class MemoryService:
         *,
         access: str = "read",
         key_workspace_id: UUID | None = None,
+        operation: str | None = None,
     ) -> tuple[Context | None, str | None, str | None]:
         """Extract workspace_id and context_id for 3-level isolation (performance optimization).
 
@@ -198,6 +199,8 @@ class MemoryService:
             access: ``"read"`` (default) or ``"write"`` — the binding gate.
             key_workspace_id: Pure API-key workspace scope for #963 confinement,
                 or ``None`` to skip it.
+            operation: MAE operation vocabulary value threaded into the
+                binding gate for #1286 deny capture, or ``None`` (log-only).
 
         Returns:
             Tuple of (context_object, workspace_id_str, context_id_str)
@@ -216,7 +219,9 @@ class MemoryService:
 
         from services.agent_binding_service import agent_binding_permits
 
-        if not await agent_binding_permits(self.db, context_id, access):
+        if not await agent_binding_permits(
+            self.db, context_id, access, operation=operation, user_id=user_id
+        ):
             raise NotFoundException("Context", str(context_id))
 
         return context, str(context.workspace_id), str(context_id)
@@ -340,7 +345,11 @@ class MemoryService:
         # Issue #1275: remember is a WRITE — gate the declared context against
         # the agent binding (no-op for non-agent credentials).
         context, workspace_id_str, context_id_str = await self._get_context_isolation_params(
-            user_id, current_context_id, access="write", key_workspace_id=key_workspace_id
+            user_id,
+            current_context_id,
+            access="write",
+            key_workspace_id=key_workspace_id,
+            operation="remember",  # #1286 (P0-5): deny-capture audit identity
         )
 
         # Validate required parameters
@@ -555,6 +564,8 @@ class MemoryService:
             workspace_id=memory.workspace_id,
             context_id=memory.context_id,
             access="write",  # #1275: WRITE path — can_read-only binding must not permit mutation
+            operation="update",  # #1286 (P0-5): deny-capture audit identity
+            memory_id=request.memory_id,
         )
         if not can_access:
             raise NotFoundException("Memory", str(request.memory_id))
@@ -755,6 +766,8 @@ class MemoryService:
             workspace_id=memory.workspace_id,
             context_id=memory.context_id,
             access="write",  # #1275: WRITE path — can_read-only binding must not permit mutation
+            operation="update",  # #1286 (P0-5): deny-capture audit identity
+            memory_id=memory_id,
         )
         if not can_access:
             raise NotFoundException("Memory", str(memory_id))
@@ -1088,6 +1101,8 @@ class MemoryService:
             memory_user_id=MemoryAuthorId(memory.user_id),
             workspace_id=memory.workspace_id,
             context_id=memory.context_id,
+            operation="reference",  # #1286 (P0-5): deny-capture audit identity
+            memory_id=memory_id,
         )
 
         if not can_access:
@@ -2219,7 +2234,13 @@ class MemoryService:
         from services.agent_binding_service import agent_binding_permits
 
         for _gated_cid in context_ids if context_ids else [current_context_id]:
-            if not await agent_binding_permits(self.db, _gated_cid, "read"):
+            if not await agent_binding_permits(
+                self.db,
+                _gated_cid,
+                "read",
+                operation="recall",  # #1286 (P0-5): deny-capture audit identity
+                user_id=user_id,
+            ):
                 raise NotFoundException("Context", str(_gated_cid))
 
         # #708 Option A: route embedding cost (key + spend cap + paid_by
@@ -2866,7 +2887,10 @@ class MemoryService:
         from config.settings import get_settings
 
         context, workspace_id_str, context_id_str = await self._get_context_isolation_params(
-            user_id, current_context_id, key_workspace_id=key_workspace_id
+            user_id,
+            current_context_id,
+            key_workspace_id=key_workspace_id,
+            operation="load_pinned",  # #1286 (P0-5): deny-capture audit identity
         )
         if not workspace_id_str or not context_id_str:
             raise ValueError("load_pinned() requires current_context_id")
@@ -2939,7 +2963,11 @@ class MemoryService:
         # Issue #1275: forget is a WRITE — gate the declared context against
         # the agent binding (no-op for non-agent credentials).
         context, workspace_id_str, context_id_str = await self._get_context_isolation_params(
-            user_id, current_context_id, access="write", key_workspace_id=key_workspace_id
+            user_id,
+            current_context_id,
+            access="write",
+            key_workspace_id=key_workspace_id,
+            operation="forget",  # #1286 (P0-5): deny-capture audit identity
         )
 
         deleted_ids = []
@@ -2963,6 +2991,8 @@ class MemoryService:
                     workspace_id=memory.workspace_id,
                     context_id=memory.context_id,
                     access="write",  # #1275: WRITE path — can_read-only binding must not permit mutation
+                    operation="forget",  # #1286 (P0-5): the denied row is the ONLY
+                    memory_id=request.memory_id,  # record — this deny is a silent empty success
                 )
 
                 if not can_access:
@@ -3243,6 +3273,9 @@ class MemoryService:
         from services.permission_service import CallerId, MemoryAuthorId, PermissionService
 
         perm_service = PermissionService(self.db)
+        # #1286 (P0-5): no operation threaded — "explore" is outside the
+        # MAE_OPERATIONS vocabulary; its denies stay log-only until the
+        # vocabulary grows (CHECK widening = a migration, out of scope here).
         can_access = await perm_service.can_access_memory(
             user_id=CallerId(user_id),
             memory_user_id=MemoryAuthorId(seed_memory.user_id),

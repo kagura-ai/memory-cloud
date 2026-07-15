@@ -187,7 +187,12 @@ class TestAgentScopePropagation:
         )
         set_agent_scope_from_verified(verified)
         scope = get_agent_scope()
-        assert scope == AgentScope(agent_id=AGENT_ID, enforcement_mode="enforce")
+        # #1286 (P0-5): the scope carries the credential's workspace so
+        # deny-capture can stamp the audit row's workspace_id from the CALLER
+        # scope (never from the requested, unverified identifier).
+        assert scope == AgentScope(
+            agent_id=AGENT_ID, enforcement_mode="enforce", workspace_id=WORKSPACE_ID
+        )
 
     def test_unbound_key_clears_scope(self):
         set_agent_scope(AgentScope(agent_id=AGENT_ID, enforcement_mode="enforce"))
@@ -239,4 +244,6 @@ class TestAgentScopePropagation:
         )
         set_agent_scope_from_verified(verified)
         scope = get_agent_scope()
-        assert scope == AgentScope(agent_id=AGENT_ID, enforcement_mode="enforce")
+        assert scope == AgentScope(
+            agent_id=AGENT_ID, enforcement_mode="enforce", workspace_id=WORKSPACE_ID
+        )

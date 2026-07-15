@@ -35,6 +35,13 @@ class AgentScope:
 
     agent_id: UUID
     enforcement_mode: str
+    # #1286 (P0-5): the credential's workspace scope — deny-capture stamps it
+    # as the audit row's workspace_id (the CALLER scope; the requested,
+    # unverified identifiers ride event_metadata only). Agent-bound keys are
+    # workspace-scoped by the F1 mint invariant, so the auth adapters always
+    # populate it; ``None`` (legacy constructions / test doubles) makes the
+    # writer drop the row rather than guess a workspace — fail-safe.
+    workspace_id: UUID | None = None
 
 
 _agent_scope: ContextVar[AgentScope | None] = ContextVar("agent_scope", default=None)
@@ -74,4 +81,10 @@ def set_agent_scope_from_verified(verified: Any) -> None:
         from models.agent import AGENT_ENFORCEMENT_ENFORCE
 
         mode = AGENT_ENFORCEMENT_ENFORCE
-    set_agent_scope(AgentScope(agent_id=agent_id, enforcement_mode=mode))
+    set_agent_scope(
+        AgentScope(
+            agent_id=agent_id,
+            enforcement_mode=mode,
+            workspace_id=getattr(verified, "workspace_id", None),
+        )
+    )
