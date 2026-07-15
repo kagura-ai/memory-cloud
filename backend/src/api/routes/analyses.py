@@ -51,7 +51,7 @@ from services.analysis.preview import (
     estimate_cost,
 )
 from tasks.analysis_tasks import cancel_run_task, register_run_task, run_analysis_task
-from utils.exceptions import ConflictError, ValidationError
+from utils.exceptions import ConflictError, NotFoundException, ValidationError
 from utils.logger import get_logger
 
 logger = get_logger(__name__)
@@ -308,11 +308,12 @@ async def _verify_context_in_workspace(
     # #1281 item 5: subtractive agent-binding gate (REST parity with the MCP
     # analysis surface). Contains an agent-bound credential to its bound
     # contexts even when the underlying role is broad; no-op for non-agent
-    # credentials; deny is the same uniform 404 (no existence leak).
+    # credentials; deny is the same uniform 404 (no existence leak). Raise the
+    # canonical NotFoundException (not a raw HTTPException) per the house rule.
     from services.agent_binding_service import agent_binding_permits
 
     if not await agent_binding_permits(db, context_id, "read"):
-        raise HTTPException(status_code=404, detail=f"Context {context_id} not found")
+        raise NotFoundException("Context", str(context_id))
 
 
 def _params_from_body(body: AnalysisPreviewRequest) -> AnalysisParams:

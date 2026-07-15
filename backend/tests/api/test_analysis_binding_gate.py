@@ -15,7 +15,6 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
-from fastapi import HTTPException
 
 WS = uuid.uuid4()
 CTX = uuid.uuid4()
@@ -63,11 +62,12 @@ async def test_mcp_gate_passes_when_binding_permits():
 @pytest.mark.asyncio
 async def test_rest_gate_denies_when_binding_rejects():
     from api.routes.analyses import _verify_context_in_workspace
+    from utils.exceptions import NotFoundException
 
     with (
         patch(_WS_OK, new=AsyncMock(return_value=True)),
         patch(_BINDING, new=AsyncMock(return_value=False)),
-        pytest.raises(HTTPException) as exc,
+        pytest.raises(NotFoundException) as exc,
     ):
         await _verify_context_in_workspace(MagicMock(), workspace_id=WS, context_id=CTX)
     assert exc.value.status_code == 404
