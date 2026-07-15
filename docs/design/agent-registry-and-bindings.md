@@ -185,7 +185,7 @@ Additional requirements:
 | Caller / credential | Before | After (Phase A: schema only) | After (Phase B: enforcement live) |
 |---|---|---|---|
 | REST/MCP request, key without `agent_id` (every credential existing today) | current behavior | **byte-for-byte unchanged** | **byte-for-byte unchanged** |
-| Key with `agent_id`, agent `enforce`, context **has** binding row | n/a | n/a | existing RBAC decision ∩ context-level binding (`can_read`, `write_policy`). Type/source filters are schema-reserved but non-`NULL` values are rejected until #1286 lands |
+| Key with `agent_id`, agent `enforce`, context **has** binding row | n/a | n/a | existing RBAC decision ∩ context-level binding (`can_read`, `write_policy`). Type/source filters are schema-reserved but non-`NULL` values are rejected until #1299 lands (per-memory type/source enforcement, split out of #1286 and deferred to P1 — P0-2 stays context-level only) |
 | Key with `agent_id`, agent `enforce`, context has **no** binding row | n/a | n/a | denied — uniform `context_not_found` (default-deny applies **only to newly bound agents**) |
 | Key with `agent_id`, agent `shadow` | n/a | n/a | legacy semantics; violations recorded as `would_deny` audit rows |
 | Key with `agent_id`, agent `suspended`/`retired` | n/a | n/a | rejected at verify time (fail-closed kill switch) |

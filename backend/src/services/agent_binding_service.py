@@ -65,18 +65,19 @@ def _validate_type_array(value: Any, field: str) -> list[str] | None:
     forward-provisioned in the F1 DDL, but per-memory type/source enforcement
     is materially larger than the context-level binding gate (it must filter
     each recall/reference/write by the memory's own type) and lands in a
-    follow-up (#1281). To avoid a **fail-open** — an admin setting a restriction
-    that is silently ignored, a false sense of containment — CRUD rejects any
-    non-NULL value for now. ``NULL`` (= all types, the P0-2-enforced value) is
-    the only accepted value. Code-review of #1275. (Same "provisioned-but-
-    reserved" posture as ``write_policy='staged'``.)
+    follow-up (#1299, split out of #1286 and deferred to P1). To avoid a
+    **fail-open** — an admin setting a restriction that is silently ignored, a
+    false sense of containment — CRUD rejects any non-NULL value for now.
+    ``NULL`` (= all types, the P0-2-enforced value) is the only accepted
+    value. Code-review of #1275. (Same "provisioned-but-reserved" posture as
+    ``write_policy='staged'``.)
     """
     if value is None:
         return None
     raise ValidationError(
         f"'{field}' is reserved: per-type binding filters are provisioned but "
         "not yet enforced — set it to null (all types) for now. Type/source "
-        "filtering ships in a follow-up (#1281).",
+        "filtering ships in a follow-up (#1299).",
         field=field,
     )
 

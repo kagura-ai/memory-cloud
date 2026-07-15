@@ -235,3 +235,110 @@ async def test_recall_under_agent_identity_writes_memory_access_event(env, db_se
     assert recall_rows, "recall under agent identity must emit a memory_access_events row"
     assert recall_rows[0].agent_id == env["agent"].id
     assert recall_rows[0].outcome == "success"
+
+
+# ---------------------------------------------------------------------------
+# #1286 item 2 (P0-5): deny capture — the decisions the log line used to
+# promise are now durable rows, end to end against the real DB.
+# ---------------------------------------------------------------------------
+
+
+async def _mae_rows(db_session, ws_id):
+    return (
+        (
+            await db_session.execute(
+                select(MemoryAccessEvent).where(MemoryAccessEvent.workspace_id == ws_id)
+            )
+        )
+        .scalars()
+        .all()
+    )
+
+
+@pytest.mark.asyncio(loop_scope="session")
+async def test_enforce_deny_persists_binding_denied_row(env, db_session):
+    # The uniform 404 stays the response; the durable record is the new part.
+    set_agent_scope(
+        AgentScope(
+            agent_id=env["agent"].id, enforcement_mode="enforce", workspace_id=env["ws_id"]
+        )
+    )
+    svc = _svc(db_session, found_memory_ids=[env["mem_unbound"]])
+    with pytest.raises(NotFoundException):
+        await svc.recall(
+            RecallRequest(query="secret", k=10, search_mode="keyword"),
+            user_id=env["uid"],
+            current_context_id=env["ctx_unbound"],
+            current_workspace_id=env["ws_id"],
+        )
+
+    denied = [r for r in await _mae_rows(db_session, env["ws_id"]) if r.outcome == "denied"]
+    assert len(denied) == 1, "the hard deny must persist exactly one denied row"
+    row = denied[0]
+    assert row.operation == "recall"
+    assert row.policy_decision == "binding_denied"
+    assert row.agent_id == env["agent"].id
+    # workspace_id = the CREDENTIAL scope; the requested (denied) context
+    # never reaches the authoritative column — it rides event_metadata.
+    assert row.workspace_id == env["ws_id"]
+    assert row.context_id is None
+    assert row.event_metadata["requested_context_id"] == str(env["ctx_unbound"])
+    assert row.event_metadata["access"] == "read"
+
+
+@pytest.mark.asyncio(loop_scope="session")
+async def test_shadow_would_deny_persists_ramp_row_and_proceeds(env, db_session):
+    # Shadow mode: the request proceeds AND leaves the would_deny ramp signal
+    # — exactly one (no double-count), alongside the normal success row.
+    set_agent_scope(
+        AgentScope(
+            agent_id=env["agent"].id, enforcement_mode="shadow", workspace_id=env["ws_id"]
+        )
+    )
+    svc = _svc(db_session, found_memory_ids=[env["mem_unbound"]])
+    resp = await svc.recall(
+        RecallRequest(query="secret", k=10, search_mode="keyword"),
+        user_id=env["uid"],
+        current_context_id=env["ctx_unbound"],
+        current_workspace_id=env["ws_id"],
+    )
+    assert str(env["mem_unbound"]) in {str(r.memory_id) for r in resp.results}
+
+    rows = await _mae_rows(db_session, env["ws_id"])
+    ramp = [r for r in rows if r.policy_decision == "would_deny"]
+    assert len(ramp) == 1, "shadow must persist exactly one would_deny row"
+    assert ramp[0].operation == "recall"
+    assert ramp[0].outcome == "success"  # the request DID proceed
+    assert ramp[0].event_metadata["requested_context_id"] == str(env["ctx_unbound"])
+    # The op's own success row still lands, unstamped.
+    plain = [r for r in rows if r.operation == "recall" and r.policy_decision is None]
+    assert plain, "the normal recall success row must still be emitted"
+    assert all(r.outcome != "denied" for r in rows)
+
+
+@pytest.mark.asyncio(loop_scope="session")
+async def test_forget_by_id_silent_deny_leaves_its_only_record(env, db_session):
+    # forget-by-id deny returns a success-shaped empty response (CWE-639
+    # posture) — before #1286 the deny left NO trace. The denied row is its
+    # only record.
+    from models.schemas import ForgetRequest
+
+    set_agent_scope(
+        AgentScope(
+            agent_id=env["agent"].id, enforcement_mode="enforce", workspace_id=env["ws_id"]
+        )
+    )
+    svc = MemoryService(db_session)
+    resp = await svc.forget(ForgetRequest(memory_id=env["mem_unbound"]), env["uid"])
+    assert resp.deleted_count == 0 and resp.memory_ids == []
+
+    rows = await _mae_rows(db_session, env["ws_id"])
+    denied = [r for r in rows if r.outcome == "denied"]
+    assert len(denied) == 1
+    row = denied[0]
+    assert row.operation == "forget"
+    assert row.policy_decision == "binding_denied"
+    assert row.memory_id is None  # requested id is a claim, not a column
+    assert row.event_metadata["requested_memory_id"] == str(env["mem_unbound"])
+    # No success row — the delete never happened.
+    assert not [r for r in rows if r.operation == "forget" and r.outcome == "success"]
