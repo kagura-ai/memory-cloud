@@ -143,12 +143,22 @@ async def env(db_session):
     from sqlalchemy import text
 
     await db_session.rollback()
-    await db_session.execute(text("ALTER TABLE memory_access_events DISABLE TRIGGER USER"))
-    await db_session.execute(
-        delete(MemoryAccessEvent).where(MemoryAccessEvent.workspace_id == ws_id)
-    )
-    await db_session.execute(text("ALTER TABLE memory_access_events ENABLE TRIGGER USER"))
-    await db_session.commit()
+    try:
+        # DISABLE + DELETE + ENABLE + COMMIT are one transaction: either all
+        # persist (triggers re-enabled at commit) or none do. ALTER TABLE ...
+        # DISABLE TRIGGER is transactional DDL in PostgreSQL, so the explicit
+        # rollback below also rolls the DISABLE back — the append-only
+        # invariant can never be left disabled for later tests (Copilot
+        # review of #1300).
+        await db_session.execute(text("ALTER TABLE memory_access_events DISABLE TRIGGER USER"))
+        await db_session.execute(
+            delete(MemoryAccessEvent).where(MemoryAccessEvent.workspace_id == ws_id)
+        )
+        await db_session.execute(text("ALTER TABLE memory_access_events ENABLE TRIGGER USER"))
+        await db_session.commit()
+    except Exception:
+        await db_session.rollback()
+        raise
 
 
 def _svc(db_session, *, found_memory_ids):
