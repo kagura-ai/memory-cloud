@@ -8,8 +8,10 @@ import pytest
 
 from models.schemas import (
     ForgetRequest,
+    PatchMemoryRequest,
     RecallRequest,
     RememberRequest,
+    UpdateMemoryRequest,
 )
 from services.memory_service import MemoryService
 
@@ -1772,3 +1774,194 @@ class TestExploreAccessStats:
         # Only one update_access_stats call: for the seed, with client="api".
         service.memory_repo.update_access_stats.assert_awaited_once_with(seed_id, client="api")
         service.db.commit.assert_awaited()
+
+
+class TestAccessEventEmission:
+    """#1286 item 2 (P0-5): update/patch/forget success-event emission.
+
+    The emission lives in the service layer so REST and MCP get it for free
+    (the writer stamps surface from the correlation contextvar and no-ops
+    unless a verified AgentScope is set — these tests patch the writer, so
+    they pin the CALL contract, not the writer's own gating).
+    """
+
+    @staticmethod
+    def _memory_row(ws, ctx, mid):
+        from datetime import datetime
+
+        memory = MagicMock()
+        memory.id = mid
+        memory.user_id = "author"
+        memory.workspace_id = ws
+        memory.context_id = ctx
+        memory.deleted_at = None
+        memory.summary = "s"
+        memory.context_summary = None
+        memory.content = "c"
+        memory.details = None
+        memory.type = "note"
+        memory.scope = "working"
+        memory.importance = 0.5
+        memory.tags = []
+        memory.context = None
+        memory.created_at = datetime(2026, 1, 1)
+        memory.client = "test"
+        memory.source_uri = None
+        memory.source_type = None
+        return memory
+
+    @pytest.mark.asyncio
+    async def test_update_in_place_emits_update_event(self):
+        service = MemoryService(MagicMock())
+        ws, ctx, mid = uuid4(), uuid4(), uuid4()
+        service.memory_repo.get = AsyncMock(return_value=self._memory_row(ws, ctx, mid))
+        service.db.commit = AsyncMock()
+        service.db.flush = AsyncMock()
+
+        with (
+            patch(
+                "services.permission_service.PermissionService.can_access_memory",
+                AsyncMock(return_value=True),
+            ),
+            patch("services.memory_service.resolve_collection_name", AsyncMock(return_value="c")),
+            patch("services.memory_service.update_memory_payload_in_qdrant", AsyncMock()),
+            patch(
+                "services.memory_access_event_writer.emit_memory_access_event", AsyncMock()
+            ) as emit,
+        ):
+            res = await service.update_memory(
+                UpdateMemoryRequest(memory_id=mid, tags=["x"]), "caller"
+            )
+
+        assert res.operation == "updated"
+        emit.assert_awaited_once()
+        kw = emit.await_args.kwargs
+        assert kw["operation"] == "update"
+        assert kw["outcome"] == "success"
+        assert kw["workspace_id"] == ws
+        assert kw["context_id"] == ctx
+        assert kw["memory_id"] == mid
+        assert kw["user_id"] == "caller"
+
+    @pytest.mark.asyncio
+    async def test_patch_memory_emits_update_event(self):
+        # PATCH is the REST-side update surface (#439) — it must emit the
+        # same operation="update" as MCP's _update_in_place (REST/MCP parity).
+        service = MemoryService(MagicMock())
+        ws, ctx, mid = uuid4(), uuid4(), uuid4()
+        service.memory_repo.get = AsyncMock(return_value=self._memory_row(ws, ctx, mid))
+        service.db.commit = AsyncMock()
+        service.db.flush = AsyncMock()
+        service._fetch_declared_link_refs = AsyncMock(return_value=([], False, [], False))
+
+        with (
+            patch(
+                "services.permission_service.PermissionService.can_access_memory",
+                AsyncMock(return_value=True),
+            ),
+            patch("services.memory_service.resolve_collection_name", AsyncMock(return_value="c")),
+            patch("services.memory_service.update_memory_payload_in_qdrant", AsyncMock()),
+            patch(
+                "services.memory_access_event_writer.emit_memory_access_event", AsyncMock()
+            ) as emit,
+        ):
+            await service.patch_memory(mid, PatchMemoryRequest(tags=["x"]), "caller")
+
+        emit.assert_awaited_once()
+        kw = emit.await_args.kwargs
+        assert kw["operation"] == "update"
+        assert kw["outcome"] == "success"
+        assert kw["workspace_id"] == ws
+        assert kw["memory_id"] == mid
+
+    @pytest.mark.asyncio
+    async def test_forget_by_id_falls_back_to_memory_row_workspace(self):
+        # REST forget declares no context (#246): the isolation helper
+        # resolves no workspace there. The emission must fall back to the
+        # deleted row's own (hard-validated) workspace, not silently no-op.
+        service = MemoryService(MagicMock())
+        ws, ctx, mid = uuid4(), uuid4(), uuid4()
+        service.memory_repo.get = AsyncMock(return_value=self._memory_row(ws, ctx, mid))
+        service.memory_repo.update = AsyncMock()
+        service.db.commit = AsyncMock()
+
+        with (
+            patch(
+                "services.permission_service.PermissionService.can_access_memory",
+                AsyncMock(return_value=True),
+            ),
+            patch("services.memory_service.resolve_collection_name", AsyncMock(return_value="c")),
+            patch("services.memory_service.delete_memory_from_qdrant", AsyncMock()),
+            patch("repositories.neural_edge.NeuralEdgeRepository") as edge_cls,
+            patch(
+                "services.memory_access_event_writer.emit_memory_access_event", AsyncMock()
+            ) as emit,
+        ):
+            edge_cls.return_value.delete_node_edges = AsyncMock(return_value=0)
+            res = await service.forget(ForgetRequest(memory_id=mid), "caller")
+
+        assert res.deleted_count == 1
+        emit.assert_awaited_once()
+        kw = emit.await_args.kwargs
+        assert kw["operation"] == "forget"
+        assert kw["outcome"] == "success"
+        assert kw["workspace_id"] == ws
+        assert kw["context_id"] == ctx
+        assert kw["memory_id"] == mid
+        assert kw["result_count"] == 1
+
+    @pytest.mark.asyncio
+    async def test_forget_with_declared_context_uses_helper_workspace(self):
+        # When a context IS declared (MCP always), the isolation helper's
+        # workspace wins over the row's.
+        service = MemoryService(MagicMock())
+        ws_helper, ws_row, ctx, mid = uuid4(), uuid4(), uuid4(), uuid4()
+        mock_context = MagicMock(id=ctx, workspace_id=ws_helper)
+        service.context_service.get_context = AsyncMock(return_value=mock_context)
+        service.memory_repo.get = AsyncMock(return_value=self._memory_row(ws_row, ctx, mid))
+        service.memory_repo.update = AsyncMock()
+        service.db.commit = AsyncMock()
+
+        with (
+            patch(
+                "services.permission_service.PermissionService.can_access_memory",
+                AsyncMock(return_value=True),
+            ),
+            patch("services.memory_service.resolve_collection_name", AsyncMock(return_value="c")),
+            patch("services.memory_service.delete_memory_from_qdrant", AsyncMock()),
+            patch("repositories.neural_edge.NeuralEdgeRepository") as edge_cls,
+            patch(
+                "services.memory_access_event_writer.emit_memory_access_event", AsyncMock()
+            ) as emit,
+        ):
+            edge_cls.return_value.delete_node_edges = AsyncMock(return_value=0)
+            res = await service.forget(
+                ForgetRequest(memory_id=mid), "caller", current_context_id=ctx
+            )
+
+        assert res.deleted_count == 1
+        kw = emit.await_args.kwargs
+        assert kw["workspace_id"] == ws_helper
+
+    @pytest.mark.asyncio
+    async def test_forget_denied_by_id_emits_no_success_event(self):
+        # The silent-filter deny (empty success-shaped response) must not
+        # produce a success audit row. (The denied row itself lands via the
+        # can_access_memory deny-capture — pinned in the permission tests.)
+        service = MemoryService(MagicMock())
+        ws, ctx, mid = uuid4(), uuid4(), uuid4()
+        service.memory_repo.get = AsyncMock(return_value=self._memory_row(ws, ctx, mid))
+
+        with (
+            patch(
+                "services.permission_service.PermissionService.can_access_memory",
+                AsyncMock(return_value=False),
+            ),
+            patch(
+                "services.memory_access_event_writer.emit_memory_access_event", AsyncMock()
+            ) as emit,
+        ):
+            res = await service.forget(ForgetRequest(memory_id=mid), "caller")
+
+        assert res.deleted_count == 0
+        emit.assert_not_awaited()

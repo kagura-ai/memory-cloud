@@ -668,6 +668,18 @@ class MemoryService:
             re_embedded=needs_reembed,
         )
 
+        # #1286 item 2 (P0-5): audit the write (no-op unless verified agent).
+        from services.memory_access_event_writer import emit_memory_access_event
+
+        await emit_memory_access_event(
+            operation="update",
+            outcome="success",
+            workspace_id=memory.workspace_id,
+            user_id=user_id,
+            context_id=memory.context_id,
+            memory_id=memory.id,
+        )
+
         return UpdateMemoryResponse(
             memory_id=memory.id,
             operation="updated",
@@ -928,6 +940,21 @@ class MemoryService:
             re_embedded=needs_reembed,
         )
 
+        # #1286 item 2 (P0-5): audit the write (no-op unless verified agent).
+        # PATCH is the REST-side update surface (#439); MCP's is
+        # `_update_in_place` — both emit operation="update" so the audit
+        # vocabulary stays unified across surfaces (#1291/#1292 parity).
+        from services.memory_access_event_writer import emit_memory_access_event
+
+        await emit_memory_access_event(
+            operation="update",
+            outcome="success",
+            workspace_id=memory.workspace_id,
+            user_id=user_id,
+            context_id=memory.context_id,
+            memory_id=memory.id,
+        )
+
         # Build the response inline from the in-scope ORM row. Delegating to
         # ``self.reference(...)`` here would re-fetch the row, re-run the
         # permission check, bump access-stats (a write — wrong for PATCH),
@@ -1005,6 +1032,10 @@ class MemoryService:
             context=request.context,
         )
 
+        # #1286 (P0-5) audit note: the upsert path intentionally emits NO
+        # operation="update" event — the inner remember()/forget() calls each
+        # emit their own row, which describes exactly what happened
+        # physically (a new row created, the old row soft-deleted).
         result = await self.remember(
             remember_request,
             user_id=user_id,
@@ -2912,6 +2943,10 @@ class MemoryService:
         )
 
         deleted_ids = []
+        # #1286 item 2 (P0-5): the deleted rows' own (hard-validated)
+        # workspace/context — the audit fallback when no context is declared.
+        deleted_workspace_ids: set[UUID] = set()
+        deleted_context_ids: set[UUID] = set()
 
         # Case 1: Delete by memory_id
         if request.memory_id:
@@ -2948,6 +2983,8 @@ class MemoryService:
 
                 memory_workspace_id = str(memory.workspace_id)
                 memory_context_id = str(memory.context_id)
+                deleted_workspace_ids.add(memory.workspace_id)
+                deleted_context_ids.add(memory.context_id)
 
                 # Soft delete in PostgreSQL (set deleted_at, deleted_by)
 
@@ -3036,6 +3073,10 @@ class MemoryService:
                         )
 
                     deleted_ids.append(memory_response.memory_id)
+                    if memory.workspace_id:
+                        deleted_workspace_ids.add(memory.workspace_id)
+                    if memory.context_id:
+                        deleted_context_ids.add(memory.context_id)
 
             logger.info(
                 "memories_soft_deleted_by_query",
@@ -3045,6 +3086,39 @@ class MemoryService:
             )
 
         await self.db.commit()
+
+        # #1286 item 2 (P0-5): audit the destructive write (no-op unless a
+        # verified agent). The REST route declares no context (#246), so the
+        # isolation helper resolves no workspace on that surface — fall back
+        # to the deleted rows' own workspace/context (unambiguous only when
+        # every deleted row shares one) so the audit row is never silently
+        # dropped on the REST face (#1291/#1292 parity lesson).
+        emit_workspace = UUID(workspace_id_str) if workspace_id_str else None
+        emit_context = UUID(context_id_str) if context_id_str else None
+        if emit_workspace is None and len(deleted_workspace_ids) == 1:
+            emit_workspace = next(iter(deleted_workspace_ids))
+        if emit_context is None and len(deleted_context_ids) == 1:
+            emit_context = next(iter(deleted_context_ids))
+
+        from services.memory_access_event_writer import (
+            MAX_METADATA_MEMORY_IDS,
+            emit_memory_access_event,
+        )
+
+        await emit_memory_access_event(
+            operation="forget",
+            outcome="success",
+            workspace_id=emit_workspace,
+            user_id=user_id,
+            context_id=emit_context,
+            memory_id=deleted_ids[0] if len(deleted_ids) == 1 else None,
+            result_count=len(deleted_ids),
+            extra_metadata=(
+                {"memory_ids": [str(mid) for mid in deleted_ids[:MAX_METADATA_MEMORY_IDS]]}
+                if len(deleted_ids) > 1
+                else None
+            ),
+        )
 
         return ForgetResponse(deleted_count=len(deleted_ids), memory_ids=deleted_ids)
 
