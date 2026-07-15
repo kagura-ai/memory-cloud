@@ -142,6 +142,88 @@ async def test_502_wrapping_after_chain_exhausted() -> None:
     assert "All fallback models exhausted" in str(err)
 
 
+@pytest.mark.asyncio
+async def test_failed_attempt_billed_tokens_are_accumulated() -> None:
+    """#1247: a failed fallback attempt that still burned paid tokens must
+    have its usage carried forward so cost reflects BOTH calls.
+
+    The primary model fails *after* the provider round-trip completed
+    (unparseable JSON on both internal tries) — the ``LLMServiceError``
+    carries that call's usage via ``response``. The fallback model then
+    succeeds. The returned ``CallResult`` exposes the failed usage in
+    ``prior_usages``, and the labeler's breakdown accumulation sums both.
+    """
+    failed_usage = LLMResponse(
+        parsed={},
+        total_tokens=90,
+        input_tokens=60,
+        output_tokens=30,
+        cached_input_tokens=0,
+        provider="openai",
+        model="gpt-5-nano",
+    )
+    primary_error = LLMServiceError("nano returned unparseable json twice")
+    # Real ``LLMServiceError`` is a plain Exception; the caller reads an
+    # optional ``response`` carrying the billed usage of the failed call.
+    primary_error.response = failed_usage  # type: ignore[attr-defined]
+
+    llm_service = AsyncMock()
+    llm_service.complete_json = AsyncMock(side_effect=[primary_error, _ok_response("gpt-5.5")])
+
+    result = await call_with_fallback(
+        llm_service,
+        user_id="u1",
+        workspace_id="w1",
+        context_id=None,
+        system_prompt="sys",
+        prompt="p",
+    )
+
+    # Winner is the fallback model; the failed attempt's usage is preserved.
+    assert result.response.model == "gpt-5.5"
+    assert len(result.prior_usages) == 1
+    assert result.prior_usages[0].input_tokens == 60
+    assert result.prior_usages[0].output_tokens == 30
+
+    # The recorded cost breakdown (the same accumulation the labeler does)
+    # must reflect BOTH calls, not just the winning response.
+    from services.sleep.reporter import accumulate_llm_response
+
+    breakdown = accumulate_llm_response(None, result.response)
+    for prior in result.prior_usages:
+        breakdown.add_call(
+            input_tokens=prior.input_tokens,
+            output_tokens=prior.output_tokens,
+            cached_input_tokens=prior.cached_input_tokens,
+        )
+    assert breakdown.calls == 2
+    # winner (_ok_response) is 80 in / 40 out; failed attempt adds 60 / 30.
+    assert breakdown.input_tokens == 80 + 60
+    assert breakdown.output_tokens == 40 + 30
+
+
+@pytest.mark.asyncio
+async def test_failed_attempt_without_usage_is_skipped() -> None:
+    """A failed attempt that exposes no usage (transport error before any
+    completion) contributes nothing — prior_usages stays empty."""
+    llm_service = AsyncMock()
+    llm_service.complete_json = AsyncMock(
+        side_effect=[LLMServiceError("connection refused"), _ok_response("gpt-5.5")]
+    )
+
+    result = await call_with_fallback(
+        llm_service,
+        user_id="u1",
+        workspace_id="w1",
+        context_id=None,
+        system_prompt="sys",
+        prompt="p",
+    )
+
+    assert result.response.model == "gpt-5.5"
+    assert result.prior_usages == ()
+
+
 def test_filter_hallucinated_ids_drops_non_members() -> None:
     """The frozenset guard returns only members, preserving input order."""
     requested = frozenset({"id-1", "id-2", "id-3"})

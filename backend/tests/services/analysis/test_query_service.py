@@ -99,9 +99,15 @@ async def _make_run(
     pricing,
     status: str = "succeeded",
     started_offset_minutes: int = 0,
+    started_at: datetime | None = None,
 ) -> MemoryAnalysis:
-    """Insert a MemoryAnalysis row with reasonable defaults."""
-    started_at = utcnow() - timedelta(minutes=started_offset_minutes)
+    """Insert a MemoryAnalysis row with reasonable defaults.
+
+    ``started_at`` overrides the offset-derived timestamp so tests can
+    pin several rows to an identical instant (keyset-tiebreaker cases).
+    """
+    if started_at is None:
+        started_at = utcnow() - timedelta(minutes=started_offset_minutes)
     finished_at = (started_at + timedelta(seconds=10)) if status != "running" else None
     run = MemoryAnalysis(
         id=uuid4(),
@@ -246,6 +252,125 @@ async def test_list_analyses_newest_first_with_cursor_pagination(
     page1_ids = {r.id for r in page1}
     page2_ids = {r.id for r in page2}
     assert page1_ids.isdisjoint(page2_ids)
+
+
+@pytest.mark.asyncio
+async def test_list_analyses_identical_started_at_no_skip(
+    db_session, fixture_workspace_id, fixture_context_id, fixture_pricing
+):
+    """#1247: runs sharing an identical ``started_at`` must not be skipped
+    across a page boundary.
+
+    With a strict ``started_at``-only cursor, page 2's ``started_at <
+    cursor`` predicate excludes every row that shares the boundary
+    timestamp, silently dropping runs. The compound ``(started_at, id)``
+    keyset keeps them all reachable.
+    """
+    shared_ts = utcnow().replace(microsecond=0) - timedelta(minutes=5)
+    runs = []
+    for _ in range(4):
+        run = await _make_run(
+            db_session,
+            workspace_id=fixture_workspace_id,
+            context_id=fixture_context_id,
+            pricing=fixture_pricing,
+            started_at=shared_ts,
+        )
+        runs.append(run)
+    all_ids = {r.id for r in runs}
+
+    # Page 1 (limit=2): 2 of the 4 identical-timestamp runs.
+    page1, cursor = await query_service.list_analyses(
+        db_session,
+        workspace_id=fixture_workspace_id,
+        context_id=fixture_context_id,
+        limit=2,
+    )
+    assert len(page1) == 2
+    assert cursor is not None
+    # Compound cursor carries both the timestamp and the id tiebreaker.
+    assert "|" in cursor
+
+    # Page 2: the REMAINING 2 runs — none skipped despite equal started_at.
+    page2, cursor2 = await query_service.list_analyses(
+        db_session,
+        workspace_id=fixture_workspace_id,
+        context_id=fixture_context_id,
+        limit=2,
+        cursor=cursor,
+    )
+    assert len(page2) == 2
+    assert cursor2 is None  # last page
+
+    page1_ids = {r.id for r in page1}
+    page2_ids = {r.id for r in page2}
+    assert page1_ids.isdisjoint(page2_ids)
+    # All four runs appear exactly once across the two pages (no skip).
+    assert page1_ids | page2_ids == all_ids
+
+
+@pytest.mark.asyncio
+async def test_list_analyses_legacy_started_at_only_cursor_still_pages(
+    db_session, fixture_workspace_id, fixture_context_id, fixture_pricing
+):
+    """Back-compat: a pre-#1247 cursor (bare ISO ``started_at``, no id)
+    still advances the page instead of erroring."""
+    from utils.datetime import to_utc_iso
+
+    for offset in (60, 30, 10):
+        await _make_run(
+            db_session,
+            workspace_id=fixture_workspace_id,
+            context_id=fixture_context_id,
+            pricing=fixture_pricing,
+            started_offset_minutes=offset,
+        )
+
+    page1, _ = await query_service.list_analyses(
+        db_session,
+        workspace_id=fixture_workspace_id,
+        context_id=fixture_context_id,
+        limit=2,
+    )
+    # Simulate an in-flight legacy cursor: the started_at of the last row,
+    # WITHOUT the ``|<id>`` tiebreaker suffix.
+    legacy_cursor = to_utc_iso(page1[-1].started_at)
+    assert "|" not in legacy_cursor
+
+    page2, _ = await query_service.list_analyses(
+        db_session,
+        workspace_id=fixture_workspace_id,
+        context_id=fixture_context_id,
+        limit=2,
+        cursor=legacy_cursor,
+    )
+    # The oldest run (60 min ago) is strictly older than page1's boundary
+    # timestamp, so the legacy cursor still returns it.
+    assert len(page2) == 1
+    assert page2[0].started_at < page1[-1].started_at
+
+
+def test_decode_list_cursor_malformed_uuid_tail_is_invalid():
+    """#1247 (Copilot): a compound cursor whose ``|`` separator is present
+    but whose UUID tail is malformed is a corrupt/tampered token — it must
+    decode to ``(None, None)`` (invalid), NOT silently downgrade to the
+    started_at-only predicate, which would reintroduce boundary-skipped
+    rows for tied ``started_at`` values."""
+    from services.analysis.query_service import _decode_list_cursor
+
+    # Valid datetime + garbage UUID suffix → whole cursor invalid.
+    assert _decode_list_cursor("2026-07-15T01:00:00|not-a-uuid") == (None, None)
+    # Trailing separator with empty UUID tail is likewise malformed.
+    assert _decode_list_cursor("2026-07-15T01:00:00|") == (None, None)
+
+    # Contrast: a legacy bare-ISO cursor (no separator) stays a valid
+    # started_at-only cursor (id=None) — back-compat preserved.
+    dt, cid = _decode_list_cursor("2026-07-15T01:00:00")
+    assert dt is not None and cid is None
+    # And a well-formed compound cursor decodes both components.
+    good_id = uuid4()
+    dt, cid = _decode_list_cursor(f"2026-07-15T01:00:00|{good_id}")
+    assert dt is not None and cid == good_id
 
 
 @pytest.mark.asyncio

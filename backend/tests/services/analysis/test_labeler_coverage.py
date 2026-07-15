@@ -336,6 +336,46 @@ class TestLabelOneCluster:
         assert captured["user_id"] == "u1"
         assert captured["context_id"] == "c1"
 
+    async def test_breakdown_includes_failed_attempt_tokens(self, monkeypatch) -> None:
+        """#1247: paid tokens from a failed fallback attempt are folded into
+        the cluster's cost breakdown (recorded cost reflects BOTH calls)."""
+        import asyncio
+
+        winner = _llm_response(parsed={"label": "L", "label_confidence": 0.5})
+        failed_usage = LLMResponse(
+            parsed={},
+            total_tokens=90,
+            input_tokens=60,
+            output_tokens=30,
+            cached_input_tokens=0,
+            provider="openai",
+            model="gpt-5-nano",
+        )
+
+        async def _fake(**_kwargs):  # noqa: ANN003
+            return CallResult(
+                parsed=winner.parsed,
+                response=winner,
+                prior_usages=(failed_usage,),
+            )
+
+        monkeypatch.setattr(labeler, "call_with_fallback", _fake)
+
+        cl = await _label_one_cluster(
+            cluster_index=0,
+            reps=[_mem()],
+            user_id="u",
+            workspace_id="w",
+            context_id=None,
+            sem=asyncio.Semaphore(1),
+        )
+
+        assert cl.breakdown is not None
+        # winner (_llm_response) is 20 in / 10 out; failed attempt adds 60 / 30.
+        assert cl.breakdown.calls == 2
+        assert cl.breakdown.input_tokens == 20 + 60
+        assert cl.breakdown.output_tokens == 10 + 30
+
     async def test_confidence_clamped_above_one(self, monkeypatch) -> None:
         """A confidence > 1 is clamped to 1.0."""
         import asyncio

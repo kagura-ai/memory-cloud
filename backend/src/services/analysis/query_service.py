@@ -33,7 +33,7 @@ from typing import Any
 from uuid import UUID
 from zoneinfo import ZoneInfo
 
-from sqlalchemy import and_, func, select
+from sqlalchemy import and_, func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from models.analysis import (
@@ -227,6 +227,48 @@ async def get_analysis(
     return (await db.execute(stmt)).scalar_one_or_none()
 
 
+def _decode_list_cursor(cursor: str) -> tuple[datetime | None, UUID | None]:
+    """Decode a ``list_analyses`` keyset cursor into ``(started_at, id)``.
+
+    The compound cursor (#1247) is ``"<started_at_iso>|<run_id>"`` — the
+    ``id`` tiebreaker makes the keyset stable when several runs share an
+    identical ``started_at``, so no row straddling a page boundary is
+    skipped. ``started_at`` is normalized to naive UTC (repo convention).
+
+    Back-compat: a legacy cursor (bare ISO ``started_at``, pre-#1247, no
+    ``|`` separator) decodes with ``id=None`` so tokens issued before this
+    change still page (the caller falls back to the strict ``started_at``
+    predicate). Returns ``(None, None)`` when the token is unparseable —
+    including a compound cursor whose ``|`` separator is present but whose
+    UUID tail is malformed (a corrupt/tampered token, NOT a legacy one).
+    """
+    # ``to_utc_iso`` never emits ``|`` and a UUID never contains one, so
+    # splitting on the LAST ``|`` cleanly separates the two components.
+    head, sep, tail = cursor.rpartition("|")
+    dt_str = head if sep else cursor
+    id_str = tail if sep else ""
+
+    try:
+        cursor_dt = datetime.fromisoformat(dt_str)
+    except ValueError:
+        return None, None
+    if cursor_dt.tzinfo is not None:
+        cursor_dt = cursor_dt.astimezone(ZoneInfo("UTC")).replace(tzinfo=None)
+
+    cursor_id: UUID | None = None
+    if sep:
+        # A compound cursor MUST carry a valid UUID tail. A malformed
+        # suffix means a corrupt/tampered token — flag the whole cursor
+        # invalid (same as an unparseable datetime) rather than silently
+        # downgrading to the started_at-only predicate, which would
+        # reintroduce boundary-skipped rows for tied ``started_at`` values.
+        try:
+            cursor_id = UUID(id_str)
+        except ValueError:
+            return None, None
+    return cursor_dt, cursor_id
+
+
 async def list_analyses(
     db: AsyncSession,
     *,
@@ -237,11 +279,17 @@ async def list_analyses(
 ) -> tuple[list[MemoryAnalysis], str | None]:
     """List runs for a context, newest first, with cursor pagination.
 
-    Cursor is the ``started_at`` ISO-8601 of the last item on the
-    previous page. Newer runs that arrive between requests appear at
-    the top of page 1; the cursor walks backward in time so missing
-    them on a subsequent page is intentional (poll page 1 for the
-    freshest list).
+    Cursor is the compound ``"<started_at_iso>|<run_id>"`` of the last
+    item on the previous page (#1247). ``started_at`` alone is NOT unique
+    — several runs (e.g. a burst of scheduled analyses) can share the
+    same second — so a strict ``started_at`` cursor would silently skip
+    runs that straddle a page boundary. Ordering and the cursor predicate
+    are therefore a compound key ``(started_at, id)`` DESC.
+
+    Newer runs that arrive between requests appear at the top of page 1;
+    the cursor walks backward through ``(started_at, id)`` so missing them
+    on a subsequent page is intentional (poll page 1 for the freshest
+    list).
     """
     page_size = _clamp_limit(limit, DEFAULT_LIST_PAGE_SIZE, MAX_LIST_PAGE_SIZE)
 
@@ -250,22 +298,31 @@ async def list_analyses(
         MemoryAnalysis.context_id == context_id,
     ]
     if cursor:
-        try:
-            cursor_dt = datetime.fromisoformat(cursor)
-        except ValueError:
+        cursor_dt, cursor_id = _decode_list_cursor(cursor)
+        if cursor_dt is None:
             logger.warning("list_analyses_invalid_cursor", cursor=cursor)
-        else:
-            # Keyset pagination on started_at DESC — strict less-than
-            # so the cursor row itself is not duplicated on the next
-            # page. ``started_at`` is naive UTC by repo convention.
-            if cursor_dt.tzinfo is not None:
-                cursor_dt = cursor_dt.astimezone(ZoneInfo("UTC")).replace(tzinfo=None)
+        elif cursor_id is None:
+            # Legacy started_at-only cursor (pre-#1247): strict less-than
+            # so the cursor row itself is not duplicated on the next page.
             conditions.append(MemoryAnalysis.started_at < cursor_dt)
+        else:
+            # Compound keyset on (started_at, id) DESC: everything strictly
+            # "older" than the cursor tuple. The id tiebreaker keeps runs
+            # sharing ``cursor_dt`` from being skipped across the boundary.
+            conditions.append(
+                or_(
+                    MemoryAnalysis.started_at < cursor_dt,
+                    and_(
+                        MemoryAnalysis.started_at == cursor_dt,
+                        MemoryAnalysis.id < cursor_id,
+                    ),
+                )
+            )
 
     stmt = (
         select(MemoryAnalysis)
         .where(and_(*conditions))
-        .order_by(MemoryAnalysis.started_at.desc())
+        .order_by(MemoryAnalysis.started_at.desc(), MemoryAnalysis.id.desc())
         .limit(page_size + 1)  # peek-one to detect last page
     )
     rows = list((await db.execute(stmt)).scalars().all())
@@ -273,13 +330,14 @@ async def list_analyses(
     next_cursor: str | None = None
     if len(rows) > page_size:
         rows = rows[:page_size]
-        # Cursor for next page is the started_at of the LAST row we
-        # returned, formatted with the project's standard ``Z`` suffix
-        # so JS clients that round-trip the cursor through their own
+        # Cursor for next page is the compound (started_at, id) of the LAST
+        # row we returned. ``started_at`` uses the project's standard ``Z``
+        # suffix so JS clients that round-trip the cursor through their own
         # parser don't drop the timezone info (#489 wire-format rule).
         from utils.datetime import to_utc_iso
 
-        next_cursor = to_utc_iso(rows[-1].started_at)
+        last = rows[-1]
+        next_cursor = f"{to_utc_iso(last.started_at)}|{last.id}"
 
     return rows, next_cursor
 

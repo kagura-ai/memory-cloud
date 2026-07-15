@@ -50,6 +50,12 @@ from utils.logger import get_logger
 
 logger = get_logger(__name__)
 
+# Generic caller-facing message for unexpected errors (#1247). The real
+# detail is logged server-side as ``error_type`` + traceback; the raw
+# exception string — which can carry SQL / driver / BYOK-key internals —
+# is NEVER placed in the MCP error envelope returned to the client.
+_GENERIC_ANALYSIS_ERROR = "An internal error occurred while processing the analysis request."
+
 # Strong-ref set for ``asyncio.create_task`` — without this the task
 # can be GC'd before the loop schedules it. Mirrors the REST-side
 # pattern in ``api/routes/analyses.py`` so MCP and REST kick-offs
@@ -194,9 +200,10 @@ def _gate_error_response(exc: Exception) -> list[TextContent]:
             exc.message,
             **{k: v for k, v in exc.details.items() if v is not None},
         )
-    # Unexpected — log + generic error.
-    logger.error("analysis_mcp_unexpected_error", error=str(exc), exc_info=True)
-    return _error_response("internal_error", str(exc))
+    # Unexpected — log the real detail server-side, return a generic
+    # message so no SQL/driver internals leak into the MCP envelope (#1247).
+    logger.error("analysis_mcp_unexpected_error", error_type=type(exc).__name__, exc_info=True)
+    return _error_response("internal_error", _GENERIC_ANALYSIS_ERROR)
 
 
 def _serialize_run_row(row: Any) -> dict[str, Any]:
@@ -393,11 +400,11 @@ async def handle_analyze_context(
 
         except Exception as e:
             await db.rollback()
-            logger.error("analyze_context_failed", error=str(e), exc_info=True)
+            logger.error("analyze_context_failed", error_type=type(e).__name__, exc_info=True)
             await _log_tool_usage(
                 db, user_id, "analyze_context", start_time, 500, workspace_id=workspace_id
             )
-            return _error_response("analyze_context_error", str(e))
+            return _error_response("analyze_context_error", _GENERIC_ANALYSIS_ERROR)
 
     return _error_response("internal_error", "Database session unavailable")
 
@@ -470,11 +477,11 @@ async def handle_get_analysis(
             return _success_response(**_serialize_run_row(row))
 
         except Exception as e:
-            logger.error("get_analysis_failed", error=str(e), exc_info=True)
+            logger.error("get_analysis_failed", error_type=type(e).__name__, exc_info=True)
             await _log_tool_usage(
                 db, user_id, "get_analysis", start_time, 500, workspace_id=workspace_id
             )
-            return _error_response("get_analysis_error", str(e))
+            return _error_response("get_analysis_error", _GENERIC_ANALYSIS_ERROR)
 
     return _error_response("internal_error", "Database session unavailable")
 
@@ -540,11 +547,11 @@ async def handle_list_analyses(
             )
 
         except Exception as e:
-            logger.error("list_analyses_failed", error=str(e), exc_info=True)
+            logger.error("list_analyses_failed", error_type=type(e).__name__, exc_info=True)
             await _log_tool_usage(
                 db, user_id, "list_analyses", start_time, 500, workspace_id=workspace_id
             )
-            return _error_response("list_analyses_error", str(e))
+            return _error_response("list_analyses_error", _GENERIC_ANALYSIS_ERROR)
 
     return _error_response("internal_error", "Database session unavailable")
 
@@ -619,7 +626,7 @@ async def handle_get_active_analysis(
             return _success_response(**_serialize_run_row(row))
 
         except Exception as e:
-            logger.error("get_active_analysis_failed", error=str(e), exc_info=True)
+            logger.error("get_active_analysis_failed", error_type=type(e).__name__, exc_info=True)
             await _log_tool_usage(
                 db,
                 user_id,
@@ -628,7 +635,7 @@ async def handle_get_active_analysis(
                 500,
                 workspace_id=workspace_id,
             )
-            return _error_response("get_active_analysis_error", str(e))
+            return _error_response("get_active_analysis_error", _GENERIC_ANALYSIS_ERROR)
 
     return _error_response("internal_error", "Database session unavailable")
 
@@ -743,10 +750,10 @@ async def handle_get_cluster(
             return _success_response(**cluster)
 
         except Exception as e:
-            logger.error("get_cluster_failed", error=str(e), exc_info=True)
+            logger.error("get_cluster_failed", error_type=type(e).__name__, exc_info=True)
             await _log_tool_usage(
                 db, user_id, "get_cluster", start_time, 500, workspace_id=workspace_id
             )
-            return _error_response("get_cluster_error", str(e))
+            return _error_response("get_cluster_error", _GENERIC_ANALYSIS_ERROR)
 
     return _error_response("internal_error", "Database session unavailable")
