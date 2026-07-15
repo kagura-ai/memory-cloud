@@ -235,10 +235,12 @@ def _decode_list_cursor(cursor: str) -> tuple[datetime | None, UUID | None]:
     identical ``started_at``, so no row straddling a page boundary is
     skipped. ``started_at`` is normalized to naive UTC (repo convention).
 
-    Back-compat: a legacy cursor (bare ISO ``started_at``, pre-#1247)
-    decodes with ``id=None`` so tokens issued before this change still
-    page (the caller falls back to the strict ``started_at`` predicate).
-    Returns ``(None, None)`` when the token is unparseable.
+    Back-compat: a legacy cursor (bare ISO ``started_at``, pre-#1247, no
+    ``|`` separator) decodes with ``id=None`` so tokens issued before this
+    change still page (the caller falls back to the strict ``started_at``
+    predicate). Returns ``(None, None)`` when the token is unparseable —
+    including a compound cursor whose ``|`` separator is present but whose
+    UUID tail is malformed (a corrupt/tampered token, NOT a legacy one).
     """
     # ``to_utc_iso`` never emits ``|`` and a UUID never contains one, so
     # splitting on the LAST ``|`` cleanly separates the two components.
@@ -254,11 +256,16 @@ def _decode_list_cursor(cursor: str) -> tuple[datetime | None, UUID | None]:
         cursor_dt = cursor_dt.astimezone(ZoneInfo("UTC")).replace(tzinfo=None)
 
     cursor_id: UUID | None = None
-    if id_str:
+    if sep:
+        # A compound cursor MUST carry a valid UUID tail. A malformed
+        # suffix means a corrupt/tampered token — flag the whole cursor
+        # invalid (same as an unparseable datetime) rather than silently
+        # downgrading to the started_at-only predicate, which would
+        # reintroduce boundary-skipped rows for tied ``started_at`` values.
         try:
             cursor_id = UUID(id_str)
         except ValueError:
-            cursor_id = None
+            return None, None
     return cursor_dt, cursor_id
 
 

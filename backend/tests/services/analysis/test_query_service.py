@@ -350,6 +350,29 @@ async def test_list_analyses_legacy_started_at_only_cursor_still_pages(
     assert page2[0].started_at < page1[-1].started_at
 
 
+def test_decode_list_cursor_malformed_uuid_tail_is_invalid():
+    """#1247 (Copilot): a compound cursor whose ``|`` separator is present
+    but whose UUID tail is malformed is a corrupt/tampered token — it must
+    decode to ``(None, None)`` (invalid), NOT silently downgrade to the
+    started_at-only predicate, which would reintroduce boundary-skipped
+    rows for tied ``started_at`` values."""
+    from services.analysis.query_service import _decode_list_cursor
+
+    # Valid datetime + garbage UUID suffix → whole cursor invalid.
+    assert _decode_list_cursor("2026-07-15T01:00:00|not-a-uuid") == (None, None)
+    # Trailing separator with empty UUID tail is likewise malformed.
+    assert _decode_list_cursor("2026-07-15T01:00:00|") == (None, None)
+
+    # Contrast: a legacy bare-ISO cursor (no separator) stays a valid
+    # started_at-only cursor (id=None) — back-compat preserved.
+    dt, cid = _decode_list_cursor("2026-07-15T01:00:00")
+    assert dt is not None and cid is None
+    # And a well-formed compound cursor decodes both components.
+    good_id = uuid4()
+    dt, cid = _decode_list_cursor(f"2026-07-15T01:00:00|{good_id}")
+    assert dt is not None and cid == good_id
+
+
 @pytest.mark.asyncio
 async def test_get_active_analysis_returns_most_recent_succeeded(
     db_session, fixture_workspace_id, fixture_context_id, fixture_pricing
