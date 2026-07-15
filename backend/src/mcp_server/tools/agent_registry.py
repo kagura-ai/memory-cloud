@@ -194,11 +194,8 @@ async def handle_update_agent(
     from db.base import get_db
     from mcp_server.tools.resource import _check_owner_admin_role
     from services.agent_registry_service import (
-        AUDIT_AGENT_ENFORCEMENT_WIDENED,
-        AUDIT_AGENT_UPDATED,
         AgentRegistryService,
-        add_agent_audit_row,
-        enforcement_widened,
+        add_agent_update_audit_rows,
     )
     from utils.exceptions import ConflictError, ValidationError
 
@@ -220,18 +217,17 @@ async def handle_update_agent(
             return _error_response("agent_name_conflict", e.message)
 
         if changes:
-            widened = enforcement_widened(changes)
-            transition = changes.get("enforcement_mode") or changes.get("status")
-            add_agent_audit_row(
+            # #1294: one audit row per governed transition (parity with the REST
+            # surface) — a combined status+enforcement PATCH must not collapse.
+            add_agent_update_audit_rows(
                 db,
                 actor_user_id=user_id,
                 actor_email=None,
-                action=AUDIT_AGENT_ENFORCEMENT_WIDENED if widened else AUDIT_AGENT_UPDATED,
                 agent_id=agent.id,
+                agent_name=agent.name,
                 workspace_id=workspace_id,
-                metadata={"via": "mcp", "agent_name": agent.name, "changes": changes},
-                old_value=transition.get("old") if transition else None,
-                new_value=transition.get("new") if transition else None,
+                changes=changes,
+                extra_metadata={"via": "mcp"},
             )
             await db.commit()
             await db.refresh(agent)

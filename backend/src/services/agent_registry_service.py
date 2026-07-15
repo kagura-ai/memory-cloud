@@ -149,6 +149,75 @@ def add_agent_audit_row(
     )
 
 
+# Governed transitions that each earn their own first-class audit row (#1294):
+# the ``status`` kill-switch and the ``enforcement_mode`` change. Ordered so a
+# combined PATCH emits rows deterministically (status before enforcement).
+_GOVERNED_TRANSITION_FIELDS: tuple[str, ...] = ("status", "enforcement_mode")
+
+
+def add_agent_update_audit_rows(
+    db: AsyncSession,
+    *,
+    actor_user_id: str,
+    actor_email: str | None,
+    agent_id: uuid.UUID,
+    agent_name: str,
+    workspace_id: uuid.UUID,
+    changes: dict[str, dict[str, Any]],
+    extra_metadata: dict[str, Any] | None = None,
+) -> None:
+    """Emit the security-mutation audit row(s) for an ``update_agent`` change set.
+
+    #1294: a combined PATCH (e.g. ``{"status":"retired","enforcement_mode":"shadow"}``)
+    must NOT collapse two governed transitions into a single old/new pair. This
+    emits **one row per governed transition** (``status`` kill-switch,
+    ``enforcement_mode``) so each is first-class in the structured
+    ``old_value``/``new_value`` columns, and ``enforce``→``shadow`` keeps its
+    distinct ``agent_enforcement_widened`` action. A change set with no governed
+    transition (``name`` / free-form text only) emits a single ``agent_updated``
+    row with no old/new pair — preserving the prior behaviour for those fields.
+
+    Every emitted row carries the full ``changes`` set in ``metadata`` so the
+    combined PATCH remains reconstructable; only the structured old/new columns
+    are per-transition. Rows are added to the session but NOT committed — the
+    caller commits atomically with the mutation.
+    """
+    if not changes:
+        return
+    base_metadata = {**(extra_metadata or {}), "agent_name": agent_name, "changes": changes}
+    governed = [field for field in _GOVERNED_TRANSITION_FIELDS if field in changes]
+    if not governed:
+        # name / free-form text only — one generic row, no transition pair.
+        add_agent_audit_row(
+            db,
+            actor_user_id=actor_user_id,
+            actor_email=actor_email,
+            action=AUDIT_AGENT_UPDATED,
+            agent_id=agent_id,
+            workspace_id=workspace_id,
+            metadata=base_metadata,
+        )
+        return
+    for field in governed:
+        pair = changes[field]
+        action = (
+            AUDIT_AGENT_ENFORCEMENT_WIDENED
+            if field == "enforcement_mode" and enforcement_widened(changes)
+            else AUDIT_AGENT_UPDATED
+        )
+        add_agent_audit_row(
+            db,
+            actor_user_id=actor_user_id,
+            actor_email=actor_email,
+            action=action,
+            agent_id=agent_id,
+            workspace_id=workspace_id,
+            metadata=base_metadata,
+            old_value=pair.get("old"),
+            new_value=pair.get("new"),
+        )
+
+
 class AgentRegistryService:
     """CRUD + throttled liveness writes for the Agent Registry."""
 

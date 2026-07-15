@@ -20,8 +20,10 @@ from models.agent import Agent
 from services.agent_registry_service import (
     AUDIT_AGENT_ENFORCEMENT_WIDENED,
     AUDIT_AGENT_REGISTERED,
+    AUDIT_AGENT_UPDATED,
     AgentRegistryService,
     add_agent_audit_row,
+    add_agent_update_audit_rows,
     enforcement_widened,
     validate_agent_enforcement_mode,
     validate_agent_name,
@@ -315,3 +317,105 @@ class TestAuditRow:
         # Raw enum values per the roles.py transition precedent.
         assert row.old_value_hash == "enforce"
         assert row.new_value_hash == "shadow"
+
+
+# ---------------------------------------------------------------------------
+# add_agent_update_audit_rows — one row per governed transition (#1294)
+# ---------------------------------------------------------------------------
+
+
+def _emit_rows(changes, *, extra_metadata=None):
+    """Run add_agent_update_audit_rows against a mock db; return the AuditLog rows."""
+    db = MagicMock()
+    add_agent_update_audit_rows(
+        db,
+        actor_user_id="user-1",
+        actor_email="u@example.com",
+        agent_id=uuid.uuid4(),
+        agent_name="ci-bot",
+        workspace_id=WORKSPACE_ID,
+        changes=changes,
+        extra_metadata=extra_metadata,
+    )
+    return [call.args[0] for call in db.add.call_args_list]
+
+
+class TestUpdateAuditRows:
+    def test_combined_patch_emits_one_row_per_governed_transition(self):
+        # #1294: a combined status+enforcement PATCH must NOT collapse — the
+        # status kill-switch and the enforcement change each get their own row
+        # with their own old/new pair, and enforce→shadow keeps the widening
+        # action. Before the fix this produced a single widened row that dropped
+        # the status old/new entirely.
+        rows = _emit_rows(
+            {
+                "status": {"old": "active", "new": "retired"},
+                "enforcement_mode": {"old": "enforce", "new": "shadow"},
+            }
+        )
+        assert len(rows) == 2
+        by_action = {r.action: r for r in rows}
+        assert set(by_action) == {AUDIT_AGENT_UPDATED, AUDIT_AGENT_ENFORCEMENT_WIDENED}
+        # status kill-switch is first-class, not buried under the widened row.
+        status_row = by_action[AUDIT_AGENT_UPDATED]
+        assert (status_row.old_value_hash, status_row.new_value_hash) == ("active", "retired")
+        enf_row = by_action[AUDIT_AGENT_ENFORCEMENT_WIDENED]
+        assert (enf_row.old_value_hash, enf_row.new_value_hash) == ("enforce", "shadow")
+
+    def test_status_ordered_before_enforcement(self):
+        rows = _emit_rows(
+            {
+                "enforcement_mode": {"old": "enforce", "new": "shadow"},
+                "status": {"old": "active", "new": "suspended"},
+            }
+        )
+        # Deterministic order regardless of dict insertion order: status first.
+        assert [r.old_value_hash for r in rows] == ["active", "enforce"]
+
+    def test_status_only_single_row(self):
+        rows = _emit_rows({"status": {"old": "active", "new": "suspended"}})
+        assert len(rows) == 1
+        assert rows[0].action == AUDIT_AGENT_UPDATED
+        assert (rows[0].old_value_hash, rows[0].new_value_hash) == ("active", "suspended")
+
+    def test_enforcement_widened_single_row(self):
+        rows = _emit_rows({"enforcement_mode": {"old": "enforce", "new": "shadow"}})
+        assert len(rows) == 1
+        assert rows[0].action == AUDIT_AGENT_ENFORCEMENT_WIDENED
+
+    def test_enforcement_narrowing_uses_updated_action(self):
+        rows = _emit_rows({"enforcement_mode": {"old": "shadow", "new": "enforce"}})
+        assert len(rows) == 1
+        assert rows[0].action == AUDIT_AGENT_UPDATED
+        assert (rows[0].old_value_hash, rows[0].new_value_hash) == ("shadow", "enforce")
+
+    def test_combined_non_widening_emits_two_updated_rows(self):
+        rows = _emit_rows(
+            {
+                "status": {"old": "active", "new": "suspended"},
+                "enforcement_mode": {"old": "shadow", "new": "enforce"},
+            }
+        )
+        assert len(rows) == 2
+        assert [r.action for r in rows] == [AUDIT_AGENT_UPDATED, AUDIT_AGENT_UPDATED]
+
+    def test_name_only_single_generic_row_without_pair(self):
+        rows = _emit_rows({"name": {"old": "ci-bot", "new": "ci-bot-2"}})
+        assert len(rows) == 1
+        assert rows[0].action == AUDIT_AGENT_UPDATED
+        assert rows[0].old_value_hash is None
+        assert rows[0].new_value_hash is None
+
+    def test_empty_changes_emits_nothing(self):
+        assert _emit_rows({}) == []
+
+    def test_every_row_carries_full_change_set_and_extra_metadata(self):
+        changes = {
+            "status": {"old": "active", "new": "retired"},
+            "enforcement_mode": {"old": "enforce", "new": "shadow"},
+        }
+        rows = _emit_rows(changes, extra_metadata={"via": "mcp"})
+        for r in rows:
+            assert r.user_metadata["changes"] == changes
+            assert r.user_metadata["agent_name"] == "ci-bot"
+            assert r.user_metadata["via"] == "mcp"

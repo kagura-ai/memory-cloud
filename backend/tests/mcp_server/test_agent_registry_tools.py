@@ -212,6 +212,36 @@ class TestUpdateAgent:
         assert audit.call_args.kwargs["new_value"] == "shadow"
 
     @pytest.mark.asyncio
+    async def test_combined_status_enforcement_patch_emits_two_rows(self):
+        # #1294: a combined status+enforcement PATCH on the MCP surface must not
+        # collapse into one audit row — parity with the REST surface.
+        agent = _fake_agent()
+        svc = MagicMock(
+            get_agent=AsyncMock(return_value=agent),
+            update_agent=AsyncMock(
+                return_value={
+                    "status": {"old": "active", "new": "retired"},
+                    "enforcement_mode": {"old": "enforce", "new": "shadow"},
+                }
+            ),
+        )
+        with ExitStack() as stack:
+            _, audit = _enter(stack, service=svc)
+            result = await handle_update_agent(
+                args={"agent_id": str(agent.id), "status": "retired", "enforcement_mode": "shadow"},
+                user_id="u",
+                workspace_id=WORKSPACE_ID,
+            )
+        assert _payload(result)["status"] == "success"
+        assert audit.call_count == 2
+        emitted = {
+            c.kwargs["action"]: (c.kwargs.get("old_value"), c.kwargs.get("new_value"))
+            for c in audit.call_args_list
+        }
+        assert emitted["agent_updated"] == ("active", "retired")
+        assert emitted["agent_enforcement_widened"] == ("enforce", "shadow")
+
+    @pytest.mark.asyncio
     async def test_noop_update_writes_no_audit(self):
         agent = _fake_agent()
         svc = MagicMock(
