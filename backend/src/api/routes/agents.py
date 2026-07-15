@@ -28,12 +28,10 @@ from models.agent import Agent
 from models.api_base import TZAwareBaseModel
 from services.agent_registry_service import (
     AUDIT_AGENT_DELETED,
-    AUDIT_AGENT_ENFORCEMENT_WIDENED,
     AUDIT_AGENT_REGISTERED,
-    AUDIT_AGENT_UPDATED,
     AgentRegistryService,
     add_agent_audit_row,
-    enforcement_widened,
+    add_agent_update_audit_rows,
 )
 from utils.exceptions import NotFoundException, ValidationError
 from utils.logger import get_logger
@@ -231,18 +229,17 @@ async def update_agent(
 
     changes = await service.update_agent(agent, updates)
     if changes:
-        widened = enforcement_widened(changes)
-        transition = changes.get("enforcement_mode") or changes.get("status")
-        add_agent_audit_row(
+        # #1294: one audit row per governed transition — a combined
+        # status+enforcement PATCH must not collapse into a single old/new pair.
+        add_agent_update_audit_rows(
             db,
             actor_user_id=user_id,
             actor_email=email,
-            action=AUDIT_AGENT_ENFORCEMENT_WIDENED if widened else AUDIT_AGENT_UPDATED,
             agent_id=agent.id,
+            agent_name=agent.name,
             workspace_id=workspace_id,
-            metadata={**metadata, "agent_name": agent.name, "changes": changes},
-            old_value=transition.get("old") if transition else None,
-            new_value=transition.get("new") if transition else None,
+            changes=changes,
+            extra_metadata=metadata,
         )
         await db.commit()
         await db.refresh(agent)

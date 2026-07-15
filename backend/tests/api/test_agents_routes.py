@@ -87,6 +87,17 @@ def audit(monkeypatch):
     return recorder
 
 
+@pytest.fixture
+def audit_update(monkeypatch):
+    # update_agent funnels its audit through add_agent_update_audit_rows (#1294);
+    # the route's contract is "call it with the change set + commit atomically".
+    # Row-emission correctness (one row per governed transition) is pinned at the
+    # service level in test_agent_registry_service.py::TestUpdateAuditRows.
+    recorder = MagicMock()
+    monkeypatch.setattr(agents_routes, "add_agent_update_audit_rows", recorder)
+    return recorder
+
+
 class TestRegisterAgent:
     @pytest.mark.asyncio
     async def test_creates_audits_and_commits(self, db, service, audit):
@@ -165,10 +176,11 @@ class TestGetAndList:
 
 class TestUpdateAgent:
     @pytest.mark.asyncio
-    async def test_transition_audited_with_old_new(self, db, service, audit):
+    async def test_transition_forwards_change_set_and_commits(self, db, service, audit_update):
         agent = _fake_agent()
         service.get_agent.return_value = agent
-        service.update_agent.return_value = {"status": {"old": "active", "new": "suspended"}}
+        changes = {"status": {"old": "active", "new": "suspended"}}
+        service.update_agent.return_value = changes
 
         await update_agent(
             agent_id=agent.id,
@@ -177,31 +189,37 @@ class TestUpdateAgent:
             db=db,
         )
 
-        kwargs = audit.call_args.kwargs
-        assert kwargs["action"] == "agent_updated"
-        assert kwargs["old_value"] == "active"
-        assert kwargs["new_value"] == "suspended"
+        kwargs = audit_update.call_args.kwargs
+        assert kwargs["changes"] == changes
+        assert kwargs["agent_id"] == agent.id
+        assert kwargs["agent_name"] == agent.name
         db.commit.assert_awaited_once()
 
     @pytest.mark.asyncio
-    async def test_enforce_to_shadow_uses_widening_action(self, db, service, audit):
+    async def test_combined_status_enforcement_patch_forwards_both(self, db, service, audit_update):
+        # #1294: the route must hand the FULL change set to the audit helper so
+        # the status kill-switch and the enforcement change are both recorded —
+        # the helper (not the route) fans them into one row per transition.
         agent = _fake_agent()
         service.get_agent.return_value = agent
-        service.update_agent.return_value = {
-            "enforcement_mode": {"old": "enforce", "new": "shadow"}
+        changes = {
+            "status": {"old": "active", "new": "retired"},
+            "enforcement_mode": {"old": "enforce", "new": "shadow"},
         }
+        service.update_agent.return_value = changes
 
         await update_agent(
             agent_id=agent.id,
-            data=AgentUpdate(enforcement_mode="shadow"),
+            data=AgentUpdate(status="retired", enforcement_mode="shadow"),
             user=MOCK_USER,
             db=db,
         )
 
-        assert audit.call_args.kwargs["action"] == "agent_enforcement_widened"
+        assert audit_update.call_args.kwargs["changes"] == changes
+        db.commit.assert_awaited_once()
 
     @pytest.mark.asyncio
-    async def test_noop_update_skips_audit_and_commit(self, db, service, audit):
+    async def test_noop_update_skips_audit_and_commit(self, db, service, audit_update):
         agent = _fake_agent()
         service.get_agent.return_value = agent
         service.update_agent.return_value = {}
@@ -214,7 +232,7 @@ class TestUpdateAgent:
         )
 
         assert result is agent
-        audit.assert_not_called()
+        audit_update.assert_not_called()
         db.commit.assert_not_awaited()
 
     @pytest.mark.asyncio
