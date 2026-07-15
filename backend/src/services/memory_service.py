@@ -2173,6 +2173,24 @@ class MemoryService:
         if not current_workspace_id or not current_context_id:
             raise ValueError("recall() requires current_workspace_id and current_context_id")
 
+        # #1291: recall does NOT pass through
+        # ``PermissionService.resolve_context_for_workspace_read`` — the MCP
+        # handler gates that path via ``_resolve_context_for_read``, but the REST
+        # ``/memory/recall`` route calls this service method directly and so
+        # bypassed the subtractive agent-binding filter before this fix. Apply
+        # the gate HERE (service layer) so an agent-bound credential cannot read
+        # a binding-denied context via ANY caller. No-op for non-agent
+        # credentials (``get_agent_scope()`` is None → one contextvar read, no
+        # DB query); deny raises the uniform ``NotFoundException("Context")``
+        # matching the MCP path's 404. Covers the single declared context and
+        # each entry on the #81 cross-context list (exactly the set searched
+        # below).
+        from services.agent_binding_service import agent_binding_permits
+
+        for _gated_cid in context_ids if context_ids else [current_context_id]:
+            if not await agent_binding_permits(self.db, _gated_cid, "read"):
+                raise NotFoundException("Context", str(_gated_cid))
+
         # #708 Option A: route embedding cost (key + spend cap + paid_by
         # + search + graph) to the context's owner workspace. Rate-limit
         # gating stays on the caller upstream — do NOT change it here.
