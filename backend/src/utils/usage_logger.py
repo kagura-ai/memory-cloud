@@ -5,6 +5,7 @@ Issue #48 - Usage Statistics - Plan Limits & Usage Tracking
 """
 
 from sqlalchemy import insert
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from models.auth import UsageStats
@@ -57,10 +58,10 @@ async def log_usage(
         flow, but callers chaining dependent writes, e.g. #1228 attribution
         rows, need the signal).
     """
-    try:
-        # Use utcnow() for timezone-naive datetime (matches DB schema)
-        now = utcnow()
+    # Use utcnow() for timezone-naive datetime (matches DB schema)
+    now = utcnow()
 
+    async def _insert(ctx_id: str | None) -> None:
         await db.execute(
             insert(UsageStats).values(
                 user_id=user_id,
@@ -70,23 +71,47 @@ async def log_usage(
                 response_time_ms=response_time_ms,
                 created_at=now,
                 date=now.date(),
-                context_id=context_id,  # Bugfix: Add context_id
+                context_id=ctx_id,  # Bugfix: Add context_id
                 workspace_id=workspace_id,  # Bugfix: Add workspace_id
                 api_key_id=api_key_id,  # Issue #626
             )
         )
         await db.commit()
 
-        logger.debug(
-            "usage_logged",
+    try:
+        await _insert(context_id)
+    except IntegrityError as e:
+        # #1318: callers may stamp an unvalidated context_id (e.g. a
+        # nonexistent UUID straight from the request), violating the
+        # usage_stats→contexts FK. Preserve the usage/quota event without
+        # the context attribution instead of dropping the row.
+        await db.rollback()
+        if context_id is None:
+            logger.error(
+                "usage_logging_failed",
+                error=str(e),
+                user_id=user_id,
+                endpoint=endpoint,
+            )
+            return False
+        try:
+            await _insert(None)
+        except Exception as retry_err:
+            await db.rollback()
+            logger.error(
+                "usage_logging_failed",
+                error=str(retry_err),
+                user_id=user_id,
+                endpoint=endpoint,
+            )
+            return False
+        logger.warning(
+            "usage_logging_context_fk_fallback",
+            context_id=context_id,
             user_id=user_id,
             endpoint=endpoint,
-            method=method,
-            status=status_code,
-            response_time_ms=response_time_ms,
         )
         return True
-
     except Exception as e:
         await db.rollback()
         logger.error(
@@ -97,3 +122,13 @@ async def log_usage(
         )
         # Don't raise - logging should not break the main flow
         return False
+
+    logger.debug(
+        "usage_logged",
+        user_id=user_id,
+        endpoint=endpoint,
+        method=method,
+        status=status_code,
+        response_time_ms=response_time_ms,
+    )
+    return True

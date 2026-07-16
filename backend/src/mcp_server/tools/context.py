@@ -186,7 +186,10 @@ async def handle_get_context_info(
                 "get_context_info",
                 start_time,
                 404,
-                args.get("context_id"),
+                # #1318: the requested context_id failed resolution — it must
+                # not be stamped as the usage_stats FK (nonexistent UUIDs
+                # violate the constraint and drop the whole usage row).
+                None,
                 workspace_id,
             )
             return e.to_response()
