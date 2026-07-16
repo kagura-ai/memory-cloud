@@ -129,13 +129,14 @@ Semantics (normative):
   credentials are not filtered; row-filter violations land as `would_deny` aggregates in
   `memory_access_events` with `filter_kind='type_source'`. The write lane (`remember` /
   `update` / `patch`) stays governed by `write_policy` only.
-  - **Known scope limit (tracked as follow-up):** the per-memory dimension is applied to the
-    memory-read lanes above, not yet to every enumeration / aggregate / update-response
-    surface (`GET /memory/list`, `GET /memory/access-patterns`, `GET /memory/stats`, MCP
-    `get_cluster`, and the `PATCH /memory/{id}` response body). Those surfaces still enforce
-    the P0-2 **context-level** binding gate; extending the row filter to them (the
-    #1291/#1292-class audit widened to non-CRUD read surfaces) is a follow-up. Operators must
-    not rely on the type/source filter to hide denied-type rows on those endpoints yet.
+  - **Known scope limit (tracked as [#1301](https://github.com/kagura-ai/memory-cloud/issues/1301)):**
+    the per-memory dimension is applied to the memory-read lanes above, not yet to every
+    enumeration / aggregate / update-response surface (`GET /memory/list`,
+    `GET /memory/access-patterns`, `GET /memory/stats`, MCP `get_cluster`, and the
+    `PATCH /memory/{id}` response body). Those surfaces still enforce the P0-2 **context-level**
+    binding gate; extending the row filter to them (the #1291/#1292-class audit widened to
+    non-CRUD read surfaces) is #1301. Operators must not rely on the type/source filter to hide
+    denied-type rows on those endpoints yet.
 - **`is_default` is the single source of truth for the bootstrap default binding.** At most
   one binding per agent is default, guaranteed by the partial unique index
   `(agent_id) WHERE is_default`. `agents.default_context_id` was rejected as a second source
