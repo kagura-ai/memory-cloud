@@ -74,7 +74,6 @@ services:
       TZ: UTC
       PGTZ: UTC
     volumes:
-      # PG18+ mounts the parent dir (PGDATA lives under it), not .../data.
       - postgres_data_18:/var/lib/postgresql
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U kagura -d kagura"]

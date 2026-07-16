@@ -32,8 +32,10 @@ services:
       - "5432:5432"
     volumes:
       # PG18+ mounts the parent dir, not .../data. Fresh volume: local data
-      # from the old postgres_data (PG15) volume is not carried over — re-run
-      # `make migrate` (or restore a dump) after first start.
+      # from the old postgres_data (PG15) volume is not carried over — after
+      # first start, rebuild the schema with
+      #   docker exec kagura-api alembic upgrade head
+      # (`make migrate` needs a host venv) or restore a dump.
       - postgres_data_18:/var/lib/postgresql
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U kagura -d postgres"]

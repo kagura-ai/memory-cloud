@@ -5,12 +5,10 @@ Operator runbook for migrating the single-server production stack from
 **stateful cutover with downtime**, not a rolling deploy — schedule a
 maintenance window.
 
-Pinned image (multi-arch manifest-list digest, resolved 2026-07-16 from
-Docker Hub; last pushed 2026-07-08):
-
-```
-postgres:18.4-alpine@sha256:9a8afca54e7861fd90fab5fdf4c42477a6b1cb7d293595148e674e0a3181de15
-```
+The pinned image lives in `docker-compose.prod.yml` (multi-arch
+manifest-list digest, resolved 2026-07-16 from Docker Hub). This runbook
+never hardcodes it — the Conventions section derives it from the compose
+file so the two cannot drift.
 
 ## Why this is not an image-tag bump
 
@@ -22,11 +20,32 @@ The PostgreSQL 18+ Docker Official Image changed its storage layout:
 | Volume mount target | `/var/lib/postgresql/data` | `/var/lib/postgresql` |
 
 **Never start the PG18 image against the existing PG15 volume
-(`kagura_postgres_data`).** The compose files now mount a fresh volume
-(`kagura_postgres_data_18`) at `/var/lib/postgresql`; data moves via
-dump/restore (Option A below). The old volume stays untouched — and is
-deliberately no longer declared in `docker-compose.prod.yml`, so
+(`kagura_postgres_data`).** The image's own entrypoint refuses to start when
+it detects an old-version data directory (`docker_error_old_databases`
+guard), but it will happily `initdb` a **fresh empty** volume — which is the
+real hazard here (see the deploy-guard note below). The compose files now
+mount a new volume (`kagura_postgres_data_18`) at `/var/lib/postgresql`;
+data moves via dump/restore (Option A). The old volume stays untouched — and
+is deliberately no longer declared in `docker-compose.prod.yml`, so
 `docker compose down -v` cannot delete it during the rollback window.
+
+## ⚠ Guard against accidental early cutover
+
+Between merging #1302 and executing this runbook, the repo's compose
+definition (PG18, empty volume) diverges from the running production
+container (PG15, real data). During that window:
+
+- `scripts/deploy.sh` is safe: its api-* paths use `--no-deps` (added in
+  #1302, matching the pre-existing web path) so a routine deploy never
+  recreates postgres.
+- A raw `dc up -d` (or `systemctl restart kagura-memory`) is **NOT** safe:
+  it recreates postgres onto the empty PG18 volume, `alembic upgrade head`
+  then builds a fresh schema, readiness passes, and production silently
+  serves an empty database. Keep the merge-to-cutover window short and do
+  not run whole-stack `up -d` in it.
+- CI runs against PG18.4 from the moment #1302 merges, while prod is still
+  PG15 until cutover. Do not merge Alembic migrations that rely on
+  PG16+/PG18-only behavior inside this window.
 
 ## Method decision
 
@@ -38,78 +57,127 @@ deliberately no longer declared in `docker-compose.prod.yml`, so
   (alpine → alpine only), `pg_upgrade --check` in rehearsal, both versioned
   data dirs under one `/var/lib/postgresql` mount, and post-upgrade
   `amcheck`/`REINDEX` validation of text indexes — carrying data files across
-  a collation-semantics change silently corrupts text indexes.
+  a collation-semantics change silently corrupts text indexes. Also: PG18's
+  `initdb` enables **data checksums by default** while the PG15 cluster has
+  them off — `pg_upgrade` refuses mismatched clusters, so initdb the new
+  cluster with `POSTGRES_INITDB_ARGS=--no-data-checksums` (or run
+  `pg_checksums --enable` on the old cluster first).
 
 Record the chosen method and rehearsal evidence on issue #1302 before the
 production cutover.
 
 ## Conventions used below
 
-- Run on the production VM from the directory holding
-  `docker-compose.prod.yml` (`terraform/single-server/` in the checked-out
-  repo; the blue/green marker lives at `/opt/kagura-memory/active-color`).
-- `dc` is the same alias `scripts/deploy.sh` uses:
+Run on the production VM from the directory holding `docker-compose.prod.yml`
+(`/opt/kagura-memory/src/terraform/single-server`; the blue/green marker is
+`/opt/kagura-memory/active-color`). Set up the shell once:
 
-  ```bash
-  dc() { docker compose -f docker-compose.prod.yml --env-file .env.prod "$@"; }
-  ```
+```bash
+cd /opt/kagura-memory/src/terraform/single-server
 
-- `PG18_IMAGE` refers to the pinned image string at the top of this runbook.
-- Backups are taken with the **PG18 client tools from the pinned image** —
-  never host binaries of unknown version (newer client dumping the older
-  server is the supported direction).
+dc() { docker compose -f docker-compose.prod.yml --env-file .env.prod "$@"; }
+
+# .env.prod is only read by compose — export it for the raw `docker run`
+# backup/restore commands below (they need $DB_PASSWORD):
+set -a; . ./.env.prod; set +a
+
+# The pinned PG18 image, derived from compose so this doc can't drift:
+PG18_IMAGE=$(dc config | awk '$1 == "image:" && $2 ~ /^postgres:/ {print $2; exit}')
+
+# The compose network (expected: single-server_default — project name comes
+# from the compose file's directory; see terraform/single-server/README.md):
+NET=$(docker inspect kagura-postgres \
+  -f '{{range $k,$_ := .NetworkSettings.Networks}}{{$k}}{{end}}')
+
+echo "image=$PG18_IMAGE net=$NET"   # sanity-check both before proceeding
+```
+
+Backups are taken with the **PG18 client tools from the pinned image** —
+never host binaries of unknown version (newer client dumping the older
+server is the supported direction).
 
 ## 1. Preflight (record everything on issue #1302)
 
 - [ ] Application commit/tag deployed, and Alembic head:
       `dc exec api-$(cat /opt/kagura-memory/active-color) alembic current`
-- [ ] Live server version + image digest:
+- [ ] Live server version + **image digest** (rollback re-pulls by this
+      digest, since the running PG15 container will not survive the cutover):
       `dc exec postgres psql -U kagura -d kagura -c 'select version()'` and
       `docker inspect --format '{{index .RepoDigests 0}}' $(docker inspect --format '{{.Image}}' kagura-postgres)`
 - [ ] Database size: `dc exec postgres psql -U kagura -d kagura -c "select pg_size_pretty(pg_database_size('kagura'))"`
 - [ ] Row counts for critical tables (memories, contexts, users, workspaces,
       memory_access_events) — keep the psql output verbatim.
-- [ ] Encoding / locale / timezone:
-      `dc exec postgres psql -U kagura -d kagura -c 'show server_encoding; show lc_collate; show timezone'`
+- [ ] Encoding / collation / timezone (use `pg_database` — the `lc_collate`
+      GUC was removed in PostgreSQL 16, so `show lc_collate` errors on 18):
+      `dc exec postgres psql -U kagura -d kagura -c "show server_encoding; show timezone; select datcollate, datctype from pg_database where datname='kagura'"`
 - [ ] Roles and grants: `dc exec postgres psql -U kagura -d postgres -c '\du'`
+- [ ] **Database-level properties** — neither `--globals-only` nor a
+      non-`--create` dump carries them, so record them for manual re-apply
+      after restore: `dc exec postgres psql -U kagura -d postgres -c '\l+'`
+      and `dc exec postgres psql -U kagura -d postgres -c 'select * from pg_db_role_setting'`
+      (any `ALTER DATABASE kagura SET ...` GUC or database-level GRANT shown
+      here must be re-applied in §4 step 7 and checked in step 8).
+- [ ] Schema ownership: `dc exec postgres psql -U kagura -d kagura -c '\dn+'`.
+      If `public` is NOT owned by `pg_database_owner`, the dump will contain
+      `CREATE SCHEMA public` and collide with the initdb-created schema under
+      `--exit-on-error` — plan to `DROP SCHEMA public` in the fresh `kagura`
+      DB right before the restore in that case.
 - [ ] Extensions (expected: `pg_trgm` + defaults):
       `dc exec postgres psql -U kagura -d kagura -c '\dx'`
-- [ ] Free disk ≥ (old volume + dump + new volume) — check `df -h` and
+- [ ] Free disk ≥ (old volume + dump + new volume) — `df -h`,
       `docker system df -v`.
-- [ ] Agree the maintenance window and the rollback decision point (§6).
+- [ ] **Pre-stage the window**: `docker pull "$PG18_IMAGE"` and `git fetch`
+      now, so no registry/network dependency remains inside the window.
+- [ ] **Docker engine ≥ 23**: `docker version -f '{{.Server.Version}}'`.
+      The VM's weekly cron (`/etc/cron.weekly/docker-prune`, installed by
+      `startup.sh`) runs `docker volume prune -f --filter "label!=keep"` and
+      `docker system prune -af --filter "until=168h"`. On engine < 23 volume
+      prune also removes **named** dangling volumes — which
+      `kagura_postgres_data` becomes after cutover. If engine < 23, disable
+      that cron until §6 closes the window. On any engine, the system prune
+      will remove the unused PG15 *image* within a week — rollback therefore
+      re-pulls by the digest recorded above, never by the floating tag.
+- [ ] Agree the maintenance window and the rollback decision point (§5).
 
-## 2. Backup (rehearsal AND final cutover use the same procedure)
+## 2. Backup procedure (used by rehearsal §3 and cutover §4)
 
 ```bash
 BACKUP_DIR=/var/lib/kagura/pg18-migration/$(date -u +%Y%m%dT%H%M%SZ)
 sudo mkdir -p "$BACKUP_DIR"
 
-# Globals (roles/grants) — PG18 client over the compose network:
-docker run --rm --network kagura-memory_default \
+# Globals (roles/grants) — tiny, serial is fine:
+docker run --rm --network "$NET" \
   -e PGPASSWORD="$DB_PASSWORD" -v "$BACKUP_DIR":/backup \
   "$PG18_IMAGE" \
   pg_dumpall -h postgres -U kagura --globals-only -f /backup/globals.sql
 
-# Application database, custom format:
-docker run --rm --network kagura-memory_default \
+# Application database — directory format with parallel jobs (the dump runs
+# inside the downtime window at cutover; parallelism cuts it by ~core count):
+docker run --rm --network "$NET" \
   -e PGPASSWORD="$DB_PASSWORD" -v "$BACKUP_DIR":/backup \
   "$PG18_IMAGE" \
-  pg_dump -h postgres -U kagura -Fc -d kagura -f /backup/kagura.dump
+  pg_dump -h postgres -U kagura -Fd -j "$(nproc)" -d kagura -f /backup/kagura.dump.d
 
-sha256sum "$BACKUP_DIR"/* | sudo tee "$BACKUP_DIR/SHA256SUMS"
+# /var/lib/kagura is root-owned 0700 and the dumps are written as root:
+sudo sh -c "cd '$BACKUP_DIR' && sha256sum globals.sql \$(find kagura.dump.d -type f) > SHA256SUMS"
 ```
 
-> The compose network name is `<project>_default`; confirm with
-> `docker network ls`. Off-VM copy of `$BACKUP_DIR` is mandatory for the
-> final cutover backup.
+Copy `$BACKUP_DIR` off-VM (mandatory for the final cutover backup — the copy
+may run in the background in parallel with §4 steps 4–9; only §6 cleanup is
+gated on it being confirmed).
 
-Additionally take a volume-level snapshot of `kagura_postgres_data`
-(stopped-container `tar` of the volume, or the provider's disk snapshot).
+**Volume snapshot** — only meaningful with postgres **stopped** (a tar of a
+live data directory is torn); at cutover it is taken at §4 step 4, after
+`dc stop postgres`. Preferred method on this GCP VM is a disk snapshot —
+see "Manual snapshot" in `terraform/single-server/README.md`
+(`gcloud compute disks snapshot ${GCP_VM} ...`; crash-consistent, fast,
+incremental). A `tar` of `kagura_postgres_data` from a helper container is
+the fallback.
 
 ## 3. Rehearsal (against a copy — never the only production volume)
 
-- [ ] Restore `globals.sql` + `kagura.dump` into a scratch PG18.4 container on
-      a fresh volume; verify checksums first.
+- [ ] Restore `globals.sql` + `kagura.dump.d` into a scratch PG18.4 container
+      on a fresh volume (same commands as §4 step 7); verify checksums first.
 - [ ] Compare schema (`pg_dump -s` diff), roles, extensions, table counts,
       critical row counts, sequence values (`select * from pg_sequences`),
       and a handful of representative application queries against §1 records.
@@ -122,7 +190,7 @@ Additionally take a volume-level snapshot of `kagura_postgres_data`
       admin CLI, background-job startup logs.
 - [ ] Measure: dump duration, restore duration → expected production
       downtime. Record on #1302.
-- [ ] Execute a rollback rehearsal (§6) and record its duration.
+- [ ] Execute a rollback rehearsal (§5) and record its duration.
 - [ ] `docker scout cves "$PG18_IMAGE"` (or equivalent scanner) — record
       accepted/fixed findings.
 
@@ -130,9 +198,18 @@ Additionally take a volume-level snapshot of `kagura_postgres_data`
 
 Announce the window. Then:
 
-1. **Fence all writers.** Background schedulers (APScheduler) run inside the
-   API containers, so stopping both colors stops them too. Stop **both**
-   colors — the idle one must not be able to come back mid-migration:
+1. **Suppress every auto-restart path for the window.** `restart: always`
+   revives manually-stopped containers on any dockerd restart, and the
+   `kagura-memory` systemd unit runs whole-stack `up -d` at boot (its
+   `up -d` would also recreate postgres onto the empty volume mid-window):
+
+   ```bash
+   sudo systemctl disable kagura-memory
+   docker update --restart=no kagura-api-blue kagura-api-green kagura-postgres
+   ```
+
+2. **Fence all writers.** Background schedulers (APScheduler) run inside the
+   API containers, so stopping **both colors** stops them too:
 
    ```bash
    dc stop api-blue api-green
@@ -140,70 +217,134 @@ Announce the window. Then:
 
    Leave `caddy`/`web` up (they will 502 the API; static pages keep serving)
    or stop them too for a full-outage banner — operator's choice.
-2. **Final backup** per §2, plus the volume snapshot. Verify checksums and
-   copy off-VM before proceeding.
-3. **Stop PG15:** `dc stop postgres` (container stays for rollback; do NOT
-   `rm` it or its volume).
-4. **Deploy the PG18 compose definition:** `git fetch && git checkout <the
-   merged #1302 commit/tag>` in the repo working copy on the VM. Confirm
-   `docker-compose.prod.yml` now pins 18.4 and mounts
-   `postgres_data_18:/var/lib/postgresql`.
-5. **Start PG18 on the fresh volume:** `dc up -d postgres` → wait healthy
-   (`dc ps postgres`). This `initdb`s `kagura_postgres_data_18` with the
-   `POSTGRES_*`/`TZ`/`PGTZ` env from compose.
-6. **Restore:**
+
+   **With writers fenced, re-run the §1 row-count queries now** — these
+   post-fence numbers (not the days-old preflight ones) are the authoritative
+   reference for step 8's validation.
+3. **Final backup** per §2 (postgres is still running — the dump needs it).
+   Verify checksums; start the off-VM copy in the background.
+4. **Stop PG15 and snapshot its volume:** `dc stop postgres`, then take the
+   volume snapshot per §2 (gcloud disk snapshot preferred). Only the
+   **volume** `kagura_postgres_data` survives this cutover — the PG15
+   *container* is removed at step 6 when compose recreates the service, and
+   the PG15 *image* will be pruned by the weekly cron; rollback uses the
+   volume + the digest recorded in §1.
+5. **Deploy the PG18 compose definition:** `git checkout <the merged #1302
+   commit/tag>` (fetched in preflight). Confirm `docker-compose.prod.yml`
+   pins 18.4 and mounts `postgres_data_18:/var/lib/postgresql`.
+6. **Start PG18 on the fresh volume:** `dc up -d postgres`. This `initdb`s
+   `kagura_postgres_data_18` (UTF8, UTC, role+DB `kagura` from the
+   `POSTGRES_*` env). Do **not** trust the compose healthcheck alone here:
+   `pg_isready` probes the Unix socket, which the entrypoint's temporary
+   bootstrap server (TCP off) also answers during first-boot init. Wait for
+   `dc logs postgres` to show `PostgreSQL init process complete` followed by
+   `database system is ready to accept connections`, then confirm over TCP.
+   Re-resolve the network var for the new container first:
 
    ```bash
-   docker run --rm --network kagura-memory_default \
-     -e PGPASSWORD="$DB_PASSWORD" -v "$BACKUP_DIR":/backup \
-     "$PG18_IMAGE" psql -h postgres -U kagura -d postgres -f /backup/globals.sql
-   docker run --rm --network kagura-memory_default \
-     -e PGPASSWORD="$DB_PASSWORD" -v "$BACKUP_DIR":/backup \
-     "$PG18_IMAGE" pg_restore -h postgres -U kagura -d kagura \
-       --no-owner --role=kagura --exit-on-error /backup/kagura.dump
+   NET=$(docker inspect kagura-postgres -f '{{range $k,$_ := .NetworkSettings.Networks}}{{$k}}{{end}}')
+   docker run --rm --network "$NET" "$PG18_IMAGE" pg_isready -h postgres -U kagura -d kagura
    ```
 
-   (`globals.sql` will error on pre-existing role `kagura` created by
-   `initdb` env — `CREATE ROLE` failing with "already exists" is expected;
-   everything else must apply cleanly.)
-7. **Validate before reopening writes** — §1 comparisons: extensions
-   (`pg_trgm` present), schema diff clean, row counts match the final backup,
-   sequences advanced to recorded values, `alembic current` == recorded head,
-   `alembic upgrade head` no-op.
-8. **Reopen:** `dc up -d api-$(cat /opt/kagura-memory/active-color)` → wait
-   `/readiness`; then verify `/health`, REST, MCP, login/auth,
-   `remember`/`recall`, background tasks (scheduler logs), admin CLI.
-9. **Monitor through the rollback window:** postgres logs
-   (`dc logs -f postgres`), connection errors, latency, locks
-   (`pg_stat_activity`), disk usage.
+   **Re-entry note:** if any later step fails and you must retry from here,
+   reset the half-written target first — `dc stop postgres && docker volume
+   rm kagura_postgres_data_18` — so `dc up -d postgres` re-initdbs cleanly
+   (the restore is `--exit-on-error` and not idempotent; a second run against
+   a half-restored DB aborts on the first "already exists").
+7. **Restore.** Globals first — plain `psql -f` continues past errors and
+   exits 0, so capture the output and require that the only errors are the
+   expected "already exists" for the initdb-created role/attributes:
+
+   ```bash
+   docker run --rm --network "$NET" \
+     -e PGPASSWORD="$DB_PASSWORD" -v "$BACKUP_DIR":/backup \
+     "$PG18_IMAGE" psql -h postgres -U kagura -d postgres -f /backup/globals.sql \
+     2>&1 | tee /tmp/globals-restore.log
+   grep '^ERROR' /tmp/globals-restore.log | grep -v 'already exists' && \
+     echo "UNEXPECTED globals errors — stop and investigate" || echo "globals OK"
+
+   docker run --rm --network "$NET" \
+     -e PGPASSWORD="$DB_PASSWORD" -v "$BACKUP_DIR":/backup \
+     "$PG18_IMAGE" pg_restore -h postgres -U kagura -d kagura \
+       --no-owner --role=kagura --exit-on-error -j "$(nproc)" /backup/kagura.dump.d
+   ```
+
+   Then re-apply any database-level settings/GRANTs recorded in §1's `\l+` /
+   `pg_db_role_setting` output — dumps do not carry them.
+
+8. **Validate before reopening writes.** Both API colors are stopped, so run
+   alembic in a one-off container (`dc exec` fails against stopped services;
+   do NOT `dc up` an api color just to exec into it — that reopens traffic
+   through Caddy before validation):
+
+   ```bash
+   dc run --rm --no-deps api-blue alembic current
+   dc run --rm --no-deps api-blue alembic upgrade head   # must be a no-op
+   ```
+
+   Compare against the records: extensions (`pg_trgm` present), schema diff
+   clean, row counts match the **post-fence** numbers from step 2, sequences
+   advanced to recorded values, `datcollate`/`datctype`/encoding match §1,
+   database-level settings re-applied (step 7), `alembic current` == recorded
+   head.
+9. **Reopen:**
+
+   ```bash
+   dc up -d --no-deps api-$(cat /opt/kagura-memory/active-color)
+   # wait for /readiness, then restore the auto-restart paths:
+   docker update --restart=always kagura-api-blue kagura-api-green kagura-postgres
+   sudo systemctl enable kagura-memory
+   ```
+
+   Verify `/health`, REST, MCP, login/auth, `remember`/`recall`, background
+   tasks (scheduler logs), admin CLI.
+10. **Monitor through the rollback window:** postgres logs
+    (`dc logs -f postgres`), connection errors, latency, locks
+    (`pg_stat_activity`), disk usage.
 
 ## 5. Rollback
 
-**Decision point: the moment writes are accepted on PG18 (§4 step 8).**
+**Decision point: the moment writes are accepted on PG18 (§4 step 9).**
 
 - **Before writes are accepted:** safe and fast. `dc stop postgres`,
   `git checkout` the pre-#1302 compose (PG15 + `kagura_postgres_data`),
-  `dc up -d postgres`, validate, `dc up -d api-<active>`. The PG15 volume was
-  never touched. PG18 data files can **not** be opened by PG15 — rollback is
-  always "switch back to the old volume", never "downgrade in place".
+  pin the postgres image to the **digest recorded in §1** (edit the compose
+  `image:` to `postgres@sha256:<recorded>` — the floating `15-alpine` tag
+  may have moved, and the local PG15 image may already be pruned),
+  `dc up -d postgres`, validate, `dc up -d --no-deps api-<active>`. The PG15
+  volume was never touched. PG18 data files can **not** be opened by PG15 —
+  rollback is always "switch back to the old volume", never "downgrade in
+  place".
 - **After writes are accepted:** forward-fix is the default. Rolling back now
   loses post-cutover writes unless you take a reverse logical export
   (PG18 `pg_dump` → restore into PG15) — decide and document per incident.
-- Do **not** delete `kagura_postgres_data`, the PG15 backups, or the stopped
-  PG15 image/container until the rollback window is formally closed on #1302.
+  Any restore of an older backup must **re-apply completed erasure
+  requests** (`docs/ops/erasure-runbook.md` — GDPR obligation).
+- Do **not** delete `kagura_postgres_data` or the PG15 backups until the
+  rollback window is formally closed on #1302. (The PG15 container/image are
+  already gone — see §4 step 4 — that is expected and not a data-loss
+  signal.)
 
 ## 6. Cleanup (after the window is formally closed on #1302)
 
+- [ ] Confirm the off-VM copy of the final backup (checksums re-verified).
 - [ ] `docker volume rm kagura_postgres_data`
-- [ ] Remove retired dumps per backup-retention policy (keep the final PG15
-      backup per policy, off-VM).
-- [ ] `docker image prune` the PG15 image.
+- [ ] Remove `postgres:15-alpine` if still present: `docker rmi
+      postgres:15-alpine` (plain `docker image prune` skips tagged images;
+      `prune -a` would also sweep the previous api/web images deploy.sh
+      rollback depends on).
+- [ ] Re-enable the weekly prune cron if it was disabled in §1.
+- [ ] Retire old dumps per the backup-retention policy — **max backup age
+      90 days** and erasure re-apply rules per `docs/ops/erasure-runbook.md`
+      §3; the final PG15 backup is subject to the same 90-day ceiling.
 - [ ] Close #1302 with links to the recorded evidence.
 
 ## Local development note
 
-`docker-compose.yml` now uses the same pinned PG18.4 image with a fresh
+`docker-compose.yml` uses the same pinned PG18.4 image with a fresh
 `postgres_data_18` volume. Local PG15 data is not migrated automatically —
-run `make migrate` for a fresh schema (or restore a local dump the same way
-as §4.6). The old `memory-cloud_postgres_data` volume can be removed whenever
-you no longer need it.
+rebuild the schema with `docker exec kagura-api alembic upgrade head`
+(`make migrate` requires a host venv), or restore a dump the same way as §4
+step 7. The old PG15 volume (project-prefixed, e.g.
+`memory-cloud_postgres_data` — confirm with `docker volume ls | grep
+postgres_data`) can be removed whenever you no longer need it.
