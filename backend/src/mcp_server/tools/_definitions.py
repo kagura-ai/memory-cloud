@@ -673,7 +673,12 @@ Edge types:
 
 Weight range: 0.0 (weakest) to 3.0 (strongest). Default: 1.0 (full-confidence manual edge).
 
-Returns: {status, edge: {source_id, target_id, edge_type, weight, confidence, created_at, last_updated}}. source_id/target_id are MEMORY UUIDs (from recall results), not context UUIDs.""",
+Duplicate behavior (#1321) — the (source, target) pair is unique per user, so calling create_edge on an existing pair is deterministic:
+- Existing AUTO edge (hebbian/semantic): upgraded by your assertion → operation: "updated" + previous {edge_type, weight, confidence, origin} pre-image.
+- Existing DECLARED edge, identical values: no write → operation: "unchanged" (safe to retry).
+- Existing DECLARED edge, different values: rejected with error 'edge_exists' (declared links are provenance). Use update_edge to modify it, or pass overwrite=true to re-assert.
+
+Returns: {status, operation: "created"|"updated"|"unchanged", edge: {source_id, target_id, edge_type, weight, confidence, created_at, last_updated}, previous?}. source_id/target_id are MEMORY UUIDs (from recall results), not context UUIDs.""",
             "inputSchema": {
                 "type": "object",
                 "required": ["source_id", "target_id", "context_id"],
@@ -712,6 +717,11 @@ Returns: {status, edge: {source_id, target_id, edge_type, weight, confidence, cr
                         "type": "number",
                         "description": "Confidence score 0.0-1.0 (default: 1.0).",
                         "default": 1.0,
+                    },
+                    "overwrite": {
+                        "type": "boolean",
+                        "description": "Re-assert an existing DECLARED edge with new values (default: false). Without it, a declared edge with different values is protected and create_edge returns 'edge_exists'. Auto edges (hebbian/semantic) never need this flag.",
+                        "default": False,
                     },
                     "context_id": {
                         "type": "string",
