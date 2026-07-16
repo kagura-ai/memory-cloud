@@ -14,7 +14,11 @@ services:
   # ==========================================================================
   # PostgreSQL (Primary DB + Graph memory)
   postgres:
-    image: postgres:15-alpine
+    # Pinned by multi-arch manifest-list digest (#1302). The 18+ Docker image
+    # moved PGDATA to /var/lib/postgresql/18/docker and the volume target to
+    # /var/lib/postgresql — never mount a PG15-era data volume here.
+    # Migration/rollback: docs/ops/postgres-18-migration-runbook.md
+    image: postgres:18.4-alpine@sha256:9a8afca54e7861fd90fab5fdf4c42477a6b1cb7d293595148e674e0a3181de15
     container_name: kagura-postgres
     environment:
       POSTGRES_DB: kagura
@@ -27,7 +31,10 @@ services:
     ports:
       - "5432:5432"
     volumes:
-      - postgres_data:/var/lib/postgresql/data
+      # PG18+ mounts the parent dir, not .../data. Fresh volume: local data
+      # from the old postgres_data (PG15) volume is not carried over — re-run
+      # `make migrate` (or restore a dump) after first start.
+      - postgres_data_18:/var/lib/postgresql
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U kagura -d postgres"]
       interval: 5s
@@ -176,7 +183,7 @@ services:
       start_period: 10s
 
 volumes:
-  postgres_data:
+  postgres_data_18:
   qdrant_data:
   redis_data:
   frontend_node_modules:

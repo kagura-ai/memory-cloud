@@ -123,7 +123,7 @@ backend/
 
 - **Web Framework**: FastAPI 0.115+
 - **ASGI Server**: Uvicorn
-- **Database**: PostgreSQL 15+ (SQLAlchemy + asyncpg)
+- **Database**: PostgreSQL 18+ (SQLAlchemy + asyncpg; 18.4 digest-pinned in Compose/CI)
 - **Vector DB**: Qdrant 1.15+
 - **Cache**: Redis 7+
 - **Graph Memory**: NetworkX 3.0+
