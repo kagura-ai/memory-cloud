@@ -468,7 +468,11 @@ class TestVerifierHardening:
             user_id="u", workspace_id=uuid4(), ownership_epoch=1
         )
         head, body, sig = minted.token.split(".")
-        tampered = f"{head}.{body}.{'BB' if sig[-2:] != 'BB' else 'CC'}{sig[2:]}"
+        # Guard on the PREFIX being replaced (sig[:2]) — checking sig[-2:]
+        # made the tamper a no-op whenever the signature happened to START
+        # with "BB" (~1/4096 runs): the "tampered" token equalled the real
+        # one and verify passed → flaky DID NOT RAISE.
+        tampered = f"{head}.{body}.{'BB' if sig[:2] != 'BB' else 'CC'}{sig[2:]}"
 
         with pytest.raises(BillingHandoffInvalid):
             verify_handoff_token(
