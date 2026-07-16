@@ -583,6 +583,13 @@ Agents are workspace-scoped registry resources, not principals. Registry and bin
 
 Owner-provisioned member keys are minted through `POST /api/v1/workspaces/{workspace_id}/members/{user_id}/credentials/api-keys`; supplying `agent_id` attaches the registered agent. Agent-bound keys for `suspended` or `retired` agents fail verification. In `enforce` mode, requests to unbound contexts use the same not-found shape as inaccessible contexts.
 
+For registered ranking evaluations, the optional `recall_evaluation` object accepts a
+deterministic `seed`, an exact `exploration_floor`, and `candidate_pool_k` (1–100, at least
+`recall_k`). The successful recall component then adds identity-only
+`selection_probabilities` for the complete authorized trusted candidate pool and a stamped
+`selection_policy`. Ordinary bootstrap clients are unchanged when the object is omitted;
+component errors never include this evidence.
+
 > **Preview boundary:** `allowed_memory_types` and `allowed_source_types` are enforced per read-lane row as of [#1299](https://github.com/kagura-ai/memory-cloud/issues/1299) (`null` = all, `[]` = deny-all) on the memory-read lanes (recall, reference, forget, explore, load_pinned, upcoming) for enforce-mode agents; shadow mode records `would_deny` without filtering. REST and MCP accept W3C `traceparent` and baggage keys `gen_ai.agent.id`, `gen_ai.conversation.id` (or `session.id`), and `kagura.agent.run.id`; invalid advisory values are dropped and credential-bound agent identity always wins. Server-side span export is not part of P0. The append-only `memory_access_events` table and writer cover bootstrap, load-pinned, feedback, recall, reference, remember, update, and forget emission with binding deny capture.
 
 ---

@@ -518,6 +518,7 @@ class BootstrapRequest(BaseModel):
     pinned_cap: int | None = None
     upcoming_until: str | None = None
     include: list[Literal["pinned", "recall", "upcoming", "state", "policy"]] | None = None
+    recall_evaluation: dict[str, Any] | None = None
 
 
 @router.post("/{agent_id}/bootstrap")
@@ -541,7 +542,9 @@ async def agent_bootstrap(
         BootstrapError,
         BootstrapParams,
         parse_include,
+        parse_recall_evaluation,
         validate_query,
+        validate_recall_evaluation_usage,
         validate_session_id,
     )
     from utils.exceptions import BadRequestError, NotFoundException
@@ -560,7 +563,9 @@ async def agent_bootstrap(
             pinned_cap=body.pinned_cap,
             upcoming_until=body.upcoming_until,
             include=parse_include(body.include),
+            recall_evaluation=parse_recall_evaluation(body.recall_evaluation),
         )
+        validate_recall_evaluation_usage(params)
     except BootstrapError as e:
         raise BadRequestError(message=e.message, error_code=e.code.upper()) from e
 

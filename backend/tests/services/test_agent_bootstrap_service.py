@@ -25,6 +25,7 @@ from services.agent_bootstrap_service import (
     BootstrapParams,
     BootstrapPrincipal,
     parse_include,
+    parse_recall_evaluation,
     validate_query,
     validate_session_id,
 )
@@ -90,6 +91,25 @@ class TestValidators:
     def test_query_too_long_rejected(self):
         with pytest.raises(BootstrapError):
             validate_query("x" * 1025)
+
+    def test_recall_evaluation_is_strict_and_bounded(self):
+        config = parse_recall_evaluation(
+            {"seed": 188, "exploration_floor": 0.05, "candidate_pool_k": 100}
+        )
+        assert config is not None
+        assert config.seed == 188
+        assert config.exploration_floor == 0.05
+        assert config.candidate_pool_k == 100
+
+        for bad in (
+            [],
+            {"seed": True, "exploration_floor": 0.05, "candidate_pool_k": 100},
+            {"seed": 1, "exploration_floor": float("nan"), "candidate_pool_k": 100},
+            {"seed": 1, "exploration_floor": 0.05, "candidate_pool_k": 101},
+            {"seed": 1, "exploration_floor": 0.05, "candidate_pool_k": 100, "x": 1},
+        ):
+            with pytest.raises(BootstrapError):
+                parse_recall_evaluation(bad)
 
 
 # ---------------------------------------------------------------------------
@@ -388,6 +408,40 @@ class TestEnvelope:
         with patch("services.time_memory.query_upcoming_time_memories", new=upcoming):
             await svc._upcoming(_context(), BootstrapParams(agent_id=AGENT_ID))
         assert upcoming.await_args.kwargs["trusted_only"] is True
+
+    @pytest.mark.asyncio
+    async def test_recall_evaluation_forwards_policy_and_exposes_only_evidence(self):
+        memory_id = uuid.uuid4()
+        selection_config = parse_recall_evaluation(
+            {"seed": 188, "exploration_floor": 0.05, "candidate_pool_k": 100}
+        )
+        result = SimpleNamespace(
+            results=[],
+            selection_evidence={
+                "selection_probabilities": {str(memory_id): 0.05},
+                "selection_policy": {"name": "deterministic_uniform_mixture_v1"},
+            },
+        )
+        svc = AgentBootstrapService(MagicMock())
+        recall = AsyncMock(return_value=result)
+        with patch("services.memory_service.MemoryService") as ms_cls:
+            ms_cls.return_value.recall = recall
+            body = await svc._recall(
+                _context(),
+                BootstrapParams(
+                    agent_id=AGENT_ID,
+                    query="hi",
+                    recall_evaluation=selection_config,
+                ),
+                self._principal(),
+            )
+
+        request = recall.await_args.args[0]
+        assert request.filters == {"trust_tier": "trusted"}
+        assert recall.await_args.kwargs["selection_config"] == selection_config
+        assert body["selection_probabilities"] == {str(memory_id): 0.05}
+        assert body["selection_policy"]["name"] == "deterministic_uniform_mixture_v1"
+        assert "content" not in repr(body["selection_policy"])
 
     @pytest.mark.asyncio
     async def test_query_absent_recall_skipped(self):
