@@ -387,6 +387,24 @@ class AgentBootstrapService:
             logger.error(f"bootstrap_component_failed: {name}: {exc}", exc_info=True)
             return {"status": STATUS_ERROR, "error": "component_error"}
 
+    async def _transaction_owning_component(self, name: str, fn: Any) -> dict[str, Any]:
+        """Run a component whose service owns the session transaction.
+
+        ``MemoryService.recall`` commits its access/adoption updates. Wrapping
+        it in ``begin_nested`` makes that successful commit close the savepoint
+        context, so ``__aexit__`` turns a valid recall into ``component_error``
+        and leaves later bootstrap components unusable. On failure, a full
+        rollback is the safe boundary: earlier bootstrap components are reads,
+        while later audit writes have not been staged yet.
+        """
+        try:
+            body = await fn()
+            return {"status": STATUS_OK, **body}
+        except Exception as exc:
+            await self.db.rollback()
+            logger.error(f"bootstrap_component_failed: {name}: {exc}", exc_info=True)
+            return {"status": STATUS_ERROR, "error": "component_error"}
+
     def _correlation_block(self, agent: Any, params: BootstrapParams) -> dict[str, Any]:
         """Build the correlation block, populating trace/span from the P0-4
         (#1277) per-request correlation context when present.
@@ -521,7 +539,9 @@ class AgentBootstrapService:
             return {"status": STATUS_SKIPPED, "reason": "no_query"}
         if recall_metered:
             return {"status": STATUS_ERROR, "error": "rate_limited"}
-        return await self._component("recall", lambda: self._recall(context, params, principal))
+        return await self._transaction_owning_component(
+            "recall", lambda: self._recall(context, params, principal)
+        )
 
     async def _recall(
         self, context: Any, params: BootstrapParams, principal: BootstrapPrincipal

@@ -444,6 +444,45 @@ class TestEnvelope:
         assert "content" not in repr(body["selection_policy"])
 
     @pytest.mark.asyncio
+    async def test_recall_component_does_not_wrap_transaction_owner_in_savepoint(self):
+        db = _savepoint_db()
+        svc = AgentBootstrapService(db)
+        with patch.object(
+            AgentBootstrapService,
+            "_recall",
+            new=AsyncMock(return_value={"results": [], "k": 5}),
+        ):
+            component = await svc._recall_component(
+                _context(),
+                BootstrapParams(agent_id=AGENT_ID, query="hi"),
+                self._principal(),
+                False,
+            )
+
+        assert component == {"status": STATUS_OK, "results": [], "k": 5}
+        db.begin_nested.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_recall_component_rolls_back_before_later_components_on_error(self):
+        db = _savepoint_db()
+        db.rollback = AsyncMock()
+        svc = AgentBootstrapService(db)
+        with patch.object(
+            AgentBootstrapService,
+            "_recall",
+            new=AsyncMock(side_effect=RuntimeError("recall failed")),
+        ):
+            component = await svc._recall_component(
+                _context(),
+                BootstrapParams(agent_id=AGENT_ID, query="hi"),
+                self._principal(),
+                False,
+            )
+
+        assert component == {"status": STATUS_ERROR, "error": "component_error"}
+        db.rollback.assert_awaited_once()
+
+    @pytest.mark.asyncio
     async def test_query_absent_recall_skipped(self):
         import contextlib
 
