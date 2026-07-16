@@ -13,6 +13,7 @@ from mcp.types import TextContent
 
 from mcp_server.tools._helpers import (
     _error_response,
+    _format_validation_error,
     _log_tool_usage,
 )
 
@@ -91,7 +92,10 @@ async def handle_update_search_config(
             try:
                 update_data = ContextSearchConfigUpdate(**update_fields)
             except Exception as validation_err:
-                return _error_response("invalid_search_config", str(validation_err))
+                # #1323: don't leak the raw pydantic dump into the envelope.
+                return _error_response(
+                    "invalid_search_config", _format_validation_error(validation_err)
+                )
 
             # Apply via repository (same as REST API)
             config = await repo.update(ctx_uuid, update_data)

@@ -82,6 +82,26 @@ def _coerce_to_boolean(value: Any) -> Any:
     return value
 
 
+def _coerce_any(value: Any) -> Any:
+    """Best-effort decode for schema fields declared WITHOUT a ``type`` ("any").
+
+    #1322: quirky clients JSON-stringify complex values for typeless fields
+    too — ``set_state``'s ``value`` arrived as ``"{\\"phase\\": ...}"`` /
+    ``"42"`` and was stored verbatim into JSONB, breaking the documented
+    round-trip. Decode strings that parse as JSON; keep everything else,
+    including strings that decode to ``None`` (a JSON null would violate
+    NOT NULL storage, and a literal ``"null"`` string is more plausibly
+    intentional than a stringified null).
+    """
+    if not isinstance(value, str):
+        return value
+    try:
+        decoded = json.loads(value)
+    except (ValueError, TypeError):
+        return value
+    return value if decoded is None else decoded
+
+
 _COERCERS = {
     "array": _coerce_to_array,
     "object": _coerce_to_object,
@@ -128,6 +148,8 @@ def coerce_mcp_arguments(tool_name: str, arguments: dict[str, Any]) -> dict[str,
             continue
         declared_type = schema.get("type")
         if not isinstance(declared_type, str):
+            # Typeless ("any") field — e.g. set_state's ``value`` (#1322).
+            coerced[arg_name] = _coerce_any(value)
             continue
         coercer = _COERCERS.get(declared_type)
         if coercer is None:

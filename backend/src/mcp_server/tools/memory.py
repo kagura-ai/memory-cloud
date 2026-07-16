@@ -16,6 +16,7 @@ from mcp_server.tools._helpers import (
     _context_response_fields,
     _ContextNotFoundError,
     _error_response,
+    _format_validation_error,
     _log_tool_usage,
     _resolve_context,
     _resolve_context_for_read,
@@ -169,7 +170,10 @@ async def handle_update_memory(
             context=args.get("context"),
             delivery_mode=args.get("delivery_mode"),  # Issue #886 (pin/unpin)
         )
-    except (ValueError, ValidationError) as e:
+    except ValidationError as e:
+        # #1323: plain field/constraint summary — no pydantic internals.
+        return _error_response("validation_error", _format_validation_error(e))
+    except ValueError as e:
         return _error_response("validation_error", str(e))
 
     start_time = time.time()
@@ -225,6 +229,16 @@ async def handle_update_memory(
         except _ContextNotFoundError as e:
             await db.rollback()
             return e.to_response()
+        except NotFoundException:
+            # #1323: structured envelope for a missing/inaccessible memory,
+            # mirroring handle_reference — previously this fell through to the
+            # generic dispatch handler as a raw slug-less string.
+            await db.rollback()
+            return _error_response(
+                "memory_not_found",
+                f"Memory not found or you don't have access: {args.get('memory_id')}",
+                help="Use recall() to find memories you have access to.",
+            )
         except ValueError as e:
             # _apply_time_trigger raises ValueError for an invalid type="time"
             # details.trigger on the update path. Return a structured

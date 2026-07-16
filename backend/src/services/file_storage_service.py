@@ -135,8 +135,8 @@ class FileStorageService:
         result = await self.db.execute(select(Workspace).where(Workspace.id == workspace_id))
         workspace = result.scalar_one_or_none()
         if workspace is None:
-            msg = f"workspace {workspace_id} not found"
-            raise NotFoundException(msg)
+            # #1323: two-arg form — NotFoundException appends " not found" itself.
+            raise NotFoundException("workspace", str(workspace_id))
         return workspace
 
     async def _load_file(
@@ -168,11 +168,9 @@ class FileStorageService:
         result = await self.db.execute(stmt)
         file = result.scalar_one_or_none()
         if file is None:
-            msg = f"file {file_id} not found in workspace {workspace_id}"
-            raise NotFoundException(msg)
+            raise NotFoundException("file", str(file_id))
         if not include_deleted and file.deleted_at is not None:
-            msg = f"file {file_id} not found in workspace {workspace_id}"
-            raise NotFoundException(msg)
+            raise NotFoundException("file", str(file_id))
         return file
 
     # ------------------------------------------------------------------
@@ -623,11 +621,9 @@ class FileStorageService:
                     actor_user_id, file.context_id
                 )
             except (AuthorizationError, NotFoundException) as exc:
-                msg = f"file {file_id} not found in workspace {workspace_id}"
-                raise NotFoundException(msg) from exc
+                raise NotFoundException("file", str(file_id)) from exc
         if file.status != "uploaded":
-            msg = f"file {file_id} not found in workspace {workspace_id}"
-            raise NotFoundException(msg)
+            raise NotFoundException("file", str(file_id))
 
         settings = get_settings()
         return await self._storage.generate_presigned_get(

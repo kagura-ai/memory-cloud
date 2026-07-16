@@ -121,3 +121,30 @@ class TestPassThroughCases:
         original_tags = ["a", "b"]
         coerced = coerce_mcp_arguments("remember", {"tags": original_tags})
         assert coerced["tags"] is original_tags
+
+
+class TestAnyCoercion:
+    """#1322: typeless ('any') schema fields — set_state's ``value`` — get a
+    best-effort JSON decode so quirky clients' stringified values round-trip."""
+
+    def test_stringified_object_is_decoded(self):
+        out = coerce_mcp_arguments("set_state", {"value": '{"phase": "running", "n": 1}'})
+        assert out["value"] == {"phase": "running", "n": 1}
+
+    def test_stringified_number_is_decoded(self):
+        assert coerce_mcp_arguments("set_state", {"value": "42"})["value"] == 42
+
+    def test_stringified_boolean_is_decoded(self):
+        assert coerce_mcp_arguments("set_state", {"value": "true"})["value"] is True
+
+    def test_plain_string_passes_through(self):
+        out = coerce_mcp_arguments("set_state", {"value": "plain string value"})
+        assert out["value"] == "plain string value"
+
+    def test_stringified_null_passes_through(self):
+        """JSON null would violate NOT NULL storage — keep the literal string."""
+        assert coerce_mcp_arguments("set_state", {"value": "null"})["value"] == "null"
+
+    def test_native_object_passes_through(self):
+        value = {"a": 1}
+        assert coerce_mcp_arguments("set_state", {"value": value})["value"] == {"a": 1}

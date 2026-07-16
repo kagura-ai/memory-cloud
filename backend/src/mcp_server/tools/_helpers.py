@@ -106,6 +106,28 @@ def _success_response(**data: Any) -> list[TextContent]:
     ]
 
 
+def _format_validation_error(exc: Any) -> str:
+    """Render a pydantic ValidationError as a plain field/constraint summary.
+
+    #1323: the raw ``str(ValidationError)`` leaks pydantic internals (model
+    class names, ``https://errors.pydantic.dev/...`` URLs) into MCP error
+    envelopes. Produce ``"field: constraint; field2: constraint"`` instead.
+    Falls back to ``str(exc)`` for anything without pydantic's ``errors()``.
+    """
+    errors_fn = getattr(exc, "errors", None)
+    if not callable(errors_fn):
+        return str(exc)
+    try:
+        entries = errors_fn(include_url=False)
+    except TypeError:  # pydantic v1 signature
+        entries = errors_fn()
+    parts = []
+    for err in entries:
+        loc = ".".join(str(p) for p in err.get("loc", ())) or "input"
+        parts.append(f"{loc}: {err.get('msg', 'invalid value')}")
+    return "; ".join(parts) if parts else str(exc)
+
+
 def _error_response(error: str, message: str, **extra: Any) -> list[TextContent]:
     """Create a standardized error response.
 
