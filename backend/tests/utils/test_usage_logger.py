@@ -35,7 +35,10 @@ async def test_success_returns_true():
 
 @pytest.mark.asyncio
 async def test_fk_violation_falls_back_to_null_context():
-    """#1318: FK violation on a stamped context_id retries with NULL."""
+    """#1318: FK violation on a stamped context_id retries with NULL — the
+    usage/quota row is preserved, but the return is False so #1228
+    attribution-dependent writes are skipped (the primary context's read was
+    NOT recorded as requested)."""
     db = _db([_fk_error(), None])
 
     result = await log_usage(
@@ -46,11 +49,12 @@ async def test_fk_violation_falls_back_to_null_context():
         context_id="00000000-0000-0000-0000-000000000000",
     )
 
-    assert result is True
+    assert result is False
     assert db.execute.await_count == 2
     retry_stmt = db.execute.await_args_list[1].args[0]
     assert retry_stmt.compile().params["context_id"] is None
     db.rollback.assert_awaited_once()
+    db.commit.assert_awaited_once()  # the NULL-context retry did commit
 
 
 @pytest.mark.asyncio

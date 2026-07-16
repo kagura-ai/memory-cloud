@@ -53,10 +53,20 @@ async def log_usage(
         await log_usage(db, user_id, "mcp:recall", "MCP", 200, 80)
 
     Returns:
-        True when the row was written; False when the insert failed (the
-        error is logged and swallowed — logging must never break the main
-        flow, but callers chaining dependent writes, e.g. #1228 attribution
-        rows, need the signal).
+        True when the row was written WITH the requested attribution; False
+        when the insert failed outright OR the row was preserved only via the
+        #1318 NULL-context fallback (errors are logged and swallowed —
+        logging must never break the main flow). Callers chaining
+        attribution-dependent writes (#1228 ContextReadAttribution rows) key
+        on this: a degraded row must NOT get secondary attributions, or the
+        primary context's read becomes invisible while secondaries are
+        attributed.
+
+    Note:
+        The FK fallback rolls back the session before retrying. Callers pass
+        a dedicated session today (middleware and _log_tool_usage both use a
+        fresh get_db()); do NOT call this on a shared session holding
+        pending business writes.
     """
     # Use utcnow() for timezone-naive datetime (matches DB schema)
     now = utcnow()
@@ -101,6 +111,7 @@ async def log_usage(
             logger.error(
                 "usage_logging_failed",
                 error=str(retry_err),
+                original_error=str(e),
                 user_id=user_id,
                 endpoint=endpoint,
             )
@@ -111,7 +122,9 @@ async def log_usage(
             user_id=user_id,
             endpoint=endpoint,
         )
-        return True
+        # Row preserved but WITHOUT the requested context attribution —
+        # report False so #1228 attribution writes are skipped (see Returns).
+        return False
     except Exception as e:
         await db.rollback()
         logger.error(

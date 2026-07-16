@@ -42,6 +42,7 @@ async def handle_get_context_info(
     from db.base import get_db
 
     start_time = time.time()
+    current_context_id = None
     async for db in get_db():
         try:
             from services.memory_service import MemoryService
@@ -201,7 +202,8 @@ async def handle_get_context_info(
                 "get_context_info",
                 start_time,
                 500,
-                args.get("context_id"),
+                # #1318: resolved-or-None — never the raw request value.
+                current_context_id,
                 workspace_id,
             )
             logger.error(f"get_context_info_failed: {e}", exc_info=True)
