@@ -173,6 +173,23 @@ class TestReference:
             await service.reference(memory_id=memory_id, user_id="test_user")
 
     @pytest.mark.asyncio
+    async def test_reference_soft_deleted_raises_not_found(self, service):
+        """#1316: repo.get() excludes tombstones by default and reference()
+        must NOT opt in — a forgotten memory is uniformly not found by
+        direct-id fetch during the retention window."""
+        from utils.exceptions import NotFoundException
+
+        memory_id = uuid4()
+        # The real repo filters deleted_at IS NULL by default → None.
+        service.memory_repo.get = AsyncMock(return_value=None)
+
+        with pytest.raises(NotFoundException):
+            await service.reference(memory_id=memory_id, user_id="test_user")
+
+        # Pins that reference() does not pass include_deleted=True.
+        service.memory_repo.get.assert_awaited_once_with(memory_id)
+
+    @pytest.mark.asyncio
     async def test_reference_found(self, service):
         """reference() returns full memory details."""
         memory_id = uuid4()
@@ -1014,6 +1031,49 @@ class TestForget:
         assert response.deleted_count == 0
         assert response.memory_ids == []
 
+    @pytest.mark.asyncio
+    async def test_forget_by_id_already_deleted_counts_zero(self, service):
+        """#1320: a second forget of the same id must report deleted_count=0
+        and must not re-stamp deleted_at/deleted_by. repo.get() excludes
+        tombstones by default and forget() must NOT opt in."""
+        memory_id = uuid4()
+        # The real repo filters deleted_at IS NULL by default → None.
+        service.memory_repo.get = AsyncMock(return_value=None)
+        service.memory_repo.update = AsyncMock()
+        service.db.commit = AsyncMock()
+
+        response = await service.forget(
+            request=ForgetRequest(memory_id=memory_id), user_id="test_user"
+        )
+
+        assert response.deleted_count == 0
+        assert response.memory_ids == []
+        service.memory_repo.update.assert_not_awaited()
+        # Pins that forget() does not pass include_deleted=True.
+        service.memory_repo.get.assert_awaited_once_with(memory_id)
+
+
+class TestUpdateInPlaceTombstone:
+    """#1316 review sweep: _update_in_place relies on the repo default filter."""
+
+    @pytest.mark.asyncio
+    async def test_update_does_not_opt_into_tombstones(self):
+        """Opting in (include_deleted=True) here would let an edit stamp new
+        content and re-embed onto a still-tombstoned row (searchable-but-
+        deleted inconsistency) — pin the default-filtered fetch."""
+        from utils.exceptions import NotFoundException
+
+        service = MemoryService(MagicMock())
+        service.memory_repo.get = AsyncMock(return_value=None)
+        request = UpdateMemoryRequest(
+            memory_id=uuid4(), summary="a new summary long enough for schema"
+        )
+
+        with pytest.raises(NotFoundException):
+            await service._update_in_place(request, user_id="test_user")
+
+        service.memory_repo.get.assert_awaited_once_with(request.memory_id)
+
 
 class TestGetContextIsolationParamsKeyWorkspaceConfinement:
     """Issue #963/#1281 item 2: pure API-key workspace-scope confinement on the
@@ -1741,6 +1801,7 @@ class TestExploreAccessStats:
             context=None,
             workspace_id=workspace_id,
             context_id=context_id,
+            deleted_at=None,
         )
         service.memory_repo.get = AsyncMock(return_value=mock_seed)
         service.memory_repo.update_access_stats = AsyncMock()
@@ -1774,6 +1835,29 @@ class TestExploreAccessStats:
         # Only one update_access_stats call: for the seed, with client="api".
         service.memory_repo.update_access_stats.assert_awaited_once_with(seed_id, client="api")
         service.db.commit.assert_awaited()
+
+    @pytest.mark.asyncio
+    async def test_explore_soft_deleted_seed_raises_not_found(self, service):
+        """#1316: a forgotten memory must not surface as an exploration seed
+        (previously leaked its summary as seed_not_in_graph). repo.get()
+        excludes tombstones by default and explore() must NOT opt in; the
+        message must match the access-denied shape (no existence oracle)."""
+        from models.schemas import ExploreRequest
+        from utils.exceptions import NotFoundException
+
+        seed_id = uuid4()
+        # The real repo filters deleted_at IS NULL by default → None.
+        service.memory_repo.get = AsyncMock(return_value=None)
+
+        with pytest.raises(NotFoundException) as exc_info:
+            await service.explore(
+                request=ExploreRequest(memory_id=seed_id, depth=2),
+                user_id="test_user",
+            )
+
+        # Uniform two-arg shape — and never the doubled "not found not found".
+        assert str(exc_info.value) == f"Memory not found: {seed_id}"
+        service.memory_repo.get.assert_awaited_once_with(seed_id)
 
 
 class TestAccessEventEmission:

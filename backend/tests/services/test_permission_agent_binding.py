@@ -433,6 +433,7 @@ class TestReadLaneRowFilterThreading:
             "context_id": uuid.uuid4(),
             "type": "note",
             "source_type": "manual",
+            "deleted_at": None,
         }
         defaults.update(overrides)
         return SimpleNamespace(**defaults)

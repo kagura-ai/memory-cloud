@@ -28,16 +28,27 @@ class MemoryRepository(BaseRepository[Memory]):
         """
         self.db = db
 
-    async def get(self, id: UUID) -> Memory | None:
+    async def get(self, id: UUID, *, include_deleted: bool = False) -> Memory | None:
         """Get memory by ID.
+
+        #1316/#1320: soft-deleted (tombstoned) rows are EXCLUDED by default —
+        every read/mutation path that fetches by id must treat a forgotten
+        memory as absent during the retention window. The only caller that
+        legitimately needs tombstones is ``patch_memory`` (its #439 contract
+        returns 410 ``MemoryGoneError`` to authorized callers); it opts in
+        with ``include_deleted=True``.
 
         Args:
             id: Memory UUID
+            include_deleted: When True, return the row even if soft-deleted.
 
         Returns:
             Memory or None
         """
-        result = await self.db.execute(select(Memory).where(Memory.id == id))
+        stmt = select(Memory).where(Memory.id == id)
+        if not include_deleted:
+            stmt = stmt.where(Memory.deleted_at.is_(None))
+        result = await self.db.execute(stmt)
         return result.scalar_one_or_none()
 
     async def list(
@@ -115,7 +126,13 @@ class MemoryRepository(BaseRepository[Memory]):
         Raises:
             NotFoundException: If memory not found
         """
-        existing = await self.get(id)
+        # include_deleted=True: callers gate tombstone visibility at the
+        # service layer; the internal fetch must still see the row that the
+        # caller already holds. Critically, forget() stamps deleted_at on the
+        # in-session object BEFORE calling update() — the SELECT here
+        # autoflushes that change, and a default-filtered fetch would then
+        # miss its own row and break soft-delete (#1316 refactor).
+        existing = await self.get(id, include_deleted=True)
         if not existing:
             raise NotFoundException("Memory", str(id))
 
@@ -141,7 +158,12 @@ class MemoryRepository(BaseRepository[Memory]):
         Returns:
             True if deleted
         """
-        memory = await self.get(id)
+        # include_deleted=True: hard-delete is how the nightly retention purge
+        # (tasks/neural_tasks.cleanup_deleted_memories_task) erases tombstoned
+        # rows after the retention window — a default-filtered fetch would
+        # make the purge a silent no-op and retention/erasure would never
+        # physically happen (#1316 review sweep).
+        memory = await self.get(id, include_deleted=True)
         if not memory:
             return False
 

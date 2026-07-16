@@ -768,6 +768,12 @@ async def handle_reference(
                     operation_name="reference",
                 )
             except NotFoundException:
+                # #1316 review: record the 404 in usage telemetry, keeping
+                # reference and explore symmetric for the identical outcome.
+                await db.rollback()
+                await _log_tool_usage(
+                    db, user_id, "reference", start_time, 404, current_context_id, workspace_id
+                )
                 return _error_response(
                     "memory_not_found",
                     f"Memory not found or you don't have access: {request.memory_id}",
