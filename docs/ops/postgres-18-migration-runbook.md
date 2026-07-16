@@ -128,15 +128,18 @@ server is the supported direction).
       `docker system df -v`.
 - [ ] **Pre-stage the window**: `docker pull "$PG18_IMAGE"` and `git fetch`
       now, so no registry/network dependency remains inside the window.
-- [ ] **Docker engine ≥ 23**: `docker version -f '{{.Server.Version}}'`.
-      The VM's weekly cron (`/etc/cron.weekly/docker-prune`, installed by
+- [ ] **Disable the weekly prune cron for the window** (re-enabled in §6):
+      `sudo chmod -x /etc/cron.weekly/docker-prune`. The cron (installed by
       `startup.sh`) runs `docker volume prune -f --filter "label!=keep"` and
-      `docker system prune -af --filter "until=168h"`. On engine < 23 volume
-      prune also removes **named** dangling volumes — which
-      `kagura_postgres_data` becomes after cutover. If engine < 23, disable
-      that cron until §6 closes the window. On any engine, the system prune
-      will remove the unused PG15 *image* within a week — rollback therefore
-      re-pulls by the digest recorded above, never by the floating tag.
+      `docker system prune -af --filter "until=168h"`; after cutover
+      `kagura_postgres_data` becomes an unreferenced named volume, and
+      whether volume prune removes it depends on engine version semantics
+      (< 23 removes named dangling volumes; the volume also has no `keep`
+      label). Do not gamble the sole rollback data source on that — disable
+      the cron unconditionally through the rollback window. The system prune
+      would also remove the unused PG15 *image* within a week — rollback
+      therefore re-pulls by the digest recorded above, never by the floating
+      tag.
 - [ ] Agree the maintenance window and the rollback decision point (§5).
 
 ## 2. Backup procedure (used by rehearsal §3 and cutover §4)
@@ -333,7 +336,8 @@ Announce the window. Then:
       postgres:15-alpine` (plain `docker image prune` skips tagged images;
       `prune -a` would also sweep the previous api/web images deploy.sh
       rollback depends on).
-- [ ] Re-enable the weekly prune cron if it was disabled in §1.
+- [ ] Re-enable the weekly prune cron disabled in §1:
+      `sudo chmod +x /etc/cron.weekly/docker-prune`
 - [ ] Retire old dumps per the backup-retention policy — **max backup age
       90 days** and erasure re-apply rules per `docs/ops/erasure-runbook.md`
       §3; the final PG15 backup is subject to the same 90-day ceiling.
