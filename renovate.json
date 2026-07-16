@@ -1,6 +1,6 @@
 {
   "$schema": "https://docs.renovatebot.com/renovate-schema.json",
-  "extends": ["config:recommended", ":dependencyDashboard"],
+  "extends": ["config:recommended"],
   "enabledManagers": ["docker-compose", "github-actions"],
   "timezone": "Asia/Tokyo",
   "schedule": ["before 8am on monday"],
@@ -8,23 +8,18 @@
   "labels": ["dependencies"],
   "packageRules": [
     {
-      "description": "Out of scope (#1310): action `uses:` bumps — only Docker images ride this config. Without this rule the github-actions manager would also propose actions/* SHA updates.",
-      "matchManagers": ["github-actions"],
-      "matchDatasources": ["github-tags", "github-releases", "github-runners", "node-version"],
+      "description": "Default-deny (#1310): nothing rides this config unless a later rule explicitly re-enables it. Structural on purpose — enumerating the managers' non-docker datasources would silently leak when Renovate adds one (e.g. github-digest for SHA-pinned actions).",
+      "matchManagers": ["docker-compose", "github-actions"],
       "enabled": false
     },
     {
-      "description": "Deferred (#1310 non-goal): non-postgres images (qdrant/redis/caddy floating tags) — extending pin+bump coverage to them is a separate decision.",
-      "matchDatasources": ["docker"],
-      "matchPackageNames": ["!postgres"],
-      "enabled": false
-    },
-    {
-      "description": "Group the postgres digest pin across both compose files and all workflow service blocks into one atomic PR (#1310). pinDigests keeps the tag@sha256 form on tag bumps (18.5, …); CVE respins of the same tag arrive as digest updates.",
+      "description": "The one enabled dependency (#1310): group the postgres digest pin across both compose files and all workflow service blocks into one atomic weekly PR. Majors are deliberately excluded — a PostgreSQL major is a stateful dump/restore cutover (docs/ops/postgres-18-migration-runbook.md), never a compose bump. pinDigests auto-pins any future unpinned postgres reference (already-pinned tag@sha256 sites keep their form on bumps regardless). To extend coverage (qdrant/redis/caddy), copy this rule — the explicit enabled: true is required to override the default-deny above.",
       "matchDatasources": ["docker"],
       "matchPackageNames": ["postgres"],
+      "matchUpdateTypes": ["minor", "patch", "digest", "pin"],
       "groupName": "postgres image",
-      "pinDigests": true
+      "pinDigests": true,
+      "enabled": true
     }
   ]
 }
