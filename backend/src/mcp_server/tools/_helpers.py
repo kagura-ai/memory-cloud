@@ -380,6 +380,11 @@ async def _touch_context_last_used(db: "AsyncSession", context: Any) -> bool:
         update(Context)
         .where(Context.id == context.id)
         .where(or_(Context.last_used_at.is_(None), Context.last_used_at <= now - throttle))
+        # Self-assignment pins updated_at so Context's onupdate does not fire
+        # for this pure access touch. NOTE the sibling model solved the same
+        # problem the other way: Memory.updated_at has NO onupdate at all
+        # (#1317) and edit paths stamp it explicitly — don't "harmonize"
+        # either model without reading #1317 first.
         .values(last_used_at=now, updated_at=Context.updated_at)
     )
     return True

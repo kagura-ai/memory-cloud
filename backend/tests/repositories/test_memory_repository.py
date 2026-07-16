@@ -109,6 +109,24 @@ class TestMemoryRepository:
         assert sample_memory.reference_count == 1
 
     @pytest.mark.asyncio
+    async def test_update_access_stats_does_not_bump_updated_at(
+        self, repository, sample_memory, db_session
+    ):
+        """#1317: read-path access tracking (recall/reference/explore) must not
+        move the staleness cue — updated_at changes only on explicit edits."""
+        before = sample_memory.updated_at
+        await repository.update_access_stats(sample_memory.id, client="api", count_as_adoption=True)
+        await db_session.refresh(sample_memory)
+
+        assert sample_memory.access_count == 1  # tracking itself still works
+        assert sample_memory.updated_at == before
+
+    def test_updated_at_column_has_no_onupdate(self):
+        """#1317: pin the column declaration — reintroducing onupdate=func.now()
+        would silently re-stamp updated_at on every read-path flush."""
+        assert Memory.__table__.columns["updated_at"].onupdate is None
+
+    @pytest.mark.asyncio
     async def test_update_access_stats_mixed_access_preserves_invariant(
         self, repository, sample_memory, db_session
     ):

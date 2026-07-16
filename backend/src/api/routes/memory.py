@@ -782,10 +782,11 @@ async def list_memories(
         # naive UTC datetimes (DateTime without timezone=True). Tag the
         # serialized form with "Z" so JS clients (which parse naive ISO as
         # local time) don't render JST-shifted relative timestamps.
-        # ``updated_at`` is nullable (only set onupdate), so fall back to
-        # ``created_at`` for fresh rows that haven't been touched since
-        # insert. The frontend renders both as the row "updated" timestamp,
-        # so created_at is the correct fallback rather than null/empty.
+        # ``updated_at`` is nullable (set explicitly by edit paths — #1317
+        # removed the column's onupdate), so fall back to ``created_at`` for
+        # fresh rows that haven't been touched since insert. The frontend
+        # renders both as the row "updated" timestamp, so created_at is the
+        # correct fallback rather than null/empty.
         memory_items = [
             MemoryListItem(
                 id=str(m.id),

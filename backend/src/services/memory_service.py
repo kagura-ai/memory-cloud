@@ -1119,14 +1119,13 @@ class MemoryService:
         if not can_access:
             raise NotFoundException("Memory", str(memory_id))
 
-        # Snapshot ``updated_at`` before bumping access stats. The Memory
-        # ORM column declares ``onupdate=func.now()``; a subsequent UPDATE
-        # (issued by ``update_access_stats``) makes SQLAlchemy expire the
-        # in-memory attribute so the next access triggers a sync lazy-load
-        # → ``MissingGreenlet`` outside the original IO context. Reading
-        # the value here is also semantically right: an access bump is
-        # not a meaningful edit, so the dialog's "Updated At" should
-        # reflect the last real change, not "now".
+        # Snapshot ``updated_at`` before bumping access stats. #1317 removed
+        # the column's ``onupdate=func.now()``, so ``update_access_stats`` no
+        # longer touches ``updated_at`` at all — the DB value is now correct
+        # by construction. The snapshot is retained as a cheap guard against
+        # any future in-session dirtying, and reading it here keeps the
+        # semantics explicit: an access bump is not a meaningful edit, so the
+        # dialog's "Updated At" reflects the last real change, not "now".
         snapshot_updated_at = memory.updated_at or memory.created_at
 
         # Update access stats. reference() is the canonical *adoption* signal
@@ -2737,11 +2736,11 @@ class MemoryService:
             if not memory:
                 continue
 
-            # Issue #1047: snapshot updated_at BEFORE update_access_stats. The
-            # Memory.updated_at column declares onupdate=func.now(), so the UPDATE
-            # issued by update_access_stats expires the in-memory attribute — a
-            # later read would then trigger a sync lazy-load → MissingGreenlet in
-            # the async context (the same trap reference() documents and avoids).
+            # Issue #1047: snapshot updated_at BEFORE update_access_stats.
+            # #1317 removed the column's onupdate, so the access-stats flush
+            # no longer touches (or expires) updated_at — the DB value is now
+            # correct by construction; the snapshot stays as a cheap guard
+            # against any future in-session dirtying of the row.
             snapshot_updated_at = memory.updated_at
 
             # Update access stats
@@ -4451,10 +4450,11 @@ def embedding_retry_eligible_clause(now: datetime):
 
     Eligible when it still has retry budget (``embedding_retry_count <
     MAX_EMBEDDING_RETRIES``) and its backoff has elapsed. The backoff is
-    measured from ``updated_at`` (the failure ``UPDATE``'s ``onupdate`` stamps
-    it to the failure time); a NULL ``updated_at`` is treated as immediately
-    eligible so a row can never get permanently stuck ``failed`` — the exact
-    state #979 exists to prevent.
+    measured from ``updated_at`` (the failure ``UPDATE`` stamps it to the
+    failure time EXPLICITLY — #1317 removed the column's ``onupdate``, so
+    nothing stamps it implicitly anymore); a NULL ``updated_at`` is treated as
+    immediately eligible so a row can never get permanently stuck ``failed``
+    — the exact state #979 exists to prevent.
 
     Shared by the sweep prefilter (``tasks/embedding_tasks.py``) and the atomic
     claim in ``process_pending_embedding`` so the two gates cannot drift.
@@ -4669,7 +4669,14 @@ async def process_pending_embedding(memory_id: UUID) -> None:
                 await db.execute(
                     update(Memory)
                     .where(Memory.id == memory_id)
-                    .values(embedding_status="failed", embedding_error=str(e)[:500])
+                    .values(
+                        embedding_status="failed",
+                        embedding_error=str(e)[:500],
+                        # #1317: the column's onupdate is gone — stamp the
+                        # failure time explicitly; the #979 retry backoff
+                        # (embedding_retry_eligible_clause) anchors on it.
+                        updated_at=utcnow(),
+                    )
                 )
                 await db.commit()
             except Exception:
