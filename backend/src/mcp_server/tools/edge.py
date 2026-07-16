@@ -166,6 +166,7 @@ async def handle_list_edges(
     limit = args.get("limit")
 
     start_time = time.time()
+    current_context_id = None
     async for db in get_db():
         try:
             current_context_id = _resolve_context_id(args["context_id"])
@@ -221,14 +222,14 @@ async def handle_list_edges(
             )
         except _ContextNotFoundError as e:
             await db.rollback()
-            await _log_tool_usage(
-                db, user_id, "list_edges", start_time, 404, args.get("context_id"), workspace_id
-            )
+            # #1318: the requested context_id failed resolution — do not
+            # stamp it as the usage_stats FK.
+            await _log_tool_usage(db, user_id, "list_edges", start_time, 404, None, workspace_id)
             return e.to_response()
         except Exception:
             await db.rollback()
             await _log_tool_usage(
-                db, user_id, "list_edges", start_time, 500, args.get("context_id"), workspace_id
+                db, user_id, "list_edges", start_time, 500, current_context_id, workspace_id
             )
             raise
 
@@ -268,6 +269,7 @@ async def handle_create_edge(
     from repositories.neural_edge import NeuralEdgeRepository
 
     start_time = time.time()
+    current_context_id = None
     async for db in get_db():
         try:
             current_context_id = _resolve_context_id(args["context_id"])
@@ -308,7 +310,7 @@ async def handle_create_edge(
         except Exception:
             await db.rollback()
             await _log_tool_usage(
-                db, user_id, "create_edge", start_time, 500, args.get("context_id"), workspace_id
+                db, user_id, "create_edge", start_time, 500, current_context_id, workspace_id
             )
             raise
 
@@ -355,6 +357,7 @@ async def handle_update_edge(
     from repositories.neural_edge import NeuralEdgeRepository
 
     start_time = time.time()
+    current_context_id = None
     async for db in get_db():
         try:
             current_context_id = _resolve_context_id(args["context_id"])
@@ -415,7 +418,7 @@ async def handle_update_edge(
         except Exception:
             await db.rollback()
             await _log_tool_usage(
-                db, user_id, "update_edge", start_time, 500, args.get("context_id"), workspace_id
+                db, user_id, "update_edge", start_time, 500, current_context_id, workspace_id
             )
             raise
 
@@ -436,6 +439,7 @@ async def handle_delete_edge(
     from repositories.neural_edge import NeuralEdgeRepository
 
     start_time = time.time()
+    current_context_id = None
     async for db in get_db():
         try:
             current_context_id = _resolve_context_id(args["context_id"])
@@ -480,7 +484,7 @@ async def handle_delete_edge(
         except Exception:
             await db.rollback()
             await _log_tool_usage(
-                db, user_id, "delete_edge", start_time, 500, args.get("context_id"), workspace_id
+                db, user_id, "delete_edge", start_time, 500, current_context_id, workspace_id
             )
             raise
 

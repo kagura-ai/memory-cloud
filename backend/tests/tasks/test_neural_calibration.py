@@ -84,3 +84,60 @@ async def test_delete_calibration_issues_delete_without_commit():
     )
     db.execute.assert_awaited_once()
     db.commit.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_compute_calibration_passes_vector_list_to_measure_random_pair(monkeypatch):
+    """#1319: fetch_vectors returns dict[str, list[float]]; measure_random_pair
+    expects a bare vector list. Passing the dict made np.asarray call
+    float(dict) and every calibration run failed pre-commit (neither kind
+    persisted). The edge_gate sampling must receive list(vectors.values())."""
+    from types import SimpleNamespace
+    from unittest.mock import MagicMock
+    from uuid import uuid4
+
+    import tasks.neural_calibration as nc
+
+    sampled = [SimpleNamespace(id=uuid4()) for _ in range(3)]
+    vectors_by_id = {str(m.id): [0.1 * (i + 1), 0.2] for i, m in enumerate(sampled)}
+    captured: dict = {}
+
+    def fake_measure_random_pair(vectors, n_pairs):
+        captured["vectors"] = vectors
+        return [0.2] * nc.EDGE_GATE_MIN_PAIR_OBSERVATIONS
+
+    async def fake_sample_memories(db, ctx_id, n):
+        return sampled
+
+    async def fake_fetch_vectors(qdrant, collection, ids):
+        return vectors_by_id
+
+    async def fake_measure_top_k(mems, vectors, collection, k):
+        assert vectors is vectors_by_id  # top-k keeps consuming the dict form
+        return [0.5] * nc.BOOTSTRAP_MIN_OBSERVATIONS, nc.BOOTSTRAP_MIN_MEMORIES
+
+    script = SimpleNamespace(
+        compute_percentiles=lambda scores: dict(_PCTS),
+        fetch_vectors=fake_fetch_vectors,
+        measure_top_k=fake_measure_top_k,
+        measure_random_pair=fake_measure_random_pair,
+        sample_memories=fake_sample_memories,
+    )
+    monkeypatch.setattr(nc, "_load_measure_script", lambda: script)
+    monkeypatch.setattr(nc, "get_qdrant_client", lambda: MagicMock())
+    monkeypatch.setattr(
+        nc.NeuralMemoryConfig,
+        "from_db",
+        AsyncMock(return_value=SimpleNamespace(calibration_ttl_days=30)),
+    )
+    upsert = AsyncMock(return_value=MagicMock())
+    monkeypatch.setattr(nc, "_upsert_calibration", upsert)
+
+    db = _mock_db()
+    row = await nc.compute_calibration(db, "text-embedding-3-small", 512, uuid4())
+
+    assert row is upsert.return_value
+    assert isinstance(captured["vectors"], list)
+    assert captured["vectors"] == list(vectors_by_id.values())
+    assert upsert.await_count == 2  # knn_seed + edge_gate both staged
+    db.commit.assert_awaited_once()

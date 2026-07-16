@@ -42,6 +42,7 @@ async def handle_get_context_info(
     from db.base import get_db
 
     start_time = time.time()
+    current_context_id = None
     async for db in get_db():
         try:
             from services.memory_service import MemoryService
@@ -186,7 +187,10 @@ async def handle_get_context_info(
                 "get_context_info",
                 start_time,
                 404,
-                args.get("context_id"),
+                # #1318: the requested context_id failed resolution — it must
+                # not be stamped as the usage_stats FK (nonexistent UUIDs
+                # violate the constraint and drop the whole usage row).
+                None,
                 workspace_id,
             )
             return e.to_response()
@@ -198,7 +202,8 @@ async def handle_get_context_info(
                 "get_context_info",
                 start_time,
                 500,
-                args.get("context_id"),
+                # #1318: resolved-or-None — never the raw request value.
+                current_context_id,
                 workspace_id,
             )
             logger.error(f"get_context_info_failed: {e}", exc_info=True)

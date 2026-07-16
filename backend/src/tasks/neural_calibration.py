@@ -497,7 +497,11 @@ async def compute_calibration(
     # cross-topic associations clear the bar. Reuse the already-fetched vectors;
     # random pairs need no extra Qdrant round-trip. Skip (leaving the runtime on
     # its absolute fallback) when too few pairs to estimate the upper tail.
-    pair_scores = measure_random_pair(vectors, SAMPLE_RANDOM_PAIRS)
+    # #1319: fetch_vectors returns dict[str, list[float]] (measure_top_k
+    # consumes it keyed), but measure_random_pair expects the bare vector
+    # list — passing the dict made np.asarray call float(dict) and the whole
+    # calibration (both kinds) rolled back on every run.
+    pair_scores = measure_random_pair(list(vectors.values()), SAMPLE_RANDOM_PAIRS)
     pair_observations = len(pair_scores)
     pair_percentiles = compute_percentiles(pair_scores)
     if pair_percentiles and pair_observations >= EDGE_GATE_MIN_PAIR_OBSERVATIONS:
