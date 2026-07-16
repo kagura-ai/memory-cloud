@@ -16,7 +16,7 @@ from uuid import UUID
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from models.auth import AuditLog
+from models.auth import AuditLog, Context
 from models.memory import Memory
 from models.retrieval_feedback import (
     _ALL_FEEDBACK_PROVENANCES,
@@ -66,8 +66,14 @@ class FeedbackService:
         query: str | None,
         note: str | None,
         provenance: str,
-    ) -> tuple[RetrievalFeedback, UUID | None]:
-        """Validate and stage one append-only event without committing it."""
+    ) -> tuple[RetrievalFeedback, UUID]:
+        """Validate and stage one append-only event without committing it.
+
+        The returned workspace id is always resolved: ``Memory.workspace_id``
+        is nullable (legacy rows), so when it is NULL the owning Context's
+        ``workspace_id`` (NOT NULL by schema) is used instead — audit
+        attribution must never record a null workspace.
+        """
         if provenance not in _ALL_FEEDBACK_PROVENANCES:
             raise ValueError(
                 f"invalid feedback provenance {provenance!r}; "
@@ -85,6 +91,18 @@ class FeedbackService:
         if existing is None:
             raise NotFoundException("Memory")
 
+        workspace_id = existing.workspace_id
+        if workspace_id is None:
+            workspace_id = (
+                await self.db.execute(
+                    select(Context.workspace_id).where(Context.id == context_id)
+                )
+            ).scalar_one_or_none()
+            if workspace_id is None:
+                # Fail fast: attribution is part of the audit contract, and a
+                # memory whose context cannot be resolved is unexpected state.
+                raise NotFoundException("Context")
+
         row = RetrievalFeedback(
             context_id=context_id,
             memory_id=memory_id,
@@ -95,7 +113,7 @@ class FeedbackService:
             provenance=provenance,
         )
         self.db.add(row)
-        return row, existing.workspace_id
+        return row, workspace_id
 
     async def record_feedback(
         self,
@@ -225,7 +243,7 @@ class FeedbackService:
                 resource=f"memory:{memory_id}",
                 user_metadata={
                     **(actor_metadata or {}),
-                    "workspace_id": str(workspace_id) if workspace_id is not None else None,
+                    "workspace_id": str(workspace_id),
                     "context_id": str(context_id),
                     "memory_id": str(memory_id),
                     "helpful": helpful,

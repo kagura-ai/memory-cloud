@@ -21,6 +21,7 @@ from models.retrieval_feedback import (
     NOTE_MAX_LEN,
 )
 from services.feedback_service import FeedbackService
+from utils.exceptions import NotFoundException
 
 
 def _svc_with_existing_memory():
@@ -126,3 +127,55 @@ class TestFeedbackProvenance:
                 uuid4(), uuid4(), helpful=True, user_id="u", provenance="forged"
             )
         db.add.assert_not_called()
+
+
+def _svc_with_legacy_memory(context_workspace_id):
+    """A FeedbackService whose memory row has workspace_id=None (legacy) and
+    whose Context lookup resolves to ``context_workspace_id``."""
+    db = MagicMock()
+    memory_row = MagicMock()
+    memory_row.workspace_id = None
+    mem_result = MagicMock()
+    mem_result.one_or_none = MagicMock(return_value=memory_row)
+    ctx_result = MagicMock()
+    ctx_result.scalar_one_or_none = MagicMock(return_value=context_workspace_id)
+    db.execute = AsyncMock(side_effect=[mem_result, ctx_result])
+    db.add = MagicMock()
+    db.commit = AsyncMock()
+    db.refresh = AsyncMock()
+    return FeedbackService(db), db
+
+
+class TestHostFeedbackWorkspaceAttribution:
+    """Audit attribution must never record a null workspace_id (PR #1307
+    review): Memory.workspace_id is nullable for legacy rows, so the owning
+    Context's NOT NULL workspace_id is the fallback."""
+
+    async def test_audit_derives_workspace_from_context_for_legacy_memory(self):
+        ctx_ws = uuid4()
+        svc, db = _svc_with_legacy_memory(ctx_ws)
+        await svc.record_host_feedback(
+            uuid4(),
+            uuid4(),
+            helpful=True,
+            user_id="cockpit",
+            verdict_source="objective_check",
+            verdict_reference="check://pytest/legacy-ws?exit=0",
+        )
+        audit = next(
+            call.args[0] for call in db.add.call_args_list if isinstance(call.args[0], AuditLog)
+        )
+        assert audit.user_metadata["workspace_id"] == str(ctx_ws)
+
+    async def test_fails_fast_when_workspace_unresolvable(self):
+        svc, db = _svc_with_legacy_memory(None)
+        with pytest.raises(NotFoundException):
+            await svc.record_host_feedback(
+                uuid4(),
+                uuid4(),
+                helpful=True,
+                user_id="cockpit",
+                verdict_source="objective_check",
+                verdict_reference="check://pytest/no-ws?exit=0",
+            )
+        db.commit.assert_not_awaited()
