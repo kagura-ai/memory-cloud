@@ -131,11 +131,22 @@ class TestAnyCoercion:
         out = coerce_mcp_arguments("set_state", {"value": '{"phase": "running", "n": 1}'})
         assert out["value"] == {"phase": "running", "n": 1}
 
-    def test_stringified_number_is_decoded(self):
-        assert coerce_mcp_arguments("set_state", {"value": "42"})["value"] == 42
+    def test_stringified_scalars_pass_through(self):
+        """Review finding on #1322: retyping "42"→42 / "true"→True would
+        corrupt legitimately-string values and diverge from the REST path —
+        only unambiguous structures (object/array) are decoded."""
+        assert coerce_mcp_arguments("set_state", {"value": "42"})["value"] == "42"
+        assert coerce_mcp_arguments("set_state", {"value": "true"})["value"] == "true"
 
-    def test_stringified_boolean_is_decoded(self):
-        assert coerce_mcp_arguments("set_state", {"value": "true"})["value"] is True
+    def test_stringified_array_is_decoded(self):
+        assert coerce_mcp_arguments("set_state", {"value": '["a", 1]'})["value"] == ["a", 1]
+
+    def test_nullable_array_field_decodes_stringified_list(self):
+        """Fields typed ["array","null"] (bind_agent_context's reserved
+        allowed_memory_types) fall into the typeless branch too — a
+        stringified list decodes; plain strings pass through to pydantic."""
+        out = coerce_mcp_arguments("bind_agent_context", {"allowed_memory_types": '["fact"]'})
+        assert out["allowed_memory_types"] == ["fact"]
 
     def test_plain_string_passes_through(self):
         out = coerce_mcp_arguments("set_state", {"value": "plain string value"})

@@ -418,9 +418,26 @@ async def execute_tool_call(
         # #1323: expected client-input errors — return the structured envelope
         # (no pydantic model names / errors.pydantic.dev URLs) and log at
         # warning without a traceback instead of an error-level exc_info dump.
-        message = _format_validation_error(e)
-        logger.warning(f"mcp_tool_{tool_name}_invalid_argument: {message}")
-        return _error_response("invalid_argument", message)
+        #
+        # Gate on the failing MODEL being a *Request* model: handlers also
+        # build pydantic Response models from DB rows deep in the service
+        # layer, and one of those failing is a SERVER data-integrity bug
+        # (e.g. a row that no longer fits the response schema — see the
+        # source_type Literal incident in models/schemas.py). Those must keep
+        # the loud error-level traceback + generic envelope below, not be
+        # misattributed to the caller as invalid_argument.
+        title = getattr(e, "title", "") or ""
+        if title.endswith("Request"):
+            message = _format_validation_error(e)
+            logger.warning(f"mcp_tool_{tool_name}_invalid_argument: {message}")
+            return _error_response("invalid_argument", message)
+        logger.error(f"mcp_tool_{tool_name}_failed: {e}", exc_info=True)
+        return [
+            TextContent(
+                type="text",
+                text=json.dumps({"status": "error", "error": str(e)}),
+            )
+        ]
     except Exception as e:
         logger.error(f"mcp_tool_{tool_name}_failed: {e}", exc_info=True)
         return [

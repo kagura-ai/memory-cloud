@@ -83,15 +83,16 @@ def _coerce_to_boolean(value: Any) -> Any:
 
 
 def _coerce_any(value: Any) -> Any:
-    """Best-effort decode for schema fields declared WITHOUT a ``type`` ("any").
+    """Best-effort decode for schema fields declared WITHOUT a scalar ``type``.
 
     #1322: quirky clients JSON-stringify complex values for typeless fields
-    too — ``set_state``'s ``value`` arrived as ``"{\\"phase\\": ...}"`` /
-    ``"42"`` and was stored verbatim into JSONB, breaking the documented
-    round-trip. Decode strings that parse as JSON; keep everything else,
-    including strings that decode to ``None`` (a JSON null would violate
-    NOT NULL storage, and a literal ``"null"`` string is more plausibly
-    intentional than a stringified null).
+    too — ``set_state``'s ``value`` arrived as ``"{\\"phase\\": ...}"`` and was
+    stored verbatim into JSONB, breaking the documented round-trip. Decode
+    strings ONLY when they parse to an object or array: those are
+    unambiguously stringified structures. Scalars stay as sent — retyping
+    ``"42"``→``42`` / ``"true"``→``True`` would corrupt legitimately-string
+    values (zip codes, string ids) and diverge from the REST path, which
+    stores exactly what the client sent (review finding on #1322).
     """
     if not isinstance(value, str):
         return value
@@ -99,7 +100,7 @@ def _coerce_any(value: Any) -> Any:
         decoded = json.loads(value)
     except (ValueError, TypeError):
         return value
-    return value if decoded is None else decoded
+    return decoded if isinstance(decoded, (dict, list)) else value
 
 
 _COERCERS = {

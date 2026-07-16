@@ -229,14 +229,27 @@ async def handle_update_memory(
         except _ContextNotFoundError as e:
             await db.rollback()
             return e.to_response()
-        except NotFoundException:
+        except NotFoundException as e:
             # #1323: structured envelope for a missing/inaccessible memory,
             # mirroring handle_reference — previously this fell through to the
             # generic dispatch handler as a raw slug-less string.
             await db.rollback()
+            await _log_tool_usage(
+                db, user_id, "update_memory", start_time, 404, current_context_id, workspace_id
+            )
+            # The upsert path (external_id) can surface the service's
+            # NotFoundException("Context", ...) from the isolation gate — the
+            # same variant handle_recall re-casts. Keep the deny shape
+            # byte-identical to a regular context deny (CWE-639 uniformity).
+            if str(e).startswith("Context"):
+                return _ContextNotFoundError(
+                    current_context_id,
+                    "Context not found or you don't have access to it.",
+                ).to_response()
+            target_id = args.get("memory_id") or args.get("external_id")
             return _error_response(
                 "memory_not_found",
-                f"Memory not found or you don't have access: {args.get('memory_id')}",
+                f"Memory not found or you don't have access: {target_id}",
                 help="Use recall() to find memories you have access to.",
             )
         except ValueError as e:

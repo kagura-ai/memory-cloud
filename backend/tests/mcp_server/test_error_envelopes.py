@@ -139,3 +139,45 @@ class TestUpdateMemoryNotFoundEnvelope:
         assert payload["error"] == "memory_not_found"
         assert str(memory_id) in payload["message"]
         assert "help" in payload
+
+
+class TestDispatchResponseModelErrorsStayLoud:
+    @pytest.mark.asyncio
+    async def test_response_model_validation_error_is_not_invalid_argument(self):
+        """Review finding on #1323: a ValidationError from building a
+        RESPONSE model (server data-integrity bug, e.g. a DB row that no
+        longer fits the schema) must NOT be misattributed to the caller —
+        it keeps the generic loud path."""
+        import mcp_server.tools as tools_mod
+        from mcp_server.tools import execute_tool_call
+
+        def _response_model_error():
+            from models.schemas import ReferenceResponse
+
+            ReferenceResponse(memory_id="not-a-uuid")  # raises ValidationError
+
+        async def broken_handler(args, user_id, workspace_id):
+            _response_model_error()
+
+        registry = tools_mod._build_registry()
+        registry = dict(registry)
+        registry["recall"] = broken_handler
+
+        with (
+            patch.object(tools_mod, "_TOOL_REGISTRY", registry),
+            patch(
+                "mcp_server.tools._check_rate_limit",
+                new_callable=AsyncMock,
+                return_value=(True, 0, 100),
+            ),
+        ):
+            result = await execute_tool_call(
+                "recall",
+                {"context_id": str(uuid4()), "query": "q"},
+                "test_user",
+                uuid4(),
+            )
+
+        payload = json.loads(result[0].text)
+        assert payload["status"] == "error"
+        assert payload.get("error") != "invalid_argument"
