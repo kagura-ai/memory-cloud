@@ -536,6 +536,7 @@ class TestCreateEdgeDuplicateSemantics:
         assert data["status"] == "success"
         assert data["operation"] == "unchanged"
         assert data["edge"]["weight"] == 1.0
+        assert data["edge"]["origin"] == "declared"
         mock_repo.create_or_update_edge.assert_not_awaited()
 
     @pytest.mark.asyncio
@@ -604,6 +605,85 @@ class TestCreateEdgeDuplicateSemantics:
         assert data["previous"]["weight"] == 1.0
         kwargs = mock_repo.create_or_update_edge.await_args.kwargs
         assert kwargs["protect_declared_link"] is False
+
+    @pytest.mark.asyncio
+    async def test_semantic_origin_edge_updates_not_protected(
+        self, user_id, workspace_id, context_id
+    ):
+        """Only origin='declared' is protected — a semantic (sleep-discovered)
+        edge is machine provenance, so the assertion applies and the pre-image
+        shows origin='semantic'. Pins the predicate as == 'declared', not
+        != 'hebbian'."""
+        src_id, dst_id = uuid4(), uuid4()
+        existing = _mock_edge(src_id, dst_id, edge_type="related_to", weight=0.7, origin="semantic")
+        post = _mock_edge(src_id, dst_id, edge_type="related_to", weight=1.0, origin="semantic")
+
+        mock_repo = MagicMock()
+        mock_repo.get_edge = AsyncMock(return_value=existing)
+        mock_repo.create_or_update_edge = AsyncMock(return_value=post)
+
+        data = await _run_create_edge(
+            {"source_id": str(src_id), "target_id": str(dst_id)},
+            mock_repo,
+            user_id,
+            workspace_id,
+            context_id,
+        )
+
+        assert data["status"] == "success"
+        assert data["operation"] == "updated"
+        assert data["previous"]["origin"] == "semantic"
+        mock_repo.create_or_update_edge.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_overwrite_true_with_no_existing_edge_creates(
+        self, user_id, workspace_id, context_id
+    ):
+        """overwrite=true on a fresh pair is a plain create — and the explicit
+        opt-in also disables the race-window declared-type guard."""
+        src_id, dst_id = uuid4(), uuid4()
+        created = _mock_edge(src_id, dst_id, edge_type="related_to", weight=1.0)
+
+        mock_repo = MagicMock()
+        mock_repo.get_edge = AsyncMock(return_value=None)
+        mock_repo.create_or_update_edge = AsyncMock(return_value=created)
+
+        data = await _run_create_edge(
+            {"source_id": str(src_id), "target_id": str(dst_id), "overwrite": True},
+            mock_repo,
+            user_id,
+            workspace_id,
+            context_id,
+        )
+
+        assert data["status"] == "success"
+        assert data["operation"] == "created"
+        kwargs = mock_repo.create_or_update_edge.await_args.kwargs
+        assert kwargs["protect_declared_link"] is False
+
+    @pytest.mark.asyncio
+    async def test_overwrite_non_boolean_rejected(self, user_id, workspace_id, context_id):
+        """A junk string for `overwrite` must fail closed (validation_error),
+        never count as truthy — bool("null") is True and would silently enable
+        the destructive path the flag is guarding."""
+        src_id, dst_id = uuid4(), uuid4()
+
+        mock_repo = MagicMock()
+        mock_repo.get_edge = AsyncMock()
+        mock_repo.create_or_update_edge = AsyncMock()
+
+        data = await _run_create_edge(
+            {"source_id": str(src_id), "target_id": str(dst_id), "overwrite": "null"},
+            mock_repo,
+            user_id,
+            workspace_id,
+            context_id,
+        )
+
+        assert data["status"] == "error"
+        assert data["error"] == "validation_error"
+        mock_repo.get_edge.assert_not_awaited()
+        mock_repo.create_or_update_edge.assert_not_awaited()
 
     def test_schema_declares_overwrite_flag(self):
         """The tool definition documents the duplicate contract: an `overwrite`

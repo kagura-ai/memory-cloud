@@ -76,13 +76,20 @@ VALID_EDGE_TYPES = frozenset(
 
 
 def _edge_to_dict(edge: Any) -> dict[str, Any]:
-    """Convert NeuralMemoryEdge to JSON-serializable dict."""
+    """Convert NeuralMemoryEdge to JSON-serializable dict.
+
+    ``origin`` is included (#1321) so callers can see the provenance the
+    duplicate contract keys on — e.g. that re-asserting a semantic edge
+    updates its values but does NOT promote it to 'declared' (the repo's
+    sticky-origin upsert keeps non-hebbian origins).
+    """
     return {
         "source_id": str(edge.src_id),
         "target_id": str(edge.dst_id),
         "edge_type": edge.edge_type,
         "weight": edge.weight,
         "confidence": edge.confidence,
+        "origin": edge.origin,
         "created_at": edge.created_at.isoformat() if edge.created_at else None,
         "last_updated": edge.last_updated.isoformat() if edge.last_updated else None,
     }
@@ -244,8 +251,11 @@ async def handle_create_edge(
 
     Duplicate behavior on an existing (source, target) pair:
     - existing ``origin != 'declared'`` (hebbian/semantic auto-edge): upsert
-      proceeds — a user assertion may upgrade an automatic edge — and the
-      response carries ``operation: "updated"`` plus the pre-image.
+      proceeds — a user assertion may update an automatic edge's values —
+      and the response carries ``operation: "updated"`` plus the pre-image.
+      The repo's sticky-origin CASE promotes hebbian rows to 'declared' but
+      keeps 'semantic' rows semantic (both are decay-exempt); the response's
+      ``edge.origin`` field makes the outcome visible.
     - existing ``origin == 'declared'`` with identical edge_type/weight/
       confidence: no write, ``operation: "unchanged"`` (keeps client
       timeout-retries idempotent).
@@ -280,7 +290,16 @@ async def handle_create_edge(
     if error:
         return error
 
-    overwrite = bool(args.get("overwrite", False))
+    # Fail closed: `overwrite` gates a destructive path, so an unrecognized
+    # value must error rather than count as truthy. The coercion layer maps
+    # "true"/"1"/"yes"/"on" (and the falsy set) to real bools; anything else
+    # (e.g. a client stringifying null as "null") arrives here non-bool.
+    overwrite = args.get("overwrite", False)
+    if not isinstance(overwrite, bool):
+        return _error_response(
+            "validation_error",
+            "overwrite must be a boolean (true or false).",
+        )
 
     from db.base import get_db
     from repositories.neural_edge import NeuralEdgeRepository
@@ -310,6 +329,11 @@ async def handle_create_edge(
             )
 
             if existing is not None and existing.origin == EDGE_ORIGIN_DECLARED and not overwrite:
+                # Snapshot while the instance is still live: Session.rollback()
+                # below expires ALL loaded ORM state regardless of
+                # expire_on_commit, and a post-rollback attribute access on the
+                # async session raises MissingGreenlet (sync lazy refresh).
+                existing_snapshot = _edge_to_dict(existing)
                 if (
                     existing.edge_type == edge_type
                     and existing.weight == weight
@@ -327,7 +351,7 @@ async def handle_create_edge(
                         workspace_id,
                     )
                     await db.commit()
-                    return _success_response(edge=_edge_to_dict(existing), operation="unchanged")
+                    return _success_response(edge=existing_snapshot, operation="unchanged")
                 await db.rollback()
                 await _log_tool_usage(
                     db, user_id, "create_edge", start_time, 409, current_context_id, workspace_id
@@ -337,7 +361,7 @@ async def handle_create_edge(
                     f"A declared edge already exists from {args.get('source_id')} to "
                     f"{args.get('target_id')} with different values. Use update_edge to "
                     "modify it, or pass overwrite=true to re-assert it.",
-                    existing_edge=_edge_to_dict(existing),
+                    existing_edge=existing_snapshot,
                 )
 
             previous = (
