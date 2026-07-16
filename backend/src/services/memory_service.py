@@ -2698,9 +2698,17 @@ class MemoryService:
                 eligible_results.append(search_result)
                 eligible_ids.append(str(memory.id))
 
+            # The over-fetch above (neural k*4, cluster buffers) can exceed
+            # candidate_pool_k, but the stamped policy promises a bounded
+            # registered pool. Truncate on the EVIDENCE side only, in
+            # production rank order — eligible_results / search_results stay
+            # untouched so response building and neural co-activation keep
+            # seeing exactly what production saw.
+            registered_pool = tuple(eligible_ids[: selection_config.candidate_pool_k])
+
             plan, selection_evidence = await self._build_selection_evidence(
                 selection_config,
-                eligible_ids=tuple(eligible_ids),
+                eligible_ids=registered_pool,
                 request=request,
                 search_config=search_config,
                 context_id=current_context_id,

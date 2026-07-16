@@ -76,6 +76,28 @@ def test_impossible_floor_fails_instead_of_fabricating_propensity() -> None:
         )
 
 
+def test_floor_at_tolerance_boundary_keeps_probabilities_consistent() -> None:
+    # The feasibility guard admits floors up to maximum_feasible_floor + 1e-12,
+    # where floor*n/m computes to just over 1.0. The mixture must be clamped so
+    # the reported evidence stays mathematically consistent with the actual
+    # procedure (mixture 1.0 == the uniform arm always fires) and no marginal
+    # exceeds 1.0.
+    boundary_floor = 2 / 5 + 5e-13  # max feasible for top_k=2, n=5, inside tolerance
+    plan = plan_recall_selection(
+        ELIGIBLE,
+        top_k=2,
+        config=RecallSelectionConfig(
+            seed=7, exploration_floor=boundary_floor, candidate_pool_k=100
+        ),
+    )
+
+    assert plan.policy["uniform_mixture_probability"] <= 1.0
+    probabilities = plan.selection_probabilities
+    assert all(0.0 < value <= 1.0 for value in probabilities.values())
+    # Marginal inclusion probabilities must still sum to the selected count.
+    assert sum(probabilities.values()) == pytest.approx(2.0)
+
+
 def test_evidence_contains_identities_but_no_candidate_content() -> None:
     plan = plan_recall_selection(
         ELIGIBLE,

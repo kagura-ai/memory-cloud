@@ -68,7 +68,11 @@ def plan_recall_selection(
                 f"{maximum_feasible_floor:.12g} for top_k={top_k}, eligible_count={n}"
             )
         if config.exploration_floor > 0.0 and selected_count < n:
-            mixture_probability = config.exploration_floor * n / selected_count
+            # The feasibility guard above admits floors up to
+            # maximum_feasible_floor + 1e-12, where floor*n/m computes to just
+            # over 1.0. Clamp so the reported marginals stay mathematically
+            # consistent with the actual procedure (p=1 → always uniform arm).
+            mixture_probability = min(1.0, config.exploration_floor * n / selected_count)
             rng = random.Random(config.seed)
             if rng.random() < mixture_probability:
                 chosen = set(rng.sample(range(n), selected_count))

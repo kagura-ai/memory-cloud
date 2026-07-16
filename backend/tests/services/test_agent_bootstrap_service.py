@@ -614,3 +614,22 @@ class TestEnvelope:
             env = await self._build(svc, BootstrapParams(agent_id=AGENT_ID, include=("state",)))
         assert set(env["components"]) == {"state"}
         assert env["correlation"]["agent_id"] == str(AGENT_ID)
+
+
+class TestTransactionOwningComponentFailSoft:
+    """A raising rollback() inside the except handler must not escape — the
+    component stays fail-soft and the bootstrap request survives (PR #1308
+    review)."""
+
+    @pytest.mark.asyncio
+    async def test_rollback_failure_still_returns_component_error(self):
+        db = MagicMock()
+        db.rollback = AsyncMock(side_effect=RuntimeError("connection is closed"))
+        svc = AgentBootstrapService(db)
+
+        async def boom():
+            raise RuntimeError("component blew up")
+
+        result = await svc._transaction_owning_component("recall", boom)
+        assert result == {"status": STATUS_ERROR, "error": "component_error"}
+        db.rollback.assert_awaited_once()

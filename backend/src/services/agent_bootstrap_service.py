@@ -404,7 +404,16 @@ class AgentBootstrapService:
             body = await fn()
             return {"status": STATUS_OK, **body}
         except Exception as exc:
-            await self.db.rollback()
+            # The rollback itself can raise (e.g. a dead connection). Guard it
+            # so this handler always returns the fail-soft component error
+            # instead of aborting the whole bootstrap request.
+            try:
+                await self.db.rollback()
+            except Exception as rollback_exc:  # noqa: BLE001 — fail-soft boundary
+                logger.error(
+                    f"bootstrap_component_rollback_failed: {name}: {rollback_exc}",
+                    exc_info=True,
+                )
             logger.error(f"bootstrap_component_failed: {name}: {exc}", exc_info=True)
             return {"status": STATUS_ERROR, "error": "component_error"}
 
