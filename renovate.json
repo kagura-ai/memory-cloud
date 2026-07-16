@@ -1,0 +1,25 @@
+{
+  "$schema": "https://docs.renovatebot.com/renovate-schema.json",
+  "extends": ["config:recommended"],
+  "enabledManagers": ["docker-compose", "github-actions"],
+  "timezone": "Asia/Tokyo",
+  "schedule": ["before 8am on monday"],
+  "prConcurrentLimit": 2,
+  "labels": ["dependencies"],
+  "packageRules": [
+    {
+      "description": "Default-deny (#1310): nothing rides this config unless a later rule explicitly re-enables it. Structural on purpose — enumerating the managers' non-docker datasources would silently leak when Renovate adds one (e.g. github-digest for SHA-pinned actions).",
+      "matchManagers": ["docker-compose", "github-actions"],
+      "enabled": false
+    },
+    {
+      "description": "The one enabled dependency (#1310): group the postgres digest pin across both compose files and all workflow service blocks into one atomic weekly PR. Majors are deliberately excluded — a PostgreSQL major is a stateful dump/restore cutover (docs/ops/postgres-18-migration-runbook.md), never a compose bump. pinDigests auto-pins any future unpinned postgres reference (already-pinned tag@sha256 sites keep their form on bumps regardless). To extend coverage (qdrant/redis/caddy), copy this rule — the explicit enabled: true is required to override the default-deny above.",
+      "matchDatasources": ["docker"],
+      "matchPackageNames": ["postgres"],
+      "matchUpdateTypes": ["minor", "patch", "digest", "pin"],
+      "groupName": "postgres image",
+      "pinDigests": true,
+      "enabled": true
+    }
+  ]
+}

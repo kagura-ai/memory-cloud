@@ -214,7 +214,10 @@ jobs:
       github.event_name == 'push'
     services:
       postgres:
-        image: &postgres-image postgres:18.4-alpine@sha256:9a8afca54e7861fd90fab5fdf4c42477a6b1cb7d293595148e674e0a3181de15
+        # Literal pin (not a YAML anchor) in all three service blocks: Renovate's
+        # github-actions manager detects plain `image:` values, and the postgres
+        # packageRule group (renovate.json, #1310) bumps every site in one PR.
+        image: postgres:18.4-alpine@sha256:9a8afca54e7861fd90fab5fdf4c42477a6b1cb7d293595148e674e0a3181de15
         env:
           POSTGRES_USER: kagura
           POSTGRES_PASSWORD: kagura_dev_password
@@ -318,7 +321,7 @@ jobs:
       NEXT_PUBLIC_API_URL: http://localhost:8080
     services:
       postgres:
-        image: *postgres-image
+        image: postgres:18.4-alpine@sha256:9a8afca54e7861fd90fab5fdf4c42477a6b1cb7d293595148e674e0a3181de15
         env:
           POSTGRES_USER: kagura
           POSTGRES_PASSWORD: kagura_dev_password
@@ -456,7 +459,7 @@ jobs:
       GOOGLE_CLIENT_SECRET: e2e-mock-google-client-secret
     services:
       postgres:
-        image: *postgres-image
+        image: postgres:18.4-alpine@sha256:9a8afca54e7861fd90fab5fdf4c42477a6b1cb7d293595148e674e0a3181de15
         env:
           POSTGRES_USER: kagura
           POSTGRES_PASSWORD: kagura_dev_password
