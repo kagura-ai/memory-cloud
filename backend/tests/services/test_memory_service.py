@@ -173,6 +173,19 @@ class TestReference:
             await service.reference(memory_id=memory_id, user_id="test_user")
 
     @pytest.mark.asyncio
+    async def test_reference_soft_deleted_raises_not_found(self, service):
+        """#1316: a forgotten (soft-deleted) memory must not be readable by
+        direct-id fetch during the retention window."""
+        from utils.exceptions import NotFoundException
+
+        memory_id = uuid4()
+        mock_memory = MagicMock(id=memory_id, deleted_at=datetime.utcnow())
+        service.memory_repo.get = AsyncMock(return_value=mock_memory)
+
+        with pytest.raises(NotFoundException):
+            await service.reference(memory_id=memory_id, user_id="test_user")
+
+    @pytest.mark.asyncio
     async def test_reference_found(self, service):
         """reference() returns full memory details."""
         memory_id = uuid4()
@@ -1014,6 +1027,24 @@ class TestForget:
         assert response.deleted_count == 0
         assert response.memory_ids == []
 
+    @pytest.mark.asyncio
+    async def test_forget_by_id_already_deleted_counts_zero(self, service):
+        """#1320: a second forget of the same id must report deleted_count=0
+        and must not re-stamp deleted_at/deleted_by."""
+        memory_id = uuid4()
+        mock_memory = MagicMock(id=memory_id, deleted_at=datetime.utcnow())
+        service.memory_repo.get = AsyncMock(return_value=mock_memory)
+        service.memory_repo.update = AsyncMock()
+        service.db.commit = AsyncMock()
+
+        response = await service.forget(
+            request=ForgetRequest(memory_id=memory_id), user_id="test_user"
+        )
+
+        assert response.deleted_count == 0
+        assert response.memory_ids == []
+        service.memory_repo.update.assert_not_awaited()
+
 
 class TestGetContextIsolationParamsKeyWorkspaceConfinement:
     """Issue #963/#1281 item 2: pure API-key workspace-scope confinement on the
@@ -1741,6 +1772,7 @@ class TestExploreAccessStats:
             context=None,
             workspace_id=workspace_id,
             context_id=context_id,
+            deleted_at=None,
         )
         service.memory_repo.get = AsyncMock(return_value=mock_seed)
         service.memory_repo.update_access_stats = AsyncMock()
@@ -1774,6 +1806,23 @@ class TestExploreAccessStats:
         # Only one update_access_stats call: for the seed, with client="api".
         service.memory_repo.update_access_stats.assert_awaited_once_with(seed_id, client="api")
         service.db.commit.assert_awaited()
+
+    @pytest.mark.asyncio
+    async def test_explore_soft_deleted_seed_raises_not_found(self, service):
+        """#1316: a forgotten memory must not surface as an exploration seed
+        (previously leaked its summary as seed_not_in_graph)."""
+        from models.schemas import ExploreRequest
+        from utils.exceptions import NotFoundException
+
+        seed_id = uuid4()
+        mock_seed = MagicMock(id=seed_id, deleted_at=datetime.utcnow())
+        service.memory_repo.get = AsyncMock(return_value=mock_seed)
+
+        with pytest.raises(NotFoundException):
+            await service.explore(
+                request=ExploreRequest(memory_id=seed_id, depth=2),
+                user_id="test_user",
+            )
 
 
 class TestAccessEventEmission:

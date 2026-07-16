@@ -1097,6 +1097,11 @@ class MemoryService:
         if not memory:
             raise NotFoundException("Memory", str(memory_id))
 
+        # #1316: repo.get() returns soft-deleted rows — a forgotten memory must
+        # not be readable by direct-id fetch during the retention window.
+        if memory.deleted_at is not None:
+            raise NotFoundException("Memory", str(memory_id))
+
         # Issue #XXX: Team collaboration - verify access permission
         from services.permission_service import CallerId, MemoryAuthorId, PermissionService
 
@@ -3185,6 +3190,11 @@ class MemoryService:
         if request.memory_id:
             memory = await self.memory_repo.get(request.memory_id)
 
+            # #1320: repo.get() returns soft-deleted rows — an already-deleted
+            # memory must not be re-stamped or counted again (deleted_count=0).
+            if memory and memory.deleted_at is not None:
+                memory = None
+
             if memory:
                 # Issue #XXX: Team collaboration - verify delete permission
                 from services.permission_service import CallerId, MemoryAuthorId, PermissionService
@@ -3475,6 +3485,12 @@ class MemoryService:
         seed_memory = await self.memory_repo.get(request.memory_id)
         if not seed_memory:
             raise NotFoundException(f"Memory {request.memory_id} not found")
+
+        # #1316: repo.get() returns soft-deleted rows — a forgotten memory must
+        # not surface as an exploration seed (its edges are already gone, so it
+        # previously leaked as seed_not_in_graph with the summary exposed).
+        if seed_memory.deleted_at is not None:
+            raise NotFoundException("Memory", str(request.memory_id))
 
         # Issue #XXX: Team collaboration - verify access permission
         from services.permission_service import CallerId, MemoryAuthorId, PermissionService
