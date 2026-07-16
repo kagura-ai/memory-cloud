@@ -191,9 +191,10 @@ explicitly not flip evidence.
 
 To be finalized and rehearsed in the escalation issue; the fixed points are:
 
-1. **Native PostgreSQL declarative partitioning, no pg_partman.** Production runs stock
-   `postgres` (18+, digest-pinned since #1302 — exact pin in `docker-compose.yml`,
-   `terraform/single-server/docker-compose.prod.yml`);
+1. **Native PostgreSQL declarative partitioning, no pg_partman.** Production runs the stock
+   `postgres` image (digest-pinned as of #1302; the exact pin — and the currently deployed
+   major version — live in `docker-compose.yml` /
+   `terraform/single-server/docker-compose.prod.yml` and the #1302 cutover record);
    pg_partman would mean a custom image, while partition maintenance fits the existing
    APScheduler pattern (`backend/src/tasks/scheduler.py`; job-registration precedent
    `schedule_file_tasks` in `backend/src/tasks/file_tasks.py`, which already runs a nightly
