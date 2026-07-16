@@ -1,0 +1,30 @@
+{
+  "$schema": "https://docs.renovatebot.com/renovate-schema.json",
+  "extends": ["config:recommended", ":dependencyDashboard"],
+  "enabledManagers": ["docker-compose", "github-actions"],
+  "timezone": "Asia/Tokyo",
+  "schedule": ["before 8am on monday"],
+  "prConcurrentLimit": 2,
+  "labels": ["dependencies"],
+  "packageRules": [
+    {
+      "description": "Out of scope (#1310): action `uses:` bumps — only Docker images ride this config. Without this rule the github-actions manager would also propose actions/* SHA updates.",
+      "matchManagers": ["github-actions"],
+      "matchDatasources": ["github-tags", "github-releases", "github-runners", "node-version"],
+      "enabled": false
+    },
+    {
+      "description": "Deferred (#1310 non-goal): non-postgres images (qdrant/redis/caddy floating tags) — extending pin+bump coverage to them is a separate decision.",
+      "matchDatasources": ["docker"],
+      "matchPackageNames": ["!postgres"],
+      "enabled": false
+    },
+    {
+      "description": "Group the postgres digest pin across both compose files and all workflow service blocks into one atomic PR (#1310). pinDigests keeps the tag@sha256 form on tag bumps (18.5, …); CVE respins of the same tag arrive as digest updates.",
+      "matchDatasources": ["docker"],
+      "matchPackageNames": ["postgres"],
+      "groupName": "postgres image",
+      "pinDigests": true
+    }
+  ]
+}
