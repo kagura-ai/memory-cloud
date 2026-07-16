@@ -90,4 +90,10 @@ Related issues: #12, #34
 ...
 
 Total: N items saved to context {context_name}
+
+💡 Learnings are saved to Kagura Memory. If you're **continuing** work, run `/compact` now to free up context. Skip it if you're ending the session — compaction isn't needed when you're done.
 ```
+
+The `/compact` line is a **continue-only nudge**, not an instruction to run: saving to Kagura Memory is a durable save point, so the transcript can be compacted afterward with little loss when work continues. Leave the continue/end decision with the user — omit or ignore the nudge on a true session end.
+
+Do **not** attempt to auto-invoke `/compact` — it is a Claude Code harness (CLI) built-in, not a shell command or a skill action, so it cannot be triggered from this skill or a hook. The nudge is the whole mechanism.
