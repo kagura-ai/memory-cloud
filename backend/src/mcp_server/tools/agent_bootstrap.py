@@ -48,7 +48,9 @@ async def handle_get_agent_bootstrap(
         BootstrapError,
         BootstrapParams,
         parse_include,
+        parse_recall_evaluation,
         validate_query,
+        validate_recall_evaluation_usage,
         validate_session_id,
     )
 
@@ -66,7 +68,9 @@ async def handle_get_agent_bootstrap(
             pinned_cap=args.get("pinned_cap"),
             upcoming_until=args.get("upcoming_until"),
             include=parse_include(args.get("include")),
+            recall_evaluation=parse_recall_evaluation(args.get("recall_evaluation")),
         )
+        validate_recall_evaluation_usage(params)
     except BootstrapError as e:
         return _error_response(e.code, e.message)
 

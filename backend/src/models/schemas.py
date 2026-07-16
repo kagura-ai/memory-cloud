@@ -5,7 +5,7 @@ Based on Issue #1 - API specifications.
 
 import logging
 from datetime import datetime
-from typing import Literal
+from typing import Any, Literal
 from uuid import UUID
 
 from pydantic import (
@@ -406,6 +406,12 @@ class RecallResponse(BaseModel):
     # Issue #1047: top-level relevance confidence. None on legacy/explore paths
     # that don't compute it; recall() always populates it (incl. "none" on empty).
     confidence: RecallConfidence | None = None
+    # #1306: internal hand-off from MemoryService to the authorized bootstrap
+    # composer.  ``exclude=True`` is a defense-in-depth boundary: the ordinary
+    # /memory/recall and share-key surfaces never serialize candidate identities
+    # outside their returned top-k.  Bootstrap copies only the documented,
+    # identity-only evaluation metadata when that mode was explicitly requested.
+    selection_evidence: dict[str, Any] | None = Field(default=None, exclude=True)
 
 
 class ReferenceRequest(BaseModel):

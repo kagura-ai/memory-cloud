@@ -64,6 +64,11 @@ from services.context_routing import resolve_collection_name
 from services.context_service import ContextService
 from services.embedding_service import EmbeddingService
 from services.query_router import classify_query
+from services.recall_selection import (
+    RecallSelectionConfig,
+    RecallSelectionPlan,
+    plan_recall_selection,
+)
 from services.search_service import SearchService
 from utils.datetime import to_utc_iso, utcnow
 from utils.exceptions import (
@@ -2170,6 +2175,51 @@ class MemoryService:
         except Exception as exc:  # noqa: BLE001 — reinforce must never break recall
             logger.warning("reinforce_rerank_skipped", error=str(exc))
 
+    async def _build_selection_evidence(
+        self,
+        config: RecallSelectionConfig,
+        *,
+        eligible_ids: tuple[str, ...],
+        request: RecallRequest,
+        search_config: Any,
+        context_id: UUID,
+    ) -> tuple[RecallSelectionPlan, dict[str, Any]]:
+        """Build identity-only #1306 evidence from an already-authorized pool."""
+        plan = plan_recall_selection(eligible_ids, top_k=request.k, config=config)
+        effective_search_config = search_config
+        if effective_search_config is None:
+            from repositories.config_repository import ContextSearchConfigRepository
+
+            effective_search_config = await ContextSearchConfigRepository(self.db).get_by_context(
+                context_id
+            )
+        graph_enabled, graph_max_boost = self._graph_boost_settings()
+        evidence = {
+            "selection_probabilities": plan.selection_probabilities,
+            "selection_policy": {
+                **plan.policy,
+                "ranking_policy": {
+                    "name": "production_hybrid_recall_v1",
+                    "search_mode": request.search_mode,
+                    "use_rerank": request.use_rerank,
+                    "reinforce_enabled": bool(
+                        getattr(effective_search_config, "reinforce_enabled", False)
+                    ),
+                    "reinforce_require_host_arbitration": bool(
+                        getattr(
+                            effective_search_config,
+                            "reinforce_require_host_arbitration",
+                            False,
+                        )
+                    ),
+                    "graph_boost_enabled": graph_enabled,
+                    "graph_boost_max": graph_max_boost,
+                    "trust_filter": "trusted",
+                },
+            },
+        }
+        return plan, evidence
+
     async def recall(
         self,
         request: RecallRequest,
@@ -2179,6 +2229,7 @@ class MemoryService:
         context_workspace_id: UUID
         | None = None,  # Issue #708: source workspace for shared-context Option A
         context_ids: list[UUID] | None = None,  # Issue #81: cross-context recall
+        selection_config: RecallSelectionConfig | None = None,
     ) -> RecallResponse:
         """Search memories with Hybrid Search + Neural Memory.
 
@@ -2231,6 +2282,10 @@ class MemoryService:
         # Single Collection Migration: Validate required parameters
         if not current_workspace_id or not current_context_id:
             raise ValueError("recall() requires current_workspace_id and current_context_id")
+        if selection_config is not None and (
+            not request.filters or request.filters.get("trust_tier") != "trusted"
+        ):
+            raise ValueError("selection evidence requires trusted-tier recall")
 
         # #1291: recall does NOT pass through
         # ``PermissionService.resolve_context_for_workspace_read`` — the MCP
@@ -2375,6 +2430,19 @@ class MemoryService:
                     results=[],
                     explore_hints=[] if request.include_explore_hints else None,
                     confidence=self._compute_recall_confidence([]),  # #1047: "none"
+                    selection_evidence=(
+                        (
+                            await self._build_selection_evidence(
+                                selection_config,
+                                eligible_ids=(),
+                                request=request,
+                                search_config=search_config,
+                                context_id=current_context_id,
+                            )
+                        )[1]
+                        if selection_config is not None
+                        else None
+                    ),
                 )
 
         # #708 Option A H1 gate (deferred): we now know hybrid_search will
@@ -2423,6 +2491,12 @@ class MemoryService:
         # Fetch more candidates when neural is enabled for better hybrid merge
         # and to feed Hebbian learning with broader co-activation data
         candidates_k = request.k * 4 if neural_enabled else request.k
+        # #1306 evaluation seam: over-fetch through the EXISTING production
+        # hybrid pipeline so the evidence covers the full registered candidate
+        # pool.  This changes neither scoring nor authorization and is inert for
+        # every ordinary recall/bootstrap call.
+        if selection_config is not None:
+            candidates_k = max(candidates_k, selection_config.candidate_pool_k)
         # When ``analysis_cluster`` filter is active, ensure the candidate
         # pool can hold the whole cluster + a safety buffer so the post-
         # filter does not starve a small ``k`` request.
@@ -2460,6 +2534,19 @@ class MemoryService:
                 results=[],
                 explore_hints=[] if request.include_explore_hints else None,
                 confidence=self._compute_recall_confidence([]),  # #1047: "none"
+                selection_evidence=(
+                    (
+                        await self._build_selection_evidence(
+                            selection_config,
+                            eligible_ids=(),
+                            request=request,
+                            search_config=search_config,
+                            context_id=current_context_id,
+                        )
+                    )[1]
+                    if selection_config is not None
+                    else None
+                ),
             )
 
         # Fetch memories from PostgreSQL (exclude soft-deleted)
@@ -2594,6 +2681,49 @@ class MemoryService:
             user_id,
             top_k=request.k,
         )
+
+        selection_evidence: dict[str, Any] | None = None
+        if selection_config is not None:
+            # All subtractive gates (trusted context/source, agent row binding,
+            # deletion, cluster scope, supersede shadowing) have run.  Therefore
+            # this is precisely the authorized eligible pool used by this query.
+            eligible_results: list[dict[str, Any]] = []
+            eligible_ids: list[str] = []
+            seen_memory_ids: set[UUID] = set()
+            for search_result in search_results:
+                memory = memories.get(search_result["id"])
+                if memory is None or memory.id in seen_memory_ids:
+                    continue
+                seen_memory_ids.add(memory.id)
+                eligible_results.append(search_result)
+                eligible_ids.append(str(memory.id))
+
+            # The over-fetch above (neural k*4, cluster buffers) can exceed
+            # candidate_pool_k, but the stamped policy promises a bounded
+            # registered pool. Truncate on the EVIDENCE side only, in
+            # production rank order — eligible_results / search_results stay
+            # untouched so response building and neural co-activation keep
+            # seeing exactly what production saw.
+            registered_pool = tuple(eligible_ids[: selection_config.candidate_pool_k])
+
+            plan, selection_evidence = await self._build_selection_evidence(
+                selection_config,
+                eligible_ids=registered_pool,
+                request=request,
+                search_config=search_config,
+                context_id=current_context_id,
+            )
+            by_memory_id = {str(memories[result["id"]].id): result for result in eligible_results}
+            selected_set = set(plan.selected_ids)
+            selected_results = [by_memory_id[memory_id] for memory_id in plan.selected_ids]
+            unselected_results = [
+                result
+                for memory_id, result in by_memory_id.items()
+                if memory_id not in selected_set
+            ]
+            # The normal response builder and neural co-activation path continue
+            # to consume ``search_results[:k]``; reorder only, never synthesize.
+            search_results[:] = selected_results + unselected_results
 
         responses = []
         for search_result in search_results[: request.k]:
@@ -2902,6 +3032,7 @@ class MemoryService:
             confidence=self._compute_recall_confidence(
                 candidate_scores, semantic_scores=semantic_scores or None
             ),
+            selection_evidence=selection_evidence,
         )
 
     async def load_pinned(

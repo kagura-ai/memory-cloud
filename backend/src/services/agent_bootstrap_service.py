@@ -18,12 +18,14 @@ component failures are fail-soft — a failing component yields
 
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass, field
 from typing import Any
 from uuid import UUID
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from services.recall_selection import RecallSelectionConfig
 from utils.datetime import to_utc_iso, utcnow
 from utils.logger import get_logger
 
@@ -65,6 +67,10 @@ class BootstrapParams:
     pinned_cap: int | None = None
     upcoming_until: str | None = None
     include: tuple[str, ...] = _ALL_COMPONENTS
+    # #1306: absent for every normal client.  When present, MemoryService still
+    # owns retrieval/ranking; bootstrap only requests reproducible selection
+    # evidence from the authorized trusted candidate pool.
+    recall_evaluation: RecallSelectionConfig | None = None
 
 
 @dataclass
@@ -118,6 +124,59 @@ def validate_query(raw: Any) -> str | None:
             f"'query' must be a string of at most {_QUERY_MAX_LEN} chars.",
         )
     return raw or None
+
+
+def parse_recall_evaluation(raw: Any) -> RecallSelectionConfig | None:
+    """Parse the additive #1306 eval policy identically on REST and MCP."""
+    if raw is None:
+        return None
+    if not isinstance(raw, dict):
+        raise BootstrapError("invalid_arguments", "'recall_evaluation' must be an object.")
+    expected = {"seed", "exploration_floor", "candidate_pool_k"}
+    if set(raw) != expected:
+        raise BootstrapError(
+            "invalid_arguments",
+            "'recall_evaluation' requires exactly seed, exploration_floor, and candidate_pool_k.",
+        )
+    seed = raw["seed"]
+    floor = raw["exploration_floor"]
+    pool_k = raw["candidate_pool_k"]
+    if isinstance(seed, bool) or not isinstance(seed, int) or not -(2**63) <= seed < 2**63:
+        raise BootstrapError(
+            "invalid_arguments", "'recall_evaluation.seed' must be a signed 64-bit integer."
+        )
+    if isinstance(floor, bool) or not isinstance(floor, (int, float)):
+        raise BootstrapError(
+            "invalid_arguments", "'recall_evaluation.exploration_floor' must be a number."
+        )
+    floor = float(floor)
+    if not math.isfinite(floor) or not 0.0 <= floor <= 1.0:
+        raise BootstrapError(
+            "invalid_arguments",
+            "'recall_evaluation.exploration_floor' must be finite and in [0, 1].",
+        )
+    if isinstance(pool_k, bool) or not isinstance(pool_k, int) or not 1 <= pool_k <= 100:
+        raise BootstrapError(
+            "invalid_arguments", "'recall_evaluation.candidate_pool_k' must be in [1, 100]."
+        )
+    return RecallSelectionConfig(seed=seed, exploration_floor=floor, candidate_pool_k=pool_k)
+
+
+def validate_recall_evaluation_usage(params: BootstrapParams) -> None:
+    """Fail closed when an eval policy cannot produce recall evidence."""
+    if params.recall_evaluation is None:
+        return
+    if params.query is None or "recall" not in params.include:
+        raise BootstrapError(
+            "invalid_arguments",
+            "'recall_evaluation' requires a query and the recall component.",
+        )
+    effective_k = params.recall_k if params.recall_k is not None else 5
+    if effective_k < 1 or effective_k > params.recall_evaluation.candidate_pool_k:
+        raise BootstrapError(
+            "invalid_arguments",
+            "'recall_evaluation.candidate_pool_k' must be at least recall_k.",
+        )
 
 
 class AgentBootstrapService:
@@ -282,7 +341,9 @@ class AgentBootstrapService:
                 "upcoming", lambda: self._upcoming(context, params)
             )
         if "state" in include:
-            components["state"] = await self._component("state", lambda: self._state(context))
+            components["state"] = await self._transaction_owning_component(
+                "state", lambda: self._state(context)
+            )
         if "policy" in include:
             components["policy"] = {"status": STATUS_SKIPPED, "reason": "no_policy_bundle"}
 
@@ -325,6 +386,34 @@ class AgentBootstrapService:
                 body = await fn()
             return {"status": STATUS_OK, **body}
         except Exception as exc:  # fail-soft per component; savepoint rolled back
+            logger.error(f"bootstrap_component_failed: {name}: {exc}", exc_info=True)
+            return {"status": STATUS_ERROR, "error": "component_error"}
+
+    async def _transaction_owning_component(self, name: str, fn: Any) -> dict[str, Any]:
+        """Run a component whose service owns the session transaction.
+
+        ``MemoryService.recall`` commits its access/adoption updates, and
+        ``AgentStateService.list_state`` commits its opportunistic TTL reap.
+        Wrapping either in ``begin_nested`` makes that successful commit close
+        the savepoint context, so ``__aexit__`` turns a valid read into
+        ``component_error``. On failure, a full rollback is the safe boundary:
+        earlier bootstrap components are reads, while later audit writes have
+        not been staged yet.
+        """
+        try:
+            body = await fn()
+            return {"status": STATUS_OK, **body}
+        except Exception as exc:
+            # The rollback itself can raise (e.g. a dead connection). Guard it
+            # so this handler always returns the fail-soft component error
+            # instead of aborting the whole bootstrap request.
+            try:
+                await self.db.rollback()
+            except Exception as rollback_exc:  # noqa: BLE001 — fail-soft boundary
+                logger.error(
+                    f"bootstrap_component_rollback_failed: {name}: {rollback_exc}",
+                    exc_info=True,
+                )
             logger.error(f"bootstrap_component_failed: {name}: {exc}", exc_info=True)
             return {"status": STATUS_ERROR, "error": "component_error"}
 
@@ -462,7 +551,9 @@ class AgentBootstrapService:
             return {"status": STATUS_SKIPPED, "reason": "no_query"}
         if recall_metered:
             return {"status": STATUS_ERROR, "error": "rate_limited"}
-        return await self._component("recall", lambda: self._recall(context, params, principal))
+        return await self._transaction_owning_component(
+            "recall", lambda: self._recall(context, params, principal)
+        )
 
     async def _recall(
         self, context: Any, params: BootstrapParams, principal: BootstrapPrincipal
@@ -485,6 +576,7 @@ class AgentBootstrapService:
             current_context_id=context.id,
             current_workspace_id=principal.workspace_id,
             context_workspace_id=context.workspace_id,
+            selection_config=params.recall_evaluation,
         )
         results_data = [
             {
@@ -505,12 +597,22 @@ class AgentBootstrapService:
         ]
         # query_hash never leaks the raw query — correlation only.
         query_hash = hmac_sha256_hex(params.query or "", get_settings().api_key_secret)
-        return {
+        body = {
             "query_hash": query_hash,
             "results": results_data,
             "k": request.k,
             "trust_filter": "trusted",
         }
+        evidence = getattr(result, "selection_evidence", None)
+        if params.recall_evaluation is not None and isinstance(evidence, dict):
+            # Identity-only metadata.  Candidate summaries/content never leave
+            # MemoryService for unselected rows.
+            probabilities = evidence.get("selection_probabilities")
+            policy = evidence.get("selection_policy")
+            if isinstance(probabilities, dict) and isinstance(policy, dict):
+                body["selection_probabilities"] = probabilities
+                body["selection_policy"] = policy
+        return body
 
     async def _upcoming(self, context: Any, params: BootstrapParams) -> dict[str, Any]:
         from services.time_memory import query_upcoming_time_memories

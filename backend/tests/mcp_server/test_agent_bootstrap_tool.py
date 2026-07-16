@@ -92,6 +92,22 @@ class TestArgValidation:
         )
         assert _payload(result)["error"] == "invalid_arguments"
 
+    @pytest.mark.asyncio
+    async def test_recall_evaluation_without_query_rejected(self):
+        result = await handle_get_agent_bootstrap(
+            args={
+                "agent_id": str(AGENT_ID),
+                "recall_evaluation": {
+                    "seed": 188,
+                    "exploration_floor": 0.01,
+                    "candidate_pool_k": 100,
+                },
+            },
+            user_id="u",
+            workspace_id=WORKSPACE_ID,
+        )
+        assert _payload(result)["error"] == "invalid_arguments"
+
 
 class TestDispatch:
     @pytest.mark.asyncio
@@ -131,6 +147,32 @@ class TestDispatch:
         assert body["status"] == "success"
         assert body["agent"]["agent_id"] == str(AGENT_ID)
         assert "degraded" in body
+
+    @pytest.mark.asyncio
+    async def test_recall_evaluation_is_forwarded(self):
+        with ExitStack() as stack:
+            svc = _enter(stack)
+            stack.enter_context(
+                patch(
+                    "mcp_server.tools._check_rate_limit", new=AsyncMock(return_value=(True, 0, 1))
+                )
+            )
+            await handle_get_agent_bootstrap(
+                args={
+                    "agent_id": str(AGENT_ID),
+                    "query": "eval query",
+                    "recall_evaluation": {
+                        "seed": 188,
+                        "exploration_floor": 0.01,
+                        "candidate_pool_k": 100,
+                    },
+                },
+                user_id="u",
+                workspace_id=WORKSPACE_ID,
+            )
+        params = svc.resolve_context.await_args.kwargs["params"]
+        assert params.recall_evaluation.seed == 188
+        assert params.recall_evaluation.candidate_pool_k == 100
 
     @pytest.mark.asyncio
     async def test_queryless_call_does_not_meter(self):

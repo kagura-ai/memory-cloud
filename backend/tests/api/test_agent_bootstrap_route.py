@@ -105,3 +105,44 @@ async def test_bad_session_id_charset_is_400(db, monkeypatch):
             user=USER,
             db=db,
         )
+
+
+@pytest.mark.asyncio
+async def test_recall_evaluation_is_parsed_and_forwarded(db, monkeypatch):
+    svc = _svc(monkeypatch)
+    await agent_bootstrap(
+        agent_id=AGENT_ID,
+        body=BootstrapRequest(
+            query="eval query",
+            recall_k=5,
+            recall_evaluation={
+                "seed": 188,
+                "exploration_floor": 0.01,
+                "candidate_pool_k": 100,
+            },
+        ),
+        user=USER,
+        db=db,
+    )
+
+    params = svc.resolve_context.await_args.kwargs["params"]
+    assert params.recall_evaluation.seed == 188
+    assert params.recall_evaluation.exploration_floor == 0.01
+
+
+@pytest.mark.asyncio
+async def test_recall_evaluation_without_query_is_400(db, monkeypatch):
+    _svc(monkeypatch)
+    with pytest.raises(BadRequestError, match="requires a query"):
+        await agent_bootstrap(
+            agent_id=AGENT_ID,
+            body=BootstrapRequest(
+                recall_evaluation={
+                    "seed": 188,
+                    "exploration_floor": 0.01,
+                    "candidate_pool_k": 100,
+                }
+            ),
+            user=USER,
+            db=db,
+        )

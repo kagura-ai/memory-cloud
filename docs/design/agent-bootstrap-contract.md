@@ -70,7 +70,12 @@ stamped, and every read param must be declared per the schema policy test
   "recall_k": 10,                // optional; forwarded verbatim to recall's existing k validation
   "pinned_cap": 100,             // optional; clamped by the load_pinned clamp to [1, 1000]
   "upcoming_until": "ISO|null",  // optional; "from" is always "now"
-  "include": ["pinned","recall","upcoming","state","policy"]  // optional selector; default all
+  "include": ["pinned","recall","upcoming","state","policy"], // optional selector; default all
+  "recall_evaluation": {        // optional #1306 evaluation-only selection evidence
+    "seed": 188,                // signed 64-bit deterministic replay seed
+    "exploration_floor": 0.05, // exact marginal inclusion-probability floor
+    "candidate_pool_k": 100    // authorized trusted pool bound, 1..100 and >= recall_k
+  }
 }
 ```
 
@@ -82,6 +87,15 @@ under `additionalProperties: false` freezes a wrong contract.
 never fabricates a recall query. This holds even when `include` explicitly names `recall`:
 an `include=["recall"]` call without `query` returns a skipped recall component, not an
 error.
+
+**Evaluation selection evidence.** `recall_evaluation` requires both `query` and the
+`recall` component. It over-fetches only through the existing authorized production recall
+pipeline; trusted-tier, binding-row, deletion, cluster, and supersession filters run before
+candidate identities become eligible. The selector mixes deterministic production top-k
+with a seeded uniform subset of the same size, so every reported marginal probability is
+exact. A zero floor truthfully reports `1` for deterministic top-k and `0` for every other
+eligible candidate. The mode never exposes unselected summaries or content, and the normal
+`/memory/recall` response never serializes this internal evidence.
 
 **Default-context resolution.** If `context_id` is omitted, the server resolves the agent's
 default binding — the row with `is_default = true`, or the agent's sole binding when exactly
@@ -110,7 +124,14 @@ one exists. If the agent has multiple bindings and no default, the call fails wi
     "pinned":   { "status": "ok", "memories": [ /* load_pinned rows */ ],
                   "total_available": 12, "truncated": false, "cap": 100 },
     "recall":   { "status": "ok", "query_hash": "<hmac-sha256>",   // never the raw query
-                  "results": [ /* recall rows */ ], "k": 10, "trust_filter": "trusted" },
+                  "results": [ /* recall rows */ ], "k": 10, "trust_filter": "trusted",
+                  // present only when recall_evaluation was requested
+                  "selection_probabilities": { "<actual memory UUID>": 0.05 },
+                  "selection_policy": { "name": "deterministic_uniform_mixture_v1",
+                    "evaluation_seed": 188, "exploration_floor": 0.05,
+                    "candidate_pool_k": 100, "minimum_selection_probability": 0.05,
+                    "ranking_policy": { "name": "production_hybrid_recall_v1",
+                      "reinforce_enabled": true, "trust_filter": "trusted" } } },
     "upcoming": { "status": "ok", "results": [ /* recall_upcoming rows */ ], "from": "…", "until": "…" },
     "state":    { "status": "ok", "states": { "…": {} }, "count": 3 },
     "policy":   { "status": "skipped", "reason": "no_policy_bundle" }
@@ -126,7 +147,10 @@ inside the sub-envelope (`load_pinned` → `{memories, total_available, truncate
 `recall_upcoming` → its handler's response fields including `results`; keyless `get_state` →
 `{states, count}`), so clients reuse one parser per primitive whether they call it directly
 or via bootstrap. Bootstrap-only fields (`status`, `query_hash`, `k`, `trust_filter`, `from`,
-`until`) are additive metadata alongside the primitive fields, never replacements. The
+`until`, `selection_probabilities`, `selection_policy`) are additive metadata alongside the
+primitive fields, never replacements. Selection probabilities cover the full eligible
+trusted evaluation pool, not just returned top-k rows; degraded/error components contain no
+positivity evidence. The
 component-level `status` vocabulary is `ok | error | skipped` (per-component health); the
 **top-level** `status` stays `"success"` per the house envelope convention — the two fields
 are different layers, not an inconsistency. A flattened bespoke bundle schema was rejected

@@ -25,6 +25,7 @@ from services.agent_bootstrap_service import (
     BootstrapParams,
     BootstrapPrincipal,
     parse_include,
+    parse_recall_evaluation,
     validate_query,
     validate_session_id,
 )
@@ -90,6 +91,25 @@ class TestValidators:
     def test_query_too_long_rejected(self):
         with pytest.raises(BootstrapError):
             validate_query("x" * 1025)
+
+    def test_recall_evaluation_is_strict_and_bounded(self):
+        config = parse_recall_evaluation(
+            {"seed": 188, "exploration_floor": 0.05, "candidate_pool_k": 100}
+        )
+        assert config is not None
+        assert config.seed == 188
+        assert config.exploration_floor == 0.05
+        assert config.candidate_pool_k == 100
+
+        for bad in (
+            [],
+            {"seed": True, "exploration_floor": 0.05, "candidate_pool_k": 100},
+            {"seed": 1, "exploration_floor": float("nan"), "candidate_pool_k": 100},
+            {"seed": 1, "exploration_floor": 0.05, "candidate_pool_k": 101},
+            {"seed": 1, "exploration_floor": 0.05, "candidate_pool_k": 100, "x": 1},
+        ):
+            with pytest.raises(BootstrapError):
+                parse_recall_evaluation(bad)
 
 
 # ---------------------------------------------------------------------------
@@ -390,6 +410,108 @@ class TestEnvelope:
         assert upcoming.await_args.kwargs["trusted_only"] is True
 
     @pytest.mark.asyncio
+    async def test_recall_evaluation_forwards_policy_and_exposes_only_evidence(self):
+        memory_id = uuid.uuid4()
+        selection_config = parse_recall_evaluation(
+            {"seed": 188, "exploration_floor": 0.05, "candidate_pool_k": 100}
+        )
+        result = SimpleNamespace(
+            results=[],
+            selection_evidence={
+                "selection_probabilities": {str(memory_id): 0.05},
+                "selection_policy": {"name": "deterministic_uniform_mixture_v1"},
+            },
+        )
+        svc = AgentBootstrapService(MagicMock())
+        recall = AsyncMock(return_value=result)
+        with patch("services.memory_service.MemoryService") as ms_cls:
+            ms_cls.return_value.recall = recall
+            body = await svc._recall(
+                _context(),
+                BootstrapParams(
+                    agent_id=AGENT_ID,
+                    query="hi",
+                    recall_evaluation=selection_config,
+                ),
+                self._principal(),
+            )
+
+        request = recall.await_args.args[0]
+        assert request.filters == {"trust_tier": "trusted"}
+        assert recall.await_args.kwargs["selection_config"] == selection_config
+        assert body["selection_probabilities"] == {str(memory_id): 0.05}
+        assert body["selection_policy"]["name"] == "deterministic_uniform_mixture_v1"
+        assert "content" not in repr(body["selection_policy"])
+
+    @pytest.mark.asyncio
+    async def test_recall_component_does_not_wrap_transaction_owner_in_savepoint(self):
+        db = _savepoint_db()
+        svc = AgentBootstrapService(db)
+        with patch.object(
+            AgentBootstrapService,
+            "_recall",
+            new=AsyncMock(return_value={"results": [], "k": 5}),
+        ):
+            component = await svc._recall_component(
+                _context(),
+                BootstrapParams(agent_id=AGENT_ID, query="hi"),
+                self._principal(),
+                False,
+            )
+
+        assert component == {"status": STATUS_OK, "results": [], "k": 5}
+        db.begin_nested.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_recall_component_rolls_back_before_later_components_on_error(self):
+        db = _savepoint_db()
+        db.rollback = AsyncMock()
+        svc = AgentBootstrapService(db)
+        with patch.object(
+            AgentBootstrapService,
+            "_recall",
+            new=AsyncMock(side_effect=RuntimeError("recall failed")),
+        ):
+            component = await svc._recall_component(
+                _context(),
+                BootstrapParams(agent_id=AGENT_ID, query="hi"),
+                self._principal(),
+                False,
+            )
+
+        assert component == {"status": STATUS_ERROR, "error": "component_error"}
+        db.rollback.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_state_component_does_not_wrap_ttl_reap_commit_in_savepoint(self):
+        import contextlib
+
+        db = _savepoint_db()
+        svc = AgentBootstrapService(db)
+        with contextlib.ExitStack() as stack:
+            stack.enter_context(
+                patch.object(
+                    AgentBootstrapService,
+                    "_context_and_instructions",
+                    new=AsyncMock(return_value=({"id": str(CONTEXT_ID)}, "g")),
+                )
+            )
+            stack.enter_context(
+                patch.object(
+                    AgentBootstrapService,
+                    "_state",
+                    new=AsyncMock(return_value={"states": {}, "count": 0}),
+                )
+            )
+            env = await self._build(
+                svc,
+                BootstrapParams(agent_id=AGENT_ID, include=("state",)),
+            )
+
+        assert env["components"]["state"] == {"status": STATUS_OK, "states": {}, "count": 0}
+        db.begin_nested.assert_not_called()
+
+    @pytest.mark.asyncio
     async def test_query_absent_recall_skipped(self):
         import contextlib
 
@@ -492,3 +614,22 @@ class TestEnvelope:
             env = await self._build(svc, BootstrapParams(agent_id=AGENT_ID, include=("state",)))
         assert set(env["components"]) == {"state"}
         assert env["correlation"]["agent_id"] == str(AGENT_ID)
+
+
+class TestTransactionOwningComponentFailSoft:
+    """A raising rollback() inside the except handler must not escape — the
+    component stays fail-soft and the bootstrap request survives (PR #1308
+    review)."""
+
+    @pytest.mark.asyncio
+    async def test_rollback_failure_still_returns_component_error(self):
+        db = MagicMock()
+        db.rollback = AsyncMock(side_effect=RuntimeError("connection is closed"))
+        svc = AgentBootstrapService(db)
+
+        async def boom():
+            raise RuntimeError("component blew up")
+
+        result = await svc._transaction_owning_component("recall", boom)
+        assert result == {"status": STATUS_ERROR, "error": "component_error"}
+        db.rollback.assert_awaited_once()
