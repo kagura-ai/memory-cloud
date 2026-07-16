@@ -14,12 +14,14 @@ from uuid import uuid4
 
 import pytest
 
+from models.auth import AuditLog
 from models.retrieval_feedback import (
     FEEDBACK_PROVENANCE_AGENT,
     FEEDBACK_PROVENANCE_HOST,
     NOTE_MAX_LEN,
 )
 from services.feedback_service import FeedbackService
+from utils.exceptions import NotFoundException
 
 
 def _svc_with_existing_memory():
@@ -46,25 +48,75 @@ class TestFeedbackProvenance:
     async def test_record_host_feedback_stamps_host_and_keeps_verdict(self):
         svc, db = _svc_with_existing_memory()
         await svc.record_host_feedback(
-            uuid4(), uuid4(), helpful=True, user_id="cockpit", verdict="check_exit=0"
+            uuid4(),
+            uuid4(),
+            helpful=True,
+            user_id="cockpit",
+            actor_email="cockpit@example.com",
+            verdict_source="objective_check",
+            verdict_reference="check://pytest/bootstrap-07?exit=0",
+            experiment_id="bootstrap-ab-07",
         )
-        row = db.add.call_args.args[0]
+        rows = [call.args[0] for call in db.add.call_args_list]
+        row = next(row for row in rows if not isinstance(row, AuditLog))
+        audit = next(row for row in rows if isinstance(row, AuditLog))
         assert row.provenance == FEEDBACK_PROVENANCE_HOST
-        assert row.note is not None and "check_exit=0" in row.note
+        assert row.note is not None and "check://pytest/bootstrap-07?exit=0" in row.note
+        assert audit.action == "host_feedback_recorded"
+        assert audit.user_email == "cockpit@example.com"
+        assert audit.user_metadata["experiment_id"] == "bootstrap-ab-07"
+        assert audit.user_metadata["verdict_source"] == "objective_check"
+        assert audit.user_metadata["verdict_reference"] == "check://pytest/bootstrap-07?exit=0"
+        assert "context_id" in audit.user_metadata
+        assert "memory_id" in audit.user_metadata
+        db.commit.assert_awaited_once()
 
     async def test_host_verdict_is_flattened_and_capped(self):
-        # The verdict is the audit trail of the host seam: newlines are flattened
-        # (no fractured audit log) and the "host-verdict: " prefix always survives
-        # record_feedback's NOTE_MAX_LEN truncation.
+        # The human-readable event copy is flattened and capped; the structured
+        # verdict reference remains separately preserved in the audit row.
         svc, db = _svc_with_existing_memory()
-        long_verdict = "line1\nline2\t" + "x" * 5000
+        long_note = "line1\nline2\t" + "x" * 5000
         await svc.record_host_feedback(
-            uuid4(), uuid4(), helpful=True, user_id="cockpit", verdict=long_verdict
+            uuid4(),
+            uuid4(),
+            helpful=True,
+            user_id="cockpit",
+            verdict_source="trusted_host_check",
+            verdict_reference="host://runner/17",
+            note=long_note,
         )
-        row = db.add.call_args.args[0]
-        assert row.note.startswith("host-verdict: ")
+        row = next(
+            call.args[0] for call in db.add.call_args_list if not isinstance(call.args[0], AuditLog)
+        )
+        assert row.note.startswith("host-verdict[trusted_host_check]: ")
         assert "\n" not in row.note and "\t" not in row.note
         assert len(row.note) <= NOTE_MAX_LEN
+
+    async def test_record_host_feedback_rejects_missing_independent_reference(self):
+        svc, db = _svc_with_existing_memory()
+        with pytest.raises(ValueError, match="verdict_reference"):
+            await svc.record_host_feedback(
+                uuid4(),
+                uuid4(),
+                helpful=True,
+                user_id="cockpit",
+                verdict_source="objective_check",
+                verdict_reference="  ",
+            )
+        db.add.assert_not_called()
+
+    async def test_record_host_feedback_rejects_agent_self_report_source(self):
+        svc, db = _svc_with_existing_memory()
+        with pytest.raises(ValueError, match="verdict_source"):
+            await svc.record_host_feedback(
+                uuid4(),
+                uuid4(),
+                helpful=True,
+                user_id="cockpit",
+                verdict_source="agent_self_report",
+                verdict_reference="agent said it worked",
+            )
+        db.add.assert_not_called()
 
     async def test_record_feedback_rejects_forged_provenance(self):
         # Defence in depth: even a service-layer caller cannot inject a bad value
@@ -75,3 +127,55 @@ class TestFeedbackProvenance:
                 uuid4(), uuid4(), helpful=True, user_id="u", provenance="forged"
             )
         db.add.assert_not_called()
+
+
+def _svc_with_legacy_memory(context_workspace_id):
+    """A FeedbackService whose memory row has workspace_id=None (legacy) and
+    whose Context lookup resolves to ``context_workspace_id``."""
+    db = MagicMock()
+    memory_row = MagicMock()
+    memory_row.workspace_id = None
+    mem_result = MagicMock()
+    mem_result.one_or_none = MagicMock(return_value=memory_row)
+    ctx_result = MagicMock()
+    ctx_result.scalar_one_or_none = MagicMock(return_value=context_workspace_id)
+    db.execute = AsyncMock(side_effect=[mem_result, ctx_result])
+    db.add = MagicMock()
+    db.commit = AsyncMock()
+    db.refresh = AsyncMock()
+    return FeedbackService(db), db
+
+
+class TestHostFeedbackWorkspaceAttribution:
+    """Audit attribution must never record a null workspace_id (PR #1307
+    review): Memory.workspace_id is nullable for legacy rows, so the owning
+    Context's NOT NULL workspace_id is the fallback."""
+
+    async def test_audit_derives_workspace_from_context_for_legacy_memory(self):
+        ctx_ws = uuid4()
+        svc, db = _svc_with_legacy_memory(ctx_ws)
+        await svc.record_host_feedback(
+            uuid4(),
+            uuid4(),
+            helpful=True,
+            user_id="cockpit",
+            verdict_source="objective_check",
+            verdict_reference="check://pytest/legacy-ws?exit=0",
+        )
+        audit = next(
+            call.args[0] for call in db.add.call_args_list if isinstance(call.args[0], AuditLog)
+        )
+        assert audit.user_metadata["workspace_id"] == str(ctx_ws)
+
+    async def test_fails_fast_when_workspace_unresolvable(self):
+        svc, db = _svc_with_legacy_memory(None)
+        with pytest.raises(NotFoundException):
+            await svc.record_host_feedback(
+                uuid4(),
+                uuid4(),
+                helpful=True,
+                user_id="cockpit",
+                verdict_source="objective_check",
+                verdict_reference="check://pytest/no-ws?exit=0",
+            )
+        db.commit.assert_not_awaited()

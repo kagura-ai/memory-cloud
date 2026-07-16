@@ -10,11 +10,13 @@ never writes to it or the search index.
 from __future__ import annotations
 
 from dataclasses import dataclass
+from typing import Any
 from uuid import UUID
 
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from models.auth import AuditLog, Context
 from models.memory import Memory
 from models.retrieval_feedback import (
     _ALL_FEEDBACK_PROVENANCES,
@@ -25,6 +27,15 @@ from models.retrieval_feedback import (
     RetrievalFeedback,
 )
 from utils.exceptions import NotFoundException
+
+HOST_VERDICT_SOURCES: tuple[str, ...] = (
+    "objective_check",
+    "trusted_host_check",
+    "hitl_approval",
+)
+HOST_VERDICT_REFERENCE_MAX_LEN = 1024
+HOST_EXPERIMENT_ID_MAX_LEN = 255
+AUDIT_HOST_FEEDBACK_RECORDED = "host_feedback_recorded"
 
 
 @dataclass(frozen=True)
@@ -45,6 +56,62 @@ class FeedbackService:
 
     def __init__(self, db: AsyncSession):
         self.db = db
+
+    async def _stage_feedback(
+        self,
+        context_id: UUID,
+        memory_id: UUID,
+        helpful: bool,
+        user_id: str,
+        query: str | None,
+        note: str | None,
+        provenance: str,
+    ) -> tuple[RetrievalFeedback, UUID]:
+        """Validate and stage one append-only event without committing it.
+
+        The returned workspace id is always resolved: ``Memory.workspace_id``
+        is nullable (legacy rows), so when it is NULL the owning Context's
+        ``workspace_id`` (NOT NULL by schema) is used instead — audit
+        attribution must never record a null workspace.
+        """
+        if provenance not in _ALL_FEEDBACK_PROVENANCES:
+            raise ValueError(
+                f"invalid feedback provenance {provenance!r}; "
+                f"expected one of {_ALL_FEEDBACK_PROVENANCES}"
+            )
+        existing = (
+            await self.db.execute(
+                select(Memory.id, Memory.workspace_id).where(
+                    Memory.id == memory_id,
+                    Memory.context_id == context_id,
+                    Memory.deleted_at.is_(None),
+                )
+            )
+        ).one_or_none()
+        if existing is None:
+            raise NotFoundException("Memory")
+
+        workspace_id = existing.workspace_id
+        if workspace_id is None:
+            workspace_id = (
+                await self.db.execute(select(Context.workspace_id).where(Context.id == context_id))
+            ).scalar_one_or_none()
+            if workspace_id is None:
+                # Fail fast: attribution is part of the audit contract, and a
+                # memory whose context cannot be resolved is unexpected state.
+                raise NotFoundException("Context")
+
+        row = RetrievalFeedback(
+            context_id=context_id,
+            memory_id=memory_id,
+            helpful=helpful,
+            user_id=user_id,
+            query=query[:QUERY_MAX_LEN] if query is not None else None,
+            note=note[:NOTE_MAX_LEN] if note is not None else None,
+            provenance=provenance,
+        )
+        self.db.add(row)
+        return row, workspace_id
 
     async def record_feedback(
         self,
@@ -72,37 +139,15 @@ class FeedbackService:
         (REST/MCP) never passes it, so an agent's signal is always ``agent`` (it
         cannot forge ``host``); only :meth:`record_host_feedback` stamps ``host``.
         """
-        if provenance not in _ALL_FEEDBACK_PROVENANCES:
-            raise ValueError(
-                f"invalid feedback provenance {provenance!r}; "
-                f"expected one of {_ALL_FEEDBACK_PROVENANCES}"
-            )
-        # Fetch workspace_id alongside the existence check so the audit emission
-        # below reuses it instead of a second round-trip (Copilot review, #1278).
-        # `.one_or_none()` on a Row disambiguates "no row" from "row with NULL
-        # workspace_id" (a bare scalar_one_or_none would conflate them).
-        existing = (
-            await self.db.execute(
-                select(Memory.id, Memory.workspace_id).where(
-                    Memory.id == memory_id,
-                    Memory.context_id == context_id,
-                    Memory.deleted_at.is_(None),
-                )
-            )
-        ).one_or_none()
-        if existing is None:
-            raise NotFoundException("Memory")
-
-        row = RetrievalFeedback(
-            context_id=context_id,
-            memory_id=memory_id,
-            helpful=helpful,
-            user_id=user_id,
-            query=query[:QUERY_MAX_LEN] if query is not None else None,
-            note=note[:NOTE_MAX_LEN] if note is not None else None,
-            provenance=provenance,
+        row, workspace_id = await self._stage_feedback(
+            context_id,
+            memory_id,
+            helpful,
+            user_id,
+            query,
+            note,
+            provenance,
         )
-        self.db.add(row)
         await self.db.commit()
         await self.db.refresh(row)
 
@@ -115,7 +160,7 @@ class FeedbackService:
             await emit_memory_access_event(
                 operation="feedback",
                 outcome="success",
-                workspace_id=existing.workspace_id,
+                workspace_id=workspace_id,
                 user_id=user_id,
                 context_id=context_id,
                 memory_id=memory_id,
@@ -128,8 +173,15 @@ class FeedbackService:
         memory_id: UUID,
         helpful: bool,
         user_id: str,
-        verdict: str,
         query: str | None = None,
+        *,
+        verdict_source: str = "trusted_host_check",
+        verdict_reference: str | None = None,
+        experiment_id: str | None = None,
+        note: str | None = None,
+        actor_email: str | None = None,
+        actor_metadata: dict[str, Any] | None = None,
+        verdict: str | None = None,
     ) -> RetrievalFeedback:
         """Record a HOST-ARBITRATED, forge-resistant feedback signal (Issue #1065).
 
@@ -139,27 +191,69 @@ class FeedbackService:
         ``provenance='host'`` so the re-rank can weight it distinctly from an
         agent's self-emitted ``feedback`` for untrusted callers.
 
-        This is deliberately NOT exposed on the agent-callable feedback() path —
-        the *computation* of the verdict is the host's job (e.g.
-        ``kagura-ai/kagura-agent#165``); this records its outcome with
-        server-authoritative provenance. The verdict reference is preserved in the
-        note for audit.
+        The caller must identify an allowed independent verdict source and a
+        concrete reference. ``verdict`` remains a compatibility alias for the
+        old service-only seam; new callers use ``verdict_reference``. The event
+        and its security audit row commit atomically.
         """
-        # Flatten whitespace (no newlines fracturing the audit note) and cap so
-        # the "host-verdict: " prefix is never lost to record_feedback's silent
-        # NOTE_MAX_LEN truncation — the prefix is what marks the entry as a verdict.
-        prefix = "host-verdict: "
-        flat_verdict = " ".join(str(verdict).split())
-        host_note = f"{prefix}{flat_verdict[: NOTE_MAX_LEN - len(prefix)]}"
-        return await self.record_feedback(
-            context_id=context_id,
-            memory_id=memory_id,
-            helpful=helpful,
-            user_id=user_id,
-            query=query,
-            note=host_note,
-            provenance=FEEDBACK_PROVENANCE_HOST,
+        if verdict_source not in HOST_VERDICT_SOURCES:
+            raise ValueError(
+                f"invalid verdict_source {verdict_source!r}; expected one of {HOST_VERDICT_SOURCES}"
+            )
+        reference = verdict_reference if verdict_reference is not None else verdict
+        flat_reference = " ".join(str(reference or "").split())
+        if not flat_reference:
+            raise ValueError("verdict_reference must identify an independent verdict")
+        if len(flat_reference) > HOST_VERDICT_REFERENCE_MAX_LEN:
+            raise ValueError(
+                f"verdict_reference must be at most {HOST_VERDICT_REFERENCE_MAX_LEN} characters"
+            )
+
+        clean_experiment_id = None
+        if experiment_id is not None:
+            clean_experiment_id = experiment_id.strip()
+            if not clean_experiment_id:
+                raise ValueError("experiment_id must not be blank")
+            if len(clean_experiment_id) > HOST_EXPERIMENT_ID_MAX_LEN:
+                raise ValueError(
+                    f"experiment_id must be at most {HOST_EXPERIMENT_ID_MAX_LEN} characters"
+                )
+
+        # Preserve a compact human-readable copy on the feedback event while
+        # keeping the structured, exact attribution in the audit lane.
+        prefix = f"host-verdict[{verdict_source}]: "
+        suffix = f" | note: {' '.join(note.split())}" if note else ""
+        host_note = f"{prefix}{flat_reference}{suffix}"[:NOTE_MAX_LEN]
+        row, workspace_id = await self._stage_feedback(
+            context_id,
+            memory_id,
+            helpful,
+            user_id,
+            query,
+            host_note,
+            FEEDBACK_PROVENANCE_HOST,
         )
+        self.db.add(
+            AuditLog(
+                user_email=actor_email or f"{user_id}@api",
+                user_id=user_id,
+                action=AUDIT_HOST_FEEDBACK_RECORDED,
+                resource=f"memory:{memory_id}",
+                user_metadata={
+                    **(actor_metadata or {}),
+                    "workspace_id": str(workspace_id),
+                    "context_id": str(context_id),
+                    "memory_id": str(memory_id),
+                    "helpful": helpful,
+                    "verdict_source": verdict_source,
+                    "verdict_reference": flat_reference,
+                    "experiment_id": clean_experiment_id,
+                },
+            )
+        )
+        await self.db.commit()
+        await self.db.refresh(row)
+        return row
 
     async def aggregate_for_memory(
         self, context_id: UUID, memory_id: UUID, *, host_only: bool = False

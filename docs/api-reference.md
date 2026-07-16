@@ -664,6 +664,34 @@ Record an explicit, attributable signal on whether a recalled memory was helpful
 
 **Response:** `201 Created` — `{ "feedback_id": "<uuid>", "memory_id": "<uuid>", "helpful": true }`
 
+### POST /api/v1/contexts/{context_id}/host-feedback
+
+Record an independently verified outcome with server-stamped `host` provenance.
+This endpoint is for trusted workspace owners/admins and operator automation only;
+agent-bound API keys are always rejected. The public feedback endpoint above is
+unchanged and can only produce `agent` provenance.
+
+```json
+{
+  "memory_id": "550e8400-e29b-41d4-a716-446655440000",
+  "helpful": true,
+  "query": "bootstrap task 07",
+  "verdict_source": "objective_check",
+  "verdict_reference": "pytest://bootstrap/task-07",
+  "experiment_id": "bootstrap-ab-2026-07-16",
+  "note": "all assertions passed"
+}
+```
+
+`verdict_source` must be `objective_check`, `trusted_host_check`, or
+`hitl_approval`; `verdict_reference` must identify the check/run/approval that
+produced the verdict. The feedback event and its actor/context/memory/experiment
+audit record are append-only and committed together.
+
+Keep this operator credential outside the evaluated agent's process and prompt.
+An evaluated model must never receive, read, log, or invoke the credential; the
+trusted harness submits the verdict only after its independent check completes.
+
 ---
 
 ## Memory Analysis APIs
