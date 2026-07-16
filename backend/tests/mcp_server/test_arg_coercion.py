@@ -81,6 +81,30 @@ class TestBooleanCoercion:
         assert result["is_private"] == "maybe"
 
 
+class TestAnyJsonCoercion:
+    def test_json_strings_are_decoded_for_untyped_values(self):
+        cases = (
+            ('{"phase": "running"}', {"phase": "running"}),
+            ("[1, 2]", [1, 2]),
+            ('"text"', "text"),
+            ("42", 42),
+            ("true", True),
+        )
+        for raw, expected in cases:
+            result = coerce_mcp_arguments("set_state", {"value": raw})
+            assert result["value"] == expected
+            assert type(result["value"]) is type(expected)
+
+    def test_native_values_pass_through(self):
+        for value in ({"phase": "running"}, [1, 2], "text", 42, True):
+            result = coerce_mcp_arguments("set_state", {"value": value})
+            assert result["value"] is value
+
+    def test_invalid_json_string_passes_through(self):
+        result = coerce_mcp_arguments("set_state", {"value": "plain text"})
+        assert result["value"] == "plain text"
+
+
 class TestPassThroughCases:
     def test_empty_arguments(self):
         assert coerce_mcp_arguments("remember", {}) == {}

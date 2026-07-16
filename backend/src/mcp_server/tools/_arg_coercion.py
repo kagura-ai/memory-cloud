@@ -1,7 +1,8 @@
 """JSON-string argument coercion for MCP tool calls.
 
 Issue #197 / #196: some MCP clients serialize complex arguments (arrays,
-objects, booleans) as JSON strings before sending them over the wire:
+objects, booleans, or arbitrary JSON values) as JSON strings before sending
+them over the wire:
 
     {"tags": "[\"a\", \"b\"]"}      instead of  {"tags": ["a", "b"]}
     {"is_private": "true"}           instead of  {"is_private": true}
@@ -82,6 +83,16 @@ def _coerce_to_boolean(value: Any) -> Any:
     return value
 
 
+def _coerce_to_any(value: Any) -> Any:
+    """Decode JSON strings for schema fields that accept any JSON value."""
+    if not isinstance(value, str):
+        return value
+    try:
+        return json.loads(value)
+    except (ValueError, TypeError):
+        return value
+
+
 _COERCERS = {
     "array": _coerce_to_array,
     "object": _coerce_to_object,
@@ -92,10 +103,11 @@ _COERCERS = {
 def coerce_mcp_arguments(tool_name: str, arguments: dict[str, Any]) -> dict[str, Any]:
     """Coerce MCP tool arguments to their declared JSON-schema types.
 
-    Only array / object / boolean fields are coerced — these are the types
-    that MCP clients have been observed to serialize as JSON strings. Other
-    types (string, number, integer) are left to pydantic to validate, since
-    pydantic already coerces numeric strings when strict mode is off.
+    Array / object / boolean fields are coerced to their declared type. Fields
+    without a declared type accept any JSON value, so their strings are decoded
+    without restricting the resulting type. Other declared types (string,
+    number, integer) are left to pydantic to validate, since pydantic already
+    coerces numeric strings when strict mode is off.
 
     When any coercion happens the returned dict is a shallow copy of the
     input: top-level keys can be replaced safely but mutable values that
@@ -127,9 +139,12 @@ def coerce_mcp_arguments(tool_name: str, arguments: dict[str, Any]) -> dict[str,
         if not schema:
             continue
         declared_type = schema.get("type")
-        if not isinstance(declared_type, str):
+        if declared_type is None:
+            coercer = _coerce_to_any
+        elif isinstance(declared_type, str):
+            coercer = _COERCERS.get(declared_type)
+        else:
             continue
-        coercer = _COERCERS.get(declared_type)
         if coercer is None:
             continue
         coerced[arg_name] = coercer(value)
