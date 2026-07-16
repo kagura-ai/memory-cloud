@@ -82,6 +82,27 @@ def _coerce_to_boolean(value: Any) -> Any:
     return value
 
 
+def _coerce_any(value: Any) -> Any:
+    """Best-effort decode for schema fields declared WITHOUT a scalar ``type``.
+
+    #1322: quirky clients JSON-stringify complex values for typeless fields
+    too — ``set_state``'s ``value`` arrived as ``"{\\"phase\\": ...}"`` and was
+    stored verbatim into JSONB, breaking the documented round-trip. Decode
+    strings ONLY when they parse to an object or array: those are
+    unambiguously stringified structures. Scalars stay as sent — retyping
+    ``"42"``→``42`` / ``"true"``→``True`` would corrupt legitimately-string
+    values (zip codes, string ids) and diverge from the REST path, which
+    stores exactly what the client sent (review finding on #1322).
+    """
+    if not isinstance(value, str):
+        return value
+    try:
+        decoded = json.loads(value)
+    except (ValueError, TypeError):
+        return value
+    return decoded if isinstance(decoded, (dict, list)) else value
+
+
 _COERCERS = {
     "array": _coerce_to_array,
     "object": _coerce_to_object,
@@ -128,6 +149,8 @@ def coerce_mcp_arguments(tool_name: str, arguments: dict[str, Any]) -> dict[str,
             continue
         declared_type = schema.get("type")
         if not isinstance(declared_type, str):
+            # Typeless ("any") field — e.g. set_state's ``value`` (#1322).
+            coerced[arg_name] = _coerce_any(value)
             continue
         coercer = _COERCERS.get(declared_type)
         if coercer is None:
