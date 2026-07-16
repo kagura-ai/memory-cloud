@@ -509,7 +509,7 @@ The admin-configurable signup gate (`backend/src/services/signup_gate_service.py
 | Layer | Technology | Version |
 |-------|-----------|---------|
 | **Backend** | FastAPI | 0.115+ |
-| **Database** | PostgreSQL | 15+ |
+| **Database** | PostgreSQL | 18+ |
 | **Vector DB** | Qdrant | 1.15+ |
 | **Cache** | Redis | 7+ |
 | **Frontend** | Next.js | 16 |
