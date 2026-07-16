@@ -217,9 +217,12 @@ class Memory(Base):
     created_at: Mapped[datetime] = mapped_column(
         DateTime, nullable=False, server_default=func.now()
     )
-    updated_at: Mapped[datetime | None] = mapped_column(
-        DateTime, nullable=True, onupdate=func.now()
-    )
+    # #1317: NO ``onupdate`` — ``updated_at`` is the documented staleness cue
+    # ("last time the fact was changed"), so it must move only when an edit
+    # path sets it explicitly (update/patch/upsert, resource re-index, sleep
+    # merge/re-eval all do). With ``onupdate=func.now()`` every read-path
+    # access-stats flush (recall/reference/explore) silently re-stamped it.
+    updated_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
 
     # Logical Delete (Issue #46 Phase 4)
     deleted_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
