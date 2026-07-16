@@ -215,6 +215,44 @@ class TestHostFeedbackRoute:
         )
 
     @pytest.mark.asyncio
+    async def test_oauth_bearer_operator_is_attributed_as_oauth_not_session(
+        self, service, perm, context_id, memory_id
+    ):
+        # OAuth Bearer principals (auth.dependencies._build_oauth_user_dict)
+        # carry oauth_scope and no api_key_workspace_id; the audit `via`
+        # marker must not mislabel them as "session" (PR #1307 review).
+        oauth_workspace_id = uuid4()
+        oauth_user = {
+            "user_id": "operator",
+            "email": "operator@oauth",
+            "role": "user",
+            "current_context_id": None,
+            "current_workspace_id": oauth_workspace_id,
+            "oauth_scope": "memory:admin",
+        }
+        context = MagicMock(workspace_id=oauth_workspace_id)
+        perm.resolve_context_for_workspace_read = AsyncMock(return_value=context)
+        service.record_host_feedback = AsyncMock(
+            return_value=MagicMock(id=uuid4(), memory_id=memory_id, helpful=True)
+        )
+
+        await record_host_feedback(
+            context_id=context_id,
+            body=HostFeedbackRequest(
+                memory_id=memory_id,
+                helpful=True,
+                verdict_source="objective_check",
+                verdict_reference="pytest://oauth/attribution",
+            ),
+            user=oauth_user,
+            service=service,
+            perm=perm,
+        )
+
+        actor_metadata = service.record_host_feedback.await_args.kwargs["actor_metadata"]
+        assert actor_metadata["via"] == "oauth_bearer"
+
+    @pytest.mark.asyncio
     async def test_context_idor_is_uniform_404(self, service, perm, context_id, memory_id):
         perm.resolve_context_for_workspace_read = AsyncMock(
             side_effect=NotFoundException("Context")

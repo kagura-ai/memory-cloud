@@ -197,9 +197,18 @@ async def record_host_feedback(
         if context.workspace_id != active_workspace_id:
             raise NotFoundException("Context")
 
-        actor_metadata = {
-            "via": "api_key" if "api_key_workspace_id" in user else "session",
-        }
+        # Three credential shapes reach this operator endpoint (all built in
+        # auth.dependencies): API keys carry api_key_workspace_id, OAuth
+        # Bearer principals carry oauth_scope (and are NOT workspace-bound),
+        # session cookies carry neither. Discriminate on those markers so the
+        # audit attribution names the real credential type.
+        if "api_key_workspace_id" in user:
+            via = "api_key"
+        elif "oauth_scope" in user:
+            via = "oauth_bearer"
+        else:
+            via = "session"
+        actor_metadata = {"via": via}
         if user.get("api_key_prefix"):
             actor_metadata["key_prefix"] = user["api_key_prefix"]
 

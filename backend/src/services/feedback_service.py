@@ -94,9 +94,7 @@ class FeedbackService:
         workspace_id = existing.workspace_id
         if workspace_id is None:
             workspace_id = (
-                await self.db.execute(
-                    select(Context.workspace_id).where(Context.id == context_id)
-                )
+                await self.db.execute(select(Context.workspace_id).where(Context.id == context_id))
             ).scalar_one_or_none()
             if workspace_id is None:
                 # Fail fast: attribution is part of the audit contract, and a
