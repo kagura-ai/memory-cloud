@@ -483,6 +483,35 @@ class TestEnvelope:
         db.rollback.assert_awaited_once()
 
     @pytest.mark.asyncio
+    async def test_state_component_does_not_wrap_ttl_reap_commit_in_savepoint(self):
+        import contextlib
+
+        db = _savepoint_db()
+        svc = AgentBootstrapService(db)
+        with contextlib.ExitStack() as stack:
+            stack.enter_context(
+                patch.object(
+                    AgentBootstrapService,
+                    "_context_and_instructions",
+                    new=AsyncMock(return_value=({"id": str(CONTEXT_ID)}, "g")),
+                )
+            )
+            stack.enter_context(
+                patch.object(
+                    AgentBootstrapService,
+                    "_state",
+                    new=AsyncMock(return_value={"states": {}, "count": 0}),
+                )
+            )
+            env = await self._build(
+                svc,
+                BootstrapParams(agent_id=AGENT_ID, include=("state",)),
+            )
+
+        assert env["components"]["state"] == {"status": STATUS_OK, "states": {}, "count": 0}
+        db.begin_nested.assert_not_called()
+
+    @pytest.mark.asyncio
     async def test_query_absent_recall_skipped(self):
         import contextlib
 

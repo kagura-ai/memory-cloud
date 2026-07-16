@@ -341,7 +341,9 @@ class AgentBootstrapService:
                 "upcoming", lambda: self._upcoming(context, params)
             )
         if "state" in include:
-            components["state"] = await self._component("state", lambda: self._state(context))
+            components["state"] = await self._transaction_owning_component(
+                "state", lambda: self._state(context)
+            )
         if "policy" in include:
             components["policy"] = {"status": STATUS_SKIPPED, "reason": "no_policy_bundle"}
 
@@ -390,12 +392,13 @@ class AgentBootstrapService:
     async def _transaction_owning_component(self, name: str, fn: Any) -> dict[str, Any]:
         """Run a component whose service owns the session transaction.
 
-        ``MemoryService.recall`` commits its access/adoption updates. Wrapping
-        it in ``begin_nested`` makes that successful commit close the savepoint
-        context, so ``__aexit__`` turns a valid recall into ``component_error``
-        and leaves later bootstrap components unusable. On failure, a full
-        rollback is the safe boundary: earlier bootstrap components are reads,
-        while later audit writes have not been staged yet.
+        ``MemoryService.recall`` commits its access/adoption updates, and
+        ``AgentStateService.list_state`` commits its opportunistic TTL reap.
+        Wrapping either in ``begin_nested`` makes that successful commit close
+        the savepoint context, so ``__aexit__`` turns a valid read into
+        ``component_error``. On failure, a full rollback is the safe boundary:
+        earlier bootstrap components are reads, while later audit writes have
+        not been staged yet.
         """
         try:
             body = await fn()
