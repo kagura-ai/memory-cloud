@@ -2285,7 +2285,8 @@ gates writes. Under enforcement_mode='enforce', contexts WITHOUT a binding
 row are denied for the agent (default-deny); under 'shadow', violations are
 only logged. Per-memory type/source filters (#1299): null = unrestricted,
 [] = deny-all, else each read row must match the arrays (enforce-mode only;
-shadow records would_deny without filtering).
+shadow records would_deny without filtering) on the memory-read lanes;
+enumeration/aggregate surfaces still use the context-level gate until #1301.
 
 Returns: {status, binding: {id, context_id, can_read, write_policy, is_default, ...}}.""",
             "inputSchema": {

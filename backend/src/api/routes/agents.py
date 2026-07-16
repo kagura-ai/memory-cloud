@@ -290,14 +290,18 @@ class BindingCreate(BaseModel):
         None,
         description=(
             "Per-memory type filter (#1299): null = all types, [] = deny-all, "
-            "else the memory types this binding may read (enforce-mode only)"
+            "else the memory types this binding may read (enforce-mode only). "
+            "Applies to the memory-read lanes; enumeration/aggregate surfaces "
+            "still use the context-level gate until #1301"
         ),
     )
     allowed_source_types: list[str] | None = Field(
         None,
         description=(
             "Per-memory source filter (#1299): null = all sources, [] = deny-all, "
-            "else values from the memories.source_type set"
+            "else values from the memories.source_type set. Applies to the "
+            "memory-read lanes; enumeration/aggregate surfaces still use the "
+            "context-level gate until #1301"
         ),
     )
 
