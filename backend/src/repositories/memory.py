@@ -307,6 +307,10 @@ class MemoryRepository(BaseRepository[Memory]):
         Memory.importance,
         Memory.delivery_mode,
         Memory.created_at,
+        # #1299: the per-memory binding filter matches rows by their own
+        # context/type/source — cheap identifier columns, still no L3 load.
+        Memory.context_id,
+        Memory.source_type,
     )
 
     async def list_pinned(
