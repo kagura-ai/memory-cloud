@@ -56,6 +56,22 @@ class TestMemoryRepository:
         assert result is None
 
     @pytest.mark.asyncio
+    async def test_get_excludes_soft_deleted_by_default(
+        self, repository, sample_memory, db_session
+    ):
+        """#1316/#1320: a tombstoned row is absent from the default get() —
+        every by-id caller treats a forgotten memory as never-existed unless
+        it explicitly opts in (patch_memory's 410 contract)."""
+        sample_memory.deleted_at = datetime.utcnow()
+        await db_session.commit()
+
+        assert await repository.get(sample_memory.id) is None
+
+        tombstone = await repository.get(sample_memory.id, include_deleted=True)
+        assert tombstone is not None
+        assert tombstone.deleted_at is not None
+
+    @pytest.mark.asyncio
     async def test_update_access_stats_surfacing_only_by_default(
         self, repository, sample_memory, db_session
     ):

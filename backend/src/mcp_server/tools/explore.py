@@ -20,6 +20,7 @@ from mcp_server.tools._helpers import (
     _validate_memory_id,
     execute_with_timeout,
 )
+from utils.exceptions import NotFoundException
 
 logger = logging.getLogger(__name__)
 
@@ -94,6 +95,26 @@ async def handle_explore(
         except _ContextNotFoundError as e:
             await db.rollback()
             return e.to_response()
+        except NotFoundException:
+            # #1316: a missing, tombstoned, or inaccessible seed is a normal
+            # client outcome — return the structured envelope (mirroring
+            # handle_reference) instead of falling through to the generic
+            # dispatch handler as a 500-logged raw error.
+            await db.rollback()
+            await _log_tool_usage(
+                db,
+                user_id,
+                "explore",
+                start_time,
+                404,
+                args.get("context_id"),
+                workspace_id,
+            )
+            return _error_response(
+                "memory_not_found",
+                f"Memory not found or you don't have access: {memory_uuid}",
+                help="Use recall() to find memories you have access to.",
+            )
         except Exception:
             await db.rollback()
             await _log_tool_usage(

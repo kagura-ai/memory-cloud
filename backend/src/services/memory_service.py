@@ -552,11 +552,10 @@ class MemoryService:
         from services.permission_service import PermissionService
         from utils.text import normalize_for_search
 
+        # #1316: repo.get() excludes soft-deleted rows by default, so a
+        # tombstoned memory is uniformly "not found" here.
         memory = await self.memory_repo.get(request.memory_id)
         if not memory:
-            raise NotFoundException("Memory", str(request.memory_id))
-
-        if memory.deleted_at is not None:
             raise NotFoundException("Memory", str(request.memory_id))
 
         # Permission check
@@ -753,7 +752,9 @@ class MemoryService:
         )
         from utils.text import normalize_for_search
 
-        memory = await self.memory_repo.get(memory_id)
+        # #1316: patch is the ONE by-id path that needs tombstones — its #439
+        # contract returns 410 MemoryGoneError to authorized callers below.
+        memory = await self.memory_repo.get(memory_id, include_deleted=True)
         if not memory:
             raise NotFoundException("Memory", str(memory_id))
 
@@ -1092,14 +1093,12 @@ class MemoryService:
         Raises:
             NotFoundException: If memory not found
         """
+        # #1316: repo.get() excludes soft-deleted rows by default — a forgotten
+        # memory must not be readable by direct-id fetch during the retention
+        # window, and a tombstone is indistinguishable from never-existed.
         memory = await self.memory_repo.get(memory_id)
 
         if not memory:
-            raise NotFoundException("Memory", str(memory_id))
-
-        # #1316: repo.get() returns soft-deleted rows — a forgotten memory must
-        # not be readable by direct-id fetch during the retention window.
-        if memory.deleted_at is not None:
             raise NotFoundException("Memory", str(memory_id))
 
         # Issue #XXX: Team collaboration - verify access permission
@@ -3188,12 +3187,10 @@ class MemoryService:
 
         # Case 1: Delete by memory_id
         if request.memory_id:
+            # #1320: repo.get() excludes soft-deleted rows by default — an
+            # already-deleted memory is not re-stamped or counted again
+            # (deleted_count=0, same as a never-existed id).
             memory = await self.memory_repo.get(request.memory_id)
-
-            # #1320: repo.get() returns soft-deleted rows — an already-deleted
-            # memory must not be re-stamped or counted again (deleted_count=0).
-            if memory and memory.deleted_at is not None:
-                memory = None
 
             if memory:
                 # Issue #XXX: Team collaboration - verify delete permission
@@ -3481,15 +3478,14 @@ class MemoryService:
             depth=request.depth,
         )
 
-        # 1. Get seed memory
+        # 1. Get seed memory. #1316: repo.get() excludes soft-deleted rows by
+        # default — a forgotten memory must not surface as an exploration seed
+        # (its edges are already gone, so it previously leaked as
+        # seed_not_in_graph with the summary exposed). The not-found message
+        # below MUST stay byte-identical to the access-denied raise so a
+        # tombstoned, never-existed, and denied id are indistinguishable.
         seed_memory = await self.memory_repo.get(request.memory_id)
         if not seed_memory:
-            raise NotFoundException(f"Memory {request.memory_id} not found")
-
-        # #1316: repo.get() returns soft-deleted rows — a forgotten memory must
-        # not surface as an exploration seed (its edges are already gone, so it
-        # previously leaked as seed_not_in_graph with the summary exposed).
-        if seed_memory.deleted_at is not None:
             raise NotFoundException("Memory", str(request.memory_id))
 
         # Issue #XXX: Team collaboration - verify access permission
@@ -3509,7 +3505,10 @@ class MemoryService:
         )
 
         if not can_access:
-            raise NotFoundException(f"Memory {request.memory_id} not found")
+            # Two-arg form — byte-identical message to the not-found raise
+            # above (uniform 404; no existence oracle, and no doubled
+            # "not found not found" from the constructor's own suffix).
+            raise NotFoundException("Memory", str(request.memory_id))
 
         # Migration 063: Get workspace_id and context_id directly from seed memory
         # CRITICAL: Validate seed memory has workspace_id/context_id (data integrity)

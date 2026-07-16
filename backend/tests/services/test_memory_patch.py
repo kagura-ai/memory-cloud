@@ -126,6 +126,10 @@ class TestPatchMemorySoftDeleted:
                 )
             assert excinfo.value.status_code == 410
 
+        # #1316: repo.get() excludes tombstones by default — patch is the one
+        # by-id caller that must opt in, or the 410 contract silently dies.
+        service.memory_repo.get.assert_awaited_once_with(memory.id, include_deleted=True)
+
     @pytest.mark.asyncio
     async def test_soft_deleted_to_unauthorized_returns_not_found(self, service):
         """Existence-leak guard: 404 (not 410) for non-members on a deleted memory."""
