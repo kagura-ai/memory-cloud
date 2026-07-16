@@ -142,6 +142,72 @@ class TestTypeArrayValidation:
         with pytest.raises(ValidationError, match="duplicate"):
             _validate_type_array(["note", "note"], "allowed_memory_types")
 
+    @pytest.mark.parametrize("bad", [" note", "note ", "no\tte", "no\x00te", "note\x7f"])
+    def test_whitespace_and_control_chars_rejected(self, bad):
+        # Stored values are matched byte-for-byte against a memory's own type,
+        # so padded/control-bearing elements that can never match must error
+        # at validation, not be silently stored.
+        with pytest.raises(ValidationError):
+            _validate_type_array([bad], "allowed_memory_types")
+
+    def test_bool_element_rejected(self):
+        # bool is an int, not a str — must be rejected, not coerced.
+        with pytest.raises(ValidationError):
+            _validate_type_array([True], "allowed_memory_types")
+
+
+class TestUpdateBindingArrayFields:
+    """#1299: the CRUD lift's update path — the array fields flow through
+    _validate_type_array, [] -> NULL clears correctly, and no-op assignments
+    are dropped from the audit changes dict."""
+
+    @staticmethod
+    def _service_with(binding):
+        svc = _service()
+        svc._flush_mapping_conflicts = AsyncMock()
+        return svc
+
+    @pytest.mark.asyncio
+    async def test_set_arrays_records_change(self):
+        binding = _binding(allowed_memory_types=None, allowed_source_types=None)
+        svc = self._service_with(binding)
+        changes = await svc.update_binding(
+            binding, {"allowed_memory_types": ["note"], "allowed_source_types": ["manual"]}
+        )
+        assert binding.allowed_memory_types == ["note"]
+        assert binding.allowed_source_types == ["manual"]
+        assert changes["allowed_memory_types"] == {"old": None, "new": ["note"]}
+
+    @pytest.mark.asyncio
+    async def test_empty_list_deny_all_persists(self):
+        binding = _binding(allowed_memory_types=["note"])
+        svc = self._service_with(binding)
+        changes = await svc.update_binding(binding, {"allowed_memory_types": []})
+        assert binding.allowed_memory_types == []
+        assert changes["allowed_memory_types"] == {"old": ["note"], "new": []}
+
+    @pytest.mark.asyncio
+    async def test_clear_to_null_lifts_filter(self):
+        binding = _binding(allowed_memory_types=[])  # deny-all
+        svc = self._service_with(binding)
+        changes = await svc.update_binding(binding, {"allowed_memory_types": None})
+        assert binding.allowed_memory_types is None
+        assert changes["allowed_memory_types"] == {"old": [], "new": None}
+
+    @pytest.mark.asyncio
+    async def test_noop_assignment_dropped(self):
+        binding = _binding(allowed_memory_types=["note"])
+        svc = self._service_with(binding)
+        changes = await svc.update_binding(binding, {"allowed_memory_types": ["note"]})
+        assert "allowed_memory_types" not in changes
+
+    @pytest.mark.asyncio
+    async def test_invalid_source_value_rejected_on_update(self):
+        binding = _binding()
+        svc = self._service_with(binding)
+        with pytest.raises(ValidationError):
+            await svc.update_binding(binding, {"allowed_source_types": ["bogus"]})
+
 
 class TestBindingRowFilter:
     """#1299: the per-memory row filter derived from a binding's type/source
@@ -174,6 +240,14 @@ class TestBindingRowFilter:
         assert f is not None
         assert f.permits("note", "manual") is False
         assert f.permits("anything", "manual") is False
+
+    def test_empty_source_array_denies_all(self):
+        # The [] = deny-all invariant must hold on the SOURCE dimension too,
+        # independent of the type dimension.
+        f = BindingRowFilter.from_binding(_binding(allowed_source_types=[]))
+        assert f is not None
+        assert f.permits("note", "manual") is False
+        assert f.permits("note", "connector") is False
 
     def test_both_arrays_must_pass(self):
         f = BindingRowFilter.from_binding(

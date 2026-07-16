@@ -461,7 +461,7 @@ The v0.49.0 control plane builds on existing workspace RBAC: agents are registry
 | `unbind_agent_context` | Remove a binding (default-deny in enforce mode) | Owner/Admin |
 | `get_agent_bootstrap` | Compose context guide + pinned + optional trusted recall + upcoming + state for session start | Agent-bound key or Owner/Admin |
 
-> **Preview boundary:** per-memory type/source filters are schema-reserved and fail closed by accepting only `null`. `traceparent` plus W3C baggage correlation for `agent_id` / `session_id` / `run_id` is implemented, but server-side span export remains out of scope for P0. `memory_access_events` is live for bootstrap, load-pinned, feedback, recall, reference, and remember; `update`/`forget` emission and deny/`would_deny` persistence remain tracked in [#1286](https://github.com/kagura-ai/memory-cloud/issues/1286).
+> **Preview boundary:** per-memory type/source filters are enforced on the memory-read lanes (recall, reference, forget, explore, load_pinned, upcoming) for enforce-mode agents as of [#1299](https://github.com/kagura-ai/memory-cloud/issues/1299) — `null` = all types, `[]` = deny-all; shadow mode records `would_deny` without filtering. `traceparent` plus W3C baggage correlation for `agent_id` / `session_id` / `run_id` is implemented, but server-side span export remains out of scope for P0. `memory_access_events` is live for bootstrap, load-pinned, feedback, recall, reference, remember, update, and forget with binding deny / `would_deny` persistence.
 
 ### Neural Edges (4)
 

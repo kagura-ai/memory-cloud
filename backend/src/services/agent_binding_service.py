@@ -91,9 +91,25 @@ def _validate_type_array(value: Any, field: str) -> list[str] | None:
         )
     cleaned: list[str] = []
     for item in value:
+        # ``bool`` is an ``int``, not a ``str`` — the isinstance guard already
+        # rejects it; there is no str subclass we need to special-case.
         if not isinstance(item, str) or not item.strip():
             raise ValidationError(
                 f"'{field}' elements must be non-blank strings",
+                field=field,
+            )
+        # Stored types are matched byte-for-byte against each memory's own
+        # ``type`` / ``source_type`` (no normalization on the compare side), so
+        # reject surrounding whitespace and control/NUL characters here rather
+        # than silently storing a value that can never match a real row.
+        if item != item.strip():
+            raise ValidationError(
+                f"'{field}' elements must not have leading/trailing whitespace",
+                field=field,
+            )
+        if any(ord(ch) < 0x20 or ord(ch) == 0x7F for ch in item):
+            raise ValidationError(
+                f"'{field}' elements must not contain control characters",
                 field=field,
             )
         if field == "allowed_source_types" and item not in _ALL_SOURCE_TYPES:

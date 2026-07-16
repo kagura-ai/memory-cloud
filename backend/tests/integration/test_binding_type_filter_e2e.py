@@ -419,6 +419,38 @@ async def test_explore_seed_denied_type(env, db_session):
         )
 
 
+#  Note: forget(query=...)'s enforcement is transitive — it resolves victims
+#  through recall(), whose per-row filter is pinned by the recall tests above,
+#  so a denied-type row never reaches its deletion loop. A dedicated E2E would
+#  need the full Qdrant-delete + edge-cleanup pipeline stubbed; the transitive
+#  coverage plus the unit pins on filter_memory_rows_by_binding suffice.
+
+
+@pytest.mark.asyncio(loop_scope="session")
+async def test_reference_linked_refs_filtered(env, db_session):
+    # reference()'s declared-link refs expose neighbor type/summary; a
+    # denied-type neighbor must not leak through them. note -> time edge
+    # exists; the filtered agent references note and must not see the time
+    # neighbor in its outgoing links.
+    _scope(env, "agent_filtered")
+    svc = MemoryService(db_session)
+    response = await svc.reference(env["mem_note"], env["uid"])
+    linked_ids = {ref.memory_id for ref in (response.outgoing_links or [])}
+    assert env["mem_time"] not in linked_ids
+
+
+@pytest.mark.asyncio(loop_scope="session")
+async def test_shadow_load_pinned_unfiltered(env, db_session):
+    _scope(env, "agent_shadow", mode="shadow")
+    svc = MemoryService(db_session)
+    response = await svc.load_pinned(
+        env["uid"], current_context_id=env["ctx"], current_workspace_id=env["ws_id"]
+    )
+    ids = {m.memory_id for m in response.memories}
+    # Shadow keeps every pinned row (note + time both delivery=always).
+    assert ids == {env["mem_note"], env["mem_time"]}
+
+
 @pytest.mark.asyncio(loop_scope="session")
 async def test_upcoming_time_lane_filtered(env, db_session):
     from services.time_memory import query_upcoming_time_memories

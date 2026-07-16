@@ -119,15 +119,23 @@ Semantics (normative):
 - **Per-memory type/source filtering is a P1 layer on top of the P0-2 context-level sets**
   (resolving the earlier normative-vs-DDL ambiguity: P0-2 was context-level only; the array
   columns were schema-reserved until [#1299](https://github.com/kagura-ai/memory-cloud/issues/1299)
-  shipped the enforcement). As of #1299, for **enforce-mode** agent credentials every read-lane
-  row (recall candidates, `reference`, `forget`, `explore` seed/neighbors, declared-link refs,
-  `load_pinned`, the upcoming time lane) is additionally matched against the binding's
-  `allowed_memory_types` / `allowed_source_types` by the memory's own `type` / `source_type` —
-  subtractive, composing with (never replacing) the context-level gate, at the service layer so
-  REST and MCP behave identically by construction (#1291/#1292 lesson). Shadow-mode credentials
-  are not filtered; row-filter violations land as `would_deny` aggregates in
-  `memory_access_events` with `filter_kind='type_source'`. The write lane stays governed by
-  `write_policy` only.
+  shipped the enforcement). As of #1299, for **enforce-mode** agent credentials the
+  **memory-read lanes** — `recall` candidates, `reference`, `forget`, `explore`
+  seed/neighbors, declared-link refs, `load_pinned`, the upcoming time lane — additionally
+  match each returned row against the binding's `allowed_memory_types` /
+  `allowed_source_types` by the memory's own `type` / `source_type`: subtractive, composing
+  with (never replacing) the context-level gate, at the service layer so REST and MCP behave
+  identically for these operations by construction (#1291/#1292 lesson). Shadow-mode
+  credentials are not filtered; row-filter violations land as `would_deny` aggregates in
+  `memory_access_events` with `filter_kind='type_source'`. The write lane (`remember` /
+  `update` / `patch`) stays governed by `write_policy` only.
+  - **Known scope limit (tracked as follow-up):** the per-memory dimension is applied to the
+    memory-read lanes above, not yet to every enumeration / aggregate / update-response
+    surface (`GET /memory/list`, `GET /memory/access-patterns`, `GET /memory/stats`, MCP
+    `get_cluster`, and the `PATCH /memory/{id}` response body). Those surfaces still enforce
+    the P0-2 **context-level** binding gate; extending the row filter to them (the
+    #1291/#1292-class audit widened to non-CRUD read surfaces) is a follow-up. Operators must
+    not rely on the type/source filter to hide denied-type rows on those endpoints yet.
 - **`is_default` is the single source of truth for the bootstrap default binding.** At most
   one binding per agent is default, guaranteed by the partial unique index
   `(agent_id) WHERE is_default`. `agents.default_context_id` was rejected as a second source

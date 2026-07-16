@@ -2530,9 +2530,13 @@ class MemoryService:
         # #1299: per-memory type/source binding filter — applied to the FULL
         # candidate pool at the service layer (REST, MCP, share-key and the
         # bootstrap recall lane all pass through here) BEFORE shadowing,
-        # rerank and the top-k slice, so enforcement never leaves the slice
-        # short of permitted rows. Shadow mode keeps every row and records
-        # the per-context would_deny aggregate inside the helper.
+        # rerank and the top-k slice, so a denied row can never survive into
+        # the slice. Enforcement is subtractive: the candidate pool is already
+        # bounded to ~k by hybrid_search's own top-k truncation, so removing
+        # denied rows MAY return fewer than k results — there is no backfill
+        # (matching the deletion/supersede-shadowing precedent). Shadow mode
+        # keeps every row and records the per-context would_deny aggregate
+        # inside the helper.
         binding_row_filtered = 0
         if memories:
             from services.agent_binding_service import filter_memory_rows_by_binding
