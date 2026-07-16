@@ -123,7 +123,7 @@ backend/
 
 - **Web Framework**: FastAPI 0.115+
 - **ASGI Server**: Uvicorn
-- **Database**: PostgreSQL 18+ (SQLAlchemy + asyncpg; exact pin in `docker-compose.yml`/CI)
+- **Database**: PostgreSQL 15+ (SQLAlchemy + asyncpg; CI/local are pinned to 18.4 — production migrates via `docs/ops/postgres-18-migration-runbook.md`)
 - **Vector DB**: Qdrant 1.15+
 - **Cache**: Redis 7+
 - **Graph Memory**: NetworkX 3.0+

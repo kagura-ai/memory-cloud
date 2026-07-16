@@ -12,15 +12,15 @@
 DEPLOY_SH="$BATS_TEST_DIRNAME/../deploy.sh"
 
 @test "no api-targeting 'dc up -d' without --no-deps" {
-    # Any `dc up -d` whose first argument does not start with a dash and
-    # targets an api color is a regression of the #1302 guard.
-    run grep -nE 'dc up -d +"api-' "$DEPLOY_SH"
+    # Any non-comment `dc up -d` line that targets an api service (quoted or
+    # unquoted) and lacks --no-deps is a regression of the #1302 guard.
+    run bash -c 'grep -nE "dc up -d" "$1" | grep -v -E "^[0-9]+:[[:space:]]*#" | grep -E "api-" | grep -v -- "--no-deps"' _ "$DEPLOY_SH"
     [ "$status" -eq 1 ]
     [ -z "$output" ]
 }
 
 @test "api colors are started via the --no-deps form (guard not vacuous)" {
-    run bash -c 'grep -cE "dc up -d --no-deps \"api-" "$1"' _ "$DEPLOY_SH"
+    run bash -c 'grep -E "dc up -d --no-deps" "$1" | grep -cE "api-"' _ "$DEPLOY_SH"
     [ "$status" -eq 0 ]
     [ "$output" -ge 2 ]
 }
