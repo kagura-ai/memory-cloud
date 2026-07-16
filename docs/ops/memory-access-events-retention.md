@@ -191,8 +191,10 @@ explicitly not flip evidence.
 
 To be finalized and rehearsed in the escalation issue; the fixed points are:
 
-1. **Native PG15 declarative partitioning, no pg_partman.** Production runs stock
-   `postgres:15-alpine` (`docker-compose.yml`, `terraform/single-server/docker-compose.prod.yml`);
+1. **Native PostgreSQL declarative partitioning, no pg_partman.** Production runs the stock
+   `postgres` image (digest-pinned as of #1302; the exact pin — and the currently deployed
+   major version — live in `docker-compose.yml` /
+   `terraform/single-server/docker-compose.prod.yml` and the #1302 cutover record);
    pg_partman would mean a custom image, while partition maintenance fits the existing
    APScheduler pattern (`backend/src/tasks/scheduler.py`; job-registration precedent
    `schedule_file_tasks` in `backend/src/tasks/file_tasks.py`, which already runs a nightly
@@ -226,7 +228,7 @@ To be finalized and rehearsed in the escalation issue; the fixed points are:
 4. **Triggers.** The two guards attach at different levels, because PostgreSQL clones only
    *row-level* triggers from a partitioned parent to its partitions. The D22 append-only
    trigger (`BEFORE UPDATE OR DELETE … FOR EACH ROW`) is recreated once on the parent —
-   row-level triggers on a PG15 partitioned parent cascade to all partitions, including
+   row-level triggers on a PG15+ partitioned parent cascade to all partitions, including
    future ones. The no-TRUNCATE trigger (`BEFORE TRUNCATE … FOR EACH STATEMENT`, the
    `e50_1128_secret_store.py` shape) does **not** cascade: a parent-only copy guards
    `TRUNCATE memory_access_events` but a direct `TRUNCATE <partition>` would bypass it,

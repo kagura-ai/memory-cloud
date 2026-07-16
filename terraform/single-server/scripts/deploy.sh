@@ -119,7 +119,10 @@ cmd_rollback() {
     if ! is_container_running "$inactive"; then
         log "api-${inactive} is not running — starting it for rollback..."
         docker update --restart=always "kagura-api-${inactive}" 2>/dev/null || true
-        dc up -d "api-${inactive}"
+        # --no-deps: never recreate shared services (postgres/redis/qdrant)
+        # whose compose config may have drifted from the running containers —
+        # same guard as cmd_deploy_web (see the #1302 postgres footgun).
+        dc up -d --no-deps "api-${inactive}"
         log "Waiting for api-${inactive} readiness..."
         wait_for_readiness "$inactive"
     fi
@@ -154,7 +157,12 @@ cmd_deploy() {
     # Re-enable restart policy in case it was disabled by a previous deploy.
     DEPLOY_STAGE="Step 2/7: start api-${inactive}"
     log "Step 2/7: Starting api-${inactive}..."
-    dc up -d "api-${inactive}"
+    # --no-deps: a routine deploy must never recreate postgres/redis/qdrant.
+    # After #1302 the postgres service definition (image + volume) changed;
+    # without this flag a plain deploy would recreate postgres onto the empty
+    # PG18 volume and the deploy would still report green. Database cutover is
+    # exclusively the runbook's job: docs/ops/postgres-18-migration-runbook.md
+    dc up -d --no-deps "api-${inactive}"
     docker update --restart=always "kagura-api-${inactive}" 2>/dev/null || true
 
     # Step 3: Wait for readiness (DB + Qdrant + Redis all reachable)

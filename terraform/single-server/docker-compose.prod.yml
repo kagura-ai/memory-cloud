@@ -57,7 +57,12 @@ services:
   # ==========================================================================
 
   postgres:
-    image: postgres:15-alpine
+    # Pinned by multi-arch manifest-list digest (#1302). The 18+ Docker image
+    # moved PGDATA to /var/lib/postgresql/18/docker and the volume target to
+    # /var/lib/postgresql — never start this image against the old PG15
+    # kagura_postgres_data volume. Cutover/rollback procedure:
+    # docs/ops/postgres-18-migration-runbook.md
+    image: postgres:18.4-alpine@sha256:9a8afca54e7861fd90fab5fdf4c42477a6b1cb7d293595148e674e0a3181de15
     container_name: kagura-postgres
     restart: always
     environment:
@@ -69,7 +74,7 @@ services:
       TZ: UTC
       PGTZ: UTC
     volumes:
-      - postgres_data:/var/lib/postgresql/data
+      - postgres_data_18:/var/lib/postgresql
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U kagura -d kagura"]
       interval: 10s
@@ -176,8 +181,13 @@ services:
       - web
 
 volumes:
-  postgres_data:
-    name: kagura_postgres_data
+  # The old PG15 volume (kagura_postgres_data) is deliberately NOT declared
+  # here anymore: keeping it out of the compose file protects it from
+  # `docker compose down -v` during the migration rollback window. Remove it
+  # manually (docker volume rm) only after the rollback window is formally
+  # closed — see docs/ops/postgres-18-migration-runbook.md.
+  postgres_data_18:
+    name: kagura_postgres_data_18
   qdrant_data:
     name: kagura_qdrant_data
   redis_data:

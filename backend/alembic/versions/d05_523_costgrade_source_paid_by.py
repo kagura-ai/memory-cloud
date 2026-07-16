@@ -13,7 +13,8 @@ two billing-classification columns:
 Both columns are ``NOT NULL`` with a ``server_default`` so existing rows
 are immediately classified as scheduler-driven platform-billed runs — the
 only mode that existed before this migration — with no data backfill
-required. On PostgreSQL >= 11 (production runs ``postgres:15-alpine``)
+required. On PostgreSQL >= 11 (production ran ``postgres:15-alpine``
+when this migration shipped; the PG 18.4 migration is tracked in #1302)
 adding a ``NOT NULL`` column with a constant ``DEFAULT`` is a metadata-
 only catalog change; no table rewrite occurs even on a populated table.
 
