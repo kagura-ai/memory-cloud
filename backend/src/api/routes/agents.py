@@ -288,11 +288,21 @@ class BindingCreate(BaseModel):
     is_default: bool = Field(False, description="Bootstrap default binding (max one per agent)")
     allowed_memory_types: list[str] | None = Field(
         None,
-        description="Reserved for #1286; only null is accepted until per-memory enforcement ships",
+        description=(
+            "Per-memory type filter (#1299): null = all types, [] = deny-all, "
+            "else the memory types this binding may read (enforce-mode only). "
+            "Applies to the memory-read lanes; enumeration/aggregate surfaces "
+            "still use the context-level gate until #1301"
+        ),
     )
     allowed_source_types: list[str] | None = Field(
         None,
-        description="Reserved for #1286; only null is accepted until per-memory enforcement ships",
+        description=(
+            "Per-memory source filter (#1299): null = all sources, [] = deny-all, "
+            "else values from the memories.source_type set. Applies to the "
+            "memory-read lanes; enumeration/aggregate surfaces still use the "
+            "context-level gate until #1301"
+        ),
     )
 
 
@@ -303,10 +313,12 @@ class BindingUpdate(BaseModel):
     write_policy: Literal["deny", "direct"] | None = None
     is_default: bool | None = None
     allowed_memory_types: list[str] | None = Field(
-        None, description="Reserved for #1286; only null is currently accepted"
+        None,
+        description="Per-memory type filter (#1299): null = all types, [] = deny-all",
     )
     allowed_source_types: list[str] | None = Field(
-        None, description="Reserved for #1286; only null is currently accepted"
+        None,
+        description="Per-memory source filter (#1299): null = all sources, [] = deny-all",
     )
 
 
@@ -381,6 +393,10 @@ async def create_agent_binding(
             "can_read": binding.can_read,
             "write_policy": binding.write_policy,
             "is_default": binding.is_default,
+            # #1299: the filter arrays are behavior-bearing now — audit them
+            # at create (update audits them via the changes dict already).
+            "allowed_memory_types": binding.allowed_memory_types,
+            "allowed_source_types": binding.allowed_source_types,
         },
     )
     await db.commit()

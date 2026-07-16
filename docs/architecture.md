@@ -283,7 +283,7 @@ The control plane extends workspace RBAC rather than creating a second principal
 3. `agent_context_bindings` narrows the underlying member/RBAC decision. In `enforce` mode, only bound contexts survive the intersection; in `shadow` mode the legacy permission result remains active while violations are observed.
 4. `get_agent_bootstrap` resolves the agent and binding, then composes existing context/pinned/recall/upcoming/state services. It does not introduce a parallel retrieval or ranking path.
 
-Registry, context-level bindings, bootstrap, transport correlation, and the append-only `memory_access_events` audit foundation are implemented. REST middleware and the MCP authentication seam parse W3C `traceparent`/baggage into a request-local correlation context; credential-bound identity has precedence, and missing trace/span IDs are generated server-side. This is observability plumbing, not an authorization input or server-side span exporter. Type/source filters are forward-provisioned but reject non-`null` values until per-memory enforcement lands. The audit writer currently covers bootstrap, load-pinned, feedback, recall, reference, and remember; filters, `update`/`forget` emission, and deny persistence continue in [#1286](https://github.com/kagura-ai/memory-cloud/issues/1286).
+Registry, context-level bindings, bootstrap, transport correlation, and the append-only `memory_access_events` audit foundation are implemented. REST middleware and the MCP authentication seam parse W3C `traceparent`/baggage into a request-local correlation context; credential-bound identity has precedence, and missing trace/span IDs are generated server-side. This is observability plumbing, not an authorization input or server-side span exporter. Per-memory type/source filters are enforced on the memory-read lanes (recall, reference, forget, explore, load_pinned, upcoming) for enforce-mode agents as of [#1299](https://github.com/kagura-ai/memory-cloud/issues/1299) — `null` = all, `[]` = deny-all; shadow records `would_deny` without filtering. The audit writer covers bootstrap, load-pinned, feedback, recall, reference, remember, update, and forget with binding deny persistence.
 
 ## Database Design
 
@@ -298,7 +298,7 @@ Tables are grouped by domain. The authoritative list lives in `backend/src/model
 - **oauth_clients** / **oauth_authorization_codes** / **oauth_tokens** — OAuth2 server
 - **audit_logs** — Security-relevant audit trail
 - **agents** — Workspace-scoped agent registry with lifecycle (`active | suspended | retired`) and binding enforcement mode (`shadow | enforce`)
-- **agent_context_bindings** — Purely subtractive per-agent context read/write/default policy; type/source columns are reserved and reject non-`null` values pending #1286
+- **agent_context_bindings** — Purely subtractive per-agent context read/write/default policy; `allowed_memory_types` / `allowed_source_types` enforce per-memory read filtering (`null` = all, `[]` = deny-all) as of #1299
 
 **Workspaces & contexts** (top-level tenancy)
 - **workspaces** — Top-level organizational unit (team / project owner)

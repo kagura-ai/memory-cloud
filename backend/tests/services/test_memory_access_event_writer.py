@@ -218,7 +218,12 @@ class TestWouldDenyDedup:
     def _scope():
         return SimpleNamespace(agent_id=AGENT_ID, workspace_id=WORKSPACE_ID)
 
-    async def _emit(self, recorder, *, policy, ctx, access="write", operation="forget"):
+    async def _emit(
+        self, recorder, *, policy, ctx, access="write", operation="forget", filter_kind=None
+    ):
+        metadata = {"requested_context_id": ctx, "access": access}
+        if filter_kind is not None:
+            metadata["filter_kind"] = filter_kind
         with (
             patch("auth.agent_scope.get_agent_scope", return_value=self._scope()),
             patch("api.correlation.get_correlation", return_value=None),
@@ -230,7 +235,7 @@ class TestWouldDenyDedup:
                 workspace_id=WORKSPACE_ID,
                 user_id="u",
                 policy_decision=policy,
-                extra_metadata={"requested_context_id": ctx, "access": access},
+                extra_metadata=metadata,
             )
 
     @pytest.mark.asyncio
@@ -257,6 +262,32 @@ class TestWouldDenyDedup:
         await self._emit(recorder, policy="would_deny", ctx=ctx, operation="remember")
         await self._emit(recorder, policy="would_deny", ctx=ctx, operation="forget")
         assert recorder.await_count == 2
+
+    @pytest.mark.asyncio
+    async def test_distinct_filter_kind_lands_own_row(self):
+        # #1299: the row-level type/source filter emits its shadow aggregate
+        # with filter_kind='type_source'. The context-level gate's would_deny
+        # for the SAME (operation, context, access) is a DIFFERENT signal —
+        # both must persist, so filter_kind participates in the dedup key.
+        recorder = AsyncMock()
+        ctx = str(uuid.uuid4())
+        await self._emit(recorder, policy="would_deny", ctx=ctx, access="read")
+        await self._emit(
+            recorder, policy="would_deny", ctx=ctx, access="read", filter_kind="type_source"
+        )
+        assert recorder.await_count == 2
+
+    @pytest.mark.asyncio
+    async def test_same_filter_kind_key_deduped(self):
+        recorder = AsyncMock()
+        ctx = str(uuid.uuid4())
+        await self._emit(
+            recorder, policy="would_deny", ctx=ctx, access="read", filter_kind="type_source"
+        )
+        await self._emit(
+            recorder, policy="would_deny", ctx=ctx, access="read", filter_kind="type_source"
+        )
+        assert recorder.await_count == 1
 
     @pytest.mark.asyncio
     async def test_hard_denies_never_deduped(self):

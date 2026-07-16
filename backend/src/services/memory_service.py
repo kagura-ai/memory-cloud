@@ -1103,6 +1103,8 @@ class MemoryService:
             context_id=memory.context_id,
             operation="reference",  # #1286 (P0-5): deny-capture audit identity
             memory_id=memory_id,
+            memory_type=memory.type,  # #1299: per-memory type/source filter
+            memory_source_type=memory.source_type,
         )
 
         if not can_access:
@@ -1252,6 +1254,17 @@ class MemoryService:
             )
         )
         memories_by_id = {m.id: m for m in result.scalars().all()}
+
+        # #1299: linked refs expose neighbor type/summary — the same context
+        # is guaranteed by the edge invariant, but types may differ, so the
+        # per-memory binding filter must drop disallowed refs too (log-only
+        # in shadow; refs are adjacent metadata, not an MAE operation).
+        from services.agent_binding_service import filter_memory_rows_by_binding
+
+        kept_refs, _ = await filter_memory_rows_by_binding(
+            self.db, list(memories_by_id.values()), operation=None, user_id=None
+        )
+        memories_by_id = {m.id: m for m in kept_refs}
 
         outgoing_links: list[LinkedMemoryRef] = []
         for e in out_edges:
@@ -2514,6 +2527,33 @@ class MemoryService:
             if m.summary_embedding_id is not None:
                 memories[str(m.summary_embedding_id)] = m
 
+        # #1299: per-memory type/source binding filter — applied to the FULL
+        # candidate pool at the service layer (REST, MCP, share-key and the
+        # bootstrap recall lane all pass through here) BEFORE shadowing,
+        # rerank and the top-k slice, so a denied row can never survive into
+        # the slice. Enforcement is subtractive: the candidate pool is already
+        # bounded to ~k by hybrid_search's own top-k truncation, so removing
+        # denied rows MAY return fewer than k results — there is no backfill
+        # (matching the deletion/supersede-shadowing precedent). Shadow mode
+        # keeps every row and records the per-context would_deny aggregate
+        # inside the helper.
+        binding_row_filtered = 0
+        if memories:
+            from services.agent_binding_service import filter_memory_rows_by_binding
+
+            unique_rows = list({m.id: m for m in memories.values()}.values())
+            kept_rows, binding_row_filtered = await filter_memory_rows_by_binding(
+                self.db, unique_rows, operation="recall", user_id=user_id
+            )
+            if binding_row_filtered:
+                kept_ids = {m.id for m in kept_rows}
+                search_results[:] = [
+                    r
+                    for r in search_results
+                    if r["id"] not in memories or memories[r["id"]].id in kept_ids
+                ]
+                memories = {key: m for key, m in memories.items() if m.id in kept_ids}
+
         # === Issue #120: Neural Memory graph is for explore() only ===
         # recall uses pure hybrid search scores (no UnifiedScorer).
         # Hebbian learning still runs to build the graph for explore().
@@ -2831,6 +2871,10 @@ class MemoryService:
         # #1278/#1281 item 7: audit the recall (no-op unless verified agent
         # identity). result_count + a keyed hash of the query; raw query never
         # stored. effective_workspace_id is the #708-aware search workspace.
+        # #1299: enforce-mode row filtering is not a request deny — the count
+        # rides this success row so the subtraction stays observable without
+        # corrupting the deny metrics.
+        from services.agent_binding_service import ROW_FILTER_KIND
         from services.memory_access_event_writer import emit_memory_access_event
 
         await emit_memory_access_event(
@@ -2841,6 +2885,14 @@ class MemoryService:
             context_id=current_context_id,
             result_count=len(responses),
             query=request.query,
+            extra_metadata=(
+                {
+                    "filter_kind": ROW_FILTER_KIND,
+                    "binding_row_filtered_count": binding_row_filtered,
+                }
+                if binding_row_filtered
+                else None
+            ),
         )
 
         return RecallResponse(
@@ -2901,6 +2953,18 @@ class MemoryService:
             UUID(workspace_id_str), UUID(context_id_str), effective_cap, trusted_only=trusted_only
         )
         truncated = total > effective_cap
+
+        # #1299: per-memory type/source binding filter — the deterministic
+        # pinned lane returns memory rows to agent credentials (standalone
+        # load_pinned + the bootstrap pinned component), so the same
+        # subtractive rule as recall applies. total_available stays the repo
+        # count (the context's pinned-set size); the filter narrows what THIS
+        # credential receives.
+        from services.agent_binding_service import filter_memory_rows_by_binding
+
+        rows, pinned_row_filtered = await filter_memory_rows_by_binding(
+            self.db, list(rows), operation="load_pinned", user_id=user_id
+        )
         if truncated:
             logger.warning(
                 "pinned_load_capped",
@@ -2911,6 +2975,8 @@ class MemoryService:
             )
 
         # #1278: append-only audit (no-op unless verified agent identity).
+        # #1299: the enforce-mode row-filter count rides the success row.
+        from services.agent_binding_service import ROW_FILTER_KIND
         from services.memory_access_event_writer import emit_memory_access_event
 
         await emit_memory_access_event(
@@ -2920,6 +2986,14 @@ class MemoryService:
             user_id=user_id,
             context_id=UUID(context_id_str),
             result_count=len(rows),
+            extra_metadata=(
+                {
+                    "filter_kind": ROW_FILTER_KIND,
+                    "binding_row_filtered_count": pinned_row_filtered,
+                }
+                if pinned_row_filtered
+                else None
+            ),
         )
 
         return LoadPinnedResponse(
@@ -2993,6 +3067,8 @@ class MemoryService:
                     access="write",  # #1275: WRITE path — can_read-only binding must not permit mutation
                     operation="forget",  # #1286 (P0-5): the denied row is the ONLY
                     memory_id=request.memory_id,  # record — this deny is a silent empty success
+                    memory_type=memory.type,  # #1299: per-memory type/source filter
+                    memory_source_type=memory.source_type,
                 )
 
                 if not can_access:
@@ -3281,6 +3357,8 @@ class MemoryService:
             memory_user_id=MemoryAuthorId(seed_memory.user_id),
             workspace_id=seed_memory.workspace_id,
             context_id=seed_memory.context_id,
+            memory_type=seed_memory.type,  # #1299: per-memory type/source filter
+            memory_source_type=seed_memory.source_type,
         )
 
         if not can_access:
@@ -3408,6 +3486,19 @@ class MemoryService:
             )
         )
         memories = {str(m.id): m for m in result.scalars().all()}
+
+        # #1299: drop neighbors the binding's type/source filter denies at
+        # materialization (enforce); shadow keeps them — log-only, since
+        # "explore" is outside the MAE vocabulary. Known limitation: a
+        # disallowed node can still RELAY activation to allowed hop-2 nodes
+        # (traversal pruning would touch the ActivationSpreader shared with
+        # recall's neural scorer); its content/metadata are never returned.
+        from services.agent_binding_service import filter_memory_rows_by_binding
+
+        kept_neighbors, _ = await filter_memory_rows_by_binding(
+            self.db, list(memories.values()), operation=None, user_id=user_id
+        )
+        memories = {str(m.id): m for m in kept_neighbors}
 
         # 8. Build response
         related_memories = []

@@ -922,6 +922,8 @@ class PermissionService:
         access: str = "read",
         operation: str | None = None,
         memory_id: UUID | None = None,
+        memory_type: str | None = None,
+        memory_source_type: str | None = None,
     ) -> bool:
         """Check if user can access a memory based on workspace membership and context privacy.
 
@@ -937,6 +939,15 @@ class PermissionService:
         unreachable even by memory_id. Callers on a WRITE path (update /
         forget) MUST pass ``access="write"`` so a ``can_read``-only binding
         cannot be used to mutate. No-op for non-agent credentials.
+
+        Issue #1299: the **read-lane** callers (reference, forget-by-id,
+        explore seed) additionally thread the fetched row's own ``memory_type``
+        / ``memory_source_type`` so the binding's per-memory type/source
+        filter applies. Write-lane callers (update / patch) leave them
+        ``None`` — the mutation stays governed by ``write_policy`` only, per
+        the F1 P1 scope. ``forget`` is a read-lane op in this sense (the
+        issue's four filtered ops are recall/reference/forget/explore), so it
+        threads the row even though its ``access`` is ``"write"``.
 
         #1286 item 2 (P0-5): ``operation`` / ``memory_id`` are the
         audit-identity passthrough. The binding-shaped deny is persisted
@@ -956,6 +967,11 @@ class PermissionService:
                 ``None`` (no emission) for callers outside that vocabulary.
             memory_id: The requested memory id — rides ``event_metadata`` as
                 an unverified claim on deny rows.
+            memory_type: The fetched row's own ``type`` (#1299) — read-lane
+                callers thread it so the binding's per-memory type filter
+                applies; write-lane callers leave it ``None``.
+            memory_source_type: The fetched row's own ``source_type`` (#1299),
+                same threading rule.
 
         Returns:
             True if user can access, False otherwise
@@ -974,6 +990,8 @@ class PermissionService:
                 operation=operation,
                 user_id=str(user_id),
                 requested_memory_id=memory_id,
+                memory_type=memory_type,
+                memory_source_type=memory_source_type,
             )
 
         async def _emit_rbac_denied() -> None:

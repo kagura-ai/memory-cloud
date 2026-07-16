@@ -1,6 +1,6 @@
 # Design sign-off: Agent Registry & Context Bindings (RFC-0002 F1)
 
-- **Status**: Implemented by [#1274](https://github.com/kagura-ai/memory-cloud/issues/1274) / [#1275](https://github.com/kagura-ai/memory-cloud/issues/1275); type/source filter enforcement remains tracked by [#1286](https://github.com/kagura-ai/memory-cloud/issues/1286)
+- **Status**: Implemented by [#1274](https://github.com/kagura-ai/memory-cloud/issues/1274) / [#1275](https://github.com/kagura-ai/memory-cloud/issues/1275); per-memory type/source filter enforcement (P1) shipped with [#1299](https://github.com/kagura-ai/memory-cloud/issues/1299)
 - **Issue**: [#1258](https://github.com/kagura-ai/memory-cloud/issues/1258) — gating item F1 of RFC-0002
   (Agent Memory & Context Control Plane; RFC text maintained locally, lands in
   `docs/rfc/0002-agent-memory-context-control-plane.md` when published)
@@ -116,6 +116,27 @@ Semantics (normative):
   the uniform `context_not_found` error (CWE-639 posture, same as today's deny paths).
 - **NULL/[] array semantics are fixed**: `NULL` = unrestricted, `[]` = deny-all. We do not
   reproduce the role-dependent `allowed_context_ids` NULL asymmetry in a new table.
+- **Per-memory type/source filtering is a P1 layer on top of the P0-2 context-level sets**
+  (resolving the earlier normative-vs-DDL ambiguity: P0-2 was context-level only; the array
+  columns were schema-reserved until [#1299](https://github.com/kagura-ai/memory-cloud/issues/1299)
+  shipped the enforcement). As of #1299, for **enforce-mode** agent credentials the
+  **memory-read lanes** — `recall` candidates, `reference`, `forget`, `explore`
+  seed/neighbors, declared-link refs, `load_pinned`, the upcoming time lane — additionally
+  match each returned row against the binding's `allowed_memory_types` /
+  `allowed_source_types` by the memory's own `type` / `source_type`: subtractive, composing
+  with (never replacing) the context-level gate, at the service layer so REST and MCP behave
+  identically for these operations by construction (#1291/#1292 lesson). Shadow-mode
+  credentials are not filtered; row-filter violations land as `would_deny` aggregates in
+  `memory_access_events` with `filter_kind='type_source'`. The write lane (`remember` /
+  `update` / `patch`) stays governed by `write_policy` only.
+  - **Known scope limit (tracked as [#1301](https://github.com/kagura-ai/memory-cloud/issues/1301)):**
+    the per-memory dimension is applied to the memory-read lanes above, not yet to every
+    enumeration / aggregate / update-response surface (`GET /memory/list`,
+    `GET /memory/access-patterns`, `GET /memory/stats`, MCP `get_cluster`, and the
+    `PATCH /memory/{id}` response body). Those surfaces still enforce the P0-2 **context-level**
+    binding gate; extending the row filter to them (the #1291/#1292-class audit widened to
+    non-CRUD read surfaces) is #1301. Operators must not rely on the type/source filter to hide
+    denied-type rows on those endpoints yet.
 - **`is_default` is the single source of truth for the bootstrap default binding.** At most
   one binding per agent is default, guaranteed by the partial unique index
   `(agent_id) WHERE is_default`. `agents.default_context_id` was rejected as a second source
@@ -185,7 +206,7 @@ Additional requirements:
 | Caller / credential | Before | After (Phase A: schema only) | After (Phase B: enforcement live) |
 |---|---|---|---|
 | REST/MCP request, key without `agent_id` (every credential existing today) | current behavior | **byte-for-byte unchanged** | **byte-for-byte unchanged** |
-| Key with `agent_id`, agent `enforce`, context **has** binding row | n/a | n/a | existing RBAC decision ∩ context-level binding (`can_read`, `write_policy`). Type/source filters are schema-reserved but non-`NULL` values are rejected until #1299 lands (per-memory type/source enforcement, split out of #1286 and deferred to P1 — P0-2 stays context-level only) |
+| Key with `agent_id`, agent `enforce`, context **has** binding row | n/a | n/a | existing RBAC decision ∩ context-level binding (`can_read`, `write_policy`) ∩ per-memory type/source filter (`allowed_memory_types` / `allowed_source_types`, enforced per read-lane row as of #1299 — P1, split out of #1286) |
 | Key with `agent_id`, agent `enforce`, context has **no** binding row | n/a | n/a | denied — uniform `context_not_found` (default-deny applies **only to newly bound agents**) |
 | Key with `agent_id`, agent `shadow` | n/a | n/a | legacy semantics; violations recorded as `would_deny` audit rows |
 | Key with `agent_id`, agent `suspended`/`retired` | n/a | n/a | rejected at verify time (fail-closed kill switch) |
@@ -231,6 +252,10 @@ The PRs that create these tables MUST, in the same PR (the two-sided closure the
   `member_api_key_provisioned` (`backend/src/auth/programmatic_workspace_auth.py`).
 - **`enforce` → `shadow` is an audited privilege-widening event**: it silently widens every
   key bound to the agent back to full member scope (containment off, attribution on).
+- Type/source filter **relaxation** (`[]` → `NULL`, adding types) is captured by the
+  `agent_binding_updated` old→new changes dict (#1299). A first-class binding-level
+  widening action (the #1294 per-transition pattern applied to filter relaxation) is
+  deliberately deferred — extend this section when that governance lands.
 
 ## Sign-off checklist (maps to #1258)
 

@@ -373,6 +373,130 @@ class TestMemoryServiceRecallGate:
             )
 
 
+class TestCanAccessMemoryRowFilter:
+    """#1299: can_access_memory forwards the memory row's own type/source to
+    the binding evaluation — the single lever that makes the per-memory
+    filter apply to every memory-id-addressed op that threads it."""
+
+    @pytest.mark.asyncio
+    async def test_row_attributes_forwarded_to_evaluation(self):
+        set_agent_scope(AgentScope(agent_id=AGENT_ID, enforcement_mode="enforce"))
+        perm = _perm()
+        patcher, instance = _patch_binding_service(True, "allowed")
+        with patcher:
+            await perm.can_access_memory(
+                user_id="u",
+                memory_user_id="u",
+                workspace_id=WORKSPACE_ID,
+                context_id=uuid.uuid4(),
+                operation="reference",
+                memory_id=uuid.uuid4(),
+                memory_type="note",
+                memory_source_type="manual",
+            )
+        kw = instance.evaluate_context_access.await_args.kwargs
+        assert kw["memory_type"] == "note"
+        assert kw["memory_source_type"] == "manual"
+
+    @pytest.mark.asyncio
+    async def test_unthreaded_callers_forward_none(self):
+        # Write-lane callers (update/patch) do not thread the row — the
+        # evaluation must see None (context-level-only semantics preserved).
+        set_agent_scope(AgentScope(agent_id=AGENT_ID, enforcement_mode="enforce"))
+        perm = _perm()
+        patcher, instance = _patch_binding_service(True, "allowed")
+        with patcher:
+            await perm.can_access_memory(
+                user_id="u",
+                memory_user_id="u",
+                workspace_id=WORKSPACE_ID,
+                context_id=uuid.uuid4(),
+                access="write",
+                operation="update",
+            )
+        kw = instance.evaluate_context_access.await_args.kwargs
+        assert kw["memory_type"] is None
+        assert kw["memory_source_type"] is None
+
+
+class TestReadLaneRowFilterThreading:
+    """#1299: the read-lane memory-id ops thread the fetched row's own
+    type/source_type into can_access_memory. Forgetting the threading on any
+    call site silently fail-opens that path — these pins hold each one."""
+
+    @staticmethod
+    def _memory(**overrides):
+        defaults = {
+            "id": uuid.uuid4(),
+            "user_id": "author",
+            "workspace_id": WORKSPACE_ID,
+            "context_id": uuid.uuid4(),
+            "type": "note",
+            "source_type": "manual",
+        }
+        defaults.update(overrides)
+        return SimpleNamespace(**defaults)
+
+    def _svc(self, memory):
+        from services.memory_service import MemoryService
+
+        svc = MemoryService.__new__(MemoryService)
+        svc.db = MagicMock()
+        svc.memory_repo = MagicMock(get=AsyncMock(return_value=memory))
+        return svc
+
+    def _deny_can_access(self):
+        return patch(
+            "services.permission_service.PermissionService.can_access_memory",
+            AsyncMock(return_value=False),
+        )
+
+    @pytest.mark.asyncio
+    async def test_reference_threads_row_type_and_source(self):
+        from services.memory_service import MemoryService
+
+        mem = self._memory(type="decision", source_type="api")
+        svc = self._svc(mem)
+        with self._deny_can_access() as can_access, pytest.raises(NotFoundException):
+            await MemoryService.reference(svc, mem.id, "u")
+        kw = can_access.await_args.kwargs
+        assert kw["operation"] == "reference"
+        assert kw["memory_type"] == "decision"
+        assert kw["memory_source_type"] == "api"
+
+    @pytest.mark.asyncio
+    async def test_forget_by_id_threads_row_and_keeps_silent_empty_deny(self):
+        from models.schemas import ForgetRequest
+        from services.memory_service import MemoryService
+
+        mem = self._memory(type="time", source_type="connector")
+        svc = self._svc(mem)
+        with self._deny_can_access() as can_access:
+            response = await MemoryService.forget(
+                svc, ForgetRequest(memory_id=mem.id), "u", current_context_id=None
+            )
+        # Deny stays a silent empty success — the MAE row is the only record.
+        assert response.deleted_count == 0
+        kw = can_access.await_args.kwargs
+        assert kw["access"] == "write"
+        assert kw["operation"] == "forget"
+        assert kw["memory_type"] == "time"
+        assert kw["memory_source_type"] == "connector"
+
+    @pytest.mark.asyncio
+    async def test_explore_seed_threads_row(self):
+        from models.schemas import ExploreRequest
+        from services.memory_service import MemoryService
+
+        mem = self._memory(type="code", source_type="file")
+        svc = self._svc(mem)
+        with self._deny_can_access() as can_access, pytest.raises(NotFoundException):
+            await MemoryService.explore(svc, ExploreRequest(memory_id=mem.id), "u")
+        kw = can_access.await_args.kwargs
+        assert kw["memory_type"] == "code"
+        assert kw["memory_source_type"] == "file"
+
+
 class TestCanAccessMemoryDenyCapture:
     """#1286 item 2 (P0-5): rbac-shaped denials at the memory-id chokepoint
     persist policy_decision='rbac_denied' rows for agent traffic. The

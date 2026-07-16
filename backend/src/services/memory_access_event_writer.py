@@ -34,14 +34,17 @@ MAX_METADATA_MEMORY_IDS = 32
 # request can legitimately traverse several binding gates that evaluate the
 # SAME denied context (MCP pre-gate → declared-context isolation gate →
 # memory-id gate); without dedup the shadow→enforce ramp metric double-counts.
-# Keyed on (operation, requested_context_id, access) so DISTINCT contexts
-# evaluated in one request (e.g. update's declared context vs the memory's
-# own) still land their own rows. Task-context isolation gives each ASGI
+# Keyed on (operation, requested_context_id, access, filter_kind) so DISTINCT
+# contexts evaluated in one request (e.g. update's declared context vs the
+# memory's own) still land their own rows, and (#1299) the per-memory
+# row-filter aggregate (filter_kind='type_source') never collides with the
+# context-level gate's would_deny for the same (operation, context, access) —
+# they are different ramp signals. Task-context isolation gives each ASGI
 # request a fresh empty set — the same per-request guarantee AgentScope
 # relies on. Hard denies are never deduped: they stop the request, so only
 # one gate can ever emit.
-_would_deny_emitted: ContextVar[frozenset[tuple[str, str | None, str | None]]] = ContextVar(
-    "mae_would_deny_emitted", default=frozenset()
+_would_deny_emitted: ContextVar[frozenset[tuple[str, str | None, str | None, str | None]]] = (
+    ContextVar("mae_would_deny_emitted", default=frozenset())
 )
 
 
@@ -208,6 +211,7 @@ async def emit_memory_access_event(
             operation,
             (metadata or {}).get("requested_context_id"),
             (metadata or {}).get("access"),
+            (metadata or {}).get("filter_kind"),
         )
         seen = _would_deny_emitted.get()
         if key in seen:
