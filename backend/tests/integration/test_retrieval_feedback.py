@@ -15,7 +15,7 @@ import pytest_asyncio
 from sqlalchemy import delete, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from models.auth import Context, Workspace
+from models.auth import AuditLog, Context, Workspace
 from models.memory import Memory
 from models.retrieval_feedback import RetrievalFeedback
 from services.feedback_service import FeedbackService
@@ -293,7 +293,16 @@ async def test_host_only_aggregation_excludes_agent_feedback(
     # Agent forges 3 helpful; the host independently verdicts 1 helpful.
     for _ in range(3):
         await svc.record_feedback(s["ctx"].id, mem.id, True, s["owner"])  # provenance='agent'
-    await svc.record_host_feedback(s["ctx"].id, mem.id, True, s["owner"], verdict="check_exit=0")
+    await svc.record_host_feedback(
+        s["ctx"].id,
+        mem.id,
+        True,
+        s["owner"],
+        actor_email="operator@example.com",
+        verdict_source="objective_check",
+        verdict_reference="pytest://bootstrap/task-07",
+        experiment_id="bootstrap-ab-07",
+    )
 
     # Default (all provenances): the agent self-report inflates the tally.
     all_agg = await svc.aggregate_for_memories(s["ctx"].id, [mem.id])
@@ -315,3 +324,19 @@ async def test_host_only_aggregation_excludes_agent_feedback(
         .all()
     )
     assert sorted(provenances) == ["agent", "agent", "agent", "host"]
+
+    audit = (
+        await db_session.execute(
+            select(AuditLog).where(
+                AuditLog.action == "host_feedback_recorded",
+                AuditLog.user_id == s["owner"],
+            )
+        )
+    ).scalar_one()
+    assert audit.created_at is not None
+    assert audit.user_email == "operator@example.com"
+    assert audit.resource == f"memory:{mem.id}"
+    assert audit.user_metadata["context_id"] == str(s["ctx"].id)
+    assert audit.user_metadata["memory_id"] == str(mem.id)
+    assert audit.user_metadata["experiment_id"] == "bootstrap-ab-07"
+    assert audit.user_metadata["verdict_reference"] == "pytest://bootstrap/task-07"

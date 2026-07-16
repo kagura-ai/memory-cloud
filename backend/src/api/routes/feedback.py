@@ -12,19 +12,30 @@ write. The caller's ``user_id`` is stored for attribution.
 
 from __future__ import annotations
 
+from typing import Literal
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException, status
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from auth.dependencies import APIKeyOrSessionUser
+from auth.agent_scope import get_agent_scope
+from auth.dependencies import APIKeyOrSessionUser, require_workspace_admin
 from auth.workspace_roles import ContextRole
 from db.base import get_db
 from models.retrieval_feedback import NOTE_MAX_LEN, QUERY_MAX_LEN
-from services.feedback_service import FeedbackService
+from services.feedback_service import (
+    HOST_EXPERIMENT_ID_MAX_LEN,
+    HOST_VERDICT_REFERENCE_MAX_LEN,
+    FeedbackService,
+)
 from services.permission_service import PermissionService
-from utils.exceptions import MemoryCloudException
+from utils.exceptions import (
+    AuthorizationError,
+    InternalError,
+    MemoryCloudException,
+    NotFoundException,
+)
 from utils.logger import get_logger
 
 logger = get_logger(__name__)
@@ -55,12 +66,57 @@ class FeedbackResponse(BaseModel):
     helpful: bool
 
 
+class HostFeedbackRequest(BaseModel):
+    """Trusted operator verdict; provenance is intentionally not caller-settable."""
+
+    memory_id: UUID = Field(..., description="The recalled memory being rated")
+    helpful: bool = Field(..., description="Independent host verdict")
+    query: str | None = Field(None, max_length=QUERY_MAX_LEN)
+    verdict_source: Literal["objective_check", "trusted_host_check", "hitl_approval"]
+    verdict_reference: str = Field(..., max_length=HOST_VERDICT_REFERENCE_MAX_LEN)
+    experiment_id: str | None = Field(None, max_length=HOST_EXPERIMENT_ID_MAX_LEN)
+    note: str | None = Field(None, max_length=NOTE_MAX_LEN)
+
+    @field_validator("verdict_reference")
+    @classmethod
+    def validate_verdict_reference(cls, value: str) -> str:
+        value = value.strip()
+        if not value:
+            raise ValueError("verdict_reference must not be blank")
+        return value
+
+    @field_validator("experiment_id")
+    @classmethod
+    def validate_experiment_id(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        value = value.strip()
+        if not value:
+            raise ValueError("experiment_id must not be blank")
+        return value
+
+
 async def get_feedback_service(db: AsyncSession = Depends(get_db)) -> FeedbackService:
     return FeedbackService(db)
 
 
 async def get_permission_service(db: AsyncSession = Depends(get_db)) -> PermissionService:
     return PermissionService(db)
+
+
+async def require_host_feedback_operator(
+    user: dict = Depends(require_workspace_admin),
+) -> dict:
+    """Allow trusted owner/admin principals, but never an agent-bound key."""
+    scope = get_agent_scope()
+    if scope is not None:
+        logger.warning(
+            "host_feedback_agent_credential_rejected",
+            user_id=user.get("user_id"),
+            agent_id=str(scope.agent_id),
+        )
+        raise AuthorizationError(reason="agent_bound_credential")
+    return user
 
 
 @router.post(
@@ -112,3 +168,63 @@ async def record_feedback(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail="Failed to record retrieval feedback",
         ) from e
+
+
+@router.post(
+    "/{context_id}/host-feedback",
+    response_model=FeedbackResponse,
+    status_code=status.HTTP_201_CREATED,
+)
+async def record_host_feedback(
+    context_id: UUID,
+    body: HostFeedbackRequest,
+    user: dict = Depends(require_host_feedback_operator),
+    service: FeedbackService = Depends(get_feedback_service),
+    perm: PermissionService = Depends(get_permission_service),
+):
+    """Record a server-stamped host verdict from a trusted operator."""
+    user_id = user["user_id"]
+    active_workspace_id = UUID(str(user["current_workspace_id"]))
+    try:
+        context = await perm.resolve_context_for_workspace_read(
+            user_id,
+            context_id,
+            required_role="admin",
+            key_workspace_id=user.get("api_key_workspace_id"),
+        )
+        # Session/global-key operators are membership-authorized across their
+        # workspaces; this mutation is deliberately confined to the selected one.
+        if context.workspace_id != active_workspace_id:
+            raise NotFoundException("Context")
+
+        actor_metadata = {
+            "via": "api_key" if "api_key_workspace_id" in user else "session",
+        }
+        if user.get("api_key_prefix"):
+            actor_metadata["key_prefix"] = user["api_key_prefix"]
+
+        row = await service.record_host_feedback(
+            context_id=context_id,
+            memory_id=body.memory_id,
+            helpful=body.helpful,
+            user_id=user_id,
+            actor_email=user.get("email"),
+            actor_metadata=actor_metadata,
+            query=body.query,
+            verdict_source=body.verdict_source,
+            verdict_reference=body.verdict_reference,
+            experiment_id=body.experiment_id,
+            note=body.note,
+        )
+        return FeedbackResponse(feedback_id=row.id, memory_id=row.memory_id, helpful=row.helpful)
+    except (HTTPException, MemoryCloudException):
+        raise
+    except Exception as e:
+        logger.error(
+            "host_feedback_failed",
+            user_id=user_id,
+            context_id=str(context_id),
+            memory_id=str(body.memory_id),
+            error=str(e),
+        )
+        raise InternalError("Failed to record host feedback") from e
