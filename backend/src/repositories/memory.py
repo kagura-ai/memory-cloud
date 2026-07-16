@@ -158,7 +158,12 @@ class MemoryRepository(BaseRepository[Memory]):
         Returns:
             True if deleted
         """
-        memory = await self.get(id)
+        # include_deleted=True: hard-delete is how the nightly retention purge
+        # (tasks/neural_tasks.cleanup_deleted_memories_task) erases tombstoned
+        # rows after the retention window — a default-filtered fetch would
+        # make the purge a silent no-op and retention/erasure would never
+        # physically happen (#1316 review sweep).
+        memory = await self.get(id, include_deleted=True)
         if not memory:
             return False
 

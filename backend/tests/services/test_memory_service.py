@@ -1053,6 +1053,28 @@ class TestForget:
         service.memory_repo.get.assert_awaited_once_with(memory_id)
 
 
+class TestUpdateInPlaceTombstone:
+    """#1316 review sweep: _update_in_place relies on the repo default filter."""
+
+    @pytest.mark.asyncio
+    async def test_update_does_not_opt_into_tombstones(self):
+        """Opting in (include_deleted=True) here would let an edit stamp new
+        content and re-embed onto a still-tombstoned row (searchable-but-
+        deleted inconsistency) — pin the default-filtered fetch."""
+        from utils.exceptions import NotFoundException
+
+        service = MemoryService(MagicMock())
+        service.memory_repo.get = AsyncMock(return_value=None)
+        request = UpdateMemoryRequest(
+            memory_id=uuid4(), summary="a new summary long enough for schema"
+        )
+
+        with pytest.raises(NotFoundException):
+            await service._update_in_place(request, user_id="test_user")
+
+        service.memory_repo.get.assert_awaited_once_with(request.memory_id)
+
+
 class TestGetContextIsolationParamsKeyWorkspaceConfinement:
     """Issue #963/#1281 item 2: pure API-key workspace-scope confinement on the
     declared-context path (remember / load_pinned / forget), mirroring the MCP

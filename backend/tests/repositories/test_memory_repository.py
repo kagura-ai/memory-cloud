@@ -72,6 +72,19 @@ class TestMemoryRepository:
         assert tombstone.deleted_at is not None
 
     @pytest.mark.asyncio
+    async def test_delete_purges_soft_deleted_row(self, repository, sample_memory, db_session):
+        """#1316 review sweep: the retention purge hard-deletes TOMBSTONED
+        rows via repository.delete() — it must see through the default
+        tombstone filter or retention/erasure silently never happens."""
+        sample_memory.deleted_at = datetime.utcnow()
+        await db_session.commit()
+
+        assert await repository.delete(sample_memory.id) is True
+        await db_session.commit()
+
+        assert await repository.get(sample_memory.id, include_deleted=True) is None
+
+    @pytest.mark.asyncio
     async def test_update_access_stats_surfacing_only_by_default(
         self, repository, sample_memory, db_session
     ):
