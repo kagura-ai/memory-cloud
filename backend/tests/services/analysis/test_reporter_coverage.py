@@ -83,6 +83,7 @@ def _cluster_label(
     representative_memory_ids: list[str] | None = None,
     breakdown: LLMCallBreakdown | None = None,
     failed: bool = False,
+    prior_breakdowns: tuple[LLMCallBreakdown, ...] = (),
 ) -> ClusterLabel:
     return ClusterLabel(
         cluster_index=cluster_index,
@@ -94,6 +95,7 @@ def _cluster_label(
         else [],
         breakdown=breakdown,
         failed=failed,
+        prior_breakdowns=prior_breakdowns,
     )
 
 
@@ -160,6 +162,32 @@ class TestAggregateBreakdownTotals:
         assert totals.output_tokens == 60
         assert totals.cached_input_tokens == 20
         assert totals.calls == 3
+
+    def test_prior_breakdowns_ride_totals_and_entry_list(self):
+        """#1289: fallback-attempt entries (attributed to their own model)
+        are collected as rows AND summed into totals — sum-invariant with
+        the pre-#1289 fold-into-winner shape, so cost_actual_cents cannot
+        move."""
+        labels = [
+            _cluster_label(
+                cluster_index=0,
+                breakdown=_breakdown(
+                    input_tokens=100, output_tokens=20, cached_input_tokens=5, calls=1
+                ),
+                prior_breakdowns=(
+                    _breakdown(model="gpt-5.5", input_tokens=60, output_tokens=30, calls=1),
+                ),
+            ),
+            # A cluster that failed all models: no entries of either kind.
+            _cluster_label(cluster_index=1, breakdown=None, failed=True),
+        ]
+        breakdowns, totals = _aggregate_breakdown_totals(labels)
+        assert len(breakdowns) == 2
+        assert {b.model for b in breakdowns} == {"gpt-5-nano", "gpt-5.5"}
+        assert totals.input_tokens == 160
+        assert totals.output_tokens == 50
+        assert totals.cached_input_tokens == 5
+        assert totals.calls == 2
 
 
 class TestComputeActualCostCents:
