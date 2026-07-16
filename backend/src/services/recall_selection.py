@@ -59,6 +59,7 @@ def plan_recall_selection(
     deterministic = ranked[:selected_count]
 
     mixture_probability = 0.0
+    effective_floor = config.exploration_floor
     selected = deterministic
     if n and selected_count:
         maximum_feasible_floor = selected_count / n
@@ -67,12 +68,15 @@ def plan_recall_selection(
                 "exploration_floor exceeds the maximum feasible floor "
                 f"{maximum_feasible_floor:.12g} for top_k={top_k}, eligible_count={n}"
             )
-        if config.exploration_floor > 0.0 and selected_count < n:
-            # The feasibility guard above admits floors up to
-            # maximum_feasible_floor + 1e-12, where floor*n/m computes to just
-            # over 1.0. Clamp so the reported marginals stay mathematically
-            # consistent with the actual procedure (p=1 → always uniform arm).
-            mixture_probability = min(1.0, config.exploration_floor * n / selected_count)
+        # The feasibility guard admits floors up to maximum_feasible_floor +
+        # 1e-12. Inside that band the ACTUAL procedure is "always the uniform
+        # arm", whose exact per-candidate marginal is selected_count/n — so
+        # clamp the floor itself: both the mixture AND the reported marginals
+        # below then describe the real procedure, not the requested value.
+        # (A feasible floor is unchanged bit-for-bit.)
+        effective_floor = min(config.exploration_floor, maximum_feasible_floor)
+        if effective_floor > 0.0 and selected_count < n:
+            mixture_probability = min(1.0, effective_floor * n / selected_count)
             rng = random.Random(config.seed)
             if rng.random() < mixture_probability:
                 chosen = set(rng.sample(range(n), selected_count))
@@ -82,25 +86,23 @@ def plan_recall_selection(
 
     if n <= selected_count:
         probabilities = dict.fromkeys(ranked, 1.0)
-    elif config.exploration_floor == 0.0:
+    elif effective_floor == 0.0:
         selected_set = set(deterministic)
         probabilities = {
             memory_id: 1.0 if memory_id in selected_set else 0.0 for memory_id in ranked
         }
     else:
         deterministic_set = set(deterministic)
-        top_probability = 1.0 - mixture_probability + config.exploration_floor
+        top_probability = 1.0 - mixture_probability + effective_floor
         probabilities = {
-            memory_id: (
-                top_probability if memory_id in deterministic_set else config.exploration_floor
-            )
+            memory_id: (top_probability if memory_id in deterministic_set else effective_floor)
             for memory_id in ranked
         }
 
     minimum_probability = min(probabilities.values()) if probabilities else None
     policy_name = (
         "deterministic_uniform_mixture_v1"
-        if config.exploration_floor > 0.0 and selected_count < n
+        if effective_floor > 0.0 and selected_count < n
         else "deterministic_top_k_v1"
     )
     return RecallSelectionPlan(
@@ -111,7 +113,9 @@ def plan_recall_selection(
             "version": 1,
             "evaluation_seed": config.seed,
             "replay_identity": f"bootstrap-recall-v1:{config.seed}",
-            "exploration_floor": config.exploration_floor,
+            # The floor the procedure ACTUALLY used (clamped to feasible);
+            # identical to the requested config value whenever it was feasible.
+            "exploration_floor": effective_floor,
             "uniform_mixture_probability": mixture_probability,
             "candidate_pool_k": config.candidate_pool_k,
             "eligible_count": n,

@@ -77,11 +77,11 @@ def test_impossible_floor_fails_instead_of_fabricating_propensity() -> None:
 
 
 def test_floor_at_tolerance_boundary_keeps_probabilities_consistent() -> None:
-    # The feasibility guard admits floors up to maximum_feasible_floor + 1e-12,
-    # where floor*n/m computes to just over 1.0. The mixture must be clamped so
-    # the reported evidence stays mathematically consistent with the actual
-    # procedure (mixture 1.0 == the uniform arm always fires) and no marginal
-    # exceeds 1.0.
+    # The feasibility guard admits floors up to maximum_feasible_floor + 1e-12.
+    # Inside that band the actual procedure is "always the uniform arm", whose
+    # exact per-candidate marginal is selected_count/n — the evidence must
+    # report THAT (the clamped effective floor), not the slightly-infeasible
+    # requested value.
     boundary_floor = 2 / 5 + 5e-13  # max feasible for top_k=2, n=5, inside tolerance
     plan = plan_recall_selection(
         ELIGIBLE,
@@ -91,10 +91,11 @@ def test_floor_at_tolerance_boundary_keeps_probabilities_consistent() -> None:
         ),
     )
 
-    assert plan.policy["uniform_mixture_probability"] <= 1.0
+    assert plan.policy["uniform_mixture_probability"] == 1.0
+    assert plan.policy["exploration_floor"] == 2 / 5  # the effective (clamped) floor
     probabilities = plan.selection_probabilities
-    assert all(0.0 < value <= 1.0 for value in probabilities.values())
-    # Marginal inclusion probabilities must still sum to the selected count.
+    # Always-uniform ⇒ every candidate's exact marginal is selected_count/n.
+    assert all(value == 2 / 5 for value in probabilities.values())
     assert sum(probabilities.values()) == pytest.approx(2.0)
 
 
