@@ -138,14 +138,18 @@ def _aggregate_breakdown_totals(
     total_cached = 0
     total_calls = 0
     for cl in cluster_labels:
-        b = cl.breakdown
-        if b is None:
-            continue
-        breakdowns.append(b)
-        total_input += b.input_tokens
-        total_output += b.output_tokens
-        total_cached += b.cached_input_tokens
-        total_calls += b.calls
+        # #1289: prior_breakdowns carry fallback-attempt usage attributed
+        # to its own (provider, model). Including them here keeps the
+        # totals — and thus cost_actual_cents — counting every billed
+        # call, exactly as when they were folded into the winner.
+        for b in (cl.breakdown, *cl.prior_breakdowns):
+            if b is None:
+                continue
+            breakdowns.append(b)
+            total_input += b.input_tokens
+            total_output += b.output_tokens
+            total_cached += b.cached_input_tokens
+            total_calls += b.calls
     return breakdowns, _CostTotals(
         input_tokens=total_input,
         output_tokens=total_output,

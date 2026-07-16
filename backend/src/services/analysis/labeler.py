@@ -161,6 +161,12 @@ class ClusterLabel:
     breakdown: LLMCallBreakdown | None
     failed: bool = False
     empty: bool = False
+    # #1289: paid tokens from fallback-chain attempts that failed on a
+    # DIFFERENT (provider, model) than the winner, one entry per pair, so
+    # the per-model sleep_report_llm_usage rows attribute those tokens to
+    # the model that actually billed them. Same-pair attempts stay folded
+    # into ``breakdown``. The reporter sums both, so cost is unchanged.
+    prior_breakdowns: tuple[LLMCallBreakdown, ...] = ()
 
 
 def _select_representatives(
@@ -297,18 +303,26 @@ async def _label_one_cluster(
         label_confidence = 0.0
 
     breakdown = accumulate_llm_response(None, result.response)
-    # #1247: fold in paid tokens burned by any earlier fallback-chain
-    # attempts that failed (e.g. a model whose output failed to parse) so
+    # #1247: paid tokens burned by earlier fallback-chain attempts (e.g. a
+    # model whose output failed to parse) are never dropped, so
     # cost_actual_cents reflects EVERY billed call, not just the winner.
-    # Keyed by the winning (provider, model); the reporter aggregates all
-    # cluster breakdowns under the run's frozen rate, so summing tokens
-    # here is what the cost ledger needs.
+    # #1289: each attempt is attributed to the (provider, model) that
+    # actually billed it — an LLMResponse carries its own provider/model,
+    # so no LLMService shape change was needed. Same-pair attempts fold
+    # into the winner's breakdown; different-pair attempts get one entry
+    # per pair in ``prior_breakdowns``.
+    winner_pair = (result.response.provider, result.response.model)
+    prior_by_pair: dict[tuple[str, str], LLMCallBreakdown] = {}
     for prior in result.prior_usages:
-        breakdown.add_call(
-            input_tokens=prior.input_tokens,
-            output_tokens=prior.output_tokens,
-            cached_input_tokens=prior.cached_input_tokens,
-        )
+        if (prior.provider, prior.model) == winner_pair:
+            breakdown.add_call(
+                input_tokens=prior.input_tokens,
+                output_tokens=prior.output_tokens,
+                cached_input_tokens=prior.cached_input_tokens,
+            )
+        else:
+            pair = (prior.provider, prior.model)
+            prior_by_pair[pair] = accumulate_llm_response(prior_by_pair.get(pair), prior)
 
     return ClusterLabel(
         cluster_index=cluster_index,
@@ -318,6 +332,7 @@ async def _label_one_cluster(
         representative_memory_ids=filtered_reps,
         breakdown=breakdown,
         failed=False,
+        prior_breakdowns=tuple(prior_by_pair.values()),
     )
 
 

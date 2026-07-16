@@ -375,6 +375,108 @@ class TestLabelOneCluster:
         assert cl.breakdown.calls == 2
         assert cl.breakdown.input_tokens == 20 + 60
         assert cl.breakdown.output_tokens == 10 + 30
+        # #1289: same (provider, model) as the winner — folds into the
+        # winner's entry, never a separate prior entry (no double count).
+        assert cl.prior_breakdowns == ()
+
+    async def test_failed_attempt_on_other_model_attributed_to_itself(self, monkeypatch) -> None:
+        """#1289: a fallback attempt billed on a DIFFERENT (provider, model)
+        than the winner gets its own breakdown entry instead of skewing the
+        winner's sleep_report_llm_usage row; totals stay sum-invariant."""
+        import asyncio
+
+        winner = _llm_response(parsed={"label": "L", "label_confidence": 0.5})
+        failed_usage = LLMResponse(
+            parsed={},
+            total_tokens=90,
+            input_tokens=60,
+            output_tokens=30,
+            cached_input_tokens=0,
+            provider="openai",
+            model="gpt-5.5",
+        )
+
+        async def _fake(**_kwargs):  # noqa: ANN003
+            return CallResult(
+                parsed=winner.parsed,
+                response=winner,
+                prior_usages=(failed_usage,),
+            )
+
+        monkeypatch.setattr(labeler, "call_with_fallback", _fake)
+
+        cl = await _label_one_cluster(
+            cluster_index=0,
+            reps=[_mem()],
+            user_id="u",
+            workspace_id="w",
+            context_id=None,
+            sem=asyncio.Semaphore(1),
+        )
+
+        assert cl.breakdown is not None
+        # The winner's row is untouched by the failed attempt...
+        assert cl.breakdown.model == "gpt-5-nano"
+        assert cl.breakdown.calls == 1
+        assert cl.breakdown.input_tokens == 20
+        assert cl.breakdown.output_tokens == 10
+        # ...the failed attempt is attributed to the model that billed it...
+        assert len(cl.prior_breakdowns) == 1
+        prior = cl.prior_breakdowns[0]
+        assert (prior.provider, prior.model) == ("openai", "gpt-5.5")
+        assert prior.calls == 1
+        assert prior.input_tokens == 60
+        assert prior.output_tokens == 30
+        # ...and the ledger stays sum-invariant vs the old fold-into-winner.
+        entries = [cl.breakdown, *cl.prior_breakdowns]
+        assert sum(b.input_tokens for b in entries) == 20 + 60
+        assert sum(b.output_tokens for b in entries) == 10 + 30
+        assert sum(b.calls for b in entries) == 2
+
+    async def test_two_failed_attempts_same_pair_merge_into_one_prior_entry(
+        self, monkeypatch
+    ) -> None:
+        """#1289: multiple billed attempts on the same non-winner pair
+        accumulate into ONE prior entry (calls=2), not one entry each."""
+        import asyncio
+
+        winner = _llm_response(parsed={"label": "L", "label_confidence": 0.5})
+
+        def _failed(input_tokens: int, output_tokens: int) -> LLMResponse:
+            return LLMResponse(
+                parsed={},
+                total_tokens=input_tokens + output_tokens,
+                input_tokens=input_tokens,
+                output_tokens=output_tokens,
+                cached_input_tokens=0,
+                provider="openai",
+                model="gpt-5.5",
+            )
+
+        async def _fake(**_kwargs):  # noqa: ANN003
+            return CallResult(
+                parsed=winner.parsed,
+                response=winner,
+                prior_usages=(_failed(30, 10), _failed(60, 30)),
+            )
+
+        monkeypatch.setattr(labeler, "call_with_fallback", _fake)
+
+        cl = await _label_one_cluster(
+            cluster_index=0,
+            reps=[_mem()],
+            user_id="u",
+            workspace_id="w",
+            context_id=None,
+            sem=asyncio.Semaphore(1),
+        )
+
+        assert len(cl.prior_breakdowns) == 1
+        prior = cl.prior_breakdowns[0]
+        assert prior.model == "gpt-5.5"
+        assert prior.calls == 2
+        assert prior.input_tokens == 90
+        assert prior.output_tokens == 40
 
     async def test_confidence_clamped_above_one(self, monkeypatch) -> None:
         """A confidence > 1 is clamped to 1.0."""
