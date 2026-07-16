@@ -5,6 +5,11 @@ Operator runbook for migrating the single-server production stack from
 **stateful cutover with downtime**, not a rolling deploy — schedule a
 maintenance window.
 
+> **Status**: executed against production on 2026-07-16 — evidence recorded on
+> #1311 (rollback-window close-out tracked in its follow-up issue). The
+> guard-window warnings below are retained as a record for future
+> major-version migrations.
+
 The pinned image lives in `docker-compose.prod.yml` (multi-arch
 manifest-list digest, resolved 2026-07-16 from Docker Hub). This runbook
 never hardcodes it — the Conventions section derives it from the compose
