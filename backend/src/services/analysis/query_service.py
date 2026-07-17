@@ -488,8 +488,8 @@ async def get_cluster(
     # drop for enforce-mode agents (shadow keeps them; outside the MAE
     # vocabulary, so shadow is log-only). Applied AFTER the keyset cursor is
     # derived, so pagination advances over denied rows instead of stalling.
-    # ``cluster.count`` stays the stored whole-cluster size (metadata-only
-    # aggregate, same severity class as stats counts).
+    # ``count`` / ``property_stats`` are handled separately below (recomputed
+    # over permitted rows for enforce-mode agents).
     from services.agent_binding_service import filter_memory_rows_by_binding
 
     rows, _ = await filter_memory_rows_by_binding(db, rows, operation=None, user_id=None)
@@ -562,6 +562,13 @@ async def get_cluster(
     # (tags/importance/time histograms) are dropped fail-closed rather than
     # recomputed — they would otherwise leak denied rows' content and
     # contradict the recomputed count.
+    #
+    # The recompute runs for EVERY enforce-mode agent (the predicate is
+    # non-None even for a non-restricting binding, since it carries the
+    # membership gate): deliberate — deriving "could this agent be
+    # restricted for THIS cluster's context" would need the run's context
+    # (not in hand here, and rows may be an empty page), and the cost is one
+    # indexed GROUP BY over a single cluster's assignments, agent-only.
     count = int(cluster.count)
     property_stats = cluster.property_stats or {}
     from services.agent_binding_service import binding_memory_sql_predicate

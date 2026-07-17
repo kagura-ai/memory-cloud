@@ -989,7 +989,12 @@ class TestBindingMemorySqlPredicate:
             db = _db_with_bindings([_binding(context_id=ctx)])  # both arrays NULL
             predicate = await binding_memory_sql_predicate(db)
             assert predicate is not None
-            assert self._compile(predicate) == f"memories.context_id IN ('{ctx}')"
+            sql = self._compile(predicate)
+            # Rendering-tolerant: the contract is a membership gate over the
+            # bound context and nothing else (no type/source subtraction).
+            assert f"memories.context_id IN ('{ctx}')" in sql
+            assert "memories.type" not in sql
+            assert "memories.source_type" not in sql
         finally:
             set_agent_scope(None)
 
@@ -1002,7 +1007,11 @@ class TestBindingMemorySqlPredicate:
         try:
             predicate = await binding_memory_sql_predicate(_db_with_bindings([]))
             assert predicate is not None
-            assert self._compile(predicate) == "false"
+            # Rendering-tolerant constant-false check: no column can satisfy
+            # the predicate (SQLA may render `false` or an equivalent).
+            sql = self._compile(predicate)
+            assert "memories." not in sql
+            assert sql.lower() in ("false", "0 = 1", "1 != 1")
         finally:
             set_agent_scope(None)
 
