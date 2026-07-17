@@ -159,6 +159,9 @@ def clamp_nearby_k(k: Any) -> int:
     if isinstance(k, bool):
         # bool is an int — int(True) would silently clamp to 1 result.
         raise LocationValidationError("k must be an integer")
+    if isinstance(k, float) and not k.is_integer():
+        # int(1.9) would silently truncate; the schema says integer.
+        raise LocationValidationError("k must be an integer")
     value = int(k)  # may raise → caller maps to validation_error
     return max(1, min(MAX_NEARBY_K, value))
 

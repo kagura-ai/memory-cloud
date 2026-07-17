@@ -139,6 +139,13 @@ class TestQueryHelpers:
         assert clamp_nearby_k(1000) == 100
         assert clamp_nearby_k(7) == 7
 
+    @pytest.mark.parametrize("bad", [True, 1.9])
+    def test_clamp_k_rejects_bool_and_fractional(self, bad):
+        # int() would silently coerce both (True→1, 1.9→1) — schema says
+        # integer, so they must be structured validation errors instead.
+        with pytest.raises(LocationValidationError):
+            clamp_nearby_k(bad)
+
     def test_clamp_radius_defaults_and_bounds(self):
         assert clamp_radius_m(None) == 1000.0
         assert clamp_radius_m(0) == MIN_RADIUS_M

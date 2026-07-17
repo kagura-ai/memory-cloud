@@ -703,6 +703,7 @@ class MemoryHealthService:
                 "window_days": _USAGE_WINDOW_DAYS,
                 "recall_calls": recalls,
                 "recall_upcoming_calls": recall_upcoming,
+                "recall_nearby_calls": recall_nearby,
                 "remember_calls": usage.get("remember", 0),
                 "explore_calls": usage.get("explore", 0),
                 **posture,
