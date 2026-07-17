@@ -553,12 +553,15 @@ async def get_cluster(
     else:
         representatives = []
 
-    # #1301: ``count`` and ``property_stats["types"]`` are whole-cluster
-    # stored aggregates — the same grouped-count existence oracle over denied
-    # types that stats.by_type was. For enforce-mode agents with an active
-    # binding filter, recompute both over the rows the binding permits (one
-    # GROUP BY). Non-type facets in property_stats are not type/source-labeled
-    # and stay as stored.
+    # #1301: ``count`` and ``property_stats`` are whole-cluster stored
+    # aggregates — ``types`` is the same grouped-count existence oracle over
+    # denied types that stats.by_type was, and ``tags`` carries verbatim tag
+    # strings from every member row. For enforce-mode agents with an active
+    # binding filter, recompute count/types over the rows the binding permits
+    # (one GROUP BY); when any row was subtracted, the remaining facets
+    # (tags/importance/time histograms) are dropped fail-closed rather than
+    # recomputed — they would otherwise leak denied rows' content and
+    # contradict the recomputed count.
     count = int(cluster.count)
     property_stats = cluster.property_stats or {}
     from services.agent_binding_service import binding_memory_sql_predicate
@@ -585,8 +588,11 @@ async def get_cluster(
             )
         ).all()
         filtered_types = {row[0]: int(row[1]) for row in type_rows}
-        count = sum(filtered_types.values())
-        if "types" in property_stats:
+        filtered_count = sum(filtered_types.values())
+        if filtered_count != count:
+            count = filtered_count
+            property_stats = {"types": filtered_types}
+        elif "types" in property_stats:
             property_stats = {**property_stats, "types": filtered_types}
 
     return {

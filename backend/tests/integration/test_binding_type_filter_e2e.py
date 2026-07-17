@@ -821,9 +821,9 @@ async def test_get_cluster_enforce_filters_members_and_representatives(
     # existence oracle stats.by_type was — they must be recomputed over the
     # rows the agent can read (mem_api is source-denied, so note counts 1).
     assert filtered["count"] == 1
-    assert filtered["property_stats"]["types"] == {"note": 1}
-    # Non-type facets stay as stored (not type/source-labeled).
-    assert filtered["property_stats"]["avg_importance"] == 0.5
+    # Rows were subtracted → the remaining stored facets (tags carry
+    # verbatim tag strings of denied rows) drop fail-closed.
+    assert filtered["property_stats"] == {"types": {"note": 1}}
 
 
 @pytest.mark.asyncio(loop_scope="session")
