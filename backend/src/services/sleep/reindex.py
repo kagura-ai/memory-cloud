@@ -118,6 +118,15 @@ class ReindexPhase:
                     "created_at": to_utc_iso(memory.created_at),
                     "updated_at": to_utc_iso(memory.updated_at),
                 }
+                # WHERE axis (#1332): the upsert replaces the WHOLE payload —
+                # without carrying the geo field a reindexed located memory
+                # would vanish from filters.near (must semantics). The e69
+                # generated columns are the single validated source.
+                if memory.location_lat is not None and memory.location_lon is not None:
+                    payload["location"] = {
+                        "lat": memory.location_lat,
+                        "lon": memory.location_lon,
+                    }
 
                 await add_memory_to_qdrant(
                     user_id=user_id,

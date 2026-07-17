@@ -104,12 +104,31 @@ async def lifespan(app: FastAPI):
     start_scheduler()
     logger.info("background_tasks_scheduled")
 
+    # WHERE axis (#1332): one-shot geo payload backfill for points embedded
+    # before the location payload existed. Best-effort — but hold a strong
+    # reference on app.state: the loop keeps tasks only weakly, and an
+    # unreferenced fire-and-forget task can be garbage-collected mid-run.
+    from tasks.geo_backfill import run_location_payload_backfill
+
+    app.state.geo_backfill_task = asyncio.create_task(run_location_payload_backfill())
+
     logger.info("application_started")
 
     yield
 
     # Shutdown
     logger.info("application_shutting_down")
+
+    # Stop the geo backfill first (#1332 Copilot review): later shutdown
+    # steps close the DB/loop out from under a still-running sweep, which
+    # would surface as pending-task warnings or spurious errors at exit.
+    backfill_task = getattr(app.state, "geo_backfill_task", None)
+    if backfill_task is not None and not backfill_task.done():
+        backfill_task.cancel()
+        try:
+            await backfill_task
+        except asyncio.CancelledError:
+            logger.info("geo_payload_backfill_cancelled_on_shutdown")
 
     # Stop scheduler
     from tasks import shutdown_scheduler

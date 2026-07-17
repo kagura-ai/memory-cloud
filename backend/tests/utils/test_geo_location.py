@@ -198,3 +198,89 @@ class TestQueryHelpers:
 
         lo, hi = bbox_lat_range(89.9999, 100_000)
         assert LAT_MIN <= lo <= hi <= LAT_MAX
+
+
+class TestExtractNearFilter:
+    """#1332: filters["near"] extraction for the Qdrant/Lance search legs.
+
+    Mirrors extract_score_threshold's contract (#1229): the filters namespace
+    is free-form user input where unknown keys are ignored, but a PRESENT and
+    malformed `near` must fail closed (LocationValidationError → 4xx), never
+    be silently dropped.
+    """
+
+    def _extract(self, filters):
+        from utils.geo_location import extract_near_filter
+
+        return extract_near_filter(filters)
+
+    def test_absent_returns_none(self):
+        assert self._extract(None) is None
+        assert self._extract({}) is None
+        assert self._extract({"type": "note"}) is None
+
+    def test_valid_near_returns_tuple(self):
+        lat, lon, radius = self._extract(
+            {"near": {"lat": 35.6812, "lon": 139.7671, "radius_m": 500}}
+        )
+        assert lat == pytest.approx(35.6812)
+        assert lon == pytest.approx(139.7671)
+        assert radius == pytest.approx(500.0)
+
+    def test_radius_defaults_and_clamps(self):
+        from utils.geo_location import DEFAULT_RADIUS_M
+
+        _, _, radius = self._extract({"near": {"lat": 0.0, "lon": 0.0}})
+        assert radius == pytest.approx(DEFAULT_RADIUS_M)
+        _, _, clamped = self._extract({"near": {"lat": 0.0, "lon": 0.0, "radius_m": 10**9}})
+        assert clamped == pytest.approx(MAX_RADIUS_M)
+        _, _, floor = self._extract({"near": {"lat": 0.0, "lon": 0.0, "radius_m": 0}})
+        assert floor == pytest.approx(MIN_RADIUS_M)
+
+    @pytest.mark.parametrize(
+        "near",
+        [
+            "35.6,139.7",  # not an object
+            ["35.6", "139.7"],
+            {"lat": 35.6},  # missing lon
+            {"lon": 139.7},  # missing lat
+            {"lat": 91.0, "lon": 0.0},  # out of range
+            {"lat": 0.0, "lon": 181.0},
+            {"lat": "35.6", "lon": 139.7},  # numeric string (write-side standard)
+            {"lat": True, "lon": 139.7},  # bool is not a coordinate
+            {"lat": 35.6, "lon": 139.7, "radius_m": "wide"},
+            {"lat": 35.6, "lon": 139.7, "radius": 500},  # unknown key
+        ],
+    )
+    def test_malformed_near_fails_closed(self, near):
+        with pytest.raises(LocationValidationError):
+            self._extract({"near": near})
+
+
+class TestHaversineM:
+    """#1332: Python-side haversine for the LanceDB near post-filter parity."""
+
+    def _hav(self, *args):
+        from utils.geo_location import haversine_m
+
+        return haversine_m(*args)
+
+    def test_zero_distance(self):
+        assert self._hav(35.0, 139.0, 35.0, 139.0) == pytest.approx(0.0)
+
+    def test_known_small_distance_on_prime_meridian(self):
+        # 0.00005° of longitude at lat 51.4779 ≈ 3.5 m (recall_nearby e2e pin).
+        assert self._hav(51.4779, 0.0, 51.4779, 0.00005) == pytest.approx(3.5, abs=1.5)
+
+    def test_symmetry(self):
+        a = self._hav(35.68, 139.76, 34.69, 135.50)
+        b = self._hav(34.69, 135.50, 35.68, 139.76)
+        assert a == pytest.approx(b)
+
+    def test_uses_shared_sphere(self):
+        # Quarter meridian on the shared mean-Earth sphere (same constant as
+        # the SQL haversine and bbox prefilter — prefilter ⊇ exact rule).
+        from utils.geo_location import EARTH_RADIUS_M
+
+        quarter = self._hav(0.0, 0.0, 90.0, 0.0)
+        assert quarter == pytest.approx(math.pi * EARTH_RADIUS_M / 2, rel=1e-9)

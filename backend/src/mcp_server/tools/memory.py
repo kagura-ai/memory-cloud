@@ -757,6 +757,17 @@ async def handle_recall(
                 current_context_id,
                 "Context not found or you don't have access to it.",
             ).to_response()
+        except ValueError as e:
+            # Malformed free-form ``filters`` input — importance range,
+            # score_threshold (#1229), near (#1332; LocationValidationError
+            # subclasses ValueError) — is routine client input: return the
+            # structured validation_error envelope (the REST route's 422
+            # mirror), not an opaque 500-shaped tool crash.
+            await db.rollback()
+            await _log_tool_usage(
+                db, user_id, "recall", start_time, 422, current_context_id, workspace_id
+            )
+            return _error_response("validation_error", str(e))
         except Exception:
             await db.rollback()
             await _log_tool_usage(

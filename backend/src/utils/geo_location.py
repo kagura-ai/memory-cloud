@@ -171,12 +171,18 @@ def clamp_radius_m(radius_m: Any) -> float:
 
     Rejects bool and non-finite values (the coordinate rules); numeric
     strings coerce like the time lane's ``int(k)`` does for top-level args.
+    Every rejection raises ``LocationValidationError`` (a ValueError) so
+    callers get one contract error — no caller-side re-wrapping of the
+    bare ``float()`` failure.
     """
     if radius_m is None:
         return DEFAULT_RADIUS_M
     if isinstance(radius_m, bool):
         raise LocationValidationError("radius_m must be a number")
-    value = float(radius_m)  # may raise → caller maps to validation_error
+    try:
+        value = float(radius_m)
+    except (TypeError, ValueError) as e:
+        raise LocationValidationError("radius_m must be a number") from e
     if not math.isfinite(value):
         raise LocationValidationError("radius_m must be finite")
     return max(MIN_RADIUS_M, min(MAX_RADIUS_M, value))
@@ -219,3 +225,51 @@ def bbox_lon_ranges(lat: float, lon: float, radius_m: float) -> list[tuple[float
     if hi > LON_MAX:
         return [(lo, LON_MAX), (LON_MIN, hi - 360.0)]
     return [(lo, hi)]
+
+
+_NEAR_ALLOWED_KEYS = frozenset({"lat", "lon", "radius_m"})
+
+
+def extract_near_filter(filters: dict[str, Any] | None) -> tuple[float, float, float] | None:
+    """Extract and validate ``filters["near"]`` (#1332) → ``(lat, lon, radius_m)``.
+
+    The recall ``filters`` namespace is free-form user input where unknown
+    keys are ignored, so a PRESENT-and-malformed ``near`` must fail closed
+    (#1229 lesson: a silently dropped filter turns a scoped search into an
+    unscoped one with no error anywhere). Coordinates are held to the
+    write-side standard (``validate_query_coords``) and the radius to the
+    ``recall_nearby`` clamps — unknown keys inside ``near`` are rejected
+    rather than ignored so a typo like ``radius`` doesn't silently search
+    the default 1 km.
+    """
+    if not filters or "near" not in filters:
+        return None
+    near = filters["near"]
+    if not isinstance(near, dict):
+        raise LocationValidationError("near must be an object: {lat, lon, radius_m?}")
+    unknown = set(near) - _NEAR_ALLOWED_KEYS
+    if unknown:
+        raise LocationValidationError(
+            f"near has unknown keys: {sorted(unknown)} (allowed: lat, lon, radius_m)"
+        )
+    if "lat" not in near or "lon" not in near:
+        raise LocationValidationError("near requires both lat and lon")
+    lat, lon = validate_query_coords(near["lat"], near["lon"])
+    radius_m = clamp_radius_m(near.get("radius_m"))
+    return lat, lon, radius_m
+
+
+def haversine_m(lat1: float, lon1: float, lat2: float, lon2: float) -> float:
+    """Great-circle distance in meters on the shared mean-Earth sphere.
+
+    Python mirror of the SQL haversine in ``services/geo_memory.py`` — the
+    LanceDB ``near`` post-filter must draw the same circle as Qdrant's
+    server-side ``geo_radius``, and both prefilters derive from the same
+    ``EARTH_RADIUS_M``.
+    """
+    lat1_r, lon1_r, lat2_r, lon2_r = map(math.radians, (lat1, lon1, lat2, lon2))
+    a = (
+        math.sin((lat2_r - lat1_r) / 2) ** 2
+        + math.cos(lat1_r) * math.cos(lat2_r) * math.sin((lon2_r - lon1_r) / 2) ** 2
+    )
+    return 2 * EARTH_RADIUS_M * math.asin(min(1.0, math.sqrt(a)))

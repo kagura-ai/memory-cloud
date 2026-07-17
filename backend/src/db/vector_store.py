@@ -94,6 +94,7 @@ class VectorStore(Protocol):
         memory_id: UUID,
         payload_updates: dict[str, Any],
         collection_name: str = DEFAULT_COLLECTION,
+        delete_keys: list[str] | None = None,
     ) -> None: ...
 
     async def delete_memory(

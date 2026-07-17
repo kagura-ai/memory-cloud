@@ -139,6 +139,10 @@ async def re_embed_memory_to_qdrant(
         "created_at": (memory.created_at.isoformat() + "Z" if memory.created_at else None),
         "updated_at": (memory.updated_at.isoformat() + "Z" if memory.updated_at else None),
     }
+    # WHERE axis (#1332): full-payload upsert — carry the geo field or a
+    # restored located memory vanishes from filters.near (must semantics).
+    if memory.location_lat is not None and memory.location_lon is not None:
+        payload["location"] = {"lat": memory.location_lat, "lon": memory.location_lon}
     await add_memory_to_qdrant(
         user_id=user_id,
         memory_id=memory.id,

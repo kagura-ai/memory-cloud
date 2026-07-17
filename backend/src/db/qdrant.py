@@ -20,6 +20,8 @@ from qdrant_client.models import (
     Distance,
     FieldCondition,
     Filter,
+    GeoPoint,
+    GeoRadius,
     MatchAny,
     MatchValue,
     Modifier,
@@ -35,6 +37,7 @@ from qdrant_client.models import (
 
 from config.database import QDRANT_URL
 from utils.exceptions import QdrantError
+from utils.geo_location import extract_near_filter
 from utils.logger import get_logger
 from utils.sparse_vector import build_query_sparse_vector
 from utils.synonyms import expand_query_tokens
@@ -243,6 +246,24 @@ def _build_search_filter(
         conditions.extend(tag_conditions)
         date_conditions = _build_date_filter_conditions(filters)
         conditions.extend(date_conditions)
+        # WHERE axis (#1332): filters["near"] → geo_radius over the
+        # ``location`` payload (written from the location_lat/lon generated
+        # columns). Points without the field — no location, resource chunks —
+        # are excluded by must semantics. extract_near_filter fails closed on
+        # malformed input (#1229 lesson; LocationValidationError is a
+        # ValueError, mapping to the same 4xx path as the importance range).
+        near = extract_near_filter(filters)
+        if near is not None:
+            near_lat, near_lon, near_radius_m = near
+            conditions.append(
+                FieldCondition(
+                    key="location",
+                    geo_radius=GeoRadius(
+                        center=GeoPoint(lat=near_lat, lon=near_lon),
+                        radius=near_radius_m,
+                    ),
+                )
+            )
 
     return Filter(must=conditions) if conditions else None
 
@@ -559,37 +580,52 @@ async def update_memory_payload_in_qdrant(
     memory_id: UUID,
     payload_updates: dict[str, Any],
     collection_name: str = KAGURA_MEMORIES_COLLECTION,
+    delete_keys: list[str] | None = None,
 ) -> None:
     """Update payload fields of a Qdrant point without re-embedding.
 
-    Uses set_payload to update only specified fields (e.g. tags, importance, type).
+    Uses set_payload to update only specified fields (e.g. tags, importance,
+    type) and delete_payload to remove keys whose backing data was removed
+    (#1332: a details write that drops ``location`` must clear the geo
+    payload, not leave a stale coordinate matching ``filters.near``).
 
     Args:
         memory_id: Memory UUID
         payload_updates: Dict of payload fields to update
         collection_name: Qdrant collection name
+        delete_keys: Payload keys to remove from the point
 
     Raises:
         QdrantError: If operation fails
     """
     _store = _active_store()
     if _store is not None:
-        return await _store.update_payload(memory_id, payload_updates, collection_name)
+        return await _store.update_payload(
+            memory_id, payload_updates, collection_name, delete_keys=delete_keys
+        )
 
     client = get_qdrant_client()
 
     try:
-        await client.set_payload(
-            collection_name=collection_name,
-            payload=payload_updates,
-            points=[str(memory_id)],
-        )
+        if payload_updates:
+            await client.set_payload(
+                collection_name=collection_name,
+                payload=payload_updates,
+                points=[str(memory_id)],
+            )
+        if delete_keys:
+            await client.delete_payload(
+                collection_name=collection_name,
+                keys=delete_keys,
+                points=[str(memory_id)],
+            )
 
         logger.debug(
             "memory_payload_updated_in_qdrant",
             collection=collection_name,
             memory_id=str(memory_id),
             updated_fields=list(payload_updates.keys()),
+            deleted_fields=delete_keys or [],
         )
 
     except Exception as e:
@@ -799,7 +835,7 @@ async def ensure_kagura_memories_collection(
             has_sparse = sparse_cfg is not None and KAGURA_MEMORIES_BM25_VECTOR_NAME in sparse_cfg
 
             if has_sparse:
-                # Collection is up-to-date, ensure keyword indexes
+                # Collection is up-to-date, ensure late-added indexes
                 existing_fields = set(info.payload_schema.keys()) if info.payload_schema else set()
                 if "tags" not in existing_fields:
                     await client.create_payload_index(
@@ -808,6 +844,15 @@ async def ensure_kagura_memories_collection(
                         field_schema="keyword",  # type: ignore[arg-type]
                     )
                     logger.info("created_missing_index", field="tags", type="keyword")
+                if "location" not in existing_fields:
+                    # WHERE axis (#1332): geo index retrofit for collections
+                    # created before the location payload existed.
+                    await client.create_payload_index(
+                        collection_name=collection_name,
+                        field_name="location",
+                        field_schema="geo",  # type: ignore[arg-type]
+                    )
+                    logger.info("created_missing_index", field="location", type="geo")
                 return
 
             # Old collection without sparse vectors — requires manual migration
@@ -941,6 +986,13 @@ async def ensure_kagura_memories_collection(
                 field_name=dt_field,
                 field_schema="datetime",  # type: ignore[arg-type]
             )
+
+        # WHERE axis (#1332): geo index for filters.near (geo_radius)
+        await client.create_payload_index(
+            collection_name=collection_name,
+            field_name="location",
+            field_schema="geo",  # type: ignore[arg-type]
+        )
 
         logger.info(
             "single_collection_indexes_created",
