@@ -350,6 +350,87 @@ async def handle_recall_upcoming(
     return _error_response("internal_error", "Database session unavailable")
 
 
+async def handle_recall_nearby(
+    args: dict[str, Any], user_id: str, workspace_id: UUID | None
+) -> list[TextContent]:
+    """List memories near a point (#1331) — recall_upcoming's spatial twin.
+
+    Deterministic filter+sort over the generated location_lat/location_lon
+    columns — NOT semantic recall, so no Hebbian write side-effects. Nearest
+    first with distance_m.
+
+    Privacy invariant (spec §7-6): the query point is precise user location —
+    neither this handler nor the geo_memory service logs lat/lon, and the
+    validation errors below never echo the coordinate values.
+    """
+    missing = [field for field in ("context_id", "lat", "lon") if field not in args]
+    if missing:
+        return _error_response("missing_fields", f"Missing required field(s): {', '.join(missing)}")
+
+    from db.base import get_db
+    from services.geo_memory import query_nearby_memories
+    from utils.geo_location import (
+        LocationValidationError,
+        clamp_nearby_k,
+        clamp_radius_m,
+        validate_query_coords,
+    )
+
+    # Validate inputs up front (before opening a DB session) so a malformed
+    # argument is a structured validation_error — the recall_upcoming pattern.
+    # Query coordinates are held to the write-side standard (bool/string
+    # numerics rejected; MCP arg coercion does not recurse into numbers here).
+    try:
+        lat, lon = validate_query_coords(args["lat"], args["lon"])
+    except LocationValidationError as e:
+        return _error_response("validation_error", str(e))
+    try:
+        radius_m = clamp_radius_m(args.get("radius_m"))
+    except (LocationValidationError, TypeError, ValueError):
+        return _error_response("validation_error", "radius_m must be a finite number")
+    try:
+        k = clamp_nearby_k(args.get("k", 20))
+    except (TypeError, ValueError):
+        return _error_response("validation_error", f"k must be an integer, got {args.get('k')!r}")
+
+    start_time = time.time()
+    async for db in get_db():
+        current_context_id: UUID | None = None
+        try:
+            current_context_id = _resolve_context_id(args["context_id"])
+            # Read path: uniform context_not_found on any deny (CWE-639 / OWASP
+            # A01), mirroring handle_recall. Cross-context nearby deliberately
+            # does not exist — it would be a location-disclosure oracle across
+            # private contexts.
+            current_context = await _resolve_context_for_read(db, user_id, current_context_id)
+
+            results = await query_nearby_memories(
+                db, current_context_id, lat=lat, lon=lon, radius_m=radius_m, k=k
+            )
+            await _log_tool_usage(
+                db, user_id, "recall_nearby", start_time, 200, current_context_id, workspace_id
+            )
+            return [
+                TextContent(
+                    type="text",
+                    text=json.dumps(
+                        {
+                            "status": "success",
+                            "results": results,
+                            **_context_response_fields(current_context),
+                        }
+                    ),
+                )
+            ]
+        except _ContextNotFoundError as e:
+            await _log_tool_usage(
+                db, user_id, "recall_nearby", start_time, 404, current_context_id, workspace_id
+            )
+            return e.to_response()
+
+    return _error_response("internal_error", "Database session unavailable")
+
+
 async def handle_load_pinned(
     args: dict[str, Any], user_id: str, workspace_id: UUID | None
 ) -> list[TextContent]:

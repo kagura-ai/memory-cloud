@@ -86,6 +86,18 @@ remember(
 
 remember(
   context_id=...,
+  summary="MCP smoke test — located memory for recall_nearby (WHERE axis)",
+  content="Geo-tagged memory seeded by smoke-test to verify recall_nearby.",
+  type="note",
+  importance=0.5,
+  tags=["smoke-test", "automated"],
+  details={"location": {"lat": 35.6812, "lon": 139.7671, "label": "smoke-test anchor"}}
+)
+-> Verify: returns a success response containing memory_id (UUID format)
+-> Save returned geo_memory_id
+
+remember(
+  context_id=...,
   summary="MCP smoke test — pinned memory for load_pinned (delivery_mode=always)",
   content="Goal/guardrail-style memory that must load deterministically every turn.",
   type="note",
@@ -132,6 +144,11 @@ recall_upcoming(context_id=..., from="now")
 -> Verify: status=success
 -> Verify: results array contains the time memory seeded in step 3 (time_memory_id present)
 -> Verify: all returned results have type="time"
+
+recall_nearby(context_id=..., lat=35.6812, lon=139.7671, radius_m=500)
+-> Verify: status=success
+-> Verify: results array contains the located memory seeded in step 3 (geo_memory_id present)
+-> Verify: that result carries distance_m (a small number — the query point equals the stored point)
 
 load_pinned(context_id=...)
 -> Verify: status=success; returns the COMPLETE unranked set for delivery_mode="always"

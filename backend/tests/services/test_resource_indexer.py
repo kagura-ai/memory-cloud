@@ -308,13 +308,16 @@ class TestResourceIndexerNamedVectorUpsert:
     @pytest.mark.asyncio
     async def test_apply_upsert_strips_computed_column_keys(self, indexer, mock_db):
         """#896 (haiku review): worker-supplied external_blob/trigger keys are
-        stripped so they can't pollute the persisted Computed columns."""
+        stripped so they can't pollute the persisted Computed columns.
+        #1331 adds 'location' — connector-ingested coordinates must never
+        drive the location_lat/location_lon generated columns."""
         event = _make_event()
         event.event_metadata = {
             "memory_details": {
                 "channel_id": "C01",
                 "external_blob": {"backend": "r2", "ref": "x"},
                 "trigger": {"from": "2099", "until": "2100"},
+                "location": {"lat": 35.68, "lon": 139.76},
             },
         }
         await indexer._apply_upsert(
@@ -325,6 +328,7 @@ class TestResourceIndexerNamedVectorUpsert:
         assert memory.details["channel_id"] == "C01"
         assert "external_blob" not in memory.details
         assert "trigger" not in memory.details
+        assert "location" not in memory.details
 
     @pytest.mark.asyncio
     async def test_apply_upsert_drops_oversized_source_uri(self, indexer, mock_db):

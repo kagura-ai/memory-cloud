@@ -479,7 +479,13 @@ class MemoryHealthService:
         no longer false-WARNs write_only_store.
         """
         since = utcnow() - timedelta(days=_USAGE_WINDOW_DAYS)
-        watched_endpoints = ["mcp:recall", "mcp:recall_upcoming", "mcp:remember", "mcp:explore"]
+        watched_endpoints = [
+            "mcp:recall",
+            "mcp:recall_upcoming",
+            "mcp:recall_nearby",  # #1331: the WHERE-axis lane is a real read
+            "mcp:remember",
+            "mcp:explore",
+        ]
         conditions = [
             UsageStats.user_id == user_id,
             UsageStats.created_at >= since,
@@ -677,8 +683,11 @@ class MemoryHealthService:
         status = STATUS_OK
         recalls = usage.get("recall", 0)
         recall_upcoming = usage.get("recall_upcoming", 0)
+        # #1331: a context read exclusively via the spatial lane (field/mobile
+        # agents) must not false-WARN write_only_store.
+        recall_nearby = usage.get("recall_nearby", 0)
 
-        if heuristics and recalls + recall_upcoming == 0 and active_memories > 0:
+        if heuristics and recalls + recall_upcoming + recall_nearby == 0 and active_memories > 0:
             status = STATUS_WARN
             notes.append(
                 _note(
@@ -694,6 +703,7 @@ class MemoryHealthService:
                 "window_days": _USAGE_WINDOW_DAYS,
                 "recall_calls": recalls,
                 "recall_upcoming_calls": recall_upcoming,
+                "recall_nearby_calls": recall_nearby,
                 "remember_calls": usage.get("remember", 0),
                 "explore_calls": usage.get("explore", 0),
                 **posture,

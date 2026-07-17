@@ -501,7 +501,10 @@ class ResourceIndexer:
     # non-blob memory), and trigger would make a resource_data memory surface as a
     # Time Memory. resource_id/doc_id are also computed-backed but the indexer
     # overwrites those itself, so they need no stripping.
-    _LINEAGE_RESERVED_KEYS = frozenset({"external_blob", "trigger"})
+    # #896 rule: details keys that drive generated columns / platform lanes
+    # must never be worker-supplied. 'location' (#1331) drives
+    # location_lat/lon — connector-ingested coordinates are stripped.
+    _LINEAGE_RESERVED_KEYS = frozenset({"external_blob", "trigger", "location"})
 
     def _extract_worker_lineage(self, event: ResourceEvent) -> tuple[dict[str, Any], str | None]:
         """Extract ai-worker lineage (#896) from event_metadata.
