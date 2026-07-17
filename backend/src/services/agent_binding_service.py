@@ -240,6 +240,57 @@ async def emit_row_filter_would_deny(
     )
 
 
+async def binding_memory_sql_predicate(db: AsyncSession) -> Any | None:
+    """SQL form of the per-memory type/source binding filter (#1301).
+
+    For SELECT/aggregate surfaces that never materialize full memory rows
+    (the ``/memory/list`` count + page pair, the access-patterns aggregates,
+    the stats ``GROUP BY``\\ s), post-filtering with
+    :func:`filter_memory_rows_by_binding` would leave the counts acting as an
+    existence oracle over denied rows and make pagination drift from
+    ``total``. This builds the same subtraction as
+    :meth:`BindingRowFilter.permits` as a WHERE clause over ``Memory``
+    instead — one bulk binding SELECT per request, applied identically to the
+    count and the row query. Contexts without a restricting binding are
+    untouched (the context-level gate is the upstream chokepoints' job, same
+    as the row lever).
+
+    Returns ``None`` (apply nothing) for non-agent credentials, shadow-mode
+    scopes, and agents whose bindings restrict nothing. Shadow here is a pure
+    no-op: these surfaces sit outside the MAE operation vocabulary, so the
+    enforcement ramp observes would-deny volume through the recall /
+    load_pinned lanes, not here.
+    """
+    from sqlalchemy import and_, false, not_, or_
+
+    from auth.agent_scope import get_agent_scope
+    from models.memory import Memory
+
+    scope = get_agent_scope()
+    if scope is None or scope.enforcement_mode == AGENT_ENFORCEMENT_SHADOW:
+        return None
+
+    result = await db.execute(
+        select(AgentContextBinding).where(AgentContextBinding.agent_id == scope.agent_id)
+    )
+    denied_clauses = []
+    for binding in result.scalars().all():
+        row_filter = BindingRowFilter.from_binding(binding)
+        if row_filter is None:
+            continue
+        dims = []
+        if row_filter.allowed_memory_types is not None:
+            allowed_types = sorted(row_filter.allowed_memory_types)
+            dims.append(Memory.type.in_(allowed_types) if allowed_types else false())
+        if row_filter.allowed_source_types is not None:
+            allowed_sources = sorted(row_filter.allowed_source_types)
+            dims.append(Memory.source_type.in_(allowed_sources) if allowed_sources else false())
+        denied_clauses.append(and_(Memory.context_id == binding.context_id, not_(and_(*dims))))
+    if not denied_clauses:
+        return None
+    return not_(or_(*denied_clauses))
+
+
 async def filter_memory_rows_by_binding(
     db: AsyncSession,
     rows: list[Any],

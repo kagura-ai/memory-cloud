@@ -570,6 +570,11 @@ class MemoryService:
             access="write",  # #1275: WRITE path — can_read-only binding must not permit mutation
             operation="update",  # #1286 (P0-5): deny-capture audit identity
             memory_id=request.memory_id,
+            # #1301: id-addressed update of a read-denied row must be a
+            # uniform 404 (reference/forget doctrine) — REST PATCH and this
+            # MCP-reachable path stay in parity (#1291/#1292).
+            memory_type=memory.type,
+            memory_source_type=memory.source_type,
         )
         if not can_access:
             raise NotFoundException("Memory", str(request.memory_id))
@@ -774,6 +779,12 @@ class MemoryService:
             access="write",  # #1275: WRITE path — can_read-only binding must not permit mutation
             operation="update",  # #1286 (P0-5): deny-capture audit identity
             memory_id=memory_id,
+            # #1301: the PATCH response echoes full L3 content — a no-op PATCH
+            # on a read-denied row would read it back. Threading type/source
+            # makes the id-addressed op uniformly 404 on denied rows, the same
+            # doctrine as reference/forget (#1299).
+            memory_type=memory.type,
+            memory_source_type=memory.source_type,
         )
         if not can_access:
             raise NotFoundException("Memory", str(memory_id))
@@ -1063,13 +1074,18 @@ class MemoryService:
             current_workspace_id=current_workspace_id,
         )
 
-        # Only forget old memory after new one is successfully created
+        # Only forget old memory after new one is successfully created.
+        # #1301: this delete is system maintenance (replacing the row the
+        # caller addressed by external_id), not an agent read — the #1299
+        # per-memory read filter must not silently no-op it, or a denied-type
+        # existing row survives as a live duplicate alongside the new row.
         operation = "created"
         if existing:
             await self.forget(
                 ForgetRequest(memory_id=existing.id),
                 user_id=user_id,
                 current_context_id=current_context_id,
+                _skip_binding_row_filter=True,
             )
             operation = "replaced"
 
@@ -3154,6 +3170,8 @@ class MemoryService:
         user_id: str,
         current_context_id: UUID | None = None,
         key_workspace_id: UUID | None = None,  # Issue #963/#1281: pure key scope
+        *,
+        _skip_binding_row_filter: bool = False,
     ) -> ForgetResponse:
         """Delete memory (single or multiple via query).
 
@@ -3163,6 +3181,12 @@ class MemoryService:
             request: Forget request (memory_id or query)
             user_id: User ID
             current_context_id: Current context UUID (Issue #82)
+            _skip_binding_row_filter: INTERNAL maintenance callers only
+                (#1301) — the upsert replacement delete. Skips the #1299
+                per-memory type/source read filter while keeping the
+                context-level write gate, so replacing a denied-type row
+                cannot silently no-op and leave a live duplicate per
+                external_id. Never expose through transport layers.
 
         Returns:
             ForgetResponse with deleted count and IDs
@@ -3204,8 +3228,11 @@ class MemoryService:
                     access="write",  # #1275: WRITE path — can_read-only binding must not permit mutation
                     operation="forget",  # #1286 (P0-5): the denied row is the ONLY
                     memory_id=request.memory_id,  # record — this deny is a silent empty success
-                    memory_type=memory.type,  # #1299: per-memory type/source filter
-                    memory_source_type=memory.source_type,
+                    # #1299: per-memory type/source filter; #1301 lets the
+                    # internal upsert replacement delete opt out (context-level
+                    # gate above still applies).
+                    memory_type=None if _skip_binding_row_filter else memory.type,
+                    memory_source_type=None if _skip_binding_row_filter else memory.source_type,
                 )
 
                 if not can_access:
@@ -3766,6 +3793,18 @@ class MemoryService:
             base_conditions.append(Memory.workspace_id == UUID(workspace_id))
         if context_id:
             base_conditions.append(Memory.context_id == UUID(context_id))
+
+        # #1301: per-memory type/source binding filter, SQL form. Every
+        # aggregate below shares base_conditions, so an enforce-mode agent
+        # sees counts over exactly the rows it can read — by_type must not be
+        # an existence oracle over denied types. Covers the REST /memory/stats
+        # route and MCP get_context_info by construction (service layer,
+        # #1291/#1292 parity). None for non-agent / shadow scopes.
+        from services.agent_binding_service import binding_memory_sql_predicate
+
+        binding_predicate = await binding_memory_sql_predicate(self.db)
+        if binding_predicate is not None:
+            base_conditions.append(binding_predicate)
 
         # Total count (exclude soft-deleted)
         total_result = await self.db.execute(

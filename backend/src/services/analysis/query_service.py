@@ -451,6 +451,11 @@ async def get_cluster(
             Memory.summary,
             Memory.tags,
             Memory.importance,
+            # #1301: the row-filter lever below needs context_id/type/
+            # source_type on each row; they never reach the response.
+            Memory.context_id,
+            Memory.type,
+            Memory.source_type,
         )
         .join(
             MemoryAnalysisAssignment,
@@ -479,6 +484,16 @@ async def get_cluster(
         rows = rows[:page_size]
         next_cursor = str(rows[-1].id)
 
+    # #1301: cluster members expose L1 summaries — denied type/source rows
+    # drop for enforce-mode agents (shadow keeps them; outside the MAE
+    # vocabulary, so shadow is log-only). Applied AFTER the keyset cursor is
+    # derived, so pagination advances over denied rows instead of stalling.
+    # ``cluster.count`` stays the stored whole-cluster size (metadata-only
+    # aggregate, same severity class as stats counts).
+    from services.agent_binding_service import filter_memory_rows_by_binding
+
+    rows, _ = await filter_memory_rows_by_binding(db, rows, operation=None, user_id=None)
+
     memories_out = [
         {
             "memory_id": str(row.id),
@@ -496,7 +511,15 @@ async def get_cluster(
     if rep_ids:
         rep_rows = (
             await db.execute(
-                select(Memory.id, Memory.summary, Memory.tags, Memory.importance).where(
+                select(
+                    Memory.id,
+                    Memory.summary,
+                    Memory.tags,
+                    Memory.importance,
+                    Memory.context_id,
+                    Memory.type,
+                    Memory.source_type,
+                ).where(
                     and_(
                         Memory.id.in_(rep_ids),
                         Memory.deleted_at.is_(None),
@@ -507,6 +530,10 @@ async def get_cluster(
                 )
             )
         ).all()
+        # #1301: same subtraction for representatives as for members.
+        rep_rows, _ = await filter_memory_rows_by_binding(
+            db, list(rep_rows), operation=None, user_id=None
+        )
         # Preserve the order from ``representative_memory_ids`` so the UI
         # gets stable "top-k" semantics across repeated calls.
         rep_by_id = {r.id: r for r in rep_rows}

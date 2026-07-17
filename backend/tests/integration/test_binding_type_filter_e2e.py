@@ -465,3 +465,336 @@ async def test_upcoming_time_lane_filtered(env, db_session):
         db_session, env["ctx"], q_from=None, q_until=None, k=10
     )
     assert filtered == []
+
+
+# ---------------------------------------------------------------------------
+# #1301: enumeration / aggregate / update-response read surfaces.
+# Same env, same doctrine: enforce subtracts, shadow changes nothing
+# observable, non-agent credentials are untouched. These surfaces are
+# outside the MAE operation vocabulary, so enforcement here is log-only
+# (no would_deny rows) — the recall/load_pinned lanes above pin the
+# audit shape for the ramp.
+# ---------------------------------------------------------------------------
+
+
+async def _list_route(env, db_session, **overrides):
+    """Call the /memory/list route handler directly (route-owned SQL —
+    there is no service method to test below it)."""
+    from api.routes.memory import list_memories
+
+    kwargs = {
+        "user": {"user_id": env["uid"]},
+        "db": db_session,
+        "scope": None,
+        "type": None,
+        "context_id": env["ctx"],
+        "q": None,
+        "tags": None,
+        "tags_match": "any",
+        "trigger_from": None,
+        "trigger_until": None,
+        "order_by": "created_at",
+        "limit": 50,
+        "offset": 0,
+    }
+    kwargs.update(overrides)
+    return await list_memories(**kwargs)
+
+
+@pytest.mark.asyncio(loop_scope="session")
+async def test_list_route_no_scope_returns_all_rows(env, db_session):
+    response = await _list_route(env, db_session)
+    assert {uuid.UUID(m.id) for m in response.memories} == {
+        env["mem_note"],
+        env["mem_time"],
+        env["mem_api"],
+    }
+    assert response.total == 3
+
+
+@pytest.mark.asyncio(loop_scope="session")
+async def test_list_route_enforce_filters_rows_and_total(env, db_session):
+    _scope(env, "agent_filtered")
+    response = await _list_route(env, db_session)
+    assert {uuid.UUID(m.id) for m in response.memories} == {env["mem_note"]}
+    # total must not act as an existence oracle over denied rows.
+    assert response.total == 1
+    assert response.has_more is False
+
+
+@pytest.mark.asyncio(loop_scope="session")
+async def test_list_route_shadow_unchanged(env, db_session):
+    _scope(env, "agent_shadow", mode="shadow")
+    response = await _list_route(env, db_session)
+    assert len(response.memories) == 3
+    assert response.total == 3
+
+
+@pytest.mark.asyncio(loop_scope="session")
+async def test_access_patterns_enforce_filters_rows_and_distribution(env, db_session):
+    from api.routes.memory import get_access_patterns
+    from utils.datetime import utcnow
+
+    # most_accessed only surfaces rows with last_used_at set.
+    for key in ("mem_note", "mem_time", "mem_api"):
+        row = await db_session.get(Memory, env[key])
+        row.last_used_at = utcnow()
+    await db_session.flush()
+
+    baseline = await get_access_patterns(
+        user={"user_id": env["uid"]}, context_id=env["ctx"], db=db_session, days=30
+    )
+    assert baseline["type_distribution"] == {"note": 2, "time": 1}
+    assert len(baseline["most_accessed"]) == 3
+
+    _scope(env, "agent_filtered")
+    filtered = await get_access_patterns(
+        user={"user_id": env["uid"]}, context_id=env["ctx"], db=db_session, days=30
+    )
+    # mem_time is type-denied, mem_api is source-denied.
+    assert filtered["type_distribution"] == {"note": 1}
+    assert {m["memory_id"] for m in filtered["most_accessed"]} == {str(env["mem_note"])}
+    assert filtered["recent_access_count"] == 1
+
+
+@pytest.mark.asyncio(loop_scope="session")
+async def test_access_patterns_shadow_unchanged(env, db_session):
+    from api.routes.memory import get_access_patterns
+    from utils.datetime import utcnow
+
+    for key in ("mem_note", "mem_time", "mem_api"):
+        row = await db_session.get(Memory, env[key])
+        row.last_used_at = utcnow()
+    await db_session.flush()
+
+    _scope(env, "agent_shadow", mode="shadow")
+    response = await get_access_patterns(
+        user={"user_id": env["uid"]}, context_id=env["ctx"], db=db_session, days=30
+    )
+    assert response["type_distribution"] == {"note": 2, "time": 1}
+    assert len(response["most_accessed"]) == 3
+
+
+@pytest.mark.asyncio(loop_scope="session")
+async def test_stats_enforce_intersects_all_aggregates(env, db_session):
+    svc = MemoryService(db_session)
+    baseline = await svc.get_stats(
+        env["uid"], workspace_id=str(env["ws_id"]), context_id=str(env["ctx"])
+    )
+    assert baseline.by_type == {"note": 2, "time": 1}
+    assert baseline.total_count == 3
+
+    _scope(env, "agent_filtered")
+    stats = await svc.get_stats(
+        env["uid"], workspace_id=str(env["ws_id"]), context_id=str(env["ctx"])
+    )
+    # Only note/manual survives — the aggregate is not an existence oracle.
+    assert stats.by_type == {"note": 1}
+    assert stats.total_count == 1
+    assert stats.working_count + stats.persistent_count == 1
+
+
+@pytest.mark.asyncio(loop_scope="session")
+async def test_stats_deny_all_agent_sees_zero(env, db_session):
+    _scope(env, "agent_deny_all")
+    stats = await MemoryService(db_session).get_stats(
+        env["uid"], workspace_id=str(env["ws_id"]), context_id=str(env["ctx"])
+    )
+    assert stats.total_count == 0
+    assert stats.by_type == {}
+
+
+@pytest.mark.asyncio(loop_scope="session")
+async def test_stats_shadow_unchanged(env, db_session):
+    _scope(env, "agent_shadow", mode="shadow")
+    stats = await MemoryService(db_session).get_stats(
+        env["uid"], workspace_id=str(env["ws_id"]), context_id=str(env["ctx"])
+    )
+    assert stats.by_type == {"note": 2, "time": 1}
+    assert stats.total_count == 3
+
+
+@pytest_asyncio.fixture(loop_scope="session")
+async def cluster_env(env, db_session):
+    """A succeeded analysis run whose single cluster contains all three
+    env memories, with the type-denied row as a representative."""
+    from datetime import datetime
+
+    from models.analysis import (
+        MemoryAnalysis,
+        MemoryAnalysisAssignment,
+        MemoryAnalysisCluster,
+    )
+    from models.llm_pricing import LLMPricing
+    from utils.datetime import utcnow
+
+    pricing = LLMPricing(
+        provider="openai",
+        model="gpt-5-nano",
+        unit_type="input_tokens",
+        price_per_unit=0.20,
+        effective_from=datetime(2026, 1, 1),
+    )
+    db_session.add(pricing)
+    await db_session.flush()
+
+    run = MemoryAnalysis(
+        id=uuid.uuid4(),
+        workspace_id=env["ws_id"],
+        context_id=env["ctx"],
+        triggered_by=env["uid"],
+        status="succeeded",
+        started_at=utcnow(),
+        finished_at=utcnow(),
+        model_id=pricing.id,
+        model_snapshot={"model": "gpt-5-nano", "rates": {}},
+        embedding_model="text-embedding-3-small",
+        params={},
+        input_count=3,
+        paid_by="byok",
+    )
+    db_session.add(run)
+    await db_session.flush()
+
+    cluster = MemoryAnalysisCluster(
+        id=uuid.uuid4(),
+        analysis_id=run.id,
+        cluster_index=0,
+        label="all rows",
+        description=None,
+        count=3,
+        centroid_2d=[0.0, 0.0],
+        representative_memory_ids=[env["mem_time"], env["mem_note"]],
+        property_stats={},
+        label_confidence=0.9,
+    )
+    db_session.add(cluster)
+    await db_session.flush()
+
+    for i, key in enumerate(("mem_note", "mem_time", "mem_api")):
+        db_session.add(
+            MemoryAnalysisAssignment(
+                analysis_id=run.id,
+                memory_id=env[key],
+                cluster_id=cluster.id,
+                x=float(i),
+                y=0.0,
+            )
+        )
+    await db_session.flush()
+    return {"run_id": run.id}
+
+
+@pytest.mark.asyncio(loop_scope="session")
+async def test_get_cluster_enforce_filters_members_and_representatives(
+    env, cluster_env, db_session
+):
+    from services.analysis import query_service
+
+    baseline = await query_service.get_cluster(
+        db_session, workspace_id=env["ws_id"], run_id=cluster_env["run_id"], cluster_index=0
+    )
+    assert {m["memory_id"] for m in baseline["memories"]} == {
+        str(env["mem_note"]),
+        str(env["mem_time"]),
+        str(env["mem_api"]),
+    }
+    assert {r["memory_id"] for r in baseline["representatives"]} == {
+        str(env["mem_time"]),
+        str(env["mem_note"]),
+    }
+
+    _scope(env, "agent_filtered")
+    filtered = await query_service.get_cluster(
+        db_session, workspace_id=env["ws_id"], run_id=cluster_env["run_id"], cluster_index=0
+    )
+    assert {m["memory_id"] for m in filtered["memories"]} == {str(env["mem_note"])}
+    assert {r["memory_id"] for r in filtered["representatives"]} == {str(env["mem_note"])}
+
+
+@pytest.mark.asyncio(loop_scope="session")
+async def test_get_cluster_shadow_unchanged(env, cluster_env, db_session):
+    from services.analysis import query_service
+
+    _scope(env, "agent_shadow", mode="shadow")
+    response = await query_service.get_cluster(
+        db_session, workspace_id=env["ws_id"], run_id=cluster_env["run_id"], cluster_index=0
+    )
+    assert len(response["memories"]) == 3
+    assert len(response["representatives"]) == 2
+
+
+@pytest.mark.asyncio(loop_scope="session")
+async def test_patch_denied_type_uniform_404(env, db_session):
+    from models.schemas import PatchMemoryRequest
+
+    _scope(env, "agent_filtered")
+    svc = MemoryService(db_session)
+    # A no-op PATCH on a read-denied row must not read it back — id-addressed
+    # ops on denied rows are uniformly 404 (the #1299 forget/reference doctrine).
+    with pytest.raises(NotFoundException):
+        await svc.patch_memory(env["mem_time"], PatchMemoryRequest(importance=0.9), env["uid"])
+
+
+@pytest.mark.asyncio(loop_scope="session")
+async def test_update_in_place_denied_type_uniform_404(env, db_session):
+    from models.schemas import UpdateMemoryRequest
+
+    _scope(env, "agent_filtered")
+    svc = MemoryService(db_session)
+    with pytest.raises(NotFoundException):
+        await svc.update_memory(
+            UpdateMemoryRequest(memory_id=env["mem_api"], importance=0.9),
+            user_id=env["uid"],
+            current_context_id=env["ctx"],
+        )
+
+
+@pytest.mark.asyncio(loop_scope="session")
+async def test_upsert_replacement_forget_bypasses_row_filter(env, db_session):
+    """#1301: the upsert's internal replacement delete is maintenance, not an
+    agent read — a denied-type existing row must still be replaced, never
+    left as a live duplicate alongside the new row."""
+    from unittest.mock import patch
+
+    from models.schemas import RememberResponse, UpdateMemoryRequest
+
+    ext = f"ext-{uuid.uuid4().hex[:8]}"
+    old = Memory(
+        id=uuid.uuid4(),
+        user_id=env["uid"],
+        workspace_id=env["ws_id"],
+        context_id=env["ctx"],
+        summary="old external row",
+        content="old content",
+        type="note",
+        client="test",
+        tags=[],
+        source_type=SOURCE_TYPE_API,  # source-denied for agent_filtered
+        details={"resource_id": ext},
+    )
+    db_session.add(old)
+    await db_session.flush()
+
+    _scope(env, "agent_filtered")
+    svc = MemoryService(db_session)
+    svc.remember = AsyncMock(return_value=RememberResponse(memory_id=uuid.uuid4(), scope="working"))
+    with patch("services.memory_service.delete_memory_from_qdrant", new=AsyncMock()):
+        response = await svc.update_memory(
+            UpdateMemoryRequest(
+                external_id=ext,
+                summary="replacement summary text",
+                content="replacement content",
+                type="note",
+            ),
+            user_id=env["uid"],
+            current_context_id=env["ctx"],
+            current_workspace_id=env["ws_id"],
+        )
+
+    assert response.operation == "replaced"
+    refreshed = await db_session.get(Memory, old.id)
+    assert refreshed.deleted_at is not None, (
+        "internal replacement forget must bypass the per-memory read filter — "
+        "a denied-type row left live creates duplicates per external_id"
+    )
