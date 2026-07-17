@@ -98,6 +98,18 @@ Deterministic time-window query over Time Memories (type='time'), soonest first.
   - `until` — string (naive ISO upper bound)
   - `k` — integer (default 20, max 100) ⚠ same `k` name as recall but a different default (20 vs 5)
 
+### recall_nearby
+
+Deterministic spatial query over memories carrying `details.location`, nearest first with `distance_m` (#1331).
+
+- **Required**:
+  - `context_id` — string, format `uuid`
+  - `lat` — number (-90..90) ⚠ JSON number required — a string numeric is a `validation_error` (arg coercion does not recurse into coordinates)
+  - `lon` — number (-180..180), same number-only rule
+- **Optional**:
+  - `radius_m` — number (default 1000, clamped to [1, 1000000])
+  - `k` — integer (default 20, max 100) — same clamp as recall_upcoming
+
 ### load_pinned
 
 Deterministically load the complete set of delivery_mode='always' memories for a context (counterpart to probabilistic recall).

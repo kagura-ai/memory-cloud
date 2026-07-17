@@ -86,6 +86,7 @@ SECURITY: DO NOT store secrets, credentials, or sensitive data in memories, incl
 - OAuth refresh tokens, session cookies
 - Contents of .env files or environment variables with credentials
 If the user's input contains such data, refuse to store it and ask them to redact the sensitive values first.
+EXCEPTION — location (#1331): geographic coordinates in details.location are a FIRST-CLASS payload (the WHERE axis), stored deliberately when the user wants a memory tied to a place. details.location = {lat, lon, label?, text?} (lat/lon must be JSON numbers, not strings; validated server-side; queryable via recall_nearby). Put coordinates ONLY there — never in context (context is replicated into the search index's payload store). All other PII rules above still apply.
 
 Supports 3-layer architecture:
 - summary: Concise overview for search (10-500 chars) - write the reusable conclusion/decision, not the process
@@ -221,6 +222,7 @@ SECURITY: DO NOT store secrets, credentials, or sensitive data in memories, incl
 - OAuth refresh tokens, session cookies
 - Contents of .env files or environment variables with credentials
 If the user's input contains such data, refuse to store it and ask them to redact the sensitive values first.
+EXCEPTION — location (#1331): geographic coordinates in details.location are a FIRST-CLASS payload (the WHERE axis), stored deliberately when the user wants a memory tied to a place. details.location = {lat, lon, label?, text?} (lat/lon must be JSON numbers, not strings; validated server-side; queryable via recall_nearby). Put coordinates ONLY there — never in context (context is replicated into the search index's payload store). All other PII rules above still apply.
 
 IMPORTANT: Always specify context_id.
 
@@ -446,6 +448,52 @@ Returns: {status, memory: {memory_id, summary, context_summary, content, details
                     "until": {
                         "type": "string",
                         "description": "Upper bound, naive ISO. Omit for an open-ended (future) window.",
+                    },
+                    "k": {
+                        "type": "integer",
+                        "description": "Max results (default 20, max 100).",
+                    },
+                },
+            },
+        },
+        {
+            "name": "recall_nearby",
+            "readOnly": True,
+            "description": (
+                "List memories near a geographic point, nearest first with "
+                'distance_m. Use for "what happened around here?" / '
+                '"この辺で何かあった?" questions. This is a deterministic spatial '
+                "query over stored coordinates (details.location), NOT semantic "
+                "search — for topic search use recall(). Store a location with "
+                "remember(details={'location': {'lat': 35.68, 'lon': 139.76, "
+                "'label': 'optional'}}) — lat/lon must be JSON numbers, not "
+                "strings, and any memory type can carry a location (validated "
+                "server-side). NOTE: update_memory/PATCH replace details wholesale "
+                "— resend location when updating details or it is dropped."
+                "\n\nReturns: {status, results: [{memory_id, summary, type, details, "
+                "distance_m}], context_id, context_name, context_display_name, "
+                "context_is_private, context_is_locked}."
+            ),
+            "inputSchema": {
+                "type": "object",
+                "required": ["context_id", "lat", "lon"],
+                "properties": {
+                    "context_id": {
+                        "type": "string",
+                        "format": "uuid",
+                        "description": "Target context UUID from list_contexts(). Do NOT fabricate.",
+                    },
+                    "lat": {
+                        "type": "number",
+                        "description": "Query latitude (-90..90). JSON number, not a string.",
+                    },
+                    "lon": {
+                        "type": "number",
+                        "description": "Query longitude (-180..180). JSON number, not a string.",
+                    },
+                    "radius_m": {
+                        "type": "number",
+                        "description": "Search radius in meters (default 1000, clamped to [1, 1000000]).",
                     },
                     "k": {
                         "type": "integer",

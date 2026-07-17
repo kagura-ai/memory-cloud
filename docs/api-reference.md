@@ -1173,7 +1173,18 @@ List forward-looking Time Memories (`type="time"`, `delivery_mode="on_trigger"`)
 }
 ```
 
-#### 10. set_state
+#### 10. recall_nearby
+
+List memories near a geographic point (`details.location`), nearest first with `distance_m`. A deterministic spatial query over stored coordinates — the WHERE-axis twin of `recall_upcoming`, not semantic search. Store a location with `remember(details={"location": {"lat": 35.68, "lon": 139.76, "label": "optional"}})` — `lat`/`lon` must be JSON numbers (validated server-side), and any memory type can carry one.
+
+```python
+{
+  "name": "recall_nearby",
+  "arguments": { "context_id": "550e8400-...", "lat": 35.6812, "lon": 139.7671, "radius_m": 1000 }
+}
+```
+
+#### 11. set_state
 
 Upsert agent scratch state (excluded from `recall()`). Requires `Editor`.
 
@@ -1189,7 +1200,7 @@ Upsert agent scratch state (excluded from `recall()`). Requires `Editor`.
 }
 ```
 
-#### 11. get_state
+#### 12. get_state
 
 Read one key, or omit `key` to list all live state for the context.
 
@@ -1200,7 +1211,7 @@ Read one key, or omit `key` to list all live state for the context.
 }
 ```
 
-#### 12. feedback
+#### 13. feedback
 
 Record whether a recalled memory was helpful (read-adjacent; any `Viewer` may call). Append-only; **collected but not auto-acted-on** (see [eval gate](eval/retrieval-feedback-and-eval-gate.md)).
 

@@ -279,6 +279,7 @@ Kagura is a **knowledge store** for humans *and* an **agent memory substrate** f
 
 - **`always` (pinned)** — `load_pinned()` returns the *complete, unranked* always-load set every call — the deterministic counterpart to probabilistic `recall()`. Pin with `remember(delivery_mode="always")` (or `update_memory(...)`); pinning also forces `scope="persistent"` so there is no sleep-consolidation wait. Unpin with `update_memory(delivery_mode="on_recall")`.
 - **`on_trigger` (time)** — a Time Memory (`type="time"`, `details.trigger={year, month, day?}`) surfaces via `recall_upcoming()` when its window is upcoming. This is a deterministic time query, not semantic search.
+- **WHERE axis (location)** — orthogonal to both `type` and `delivery_mode`: any memory can carry `details.location = {lat, lon, label?, text?}` (server-validated; `lat`/`lon` must be JSON numbers, not strings). `recall_nearby(context_id, lat, lon, radius_m=1000)` lists memories near a point, nearest first with `distance_m` — the deterministic spatial twin of `recall_upcoming()`. Coordinates belong ONLY in `details.location` (never in `context`, which is replicated into the search-index payload store), and `details` is replaced wholesale on update — resend `location` when updating details or it is dropped.
 
 ### 2. Trust tier — provenance & behaviour-influencing reads
 

@@ -19,6 +19,7 @@ from sqlalchemy import (
     CheckConstraint,
     Computed,  # Migration 061: For generated columns
     DateTime,
+    Double,  # #1331: WHERE-axis generated coordinate columns
     Float,
     ForeignKey,  # Migration 062: For context_id FK
     Index,
@@ -305,6 +306,35 @@ class Memory(Base):
         index=False,
     )
 
+    # WHERE axis (#1331): generated numeric coordinates extracted from
+    # details.location.lat/lon (validated + 7-decimal-normalized by
+    # MemoryService._apply_location on every write path). Unlike the time
+    # axis' TEXT trick, ``::double precision`` is IMMUTABLE, so these are real
+    # numeric columns. The regex guard NULLs malformed values instead of
+    # failing the INSERT (raw-SQL defense); JSONB renders numerics via
+    # ``numeric`` (never exponent notation), so writer-normalized values
+    # always match. Partial btree (location_lat, location_lon) WHERE
+    # location_lat IS NOT NULL AND deleted_at IS NULL is created in migration
+    # e68_1331_location_cols.
+    location_lat: Mapped[float | None] = mapped_column(
+        Double,
+        Computed(
+            r"CASE WHEN details->'location'->>'lat' ~ '^-?[0-9]+(\.[0-9]+)?$' "
+            "THEN (details->'location'->>'lat')::double precision ELSE NULL END",
+            persisted=True,
+        ),
+        index=False,
+    )
+    location_lon: Mapped[float | None] = mapped_column(
+        Double,
+        Computed(
+            r"CASE WHEN details->'location'->>'lon' ~ '^-?[0-9]+(\.[0-9]+)?$' "
+            "THEN (details->'location'->>'lon')::double precision ELSE NULL END",
+            persisted=True,
+        ),
+        index=False,
+    )
+
     # Constraints
     __table_args__ = (
         CheckConstraint("importance BETWEEN 0 AND 1", name="valid_importance"),
@@ -418,6 +448,28 @@ class Memory(Base):
             "AND trigger_until IS NOT NULL "
             "AND trigger_until ~ '^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}$')",
             name="valid_trigger_window_format",
+        ),
+        # WHERE axis (#1331) partial btree backing recall_nearby's bbox
+        # prefilter. The predicate carries deleted_at IS NULL (an improvement
+        # over idx_memories_trigger_from) so the query's tombstone condition
+        # must appear verbatim for the index to serve — a missing predicate
+        # shows up as a seq scan instead of a silent leak. Created in
+        # migration e68_1331_location_cols.
+        Index(
+            "idx_memories_location",
+            "location_lat",
+            "location_lon",
+            postgresql_where=text("location_lat IS NOT NULL AND deleted_at IS NULL"),
+        ),
+        # WHERE axis (#1331) range CHECK — raw-SQL defense behind
+        # normalize_location. A CHECK passes when the expression is NULL, so
+        # rows without a location (both columns NULL from the regex guard)
+        # pass; the explicit IS NULL arms make that reading unmissable while
+        # a present-but-out-of-range value is a definite FALSE.
+        CheckConstraint(
+            "(location_lat IS NULL OR (location_lat >= -90 AND location_lat <= 90)) "
+            "AND (location_lon IS NULL OR (location_lon >= -180 AND location_lon <= 180))",
+            name="valid_location_range",
         ),
     )
 
