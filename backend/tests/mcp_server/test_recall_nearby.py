@@ -122,19 +122,31 @@ async def test_invalid_coordinates_are_validation_errors(bad):
 
 
 @pytest.mark.asyncio
-async def test_invalid_coordinate_error_does_not_echo_value():
+@pytest.mark.parametrize(
+    ("lat", "lon", "leaked"),
+    [
+        (95.123456, 139.76, "95.123456"),  # lat-rejection branch
+        (35.68, 200.567891, "200.567891"),  # lon-rejection branch
+    ],
+)
+async def test_invalid_coordinate_error_does_not_echo_value(lat, lon, leaked):
     # Privacy invariant #6: even rejected coordinates are location data —
-    # the structured error names the rule, never the value.
-    result = await handle_recall_nearby(_args(lat=89.123456, lon=200.5), "u1", None)
+    # the structured error names the rule, never the value. Both rejection
+    # branches are driven (a valid coordinate not appearing is vacuous).
+    result = await handle_recall_nearby(_args(lat=lat, lon=lon), "u1", None)
     payload = json.loads(result[0].text)
     assert payload["error"] == "validation_error"
-    assert "200.5" not in payload["message"]
-    assert "89.123456" not in payload["message"]
+    assert leaked not in payload["message"]
 
 
 @pytest.mark.asyncio
 async def test_invalid_k_and_radius_are_validation_errors():
-    for args in (_args(k="many"), _args(radius_m="wide"), _args(radius_m=True)):
+    for args in (
+        _args(k="many"),
+        _args(k=True),  # bool-is-int must not clamp to 1 result silently
+        _args(radius_m="wide"),
+        _args(radius_m=True),
+    ):
         result = await handle_recall_nearby(args, "u1", None)
         assert json.loads(result[0].text)["error"] == "validation_error"
 

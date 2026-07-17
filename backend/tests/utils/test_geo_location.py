@@ -146,17 +146,33 @@ class TestQueryHelpers:
         assert clamp_radius_m(250) == 250.0
 
     def test_bbox_simple_midlatitude(self):
-        # 1km at Tokyo: lon half-width ≈ radius / (111320 * cos(lat)),
-        # never narrower than the center-lat estimate (the implementation
-        # uses the worst-case window edge so the box can't undershoot).
+        # 1km at Tokyo: lon half-width ≈ radius / (m-per-deg · cos(lat)),
+        # where m-per-deg derives from the SAME sphere as the haversine
+        # (π·R/180) — a divergent constant would make the prefilter a strict
+        # subset of the exact filter and drop radius-edge rows. Never
+        # narrower than the center-lat estimate (worst-case window edge).
+        from utils.geo_location import EARTH_RADIUS_M
+
+        meters_per_deg = math.pi * EARTH_RADIUS_M / 180.0
         ranges = bbox_lon_ranges(35.68, 139.76, 1000)
         assert len(ranges) == 1
         lo, hi = ranges[0]
-        center_half = 1000 / (111_320 * math.cos(math.radians(35.68)))
-        assert lo == pytest.approx(139.76 - center_half, rel=1e-3)
-        assert hi == pytest.approx(139.76 + center_half, rel=1e-3)
+        center_half = 1000 / (meters_per_deg * math.cos(math.radians(35.68)))
+        assert lo == pytest.approx(139.76 - center_half, rel=1e-4)
+        assert hi == pytest.approx(139.76 + center_half, rel=1e-4)
         assert lo <= 139.76 - center_half
         assert hi >= 139.76 + center_half
+
+    def test_bbox_lat_range_is_superset_of_haversine_reach(self):
+        # A row due north at exactly the radius must fall inside the lat
+        # window (prefilter ⊇ exact filter).
+        from utils.geo_location import EARTH_RADIUS_M, bbox_lat_range
+
+        radius = 1000.0
+        exact_deg = math.degrees(radius / EARTH_RADIUS_M)
+        lo, hi = bbox_lat_range(0.0, radius)
+        assert hi >= exact_deg
+        assert lo <= -exact_deg
 
     def test_bbox_antimeridian_split(self):
         # Near ±180° the window wraps: two ranges ORed together.

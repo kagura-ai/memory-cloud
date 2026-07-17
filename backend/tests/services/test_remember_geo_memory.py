@@ -41,12 +41,13 @@ def service(mock_db):
     return svc
 
 
-def _req(details, mtype="note"):
+def _req(details, mtype="note", context=None):
     return RememberRequest(
         summary="現場訪問の記録（テスト用サマリー）",
         content="訪問メモ本文",
         details=details,
         type=mtype,
+        context=context,
     )
 
 
@@ -94,6 +95,23 @@ async def test_remember_without_location_passthrough(service):
     result = await _call(service, req)
     assert result.memory_id is not None
     assert "location" not in req.details
+
+
+@pytest.mark.asyncio
+async def test_remember_rejects_context_location(service):
+    # context JSONB is replicated into the Qdrant payload — coordinates
+    # there would leave the PG-only containment AND be invisible to
+    # recall_nearby. Loud 422, not a documented-only rule.
+    req = _req({"other": 1}, context={"location": {"lat": 1.0, "lon": 2.0}})
+    with pytest.raises(ValueError, match="context.location"):
+        await _call(service, req)
+
+
+def test_reject_context_location_passthrough():
+    MemoryService._reject_context_location(None)
+    MemoryService._reject_context_location({"project": "x"})
+    with pytest.raises(ValueError, match="details.location"):
+        MemoryService._reject_context_location({"location": "anything"})
 
 
 # _apply_location is the centralized helper used by remember(),

@@ -62,6 +62,13 @@ def _get_engine():
         engine = create_async_engine(
             DATABASE_URL,
             echo=False,
+            # #1331 privacy invariant: bound parameters carry user memory
+            # content, details JSONB, and (now) location coordinates — a
+            # DBAPIError's str() would otherwise embed them verbatim in the
+            # `[parameters: ...]` block of every ERROR log (the generic MCP
+            # tool-error handler logs str(e)). Hide them engine-wide; the
+            # statement text still surfaces for debugging.
+            hide_parameters=True,
             pool_pre_ping=True,
             pool_size=5,
             max_overflow=10,
@@ -107,6 +114,8 @@ def _get_sync_engine():
         sync_engine = create_engine(
             sync_url,
             echo=False,
+            # #1331: same bound-parameter log hygiene as the async engine.
+            hide_parameters=True,
             pool_pre_ping=True,
             pool_size=5,
             max_overflow=10,

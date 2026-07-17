@@ -326,6 +326,28 @@ class MemoryService:
         except LocationValidationError as exc:
             raise ValueError(f"invalid details.location: {exc}") from exc
 
+    @staticmethod
+    def _reject_context_location(context: dict | None) -> None:
+        """Enforce the "coordinates never in ``context``" rule (#1331, spec §4).
+
+        ``memory.context`` JSONB is replicated verbatim into the Qdrant point
+        payload, so a ``location`` key there would push coordinates into the
+        second store the WHERE axis deliberately avoids — and the generated
+        columns read only ``details.location``, so such a memory would also
+        be invisible to recall_nearby. Documentation alone leaves that a
+        silent double failure; reject it loudly at every write path that
+        accepts caller-supplied context.
+
+        Raises:
+            ValueError: when the caller-supplied context carries 'location'.
+        """
+        if context is not None and isinstance(context, dict) and "location" in context:
+            raise ValueError(
+                "context.location is not allowed — put coordinates in "
+                "details.location (context is replicated into the search-index "
+                "payload store)"
+            )
+
     async def remember(
         self,
         request: RememberRequest,
@@ -449,8 +471,10 @@ class MemoryService:
         # update/patch paths enforce the same invariant (see those methods).
         request.details = self._apply_time_trigger(request.type, request.details)
         # WHERE axis (#1331): validate/normalize details.location (orthogonal
-        # gate — fires on key presence for any type).
+        # gate — fires on key presence for any type); coordinates must never
+        # ride the Qdrant-replicated context JSONB.
         request.details = self._apply_location(request.details)
+        self._reject_context_location(request.context)
 
         # Create memory entity first with pending status
         memory = Memory(
@@ -657,6 +681,7 @@ class MemoryService:
         # location predates the contract (its generated columns are NULL).
         if request.details is not None:
             effective_details = self._apply_location(effective_details)
+        self._reject_context_location(request.context)
         if request.details is not None or effective_type == "time":
             memory.details = effective_details
         if request.type is not None:
@@ -885,6 +910,7 @@ class MemoryService:
         effective_details = self._apply_time_trigger(effective_type, effective_details)
         # WHERE axis (#1331): only caller-supplied details are validated
         # (mirrors _update_in_place — untouched legacy rows must not 422).
+        # No context guard here: PatchMemoryRequest has no context field.
         if "details" in provided_fields:
             effective_details = self._apply_location(effective_details)
         if "details" in provided_fields or effective_type == "time":

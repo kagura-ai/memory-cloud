@@ -44,9 +44,14 @@ MAX_RADIUS_M = 1_000_000.0  # 1000 km
 # Rounded write-back precision: 7 decimal places ≈ 1 cm at the equator.
 _COORD_DECIMALS = 7
 
-# meters per degree of latitude (spherical approximation, matches the
-# haversine sphere radius used by the query lane).
-_METERS_PER_DEG_LAT = 111_320.0
+# Mean Earth radius — the single sphere both the bbox prefilter (here) and
+# the SQL haversine (services/geo_memory.py) are derived from. A prefilter
+# must be a SUPERSET of the exact filter: deriving meters-per-degree from a
+# different constant (e.g. the WGS84 equatorial 111,320 m/deg) makes the
+# latitude window ~0.11% narrower than the haversine's reach and silently
+# drops rows in the annulus at the radius edge.
+EARTH_RADIUS_M = 6_371_000.0
+_METERS_PER_DEG_LAT = math.pi * EARTH_RADIUS_M / 180.0  # ≈ 111,194.93
 
 _ALLOWED_KEYS = frozenset({"lat", "lon", "label", "text"})
 _LABEL_MAX_CHARS = 256
@@ -71,7 +76,13 @@ def _require_coord(value: Any, name: str, lo: float, hi: float) -> float:
         raise LocationValidationError(
             f"location.{name} must be a number, got {type(value).__name__}"
         )
-    coord = float(value)
+    try:
+        coord = float(value)
+    except OverflowError as exc:
+        # An unbounded Python int (JSON integer literal) passes the
+        # isinstance gate but overflows float — same clean 422 as any other
+        # out-of-domain coordinate, never an unmapped 500.
+        raise LocationValidationError(f"location.{name} must be within [{lo}, {hi}]") from exc
     if not math.isfinite(coord):
         raise LocationValidationError(f"location.{name} must be finite")
     if not (lo <= coord <= hi):
@@ -145,6 +156,9 @@ def clamp_nearby_k(k: Any) -> int:
     """
     if k is None:
         return DEFAULT_NEARBY_K
+    if isinstance(k, bool):
+        # bool is an int — int(True) would silently clamp to 1 result.
+        raise LocationValidationError("k must be an integer")
     value = int(k)  # may raise → caller maps to validation_error
     return max(1, min(MAX_NEARBY_K, value))
 

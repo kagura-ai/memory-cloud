@@ -18,11 +18,10 @@ from uuid import UUID
 from sqlalchemy import func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from utils.geo_location import bbox_lat_range, bbox_lon_ranges
-
-# Mean Earth radius — pairs with the spherical meters-per-degree constant in
-# utils.geo_location (the bbox prefilter and the haversine agree on the sphere).
-_EARTH_RADIUS_M = 6_371_000.0
+# EARTH_RADIUS_M is the shared sphere: the bbox prefilter's meters-per-degree
+# is derived from it, so the prefilter is always a superset of the haversine
+# cutoff below (a divergent constant silently drops radius-edge rows).
+from utils.geo_location import EARTH_RADIUS_M, bbox_lat_range, bbox_lon_ranges
 
 
 async def query_nearby_memories(
@@ -67,7 +66,7 @@ async def query_nearby_memories(
     haversine_a = func.power(func.sin(dlat_half), 2) + func.cos(func.radians(lat)) * func.cos(
         func.radians(Memory.location_lat)
     ) * func.power(func.sin(dlon_half), 2)
-    distance_m = (2 * _EARTH_RADIUS_M * func.asin(func.sqrt(func.least(1.0, haversine_a)))).label(
+    distance_m = (2 * EARTH_RADIUS_M * func.asin(func.sqrt(func.least(1.0, haversine_a)))).label(
         "distance_m"
     )
 

@@ -156,6 +156,74 @@ async def test_nearby_antimeridian_wraps(geo_env, db_session):
 
 
 @pytest.mark.asyncio(loop_scope="session")
+async def test_nearby_radius_edge_row_included(geo_env, db_session):
+    # Prefilter-superset pin: a row due north at 99.99% of the radius sits in
+    # the annulus a mismatched meters-per-degree constant (e.g. WGS84's
+    # 111,320 vs the haversine sphere's 111,194.9) silently drops.
+    import math
+
+    from utils.geo_location import EARTH_RADIUS_M
+
+    radius = 1000.0
+    edge_lat = 0.0 + math.degrees(radius * 0.9999 / EARTH_RADIUS_M)
+    edge = Memory(
+        id=uuid.uuid4(),
+        user_id=geo_env["uid"],
+        workspace_id=geo_env["ws_id"],
+        context_id=geo_env["ctx"],
+        summary="row at the radius edge",
+        content="x",
+        type="note",
+        client="test",
+        tags=[],
+        source_type=SOURCE_TYPE_MANUAL,
+        details={"location": {"lat": edge_lat, "lon": 0.0}},
+    )
+    db_session.add(edge)
+    await db_session.flush()
+
+    results = await query_nearby_memories(
+        db_session, geo_env["ctx"], lat=0.0, lon=0.0, radius_m=radius, k=50
+    )
+    hit = next((r for r in results if r["memory_id"] == str(edge.id)), None)
+    assert hit is not None, "radius-edge row dropped by the bbox prefilter"
+    assert 995 < hit["distance_m"] <= 1000
+
+
+@pytest.mark.asyncio(loop_scope="session")
+async def test_nearby_high_latitude_retrieval(geo_env, db_session):
+    # The cos-corrected lon window + haversine must still retrieve near ±89.5°
+    # (and the pole fallback keeps a query at 89.9999° from breaking).
+    arctic = Memory(
+        id=uuid.uuid4(),
+        user_id=geo_env["uid"],
+        workspace_id=geo_env["ws_id"],
+        context_id=geo_env["ctx"],
+        summary="arctic row",
+        content="x",
+        type="note",
+        client="test",
+        tags=[],
+        source_type=SOURCE_TYPE_MANUAL,
+        details={"location": {"lat": 89.5, "lon": 45.0}},
+    )
+    db_session.add(arctic)
+    await db_session.flush()
+
+    # Same latitude, 1° of longitude away — under 1 km up there.
+    results = await query_nearby_memories(
+        db_session, geo_env["ctx"], lat=89.5, lon=46.0, radius_m=2000, k=10
+    )
+    assert str(arctic.id) in [r["memory_id"] for r in results]
+
+    # Pole-fallback query: every longitude is in reach, no error.
+    results = await query_nearby_memories(
+        db_session, geo_env["ctx"], lat=89.9999, lon=-170.0, radius_m=100_000, k=10
+    )
+    assert str(arctic.id) in [r["memory_id"] for r in results]
+
+
+@pytest.mark.asyncio(loop_scope="session")
 async def test_nearby_applies_binding_row_filter(geo_env, db_session):
     agent = Agent(
         workspace_id=geo_env["ws_id"],

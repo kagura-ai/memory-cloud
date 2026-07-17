@@ -145,6 +145,20 @@ async def test_update_without_details_skips_location_validation(geo_update_env, 
 
 
 @pytest.mark.asyncio(loop_scope="session")
+async def test_update_rejects_context_location(geo_update_env, db_session):
+    svc = MemoryService(db_session)
+    with pytest.raises(ValueError, match="context.location"):
+        await svc.update_memory(
+            UpdateMemoryRequest(
+                memory_id=geo_update_env["located"],
+                context={"location": {"lat": 1.0, "lon": 2.0}},
+            ),
+            user_id=geo_update_env["uid"],
+            current_context_id=geo_update_env["ctx"],
+        )
+
+
+@pytest.mark.asyncio(loop_scope="session")
 async def test_patch_with_valid_location_populates_columns(geo_update_env, db_session):
     svc = MemoryService(db_session)
     p1, p2 = _patched_side_effects()

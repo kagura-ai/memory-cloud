@@ -95,6 +95,19 @@ async def test_negative_and_integer_coordinates_cast(db_session):
 
 
 @pytest.mark.asyncio
+async def test_tiny_coordinate_survives_jsonb_rendering(db_session):
+    # The regex guard's contract rests on JSONB rendering numerics via
+    # ``numeric`` (never exponent notation): a ~1e-7-scale coordinate — whose
+    # Python repr IS exponential — must still populate the column. If details
+    # ever migrates off JSONB or serialization changes, this pin catches the
+    # silent NULL-out.
+    mem_id = await _insert(db_session, '{"location": {"lat": 1e-7, "lon": -0.0000001}}')
+    row = await _cols(db_session, mem_id)
+    assert row.location_lat == pytest.approx(1e-7)
+    assert row.location_lon == pytest.approx(-1e-7)
+
+
+@pytest.mark.asyncio
 async def test_out_of_range_value_rejected_by_check(db_session):
     # valid_location_range: numeric-but-impossible coordinates written via
     # raw SQL must fail the CHECK, not become queryable garbage.
