@@ -28,6 +28,7 @@ from services.worker_app_identity import (
     WorkerAppIdentityService,
     identity_revision,
 )
+from utils.datetime import to_utc_iso
 from utils.exceptions import ConflictError, MemoryCloudException, WorkerAppOperationError
 from utils.logger import get_logger
 
@@ -193,6 +194,12 @@ async def update_worker_app(
         status=identity.status,
         # "provided", not "changed" — the route never sees the old value.
         display_name_provided=request.display_name is not None,
+        # Revision context so an enable/disable can be correlated with the
+        # secret material that was active/retiring at that moment. Serialized
+        # to a string — a raw datetime would break the JSON log renderer.
+        active_secret_revision=identity.active_secret_revision,
+        retiring_secret_revision=identity.retiring_secret_revision,
+        retiring_valid_until=to_utc_iso(identity.retiring_valid_until),
     )
     return _admin_response(identity)
 
