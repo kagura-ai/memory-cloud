@@ -14,8 +14,19 @@ from auth.dependencies import WorkspaceAdmin
 from db.base import get_db
 from models.api_base import TZAwareBaseModel
 from models.schemas import validate_pii_guardrail_config
-from services.connector_provisioning import ConnectorProvisioningService
-from utils.exceptions import BadRequestError, MemoryCloudException, ValidationError
+from models.worker_runtime import WorkerRuntimeConfig
+from services.connector_provisioning import (
+    ConnectorProvisioningService,
+    ConnectorRuntimeUpdateResult,
+)
+from utils.exceptions import (
+    BadRequestError,
+    ConflictError,
+    InternalError,
+    MemoryCloudException,
+    NotFoundException,
+    ValidationError,
+)
 from utils.logger import get_logger
 
 logger = get_logger(__name__)
@@ -69,6 +80,10 @@ class WorkspaceConnectorCreateRequest(BaseModel):
         description="One-time handle from the Slack OAuth callback; resolved "
         "server-side to oauth_tokens + external_team_id (bot token never sent by client)",
     )
+    runtime: WorkerRuntimeConfig | None = Field(
+        None,
+        description="Non-secret per-connector worker controls; omitted uses worker defaults",
+    )
 
 
 class WorkspaceConnectorCreateResponse(BaseModel):
@@ -106,6 +121,36 @@ class WorkspaceConnectorSummary(TZAwareBaseModel):
     config_version: int
     created_at: datetime
     created_by: str | None = None
+    runtime: WorkerRuntimeConfig = Field(default_factory=WorkerRuntimeConfig)
+
+
+class WorkspaceConnectorRuntimeUpdateRequest(BaseModel):
+    """Complete normalized replacement for tenant-owned worker controls.
+
+    ``runtime`` is required but nullable: an explicit ``null`` clears the
+    stored block back to NULL (worker built-in defaults) so a tuned
+    connector is not a one-way door. ``expected_config_version`` is the
+    optimistic-concurrency guard for the full-document replacement: pass the
+    version your snapshot came from and a concurrent change turns into a 409
+    instead of a silent revert.
+    """
+
+    runtime: WorkerRuntimeConfig | None = Field(...)
+    expected_config_version: int | None = Field(default=None, ge=0)
+
+
+class WorkspaceConnectorRuntimeUpdateResponse(BaseModel):
+    """Updated effective controls and the new opaque-source connector revision.
+
+    ``runtime`` is the EFFECTIVE config (worker defaults when the stored
+    block was cleared); ``stored`` distinguishes a persisted override from
+    the cleared/defaults state.
+    """
+
+    connector_id: UUID
+    runtime: WorkerRuntimeConfig
+    stored: bool
+    config_version: int
 
 
 class RotateKmcKeyResponse(TZAwareBaseModel):
@@ -207,6 +252,9 @@ async def create_workspace_connector(
             locale=request.locale,
             external_team_id=external_team_id,
             app_key=request.app_key,
+            runtime_config=(
+                request.runtime.model_dump(mode="json") if request.runtime is not None else None
+            ),
         )
         await db.commit()
         await db.refresh(result.connector)
@@ -273,9 +321,74 @@ async def list_workspace_connectors(
             config_version=item.connector.config_version,
             created_at=item.connector.created_at,
             created_by=item.connector.created_by,
+            # Lenient rehydrate (#1350 review): one drifted stored document
+            # must not 500 the whole workspace list — fall back to defaults.
+            runtime=(
+                WorkerRuntimeConfig.from_stored(item.connector.runtime_config)
+                or WorkerRuntimeConfig()
+            ),
         )
         for item in items
     ]
+
+
+@router.patch(
+    "/{connector_id}/runtime",
+    response_model=WorkspaceConnectorRuntimeUpdateResponse,
+)
+async def update_workspace_connector_runtime(
+    connector_id: UUID,
+    request: WorkspaceConnectorRuntimeUpdateRequest,
+    admin: WorkspaceAdmin,
+    db: AsyncSession = Depends(get_db),
+) -> WorkspaceConnectorRuntimeUpdateResponse:
+    """Replace per-connector runtime controls (workspace-admin scoped)."""
+    workspace_id = admin.get("current_workspace_id")
+    if workspace_id is None:
+        raise BadRequestError(
+            "No workspace selected. Please select a workspace first.",
+        )
+    try:
+        update_result: ConnectorRuntimeUpdateResult = await ConnectorProvisioningService(
+            db
+        ).update_runtime_config(
+            workspace_id=workspace_id,
+            connector_id=connector_id,
+            runtime_config=(
+                request.runtime.model_dump(mode="json") if request.runtime is not None else None
+            ),
+            user_id=admin["user_id"],
+            expected_config_version=request.expected_config_version,
+        )
+        await db.commit()
+    except NotFoundException as exc:
+        await db.rollback()
+        raise NotFoundException("Connector") from exc
+    except ConflictError:
+        await db.rollback()
+        raise
+    except Exception as exc:
+        await db.rollback()
+        logger.error(
+            "workspace_connector_runtime_update_failed",
+            connector_id=str(connector_id),
+            workspace_id=str(workspace_id),
+            user_id=admin["user_id"],
+            error_type=type(exc).__name__,
+        )
+        raise InternalError("Failed to update connector runtime") from exc
+
+    stored = update_result.runtime_config is not None
+    return WorkspaceConnectorRuntimeUpdateResponse(
+        connector_id=connector_id,
+        runtime=(
+            WorkerRuntimeConfig.model_validate(update_result.runtime_config)
+            if stored
+            else WorkerRuntimeConfig()
+        ),
+        stored=stored,
+        config_version=update_result.config_version,
+    )
 
 
 @router.get("/available-apps", response_model=list[AvailableWorkerApp])

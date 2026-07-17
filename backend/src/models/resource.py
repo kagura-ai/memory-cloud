@@ -469,6 +469,7 @@ class WorkspaceConnector(Base):
             token bundle (NULL until the F6-b setup flow populates it)
         pii_guardrail_config: PII-scrubbing config consumed by the ai-worker
             pre-compile stage (F6-d)
+        runtime_config: Validated non-secret per-connector worker controls
         litellm_virtual_key_id: LiteLLM virtual-key identifier (NULL until set)
         config_version: Monotonic connector-config revision
         virtual_key_valid_until: Expiry of the LiteLLM virtual key (NULL = none)
@@ -534,6 +535,10 @@ class WorkspaceConnector(Base):
     # NULL on legacy rows → the worker falls back to the kmc/remember path.
     resource_token_encrypted: Mapped[str | None] = mapped_column(Text, nullable=True)
     pii_guardrail_config: Mapped[dict[str, Any] | None] = mapped_column(JSONB, nullable=True)
+    # Optional for rolling compatibility: NULL rows predate #1348 and cause the
+    # worker endpoint to omit the additive runtime block, preserving worker
+    # defaults. Admin writes are validated and normalized before storage.
+    runtime_config: Mapped[dict[str, Any] | None] = mapped_column(JSONB, nullable=True)
     litellm_virtual_key_id: Mapped[str | None] = mapped_column(String(255), nullable=True)
     config_version: Mapped[int] = mapped_column(
         Integer, nullable=False, default=1, server_default="1"

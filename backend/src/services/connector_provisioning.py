@@ -31,6 +31,29 @@ logger = get_logger(__name__)
 CONNECTOR_TYPES = frozenset({"slack", "discord", "teams"})
 _RESOURCE_ID_RE = re.compile(r"^[a-z0-9_-]+$")
 
+
+def _flatten_runtime_fields(value: dict[str, Any], prefix: str = "") -> set[str]:
+    """Return dotted leaf names for secret-free audit logging."""
+    fields: set[str] = set()
+    for key, child in value.items():
+        name = f"{prefix}.{key}" if prefix else key
+        if isinstance(child, dict):
+            fields.update(_flatten_runtime_fields(child, name))
+        else:
+            fields.add(name)
+    return fields
+
+
+def _runtime_field(value: dict[str, Any], dotted_name: str) -> object:
+    """Read a dotted leaf from a normalized runtime document."""
+    current: object = value
+    for part in dotted_name.split("."):
+        if not isinstance(current, dict):
+            return None
+        current = current.get(part)
+    return current
+
+
 # Issue #910: canonical chat resource schema provisioned at connector
 # registration. The ai-worker writes ``payload={"text": <llm_summary>, ...}`` on
 # every ingest_event upsert; ``text`` is the single agreed fulltext field
@@ -88,6 +111,14 @@ class KmcKeyRotationResult:
     config_version: int
 
 
+@dataclass(frozen=True)
+class ConnectorRuntimeUpdateResult:
+    """Normalized runtime controls (None = cleared) and revision after an admin update."""
+
+    runtime_config: dict[str, Any] | None
+    config_version: int
+
+
 class ConnectorProvisioningService:
     """Provision ai-worker chat-ingest connectors atomically.
 
@@ -119,6 +150,7 @@ class ConnectorProvisioningService:
         locale: str | None = None,
         external_team_id: str | None = None,
         app_key: str = "default",
+        runtime_config: dict[str, Any] | None = None,
     ) -> ConnectorProvisioningResult:
         """Create resource + connector + connector-scoped token in one flow.
 
@@ -130,6 +162,14 @@ class ConnectorProvisioningService:
         KMC key) for backward compatibility.
         """
         self._validate_inputs(connector_type, resource_id, quota_events_per_hour)
+
+        normalized_runtime_config = None
+        if runtime_config is not None:
+            from models.worker_runtime import WorkerRuntimeConfig
+
+            normalized_runtime_config = WorkerRuntimeConfig.model_validate(
+                runtime_config
+            ).model_dump(mode="json")
 
         workspace = await self._get_workspace(workspace_id)
 
@@ -271,6 +311,7 @@ class ConnectorProvisioningService:
                 channel_ids=channel_ids,
                 external_team_id=external_team_id,
                 pii_guardrail_config=pii_guardrail_config,
+                runtime_config=normalized_runtime_config,
                 litellm_virtual_key_id=litellm_virtual_key_id,
                 virtual_key_valid_until=virtual_key_valid_until,
                 created_by=user_id,
@@ -318,6 +359,21 @@ class ConnectorProvisioningService:
                 await self._delete_orphan_context(auto_created_context_id)
             raise
 
+        # #1350 review: initial runtime controls set at provisioning must be
+        # auditable too — otherwise the changed-fields contract is bypassable
+        # by setting values at creation instead of via PATCH. Names of the
+        # fields that diverge from defaults only, never values.
+        runtime_fields: list[str] = []
+        if normalized_runtime_config is not None:
+            from models.worker_runtime import WorkerRuntimeConfig as _WRC
+
+            _defaults = _WRC().model_dump(mode="json")
+            runtime_fields = sorted(
+                key
+                for key in _flatten_runtime_fields(normalized_runtime_config)
+                if _runtime_field(normalized_runtime_config, key) != _runtime_field(_defaults, key)
+            )
+
         logger.info(
             "workspace_connector_provisioned",
             connector_id=str(connector.id),
@@ -326,6 +382,7 @@ class ConnectorProvisioningService:
             resource_pk=str(resource_pk),
             workspace_id=str(workspace_id),
             user_id=user_id,
+            runtime_fields=runtime_fields,
         )
 
         return ConnectorProvisioningResult(
@@ -615,6 +672,95 @@ class ConnectorProvisioningService:
         )
         await self.db.execute(delete(Resource).where(Resource.id == connector.resource_pk))
         return True
+
+    async def update_runtime_config(
+        self,
+        *,
+        workspace_id: UUID,
+        connector_id: UUID,
+        runtime_config: dict[str, Any] | None,
+        user_id: str,
+        expected_config_version: int | None = None,
+    ) -> ConnectorRuntimeUpdateResult:
+        """Replace (or clear) normalized tenant controls and bump the revision.
+
+        The workspace predicate and row lock are part of the authorization and
+        monotonic-revision contract: a connector from another workspace is
+        indistinguishable from a missing connector, and concurrent updates
+        cannot lose a revision increment.
+
+        ``runtime_config=None`` clears the stored block back to NULL — the
+        "worker built-in defaults" state existing rows start in — so a tuned
+        connector is not a one-way door (#1350 review). The full-document
+        replacement semantics make lost updates possible from stale readers,
+        so callers can pass ``expected_config_version`` (the version their
+        snapshot came from) to fail the write with ConflictError instead of
+        silently reverting a concurrent change.
+        """
+        result = await self.db.execute(
+            select(WorkspaceConnector)
+            .where(
+                WorkspaceConnector.id == connector_id,
+                WorkspaceConnector.workspace_id == workspace_id,
+            )
+            .with_for_update()
+        )
+        connector = result.scalar_one_or_none()
+        if connector is None:
+            raise NotFoundException("Connector", str(connector_id))
+
+        if (
+            expected_config_version is not None
+            and connector.config_version != expected_config_version
+        ):
+            from utils.exceptions import ConflictError
+
+            raise ConflictError(
+                f"Connector config_version is {connector.config_version}, "
+                f"expected {expected_config_version} — reload and retry."
+            )
+
+        from models.worker_runtime import WorkerRuntimeConfig
+
+        normalized_runtime_config = (
+            None
+            if runtime_config is None
+            else WorkerRuntimeConfig.model_validate(runtime_config).model_dump(mode="json")
+        )
+        # from_stored (lenient) for the previous side: a drifted stored doc
+        # must never make the repair PATCH itself 500 (#1350 review).
+        previous = (
+            WorkerRuntimeConfig.from_stored(connector.runtime_config) or WorkerRuntimeConfig()
+        ).model_dump(mode="json")
+        # Diff against effective values: clearing shows the fields returning
+        # to worker defaults.
+        effective_new = (
+            normalized_runtime_config
+            if normalized_runtime_config is not None
+            else WorkerRuntimeConfig().model_dump(mode="json")
+        )
+        changed_fields = sorted(
+            key
+            for key in _flatten_runtime_fields(previous) | _flatten_runtime_fields(effective_new)
+            if _runtime_field(previous, key) != _runtime_field(effective_new, key)
+        )
+        connector.runtime_config = normalized_runtime_config
+        connector.config_version += 1
+        await self.db.flush()
+
+        logger.info(
+            "workspace_connector_runtime_updated",
+            connector_id=str(connector_id),
+            workspace_id=str(workspace_id),
+            updated_by=user_id,
+            changed_fields=changed_fields,
+            cleared=normalized_runtime_config is None,
+            config_version=connector.config_version,
+        )
+        return ConnectorRuntimeUpdateResult(
+            runtime_config=normalized_runtime_config,
+            config_version=connector.config_version,
+        )
 
     async def rotate_kmc_key(
         self,

@@ -14,6 +14,7 @@ from models.auth import Workspace, WorkspaceMember
 from models.resource import Resource, ResourceEvent, ResourceToken, WorkspaceConnector
 from models.schemas import ResourceEventRequest
 from services.connector_provisioning import ConnectorProvisioningService
+from utils.exceptions import NotFoundException
 
 
 @pytest.fixture(autouse=True)
@@ -57,6 +58,41 @@ async def _seed_workspace(
 
 
 class TestConnectorProvisioningDbFlow:
+    @pytest.mark.asyncio
+    async def test_runtime_update_is_normalized_revisioned_and_workspace_scoped(
+        self,
+        db_session: AsyncSession,
+    ):
+        user_id, workspace = await _seed_workspace(db_session)
+        result = await ConnectorProvisioningService(db_session).provision_connector(
+            workspace_id=workspace.id,
+            user_id=user_id,
+            connector_type="slack",
+            resource_id=f"slack_{uuid4().hex[:8]}",
+            runtime_config={"vision_enabled": False},
+        )
+        original_revision = result.connector.config_version
+
+        update = await ConnectorProvisioningService(db_session).update_runtime_config(
+            workspace_id=workspace.id,
+            connector_id=result.connector.id,
+            runtime_config={"vision_enabled": True},
+            user_id=user_id,
+        )
+
+        assert update.config_version == original_revision + 1
+        assert update.runtime_config["vision_enabled"] is True
+        assert update.runtime_config["buffer"]["ttl_seconds"] == 86400
+
+        other_user_id, other_workspace = await _seed_workspace(db_session)
+        with pytest.raises(NotFoundException):
+            await ConnectorProvisioningService(db_session).update_runtime_config(
+                workspace_id=other_workspace.id,
+                connector_id=result.connector.id,
+                runtime_config={"vision_enabled": False},
+                user_id=other_user_id,
+            )
+
     @pytest.mark.asyncio
     async def test_token_failure_rolls_back_resource_and_connector_rows(
         self,

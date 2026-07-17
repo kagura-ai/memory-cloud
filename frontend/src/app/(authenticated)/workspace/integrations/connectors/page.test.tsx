@@ -21,12 +21,15 @@ import ConnectorsPage from "./page";
 const mockListConnectors = vi.fn();
 const mockListAvailableWorkerApps = vi.fn();
 const mockCreateConnector = vi.fn();
+const mockUpdateConnectorRuntime = vi.fn();
 vi.mock("@/lib/api/workspace-connectors", () => ({
   listConnectors: (...args: unknown[]) => mockListConnectors(...args),
   listAvailableWorkerApps: (...args: unknown[]) =>
     mockListAvailableWorkerApps(...args),
   deleteConnector: vi.fn(),
   createConnector: (...args: unknown[]) => mockCreateConnector(...args),
+  updateConnectorRuntime: (...args: unknown[]) =>
+    mockUpdateConnectorRuntime(...args),
   getSlackPendingInstall: vi.fn(),
   slackInstallUrl: () => "https://slack.example/install",
 }));
@@ -78,6 +81,13 @@ beforeEach(() => {
     quota_events_per_hour: 1000,
     idempotency_key_prefix: "connector-1:",
   });
+  mockUpdateConnectorRuntime.mockImplementation(
+    async (connectorId: string, runtime: Record<string, unknown>) => ({
+      connector_id: connectorId,
+      runtime,
+      config_version: 2,
+    }),
+  );
 });
 
 afterEach(() => {
@@ -176,5 +186,41 @@ describe("ConnectorsPage RBAC gate", () => {
       ),
     );
     await waitFor(() => expect(tokenInput).toHaveValue(""));
+  });
+
+  it("updates the tenant-local vision kill-switch from the connector row", async () => {
+    setWorkspace("admin");
+    mockListConnectors.mockResolvedValue([
+      {
+        connector_id: "connector-1",
+        connector_type: "slack",
+        app_key: "default",
+        resource_id: "slack-t01",
+        context_id: "context-1",
+        config_version: 1,
+        created_at: "2026-07-18T00:00:00Z",
+        created_by: "user-1",
+        runtime: {
+          vision_enabled: true,
+        },
+      },
+    ]);
+
+    render(<ConnectorsPage />);
+
+    const toggle = await screen.findByRole("switch", {
+      name: "visionEnabledFor",
+    });
+    fireEvent.click(toggle);
+
+    await waitFor(() =>
+      expect(mockUpdateConnectorRuntime).toHaveBeenCalledWith(
+        "connector-1",
+        expect.objectContaining({ vision_enabled: false }),
+        // The snapshot's config_version rides along as the
+        // optimistic-concurrency guard (server 409s on staleness).
+        1,
+      ),
+    );
   });
 });

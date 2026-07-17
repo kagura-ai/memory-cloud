@@ -4,6 +4,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 from uuid import uuid4
 
 import pytest
+from pydantic import ValidationError as PydanticValidationError
 
 from api.routes.workspace_connectors import (
     WorkspaceConnectorCreateRequest,
@@ -103,6 +104,170 @@ async def test_create_passes_normalized_pii_guardrail_config_dict_to_service():
 
 
 @pytest.mark.asyncio
+async def test_create_passes_normalized_runtime_config_to_service():
+    db = MagicMock()
+    db.commit = AsyncMock()
+    db.refresh = AsyncMock()
+    request = WorkspaceConnectorCreateRequest(
+        connector_type="slack",
+        resource_id="slack_general",
+        runtime={"vision_enabled": False},
+    )
+    admin = {"user_id": "user-1", "current_workspace_id": uuid4()}
+
+    result = MagicMock()
+    result.connector.id = uuid4()
+    result.connector.connector_type = "slack"
+    result.connector.app_key = "default"
+    result.resource_id = "slack_general"
+    result.context_id = None
+    result.plaintext_kmc_api_key = None
+    result.token.id = 1
+    result.plaintext_token = "kagura_resource_x"
+    result.token.quota_events_per_hour = 1000
+
+    with patch("api.routes.workspace_connectors.ConnectorProvisioningService") as service_cls:
+        service_cls.return_value.provision_connector = AsyncMock(return_value=result)
+        await create_workspace_connector(request, admin, db)
+
+    runtime = service_cls.return_value.provision_connector.await_args.kwargs["runtime_config"]
+    assert runtime["vision_enabled"] is False
+    assert runtime["buffer"] == {"ttl_seconds": 86400, "max_len": 10_000}
+
+
+def test_create_rejects_process_owned_runtime_fields_at_rest_boundary():
+    with pytest.raises(PydanticValidationError):
+        WorkspaceConnectorCreateRequest(
+            connector_type="slack",
+            resource_id="slack_general",
+            runtime={"buffer": {"redis_url": "redis://tenant.invalid:6379/0"}},
+        )
+
+
+@pytest.mark.asyncio
+async def test_update_runtime_commits_revision_and_returns_normalized_config():
+    from api.routes.workspace_connectors import (
+        WorkspaceConnectorRuntimeUpdateRequest,
+        update_workspace_connector_runtime,
+    )
+    from services.connector_provisioning import ConnectorRuntimeUpdateResult
+
+    db = MagicMock()
+    db.commit = AsyncMock()
+    workspace_id = uuid4()
+    connector_id = uuid4()
+    admin = {"user_id": "user-1", "current_workspace_id": workspace_id}
+    request = WorkspaceConnectorRuntimeUpdateRequest(runtime={"vision_enabled": False})
+
+    with patch("api.routes.workspace_connectors.ConnectorProvisioningService") as service_cls:
+        service_cls.return_value.update_runtime_config = AsyncMock(
+            return_value=ConnectorRuntimeUpdateResult(
+                runtime_config=request.runtime.model_dump(mode="json"),
+                config_version=4,
+            )
+        )
+        response = await update_workspace_connector_runtime(connector_id, request, admin, db)
+
+    assert response.connector_id == connector_id
+    assert response.runtime.vision_enabled is False
+    assert response.stored is True
+    assert response.config_version == 4
+    db.commit.assert_awaited_once()
+    service_cls.return_value.update_runtime_config.assert_awaited_once_with(
+        workspace_id=workspace_id,
+        connector_id=connector_id,
+        runtime_config=request.runtime.model_dump(mode="json"),
+        user_id="user-1",
+        expected_config_version=None,
+    )
+
+
+@pytest.mark.asyncio
+async def test_update_runtime_hides_cross_workspace_connector_as_not_found():
+    from api.routes.workspace_connectors import (
+        WorkspaceConnectorRuntimeUpdateRequest,
+        update_workspace_connector_runtime,
+    )
+    from utils.exceptions import NotFoundException
+
+    db = MagicMock()
+    db.rollback = AsyncMock()
+    admin = {"user_id": "user-1", "current_workspace_id": uuid4()}
+
+    with patch("api.routes.workspace_connectors.ConnectorProvisioningService") as service_cls:
+        service_cls.return_value.update_runtime_config = AsyncMock(
+            side_effect=NotFoundException("Connector", "hidden")
+        )
+        with pytest.raises(NotFoundException) as exc:
+            await update_workspace_connector_runtime(
+                uuid4(),
+                WorkspaceConnectorRuntimeUpdateRequest(runtime={"vision_enabled": False}),
+                admin,
+                db,
+            )
+
+    assert exc.value.status_code == 404
+    assert exc.value.message == "Connector not found"
+    assert "hidden" not in exc.value.message
+    db.rollback.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_update_runtime_requires_selected_workspace():
+    from api.routes.workspace_connectors import (
+        WorkspaceConnectorRuntimeUpdateRequest,
+        update_workspace_connector_runtime,
+    )
+    from utils.exceptions import BadRequestError
+
+    with pytest.raises(BadRequestError) as exc:
+        await update_workspace_connector_runtime(
+            uuid4(),
+            WorkspaceConnectorRuntimeUpdateRequest(runtime={"vision_enabled": False}),
+            {"user_id": "user-1", "current_workspace_id": None},
+            MagicMock(),
+        )
+
+    assert exc.value.status_code == 400
+    assert exc.value.error_code == "REQ-001"
+
+
+@pytest.mark.asyncio
+async def test_update_runtime_maps_unexpected_failure_to_canonical_internal_error():
+    from api.routes.workspace_connectors import (
+        WorkspaceConnectorRuntimeUpdateRequest,
+        update_workspace_connector_runtime,
+    )
+    from utils.exceptions import InternalError
+
+    db = MagicMock()
+    db.rollback = AsyncMock()
+    admin = {"user_id": "user-1", "current_workspace_id": uuid4()}
+
+    with (
+        patch("api.routes.workspace_connectors.ConnectorProvisioningService") as service_cls,
+        patch("api.routes.workspace_connectors.logger.error") as log_error,
+    ):
+        service_cls.return_value.update_runtime_config = AsyncMock(
+            side_effect=RuntimeError("secret-bearing internal detail")
+        )
+        with pytest.raises(InternalError) as exc:
+            await update_workspace_connector_runtime(
+                uuid4(),
+                WorkspaceConnectorRuntimeUpdateRequest(runtime={"vision_enabled": False}),
+                admin,
+                db,
+            )
+
+    assert exc.value.status_code == 500
+    assert exc.value.error_code == "INT-001"
+    assert exc.value.message == "Failed to update connector runtime"
+    assert "secret-bearing" not in str(log_error.call_args)
+    assert log_error.call_args.kwargs["error_type"] == "RuntimeError"
+    db.rollback.assert_awaited_once()
+
+
+@pytest.mark.asyncio
 async def test_list_workspace_connectors_returns_summaries():
     from datetime import datetime
     from types import SimpleNamespace
@@ -119,6 +284,7 @@ async def test_list_workspace_connectors_returns_summaries():
     c.app_key = "default"
     c.context_id = uuid4()
     c.config_version = 1
+    c.runtime_config = None
     c.created_at = datetime(2026, 6, 2, 0, 0, 0)
     c.created_by = "user-1"
 

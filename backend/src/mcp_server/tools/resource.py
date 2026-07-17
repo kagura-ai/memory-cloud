@@ -1018,6 +1018,32 @@ async def handle_setup_connector(
             except ValueError as ve:
                 return _error_response("validation_error", str(ve))
 
+            # Value-based guard (#1350 review): an explicit "runtime": null is
+            # a common client spelling of "no override" and must provision
+            # with runtime_config=NULL, same as the REST create path.
+            runtime_config = None
+            if args.get("runtime") is not None:
+                from pydantic import ValidationError as PydanticValidationError
+
+                from models.worker_runtime import WorkerRuntimeConfig
+
+                try:
+                    runtime_config = WorkerRuntimeConfig.model_validate(args["runtime"]).model_dump(
+                        mode="json"
+                    )
+                except PydanticValidationError as ve:
+                    # errors(include_input=False): the rejected document may
+                    # carry values the tenant should not see echoed (e.g. a
+                    # mistakenly pasted redis://:password@ URL) — same
+                    # sanitization contract as validate_pii_guardrail_config.
+                    reasons = "; ".join(
+                        f"{'.'.join(str(loc) for loc in err['loc'])}: {err['msg']}"
+                        for err in ve.errors(include_url=False, include_input=False)
+                    )
+                    return _error_response("validation_error", f"Invalid runtime config: {reasons}")
+                except (TypeError, ValueError) as ve:
+                    return _error_response("validation_error", str(ve))
+
             from services.connector_provisioning import ConnectorProvisioningService
             from utils.exceptions import MemoryCloudException
 
@@ -1040,6 +1066,7 @@ async def handle_setup_connector(
                 channel_ids=args.get("channel_ids"),
                 locale=args.get("locale"),
                 external_team_id=args.get("external_team_id"),
+                runtime_config=runtime_config,
             )
             await db.commit()
             await db.refresh(result.connector)

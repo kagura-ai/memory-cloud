@@ -20,12 +20,13 @@ from typing import Any, Literal
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, Header, HTTPException, Query, Response, status
-from pydantic import BaseModel
+from pydantic import BaseModel, SerializerFunctionWrapHandler, model_serializer
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from config.settings import get_settings
 from db.base import get_db
 from models.api_base import TZAwareBaseModel
+from models.worker_runtime import WorkerRuntimeConfig
 from services.connector_provisioning import ConnectorProvisioningService
 from services.worker_app_identity import (
     WorkerAppIdentityService,
@@ -89,6 +90,18 @@ class WorkerConnectorConfig(TZAwareBaseModel):
     resource: dict[str, Any] | None = None
     llm: dict[str, Any] | None = None
     pii_guardrail_config: dict[str, Any] | None = None
+    runtime: WorkerRuntimeConfig | None = None
+
+    @model_serializer(mode="wrap")
+    def _omit_absent_runtime(
+        self,
+        handler: SerializerFunctionWrapHandler,
+    ) -> dict[str, Any]:
+        """Keep legacy nullable fields while omitting only the additive block."""
+        payload: dict[str, Any] = handler(self)
+        if self.runtime is None:
+            payload.pop("runtime", None)
+        return payload
 
 
 class WorkerSigningSecret(TZAwareBaseModel):
@@ -190,7 +203,10 @@ async def get_worker_apps(
     return WorkerAppBootstrapResponse(revision=revision, apps=apps)
 
 
-@router.get("/config", response_model=WorkerConnectorConfig)
+@router.get(
+    "/config",
+    response_model=WorkerConnectorConfig,
+)
 async def get_worker_config(
     response: Response,
     # Only Slack is implemented end-to-end (the response carries a Slack-specific
@@ -308,4 +324,9 @@ async def get_worker_config(
         resource=resource_block,
         llm=connector.get_llm_config(),
         pii_guardrail_config=connector.pii_guardrail_config,
+        # Lenient rehydrate (#1350 review): a stored document drifted across
+        # releases must degrade to "no runtime block, worker defaults" — a
+        # strict-validation 500 here is a full connector outage (the worker
+        # cannot fetch its token/KMC key either).
+        runtime=WorkerRuntimeConfig.from_stored(connector.runtime_config),
     )

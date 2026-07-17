@@ -8,10 +8,14 @@ import { Check, Copy, Plug, Trash2 } from "lucide-react";
 import { PageContainer } from "@/components/common/PageContainer";
 import { PageHeader } from "@/components/common/PageHeader";
 import { ErrorBanner } from "@/components/common/ErrorBanner";
-import { TableLoadingState } from "@/components/common/LoadingState";
+import {
+  InlineSpinner,
+  TableLoadingState,
+} from "@/components/common/LoadingState";
 import { EmptyState } from "@/components/ui/empty-state";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
+import { Switch } from "@/components/ui/switch";
 import { Alert, AlertDescription } from "@/components/ui/alert";
 import {
   Select,
@@ -42,6 +46,7 @@ import {
   listAvailableWorkerApps,
   listConnectors,
   slackInstallUrl,
+  updateConnectorRuntime,
   type AvailableWorkerApp,
   type CreateConnectorResponse,
   type SlackPendingInstall,
@@ -169,6 +174,7 @@ export default function ConnectorsPage() {
   const [toDelete, setToDelete] = useState<WorkspaceConnectorSummary | null>(
     null,
   );
+  const [runtimeSaving, setRuntimeSaving] = useState<string | null>(null);
 
   const reload = useCallback(async () => {
     try {
@@ -309,6 +315,49 @@ export default function ConnectorsPage() {
       });
     }
   }, [toDelete, t, toast, reload]);
+
+  const handleVisionEnabledChange = useCallback(
+    async (connector: WorkspaceConnectorSummary, enabled: boolean) => {
+      setRuntimeSaving(connector.connector_id);
+      try {
+        // Pass the snapshot's config_version so a concurrent admin change
+        // 409s (and we reload) instead of being silently overwritten by
+        // this full-document replacement (#1348).
+        const result = await updateConnectorRuntime(
+          connector.connector_id,
+          {
+            ...connector.runtime,
+            vision_enabled: enabled,
+          },
+          connector.config_version,
+        );
+        setConnectors((current) =>
+          current?.map((item) =>
+            item.connector_id === connector.connector_id
+              ? {
+                  ...item,
+                  runtime: result.runtime,
+                  config_version: result.config_version,
+                }
+              : item,
+          ) ?? null,
+        );
+        toast({ title: t("runtimeUpdated") });
+      } catch (err) {
+        toast({
+          variant: "destructive",
+          title: t("runtimeUpdateFailed"),
+          description: err instanceof Error ? err.message : String(err),
+        });
+        // A 409 (stale snapshot) or any failure leaves our list stale —
+        // refetch so the switch reflects the server state.
+        void reload();
+      } finally {
+        setRuntimeSaving(null);
+      }
+    },
+    [t, toast],
+  );
 
   const handleManualCreate = useCallback(
     async (event: FormEvent) => {
@@ -511,14 +560,32 @@ export default function ConnectorsPage() {
                   </Button>
                 </div>
               </div>
-              <Button
-                variant="ghost"
-                size="sm"
-                onClick={() => setToDelete(c)}
-                aria-label={tCommon("delete")}
-              >
-                <Trash2 className="h-4 w-4" />
-              </Button>
+              <div className="flex items-center gap-4">
+                <label className="flex items-center gap-2 text-sm">
+                  <span>{t("visionEnabled")}</span>
+                  {runtimeSaving === c.connector_id && (
+                    <InlineSpinner aria-hidden="true" />
+                  )}
+                  <Switch
+                    checked={c.runtime?.vision_enabled ?? true}
+                    disabled={c.runtime == null || runtimeSaving === c.connector_id}
+                    onCheckedChange={(enabled) =>
+                      void handleVisionEnabledChange(c, enabled)
+                    }
+                    aria-label={t("visionEnabledFor", {
+                      id: c.connector_id,
+                    })}
+                  />
+                </label>
+                <Button
+                  variant="ghost"
+                  size="sm"
+                  onClick={() => setToDelete(c)}
+                  aria-label={tCommon("delete")}
+                >
+                  <Trash2 className="h-4 w-4" />
+                </Button>
+              </div>
             </li>
           ))}
         </ul>

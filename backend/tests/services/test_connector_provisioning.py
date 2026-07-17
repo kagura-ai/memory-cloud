@@ -334,3 +334,132 @@ async def test_list_connectors_returns_workspace_scoped_rows_newest_first():
         ConnectorListItem(connector=conn_b, resource_id="slug-b"),
     ]
     db.execute.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_update_runtime_config_is_workspace_scoped_and_bumps_revision():
+    connector_id = uuid4()
+    workspace_id = uuid4()
+    connector = SimpleNamespace(
+        id=connector_id,
+        workspace_id=workspace_id,
+        runtime_config={"vision_enabled": True},
+        config_version=7,
+    )
+    db = MagicMock()
+    db.execute = AsyncMock(return_value=_result(one=connector))
+    db.flush = AsyncMock()
+
+    with patch("services.connector_provisioning.logger.info") as log_info:
+        result = await ConnectorProvisioningService(db).update_runtime_config(
+            workspace_id=workspace_id,
+            connector_id=connector_id,
+            runtime_config={"vision_enabled": False},
+            user_id="admin-1",
+        )
+
+    assert connector.runtime_config["vision_enabled"] is False
+    assert connector.runtime_config["buffer"] == {
+        "ttl_seconds": 86400,
+        "max_len": 10_000,
+    }
+    assert connector.config_version == 8
+    assert result.config_version == 8
+    db.flush.assert_awaited_once()
+    statement = db.execute.await_args.args[0]
+    assert "workspace_connectors.workspace_id" in str(statement)
+    assert "FOR UPDATE" in str(statement)
+    log_info.assert_called_once_with(
+        "workspace_connector_runtime_updated",
+        connector_id=str(connector_id),
+        workspace_id=str(workspace_id),
+        updated_by="admin-1",
+        changed_fields=["vision_enabled"],
+        cleared=False,
+        config_version=8,
+    )
+
+
+@pytest.mark.asyncio
+async def test_update_runtime_config_null_clears_back_to_worker_defaults():
+    """#1350 review: runtime_config=None returns the row to NULL (the worker
+    built-in defaults state) — a tuned connector is not a one-way door."""
+    connector_id = uuid4()
+    workspace_id = uuid4()
+    connector = SimpleNamespace(
+        id=connector_id,
+        workspace_id=workspace_id,
+        runtime_config={"vision_enabled": False},
+        config_version=3,
+    )
+    db = MagicMock()
+    db.execute = AsyncMock(return_value=_result(one=connector))
+    db.flush = AsyncMock()
+
+    with patch("services.connector_provisioning.logger.info") as log_info:
+        result = await ConnectorProvisioningService(db).update_runtime_config(
+            workspace_id=workspace_id,
+            connector_id=connector_id,
+            runtime_config=None,
+            user_id="admin-1",
+        )
+
+    assert connector.runtime_config is None
+    assert result.runtime_config is None
+    assert connector.config_version == 4
+    kwargs = log_info.call_args.kwargs
+    assert kwargs["cleared"] is True
+    # Diff shows the field returning to its default.
+    assert kwargs["changed_fields"] == ["vision_enabled"]
+
+
+@pytest.mark.asyncio
+async def test_update_runtime_config_stale_expected_version_conflicts():
+    """#1350 review: the full-document replacement gets an optimistic guard —
+    a stale snapshot 409s instead of silently reverting concurrent changes."""
+    from utils.exceptions import ConflictError
+
+    connector = SimpleNamespace(
+        id=uuid4(),
+        workspace_id=uuid4(),
+        runtime_config=None,
+        config_version=5,
+    )
+    db = MagicMock()
+    db.execute = AsyncMock(return_value=_result(one=connector))
+    db.flush = AsyncMock()
+
+    with pytest.raises(ConflictError):
+        await ConnectorProvisioningService(db).update_runtime_config(
+            workspace_id=connector.workspace_id,
+            connector_id=connector.id,
+            runtime_config={"vision_enabled": False},
+            user_id="admin-1",
+            expected_config_version=4,
+        )
+    assert connector.config_version == 5  # untouched
+    db.flush.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_update_runtime_config_survives_drifted_stored_document():
+    """#1350 review: a stored doc the current schema rejects must not make
+    the repair PATCH itself fail — previous falls back to defaults."""
+    connector = SimpleNamespace(
+        id=uuid4(),
+        workspace_id=uuid4(),
+        runtime_config={"future_field": True, "buffer": {"max_len": 10**15}},
+        config_version=1,
+    )
+    db = MagicMock()
+    db.execute = AsyncMock(return_value=_result(one=connector))
+    db.flush = AsyncMock()
+
+    result = await ConnectorProvisioningService(db).update_runtime_config(
+        workspace_id=connector.workspace_id,
+        connector_id=connector.id,
+        runtime_config={"vision_enabled": False},
+        user_id="admin-1",
+    )
+    assert result.config_version == 2
+    assert connector.runtime_config["vision_enabled"] is False
