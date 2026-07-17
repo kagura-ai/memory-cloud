@@ -128,15 +128,36 @@ Semantics (normative):
   identically for these operations by construction (#1291/#1292 lesson). Shadow-mode
   credentials are not filtered; row-filter violations land as `would_deny` aggregates in
   `memory_access_events` with `filter_kind='type_source'`. The write lane (`remember` /
-  `update` / `patch`) stays governed by `write_policy` only.
-  - **Known scope limit (tracked as [#1301](https://github.com/kagura-ai/memory-cloud/issues/1301)):**
-    the per-memory dimension is applied to the memory-read lanes above, not yet to every
-    enumeration / aggregate / update-response surface (`GET /memory/list`,
-    `GET /memory/access-patterns`, `GET /memory/stats`, MCP `get_cluster`, and the
-    `PATCH /memory/{id}` response body). Those surfaces still enforce the P0-2 **context-level**
-    binding gate; extending the row filter to them (the #1291/#1292-class audit widened to
-    non-CRUD read surfaces) is #1301. Operators must not rely on the type/source filter to hide
-    denied-type rows on those endpoints yet.
+  `update` / `patch`) stays governed by `write_policy` for whether the **mutation** may run;
+  as of [#1301](https://github.com/kagura-ai/memory-cloud/issues/1301) the id-addressed
+  update paths (`PATCH /memory/{id}`, MCP-reachable in-place update) additionally thread the
+  target row's `type`/`source_type` through the row filter, so updating a read-denied row is
+  a uniform 404 (the reference/forget doctrine — a no-op PATCH must not read back L3 content
+  the read lanes would hide).
+  - **Enumeration / aggregate surfaces (closed by
+    [#1301](https://github.com/kagura-ai/memory-cloud/issues/1301)):** `GET /memory/list`,
+    `GET /memory/access-patterns`, and `GET /memory/stats` (with its MCP mirror
+    `get_context_info`) subtract denied rows via the SQL form of the binding read filter
+    (`binding_memory_sql_predicate`) applied identically to page and count queries, so
+    totals and grouped counts (`by_type`, type distribution) are not an existence oracle
+    over denied types. The SQL form carries **both** dimensions: the P0-2 context-level
+    default-deny (rows in unbound or `can_read=False` contexts are subtracted) **and**
+    the per-memory type/source subtraction. The scoped forms of these surfaces are
+    already context-gated at the `resolve_context_for_workspace_read` chokepoint (#1275
+    uniform 404); the predicate's membership gate is what covers the **unscoped** forms
+    (no `context_id` → no chokepoint) and cross-context aggregates, which previously
+    enumerated unbound contexts' rows.
+    MCP `get_cluster` (context-gated in its handler via `agent_binding_permits`) filters
+    member and representative rows through the shared row lever, and recomputes `count` +
+    `property_stats.types` over permitted rows for enforce-mode agents (non-type facets
+    stay stored aggregates). These surfaces sit outside the MAE operation vocabulary:
+    shadow mode is a pure no-op there (no `would_deny` aggregates); the enforcement ramp
+    observes would-deny volume through the `recall` / `load_pinned` lanes.
+  - **Internal maintenance carve-out (#1301):** the upsert-by-`external_id` replacement
+    delete calls `forget` with the per-memory filter skipped (context-level write gate still
+    applies) — otherwise replacing a denied-type row would silently no-op and leave a live
+    duplicate per `external_id`. The flag is service-internal and not reachable from any
+    transport layer.
 - **`is_default` is the single source of truth for the bootstrap default binding.** At most
   one binding per agent is default, guaranteed by the partial unique index
   `(agent_id) WHERE is_default`. `agents.default_context_id` was rejected as a second source

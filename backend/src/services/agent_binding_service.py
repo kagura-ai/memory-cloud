@@ -240,6 +240,71 @@ async def emit_row_filter_would_deny(
     )
 
 
+async def binding_memory_sql_predicate(db: AsyncSession) -> Any | None:
+    """SQL form of the agent-binding read filter over ``Memory`` (#1301).
+
+    For SELECT/aggregate surfaces that never materialize full memory rows
+    (the ``/memory/list`` count + page pair, the access-patterns aggregates,
+    the stats ``GROUP BY``\\ s), post-filtering with
+    :func:`filter_memory_rows_by_binding` would leave the counts acting as an
+    existence oracle over denied rows and make pagination drift from
+    ``total``. This encodes the read lanes' full subtractive decision as a
+    WHERE clause instead — one bulk binding SELECT per request, applied
+    identically to the count and the row query:
+
+    - **Context membership (P0-2 default-deny)**: rows outside the agent's
+      readable bound set (no binding, or ``can_read=False``) are subtracted.
+      The SCOPED forms of these surfaces are already context-gated at the
+      ``resolve_context_for_workspace_read`` chokepoint (#1275 uniform 404);
+      the membership gate here is what covers the UNSCOPED forms (no
+      ``context_id`` → no chokepoint) and cross-context aggregates.
+      ``context_id IS NULL`` rows fall out of the ``IN`` gate too
+      (fail-closed: a NULL context is not a bound one).
+    - **Per-memory type/source subtraction (#1299)**: the same subtraction as
+      :meth:`BindingRowFilter.permits`, one clause per restricting binding.
+
+    Returns ``None`` (apply nothing) for non-agent credentials and
+    shadow-mode scopes. Shadow here is a pure no-op: these surfaces sit
+    outside the MAE operation vocabulary, so the enforcement ramp observes
+    would-deny volume through the recall / load_pinned lanes, not here.
+    """
+    from sqlalchemy import and_, false, not_, or_
+
+    from auth.agent_scope import get_agent_scope
+    from models.memory import Memory
+
+    scope = get_agent_scope()
+    if scope is None or scope.enforcement_mode == AGENT_ENFORCEMENT_SHADOW:
+        return None
+
+    result = await db.execute(
+        select(AgentContextBinding).where(AgentContextBinding.agent_id == scope.agent_id)
+    )
+    bindings = result.scalars().all()
+
+    readable_ids = [binding.context_id for binding in bindings if binding.can_read]
+    membership_gate = Memory.context_id.in_(readable_ids) if readable_ids else false()
+
+    denied_clauses = []
+    for binding in bindings:
+        if not binding.can_read:
+            continue  # already excluded by the membership gate
+        row_filter = BindingRowFilter.from_binding(binding)
+        if row_filter is None:
+            continue
+        dims = []
+        if row_filter.allowed_memory_types is not None:
+            allowed_types = sorted(row_filter.allowed_memory_types)
+            dims.append(Memory.type.in_(allowed_types) if allowed_types else false())
+        if row_filter.allowed_source_types is not None:
+            allowed_sources = sorted(row_filter.allowed_source_types)
+            dims.append(Memory.source_type.in_(allowed_sources) if allowed_sources else false())
+        denied_clauses.append(and_(Memory.context_id == binding.context_id, not_(and_(*dims))))
+    if not denied_clauses:
+        return membership_gate
+    return and_(membership_gate, not_(or_(*denied_clauses)))
+
+
 async def filter_memory_rows_by_binding(
     db: AsyncSession,
     rows: list[Any],

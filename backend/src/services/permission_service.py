@@ -943,11 +943,14 @@ class PermissionService:
         Issue #1299: the **read-lane** callers (reference, forget-by-id,
         explore seed) additionally thread the fetched row's own ``memory_type``
         / ``memory_source_type`` so the binding's per-memory type/source
-        filter applies. Write-lane callers (update / patch) leave them
-        ``None`` — the mutation stays governed by ``write_policy`` only, per
-        the F1 P1 scope. ``forget`` is a read-lane op in this sense (the
-        issue's four filtered ops are recall/reference/forget/explore), so it
-        threads the row even though its ``access`` is ``"write"``.
+        filter applies. #1301 extended the same threading to the id-addressed
+        **update** paths (PATCH / in-place update): a no-op update on a
+        read-denied row would otherwise read back the L3 content the read
+        lanes hide, so those ops are uniformly 404 on denied rows too. The
+        one deliberate exception is the upsert's internal replacement
+        forget (``_skip_binding_row_filter``), which passes ``None`` — see
+        MemoryService.forget. Whether a mutation may run at all stays
+        governed by ``write_policy``.
 
         #1286 item 2 (P0-5): ``operation`` / ``memory_id`` are the
         audit-identity passthrough. The binding-shaped deny is persisted
@@ -968,8 +971,9 @@ class PermissionService:
             memory_id: The requested memory id — rides ``event_metadata`` as
                 an unverified claim on deny rows.
             memory_type: The fetched row's own ``type`` (#1299) — read-lane
-                callers thread it so the binding's per-memory type filter
-                applies; write-lane callers leave it ``None``.
+                AND id-addressed update callers (#1301) thread it so the
+                binding's per-memory type filter applies; only internal
+                maintenance callers leave it ``None``.
             memory_source_type: The fetched row's own ``source_type`` (#1299),
                 same threading rule.
 

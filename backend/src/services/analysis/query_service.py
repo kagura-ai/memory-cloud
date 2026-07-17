@@ -451,6 +451,11 @@ async def get_cluster(
             Memory.summary,
             Memory.tags,
             Memory.importance,
+            # #1301: the row-filter lever below needs context_id/type/
+            # source_type on each row; they never reach the response.
+            Memory.context_id,
+            Memory.type,
+            Memory.source_type,
         )
         .join(
             MemoryAnalysisAssignment,
@@ -479,6 +484,16 @@ async def get_cluster(
         rows = rows[:page_size]
         next_cursor = str(rows[-1].id)
 
+    # #1301: cluster members expose L1 summaries — denied type/source rows
+    # drop for enforce-mode agents (shadow keeps them; outside the MAE
+    # vocabulary, so shadow is log-only). Applied AFTER the keyset cursor is
+    # derived, so pagination advances over denied rows instead of stalling.
+    # ``count`` / ``property_stats`` are handled separately below (recomputed
+    # over permitted rows for enforce-mode agents).
+    from services.agent_binding_service import filter_memory_rows_by_binding
+
+    rows, _ = await filter_memory_rows_by_binding(db, rows, operation=None, user_id=None)
+
     memories_out = [
         {
             "memory_id": str(row.id),
@@ -496,7 +511,15 @@ async def get_cluster(
     if rep_ids:
         rep_rows = (
             await db.execute(
-                select(Memory.id, Memory.summary, Memory.tags, Memory.importance).where(
+                select(
+                    Memory.id,
+                    Memory.summary,
+                    Memory.tags,
+                    Memory.importance,
+                    Memory.context_id,
+                    Memory.type,
+                    Memory.source_type,
+                ).where(
                     and_(
                         Memory.id.in_(rep_ids),
                         Memory.deleted_at.is_(None),
@@ -507,6 +530,9 @@ async def get_cluster(
                 )
             )
         ).all()
+        rep_rows, _ = await filter_memory_rows_by_binding(
+            db, list(rep_rows), operation=None, user_id=None
+        )
         # Preserve the order from ``representative_memory_ids`` so the UI
         # gets stable "top-k" semantics across repeated calls.
         rep_by_id = {r.id: r for r in rep_rows}
@@ -527,16 +553,65 @@ async def get_cluster(
     else:
         representatives = []
 
+    # #1301: ``count`` and ``property_stats`` are whole-cluster stored
+    # aggregates — ``types`` is the same grouped-count existence oracle over
+    # denied types that stats.by_type was, and ``tags`` carries verbatim tag
+    # strings from every member row. For enforce-mode agents with an active
+    # binding filter, recompute count/types over the rows the binding permits
+    # (one GROUP BY); when any row was subtracted, the remaining facets
+    # (tags/importance/time histograms) are dropped fail-closed rather than
+    # recomputed — they would otherwise leak denied rows' content and
+    # contradict the recomputed count.
+    #
+    # The recompute runs for EVERY enforce-mode agent (the predicate is
+    # non-None even for a non-restricting binding, since it carries the
+    # membership gate): deliberate — deriving "could this agent be
+    # restricted for THIS cluster's context" would need the run's context
+    # (not in hand here, and rows may be an empty page), and the cost is one
+    # indexed GROUP BY over a single cluster's assignments, agent-only.
+    count = int(cluster.count)
+    property_stats = cluster.property_stats or {}
+    from services.agent_binding_service import binding_memory_sql_predicate
+
+    binding_predicate = await binding_memory_sql_predicate(db)
+    if binding_predicate is not None:
+        type_rows = (
+            await db.execute(
+                select(Memory.type, func.count(Memory.id))
+                .join(
+                    MemoryAnalysisAssignment,
+                    MemoryAnalysisAssignment.memory_id == Memory.id,
+                )
+                .where(
+                    and_(
+                        MemoryAnalysisAssignment.analysis_id == run_id,
+                        MemoryAnalysisAssignment.cluster_id == cluster.id,
+                        Memory.deleted_at.is_(None),
+                        Memory.workspace_id == workspace_id,
+                        binding_predicate,
+                    )
+                )
+                .group_by(Memory.type)
+            )
+        ).all()
+        filtered_types = {row[0]: int(row[1]) for row in type_rows}
+        filtered_count = sum(filtered_types.values())
+        if filtered_count != count:
+            count = filtered_count
+            property_stats = {"types": filtered_types}
+        elif "types" in property_stats:
+            property_stats = {**property_stats, "types": filtered_types}
+
     return {
         "run_id": str(run_id),
         "cluster_index": cluster_index,
         "cluster_id": str(cluster.id),
         "label": cluster.label,
         "description": cluster.description,
-        "count": int(cluster.count),
+        "count": count,
         "label_confidence": float(cluster.label_confidence),
         "centroid_2d": list(cluster.centroid_2d) if cluster.centroid_2d else None,
-        "property_stats": cluster.property_stats or {},
+        "property_stats": property_stats,
         "representatives": representatives,
         "memories": memories_out,
         "next_cursor": next_cursor,
