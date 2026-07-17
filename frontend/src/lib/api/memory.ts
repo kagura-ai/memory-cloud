@@ -37,6 +37,15 @@ export interface ListMemoriesParams {
   tagsMatch?: "any" | "all";
   limit?: number;
   offset?: number;
+  /**
+   * #1334 WHERE-axis bbox filter (degrees). Bounds may be one-sided; any
+   * bound restricts results to memories with a complete location.
+   * lonMin > lonMax selects the antimeridian-crossing (±180°) box.
+   */
+  latMin?: number;
+  latMax?: number;
+  lonMin?: number;
+  lonMax?: number;
 }
 
 /**
@@ -64,6 +73,11 @@ export async function getMemories(
   // Only send tags_match when "all" — default "any" keeps the URL clean and
   // matches the backend default (#618 behavior preserved).
   if (params.tagsMatch === "all") searchParams.set("tags_match", "all");
+  // #1334 bbox bounds — `!= null` (not truthiness) so 0 stays a valid bound.
+  if (params.latMin != null) searchParams.set("lat_min", String(params.latMin));
+  if (params.latMax != null) searchParams.set("lat_max", String(params.latMax));
+  if (params.lonMin != null) searchParams.set("lon_min", String(params.lonMin));
+  if (params.lonMax != null) searchParams.set("lon_max", String(params.lonMax));
   searchParams.set("limit", String(params.limit ?? 50));
   searchParams.set("offset", String(params.offset ?? 0));
 

@@ -12,7 +12,15 @@ export type MemoryScope = "working" | "persistent";
 export type MemoryType = string;
 export type KnownMemoryType = "normal" | "coding";
 
-// Exact mirror of backend `MemoryListItem` (routes/memory.py:324) — the row
+// WHERE-axis (#1334) coordinates of a list row. Mirror of backend
+// `MemoryListItemLocation` — present only when both generated columns
+// (location_lat/location_lon) are populated.
+export interface MemoryListItemLocation {
+  lat: number;
+  lon: number;
+}
+
+// Exact mirror of backend `MemoryListItem` (routes/memory.py) — the row
 // shape returned by the UUID-addressed `GET /api/v1/memory/list` endpoint.
 // `type` is `string` (not `KnownMemoryType`) to match the backend column.
 export interface MemoryListItem {
@@ -23,6 +31,10 @@ export interface MemoryListItem {
   importance: number;
   created_at: string;
   updated_at: string;
+  // Always present on the wire (FastAPI serializes null without
+  // response_model_exclude_none) — non-optional so the type matches the
+  // actual contract.
+  location: MemoryListItemLocation | null;
 }
 
 // Issue #440: a single declared_link reference surfaced in MemoryReference.

@@ -9,7 +9,7 @@ from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 from pydantic import BaseModel
-from sqlalchemy import func, select
+from sqlalchemy import func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from auth.dependencies import APIKeyOrSessionUser
@@ -449,6 +449,14 @@ async def explore(
 # ============================================================================
 
 
+class MemoryListItemLocation(BaseModel):
+    """WHERE-axis coordinates of a list item (#1334), sourced from the
+    ``location_lat`` / ``location_lon`` generated columns."""
+
+    lat: float
+    lon: float
+
+
 class MemoryListItem(BaseModel):
     """Memory list item."""
 
@@ -459,6 +467,7 @@ class MemoryListItem(BaseModel):
     importance: float
     created_at: str
     updated_at: str
+    location: MemoryListItemLocation | None = None
 
 
 class MemoryListResponse(BaseModel):
@@ -594,6 +603,29 @@ async def list_memories(
         None,
         description="Time Memory (#877) window upper bound (naive ISO). Omit for "
         "an open-ended (future) window.",
+    ),
+    lat_min: float | None = Query(
+        None,
+        ge=-90,
+        le=90,
+        description="WHERE-axis (#1334) bbox lower latitude bound (degrees). "
+        "Any bbox bound restricts results to memories with a complete "
+        "location (generated columns from details.location); bounds may be "
+        "one-sided.",
+    ),
+    lat_max: float | None = Query(None, ge=-90, le=90, description="Bbox upper latitude bound."),
+    lon_min: float | None = Query(
+        None,
+        ge=-180,
+        le=180,
+        description="Bbox lower longitude bound. lon_min > lon_max selects the "
+        "antimeridian-crossing (±180°) box: lon >= lon_min OR lon <= lon_max.",
+    ),
+    lon_max: float | None = Query(
+        None,
+        ge=-180,
+        le=180,
+        description="Bbox upper longitude bound (see lon_min for the antimeridian-crossing form).",
     ),
     order_by: str = Query(
         "created_at",
@@ -761,6 +793,45 @@ async def list_memories(
         for wf in window_filters:
             query = query.where(wf)
 
+        # WHERE-axis bbox filter (#1334), built once and applied to BOTH
+        # queries (anti-drift, same rationale as tag_filter / window_filters).
+        # Bounds may be one-sided (time-axis mirror). isinstance (not
+        # `is not None`) skips the unset Query() FieldInfo sentinel that
+        # direct-call unit tests pass.
+        geo_filters = []
+        if isinstance(lat_min, int | float):
+            geo_filters.append(Memory.location_lat >= lat_min)
+        if isinstance(lat_max, int | float):
+            geo_filters.append(Memory.location_lat <= lat_max)
+        lon_lo = lon_min if isinstance(lon_min, int | float) else None
+        lon_hi = lon_max if isinstance(lon_max, int | float) else None
+        if lon_lo is not None and lon_hi is not None and lon_lo > lon_hi:
+            # Antimeridian-crossing box (map viewport panned across ±180°):
+            # the wrapped range is the union of the two edge ranges, same
+            # two-ranges-ORed convention as utils.geo_location.bbox_lon_ranges
+            # (#1331). Without this branch the AND of the two bounds is
+            # unsatisfiable and a valid viewport silently returns empty.
+            geo_filters.append(or_(Memory.location_lon >= lon_lo, Memory.location_lon <= lon_hi))
+        else:
+            if lon_lo is not None:
+                geo_filters.append(Memory.location_lon >= lon_lo)
+            if lon_hi is not None:
+                geo_filters.append(Memory.location_lon <= lon_hi)
+        if geo_filters:
+            # Pair-completeness: a bbox-filtered result must contain only
+            # plottable rows. A half-populated pair (raw-SQL writer artifact
+            # where the e69 regex guard NULLed one coordinate) would match a
+            # one-sided bound yet serialize location=None below — require
+            # both columns so filter and serialization semantics agree
+            # (mirrors services/geo_memory.py's explicit IS NOT NULL; the
+            # explicit location_lat IS NOT NULL also keeps the query
+            # eligible for the partial index, whose predicate covers lat
+            # and deleted_at only).
+            geo_filters.append(Memory.location_lat.is_not(None))
+            geo_filters.append(Memory.location_lon.is_not(None))
+        for gf in geo_filters:
+            query = query.where(gf)
+
         # Get total count (with same filters as data query)
         count_query = select(func.count(Memory.id)).where(Memory.deleted_at.is_(None))
         if binding_predicate is not None:
@@ -779,6 +850,8 @@ async def list_memories(
             count_query = count_query.where(tag_filter)
         for wf in window_filters:
             count_query = count_query.where(wf)
+        for gf in geo_filters:
+            count_query = count_query.where(gf)
         count_result = await db.execute(count_query)
         total = count_result.scalar() or 0
 
@@ -799,6 +872,10 @@ async def list_memories(
         # fresh rows that haven't been touched since insert. The frontend
         # renders both as the row "updated" timestamp, so created_at is the
         # correct fallback rather than null/empty.
+        # ``location`` (#1334) surfaces the generated columns so the UI can
+        # plot pins. A half-populated pair (raw-SQL writer artifact where the
+        # e69 regex guard NULLed one coordinate) serializes as None rather
+        # than a partial point.
         memory_items = [
             MemoryListItem(
                 id=str(m.id),
@@ -808,6 +885,11 @@ async def list_memories(
                 importance=m.importance,
                 created_at=to_utc_iso(m.created_at) or "",
                 updated_at=to_utc_iso(m.updated_at or m.created_at) or "",
+                location=(
+                    MemoryListItemLocation(lat=m.location_lat, lon=m.location_lon)
+                    if m.location_lat is not None and m.location_lon is not None
+                    else None
+                ),
             )
             for m in memories
         ]

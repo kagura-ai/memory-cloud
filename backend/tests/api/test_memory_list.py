@@ -28,6 +28,10 @@ def _mock_memory_row():
     mem.importance = 0.8
     mem.created_at = datetime(2026, 4, 1)
     mem.updated_at = datetime(2026, 4, 2)
+    # Explicit None (a bare MagicMock attribute is truthy) so the #1334
+    # location serialization takes the no-location branch.
+    mem.location_lat = None
+    mem.location_lon = None
     return mem
 
 
