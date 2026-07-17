@@ -21,6 +21,7 @@ from services.connector_provisioning import (
 )
 from utils.exceptions import (
     BadRequestError,
+    InternalError,
     MemoryCloudException,
     NotFoundException,
     ValidationError,
@@ -323,9 +324,8 @@ async def update_workspace_connector_runtime(
     """Replace per-connector runtime controls (workspace-admin scoped)."""
     workspace_id = admin.get("current_workspace_id")
     if workspace_id is None:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="No workspace selected. Please select a workspace first.",
+        raise BadRequestError(
+            "No workspace selected. Please select a workspace first.",
         )
     try:
         update_result: ConnectorRuntimeUpdateResult = await ConnectorProvisioningService(
@@ -339,10 +339,7 @@ async def update_workspace_connector_runtime(
         await db.commit()
     except NotFoundException as exc:
         await db.rollback()
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail="Connector not found",
-        ) from exc
+        raise NotFoundException("Connector") from exc
     except Exception as exc:
         await db.rollback()
         logger.error(
@@ -352,10 +349,7 @@ async def update_workspace_connector_runtime(
             user_id=admin["user_id"],
             error_type=type(exc).__name__,
         )
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail="Failed to update connector runtime",
-        ) from exc
+        raise InternalError("Failed to update connector runtime") from exc
 
     return WorkspaceConnectorRuntimeUpdateResponse(
         connector_id=connector_id,

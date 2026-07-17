@@ -182,8 +182,6 @@ async def test_update_runtime_commits_revision_and_returns_normalized_config():
 
 @pytest.mark.asyncio
 async def test_update_runtime_hides_cross_workspace_connector_as_not_found():
-    from fastapi import HTTPException
-
     from api.routes.workspace_connectors import (
         WorkspaceConnectorRuntimeUpdateRequest,
         update_workspace_connector_runtime,
@@ -198,7 +196,7 @@ async def test_update_runtime_hides_cross_workspace_connector_as_not_found():
         service_cls.return_value.update_runtime_config = AsyncMock(
             side_effect=NotFoundException("Connector", "hidden")
         )
-        with pytest.raises(HTTPException) as exc:
+        with pytest.raises(NotFoundException) as exc:
             await update_workspace_connector_runtime(
                 uuid4(),
                 WorkspaceConnectorRuntimeUpdateRequest(runtime={"vision_enabled": False}),
@@ -207,6 +205,63 @@ async def test_update_runtime_hides_cross_workspace_connector_as_not_found():
             )
 
     assert exc.value.status_code == 404
+    assert exc.value.message == "Connector not found"
+    assert "hidden" not in exc.value.message
+    db.rollback.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_update_runtime_requires_selected_workspace():
+    from api.routes.workspace_connectors import (
+        WorkspaceConnectorRuntimeUpdateRequest,
+        update_workspace_connector_runtime,
+    )
+    from utils.exceptions import BadRequestError
+
+    with pytest.raises(BadRequestError) as exc:
+        await update_workspace_connector_runtime(
+            uuid4(),
+            WorkspaceConnectorRuntimeUpdateRequest(runtime={"vision_enabled": False}),
+            {"user_id": "user-1", "current_workspace_id": None},
+            MagicMock(),
+        )
+
+    assert exc.value.status_code == 400
+    assert exc.value.error_code == "REQ-001"
+
+
+@pytest.mark.asyncio
+async def test_update_runtime_maps_unexpected_failure_to_canonical_internal_error():
+    from api.routes.workspace_connectors import (
+        WorkspaceConnectorRuntimeUpdateRequest,
+        update_workspace_connector_runtime,
+    )
+    from utils.exceptions import InternalError
+
+    db = MagicMock()
+    db.rollback = AsyncMock()
+    admin = {"user_id": "user-1", "current_workspace_id": uuid4()}
+
+    with (
+        patch("api.routes.workspace_connectors.ConnectorProvisioningService") as service_cls,
+        patch("api.routes.workspace_connectors.logger.error") as log_error,
+    ):
+        service_cls.return_value.update_runtime_config = AsyncMock(
+            side_effect=RuntimeError("secret-bearing internal detail")
+        )
+        with pytest.raises(InternalError) as exc:
+            await update_workspace_connector_runtime(
+                uuid4(),
+                WorkspaceConnectorRuntimeUpdateRequest(runtime={"vision_enabled": False}),
+                admin,
+                db,
+            )
+
+    assert exc.value.status_code == 500
+    assert exc.value.error_code == "INT-001"
+    assert exc.value.message == "Failed to update connector runtime"
+    assert "secret-bearing" not in str(log_error.call_args)
+    assert log_error.call_args.kwargs["error_type"] == "RuntimeError"
     db.rollback.assert_awaited_once()
 
 
