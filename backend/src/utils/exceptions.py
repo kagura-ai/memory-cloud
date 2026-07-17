@@ -242,6 +242,64 @@ class BadRequestError(MemoryCloudException):
         super().__init__(message, status_code=400, error_code=error_code, **details)
 
 
+class WorkerAppNotFoundError(MemoryCloudException):
+    """The app-qualified worker selector is unknown (404)."""
+
+    def __init__(self, app_key: str) -> None:
+        super().__init__(
+            "Worker app identity not found",
+            status_code=404,
+            error_code="WORKER-APP-001",
+            app_key=app_key,
+        )
+
+
+class WorkerAppDisabledError(MemoryCloudException):
+    """The app identity is explicitly disabled and must be evicted (410)."""
+
+    def __init__(self, app_key: str) -> None:
+        super().__init__(
+            "Worker app identity is disabled",
+            status_code=410,
+            error_code="WORKER-APP-002",
+            app_key=app_key,
+        )
+
+
+class WorkerAppNotReadyError(MemoryCloudException):
+    """The app identity exists but lacks active verification material (409)."""
+
+    def __init__(self, app_key: str) -> None:
+        super().__init__(
+            "Worker app identity is not ready",
+            status_code=409,
+            error_code="WORKER-APP-003",
+            app_key=app_key,
+        )
+
+
+class WorkerConnectorNotReadyError(MemoryCloudException):
+    """No complete connector config exists for an app-qualified team (404)."""
+
+    def __init__(self) -> None:
+        super().__init__(
+            "No ready connector for this team",
+            status_code=404,
+            error_code="WORKER-CONNECTOR-001",
+        )
+
+
+class WorkerAppOperationError(MemoryCloudException):
+    """An app-identity lifecycle write failed without exposing secret context."""
+
+    def __init__(self, operation: str) -> None:
+        super().__init__(
+            f"Failed to {operation} worker app identity",
+            status_code=500,
+            error_code="WORKER-APP-004",
+        )
+
+
 class UnsupportedMediaTypeError(MemoryCloudException):
     """Content-Type not in the platform allow-list (415).
 

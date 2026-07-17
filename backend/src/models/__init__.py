@@ -18,6 +18,7 @@ import models.memory_access_event  # noqa: F401  # Issue #1278: agent access aud
 import models.retrieval_feedback  # noqa: F401  # Issue #888: retrieval feedback signal
 import models.secrets  # noqa: F401  # Issue #1128: zero-knowledge secret store
 import models.sleep  # noqa: F401
+import models.worker_app  # noqa: F401  # Issue #1315: worker app identities
 from models.config import ContextSearchConfig
 from models.file_objects import FileObject, WorkspaceStorageUsage
 from models.neural import NeuralConfig
@@ -29,6 +30,7 @@ from models.resource import (
     WorkspaceAddon,
     WorkspaceConnector,
 )
+from models.worker_app import WorkerAppIdentity
 
 __all__ = [
     "NeuralConfig",
@@ -41,4 +43,5 @@ __all__ = [
     "ResourceToken",
     "WorkspaceAddon",
     "WorkspaceConnector",
+    "WorkerAppIdentity",
 ]

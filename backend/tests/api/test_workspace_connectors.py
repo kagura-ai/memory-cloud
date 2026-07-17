@@ -80,6 +80,7 @@ async def test_create_passes_normalized_pii_guardrail_config_dict_to_service():
     result = MagicMock()
     result.connector.id = uuid4()
     result.connector.connector_type = "slack"
+    result.connector.app_key = "default"
     result.resource_id = "slack_general"
     result.context_id = None
     result.plaintext_kmc_api_key = None
@@ -115,6 +116,7 @@ async def test_list_workspace_connectors_returns_summaries():
     c = MagicMock()
     c.id = uuid4()
     c.connector_type = "slack"
+    c.app_key = "default"
     c.context_id = uuid4()
     c.config_version = 1
     c.created_at = datetime(2026, 6, 2, 0, 0, 0)
@@ -131,6 +133,7 @@ async def test_list_workspace_connectors_returns_summaries():
     assert len(result) == 1
     assert result[0].connector_id == c.id
     assert result[0].connector_type == "slack"
+    assert result[0].app_key == "default"
     assert result[0].resource_id == "my-resource-slug"
     assert not hasattr(result[0], "resource_pk")
     service_cls.return_value.list_connectors.assert_awaited_once_with(ws_id)
@@ -148,6 +151,31 @@ async def test_list_workspace_connectors_400_without_workspace():
     with pytest.raises(HTTPException) as exc:
         await list_workspace_connectors(admin, db)
     assert exc.value.status_code == 400
+
+
+@pytest.mark.asyncio
+async def test_list_available_worker_apps_returns_active_non_secret_metadata():
+    from api.routes.workspace_connectors import list_available_worker_apps
+
+    admin = {"user_id": "user-1", "current_workspace_id": uuid4()}
+    identity = MagicMock()
+    identity.platform = "slack"
+    identity.app_key = "sales"
+    identity.display_name = "Sales Slack App"
+
+    with patch("services.worker_app_identity.WorkerAppIdentityService") as service_cls:
+        service_cls.return_value.list_identities = AsyncMock(return_value=[identity])
+        result = await list_available_worker_apps(admin, MagicMock())
+
+    assert [item.model_dump() for item in result] == [
+        {
+            "platform": "slack",
+            "app_key": "sales",
+            "display_name": "Sales Slack App",
+        }
+    ]
+    assert "signing_secret" not in result[0].model_dump()
+    service_cls.return_value.list_identities.assert_awaited_once_with(active_only=True)
 
 
 @pytest.mark.asyncio

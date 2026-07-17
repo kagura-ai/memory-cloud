@@ -505,8 +505,14 @@ class WorkspaceConnector(Base):
     # Worker-facing pre-compile locale (e.g. cluster labelling). Defaults to the
     # workspace locale at provision time; NULL falls back to worker default.
     locale: Mapped[str | None] = mapped_column(String(10), nullable=True)
+    # Stable platform app selector. Existing connectors are backfilled to the
+    # compatibility identity ``default`` by migration e68 (#1315).
+    app_key: Mapped[str] = mapped_column(
+        String(64), nullable=False, default="default", server_default="default"
+    )
     # Queryable external account/team id (Slack team_id / Discord guild / Teams
-    # tenant). The worker config endpoint dispatches by (connector_type, this).
+    # tenant). Dispatch is unique by (connector_type, app_key, this), allowing
+    # the same platform team to install two distinct apps safely.
     external_team_id: Mapped[str | None] = mapped_column(String(255), nullable=True)
     # Ingest channel selection (Slack channel id list, v1 = ids only).
     channel_ids: Mapped[list[Any] | None] = mapped_column(JSONB, nullable=True)
@@ -548,12 +554,13 @@ class WorkspaceConnector(Base):
             "connector_type IN ('slack', 'discord', 'teams')",
             name="check_connector_type",
         ),
-        # UNIQUE so one platform team maps to exactly one connector (prevents
-        # cross-tenant dispatch hijack). Postgres allows multiple NULL
-        # external_team_id rows, so legacy/not-yet-OAuthed connectors are fine.
+        # UNIQUE so one app-qualified platform team maps to exactly one
+        # connector (prevents cross-tenant dispatch hijack). Postgres allows
+        # multiple NULL external_team_id rows for not-yet-OAuthed connectors.
         Index(
-            "ix_workspace_connectors_type_team",
+            "ix_workspace_connectors_app_team",
             "connector_type",
+            "app_key",
             "external_team_id",
             unique=True,
         ),

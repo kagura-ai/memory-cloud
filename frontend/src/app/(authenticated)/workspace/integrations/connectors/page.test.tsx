@@ -7,16 +7,26 @@
  * workspace shows the "no workspace selected" banner rather than the role
  * banner.
  */
-import { render, screen, waitFor, cleanup } from "@testing-library/react";
+import {
+  cleanup,
+  fireEvent,
+  render,
+  screen,
+  waitFor,
+} from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import ConnectorsPage from "./page";
 
 const mockListConnectors = vi.fn();
+const mockListAvailableWorkerApps = vi.fn();
+const mockCreateConnector = vi.fn();
 vi.mock("@/lib/api/workspace-connectors", () => ({
   listConnectors: (...args: unknown[]) => mockListConnectors(...args),
+  listAvailableWorkerApps: (...args: unknown[]) =>
+    mockListAvailableWorkerApps(...args),
   deleteConnector: vi.fn(),
-  createConnector: vi.fn(),
+  createConnector: (...args: unknown[]) => mockCreateConnector(...args),
   getSlackPendingInstall: vi.fn(),
   slackInstallUrl: () => "https://slack.example/install",
 }));
@@ -55,6 +65,19 @@ function setWorkspace(role: string | undefined, overrides = {}) {
 
 beforeEach(() => {
   mockListConnectors.mockResolvedValue([]);
+  mockListAvailableWorkerApps.mockResolvedValue([]);
+  mockCreateConnector.mockResolvedValue({
+    connector_id: "connector-1",
+    connector_type: "slack",
+    app_key: "sales",
+    resource_id: "slack-sales-t01",
+    context_id: "context-1",
+    token_id: 1,
+    token: "resource-token",
+    kmc_api_key: "kmc-key",
+    quota_events_per_hour: 1000,
+    idempotency_key_prefix: "connector-1:",
+  });
 });
 
 afterEach(() => {
@@ -74,6 +97,7 @@ describe("ConnectorsPage RBAC gate", () => {
       ).toBeInTheDocument();
       // The admin-only list call must not fire for non-admins.
       expect(mockListConnectors).not.toHaveBeenCalled();
+      expect(mockListAvailableWorkerApps).not.toHaveBeenCalled();
       // No connect action surfaced.
       expect(screen.queryByText("connectSlack")).not.toBeInTheDocument();
     },
@@ -102,6 +126,7 @@ describe("ConnectorsPage RBAC gate", () => {
       screen.queryByText("errors.forbiddenWorkspace"),
     ).not.toBeInTheDocument();
     expect(mockListConnectors).not.toHaveBeenCalled();
+    expect(mockListAvailableWorkerApps).not.toHaveBeenCalled();
   });
 
   it("distinguishes no-workspace from wrong-role", async () => {
@@ -115,5 +140,41 @@ describe("ConnectorsPage RBAC gate", () => {
       await screen.findByText("errors.noWorkspaceSelected"),
     ).toBeInTheDocument();
     expect(mockListConnectors).not.toHaveBeenCalled();
+    expect(mockListAvailableWorkerApps).not.toHaveBeenCalled();
+  });
+
+  it("binds an active app identity and clears the installation bot token", async () => {
+    setWorkspace("admin");
+    mockListAvailableWorkerApps.mockResolvedValue([
+      {
+        platform: "slack",
+        app_key: "sales",
+        display_name: "Sales Slack App",
+      },
+    ]);
+
+    render(<ConnectorsPage />);
+
+    await screen.findByText("manualBindTitle");
+    fireEvent.change(screen.getByLabelText("manualTeamId"), {
+      target: { value: "T01" },
+    });
+    const tokenInput = screen.getByLabelText("manualBotToken");
+    fireEvent.change(tokenInput, { target: { value: "xoxb-install-token" } });
+    fireEvent.click(screen.getByRole("button", { name: "manualBind" }));
+
+    await waitFor(() =>
+      expect(mockCreateConnector).toHaveBeenCalledWith(
+        expect.objectContaining({
+          connector_type: "slack",
+          app_key: "sales",
+          external_team_id: "T01",
+          oauth_tokens: { bot_token: "xoxb-install-token" },
+          resource_id: "slack-sales-t01",
+          auto_create_context_name: "slack-sales-t01",
+        }),
+      ),
+    );
+    await waitFor(() => expect(tokenInput).toHaveValue(""));
   });
 });

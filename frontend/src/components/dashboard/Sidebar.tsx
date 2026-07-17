@@ -277,6 +277,12 @@ const navigationGroups: NavGroup[] = [
         requiredRole: Role.ADMIN,
       },
       {
+        nameKey: "workerApps",
+        href: "/admin/worker-apps",
+        icon: Puzzle,
+        requiredRole: Role.ADMIN,
+      },
+      {
         // Issue #358: admin-configurable signup gate
         nameKey: "signupGate",
         href: "/admin/signup-gate",

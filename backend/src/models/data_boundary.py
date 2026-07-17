@@ -87,6 +87,9 @@ OPERATIONAL_TABLES: frozenset[str] = frozenset(
         "workspace_invitations",
         "workspace_addons",
         "workspace_connectors",
+        # Global external-app verification control plane (#1315). Contains
+        # Fernet ciphertext and lifecycle metadata, never user-authored memory.
+        "worker_app_identities",
         "workspace_storage_usage",
         # break-glass dual-control approval workflow (#1113) — governance plumbing,
         # like erasure_requests/audit_logs; no user content, no learned structure

@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useState } from "react";
+import { FormEvent, useCallback, useEffect, useState } from "react";
 import { useRouter, useSearchParams } from "next/navigation";
 import { useTranslations, useLocale } from "next-intl";
 import { Check, Copy, Plug, Trash2 } from "lucide-react";
@@ -39,8 +39,10 @@ import {
   createConnector,
   deleteConnector,
   getSlackPendingInstall,
+  listAvailableWorkerApps,
   listConnectors,
   slackInstallUrl,
+  type AvailableWorkerApp,
   type CreateConnectorResponse,
   type SlackPendingInstall,
   type WorkspaceConnectorSummary,
@@ -130,6 +132,19 @@ export default function ConnectorsPage() {
     WorkspaceConnectorSummary[] | null
   >(null);
   const [loadError, setLoadError] = useState<string | null>(null);
+  const [availableApps, setAvailableApps] = useState<
+    AvailableWorkerApp[] | null
+  >(null);
+
+  // Manual binding is the multi-app path: a workspace admin selects a global
+  // app identity and supplies that installation's bot token + Slack team id.
+  // The token is sent once to memory-cloud and stored Fernet-encrypted; worker
+  // config remains entirely server-managed.
+  const [manualAppKey, setManualAppKey] = useState("");
+  const [manualTeamId, setManualTeamId] = useState("");
+  const [manualBotToken, setManualBotToken] = useState("");
+  const [manualSubmitting, setManualSubmitting] = useState(false);
+  const [manualError, setManualError] = useState<string | null>(null);
 
   // Slack install → create dialog
   const [pending, setPending] = useState<SlackPendingInstall | null>(null);
@@ -158,7 +173,18 @@ export default function ConnectorsPage() {
   const reload = useCallback(async () => {
     try {
       setLoadError(null);
-      setConnectors(await listConnectors());
+      const [connectorRows, appRows] = await Promise.all([
+        listConnectors(),
+        listAvailableWorkerApps(),
+      ]);
+      const slackApps = appRows.filter((app) => app.platform === "slack");
+      setConnectors(connectorRows);
+      setAvailableApps(slackApps);
+      setManualAppKey((current) =>
+        slackApps.some((app) => app.app_key === current)
+          ? current
+          : (slackApps[0]?.app_key ?? ""),
+      );
     } catch (err) {
       setLoadError(err instanceof Error ? err.message : String(err));
     }
@@ -229,6 +255,7 @@ export default function ConnectorsPage() {
       // otherwise) so the {enabled:true, detectors:[]} 422 can't occur.
       const result = await createConnector({
         connector_type: "slack",
+        app_key: pending.app_key,
         resource_id: toResourceId(pending.team_id),
         display_name: displayName || undefined,
         auto_create_context_name: contextName || undefined,
@@ -283,6 +310,54 @@ export default function ConnectorsPage() {
     }
   }, [toDelete, t, toast, reload]);
 
+  const handleManualCreate = useCallback(
+    async (event: FormEvent) => {
+      event.preventDefault();
+      if (!manualAppKey || !manualTeamId || !manualBotToken) return;
+      setManualSubmitting(true);
+      setManualError(null);
+      try {
+        const resourceId = toResourceId(`${manualAppKey}-${manualTeamId}`);
+        const app = availableApps?.find(
+          (candidate) => candidate.app_key === manualAppKey,
+        );
+        const result = await createConnector({
+          connector_type: "slack",
+          app_key: manualAppKey,
+          resource_id: resourceId,
+          display_name: app
+            ? `${app.display_name} / ${manualTeamId}`
+            : manualTeamId,
+          auto_create_context_name: resourceId,
+          external_team_id: manualTeamId,
+          oauth_tokens: { bot_token: manualBotToken },
+          pii_guardrail_config: {
+            enabled: true,
+            detectors: PII_DEFAULT_DETECTORS,
+            redaction: "mask",
+            locale,
+            fail_closed: true,
+          },
+        });
+        setManualTeamId("");
+        setManualBotToken("");
+        setCreated(result);
+        await reload();
+      } catch (err) {
+        setManualError(err instanceof Error ? err.message : String(err));
+      } finally {
+        setManualSubmitting(false);
+      }
+    }, [
+      availableApps,
+      locale,
+      manualAppKey,
+      manualBotToken,
+      manualTeamId,
+      reload,
+    ],
+  );
+
   // Resolve loading before role gating to avoid a flash of the admin UI
   // before the workspace role is known. All hooks above run unconditionally
   // (these early returns are after every hook call).
@@ -325,6 +400,64 @@ export default function ConnectorsPage() {
         </Button>
       </div>
 
+      {availableApps && availableApps.length > 0 && (
+        <form
+          onSubmit={handleManualCreate}
+          className="mb-6 grid gap-3 rounded-md border p-4 md:grid-cols-4"
+        >
+          <div className="md:col-span-4">
+            <h2 className="font-medium">{t("manualBindTitle")}</h2>
+            <p className="text-sm text-muted-foreground">
+              {t("manualBindDescription")}
+            </p>
+          </div>
+          {manualError && (
+            <Alert variant="destructive" className="md:col-span-4">
+              <AlertDescription>{manualError}</AlertDescription>
+            </Alert>
+          )}
+          <Select value={manualAppKey} onValueChange={setManualAppKey}>
+            <SelectTrigger aria-label={t("manualAppIdentity")}>
+              <SelectValue placeholder={t("manualAppIdentity")} />
+            </SelectTrigger>
+            <SelectContent>
+              {availableApps.map((app) => (
+                <SelectItem key={app.app_key} value={app.app_key}>
+                  {app.display_name} ({app.app_key})
+                </SelectItem>
+              ))}
+            </SelectContent>
+          </Select>
+          <Input
+            aria-label={t("manualTeamId")}
+            placeholder={t("manualTeamId")}
+            value={manualTeamId}
+            onChange={(event) => setManualTeamId(event.target.value)}
+            required
+          />
+          <Input
+            aria-label={t("manualBotToken")}
+            placeholder={t("manualBotToken")}
+            type="password"
+            autoComplete="new-password"
+            value={manualBotToken}
+            onChange={(event) => setManualBotToken(event.target.value)}
+            required
+          />
+          <Button
+            type="submit"
+            disabled={
+              manualSubmitting ||
+              !manualAppKey ||
+              !manualTeamId ||
+              !manualBotToken
+            }
+          >
+            {t("manualBind")}
+          </Button>
+        </form>
+      )}
+
       {loadError ? (
         <ErrorBanner error={loadError} />
       ) : connectors === null ? (
@@ -346,6 +479,9 @@ export default function ConnectorsPage() {
             >
               <div className="min-w-0">
                 <p className="font-medium capitalize">{c.connector_type}</p>
+                <p className="text-xs text-muted-foreground">
+                  {t("appIdentity", { appKey: c.app_key })}
+                </p>
                 <p className="text-sm text-muted-foreground">
                   {c.context_id
                     ? t("contextBound", { id: c.context_id })

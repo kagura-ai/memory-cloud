@@ -221,6 +221,10 @@ async def slack_callback(
 
     install = {
         "workspace_id": stored_workspace_id,
+        # The existing shared OAuth client is the compatibility app identity.
+        # Multi-app OAuth credentials are a later control-plane extension;
+        # carrying this binding now prevents a handle from being rebound.
+        "app_key": "default",
         "bot_token_enc": bot_token_enc,
         "team_id": team.get("id"),
         "team_name": team.get("name"),
@@ -273,4 +277,5 @@ async def slack_pending(handle: str, admin: WorkspaceAdmin) -> dict[str, Any]:
         "team_id": install.get("team_id"),
         "team_name": install.get("team_name"),
         "installing_admin_user_id": install.get("installing_admin_user_id"),
+        "app_key": install.get("app_key") or "default",
     }

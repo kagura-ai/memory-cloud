@@ -44,6 +44,17 @@ class TestConnectorProvisioningService:
         db.rollback = AsyncMock()
         return db
 
+    @pytest.fixture(autouse=True)
+    def _absent_worker_app_identity(self):
+        """provision_connector always resolves the app identity now (an
+        explicitly disabled default fails closed — #1337 review), which
+        would consume one extra db.execute from the positional side_effect
+        sequences below. Stub the identity lookup as absent (allowed
+        migration-window state) so the plan-cap sequences stay aligned."""
+        with patch("services.worker_app_identity.WorkerAppIdentityService") as svc:
+            svc.return_value.get_identity = AsyncMock(return_value=None)
+            yield
+
     @pytest.mark.asyncio
     async def test_free_plan_zero_connector_cap_blocks_before_writes(self, mock_db):
         workspace_id = uuid4()

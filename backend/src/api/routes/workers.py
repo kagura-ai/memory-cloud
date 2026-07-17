@@ -15,16 +15,30 @@ payload as sensitive and never log it.
 from __future__ import annotations
 
 import secrets
+from datetime import datetime
 from typing import Any, Literal
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, Header, HTTPException, Query, status
+from fastapi import APIRouter, Depends, Header, HTTPException, Query, Response, status
+from pydantic import BaseModel
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from config.settings import get_settings
 from db.base import get_db
 from models.api_base import TZAwareBaseModel
 from services.connector_provisioning import ConnectorProvisioningService
+from services.worker_app_identity import (
+    WorkerAppIdentityService,
+    identity_collection_revision,
+    identity_revision,
+    opaque_revision,
+)
+from utils.exceptions import (
+    WorkerAppDisabledError,
+    WorkerAppNotFoundError,
+    WorkerAppNotReadyError,
+    WorkerConnectorNotReadyError,
+)
 from utils.logger import get_logger
 
 logger = get_logger(__name__)
@@ -64,6 +78,8 @@ class WorkerConnectorConfig(TZAwareBaseModel):
     workspace_id: UUID
     context_id: UUID
     platform: str
+    app_key: str
+    config_revision: str
     locale: str | None = None
     slack: dict[str, Any]
     kmc: dict[str, Any]
@@ -75,29 +91,168 @@ class WorkerConnectorConfig(TZAwareBaseModel):
     pii_guardrail_config: dict[str, Any] | None = None
 
 
+class WorkerSigningSecret(TZAwareBaseModel):
+    """One revision of signing-secret material for an internal worker."""
+
+    revision: int
+    signing_secret: str
+    valid_until: datetime | None = None
+
+
+class WorkerAppBootstrapItem(TZAwareBaseModel):
+    """One app identity. Secrets are present only while the app is active."""
+
+    app_key: str
+    platform: str
+    status: str
+    revision: str
+    active: WorkerSigningSecret | None = None
+    retiring: WorkerSigningSecret | None = None
+
+
+class WorkerAppBootstrapResponse(BaseModel):
+    revision: str
+    apps: list[WorkerAppBootstrapItem]
+
+
+def _etag(revision: str) -> str:
+    return f'"{revision}"'
+
+
+@router.get("/apps", response_model=WorkerAppBootstrapResponse)
+async def get_worker_apps(
+    response: Response,
+    if_none_match: str | None = Header(None, alias="If-None-Match"),
+    _: None = Depends(verify_worker_token),
+    db: AsyncSession = Depends(get_db),
+) -> WorkerAppBootstrapResponse | Response:
+    """Bootstrap app identities and signing secrets over the internal lane.
+
+    This service token grants no memory authority. Disabled/unconfigured apps
+    remain in the list without secret material so a polling worker can evict
+    stale verification state deterministically.
+    """
+    identities = await WorkerAppIdentityService(db).list_identities()
+    revision = identity_collection_revision(identities)
+    etag = _etag(revision)
+    headers = {"ETag": etag, "Cache-Control": "no-store"}
+    if if_none_match == etag:
+        return Response(status_code=status.HTTP_304_NOT_MODIFIED, headers=headers)
+    response.headers.update(headers)
+
+    from utils.datetime import utcnow
+
+    now = utcnow()
+    apps: list[WorkerAppBootstrapItem] = []
+    for identity in identities:
+        active = None
+        retiring = None
+        if identity.status == "active":
+            try:
+                active_secret = identity.get_active_signing_secret()
+                if active_secret and identity.active_secret_revision is not None:
+                    active = WorkerSigningSecret(
+                        revision=identity.active_secret_revision,
+                        signing_secret=active_secret,
+                    )
+                if identity.retiring_valid_until and identity.retiring_valid_until > now:
+                    retiring_secret = identity.get_retiring_signing_secret()
+                    if retiring_secret and identity.retiring_secret_revision is not None:
+                        retiring = WorkerSigningSecret(
+                            revision=identity.retiring_secret_revision,
+                            signing_secret=retiring_secret,
+                            valid_until=identity.retiring_valid_until,
+                        )
+            except ValueError:
+                # One undecryptable row (encryption-key rotation, corrupted
+                # ciphertext) must not 500 the whole fleet's bootstrap lane.
+                # Serve the item without secret material — the documented
+                # eviction semantics for a secretless entry — and log loudly
+                # (no secret material in this log line).
+                active = None
+                retiring = None
+                logger.warning(
+                    "worker_app_bootstrap_undecryptable_secret",
+                    platform=identity.platform,
+                    app_key=identity.app_key,
+                    active_secret_revision=identity.active_secret_revision,
+                )
+        apps.append(
+            WorkerAppBootstrapItem(
+                app_key=identity.app_key,
+                platform=identity.platform,
+                status=identity.status,
+                revision=identity_revision(identity),
+                active=active,
+                retiring=retiring,
+            )
+        )
+    return WorkerAppBootstrapResponse(revision=revision, apps=apps)
+
+
 @router.get("/config", response_model=WorkerConnectorConfig)
 async def get_worker_config(
+    response: Response,
     # Only Slack is implemented end-to-end (the response carries a Slack-specific
     # ``slack`` block). Widen to discord/teams when those connectors ship.
     platform: Literal["slack"],
     team_id: str = Query(..., max_length=255),
+    app_key: str | None = Query(
+        None, min_length=1, max_length=64, pattern=r"^[a-z0-9][a-z0-9_-]{0,63}$"
+    ),
+    if_none_match: str | None = Header(None, alias="If-None-Match"),
     _: None = Depends(verify_worker_token),
     db: AsyncSession = Depends(get_db),
-) -> WorkerConnectorConfig:
+) -> WorkerConnectorConfig | Response:
     """Return the connector config for a platform team (worker dispatch).
 
     404 when no connector serves the team, or the connector has no write-target
     context yet (registration incomplete) — the worker treats both as not-ready.
     """
-    connector = await ConnectorProvisioningService(db).get_connector_for_dispatch(
-        connector_type=platform, external_team_id=team_id
-    )
-    kmc_api_key = connector.get_kmc_api_key() if connector else None
-    if connector is None or connector.context_id is None or not kmc_api_key:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail="No ready connector for this team",
+    selected_app_key = app_key or "default"
+    app_config_version = 0
+    identity = await WorkerAppIdentityService(db).get_identity(platform, selected_app_key)
+    if identity is None:
+        if app_key is not None:
+            raise WorkerAppNotFoundError(app_key)
+    else:
+        if identity.status == "disabled":
+            raise WorkerAppDisabledError(selected_app_key)
+        # An unconfigured default identity is the deliberate Phase-3a migration
+        # state: legacy callers that omit app_key still use the worker env
+        # signing secret. Explicit app-qualified callers never get that bypass.
+        legacy_unconfigured_default = (
+            app_key is None and selected_app_key == "default" and identity.status == "unconfigured"
         )
+        if not legacy_unconfigured_default and (
+            identity.status != "active" or not identity.active_signing_secret_encrypted
+        ):
+            raise WorkerAppNotReadyError(selected_app_key)
+        app_config_version = identity.config_version
+
+    connector = await ConnectorProvisioningService(db).get_connector_for_dispatch(
+        connector_type=platform,
+        external_team_id=team_id,
+        app_key=selected_app_key,
+    )
+    if connector is None or connector.context_id is None:
+        raise WorkerConnectorNotReadyError()
+
+    config_revision = opaque_revision(
+        connector.id,
+        connector.config_version,
+        selected_app_key,
+        app_config_version,
+    )
+    etag = _etag(config_revision)
+    headers = {"ETag": etag, "Cache-Control": "no-store"}
+    if if_none_match == etag:
+        return Response(status_code=status.HTTP_304_NOT_MODIFIED, headers=headers)
+    response.headers.update(headers)
+
+    kmc_api_key = connector.get_kmc_api_key()
+    if not kmc_api_key:
+        raise WorkerConnectorNotReadyError()
 
     from utils.datetime import utcnow
 
@@ -145,6 +300,8 @@ async def get_worker_config(
         workspace_id=connector.workspace_id,
         context_id=connector.context_id,
         platform=connector.connector_type,
+        app_key=selected_app_key,
+        config_revision=config_revision,
         locale=connector.locale,
         slack=slack,
         kmc={"mcp_url": get_settings().kmc_mcp_url, "api_key": kmc_api_key},
