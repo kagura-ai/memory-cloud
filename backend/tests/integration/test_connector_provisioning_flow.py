@@ -463,18 +463,25 @@ async def test_provision_rejects_explicitly_disabled_default_identity(db_session
     admin revocation: binding a new connector to it would create a connector
     whose dispatch immediately 410s, so provisioning must fail closed."""
     from models.worker_app import WorkerAppIdentity
+    from services.worker_app_identity import WorkerAppIdentityService
     from utils.exceptions import ValidationError
 
     user_id, workspace = await _seed_workspace(db_session, plan_name="pro")
-    db_session.add(
-        WorkerAppIdentity(
-            platform="slack",
-            app_key="default",
-            display_name="Default",
-            status="disabled",
-            created_by=user_id,
+    # e68_1315 seeds slack/default, so disable the existing row rather than
+    # inserting a duplicate; the session rollback restores it afterwards.
+    seeded = await WorkerAppIdentityService(db_session).get_identity("slack", "default")
+    if seeded is None:
+        db_session.add(
+            WorkerAppIdentity(
+                platform="slack",
+                app_key="default",
+                display_name="Default",
+                status="disabled",
+                created_by=user_id,
+            )
         )
-    )
+    else:
+        seeded.status = "disabled"
     await db_session.flush()
 
     svc = ConnectorProvisioningService(db_session)
