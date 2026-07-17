@@ -823,8 +823,10 @@ async def list_memories(
             # where the e69 regex guard NULLed one coordinate) would match a
             # one-sided bound yet serialize location=None below — require
             # both columns so filter and serialization semantics agree
-            # (mirrors services/geo_memory.py's explicit IS NOT NULL; also
-            # matches the partial index predicate exactly).
+            # (mirrors services/geo_memory.py's explicit IS NOT NULL; the
+            # explicit location_lat IS NOT NULL also keeps the query
+            # eligible for the partial index, whose predicate covers lat
+            # and deleted_at only).
             geo_filters.append(Memory.location_lat.is_not(None))
             geo_filters.append(Memory.location_lon.is_not(None))
         for gf in geo_filters:

@@ -31,7 +31,10 @@ export interface MemoryListItem {
   importance: number;
   created_at: string;
   updated_at: string;
-  location?: MemoryListItemLocation | null;
+  // Always present on the wire (FastAPI serializes null without
+  // response_model_exclude_none) — non-optional so the type matches the
+  // actual contract.
+  location: MemoryListItemLocation | null;
 }
 
 // Issue #440: a single declared_link reference surfaced in MemoryReference.
