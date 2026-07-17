@@ -5,9 +5,14 @@ columns' TEXT trick (::timestamp is only STABLE), ``::double precision`` is
 IMMUTABLE, so these are real numeric STORED generated columns. The regex
 guard NULLs malformed details.location values instead of failing the INSERT
 (raw-SQL defense); MemoryService._apply_location's normalize_location is the
-writer-side contract (validation + 7-decimal fixed-point write-back) and
-JSONB renders numerics via ``numeric`` (never exponent notation), so
-well-formed writes always match the guard.
+writer-side contract (validation + 7-decimal fixed-point write-back).
+
+``memories.details`` is PostgreSQL json (NOT jsonb) — inserted text is
+stored VERBATIM, so numerics reach ``->>`` exactly as the writer serialized
+them. The app path (json.dumps) renders 0 < |value| < 1e-4 in exponent
+notation (``5e-05``), so the guard accepts exponent forms (#1344); the
+2-digit exponent cap keeps every accepted lexeme castable without
+double-precision overflow ("malformed -> NULL, never error").
 
 NOTE: adding STORED generated columns rewrites the table — check the prod
 ``memories`` row count before applying (e30_877 was the same shape and
@@ -30,7 +35,7 @@ def upgrade() -> None:
         r"""
         ALTER TABLE memories
         ADD COLUMN location_lat DOUBLE PRECISION
-        GENERATED ALWAYS AS (CASE WHEN details->'location'->>'lat' ~ '^-?[0-9]+(\.[0-9]+)?$'
+        GENERATED ALWAYS AS (CASE WHEN details->'location'->>'lat' ~ '^-?[0-9]+(\.[0-9]+)?([eE][+-]?[0-9]{1,2})?$'
         THEN (details->'location'->>'lat')::double precision ELSE NULL END) STORED
         """
     )
@@ -38,7 +43,7 @@ def upgrade() -> None:
         r"""
         ALTER TABLE memories
         ADD COLUMN location_lon DOUBLE PRECISION
-        GENERATED ALWAYS AS (CASE WHEN details->'location'->>'lon' ~ '^-?[0-9]+(\.[0-9]+)?$'
+        GENERATED ALWAYS AS (CASE WHEN details->'location'->>'lon' ~ '^-?[0-9]+(\.[0-9]+)?([eE][+-]?[0-9]{1,2})?$'
         THEN (details->'location'->>'lon')::double precision ELSE NULL END) STORED
         """
     )
