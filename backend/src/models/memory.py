@@ -315,9 +315,12 @@ class Memory(Base):
     # (NOT jsonb) — inserted text is stored VERBATIM, and the app write path
     # (json.dumps) renders 0 < |value| < 1e-4 in exponent notation
     # (``5e-05``), so the guard must accept exponent forms too (#1344). The
-    # exponent is capped at 2 digits so every accepted lexeme casts without
-    # double-precision overflow, preserving the "malformed -> NULL, never
-    # error" contract. Partial btree (location_lat, location_lon) WHERE
+    # 2-digit exponent cap rejects the exponent-driven extremes: ``1e309``
+    # would error at the ``::double precision`` cast (breaking the
+    # "malformed -> NULL, never error" contract) and ``1e123`` would cast
+    # and then abort the INSERT on the range CHECK. (A 300+-digit
+    # plain-decimal lexeme can still error at the cast — raw-SQL-only and
+    # unchanged from pre-#1344.) Partial btree (location_lat, location_lon) WHERE
     # location_lat IS NOT NULL AND deleted_at IS NULL is created in migration
     # e69_1331_location_cols.
     location_lat: Mapped[float | None] = mapped_column(

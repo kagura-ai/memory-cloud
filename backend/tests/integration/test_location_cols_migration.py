@@ -5,9 +5,9 @@ including the regex guard's malformed-value → NULL behavior and the
 valid_location_range CHECK (raw-SQL defense).
 
 Two insert paths on purpose (#1344): ``memories.details`` is PostgreSQL json
-(NOT jsonb), which stores inserted text VERBATIM. ``CAST(:d AS JSON)``
+(NOT jsonb), which stores inserted text VERBATIM. ``CAST(:details AS JSON)``
 reproduces the app write path (json.dumps text lands unchanged — exponent
-notation included), while ``CAST(:d AS JSONB)`` canonicalizes numerics
+notation included), while ``CAST(:details AS JSONB)`` canonicalizes numerics
 before the json assignment and models raw-SQL writers that round-trip
 through jsonb. The guard must behave on BOTH.
 """
@@ -149,17 +149,20 @@ async def test_exponent_notation_survives_json_verbatim_storage(db_session):
 
 @pytest.mark.asyncio
 async def test_exponent_cap_nulls_absurd_exponents_instead_of_erroring(db_session):
-    # The 2-digit exponent cap keeps every regex-accepted lexeme castable:
-    # a 3+-digit exponent ("1e123") would overflow double precision at cast
-    # time, so the guard must classify it as malformed → NULL, never error.
-    mem_id = await _insert(
-        db_session,
-        '{"location": {"lat": 1e123, "lon": 5.0}}',
-        verbatim=True,
-    )
-    row = await _cols(db_session, mem_id)
-    assert row.location_lat is None
-    assert row.location_lon == pytest.approx(5.0)
+    # The 2-digit exponent cap classifies 3+-digit exponents as malformed →
+    # NULL. Without the cap, "1e309" would raise an out-of-range error at the
+    # ::double precision cast (breaking "malformed → NULL, never error"),
+    # and "1e123" — within double range but absurd as a coordinate — would
+    # cast and then abort the INSERT on the range CHECK instead of NULLing.
+    for lexeme in ("1e123", "1e309"):
+        mem_id = await _insert(
+            db_session,
+            f'{{"location": {{"lat": {lexeme}, "lon": 5.0}}}}',
+            verbatim=True,
+        )
+        row = await _cols(db_session, mem_id)
+        assert row.location_lat is None, lexeme
+        assert row.location_lon == pytest.approx(5.0)
 
 
 @pytest.mark.asyncio
