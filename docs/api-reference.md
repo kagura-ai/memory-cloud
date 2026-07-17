@@ -1037,6 +1037,17 @@ See [Memory Health Report](ops/memory-health-report.md) for every metric and thr
 
 Sleep and Neural Memory tuning knobs (LLM provider, budgets, per-phase toggles, reranker weights) are persisted in `neural_config` and exposed under `/api/v1/admin/neural-config`. The fields are editable from the admin UI's Neural Config page.
 
+### Worker App Identities
+
+System-admin (`role=admin`) lifecycle API for platform worker app identities (Slack / Discord / Teams bridge apps) — [#1315](https://github.com/kagura-ai/memory-cloud/issues/1315). Signing secrets are **write-only**: responses expose `has_active_secret` and revision metadata, never the secret or its ciphertext. Lifecycle mutations emit post-commit audit log events ([#1339](https://github.com/kagura-ai/memory-cloud/issues/1339)).
+
+| Endpoint                                                          | Purpose                                                       |
+|-------------------------------------------------------------------|---------------------------------------------------------------|
+| `GET /api/v1/admin/worker-apps`                                   | List identities with lifecycle metadata (`status`, `revision`, active/retiring secret revisions). |
+| `POST /api/v1/admin/worker-apps`                                  | Create an identity: `platform` (`slack`/`discord`/`teams`), `app_key`, `display_name`, `signing_secret`. |
+| `PATCH /api/v1/admin/worker-apps/{platform}/{app_key}`            | Update `display_name` and/or `status` (`active` / `disabled`); at least one field required. |
+| `POST /api/v1/admin/worker-apps/{platform}/{app_key}/rotate-secret` | Rotate the signing secret; the previous secret stays verifiable for `retiring_for_seconds` (default 3600). |
+
 ---
 
 ## MCP Tools

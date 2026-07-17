@@ -62,7 +62,7 @@
 | **Neural Memory Graph** | Hebbian 学習がバックグラウンドで知識グラフを構築。`explore()` がそれを辿り偶発的発見を提供 |
 | **Agent Memory Substrate** | 単なる知識ストアを超えて — delivery mode (pin / 時刻トリガ)、サーバー署名の trust boundary、agent state レーン、retrieval feedback シグナル。自律エージェントのループに必要なプリミティブ群 |
 | **Agent Control Plane (preview)** | Workspace スコープの Agent Registry、減算的な context binding、agent-bound member key、ライフサイクル kill switch、1 呼出の session bootstrap。v0.49.0 で導入 |
-| **60 の MCP ツール** | Memory、Agent Substrate、Agent Control Plane、Neural edges、Contexts、Tags、Files (R2)、Analyses (メモリー分析)、Resources、Secrets、Sleep Maintenance、Usage、API-Key Bindings |
+| **61 の MCP ツール** | Memory、Agent Substrate、Agent Control Plane、Neural edges、Contexts、Tags、Files (R2)、Analyses (メモリー分析)、Resources、Secrets、Sleep Maintenance、Usage、API-Key Bindings |
 | **マルチプロバイダ** | 埋め込みに OpenAI かセルフホスト (Ollama、vLLM — ローカル・非公開・コストゼロ) |
 | **チーム対応** | Workspace、RBAC、context 分離、共有メモリ |
 | **Web UI** | Next.js ダッシュボード — context、検索設定、メンバー管理 |
@@ -294,14 +294,15 @@ curl -X POST -H "Authorization: Bearer kagura_{your_key}" \
 
 ## MCP ツール
 
-13 カテゴリ・全 60 ツール。Workspace ロール: **Owner** > Admin > Member > **Viewer** (read-only)。Context ロール: **Owner** > Editor > Viewer。Private context は作成者のみ閲覧可。Member を特定 context に allowlist で制限可能。
+13 カテゴリ・全 61 ツール。Workspace ロール: **Owner** > Admin > Member > **Viewer** (read-only)。Context ロール: **Owner** > Editor > Viewer。Private context は作成者のみ閲覧可。Member を特定 context に allowlist で制限可能。
 
-### Memory (6)
+### Memory (7)
 
 | ツール | 説明 | 必要ロール |
 |--------|------|------------|
 | `remember` | 新規メモリ保存 (summary + content + type、任意で `delivery_mode`) | Member+ |
 | `recall` | Hybrid Search でメモリ検索 (`trust_tier` フィルタ対応) | Viewer+ |
+| `recall_nearby` | 決定論の WHERE 軸クエリ — `details.location` を持つメモリを指定地点から `radius_m` 以内・近い順に返す | Viewer+ |
 | `reference` | メモリの 3 層詳細取得 | Viewer+ |
 | `update_memory` | メモリ更新 / 外部 ID で upsert | Member+ |
 | `forget` | ソフト削除 (30 日保持) | Member+ |
@@ -336,7 +337,7 @@ v0.49.0 の control plane は既存の workspace RBAC を土台にする。Agent
 | `unbind_agent_context` | binding を削除 (enforce mode では default-deny) | Owner/Admin |
 | `get_agent_bootstrap` | session start 用に context guide + pinned + 任意の trusted recall + upcoming + state を合成 | Agent-bound key または Owner/Admin |
 
-> **Preview 境界:** memory type/source 単位の filter は schema 予約済みで、fail-closed として `null` のみ受け付ける。`traceparent` と W3C baggage による `agent_id` / `session_id` / `run_id` correlation は実装済みだが、server-side span export は P0 の対象外。`memory_access_events` は bootstrap、load-pinned、feedback、recall、reference、remember で稼働し、`update`/`forget` emission と deny/`would_deny` 永続化は [#1286](https://github.com/kagura-ai/memory-cloud/issues/1286) で継続する。
+> **Preview 境界:** memory type/source 単位の filter は enforce モードの agent に対し、メモリ読取レーン (recall、recall_nearby、reference、forget、explore、load_pinned、upcoming) で [#1299](https://github.com/kagura-ai/memory-cloud/issues/1299)、列挙/集計面 (list、stats、access-patterns、get_cluster) で [#1301](https://github.com/kagura-ai/memory-cloud/issues/1301) から強制される — `null` = 全 type 許可、`[]` = deny-all。shadow モードはフィルタせず `would_deny` を記録する。`traceparent` と W3C baggage による `agent_id` / `session_id` / `run_id` correlation は実装済みだが、server-side span export は P0 の対象外。`memory_access_events` は bootstrap、load-pinned、feedback、recall、reference、remember、update、forget で稼働し、binding deny / `would_deny` を永続化する。
 
 ### Neural Edges (4)
 
