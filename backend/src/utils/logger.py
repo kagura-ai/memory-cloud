@@ -48,7 +48,14 @@ def setup_logger(log_level: str = "INFO", enable_colors: bool = True) -> None:
             )
         )
     else:
-        # JSON output for production
+        # JSON output for production. format_exc_info is load-bearing (#1339):
+        # without it, exc_info=True serializes as a bare boolean and the
+        # traceback is silently dropped — every exc_info caller (worker-app
+        # lifecycle failure arms, the unhandled-exception handler) would emit
+        # undiagnosable errors in production. The ConsoleRenderer branch above
+        # renders exceptions itself and must NOT get this processor (structlog
+        # docs: ConsoleRenderer + format_exc_info double-render).
+        processors.append(structlog.processors.format_exc_info)
         processors.append(structlog.processors.JSONRenderer())
 
     structlog.configure(
