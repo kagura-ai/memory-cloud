@@ -177,15 +177,23 @@ async def test_update_success_event_carries_revision_context():
         patch("api.routes.worker_apps.logger") as mock_logger,
     ):
         service_cls.return_value.update_identity = AsyncMock(
-            return_value=_identity(status="disabled")
+            return_value=_identity(
+                status="disabled",
+                retiring_valid_until=datetime(2026, 7, 17, 12, 0, 0),
+            )
         )
         await _update(db)
 
-    fields = mock_logger.info.call_args.kwargs
+    events = [
+        c for c in mock_logger.info.call_args_list if c.args and c.args[0] == "worker_app_updated"
+    ]
+    assert len(events) == 1, "expected one 'worker_app_updated' success event"
+    fields = events[0].kwargs
     assert fields["status"] == "disabled"
     assert fields["active_secret_revision"] == 2
     assert fields["retiring_secret_revision"] == 1
-    assert "retiring_valid_until" in fields
+    # Serialized for the JSON log renderer — never a raw datetime.
+    assert fields["retiring_valid_until"] == "2026-07-17T12:00:00Z"
     _assert_no_secret_material(mock_logger)
 
 
