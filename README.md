@@ -62,7 +62,7 @@ Most AI memory tools are just vector databases with a chat wrapper. Kagura is di
 | **Neural Memory Graph** | Hebbian learning builds a knowledge graph in the background. `explore()` traverses it for serendipitous discovery. |
 | **Agent Memory Substrate** | Beyond a knowledge store: delivery modes (pinned / time-triggered), a server-stamped trust boundary, an agent state lane, and a retrieval-feedback signal — the primitives an autonomous agent loop needs. |
 | **Agent Control Plane (preview)** | Workspace-scoped Agent Registry, subtractive context bindings, agent-bound member keys, lifecycle kill switches, and one-call session bootstrap. Introduced in v0.49.0. |
-| **60 MCP Tools** | Memory, Agent Substrate, Agent Control Plane, Neural edges, Contexts, Tags, Files (R2), Analyses (Memory Analysis), Resources, Secrets, Sleep Maintenance, Usage, API-Key Bindings |
+| **61 MCP Tools** | Memory, Agent Substrate, Agent Control Plane, Neural edges, Contexts, Tags, Files (R2), Analyses (Memory Analysis), Resources, Secrets, Sleep Maintenance, Usage, API-Key Bindings |
 | **Multi-Provider** | OpenAI or self-hosted (Ollama, vLLM — local, private, zero cost) for embeddings |
 | **Team Ready** | Workspaces, RBAC, context isolation, shared memory |
 | **Web UI** | Next.js dashboard — contexts, search settings, member management |
