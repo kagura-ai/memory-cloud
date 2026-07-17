@@ -481,3 +481,47 @@ class TestFromDbSleepLLMPrecedence:
         assert not [
             c for c in spy.warning.call_args_list if c.args[0] == "sleep_llm_config_mismatch"
         ]
+
+
+class TestForgetRetentionConfigPlumbing:
+    """#1336 review: the config key must survive the from_db merge — a field
+    missing from the merged-kwargs list silently pins the dataclass default
+    and ships the phase as dead code."""
+
+    @pytest.fixture(autouse=True)
+    def _fresh_cache(self):
+        NeuralMemoryConfig.invalidate_cache()
+        yield
+        NeuralMemoryConfig.invalidate_cache()
+
+    @staticmethod
+    def _db(rows: dict):
+        class _Row:
+            def __init__(self, key, value):
+                self.key = key
+                self._value = value
+
+            def get_typed_value(self):
+                return self._value
+
+        result = MagicMock()
+        result.scalars.return_value.all.return_value = [_Row(k, v) for k, v in rows.items()]
+        db = MagicMock()
+        db.execute = AsyncMock(return_value=result)
+        return db
+
+    async def test_env_value_survives_from_db_merge(self, monkeypatch):
+        monkeypatch.setenv("SLEEP_FORGET_RETENTION_DAYS", "30")
+        config = await NeuralMemoryConfig.from_db(self._db({}))
+        assert config.sleep_forget_retention_days == 30
+
+    async def test_db_override_wins(self, monkeypatch):
+        monkeypatch.delenv("SLEEP_FORGET_RETENTION_DAYS", raising=False)
+        config = await NeuralMemoryConfig.from_db(self._db({"sleep_forget_retention_days": 14}))
+        assert config.sleep_forget_retention_days == 14
+
+    def test_negative_value_rejected(self):
+        import pytest as _pytest
+
+        with _pytest.raises(ValueError, match="sleep_forget_retention_days"):
+            NeuralMemoryConfig(sleep_forget_retention_days=-1)

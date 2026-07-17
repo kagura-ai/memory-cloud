@@ -344,8 +344,9 @@ pre-tokenized FTS text. Semantic + BM25 hybrid fusion is unchanged.
 
 - **Single-writer only.** Not for multi-process / SaaS topologies.
 - These operations raise `NotImplementedError` on the lance backend: context
-  copy (`copy_context_points`), cross-collection GDPR erasure
-  (`delete_user_points`), and the admin BM25-drift reverse-lookup scroll.
+  copy (`copy_context_points`) and the admin BM25-drift reverse-lookup scroll.
+  Cross-collection GDPR erasure (`delete_user_points`) IS supported as of
+  #1336 (per-table SQL delete across `kagura_memories*`).
 - End-to-end LanceDB behavior is pending live validation; the backend selector
   and the SQL isolation/escaping filter are unit-tested independently of
   LanceDB.

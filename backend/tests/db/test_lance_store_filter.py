@@ -288,3 +288,37 @@ async def test_search_semantic_malformed_near_is_a_value_error():
 
     with pytest.raises(ValueError, match="lat"):
         await store.search_semantic(USER, [0.1], WS, CTX, filters={"near": {"lat": 95, "lon": 0}})
+
+
+async def test_delete_user_points_removes_rows_across_collections():
+    """#1336 Gap: GDPR erasure must work on the Lance backend too — the
+    NotImplementedError left erased users' vectors at rest."""
+    from db.lance_store import LanceVectorStore
+
+    deleted_filters: list[tuple[str, str]] = []
+
+    class _DeletableTable:
+        def __init__(self, name: str, rows: int):
+            self._name = name
+            self._rows = rows
+
+        def count_rows(self, filter=None):  # noqa: A002 - lancedb API name
+            return self._rows
+
+        def delete(self, where):
+            deleted_filters.append((self._name, where))
+
+    tables = {"kagura_memories": _DeletableTable("kagura_memories", 3)}
+
+    store = LanceVectorStore.__new__(LanceVectorStore)
+    store._lock = __import__("threading").Lock()
+    store._open = lambda name, dim=0: tables.get(name)
+    store._collection_names = lambda: list(tables)
+
+    result = await store.delete_user_points("google-oauth2|erased")
+
+    assert result == {"kagura_memories": 3}
+    assert len(deleted_filters) == 1
+    name, where = deleted_filters[0]
+    assert name == "kagura_memories"
+    assert "user_id = 'google-oauth2|erased'" in where

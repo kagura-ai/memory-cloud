@@ -40,6 +40,8 @@ GDPR Art.12(3) の「受領後 1 ヶ月以内」応答義務を満たすため�
 
 `db.qdrant.delete_user_points(user_id)` が `kagura_memories*` 全 collection (per-model variant 含む) で `Filter(must=[FieldCondition(key="user_id", match=user_id)])` による bulk delete を実行。
 
+> Lance backend (Lite): 同エントリポイントが `LanceStore.delete_user_points` に委譲され、`kagura_memories*` 各テーブルへ `user_id = :sub` の SQL delete を発行する(#1336)。確認は Qdrant collection ではなく Lance テーブルの行数で行う。
+
 > ⚠️ **Multi-tenant 設計の trade-off**: 共有 workspace 内でユーザーが author の point も削除される。GDPR 上の data subject = author のため意図的な挙動。共有 workspace co-owner には事前同意 (Privacy Policy / ToS) が前提。
 
 ### 2.3 Workspace ownership (Step 3)
@@ -68,6 +70,7 @@ FK の依存逆順で削除:
 | `workspace_invitations` | `invited_by = :uid OR email = :email` | |
 | `plan_changes.changed_by` | SHA256 pseudonymize | legal retention 維持 |
 | `workspaces` | `owner_user_id = :uid` | step 3 後の sole-owner のみ。cascade で contexts/memories/etc. |
+| `memories` (残存行) | `user_id` を SHA256 pseudonymize + `details = NULL` | #1336: 共有/移譲 workspace に残る本人著メモリの scrub。details の NULL 化で生成列 (location_lat/lon, trigger_from/until) も自動 NULL。tombstone 行も対象 |
 | `users` | `user_id = :uid` | 最後 |
 
 ### 2.5 Audit logs (Step 5)
