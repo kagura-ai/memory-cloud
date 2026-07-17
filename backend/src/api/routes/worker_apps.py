@@ -20,6 +20,9 @@ from services.worker_app_identity import (
     identity_revision,
 )
 from utils.exceptions import ConflictError, MemoryCloudException, WorkerAppOperationError
+from utils.logger import get_logger
+
+logger = get_logger(__name__)
 
 router = APIRouter(prefix="/admin/worker-apps", tags=["admin-worker-apps"])
 
@@ -114,7 +117,26 @@ async def create_worker_app(
         raise ConflictError("Worker app identity already exists") from exc
     except Exception as exc:
         await db.rollback()
+        # #1339: WorkerAppOperationError deliberately carries a fixed client
+        # message; the underlying cause must land in the server log or a
+        # failed lifecycle write is undiagnosable. Tracebacks never contain
+        # secret material (request bodies are not in the trace context).
+        logger.error(
+            "worker_app_create_failed",
+            requested_by=admin["user_id"],
+            platform=request.platform,
+            app_key=request.app_key,
+            exc_info=True,
+        )
         raise WorkerAppOperationError("create") from exc
+    logger.info(
+        "worker_app_created",
+        requested_by=admin["user_id"],
+        platform=identity.platform,
+        app_key=identity.app_key,
+        app_status=identity.status,
+        active_secret_revision=identity.active_secret_revision,
+    )
     return _admin_response(identity)
 
 
@@ -141,7 +163,23 @@ async def update_worker_app(
         raise
     except Exception as exc:
         await db.rollback()
+        logger.error(
+            "worker_app_update_failed",
+            requested_by=admin["user_id"],
+            platform=platform,
+            app_key=app_key,
+            exc_info=True,
+        )
         raise WorkerAppOperationError("update") from exc
+    logger.info(
+        "worker_app_updated",
+        requested_by=admin["user_id"],
+        platform=identity.platform,
+        app_key=identity.app_key,
+        app_status=identity.status,
+        display_name_changed=request.display_name is not None,
+        status_changed=request.status is not None,
+    )
     return _admin_response(identity)
 
 
@@ -168,5 +206,22 @@ async def rotate_worker_app_secret(
         raise
     except Exception as exc:
         await db.rollback()
+        logger.error(
+            "worker_app_rotate_failed",
+            requested_by=admin["user_id"],
+            platform=platform,
+            app_key=app_key,
+            exc_info=True,
+        )
         raise WorkerAppOperationError("rotate") from exc
+    logger.info(
+        "worker_app_secret_rotated",
+        requested_by=admin["user_id"],
+        platform=identity.platform,
+        app_key=identity.app_key,
+        app_status=identity.status,
+        active_secret_revision=identity.active_secret_revision,
+        retiring_secret_revision=identity.retiring_secret_revision,
+        retiring_for_seconds=request.retiring_for_seconds,
+    )
     return _admin_response(identity)
