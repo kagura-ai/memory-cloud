@@ -255,7 +255,7 @@ class TestCreateEdgeOriginAndWeight:
         """handle_create_edge MUST pass origin='declared' to the repository."""
         src_id = uuid4()
         dst_id = uuid4()
-        created = _mock_edge(src_id, dst_id, edge_type="related_to", weight=1.0)
+        created = _mock_edge(src_id, dst_id, edge_type="related_to", weight=1.0, origin="declared")
 
         mock_repo = MagicMock()
         mock_repo.get_edge = AsyncMock(return_value=None)
@@ -280,7 +280,7 @@ class TestCreateEdgeOriginAndWeight:
         """When `weight` is omitted from args, handler MUST default to 1.0."""
         src_id = uuid4()
         dst_id = uuid4()
-        created = _mock_edge(src_id, dst_id, edge_type="related_to", weight=1.0)
+        created = _mock_edge(src_id, dst_id, edge_type="related_to", weight=1.0, origin="declared")
 
         mock_repo = MagicMock()
         mock_repo.get_edge = AsyncMock(return_value=None)
@@ -447,7 +447,7 @@ class TestCreateEdgeDuplicateSemantics:
     async def test_new_edge_returns_operation_created(self, user_id, workspace_id, context_id):
         """No existing edge → insert path reports operation='created'."""
         src_id, dst_id = uuid4(), uuid4()
-        created = _mock_edge(src_id, dst_id, edge_type="related_to", weight=1.0)
+        created = _mock_edge(src_id, dst_id, edge_type="related_to", weight=1.0, origin="declared")
 
         mock_repo = MagicMock()
         mock_repo.get_edge = AsyncMock(return_value=None)
@@ -463,6 +463,7 @@ class TestCreateEdgeDuplicateSemantics:
 
         assert data["status"] == "success"
         assert data["operation"] == "created"
+        assert data["edge"]["origin"] == "declared"
         assert "previous" not in data
         # Race belt-and-suspenders: even the believed-fresh insert arm keeps
         # the declared-type guard, so a declared edge created between the
@@ -642,7 +643,7 @@ class TestCreateEdgeDuplicateSemantics:
         """overwrite=true on a fresh pair is a plain create — and the explicit
         opt-in also disables the race-window declared-type guard."""
         src_id, dst_id = uuid4(), uuid4()
-        created = _mock_edge(src_id, dst_id, edge_type="related_to", weight=1.0)
+        created = _mock_edge(src_id, dst_id, edge_type="related_to", weight=1.0, origin="declared")
 
         mock_repo = MagicMock()
         mock_repo.get_edge = AsyncMock(return_value=None)
@@ -658,6 +659,7 @@ class TestCreateEdgeDuplicateSemantics:
 
         assert data["status"] == "success"
         assert data["operation"] == "created"
+        assert data["edge"]["origin"] == "declared"
         kwargs = mock_repo.create_or_update_edge.await_args.kwargs
         assert kwargs["protect_declared_link"] is False
 
