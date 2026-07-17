@@ -1,4 +1,13 @@
-"""System-admin lifecycle API for worker app identities (#1315)."""
+"""System-admin lifecycle API for worker app identities (#1315).
+
+Audit discipline (#1339): every lifecycle mutation (create / update /
+rotate-secret) emits a structlog success event AFTER commit with the actor
+and non-secret fields only, and the unexpected-exception arms log the
+underlying cause with ``exc_info=True`` before collapsing it into
+``WorkerAppOperationError`` (whose fixed message the generic handler logs
+without the chained cause). Secret material and ciphertext must never
+appear in any log call — pinned by tests/api/test_worker_apps.py.
+"""
 
 from __future__ import annotations
 
@@ -20,6 +29,9 @@ from services.worker_app_identity import (
     identity_revision,
 )
 from utils.exceptions import ConflictError, MemoryCloudException, WorkerAppOperationError
+from utils.logger import get_logger
+
+logger = get_logger(__name__)
 
 router = APIRouter(prefix="/admin/worker-apps", tags=["admin-worker-apps"])
 
@@ -114,7 +126,29 @@ async def create_worker_app(
         raise ConflictError("Worker app identity already exists") from exc
     except Exception as exc:
         await db.rollback()
+        # #1339: the generic exception handler logs only the fixed
+        # WorkerAppOperationError message — capture the real cause here or a
+        # failed lifecycle write is undiagnosable. Tracebacks carry no
+        # request body, so no secret material reaches the log.
+        logger.error(
+            "worker_app_operation_failed",
+            operation="create",
+            actor=admin["user_id"],
+            platform=request.platform,
+            app_key=request.app_key,
+            error_type=type(exc).__name__,
+            exc_info=True,
+        )
         raise WorkerAppOperationError("create") from exc
+    # #1339: post-commit audit event — non-secret fields only.
+    logger.info(
+        "worker_app_created",
+        actor=admin["user_id"],
+        platform=identity.platform,
+        app_key=identity.app_key,
+        status=identity.status,
+        active_secret_revision=identity.active_secret_revision,
+    )
     return _admin_response(identity)
 
 
@@ -141,7 +175,25 @@ async def update_worker_app(
         raise
     except Exception as exc:
         await db.rollback()
+        logger.error(
+            "worker_app_operation_failed",
+            operation="update",
+            actor=admin["user_id"],
+            platform=platform,
+            app_key=app_key,
+            error_type=type(exc).__name__,
+            exc_info=True,
+        )
         raise WorkerAppOperationError("update") from exc
+    logger.info(
+        "worker_app_updated",
+        actor=admin["user_id"],
+        platform=identity.platform,
+        app_key=identity.app_key,
+        status=identity.status,
+        # "provided", not "changed" — the route never sees the old value.
+        display_name_provided=request.display_name is not None,
+    )
     return _admin_response(identity)
 
 
@@ -168,5 +220,24 @@ async def rotate_worker_app_secret(
         raise
     except Exception as exc:
         await db.rollback()
+        logger.error(
+            "worker_app_operation_failed",
+            operation="rotate",
+            actor=admin["user_id"],
+            platform=platform,
+            app_key=app_key,
+            error_type=type(exc).__name__,
+            exc_info=True,
+        )
         raise WorkerAppOperationError("rotate") from exc
+    logger.info(
+        "worker_app_secret_rotated",
+        actor=admin["user_id"],
+        platform=identity.platform,
+        app_key=identity.app_key,
+        status=identity.status,
+        active_secret_revision=identity.active_secret_revision,
+        retiring_secret_revision=identity.retiring_secret_revision,
+        retiring_for_seconds=request.retiring_for_seconds,
+    )
     return _admin_response(identity)
