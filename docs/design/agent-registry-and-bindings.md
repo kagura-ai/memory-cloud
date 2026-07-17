@@ -137,12 +137,20 @@ Semantics (normative):
   - **Enumeration / aggregate surfaces (closed by
     [#1301](https://github.com/kagura-ai/memory-cloud/issues/1301)):** `GET /memory/list`,
     `GET /memory/access-patterns`, and `GET /memory/stats` (with its MCP mirror
-    `get_context_info`) subtract denied rows via the SQL form of the same filter
+    `get_context_info`) subtract denied rows via the SQL form of the binding read filter
     (`binding_memory_sql_predicate`) applied identically to page and count queries, so
     totals and grouped counts (`by_type`, type distribution) are not an existence oracle
-    over denied types. MCP `get_cluster` filters member and representative rows through the
-    shared row lever (`cluster.count` remains the stored whole-cluster size — a
-    metadata-only aggregate). These surfaces sit outside the MAE operation vocabulary:
+    over denied types. The SQL form carries **both** dimensions: the P0-2 context-level
+    default-deny (rows in unbound or `can_read=False` contexts are subtracted) **and**
+    the per-memory type/source subtraction. The scoped forms of these surfaces are
+    already context-gated at the `resolve_context_for_workspace_read` chokepoint (#1275
+    uniform 404); the predicate's membership gate is what covers the **unscoped** forms
+    (no `context_id` → no chokepoint) and cross-context aggregates, which previously
+    enumerated unbound contexts' rows.
+    MCP `get_cluster` (context-gated in its handler via `agent_binding_permits`) filters
+    member and representative rows through the shared row lever, and recomputes `count` +
+    `property_stats.types` over permitted rows for enforce-mode agents (non-type facets
+    stay stored aggregates). These surfaces sit outside the MAE operation vocabulary:
     shadow mode is a pure no-op there (no `would_deny` aggregates); the enforcement ramp
     observes would-deny volume through the `recall` / `load_pinned` lanes.
   - **Internal maintenance carve-out (#1301):** the upsert-by-`external_id` replacement

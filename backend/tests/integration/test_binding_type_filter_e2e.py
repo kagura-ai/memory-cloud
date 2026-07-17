@@ -102,7 +102,13 @@ async def env(db_session):
         owner_user_id=uid,
         enforcement_mode="shadow",
     )
-    db_session.add_all([agent_filtered, agent_deny_all, agent_shadow])
+    # #1301: read-denied at the CONTEXT level (can_read=False, no arrays) —
+    # the enumeration surfaces must subtract this whole context, not just
+    # type/source-denied rows.
+    agent_no_read = Agent(
+        workspace_id=ws_id, name=f"noread-{uuid.uuid4().hex[:6]}", owner_user_id=uid
+    )
+    db_session.add_all([agent_filtered, agent_deny_all, agent_shadow, agent_no_read])
     await db_session.flush()
 
     svc = AgentBindingService(db_session)
@@ -135,6 +141,20 @@ async def env(db_session):
         allowed_memory_types=["note"],
         allowed_source_types=["manual"],
     )
+    await svc.create_binding(
+        agent=agent_no_read,
+        context_id=ctx.id,
+        created_by=uid,
+        can_read=False,
+        write_policy="direct",
+        is_default=True,
+    )
+
+    # #1301: a second context the agents have NO binding on — default-deny
+    # must keep its rows out of the unscoped enumeration/aggregate surfaces.
+    ctx_unbound = Context(id=uuid.uuid4(), workspace_id=ws_id, name="unbound", created_by=uid)
+    db_session.add(ctx_unbound)
+    await db_session.flush()
 
     def _mem(summary, *, mtype, source, delivery=None, details=None):
         return Memory(
@@ -164,7 +184,19 @@ async def env(db_session):
         details={"trigger": {"from": "2026-07-01T00:00:00", "until": "2027-01-01T00:00:00"}},
     )
     mem_api = _mem("note api", mtype="note", source=SOURCE_TYPE_API)
-    db_session.add_all([mem_note, mem_time, mem_api])
+    mem_unbound = Memory(
+        id=uuid.uuid4(),
+        user_id=uid,
+        workspace_id=ws_id,
+        context_id=ctx_unbound.id,
+        summary="unbound context row",
+        content="content of unbound row",
+        type="note",
+        client="test",
+        tags=[],
+        source_type=SOURCE_TYPE_MANUAL,
+    )
+    db_session.add_all([mem_note, mem_time, mem_api, mem_unbound])
     await db_session.flush()
 
     # Graph edge for the explore-neighbor pin: note -> time.
@@ -184,12 +216,15 @@ async def env(db_session):
         "uid": uid,
         "ws_id": ws_id,
         "ctx": ctx.id,
+        "ctx_unbound": ctx_unbound.id,
         "agent_filtered": agent_filtered.id,
         "agent_deny_all": agent_deny_all.id,
         "agent_shadow": agent_shadow.id,
+        "agent_no_read": agent_no_read.id,
         "mem_note": mem_note.id,
         "mem_time": mem_time.id,
         "mem_api": mem_api.id,
+        "mem_unbound": mem_unbound.id,
     }
 
     # Audit writer commits on an independent session — clean by workspace.
@@ -531,15 +566,72 @@ async def test_list_route_shadow_unchanged(env, db_session):
 
 
 @pytest.mark.asyncio(loop_scope="session")
-async def test_access_patterns_enforce_filters_rows_and_distribution(env, db_session):
-    from api.routes.memory import get_access_patterns
+async def test_list_route_enforce_excludes_unbound_context(env, db_session):
+    # Unscoped "my memories" view: the non-agent owner sees rows from every
+    # context; an enforce-mode agent must not enumerate contexts it has no
+    # binding on (P0-2 default-deny — recall 404s these outright).
+    baseline = await _list_route(env, db_session, context_id=None)
+    assert env["mem_unbound"] in {uuid.UUID(m.id) for m in baseline.memories}
+    assert baseline.total == 4
+
+    _scope(env, "agent_filtered")
+    response = await _list_route(env, db_session, context_id=None)
+    assert {uuid.UUID(m.id) for m in response.memories} == {env["mem_note"]}
+    assert response.total == 1
+
+
+@pytest.mark.asyncio(loop_scope="session")
+async def test_list_route_scoped_can_read_false_uniform_404(env, db_session):
+    # Scoped list goes through resolve_context_for_workspace_read, whose
+    # #1275 agent gate already denies can_read=False with the uniform 404.
+    _scope(env, "agent_no_read")
+    with pytest.raises(NotFoundException):
+        await _list_route(env, db_session)
+
+
+@pytest.mark.asyncio(loop_scope="session")
+async def test_list_route_unscoped_can_read_false_context_empty(env, db_session):
+    # The UNSCOPED list has no context chokepoint — the SQL predicate's
+    # membership gate must subtract the read-denied context's rows itself.
+    _scope(env, "agent_no_read")
+    response = await _list_route(env, db_session, context_id=None)
+    assert response.memories == []
+    assert response.total == 0
+
+
+@pytest.mark.asyncio(loop_scope="session")
+async def test_stats_enforce_excludes_unbound_and_no_read_contexts(env, db_session):
+    svc = MemoryService(db_session)
+
+    # Workspace-wide stats: unbound-context rows must not be counted.
+    _scope(env, "agent_filtered")
+    stats = await svc.get_stats(env["uid"], workspace_id=str(env["ws_id"]))
+    assert stats.by_type == {"note": 1}
+    assert stats.total_count == 1
+
+    # can_read=False: the bound context contributes nothing either.
+    _scope(env, "agent_no_read")
+    stats = await svc.get_stats(env["uid"], workspace_id=str(env["ws_id"]))
+    assert stats.total_count == 0
+    assert stats.by_type == {}
+
+
+@pytest_asyncio.fixture(loop_scope="session")
+async def access_seeded(env, db_session):
+    """most_accessed only surfaces rows with last_used_at set."""
     from utils.datetime import utcnow
 
-    # most_accessed only surfaces rows with last_used_at set.
     for key in ("mem_note", "mem_time", "mem_api"):
         row = await db_session.get(Memory, env[key])
         row.last_used_at = utcnow()
     await db_session.flush()
+
+
+@pytest.mark.asyncio(loop_scope="session")
+async def test_access_patterns_enforce_filters_rows_and_distribution(
+    env, access_seeded, db_session
+):
+    from api.routes.memory import get_access_patterns
 
     baseline = await get_access_patterns(
         user={"user_id": env["uid"]}, context_id=env["ctx"], db=db_session, days=30
@@ -558,14 +650,8 @@ async def test_access_patterns_enforce_filters_rows_and_distribution(env, db_ses
 
 
 @pytest.mark.asyncio(loop_scope="session")
-async def test_access_patterns_shadow_unchanged(env, db_session):
+async def test_access_patterns_shadow_unchanged(env, access_seeded, db_session):
     from api.routes.memory import get_access_patterns
-    from utils.datetime import utcnow
-
-    for key in ("mem_note", "mem_time", "mem_api"):
-        row = await db_session.get(Memory, env[key])
-        row.last_used_at = utcnow()
-    await db_session.flush()
 
     _scope(env, "agent_shadow", mode="shadow")
     response = await get_access_patterns(
@@ -573,6 +659,23 @@ async def test_access_patterns_shadow_unchanged(env, db_session):
     )
     assert response["type_distribution"] == {"note": 2, "time": 1}
     assert len(response["most_accessed"]) == 3
+
+
+@pytest.mark.asyncio(loop_scope="session")
+async def test_access_patterns_unscoped_can_read_false_context_empty(
+    env, access_seeded, db_session
+):
+    from api.routes.memory import get_access_patterns
+
+    # Unscoped access-patterns has no context chokepoint (scoped goes through
+    # the resolver's #1275 gate) — the membership gate must empty it.
+    _scope(env, "agent_no_read")
+    response = await get_access_patterns(
+        user={"user_id": env["uid"]}, context_id=None, db=db_session, days=30
+    )
+    assert response["most_accessed"] == []
+    assert response["type_distribution"] == {}
+    assert response["recent_access_count"] == 0
 
 
 @pytest.mark.asyncio(loop_scope="session")
@@ -591,7 +694,11 @@ async def test_stats_enforce_intersects_all_aggregates(env, db_session):
     # Only note/manual survives — the aggregate is not an existence oracle.
     assert stats.by_type == {"note": 1}
     assert stats.total_count == 1
-    assert stats.working_count + stats.persistent_count == 1
+    # All seeded rows are scope='working' (direct inserts bypass
+    # pin-on-write): the filtered working-count must be 1, not the
+    # unfiltered 3 — this pins the scope sub-count query independently.
+    assert stats.working_count == 1
+    assert stats.persistent_count == 0
 
 
 @pytest.mark.asyncio(loop_scope="session")
@@ -665,7 +772,7 @@ async def cluster_env(env, db_session):
         count=3,
         centroid_2d=[0.0, 0.0],
         representative_memory_ids=[env["mem_time"], env["mem_note"]],
-        property_stats={},
+        property_stats={"types": {"note": 2, "time": 1}, "avg_importance": 0.5},
         label_confidence=0.9,
     )
     db_session.add(cluster)
@@ -710,6 +817,13 @@ async def test_get_cluster_enforce_filters_members_and_representatives(
     )
     assert {m["memory_id"] for m in filtered["memories"]} == {str(env["mem_note"])}
     assert {r["memory_id"] for r in filtered["representatives"]} == {str(env["mem_note"])}
+    # The stored whole-cluster aggregates are the same grouped-count
+    # existence oracle stats.by_type was — they must be recomputed over the
+    # rows the agent can read (mem_api is source-denied, so note counts 1).
+    assert filtered["count"] == 1
+    assert filtered["property_stats"]["types"] == {"note": 1}
+    # Non-type facets stay as stored (not type/source-labeled).
+    assert filtered["property_stats"]["avg_importance"] == 0.5
 
 
 @pytest.mark.asyncio(loop_scope="session")
@@ -722,6 +836,24 @@ async def test_get_cluster_shadow_unchanged(env, cluster_env, db_session):
     )
     assert len(response["memories"]) == 3
     assert len(response["representatives"]) == 2
+    assert response["count"] == 3
+    assert response["property_stats"]["types"] == {"note": 2, "time": 1}
+
+
+@pytest.mark.asyncio(loop_scope="session")
+async def test_forget_skip_flag_rejected_for_query_mode(env, db_session):
+    # The internal bypass only covers the memory_id branch; forget(query=...)
+    # resolves victims through recall() where the flag cannot propagate. A
+    # caller combining them would get silent partial maintenance — reject it
+    # loudly instead.
+    svc = MemoryService(db_session)
+    with pytest.raises(ValueError, match="_skip_binding_row_filter"):
+        await svc.forget(
+            ForgetRequest(query="anything"),
+            env["uid"],
+            current_context_id=env["ctx"],
+            _skip_binding_row_filter=True,
+        )
 
 
 @pytest.mark.asyncio(loop_scope="session")

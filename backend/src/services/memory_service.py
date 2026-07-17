@@ -3191,6 +3191,13 @@ class MemoryService:
         Returns:
             ForgetResponse with deleted count and IDs
         """
+        if _skip_binding_row_filter and not request.memory_id:
+            raise ValueError(
+                "_skip_binding_row_filter only covers the memory_id branch; "
+                "forget(query=...) resolves victims through recall(), where "
+                "the flag cannot propagate — combining them would silently "
+                "skip the rows the maintenance delete was meant to clean up."
+            )
         # Single Collection Migration: Extract isolation params (optimized).
         # Issue #1275: forget is a WRITE — gate the declared context against
         # the agent binding (no-op for non-agent credentials).

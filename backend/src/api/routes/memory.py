@@ -31,6 +31,7 @@ from models.schemas import (
     RememberRequest,
     RememberResponse,
 )
+from services.agent_binding_service import binding_memory_sql_predicate
 from services.memory_service import MemoryService
 from services.permission_service import PermissionService
 from utils.datetime import to_utc_iso, utcnow
@@ -686,12 +687,11 @@ async def list_memories(
             ]
             tags_normalized = cleaned or None
 
-        # #1301: per-memory type/source binding filter, SQL form — applied to
-        # BOTH the page query and the count query below so ``total`` never
-        # acts as an existence oracle over denied rows and pagination stays
-        # exact. None for non-agent credentials and shadow-mode scopes.
-        from services.agent_binding_service import binding_memory_sql_predicate
-
+        # #1301: agent-binding read filter, SQL form (P0-2 context default-deny
+        # + per-memory type/source subtraction) — applied to BOTH the page
+        # query and the count query below so ``total`` never acts as an
+        # existence oracle over denied rows and pagination stays exact. None
+        # for non-agent credentials and shadow-mode scopes.
         binding_predicate = await binding_memory_sql_predicate(db)
 
         # Build query. Exclude soft-deleted rows — POST /forget sets
@@ -897,12 +897,10 @@ async def get_access_patterns(
         if target_context_id:
             base_filter.append(Memory.context_id == target_context_id)
 
-        # #1301: subtract denied type/source rows from the most-accessed page
-        # AND every aggregate (type distribution, recent count) — a grouped
-        # count over denied types is an existence oracle. None for non-agent
-        # credentials and shadow-mode scopes.
-        from services.agent_binding_service import binding_memory_sql_predicate
-
+        # #1301: agent-binding read filter (context default-deny + type/source
+        # subtraction) on the most-accessed page AND every aggregate — a
+        # grouped count over denied rows is an existence oracle. None for
+        # non-agent credentials and shadow-mode scopes.
         binding_predicate = await binding_memory_sql_predicate(db)
         if binding_predicate is not None:
             base_filter.append(binding_predicate)

@@ -530,7 +530,6 @@ async def get_cluster(
                 )
             )
         ).all()
-        # #1301: same subtraction for representatives as for members.
         rep_rows, _ = await filter_memory_rows_by_binding(
             db, list(rep_rows), operation=None, user_id=None
         )
@@ -554,16 +553,52 @@ async def get_cluster(
     else:
         representatives = []
 
+    # #1301: ``count`` and ``property_stats["types"]`` are whole-cluster
+    # stored aggregates — the same grouped-count existence oracle over denied
+    # types that stats.by_type was. For enforce-mode agents with an active
+    # binding filter, recompute both over the rows the binding permits (one
+    # GROUP BY). Non-type facets in property_stats are not type/source-labeled
+    # and stay as stored.
+    count = int(cluster.count)
+    property_stats = cluster.property_stats or {}
+    from services.agent_binding_service import binding_memory_sql_predicate
+
+    binding_predicate = await binding_memory_sql_predicate(db)
+    if binding_predicate is not None:
+        type_rows = (
+            await db.execute(
+                select(Memory.type, func.count(Memory.id))
+                .join(
+                    MemoryAnalysisAssignment,
+                    MemoryAnalysisAssignment.memory_id == Memory.id,
+                )
+                .where(
+                    and_(
+                        MemoryAnalysisAssignment.analysis_id == run_id,
+                        MemoryAnalysisAssignment.cluster_id == cluster.id,
+                        Memory.deleted_at.is_(None),
+                        Memory.workspace_id == workspace_id,
+                        binding_predicate,
+                    )
+                )
+                .group_by(Memory.type)
+            )
+        ).all()
+        filtered_types = {row[0]: int(row[1]) for row in type_rows}
+        count = sum(filtered_types.values())
+        if "types" in property_stats:
+            property_stats = {**property_stats, "types": filtered_types}
+
     return {
         "run_id": str(run_id),
         "cluster_index": cluster_index,
         "cluster_id": str(cluster.id),
         "label": cluster.label,
         "description": cluster.description,
-        "count": int(cluster.count),
+        "count": count,
         "label_confidence": float(cluster.label_confidence),
         "centroid_2d": list(cluster.centroid_2d) if cluster.centroid_2d else None,
-        "property_stats": cluster.property_stats or {},
+        "property_stats": property_stats,
         "representatives": representatives,
         "memories": memories_out,
         "next_cursor": next_cursor,

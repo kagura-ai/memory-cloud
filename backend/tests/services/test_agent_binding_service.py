@@ -69,6 +69,15 @@ def _scope(agent_id=None, mode="enforce", workspace_id=None) -> AgentScope:
     )
 
 
+def _db_with_bindings(bindings):
+    """MagicMock db whose binding SELECT returns ``bindings`` (shared by the
+    row-lever and SQL-predicate test classes)."""
+    db = MagicMock()
+    scalars = MagicMock(all=MagicMock(return_value=bindings))
+    db.execute = AsyncMock(return_value=MagicMock(scalars=MagicMock(return_value=scalars)))
+    return db
+
+
 def _service(execute_results: list | None = None) -> AgentBindingService:
     db = MagicMock()
     db.flush = AsyncMock()
@@ -742,12 +751,6 @@ class TestFilterMemoryRowsByBinding:
 
         return SimpleNamespace(id=uuid.uuid4(), context_id=ctx, type=mtype, source_type=source)
 
-    def _db_with_bindings(self, bindings):
-        db = MagicMock()
-        scalars = MagicMock(all=MagicMock(return_value=bindings))
-        db.execute = AsyncMock(return_value=MagicMock(scalars=MagicMock(return_value=scalars)))
-        return db
-
     @pytest.mark.asyncio
     async def test_non_agent_credential_is_structural_noop(self):
         from auth.agent_scope import set_agent_scope
@@ -772,7 +775,7 @@ class TestFilterMemoryRowsByBinding:
         ctx_a, ctx_b = uuid.uuid4(), uuid.uuid4()
         set_agent_scope(_scope(mode="enforce", workspace_id=uuid.uuid4()))
         try:
-            db = self._db_with_bindings([_binding(context_id=ctx_a, allowed_memory_types=["note"])])
+            db = _db_with_bindings([_binding(context_id=ctx_a, allowed_memory_types=["note"])])
             note_a = self._row(ctx_a, "note")
             time_a = self._row(ctx_a, "time")
             time_b = self._row(ctx_b, "time")  # ctx_b unrestricted
@@ -798,7 +801,7 @@ class TestFilterMemoryRowsByBinding:
         ctx_a, ctx_b = uuid.uuid4(), uuid.uuid4()
         set_agent_scope(_scope(mode="shadow", workspace_id=uuid.uuid4()))
         try:
-            db = self._db_with_bindings(
+            db = _db_with_bindings(
                 [
                     _binding(context_id=ctx_a, allowed_memory_types=["note"]),
                     _binding(context_id=ctx_b, allowed_source_types=["manual"]),
@@ -833,7 +836,7 @@ class TestFilterMemoryRowsByBinding:
         ctx = uuid.uuid4()
         set_agent_scope(_scope(mode="shadow", workspace_id=uuid.uuid4()))
         try:
-            db = self._db_with_bindings([_binding(context_id=ctx, allowed_memory_types=[])])
+            db = _db_with_bindings([_binding(context_id=ctx, allowed_memory_types=[])])
             rows = [self._row(ctx)]
             with patch(
                 "services.agent_binding_service.emit_row_filter_would_deny", AsyncMock()
@@ -855,7 +858,7 @@ class TestFilterMemoryRowsByBinding:
         ctx = uuid.uuid4()
         set_agent_scope(_scope(mode="enforce", workspace_id=uuid.uuid4()))
         try:
-            db = self._db_with_bindings([_binding(context_id=ctx)])  # arrays NULL
+            db = _db_with_bindings([_binding(context_id=ctx)])  # arrays NULL
             rows = [self._row(ctx, "anything", source="connector")]
             kept, denied = await filter_memory_rows_by_binding(
                 db, rows, operation="recall", user_id="u"
@@ -937,12 +940,6 @@ class TestBindingMemorySqlPredicate:
     tests/integration/test_binding_type_filter_e2e.py; these pin the
     structural no-op contract (when NO clause may be applied)."""
 
-    def _db_with_bindings(self, bindings):
-        db = MagicMock()
-        scalars = MagicMock(all=MagicMock(return_value=bindings))
-        db.execute = AsyncMock(return_value=MagicMock(scalars=MagicMock(return_value=scalars)))
-        return db
-
     @pytest.mark.asyncio
     async def test_non_agent_credential_returns_none_without_query(self):
         from auth.agent_scope import set_agent_scope
@@ -970,31 +967,76 @@ class TestBindingMemorySqlPredicate:
         finally:
             set_agent_scope(None)
 
+    @staticmethod
+    def _compile(predicate) -> str:
+        from sqlalchemy.dialects import postgresql
+
+        return str(
+            predicate.compile(dialect=postgresql.dialect(), compile_kwargs={"literal_binds": True})
+        )
+
     @pytest.mark.asyncio
-    async def test_non_restricting_bindings_return_none(self):
+    async def test_non_restricting_binding_still_gates_context_membership(self):
+        # can_read=True with NULL arrays restricts no rows INSIDE the bound
+        # context, but P0-2 default-deny still confines the agent to its
+        # bound set — the predicate is the membership gate, never None.
+        from auth.agent_scope import set_agent_scope
+        from services.agent_binding_service import binding_memory_sql_predicate
+
+        ctx = uuid.uuid4()
+        set_agent_scope(_scope(mode="enforce", workspace_id=uuid.uuid4()))
+        try:
+            db = _db_with_bindings([_binding(context_id=ctx)])  # both arrays NULL
+            predicate = await binding_memory_sql_predicate(db)
+            assert predicate is not None
+            assert self._compile(predicate) == f"memories.context_id IN ('{ctx}')"
+        finally:
+            set_agent_scope(None)
+
+    @pytest.mark.asyncio
+    async def test_zero_bindings_deny_everything(self):
         from auth.agent_scope import set_agent_scope
         from services.agent_binding_service import binding_memory_sql_predicate
 
         set_agent_scope(_scope(mode="enforce", workspace_id=uuid.uuid4()))
         try:
-            db = self._db_with_bindings([_binding()])  # both arrays NULL
-            assert await binding_memory_sql_predicate(db) is None
+            predicate = await binding_memory_sql_predicate(_db_with_bindings([]))
+            assert predicate is not None
+            assert self._compile(predicate) == "false"
+        finally:
+            set_agent_scope(None)
+
+    @pytest.mark.asyncio
+    async def test_can_read_false_context_excluded_from_membership_gate(self):
+        from auth.agent_scope import set_agent_scope
+        from services.agent_binding_service import binding_memory_sql_predicate
+
+        ctx_ro, ctx_no = uuid.uuid4(), uuid.uuid4()
+        set_agent_scope(_scope(mode="enforce", workspace_id=uuid.uuid4()))
+        try:
+            db = _db_with_bindings(
+                [
+                    _binding(context_id=ctx_ro),
+                    _binding(context_id=ctx_no, can_read=False),
+                ]
+            )
+            sql = self._compile(await binding_memory_sql_predicate(db))
+            assert sql == f"memories.context_id IN ('{ctx_ro}')"
         finally:
             set_agent_scope(None)
 
     @pytest.mark.asyncio
     async def test_enforce_predicate_mirrors_permits_semantics(self):
-        # One clause per restricting context; []=deny-all compiles to a
-        # constant-false allow (is-not-None doctrine, never truthiness).
-        from sqlalchemy.dialects import postgresql
-
+        # Membership gate over readable contexts, AND one subtraction clause
+        # per restricting context; []=deny-all compiles to a constant-false
+        # allow (is-not-None doctrine, never truthiness).
         from auth.agent_scope import set_agent_scope
         from services.agent_binding_service import binding_memory_sql_predicate
 
         ctx_a, ctx_b = uuid.uuid4(), uuid.uuid4()
         set_agent_scope(_scope(mode="enforce", workspace_id=uuid.uuid4()))
         try:
-            db = self._db_with_bindings(
+            db = _db_with_bindings(
                 [
                     _binding(context_id=ctx_a, allowed_memory_types=["note"]),
                     _binding(context_id=ctx_b, allowed_source_types=[]),
@@ -1002,16 +1044,12 @@ class TestBindingMemorySqlPredicate:
             )
             predicate = await binding_memory_sql_predicate(db)
             assert predicate is not None
-            sql = str(
-                predicate.compile(
-                    dialect=postgresql.dialect(), compile_kwargs={"literal_binds": True}
-                )
-            )
-            assert sql.startswith("NOT (")
+            sql = self._compile(predicate)
+            assert "memories.context_id IN (" in sql
+            assert str(ctx_a) in sql and str(ctx_b) in sql
             assert f"memories.context_id = '{ctx_a}' AND (memories.type NOT IN ('note'))" in sql
             # []=deny-all: NOT(false) folds to true, leaving the bare context
             # clause — every row of that context is denied, never IN ().
-            assert f"memories.context_id = '{ctx_b}'" in sql
-            assert f"'{ctx_b}' AND" not in sql
+            assert f"OR memories.context_id = '{ctx_b}'" in sql
         finally:
             set_agent_scope(None)
