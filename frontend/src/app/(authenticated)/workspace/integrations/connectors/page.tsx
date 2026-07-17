@@ -8,7 +8,10 @@ import { Check, Copy, Plug, Trash2 } from "lucide-react";
 import { PageContainer } from "@/components/common/PageContainer";
 import { PageHeader } from "@/components/common/PageHeader";
 import { ErrorBanner } from "@/components/common/ErrorBanner";
-import { TableLoadingState } from "@/components/common/LoadingState";
+import {
+  InlineSpinner,
+  TableLoadingState,
+} from "@/components/common/LoadingState";
 import { EmptyState } from "@/components/ui/empty-state";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -317,10 +320,17 @@ export default function ConnectorsPage() {
     async (connector: WorkspaceConnectorSummary, enabled: boolean) => {
       setRuntimeSaving(connector.connector_id);
       try {
-        const result = await updateConnectorRuntime(connector.connector_id, {
-          ...connector.runtime,
-          vision_enabled: enabled,
-        });
+        // Pass the snapshot's config_version so a concurrent admin change
+        // 409s (and we reload) instead of being silently overwritten by
+        // this full-document replacement (#1348).
+        const result = await updateConnectorRuntime(
+          connector.connector_id,
+          {
+            ...connector.runtime,
+            vision_enabled: enabled,
+          },
+          connector.config_version,
+        );
         setConnectors((current) =>
           current?.map((item) =>
             item.connector_id === connector.connector_id
@@ -339,6 +349,9 @@ export default function ConnectorsPage() {
           title: t("runtimeUpdateFailed"),
           description: err instanceof Error ? err.message : String(err),
         });
+        // A 409 (stale snapshot) or any failure leaves our list stale —
+        // refetch so the switch reflects the server state.
+        void reload();
       } finally {
         setRuntimeSaving(null);
       }
@@ -550,9 +563,12 @@ export default function ConnectorsPage() {
               <div className="flex items-center gap-4">
                 <label className="flex items-center gap-2 text-sm">
                   <span>{t("visionEnabled")}</span>
+                  {runtimeSaving === c.connector_id && (
+                    <InlineSpinner aria-hidden="true" />
+                  )}
                   <Switch
-                    checked={c.runtime.vision_enabled}
-                    disabled={runtimeSaving !== null}
+                    checked={c.runtime?.vision_enabled ?? true}
+                    disabled={c.runtime == null || runtimeSaving === c.connector_id}
                     onCheckedChange={(enabled) =>
                       void handleVisionEnabledChange(c, enabled)
                     }

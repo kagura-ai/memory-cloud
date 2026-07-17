@@ -170,6 +170,7 @@ async def test_update_runtime_commits_revision_and_returns_normalized_config():
 
     assert response.connector_id == connector_id
     assert response.runtime.vision_enabled is False
+    assert response.stored is True
     assert response.config_version == 4
     db.commit.assert_awaited_once()
     service_cls.return_value.update_runtime_config.assert_awaited_once_with(
@@ -177,6 +178,7 @@ async def test_update_runtime_commits_revision_and_returns_normalized_config():
         connector_id=connector_id,
         runtime_config=request.runtime.model_dump(mode="json"),
         user_id="user-1",
+        expected_config_version=None,
     )
 
 

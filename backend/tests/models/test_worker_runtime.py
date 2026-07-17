@@ -52,3 +52,74 @@ def test_worker_runtime_config_normalizes_nested_values_for_jsonb() -> None:
     assert stored["buffer"] == {"ttl_seconds": 3600, "max_len": 250}
     assert stored["vision_enabled"] is False
     assert stored["flush"]["max_tracked_topics"] == 10_000
+
+
+class TestReviewHardening:
+    """#1350 review: bounds, Infinity, template safety, lenient rehydrate."""
+
+    def test_numeric_knobs_reject_absurd_values(self):
+        import pytest as _pytest
+        from pydantic import ValidationError as _VE
+
+        from models.worker_runtime import WorkerRuntimeConfig
+
+        for doc in (
+            {"buffer": {"max_len": 10**15}},
+            {"flush": {"max_tracked_topics": 10**12}},
+            {"supervisor": {"tick_seconds": 10**9}},
+            {"supervisor": {"tick_seconds": 0.0001}},  # busy-loop floor
+            {"supervisor": {"shutdown_flush_timeout_seconds": 1e9}},
+            {"answer_timeout_sec": 1e6},
+        ):
+            with _pytest.raises(_VE):
+                WorkerRuntimeConfig.model_validate(doc)
+
+    def test_floats_reject_infinity_and_nan(self):
+        import math
+
+        import pytest as _pytest
+        from pydantic import ValidationError as _VE
+
+        from models.worker_runtime import WorkerRuntimeConfig
+
+        for value in (math.inf, -math.inf, math.nan):
+            with _pytest.raises(_VE):
+                WorkerRuntimeConfig.model_validate({"answer_timeout_sec": value})
+
+    def test_link_template_rejects_scheme_and_placeholder_abuse(self):
+        import pytest as _pytest
+        from pydantic import ValidationError as _VE
+
+        from models.worker_runtime import WorkerRuntimeConfig
+
+        for template in (
+            "javascript:alert(1)/{context_id}/{memory_id}",  # scheme injection
+            "https://x/{context_id}/{memory_id}/{oops}",  # unknown field → worker KeyError
+            "https://x/{context_id.__class__}/{memory_id}",  # attribute access
+            "https://x/{context_id}",  # missing memory_id
+        ):
+            with _pytest.raises(_VE):
+                WorkerRuntimeConfig.model_validate({"memory_link_template": template})
+        ok = WorkerRuntimeConfig.model_validate(
+            {"memory_link_template": "https://x/{context_id}/{memory_id}"}
+        )
+        assert ok.memory_link_template is not None
+
+    def test_from_stored_drops_unknown_keys_from_newer_schema(self):
+        from models.worker_runtime import WorkerRuntimeConfig
+
+        stored = WorkerRuntimeConfig().model_dump(mode="json")
+        stored["future_field"] = {"x": 1}  # written by vNext, read after rollback
+        stored["buffer"]["future_nested"] = 5
+        cfg = WorkerRuntimeConfig.from_stored(stored)
+        assert cfg is not None
+        assert cfg.buffer.ttl_seconds == 86400
+
+    def test_from_stored_degrades_to_none_instead_of_raising(self):
+        from models.worker_runtime import WorkerRuntimeConfig
+
+        # Bound violation that survives key-stripping (tightened across
+        # releases): the read path gets the NULL-row contract, not a 500.
+        assert WorkerRuntimeConfig.from_stored({"buffer": {"max_len": 10**15}}) is None
+        assert WorkerRuntimeConfig.from_stored("not-a-dict") is None
+        assert WorkerRuntimeConfig.from_stored(None) is None

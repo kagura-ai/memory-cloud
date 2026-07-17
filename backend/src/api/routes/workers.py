@@ -324,9 +324,9 @@ async def get_worker_config(
         resource=resource_block,
         llm=connector.get_llm_config(),
         pii_guardrail_config=connector.pii_guardrail_config,
-        runtime=(
-            WorkerRuntimeConfig.model_validate(connector.runtime_config)
-            if connector.runtime_config is not None
-            else None
-        ),
+        # Lenient rehydrate (#1350 review): a stored document drifted across
+        # releases must degrade to "no runtime block, worker defaults" — a
+        # strict-validation 500 here is a full connector outage (the worker
+        # cannot fetch its token/KMC key either).
+        runtime=WorkerRuntimeConfig.from_stored(connector.runtime_config),
     )

@@ -1666,6 +1666,12 @@ Returns: {status, report_id, rollback_summary: {edges_deleted, merges_reversed, 
                             },
                             "memory_link_template": {
                                 "anyOf": [{"type": "string"}, {"type": "null"}],
+                                "description": "http(s) URL template containing "
+                                "exactly the {context_id} and {memory_id} "
+                                "placeholders (no other format fields). The "
+                                "server-side WorkerRuntimeConfig model is the "
+                                "authoritative validator for all runtime fields; "
+                                "this schema is advisory.",
                             },
                             "entity_extraction_enabled": {"type": "boolean"},
                             "entity_max": {

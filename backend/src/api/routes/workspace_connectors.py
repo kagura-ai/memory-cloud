@@ -21,6 +21,7 @@ from services.connector_provisioning import (
 )
 from utils.exceptions import (
     BadRequestError,
+    ConflictError,
     InternalError,
     MemoryCloudException,
     NotFoundException,
@@ -124,16 +125,31 @@ class WorkspaceConnectorSummary(TZAwareBaseModel):
 
 
 class WorkspaceConnectorRuntimeUpdateRequest(BaseModel):
-    """Complete normalized replacement for tenant-owned worker controls."""
+    """Complete normalized replacement for tenant-owned worker controls.
 
-    runtime: WorkerRuntimeConfig
+    ``runtime`` is required but nullable: an explicit ``null`` clears the
+    stored block back to NULL (worker built-in defaults) so a tuned
+    connector is not a one-way door. ``expected_config_version`` is the
+    optimistic-concurrency guard for the full-document replacement: pass the
+    version your snapshot came from and a concurrent change turns into a 409
+    instead of a silent revert.
+    """
+
+    runtime: WorkerRuntimeConfig | None = Field(...)
+    expected_config_version: int | None = Field(default=None, ge=0)
 
 
 class WorkspaceConnectorRuntimeUpdateResponse(BaseModel):
-    """Updated controls and the new opaque-source connector revision."""
+    """Updated effective controls and the new opaque-source connector revision.
+
+    ``runtime`` is the EFFECTIVE config (worker defaults when the stored
+    block was cleared); ``stored`` distinguishes a persisted override from
+    the cleared/defaults state.
+    """
 
     connector_id: UUID
     runtime: WorkerRuntimeConfig
+    stored: bool
     config_version: int
 
 
@@ -305,7 +321,12 @@ async def list_workspace_connectors(
             config_version=item.connector.config_version,
             created_at=item.connector.created_at,
             created_by=item.connector.created_by,
-            runtime=WorkerRuntimeConfig.model_validate(item.connector.runtime_config or {}),
+            # Lenient rehydrate (#1350 review): one drifted stored document
+            # must not 500 the whole workspace list — fall back to defaults.
+            runtime=(
+                WorkerRuntimeConfig.from_stored(item.connector.runtime_config)
+                or WorkerRuntimeConfig()
+            ),
         )
         for item in items
     ]
@@ -333,13 +354,19 @@ async def update_workspace_connector_runtime(
         ).update_runtime_config(
             workspace_id=workspace_id,
             connector_id=connector_id,
-            runtime_config=request.runtime.model_dump(mode="json"),
+            runtime_config=(
+                request.runtime.model_dump(mode="json") if request.runtime is not None else None
+            ),
             user_id=admin["user_id"],
+            expected_config_version=request.expected_config_version,
         )
         await db.commit()
     except NotFoundException as exc:
         await db.rollback()
         raise NotFoundException("Connector") from exc
+    except ConflictError:
+        await db.rollback()
+        raise
     except Exception as exc:
         await db.rollback()
         logger.error(
@@ -351,9 +378,15 @@ async def update_workspace_connector_runtime(
         )
         raise InternalError("Failed to update connector runtime") from exc
 
+    stored = update_result.runtime_config is not None
     return WorkspaceConnectorRuntimeUpdateResponse(
         connector_id=connector_id,
-        runtime=WorkerRuntimeConfig.model_validate(update_result.runtime_config),
+        runtime=(
+            WorkerRuntimeConfig.model_validate(update_result.runtime_config)
+            if stored
+            else WorkerRuntimeConfig()
+        ),
+        stored=stored,
         config_version=update_result.config_version,
     )
 

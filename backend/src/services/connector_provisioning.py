@@ -113,9 +113,9 @@ class KmcKeyRotationResult:
 
 @dataclass(frozen=True)
 class ConnectorRuntimeUpdateResult:
-    """Normalized runtime controls and revision after an admin update."""
+    """Normalized runtime controls (None = cleared) and revision after an admin update."""
 
-    runtime_config: dict[str, Any]
+    runtime_config: dict[str, Any] | None
     config_version: int
 
 
@@ -359,6 +359,21 @@ class ConnectorProvisioningService:
                 await self._delete_orphan_context(auto_created_context_id)
             raise
 
+        # #1350 review: initial runtime controls set at provisioning must be
+        # auditable too — otherwise the changed-fields contract is bypassable
+        # by setting values at creation instead of via PATCH. Names of the
+        # fields that diverge from defaults only, never values.
+        runtime_fields: list[str] = []
+        if normalized_runtime_config is not None:
+            from models.worker_runtime import WorkerRuntimeConfig as _WRC
+
+            _defaults = _WRC().model_dump(mode="json")
+            runtime_fields = sorted(
+                key
+                for key in _flatten_runtime_fields(normalized_runtime_config)
+                if _runtime_field(normalized_runtime_config, key) != _runtime_field(_defaults, key)
+            )
+
         logger.info(
             "workspace_connector_provisioned",
             connector_id=str(connector.id),
@@ -367,6 +382,7 @@ class ConnectorProvisioningService:
             resource_pk=str(resource_pk),
             workspace_id=str(workspace_id),
             user_id=user_id,
+            runtime_fields=runtime_fields,
         )
 
         return ConnectorProvisioningResult(
@@ -662,15 +678,24 @@ class ConnectorProvisioningService:
         *,
         workspace_id: UUID,
         connector_id: UUID,
-        runtime_config: dict[str, Any],
+        runtime_config: dict[str, Any] | None,
         user_id: str,
+        expected_config_version: int | None = None,
     ) -> ConnectorRuntimeUpdateResult:
-        """Replace normalized tenant controls and bump the worker revision.
+        """Replace (or clear) normalized tenant controls and bump the revision.
 
         The workspace predicate and row lock are part of the authorization and
         monotonic-revision contract: a connector from another workspace is
         indistinguishable from a missing connector, and concurrent updates
         cannot lose a revision increment.
+
+        ``runtime_config=None`` clears the stored block back to NULL — the
+        "worker built-in defaults" state existing rows start in — so a tuned
+        connector is not a one-way door (#1350 review). The full-document
+        replacement semantics make lost updates possible from stale readers,
+        so callers can pass ``expected_config_version`` (the version their
+        snapshot came from) to fail the write with ConflictError instead of
+        silently reverting a concurrent change.
         """
         result = await self.db.execute(
             select(WorkspaceConnector)
@@ -684,19 +709,40 @@ class ConnectorProvisioningService:
         if connector is None:
             raise NotFoundException("Connector", str(connector_id))
 
+        if (
+            expected_config_version is not None
+            and connector.config_version != expected_config_version
+        ):
+            from utils.exceptions import ConflictError
+
+            raise ConflictError(
+                f"Connector config_version is {connector.config_version}, "
+                f"expected {expected_config_version} — reload and retry."
+            )
+
         from models.worker_runtime import WorkerRuntimeConfig
 
-        normalized_runtime_config = WorkerRuntimeConfig.model_validate(runtime_config).model_dump(
-            mode="json"
+        normalized_runtime_config = (
+            None
+            if runtime_config is None
+            else WorkerRuntimeConfig.model_validate(runtime_config).model_dump(mode="json")
         )
-        previous = WorkerRuntimeConfig.model_validate(connector.runtime_config or {}).model_dump(
-            mode="json"
+        # from_stored (lenient) for the previous side: a drifted stored doc
+        # must never make the repair PATCH itself 500 (#1350 review).
+        previous = (
+            WorkerRuntimeConfig.from_stored(connector.runtime_config) or WorkerRuntimeConfig()
+        ).model_dump(mode="json")
+        # Diff against effective values: clearing shows the fields returning
+        # to worker defaults.
+        effective_new = (
+            normalized_runtime_config
+            if normalized_runtime_config is not None
+            else WorkerRuntimeConfig().model_dump(mode="json")
         )
         changed_fields = sorted(
             key
-            for key in _flatten_runtime_fields(previous)
-            | _flatten_runtime_fields(normalized_runtime_config)
-            if _runtime_field(previous, key) != _runtime_field(normalized_runtime_config, key)
+            for key in _flatten_runtime_fields(previous) | _flatten_runtime_fields(effective_new)
+            if _runtime_field(previous, key) != _runtime_field(effective_new, key)
         )
         connector.runtime_config = normalized_runtime_config
         connector.config_version += 1
@@ -708,6 +754,7 @@ class ConnectorProvisioningService:
             workspace_id=str(workspace_id),
             updated_by=user_id,
             changed_fields=changed_fields,
+            cleared=normalized_runtime_config is None,
             config_version=connector.config_version,
         )
         return ConnectorRuntimeUpdateResult(

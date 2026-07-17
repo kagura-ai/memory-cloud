@@ -217,6 +217,9 @@ describe("ConnectorsPage RBAC gate", () => {
       expect(mockUpdateConnectorRuntime).toHaveBeenCalledWith(
         "connector-1",
         expect.objectContaining({ vision_enabled: false }),
+        // The snapshot's config_version rides along as the
+        // optimistic-concurrency guard (server 409s on staleness).
+        1,
       ),
     );
   });

@@ -101,7 +101,10 @@ export interface AvailableWorkerApp {
 
 export interface UpdateConnectorRuntimeResponse {
   connector_id: string;
+  // Effective config (worker defaults when the stored block was cleared).
   runtime: WorkerRuntimeConfig;
+  // false = cleared/NULL row (worker built-in defaults apply).
+  stored: boolean;
   config_version: number;
 }
 
@@ -132,11 +135,21 @@ export async function deleteConnector(connectorId: string): Promise<void> {
 
 export async function updateConnectorRuntime(
   connectorId: string,
-  runtime: WorkerRuntimeConfig,
+  // null clears the stored block back to worker defaults (#1348).
+  runtime: WorkerRuntimeConfig | null,
+  // Optimistic-concurrency guard: version the caller's snapshot came from.
+  // The server 409s on mismatch instead of silently reverting a concurrent
+  // change (full-document replacement semantics).
+  expectedConfigVersion?: number,
 ): Promise<UpdateConnectorRuntimeResponse> {
   return apiClient.patch<UpdateConnectorRuntimeResponse>(
     `/api/v1/workspace-connectors/${connectorId}/runtime`,
-    { runtime },
+    {
+      runtime,
+      ...(expectedConfigVersion != null
+        ? { expected_config_version: expectedConfigVersion }
+        : {}),
+    },
   );
 }
 
