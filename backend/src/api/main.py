@@ -119,6 +119,17 @@ async def lifespan(app: FastAPI):
     # Shutdown
     logger.info("application_shutting_down")
 
+    # Stop the geo backfill first (#1332 Copilot review): later shutdown
+    # steps close the DB/loop out from under a still-running sweep, which
+    # would surface as pending-task warnings or spurious errors at exit.
+    backfill_task = getattr(app.state, "geo_backfill_task", None)
+    if backfill_task is not None and not backfill_task.done():
+        backfill_task.cancel()
+        try:
+            await backfill_task
+        except asyncio.CancelledError:
+            logger.info("geo_payload_backfill_cancelled_on_shutdown")
+
     # Stop scheduler
     from tasks import shutdown_scheduler
 
