@@ -118,6 +118,7 @@ class ConnectorProvisioningService:
         channel_ids: list[Any] | None = None,
         locale: str | None = None,
         external_team_id: str | None = None,
+        app_key: str = "default",
     ) -> ConnectorProvisioningResult:
         """Create resource + connector + connector-scoped token in one flow.
 
@@ -132,13 +133,36 @@ class ConnectorProvisioningService:
 
         workspace = await self._get_workspace(workspace_id)
 
-        # One platform team maps to exactly one connector — check BEFORE creating
+        # Non-default identities must already be active. ``default`` stays
+        # compatible during the migration window while its signing secret is
+        # still supplied by the worker environment.
+        if app_key != "default":
+            from services.worker_app_identity import WorkerAppIdentityService
+
+            app_identity = await WorkerAppIdentityService(self.db).get_identity(
+                connector_type, app_key
+            )
+            if (
+                app_identity is None
+                or app_identity.status != "active"
+                or not app_identity.active_signing_secret_encrypted
+            ):
+                raise ValidationError(
+                    "app_key must identify an active worker app identity",
+                    field="app_key",
+                )
+
+        # One app-qualified platform team maps to one connector — check BEFORE creating
         # any context so a duplicate is rejected without leaving orphan rows.
         # Falsy check (not `is not None`) also rejects empty-string team_id from
         # a malformed OAuth response. Do NOT include the conflicting connector_id —
         # it may belong to a different workspace (cross-tenant UUID disclosure).
         if external_team_id:
-            existing_team = await self.get_connector_for_dispatch(connector_type, external_team_id)
+            existing_team = await self.get_connector_for_dispatch(
+                connector_type=connector_type,
+                external_team_id=external_team_id,
+                app_key=app_key,
+            )
             if existing_team is not None:
                 raise ConflictError(
                     f"A {connector_type} connector for team '{external_team_id}' already exists.",
@@ -235,6 +259,7 @@ class ConnectorProvisioningService:
                 resource_pk=resource_pk,
                 workspace_id=workspace_id,
                 connector_type=connector_type,
+                app_key=app_key,
                 context_id=resolved_context_id,
                 locale=locale,
                 channel_ids=channel_ids,
@@ -536,13 +561,14 @@ class ConnectorProvisioningService:
         ]
 
     async def get_connector_for_dispatch(
-        self, connector_type: str, external_team_id: str
+        self, connector_type: str, external_team_id: str, app_key: str = "default"
     ) -> WorkspaceConnector | None:
-        """Resolve the connector serving a platform team (worker dispatch key)."""
+        """Resolve the connector serving an app-qualified platform team."""
         result = await self.db.execute(
             select(WorkspaceConnector)
             .where(
                 WorkspaceConnector.connector_type == connector_type,
+                WorkspaceConnector.app_key == app_key,
                 WorkspaceConnector.external_team_id == external_team_id,
             )
             .limit(1)

@@ -253,6 +253,10 @@ openapi_tags = [
     {"name": "admin", "description": "Admin: user management and system stats"},
     {"name": "admin-plans", "description": "Admin: plan tier and quota management"},
     {
+        "name": "admin-worker-apps",
+        "description": "Admin: worker app identity and signing-secret lifecycle",
+    },
+    {
         "name": "admin-memory-health",
         "description": "Admin: per-context memory health diagnosis and signal breakdown",
     },
@@ -599,6 +603,7 @@ from api.routes import (  # noqa: E402
     system_admins,
     users,
     well_known,
+    worker_apps,  # Issue #1315: worker app identity lifecycle
     workers,  # Spec 2026-06-02: ai-worker config endpoint
     workspace,
     workspace_connectors,  # Issue #851: ai-worker connector setup
@@ -737,6 +742,7 @@ app.include_router(resource_tokens.router, prefix="/api/v1")
 # Workspace connector setup route (Issue #851 - ai-worker connector provisioning)
 app.include_router(workspace_connectors.router, prefix="/api/v1")
 app.include_router(workers.router, prefix="/api/v1")
+app.include_router(worker_apps.router, prefix="/api/v1")
 # Issue #954: internal billing entitlement push. Mounted WITHOUT /api/v1 — it
 # lives under /internal so it stays off the public API surface (#622) and is
 # blocked at the edge (Caddyfile.tpl `handle /internal*` -> 404, enforced every

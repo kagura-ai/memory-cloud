@@ -380,10 +380,11 @@ async def test_admin_non_owner_can_auto_create_context(db_session: AsyncSession)
 
 @pytest.mark.asyncio
 async def test_duplicate_team_id_is_rejected(db_session: AsyncSession):
-    """Code-review fix: one platform team maps to exactly one connector.
+    """One app-qualified platform team maps to exactly one connector.
 
-    A second connector claiming the same (connector_type, external_team_id)
-    is rejected with a 409 ConflictError — prevents cross-tenant dispatch hijack.
+    A second connector claiming the same (connector_type, app_key,
+    external_team_id) is rejected with a 409 ConflictError — preventing
+    cross-tenant dispatch hijack while allowing a team to install another app.
     """
     from utils.exceptions import ConflictError
 
@@ -408,6 +409,51 @@ async def test_duplicate_team_id_is_rejected(db_session: AsyncSession):
             auto_create_context_name=f"slack-{uuid4().hex[:8]}",
             external_team_id="T0DUP",  # same team — must be rejected
         )
+
+
+@pytest.mark.asyncio
+async def test_same_team_id_is_allowed_under_two_app_identities(db_session: AsyncSession):
+    """The dispatch uniqueness boundary is (platform, app_key, team_id)."""
+    from models.worker_app import WorkerAppIdentity
+
+    user_id, workspace = await _seed_workspace(db_session, plan_name="pro")
+    custom_app = WorkerAppIdentity(
+        platform="slack",
+        app_key="sales",
+        display_name="Sales app",
+        status="active",
+        active_signing_secret_encrypted="test-ciphertext",
+        active_secret_revision=1,
+        created_by=user_id,
+    )
+    db_session.add(custom_app)
+    await db_session.flush()
+
+    svc = ConnectorProvisioningService(db_session)
+    await svc.provision_connector(
+        workspace_id=workspace.id,
+        user_id=user_id,
+        connector_type="slack",
+        app_key="default",
+        resource_id=f"slack_{uuid4().hex[:8]}",
+        external_team_id="T0SHARED",
+    )
+    await svc.provision_connector(
+        workspace_id=workspace.id,
+        user_id=user_id,
+        connector_type="slack",
+        app_key="sales",
+        resource_id=f"slack_{uuid4().hex[:8]}",
+        external_team_id="T0SHARED",
+    )
+    await db_session.flush()
+
+    assert (
+        await svc.get_connector_for_dispatch("slack", "T0SHARED", app_key="default")
+    ).app_key == "default"
+    assert (
+        await svc.get_connector_for_dispatch("slack", "T0SHARED", app_key="sales")
+    ).app_key == "sales"
 
 
 @pytest.mark.asyncio

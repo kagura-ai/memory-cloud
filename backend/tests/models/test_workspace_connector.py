@@ -87,6 +87,18 @@ class TestSchemaContract:
         }
         assert "check_connector_type" in check_names
 
+    def test_dispatch_uniqueness_is_app_qualified(self):
+        table = WorkspaceConnector.__table__
+        assert table.c.app_key.nullable is False
+        indexes = {
+            index.name: tuple(column.name for column in index.columns) for index in table.indexes
+        }
+        assert indexes["ix_workspace_connectors_app_team"] == (
+            "connector_type",
+            "app_key",
+            "external_team_id",
+        )
+
     def test_exempt_from_resource_pk_invariant_listener(self):
         # The dual-write guard hooks the slug-bearing satellites only.
         assert not event.contains(

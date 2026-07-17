@@ -14,6 +14,7 @@ export type ConnectorType = "slack" | "discord" | "teams";
 export interface WorkspaceConnectorSummary {
   connector_id: string;
   connector_type: ConnectorType;
+  app_key: string;
   resource_id: string;
   context_id: string | null;
   config_version: number;
@@ -26,19 +27,23 @@ export interface CreateConnectorRequest {
   connector_type: ConnectorType;
   resource_id: string;
   display_name?: string;
+  oauth_tokens?: Record<string, unknown>;
   auto_create_context_name?: string;
   context_id?: string;
   llm_config?: Record<string, unknown>;
   channel_ids?: unknown[];
   locale?: string;
   pii_guardrail_config?: Record<string, unknown>;
+  external_team_id?: string;
   slack_install_handle?: string;
+  app_key?: string;
 }
 
 /** Create response — token + KMC key are shown exactly once. */
 export interface CreateConnectorResponse {
   connector_id: string;
   connector_type: ConnectorType;
+  app_key: string;
   resource_id: string;
   context_id: string | null;
   token_id: number;
@@ -53,11 +58,24 @@ export interface SlackPendingInstall {
   team_id: string;
   team_name: string | null;
   installing_admin_user_id: string | null;
+  app_key: string;
+}
+
+export interface AvailableWorkerApp {
+  platform: ConnectorType;
+  app_key: string;
+  display_name: string;
 }
 
 export async function listConnectors(): Promise<WorkspaceConnectorSummary[]> {
   return apiClient.get<WorkspaceConnectorSummary[]>(
     "/api/v1/workspace-connectors",
+  );
+}
+
+export async function listAvailableWorkerApps(): Promise<AvailableWorkerApp[]> {
+  return apiClient.get<AvailableWorkerApp[]>(
+    "/api/v1/workspace-connectors/available-apps",
   );
 }
 

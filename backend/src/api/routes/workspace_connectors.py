@@ -15,7 +15,7 @@ from db.base import get_db
 from models.api_base import TZAwareBaseModel
 from models.schemas import validate_pii_guardrail_config
 from services.connector_provisioning import ConnectorProvisioningService
-from utils.exceptions import MemoryCloudException, ValidationError
+from utils.exceptions import BadRequestError, MemoryCloudException, ValidationError
 from utils.logger import get_logger
 
 logger = get_logger(__name__)
@@ -56,6 +56,13 @@ class WorkspaceConnectorCreateRequest(BaseModel):
     external_team_id: str | None = Field(
         None, max_length=255, description="Platform team id (worker dispatch key)"
     )
+    app_key: str = Field(
+        "default",
+        min_length=1,
+        max_length=64,
+        pattern=r"^[a-z0-9][a-z0-9_-]{0,63}$",
+        description="Stable platform app identity selector",
+    )
     slack_install_handle: str | None = Field(
         None,
         max_length=255,
@@ -69,6 +76,7 @@ class WorkspaceConnectorCreateResponse(BaseModel):
 
     connector_id: UUID
     connector_type: str
+    app_key: str
     resource_id: str
     # resource_pk (internal resources.id DB PK) intentionally not exposed (#991):
     # the public `resource_id` slug above is the stable identifier; the internal
@@ -88,6 +96,7 @@ class WorkspaceConnectorSummary(TZAwareBaseModel):
 
     connector_id: UUID
     connector_type: str
+    app_key: str
     # Public `resource_id` slug, not the internal `resource_pk` DB key (#991):
     # the slug is the stable surface identifier; the internal PK was an
     # information leak and is dropped before the 1.0 freeze. Resolved via a
@@ -106,6 +115,14 @@ class RotateKmcKeyResponse(TZAwareBaseModel):
     kmc_api_key: str = Field(..., description="New plaintext KMC write key; save immediately")
     kmc_api_key_expires_at: datetime
     config_version: int
+
+
+class AvailableWorkerApp(BaseModel):
+    """Non-secret app identity that a workspace admin may bind."""
+
+    platform: str
+    app_key: str
+    display_name: str
 
 
 @router.post(
@@ -164,6 +181,12 @@ async def create_workspace_connector(
             "installing_admin_user_id": install.get("installing_admin_user_id"),
         }
         external_team_id = install.get("team_id")
+        install_app_key = str(install.get("app_key") or "default")
+        if request.app_key != install_app_key:
+            raise BadRequestError(
+                "Slack install handle belongs to a different app identity",
+                error_code="CONNECTOR-003",
+            )
 
     try:
         result = await ConnectorProvisioningService(db).provision_connector(
@@ -183,6 +206,7 @@ async def create_workspace_connector(
             channel_ids=request.channel_ids,
             locale=request.locale,
             external_team_id=external_team_id,
+            app_key=request.app_key,
         )
         await db.commit()
         await db.refresh(result.connector)
@@ -215,6 +239,7 @@ async def create_workspace_connector(
     return WorkspaceConnectorCreateResponse(
         connector_id=result.connector.id,
         connector_type=result.connector.connector_type,
+        app_key=result.connector.app_key,
         resource_id=result.resource_id,
         context_id=result.context_id,
         token_id=result.token.id,
@@ -242,6 +267,7 @@ async def list_workspace_connectors(
         WorkspaceConnectorSummary(
             connector_id=item.connector.id,
             connector_type=item.connector.connector_type,
+            app_key=item.connector.app_key,
             resource_id=item.resource_id,
             context_id=item.connector.context_id,
             config_version=item.connector.config_version,
@@ -249,6 +275,30 @@ async def list_workspace_connectors(
             created_by=item.connector.created_by,
         )
         for item in items
+    ]
+
+
+@router.get("/available-apps", response_model=list[AvailableWorkerApp])
+async def list_available_worker_apps(
+    admin: WorkspaceAdmin,
+    db: AsyncSession = Depends(get_db),
+) -> list[AvailableWorkerApp]:
+    """List active, non-secret app identities available for connector binding."""
+    if admin.get("current_workspace_id") is None:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="No workspace selected. Please select a workspace first.",
+        )
+    from services.worker_app_identity import WorkerAppIdentityService
+
+    identities = await WorkerAppIdentityService(db).list_identities(active_only=True)
+    return [
+        AvailableWorkerApp(
+            platform=identity.platform,
+            app_key=identity.app_key,
+            display_name=identity.display_name,
+        )
+        for identity in identities
     ]
 
 

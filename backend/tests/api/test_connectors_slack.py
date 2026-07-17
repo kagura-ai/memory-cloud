@@ -181,7 +181,12 @@ async def test_pending_returns_summary_without_bot_token():
     with patch("api.routes.connectors_slack.get_redis_client", return_value=redis):
         result = await slack_pending("h1", admin)
 
-    assert result == {"team_id": "T01", "team_name": "Acme", "installing_admin_user_id": "U01"}
+    assert result == {
+        "team_id": "T01",
+        "team_name": "Acme",
+        "installing_admin_user_id": "U01",
+        "app_key": "default",
+    }
     assert "bot_token" not in result
     assert "bot_token_enc" not in result
 
