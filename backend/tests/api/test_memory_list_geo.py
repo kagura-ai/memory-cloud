@@ -81,7 +81,7 @@ async def test_bbox_predicates_applied_to_both_queries():
 @pytest.mark.asyncio
 async def test_one_sided_bound_applied_independently():
     """Each bound applies independently (time-axis mirror): lat_min alone adds
-    only the lat lower-bound predicate — no lat upper bound, no lon bounds."""
+    only the lat lower-bound predicate — no lat upper bound, no lon range."""
     mock_db = _db_with_rows()
     await list_memories(
         user=MOCK_USER,
@@ -99,7 +99,59 @@ async def test_one_sided_bound_applied_independently():
         sql = _where_sql(mock_db, call_index)
         assert "memories.location_lat >=" in sql, sql
         assert "memories.location_lat <=" not in sql, sql
-        assert "location_lon" not in sql, sql
+        assert "memories.location_lon >=" not in sql, sql
+        assert "memories.location_lon <=" not in sql, sql
+
+
+@pytest.mark.asyncio
+async def test_any_geo_bound_requires_complete_coordinate_pair():
+    """Any active bbox bound also requires BOTH generated columns non-NULL, so
+    a half-populated pair (e69 regex-guard artifact) can never match a
+    one-sided bound while serializing location=None — filter and serialization
+    semantics must agree."""
+    mock_db = _db_with_rows()
+    await list_memories(
+        user=MOCK_USER,
+        db=mock_db,
+        scope=None,
+        type=None,
+        context_id=None,
+        q=None,
+        tags=None,
+        lat_min=35.0,
+        limit=50,
+        offset=0,
+    )
+    for call_index in (0, 1):
+        sql = _where_sql(mock_db, call_index)
+        assert "memories.location_lat IS NOT NULL" in sql, sql
+        assert "memories.location_lon IS NOT NULL" in sql, sql
+
+
+@pytest.mark.asyncio
+async def test_antimeridian_crossing_box_emits_wrapped_or_range():
+    """lon_min > lon_max selects the ±180°-crossing box as an OR of the two
+    edge ranges (bbox_lon_ranges convention) instead of an unsatisfiable AND
+    that would silently return an empty result for a valid map viewport."""
+    mock_db = _db_with_rows()
+    await list_memories(
+        user=MOCK_USER,
+        db=mock_db,
+        scope=None,
+        type=None,
+        context_id=None,
+        q=None,
+        tags=None,
+        lon_min=170.0,
+        lon_max=-170.0,
+        limit=50,
+        offset=0,
+    )
+    for call_index in (0, 1):
+        sql = _where_sql(mock_db, call_index)
+        assert "memories.location_lon >=" in sql, sql
+        assert "memories.location_lon <=" in sql, sql
+        assert " OR " in sql, sql
 
 
 @pytest.mark.asyncio

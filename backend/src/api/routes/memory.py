@@ -9,7 +9,7 @@ from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 from pydantic import BaseModel
-from sqlalchemy import func, select
+from sqlalchemy import func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from auth.dependencies import APIKeyOrSessionUser
@@ -609,14 +609,24 @@ async def list_memories(
         ge=-90,
         le=90,
         description="WHERE-axis (#1334) bbox lower latitude bound (degrees). "
-        "Each bbox bound applies independently and only matches memories with "
-        "a location (generated columns from details.location). An "
-        "antimeridian-crossing box (lon_min > lon_max) is not supported and "
-        "yields an empty result.",
+        "Any bbox bound restricts results to memories with a complete "
+        "location (generated columns from details.location); bounds may be "
+        "one-sided.",
     ),
     lat_max: float | None = Query(None, ge=-90, le=90, description="Bbox upper latitude bound."),
-    lon_min: float | None = Query(None, ge=-180, le=180, description="Bbox lower longitude bound."),
-    lon_max: float | None = Query(None, ge=-180, le=180, description="Bbox upper longitude bound."),
+    lon_min: float | None = Query(
+        None,
+        ge=-180,
+        le=180,
+        description="Bbox lower longitude bound. lon_min > lon_max selects the "
+        "antimeridian-crossing (±180°) box: lon >= lon_min OR lon <= lon_max.",
+    ),
+    lon_max: float | None = Query(
+        None,
+        ge=-180,
+        le=180,
+        description="Bbox upper longitude bound (see lon_min for the antimeridian-crossing form).",
+    ),
     order_by: str = Query(
         "created_at",
         pattern="^(created_at|trigger_from)$",
@@ -785,20 +795,38 @@ async def list_memories(
 
         # WHERE-axis bbox filter (#1334), built once and applied to BOTH
         # queries (anti-drift, same rationale as tag_filter / window_filters).
-        # Each bound applies independently (time-axis mirror), so one-sided
-        # queries work; a range comparison is never true for NULL, so any geo
-        # bound naturally restricts results to memories that have a location.
-        # isinstance (not `is not None`) skips the unset Query() FieldInfo
-        # sentinel that direct-call unit tests pass.
+        # Bounds may be one-sided (time-axis mirror). isinstance (not
+        # `is not None`) skips the unset Query() FieldInfo sentinel that
+        # direct-call unit tests pass.
         geo_filters = []
         if isinstance(lat_min, int | float):
             geo_filters.append(Memory.location_lat >= lat_min)
         if isinstance(lat_max, int | float):
             geo_filters.append(Memory.location_lat <= lat_max)
-        if isinstance(lon_min, int | float):
-            geo_filters.append(Memory.location_lon >= lon_min)
-        if isinstance(lon_max, int | float):
-            geo_filters.append(Memory.location_lon <= lon_max)
+        lon_lo = lon_min if isinstance(lon_min, int | float) else None
+        lon_hi = lon_max if isinstance(lon_max, int | float) else None
+        if lon_lo is not None and lon_hi is not None and lon_lo > lon_hi:
+            # Antimeridian-crossing box (map viewport panned across ±180°):
+            # the wrapped range is the union of the two edge ranges, same
+            # two-ranges-ORed convention as utils.geo_location.bbox_lon_ranges
+            # (#1331). Without this branch the AND of the two bounds is
+            # unsatisfiable and a valid viewport silently returns empty.
+            geo_filters.append(or_(Memory.location_lon >= lon_lo, Memory.location_lon <= lon_hi))
+        else:
+            if lon_lo is not None:
+                geo_filters.append(Memory.location_lon >= lon_lo)
+            if lon_hi is not None:
+                geo_filters.append(Memory.location_lon <= lon_hi)
+        if geo_filters:
+            # Pair-completeness: a bbox-filtered result must contain only
+            # plottable rows. A half-populated pair (raw-SQL writer artifact
+            # where the e69 regex guard NULLed one coordinate) would match a
+            # one-sided bound yet serialize location=None below — require
+            # both columns so filter and serialization semantics agree
+            # (mirrors services/geo_memory.py's explicit IS NOT NULL; also
+            # matches the partial index predicate exactly).
+            geo_filters.append(Memory.location_lat.is_not(None))
+            geo_filters.append(Memory.location_lon.is_not(None))
         for gf in geo_filters:
             query = query.where(gf)
 
