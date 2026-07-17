@@ -334,3 +334,46 @@ async def test_list_connectors_returns_workspace_scoped_rows_newest_first():
         ConnectorListItem(connector=conn_b, resource_id="slug-b"),
     ]
     db.execute.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_update_runtime_config_is_workspace_scoped_and_bumps_revision():
+    connector_id = uuid4()
+    workspace_id = uuid4()
+    connector = SimpleNamespace(
+        id=connector_id,
+        workspace_id=workspace_id,
+        runtime_config={"vision_enabled": True},
+        config_version=7,
+    )
+    db = MagicMock()
+    db.execute = AsyncMock(return_value=_result(one=connector))
+    db.flush = AsyncMock()
+
+    with patch("services.connector_provisioning.logger.info") as log_info:
+        result = await ConnectorProvisioningService(db).update_runtime_config(
+            workspace_id=workspace_id,
+            connector_id=connector_id,
+            runtime_config={"vision_enabled": False},
+            user_id="admin-1",
+        )
+
+    assert connector.runtime_config["vision_enabled"] is False
+    assert connector.runtime_config["buffer"] == {
+        "ttl_seconds": 86400,
+        "max_len": 10_000,
+    }
+    assert connector.config_version == 8
+    assert result.config_version == 8
+    db.flush.assert_awaited_once()
+    statement = db.execute.await_args.args[0]
+    assert "workspace_connectors.workspace_id" in str(statement)
+    assert "FOR UPDATE" in str(statement)
+    log_info.assert_called_once_with(
+        "workspace_connector_runtime_updated",
+        connector_id=str(connector_id),
+        workspace_id=str(workspace_id),
+        updated_by="admin-1",
+        changed_fields=["vision_enabled"],
+        config_version=8,
+    )

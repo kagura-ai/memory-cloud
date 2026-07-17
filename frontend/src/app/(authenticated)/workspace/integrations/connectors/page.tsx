@@ -12,6 +12,7 @@ import { TableLoadingState } from "@/components/common/LoadingState";
 import { EmptyState } from "@/components/ui/empty-state";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
+import { Switch } from "@/components/ui/switch";
 import { Alert, AlertDescription } from "@/components/ui/alert";
 import {
   Select,
@@ -42,6 +43,7 @@ import {
   listAvailableWorkerApps,
   listConnectors,
   slackInstallUrl,
+  updateConnectorRuntime,
   type AvailableWorkerApp,
   type CreateConnectorResponse,
   type SlackPendingInstall,
@@ -169,6 +171,7 @@ export default function ConnectorsPage() {
   const [toDelete, setToDelete] = useState<WorkspaceConnectorSummary | null>(
     null,
   );
+  const [runtimeSaving, setRuntimeSaving] = useState<string | null>(null);
 
   const reload = useCallback(async () => {
     try {
@@ -309,6 +312,39 @@ export default function ConnectorsPage() {
       });
     }
   }, [toDelete, t, toast, reload]);
+
+  const handleVisionEnabledChange = useCallback(
+    async (connector: WorkspaceConnectorSummary, enabled: boolean) => {
+      setRuntimeSaving(connector.connector_id);
+      try {
+        const result = await updateConnectorRuntime(connector.connector_id, {
+          ...connector.runtime,
+          vision_enabled: enabled,
+        });
+        setConnectors((current) =>
+          current?.map((item) =>
+            item.connector_id === connector.connector_id
+              ? {
+                  ...item,
+                  runtime: result.runtime,
+                  config_version: result.config_version,
+                }
+              : item,
+          ) ?? null,
+        );
+        toast({ title: t("runtimeUpdated") });
+      } catch (err) {
+        toast({
+          variant: "destructive",
+          title: t("runtimeUpdateFailed"),
+          description: err instanceof Error ? err.message : String(err),
+        });
+      } finally {
+        setRuntimeSaving(null);
+      }
+    },
+    [t, toast],
+  );
 
   const handleManualCreate = useCallback(
     async (event: FormEvent) => {
@@ -511,14 +547,29 @@ export default function ConnectorsPage() {
                   </Button>
                 </div>
               </div>
-              <Button
-                variant="ghost"
-                size="sm"
-                onClick={() => setToDelete(c)}
-                aria-label={tCommon("delete")}
-              >
-                <Trash2 className="h-4 w-4" />
-              </Button>
+              <div className="flex items-center gap-4">
+                <label className="flex items-center gap-2 text-sm">
+                  <span>{t("visionEnabled")}</span>
+                  <Switch
+                    checked={c.runtime.vision_enabled}
+                    disabled={runtimeSaving !== null}
+                    onCheckedChange={(enabled) =>
+                      void handleVisionEnabledChange(c, enabled)
+                    }
+                    aria-label={t("visionEnabledFor", {
+                      id: c.connector_id,
+                    })}
+                  />
+                </label>
+                <Button
+                  variant="ghost"
+                  size="sm"
+                  onClick={() => setToDelete(c)}
+                  aria-label={tCommon("delete")}
+                >
+                  <Trash2 className="h-4 w-4" />
+                </Button>
+              </div>
             </li>
           ))}
         </ul>

@@ -8,12 +8,38 @@ from uuid import uuid4
 import pytest
 from fastapi import Response
 
-from api.routes.workers import get_worker_apps, get_worker_config, verify_worker_token
+from api.routes.workers import (
+    WorkerConnectorConfig,
+    get_worker_apps,
+    get_worker_config,
+    verify_worker_token,
+)
 from utils.datetime import utcnow
 
 
 def _settings(token: str = "wt-secret", mcp_url: str = "https://mcp.example/mcp"):
     return SimpleNamespace(worker_service_token=token, kmc_mcp_url=mcp_url)
+
+
+def test_worker_config_omits_only_absent_runtime_block():
+    config = WorkerConnectorConfig(
+        connector_id=uuid4(),
+        workspace_id=uuid4(),
+        context_id=uuid4(),
+        platform="slack",
+        app_key="default",
+        config_revision="revision",
+        slack={},
+        kmc={},
+    )
+
+    payload = config.model_dump(mode="json")
+
+    assert "runtime" not in payload
+    assert payload["locale"] is None
+    assert payload["resource"] is None
+    assert payload["llm"] is None
+    assert payload["pii_guardrail_config"] is None
 
 
 @pytest.mark.asyncio
@@ -56,6 +82,7 @@ async def test_get_worker_config_returns_secrets_for_ready_connector():
     conn.config_version = 1
     conn.channel_ids = ["C01"]
     conn.pii_guardrail_config = {"enabled": True}
+    conn.runtime_config = {"vision_enabled": False}
     conn.get_oauth_tokens.return_value = {
         "bot_token": "xoxb-x",
         "installing_admin_user_id": "U01",
@@ -91,11 +118,71 @@ async def test_get_worker_config_returns_secrets_for_ready_connector():
     assert result.slack["channel_ids"] == ["C01"]
     assert result.kmc == {"mcp_url": "https://mcp.example/mcp", "api_key": "kagura_writekey"}
     assert result.llm["api_key"] == "sk"
+    assert result.runtime is not None
+    assert result.runtime.vision_enabled is False
+    assert result.runtime.buffer.ttl_seconds == 86400
     svc.return_value.get_connector_for_dispatch.assert_awaited_once_with(
         connector_type="slack", external_team_id="T01", app_key="default"
     )
     # #895: legacy connector (no stored resource token) → resource omitted.
     assert result.resource is None
+
+
+@pytest.mark.asyncio
+async def test_get_worker_config_revision_changes_when_runtime_revision_changes():
+    db = MagicMock()
+    conn = MagicMock()
+    conn.id = uuid4()
+    conn.workspace_id = uuid4()
+    conn.context_id = uuid4()
+    conn.connector_type = "slack"
+    conn.locale = "ja"
+    conn.external_team_id = "T01"
+    conn.config_version = 1
+    conn.channel_ids = []
+    conn.pii_guardrail_config = None
+    conn.runtime_config = {"vision_enabled": True}
+    conn.get_oauth_tokens.return_value = {"bot_token": "xoxb-x"}
+    conn.get_kmc_api_key.return_value = "kagura_writekey"
+    conn.kmc_api_key_expires_at = None
+    conn.get_resource_token.return_value = None
+    conn.get_llm_config.return_value = None
+
+    with (
+        patch("api.routes.workers.get_settings", return_value=_settings()),
+        patch("api.routes.workers.ConnectorProvisioningService") as svc,
+        patch("api.routes.workers.WorkerAppIdentityService") as app_svc,
+    ):
+        app_svc.return_value.get_identity = AsyncMock(return_value=None)
+        svc.return_value.get_connector_for_dispatch = AsyncMock(return_value=conn)
+        first_response = Response()
+        first = await get_worker_config(
+            response=first_response,
+            platform="slack",
+            team_id="T01",
+            app_key=None,
+            if_none_match=None,
+            _=None,
+            db=db,
+        )
+
+        conn.config_version = 2
+        conn.runtime_config = {"vision_enabled": False}
+        second_response = Response()
+        second = await get_worker_config(
+            response=second_response,
+            platform="slack",
+            team_id="T01",
+            app_key=None,
+            if_none_match=None,
+            _=None,
+            db=db,
+        )
+
+    assert first.config_revision != second.config_revision
+    assert first_response.headers["etag"] != second_response.headers["etag"]
+    assert second.runtime is not None
+    assert second.runtime.vision_enabled is False
 
 
 @pytest.mark.asyncio
@@ -117,6 +204,7 @@ async def test_get_worker_config_includes_resource_block_when_token_present():
     conn.config_version = 1
     conn.channel_ids = ["C01"]
     conn.pii_guardrail_config = None
+    conn.runtime_config = None
     conn.resource_pk = uuid4()
     conn.get_oauth_tokens.return_value = {"bot_token": "xoxb-x"}
     conn.get_kmc_api_key.return_value = "kagura_writekey"
@@ -213,6 +301,7 @@ async def test_get_worker_config_uses_app_qualified_selector():
     conn.external_team_id = "T01"
     conn.channel_ids = []
     conn.pii_guardrail_config = None
+    conn.runtime_config = None
     conn.kmc_api_key_expires_at = None
     conn.get_kmc_api_key.return_value = "kmc-key"
     conn.get_oauth_tokens.return_value = {"bot_token": "xoxb"}
@@ -349,6 +438,7 @@ async def test_get_worker_config_legacy_env_path_with_seeded_unconfigured_defaul
     conn.config_version = 1
     conn.channel_ids = ["C01"]
     conn.pii_guardrail_config = {"enabled": True}
+    conn.runtime_config = None
     conn.get_oauth_tokens.return_value = {
         "bot_token": "xoxb-x",
         "installing_admin_user_id": "U01",

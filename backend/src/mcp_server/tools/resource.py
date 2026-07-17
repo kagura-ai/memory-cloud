@@ -1018,6 +1018,17 @@ async def handle_setup_connector(
             except ValueError as ve:
                 return _error_response("validation_error", str(ve))
 
+            runtime_config = None
+            if "runtime" in args:
+                from models.worker_runtime import WorkerRuntimeConfig
+
+                try:
+                    runtime_config = WorkerRuntimeConfig.model_validate(args["runtime"]).model_dump(
+                        mode="json"
+                    )
+                except (TypeError, ValueError) as ve:
+                    return _error_response("validation_error", str(ve))
+
             from services.connector_provisioning import ConnectorProvisioningService
             from utils.exceptions import MemoryCloudException
 
@@ -1040,6 +1051,7 @@ async def handle_setup_connector(
                 channel_ids=args.get("channel_ids"),
                 locale=args.get("locale"),
                 external_team_id=args.get("external_team_id"),
+                runtime_config=runtime_config,
             )
             await db.commit()
             await db.refresh(result.connector)

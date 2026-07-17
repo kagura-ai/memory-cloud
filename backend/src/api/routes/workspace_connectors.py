@@ -14,8 +14,17 @@ from auth.dependencies import WorkspaceAdmin
 from db.base import get_db
 from models.api_base import TZAwareBaseModel
 from models.schemas import validate_pii_guardrail_config
-from services.connector_provisioning import ConnectorProvisioningService
-from utils.exceptions import BadRequestError, MemoryCloudException, ValidationError
+from models.worker_runtime import WorkerRuntimeConfig
+from services.connector_provisioning import (
+    ConnectorProvisioningService,
+    ConnectorRuntimeUpdateResult,
+)
+from utils.exceptions import (
+    BadRequestError,
+    MemoryCloudException,
+    NotFoundException,
+    ValidationError,
+)
 from utils.logger import get_logger
 
 logger = get_logger(__name__)
@@ -69,6 +78,10 @@ class WorkspaceConnectorCreateRequest(BaseModel):
         description="One-time handle from the Slack OAuth callback; resolved "
         "server-side to oauth_tokens + external_team_id (bot token never sent by client)",
     )
+    runtime: WorkerRuntimeConfig | None = Field(
+        None,
+        description="Non-secret per-connector worker controls; omitted uses worker defaults",
+    )
 
 
 class WorkspaceConnectorCreateResponse(BaseModel):
@@ -106,6 +119,21 @@ class WorkspaceConnectorSummary(TZAwareBaseModel):
     config_version: int
     created_at: datetime
     created_by: str | None = None
+    runtime: WorkerRuntimeConfig = Field(default_factory=WorkerRuntimeConfig)
+
+
+class WorkspaceConnectorRuntimeUpdateRequest(BaseModel):
+    """Complete normalized replacement for tenant-owned worker controls."""
+
+    runtime: WorkerRuntimeConfig
+
+
+class WorkspaceConnectorRuntimeUpdateResponse(BaseModel):
+    """Updated controls and the new opaque-source connector revision."""
+
+    connector_id: UUID
+    runtime: WorkerRuntimeConfig
+    config_version: int
 
 
 class RotateKmcKeyResponse(TZAwareBaseModel):
@@ -207,6 +235,9 @@ async def create_workspace_connector(
             locale=request.locale,
             external_team_id=external_team_id,
             app_key=request.app_key,
+            runtime_config=(
+                request.runtime.model_dump(mode="json") if request.runtime is not None else None
+            ),
         )
         await db.commit()
         await db.refresh(result.connector)
@@ -273,9 +304,64 @@ async def list_workspace_connectors(
             config_version=item.connector.config_version,
             created_at=item.connector.created_at,
             created_by=item.connector.created_by,
+            runtime=WorkerRuntimeConfig.model_validate(item.connector.runtime_config or {}),
         )
         for item in items
     ]
+
+
+@router.patch(
+    "/{connector_id}/runtime",
+    response_model=WorkspaceConnectorRuntimeUpdateResponse,
+)
+async def update_workspace_connector_runtime(
+    connector_id: UUID,
+    request: WorkspaceConnectorRuntimeUpdateRequest,
+    admin: WorkspaceAdmin,
+    db: AsyncSession = Depends(get_db),
+) -> WorkspaceConnectorRuntimeUpdateResponse:
+    """Replace per-connector runtime controls (workspace-admin scoped)."""
+    workspace_id = admin.get("current_workspace_id")
+    if workspace_id is None:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="No workspace selected. Please select a workspace first.",
+        )
+    try:
+        update_result: ConnectorRuntimeUpdateResult = await ConnectorProvisioningService(
+            db
+        ).update_runtime_config(
+            workspace_id=workspace_id,
+            connector_id=connector_id,
+            runtime_config=request.runtime.model_dump(mode="json"),
+            user_id=admin["user_id"],
+        )
+        await db.commit()
+    except NotFoundException as exc:
+        await db.rollback()
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Connector not found",
+        ) from exc
+    except Exception as exc:
+        await db.rollback()
+        logger.error(
+            "workspace_connector_runtime_update_failed",
+            connector_id=str(connector_id),
+            workspace_id=str(workspace_id),
+            user_id=admin["user_id"],
+            error_type=type(exc).__name__,
+        )
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Failed to update connector runtime",
+        ) from exc
+
+    return WorkspaceConnectorRuntimeUpdateResponse(
+        connector_id=connector_id,
+        runtime=WorkerRuntimeConfig.model_validate(update_result.runtime_config),
+        config_version=update_result.config_version,
+    )
 
 
 @router.get("/available-apps", response_model=list[AvailableWorkerApp])

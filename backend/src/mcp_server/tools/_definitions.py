@@ -1561,6 +1561,120 @@ Returns: {status, report_id, rollback_summary: {edges_deleted, merges_reversed, 
                         "type": "string",
                         "description": "Platform team id (worker dispatch key; max 255 chars).",
                     },
+                    "runtime": {
+                        "type": "object",
+                        "description": (
+                            "Validated non-secret per-connector worker controls. "
+                            "Unknown fields are rejected; process network settings such as "
+                            "Redis URL and webhook/metrics ports are not accepted."
+                        ),
+                        "additionalProperties": False,
+                        "properties": {
+                            "buffer": {
+                                "type": "object",
+                                "additionalProperties": False,
+                                "properties": {
+                                    "ttl_seconds": {
+                                        "type": "integer",
+                                        "minimum": 1,
+                                        "maximum": 86400,
+                                    },
+                                    "max_len": {
+                                        "type": "integer",
+                                        "minimum": 1,
+                                    },
+                                },
+                            },
+                            "flush": {
+                                "type": "object",
+                                "additionalProperties": False,
+                                "properties": {
+                                    "silence_seconds": {
+                                        "type": "integer",
+                                        "minimum": 0,
+                                    },
+                                    "volume_tokens": {
+                                        "type": "integer",
+                                        "minimum": 1,
+                                    },
+                                    "max_tracked_topics": {
+                                        "type": "integer",
+                                        "minimum": 1,
+                                    },
+                                },
+                            },
+                            "supervisor": {
+                                "type": "object",
+                                "additionalProperties": False,
+                                "properties": {
+                                    "tick_seconds": {
+                                        "type": "number",
+                                        "exclusiveMinimum": 0,
+                                    },
+                                    "shutdown_flush_timeout_seconds": {
+                                        "type": "number",
+                                        "exclusiveMinimum": 0,
+                                    },
+                                },
+                            },
+                            "lifecycle": {
+                                "type": "object",
+                                "additionalProperties": False,
+                                "properties": {
+                                    "deletion_mode": {
+                                        "type": "string",
+                                        "enum": ["forget", "redact"],
+                                    },
+                                    "redacted_summary": {
+                                        "type": "string",
+                                        "minLength": 1,
+                                    },
+                                    "dormant_summary": {
+                                        "type": "string",
+                                        "minLength": 1,
+                                    },
+                                },
+                            },
+                            "continuity": {
+                                "type": "object",
+                                "additionalProperties": False,
+                                "properties": {
+                                    "time_window_minutes": {
+                                        "type": "integer",
+                                        "minimum": 0,
+                                    },
+                                    "semantic_threshold": {
+                                        "type": "number",
+                                        "minimum": 0,
+                                        "maximum": 1,
+                                    },
+                                    "semantic_check_enabled": {
+                                        "type": "boolean",
+                                    },
+                                },
+                            },
+                            "vision_enabled": {"type": "boolean"},
+                            "mention_answer_enabled": {"type": "boolean"},
+                            "answer_relevance_threshold": {
+                                "type": "number",
+                                "minimum": 0,
+                                "maximum": 1,
+                            },
+                            "answer_timeout_sec": {
+                                "type": "number",
+                                "exclusiveMinimum": 0,
+                            },
+                            "memory_link_template": {
+                                "anyOf": [{"type": "string"}, {"type": "null"}],
+                            },
+                            "entity_extraction_enabled": {"type": "boolean"},
+                            "entity_max": {
+                                "type": "integer",
+                                "minimum": 1,
+                                "maximum": 50,
+                            },
+                        },
+                    },
                 },
             },
         },
