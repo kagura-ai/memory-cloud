@@ -193,6 +193,11 @@ async def update_worker_app(
         status=identity.status,
         # "provided", not "changed" — the route never sees the old value.
         display_name_provided=request.display_name is not None,
+        # Revision context so an enable/disable can be correlated with the
+        # secret material that was active/retiring at that moment.
+        active_secret_revision=identity.active_secret_revision,
+        retiring_secret_revision=identity.retiring_secret_revision,
+        retiring_valid_until=identity.retiring_valid_until,
     )
     return _admin_response(identity)
 
