@@ -59,7 +59,13 @@ class ForgetRetentionPhase:
         """
         # NULL deleted_by = legacy user-forget rows that predate the column
         # being written; the sentinel exclusion keeps merge losers on their
-        # own retention window.
+        # own retention window. deleted_by is deliberately NOT pinned to
+        # this run's user sub: forget() records the ACTOR, so a teammate's
+        # forget on this user's memory writes the teammate's sub — pinning
+        # would strand those tombstones forever (no sleep run ever matches
+        # them). With the live-context guard below, every remaining
+        # non-merge tombstone is a forget() row whose point and edges were
+        # already deleted at soft-delete time.
         not_merge_loser = or_(
             Memory.deleted_by.is_(None),
             Memory.deleted_by != _MERGE_DELETED_BY,

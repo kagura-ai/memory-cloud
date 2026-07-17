@@ -1043,7 +1043,7 @@ class AccountErasureService:
         # in co-owned/transferred workspaces (the sole-owner cascade above
         # already wiped the rest). Their Qdrant points were deleted in step 1
         # but the PG rows kept details (coordinates included) and the raw
-        # user_id. Pseudonymize the subject link and NULL the details JSONB —
+        # user_id. Pseudonymize the subject link and NULL the details column (PostgreSQL json) —
         # which also NULLs the generated columns (location_lat/lon,
         # trigger_from/until) derived from it. Runs AFTER the workspace
         # cascade so the count reflects only survivors.
@@ -1124,7 +1124,9 @@ class AccountErasureService:
         compliance, the sub is unrecoverable) and ``details`` is NULLed —
         the memory text remains workspace content, but structured personal
         payload (coordinates, triggers, arbitrary detail keys) is removed
-        at rest. Tombstoned rows of the subject are scrubbed too.
+        at rest. Tombstoned rows of the subject are HARD-DELETED first (not
+        scrubbed): their points are already gone and a pseudonymized
+        tombstone would be unpurgeable by any retention run.
         """
         # Tombstoned rows first: they are invisible to every member already
         # and their Qdrant points were removed in step 1 (delete_user_points),
