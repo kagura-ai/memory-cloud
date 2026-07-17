@@ -419,14 +419,15 @@ curl -X POST -H "Authorization: Bearer kagura_{your_key}" \
 
 ## MCP Tools
 
-60 tools across 13 categories. Workspace roles: **Owner** > Admin > Member > **Viewer** (read-only). Context roles: **Owner** > Editor > Viewer. Private contexts are visible only to the creator. Members may be restricted to specific contexts via allowlist.
+61 tools across 13 categories. Workspace roles: **Owner** > Admin > Member > **Viewer** (read-only). Context roles: **Owner** > Editor > Viewer. Private contexts are visible only to the creator. Members may be restricted to specific contexts via allowlist.
 
-### Memory (6)
+### Memory (7)
 
 | Tool | Description | Required Role |
 |------|------------|---------------|
 | `remember` | Store a new memory (summary + content + type; optional `delivery_mode`) | Member+ |
 | `recall` | Search memories with Hybrid Search (supports `trust_tier` filter) | Viewer+ |
+| `recall_nearby` | Deterministic WHERE-axis query — memories with `details.location` within `radius_m` of a point, nearest first | Viewer+ |
 | `reference` | Get full 3-layer details of a memory | Viewer+ |
 | `update_memory` | Update an existing memory in-place or upsert by external ID | Member+ |
 | `forget` | Soft-delete a memory (30-day retention) | Member+ |
@@ -461,7 +462,7 @@ The v0.49.0 control plane builds on existing workspace RBAC: agents are registry
 | `unbind_agent_context` | Remove a binding (default-deny in enforce mode) | Owner/Admin |
 | `get_agent_bootstrap` | Compose context guide + pinned + optional trusted recall + upcoming + state for session start | Agent-bound key or Owner/Admin |
 
-> **Preview boundary:** per-memory type/source filters are enforced on the memory-read lanes (recall, reference, forget, explore, load_pinned, upcoming) for enforce-mode agents as of [#1299](https://github.com/kagura-ai/memory-cloud/issues/1299) — `null` = all types, `[]` = deny-all; shadow mode records `would_deny` without filtering. `traceparent` plus W3C baggage correlation for `agent_id` / `session_id` / `run_id` is implemented, but server-side span export remains out of scope for P0. `memory_access_events` is live for bootstrap, load-pinned, feedback, recall, reference, remember, update, and forget with binding deny / `would_deny` persistence.
+> **Preview boundary:** per-memory type/source filters are enforced on the memory-read lanes (recall, recall_nearby, reference, forget, explore, load_pinned, upcoming) for enforce-mode agents as of [#1299](https://github.com/kagura-ai/memory-cloud/issues/1299) — and on the enumeration/aggregate surfaces (list, stats, access-patterns, get_cluster) as of [#1301](https://github.com/kagura-ai/memory-cloud/issues/1301) — `null` = all types, `[]` = deny-all; shadow mode records `would_deny` without filtering. `traceparent` plus W3C baggage correlation for `agent_id` / `session_id` / `run_id` is implemented, but server-side span export remains out of scope for P0. `memory_access_events` is live for bootstrap, load-pinned, feedback, recall, reference, remember, update, and forget with binding deny / `would_deny` persistence.
 
 ### Neural Edges (4)
 
