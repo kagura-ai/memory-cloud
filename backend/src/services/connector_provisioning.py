@@ -135,13 +135,13 @@ class ConnectorProvisioningService:
 
         # Non-default identities must already be active. ``default`` stays
         # compatible during the migration window while its signing secret is
-        # still supplied by the worker environment.
-        if app_key != "default":
-            from services.worker_app_identity import WorkerAppIdentityService
+        # still supplied by the worker environment — but an EXPLICITLY
+        # disabled default is an admin revocation and must fail closed here
+        # too, or the new connector would be born unusable (dispatch 410s).
+        from services.worker_app_identity import WorkerAppIdentityService
 
-            app_identity = await WorkerAppIdentityService(self.db).get_identity(
-                connector_type, app_key
-            )
+        app_identity = await WorkerAppIdentityService(self.db).get_identity(connector_type, app_key)
+        if app_key != "default":
             if (
                 app_identity is None
                 or app_identity.status != "active"
@@ -151,6 +151,12 @@ class ConnectorProvisioningService:
                     "app_key must identify an active worker app identity",
                     field="app_key",
                 )
+        elif app_identity is not None and app_identity.status == "disabled":
+            raise ValidationError(
+                "The default worker app identity is disabled; re-enable it "
+                "before binding new connectors",
+                field="app_key",
+            )
 
         # One app-qualified platform team maps to one connector — check BEFORE creating
         # any context so a duplicate is rejected without leaving orphan rows.

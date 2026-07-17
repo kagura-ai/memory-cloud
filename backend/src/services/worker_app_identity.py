@@ -66,7 +66,12 @@ class WorkerAppIdentityService:
             WorkerAppIdentity.app_key == app_key,
         )
         if for_update:
-            statement = statement.with_for_update()
+            # populate_existing is load-bearing (same pattern as
+            # workspace_locks.py): if the row is already in this session's
+            # identity map, a bare FOR UPDATE re-read would return the stale
+            # cached instance — the lock would be held while mutating
+            # attributes read before the lock. Force a refresh under the lock.
+            statement = statement.with_for_update().execution_options(populate_existing=True)
         result = await self.db.execute(statement)
         return result.scalar_one_or_none()
 
@@ -137,7 +142,17 @@ class WorkerAppIdentityService:
         identity = await self._require_identity(platform, app_key)
         previous_secret = identity.get_active_signing_secret()
         previous_revision = identity.active_secret_revision
-        if previous_secret and previous_revision and retiring_for_seconds > 0:
+        # Arm the retiring window only when the identity is currently ACTIVE.
+        # On a disabled identity the previous secret is revoked material — it
+        # must not be re-served to the fleet if the identity is later
+        # re-enabled; on an unconfigured identity there is no fleet to keep
+        # verifying against the old value.
+        if (
+            identity.status == "active"
+            and previous_secret
+            and previous_revision
+            and retiring_for_seconds > 0
+        ):
             identity.set_retiring_signing_secret(previous_secret)
             identity.retiring_secret_revision = previous_revision
             identity.retiring_valid_until = utcnow() + timedelta(seconds=retiring_for_seconds)
@@ -148,7 +163,12 @@ class WorkerAppIdentityService:
 
         identity.set_active_signing_secret(signing_secret)
         identity.active_secret_revision = (previous_revision or 0) + 1
-        identity.status = "active"
+        # Rotation replaces secret material only — it never changes status.
+        # Enabling stays the explicit update_identity(status="active") step:
+        # revocation must be sticky (rotating a disabled identity must not
+        # resurrect it), and rotating a secret into the migration-window
+        # 'unconfigured' default must not flip config dispatch from the
+        # worker-env path to identity-governed until the operator says so.
         identity.updated_by = actor_id
         identity.config_version += 1
         await self.db.flush()

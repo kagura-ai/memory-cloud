@@ -457,6 +457,39 @@ async def test_same_team_id_is_allowed_under_two_app_identities(db_session: Asyn
 
 
 @pytest.mark.asyncio
+async def test_provision_rejects_explicitly_disabled_default_identity(db_session: AsyncSession):
+    """The migration-window exemption for app_key='default' covers the
+    ABSENT/unconfigured states only. An explicitly disabled default is an
+    admin revocation: binding a new connector to it would create a connector
+    whose dispatch immediately 410s, so provisioning must fail closed."""
+    from models.worker_app import WorkerAppIdentity
+    from utils.exceptions import ValidationError
+
+    user_id, workspace = await _seed_workspace(db_session, plan_name="pro")
+    db_session.add(
+        WorkerAppIdentity(
+            platform="slack",
+            app_key="default",
+            display_name="Default",
+            status="disabled",
+            created_by=user_id,
+        )
+    )
+    await db_session.flush()
+
+    svc = ConnectorProvisioningService(db_session)
+    with pytest.raises(ValidationError):
+        await svc.provision_connector(
+            workspace_id=workspace.id,
+            user_id=user_id,
+            connector_type="slack",
+            app_key="default",
+            resource_id=f"slack_{uuid4().hex[:8]}",
+            external_team_id="T0DISABLED",
+        )
+
+
+@pytest.mark.asyncio
 async def test_orphan_context_cleaned_up_on_post_context_failure(db_session: AsyncSession):
     """Self-review fix: a failure AFTER the context is committed must not orphan it.
 

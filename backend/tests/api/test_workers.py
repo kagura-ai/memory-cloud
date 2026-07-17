@@ -332,6 +332,99 @@ async def test_get_worker_config_explicit_unconfigured_app_is_not_ready():
 
 
 @pytest.mark.asyncio
+async def test_get_worker_config_legacy_env_path_with_seeded_unconfigured_default():
+    """The REACHABLE post-migration legacy state: e68_1315 seeds slack/default
+    as status='unconfigured', so an omitted app_key must resolve through the
+    legacy_unconfigured_default carve-out (env-based secrets) — not through
+    the identity=None branch the other legacy tests mock, which cannot occur
+    on a migrated database."""
+    db = MagicMock()
+    conn = MagicMock()
+    conn.id = uuid4()
+    conn.workspace_id = uuid4()
+    conn.context_id = uuid4()
+    conn.connector_type = "slack"
+    conn.locale = "ja"
+    conn.external_team_id = "T01"
+    conn.config_version = 1
+    conn.channel_ids = ["C01"]
+    conn.pii_guardrail_config = {"enabled": True}
+    conn.get_oauth_tokens.return_value = {
+        "bot_token": "xoxb-x",
+        "installing_admin_user_id": "U01",
+    }
+    conn.get_kmc_api_key.return_value = "kagura_writekey"
+    conn.kmc_api_key_expires_at = None
+    conn.get_resource_token.return_value = None
+    conn.get_llm_config.return_value = {"provider": "anthropic", "model": "m", "api_key": "sk"}
+
+    seeded_default = MagicMock()
+    seeded_default.status = "unconfigured"
+    seeded_default.active_signing_secret_encrypted = None
+
+    with (
+        patch("api.routes.workers.get_settings", return_value=_settings()),
+        patch("api.routes.workers.ConnectorProvisioningService") as svc,
+        patch("api.routes.workers.WorkerAppIdentityService") as app_svc,
+    ):
+        app_svc.return_value.get_identity = AsyncMock(return_value=seeded_default)
+        svc.return_value.get_connector_for_dispatch = AsyncMock(return_value=conn)
+        result = await get_worker_config(
+            response=Response(),
+            platform="slack",
+            team_id="T01",
+            app_key=None,
+            if_none_match=None,
+            _=None,
+            db=db,
+        )
+
+    assert result.slack["bot_token"] == "xoxb-x"
+    assert result.app_key == "default"
+    svc.return_value.get_connector_for_dispatch.assert_awaited_once_with(
+        connector_type="slack", external_team_id="T01", app_key="default"
+    )
+
+
+@pytest.mark.asyncio
+async def test_worker_apps_isolates_undecryptable_secret_row():
+    """One row whose ciphertext no longer decrypts (key rotation, corruption)
+    must not 500 the whole bootstrap lane: the poisoned identity is served
+    without secret material and every healthy identity keeps its secrets."""
+    poisoned = MagicMock()
+    poisoned.id = uuid4()
+    poisoned.platform = "slack"
+    poisoned.app_key = "poisoned"
+    poisoned.status = "active"
+    poisoned.config_version = 2
+    poisoned.active_secret_revision = 1
+    poisoned.retiring_valid_until = None
+    poisoned.get_active_signing_secret.side_effect = ValueError("Failed to decrypt data")
+
+    healthy = MagicMock()
+    healthy.id = uuid4()
+    healthy.platform = "slack"
+    healthy.app_key = "healthy"
+    healthy.status = "active"
+    healthy.config_version = 3
+    healthy.active_secret_revision = 2
+    healthy.retiring_valid_until = None
+    healthy.get_active_signing_secret.return_value = "healthy-secret"
+
+    with patch("api.routes.workers.WorkerAppIdentityService") as app_service:
+        app_service.return_value.list_identities = AsyncMock(return_value=[poisoned, healthy])
+        result = await get_worker_apps(
+            response=Response(), if_none_match=None, _=None, db=MagicMock()
+        )
+
+    assert result.apps[0].app_key == "poisoned"
+    assert result.apps[0].active is None
+    assert result.apps[0].retiring is None
+    assert result.apps[1].app_key == "healthy"
+    assert result.apps[1].active.signing_secret == "healthy-secret"
+
+
+@pytest.mark.asyncio
 async def test_worker_apps_returns_active_and_retiring_secrets_but_not_disabled_secret():
     active = MagicMock()
     active.id = uuid4()

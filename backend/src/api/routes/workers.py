@@ -148,20 +148,35 @@ async def get_worker_apps(
         active = None
         retiring = None
         if identity.status == "active":
-            active_secret = identity.get_active_signing_secret()
-            if active_secret and identity.active_secret_revision is not None:
-                active = WorkerSigningSecret(
-                    revision=identity.active_secret_revision,
-                    signing_secret=active_secret,
-                )
-            if identity.retiring_valid_until and identity.retiring_valid_until > now:
-                retiring_secret = identity.get_retiring_signing_secret()
-                if retiring_secret and identity.retiring_secret_revision is not None:
-                    retiring = WorkerSigningSecret(
-                        revision=identity.retiring_secret_revision,
-                        signing_secret=retiring_secret,
-                        valid_until=identity.retiring_valid_until,
+            try:
+                active_secret = identity.get_active_signing_secret()
+                if active_secret and identity.active_secret_revision is not None:
+                    active = WorkerSigningSecret(
+                        revision=identity.active_secret_revision,
+                        signing_secret=active_secret,
                     )
+                if identity.retiring_valid_until and identity.retiring_valid_until > now:
+                    retiring_secret = identity.get_retiring_signing_secret()
+                    if retiring_secret and identity.retiring_secret_revision is not None:
+                        retiring = WorkerSigningSecret(
+                            revision=identity.retiring_secret_revision,
+                            signing_secret=retiring_secret,
+                            valid_until=identity.retiring_valid_until,
+                        )
+            except ValueError:
+                # One undecryptable row (encryption-key rotation, corrupted
+                # ciphertext) must not 500 the whole fleet's bootstrap lane.
+                # Serve the item without secret material — the documented
+                # eviction semantics for a secretless entry — and log loudly
+                # (no secret material in this log line).
+                active = None
+                retiring = None
+                logger.warning(
+                    "worker_app_bootstrap_undecryptable_secret",
+                    platform=identity.platform,
+                    app_key=identity.app_key,
+                    active_secret_revision=identity.active_secret_revision,
+                )
         apps.append(
             WorkerAppBootstrapItem(
                 app_key=identity.app_key,

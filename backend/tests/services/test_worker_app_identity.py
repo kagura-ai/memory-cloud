@@ -85,6 +85,76 @@ async def test_disable_preserves_ciphertext_but_bumps_revision(_fernet_env):
     assert result.active_signing_secret_encrypted == ciphertext
 
 
+@pytest.mark.asyncio
+async def test_rotate_disabled_identity_stays_disabled_and_drops_revoked_secret(_fernet_env):
+    """Revocation is sticky: rotating a disabled identity stages the new
+    secret but must NOT resurrect the identity to active, and must NOT arm
+    the (revoked) previous secret as a retiring revision that /workers/apps
+    would re-serve to the fleet after a later re-enable."""
+    db = MagicMock()
+    db.flush = AsyncMock()
+    identity = WorkerAppIdentity(
+        platform="slack",
+        app_key="sales",
+        display_name="Sales",
+        status="disabled",
+        active_secret_revision=3,
+        config_version=5,
+    )
+    identity.set_active_signing_secret("compromised")
+    service = WorkerAppIdentityService(db)
+    service._require_identity = AsyncMock(return_value=identity)
+
+    result = await service.rotate_secret(
+        platform="slack",
+        app_key="sales",
+        signing_secret="fresh-secret",
+        retiring_for_seconds=3600,
+        actor_id="admin-1",
+    )
+
+    assert result.status == "disabled"
+    assert result.get_active_signing_secret() == "fresh-secret"
+    assert result.active_secret_revision == 4
+    assert result.retiring_signing_secret_encrypted is None
+    assert result.retiring_secret_revision is None
+    assert result.retiring_valid_until is None
+    assert result.config_version == 6
+
+
+@pytest.mark.asyncio
+async def test_rotate_unconfigured_identity_preserves_status(_fernet_env):
+    """Staging a secret into the migration-window 'unconfigured' default
+    must not flip it to active — that would switch config dispatch from the
+    worker-env path to identity-governed before the operator opts in
+    (enable stays the explicit update_identity(status='active') step)."""
+    db = MagicMock()
+    db.flush = AsyncMock()
+    identity = WorkerAppIdentity(
+        platform="slack",
+        app_key="default",
+        display_name="Default",
+        status="unconfigured",
+        config_version=1,
+    )
+    service = WorkerAppIdentityService(db)
+    service._require_identity = AsyncMock(return_value=identity)
+
+    result = await service.rotate_secret(
+        platform="slack",
+        app_key="default",
+        signing_secret="staged-secret",
+        retiring_for_seconds=3600,
+        actor_id="admin-1",
+    )
+
+    assert result.status == "unconfigured"
+    assert result.get_active_signing_secret() == "staged-secret"
+    assert result.active_secret_revision == 1
+    assert result.retiring_signing_secret_encrypted is None
+    assert result.retiring_valid_until is None
+
+
 def test_bootstrap_revision_changes_when_retiring_window_expires():
     identity = WorkerAppIdentity(
         id=uuid4(),

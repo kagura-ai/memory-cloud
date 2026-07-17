@@ -250,7 +250,11 @@ export default function WorkerAppsPage() {
                       revision: app.active_secret_revision ?? "—",
                     })}
                   </span>
-                  {app.status !== "unconfigured" && (
+                  {/* Rotation stages secret material without changing status,
+                      so an unconfigured app with a staged secret needs the
+                      explicit enable control (the backend rejects enabling
+                      without a configured secret). */}
+                  {(app.status !== "unconfigured" || app.has_active_secret) && (
                     <Button
                       type="button"
                       variant={app.status === "active" ? "destructive" : "outline"}

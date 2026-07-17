@@ -151,7 +151,13 @@ class TestE68WorkerAppMigration:
             assert "worker_app_identities" not in inspector.get_table_names()
             columns = {column["name"] for column in inspector.get_columns("workspace_connectors")}
             assert "app_key" not in columns
-            indexes = {index["name"] for index in inspector.get_indexes("workspace_connectors")}
+            indexes = {
+                index["name"]: index for index in inspector.get_indexes("workspace_connectors")
+            }
             assert "ix_workspace_connectors_type_team" in indexes
+            # Name alone is not enough: the legacy index is the cross-tenant
+            # dispatch-hijack guard, so losing unique=True on downgrade would
+            # silently allow a second connector for the same Slack team.
+            assert indexes["ix_workspace_connectors_type_team"]["unique"] is True
         finally:
             _leave_db_at_head()
