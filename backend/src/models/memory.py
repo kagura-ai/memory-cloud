@@ -315,7 +315,7 @@ class Memory(Base):
     # ``numeric`` (never exponent notation), so writer-normalized values
     # always match. Partial btree (location_lat, location_lon) WHERE
     # location_lat IS NOT NULL AND deleted_at IS NULL is created in migration
-    # e68_1331_location_cols.
+    # e69_1331_location_cols.
     location_lat: Mapped[float | None] = mapped_column(
         Double,
         Computed(
@@ -454,7 +454,7 @@ class Memory(Base):
         # over idx_memories_trigger_from) so the query's tombstone condition
         # must appear verbatim for the index to serve — a missing predicate
         # shows up as a seq scan instead of a silent leak. Created in
-        # migration e68_1331_location_cols.
+        # migration e69_1331_location_cols.
         Index(
             "idx_memories_location",
             "location_lat",

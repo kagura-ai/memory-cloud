@@ -19,8 +19,8 @@ import sqlalchemy as sa
 from alembic import op
 
 # revision identifiers
-revision = "e68_1331_location_cols"
-down_revision = "e67_1281_agent_ws"
+revision = "e69_1331_location_cols"
+down_revision = "e68_1315_worker_apps"
 branch_labels = None
 depends_on = None
 

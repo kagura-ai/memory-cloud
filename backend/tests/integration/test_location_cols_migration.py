@@ -1,4 +1,4 @@
-"""WHERE-axis generated columns round-trip (#1331, e68_1331_location_cols).
+"""WHERE-axis generated columns round-trip (#1331, e69_1331_location_cols).
 
 Mirrors test_time_trigger_migration.py: raw INSERT → generated-column SELECT,
 including the regex guard's malformed-value → NULL behavior and the
