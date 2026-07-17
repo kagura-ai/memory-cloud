@@ -9,8 +9,10 @@ import pytest
 from api.routes.worker_apps import (
     WorkerAppCreateRequest,
     WorkerAppRotateSecretRequest,
+    WorkerAppUpdateRequest,
     create_worker_app,
     rotate_worker_app_secret,
+    update_worker_app,
 )
 from models.worker_app import WorkerAppIdentity
 from utils.exceptions import WorkerAppOperationError
@@ -117,6 +119,54 @@ async def test_create_logs_audit_event_without_secret_material():
     assert kwargs["app_key"] == "sales"
     assert kwargs["active_secret_revision"] == 1
     _assert_no_secret_material(mock_logger, ["plaintext-secret", "ciphertext-material"])
+
+
+@pytest.mark.asyncio
+async def test_update_logs_audit_event_with_revision_context():
+    """#1339: a disable (or any update) emits worker_app_updated carrying the
+    secret revisions/retiring window active at that moment, so a status flip
+    can be correlated with the material it revoked — never the secret itself."""
+    db = MagicMock()
+    db.commit = AsyncMock()
+    db.rollback = AsyncMock()
+    db.refresh = AsyncMock()
+    identity = WorkerAppIdentity(
+        id=uuid4(),
+        platform="slack",
+        app_key="sales",
+        display_name="Sales app",
+        status="disabled",
+        active_secret_revision=5,
+        retiring_secret_revision=4,
+        config_version=6,
+        created_at=datetime(2026, 7, 17),
+        updated_at=datetime(2026, 7, 17),
+    )
+    identity.active_signing_secret_encrypted = "ciphertext-material"
+
+    with (
+        patch("api.routes.worker_apps.WorkerAppIdentityService") as service_cls,
+        patch("api.routes.worker_apps.logger") as mock_logger,
+    ):
+        service_cls.return_value.update_identity = AsyncMock(return_value=identity)
+        await update_worker_app(
+            WorkerAppUpdateRequest(status="disabled"),
+            "slack",
+            "sales",
+            {"user_id": "admin-3"},
+            db,
+        )
+
+    mock_logger.info.assert_called_once()
+    event, kwargs = mock_logger.info.call_args.args[0], mock_logger.info.call_args.kwargs
+    assert event == "worker_app_updated"
+    assert kwargs["requested_by"] == "admin-3"
+    assert kwargs["app_status"] == "disabled"
+    assert kwargs["status_changed"] is True
+    assert kwargs["display_name_changed"] is False
+    assert kwargs["active_secret_revision"] == 5
+    assert kwargs["retiring_secret_revision"] == 4
+    _assert_no_secret_material(mock_logger, ["ciphertext-material"])
 
 
 @pytest.mark.asyncio

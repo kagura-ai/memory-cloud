@@ -179,6 +179,11 @@ async def update_worker_app(
         app_status=identity.status,
         display_name_changed=request.display_name is not None,
         status_changed=request.status is not None,
+        # Revisions/window let an enable/disable be correlated with the
+        # secret material that was active/retiring at that moment.
+        active_secret_revision=identity.active_secret_revision,
+        retiring_secret_revision=identity.retiring_secret_revision,
+        retiring_valid_until=identity.retiring_valid_until,
     )
     return _admin_response(identity)
 
