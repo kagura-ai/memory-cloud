@@ -48,6 +48,7 @@ from uuid import UUID
 from db.qdrant import extract_score_threshold
 from utils.datetime import parse_iso8601_to_aware, to_utc_iso
 from utils.exceptions import QdrantError
+from utils.geo_location import extract_near_filter, haversine_m
 from utils.logger import get_logger
 from utils.tokenizer import build_fulltext_query, tokenize_for_search
 
@@ -67,6 +68,12 @@ _FIELD_REPEATS: tuple[tuple[str, str, int], ...] = (
     ("content_tokens", "content", 1),
 )
 _MAX_TAGS = 50
+
+# #1332: near post-filter overfetch — the spatial predicate is applied
+# post-hoc, so fetch a wider similarity window before filtering (Qdrant
+# prefilters server-side; this narrows the backend parity gap).
+_NEAR_OVERFETCH = 10
+_NEAR_FETCH_CAP = 1000
 
 
 # ---------------------------------------------------------------------------
@@ -138,6 +145,34 @@ def _build_date_clauses(filters: dict[str, Any]) -> list[str]:
         normalized = to_utc_iso(parse_iso8601_to_aware(value, key).astimezone(UTC))
         out.append(f"{col} {op} {_sql_str(normalized)}")
     return out
+
+
+def filter_results_by_near(
+    results: list[dict[str, Any]], near: tuple[float, float, float]
+) -> list[dict[str, Any]]:
+    """Post-hoc ``filters.near`` for the LanceDB legs (#1332).
+
+    LanceDB has no server-side geo filter, so — like the score_threshold
+    parity contract (#1229) — the same circle Qdrant draws with
+    ``geo_radius`` is enforced here over the payload's ``location`` field
+    using the shared-sphere haversine. Rows without a complete location
+    never match (must semantics).
+    """
+    lat, lon, radius_m = near
+    kept: list[dict[str, Any]] = []
+    for row in results:
+        loc = (row.get("payload") or {}).get("location")
+        if not isinstance(loc, dict):
+            continue
+        row_lat, row_lon = loc.get("lat"), loc.get("lon")
+        if isinstance(row_lat, bool) or isinstance(row_lon, bool):
+            # bool is an int — True/False must not read as (1.0, 0.0).
+            continue
+        if not isinstance(row_lat, int | float) or not isinstance(row_lon, int | float):
+            continue
+        if haversine_m(lat, lon, float(row_lat), float(row_lon)) <= radius_m:
+            kept.append(row)
+    return kept
 
 
 def build_lance_filter(
@@ -449,6 +484,7 @@ class LanceVectorStore:
         # #1229: validated here (outside the QdrantError-wrapping try) so junk
         # user input maps to 4xx, not a bare TypeError at the comparison below.
         score_threshold = extract_score_threshold(filters)
+        near = extract_near_filter(filters)
 
         def _run() -> list[dict]:
             tbl = self._open(collection_name)
@@ -459,7 +495,14 @@ class LanceVectorStore:
                 .metric("cosine")
                 .where(where, prefilter=True)
             )
-            return q.limit(limit).to_list()
+            # #1332: near is a hard spatial predicate applied post-hoc, so
+            # draw from a wider similarity window than k — a plain top-k
+            # fetch could contain only out-of-radius rows while in-radius
+            # matches sit just below the cutoff (Qdrant prefilters
+            # server-side and has no such gap). Overfetch narrows, but does
+            # not close, that parity gap.
+            fetch_limit = min(limit * _NEAR_OVERFETCH, _NEAR_FETCH_CAP) if near else limit
+            return q.limit(fetch_limit).to_list()
 
         try:
             rows = await asyncio.to_thread(_run)
@@ -484,6 +527,10 @@ class LanceVectorStore:
         # score_threshold, so enforce the same contract post-hoc.
         if score_threshold is not None:
             results = [r for r in results if r["score"] >= score_threshold]
+        # #1332: parity with Qdrant's geo_radius — post-hoc over the
+        # overfetched window, then truncate back to the caller's limit.
+        if near is not None:
+            results = filter_results_by_near(results, near)[:limit]
         return results
 
     async def search_fulltext(
@@ -503,6 +550,7 @@ class LanceVectorStore:
                 f"Got workspace_id={workspace_id}, context_id={context_id}, user_id={user_id}"
             )
         where = build_lance_filter(workspace_id, context_id, user_id, is_shared_context, filters)
+        near = extract_near_filter(filters)
 
         # Shared expanded-query pipeline (identical to
         # db.qdrant.search_memories_fulltext) so both backends tokenize the same.
@@ -516,14 +564,17 @@ class LanceVectorStore:
             if tbl is None:
                 return []
             q = tbl.search(expanded, query_type="fts").where(where, prefilter=True)
-            return q.limit(limit).to_list()
+            # #1332: widen the BM25 window when the hard near predicate will
+            # post-filter it (see search_semantic).
+            fetch_limit = min(limit * _NEAR_OVERFETCH, _NEAR_FETCH_CAP) if near else limit
+            return q.limit(fetch_limit).to_list()
 
         try:
             rows = await asyncio.to_thread(_run)
         except Exception as e:
             raise QdrantError(f"LanceDB BM25 search failed: {e}") from e
 
-        return [
+        results = [
             {
                 "id": row["id"],
                 "score": float(row.get("_score", row.get("score", 0.0)) or 0.0),
@@ -531,12 +582,18 @@ class LanceVectorStore:
             }
             for row in rows
         ]
+        # #1332: parity with Qdrant's geo_radius — post-hoc over the
+        # overfetched window, then truncate back to the caller's limit.
+        if near is not None:
+            results = filter_results_by_near(results, near)[:limit]
+        return results
 
     async def update_payload(
         self,
         memory_id: UUID,
         payload_updates: dict[str, Any],
         collection_name: str = DEFAULT_COLLECTION,
+        delete_keys: list[str] | None = None,
     ) -> None:
         mirror_cols = ("scope", "type", "importance", "tags", "created_at", "updated_at")
         where = f"id = {_sql_str(str(memory_id))}"
@@ -555,6 +612,11 @@ class LanceVectorStore:
                     return
                 payload = json.loads(existing[0]["payload_json"])
                 payload.update(payload_updates)
+                # #1332: mirror Qdrant's delete_payload — a removed key (e.g.
+                # ``location`` after a details write dropped it) must leave
+                # the blob, not linger as a stale match for filters.near.
+                for key in delete_keys or ():
+                    payload.pop(key, None)
                 values: dict[str, Any] = {
                     "payload_json": json.dumps(payload, ensure_ascii=False),
                     "search_text": _build_search_text(payload),

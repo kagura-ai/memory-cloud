@@ -104,6 +104,14 @@ async def lifespan(app: FastAPI):
     start_scheduler()
     logger.info("background_tasks_scheduled")
 
+    # WHERE axis (#1332): one-shot geo payload backfill for points embedded
+    # before the location payload existed. Best-effort — but hold a strong
+    # reference on app.state: the loop keeps tasks only weakly, and an
+    # unreferenced fire-and-forget task can be garbage-collected mid-run.
+    from tasks.geo_backfill import run_location_payload_backfill
+
+    app.state.geo_backfill_task = asyncio.create_task(run_location_payload_backfill())
+
     logger.info("application_started")
 
     yield

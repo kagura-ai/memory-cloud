@@ -674,21 +674,21 @@ class TestEnsureCollection:
         assert mock_client.create_payload_index.await_count >= 10
 
     async def test_existing_with_sparse_and_tags_returns_early(self, mock_client):
-        """An up-to-date collection with a tags index creates nothing new."""
+        """An up-to-date collection (tags + location indexes) creates nothing new."""
         mock_client.get_collections.return_value = SimpleNamespace(
             collections=[SimpleNamespace(name=KAGURA_MEMORIES_COLLECTION)]
         )
         params = SimpleNamespace(sparse_vectors={KAGURA_MEMORIES_BM25_VECTOR_NAME: object()})
         mock_client.get_collection.return_value = SimpleNamespace(
             config=SimpleNamespace(params=params),
-            payload_schema={"tags": object(), "scope": object()},
+            payload_schema={"tags": object(), "location": object(), "scope": object()},
         )
         await ensure_kagura_memories_collection()
         mock_client.create_collection.assert_not_awaited()
         mock_client.create_payload_index.assert_not_awaited()
 
     async def test_existing_with_sparse_missing_tags_creates_tag_index(self, mock_client):
-        """A sparse-enabled collection lacking a tags index gets one created."""
+        """A sparse-enabled collection lacking late-added indexes gets them created."""
         mock_client.get_collections.return_value = SimpleNamespace(
             collections=[SimpleNamespace(name=KAGURA_MEMORIES_COLLECTION)]
         )
@@ -698,8 +698,12 @@ class TestEnsureCollection:
             payload_schema={"scope": object()},
         )
         await ensure_kagura_memories_collection()
-        mock_client.create_payload_index.assert_awaited_once()
-        assert mock_client.create_payload_index.await_args.kwargs["field_name"] == "tags"
+        # Both retrofit branches fire: tags (keyword) + location (geo, #1332).
+        created = {
+            c.kwargs["field_name"]: c.kwargs["field_schema"]
+            for c in mock_client.create_payload_index.await_args_list
+        }
+        assert created == {"tags": "keyword", "location": "geo"}
         mock_client.create_collection.assert_not_awaited()
 
     async def test_old_collection_no_recreate_flag_raises(self, mock_client, monkeypatch):

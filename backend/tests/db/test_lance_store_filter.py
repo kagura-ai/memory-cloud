@@ -241,3 +241,50 @@ async def test_search_semantic_invalid_score_threshold_is_a_value_error():
 
     with pytest.raises(ValueError, match="score_threshold"):
         await store.search_semantic(USER, [0.1], WS, CTX, filters={"score_threshold": "0.92"})
+
+
+@pytest.mark.asyncio
+async def test_search_semantic_enforces_near_post_filter():
+    """#1332: LanceDB has no server-side geo filter; filters={'near': ...}
+    draws the same circle as Qdrant's geo_radius via the shared-sphere
+    haversine, post-hoc. Rows without a complete location never match."""
+    import json as _json
+
+    from db.lance_store import LanceVectorStore
+
+    store = LanceVectorStore.__new__(LanceVectorStore)
+    rows = [
+        {
+            "id": "inside",
+            "_distance": 0.05,
+            "payload_json": _json.dumps({"location": {"lat": 51.4779, "lon": 0.00005}}),
+        },
+        {
+            "id": "outside",
+            "_distance": 0.06,
+            "payload_json": _json.dumps({"location": {"lat": 51.4779, "lon": 1.0}}),
+        },
+        {"id": "no-location", "_distance": 0.07, "payload_json": "{}"},
+    ]
+    store._open = lambda _name, dim=0: _StubTable(rows)
+
+    out = await store.search_semantic(
+        USER, [0.1], WS, CTX, filters={"near": {"lat": 51.4779, "lon": 0.0, "radius_m": 10}}
+    )
+    assert [r["id"] for r in out] == ["inside"]
+
+    out_nofilter = await store.search_semantic(USER, [0.1], WS, CTX)
+    assert [r["id"] for r in out_nofilter] == ["inside", "outside", "no-location"]
+
+
+@pytest.mark.asyncio
+async def test_search_semantic_malformed_near_is_a_value_error():
+    """#1332: like score_threshold (#1229), a present-but-broken near must
+    raise before any table access — never be silently dropped."""
+    from db.lance_store import LanceVectorStore
+
+    store = LanceVectorStore.__new__(LanceVectorStore)
+    store._open = lambda _name, dim=0: _StubTable([])
+
+    with pytest.raises(ValueError, match="lat"):
+        await store.search_semantic(USER, [0.1], WS, CTX, filters={"near": {"lat": 95, "lon": 0}})

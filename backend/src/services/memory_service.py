@@ -145,6 +145,38 @@ def _log_embedding_task_result(task: asyncio.Task, memory_id: str) -> None:
         )
 
 
+def location_payload_from_details(details: dict | None) -> dict | None:
+    """Qdrant ``location`` geo payload value from a details dict (#1332).
+
+    Returns ``{"lat": float, "lon": float}`` only for a complete numeric
+    pair, else None — never raises. Contract-valid writes are already
+    normalized by ``_apply_location`` (422 on bad input); legacy rows that
+    predate the contract simply carry no geo payload, mirroring the e69
+    generated columns' NULL behavior.
+
+    Payload-source invariant (do NOT "unify" these): the update/patch
+    metadata-only branches call THIS helper on ``effective_details``
+    because the ORM has not round-tripped the generated columns yet, while
+    ``process_pending_embedding``, sleep reindex/undo, and the startup
+    backfill read ``memory.location_lat/lon`` — the PG-validated source.
+    The two derivations agree only because ``_apply_location`` ran first on
+    caller-supplied details; consolidating the embed/backfill paths onto
+    this details parser would resurrect the #1344 legacy-value divergence
+    (PG lane and Qdrant lane disagreeing per row).
+    """
+    if not isinstance(details, dict):
+        return None
+    loc = details.get("location")
+    if not isinstance(loc, dict):
+        return None
+    lat, lon = loc.get("lat"), loc.get("lon")
+    if isinstance(lat, bool) or isinstance(lon, bool):
+        return None
+    if not isinstance(lat, int | float) or not isinstance(lon, int | float):
+        return None
+    return {"lat": float(lat), "lon": float(lon)}
+
+
 class MemoryService:
     """Memory service for core memory operations.
 
@@ -721,6 +753,7 @@ class MemoryService:
         else:
             # Metadata-only update: patch Qdrant payload without re-embedding
             payload_updates: dict = {}
+            delete_keys: list[str] = []
             if request.tags is not None:
                 payload_updates["tags"] = request.tags
             if request.importance is not None:
@@ -729,8 +762,17 @@ class MemoryService:
                 payload_updates["type"] = request.type
             if normalized_ctx_summary is not None:
                 payload_updates["context_summary"] = normalized_ctx_summary
+            # WHERE axis (#1332): a details write changes the geo payload —
+            # sync it (or clear it when the location was removed) so
+            # filters.near never matches a stale coordinate.
+            if request.details is not None:
+                loc = location_payload_from_details(effective_details)
+                if loc is not None:
+                    payload_updates["location"] = loc
+                else:
+                    delete_keys.append("location")
 
-            if payload_updates:
+            if payload_updates or delete_keys:
                 # Sync updated_at to Qdrant for date range filtering (Issue #78)
                 payload_updates["updated_at"] = to_utc_iso(utcnow())
                 collection = await resolve_collection_name(self.db, memory.context_id)
@@ -738,6 +780,7 @@ class MemoryService:
                     memory_id=memory.id,
                     payload_updates=payload_updates,
                     collection_name=collection,
+                    delete_keys=delete_keys or None,
                 )
 
             await self.db.commit()
@@ -1001,6 +1044,7 @@ class MemoryService:
             await self.db.commit()
 
             payload_updates: dict[str, object] = {}
+            delete_keys: list[str] = []
             if "tags" in provided_fields:
                 payload_updates["tags"] = request.tags
             # Mirror the PG-side None-guard above: explicit-null for
@@ -1010,8 +1054,16 @@ class MemoryService:
                 payload_updates["importance"] = request.importance
             if "type" in provided_fields and request.type is not None:
                 payload_updates["type"] = request.type
+            # WHERE axis (#1332): a details patch changes the geo payload —
+            # sync or clear so filters.near never matches a stale coordinate.
+            if "details" in provided_fields:
+                loc = location_payload_from_details(effective_details)
+                if loc is not None:
+                    payload_updates["location"] = loc
+                else:
+                    delete_keys.append("location")
 
-            if payload_updates:
+            if payload_updates or delete_keys:
                 payload_updates["updated_at"] = to_utc_iso(utcnow())
                 try:
                     collection = await resolve_collection_name(self.db, memory.context_id)
@@ -1019,6 +1071,7 @@ class MemoryService:
                         memory_id=memory.id,
                         payload_updates=payload_updates,
                         collection_name=collection,
+                        delete_keys=delete_keys or None,
                     )
                 except Exception as exc:  # noqa: BLE001
                     logger.error(
@@ -4713,6 +4766,15 @@ async def process_pending_embedding(memory_id: UUID) -> None:
             }
             if memory.context:
                 payload["context"] = memory.context
+            # WHERE axis (#1332): geo payload for filters.near. The e69
+            # generated columns are the single validated source — populated
+            # only for a complete numeric pair that passed the regex guard
+            # and range CHECK, so the payload mirrors PG exactly.
+            if memory.location_lat is not None and memory.location_lon is not None:
+                payload["location"] = {
+                    "lat": memory.location_lat,
+                    "lon": memory.location_lon,
+                }
 
             await add_memory_to_qdrant(
                 user_id=memory.user_id,
