@@ -49,7 +49,12 @@ from uuid import UUID
 from db.qdrant import extract_score_threshold
 from utils.datetime import parse_iso8601_to_aware, to_utc_iso
 from utils.exceptions import QdrantError
-from utils.geo_location import extract_near_filter, haversine_m
+from utils.geo_location import (
+    extract_near_filter,
+    extract_within_filter,
+    haversine_m,
+    point_in_polygon,
+)
 from utils.logger import get_logger
 from utils.tokenizer import build_fulltext_query, tokenize_for_search
 
@@ -172,6 +177,31 @@ def filter_results_by_near(
         if not isinstance(row_lat, int | float) or not isinstance(row_lon, int | float):
             continue
         if haversine_m(lat, lon, float(row_lat), float(row_lon)) <= radius_m:
+            kept.append(row)
+    return kept
+
+
+def filter_results_by_within(
+    results: list[dict[str, Any]], ring: list[tuple[float, float]]
+) -> list[dict[str, Any]]:
+    """Post-hoc ``filters.within`` for the LanceDB legs (#1335).
+
+    Ray-casting point-in-polygon over the payload's ``location`` field —
+    the same planar treatment as Qdrant's ``geo_polygon``. Rows without a
+    complete numeric location never match (must semantics; bool rejected
+    like filter_results_by_near).
+    """
+    kept: list[dict[str, Any]] = []
+    for row in results:
+        loc = (row.get("payload") or {}).get("location")
+        if not isinstance(loc, dict):
+            continue
+        row_lat, row_lon = loc.get("lat"), loc.get("lon")
+        if isinstance(row_lat, bool) or isinstance(row_lon, bool):
+            continue
+        if not isinstance(row_lat, int | float) or not isinstance(row_lon, int | float):
+            continue
+        if point_in_polygon(float(row_lat), float(row_lon), ring):
             kept.append(row)
     return kept
 
@@ -486,6 +516,7 @@ class LanceVectorStore:
         # user input maps to 4xx, not a bare TypeError at the comparison below.
         score_threshold = extract_score_threshold(filters)
         near = extract_near_filter(filters)
+        within = extract_within_filter(filters)
 
         def _run() -> list[dict]:
             tbl = self._open(collection_name)
@@ -502,7 +533,9 @@ class LanceVectorStore:
             # matches sit just below the cutoff (Qdrant prefilters
             # server-side and has no such gap). Overfetch narrows, but does
             # not close, that parity gap.
-            fetch_limit = min(limit * _NEAR_OVERFETCH, _NEAR_FETCH_CAP) if near else limit
+            fetch_limit = (
+                min(limit * _NEAR_OVERFETCH, _NEAR_FETCH_CAP) if (near or within) else limit
+            )
             return q.limit(fetch_limit).to_list()
 
         try:
@@ -528,10 +561,14 @@ class LanceVectorStore:
         # score_threshold, so enforce the same contract post-hoc.
         if score_threshold is not None:
             results = [r for r in results if r["score"] >= score_threshold]
-        # #1332: parity with Qdrant's geo_radius — post-hoc over the
-        # overfetched window, then truncate back to the caller's limit.
+        # #1332/#1335: parity with Qdrant's geo conditions — post-hoc over
+        # the overfetched window, then truncate back to the caller's limit.
         if near is not None:
-            results = filter_results_by_near(results, near)[:limit]
+            results = filter_results_by_near(results, near)
+        if within is not None:
+            results = filter_results_by_within(results, within)
+        if near is not None or within is not None:
+            results = results[:limit]
         return results
 
     async def search_fulltext(
@@ -552,6 +589,7 @@ class LanceVectorStore:
             )
         where = build_lance_filter(workspace_id, context_id, user_id, is_shared_context, filters)
         near = extract_near_filter(filters)
+        within = extract_within_filter(filters)
 
         # Shared expanded-query pipeline (identical to
         # db.qdrant.search_memories_fulltext) so both backends tokenize the same.
@@ -565,9 +603,11 @@ class LanceVectorStore:
             if tbl is None:
                 return []
             q = tbl.search(expanded, query_type="fts").where(where, prefilter=True)
-            # #1332: widen the BM25 window when the hard near predicate will
-            # post-filter it (see search_semantic).
-            fetch_limit = min(limit * _NEAR_OVERFETCH, _NEAR_FETCH_CAP) if near else limit
+            # #1332/#1335: widen the BM25 window when a hard geo predicate
+            # will post-filter it (see search_semantic).
+            fetch_limit = (
+                min(limit * _NEAR_OVERFETCH, _NEAR_FETCH_CAP) if (near or within) else limit
+            )
             return q.limit(fetch_limit).to_list()
 
         try:
@@ -583,10 +623,14 @@ class LanceVectorStore:
             }
             for row in rows
         ]
-        # #1332: parity with Qdrant's geo_radius — post-hoc over the
-        # overfetched window, then truncate back to the caller's limit.
+        # #1332/#1335: parity with Qdrant's geo conditions — post-hoc over
+        # the overfetched window, then truncate back to the caller's limit.
         if near is not None:
-            results = filter_results_by_near(results, near)[:limit]
+            results = filter_results_by_near(results, near)
+        if within is not None:
+            results = filter_results_by_within(results, within)
+        if near is not None or within is not None:
+            results = results[:limit]
         return results
 
     async def update_payload(

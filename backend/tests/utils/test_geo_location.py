@@ -284,3 +284,105 @@ class TestHaversineM:
 
         quarter = self._hav(0.0, 0.0, 90.0, 0.0)
         assert quarter == pytest.approx(math.pi * EARTH_RADIUS_M / 2, rel=1e-9)
+
+
+class TestExtractWithinFilter:
+    """#1335: filters["within"] (geofence polygon) extraction.
+
+    Same fail-closed contract as near (#1332): unknown keys, short rings,
+    out-of-range vertices, and non-numeric coordinates raise
+    LocationValidationError — never silently drop the filter.
+    """
+
+    def _extract(self, filters):
+        from utils.geo_location import extract_within_filter
+
+        return extract_within_filter(filters)
+
+    def test_absent_returns_none(self):
+        assert self._extract(None) is None
+        assert self._extract({}) is None
+        assert self._extract({"near": {"lat": 0.0, "lon": 0.0}}) is None
+
+    def test_valid_polygon_returns_closed_ring(self):
+        ring = self._extract(
+            {
+                "within": {
+                    "polygon": [
+                        {"lat": 0.0, "lon": 0.0},
+                        {"lat": 0.0, "lon": 1.0},
+                        {"lat": 1.0, "lon": 1.0},
+                    ]
+                }
+            }
+        )
+        # Auto-closed: first vertex appended when the caller left it open
+        # (Qdrant requires a closed exterior ring).
+        assert ring[0] == ring[-1]
+        assert len(ring) == 4
+
+    def test_already_closed_ring_not_double_closed(self):
+        ring = self._extract(
+            {
+                "within": {
+                    "polygon": [
+                        {"lat": 0.0, "lon": 0.0},
+                        {"lat": 0.0, "lon": 1.0},
+                        {"lat": 1.0, "lon": 1.0},
+                        {"lat": 0.0, "lon": 0.0},
+                    ]
+                }
+            }
+        )
+        assert len(ring) == 4
+
+    @pytest.mark.parametrize(
+        "within",
+        [
+            "not-an-object",
+            {},  # missing polygon
+            {"polygon": []},
+            {"polygon": [{"lat": 0.0, "lon": 0.0}, {"lat": 1.0, "lon": 1.0}]},  # < 3 distinct
+            {"polygon": [{"lat": 95.0, "lon": 0.0}] * 3},  # out of range
+            {"polygon": [{"lat": "0", "lon": 0.0}] * 3},  # numeric string
+            {"polygon": [[0.0, 0.0], [0.0, 1.0], [1.0, 1.0]]},  # wrong point shape
+            {"polygon": [{"lat": 0.0, "lon": 0.0}] * 3, "radius_m": 5},  # unknown key
+        ],
+    )
+    def test_malformed_within_fails_closed(self, within):
+        with pytest.raises(LocationValidationError):
+            self._extract({"within": within})
+
+    def test_vertex_cap(self):
+        many = [{"lat": 0.0, "lon": i * 0.001} for i in range(200)]
+        with pytest.raises(LocationValidationError):
+            self._extract({"within": {"polygon": many}})
+
+
+class TestPointInPolygon:
+    """#1335: ray-casting point-in-polygon for the LanceDB parity leg."""
+
+    def _pip(self, lat, lon, ring):
+        from utils.geo_location import point_in_polygon
+
+        return point_in_polygon(lat, lon, ring)
+
+    def test_inside_and_outside_unit_square(self):
+        ring = [(0.0, 0.0), (0.0, 1.0), (1.0, 1.0), (1.0, 0.0), (0.0, 0.0)]
+        assert self._pip(0.5, 0.5, ring) is True
+        assert self._pip(1.5, 0.5, ring) is False
+        assert self._pip(-0.1, 0.5, ring) is False
+
+    def test_concave_polygon(self):
+        # L-shape: the notch (0.75, 0.75) is outside.
+        ring = [
+            (0.0, 0.0),
+            (0.0, 1.0),
+            (0.5, 1.0),
+            (0.5, 0.5),
+            (1.0, 0.5),
+            (1.0, 0.0),
+            (0.0, 0.0),
+        ]
+        assert self._pip(0.25, 0.25, ring) is True
+        assert self._pip(0.75, 0.75, ring) is False

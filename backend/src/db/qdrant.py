@@ -20,7 +20,9 @@ from qdrant_client.models import (
     Distance,
     FieldCondition,
     Filter,
+    GeoLineString,
     GeoPoint,
+    GeoPolygon,
     GeoRadius,
     MatchAny,
     MatchValue,
@@ -37,7 +39,7 @@ from qdrant_client.models import (
 
 from config.database import QDRANT_URL
 from utils.exceptions import QdrantError
-from utils.geo_location import extract_near_filter
+from utils.geo_location import extract_near_filter, extract_within_filter
 from utils.logger import get_logger
 from utils.sparse_vector import build_query_sparse_vector
 from utils.synonyms import expand_query_tokens
@@ -261,6 +263,22 @@ def _build_search_filter(
                     geo_radius=GeoRadius(
                         center=GeoPoint(lat=near_lat, lon=near_lon),
                         radius=near_radius_m,
+                    ),
+                )
+            )
+        # WHERE axis (#1335): filters["within"] → geo_polygon geofence over
+        # the same payload field. NOTE: Qdrant's geo index accelerates only
+        # bbox/radius — the polygon condition filters by scan, hence the
+        # vertex cap in extract_within_filter. Composes with near (AND).
+        within = extract_within_filter(filters)
+        if within is not None:
+            conditions.append(
+                FieldCondition(
+                    key="location",
+                    geo_polygon=GeoPolygon(
+                        exterior=GeoLineString(
+                            points=[GeoPoint(lat=v_lat, lon=v_lon) for v_lat, v_lon in within]
+                        )
                     ),
                 )
             )

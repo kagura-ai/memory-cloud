@@ -273,3 +273,67 @@ def haversine_m(lat1: float, lon1: float, lat2: float, lon2: float) -> float:
         + math.cos(lat1_r) * math.cos(lat2_r) * math.sin((lon2_r - lon1_r) / 2) ** 2
     )
     return 2 * EARTH_RADIUS_M * math.asin(min(1.0, math.sqrt(a)))
+
+
+_WITHIN_ALLOWED_KEYS = frozenset({"polygon"})
+_MAX_POLYGON_VERTICES = 128
+
+
+def extract_within_filter(
+    filters: dict[str, Any] | None,
+) -> list[tuple[float, float]] | None:
+    """Extract and validate ``filters["within"]`` (#1335) → closed ring.
+
+    ``within = {"polygon": [{"lat", "lon"}, ...]}`` — the geofence exterior
+    ring. Same fail-closed contract as ``extract_near_filter`` (#1229
+    lesson): a present-and-malformed filter raises instead of silently
+    searching unfiltered. Vertices are held to the write-side coordinate
+    standard, capped at 128 (the polygon condition is not accelerated by
+    Qdrant's geo index — it filters by scan — so an unbounded ring is a
+    query-cost lever), and the ring is auto-closed (Qdrant requires
+    first == last).
+    """
+    if not filters or "within" not in filters:
+        return None
+    within = filters["within"]
+    if not isinstance(within, dict):
+        raise LocationValidationError('within must be an object: {"polygon": [{lat, lon}, ...]}')
+    unknown = set(within) - _WITHIN_ALLOWED_KEYS
+    if unknown:
+        raise LocationValidationError(
+            f"within has unknown keys: {sorted(unknown)} (allowed: polygon)"
+        )
+    polygon = within.get("polygon")
+    if not isinstance(polygon, list) or not polygon:
+        raise LocationValidationError("within.polygon must be a non-empty list of {lat, lon}")
+    if len(polygon) > _MAX_POLYGON_VERTICES:
+        raise LocationValidationError(
+            f"within.polygon supports at most {_MAX_POLYGON_VERTICES} vertices"
+        )
+    ring: list[tuple[float, float]] = []
+    for vertex in polygon:
+        if not isinstance(vertex, dict) or "lat" not in vertex or "lon" not in vertex:
+            raise LocationValidationError("within.polygon vertices must be {lat, lon} objects")
+        ring.append(validate_query_coords(vertex["lat"], vertex["lon"]))
+    if ring[0] != ring[-1]:
+        ring.append(ring[0])
+    # A closed ring needs at least 3 DISTINCT vertices (4 points closed).
+    if len(set(ring)) < 3:
+        raise LocationValidationError("within.polygon needs at least 3 distinct vertices")
+    return ring
+
+
+def point_in_polygon(lat: float, lon: float, ring: list[tuple[float, float]]) -> bool:
+    """Ray-casting point-in-polygon over (lat, lon) pairs (#1335).
+
+    Planar approximation on the coordinate grid — the same treatment
+    Qdrant's ``geo_polygon`` applies — used by the LanceDB parity
+    post-filter. ``ring`` is closed (first == last).
+    """
+    inside = False
+    for (lat1, lon1), (lat2, lon2) in zip(ring, ring[1:], strict=False):
+        if (lon1 > lon) != (lon2 > lon):
+            intersect_lat = (lat2 - lat1) * (lon - lon1) / (lon2 - lon1) + lat1
+            if lat < intersect_lat:
+                inside = not inside
+    return inside
