@@ -311,15 +311,23 @@ class Memory(Base):
     # MemoryService._apply_location on every write path). Unlike the time
     # axis' TEXT trick, ``::double precision`` is IMMUTABLE, so these are real
     # numeric columns. The regex guard NULLs malformed values instead of
-    # failing the INSERT (raw-SQL defense); JSONB renders numerics via
-    # ``numeric`` (never exponent notation), so writer-normalized values
-    # always match. Partial btree (location_lat, location_lon) WHERE
+    # failing the INSERT (raw-SQL defense). ``details`` is PostgreSQL json
+    # (NOT jsonb) — inserted text is stored VERBATIM, and the app write path
+    # (json.dumps) renders 0 < |value| < 1e-4 in exponent notation
+    # (``5e-05``), so the guard must accept exponent forms too (#1344). The
+    # 2-digit exponent cap rejects the exponent-driven extremes: ``1e309``
+    # would error at the ``::double precision`` cast (breaking the
+    # "malformed -> NULL, never error" contract) and ``1e123`` would cast
+    # and then abort the INSERT on the range CHECK. (A 300+-digit
+    # plain-decimal lexeme can still error at the cast — raw-SQL-only and
+    # unchanged from pre-#1344.) Partial btree (location_lat, location_lon) WHERE
     # location_lat IS NOT NULL AND deleted_at IS NULL is created in migration
     # e69_1331_location_cols.
     location_lat: Mapped[float | None] = mapped_column(
         Double,
         Computed(
-            r"CASE WHEN details->'location'->>'lat' ~ '^-?[0-9]+(\.[0-9]+)?$' "
+            r"CASE WHEN details->'location'->>'lat' ~ "
+            r"'^-?[0-9]+(\.[0-9]+)?([eE][+-]?[0-9]{1,2})?$' "
             "THEN (details->'location'->>'lat')::double precision ELSE NULL END",
             persisted=True,
         ),
@@ -328,7 +336,8 @@ class Memory(Base):
     location_lon: Mapped[float | None] = mapped_column(
         Double,
         Computed(
-            r"CASE WHEN details->'location'->>'lon' ~ '^-?[0-9]+(\.[0-9]+)?$' "
+            r"CASE WHEN details->'location'->>'lon' ~ "
+            r"'^-?[0-9]+(\.[0-9]+)?([eE][+-]?[0-9]{1,2})?$' "
             "THEN (details->'location'->>'lon')::double precision ELSE NULL END",
             persisted=True,
         ),

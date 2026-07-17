@@ -251,3 +251,34 @@ async def test_nearby_applies_binding_row_filter(geo_env, db_session):
     # The troubleshooting-typed row is subtracted (#1299); notes remain.
     assert str(geo_env["timed"]) not in ids
     assert str(geo_env["near"]) in ids
+
+
+@pytest.mark.asyncio(loop_scope="session")
+async def test_nearby_finds_sub_1e4_coordinate_written_via_orm(geo_env, db_session):
+    # #1344: the ORM serializes details via json.dumps, which renders
+    # 0 < |value| < 1e-4 in exponent notation ("5e-05"); the json (not jsonb)
+    # column stores that text verbatim. The generated-column regex must accept
+    # it or a memory ~5 m off the prime meridian silently vanishes from
+    # recall_nearby while the write reports success.
+    greenwich = Memory(
+        id=uuid.uuid4(),
+        user_id=geo_env["uid"],
+        workspace_id=geo_env["ws_id"],
+        context_id=geo_env["ctx"],
+        summary="5m east of the prime meridian",
+        content="5m east of the prime meridian",
+        type="note",
+        client="test",
+        tags=[],
+        source_type=SOURCE_TYPE_MANUAL,
+        details={"location": {"lat": 51.4779, "lon": 0.00005}},
+    )
+    db_session.add(greenwich)
+    await db_session.flush()
+
+    results = await query_nearby_memories(
+        db_session, geo_env["ctx"], lat=51.4779, lon=0.0, radius_m=1000, k=10
+    )
+    hits = {r["memory_id"]: r for r in results}
+    assert str(greenwich.id) in hits
+    assert hits[str(greenwich.id)]["distance_m"] == pytest.approx(3.5, abs=1.5)

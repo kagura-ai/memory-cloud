@@ -49,7 +49,7 @@ details.location = {
   - lat/lon は int/float のみ受理。**bool を明示拒否**（`_require_int` の bool-is-int 罠の float 版）、**文字列数値も拒否**（MCP arg coercion は details 内部を再帰しないため、`"35.6"` を黙って通すと生成列 NULL → recall_nearby から不可視。早期 422 が正）
   - NaN / ±Inf 拒否、範囲検証
   - **未知キーは拒否**（許可キー: lat / lon / label / text。将来 accuracy_m / altitude 等はサーバ側バージョンアップで追加）
-  - 正規化時に **7桁固定小数へ丸めて書き戻し**（≈1cm 精度）— JSONB 数値の指数表記を排除し、生成列 regex ガードと書き手を契約で結ぶ
+  - 正規化時に **7桁固定小数へ丸めて書き戻し**（≈1cm 精度）。~~JSONB 数値の指数表記を排除し~~ **(#1344 訂正)** `memories.details` は json 型（jsonb ではない）で挿入テキストを逐語保存するため、`json.dumps` は `0 < |値| < 1e-4` を指数表記（`5e-05`）で出力し、丸めでは排除できない。生成列 regex ガード側が指数表記を受理する（下記 §5）
 - **ゲート**: `details` に `location` キーが存在する時のみ検証発火。非 dict（例: 既存データの `{"location": "Tokyo office"}` 文字列）や不正 shape は ValueError → 422。**実装前に prod の details に別 shape の location キーが存在しないかを確認する**（存在すれば移行判断を追加）
 - **正典は `details.location` のみ**。`context.location` は禁止（context JSONB は Qdrant payload に複製されるため座標が第2ストアへ漏れる）— ツール説明と docs に明記
 
@@ -58,11 +58,11 @@ details.location = {
 - 生成列（`models/memory.py` の resource_version パターン L264-271 を踏襲）:
   ```sql
   location_lat  DOUBLE PRECISION GENERATED ALWAYS AS (
-    CASE WHEN details->'location'->>'lat' ~ '^-?[0-9]+(\.[0-9]+)?$'
+    CASE WHEN details->'location'->>'lat' ~ '^-?[0-9]+(\.[0-9]+)?([eE][+-]?[0-9]{1,2})?$'
          THEN (details->'location'->>'lat')::double precision ELSE NULL END) STORED
   -- location_lon 同型
   ```
-  float キャストは IMMUTABLE のため本物の数値列が持てる（time 軸の TEXT 固定幅トリックは ::timestamp が STABLE だったための回避であり、ここでは不要）。regex ガードにより不正値は NULL 化し INSERT を落とさない（raw SQL 経路の防御）
+  float キャストは IMMUTABLE のため本物の数値列が持てる（time 軸の TEXT 固定幅トリックは ::timestamp が STABLE だったための回避であり、ここでは不要）。regex ガードにより不正値は NULL 化し INSERT を落とさない（raw SQL 経路の防御）。**指数表記の受理は #1344 で追加**（details は json 型・逐語保存のため app 経路の `5e-05` が届く）— exponent 2 桁上限で、regex を通った字句は必ず double precision に overflow なくキャストできる
 - 部分 btree: `idx_memories_location (location_lat, location_lon) WHERE location_lat IS NOT NULL AND deleted_at IS NULL` — **述語に tombstone 条件を含める**（`idx_memories_delivery_always` L398 と同型。time index L407 に無い改良で、述語漏れが seq scan として即可視化される）
 - CHECK `valid_location_range`: IS NOT NULL ガード付きで lat ∈ [-90,90] AND lon ∈ [-180,180]（CHECK は NULL で通過するため明示ガード必須 — e30_877 L44-63 の教訓）。ORM `__table_args__` と migration にバイト同一で記述（`test_schema_drift.py` / `test_create_all_vs_alembic_drift.py` が自動照合）
 - migration: `down_revision` は実装時点の head を確認（調査時点では `e67_1281_agent_ws`）。STORED 生成列追加はテーブル書換を伴う — **prod の memories 行数を事前確認**（e30_877 は同型で本番通過済み）
