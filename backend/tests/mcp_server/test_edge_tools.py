@@ -26,7 +26,7 @@ from mcp_server.tools.edge import handle_create_edge, handle_update_edge
 from models.memory import EDGE_ORIGIN_DECLARED
 
 
-def _mock_edge(src_id, dst_id, *, edge_type="neural_association", weight=0.5):
+def _mock_edge(src_id, dst_id, *, edge_type="neural_association", weight=0.5, origin="hebbian"):
     """Build a minimal NeuralMemoryEdge-shaped mock for response serialization."""
     e = MagicMock()
     e.src_id = src_id
@@ -34,9 +34,57 @@ def _mock_edge(src_id, dst_id, *, edge_type="neural_association", weight=0.5):
     e.edge_type = edge_type
     e.weight = weight
     e.confidence = 1.0
+    e.origin = origin
     e.created_at = datetime(2026, 4, 26, 9, 0, 0, tzinfo=UTC)
     e.last_updated = datetime(2026, 4, 26, 9, 0, 0, tzinfo=UTC)
     return e
+
+
+async def _run_create_edge(args, mock_repo, user_id, workspace_id, context_id):
+    """Invoke handle_create_edge with the standard mock environment.
+
+    Shared by TestCreateEdgeDuplicateSemantics (#1321) — the per-test setup
+    differs only in `args` and the repo mock's get_edge/create_or_update_edge
+    return values, so the patching boilerplate lives here once.
+    """
+    mock_db = AsyncMock()
+    mock_db.commit = AsyncMock()
+    mock_db.rollback = AsyncMock()
+
+    async def mock_get_db():
+        yield mock_db
+
+    mock_ctx = MagicMock()
+    mock_ctx.id = context_id
+    mock_ctx.workspace_id = workspace_id
+
+    with (
+        patch("db.base.get_db", new=mock_get_db),
+        patch(
+            "repositories.neural_edge.NeuralEdgeRepository",
+            return_value=mock_repo,
+        ),
+        patch(
+            "mcp_server.tools.edge._resolve_context",
+            new_callable=AsyncMock,
+            return_value=mock_ctx,
+        ),
+        patch(
+            "mcp_server.tools.edge._check_viewer_permission",
+            new_callable=AsyncMock,
+            return_value=None,
+        ),
+        patch(
+            "mcp_server.tools.edge._log_tool_usage",
+            new_callable=AsyncMock,
+        ),
+    ):
+        result = await handle_create_edge(
+            {"context_id": str(context_id), **args},
+            user_id,
+            workspace_id,
+        )
+    return json.loads(result[0].text)
 
 
 class TestUpdateEdgeResponsePayload:
@@ -207,54 +255,20 @@ class TestCreateEdgeOriginAndWeight:
         """handle_create_edge MUST pass origin='declared' to the repository."""
         src_id = uuid4()
         dst_id = uuid4()
-        created = _mock_edge(src_id, dst_id, edge_type="related_to", weight=1.0)
-
-        mock_db = AsyncMock()
-        mock_db.commit = AsyncMock()
-        mock_db.rollback = AsyncMock()
-
-        async def mock_get_db():
-            yield mock_db
+        created = _mock_edge(src_id, dst_id, edge_type="related_to", weight=1.0, origin="declared")
 
         mock_repo = MagicMock()
+        mock_repo.get_edge = AsyncMock(return_value=None)
         mock_repo.create_or_update_edge = AsyncMock(return_value=created)
 
-        mock_ctx = MagicMock()
-        mock_ctx.id = context_id
-        mock_ctx.workspace_id = workspace_id
+        data = await _run_create_edge(
+            {"source_id": str(src_id), "target_id": str(dst_id)},
+            mock_repo,
+            user_id,
+            workspace_id,
+            context_id,
+        )
 
-        with (
-            patch("db.base.get_db", new=mock_get_db),
-            patch(
-                "repositories.neural_edge.NeuralEdgeRepository",
-                return_value=mock_repo,
-            ),
-            patch(
-                "mcp_server.tools.edge._resolve_context",
-                new_callable=AsyncMock,
-                return_value=mock_ctx,
-            ),
-            patch(
-                "mcp_server.tools.edge._check_viewer_permission",
-                new_callable=AsyncMock,
-                return_value=None,
-            ),
-            patch(
-                "mcp_server.tools.edge._log_tool_usage",
-                new_callable=AsyncMock,
-            ),
-        ):
-            result = await handle_create_edge(
-                {
-                    "source_id": str(src_id),
-                    "target_id": str(dst_id),
-                    "context_id": str(context_id),
-                },
-                user_id,
-                workspace_id,
-            )
-
-        data = json.loads(result[0].text)
         assert data["status"] == "success"
         mock_repo.create_or_update_edge.assert_awaited_once()
         kwargs = mock_repo.create_or_update_edge.await_args.kwargs
@@ -266,55 +280,21 @@ class TestCreateEdgeOriginAndWeight:
         """When `weight` is omitted from args, handler MUST default to 1.0."""
         src_id = uuid4()
         dst_id = uuid4()
-        created = _mock_edge(src_id, dst_id, edge_type="related_to", weight=1.0)
-
-        mock_db = AsyncMock()
-        mock_db.commit = AsyncMock()
-        mock_db.rollback = AsyncMock()
-
-        async def mock_get_db():
-            yield mock_db
+        created = _mock_edge(src_id, dst_id, edge_type="related_to", weight=1.0, origin="declared")
 
         mock_repo = MagicMock()
+        mock_repo.get_edge = AsyncMock(return_value=None)
         mock_repo.create_or_update_edge = AsyncMock(return_value=created)
 
-        mock_ctx = MagicMock()
-        mock_ctx.id = context_id
-        mock_ctx.workspace_id = workspace_id
+        data = await _run_create_edge(
+            # weight intentionally omitted
+            {"source_id": str(src_id), "target_id": str(dst_id)},
+            mock_repo,
+            user_id,
+            workspace_id,
+            context_id,
+        )
 
-        with (
-            patch("db.base.get_db", new=mock_get_db),
-            patch(
-                "repositories.neural_edge.NeuralEdgeRepository",
-                return_value=mock_repo,
-            ),
-            patch(
-                "mcp_server.tools.edge._resolve_context",
-                new_callable=AsyncMock,
-                return_value=mock_ctx,
-            ),
-            patch(
-                "mcp_server.tools.edge._check_viewer_permission",
-                new_callable=AsyncMock,
-                return_value=None,
-            ),
-            patch(
-                "mcp_server.tools.edge._log_tool_usage",
-                new_callable=AsyncMock,
-            ),
-        ):
-            result = await handle_create_edge(
-                {
-                    "source_id": str(src_id),
-                    "target_id": str(dst_id),
-                    "context_id": str(context_id),
-                    # weight intentionally omitted
-                },
-                user_id,
-                workspace_id,
-            )
-
-        data = json.loads(result[0].text)
         assert data["status"] == "success"
         mock_repo.create_or_update_edge.assert_awaited_once()
         kwargs = mock_repo.create_or_update_edge.await_args.kwargs
@@ -438,3 +418,280 @@ class TestUpdateEdgeWeightNoDefault:
 
         assert _parse_float(None, "weight", 0.0, 3.0) == (None, None)
         assert _parse_float(0.8, "weight", 0.0, 3.0) == (0.8, None)
+
+
+class TestCreateEdgeDuplicateSemantics:
+    """Issue #1321: create_edge duplicate behavior is deterministic and declared.
+
+    Contract:
+    - no existing edge            → insert, ``operation: "created"``
+    - existing origin != declared → upsert, ``operation: "updated"`` + ``previous``
+    - existing declared, values identical → no write, ``operation: "unchanged"``
+    - existing declared, values differ, no overwrite → error ``edge_exists``
+    - existing declared, values differ, overwrite=true → upsert, ``operation: "updated"``
+    """
+
+    @pytest.fixture
+    def user_id(self):
+        return "test_user_1321"
+
+    @pytest.fixture
+    def workspace_id(self):
+        return uuid4()
+
+    @pytest.fixture
+    def context_id(self):
+        return uuid4()
+
+    @pytest.mark.asyncio
+    async def test_new_edge_returns_operation_created(self, user_id, workspace_id, context_id):
+        """No existing edge → insert path reports operation='created'."""
+        src_id, dst_id = uuid4(), uuid4()
+        created = _mock_edge(src_id, dst_id, edge_type="related_to", weight=1.0, origin="declared")
+
+        mock_repo = MagicMock()
+        mock_repo.get_edge = AsyncMock(return_value=None)
+        mock_repo.create_or_update_edge = AsyncMock(return_value=created)
+
+        data = await _run_create_edge(
+            {"source_id": str(src_id), "target_id": str(dst_id)},
+            mock_repo,
+            user_id,
+            workspace_id,
+            context_id,
+        )
+
+        assert data["status"] == "success"
+        assert data["operation"] == "created"
+        assert data["edge"]["origin"] == "declared"
+        assert "previous" not in data
+        # Race belt-and-suspenders: even the believed-fresh insert arm keeps
+        # the declared-type guard, so a declared edge created between the
+        # SELECT and the upsert cannot be silently retyped.
+        kwargs = mock_repo.create_or_update_edge.await_args.kwargs
+        assert kwargs["protect_declared_link"] is True
+
+    @pytest.mark.asyncio
+    async def test_existing_hebbian_edge_updates_with_previous(
+        self, user_id, workspace_id, context_id
+    ):
+        """A hebbian (auto-created) edge is upgradeable: upsert proceeds, but the
+        response says operation='updated' and carries the pre-image."""
+        src_id, dst_id = uuid4(), uuid4()
+        existing = _mock_edge(
+            src_id, dst_id, edge_type="neural_association", weight=0.4, origin="hebbian"
+        )
+        post = _mock_edge(src_id, dst_id, edge_type="supersedes", weight=1.0, origin="declared")
+
+        mock_repo = MagicMock()
+        mock_repo.get_edge = AsyncMock(return_value=existing)
+        mock_repo.create_or_update_edge = AsyncMock(return_value=post)
+
+        data = await _run_create_edge(
+            {
+                "source_id": str(src_id),
+                "target_id": str(dst_id),
+                "edge_type": "supersedes",
+            },
+            mock_repo,
+            user_id,
+            workspace_id,
+            context_id,
+        )
+
+        assert data["status"] == "success"
+        assert data["operation"] == "updated"
+        assert data["previous"] == {
+            "edge_type": "neural_association",
+            "weight": 0.4,
+            "confidence": 1.0,
+            "origin": "hebbian",
+        }
+        assert data["edge"]["edge_type"] == "supersedes"
+
+    @pytest.mark.asyncio
+    async def test_declared_edge_identical_values_is_unchanged(
+        self, user_id, workspace_id, context_id
+    ):
+        """Re-asserting a declared edge with identical values is a no-op success —
+        client timeout-retries of create_edge stay idempotent instead of erroring."""
+        src_id, dst_id = uuid4(), uuid4()
+        existing = _mock_edge(
+            src_id, dst_id, edge_type="related_to", weight=1.0, origin=EDGE_ORIGIN_DECLARED
+        )
+
+        mock_repo = MagicMock()
+        mock_repo.get_edge = AsyncMock(return_value=existing)
+        mock_repo.create_or_update_edge = AsyncMock()
+
+        data = await _run_create_edge(
+            # edge_type/weight/confidence omitted → defaults related_to/1.0/1.0
+            # match the existing row exactly.
+            {"source_id": str(src_id), "target_id": str(dst_id)},
+            mock_repo,
+            user_id,
+            workspace_id,
+            context_id,
+        )
+
+        assert data["status"] == "success"
+        assert data["operation"] == "unchanged"
+        assert data["edge"]["weight"] == 1.0
+        assert data["edge"]["origin"] == "declared"
+        mock_repo.create_or_update_edge.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_declared_edge_conflicting_values_rejected(
+        self, user_id, workspace_id, context_id
+    ):
+        """A declared edge with different values is protected: error edge_exists,
+        no write, message points to update_edge / overwrite=true."""
+        src_id, dst_id = uuid4(), uuid4()
+        existing = _mock_edge(
+            src_id, dst_id, edge_type="related_to", weight=1.0, origin=EDGE_ORIGIN_DECLARED
+        )
+
+        mock_repo = MagicMock()
+        mock_repo.get_edge = AsyncMock(return_value=existing)
+        mock_repo.create_or_update_edge = AsyncMock()
+
+        data = await _run_create_edge(
+            {"source_id": str(src_id), "target_id": str(dst_id), "weight": 0.9},
+            mock_repo,
+            user_id,
+            workspace_id,
+            context_id,
+        )
+
+        assert data["status"] == "error"
+        assert data["error"] == "edge_exists"
+        assert "update_edge" in data["message"]
+        assert "overwrite" in data["message"]
+        # The pre-existing declared edge is echoed so the caller can decide.
+        assert data["existing_edge"]["edge_type"] == "related_to"
+        assert data["existing_edge"]["weight"] == 1.0
+        mock_repo.create_or_update_edge.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_declared_edge_overwrite_flag_updates(self, user_id, workspace_id, context_id):
+        """overwrite=true is the explicit opt-in: the declared edge is re-asserted
+        (upsert without the declared-type guard) and the pre-image is returned."""
+        src_id, dst_id = uuid4(), uuid4()
+        existing = _mock_edge(
+            src_id, dst_id, edge_type="related_to", weight=1.0, origin=EDGE_ORIGIN_DECLARED
+        )
+        post = _mock_edge(src_id, dst_id, edge_type="depends_on", weight=0.9, origin="declared")
+
+        mock_repo = MagicMock()
+        mock_repo.get_edge = AsyncMock(return_value=existing)
+        mock_repo.create_or_update_edge = AsyncMock(return_value=post)
+
+        data = await _run_create_edge(
+            {
+                "source_id": str(src_id),
+                "target_id": str(dst_id),
+                "edge_type": "depends_on",
+                "weight": 0.9,
+                "overwrite": True,
+            },
+            mock_repo,
+            user_id,
+            workspace_id,
+            context_id,
+        )
+
+        assert data["status"] == "success"
+        assert data["operation"] == "updated"
+        assert data["previous"]["edge_type"] == "related_to"
+        assert data["previous"]["weight"] == 1.0
+        kwargs = mock_repo.create_or_update_edge.await_args.kwargs
+        assert kwargs["protect_declared_link"] is False
+
+    @pytest.mark.asyncio
+    async def test_semantic_origin_edge_updates_not_protected(
+        self, user_id, workspace_id, context_id
+    ):
+        """Only origin='declared' is protected — a semantic (sleep-discovered)
+        edge is machine provenance, so the assertion applies and the pre-image
+        shows origin='semantic'. Pins the predicate as == 'declared', not
+        != 'hebbian'."""
+        src_id, dst_id = uuid4(), uuid4()
+        existing = _mock_edge(src_id, dst_id, edge_type="related_to", weight=0.7, origin="semantic")
+        post = _mock_edge(src_id, dst_id, edge_type="related_to", weight=1.0, origin="semantic")
+
+        mock_repo = MagicMock()
+        mock_repo.get_edge = AsyncMock(return_value=existing)
+        mock_repo.create_or_update_edge = AsyncMock(return_value=post)
+
+        data = await _run_create_edge(
+            {"source_id": str(src_id), "target_id": str(dst_id)},
+            mock_repo,
+            user_id,
+            workspace_id,
+            context_id,
+        )
+
+        assert data["status"] == "success"
+        assert data["operation"] == "updated"
+        assert data["previous"]["origin"] == "semantic"
+        mock_repo.create_or_update_edge.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_overwrite_true_with_no_existing_edge_creates(
+        self, user_id, workspace_id, context_id
+    ):
+        """overwrite=true on a fresh pair is a plain create — and the explicit
+        opt-in also disables the race-window declared-type guard."""
+        src_id, dst_id = uuid4(), uuid4()
+        created = _mock_edge(src_id, dst_id, edge_type="related_to", weight=1.0, origin="declared")
+
+        mock_repo = MagicMock()
+        mock_repo.get_edge = AsyncMock(return_value=None)
+        mock_repo.create_or_update_edge = AsyncMock(return_value=created)
+
+        data = await _run_create_edge(
+            {"source_id": str(src_id), "target_id": str(dst_id), "overwrite": True},
+            mock_repo,
+            user_id,
+            workspace_id,
+            context_id,
+        )
+
+        assert data["status"] == "success"
+        assert data["operation"] == "created"
+        assert data["edge"]["origin"] == "declared"
+        kwargs = mock_repo.create_or_update_edge.await_args.kwargs
+        assert kwargs["protect_declared_link"] is False
+
+    @pytest.mark.asyncio
+    async def test_overwrite_non_boolean_rejected(self, user_id, workspace_id, context_id):
+        """A junk string for `overwrite` must fail closed (validation_error),
+        never count as truthy — bool("null") is True and would silently enable
+        the destructive path the flag is guarding."""
+        src_id, dst_id = uuid4(), uuid4()
+
+        mock_repo = MagicMock()
+        mock_repo.get_edge = AsyncMock()
+        mock_repo.create_or_update_edge = AsyncMock()
+
+        data = await _run_create_edge(
+            {"source_id": str(src_id), "target_id": str(dst_id), "overwrite": "null"},
+            mock_repo,
+            user_id,
+            workspace_id,
+            context_id,
+        )
+
+        assert data["status"] == "error"
+        assert data["error"] == "validation_error"
+        mock_repo.get_edge.assert_not_awaited()
+        mock_repo.create_or_update_edge.assert_not_awaited()
+
+    def test_schema_declares_overwrite_flag(self):
+        """The tool definition documents the duplicate contract: an `overwrite`
+        boolean (default false) and an `operation` field in the response."""
+        create_edge = next(t for t in get_tool_definitions() if t["name"] == "create_edge")
+        overwrite_schema = create_edge["inputSchema"]["properties"]["overwrite"]
+        assert overwrite_schema["type"] == "boolean"
+        assert overwrite_schema["default"] is False
+        assert "operation" in create_edge["description"]
