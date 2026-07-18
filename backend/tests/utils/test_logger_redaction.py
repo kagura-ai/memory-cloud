@@ -19,8 +19,12 @@ from utils.logger import redact_pg_detail, setup_logger
 
 @pytest.fixture
 def _structlog_reset():
+    # Snapshot + restore (NOT reset_defaults): the suite-wide conftest
+    # configures structlog for kwarg logging, and resetting to library
+    # defaults would make later tests order-dependent. Copilot review.
+    saved = structlog.get_config()
     yield
-    structlog.reset_defaults()
+    structlog.configure(**saved)
 
 
 def _fresh_logger():
