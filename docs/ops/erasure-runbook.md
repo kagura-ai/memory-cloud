@@ -71,6 +71,7 @@ FK の依存逆順で削除:
 | `plan_changes.changed_by` | SHA256 pseudonymize | legal retention 維持 |
 | `workspaces` | `owner_user_id = :uid` | step 3 後の sole-owner のみ。cascade で contexts/memories/etc. |
 | `memories` (残存行) | `user_id` を SHA256 pseudonymize + `details = NULL` | #1336: 共有/移譲 workspace に残る本人著メモリの scrub。details の NULL 化で生成列 (location_lat/lon, trigger_from/until) も自動 NULL。tombstone 行も対象 |
+| `worker_app_identities.created_by` / `updated_by` | SHA256 pseudonymize | #1358: global 行 (workspace cascade なし)。legal retention 維持、operator sub のリンクのみ切断 |
 | `users` | `user_id = :uid` | 最後 |
 
 ### 2.5 Audit logs (Step 5)

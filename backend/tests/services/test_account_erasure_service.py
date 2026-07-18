@@ -982,6 +982,36 @@ class TestDeletePostgresSweep:
         assert agent_call.args[2] == target.user_id
 
 
+    @pytest.mark.asyncio
+    async def test_sweep_pseudonymizes_worker_app_identity_actor_columns(self):
+        """#1358: worker_app_identities are GLOBAL control-plane rows (no
+        workspace FK, so no cascade ever removes them) — created_by /
+        updated_by hold the operator's raw OAuth sub and must be
+        pseudonymized on erasure (plan_changes/agents legal-retention
+        posture: row survives, personal link breaks)."""
+        from models.worker_app import WorkerAppIdentity
+
+        svc = _service()
+        svc._count_and_delete = AsyncMock(return_value=0)
+        svc._pseudonymize_field = AsyncMock(return_value=1)
+        svc.db.delete = AsyncMock()
+        svc.db.commit = AsyncMock()
+        target = _user()
+
+        counts = await svc._delete_postgres(target)
+
+        assert counts["worker_app_identities_pseudonymized"] == 2
+        calls = [
+            c
+            for c in svc._pseudonymize_field.await_args_list
+            if c.args[0] is WorkerAppIdentity
+        ]
+        assert len(calls) == 2
+        assert any(c.args[1] is WorkerAppIdentity.created_by for c in calls)
+        assert any(c.args[1] is WorkerAppIdentity.updated_by for c in calls)
+        assert all(c.args[2] == target.user_id for c in calls)
+
+
 class TestMemoryAccessEventsErasure:
     """#1278: the erased subject's memory_access_events rows are pseudonymized
     + scrubbed in ONE carve-out UPDATE (user_id pseudonym, session_id/run_id
