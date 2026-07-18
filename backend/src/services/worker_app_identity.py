@@ -11,6 +11,9 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from models.worker_app import WorkerAppIdentity
 from utils.datetime import utcnow
 from utils.exceptions import ConflictError, NotFoundException, ValidationError
+from utils.logger import get_logger
+
+logger = get_logger(__name__)
 
 MAX_RETIRING_WINDOW_SECONDS = 86_400
 
@@ -119,6 +122,16 @@ class WorkerAppIdentityService:
                     "A signing secret must be configured before enabling an app identity",
                     field="status",
                 )
+            # #1356: a real status transition tears down the retiring window.
+            # Disabling revokes ALL acceptance (sticky revocation — the armed
+            # previous secret must not survive to be revived by a later
+            # re-enable), and enabling purges retiring material a row may
+            # still carry from before this rule existed. A same-status PATCH
+            # is not a transition and keeps a legitimately armed window.
+            if status != identity.status:
+                identity.set_retiring_signing_secret(None)
+                identity.retiring_secret_revision = None
+                identity.retiring_valid_until = None
             identity.status = status
         identity.updated_by = actor_id
         identity.config_version += 1
@@ -140,7 +153,24 @@ class WorkerAppIdentityService:
                 field="retiring_for_seconds",
             )
         identity = await self._require_identity(platform, app_key)
-        previous_secret = identity.get_active_signing_secret()
+        # #1356: rotate is the documented recovery path when the stored
+        # ciphertext can no longer be decrypted (Fernet key rotation,
+        # corruption) — it must not 500 on the OLD material it is about to
+        # replace. Drop the unrecoverable previous secret (no retiring
+        # window; the fleet could never verify against it anyway) and let
+        # the new-secret write below BE the recovery. Ids/enums only in the
+        # audit event — never secret material or ciphertext.
+        try:
+            previous_secret = identity.get_active_signing_secret()
+        except Exception as exc:
+            previous_secret = None
+            logger.warning(
+                "worker_app_previous_secret_undecryptable",
+                platform=identity.platform,
+                app_key=identity.app_key,
+                active_secret_revision=identity.active_secret_revision,
+                error_type=type(exc).__name__,
+            )
         previous_revision = identity.active_secret_revision
         # Arm the retiring window only when the identity is currently ACTIVE.
         # On a disabled identity the previous secret is revoked material — it
