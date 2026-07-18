@@ -273,6 +273,115 @@ async def test_reenable_clears_stale_retiring_window(_fernet_env):
 
 
 @pytest.mark.asyncio
+async def test_rotate_undecryptable_on_disabled_identity_stays_disabled(_fernet_env):
+    """Composition of the two #1356 behaviors: decrypt-failure recovery must
+    not bypass sticky revocation — rotate on a disabled identity with
+    rotated-away ciphertext succeeds, stays disabled, arms nothing."""
+    db = MagicMock()
+    db.flush = AsyncMock()
+    identity = WorkerAppIdentity(
+        platform="slack",
+        app_key="sales",
+        display_name="Sales",
+        status="disabled",
+        active_secret_revision=3,
+        config_version=5,
+    )
+    identity.active_signing_secret_encrypted = "gAAAAA-not-decryptable-with-current-key"
+    service = WorkerAppIdentityService(db)
+    service._require_identity = AsyncMock(return_value=identity)
+
+    result = await service.rotate_secret(
+        platform="slack",
+        app_key="sales",
+        signing_secret="fresh-secret",
+        retiring_for_seconds=3600,
+        actor_id="admin-1",
+    )
+
+    assert result.status == "disabled"
+    assert result.get_active_signing_secret() == "fresh-secret"
+    assert result.active_secret_revision == 4
+    assert result.retiring_signing_secret_encrypted is None
+    assert result.retiring_valid_until is None
+
+
+@pytest.mark.asyncio
+async def test_enable_rejects_undecryptable_ciphertext(_fernet_env):
+    """#1356: enabling must not 200 when the fleet would be served nothing —
+    an undecryptable stored secret fails loudly, pointing at rotate."""
+    from utils.exceptions import ValidationError
+
+    db = MagicMock()
+    db.flush = AsyncMock()
+    identity = WorkerAppIdentity(
+        platform="slack",
+        app_key="sales",
+        display_name="Sales",
+        status="disabled",
+        active_secret_revision=3,
+        config_version=5,
+    )
+    identity.active_signing_secret_encrypted = "gAAAAA-not-decryptable-with-current-key"
+    service = WorkerAppIdentityService(db)
+    service._require_identity = AsyncMock(return_value=identity)
+
+    with pytest.raises(ValidationError):
+        await service.update_identity(
+            platform="slack",
+            app_key="sales",
+            actor_id="admin-1",
+            status="active",
+        )
+
+
+@pytest.mark.asyncio
+async def test_disabled_noop_update_purges_stale_retiring_material(_fernet_env):
+    """#1356: PATCH status=disabled on an already-disabled legacy row is the
+    operator lever to scrub revoked retiring material at rest."""
+    db = MagicMock()
+    db.flush = AsyncMock()
+    identity = WorkerAppIdentity(
+        platform="slack",
+        app_key="sales",
+        display_name="Sales",
+        status="disabled",
+        active_secret_revision=5,
+        config_version=9,
+    )
+    identity.set_active_signing_secret("current")
+    identity.set_retiring_signing_secret("revoked-old")
+    identity.retiring_secret_revision = 4
+    identity.retiring_valid_until = utcnow() + timedelta(hours=1)
+    service = WorkerAppIdentityService(db)
+    service._require_identity = AsyncMock(return_value=identity)
+
+    with patch("services.worker_app_identity.logger") as mock_logger:
+        result = await service.update_identity(
+            platform="slack",
+            app_key="sales",
+            actor_id="admin-1",
+            status="disabled",
+        )
+
+    assert result.status == "disabled"
+    assert result.retiring_signing_secret_encrypted is None
+    assert result.retiring_secret_revision is None
+    assert result.retiring_valid_until is None
+    # #1343 correlation: the teardown audit carries the PRE-clear revision.
+    cleared = [
+        c
+        for c in mock_logger.info.call_args_list
+        if c.args and c.args[0] == "worker_app_retiring_window_cleared"
+    ]
+    assert len(cleared) == 1
+    assert cleared[0].kwargs["retiring_secret_revision"] == 4
+    for value in cleared[0].kwargs.values():
+        assert "revoked-old" not in str(value)
+        assert "current" not in str(value)
+
+
+@pytest.mark.asyncio
 async def test_status_noop_update_keeps_retiring_window(_fernet_env):
     """A same-status PATCH (e.g. display_name edit sent with status=active)
     is not a transition — it must not tear down a legitimately armed

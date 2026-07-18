@@ -122,16 +122,45 @@ class WorkerAppIdentityService:
                     "A signing secret must be configured before enabling an app identity",
                     field="status",
                 )
+            if status == "active" and status != identity.status:
+                # #1356: enabling a row whose stored ciphertext no longer
+                # decrypts (Fernet key rotation / corruption) would return
+                # 200 while the fleet silently serves the app secretless.
+                # Fail loudly and point the operator at the recovery path.
+                try:
+                    identity.get_active_signing_secret()
+                except ValueError as exc:
+                    raise ValidationError(
+                        "The stored signing secret cannot be decrypted; "
+                        "rotate the secret before enabling this app identity",
+                        field="status",
+                    ) from exc
             # #1356: a real status transition tears down the retiring window.
             # Disabling revokes ALL acceptance (sticky revocation — the armed
             # previous secret must not survive to be revived by a later
             # re-enable), and enabling purges retiring material a row may
-            # still carry from before this rule existed. A same-status PATCH
-            # is not a transition and keeps a legitimately armed window.
-            if status != identity.status:
-                identity.set_retiring_signing_secret(None)
-                identity.retiring_secret_revision = None
-                identity.retiring_valid_until = None
+            # still carry from before this rule existed. A same-status
+            # PATCH to "disabled" also purges (operator lever to scrub
+            # revoked material from legacy rows without re-enabling); an
+            # active→active PATCH is not a transition and keeps a
+            # legitimately armed rotation window.
+            if status != identity.status or status == "disabled":
+                if identity.retiring_secret_revision is not None or (
+                    identity.retiring_signing_secret_encrypted is not None
+                ):
+                    # Audit the teardown BEFORE clearing so the #1343
+                    # correlation (which retiring revision a disable
+                    # revoked) survives — the route only sees post-clear
+                    # state. Ids/enums only, never secret material.
+                    logger.info(
+                        "worker_app_retiring_window_cleared",
+                        platform=identity.platform,
+                        app_key=identity.app_key,
+                        from_status=identity.status,
+                        to_status=status,
+                        retiring_secret_revision=identity.retiring_secret_revision,
+                    )
+                identity.clear_retiring_secret()
             identity.status = status
         identity.updated_by = actor_id
         identity.config_version += 1
@@ -162,7 +191,11 @@ class WorkerAppIdentityService:
         # audit event — never secret material or ciphertext.
         try:
             previous_secret = identity.get_active_signing_secret()
-        except Exception as exc:
+        except ValueError as exc:
+            # utils.encryption.decrypt maps every real decryption failure
+            # (InvalidToken: wrong key / tampered) to ValueError — same
+            # contract the bootstrap lane in routes/workers.py relies on.
+            # Anything else is a programming error and must keep surfacing.
             previous_secret = None
             logger.warning(
                 "worker_app_previous_secret_undecryptable",
@@ -187,9 +220,7 @@ class WorkerAppIdentityService:
             identity.retiring_secret_revision = previous_revision
             identity.retiring_valid_until = utcnow() + timedelta(seconds=retiring_for_seconds)
         else:
-            identity.set_retiring_signing_secret(None)
-            identity.retiring_secret_revision = None
-            identity.retiring_valid_until = None
+            identity.clear_retiring_secret()
 
         identity.set_active_signing_secret(signing_secret)
         identity.active_secret_revision = (previous_revision or 0) + 1
