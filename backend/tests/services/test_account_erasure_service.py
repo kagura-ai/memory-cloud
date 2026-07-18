@@ -993,14 +993,25 @@ class TestDeletePostgresSweep:
 
         svc = _service()
         svc._count_and_delete = AsyncMock(return_value=0)
-        svc._pseudonymize_field = AsyncMock(return_value=1)
+
+        # Distinct per-column values pin the SUM semantics exactly — a
+        # refactor that doubles one sweep (2 * created_by) would still
+        # produce 2 under a uniform return_value.
+        async def _by_column(model, column, user_id, extra_values=None):
+            if model is WorkerAppIdentity and column is WorkerAppIdentity.created_by:
+                return 1
+            if model is WorkerAppIdentity and column is WorkerAppIdentity.updated_by:
+                return 2
+            return 0
+
+        svc._pseudonymize_field = AsyncMock(side_effect=_by_column)
         svc.db.delete = AsyncMock()
         svc.db.commit = AsyncMock()
         target = _user()
 
         counts = await svc._delete_postgres(target)
 
-        assert counts["worker_app_identities_pseudonymized"] == 2
+        assert counts["worker_app_identities_pseudonymized"] == 3
         calls = [
             c
             for c in svc._pseudonymize_field.await_args_list
