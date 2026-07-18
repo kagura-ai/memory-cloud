@@ -992,3 +992,157 @@ async def test_clusters_and_positions_unchanged_without_agent_scope(
         db_session, workspace_id=fixture_workspace_id, run_id=run.id
     )
     assert positions is not None and len(positions) == 4
+
+
+@pytest.mark.asyncio
+async def test_get_cluster_representatives_respect_membership_gate(
+    db_session, fixture_workspace_id, fixture_context_id, fixture_pricing
+):
+    """#1357 review F1: a representative moved to an UNBOUND context after
+    the analysis ran must not leak its summary — the post-fetch row filter
+    alone keeps rows from contexts with no binding row."""
+    from uuid import uuid4 as _uuid4
+
+    from auth.agent_scope import set_agent_scope
+    from models.auth import Context
+
+    run, cluster, mems, _denied = await _cluster_with_members(
+        db_session,
+        workspace_id=fixture_workspace_id,
+        context_id=fixture_context_id,
+        pricing=fixture_pricing,
+        allowed=2,
+        denied=0,
+    )
+    other_ctx = Context(
+        id=_uuid4(),
+        workspace_id=fixture_workspace_id,
+        name="unbound_ctx",
+        display_name="Unbound",
+        created_by="test_user",
+        is_private=False,
+    )
+    db_session.add(other_ctx)
+    await db_session.flush()
+    stray = await _make_typed_memory(
+        db_session, workspace_id=fixture_workspace_id, context_id=other_ctx.id, mem_type="note"
+    )
+    cluster.representative_memory_ids = [mems[0].id, stray.id]
+    await db_session.flush()
+
+    await _enforce_scope(
+        db_session, workspace_id=fixture_workspace_id, context_id=fixture_context_id
+    )
+    try:
+        detail = await query_service.get_cluster(
+            db_session,
+            workspace_id=fixture_workspace_id,
+            run_id=run.id,
+            cluster_index=0,
+        )
+        assert detail is not None
+        rep_ids = {r["memory_id"] for r in detail["representatives"]}
+        assert str(stray.id) not in rep_ids
+        assert str(mems[0].id) in rep_ids
+    finally:
+        set_agent_scope(None)
+
+
+@pytest.mark.asyncio
+async def test_list_clusters_omits_fully_denied_cluster(
+    db_session, fixture_workspace_id, fixture_context_id, fixture_pricing
+):
+    """#1357 review F2: a cluster with ZERO permitted rows must not be
+    enumerated — its LLM label/description are synthesized from denied
+    members, and the count-0-with-label shape is itself an oracle."""
+    from auth.agent_scope import set_agent_scope
+
+    run, _cluster, mems, _denied = await _cluster_with_members(
+        db_session,
+        workspace_id=fixture_workspace_id,
+        context_id=fixture_context_id,
+        pricing=fixture_pricing,
+        allowed=1,
+        denied=0,
+    )
+    denied_only = await _make_typed_memory(
+        db_session,
+        workspace_id=fixture_workspace_id,
+        context_id=fixture_context_id,
+        mem_type="decision",
+    )
+    cluster2 = await _make_cluster(db_session, run=run, cluster_index=1, label="denied topic")
+    cluster2.count = 1
+    db_session.add(
+        MemoryAnalysisAssignment(
+            analysis_id=run.id, memory_id=denied_only.id, cluster_id=cluster2.id, x=0.0, y=0.0
+        )
+    )
+    await db_session.flush()
+
+    await _enforce_scope(
+        db_session, workspace_id=fixture_workspace_id, context_id=fixture_context_id
+    )
+    try:
+        rows = await query_service.list_clusters(
+            db_session, workspace_id=fixture_workspace_id, run_id=run.id
+        )
+        assert rows is not None
+        labels = [r["label"] if isinstance(r, dict) else r.label for r in rows]
+        assert labels == ["alpha"]  # the fully-denied cluster is omitted
+    finally:
+        set_agent_scope(None)
+
+    # Human view keeps both.
+    rows = await query_service.list_clusters(
+        db_session, workspace_id=fixture_workspace_id, run_id=run.id
+    )
+    assert rows is not None and len(rows) == 2
+
+
+@pytest.mark.asyncio
+async def test_shadow_scope_keeps_full_view(
+    db_session, fixture_workspace_id, fixture_context_id, fixture_pricing
+):
+    """Shadow enforcement must change nothing observable on any of the
+    three surfaces (predicate is None for shadow scopes)."""
+    from auth.agent_scope import AgentScope, set_agent_scope
+
+    run, cluster, mems, denied_mems = await _cluster_with_members(
+        db_session,
+        workspace_id=fixture_workspace_id,
+        context_id=fixture_context_id,
+        pricing=fixture_pricing,
+        allowed=2,
+        denied=2,
+    )
+    agent = await _enforce_scope(
+        db_session, workspace_id=fixture_workspace_id, context_id=fixture_context_id
+    )
+    set_agent_scope(
+        AgentScope(
+            agent_id=agent.id, enforcement_mode="shadow", workspace_id=fixture_workspace_id
+        )
+    )
+    try:
+        rows = await query_service.list_clusters(
+            db_session, workspace_id=fixture_workspace_id, run_id=run.id
+        )
+        assert rows is not None and len(rows) == 1
+        first = rows[0]
+        assert (first["count"] if isinstance(first, dict) else first.count) == 4
+        positions = await query_service.list_positions(
+            db_session, workspace_id=fixture_workspace_id, run_id=run.id
+        )
+        assert positions is not None and len(positions) == 4
+        detail = await query_service.get_cluster(
+            db_session,
+            workspace_id=fixture_workspace_id,
+            run_id=run.id,
+            cluster_index=0,
+        )
+        assert detail is not None
+        assert len(detail["memories"]) == 4
+        assert detail["count"] == 4
+    finally:
+        set_agent_scope(None)

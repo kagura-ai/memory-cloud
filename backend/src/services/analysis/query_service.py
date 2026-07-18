@@ -519,6 +519,21 @@ async def get_cluster(
     # memories were soft-deleted post-analysis (model docstring guard).
     rep_ids = list(cluster.representative_memory_ids or [])
     if rep_ids:
+        # #1357: same SQL predicate as the member page — the post-fetch row
+        # filter below only subtracts type/source for BOUND contexts (an
+        # unbound context has no filter row → kept), so a representative
+        # moved to an unbound context after the analysis ran would leak its
+        # summary through the membership gap. All three enforce-mode
+        # subtraction points (page, reps, list_clusters) use the one lever.
+        rep_conditions = [
+            Memory.id.in_(rep_ids),
+            Memory.deleted_at.is_(None),
+            # Same defense-in-depth predicate as the page query
+            # above — Issue #496 Copilot review.
+            Memory.workspace_id == workspace_id,
+        ]
+        if binding_predicate is not None:
+            rep_conditions.append(binding_predicate)
         rep_rows = (
             await db.execute(
                 select(
@@ -529,15 +544,7 @@ async def get_cluster(
                     Memory.context_id,
                     Memory.type,
                     Memory.source_type,
-                ).where(
-                    and_(
-                        Memory.id.in_(rep_ids),
-                        Memory.deleted_at.is_(None),
-                        # Same defense-in-depth predicate as the page query
-                        # above — Issue #496 Copilot review.
-                        Memory.workspace_id == workspace_id,
-                    )
-                )
+                ).where(and_(*rep_conditions))
             )
         ).all()
         rep_rows, _ = await filter_memory_rows_by_binding(
@@ -652,6 +659,14 @@ async def list_clusters(
       otherwise. Cluster count is bounded by
       ``ceil(sqrt(memory_count))`` ≈ 90 clusters on an 8000-memory run,
       so no pagination is offered.
+    - **Enforce-mode agent scope (#1357)**: ``list[dict]`` instead — plain
+      copies shaped like ``ClusterRow`` (``cluster_index`` / ``label`` /
+      ``description`` / ``count`` / ``centroid_2d`` /
+      ``representative_memory_ids`` / ``property_stats`` /
+      ``label_confidence``; no DB ``id`` / ``analysis_id``), with
+      count/types recomputed over permitted rows, other facets dropped
+      fail-closed on subtraction, denied representative ids removed, and
+      clusters with ZERO permitted rows omitted entirely.
     """
     boundary = (
         await db.execute(_live_run_boundary_stmt(run_id, workspace_id))
@@ -725,6 +740,14 @@ async def list_clusters(
     for c in clusters:
         types = permitted_types.get(c.id, {})
         filtered_count = sum(types.values())
+        if filtered_count == 0:
+            # Fail-closed on the ENUMERATION surface: a cluster with zero
+            # permitted rows would still volunteer its LLM label /
+            # description — content synthesized from the denied members —
+            # and the count-0-with-label shape confirms denied rows exist.
+            # Direct drill-down (get_cluster by index) keeps the #1301
+            # contract; the list simply does not advertise it.
+            continue
         count = int(c.count)
         stats = dict(c.property_stats or {})
         if filtered_count != count:
