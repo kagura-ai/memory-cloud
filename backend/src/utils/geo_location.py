@@ -306,17 +306,20 @@ def extract_within_filter(
     polygon = within.get("polygon")
     if not isinstance(polygon, list) or not polygon:
         raise LocationValidationError("within.polygon must be a non-empty list of {lat, lon}")
-    if len(polygon) > _MAX_POLYGON_VERTICES:
-        raise LocationValidationError(
-            f"within.polygon supports at most {_MAX_POLYGON_VERTICES} vertices"
-        )
     ring: list[tuple[float, float]] = []
-    for vertex in polygon:
+    for vertex in polygon[: _MAX_POLYGON_VERTICES + 2]:
         if not isinstance(vertex, dict) or "lat" not in vertex or "lon" not in vertex:
             raise LocationValidationError("within.polygon vertices must be {lat, lon} objects")
         ring.append(validate_query_coords(vertex["lat"], vertex["lon"]))
     if ring[0] != ring[-1]:
         ring.append(ring[0])
+    # Cap on the CLOSED ring so an already-closed 128-vertex polygon (129
+    # points) is not wrongly rejected — the closure point is bookkeeping,
+    # not a vertex (#1353 Copilot).
+    if len(ring) - 1 > _MAX_POLYGON_VERTICES:
+        raise LocationValidationError(
+            f"within.polygon supports at most {_MAX_POLYGON_VERTICES} vertices"
+        )
     # A closed ring needs at least 3 DISTINCT vertices (4 points closed).
     if len(set(ring)) < 3:
         raise LocationValidationError("within.polygon needs at least 3 distinct vertices")

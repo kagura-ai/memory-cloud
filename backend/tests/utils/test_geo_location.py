@@ -358,6 +358,22 @@ class TestExtractWithinFilter:
         with pytest.raises(LocationValidationError):
             self._extract({"within": {"polygon": many}})
 
+    def test_closed_ring_closure_point_does_not_count_toward_cap(self):
+        # 128 distinct vertices expressed as a closed 129-point ring must
+        # pass — the closure point is bookkeeping, not a vertex.
+        from utils.geo_location import _MAX_POLYGON_VERTICES
+
+        verts = [{"lat": (i % 90) * 0.001, "lon": i * 0.001} for i in range(_MAX_POLYGON_VERTICES)]
+        closed = [*verts, verts[0]]
+        ring = self._extract({"within": {"polygon": closed}})
+        assert len(ring) == _MAX_POLYGON_VERTICES + 1
+        # One more distinct vertex beyond the cap still fails.
+        overful = [
+            {"lat": (i % 90) * 0.001, "lon": i * 0.001} for i in range(_MAX_POLYGON_VERTICES + 1)
+        ]
+        with pytest.raises(LocationValidationError):
+            self._extract({"within": {"polygon": overful}})
+
 
 class TestPointInPolygon:
     """#1335: ray-casting point-in-polygon for the LanceDB parity leg."""
