@@ -2331,8 +2331,10 @@ Returns: {status, measurement_id, metric, measured_at, value, unit}.""",
                         "description": "Series name, e.g. 'weight_kg' (max 64 chars). Reuse the exact same name to extend a series.",
                     },
                     "value": {
-                        "type": "number",
-                        "description": "The observed value. Must be a finite number (NaN/inf rejected).",
+                        "anyOf": [{"type": "number"}, {"type": "string"}],
+                        "description": "The observed value. Must be a finite number "
+                        "(NaN/inf rejected). Numeric strings are accepted and "
+                        "coerced (#1322 client compat — prefer sending a number).",
                     },
                     "measured_at": {
                         "type": "string",
