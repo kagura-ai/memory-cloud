@@ -1039,6 +1039,18 @@ class AccountErasureService:
             AgentContextBinding, AgentContextBinding.created_by, user_id
         )
 
+        # #1358: worker app identities are GLOBAL control-plane rows — no
+        # workspace FK, so no cascade ever removes them and the operator's
+        # raw OAuth sub in created_by/updated_by would outlive erasure.
+        # Same legal-retention posture (row survives, personal link breaks).
+        # The count is per swept column: a row where the subject is both
+        # creator and last updater contributes 2.
+        from models.worker_app import WorkerAppIdentity
+
+        counts["worker_app_identities_pseudonymized"] = await self._pseudonymize_field(
+            WorkerAppIdentity, WorkerAppIdentity.created_by, user_id
+        ) + await self._pseudonymize_field(WorkerAppIdentity, WorkerAppIdentity.updated_by, user_id)
+
         # #1336 Gap 2: author memories that OUTLIVE the erased subject — rows
         # in co-owned/transferred workspaces (the sole-owner cascade above
         # already wiped the rest). Their Qdrant points were deleted in step 1
