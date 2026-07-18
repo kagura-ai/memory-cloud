@@ -257,6 +257,11 @@ class NeuralMemoryConfig:
     # forever (pre-#1209 behavior). When > 0 the merge_retention phase
     # hard-deletes losers past the window; undo/rollback only work inside it.
     sleep_merge_retention_days: int = 0
+    # #1336: user-forget tombstone retention window in days. 0 = disabled =
+    # retain forever (pre-#1336 behavior). When > 0 the forget_retention
+    # phase hard-deletes user-forgotten rows (details incl. coordinates)
+    # past the window; merge losers keep their own window above.
+    sleep_forget_retention_days: int = 0
     # #1208: shadow-mode dedup — merges record a supersedes edge and leave the
     # loser alive-but-shadowed instead of soft-deleting it. Default OFF =
     # update-by-removal (pre-#1208 behavior).
@@ -471,6 +476,11 @@ class NeuralMemoryConfig:
                 f"sleep_merge_retention_days must be >= 0 (0 = retain forever), "
                 f"got {self.sleep_merge_retention_days}"
             )
+        if self.sleep_forget_retention_days < 0:
+            raise ValueError(
+                f"sleep_forget_retention_days must be >= 0 (0 = retain forever), "
+                f"got {self.sleep_forget_retention_days}"
+            )
         if not self.sleep_edge_discovery_sample_size > 0:
             raise ValueError(
                 f"sleep_edge_discovery_sample_size must be positive, "
@@ -607,6 +617,7 @@ class NeuralMemoryConfig:
             sleep_dedup_enabled=get_bool("SLEEP_DEDUP_ENABLED", True),
             sleep_dedup_similarity_threshold=get_float("SLEEP_DEDUP_SIMILARITY_THRESHOLD", 0.92),
             sleep_merge_retention_days=get_int("SLEEP_MERGE_RETENTION_DAYS", 0),
+            sleep_forget_retention_days=get_int("SLEEP_FORGET_RETENTION_DAYS", 0),
             sleep_dedup_supersede_enabled=get_bool("SLEEP_DEDUP_SUPERSEDE_ENABLED", False),
             sleep_edge_discovery_enabled=get_bool("SLEEP_EDGE_DISCOVERY_ENABLED", True),
             sleep_edge_discovery_sample_size=get_int("SLEEP_EDGE_DISCOVERY_SAMPLE_SIZE", 30),
@@ -847,6 +858,10 @@ class NeuralMemoryConfig:
             sleep_merge_retention_days=configs.get(
                 "sleep_merge_retention_days",
                 base_config.sleep_merge_retention_days,
+            ),
+            sleep_forget_retention_days=configs.get(
+                "sleep_forget_retention_days",
+                base_config.sleep_forget_retention_days,
             ),
             sleep_dedup_supersede_enabled=configs.get(
                 "sleep_dedup_supersede_enabled",

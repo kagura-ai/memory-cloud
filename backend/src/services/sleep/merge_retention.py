@@ -41,6 +41,107 @@ logger = get_logger(__name__)
 _MERGE_DELETED_BY = "sleep_maintenance"
 
 
+async def purge_tombstones(
+    db: AsyncSession,
+    *,
+    phase_name: str,
+    deleted_by_predicate,
+    retention_days: int,
+    user_id: str,
+    workspace_id: str | None,
+    context_id: str | None,
+    reporter: SleepReporter | None = None,
+    report_id: UUID | None = None,
+) -> PhaseResult:
+    """Shared retention sweep for soft-deleted memory rows (#1209 / #1336).
+
+    One implementation for both tombstone classes (merge losers /
+    user-forgotten rows) so the TOCTOU guard, budget exemption, and
+    batch-audit contract cannot drift between the two phases — only the
+    ``deleted_by_predicate`` and config key differ.
+    """
+    result = PhaseResult(phase_name=phase_name)
+
+    if retention_days <= 0:
+        result.skipped = True
+        result.skip_reason = "retention_disabled"
+        return result
+
+    cutoff = utcnow() - timedelta(days=retention_days)
+
+    stmt = select(Memory.id).where(
+        Memory.user_id == user_id,
+        deleted_by_predicate,
+        Memory.deleted_at.is_not(None),
+        Memory.deleted_at < cutoff,
+    )
+    if workspace_id:
+        stmt = stmt.where(Memory.workspace_id == UUID(workspace_id))
+    if context_id:
+        stmt = stmt.where(Memory.context_id == UUID(context_id))
+
+    ids = [row[0] for row in (await db.execute(stmt)).all()]
+    if not ids:
+        result.details = {
+            "purged": 0,
+            "retention_days": retention_days,
+            "cutoff": f"{cutoff:%Y-%m-%d %H:%M}",
+        }
+        return result
+
+    # Re-assert the full purge predicate in the DELETE itself (not just
+    # the ids): a concurrent restore commits in its own session, and a
+    # bare id-DELETE under READ COMMITTED would hard-delete the memory
+    # that was just restored (TOCTOU between our SELECT and this DELETE).
+    # With the predicate repeated, a restored row (deleted_at IS NULL) no
+    # longer matches and survives.
+    await db.execute(
+        delete(Memory).where(
+            Memory.id.in_(ids),
+            deleted_by_predicate,
+            Memory.deleted_at.is_not(None),
+            Memory.deleted_at < cutoff,
+        )
+    )
+
+    # Deliberately NOT counted into memories_processed: the orchestrator
+    # consumes the shared per-run budget from that field, and purging an
+    # unbounded historical backlog of dead rows must not starve the
+    # live-memory phases (importance_reeval / consolidation) that run
+    # after this one. The purge volume is reported in details + the
+    # batch audit action instead.
+    result.memories_processed = 0
+    result.details = {
+        "purged": len(ids),
+        "retention_days": retention_days,
+        "cutoff": f"{cutoff:%Y-%m-%d %H:%M}",
+    }
+
+    # Batch-summary audit action (deliberately NOT per-row): the purge is
+    # the moment reversibility ends, so it must be visible in the same
+    # audit log the deletions live in.
+    if reporter and report_id:
+        await reporter.add_action(
+            report_id=report_id,
+            phase=phase_name,
+            action_type="purge",
+            details={
+                "purged": len(ids),
+                "retention_days": retention_days,
+                "cutoff": f"{cutoff:%Y-%m-%d %H:%M}",
+            },
+        )
+
+    logger.info(
+        f"{phase_name}_purged",
+        purged=len(ids),
+        retention_days=retention_days,
+        user_id=user_id,
+        context_id=context_id,
+    )
+    return result
+
+
 class MergeRetentionPhase:
     """Hard-delete merge losers past the declared retention window."""
 
@@ -62,84 +163,14 @@ class MergeRetentionPhase:
 
         No-op (skipped) when the retention window is disabled (<= 0).
         """
-        result = PhaseResult(phase_name="merge_retention")
-
-        retention_days = int(getattr(config, "sleep_merge_retention_days", 0) or 0)
-        if retention_days <= 0:
-            result.skipped = True
-            result.skip_reason = "retention_disabled"
-            return result
-
-        cutoff = utcnow() - timedelta(days=retention_days)
-
-        stmt = select(Memory.id).where(
-            Memory.user_id == user_id,
-            Memory.deleted_by == _MERGE_DELETED_BY,
-            Memory.deleted_at.is_not(None),
-            Memory.deleted_at < cutoff,
-        )
-        if workspace_id:
-            stmt = stmt.where(Memory.workspace_id == UUID(workspace_id))
-        if context_id:
-            stmt = stmt.where(Memory.context_id == UUID(context_id))
-
-        ids = [row[0] for row in (await self.db.execute(stmt)).all()]
-        if not ids:
-            result.details = {
-                "purged": 0,
-                "retention_days": retention_days,
-                "cutoff": f"{cutoff:%Y-%m-%d %H:%M}",
-            }
-            return result
-
-        # Re-assert the full purge predicate in the DELETE itself (not just
-        # the ids): a concurrent per-merge undo commits in its own session,
-        # and a bare id-DELETE under READ COMMITTED would hard-delete the
-        # memory the admin just restored (TOCTOU between our SELECT and this
-        # DELETE). With the predicate repeated, a restored row (deleted_at
-        # IS NULL) no longer matches and survives.
-        await self.db.execute(
-            delete(Memory).where(
-                Memory.id.in_(ids),
-                Memory.deleted_by == _MERGE_DELETED_BY,
-                Memory.deleted_at.is_not(None),
-                Memory.deleted_at < cutoff,
-            )
-        )
-
-        # Deliberately NOT counted into memories_processed: the orchestrator
-        # consumes the shared per-run budget from that field, and purging an
-        # unbounded historical backlog of dead rows must not starve the
-        # live-memory phases (importance_reeval / consolidation) that run
-        # after this one. The purge volume is reported in details + the
-        # batch audit action instead.
-        result.memories_processed = 0
-        result.details = {
-            "purged": len(ids),
-            "retention_days": retention_days,
-            "cutoff": f"{cutoff:%Y-%m-%d %H:%M}",
-        }
-
-        # Batch-summary audit action (deliberately NOT per-row): the purge is
-        # the moment reversibility ends, so it must be visible in the same
-        # audit log the merges live in.
-        if reporter and report_id:
-            await reporter.add_action(
-                report_id=report_id,
-                phase="merge_retention",
-                action_type="purge",
-                details={
-                    "purged": len(ids),
-                    "retention_days": retention_days,
-                    "cutoff": f"{cutoff:%Y-%m-%d %H:%M}",
-                },
-            )
-
-        logger.info(
-            "merge_retention_purged",
-            purged=len(ids),
-            retention_days=retention_days,
+        return await purge_tombstones(
+            self.db,
+            phase_name="merge_retention",
+            deleted_by_predicate=(Memory.deleted_by == _MERGE_DELETED_BY),
+            retention_days=int(getattr(config, "sleep_merge_retention_days", 0) or 0),
             user_id=user_id,
+            workspace_id=workspace_id,
             context_id=context_id,
+            reporter=reporter,
+            report_id=report_id,
         )
-        return result

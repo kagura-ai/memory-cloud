@@ -1243,11 +1243,12 @@ async def delete_user_points(user_id: str) -> dict[str, int]:
         >>> deleted
         {'kagura_memories': 38, 'kagura_memories_voyage_2_1024': 4}
     """
-    if _active_store() is not None:
-        raise NotImplementedError(
-            "delete_user_points (cross-collection GDPR erasure) is not supported "
-            "by the LanceDB backend (preview)."
-        )
+    _store = _active_store()
+    if _store is not None:
+        # #1336: the Lance backend now implements the cross-collection GDPR
+        # erasure — the preview NotImplementedError left erased users'
+        # vectors at rest on self-hosted Lite installs.
+        return await _store.delete_user_points(user_id)
 
     client = get_qdrant_client()
     deleted_per_collection: dict[str, int] = {}

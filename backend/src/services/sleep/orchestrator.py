@@ -26,6 +26,7 @@ from services.llm_service import LLMService
 from services.sleep.consolidation import ConsolidationPhase
 from services.sleep.dedup_merge import DedupMergePhase
 from services.sleep.edge_discovery import EdgeDiscoveryPhase
+from services.sleep.forget_retention import ForgetRetentionPhase
 from services.sleep.importance_reeval import ImportanceReevalPhase
 from services.sleep.merge_retention import MergeRetentionPhase
 from services.sleep.reindex import ReindexPhase
@@ -42,6 +43,7 @@ FULL_PHASES = {
     "edge_discovery",
     "dedup_merge",
     "merge_retention",
+    "forget_retention",
     "importance_reeval",
     "consolidation",
 }
@@ -127,6 +129,7 @@ class SleepOrchestrator:
             ("edge_discovery", lambda: EdgeDiscoveryPhase(self.db, self.llm_service, em, cn)),
             ("dedup_merge", lambda: DedupMergePhase(self.db, self.llm_service, em, cn)),
             ("merge_retention", lambda: MergeRetentionPhase(self.db)),
+            ("forget_retention", lambda: ForgetRetentionPhase(self.db)),
             ("importance_reeval", lambda: ImportanceReevalPhase(self.db, self.llm_service, cn)),
             ("consolidation", lambda: ConsolidationPhase(self.db, self.llm_service, cn)),
         ]

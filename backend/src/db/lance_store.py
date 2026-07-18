@@ -27,9 +27,10 @@ Design (mirrors the Qdrant data path so no higher layer changes):
 
 PREVIEW limitations (documented, not silently dropped):
 
-* ``copy_context_points`` / ``delete_user_points`` (GDPR cross-collection) /
-  the admin BM25-drift scroll are not implemented for this backend and raise
-  :class:`NotImplementedError`.
+* ``copy_context_points`` / the admin BM25-drift scroll are not implemented
+  for this backend and raise :class:`NotImplementedError`.
+  (``delete_user_points`` — GDPR cross-collection erasure — IS implemented
+  as of #1336.)
 * Cosine ``_distance`` is converted to a similarity score via ``1 - distance``.
 * End-to-end behavior requires ``lancedb`` installed (``pip install
   'kagura-memory[lite]'``) and is pending live validation; the SQL filter
@@ -648,6 +649,40 @@ class LanceVectorStore:
             await asyncio.to_thread(_run)
         except Exception as e:
             raise QdrantError(f"Failed to delete memory from LanceDB: {e}") from e
+
+    def _collection_names(self) -> list[str]:
+        """All kagura_memories* tables in the store (per-model variants included)."""
+        with self._lock:
+            db = self._connect()
+            return [name for name in db.table_names() if name.startswith(DEFAULT_COLLECTION)]
+
+    async def delete_user_points(self, user_id: str) -> dict[str, int]:
+        """Hard-delete every point authored by ``user_id`` across collections.
+
+        GDPR erasure path (#1336): closes the documented preview gap where
+        ``delete_user_points`` raised NotImplementedError on this backend and
+        erased users' vectors stayed at rest. ``user_id`` is an OAuth2 sub
+        (not a UUID) — quote-escaped like every literal in this module.
+        """
+        where = f"user_id = {_sql_str(user_id)}"
+
+        def _run() -> dict[str, int]:
+            deleted: dict[str, int] = {}
+            with self._lock:
+                for name in self._collection_names():
+                    tbl = self._open(name)
+                    if tbl is None:
+                        continue
+                    count = tbl.count_rows(filter=where)
+                    if count:
+                        tbl.delete(where)
+                    deleted[name] = int(count)
+            return deleted
+
+        try:
+            return await asyncio.to_thread(_run)
+        except Exception as e:
+            raise QdrantError(f"Failed to delete user points from LanceDB: {e}") from e
 
     async def delete_context_points(
         self,

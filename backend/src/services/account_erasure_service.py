@@ -49,6 +49,7 @@ from models.agent import Agent, AgentContextBinding
 from models.auth import (
     APIKey,
     AuditLog,
+    Context,
     ExternalAPIKey,
     OAuth2AuthorizationCode,
     OAuth2Client,
@@ -70,6 +71,7 @@ from models.erasure import (
     VALID_REASON_CODES,
     ErasureRequest,
 )
+from models.memory import Memory
 from services.email_service import EmailService, get_email_service
 from services.system_admin_service import SystemAdminService
 from services.workspace_locks import lock_workspace_for_update
@@ -1037,6 +1039,16 @@ class AccountErasureService:
             AgentContextBinding, AgentContextBinding.created_by, user_id
         )
 
+        # #1336 Gap 2: author memories that OUTLIVE the erased subject — rows
+        # in co-owned/transferred workspaces (the sole-owner cascade above
+        # already wiped the rest). Their Qdrant points were deleted in step 1
+        # but the PG rows kept details (coordinates included) and the raw
+        # user_id. Pseudonymize the subject link and NULL the details column (PostgreSQL json) —
+        # which also NULLs the generated columns (location_lat/lon,
+        # trigger_from/until) derived from it. Runs AFTER the workspace
+        # cascade so the count reflects only survivors.
+        counts["memories_scrubbed"] = await self._scrub_surviving_memories(user_id)
+
         # memory_access_events (#1278, RFC-0002 P0-5): no-FK append-only audit
         # rows survive entity deletion, so the subject's rows must be
         # pseudonymized + scrubbed here. The append-only trigger permits UPDATE
@@ -1104,19 +1116,63 @@ class AccountErasureService:
         )
         return result.rowcount or 0
 
-    async def _pseudonymize_field(self, model: Any, column: Any, user_id: str) -> int:
+    async def _scrub_surviving_memories(self, user_id: str) -> int:
+        """Scrub author memories that outlive the erased subject (#1336).
+
+        ``user_id`` becomes the salted pseudonym (the plan_changes/agents
+        legal-retention convention: same-user correlation stays possible for
+        compliance, the sub is unrecoverable) and ``details`` is NULLed —
+        the memory text remains workspace content, but structured personal
+        payload (coordinates, triggers, arbitrary detail keys) is removed
+        at rest. Tombstoned rows of the subject are HARD-DELETED first (not
+        scrubbed): their points are already gone and a pseudonymized
+        tombstone would be unpurgeable by any retention run.
+        """
+        # Tombstoned rows first: they are invisible to every member already
+        # and their Qdrant points were removed in step 1 (delete_user_points),
+        # so hard-DELETE beats scrubbing — a pseudonymized tombstone would be
+        # unpurgeable forever (no sleep run ever executes for the pseudonym,
+        # so no retention window matches it).
+        await self.db.execute(
+            delete(Memory).where(Memory.user_id == user_id, Memory.deleted_at.is_not(None))
+        )
+        scrubbed = await self._pseudonymize_field(
+            Memory, Memory.user_id, user_id, extra_values={"details": None}
+        )
+        # The subject's raw sub also survives in OTHER rows' deleted_by
+        # (forget()/context-delete stamp the actor) and contexts.deleted_by.
+        # Clear to NULL — the member-removal precedent
+        # (member_credentials_service) — so no raw sub outlives erasure.
+        await self.db.execute(
+            update(Memory).where(Memory.deleted_by == user_id).values(deleted_by=None)
+        )
+        await self.db.execute(
+            update(Context).where(Context.deleted_by == user_id).values(deleted_by=None)
+        )
+        return scrubbed
+
+    async def _pseudonymize_field(
+        self,
+        model: Any,
+        column: Any,
+        user_id: str,
+        extra_values: dict[str, Any] | None = None,
+    ) -> int:
         """SHA256-pseudonymize a column across all matching rows.
 
         Used for legal-retention tables (e.g. plan_changes) where the row
         must survive but the personal-data link to the deleted user must
-        not.
+        not. ``extra_values`` lets a caller scrub additional columns in the
+        same UPDATE (#1336: memories.details) so the pseudonym convention
+        stays single-sourced here.
         """
         pseudonym = sha256_hex(user_id, salt=_audit_salt())
+        values: dict[Any, Any] = {column: pseudonym}
+        if extra_values:
+            values.update(extra_values)
         result = cast(
             CursorResult[Any],
-            await self.db.execute(
-                update(model).where(column == user_id).values({column: pseudonym})
-            ),
+            await self.db.execute(update(model).where(column == user_id).values(values)),
         )
         return result.rowcount or 0
 

@@ -104,6 +104,8 @@ class VectorStore(Protocol):
         collection_name: str = DEFAULT_COLLECTION,
     ) -> None: ...
 
+    async def delete_user_points(self, user_id: str) -> dict[str, int]: ...
+
     async def delete_context_points(
         self,
         workspace_id: str,
