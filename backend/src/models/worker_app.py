@@ -95,3 +95,14 @@ class WorkerAppIdentity(Base):
     def get_retiring_signing_secret(self) -> str | None:
         """Decrypt the retiring secret for the internal worker bootstrap only."""
         return self._decrypt_secret(self.retiring_signing_secret_encrypted)
+
+    def clear_retiring_secret(self) -> None:
+        """Tear down the whole retiring window (#1356).
+
+        The three columns are one invariant — a half-cleared window (e.g.
+        ciphertext gone but ``retiring_valid_until`` set) would desync the
+        bootstrap window check and ``identity_collection_revision``.
+        """
+        self.retiring_signing_secret_encrypted = None
+        self.retiring_secret_revision = None
+        self.retiring_valid_until = None

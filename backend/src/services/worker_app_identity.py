@@ -11,6 +11,9 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from models.worker_app import WorkerAppIdentity
 from utils.datetime import utcnow
 from utils.exceptions import ConflictError, NotFoundException, ValidationError
+from utils.logger import get_logger
+
+logger = get_logger(__name__)
 
 MAX_RETIRING_WINDOW_SECONDS = 86_400
 
@@ -119,6 +122,50 @@ class WorkerAppIdentityService:
                     "A signing secret must be configured before enabling an app identity",
                     field="status",
                 )
+            if status == "active" and status != identity.status:
+                # #1356: enabling a row whose stored ciphertext no longer
+                # decrypts (Fernet key rotation / corruption) would return
+                # 200 while the fleet silently serves the app secretless.
+                # Fail loudly and point the operator at the recovery path.
+                try:
+                    identity.get_active_signing_secret()
+                except ValueError as exc:
+                    raise ValidationError(
+                        "The stored signing secret cannot be decrypted; "
+                        "rotate the secret before enabling this app identity",
+                        field="status",
+                    ) from exc
+            # #1356: a real status transition tears down the retiring window.
+            # Disabling revokes ALL acceptance (sticky revocation — the armed
+            # previous secret must not survive to be revived by a later
+            # re-enable), and enabling purges retiring material a row may
+            # still carry from before this rule existed. A same-status
+            # PATCH to "disabled" also purges (operator lever to scrub
+            # revoked material from legacy rows without re-enabling); an
+            # active→active PATCH is not a transition and keeps a
+            # legitimately armed rotation window.
+            if status != identity.status or status == "disabled":
+                # Any of the three window columns set → audit (the trio is
+                # one invariant; a half-populated legacy row must not be
+                # cleared silently). Copilot review on #1361.
+                if (
+                    identity.retiring_secret_revision is not None
+                    or identity.retiring_signing_secret_encrypted is not None
+                    or identity.retiring_valid_until is not None
+                ):
+                    # Audit the teardown BEFORE clearing so the #1343
+                    # correlation (which retiring revision a disable
+                    # revoked) survives — the route only sees post-clear
+                    # state. Ids/enums only, never secret material.
+                    logger.info(
+                        "worker_app_retiring_window_cleared",
+                        platform=identity.platform,
+                        app_key=identity.app_key,
+                        from_status=identity.status,
+                        to_status=status,
+                        retiring_secret_revision=identity.retiring_secret_revision,
+                    )
+                identity.clear_retiring_secret()
             identity.status = status
         identity.updated_by = actor_id
         identity.config_version += 1
@@ -140,7 +187,28 @@ class WorkerAppIdentityService:
                 field="retiring_for_seconds",
             )
         identity = await self._require_identity(platform, app_key)
-        previous_secret = identity.get_active_signing_secret()
+        # #1356: rotate is the documented recovery path when the stored
+        # ciphertext can no longer be decrypted (Fernet key rotation,
+        # corruption) — it must not 500 on the OLD material it is about to
+        # replace. Drop the unrecoverable previous secret (no retiring
+        # window; the fleet could never verify against it anyway) and let
+        # the new-secret write below BE the recovery. Ids/enums only in the
+        # audit event — never secret material or ciphertext.
+        try:
+            previous_secret = identity.get_active_signing_secret()
+        except ValueError as exc:
+            # utils.encryption.decrypt maps every real decryption failure
+            # (InvalidToken: wrong key / tampered) to ValueError — same
+            # contract the bootstrap lane in routes/workers.py relies on.
+            # Anything else is a programming error and must keep surfacing.
+            previous_secret = None
+            logger.warning(
+                "worker_app_previous_secret_undecryptable",
+                platform=identity.platform,
+                app_key=identity.app_key,
+                active_secret_revision=identity.active_secret_revision,
+                error_type=type(exc).__name__,
+            )
         previous_revision = identity.active_secret_revision
         # Arm the retiring window only when the identity is currently ACTIVE.
         # On a disabled identity the previous secret is revoked material — it
@@ -157,9 +225,7 @@ class WorkerAppIdentityService:
             identity.retiring_secret_revision = previous_revision
             identity.retiring_valid_until = utcnow() + timedelta(seconds=retiring_for_seconds)
         else:
-            identity.set_retiring_signing_secret(None)
-            identity.retiring_secret_revision = None
-            identity.retiring_valid_until = None
+            identity.clear_retiring_secret()
 
         identity.set_active_signing_secret(signing_secret)
         identity.active_secret_revision = (previous_revision or 0) + 1
