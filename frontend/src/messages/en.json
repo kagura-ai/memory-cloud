@@ -3932,7 +3932,8 @@
     "secretRevision": "Active secret revision: {revision}",
     "status_unconfigured": "Unconfigured",
     "status_active": "Active",
-    "status_disabled": "Disabled"
+    "status_disabled": "Disabled",
+    "operationFailed": "Operation failed"
   },
   "connectors": {
     "title": "Workspace Connectors",

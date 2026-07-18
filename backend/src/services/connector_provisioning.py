@@ -204,15 +204,12 @@ class ConnectorProvisioningService:
         # a malformed OAuth response. Do NOT include the conflicting connector_id —
         # it may belong to a different workspace (cross-tenant UUID disclosure).
         if external_team_id:
-            existing_team = await self.get_connector_for_dispatch(
+            await self._assert_team_unclaimed(
+                workspace_id=workspace_id,
                 connector_type=connector_type,
-                external_team_id=external_team_id,
                 app_key=app_key,
+                external_team_id=external_team_id,
             )
-            if existing_team is not None:
-                raise ConflictError(
-                    f"A {connector_type} connector for team '{external_team_id}' already exists.",
-                )
 
         # ``auto_create_context_name`` goes through ContextService.create_context,
         # which COMMITS mid-flow — that would release the seat-cap advisory lock
@@ -622,6 +619,51 @@ class ConnectorProvisioningService:
             ConnectorListItem(connector=connector, resource_id=resource_id)
             for connector, resource_id in result.all()
         ]
+
+    async def _assert_team_unclaimed(
+        self,
+        *,
+        workspace_id: UUID,
+        connector_type: str,
+        app_key: str,
+        external_team_id: str,
+    ) -> None:
+        """Reject binding a platform team that is already claimed.
+
+        Two layers (#1360): the app-qualified exact match keeps one
+        connector per ``(type, app_key, team)`` anywhere, and the
+        cross-tenant guard blocks a team bound to ANOTHER workspace from
+        being pre-bound here under a *different* ``app_key`` — the #1315
+        app-qualification would otherwise let a second tenant route that
+        team's future events to a workspace its owner never authorized.
+        Same-workspace multi-app stays allowed (one tenant, several
+        platform apps). Both arms raise the same fixed message — no
+        cross-tenant existence disclosure beyond the conflict itself.
+        """
+        existing_team = await self.get_connector_for_dispatch(
+            connector_type=connector_type,
+            external_team_id=external_team_id,
+            app_key=app_key,
+        )
+        if existing_team is not None:
+            raise ConflictError(
+                f"A {connector_type} connector for team '{external_team_id}' already exists.",
+            )
+        other_tenant = (
+            await self.db.execute(
+                select(WorkspaceConnector.id)
+                .where(
+                    WorkspaceConnector.connector_type == connector_type,
+                    WorkspaceConnector.external_team_id == external_team_id,
+                    WorkspaceConnector.workspace_id != workspace_id,
+                )
+                .limit(1)
+            )
+        ).scalar_one_or_none()
+        if other_tenant is not None:
+            raise ConflictError(
+                f"A {connector_type} connector for team '{external_team_id}' already exists.",
+            )
 
     async def get_connector_for_dispatch(
         self, connector_type: str, external_team_id: str, app_key: str = "default"

@@ -179,18 +179,30 @@ export default function ConnectorsPage() {
   const reload = useCallback(async () => {
     try {
       setLoadError(null);
-      const [connectorRows, appRows] = await Promise.all([
+      // #1360: allSettled, not all — the connectors list is the page's
+      // primary content and must not be taken down by a failure of the
+      // auxiliary available-apps lookup (the app selector just degrades).
+      const [connectorResult, appResult] = await Promise.allSettled([
         listConnectors(),
         listAvailableWorkerApps(),
       ]);
-      const slackApps = appRows.filter((app) => app.platform === "slack");
-      setConnectors(connectorRows);
-      setAvailableApps(slackApps);
-      setManualAppKey((current) =>
-        slackApps.some((app) => app.app_key === current)
-          ? current
-          : (slackApps[0]?.app_key ?? ""),
-      );
+      if (connectorResult.status === "rejected") {
+        throw connectorResult.reason;
+      }
+      setConnectors(connectorResult.value);
+      if (appResult.status === "fulfilled") {
+        const slackApps = appResult.value.filter(
+          (app) => app.platform === "slack",
+        );
+        setAvailableApps(slackApps);
+        setManualAppKey((current) =>
+          slackApps.some((app) => app.app_key === current)
+            ? current
+            : (slackApps[0]?.app_key ?? ""),
+        );
+      } else {
+        setAvailableApps(null);
+      }
     } catch (err) {
       setLoadError(err instanceof Error ? err.message : String(err));
     }
@@ -331,16 +343,17 @@ export default function ConnectorsPage() {
           },
           connector.config_version,
         );
-        setConnectors((current) =>
-          current?.map((item) =>
-            item.connector_id === connector.connector_id
-              ? {
-                  ...item,
-                  runtime: result.runtime,
-                  config_version: result.config_version,
-                }
-              : item,
-          ) ?? null,
+        setConnectors(
+          (current) =>
+            current?.map((item) =>
+              item.connector_id === connector.connector_id
+                ? {
+                    ...item,
+                    runtime: result.runtime,
+                    config_version: result.config_version,
+                  }
+                : item,
+            ) ?? null,
         );
         toast({ title: t("runtimeUpdated") });
       } catch (err) {
@@ -397,14 +410,8 @@ export default function ConnectorsPage() {
       } finally {
         setManualSubmitting(false);
       }
-    }, [
-      availableApps,
-      locale,
-      manualAppKey,
-      manualBotToken,
-      manualTeamId,
-      reload,
-    ],
+    },
+    [availableApps, locale, manualAppKey, manualBotToken, manualTeamId, reload],
   );
 
   // Resolve loading before role gating to avoid a flash of the admin UI
@@ -568,7 +575,9 @@ export default function ConnectorsPage() {
                   )}
                   <Switch
                     checked={c.runtime?.vision_enabled ?? true}
-                    disabled={c.runtime == null || runtimeSaving === c.connector_id}
+                    disabled={
+                      c.runtime == null || runtimeSaving === c.connector_id
+                    }
                     onCheckedChange={(enabled) =>
                       void handleVisionEnabledChange(c, enabled)
                     }
