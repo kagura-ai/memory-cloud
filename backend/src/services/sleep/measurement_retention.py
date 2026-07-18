@@ -21,7 +21,7 @@ Default is **0 = disabled = retain forever** (the #1333 contract).
 from __future__ import annotations
 
 from datetime import timedelta
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, cast
 from uuid import UUID
 
 from sqlalchemy import delete
@@ -77,20 +77,26 @@ class MeasurementRetentionPhase:
             return result
 
         cutoff = utcnow() - timedelta(days=retention_days)
-        delete_result = cast_cursor(
+        delete_result = cast(
+            CursorResult,
             await self.db.execute(
                 delete(Measurement).where(
                     Measurement.context_id == UUID(context_id),
                     Measurement.measured_at < cutoff,
                 )
-            )
+            ),
         )
         purged = delete_result.rowcount or 0
 
         # Purged rows never consume the shared per-run budget (mirrors
         # merge/forget retention: a first-enable backlog purge must not
-        # starve the live-memory phases).
-        result.details = {"purged": purged, "retention_days": retention_days}
+        # starve the live-memory phases). ``cutoff`` mirrors the
+        # merge/forget details shape for report parity.
+        result.details = {
+            "purged": purged,
+            "retention_days": retention_days,
+            "cutoff": f"{cutoff:%Y-%m-%d %H:%M}",
+        }
 
         if purged and reporter is not None and report_id is not None:
             # One batch-summary action — ids/counts only, never metric
@@ -99,18 +105,15 @@ class MeasurementRetentionPhase:
                 report_id=report_id,
                 phase="measurement_retention",
                 action_type="purge",
-                details={"purged": purged, "retention_days": retention_days},
+                details=dict(result.details),
             )
-        if purged:
-            logger.info(
-                "measurement_retention_purged",
-                context_id=context_id,
-                purged=purged,
-                retention_days=retention_days,
-            )
+        # Unconditional: an ENABLED run that purged 0 must be
+        # distinguishable from a disabled/dead phase without a report
+        # column (like forget_retention, this phase has none).
+        logger.info(
+            "measurement_retention_ran",
+            context_id=context_id,
+            purged=purged,
+            retention_days=retention_days,
+        )
         return result
-
-
-def cast_cursor(result: object) -> CursorResult:
-    """Narrow the Any-typed execute() return for rowcount access."""
-    return result  # type: ignore[return-value]

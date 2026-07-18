@@ -90,6 +90,29 @@ async def test_purges_old_observations_and_audits_batch_summary() -> None:
 
 
 @pytest.mark.asyncio
+async def test_reads_real_config_field_and_is_wired_into_full_phases() -> None:
+    """#1336 dead-code lesson, closed both ways: the phase must read the
+    REAL NeuralMemoryConfig field (a getattr against a renamed field would
+    silently return 0 = disabled forever while MagicMock tests stay
+    green), and the orchestrator must actually schedule the phase."""
+    from neural.config import NeuralMemoryConfig
+    from services.sleep.orchestrator import FULL_PHASES
+
+    db = AsyncMock()
+    delete_result = MagicMock()
+    delete_result.rowcount = 1
+    db.execute.return_value = delete_result
+
+    phase = MeasurementRetentionPhase(db)
+    real_config = NeuralMemoryConfig(sleep_measurement_retention_days=30)
+    result = await phase.execute(real_config, "user", None, str(uuid4()), _budget())
+
+    assert result.skipped is False
+    assert result.details["retention_days"] == 30
+    assert "measurement_retention" in FULL_PHASES
+
+
+@pytest.mark.asyncio
 async def test_nothing_to_purge_records_no_action() -> None:
     db = AsyncMock()
     delete_result = MagicMock()
