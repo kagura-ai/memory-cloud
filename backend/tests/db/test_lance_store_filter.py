@@ -322,3 +322,46 @@ async def test_delete_user_points_removes_rows_across_collections():
     name, where = deleted_filters[0]
     assert name == "kagura_memories"
     assert "user_id = 'google-oauth2|erased'" in where
+
+
+@pytest.mark.asyncio
+async def test_search_semantic_enforces_within_post_filter():
+    """#1335: geofence polygon on the LanceDB leg — same post-hoc parity
+    contract as near (#1332)."""
+    import json as _json
+
+    from db.lance_store import LanceVectorStore
+
+    store = LanceVectorStore.__new__(LanceVectorStore)
+    rows = [
+        {
+            "id": "inside",
+            "_distance": 0.05,
+            "payload_json": _json.dumps({"location": {"lat": 0.5, "lon": 0.5}}),
+        },
+        {
+            "id": "outside",
+            "_distance": 0.06,
+            "payload_json": _json.dumps({"location": {"lat": 2.0, "lon": 2.0}}),
+        },
+        {"id": "no-location", "_distance": 0.07, "payload_json": "{}"},
+    ]
+    store._open = lambda _name, dim=0: _StubTable(rows)
+
+    out = await store.search_semantic(
+        USER,
+        [0.1],
+        WS,
+        CTX,
+        filters={
+            "within": {
+                "polygon": [
+                    {"lat": 0.0, "lon": 0.0},
+                    {"lat": 0.0, "lon": 1.0},
+                    {"lat": 1.0, "lon": 1.0},
+                    {"lat": 1.0, "lon": 0.0},
+                ]
+            }
+        },
+    )
+    assert [r["id"] for r in out] == ["inside"]

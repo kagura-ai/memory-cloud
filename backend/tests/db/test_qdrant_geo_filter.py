@@ -120,3 +120,53 @@ class TestEnsureCollectionGeoIndex:
         )
         await ensure_kagura_memories_collection()
         mock_client.create_payload_index.assert_not_awaited()
+
+
+class TestWithinFilterCondition:
+    def test_within_adds_geo_polygon_condition(self):
+        qfilter = _build_search_filter(
+            WS,
+            CTX,
+            UID,
+            filters={
+                "within": {
+                    "polygon": [
+                        {"lat": 0.0, "lon": 0.0},
+                        {"lat": 0.0, "lon": 1.0},
+                        {"lat": 1.0, "lon": 1.0},
+                    ]
+                }
+            },
+        )
+        conds = _location_conditions(qfilter)
+        assert len(conds) == 1
+        exterior = conds[0].geo_polygon.exterior
+        # Auto-closed ring: first == last.
+        assert exterior.points[0].lat == exterior.points[-1].lat
+        assert exterior.points[0].lon == exterior.points[-1].lon
+        assert len(exterior.points) == 4
+
+    def test_malformed_within_fails_closed(self):
+        with pytest.raises(LocationValidationError):
+            _build_search_filter(
+                WS, CTX, UID, filters={"within": {"polygon": [{"lat": 0.0, "lon": 0.0}]}}
+            )
+
+    def test_near_and_within_compose(self):
+        qfilter = _build_search_filter(
+            WS,
+            CTX,
+            UID,
+            filters={
+                "near": {"lat": 0.5, "lon": 0.5, "radius_m": 1000},
+                "within": {
+                    "polygon": [
+                        {"lat": 0.0, "lon": 0.0},
+                        {"lat": 0.0, "lon": 1.0},
+                        {"lat": 1.0, "lon": 1.0},
+                    ]
+                },
+            },
+        )
+        conds = _location_conditions(qfilter)
+        assert len(conds) == 2
