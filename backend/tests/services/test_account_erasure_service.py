@@ -981,7 +981,6 @@ class TestDeletePostgresSweep:
         assert agent_call.args[1] is Agent.owner_user_id
         assert agent_call.args[2] == target.user_id
 
-
     @pytest.mark.asyncio
     async def test_sweep_pseudonymizes_worker_app_identity_actor_columns(self):
         """#1358: worker_app_identities are GLOBAL control-plane rows (no
@@ -1013,9 +1012,7 @@ class TestDeletePostgresSweep:
 
         assert counts["worker_app_identities_pseudonymized"] == 3
         calls = [
-            c
-            for c in svc._pseudonymize_field.await_args_list
-            if c.args[0] is WorkerAppIdentity
+            c for c in svc._pseudonymize_field.await_args_list if c.args[0] is WorkerAppIdentity
         ]
         assert len(calls) == 2
         assert any(c.args[1] is WorkerAppIdentity.created_by for c in calls)
