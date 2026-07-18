@@ -86,7 +86,9 @@ async def test_purges_old_observations_and_audits_batch_summary() -> None:
     kwargs = reporter.add_action.await_args.kwargs
     assert kwargs["phase"] == "measurement_retention"
     assert kwargs["action_type"] == "purge"
-    assert kwargs["details"] == {"purged": 5, "retention_days": 90}
+    assert kwargs["details"]["purged"] == 5
+    assert kwargs["details"]["retention_days"] == 90
+    assert "cutoff" in kwargs["details"]
 
 
 @pytest.mark.asyncio
