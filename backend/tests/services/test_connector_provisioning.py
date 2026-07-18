@@ -516,4 +516,8 @@ class TestTeamUniquenessGuard:
                 app_key="default",
                 external_team_id="T123",
             )
-        db.execute.assert_not_awaited()
+        # Only the (type, team) advisory lock ran — the cross-tenant probe
+        # never fires once the app-qualified duplicate rejects.
+        assert db.execute.await_count == 1
+        lock_sql = str(db.execute.await_args_list[0].args[0])
+        assert "pg_advisory_xact_lock" in lock_sql

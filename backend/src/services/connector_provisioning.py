@@ -640,6 +640,19 @@ class ConnectorProvisioningService:
         platform apps). Both arms raise the same fixed message — no
         cross-tenant existence disclosure beyond the conflict itself.
         """
+        # Serialize concurrent claims on the same (type, team): the
+        # cross-tenant arm below is a read-then-write check with NO unique
+        # backstop (the index is app_key-qualified), so two workspaces
+        # racing under different app_keys would both pass the SELECT. The
+        # xact-scoped advisory lock holds until commit — same pattern as
+        # the seat-cap lock.
+        await self.db.execute(
+            select(
+                func.pg_advisory_xact_lock(
+                    func.hashtext(f"wct:{connector_type}:{external_team_id}")
+                )
+            )
+        )
         existing_team = await self.get_connector_for_dispatch(
             connector_type=connector_type,
             external_team_id=external_team_id,

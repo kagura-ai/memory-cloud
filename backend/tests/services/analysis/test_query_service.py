@@ -1269,3 +1269,38 @@ async def test_enforce_mode_skips_redundant_row_filter(
         assert len(detail["memories"]) == 2
     finally:
         set_agent_scope(None)
+
+
+@pytest.mark.asyncio
+async def test_soft_delete_emptied_cluster_stays_listed_for_enforce_agent(
+    db_session, fixture_workspace_id, fixture_context_id, fixture_pricing
+):
+    """#1360 review F4: a cluster emptied purely by post-analysis
+    soft-deletes (nothing denied) must stay in the enforce-agent list
+    with count 0 — omission is reserved for denied-only clusters."""
+    from auth.agent_scope import set_agent_scope
+
+    run, cluster, mems, _denied = await _cluster_with_members(
+        db_session,
+        workspace_id=fixture_workspace_id,
+        context_id=fixture_context_id,
+        pricing=fixture_pricing,
+        allowed=2,
+        denied=0,
+    )
+    for mem in mems:
+        mem.deleted_at = utcnow()
+    await db_session.flush()
+
+    await _enforce_scope(
+        db_session, workspace_id=fixture_workspace_id, context_id=fixture_context_id
+    )
+    try:
+        rows = await query_service.list_clusters(
+            db_session, workspace_id=fixture_workspace_id, run_id=run.id
+        )
+        assert rows is not None and len(rows) == 1
+        row = rows[0]
+        assert (row["count"] if isinstance(row, dict) else row.count) == 0
+    finally:
+        set_agent_scope(None)

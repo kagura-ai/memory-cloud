@@ -629,6 +629,20 @@ async def get_cluster(
         count = permitted_count
         if permitted_count != live_count:
             property_stats = {"types": permitted_types}
+            # Deny-observability parity with the row-filter lever (#1360
+            # review): the SQL predicate subtracts silently — emit the
+            # aggregate operators previously got from
+            # agent_binding_row_filter_denied. Ids/counts only.
+            from auth.agent_scope import get_agent_scope
+
+            scope = get_agent_scope()
+            logger.warning(
+                "agent_binding_sql_subtraction",
+                surface="get_cluster",
+                run_id=str(run_id),
+                denied_count=live_count - permitted_count,
+                agent_id=str(scope.agent_id) if scope else None,
+            )
         elif "types" in property_stats:
             property_stats = {**property_stats, "types": permitted_types}
 
@@ -759,16 +773,22 @@ async def list_clusters(
         permitted_rep_ids = {row[0] for row in rep_id_rows}
 
     subtracted: list[dict[str, Any]] = []
+    denied_total = 0
     for c in clusters:
         types = permitted_types.get(c.id, {})
         filtered_count = sum(types.values())
-        if filtered_count == 0:
-            # Fail-closed on the ENUMERATION surface: a cluster with zero
-            # permitted rows would still volunteer its LLM label /
-            # description — content synthesized from the denied members —
-            # and the count-0-with-label shape confirms denied rows exist.
-            # Direct drill-down (get_cluster by index) keeps the #1301
-            # contract; the list simply does not advertise it.
+        cluster_live = live_counts.get(c.id, 0)
+        denied_total += cluster_live - filtered_count
+        if filtered_count == 0 and cluster_live > 0:
+            # Fail-closed on the ENUMERATION surface: a cluster whose
+            # every LIVE row the binding denies would still volunteer its
+            # LLM label / description — content synthesized from the
+            # denied members — and the count-0-with-label shape confirms
+            # denied rows exist. A cluster emptied purely by post-analysis
+            # soft-deletes (live == 0, nothing denied) stays listed with
+            # count 0, matching the human view and the get_cluster
+            # drill-down. Direct drill-down keeps the #1301 contract; the
+            # list simply does not advertise denied-only clusters.
             continue
         stats = dict(c.property_stats or {})
         count = filtered_count
@@ -792,6 +812,21 @@ async def list_clusters(
                 "property_stats": stats,
                 "label_confidence": float(c.label_confidence),
             }
+        )
+    if denied_total > 0:
+        # Deny-observability parity with the row-filter lever (#1360
+        # review): the SQL predicate subtracts silently, so emit the
+        # aggregate the operators previously got from
+        # agent_binding_row_filter_denied. Ids/counts only.
+        from auth.agent_scope import get_agent_scope
+
+        scope = get_agent_scope()
+        logger.warning(
+            "agent_binding_sql_subtraction",
+            surface="list_clusters",
+            run_id=str(run_id),
+            denied_count=denied_total,
+            agent_id=str(scope.agent_id) if scope else None,
         )
     return subtracted
 

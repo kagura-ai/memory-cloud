@@ -104,3 +104,20 @@ def test_json_path_orders_redaction_after_format_exc_info(monkeypatch):
         structlog.processors.format_exc_info
     )
     assert processors.index(redact_pg_detail) < len(processors) - 1
+
+
+def test_redact_pg_detail_scrubs_nested_containers():
+    """#1360 review: DETAIL inside dict/list fields must be scrubbed too —
+    the JSON renderer stringifies nested structures after the processors."""
+    event_dict = {
+        "event": "batch_failed",
+        "results": [{"row": 3, "error": _ASYNCPG_STYLE_MESSAGE}],
+        "context": {"cause": _ASYNCPG_STYLE_MESSAGE, "n": 1},
+    }
+    out = redact_pg_detail(None, "error", event_dict)
+    assert "35.6812" not in str(out)
+    assert "secret content" not in str(out)
+    assert out["results"][0]["row"] == 3
+    assert "DETAIL: [redacted]" in out["results"][0]["error"]
+    assert "DETAIL: [redacted]" in out["context"]["cause"]
+    assert out["context"]["n"] == 1
