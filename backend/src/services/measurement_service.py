@@ -8,6 +8,15 @@ untouchable by Sleep consolidation.
 ``record`` is a plain INSERT (no upsert — a series is history, not state).
 ``recall_series`` buckets with PostgreSQL ``date_trunc`` and aggregates with
 an allowlist-gated aggregate, capped to a bounded lookback window.
+
+Retention (#1355): **unbounded by default** — series completeness is the
+lane's value, so nothing expires unless the operator opts in. Growth
+control is ``SLEEP_MEASUREMENT_RETENTION_DAYS`` (0 = retain forever):
+when > 0, the sleep ``measurement_retention`` phase hard-deletes
+observations older than the window for the run's context. The workspace
+MCP rate limiter remains the only ingestion ceiling; ``recall_series``
+deliberately stays rate-limited (NOT in ``_RATE_LIMIT_EXEMPT_TOOLS`` —
+strict-side default, unlike the deterministic id-keyed siblings).
 """
 
 from __future__ import annotations
