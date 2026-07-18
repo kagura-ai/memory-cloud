@@ -49,6 +49,7 @@ feature-development time, not discovered at export time.
 | `attachments` | User file metadata (filename, content type, size) |
 | `file_objects` | R2 object records for user uploads (#485) |
 | `agent_states` | User-set key/value run state (#889) |
+| `measurements` | User-recorded numeric time series — metric, value, unit, observation time (#1333) |
 | `contexts` | User-authored container name/description |
 | `resources` | Connected source-of-truth resources |
 | `resource_events` | Ingested raw source events |

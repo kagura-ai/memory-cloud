@@ -2305,6 +2305,97 @@ Returns: {status, key, value, found}. found is false (value null) when the key i
                 "required": ["context_id"],
             },
         },
+        {
+            "name": "record_measurement",
+            "description": """Append one numeric observation to a metric's series (Issue #1333).
+
+The HOW-MUCH lane: an append-only numeric time-series store (weight, revenue,
+reps, glucose, ...). It is SEPARATE from memories: measurements are NOT
+embedded, are structurally excluded from recall(), and are never merged or
+rewritten by Sleep consolidation — the series stays intact forever.
+
+Use this for raw numbers, NOT prose (use remember() for milestone notes like
+"hit goal weight"). Each call appends a new row; nothing is upserted.
+
+Returns: {status, measurement_id, metric, measured_at, value, unit}.""",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "context_id": {
+                        "type": "string",
+                        "format": "uuid",
+                        "description": "Target context UUID (the series is scoped to this context).",
+                    },
+                    "metric": {
+                        "type": "string",
+                        "description": "Series name, e.g. 'weight_kg' (max 64 chars). Reuse the exact same name to extend a series.",
+                    },
+                    "value": {
+                        "type": "number",
+                        "description": "The observed value. Must be a finite number (NaN/inf rejected).",
+                    },
+                    "measured_at": {
+                        "type": "string",
+                        "description": "Optional ISO 8601 observation time (UTC assumed if naive). Defaults to now; pass it to backdate imports.",
+                    },
+                    "unit": {
+                        "type": "string",
+                        "description": "Optional display unit, e.g. 'kg' (max 32 chars).",
+                    },
+                    "details": {
+                        "type": "object",
+                        "description": "Optional JSON metadata (device, source, notes).",
+                    },
+                },
+                "required": ["context_id", "metric", "value"],
+            },
+        },
+        {
+            "name": "recall_series",
+            "readOnly": True,
+            "description": """Read a metric's measurement series, bucketed and aggregated (Issue #1333).
+
+Deterministic HOW-MUCH query over the measurement lane (see record_measurement):
+buckets one metric's observations by period and aggregates each bucket. Empty
+buckets are omitted. The window is capped at 365 days per call; the default
+window is the last 30 days ending now.
+
+Returns: {status, metric, period, agg, series: [{bucket, value, count}], count}.
+bucket is the ISO start of the period; count is the observations in the bucket.""",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "context_id": {
+                        "type": "string",
+                        "format": "uuid",
+                        "description": "Target context UUID.",
+                    },
+                    "metric": {
+                        "type": "string",
+                        "description": "Series name as passed to record_measurement (max 64 chars).",
+                    },
+                    "period": {
+                        "type": "string",
+                        "enum": ["day", "week", "month"],
+                        "description": "Bucket size (default 'day').",
+                    },
+                    "agg": {
+                        "type": "string",
+                        "enum": ["avg", "min", "max", "sum", "count", "last"],
+                        "description": "Per-bucket aggregate (default 'avg'). 'last' = most recent value in the bucket.",
+                    },
+                    "start": {
+                        "type": "string",
+                        "description": "Optional ISO 8601 window start, inclusive (default: end - 30 days). Window capped at 365 days.",
+                    },
+                    "end": {
+                        "type": "string",
+                        "description": "Optional ISO 8601 window end, exclusive (default: now).",
+                    },
+                },
+                "required": ["context_id", "metric"],
+            },
+        },
         # Issue #1274 (RFC-0002 P0-1): Agent Registry — owner/admin-gated CRUD
         # over the workspace-scoped agents table. Agents are resources, not
         # principals: enforcement attaches to member keys in P0-2.

@@ -62,7 +62,7 @@ Most AI memory tools are just vector databases with a chat wrapper. Kagura is di
 | **Neural Memory Graph** | Hebbian learning builds a knowledge graph in the background. `explore()` traverses it for serendipitous discovery. |
 | **Agent Memory Substrate** | Beyond a knowledge store: delivery modes (pinned / time-triggered), a server-stamped trust boundary, an agent state lane, and a retrieval-feedback signal — the primitives an autonomous agent loop needs. |
 | **Agent Control Plane (preview)** | Workspace-scoped Agent Registry, subtractive context bindings, agent-bound member keys, lifecycle kill switches, and one-call session bootstrap. Introduced in v0.49.0. |
-| **61 MCP Tools** | Memory, Agent Substrate, Agent Control Plane, Neural edges, Contexts, Tags, Files (R2), Analyses (Memory Analysis), Resources, Secrets, Sleep Maintenance, Usage, API-Key Bindings |
+| **63 MCP Tools** | Memory, Agent Substrate, Agent Control Plane, Neural edges, Contexts, Tags, Files (R2), Analyses (Memory Analysis), Resources, Secrets, Sleep Maintenance, Usage, API-Key Bindings |
 | **Multi-Provider** | OpenAI or self-hosted (Ollama, vLLM — local, private, zero cost) for embeddings |
 | **Team Ready** | Workspaces, RBAC, context isolation, shared memory |
 | **Web UI** | Next.js dashboard — contexts, search settings, member management |
@@ -419,7 +419,7 @@ curl -X POST -H "Authorization: Bearer kagura_{your_key}" \
 
 ## MCP Tools
 
-61 tools across 13 categories. Workspace roles: **Owner** > Admin > Member > **Viewer** (read-only). Context roles: **Owner** > Editor > Viewer. Private contexts are visible only to the creator. Members may be restricted to specific contexts via allowlist.
+63 tools across 13 categories. Workspace roles: **Owner** > Admin > Member > **Viewer** (read-only). Context roles: **Owner** > Editor > Viewer. Private contexts are visible only to the creator. Members may be restricted to specific contexts via allowlist.
 
 ### Memory (7)
 
@@ -433,7 +433,7 @@ curl -X POST -H "Authorization: Bearer kagura_{your_key}" \
 | `forget` | Soft-delete a memory (30-day retention) | Member+ |
 | `explore` | Discover related memories via Neural Memory graph | Viewer+ |
 
-### Agent Substrate (5)
+### Agent Substrate (7)
 
 The primitives an autonomous agent loop needs beyond a knowledge store — see [Concepts › Agent Memory Substrate](docs/concepts.md#agent-memory-substrate).
 
@@ -443,6 +443,8 @@ The primitives an autonomous agent loop needs beyond a knowledge store — see [
 | `recall_upcoming` | List upcoming Time Memories (`type="time"`, `delivery_mode="on_trigger"`) | Viewer+ |
 | `set_state` | Upsert agent scratch state (key→value, optional TTL; excluded from recall) | Editor+ |
 | `get_state` | Read one state key, or list all live state for a context | Viewer+ |
+| `record_measurement` | Append one numeric observation to a metric's series (HOW-MUCH lane; excluded from recall, untouched by Sleep) | Editor+ |
+| `recall_series` | Read a metric's series bucketed by day/week/month with avg/min/max/sum/count/last | Viewer+ |
 | `feedback` | Record whether a recalled memory was helpful (append-only signal) | Viewer+ |
 
 ### Agent Control Plane (10, preview)

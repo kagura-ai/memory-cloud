@@ -62,7 +62,7 @@
 | **Neural Memory Graph** | Hebbian 学習がバックグラウンドで知識グラフを構築。`explore()` がそれを辿り偶発的発見を提供 |
 | **Agent Memory Substrate** | 単なる知識ストアを超えて — delivery mode (pin / 時刻トリガ)、サーバー署名の trust boundary、agent state レーン、retrieval feedback シグナル。自律エージェントのループに必要なプリミティブ群 |
 | **Agent Control Plane (preview)** | Workspace スコープの Agent Registry、減算的な context binding、agent-bound member key、ライフサイクル kill switch、1 呼出の session bootstrap。v0.49.0 で導入 |
-| **61 の MCP ツール** | Memory、Agent Substrate、Agent Control Plane、Neural edges、Contexts、Tags、Files (R2)、Analyses (メモリー分析)、Resources、Secrets、Sleep Maintenance、Usage、API-Key Bindings |
+| **63 の MCP ツール** | Memory、Agent Substrate、Agent Control Plane、Neural edges、Contexts、Tags、Files (R2)、Analyses (メモリー分析)、Resources、Secrets、Sleep Maintenance、Usage、API-Key Bindings |
 | **マルチプロバイダ** | 埋め込みに OpenAI かセルフホスト (Ollama、vLLM — ローカル・非公開・コストゼロ) |
 | **チーム対応** | Workspace、RBAC、context 分離、共有メモリ |
 | **Web UI** | Next.js ダッシュボード — context、検索設定、メンバー管理 |
@@ -294,7 +294,7 @@ curl -X POST -H "Authorization: Bearer kagura_{your_key}" \
 
 ## MCP ツール
 
-13 カテゴリ・全 61 ツール。Workspace ロール: **Owner** > Admin > Member > **Viewer** (read-only)。Context ロール: **Owner** > Editor > Viewer。Private context は作成者のみ閲覧可。Member を特定 context に allowlist で制限可能。
+13 カテゴリ・全 63 ツール。Workspace ロール: **Owner** > Admin > Member > **Viewer** (read-only)。Context ロール: **Owner** > Editor > Viewer。Private context は作成者のみ閲覧可。Member を特定 context に allowlist で制限可能。
 
 ### Memory (7)
 
@@ -308,7 +308,7 @@ curl -X POST -H "Authorization: Bearer kagura_{your_key}" \
 | `forget` | ソフト削除 (30 日保持) | Member+ |
 | `explore` | Neural Memory graph で関連メモリ発見 | Viewer+ |
 
-### Agent Substrate (5)
+### Agent Substrate (7)
 
 自律エージェントのループに必要なプリミティブ群 — 詳細は [Concepts › Agent Memory Substrate](docs/concepts.md#agent-memory-substrate)。
 
@@ -318,6 +318,8 @@ curl -X POST -H "Authorization: Bearer kagura_{your_key}" \
 | `recall_upcoming` | 近日の Time Memory (`type="time"`、`delivery_mode="on_trigger"`) を列挙 | Viewer+ |
 | `set_state` | エージェントの scratch state を upsert (key→value、任意 TTL、recall から除外) | Editor+ |
 | `get_state` | state を 1 件取得、または context の全 live state を列挙 | Viewer+ |
+| `record_measurement` | metric の系列に数値観測を 1 件 append (HOW-MUCH レーン、recall から除外・Sleep 対象外) | Editor+ |
+| `recall_series` | metric の系列を day/week/month でバケット集計 (avg/min/max/sum/count/last) | Viewer+ |
 | `feedback` | recall したメモリが有用だったかを記録 (append-only シグナル) | Viewer+ |
 
 ### Agent Control Plane (10、preview)
