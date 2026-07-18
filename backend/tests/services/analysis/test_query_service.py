@@ -1144,3 +1144,128 @@ async def test_shadow_scope_keeps_full_view(
         assert detail["count"] == 4
     finally:
         set_agent_scope(None)
+
+
+@pytest.mark.asyncio
+async def test_soft_delete_drift_keeps_facets_for_enforce_agent(
+    db_session, fixture_workspace_id, fixture_context_id, fixture_pricing
+):
+    """#1360 item 12: a stored-count mismatch caused purely by
+    post-analysis soft-deletes must NOT be treated as a binding
+    subtraction — facets survive, count reflects live permitted rows."""
+    from auth.agent_scope import set_agent_scope
+
+    run, cluster, mems, _denied = await _cluster_with_members(
+        db_session,
+        workspace_id=fixture_workspace_id,
+        context_id=fixture_context_id,
+        pricing=fixture_pricing,
+        allowed=3,
+        denied=0,
+    )
+    # cluster.count stored 3; soft-delete one member AFTER the analysis.
+    mems[0].deleted_at = utcnow()
+    await db_session.flush()
+
+    await _enforce_scope(
+        db_session, workspace_id=fixture_workspace_id, context_id=fixture_context_id
+    )
+    try:
+        detail = await query_service.get_cluster(
+            db_session,
+            workspace_id=fixture_workspace_id,
+            run_id=run.id,
+            cluster_index=0,
+        )
+        assert detail is not None
+        assert detail["count"] == 2
+        # No binding subtraction happened → the tags facet survives.
+        assert "tags" in detail["property_stats"]
+        assert detail["property_stats"]["types"] == {"note": 2}
+
+        rows = await query_service.list_clusters(
+            db_session, workspace_id=fixture_workspace_id, run_id=run.id
+        )
+        assert rows is not None and len(rows) == 1
+        row = rows[0]
+        assert row["count"] == 2
+        assert "tags" in row["property_stats"]
+    finally:
+        set_agent_scope(None)
+
+
+@pytest.mark.asyncio
+async def test_real_subtraction_still_drops_facets_for_enforce_agent(
+    db_session, fixture_workspace_id, fixture_context_id, fixture_pricing
+):
+    """Companion pin: an actual binding subtraction keeps the fail-closed
+    facet drop even when soft-delete drift is present too."""
+    from auth.agent_scope import set_agent_scope
+
+    run, _cluster, mems, denied_mems = await _cluster_with_members(
+        db_session,
+        workspace_id=fixture_workspace_id,
+        context_id=fixture_context_id,
+        pricing=fixture_pricing,
+        allowed=2,
+        denied=1,
+    )
+    mems[0].deleted_at = utcnow()
+    await db_session.flush()
+
+    await _enforce_scope(
+        db_session, workspace_id=fixture_workspace_id, context_id=fixture_context_id
+    )
+    try:
+        detail = await query_service.get_cluster(
+            db_session,
+            workspace_id=fixture_workspace_id,
+            run_id=run.id,
+            cluster_index=0,
+        )
+        assert detail is not None
+        assert detail["count"] == 1
+        assert detail["property_stats"] == {"types": {"note": 1}}
+    finally:
+        set_agent_scope(None)
+
+
+@pytest.mark.asyncio
+async def test_enforce_mode_skips_redundant_row_filter(
+    db_session, fixture_workspace_id, fixture_context_id, fixture_pricing
+):
+    """#1360 item 7: enforce mode subtracts in the page WHERE — the
+    post-fetch row filter (an extra binding SELECT per row set) must not
+    run at all."""
+    from unittest.mock import AsyncMock, patch
+
+    from auth.agent_scope import set_agent_scope
+
+    run, cluster, mems, _denied = await _cluster_with_members(
+        db_session,
+        workspace_id=fixture_workspace_id,
+        context_id=fixture_context_id,
+        pricing=fixture_pricing,
+        allowed=2,
+        denied=1,
+    )
+    cluster.representative_memory_ids = [mems[0].id]
+    await db_session.flush()
+    await _enforce_scope(
+        db_session, workspace_id=fixture_workspace_id, context_id=fixture_context_id
+    )
+    try:
+        with patch(
+            "services.agent_binding_service.filter_memory_rows_by_binding",
+            AsyncMock(side_effect=AssertionError("row filter must not run in enforce mode")),
+        ):
+            detail = await query_service.get_cluster(
+                db_session,
+                workspace_id=fixture_workspace_id,
+                run_id=run.id,
+                cluster_index=0,
+            )
+        assert detail is not None
+        assert len(detail["memories"]) == 2
+    finally:
+        set_agent_scope(None)
