@@ -125,7 +125,14 @@ class MeasurementService:
         # check; NaN/inf are numbers but poison every aggregate.
         if isinstance(value, bool) or not isinstance(value, int | float):
             raise ValueError("'value' must be a number")
-        if not math.isfinite(value):
+        try:
+            finite = math.isfinite(value)
+        except OverflowError as exc:
+            # A JSON integer is arbitrary-precision; one beyond float range
+            # makes isfinite() raise OverflowError, which the MCP boundary
+            # does not map — normalize to the documented validation error.
+            raise ValueError("'value' must be finite (NaN and infinity are rejected)") from exc
+        if not finite:
             raise ValueError("'value' must be finite (NaN and infinity are rejected)")
         if unit is not None:
             if not isinstance(unit, str) or not unit:
@@ -147,10 +154,12 @@ class MeasurementService:
         )
         self.db.add(row)
         await self.db.commit()
+        # Ids only — metric names are free-form user data and must not land
+        # in log aggregation (memory_service convention: ids/enums only).
         logger.info(
             "measurement_recorded",
             context_id=str(context_id),
-            metric=metric,
+            measurement_id=str(row.id),
         )
         return row
 

@@ -134,8 +134,11 @@ class TestRecordMeasurement:
 
     @pytest.mark.asyncio
     async def test_non_number_value_is_rejected(self):
+        # "72.5" is NOT here: numeric strings coerce (#1322 parity — some
+        # MCP clients stringify scalars and this handler has no pydantic
+        # model to do the coercion).
         svc = MagicMock(record=AsyncMock())
-        for bad in (True, "72.5", [1], {"v": 1}):
+        for bad in (True, "abc", [1], {"v": 1}):
             with ExitStack() as stack:
                 _enter(stack, service=svc)
                 result = await handle_record_measurement(
@@ -404,3 +407,25 @@ class TestRegistration:
         for name in ("record_measurement", "recall_series"):
             assert name not in _TOOLS_WITHOUT_CONTEXT_ID
             assert name not in _RATE_LIMIT_EXEMPT_TOOLS
+
+
+@pytest.mark.asyncio
+async def test_numeric_string_value_coerces_like_pydantic_tools():
+    """#1322 parity: clients that JSON-stringify scalars get the same
+    acceptance a pydantic-backed tool would give."""
+    from contextlib import ExitStack
+    from unittest.mock import AsyncMock, MagicMock
+    from uuid import uuid4
+
+    svc = MagicMock(record=AsyncMock(return_value=_row()))
+    with ExitStack() as stack:
+        _enter(stack, service=svc)
+        result = await handle_record_measurement(
+            args={"context_id": CTX, "metric": "weight_kg", "value": "72.5"},
+            user_id="u",
+            workspace_id=uuid4(),
+        )
+    assert _payload(result)["status"] == "success"
+    assert svc.record.await_args.kwargs.get("value") == pytest.approx(72.5) or (
+        len(svc.record.await_args.args) > 2 and svc.record.await_args.args[2] == pytest.approx(72.5)
+    )

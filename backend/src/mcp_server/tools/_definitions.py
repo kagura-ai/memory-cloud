@@ -2386,11 +2386,11 @@ bucket is the ISO start of the period; count is the observations in the bucket."
                     },
                     "start": {
                         "type": "string",
-                        "description": "Optional ISO 8601 window start, inclusive (default: end - 30 days). Window capped at 365 days.",
+                        "description": "Optional ISO 8601 window start, inclusive (default: end - 30 days). Window capped at 365 days. Naive timestamps are interpreted as UTC and buckets align to UTC boundaries (a local-time day may span two buckets); pass an offset (e.g. +09:00) to have it normalized.",
                     },
                     "end": {
                         "type": "string",
-                        "description": "Optional ISO 8601 window end, exclusive (default: now).",
+                        "description": "Optional ISO 8601 window end, exclusive (default: now). Naive = UTC (see start).",
                     },
                 },
                 "required": ["context_id", "metric"],

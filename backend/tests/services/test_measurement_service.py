@@ -220,3 +220,51 @@ class TestRecallSeriesSQL:
         assert params["start"] == datetime(2026, 6, 1)
         assert params["start"].tzinfo is None
         assert params["end"] == datetime(2026, 7, 1)
+
+
+class TestCrossModulePins:
+    """#1333 review: clones and schemas must not drift silently."""
+
+    def test_window_cap_matches_cost_aggregation(self):
+        # The measurement window constants clone cost_aggregation_service's
+        # (importing would couple the lanes) — this pin is what makes the
+        # clone safe: tune one, and this fails until the other follows.
+        from services import cost_aggregation_service as cost
+        from services import measurement_service as meas
+
+        assert meas.VALID_PERIODS == cost.VALID_PERIODS
+        assert meas.MAX_LOOKBACK_DAYS == cost.MAX_LOOKBACK_DAYS
+
+    def test_tool_schema_enums_match_service_allowlists_exactly(self):
+        # A schema/service mismatch either 500s an advertised value or hides
+        # an implemented one.
+        from mcp_server.tools._definitions import get_tool_definitions
+        from services.measurement_service import VALID_AGGS, VALID_PERIODS
+
+        tools = {t["name"]: t for t in get_tool_definitions()}
+        props = tools["recall_series"]["inputSchema"]["properties"]
+        assert tuple(props["period"]["enum"]) == VALID_PERIODS
+        assert tuple(props["agg"]["enum"]) == VALID_AGGS
+
+    def test_all_aggs_including_last_are_implemented(self):
+        from services.measurement_service import _AGG_SQL, VALID_AGGS
+
+        assert set(VALID_AGGS) == set(_AGG_SQL)
+        assert "last" in VALID_AGGS
+
+
+class TestReviewHardening:
+    """#1333 review: overflow normalization."""
+
+    @pytest.mark.asyncio
+    async def test_huge_int_value_is_validation_error_not_overflow(self):
+        # JSON ints are arbitrary-precision; math.isfinite(10**400) raises
+        # OverflowError, which the MCP boundary does not map — the service
+        # must normalize it to the documented ValueError.
+        from unittest.mock import MagicMock
+
+        from services.measurement_service import MeasurementService
+
+        service = MeasurementService(MagicMock())
+        with pytest.raises(ValueError, match="finite"):
+            await service.record(uuid4(), "metric", 10**400)

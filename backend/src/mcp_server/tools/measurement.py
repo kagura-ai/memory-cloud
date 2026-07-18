@@ -25,11 +25,11 @@ from mcp_server.tools._helpers import (
     _resolve_context_id,
     _success_response,
 )
-from utils.datetime import to_utc_iso
 
 # Matches the measurements.metric column length (VARCHAR(64)). Enforced in the
 # handlers too so an overlong metric returns a structured error, not a DB 500.
-_METRIC_MAX_LEN = 64
+from services.measurement_service import METRIC_MAX_LEN as _METRIC_MAX_LEN
+from utils.datetime import to_utc_iso
 
 
 def _validate_metric_arg(metric: Any) -> list[TextContent] | None:
@@ -70,6 +70,15 @@ async def handle_record_measurement(
     if metric_error:
         return metric_error
     value = args["value"]
+    # #1322 parity: some MCP clients JSON-stringify scalar args, and
+    # _arg_coercion leaves numbers to pydantic — which this handler doesn't
+    # have. Coerce numeric strings here so the tool behaves like every
+    # pydantic-backed tool would.
+    if isinstance(value, str):
+        try:
+            value = float(value)
+        except ValueError:
+            return _error_response("validation_error", "'value' must be a number")
     if isinstance(value, bool) or not isinstance(value, int | float):
         return _error_response("validation_error", "'value' must be a number")
     measured_at: datetime | None = None
