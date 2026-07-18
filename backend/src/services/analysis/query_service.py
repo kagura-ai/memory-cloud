@@ -431,12 +431,23 @@ async def get_cluster(
 
     page_size = _clamp_limit(limit, DEFAULT_CLUSTER_PAGE_SIZE, MAX_CLUSTER_PAGE_SIZE)
 
+    # #1301/#1357: one bulk binding SELECT per request; None for non-agent
+    # credentials and shadow scopes. Encoding the subtraction in the page
+    # WHERE (rather than post-filtering fetched rows) is what keeps
+    # ``next_cursor`` from ever naming a denied row (existence oracle,
+    # CWE-639) and keeps pagination advancing without fetching denied rows.
+    from services.agent_binding_service import binding_memory_sql_predicate
+
+    binding_predicate = await binding_memory_sql_predicate(db)
+
     # Page through the cluster's memories. Keyset on memory_id (UUID
     # textual order) — opaque cursor that the client should not parse.
     mem_conditions = [
         MemoryAnalysisAssignment.analysis_id == run_id,
         MemoryAnalysisAssignment.cluster_id == cluster.id,
     ]
+    if binding_predicate is not None:
+        mem_conditions.append(binding_predicate)
     if cursor:
         try:
             cursor_uuid = UUID(cursor)
@@ -484,12 +495,11 @@ async def get_cluster(
         rows = rows[:page_size]
         next_cursor = str(rows[-1].id)
 
-    # #1301: cluster members expose L1 summaries — denied type/source rows
-    # drop for enforce-mode agents (shadow keeps them; outside the MAE
-    # vocabulary, so shadow is log-only). Applied AFTER the keyset cursor is
-    # derived, so pagination advances over denied rows instead of stalling.
-    # ``count`` / ``property_stats`` are handled separately below (recomputed
-    # over permitted rows for enforce-mode agents).
+    # #1301: enforce-mode subtraction now happens in the page WHERE above
+    # (#1357) — for enforce agents this row filter finds nothing to drop.
+    # It stays for SHADOW scopes (predicate is None there): rows are kept
+    # unchanged and the would-deny volume is logged (outside the MAE
+    # vocabulary, so shadow is log-only).
     from services.agent_binding_service import filter_memory_rows_by_binding
 
     rows, _ = await filter_memory_rows_by_binding(db, rows, operation=None, user_id=None)
@@ -509,6 +519,21 @@ async def get_cluster(
     # memories were soft-deleted post-analysis (model docstring guard).
     rep_ids = list(cluster.representative_memory_ids or [])
     if rep_ids:
+        # #1357: same SQL predicate as the member page — the post-fetch row
+        # filter below only subtracts type/source for BOUND contexts (an
+        # unbound context has no filter row → kept), so a representative
+        # moved to an unbound context after the analysis ran would leak its
+        # summary through the membership gap. All three enforce-mode
+        # subtraction points (page, reps, list_clusters) use the one lever.
+        rep_conditions = [
+            Memory.id.in_(rep_ids),
+            Memory.deleted_at.is_(None),
+            # Same defense-in-depth predicate as the page query
+            # above — Issue #496 Copilot review.
+            Memory.workspace_id == workspace_id,
+        ]
+        if binding_predicate is not None:
+            rep_conditions.append(binding_predicate)
         rep_rows = (
             await db.execute(
                 select(
@@ -519,15 +544,7 @@ async def get_cluster(
                     Memory.context_id,
                     Memory.type,
                     Memory.source_type,
-                ).where(
-                    and_(
-                        Memory.id.in_(rep_ids),
-                        Memory.deleted_at.is_(None),
-                        # Same defense-in-depth predicate as the page query
-                        # above — Issue #496 Copilot review.
-                        Memory.workspace_id == workspace_id,
-                    )
-                )
+                ).where(and_(*rep_conditions))
             )
         ).all()
         rep_rows, _ = await filter_memory_rows_by_binding(
@@ -571,9 +588,6 @@ async def get_cluster(
     # indexed GROUP BY over a single cluster's assignments, agent-only.
     count = int(cluster.count)
     property_stats = cluster.property_stats or {}
-    from services.agent_binding_service import binding_memory_sql_predicate
-
-    binding_predicate = await binding_memory_sql_predicate(db)
     if binding_predicate is not None:
         type_rows = (
             await db.execute(
@@ -623,7 +637,7 @@ async def list_clusters(
     *,
     workspace_id: UUID,
     run_id: UUID,
-) -> list[MemoryAnalysisCluster] | None:
+) -> list[MemoryAnalysisCluster] | list[dict[str, Any]] | None:
     """Return every cluster row for a run, ordered by ``cluster_index``.
 
     Used by the REST surface in #497 to render the cluster list, scatter
@@ -645,6 +659,14 @@ async def list_clusters(
       otherwise. Cluster count is bounded by
       ``ceil(sqrt(memory_count))`` ≈ 90 clusters on an 8000-memory run,
       so no pagination is offered.
+    - **Enforce-mode agent scope (#1357)**: ``list[dict]`` instead — plain
+      copies shaped like ``ClusterRow`` (``cluster_index`` / ``label`` /
+      ``description`` / ``count`` / ``centroid_2d`` /
+      ``representative_memory_ids`` / ``property_stats`` /
+      ``label_confidence``; no DB ``id`` / ``analysis_id``), with
+      count/types recomputed over permitted rows, other facets dropped
+      fail-closed on subtraction, denied representative ids removed, and
+      clusters with ZERO permitted rows omitted entirely.
     """
     boundary = (
         await db.execute(_live_run_boundary_stmt(run_id, workspace_id))
@@ -657,7 +679,97 @@ async def list_clusters(
         .where(MemoryAnalysisCluster.analysis_id == run_id)
         .order_by(MemoryAnalysisCluster.cluster_index.asc())
     )
-    return list((await db.execute(stmt)).scalars().all())
+    clusters = list((await db.execute(stmt)).scalars().all())
+
+    # #1357: REST parity with the MCP ``get_cluster`` subtraction (#1301).
+    # For enforce-mode agents the stored per-cluster ``count`` /
+    # ``property_stats.types`` are an existence oracle over denied
+    # type/source rows, and ``representative_memory_ids`` names denied
+    # rows' UUIDs outright. Recompute count/types over permitted rows
+    # (ONE grouped query for the whole run), drop the remaining facets
+    # fail-closed when any row was subtracted (same rule as
+    # ``get_cluster``), and subtract denied representative ids. Plain
+    # dict copies — never mutate the ORM rows (they would flush).
+    from services.agent_binding_service import binding_memory_sql_predicate
+
+    binding_predicate = await binding_memory_sql_predicate(db)
+    if binding_predicate is None or not clusters:
+        return clusters
+
+    type_rows = (
+        await db.execute(
+            select(
+                MemoryAnalysisAssignment.cluster_id,
+                Memory.type,
+                func.count(Memory.id),
+            )
+            .join(Memory, Memory.id == MemoryAnalysisAssignment.memory_id)
+            .where(
+                and_(
+                    MemoryAnalysisAssignment.analysis_id == run_id,
+                    Memory.deleted_at.is_(None),
+                    Memory.workspace_id == workspace_id,
+                    binding_predicate,
+                )
+            )
+            .group_by(MemoryAnalysisAssignment.cluster_id, Memory.type)
+        )
+    ).all()
+    permitted_types: dict[UUID, dict[str, int]] = {}
+    for cluster_id, mem_type, cnt in type_rows:
+        permitted_types.setdefault(cluster_id, {})[mem_type] = int(cnt)
+
+    all_rep_ids = {rid for c in clusters for rid in (c.representative_memory_ids or [])}
+    permitted_rep_ids: set[UUID] = set()
+    if all_rep_ids:
+        rep_id_rows = (
+            await db.execute(
+                select(Memory.id).where(
+                    and_(
+                        Memory.id.in_(all_rep_ids),
+                        Memory.deleted_at.is_(None),
+                        Memory.workspace_id == workspace_id,
+                        binding_predicate,
+                    )
+                )
+            )
+        ).all()
+        permitted_rep_ids = {row[0] for row in rep_id_rows}
+
+    subtracted: list[dict[str, Any]] = []
+    for c in clusters:
+        types = permitted_types.get(c.id, {})
+        filtered_count = sum(types.values())
+        if filtered_count == 0:
+            # Fail-closed on the ENUMERATION surface: a cluster with zero
+            # permitted rows would still volunteer its LLM label /
+            # description — content synthesized from the denied members —
+            # and the count-0-with-label shape confirms denied rows exist.
+            # Direct drill-down (get_cluster by index) keeps the #1301
+            # contract; the list simply does not advertise it.
+            continue
+        count = int(c.count)
+        stats = dict(c.property_stats or {})
+        if filtered_count != count:
+            count = filtered_count
+            stats = {"types": types}
+        elif "types" in stats:
+            stats = {**stats, "types": types}
+        subtracted.append(
+            {
+                "cluster_index": c.cluster_index,
+                "label": c.label,
+                "description": c.description,
+                "count": count,
+                "centroid_2d": list(c.centroid_2d) if c.centroid_2d else [],
+                "representative_memory_ids": [
+                    rid for rid in (c.representative_memory_ids or []) if rid in permitted_rep_ids
+                ],
+                "property_stats": stats,
+                "label_confidence": float(c.label_confidence),
+            }
+        )
+    return subtracted
 
 
 async def list_positions(
@@ -695,6 +807,11 @@ async def list_positions(
     if boundary is None:
         return None
 
+    from services.agent_binding_service import binding_memory_sql_predicate
+
+    binding_predicate = await binding_memory_sql_predicate(db)
+    position_binding = [binding_predicate] if binding_predicate is not None else []
+
     # Filter out soft-deleted memories so the scatter does not render
     # orphan dots for memories the user has since forgotten — matches
     # ``get_cluster``'s ``Memory.deleted_at.is_(None)`` discipline so
@@ -723,6 +840,9 @@ async def list_positions(
                 MemoryAnalysisAssignment.analysis_id == run_id,
                 Memory.deleted_at.is_(None),
                 Memory.workspace_id == workspace_id,
+                # #1357: enforce-mode agents never see denied rows' memory_id
+                # (or their dot positions) — same lever as get_cluster.
+                *position_binding,
             )
         )
         .order_by(
