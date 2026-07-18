@@ -66,11 +66,12 @@ export default function WorkerAppsPage() {
   }, [allowed, reload]);
 
   const run = useCallback(
-    async (key: string, action: () => Promise<unknown>) => {
+    async (key: string, action: () => Promise<unknown>): Promise<boolean> => {
       setBusyKey(key);
       try {
         await action();
         await reload();
+        return true;
       } catch (error) {
         // #1360: user-action failures go to a destructive toast (error
         // surface rule) — inline banners are for load failures only.
@@ -79,6 +80,7 @@ export default function WorkerAppsPage() {
           title: t("operationFailed"),
           description: error instanceof Error ? error.message : String(error),
         });
+        return false;
       } finally {
         setBusyKey(null);
       }
@@ -206,16 +208,22 @@ export default function WorkerAppsPage() {
                       variant="outline"
                       disabled={busy || busyKey !== null}
                       onClick={() =>
-                        void run(key, async () => {
-                          await updateWorkerApp(app, {
+                        void run(key, () =>
+                          updateWorkerApp(app, {
                             display_name: names[key] ?? app.display_name,
-                          });
-                          // Saved — drop this row's draft so the input
-                          // tracks the fresh server value again.
-                          setNames((current) => {
-                            const { [key]: _saved, ...rest } = current;
-                            return rest;
-                          });
+                          }),
+                        ).then((saved) => {
+                          // Drop this row's draft only AFTER the reload
+                          // inside run() delivered the fresh server value
+                          // — clearing earlier flashes the stale name
+                          // mid-refetch, and a failed save keeps the
+                          // draft for retry.
+                          if (saved) {
+                            setNames((current) => {
+                              const { [key]: _saved, ...rest } = current;
+                              return rest;
+                            });
+                          }
                         })
                       }
                     >

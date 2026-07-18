@@ -223,4 +223,34 @@ describe("ConnectorsPage RBAC gate", () => {
       ),
     );
   });
+  it("keeps the connectors list when available-apps fails (#1360)", async () => {
+    setWorkspace("admin");
+    mockListConnectors.mockResolvedValue([
+      {
+        connector_id: "connector-1",
+        connector_type: "slack",
+        app_key: "default",
+        resource_id: "slack-t01",
+        context_id: "context-1",
+        config_version: 1,
+        created_at: "2026-07-18T00:00:00Z",
+        created_by: "user-1",
+        runtime: { vision_enabled: true },
+      },
+    ]);
+    mockListAvailableWorkerApps.mockRejectedValue(new Error("apps down"));
+
+    render(<ConnectorsPage />);
+
+    // Primary content still renders (the i18n mock drops params, so
+    // match the row's static bits rather than the resource id).
+    expect(await screen.findByText("slack")).toBeInTheDocument();
+    expect(
+      screen.getByRole("switch", { name: "visionEnabledFor" }),
+    ).toBeInTheDocument();
+    // ...the manual-bind form degrades away...
+    expect(screen.queryByText("manualBindTitle")).not.toBeInTheDocument();
+    // ...and the degradation is surfaced, not silent.
+    expect(screen.getByText("apps down")).toBeInTheDocument();
+  });
 });

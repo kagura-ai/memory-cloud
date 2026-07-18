@@ -137,6 +137,9 @@ export default function ConnectorsPage() {
     WorkspaceConnectorSummary[] | null
   >(null);
   const [loadError, setLoadError] = useState<string | null>(null);
+  // #1360: available-apps panel failure is decoupled from the primary
+  // connectors list — its own banner, never a page takedown.
+  const [appsLoadError, setAppsLoadError] = useState<string | null>(null);
   const [availableApps, setAvailableApps] = useState<
     AvailableWorkerApp[] | null
   >(null);
@@ -191,6 +194,7 @@ export default function ConnectorsPage() {
       }
       setConnectors(connectorResult.value);
       if (appResult.status === "fulfilled") {
+        setAppsLoadError(null);
         const slackApps = appResult.value.filter(
           (app) => app.platform === "slack",
         );
@@ -201,7 +205,15 @@ export default function ConnectorsPage() {
             : (slackApps[0]?.app_key ?? ""),
         );
       } else {
-        setAvailableApps(null);
+        // Keep whatever list we already had (a transient refresh failure
+        // must not wipe a working selector mid-session) and surface the
+        // degradation via a panel-level banner instead of vanishing
+        // silently — null vs [] would otherwise be indistinguishable.
+        setAppsLoadError(
+          appResult.reason instanceof Error
+            ? appResult.reason.message
+            : String(appResult.reason),
+        );
       }
     } catch (err) {
       setLoadError(err instanceof Error ? err.message : String(err));
@@ -455,6 +467,8 @@ export default function ConnectorsPage() {
           {t("connectSlack")}
         </Button>
       </div>
+
+      {appsLoadError && !availableApps && <ErrorBanner error={appsLoadError} />}
 
       {availableApps && availableApps.length > 0 && (
         <form
