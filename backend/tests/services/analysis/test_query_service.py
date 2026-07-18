@@ -1120,9 +1120,7 @@ async def test_shadow_scope_keeps_full_view(
         db_session, workspace_id=fixture_workspace_id, context_id=fixture_context_id
     )
     set_agent_scope(
-        AgentScope(
-            agent_id=agent.id, enforcement_mode="shadow", workspace_id=fixture_workspace_id
-        )
+        AgentScope(agent_id=agent.id, enforcement_mode="shadow", workspace_id=fixture_workspace_id)
     )
     try:
         rows = await query_service.list_clusters(
