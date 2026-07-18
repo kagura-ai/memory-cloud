@@ -185,6 +185,7 @@ def _build_registry() -> dict[str, Any]:
         handle_init_file_upload,
         handle_list_files,
     )
+    from mcp_server.tools.measurement import handle_recall_series, handle_record_measurement
     from mcp_server.tools.resource import (
         handle_get_resource_impact,
         handle_get_resource_schema,
@@ -225,6 +226,9 @@ def _build_registry() -> dict[str, Any]:
         # Issue #889: agent session-state lane (TTL, recall-excluded)
         "set_state": handle_set_state,
         "get_state": handle_get_state,
+        # Issue #1333: HOW-MUCH measurement lane (append-only, recall-excluded)
+        "record_measurement": handle_record_measurement,
+        "recall_series": handle_recall_series,
         # Issue #888: retrieval feedback signal (append-only, recall-excluded)
         "feedback": handle_feedback,
         "get_context_info": handle_get_context_info,

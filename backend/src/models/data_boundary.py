@@ -32,6 +32,7 @@ RAW_EXPORTABLE_TABLES: frozenset[str] = frozenset(
         "attachments",  # user file metadata (blobs in R2)
         "file_objects",  # R2 object records for user uploads (#485)
         "agent_states",  # user-set key/value run state (#889)
+        "measurements",  # user-recorded numeric time series (#1333)
         "contexts",  # user-authored container name/description
         "resources",  # connected source-of-truth resources
         "resource_events",  # ingested raw source events
