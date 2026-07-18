@@ -145,8 +145,13 @@ class WorkerAppIdentityService:
             # active→active PATCH is not a transition and keeps a
             # legitimately armed rotation window.
             if status != identity.status or status == "disabled":
-                if identity.retiring_secret_revision is not None or (
-                    identity.retiring_signing_secret_encrypted is not None
+                # Any of the three window columns set → audit (the trio is
+                # one invariant; a half-populated legacy row must not be
+                # cleared silently). Copilot review on #1361.
+                if (
+                    identity.retiring_secret_revision is not None
+                    or identity.retiring_signing_secret_encrypted is not None
+                    or identity.retiring_valid_until is not None
                 ):
                     # Audit the teardown BEFORE clearing so the #1343
                     # correlation (which retiring revision a disable
