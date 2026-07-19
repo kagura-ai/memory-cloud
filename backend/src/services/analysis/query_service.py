@@ -179,15 +179,50 @@ async def count_context_memories(
     so the count semantics (filters ignored in v1, soft-delete excluded)
     are defined in one place.
     """
-    from models.memory import Memory
-
     stmt = select(func.count(Memory.id)).where(
-        and_(
-            Memory.workspace_id == workspace_id,
-            Memory.context_id == context_id,
-            Memory.deleted_at.is_(None),
-        )
+        and_(*_live_context_count_conditions(workspace_id=workspace_id, context_id=context_id))
     )
+    return int((await db.execute(stmt)).scalar() or 0)
+
+
+def _live_context_count_conditions(*, workspace_id: UUID, context_id: UUID) -> list[Any]:
+    """Base WHERE set shared by BOTH count lanes (#1366).
+
+    The cap-lane count and the agent-visible count must differ ONLY by
+    the binding predicate — defining the live-row membership here keeps
+    that guaranteed when the base semantics evolve.
+    """
+    return [
+        Memory.workspace_id == workspace_id,
+        Memory.context_id == context_id,
+        Memory.deleted_at.is_(None),
+    ]
+
+
+async def count_context_memories_binding_visible(
+    db: AsyncSession,
+    *,
+    workspace_id: UUID,
+    context_id: UUID,
+) -> int:
+    """Binding-subtracted count for agent-facing response payloads (#1366).
+
+    ``count_context_memories`` deliberately stays the TRUE full-context
+    total: the #1244 run-size cap must bound the run the pipeline would
+    actually execute, and a binding-scoped cap count would let an
+    enforce agent start an over-cap run. This variant applies the #1301
+    SQL predicate on top of the same conditions, so the count an enforce
+    agent *sees* (dry_run/preview ``memory_count`` and the estimate
+    derived from it) never acts as an existence oracle over denied rows.
+    Non-agent and shadow scopes get the true count (predicate is None).
+    """
+    from services.agent_binding_service import binding_memory_sql_predicate
+
+    predicate = await binding_memory_sql_predicate(db)
+    conditions = _live_context_count_conditions(workspace_id=workspace_id, context_id=context_id)
+    if predicate is not None:
+        conditions.append(predicate)
+    stmt = select(func.count(Memory.id)).where(and_(*conditions))
     return int((await db.execute(stmt)).scalar() or 0)
 
 

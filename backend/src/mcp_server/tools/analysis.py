@@ -213,9 +213,13 @@ def _serialize_run_row(row: Any) -> dict[str, Any]:
     consumers see the same fields. Datetimes are emitted with explicit
     UTC ``Z`` suffix via ``to_utc_iso`` (#489 wire-format guarantee).
     """
+    from services.agent_binding_service import (
+        REDACTED_RUN_AGGREGATE_FIELDS,
+        agent_scope_is_enforce,
+    )
     from utils.datetime import to_utc_iso
 
-    return {
+    out = {
         "run_id": str(row.id),
         "workspace_id": str(row.workspace_id),
         "context_id": str(row.context_id),
@@ -233,6 +237,20 @@ def _serialize_run_row(row: Any) -> dict[str, Any]:
         "error": row.error,
         "cancellation_reason": row.cancellation_reason,
     }
+    # #1366: run-level aggregates are an existence/volume oracle for
+    # enforce-mode agents — ``input_count`` includes binding-denied (and
+    # soft-deleted) rows, and cost scales with total token volume, so
+    # both would let a type/source-restricted agent recover the denied
+    # row volume by differencing against per-cluster recomputed counts.
+    # Withhold (null) rather than recompute: a binding-scoped recount
+    # would misrepresent what the run actually billed. Shadow mode is
+    # untouched (enforcement ramp invariant). The field set is shared
+    # with REST ``AnalysisRow.redacted_for_agent_scope`` so the lanes
+    # cannot drift.
+    if agent_scope_is_enforce():
+        for field in REDACTED_RUN_AGGREGATE_FIELDS:
+            out[field] = None
+    return out
 
 
 # ============================================================================
@@ -286,6 +304,7 @@ async def handle_analyze_context(
             if dry_run:
                 # Preview path — same memory count semantics as REST /preview
                 # (delegates to ``query_service.count_context_memories``).
+                from services.agent_binding_service import agent_scope_is_enforce
                 from services.analysis import query_service
                 from services.analysis.preview import (
                     DEFAULT_MODEL_ID,
@@ -293,15 +312,26 @@ async def handle_analyze_context(
                     estimate_cost,
                 )
 
+                is_enforce = agent_scope_is_enforce()
                 memory_count = await query_service.count_context_memories(
                     db, workspace_id=workspace_id, context_id=context_id
                 )
                 # #1244: run-size cap — same rejection the real start
                 # returns, so dry_run callers see it before confirming.
+                # #1366: the cap decision uses the TRUE count, but the
+                # 422 must not name it for enforce agents (oracle).
                 try:
-                    assert_run_size_within_cap(memory_count)
+                    assert_run_size_within_cap(memory_count, redact_count=is_enforce)
                 except ValidationError as cap_exc:
                     return _gate_error_response(cap_exc)
+                # #1366: the count an enforce agent SEES (and the
+                # estimate derived from it) is binding-subtracted so
+                # neither reports denied-row volume. Non-agent/shadow
+                # callers skip the second COUNT entirely.
+                if is_enforce:
+                    memory_count = await query_service.count_context_memories_binding_visible(
+                        db, workspace_id=workspace_id, context_id=context_id
+                    )
                 estimate = estimate_cost(memory_count, model_id=DEFAULT_MODEL_ID)
                 await _log_tool_usage(
                     db,
@@ -336,8 +366,12 @@ async def handle_analyze_context(
             memory_count = await query_service.count_context_memories(
                 db, workspace_id=workspace_id, context_id=context_id
             )
+            # #1366: same true-count cap / redacted-message split as the
+            # dry_run path above.
+            from services.agent_binding_service import agent_scope_is_enforce
+
             try:
-                assert_run_size_within_cap(memory_count)
+                assert_run_size_within_cap(memory_count, redact_count=agent_scope_is_enforce())
             except ValidationError as cap_exc:
                 return _gate_error_response(cap_exc)
 
