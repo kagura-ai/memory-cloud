@@ -156,9 +156,12 @@ def _connectors_page_url(frontend_url: str) -> str:
 def _error_redirect(frontend_url: str, reason: str) -> RedirectResponse:
     """303 back to the Connectors page with an allowlisted ``slack_error`` reason.
 
-    ``reason`` is always one of ``cancelled``/``failed`` — raw Slack error text
-    is never reflected into the redirect URL (same policy as auth.py's
-    ``_oauth_cancel_redirect``).
+    ``reason`` is always one of ``cancelled``/``failed``/``expired`` — raw
+    Slack error text is never reflected into the redirect URL (same policy as
+    auth.py's ``_oauth_cancel_redirect``/``_oauth_error_redirect``).
+    ``expired`` is the one distinguished failure (state TTL/replay) because it
+    is admin-retryable; everything else stays under the generic ``failed`` so
+    the URL cannot become a validation oracle (#1381).
     """
     return RedirectResponse(
         url=f"{_connectors_page_url(frontend_url)}?slack_error={reason}",
@@ -228,17 +231,16 @@ async def slack_callback(
     try:
         stored = await redis.get(_state_key(state))
     except Exception:
+        # #1381: storage outage on a browser-facing callback → friendly
+        # redirect; the error log keeps the outage visible to alerting.
         logger.error("slack_oauth_state_read_failed")
-        raise HTTPException(
-            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-            detail="OAuth state storage unavailable",
-        ) from None
+        return _error_redirect(settings.frontend_url, "failed")
 
     if stored is None:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Invalid or expired state token (CSRF protection)",
-        )
+        # #1381: expired TTL or replay (deny → Back → approve re-uses a
+        # consumed state). Admin-retryable, so it gets the dedicated token.
+        logger.warning("slack_oauth_state_invalid", state=state[:8])
+        return _error_redirect(settings.frontend_url, "expired")
 
     # Normalise workspace_id: aioredis may return str or bytes depending on
     # decode_responses config; str(UUID()) and str(bytes) are both valid
@@ -249,10 +251,15 @@ async def slack_callback(
     # the install, preventing cross-workspace install completion.
     current_workspace_id = str(admin.get("current_workspace_id") or "")
     if stored_workspace_id != current_workspace_id:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Workspace mismatch — please start the Slack connection again",
+        # #1381: generic `failed` (no mismatch oracle in the URL); the log
+        # carries the detail. The state is deliberately NOT consumed — a tab
+        # signed into the correct workspace can still complete the install.
+        logger.warning(
+            "slack_oauth_workspace_mismatch",
+            stored_workspace_id=stored_workspace_id,
+            current_workspace_id=current_workspace_id,
         )
+        return _error_redirect(settings.frontend_url, "failed")
 
     try:
         await redis.delete(_state_key(state))
@@ -262,11 +269,10 @@ async def slack_callback(
     try:
         data = await _exchange_slack_code(code)
     except (httpx.HTTPError, ValueError) as exc:
+        # #1381: redirect instead of 400 JSON; the raw Slack error stays in
+        # the log only.
         logger.warning("slack_oauth_exchange_failed", error=str(exc))
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Slack authorization failed",
-        ) from exc
+        return _error_redirect(settings.frontend_url, "failed")
 
     team = data.get("team") or {}
     authed_user = data.get("authed_user") or {}
@@ -277,11 +283,10 @@ async def slack_callback(
     try:
         bot_token_enc = get_encryptor().encrypt(bot_token) if bot_token else ""
     except Exception:
+        # #1381: redirect instead of 500 JSON; the error log keeps the
+        # encryption failure visible to alerting.
         logger.error("slack_bot_token_encrypt_failed")
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail="Failed to secure Slack credentials",
-        ) from None
+        return _error_redirect(settings.frontend_url, "failed")
 
     install = {
         "workspace_id": stored_workspace_id,
@@ -298,11 +303,10 @@ async def slack_callback(
     try:
         await redis.setex(_install_key(handle), _INSTALL_TTL_SECONDS, json.dumps(install))
     except Exception:
+        # #1381: redirect instead of 503 JSON; the error log keeps the
+        # storage outage visible to alerting.
         logger.error("slack_install_store_failed")
-        raise HTTPException(
-            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-            detail="Failed to store Slack install (storage unavailable)",
-        ) from None
+        return _error_redirect(settings.frontend_url, "failed")
 
     return RedirectResponse(
         url=f"{_connectors_page_url(settings.frontend_url)}?slack_install={handle}",

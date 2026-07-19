@@ -544,6 +544,44 @@ async def google_login(
         return LoginResponse(authorization_url=auth_url, state=state)
 
 
+def _state_hash(state: str | None) -> str | None:
+    """HMAC the CSRF state token for audit logs — the raw token is never logged."""
+    from config.settings import get_settings
+    from utils.hashing import hmac_sha256_hex
+
+    return hmac_sha256_hex(state, get_settings().audit_hmac_key) if state else None
+
+
+# Internal reason tokens for the non-cancel failure redirect (#1381). These are
+# literals chosen by call sites — IdP-supplied text never reaches the URL.
+_OAUTH_ERROR_REASONS = frozenset({"oauth_failed", "oauth_expired"})
+
+
+def _oauth_error_redirect(provider: str, reason: str) -> RedirectResponse:
+    """Redirect a non-cancel callback failure to the login page (#1381).
+
+    Counterpart to ``_oauth_cancel_redirect`` for real failures: missing
+    params, expired/replayed state, exchange failure, DB trouble. The login
+    page maps the well-known ``error`` tokens (``oauth_failed`` /
+    ``oauth_expired``) to i18n'd banners — the same channel already used by
+    ``registration_disabled`` / ``email_in_use``.
+
+    ``reason`` is an internal literal (never IdP-derived); an unknown value
+    collapses to ``oauth_failed`` so the URL vocabulary cannot widen by
+    accident. The base is the fixed ``FRONTEND_URL`` origin, so this is not
+    an open redirect (CWE-601).
+    """
+    from urllib.parse import quote
+
+    if reason not in _OAUTH_ERROR_REASONS:
+        reason = "oauth_failed"
+    frontend_url = os.getenv("FRONTEND_URL", "http://localhost:3000")
+    return RedirectResponse(
+        f"{frontend_url}/login?error={reason}&provider={quote(provider, safe='')}",
+        status_code=303,
+    )
+
+
 def _oauth_cancel_redirect(provider: str, error: str | None, state: str | None) -> RedirectResponse:
     """Redirect a cancelled/errored IdP callback to the friendly login page.
 
@@ -562,10 +600,6 @@ def _oauth_cancel_redirect(provider: str, error: str | None, state: str | None) 
     """
     from urllib.parse import quote
 
-    from config.settings import get_settings
-    from utils.hashing import hmac_sha256_hex
-
-    settings = get_settings()
     frontend_url = os.getenv("FRONTEND_URL", "http://localhost:3000")
 
     # Charset restriction is the primary defense against query-string
@@ -583,7 +617,7 @@ def _oauth_cancel_redirect(provider: str, error: str | None, state: str | None) 
         "oauth_login_cancelled",
         provider=provider,
         reason=reason,
-        state_hash=(hmac_sha256_hex(state, settings.audit_hmac_key) if state else None),
+        state_hash=_state_hash(state),
     )
 
     return RedirectResponse(
@@ -618,12 +652,10 @@ async def google_callback(
         state: CSRF state token (must match stored state).
 
     Returns:
-        Redirect to dashboard with session cookie set
-
-    Raises:
-        HTTPException(400): Invalid state (CSRF attack)
-        HTTPException(401): OAuth2 exchange failed
-        HTTPException(500): Session creation failed
+        Redirect to dashboard with session cookie set. Every failure class on
+        this browser-facing route 303-redirects to ``/login`` with a
+        well-known ``error`` token (#1381) — raw JSON is never the terminal
+        state for an interactive user.
 
     Example:
         GET /api/v1/auth/google/callback?code=xxx&state=yyy
@@ -641,21 +673,31 @@ async def google_callback(
     # other validation so the user gets a friendly /login?cancelled=1 page
     # instead of a raw pydantic 422. The state is left in Redis to expire on
     # its own TTL — deleting it here would break a concurrent legitimate tab.
-    if error is not None:
+    # #1381: truthiness (not `is not None`) — a proxy echoing `?error=`
+    # (empty) alongside a valid code must not abort the sign-in (#1375 lesson).
+    if error:
         return _oauth_cancel_redirect("google", error, state)
-    if code is None or state is None:
-        raise HTTPException(status_code=400, detail="Missing required OAuth2 parameters")
+    if not code or not state:
+        # #1381: browser-facing route — redirect instead of a raw 400 JSON.
+        # Truthiness also catches `?code=&state=` empty-string params.
+        logger.warning("oauth_callback_missing_params", provider="google")
+        return _oauth_error_redirect("google", "oauth_failed")
 
     if not _oauth2_manager or not _session_manager:
-        raise HTTPException(status_code=500, detail="Auth managers not initialized")
+        logger.error("oauth_callback_managers_not_initialized", provider="google")
+        return _oauth_error_redirect("google", "oauth_failed")
 
     # 1. Validate CSRF state
     stored_state = _session_manager._redis.get(f"oauth2_state:{state}")
     if not stored_state:
-        raise HTTPException(
-            status_code=400,
-            detail="Invalid or expired state token (CSRF protection)",
+        # #1381: expired TTL or replay of a consumed state. The hash keeps the
+        # event correlatable for CSRF triage without logging the raw token.
+        logger.warning(
+            "oauth_callback_state_invalid",
+            provider="google",
+            state_hash=_state_hash(state),
         )
+        return _oauth_error_redirect("google", "oauth_expired")
 
     # Delete state (one-time use)
     _session_manager._redis.delete(f"oauth2_state:{state}")
@@ -839,17 +881,17 @@ async def google_callback(
     except ConflictError:
         return _email_in_use_redirect()
     except SQLAlchemyError:
-        # Don't swallow DB errors as 401 — let the app-wide
-        # @app.exception_handler(SQLAlchemyError) map them to 503 so DB
-        # availability issues surface as retriable, not as auth failures.
-        # ConflictError above already handles the email-collision IntegrityError
-        # path; anything else here is unexpected DB trouble.
-        raise
+        # #1381: this route only ever renders in a browser mid-login, so the
+        # app-wide SQLAlchemyError→503 JSON handler (correct for API routes)
+        # is a dead-end here. The error log keeps the outage visible to
+        # log-based alerting; every API route still surfaces the 503.
+        logger.error("oauth_callback_db_error", provider="google", exc_info=True)
+        return _oauth_error_redirect("google", "oauth_failed")
     except Exception as e:
+        # #1381: exchange/userinfo/session failures redirect instead of the
+        # former 401 JSON. The internal exception text stays in the log only.
         logger.error(f"OAuth2 callback failed: {e}")
-        # Keep the internal exception text off the wire (already logged above);
-        # the global handler emits the canonical {error, message, details}.
-        raise AuthenticationError("OAuth2 authentication failed") from e
+        return _oauth_error_redirect("google", "oauth_failed")
 
 
 @router.post("/logout")
@@ -1131,18 +1173,28 @@ async def github_callback(
     """
     # Issue #727: cancelled/errored callback (?error=access_denied&state=...,
     # no code) → friendly /login?cancelled=1 instead of a raw pydantic 422.
-    if error is not None:
+    # #1381: truthiness — empty `?error=` must not abort the sign-in; every
+    # other failure class redirects with a well-known token (see
+    # google_callback for the full rationale).
+    if error:
         return _oauth_cancel_redirect("github", error, state)
-    if code is None or state is None:
-        raise HTTPException(status_code=400, detail="Missing required OAuth2 parameters")
+    if not code or not state:
+        logger.warning("oauth_callback_missing_params", provider="github")
+        return _oauth_error_redirect("github", "oauth_failed")
 
     if not _oauth2_manager or not _session_manager:
-        raise HTTPException(status_code=500, detail="Auth managers not initialized")
+        logger.error("oauth_callback_managers_not_initialized", provider="github")
+        return _oauth_error_redirect("github", "oauth_failed")
 
     # 1. Validate CSRF state
     stored_state = _session_manager._redis.get(f"oauth2_state:{state}")
     if not stored_state:
-        raise HTTPException(status_code=400, detail="Invalid or expired state token")
+        logger.warning(
+            "oauth_callback_state_invalid",
+            provider="github",
+            state_hash=_state_hash(state),
+        )
+        return _oauth_error_redirect("github", "oauth_expired")
     _session_manager._redis.delete(f"oauth2_state:{state}")
 
     try:
@@ -1279,14 +1331,15 @@ async def github_callback(
     except ConflictError:
         return _email_in_use_redirect()
     except SQLAlchemyError:
-        # See google_callback's matching block — let DB errors hit the
-        # global SQLAlchemyError → 503 handler instead of being misclassified
-        # as 401 auth failures.
-        raise
+        # #1381: browser-facing dead-end → redirect; see google_callback's
+        # matching block for the observability rationale.
+        logger.error("oauth_callback_db_error", provider="github", exc_info=True)
+        return _oauth_error_redirect("github", "oauth_failed")
     except Exception as e:
+        # #1381: redirect instead of the former 401 JSON; str(e) stays in the
+        # log only.
         logger.error(f"GitHub OAuth2 callback failed: {e}")
-        # str(e) stays in the log only; the global handler emits the canonical shape.
-        raise AuthenticationError("GitHub authentication failed") from e
+        return _oauth_error_redirect("github", "oauth_failed")
 
 
 # ============================================================================
