@@ -225,3 +225,60 @@ This project includes pre-configured Claude Code tooling in `.claude/`. See the 
 ## License
 
 By contributing, you agree that your contributions will be licensed under the [Apache License 2.0](LICENSE).
+
+## Development with Claude Code
+
+This project is designed to be developed **with** Claude Code and Kagura Memory Cloud itself.
+
+### Getting Started with Claude Code
+
+1. [Install Claude Code](https://docs.anthropic.com/en/docs/claude-code)
+2. Clone the repo and start services (see [README Quick Start](README.md#quick-start))
+3. Create an API key in the Web UI (`http://localhost:3000`)
+4. Create `.mcp.json` in the project root (see [MCP Client Setup](docs/mcp-clients.md))
+
+   > `.mcp.json` is in `.gitignore` — never commit it (contains API keys)
+
+5. Verify in Claude Code:
+   ```
+   > list_contexts()
+   > create_context(name="my-project")
+   ```
+6. Pre-configured tooling loads automatically from `.claude/`:
+
+### Slash Commands
+
+Project-specific local commands (`.claude/commands/`):
+
+| Command | Description |
+|---------|-------------|
+| `/setup` | Set up dev environment from scratch (detects WSL/macOS/Linux) |
+| `/remember <text>` | Save patterns, decisions, or learnings to memory |
+| `/recall <query>` | Search past knowledge for relevant patterns |
+| `/guide` | Show Kagura Memory Cloud usage guide |
+| `/test` | Run full test suite (backend pytest + frontend build) |
+| `/quality` | Run all quality checks (ruff, pyright, frontend build) |
+| `/self-maint` | Audit `.claude/` config against current codebase state |
+| `/api-docs-audit` | Audit OpenAPI tags and endpoint documentation |
+
+The issue→PR workflow lives in the [`kagura-plugins`](https://github.com/kagura-ai/kagura-plugins) marketplace: `/gh-issue-driven:start` (branch + gate1 + recall), `/kagura-code-reviewer` (memory-grounded review), `/gh-issue-driven:ship` (gate2 + PR), `/gh-issue-driven:review` (post-PR loop).
+
+### Hooks (Automatic Safety Guards)
+
+- **Auto-format**: Python (ruff) / TypeScript (prettier) on every file save
+- **Secret detection**: Blocks commits containing hardcoded API keys or passwords
+- **SQL injection prevention**: Blocks f-string SQL queries (enforces SQLAlchemy)
+- **.env protection**: Prevents accidental modification of .env files
+- **Migration protection**: Prevents modification of lock files
+- **Memory sync**: Auto-syncs Claude Code memory files to Kagura Memory Cloud ([details](docs/mcp-clients.md#claude-code-recommended))
+
+### Agents
+
+- **code-reviewer**: Read-only code review against project standards (runs on Sonnet)
+- **test-runner**: Test execution, failure diagnosis, and auto-fix (runs on Sonnet)
+
+### Rules (Auto-loaded Context)
+
+- `rules/backend.md`: FastAPI/Python patterns, async requirements, testing conventions
+- `rules/frontend.md`: Next.js/TypeScript patterns, Tailwind, SWR conventions
+- `rules/security.md`: Auth requirements, RBAC, SQL safety, CORS policy

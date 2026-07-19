@@ -205,238 +205,29 @@ docker compose up -d
 
 ## MCP クライアント設定
 
-### Claude Code (推奨)
+Claude Code / Claude Desktop / Claude Chat / ChatGPT / Gemini CLI ほか、Streamable HTTP 対応の任意の MCP クライアントから接続できます。
 
-Claude Code + Kagura Memory Cloud で、**セッション / マシン / プロジェクト横断の永続・検索可能・チーム共有メモリ** を AI アシスタントに与えます。
+**Claude Code(3 ステップ):**
 
-**Claude Code の組込みメモリで足りないのはなぜ？**
-
-| | Claude Code メモリ | Kagura Memory Cloud |
-|---|---|---|
-| 保存場所 | ローカルファイル (`~/.claude/`) | クラウド (PostgreSQL + Qdrant) |
-| 検索 | ファイル名のみ | Hybrid Search (semantic + 全文) |
-| 共有 | 単一マシン | RBAC 付き team workspace |
-| 構造 | フラット markdown | 3 層 + Neural Memory graph |
-| プロジェクト横断 | プロジェクトごと | MCP で任意プロジェクト |
-
-**セットアップ (3 ステップ):**
-
-1. サービス起動後 `http://localhost:3000/workspace/integrations/api-keys` で API キー作成
-2. `.mcp.json.example` を `.mcp.json` にコピーし workspace ID と API キーを設定:
+1. サービスを起動し `http://localhost:3000/workspace/integrations/api-keys` で API キーを作成
+2. `.mcp.json.example` を `.mcp.json` にコピーし、workspace ID と API キーを設定:
 
 ```bash
 cp .mcp.json.example .mcp.json
 # .mcp.json を編集 — URL の workspace_id と API キーを入れる
 ```
 
-3. Claude Code を再起動して確認:
-```
-あなた: "メモリの context 一覧を教えて"
-→ AI が list_contexts() を呼ぶ
+3. Claude Code を再起動して動作確認(`recall` / `remember` が呼べれば OK)
 
-あなた: "覚えておいて: API は JWT 1h expiry + refresh token rotation"
-→ AI が remember() で恒久保存
+> `.mcp.json` は `.gitignore` 済み — API キーを含むためコミット禁止。
 
-あなた: "認証について何を知ってる？"
-→ AI が recall() で即検索、数ヶ月後でも発見
-```
-
-> `.mcp.json` は `.gitignore` 済み — 絶対に commit しない (API キーが入るため)。
-> プロジェクトごとはプロジェクトルート、全体設定は `~/.claude/.mcp.json` に配置。
-
-### Claude Desktop / Claude Chat (Web)
-
-**Claude Desktop**: `.mcp.json` の形式は Claude Code と同一。プロジェクトルートまたは `~/.claude/.mcp.json` に置く。
-
-**Claude Chat (claude.ai)**: Settings > Integrations でリモート MCP サーバを追加:
-1. "Add Integration" → "Custom MCP Server"
-2. MCP エンドポイント URL: `https://your-domain.com/mcp/w/{workspace_id}`
-3. `Authorization: Bearer kagura_{your_api_key}` ヘッダを追加
-
-> Claude Chat は `localhost` 不可、公開 URL が必須。production 配備または tunnel (ngrok、Cloudflare Tunnel 等) を使う。
-
-### ChatGPT Desktop
-
-ChatGPT デスクトップ版は MCP サーバ対応。Settings > MCP Servers から追加:
-1. サーバ URL: `https://your-domain.com/mcp/w/{workspace_id}`
-2. 認証: Bearer トークン `kagura_{your_api_key}`
-
-> Claude Chat と同様に公開 URL が必要。ローカル開発では tunnel または REST API 直接使用を推奨。
-
-### Gemini CLI
-
-`.gemini/settings.json` (プロジェクトルートまたは `~/.gemini/settings.json`) に追加:
-
-```json
-{
-  "mcpServers": {
-    "kagura-memory": {
-      "url": "http://localhost:8080/mcp/w/{workspace_id}",
-      "headers": {
-        "Authorization": "Bearer kagura_{your_api_key}"
-      }
-    }
-  }
-}
-```
-
-### その他の MCP クライアント / REST API
-
-MCP 互換クライアントなら Streamable HTTP 経由で接続可。MCP 非対応クライアントは REST API を直接利用:
-
-```bash
-# メモリ検索
-curl -X POST -H "Authorization: Bearer kagura_{your_key}" \
-  -H "Content-Type: application/json" \
-  -d '{"query": "your search", "context_id": "..."}' \
-  http://localhost:8080/api/v1/memories/search
-```
+各クライアントの詳細設定・メモリ同期フック・`.claude/` テンプレート・WSL2 ネットワーク注意点は **[MCP Client Setup](docs/mcp-clients.md)**(英語)を参照してください。
 
 ## MCP ツール
 
-13 カテゴリ・全 63 ツール。Workspace ロール: **Owner** > Admin > Member > **Viewer** (read-only)。Context ロール: **Owner** > Editor > Viewer。Private context は作成者のみ閲覧可。Member を特定 context に allowlist で制限可能。
+**13 カテゴリ 63 ツール**: Memory(`remember` / `recall` / `explore` …)、Agent Substrate、Agent Control Plane(preview)、Neural Edges、Contexts、Tags、Files (R2)、Analyses(メモリー分析)、Resources、Secrets(ゼロ知識)、Sleep Maintenance、Usage、API-Key Bindings — 各ツールにロール別アクセス制御。
 
-### Memory (7)
-
-| ツール | 説明 | 必要ロール |
-|--------|------|------------|
-| `remember` | 新規メモリ保存 (summary + content + type、任意で `delivery_mode`) | Member+ |
-| `recall` | Hybrid Search でメモリ検索 (`trust_tier` フィルタ対応) | Viewer+ |
-| `recall_nearby` | 決定論の WHERE 軸クエリ — `details.location` を持つメモリを指定地点から `radius_m` 以内・近い順に返す | Viewer+ |
-| `reference` | メモリの 3 層詳細取得 | Viewer+ |
-| `update_memory` | メモリ更新 / 外部 ID で upsert | Member+ |
-| `forget` | ソフト削除 (30 日保持) | Member+ |
-| `explore` | Neural Memory graph で関連メモリ発見 | Viewer+ |
-
-### Agent Substrate (7)
-
-自律エージェントのループに必要なプリミティブ群 — 詳細は [Concepts › Agent Memory Substrate](docs/concepts.md#agent-memory-substrate)。
-
-| ツール | 説明 | 必要ロール |
-|--------|------|------------|
-| `load_pinned` | always-load メモリ (`delivery_mode="always"`) を決定的にロード — Goal / Guardrail / ポリシー用 | Viewer+ |
-| `recall_upcoming` | 近日の Time Memory (`type="time"`、`delivery_mode="on_trigger"`) を列挙 | Viewer+ |
-| `set_state` | エージェントの scratch state を upsert (key→value、任意 TTL、recall から除外) | Editor+ |
-| `get_state` | state を 1 件取得、または context の全 live state を列挙 | Viewer+ |
-| `record_measurement` | metric の系列に数値観測を 1 件 append (HOW-MUCH レーン、recall から除外・Sleep 対象外) | Editor+ |
-| `recall_series` | metric の系列を day/week/month でバケット集計 (avg/min/max/sum/count/last) | Viewer+ |
-| `feedback` | recall したメモリが有用だったかを記録 (append-only シグナル) | Viewer+ |
-
-### Agent Control Plane (10、preview)
-
-v0.49.0 の control plane は既存の workspace RBAC を土台にする。Agent は principal ではなく registry resource であり、context binding は agent-bound member key の権限を減らすことしかできない。Registry、binding、composed bootstrap、W3C Trace Context / baggage correlation、append-only audit 基盤は実装済み。
-
-| ツール | 説明 | 必要ロール |
-|--------|------|------------|
-| `register_agent` | workspace スコープの agent を登録 | Owner/Admin |
-| `list_agents` | 登録 agent と lifecycle/enforcement status を列挙 | Owner/Admin |
-| `get_agent` | agent を 1 件取得 | Owner/Admin |
-| `update_agent` | metadata、`status`、`enforcement_mode` を更新 | Owner/Admin |
-| `delete_agent` | agent と bound key を恒久削除。運用上は `status="retired"` を推奨 | Owner/Admin |
-| `bind_agent_context` | 減算的な context binding を追加 | Owner/Admin |
-| `list_agent_bindings` | agent の context binding 一覧 | Owner/Admin |
-| `update_agent_binding` | read/write/default binding policy を更新 | Owner/Admin |
-| `unbind_agent_context` | binding を削除 (enforce mode では default-deny) | Owner/Admin |
-| `get_agent_bootstrap` | session start 用に context guide + pinned + 任意の trusted recall + upcoming + state を合成 | Agent-bound key または Owner/Admin |
-
-> **Preview 境界:** memory type/source 単位の filter は enforce モードの agent に対し、メモリ読取レーン (recall、recall_nearby、reference、forget、explore、load_pinned、upcoming) で [#1299](https://github.com/kagura-ai/memory-cloud/issues/1299)、列挙/集計面 (list、stats、access-patterns、get_cluster) で [#1301](https://github.com/kagura-ai/memory-cloud/issues/1301) から強制される — `null` = 全 type 許可、`[]` = deny-all。shadow モードはフィルタせず `would_deny` を記録する。`traceparent` と W3C baggage による `agent_id` / `session_id` / `run_id` correlation は実装済みだが、server-side span export は P0 の対象外。`memory_access_events` は bootstrap、load-pinned、feedback、recall、reference、remember、update、forget で稼働し、binding deny / `would_deny` を永続化する。
-
-### Neural Edges (4)
-
-| ツール | 説明 | 必要ロール |
-|--------|------|------------|
-| `list_edges` | メモリに接続された edge 一覧 | Viewer+ |
-| `create_edge` | 2 メモリ間に edge 作成 | Member+ |
-| `update_edge` | edge の weight / type 更新 | Member+ |
-| `delete_edge` | 2 メモリ間の edge 削除 | Member+ |
-
-### Contexts (7)
-
-| ツール | 説明 | 必要ロール |
-|--------|------|------------|
-| `get_context_info` | context メタデータとガイドライン取得 | Viewer+ |
-| `list_contexts` | workspace 内の context 一覧 | Viewer+ |
-| `create_context` | context 新規作成 | Owner/Admin |
-| `update_context` | context 設定更新 (summary、usage guide、resource_id、is_public) | Editor+ |
-| `delete_context` | context とその全メモリを削除 | Owner/Admin |
-| `merge_contexts` | source context から target context へメモリを統合 | Owner/Admin |
-| `update_search_config` | context 単位で hybrid search 重み、reranker、query-intent routing (`routing_mode`) を調整 | Editor+ |
-
-### Tags (1)
-
-| ツール | 説明 | 必要ロール |
-|--------|------|------------|
-| `list_tags` | context 内の tag 語彙一覧 (remember/recall 前に呼んで揃える用途) | Viewer+ |
-
-### Files / R2 添付ファイル (5)
-
-| ツール | 説明 | 必要ロール |
-|--------|------|------------|
-| `init_file_upload` | quota 予約 + presigned PUT URL 発行 (R2、≤100 MiB) | Member+ |
-| `complete_file_upload` | R2 PUT 後にアップロード確定、sha256 検証、status=uploaded に遷移 | Member+ |
-| `list_files` | workspace 内のアップロード済み (非削除) ファイル一覧 (新しい順) | Viewer+ |
-| `get_file_download_url` | ファイルへの presigned GET URL 発行 | Viewer+ |
-| `delete_file` | ファイルオブジェクトのソフト削除 | Member+ |
-
-### Analyses — メモリー分析 (5)
-
-メモリを UMAP + KMeans + LLM ラベリング (kouchou-ai 方式) で大規模クラスタリング。質的分析用途。
-
-| ツール | 説明 | 必要ロール |
-|--------|------|------------|
-| `analyze_context` | 分析 run 開始 (`dry_run=true` でコスト試算のみ可) | Owner + Pro プラン + BYOK + quota |
-| `list_analyses` | context の過去分析 run 一覧 | Owner |
-| `get_analysis` | 完了済み分析 (クラスタ、ラベル、統計) 取得 | Owner |
-| `get_active_analysis` | 実行中分析の取得 (あれば) | Owner |
-| `get_cluster` | 単一クラスタの所属メモリを drilldown | Owner |
-
-分析 run は `ANALYSIS_MAX_MEMORY_COUNT` (既定 10,000、preview/start の両方で超過を拒否) で上限を持つ。v0.47.0 以降、cancel は all-or-nothing、削除済み context の run は REST/MCP の双方で不可視、strict BYOK labeling は platform key へ fallback せず、labeling 対象 cluster の過半数が失敗した run は `failed` になる。
-
-### Resources — 外部データ取り込み (6)
-
-| ツール | 説明 | 必要ロール |
-|--------|------|------------|
-| `setup_resource` | public context 作成 + resource token 発行 | Owner/Admin + Pro プラン |
-| `setup_connector` | ai-worker チャットコネクタを provision (resource + connector 行 + token) | Owner/Admin + connector seats |
-| `list_resource_tokens` | workspace の有効 resource token 一覧 | Owner/Admin |
-| `ingest_events` | resource に batch upsert/delete events (最大 100 events、session-auth MCP 経路) | Member+ |
-| `get_resource_impact` | resource 統計 (token 数、memory 数、schema version) | Viewer+ |
-| `get_resource_schema` | resource のフィールド定義取得 | Viewer+ |
-
-### Secrets (5)
-
-ゼロ知識シークレットストア: サーバーは `age` 公開受信者キーと不透明な ciphertext のみを保持し、**復号は一切行わない**。暗号化・復号はすべてクライアント側 (`kagura secret` CLI / SDK)。`list` はメタデータのみを返し、平文値を返すエンドポイントは存在しない。
-
-| ツール | 説明 | 必要ロール |
-|--------|------|------------|
-| `secret_register_pubkey` | 自分の `age` 受信者公開鍵を登録 (pending で開始、owner 承認後に grant 受領可) | Member+ |
-| `secret_put` | age 暗号化 ciphertext を保存 + 承認済み受信者へ grant (`recipients_snapshot` は `grant_pubkey_ids` と完全一致必須) | Owner/Admin |
-| `secret_get` | 有効な grant を持つ ciphertext を取得 (ローカルで復号、全 fetch は改竄検知監査ログに記録) | Member+ |
-| `secret_list` | secret 名 + メタデータ (status、version、grant 数、rotation フラグ) を列挙 — 値は返さない | Owner/Admin |
-| `secret_revoke_grant` | 受信者の grant を revoke し secret を `rotation_needed` にフラグ (遡及不可 — 上流を rotate) | Owner/Admin |
-
-### Sleep Maintenance (3)
-
-バックグラウンドでメモリ統合 (decay、edge pruning、テーマ要約) を実行。
-
-| ツール | 説明 | 必要ロール |
-|--------|------|------------|
-| `get_sleep_history` | 過去 sleep run 一覧 | Viewer+ |
-| `get_sleep_report` | sleep run の詳細レポート (全 action 込み) | Viewer+ |
-| `rollback_sleep_run` | 完了済み sleep run の全 action をロールバック | Member+ (report 作成者のみ) |
-
-### Usage (1)
-
-| ツール | 説明 | 必要ロール |
-|--------|------|------------|
-| `get_usage` | workspace の現在使用量 (memory / context / member / MCP 呼出/日) | Viewer+ |
-
-### API-Key Bindings (2)
-
-| ツール | 説明 | 必要ロール |
-|--------|------|------------|
-| `list_my_bindings` | public-bound API キー一覧 (read-only、owner スコープ) | Viewer+ |
-| `describe_binding` | `key_id` か `context_id` の一方で binding を 1 件記述 (read-only、owner スコープ) | Viewer+ |
+ツールごとの詳細と必要ロール: **[MCP Tools Reference](docs/mcp-tools.md)**(英語)
 
 ## REST API
 
@@ -458,39 +249,14 @@ MCP ツールに加えてフル REST API を提供:
 
 2 つの OAuth2 プロバイダをサポート:
 
-- **Google OAuth2** — 必須。`GOOGLE_CLIENT_ID` と `GOOGLE_CLIENT_SECRET` を設定
+- **Google OAuth2** — 任意。`GOOGLE_CLIENT_ID` と `GOOGLE_CLIENT_SECRET` を設定
 - **GitHub OAuth2** — 任意。`GITHUB_CLIENT_ID` と `GITHUB_CLIENT_SECRET` を設定
 
-プロバイダ間で同じメールアドレスのユーザは単一アカウントを共有。
+プロバイダ間で同じメールアドレスのユーザは単一アカウントを共有。OAuth プロバイダなしでもパスワード + MFA ログインが利用できます。
 
 ## プランティア カスタマイズ
 
-プランは workspace ごとのリソース上限を制御。既定:
-
-| プラン | Contexts | Memories | MCP 呼出/日 |
-|--------|----------|----------|------------|
-| S (Free) | 1 | 1,000 | 1,000 |
-| M (Basic) | 3 | 10,000 | 10,000 |
-| L (Pro) | 20 | 100,000 | 50,000 |
-
-環境変数でオーバーライド:
-
-```bash
-PLAN_FREE_MAX_CONTEXTS=5
-PLAN_FREE_MEMORY_LIMIT=5000
-PLAN_BASIC_MAX_CONTEXTS=10
-PLAN_PRO_MAX_CONTEXTS=50
-```
-
-セルフホストの個人利用では自分の workspace に L (Pro) を割当て。プラン変更は既定で admin のみ。SaaS で self-service billing を使う場合は Stripe を有効化:
-
-```bash
-BILLING_ENABLED=true
-STRIPE_SECRET_KEY=sk_...
-STRIPE_WEBHOOK_SECRET=whsec_...
-STRIPE_PRICE_BASIC=price_xxx
-STRIPE_PRICE_PRO=price_yyy
-```
+プランは workspace ごとのリソース上限(contexts / memories / MCP 呼出/日)を制御します。セルフホストの単独利用では自分の workspace に L (Pro) プランを割り当ててください。既定値・環境変数での上書き・Stripe 課金の有効化: **[Deployment → Plan Tiers](docs/deployment.md#plan-tiers)**(英語)
 
 ## Claude Code プラグイン
 
@@ -538,6 +304,9 @@ STRIPE_PRICE_PRO=price_yyy
 - **エンドポイント (ライブ)**: `http://localhost:8080/redoc` — FastAPI から自動生成、稼働バックエンドと常に同期
 
 **コンセプトとガイド:**
+
+- [MCP Client Setup](docs/mcp-clients.md) — 各クライアントの接続設定(英語)
+- [MCP Tools Reference](docs/mcp-tools.md) — 全 63 ツールと必要ロール(英語)
 
 - [Core Concepts](docs/concepts.md) — Workspace、Context、Memory、Neural Memory、MCP ツール
 - [Architecture](docs/architecture.md) — システム設計とデータフロー
