@@ -397,13 +397,26 @@ async def test_audit_log_append_only_triggers(db_session, ws):
     then assert in-band mutation (UPDATE/DELETE) and a full-table TRUNCATE — which
     would silently reset the hash chain to genesis — are all rejected.
     """
-    # Install the same triggers the migration ships (row UPDATE/DELETE + TRUNCATE).
+    # Install the same triggers the migrations ship (e50 triggers + the
+    # e72 carve-out body: UPDATE limited to the erasure identity columns).
     await db_session.execute(
         text(
             """
             CREATE OR REPLACE FUNCTION secret_access_log_no_mutate()
             RETURNS trigger AS $$
             BEGIN
+                IF TG_OP = 'UPDATE' THEN
+                    IF (to_jsonb(OLD) - ARRAY['actor_user_id', 'recipient_identity'])
+                       IS DISTINCT FROM
+                       (to_jsonb(NEW) - ARRAY['actor_user_id', 'recipient_identity']) THEN
+                        RAISE EXCEPTION
+                            'secret_access_log is append-only; only '
+                            '(actor_user_id, recipient_identity) may be '
+                            'updated (erasure carve-out)'
+                            USING ERRCODE = 'restrict_violation';
+                    END IF;
+                    RETURN NEW;
+                END IF;
                 RAISE EXCEPTION
                     'secret_access_log is append-only; % is not permitted', TG_OP
                     USING ERRCODE = 'restrict_violation';
@@ -457,6 +470,19 @@ async def test_audit_log_append_only_triggers(db_session, ws):
 
         with pytest.raises(Exception, match="append-only"):
             await db_session.execute(text("TRUNCATE secret_access_log"))
+        await db_session.rollback()
+
+        # #1365: the erasure carve-out — an UPDATE touching ONLY the
+        # identity columns is permitted (pseudonymization path); the
+        # non-carve-out UPDATE above stays rejected.
+        result = await db_session.execute(
+            text(
+                "UPDATE secret_access_log SET actor_user_id = 'pseudonym-x', "
+                "recipient_identity = NULL WHERE workspace_id = :w"
+            ),
+            {"w": str(ws)},
+        )
+        assert result.rowcount >= 1
         await db_session.rollback()
     finally:
         # Drop the triggers so the fixture teardown can wipe rows.
@@ -616,6 +642,40 @@ async def test_verify_audit_chain_valid_then_detects_tampering(db_session, ws):
     bad = await svc.verify_audit_chain(workspace_id=ws)
     assert bad["valid"] is False
     assert bad["reason"] == "entry_hash_mismatch"
+
+
+async def test_verify_audit_chain_classifies_erasure_pseudonym(db_session, ws):
+    """#1365: an erasure-shaped mutation (64-hex pseudonym in a carve-out
+    identity column) is reported in ``erasure_pseudonymized`` — NOT a tamper
+    alarm — and the walk continues so all other rows still verify."""
+    svc = SecretStoreService(db_session)
+    await _register_and_approve(svc, ws, "alice", PUBKEY_A)
+    await db_session.commit()
+
+    ok = await svc.verify_audit_chain(workspace_id=ws)
+    assert ok["valid"] is True
+    assert ok["entries"] >= 2
+    assert ok["erasure_pseudonymized"] == []
+
+    # Simulate the erasure sweep on the FIRST row (identity columns only —
+    # exactly what _erase_secret_access_log writes through the e72 carve-out).
+    pseudonym = "ab" * 32  # 64 lowercase hex chars
+    await db_session.execute(
+        text(
+            "UPDATE secret_access_log SET actor_user_id = :p "
+            "WHERE id = (SELECT min(id) FROM secret_access_log WHERE workspace_id = :w)"
+        ),
+        {"p": pseudonym, "w": str(ws)},
+    )
+    await db_session.commit()
+
+    after = await svc.verify_audit_chain(workspace_id=ws)
+    assert after["valid"] is True
+    assert len(after["erasure_pseudonymized"]) == 1
+    # The scarred row did not stop the walk — every entry was visited and
+    # the head hash still reflects the full chain.
+    assert after["entries"] == ok["entries"]
+    assert after["head"] == ok["head"]
 
 
 async def test_put_multi_recipient_integrity(db_session, ws):

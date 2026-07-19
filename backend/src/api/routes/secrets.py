@@ -304,6 +304,10 @@ class AuditVerifyResponse(BaseModel):
     head: str | None = None
     broken_at: int | None = None
     reason: str | None = None
+    # #1365: row ids whose entry_hash mismatch is the EXPECTED erasure scar
+    # (identity columns pseudonymized through the e72 carve-out). Present
+    # (possibly empty) on valid=True results; None on tamper failures.
+    erasure_pseudonymized: list[int] | None = None
 
 
 @router.get("/audit/verify", response_model=AuditVerifyResponse)
