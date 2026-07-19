@@ -275,6 +275,36 @@ async function clickOAuthButton(provider: "google" | "github"): Promise<void> {
   fireEvent.click(button);
 }
 
+describe("LoginPage OAuth failure banners (#1381)", () => {
+  // The backend redirects non-cancel callback failures here with a
+  // well-known error token — the page must map it to an i18n'd banner,
+  // never render the raw token, and keep the cancel notice separate.
+  it("shows the failed banner for ?error=oauth_failed", async () => {
+    mockSearchParams.set("error", "oauth_failed");
+    render(<LoginPage />);
+
+    expect(await screen.findByText("oauthFailed")).toBeTruthy();
+    // The raw token itself is not rendered as banner text.
+    expect(screen.queryByText("oauth_failed")).toBeNull();
+  });
+
+  it("shows the expired banner for ?error=oauth_expired", async () => {
+    mockSearchParams.set("error", "oauth_expired");
+    render(<LoginPage />);
+
+    expect(await screen.findByText("oauthExpired")).toBeTruthy();
+    expect(screen.queryByText("oauth_expired")).toBeNull();
+  });
+
+  it("keeps the cancelled notice separate from the failure banner", async () => {
+    mockSearchParams.set("cancelled", "1");
+    render(<LoginPage />);
+
+    expect(await screen.findByText("signinCancelled")).toBeTruthy();
+    expect(screen.queryByText("oauthFailed")).toBeNull();
+  });
+});
+
 describe("LoginPage OAuth return_to forwarding (#774)", () => {
   // Capture window.location.href assignments. Backend switches /api/v1/auth/
   // {provider}/login between JSON (no return_to) and 303 redirect (with
