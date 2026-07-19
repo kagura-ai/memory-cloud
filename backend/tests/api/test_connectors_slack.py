@@ -163,6 +163,195 @@ async def test_callback_rejects_workspace_mismatch():
 
 
 @pytest.mark.asyncio
+async def test_callback_cancel_redirects_with_cancelled():
+    """#1375: user denies the Slack consent → 303 to connectors page, not raw 422."""
+    from api.routes.connectors_slack import slack_callback
+
+    ws_id = uuid4()
+    redis = _FakeRedis({"slack_oauth_state:st": str(ws_id)})
+    admin = {"user_id": "u1", "current_workspace_id": ws_id}
+
+    with (
+        patch("api.routes.connectors_slack.get_settings", return_value=_settings()),
+        patch("api.routes.connectors_slack.get_redis_client", return_value=redis),
+    ):
+        resp = await slack_callback(
+            admin=admin,
+            code=None,
+            state="st",
+            error="access_denied",
+            error_description="The user denied the request",
+        )
+
+    assert resp.status_code == 303
+    assert resp.headers["location"] == (
+        "http://localhost:3000/workspace/integrations/connectors?slack_error=cancelled"
+    )
+    # CSRF state is consumed on the cancel path too.
+    assert "slack_oauth_state:st" not in redis.store
+
+
+@pytest.mark.asyncio
+async def test_callback_cancel_with_expired_state_still_redirects():
+    """#1375: cancel with an unknown/expired state must not dead-end."""
+    from api.routes.connectors_slack import slack_callback
+
+    admin = {"user_id": "u1", "current_workspace_id": uuid4()}
+    with (
+        patch("api.routes.connectors_slack.get_settings", return_value=_settings()),
+        patch("api.routes.connectors_slack.get_redis_client", return_value=_FakeRedis()),
+    ):
+        resp = await slack_callback(admin=admin, code=None, state="gone", error="access_denied")
+
+    assert resp.status_code == 303
+    assert resp.headers["location"].endswith("?slack_error=cancelled")
+
+
+@pytest.mark.asyncio
+async def test_callback_unknown_error_maps_failed_and_never_reflects():
+    """#1375: non-cancel errors map to the allowlisted 'failed'; raw text never reflected."""
+    from api.routes.connectors_slack import slack_callback
+
+    admin = {"user_id": "u1", "current_workspace_id": uuid4()}
+    with (
+        patch("api.routes.connectors_slack.get_settings", return_value=_settings()),
+        patch("api.routes.connectors_slack.get_redis_client", return_value=_FakeRedis()),
+    ):
+        resp = await slack_callback(
+            admin=admin,
+            code=None,
+            state=None,
+            error="invalid_scope",
+            error_description="<script>alert(1)</script>",
+        )
+
+    assert resp.status_code == 303
+    location = resp.headers["location"]
+    assert location.endswith("?slack_error=failed")
+    assert "invalid_scope" not in location
+    assert "script" not in location
+
+
+@pytest.mark.asyncio
+async def test_callback_no_code_no_error_redirects_failed():
+    """#1375: neither code nor error → failed redirect, no raw 422."""
+    from api.routes.connectors_slack import slack_callback
+
+    admin = {"user_id": "u1", "current_workspace_id": uuid4()}
+    with (
+        patch("api.routes.connectors_slack.get_settings", return_value=_settings()),
+        patch("api.routes.connectors_slack.get_redis_client", return_value=_FakeRedis()),
+    ):
+        resp = await slack_callback(admin=admin, code=None, state=None)
+
+    assert resp.status_code == 303
+    assert resp.headers["location"].endswith("?slack_error=failed")
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "kwargs",
+    [
+        {"code": "", "state": "st"},  # empty code — "" must not reach the exchange
+        {"code": "abc", "state": ""},  # empty state — "" must not reach validation
+    ],
+)
+async def test_callback_empty_string_params_redirect_failed(kwargs):
+    """#1375: FastAPI delivers ``?code=``/``?state=`` as "" — empty strings must
+    take the friendly-redirect lane, not fall through to a raw 4xx JSON."""
+    from api.routes.connectors_slack import slack_callback
+
+    admin = {"user_id": "u1", "current_workspace_id": uuid4()}
+    with (
+        patch("api.routes.connectors_slack.get_settings", return_value=_settings()),
+        patch("api.routes.connectors_slack.get_redis_client", return_value=_FakeRedis()),
+    ):
+        resp = await slack_callback(admin=admin, **kwargs)
+
+    assert resp.status_code == 303
+    assert resp.headers["location"].endswith("?slack_error=failed")
+
+
+@pytest.mark.asyncio
+async def test_callback_empty_error_param_does_not_abort_success():
+    """#1375: a proxy echoing ``?error=`` (empty) alongside a valid code/state
+    must not abort the install — empty error is treated as absent."""
+    from api.routes.connectors_slack import slack_callback
+
+    ws_id = uuid4()
+    redis = _FakeRedis({"slack_oauth_state:st": str(ws_id)})
+    admin = {"user_id": "u1", "current_workspace_id": ws_id}
+
+    token_resp = MagicMock()
+    token_resp.raise_for_status = MagicMock()
+    token_resp.json.return_value = {
+        "ok": True,
+        "access_token": "xoxb-123",
+        "team": {"id": "T01", "name": "Acme"},
+        "authed_user": {"id": "U01"},
+    }
+    http_client = MagicMock()
+    http_client.post = AsyncMock(return_value=token_resp)
+    http_ctx = MagicMock()
+    http_ctx.__aenter__ = AsyncMock(return_value=http_client)
+    http_ctx.__aexit__ = AsyncMock(return_value=False)
+
+    with (
+        patch("api.routes.connectors_slack.get_settings", return_value=_settings()),
+        patch("api.routes.connectors_slack.get_redis_client", return_value=redis),
+        patch("api.routes.connectors_slack.httpx.AsyncClient", return_value=http_ctx),
+        patch("api.routes.connectors_slack.get_encryptor", return_value=_fake_encryptor()),
+    ):
+        resp = await slack_callback(admin=admin, code="abc", state="st", error="")
+
+    assert resp.status_code == 303
+    assert "slack_install=" in resp.headers["location"]
+    assert "slack_error" not in resp.headers["location"]
+
+
+def test_callback_query_params_not_required():
+    """#1375 regression pin: a required Query param turns user-cancel into raw 422.
+
+    The bug shape was ``code: str = Query(...)``. Both optional idioms are
+    accepted — ``Annotated[str | None, Query()] = None`` and the auth.py-style
+    ``str | None = Query(None)`` — so the pin fires only on a genuine
+    required-param regression, not on a style refactor.
+    """
+    import inspect
+
+    from fastapi.params import Query as QueryInfo
+
+    from api.routes.connectors_slack import slack_callback
+
+    sig = inspect.signature(slack_callback)
+    for name in ("code", "state", "error", "error_description"):
+        default = sig.parameters[name].default
+        if isinstance(default, QueryInfo):
+            default = default.default
+        assert default is None, (
+            f"slack_callback param {name!r} must be optional with a None "
+            "default — a required Query param turns the Slack consent cancel "
+            "into a raw 422 (#1375)."
+        )
+
+
+@pytest.mark.asyncio
+async def test_callback_code_without_state_redirects_failed():
+    """#1375: code present but state missing cannot be CSRF-validated → failed redirect."""
+    from api.routes.connectors_slack import slack_callback
+
+    admin = {"user_id": "u1", "current_workspace_id": uuid4()}
+    with (
+        patch("api.routes.connectors_slack.get_settings", return_value=_settings()),
+        patch("api.routes.connectors_slack.get_redis_client", return_value=_FakeRedis()),
+    ):
+        resp = await slack_callback(admin=admin, code="abc", state=None)
+
+    assert resp.status_code == 303
+    assert resp.headers["location"].endswith("?slack_error=failed")
+
+
+@pytest.mark.asyncio
 async def test_pending_returns_summary_without_bot_token():
     from api.routes.connectors_slack import slack_pending
 

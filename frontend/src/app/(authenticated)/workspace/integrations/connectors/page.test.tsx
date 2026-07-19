@@ -34,9 +34,13 @@ vi.mock("@/lib/api/workspace-connectors", () => ({
   slackInstallUrl: () => "https://slack.example/install",
 }));
 
+const mockRouterReplace = vi.fn();
+const mockSearchParamsGet = vi.fn<(key: string) => string | null>();
 vi.mock("next/navigation", () => ({
-  useRouter: () => ({ push: vi.fn(), replace: vi.fn() }),
-  useSearchParams: () => ({ get: () => null }),
+  useRouter: () => ({ push: vi.fn(), replace: mockRouterReplace }),
+  useSearchParams: () => ({
+    get: (key: string) => mockSearchParamsGet(key),
+  }),
 }));
 
 vi.mock("next-intl", () => ({
@@ -49,8 +53,9 @@ vi.mock("@/contexts/WorkspaceContext", () => ({
   useWorkspace: () => mockUseWorkspace(),
 }));
 
+const mockToast = vi.fn();
 vi.mock("@/hooks/use-toast", () => ({
-  useToast: () => ({ toast: vi.fn() }),
+  useToast: () => ({ toast: (...args: unknown[]) => mockToast(...args) }),
 }));
 
 vi.mock("@/hooks/useCopyFeedback", () => ({
@@ -67,6 +72,7 @@ function setWorkspace(role: string | undefined, overrides = {}) {
 }
 
 beforeEach(() => {
+  mockSearchParamsGet.mockReturnValue(null);
   mockListConnectors.mockResolvedValue([]);
   mockListAvailableWorkerApps.mockResolvedValue([]);
   mockCreateConnector.mockResolvedValue({
@@ -223,6 +229,66 @@ describe("ConnectorsPage RBAC gate", () => {
       ),
     );
   });
+  it("shows a cancelled notice and strips slack_error=cancelled (#1375)", async () => {
+    setWorkspace("admin");
+    mockSearchParamsGet.mockImplementation((key: string) =>
+      key === "slack_error" ? "cancelled" : null,
+    );
+    render(<ConnectorsPage />);
+
+    await waitFor(() =>
+      expect(mockToast).toHaveBeenCalledWith(
+        expect.objectContaining({
+          title: "slackCancelledTitle",
+          description: "slackCancelledDesc",
+        }),
+      ),
+    );
+    // Informational, not destructive — the user chose to cancel.
+    expect(mockToast).not.toHaveBeenCalledWith(
+      expect.objectContaining({ variant: "destructive" }),
+    );
+    // Param stripped so refresh/back doesn't re-toast.
+    expect(mockRouterReplace).toHaveBeenCalledWith(
+      "/workspace/integrations/connectors",
+    );
+  });
+
+  it("shows a destructive failed notice for slack_error=failed (#1375)", async () => {
+    setWorkspace("admin");
+    mockSearchParamsGet.mockImplementation((key: string) =>
+      key === "slack_error" ? "failed" : null,
+    );
+    render(<ConnectorsPage />);
+
+    await waitFor(() =>
+      expect(mockToast).toHaveBeenCalledWith(
+        expect.objectContaining({
+          variant: "destructive",
+          title: "slackFailedTitle",
+          description: "slackFailedDesc",
+        }),
+      ),
+    );
+    expect(mockRouterReplace).toHaveBeenCalledWith(
+      "/workspace/integrations/connectors",
+    );
+  });
+
+  it("does not toast slack_error for non-admins (#1375)", async () => {
+    setWorkspace("member");
+    mockSearchParamsGet.mockImplementation((key: string) =>
+      key === "slack_error" ? "cancelled" : null,
+    );
+    render(<ConnectorsPage />);
+
+    expect(
+      await screen.findByText("errors.forbiddenWorkspace"),
+    ).toBeInTheDocument();
+    expect(mockToast).not.toHaveBeenCalled();
+    expect(mockRouterReplace).not.toHaveBeenCalled();
+  });
+
   it("keeps the connectors list when available-apps fails (#1360)", async () => {
     setWorkspace("admin");
     mockListConnectors.mockResolvedValue([

@@ -22,7 +22,7 @@ from __future__ import annotations
 
 import json
 import secrets
-from typing import Any
+from typing import Annotated, Any
 from urllib.parse import urlencode
 
 import httpx
@@ -148,18 +148,82 @@ async def _exchange_slack_code(code: str) -> dict[str, Any]:
     return data
 
 
+def _connectors_page_url(frontend_url: str) -> str:
+    """Single source for the Connectors page URL used by every callback redirect."""
+    return f"{frontend_url.rstrip('/')}/workspace/integrations/connectors"
+
+
+def _error_redirect(frontend_url: str, reason: str) -> RedirectResponse:
+    """303 back to the Connectors page with an allowlisted ``slack_error`` reason.
+
+    ``reason`` is always one of ``cancelled``/``failed`` — raw Slack error text
+    is never reflected into the redirect URL (same policy as auth.py's
+    ``_oauth_cancel_redirect``).
+    """
+    return RedirectResponse(
+        url=f"{_connectors_page_url(frontend_url)}?slack_error={reason}",
+        status_code=303,
+    )
+
+
 @router.get("/callback")
 async def slack_callback(
     # WorkspaceAdmin re-asserts the caller's identity at callback time.
     # The CSRF state alone validates origin but not the calling principal —
     # any authenticated admin in the workspace can complete the install.
     admin: WorkspaceAdmin,
-    code: str = Query(...),
-    state: str = Query(...),
+    # All optional at the route layer (#1375): a cancelled/denied consent
+    # arrives as ?error=access_denied&state=... with NO code, and a required
+    # `code` would turn that into a raw 422 JSON dead-end. Annotated form (not
+    # `= Query(None)`) so direct calls in tests get real None defaults instead
+    # of the Query sentinel object.
+    code: Annotated[str | None, Query()] = None,
+    state: Annotated[str | None, Query()] = None,
+    error: Annotated[
+        str | None,
+        Query(description="OAuth2 error code (e.g. access_denied) when the user cancels"),
+    ] = None,
+    error_description: Annotated[
+        str | None, Query(description="Human-readable OAuth2 error detail (not reflected)")
+    ] = None,
 ) -> RedirectResponse:
     """Handle the Slack OAuth callback: validate state, exchange code, stash install."""
     settings = get_settings()
     redis = get_redis_client()
+
+    # #1375: cancel/error short-circuit BEFORE strict validation. Truthiness
+    # (not `is None`) on purpose: FastAPI delivers `?error=`/`?code=` as ""
+    # and an empty value must take the friendly-redirect lane, not fall
+    # through to the exchange/validation 4xx JSON. The raw error text goes to
+    # the server log only; the redirect carries an allowlisted token.
+    if error or not code:
+        reason = "cancelled" if error == "access_denied" else "failed"
+        if reason == "cancelled":
+            logger.info("slack_oauth_cancelled", error=error)
+        else:
+            # Distinct event + warning level so real integration failures
+            # (invalid_scope, malformed callbacks) never hide under the
+            # benign user-cancel event. Description is attacker-influenced
+            # free text — truncated, never reflected into the redirect.
+            logger.warning(
+                "slack_oauth_callback_failed",
+                error=error or "missing_code",
+                error_description=error_description[:256] if error_description else None,
+            )
+        if state:
+            # Best-effort cleanup: the state is single-use and unguessable;
+            # TTL expiry is the backstop if this delete fails.
+            try:
+                await redis.delete(_state_key(state))
+            except Exception:
+                logger.warning("slack_oauth_state_delete_failed", state=state[:8])
+        return _error_redirect(settings.frontend_url, reason)
+
+    if not state:
+        # code without state cannot be CSRF-validated; this is a browser-facing
+        # route, so redirect instead of a raw 4xx dead-end.
+        logger.warning("slack_oauth_callback_missing_state")
+        return _error_redirect(settings.frontend_url, "failed")
 
     try:
         stored = await redis.get(_state_key(state))
@@ -240,9 +304,8 @@ async def slack_callback(
             detail="Failed to store Slack install (storage unavailable)",
         ) from None
 
-    frontend = settings.frontend_url.rstrip("/")
     return RedirectResponse(
-        url=f"{frontend}/workspace/integrations/connectors?slack_install={handle}",
+        url=f"{_connectors_page_url(settings.frontend_url)}?slack_install={handle}",
         status_code=303,
     )
 
