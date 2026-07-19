@@ -1557,7 +1557,12 @@ Returns: {status, report_id, rollback_summary: {edges_deleted, merges_reversed, 
                     },
                     "locale": {
                         "type": "string",
-                        "description": "Connector locale (max 10 chars).",
+                        "description": (
+                            "Worker pre-compile locale. Must map to the worker "
+                            "Locale contract ('en' | 'ja'); common BCP-47 forms "
+                            "are normalized (ja-JP -> ja), anything else is "
+                            "rejected (#1377)."
+                        ),
                     },
                     "external_team_id": {
                         "type": "string",

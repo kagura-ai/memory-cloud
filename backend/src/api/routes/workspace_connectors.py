@@ -63,7 +63,15 @@ class WorkspaceConnectorCreateRequest(BaseModel):
     )
     llm_config: dict[str, Any] | None = Field(None, description="BYO LLM bundle; Fernet-encrypted")
     channel_ids: list[Any] | None = Field(None, description="Ingest channel selection")
-    locale: str | None = Field(None, max_length=10)
+    locale: str | None = Field(
+        None,
+        max_length=10,
+        description=(
+            "Worker pre-compile locale. Must map to the worker Locale "
+            "contract ('en' | 'ja'); common BCP-47 forms are normalized "
+            "(ja-JP → ja). See models.worker_runtime.WORKER_LOCALES (#1377)."
+        ),
+    )
     external_team_id: str | None = Field(
         None, max_length=255, description="Platform team id (worker dispatch key)"
     )

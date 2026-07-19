@@ -163,6 +163,15 @@ class ConnectorProvisioningService:
         """
         self._validate_inputs(connector_type, resource_id, quota_events_per_hour)
 
+        # #1377: strict write boundary for the worker Locale contract (see
+        # WORKER_LOCALES) — a connector must never be born un-vendable.
+        from models.worker_runtime import normalize_worker_locale
+
+        try:
+            locale = normalize_worker_locale(locale)
+        except ValueError as ve:
+            raise ValidationError(str(ve), field="locale") from ve
+
         normalized_runtime_config = None
         if runtime_config is not None:
             from models.worker_runtime import WorkerRuntimeConfig

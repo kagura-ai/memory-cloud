@@ -3,9 +3,45 @@
 from __future__ import annotations
 
 import string
-from typing import Literal
+from typing import Literal, cast, get_args
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator
+
+# #1377: the worker Locale contract, mirroring kagura-bridge's
+# WorkerConfigResponse.locale (Literal["en", "ja"]). A non-conforming vended
+# value fails bridge-side validation of the WHOLE config body — the tenant
+# fails closed with only a generic config_unavailable in the logs. This is the
+# single source shared by the admin write boundary (strict: 422), the vend
+# read boundary (lenient: degrade to None), and the OpenAPI schema. See
+# docs/connector-ingest-contract.md for the cross-repo contract.
+WorkerLocale = Literal["en", "ja"]
+# Derived from the Literal so the runtime normalizer and the type/OpenAPI
+# contract can never disagree.
+WORKER_LOCALES: tuple[str, ...] = get_args(WorkerLocale)
+
+
+def normalize_worker_locale(value: str | None) -> WorkerLocale | None:
+    """Normalize a connector locale to the worker Locale contract.
+
+    Maps common BCP-47 forms to their primary subtag (``ja-JP`` → ``ja``,
+    ``en_GB`` → ``en``, case-insensitive). Blank/None normalizes to ``None``
+    (worker default).
+
+    Raises:
+        ValueError: when the primary subtag is not in ``WORKER_LOCALES``.
+    """
+    if value is None:
+        return None
+    primary = value.strip().replace("_", "-").split("-", 1)[0].lower()
+    if not primary:
+        return None
+    if primary not in WORKER_LOCALES:
+        raise ValueError(
+            f"locale must map to one of {list(WORKER_LOCALES)} "
+            f"(the worker Locale contract); got {value!r}"
+        )
+    return cast(WorkerLocale, primary)
+
 
 # Upper bounds on tenant-writable knobs (#1350 review). These controls tune a
 # SHARED worker process (its Redis, its supervisor loop, its shutdown budget),

@@ -143,6 +143,23 @@ worker (connector token)
 - **Slug, not UUID.** Address the resource by its slug in the URL; the server
   resolves it against the authenticated workspace.
 
+## Worker config vend: the Locale contract (#1377)
+
+The config vend (`GET /api/v1/workers/config`) types
+`WorkerConnectorConfig.locale` as `"en" | "ja" | null`, mirroring the bridge's
+`WorkerConfigResponse.locale` (`Literal["en", "ja"]` in kagura-bridge
+`models.py::Locale`). A vended value outside that enum fails the bridge's
+validation of the **whole** config body and the tenant fails closed
+(`config_unavailable`), so both sides of the contract are pinned:
+
+- **memory-cloud** — single source `models.worker_runtime.WORKER_LOCALES`
+  (write boundary rejects/normalizes at connector create/update; vend boundary
+  degrades non-conforming legacy rows to `null` = worker default).
+- **kagura-bridge** — `models.py::Locale`.
+
+Widening the enum (e.g. adding `ko`) requires a coordinated change to **both**
+repos: bridge `Locale` first (workers tolerate `null`), then `WORKER_LOCALES`.
+
 ## Related
 
 - Epic #755 (F6) — chat ingest reuses Resource Foundation
