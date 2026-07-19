@@ -123,3 +123,35 @@ class TestReviewHardening:
         assert WorkerRuntimeConfig.from_stored({"buffer": {"max_len": 10**15}}) is None
         assert WorkerRuntimeConfig.from_stored("not-a-dict") is None
         assert WorkerRuntimeConfig.from_stored(None) is None
+
+
+class TestNormalizeWorkerLocale:
+    """#1377: connector locale must conform to the worker Locale contract (en|ja)."""
+
+    @pytest.mark.parametrize(
+        ("raw", "expected"),
+        [
+            ("en", "en"),
+            ("ja", "ja"),
+            ("EN", "en"),
+            ("Ja", "ja"),
+            ("ja-JP", "ja"),
+            ("en-US", "en"),
+            ("en_GB", "en"),
+            (" ja ", "ja"),
+            (None, None),
+            ("", None),
+            ("   ", None),
+        ],
+    )
+    def test_normalizes_conforming_and_bcp47_values(self, raw, expected):
+        from models.worker_runtime import normalize_worker_locale
+
+        assert normalize_worker_locale(raw) == expected
+
+    @pytest.mark.parametrize("raw", ["fr", "de-DE", "japanese", "j", "english", "jp"])
+    def test_rejects_non_contract_locales(self, raw):
+        from models.worker_runtime import normalize_worker_locale
+
+        with pytest.raises(ValueError):
+            normalize_worker_locale(raw)

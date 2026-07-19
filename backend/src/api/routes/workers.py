@@ -26,7 +26,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from config.settings import get_settings
 from db.base import get_db
 from models.api_base import TZAwareBaseModel
-from models.worker_runtime import WorkerRuntimeConfig
+from models.worker_runtime import WorkerLocale, WorkerRuntimeConfig, normalize_worker_locale
 from services.connector_provisioning import ConnectorProvisioningService
 from services.worker_app_identity import (
     WorkerAppIdentityService,
@@ -81,7 +81,10 @@ class WorkerConnectorConfig(TZAwareBaseModel):
     platform: str
     app_key: str
     config_revision: str
-    locale: str | None = None
+    # #1377: typed to the worker Locale contract so the OpenAPI schema carries
+    # the enum and the two repos cannot drift silently. The vend site
+    # normalizes legacy stored values before construction.
+    locale: WorkerLocale | None = None
     slack: dict[str, Any]
     kmc: dict[str, Any]
     # #895: resource-ingest credentials for worker #91 Option A. NULL on legacy
@@ -130,6 +133,29 @@ class WorkerAppBootstrapResponse(BaseModel):
 
 def _etag(revision: str) -> str:
     return f'"{revision}"'
+
+
+def _vend_locale(connector: Any) -> WorkerLocale | None:
+    """Best-effort normalization of the stored locale to the worker contract.
+
+    #1377 rolling compat: rows written before the write-boundary validation may
+    hold BCP-47 or arbitrary values. A non-conforming vended locale fails the
+    bridge's pydantic validation of the WHOLE config body (tenant fails closed
+    on a non-secret cosmetic field), so the read boundary degrades to ``None``
+    (worker default) instead — same fail-open principle as
+    ``WorkerRuntimeConfig.from_stored``.
+    """
+    try:
+        normalized = normalize_worker_locale(connector.locale)
+    except ValueError:
+        logger.warning(
+            "worker_config_locale_nonconforming",
+            connector_id=str(connector.id),
+            locale=str(connector.locale)[:32],
+        )
+        return None
+    # normalize_worker_locale returns a WORKER_LOCALES member or None here.
+    return normalized  # type: ignore[return-value]
 
 
 @router.get("/apps", response_model=WorkerAppBootstrapResponse)
@@ -318,7 +344,7 @@ async def get_worker_config(
         platform=connector.connector_type,
         app_key=selected_app_key,
         config_revision=config_revision,
-        locale=connector.locale,
+        locale=_vend_locale(connector),
         slack=slack,
         kmc={"mcp_url": get_settings().kmc_mcp_url, "api_key": kmc_api_key},
         resource=resource_block,

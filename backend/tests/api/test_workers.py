@@ -128,6 +128,62 @@ async def test_get_worker_config_returns_secrets_for_ready_connector():
     assert result.resource is None
 
 
+def _minimal_ready_conn(locale):
+    """MagicMock connector with just enough state for a config vend (#1377)."""
+    conn = MagicMock()
+    conn.id = uuid4()
+    conn.workspace_id = uuid4()
+    conn.context_id = uuid4()
+    conn.connector_type = "slack"
+    conn.locale = locale
+    conn.external_team_id = "T01"
+    conn.config_version = 1
+    conn.channel_ids = ["C01"]
+    conn.pii_guardrail_config = None
+    conn.runtime_config = None
+    conn.get_oauth_tokens.return_value = {"bot_token": "xoxb-x"}
+    conn.get_kmc_api_key.return_value = "kagura_writekey"
+    conn.kmc_api_key_expires_at = None
+    conn.get_resource_token.return_value = None
+    conn.get_llm_config.return_value = None
+    return conn
+
+
+async def _vend_config_for(conn):
+    with (
+        patch("api.routes.workers.get_settings", return_value=_settings()),
+        patch("api.routes.workers.ConnectorProvisioningService") as svc,
+        patch("api.routes.workers.WorkerAppIdentityService") as app_svc,
+    ):
+        app_svc.return_value.get_identity = AsyncMock(return_value=None)
+        svc.return_value.get_connector_for_dispatch = AsyncMock(return_value=conn)
+        return await get_worker_config(
+            response=Response(),
+            platform="slack",
+            team_id="T01",
+            app_key=None,
+            if_none_match=None,
+            _=None,
+            db=MagicMock(),
+        )
+
+
+@pytest.mark.asyncio
+async def test_get_worker_config_normalizes_legacy_bcp47_locale():
+    """#1377: a pre-fix row storing ja-JP is vended as the contract value ja."""
+    result = await _vend_config_for(_minimal_ready_conn("ja-JP"))
+    assert result.locale == "ja"
+
+
+@pytest.mark.asyncio
+async def test_get_worker_config_nonconforming_locale_vends_none():
+    """#1377: a non-conforming legacy locale must not fail the tenant closed —
+    it degrades to None (worker default) instead of failing bridge-side
+    validation of the whole config body."""
+    result = await _vend_config_for(_minimal_ready_conn("zz-XX"))
+    assert result.locale is None
+
+
 @pytest.mark.asyncio
 async def test_get_worker_config_revision_changes_when_runtime_revision_changes():
     db = MagicMock()

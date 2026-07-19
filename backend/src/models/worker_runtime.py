@@ -7,6 +7,40 @@ from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator
 
+# #1377: the worker Locale contract. The bridge's WorkerConfigResponse.locale is
+# Literal["en", "ja"] and a non-conforming vended value fails bridge-side
+# validation of the WHOLE config body — the tenant fails closed with only a
+# generic config_unavailable in the logs. This tuple + normalizer are the
+# single source both the admin write boundary (strict: 422) and the vend read
+# boundary (lenient: degrade to None) share.
+WORKER_LOCALES: tuple[str, ...] = ("en", "ja")
+
+WorkerLocale = Literal["en", "ja"]
+
+
+def normalize_worker_locale(value: str | None) -> str | None:
+    """Normalize a connector locale to the worker Locale contract.
+
+    Maps common BCP-47 forms to their primary subtag (``ja-JP`` → ``ja``,
+    ``en_GB`` → ``en``, case-insensitive). Blank/None normalizes to ``None``
+    (worker default).
+
+    Raises:
+        ValueError: when the primary subtag is not in ``WORKER_LOCALES``.
+    """
+    if value is None:
+        return None
+    primary = value.strip().replace("_", "-").split("-", 1)[0].lower()
+    if not primary:
+        return None
+    if primary not in WORKER_LOCALES:
+        raise ValueError(
+            f"locale must map to one of {list(WORKER_LOCALES)} "
+            f"(the worker Locale contract); got {value!r}"
+        )
+    return primary
+
+
 # Upper bounds on tenant-writable knobs (#1350 review). These controls tune a
 # SHARED worker process (its Redis, its supervisor loop, its shutdown budget),
 # so an unbounded value is a cross-tenant resource lever: max_len/volume caps

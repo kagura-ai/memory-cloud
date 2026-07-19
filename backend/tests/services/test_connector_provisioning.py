@@ -465,6 +465,27 @@ async def test_update_runtime_config_survives_drifted_stored_document():
     assert connector.runtime_config["vision_enabled"] is False
 
 
+@pytest.mark.asyncio
+async def test_provision_connector_rejects_non_contract_locale():
+    """#1377: locale is validated at the service choke point BEFORE any DB work,
+    so a non-conforming value 422s instead of producing an un-vendable connector."""
+    db = MagicMock()
+    db.execute = AsyncMock()
+    svc = ConnectorProvisioningService(db)
+
+    with pytest.raises(ValidationError) as exc:
+        await svc.provision_connector(
+            workspace_id=uuid4(),
+            user_id="u1",
+            connector_type="slack",
+            resource_id="slack-x",
+            locale="fr",
+        )
+
+    assert "locale" in str(exc.value).lower()
+    db.execute.assert_not_awaited()
+
+
 class TestTeamUniquenessGuard:
     """#1360: the #1315 app-qualified uniqueness must not re-open
     cross-tenant pre-binding of an already-bound platform team."""
