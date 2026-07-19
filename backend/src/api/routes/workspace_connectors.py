@@ -7,7 +7,7 @@ from typing import Any, Literal
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException, Response, status
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from auth.dependencies import WorkspaceAdmin
@@ -130,6 +130,55 @@ class WorkspaceConnectorSummary(TZAwareBaseModel):
     created_at: datetime
     created_by: str | None = None
     runtime: WorkerRuntimeConfig = Field(default_factory=WorkerRuntimeConfig)
+    # #1376: vend-settings presence indicators for the admin card. The LLM
+    # bundle itself is write-only — only the flag is listed.
+    channel_ids: list[Any] | None = None
+    locale: str | None = None
+    litellm_virtual_key_id: str | None = None
+    llm_config_present: bool = False
+
+
+class WorkspaceConnectorSettingsUpdateRequest(BaseModel):
+    """PATCH body for connector vend settings (#1376).
+
+    True PATCH semantics: fields absent from the request are untouched; an
+    explicit ``null`` clears. The route forwards ``exclude_unset`` fields to
+    the service sentinel, so every default below is just the "absent" marker.
+    ``extra="forbid"`` because a silently-dropped typo'd field name would
+    read as a successful partial update (#1376 review).
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    channel_ids: list[str] | None = Field(
+        None,
+        description="Ingest channel selection; non-empty list of channel ids, or null to clear",
+    )
+    litellm_virtual_key_id: str | None = Field(None, max_length=255)
+    llm_config: dict[str, Any] | None = Field(
+        None,
+        description="Write-only BYO LLM bundle; stored Fernet-encrypted, "
+        "never returned (a presence flag is). Null clears.",
+    )
+    locale: str | None = Field(
+        None,
+        max_length=10,
+        description="Worker pre-compile locale. Must map to the worker Locale "
+        "contract ('en' | 'ja'); common BCP-47 forms are normalized "
+        "(ja-JP → ja). Null clears (#1377).",
+    )
+    expected_config_version: int | None = Field(default=None, ge=0)
+
+
+class WorkspaceConnectorSettingsUpdateResponse(BaseModel):
+    """Post-update settings. The LLM bundle itself is never echoed."""
+
+    connector_id: UUID
+    channel_ids: list[Any] | None
+    litellm_virtual_key_id: str | None
+    llm_config_present: bool
+    locale: str | None
+    config_version: int
 
 
 class WorkspaceConnectorRuntimeUpdateRequest(BaseModel):
@@ -335,6 +384,10 @@ async def list_workspace_connectors(
                 WorkerRuntimeConfig.from_stored(item.connector.runtime_config)
                 or WorkerRuntimeConfig()
             ),
+            channel_ids=item.connector.channel_ids,
+            locale=item.connector.locale,
+            litellm_virtual_key_id=item.connector.litellm_virtual_key_id,
+            llm_config_present=bool(item.connector.llm_config_encrypted),
         )
         for item in items
     ]
@@ -396,6 +449,71 @@ async def update_workspace_connector_runtime(
         ),
         stored=stored,
         config_version=update_result.config_version,
+    )
+
+
+@router.patch(
+    "/{connector_id}",
+    response_model=WorkspaceConnectorSettingsUpdateResponse,
+)
+async def update_workspace_connector_settings(
+    connector_id: UUID,
+    request: WorkspaceConnectorSettingsUpdateRequest,
+    admin: WorkspaceAdmin,
+    db: AsyncSession = Depends(get_db),
+) -> WorkspaceConnectorSettingsUpdateResponse:
+    """PATCH connector vend settings (#1376): channel_ids / LLM binding / locale.
+
+    Repairs connectors born un-vendable (the create endpoint was previously
+    the only writer of these columns). True PATCH semantics — absent fields
+    are untouched, explicit ``null`` clears — with the runtime PATCH's
+    ``expected_config_version`` optimistic lock (409 on staleness).
+    """
+    workspace_id = admin.get("current_workspace_id")
+    if workspace_id is None:
+        raise BadRequestError(
+            "No workspace selected. Please select a workspace first.",
+        )
+    # exclude_unset distinguishes an explicit null (clear) from an absent
+    # field (untouched) and derives the field set from the model itself — a
+    # hand-listed tuple here would silently drop a future request field
+    # (#1376 review).
+    kwargs: dict[str, Any] = request.model_dump(
+        exclude_unset=True, exclude={"expected_config_version"}
+    )
+    try:
+        settings_result = await ConnectorProvisioningService(db).update_connector_settings(
+            workspace_id=workspace_id,
+            connector_id=connector_id,
+            user_id=admin["user_id"],
+            expected_config_version=request.expected_config_version,
+            **kwargs,
+        )
+        await db.commit()
+    except NotFoundException as exc:
+        await db.rollback()
+        raise NotFoundException("Connector") from exc
+    except (ConflictError, ValidationError):
+        await db.rollback()
+        raise
+    except Exception as exc:
+        await db.rollback()
+        logger.error(
+            "workspace_connector_settings_update_failed",
+            connector_id=str(connector_id),
+            workspace_id=str(workspace_id),
+            user_id=admin["user_id"],
+            error_type=type(exc).__name__,
+        )
+        raise InternalError("Failed to update connector settings") from exc
+
+    return WorkspaceConnectorSettingsUpdateResponse(
+        connector_id=connector_id,
+        channel_ids=settings_result.channel_ids,
+        litellm_virtual_key_id=settings_result.litellm_virtual_key_id,
+        llm_config_present=settings_result.llm_config_present,
+        locale=settings_result.locale,
+        config_version=settings_result.config_version,
     )
 
 

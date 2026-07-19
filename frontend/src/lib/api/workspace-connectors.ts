@@ -51,6 +51,12 @@ export interface WorkspaceConnectorSummary {
   created_at: string;
   created_by: string | null;
   runtime: WorkerRuntimeConfig;
+  // #1376: vend-settings presence indicators. The LLM bundle is write-only —
+  // only the flag is listed.
+  channel_ids: string[] | null;
+  locale: string | null;
+  litellm_virtual_key_id: string | null;
+  llm_config_present: boolean;
 }
 
 /** Create request — the registration flow fields are all optional. */
@@ -146,6 +152,44 @@ export async function updateConnectorRuntime(
     `/api/v1/workspace-connectors/${connectorId}/runtime`,
     {
       runtime,
+      ...(expectedConfigVersion != null
+        ? { expected_config_version: expectedConfigVersion }
+        : {}),
+    },
+  );
+}
+
+/**
+ * PATCH body for connector vend settings (#1376). True PATCH semantics:
+ * omit a field to leave it untouched; explicit null clears it.
+ */
+export interface UpdateConnectorSettingsRequest {
+  channel_ids?: string[] | null;
+  litellm_virtual_key_id?: string | null;
+  // Write-only BYO LLM bundle — never returned (a presence flag is).
+  llm_config?: Record<string, unknown> | null;
+  locale?: string | null;
+}
+
+export interface UpdateConnectorSettingsResponse {
+  connector_id: string;
+  channel_ids: string[] | null;
+  litellm_virtual_key_id: string | null;
+  llm_config_present: boolean;
+  locale: string | null;
+  config_version: number;
+}
+
+export async function updateConnectorSettings(
+  connectorId: string,
+  patch: UpdateConnectorSettingsRequest,
+  // Optimistic-concurrency guard: version the caller's snapshot came from.
+  expectedConfigVersion?: number,
+): Promise<UpdateConnectorSettingsResponse> {
+  return apiClient.patch<UpdateConnectorSettingsResponse>(
+    `/api/v1/workspace-connectors/${connectorId}`,
+    {
+      ...patch,
       ...(expectedConfigVersion != null
         ? { expected_config_version: expectedConfigVersion }
         : {}),

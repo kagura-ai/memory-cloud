@@ -119,6 +119,29 @@ class ConnectorRuntimeUpdateResult:
     config_version: int
 
 
+@dataclass(frozen=True)
+class ConnectorSettingsUpdateResult:
+    """Post-update connector settings (#1376). The LLM bundle is write-only —
+    only a presence flag is surfaced."""
+
+    channel_ids: list[Any] | None
+    litellm_virtual_key_id: str | None
+    llm_config_present: bool
+    locale: str | None
+    config_version: int
+
+
+# Sentinel distinguishing "field not provided" from an explicit null (clear)
+# in the PATCH-semantics settings update (#1376).
+_UNSET: Any = object()
+
+# Bounds for tenant-writable channel selections (#1376): Slack channel ids are
+# ~11 chars; the caps only exist to keep a hostile payload from bloating the
+# JSONB column / worker config body.
+_MAX_CHANNEL_IDS = 500
+_MAX_CHANNEL_ID_CHARS = 64
+
+
 class ConnectorProvisioningService:
     """Provision ai-worker chat-ingest connectors atomically.
 
@@ -171,6 +194,9 @@ class ConnectorProvisioningService:
             locale = normalize_worker_locale(locale)
         except ValueError as ve:
             raise ValidationError(str(ve), field="locale") from ve
+
+        # #1376 review: same un-vendable guard as the settings PATCH.
+        self._validate_llm_config(llm_config)
 
         normalized_runtime_config = None
         if runtime_config is not None:
@@ -761,28 +787,9 @@ class ConnectorProvisioningService:
         snapshot came from) to fail the write with ConflictError instead of
         silently reverting a concurrent change.
         """
-        result = await self.db.execute(
-            select(WorkspaceConnector)
-            .where(
-                WorkspaceConnector.id == connector_id,
-                WorkspaceConnector.workspace_id == workspace_id,
-            )
-            .with_for_update()
+        connector = await self._get_connector_for_update(
+            workspace_id, connector_id, expected_config_version
         )
-        connector = result.scalar_one_or_none()
-        if connector is None:
-            raise NotFoundException("Connector", str(connector_id))
-
-        if (
-            expected_config_version is not None
-            and connector.config_version != expected_config_version
-        ):
-            from utils.exceptions import ConflictError
-
-            raise ConflictError(
-                f"Connector config_version is {connector.config_version}, "
-                f"expected {expected_config_version} — reload and retry."
-            )
 
         from models.worker_runtime import WorkerRuntimeConfig
 
@@ -823,6 +830,173 @@ class ConnectorProvisioningService:
         )
         return ConnectorRuntimeUpdateResult(
             runtime_config=normalized_runtime_config,
+            config_version=connector.config_version,
+        )
+
+    async def _get_connector_for_update(
+        self,
+        workspace_id: UUID,
+        connector_id: UUID,
+        expected_config_version: int | None,
+    ) -> WorkspaceConnector:
+        """Lock and version-check a connector for an admin update.
+
+        Shared by the runtime and settings PATCH paths so the authorization
+        invariant (workspace predicate — a cross-tenant connector is
+        indistinguishable from a missing one) and the optimistic-lock
+        contract cannot drift between them.
+
+        Raises:
+            NotFoundException: unknown or cross-workspace connector.
+            ConflictError: stale ``expected_config_version``.
+        """
+        result = await self.db.execute(
+            select(WorkspaceConnector)
+            .where(
+                WorkspaceConnector.id == connector_id,
+                WorkspaceConnector.workspace_id == workspace_id,
+            )
+            .with_for_update()
+        )
+        connector = result.scalar_one_or_none()
+        if connector is None:
+            raise NotFoundException("Connector", str(connector_id))
+        if (
+            expected_config_version is not None
+            and connector.config_version != expected_config_version
+        ):
+            raise ConflictError(
+                f"Connector config_version is {connector.config_version}, "
+                f"expected {expected_config_version} — reload and retry."
+            )
+        return connector
+
+    @staticmethod
+    def _validate_llm_config(config: dict[str, Any] | None) -> None:
+        """Reject an LLM bundle that could never vend (#1376 review).
+
+        The vend hands the bundle to the worker verbatim, so a junk dict
+        stored here reads as ``llm_config_present=true`` in the admin UI
+        while the tenant stays un-vendable. ``provider`` and ``model`` are
+        the universal minimum; ``api_key`` is intentionally NOT required
+        (provider-dependent — e.g. local ollama has none) and extra keys
+        pass through opaquely.
+        """
+        if config is None:
+            return
+        if not all(
+            isinstance(config.get(key), str) and config[key].strip()
+            for key in ("provider", "model")
+        ):
+            raise ValidationError(
+                "llm_config requires non-empty string 'provider' and 'model' "
+                "(api_key and extra keys are provider-dependent); pass null to clear",
+                field="llm_config",
+            )
+
+    async def update_connector_settings(
+        self,
+        *,
+        workspace_id: UUID,
+        connector_id: UUID,
+        user_id: str,
+        expected_config_version: int | None = None,
+        channel_ids: list[Any] | None = _UNSET,
+        litellm_virtual_key_id: str | None = _UNSET,
+        llm_config: dict[str, Any] | None = _UNSET,
+        locale: str | None = _UNSET,
+    ) -> ConnectorSettingsUpdateResult:
+        """PATCH-update connector vend settings (#1376).
+
+        Fields left at ``_UNSET`` are untouched; an explicit ``None`` clears.
+        Repairs UI-created connectors born un-vendable (the create endpoint is
+        the only other writer of these columns). Shares the runtime PATCH's
+        contract: workspace-predicated ``SELECT FOR UPDATE``, optional
+        ``expected_config_version`` optimistic lock (409 on staleness), and a
+        ``config_version`` bump so the worker refetches.
+
+        Raises:
+            ValidationError: no field provided, malformed ``channel_ids``
+                (empty list / blank or non-string ids are rejected so the
+                stored "no channels" state has exactly one canonical shape —
+                the explicit null the vend already coalesces to ``[]``), an
+                un-vendable ``llm_config`` shape, or a locale outside the
+                worker contract.
+            NotFoundException: unknown or cross-workspace connector.
+            ConflictError: stale ``expected_config_version``.
+        """
+        provided_names = sorted(
+            name
+            for name, value in (
+                ("channel_ids", channel_ids),
+                ("litellm_virtual_key_id", litellm_virtual_key_id),
+                ("llm_config", llm_config),
+                ("locale", locale),
+            )
+            if value is not _UNSET
+        )
+        if not provided_names:
+            raise ValidationError(
+                "Provide at least one of channel_ids, litellm_virtual_key_id, llm_config, locale",
+                field="body",
+            )
+
+        if channel_ids is not _UNSET and channel_ids is not None:
+            if (
+                not channel_ids
+                or len(channel_ids) > _MAX_CHANNEL_IDS
+                or not all(
+                    isinstance(cid, str) and cid.strip() and len(cid) <= _MAX_CHANNEL_ID_CHARS
+                    for cid in channel_ids
+                )
+            ):
+                raise ValidationError(
+                    "channel_ids must be a non-empty list of non-blank channel "
+                    f"id strings (max {_MAX_CHANNEL_IDS} ids, "
+                    f"{_MAX_CHANNEL_ID_CHARS} chars each); pass null to clear",
+                    field="channel_ids",
+                )
+
+        if llm_config is not _UNSET:
+            self._validate_llm_config(llm_config)
+
+        if locale is not _UNSET:
+            from models.worker_runtime import normalize_worker_locale
+
+            try:
+                locale = normalize_worker_locale(locale)
+            except ValueError as ve:
+                raise ValidationError(str(ve), field="locale") from ve
+
+        connector = await self._get_connector_for_update(
+            workspace_id, connector_id, expected_config_version
+        )
+
+        if channel_ids is not _UNSET:
+            connector.channel_ids = channel_ids
+        if litellm_virtual_key_id is not _UNSET:
+            connector.litellm_virtual_key_id = litellm_virtual_key_id
+        if llm_config is not _UNSET:
+            connector.set_llm_config(llm_config)
+        if locale is not _UNSET:
+            connector.locale = locale
+        connector.config_version += 1
+        await self.db.flush()
+
+        # Field NAMES only — the llm_config bundle carries credentials.
+        logger.info(
+            "workspace_connector_settings_updated",
+            connector_id=str(connector_id),
+            workspace_id=str(workspace_id),
+            updated_by=user_id,
+            changed_fields=provided_names,
+            config_version=connector.config_version,
+        )
+        return ConnectorSettingsUpdateResult(
+            channel_ids=connector.channel_ids,
+            litellm_virtual_key_id=connector.litellm_virtual_key_id,
+            llm_config_present=bool(connector.llm_config_encrypted),
+            locale=connector.locale,
             config_version=connector.config_version,
         )
 
