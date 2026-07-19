@@ -503,8 +503,10 @@ class WorkspaceConnector(Base):
         ForeignKey("contexts.id", ondelete="SET NULL"),
         nullable=True,
     )
-    # Worker-facing pre-compile locale (e.g. cluster labelling). Defaults to the
-    # workspace locale at provision time; NULL falls back to worker default.
+    # Worker-facing pre-compile locale (e.g. cluster labelling). Client-supplied
+    # at provision time (no workspace-locale defaulting exists); normalized to
+    # the worker Locale contract (models.worker_runtime.WORKER_LOCALES, #1377).
+    # NULL falls back to the worker default.
     locale: Mapped[str | None] = mapped_column(String(10), nullable=True)
     # Stable platform app selector. Existing connectors are backfilled to the
     # compatibility identity ``default`` by migration e68 (#1315).

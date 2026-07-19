@@ -3,22 +3,24 @@
 from __future__ import annotations
 
 import string
-from typing import Literal
+from typing import Literal, cast, get_args
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator
 
-# #1377: the worker Locale contract. The bridge's WorkerConfigResponse.locale is
-# Literal["en", "ja"] and a non-conforming vended value fails bridge-side
-# validation of the WHOLE config body — the tenant fails closed with only a
-# generic config_unavailable in the logs. This tuple + normalizer are the
-# single source both the admin write boundary (strict: 422) and the vend read
-# boundary (lenient: degrade to None) share.
-WORKER_LOCALES: tuple[str, ...] = ("en", "ja")
-
+# #1377: the worker Locale contract, mirroring kagura-bridge's
+# WorkerConfigResponse.locale (Literal["en", "ja"]). A non-conforming vended
+# value fails bridge-side validation of the WHOLE config body — the tenant
+# fails closed with only a generic config_unavailable in the logs. This is the
+# single source shared by the admin write boundary (strict: 422), the vend
+# read boundary (lenient: degrade to None), and the OpenAPI schema. See
+# docs/connector-ingest-contract.md for the cross-repo contract.
 WorkerLocale = Literal["en", "ja"]
+# Derived from the Literal so the runtime normalizer and the type/OpenAPI
+# contract can never disagree.
+WORKER_LOCALES: tuple[str, ...] = get_args(WorkerLocale)
 
 
-def normalize_worker_locale(value: str | None) -> str | None:
+def normalize_worker_locale(value: str | None) -> WorkerLocale | None:
     """Normalize a connector locale to the worker Locale contract.
 
     Maps common BCP-47 forms to their primary subtag (``ja-JP`` → ``ja``,
@@ -38,7 +40,7 @@ def normalize_worker_locale(value: str | None) -> str | None:
             f"locale must map to one of {list(WORKER_LOCALES)} "
             f"(the worker Locale contract); got {value!r}"
         )
-    return primary
+    return cast(WorkerLocale, primary)
 
 
 # Upper bounds on tenant-writable knobs (#1350 review). These controls tune a

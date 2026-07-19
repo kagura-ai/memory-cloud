@@ -163,9 +163,8 @@ class ConnectorProvisioningService:
         """
         self._validate_inputs(connector_type, resource_id, quota_events_per_hour)
 
-        # #1377: normalize to the worker Locale contract (en|ja) at the write
-        # boundary so a connector can never be born un-vendable — a bad locale
-        # fails the bridge's validation of the WHOLE config body downstream.
+        # #1377: strict write boundary for the worker Locale contract (see
+        # WORKER_LOCALES) — a connector must never be born un-vendable.
         from models.worker_runtime import normalize_worker_locale
 
         try:

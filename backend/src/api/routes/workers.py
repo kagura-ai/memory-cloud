@@ -136,17 +136,15 @@ def _etag(revision: str) -> str:
 
 
 def _vend_locale(connector: Any) -> WorkerLocale | None:
-    """Best-effort normalization of the stored locale to the worker contract.
+    """Best-effort normalization of a stored locale to ``WORKER_LOCALES``.
 
-    #1377 rolling compat: rows written before the write-boundary validation may
-    hold BCP-47 or arbitrary values. A non-conforming vended locale fails the
-    bridge's pydantic validation of the WHOLE config body (tenant fails closed
-    on a non-secret cosmetic field), so the read boundary degrades to ``None``
-    (worker default) instead — same fail-open principle as
+    #1377 rolling compat for pre-fix rows: the read boundary degrades a
+    non-conforming value to ``None`` (worker default) instead of failing the
+    tenant closed — same fail-open principle as
     ``WorkerRuntimeConfig.from_stored``.
     """
     try:
-        normalized = normalize_worker_locale(connector.locale)
+        return normalize_worker_locale(connector.locale)
     except ValueError:
         logger.warning(
             "worker_config_locale_nonconforming",
@@ -154,8 +152,6 @@ def _vend_locale(connector: Any) -> WorkerLocale | None:
             locale=str(connector.locale)[:32],
         )
         return None
-    # normalize_worker_locale returns a WORKER_LOCALES member or None here.
-    return normalized  # type: ignore[return-value]
 
 
 @router.get("/apps", response_model=WorkerAppBootstrapResponse)
