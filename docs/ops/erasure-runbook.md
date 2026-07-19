@@ -72,6 +72,9 @@ FK の依存逆順で削除:
 | `workspaces` | `owner_user_id = :uid` | step 3 後の sole-owner のみ。cascade で contexts/memories/etc. |
 | `memories` (残存行) | `user_id` を SHA256 pseudonymize + `details = NULL` | #1336: 共有/移譲 workspace に残る本人著メモリの scrub。details の NULL 化で生成列 (location_lat/lon, trigger_from/until) も自動 NULL。tombstone 行も対象 |
 | `worker_app_identities.created_by` / `updated_by` | SHA256 pseudonymize | #1358: global 行 (workspace cascade なし)。legal retention 維持、operator sub のリンクのみ切断 |
+| `config_overrides.updated_by` | SHA256 pseudonymize | #1365: #1358 と同形の global 行。admin sub のリンク切断 |
+| authorship 列族 (残存 workspace 行) | SHA256 pseudonymize | #1365: `workspace_connectors` / `resources` / `resource_tokens` / `workspace_addons` / `file_objects` / `secrets` / `secret_versions` / `recipient_pubkeys` の `created_by` + `recipient_pubkeys.attested_by` + `secret_grants.granted_by` + `contexts.created_by` + `external_api_keys.updated_by`。counts キー = `authorship_columns_pseudonymized` (12 列の合計) |
+| `secret_access_log.actor_user_id` / `recipient_identity` | SHA256 pseudonymize (e72 trigger carve-out) | #1365: append-only + HMAC hash chain。**pseudonymize した行の per-row entry_hash 再計算は fail する (意図的・検出可能)**。chain リンク (prev_hash→entry_hash) は無傷で他行の検証は通る。GDPR/APPI 消去義務 > 当該行の content 認証、という受容トレードオフ。`verify_audit_chain` は 64-hex pseudonym 形の mismatch を `erasure_pseudonymized` として分類して walk を継続する (それ以外の mismatch は従来どおり tamper alarm)。残余リスク: raw SQL 権限を持つ攻撃者は identity 列改竄を 64-hex に偽装できるが、その攻撃者クラスは trigger も erasure コードも実行できるため chain の脅威モデル外。carve-out 外の全列は完全に tamper-evident のまま |
 | `users` | `user_id = :uid` | 最後 |
 
 ### 2.5 Audit logs (Step 5)

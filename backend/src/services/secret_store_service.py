@@ -213,16 +213,47 @@ class SecretStoreService:
             default=str,
         )
 
+    # An erasure pseudonym is a salted SHA256 hex digest (64 lowercase hex
+    # chars) — real actor/recipient identities are OAuth subs / emails and
+    # never take this shape on the append path.
+    _PSEUDONYM_RE = re.compile(r"^[0-9a-f]{64}$")
+
+    def _entry_mutation_is_erasure_shaped(self, e: SecretAccessLog) -> bool:
+        """True iff the row's mutable (e72 carve-out) columns look pseudonymized.
+
+        The account-erasure sweep (#1365) rewrites ``actor_user_id`` /
+        ``recipient_identity`` to a 64-hex salted-SHA256 pseudonym through the
+        append-only trigger's carve-out. That legitimately breaks the row's
+        stored ``entry_hash`` recomputation, so the verifier classifies such
+        rows instead of raising a tamper alarm. Residual risk (documented in
+        the runbook §2.4): an attacker with raw SQL access could disguise an
+        identity-column edit as a 64-hex string — but that attacker class
+        already defeats the trigger and could run the erasure path itself;
+        every NON-carve-out column remains fully tamper-evident.
+        """
+        return bool(
+            self._PSEUDONYM_RE.match(e.actor_user_id or "")
+            or self._PSEUDONYM_RE.match(e.recipient_identity or "")
+        )
+
     async def verify_audit_chain(self, *, workspace_id: UUID) -> dict[str, Any]:
         """Recompute and verify a workspace's tamper-evident audit chain.
 
         Walks entries id-ascending, recomputing ``entry_hash`` from the stored
         fields with the same payload construction as the append path, and checks
         the ``prev_hash`` linkage (genesis for the first). Returns
-        ``{valid, entries, head}`` on success, or ``{valid: False, broken_at,
-        reason}`` at the first entry that fails — catching any out-of-band field
-        edit that left ``entry_hash`` stale. This is the verifier that makes the
-        chain's tamper-evidence usable (not merely latent).
+        ``{valid, entries, head, erasure_pseudonymized}`` on success, or
+        ``{valid: False, broken_at, reason}`` at the first entry that fails —
+        catching any out-of-band field edit that left ``entry_hash`` stale.
+        This is the verifier that makes the chain's tamper-evidence usable
+        (not merely latent).
+
+        #1365: an ``entry_hash`` mismatch on a row whose carve-out identity
+        columns look erasure-pseudonymized (64-hex) is EXPECTED — the row id
+        is reported in ``erasure_pseudonymized`` and the walk continues
+        (chain linkage still uses the stored ``entry_hash``, which erasure
+        never touches, so all other rows keep verifying). Any other mismatch
+        remains a hard tamper alarm.
         """
         rows = await self.db.execute(
             select(SecretAccessLog)
@@ -232,6 +263,7 @@ class SecretStoreService:
         entries = list(rows.scalars().all())
         key = get_settings().audit_hmac_key
         expected_prev = AUDIT_GENESIS_HASH
+        erasure_pseudonymized: list[int] = []
         for e in entries:
             if e.prev_hash != expected_prev:
                 return {"valid": False, "broken_at": e.id, "reason": "prev_hash_mismatch"}
@@ -248,12 +280,19 @@ class SecretStoreService:
                 req_meta=e.req_meta,
             )
             if hmac_sha256_hex(payload, key) != e.entry_hash:
+                if self._entry_mutation_is_erasure_shaped(e):
+                    # Expected erasure scar (#1365) — record and keep walking;
+                    # linkage continues off the untouched stored entry_hash.
+                    erasure_pseudonymized.append(e.id)
+                    expected_prev = e.entry_hash
+                    continue
                 return {"valid": False, "broken_at": e.id, "reason": "entry_hash_mismatch"}
             expected_prev = e.entry_hash
         return {
             "valid": True,
             "entries": len(entries),
             "head": expected_prev if entries else AUDIT_GENESIS_HASH,
+            "erasure_pseudonymized": erasure_pseudonymized,
         }
 
     # -------------------------------------------------------------- pubkeys

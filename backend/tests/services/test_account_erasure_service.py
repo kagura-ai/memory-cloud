@@ -1051,3 +1051,124 @@ class TestMemoryAccessEventsErasure:
         assert params["user_id"] != target.user_id  # pseudonymized
         assert params["session_id"] is None
         assert params["run_id"] is None
+
+
+class TestErasureResiduals1365:
+    """#1365: the four raw-sub residual families left by #1358."""
+
+    @pytest.mark.asyncio
+    async def test_sweep_pseudonymizes_config_overrides_updated_by(self):
+        from models.config import ConfigOverride
+
+        svc = _service()
+        svc._count_and_delete = AsyncMock(return_value=0)
+        svc._pseudonymize_field = AsyncMock(return_value=0)
+        svc._erase_secret_access_log = AsyncMock(return_value=0)
+        svc.db.delete = AsyncMock()
+        svc.db.commit = AsyncMock()
+        target = _user()
+
+        counts = await svc._delete_postgres(target)
+
+        assert "config_overrides_pseudonymized" in counts
+        calls = [c for c in svc._pseudonymize_field.await_args_list if c.args[0] is ConfigOverride]
+        assert len(calls) == 1
+        assert calls[0].args[1] is ConfigOverride.updated_by
+        assert calls[0].args[2] == target.user_id
+
+    @pytest.mark.asyncio
+    async def test_sweep_pseudonymizes_all_authorship_columns(self):
+        """All 10 surviving-row authorship columns are swept, and the
+        count is their sum (distinct per-column values pin the SUM)."""
+        from models.auth import Context, ExternalAPIKey
+        from models.file_objects import FileObject
+        from models.resource import (
+            Resource,
+            ResourceToken,
+            WorkspaceAddon,
+            WorkspaceConnector,
+        )
+        from models.secrets import (
+            RecipientPubkey,
+            Secret,
+            SecretGrant,
+            SecretVersion,
+        )
+
+        expected = {
+            (WorkspaceConnector, "created_by"): 1,
+            (Resource, "created_by"): 2,
+            (ResourceToken, "created_by"): 3,
+            (WorkspaceAddon, "created_by"): 4,
+            (FileObject, "created_by"): 5,
+            (Secret, "created_by"): 6,
+            (SecretVersion, "created_by"): 7,
+            (RecipientPubkey, "created_by"): 8,
+            (RecipientPubkey, "attested_by"): 9,
+            (SecretGrant, "granted_by"): 10,
+            (Context, "created_by"): 11,
+            (ExternalAPIKey, "updated_by"): 12,
+        }
+
+        async def _by_column(model, column, user_id, extra_values=None):
+            return expected.get((model, column.key), 0)
+
+        svc = _service()
+        svc._count_and_delete = AsyncMock(return_value=0)
+        svc._pseudonymize_field = AsyncMock(side_effect=_by_column)
+        svc._erase_secret_access_log = AsyncMock(return_value=0)
+        svc.db.delete = AsyncMock()
+        svc.db.commit = AsyncMock()
+        target = _user()
+
+        counts = await svc._delete_postgres(target)
+
+        assert counts["authorship_columns_pseudonymized"] == sum(expected.values())
+        swept = {
+            (c.args[0], c.args[1].key)
+            for c in svc._pseudonymize_field.await_args_list
+            if (c.args[0], c.args[1].key) in expected
+        }
+        assert swept == set(expected)
+
+    @pytest.mark.asyncio
+    async def test_sweep_calls_secret_access_log_erasure(self):
+        svc = _service()
+        svc._count_and_delete = AsyncMock(return_value=0)
+        svc._pseudonymize_field = AsyncMock(return_value=0)
+        svc._erase_secret_access_log = AsyncMock(return_value=5)
+        svc.db.delete = AsyncMock()
+        svc.db.commit = AsyncMock()
+        target = _user()
+
+        counts = await svc._delete_postgres(target)
+
+        assert counts["secret_access_log_pseudonymized"] == 5
+        svc._erase_secret_access_log.assert_awaited_once_with(target.user_id)
+
+    @pytest.mark.asyncio
+    async def test_erase_secret_access_log_touches_only_carveout_columns(self):
+        """Two UPDATEs (actor / recipient), each touching ONLY its own
+        carve-out identity column — anything else would be rejected by
+        the e72 append-only trigger in production."""
+        svc = _service()
+        captured = []
+
+        async def _exec(stmt):
+            captured.append(stmt)
+            return SimpleNamespace(rowcount=2)
+
+        svc.db.execute = AsyncMock(side_effect=_exec)
+        target = _user()
+
+        count = await svc._erase_secret_access_log(target.user_id)
+
+        assert count == 4
+        assert len(captured) == 2
+        for stmt in captured:
+            compiled = str(stmt).lower()
+            assert "update secret_access_log" in compiled
+        actor_params = captured[0].compile().params
+        assert actor_params["actor_user_id"] != target.user_id  # pseudonymized
+        recipient_params = captured[1].compile().params
+        assert recipient_params["recipient_identity"] != target.user_id

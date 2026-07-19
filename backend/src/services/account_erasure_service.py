@@ -1051,6 +1051,65 @@ class AccountErasureService:
             WorkerAppIdentity, WorkerAppIdentity.created_by, user_id
         ) + await self._pseudonymize_field(WorkerAppIdentity, WorkerAppIdentity.updated_by, user_id)
 
+        # #1365 (1): config_overrides are the same #1358 shape — GLOBAL
+        # control-plane rows with no workspace FK, so no cascade ever
+        # removes them and an erased admin's raw sub would persist in
+        # updated_by. Same legal-retention posture.
+        from models.config import ConfigOverride
+
+        counts["config_overrides_pseudonymized"] = await self._pseudonymize_field(
+            ConfigOverride, ConfigOverride.updated_by, user_id
+        )
+
+        # #1365 (3+4): workspace-scoped authorship columns on rows that
+        # OUTLIVE the erased subject (co-owned/transferred workspaces —
+        # the sole-owner cascade above already wiped the rest). Same
+        # posture as agent_context_bindings.created_by (#1275): row
+        # survives, personal link breaks. contexts.created_by closes the
+        # #1336 asymmetry (deleted_by was NULL-cleared there; created_by
+        # was the leftover).
+        from models.file_objects import FileObject
+        from models.resource import (
+            Resource,
+            ResourceToken,
+            WorkspaceAddon,
+            WorkspaceConnector,
+        )
+        from models.secrets import (
+            RecipientPubkey,
+            Secret,
+            SecretGrant,
+            SecretVersion,
+        )
+
+        authorship_sweeps: tuple[tuple[Any, Any], ...] = (
+            (WorkspaceConnector, WorkspaceConnector.created_by),
+            (Resource, Resource.created_by),
+            (ResourceToken, ResourceToken.created_by),
+            (WorkspaceAddon, WorkspaceAddon.created_by),
+            (FileObject, FileObject.created_by),
+            (Secret, Secret.created_by),
+            (SecretVersion, SecretVersion.created_by),
+            (RecipientPubkey, RecipientPubkey.created_by),
+            # attested_by: another user's sub lands here when they attest a
+            # pubkey — same surviving-row shape (code-review finder, #1365).
+            (RecipientPubkey, RecipientPubkey.attested_by),
+            (SecretGrant, SecretGrant.granted_by),
+            (Context, Context.created_by),
+            # updated_by on keys OWNED BY OTHERS survives the user_id delete
+            # above (code-review finder, #1365).
+            (ExternalAPIKey, ExternalAPIKey.updated_by),
+        )
+        authorship_total = 0
+        for model, column in authorship_sweeps:
+            authorship_total += await self._pseudonymize_field(model, column, user_id)
+        counts["authorship_columns_pseudonymized"] = authorship_total
+
+        # #1365 (2): secret_access_log — append-only, HMAC hash-chained
+        # audit rows that deliberately survive entity deletion. The e72
+        # trigger carve-out permits UPDATE of ONLY the identity columns.
+        counts["secret_access_log_pseudonymized"] = await self._erase_secret_access_log(user_id)
+
         # #1336 Gap 2: author memories that OUTLIVE the erased subject — rows
         # in co-owned/transferred workspaces (the sole-owner cascade above
         # already wiped the rest). Their Qdrant points were deleted in step 1
@@ -1076,6 +1135,15 @@ class AccountErasureService:
         counts["users"] = 1
 
         return counts
+
+    def _pseudonym(self, value: str) -> str:
+        """Salted-SHA256 pseudonym — the single derivation every sweep uses.
+
+        One definition so a future salt rotation / algorithm change cannot
+        produce inconsistent pseudonyms for the same subject across tables
+        (same-user cross-row correlation is the legal-retention contract).
+        """
+        return sha256_hex(value, salt=_audit_salt())
 
     async def _count_and_delete(self, model: Any, where_clause: Any) -> int:
         """Delete rows and return the affected count from the cursor.
@@ -1112,7 +1180,7 @@ class AccountErasureService:
         """
         from models.memory_access_event import MemoryAccessEvent
 
-        pseudonym = sha256_hex(user_id, salt=_audit_salt())
+        pseudonym = self._pseudonym(user_id)
         result = cast(
             CursorResult[Any],
             await self.db.execute(
@@ -1127,6 +1195,44 @@ class AccountErasureService:
             ),
         )
         return result.rowcount or 0
+
+    async def _erase_secret_access_log(self, user_id: str) -> int:
+        """Pseudonymize the erased subject in ``secret_access_log`` (#1365).
+
+        The e72 append-only carve-out permits UPDATE of ONLY
+        ``(actor_user_id, recipient_identity)`` — the #1278 pattern. Two
+        UPDATEs, one per identity column; a row where the subject is
+        both actor and recipient contributes 2 to the count (mirrors
+        worker_app_identities' per-column sum).
+
+        Tamper-evidence trade-off (runbook §2.4): rows are HMAC
+        hash-chained, so the stored ``entry_hash`` no longer recomputes
+        for exactly the mutated rows. Chain linkage (``prev_hash``
+        pointers) is untouched — every other row still verifies — and
+        GDPR/APPI erasure takes precedence over per-row content
+        authentication for the erased subject. Verifiers must treat
+        entry-hash mismatches on pseudonymized rows as expected.
+        """
+        from models.secrets import SecretAccessLog
+
+        pseudonym = self._pseudonym(user_id)
+        actor = cast(
+            CursorResult[Any],
+            await self.db.execute(
+                update(SecretAccessLog)
+                .where(SecretAccessLog.actor_user_id == user_id)
+                .values(actor_user_id=pseudonym)
+            ),
+        )
+        recipient = cast(
+            CursorResult[Any],
+            await self.db.execute(
+                update(SecretAccessLog)
+                .where(SecretAccessLog.recipient_identity == user_id)
+                .values(recipient_identity=pseudonym)
+            ),
+        )
+        return (actor.rowcount or 0) + (recipient.rowcount or 0)
 
     async def _scrub_surviving_memories(self, user_id: str) -> int:
         """Scrub author memories that outlive the erased subject (#1336).
@@ -1178,7 +1284,7 @@ class AccountErasureService:
         same UPDATE (#1336: memories.details) so the pseudonym convention
         stays single-sourced here.
         """
-        pseudonym = sha256_hex(user_id, salt=_audit_salt())
+        pseudonym = self._pseudonym(user_id)
         values: dict[Any, Any] = {column: pseudonym}
         if extra_values:
             values.update(extra_values)
