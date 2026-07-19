@@ -44,6 +44,7 @@ import {
 } from "@/components/ui/dialog";
 import { useToast } from "@/hooks/use-toast";
 import { useCopyFeedback } from "@/hooks/useCopyFeedback";
+import { useConsumeSearchParams } from "@/hooks/useConsumeSearchParams";
 import { useWorkspace } from "@/contexts/WorkspaceContext";
 import { hasWorkspaceRole, WorkspaceRole } from "@/lib/auth/rbac";
 import { API_BASE_URL } from "@/lib/api/base";
@@ -142,7 +143,6 @@ export default function ConnectorsPage() {
     [copyToTarget, toast, tCommon],
   );
   const installHandle = searchParams.get("slack_install");
-  const slackError = searchParams.get("slack_error");
 
   const [connectors, setConnectors] = useState<
     WorkspaceConnectorSummary[] | null
@@ -297,34 +297,37 @@ export default function ConnectorsPage() {
 
   // #1375/#1381: a cancelled/failed/expired Slack OAuth consent redirects
   // back with ?slack_error=cancelled|failed|expired (allowlisted by the
-  // backend). Surface a notice and strip the param so refresh/back doesn't
-  // re-trigger it. Cancel is a user choice (informational toast); expired is
-  // retryable (say so); anything else is destructive. Gated on `allowed`
-  // like the slack_install effect — only admins can run the install flow,
-  // so only they get the outcome notice.
-  useEffect(() => {
-    if (!slackError) return;
-    if (!allowed) return;
-    if (slackError === "cancelled") {
-      toast({
-        title: t("slackCancelledTitle"),
-        description: t("slackCancelledDesc"),
-      });
-    } else if (slackError === "expired") {
-      toast({
-        variant: "destructive",
-        title: t("slackExpiredTitle"),
-        description: t("slackExpiredDesc"),
-      });
-    } else {
-      toast({
-        variant: "destructive",
-        title: t("slackFailedTitle"),
-        description: t("slackFailedDesc"),
-      });
-    }
-    router.replace("/workspace/integrations/connectors");
-  }, [slackError, allowed, t, toast, router]);
+  // backend). Surface a notice, then the hook strips the param so
+  // refresh/back doesn't re-trigger it (#1382). Cancel is a user choice
+  // (informational toast); expired is retryable (say so); anything else is
+  // destructive. Gated on `allowed` like the slack_install effect — only
+  // admins can run the install flow, so only they get the outcome notice.
+  useConsumeSearchParams(
+    (params) => {
+      const slackError = params.get("slack_error");
+      if (!slackError) return false;
+      if (slackError === "cancelled") {
+        toast({
+          title: t("slackCancelledTitle"),
+          description: t("slackCancelledDesc"),
+        });
+      } else if (slackError === "expired") {
+        toast({
+          variant: "destructive",
+          title: t("slackExpiredTitle"),
+          description: t("slackExpiredDesc"),
+        });
+      } else {
+        toast({
+          variant: "destructive",
+          title: t("slackFailedTitle"),
+          description: t("slackFailedDesc"),
+        });
+      }
+      return true;
+    },
+    { enabled: allowed, cleanUrl: "/workspace/integrations/connectors" },
+  );
 
   const openSettings = useCallback((c: WorkspaceConnectorSummary) => {
     setSettingsFor(c);

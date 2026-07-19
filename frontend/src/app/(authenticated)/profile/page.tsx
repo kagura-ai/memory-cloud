@@ -8,9 +8,8 @@
  * Issue #223: i18n support
  */
 
-import { useState, useEffect, useRef } from "react";
+import { useState, useEffect } from "react";
 import { useTranslations } from "next-intl";
-import { useRouter, useSearchParams } from "next/navigation";
 import {
   Card,
   CardContent,
@@ -32,6 +31,7 @@ import {
 import { useAuth } from "@/contexts/AuthContext";
 import { useLocale, type Locale } from "@/i18n";
 import { useToast } from "@/hooks/use-toast";
+import { useConsumeSearchParams } from "@/hooks/useConsumeSearchParams";
 import { User, Moon, Sun, Save, RefreshCw } from "lucide-react";
 import { COMMON_TIMEZONES } from "@/lib/utils/datetime";
 import { apiClient, ApiError } from "@/lib/api/base";
@@ -45,80 +45,73 @@ export default function ProfilePage() {
   const tCommon = useTranslations("common");
   const { user, refetchUser } = useAuth();
   const { toast } = useToast();
-  const router = useRouter();
-  const searchParams = useSearchParams();
   const [isEditMode, setIsEditMode] = useState(false);
   const [isRefreshing, setIsRefreshing] = useState(false);
 
   // Wait for useAuth() to finish its initial /auth/me fetch before
-  // surfacing the refreshed=1 / error=refresh_* toast. If the effect
-  // ran on the first render (where user is still null), the toast
-  // would say "Profile refreshed from IdP" instead of "from Google" /
-  // "from GitHub". The ref ensures the effect handles the params
-  // exactly once even though the deps now include `user`.
-  const refreshParamsHandled = useRef(false);
-  useEffect(() => {
-    if (refreshParamsHandled.current) return;
-    if (!user) return;
-    const refreshed = searchParams.get("refreshed");
-    const linked = searchParams.get("linked");
-    const errorCode = searchParams.get("error");
-    const isRefreshParam =
-      refreshed === "1" || !!errorCode?.startsWith("refresh_");
-    // Link outcomes from the link-mode callback (_maybe_link_redirect, #517).
-    const isLinkParam =
-      linked === "1" ||
-      errorCode === "link_failed" ||
-      errorCode === "provider_already_linked";
-    if (!isRefreshParam && !isLinkParam) return;
-    refreshParamsHandled.current = true;
+  // surfacing the refreshed=1 / error=refresh_* toast (enabled: !!user).
+  // If the consume ran on the first render (where user is still null), the
+  // toast would say "Profile refreshed from IdP" instead of "from Google" /
+  // "from GitHub". The hook handles the params exactly once and strips them
+  // via router.replace (#1382).
+  useConsumeSearchParams(
+    (params) => {
+      const refreshed = params.get("refreshed");
+      const linked = params.get("linked");
+      const errorCode = params.get("error");
+      const isRefreshParam =
+        refreshed === "1" || !!errorCode?.startsWith("refresh_");
+      // Link outcomes from the link-mode callback (_maybe_link_redirect, #517).
+      const isLinkParam =
+        linked === "1" ||
+        errorCode === "link_failed" ||
+        errorCode === "provider_already_linked";
+      if (!isRefreshParam && !isLinkParam) return false;
 
-    const provider =
-      getRefreshProviderName(user, t) ?? t("signInProviderFallback");
-    const cleanUrl = "/profile";
+      const provider =
+        getRefreshProviderName(user ?? {}, t) ?? t("signInProviderFallback");
 
-    if (refreshed === "1") {
-      toast({
-        title: t("refreshFromIdPSuccess", { provider }),
-        description: t("refreshFromIdPSuccessDesc"),
-      });
-      refetchUser();
-      router.replace(cleanUrl);
-    } else if (errorCode?.startsWith("refresh_")) {
-      // Wire-format contract with backend's _maybe_refresh_redirect:
-      // any code not in this map falls through to the generic message.
-      const errorMessageKey: Record<string, string> = {
-        refresh_user_mismatch: "refreshFromIdPErrorMismatch",
-        refresh_state_expired: "refreshFromIdPErrorExpired",
-      };
-      const messageKey =
-        errorMessageKey[errorCode] ?? "refreshFromIdPErrorGeneric";
-      toast({
-        title: tCommon("error"),
-        description: t(messageKey, { provider }),
-        variant: "destructive",
-      });
-      router.replace(cleanUrl);
-    } else if (linked === "1") {
-      toast({ title: t("linkSuccess") });
-      refetchUser();
-      router.replace(cleanUrl);
-    } else if (errorCode === "link_failed") {
-      toast({
-        title: tCommon("error"),
-        description: t("linkFailed"),
-        variant: "destructive",
-      });
-      router.replace(cleanUrl);
-    } else if (errorCode === "provider_already_linked") {
-      toast({
-        title: tCommon("error"),
-        description: t("linkAlreadyLinked"),
-        variant: "destructive",
-      });
-      router.replace(cleanUrl);
-    }
-  }, [user, searchParams, t, tCommon, toast, refetchUser, router]);
+      if (refreshed === "1") {
+        toast({
+          title: t("refreshFromIdPSuccess", { provider }),
+          description: t("refreshFromIdPSuccessDesc"),
+        });
+        refetchUser();
+      } else if (errorCode?.startsWith("refresh_")) {
+        // Wire-format contract with backend's _maybe_refresh_redirect:
+        // any code not in this map falls through to the generic message.
+        const errorMessageKey: Record<string, string> = {
+          refresh_user_mismatch: "refreshFromIdPErrorMismatch",
+          refresh_state_expired: "refreshFromIdPErrorExpired",
+        };
+        const messageKey =
+          errorMessageKey[errorCode] ?? "refreshFromIdPErrorGeneric";
+        toast({
+          title: tCommon("error"),
+          description: t(messageKey, { provider }),
+          variant: "destructive",
+        });
+      } else if (linked === "1") {
+        toast({ title: t("linkSuccess") });
+        refetchUser();
+      } else if (errorCode === "link_failed") {
+        toast({
+          title: tCommon("error"),
+          description: t("linkFailed"),
+          variant: "destructive",
+        });
+      } else {
+        // Group check above guarantees this is provider_already_linked.
+        toast({
+          title: tCommon("error"),
+          description: t("linkAlreadyLinked"),
+          variant: "destructive",
+        });
+      }
+      return true;
+    },
+    { enabled: !!user, cleanUrl: "/profile" },
+  );
 
   const handleRefreshFromIdP = async () => {
     const provider = getRefreshProviderName(user ?? {}, t);
