@@ -106,9 +106,15 @@ def test_last_activity_tooltip_displays_jst_under_non_utc_browser_tz(jst_page: P
     and re-fetches before asserting. Skips only when the workspace has
     zero contexts (environmental — rarer than the data-empty case).
     """
+    # locale is pinned via the PROFILE, not just the browser context: since
+    # the authenticated layout syncs the UI locale from the user profile
+    # (#221), the browser-level ``locale="ja"`` fixture alone no longer
+    # drives the date formatting — an en-profile user would render
+    # "07/19/2026, 10:49:00 AM" and the ja-format assertion below would
+    # false-fail even though the JST conversion is correct (#1369).
     profile_response = jst_page.request.put(
         f"{API_URL}/api/v1/users/profile",
-        data={"timezone": TARGET_PROFILE_TZ},
+        data={"timezone": TARGET_PROFILE_TZ, "locale": "ja"},
     )
     assert profile_response.ok, (
         f"PUT /api/v1/users/profile failed: {profile_response.status} {profile_response.text()}"
@@ -194,3 +200,10 @@ def test_last_activity_tooltip_displays_jst_under_non_utc_browser_tz(jst_page: P
             f"  Browser timezone     : {NON_UTC_BROWSER_TZ}\n"
             f"  Profile timezone     : {TARGET_PROFILE_TZ}"
         ) from exc
+    finally:
+        # The profile is shared session state — leaking locale=ja/JST into
+        # later modules breaks their English text matchers (#1369).
+        jst_page.request.put(
+            f"{API_URL}/api/v1/users/profile",
+            data={"timezone": "UTC", "locale": "en"},
+        )

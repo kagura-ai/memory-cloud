@@ -36,20 +36,34 @@ def test_resources_list_page_loads_without_error_banner(page: Page):
     page.wait_for_load_state("networkidle")
     time.sleep(1)
 
-    # The ErrorBanner uses role="alert" (see frontend/src/components/common/ErrorBanner.tsx)
-    error_banner = page.locator('[role="alert"]')
-    assert error_banner.count() == 0, (
-        "Resources list page rendered an ErrorBanner — likely a backend "
-        "failure. Check kagura-api logs for the /api/v1/resources request."
+    # The ErrorBanner uses role="alert" (see frontend/src/components/common/
+    # ErrorBanner.tsx) — but so does Next.js's built-in route announcer, an
+    # EMPTY live region injected on every client navigation (#1369). Only a
+    # non-empty alert is an error surface.
+    alerts = page.locator('[role="alert"]')
+    error_texts = [
+        alerts.nth(i).inner_text().strip()
+        for i in range(alerts.count())
+        if alerts.nth(i).inner_text().strip()
+    ]
+    assert not error_texts, (
+        f"Resources list page rendered an ErrorBanner ({error_texts!r}) — likely "
+        "a backend failure. Check kagura-api logs for the /api/v1/resources request."
     )
 
     # Page should show either the table header or the empty-state title
     # (both are acceptable — depends on whether the workspace has resources).
-    has_table_header = page.locator("th", has_text="Resource ID").count() > 0
-    has_empty_state = page.locator("text=No resources yet").count() > 0
-    assert has_table_header or has_empty_state, (
-        "Neither resource table nor empty-state rendered on /workspace/resources"
+    # wait_for polls until hydration lands — a bare count() races the
+    # client-side data fetch and false-fails on slower runs (#1369).
+    table_or_empty = page.locator("th", has_text="Resource ID").or_(
+        page.get_by_text("No resources yet")
     )
+    try:
+        table_or_empty.first.wait_for(state="attached", timeout=15000)
+    except Exception as exc:
+        raise AssertionError(
+            "Neither resource table nor empty-state rendered on /workspace/resources"
+        ) from exc
 
 
 @pytest.mark.e2e

@@ -24,39 +24,50 @@ import pytest
 from playwright.sync_api import Page
 
 BASE_URL = os.environ.get("E2E_BASE_URL", "http://localhost:3000")
+API_URL = os.environ.get("E2E_API_URL", "http://localhost:8080")
 
 # Use first available context — discovered at session start
 _context_id: str | None = None
 
 
 def _get_context_id(page: Page) -> str:
-    """Navigate to contexts list and grab the first context ID from the URL."""
+    """Resolve a context id: first existing link, else self-seed via API.
+
+    #1369: the previous fallback was a hardcoded UUID that only existed in
+    one historical dev database — on any fresh workspace (e.g. right after
+    ``seed_e2e_admin``) every navigation 404'd and the whole module failed.
+    A suite must be self-sufficient: when the contexts page has no
+    search-settings link yet, create a context through the API with the
+    page's own session cookies.
+    """
     global _context_id
     if _context_id:
         return _context_id
 
-    page.goto(f"{BASE_URL}/workspace/contexts")
-    page.wait_for_load_state("networkidle")
-    time.sleep(1)
+    # Env override, else self-seed a context via the API (session cookies
+    # from the authenticated page ride along on page.request).
+    env_ctx = os.environ.get("E2E_CONTEXT_ID")
+    if env_ctx:
+        _context_id = env_ctx
+        return _context_id
 
-    # Click the first settings link/icon
-    settings_link = page.locator('a[href*="/search-settings"]').first
-    if settings_link.count() > 0:
-        href = settings_link.get_attribute("href") or ""
-        # Extract context ID from /workspace/contexts/{id}/search-settings
-        match = re.search(r"/contexts/([a-f0-9-]+)/search-settings", href)
-        if match:
-            _context_id = match.group(1)
-            return _context_id
-
-    # Fallback: use env var or hardcoded dev context
-    _context_id = os.environ.get("E2E_CONTEXT_ID", "700a6873-ade0-44ba-beca-95e8cda3ad82")
+    resp = page.request.post(
+        f"{API_URL}/api/v1/contexts",
+        data={
+            "name": f"e2e-search-settings-{int(time.time())}",
+            "display_name": "E2E Search Settings",
+        },
+    )
+    assert resp.ok, f"context self-seed failed: {resp.status} {resp.text()[:200]}"
+    _context_id = resp.json()["id"]
     return _context_id
 
 
 def _search_settings_url(page: Page) -> str:
+    # #232 consolidated the standalone /search-settings route into the
+    # context detail page's Settings tab (useTabParam deep link).
     ctx_id = _get_context_id(page)
-    return f"{BASE_URL}/workspace/contexts/{ctx_id}/search-settings"
+    return f"{BASE_URL}/workspace/contexts/{ctx_id}?tab=settings"
 
 
 def _navigate(page: Page):
@@ -67,16 +78,25 @@ def _navigate(page: Page):
 
 
 def _enable_reranking(page: Page):
-    """Enable the reranking switch if not already on."""
+    """Enable the reranking switch if not already on.
+
+    The switch is DISABLED when the workspace is on the free plan or no
+    reranker provider is available (no API keys, no self-hosted reranker) —
+    an environment capability, not a regression. Skip in that case so the
+    provider-dropdown tests only run where they can mean anything.
+    """
     switch = page.locator('button[role="switch"]#use_rerank')
-    if switch.count() > 0:
-        is_checked = (
-            switch.get_attribute("data-state") == "checked"
-            or switch.get_attribute("aria-checked") == "true"
-        )
-        if not is_checked:
-            switch.click()
-            time.sleep(0.5)
+    if switch.count() == 0:
+        pytest.skip("use_rerank switch not rendered")
+    if not switch.first.is_enabled():
+        pytest.skip("no reranker provider available in this environment")
+    is_checked = (
+        switch.get_attribute("data-state") == "checked"
+        or switch.get_attribute("aria-checked") == "true"
+    )
+    if not is_checked:
+        switch.click()
+        time.sleep(0.5)
 
 
 # ---------------------------------------------------------------------------
@@ -97,10 +117,15 @@ class TestPageStructure:
         )
         assert cards.count() >= 3, f"Expected ≥3 cards, found {cards.count()}"
 
-    def test_back_button_present(self, page: Page):
+    def test_settings_tab_active(self, page: Page):
+        """#232 replaced the standalone page (and its Back button) with the
+        context-detail Settings tab — pin that the deep link lands on it."""
         _navigate(page)
-        back = page.locator("button", has_text=re.compile(r"Back|戻る"))
-        assert back.count() > 0
+        active_tab = page.locator('[role="tab"][aria-selected="true"]')
+        assert active_tab.count() > 0, "No active tab found on context detail page"
+        assert re.search(r"Settings|設定", active_tab.first.inner_text() or ""), (
+            f"Active tab is not Settings: {active_tab.first.inner_text()!r}"
+        )
 
     def test_refresh_button_removed(self, page: Page):
         _navigate(page)
@@ -116,29 +141,35 @@ class TestPageStructure:
 
 
 class TestStickySaveBar:
-    """Verify sticky save bar appears/hides correctly."""
+    """Verify sticky save bar appears/hides correctly.
+
+    #232: the bar is render-when-dirty (``{isDirty && ...}``) at
+    ``fixed bottom-14`` — not an always-mounted translate-y animation at
+    ``bottom-0`` as on the pre-consolidation page.
+    """
+
+    _BAR = "div.fixed.bottom-14"
 
     def test_hidden_initially(self, page: Page):
         _navigate(page)
-        bar = page.locator("div.fixed.bottom-0")
-        assert bar.count() > 0
-        assert "translate-y-full" in (bar.get_attribute("class") or "")
+        assert page.locator(self._BAR).count() == 0, "Sticky save bar rendered without any edit"
 
     def test_visible_after_change(self, page: Page):
         _navigate(page)
         page.locator("input#semantic_weight").fill("0.50")
         time.sleep(0.5)
-        bar = page.locator("div.fixed.bottom-0")
-        assert "translate-y-0" in (bar.get_attribute("class") or "")
+        assert page.locator(self._BAR).count() > 0, "Sticky save bar did not appear after an edit"
 
     def test_hidden_after_discard(self, page: Page):
         _navigate(page)
         page.locator("input#semantic_weight").fill("0.50")
         time.sleep(0.5)
-        bar = page.locator("div.fixed.bottom-0")
+        bar = page.locator(self._BAR)
         bar.locator("button", has_text=re.compile(r"Discard|破棄")).click()
         time.sleep(1)
-        assert "translate-y-full" in (bar.get_attribute("class") or "")
+        assert page.locator(self._BAR).count() == 0, (
+            "Sticky save bar still rendered after discarding the edit"
+        )
 
 
 class TestRerankerProviders:
@@ -222,35 +253,22 @@ class TestI18n:
     """Verify Japanese locale renders."""
 
     def test_japanese_strings(self, page: Page):
-        page.goto(f"{_search_settings_url(page)}?locale=ja")
-        page.wait_for_load_state("networkidle")
-        time.sleep(1)
+        """Locale is the logged-in user's PROFILE preference (#221 → the
+        authenticated layout syncs it over any localStorage value), so the
+        only reliable switch is PUT /users/profile — restore afterwards."""
+        resp = page.request.put(f"{API_URL}/api/v1/users/profile", data={"locale": "ja"})
+        assert resp.ok, f"profile locale switch failed: {resp.status}"
+        try:
+            _navigate(page)
+            body_text = page.text_content("body") or ""
+            jp_strings = ["ハイブリッド検索", "検索設定", "リランカー", "埋め込み"]
+            found = [s for s in jp_strings if s in body_text]
+            assert len(found) > 0, f"No Japanese strings found. Checked: {jp_strings}"
+        finally:
+            page.request.put(f"{API_URL}/api/v1/users/profile", data={"locale": "en"})
 
-        body_text = page.text_content("body") or ""
-        jp_strings = ["ハイブリッド検索", "検索設定", "リランカー", "埋め込み"]
-        found = [s for s in jp_strings if s in body_text]
-        assert len(found) > 0, f"No Japanese strings found. Checked: {jp_strings}"
 
-
-class TestResetDialog:
-    """Verify AlertDialog for reset confirmation (not window.confirm)."""
-
-    def test_alert_dialog_shown(self, page: Page):
-        _navigate(page)
-        reset_btn = page.locator("button", has_text=re.compile(r"Reset|デフォルト"))
-        assert reset_btn.count() > 0, "Reset button not found"
-        reset_btn.click()
-        time.sleep(0.5)
-
-        dialog = page.locator('[role="alertdialog"]')
-        assert dialog.count() > 0, "AlertDialog not shown"
-
-    def test_dialog_has_cancel(self, page: Page):
-        _navigate(page)
-        page.locator("button", has_text=re.compile(r"Reset|デフォルト")).click()
-        time.sleep(0.5)
-
-        dialog = page.locator('[role="alertdialog"]')
-        cancel = dialog.locator("button", has_text=re.compile(r"Cancel|キャンセル"))
-        assert cancel.count() > 0, "Cancel button not found in dialog"
-        cancel.click()
+# TestResetDialog was removed in #1369: the #158 reset-to-defaults control
+# did not survive the #232 consolidation into the context-detail Settings
+# tab — there is no Reset button (or AlertDialog) on the surface anymore,
+# so the tests asserted a feature that no longer exists.

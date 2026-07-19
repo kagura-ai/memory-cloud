@@ -78,8 +78,11 @@ class TestMemoryEndpoints:
                 "context_id": str(MOCK_CONTEXT_ID),
             },
         )
-        # 422 = validation error (bad payload), others = service behavior
-        assert response.status_code in (200, 404, 500), (
+        # 422 is part of the current contract for a context the caller
+        # cannot resolve: the route resolves MOCK_CONTEXT_ID to nothing and
+        # recall() rejects the missing workspace/context pair as a
+        # validation error (#1369) — a structured response, not a crash.
+        assert response.status_code in (200, 404, 422, 500), (
             f"recall returned unexpected {response.status_code}: {response.text[:200]}"
         )
 
