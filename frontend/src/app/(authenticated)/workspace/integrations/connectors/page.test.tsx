@@ -75,6 +75,9 @@ function setWorkspace(role: string | undefined, overrides = {}) {
 }
 
 beforeEach(() => {
+  // clearAllMocks does NOT reset implementations — re-arm defaults here so a
+  // per-test mockResolvedValue never leaks into later tests (#1376 review).
+  mockUpdateConnectorSettings.mockReset();
   mockSearchParamsGet.mockReturnValue(null);
   mockListConnectors.mockResolvedValue([]);
   mockListAvailableWorkerApps.mockResolvedValue([]);
@@ -352,6 +355,40 @@ describe("ConnectorsPage RBAC gate", () => {
         3,
       ),
     );
+  });
+
+  it("treats llm-clear on an unbound connector as no-change (#1376)", async () => {
+    setWorkspace("admin");
+    mockListConnectors.mockResolvedValue([
+      {
+        connector_id: "connector-1",
+        connector_type: "slack",
+        app_key: "default",
+        resource_id: "slack-t01",
+        context_id: "context-1",
+        config_version: 3,
+        created_at: "2026-07-19T00:00:00Z",
+        created_by: "user-1",
+        runtime: { vision_enabled: true },
+        channel_ids: ["C1"],
+        locale: null,
+        litellm_virtual_key_id: null,
+        llm_config_present: false,
+      },
+    ]);
+
+    render(<ConnectorsPage />);
+
+    fireEvent.click(
+      await screen.findByRole("button", { name: "editSettings" }),
+    );
+    // Tick "clear LLM" with nothing bound and change nothing else.
+    fireEvent.click(await screen.findByRole("switch", { name: "llmClear" }));
+    fireEvent.click(screen.getByRole("button", { name: "settingsSave" }));
+
+    // No-op guard: nothing to clear → no PATCH, inline notice instead.
+    expect(await screen.findByText("noChanges")).toBeInTheDocument();
+    expect(mockUpdateConnectorSettings).not.toHaveBeenCalled();
   });
 
   it("does not toast slack_error for non-admins (#1375)", async () => {

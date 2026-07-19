@@ -731,3 +731,63 @@ async def test_update_settings_hides_cross_workspace_as_not_found():
             user_id="admin-1",
             channel_ids=["C01"],
         )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "bad_llm",
+    [{}, {"provider": "openai"}, {"model": "gpt"}, {"provider": " ", "model": "gpt"}],
+)
+async def test_update_settings_rejects_unvendable_llm_config(bad_llm):
+    """#1376 review: a junk bundle would read llm_config_present=true while the
+    tenant stays un-vendable — reject before any DB work."""
+    db = MagicMock()
+    db.execute = AsyncMock()
+
+    with pytest.raises(ValidationError) as exc:
+        await ConnectorProvisioningService(db).update_connector_settings(
+            workspace_id=uuid4(),
+            connector_id=uuid4(),
+            user_id="admin-1",
+            llm_config=bad_llm,
+        )
+
+    assert "llm_config" in str(exc.value).lower()
+    db.execute.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_update_settings_accepts_llm_config_without_api_key():
+    """#1376 review: api_key is provider-dependent (e.g. local ollama) — only
+    provider/model are the universal minimum."""
+    conn = _settings_conn()
+    db = MagicMock()
+    db.execute = AsyncMock(return_value=_result(one=conn))
+    db.flush = AsyncMock()
+
+    result = await ConnectorProvisioningService(db).update_connector_settings(
+        workspace_id=conn.workspace_id,
+        connector_id=conn.id,
+        user_id="admin-1",
+        llm_config={"provider": "ollama", "model": "qwen3"},
+    )
+
+    assert result.llm_config_present is True
+
+
+@pytest.mark.asyncio
+async def test_provision_connector_rejects_unvendable_llm_config():
+    """#1376 review: the create path shares the same un-vendable guard."""
+    db = MagicMock()
+    db.execute = AsyncMock()
+
+    with pytest.raises(ValidationError):
+        await ConnectorProvisioningService(db).provision_connector(
+            workspace_id=uuid4(),
+            user_id="u1",
+            connector_type="slack",
+            resource_id="slack-x",
+            llm_config={"foo": "bar"},
+        )
+
+    db.execute.assert_not_awaited()

@@ -617,3 +617,12 @@ async def test_update_settings_route_rolls_back_on_conflict():
 
     db.rollback.assert_awaited_once()
     db.commit.assert_not_awaited()
+
+
+def test_update_settings_request_forbids_unknown_fields():
+    """#1376 review: a silently-dropped typo'd field name would read as a
+    successful partial update — unknown keys must 422 at the request layer."""
+    from api.routes.workspace_connectors import WorkspaceConnectorSettingsUpdateRequest
+
+    with pytest.raises(PydanticValidationError):
+        WorkspaceConnectorSettingsUpdateRequest.model_validate({"locail": "ja"})

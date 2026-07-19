@@ -7,7 +7,7 @@ from typing import Any, Literal
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException, Response, status
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from auth.dependencies import WorkspaceAdmin
@@ -142,9 +142,13 @@ class WorkspaceConnectorSettingsUpdateRequest(BaseModel):
     """PATCH body for connector vend settings (#1376).
 
     True PATCH semantics: fields absent from the request are untouched; an
-    explicit ``null`` clears. The route inspects ``model_fields_set`` to tell
-    the two apart, so every default below is just the "absent" marker.
+    explicit ``null`` clears. The route forwards ``exclude_unset`` fields to
+    the service sentinel, so every default below is just the "absent" marker.
+    ``extra="forbid"`` because a silently-dropped typo'd field name would
+    read as a successful partial update (#1376 review).
     """
+
+    model_config = ConfigDict(extra="forbid")
 
     channel_ids: list[str] | None = Field(
         None,
@@ -470,13 +474,13 @@ async def update_workspace_connector_settings(
         raise BadRequestError(
             "No workspace selected. Please select a workspace first.",
         )
-    # model_fields_set distinguishes an explicit null (clear) from an absent
-    # field (untouched) — only provided fields reach the service sentinel.
-    kwargs: dict[str, Any] = {
-        field: getattr(request, field)
-        for field in ("channel_ids", "litellm_virtual_key_id", "llm_config", "locale")
-        if field in request.model_fields_set
-    }
+    # exclude_unset distinguishes an explicit null (clear) from an absent
+    # field (untouched) and derives the field set from the model itself — a
+    # hand-listed tuple here would silently drop a future request field
+    # (#1376 review).
+    kwargs: dict[str, Any] = request.model_dump(
+        exclude_unset=True, exclude={"expected_config_version"}
+    )
     try:
         settings_result = await ConnectorProvisioningService(db).update_connector_settings(
             workspace_id=workspace_id,

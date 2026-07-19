@@ -344,19 +344,32 @@ export default function ConnectorsPage() {
     const oldChannels = settingsFor.channel_ids?.length
       ? settingsFor.channel_ids
       : null;
-    if (JSON.stringify(newChannels) !== JSON.stringify(oldChannels)) {
+    // Order-insensitive compare: channel selection is a set, and a
+    // reorder-only save must not bump config_version / refetch the worker.
+    const sortedJson = (ids: string[] | null) =>
+      ids ? JSON.stringify([...ids].sort()) : "null";
+    if (sortedJson(newChannels) !== sortedJson(oldChannels)) {
       patch.channel_ids = newChannels;
     }
-    const newLocale = localeSel === "default" ? null : localeSel;
-    if (newLocale !== (settingsFor.locale ?? null)) {
-      patch.locale = newLocale;
+    // Compare select STATE against its initial mapping (not the raw stored
+    // value) so a stored locale this 3-option select cannot represent is
+    // never silently cleared by an unrelated save.
+    const initialLocaleSel =
+      settingsFor.locale === "en" || settingsFor.locale === "ja"
+        ? settingsFor.locale
+        : "default";
+    if (localeSel !== initialLocaleSel) {
+      patch.locale = localeSel === "default" ? null : localeSel;
     }
     const newLitellmKey = litellmKey.trim() || null;
     if (newLitellmKey !== (settingsFor.litellm_virtual_key_id ?? null)) {
       patch.litellm_virtual_key_id = newLitellmKey;
     }
     if (llmClear) {
-      patch.llm_config = null;
+      // Clearing an already-empty binding is a no-op, not a PATCH.
+      if (settingsFor.llm_config_present) {
+        patch.llm_config = null;
+      }
     } else if (llmProvider.trim() || llmModel.trim() || llmApiKey.trim()) {
       if (!(llmProvider.trim() && llmModel.trim() && llmApiKey.trim())) {
         setSettingsError(t("llmIncomplete"));
@@ -779,7 +792,12 @@ export default function ConnectorsPage() {
       {/* #1376: vend-settings editor */}
       <Dialog
         open={settingsFor !== null}
-        onOpenChange={(o) => !o && setSettingsFor(null)}
+        // Escape/overlay-close is blocked mid-save: the error Alert lives in
+        // this dialog, so closing while the PATCH is in flight would swallow
+        // a failure (#1376 review).
+        onOpenChange={(o) => {
+          if (!o && !settingsSaving) setSettingsFor(null);
+        }}
       >
         <DialogContent>
           <DialogHeader>
