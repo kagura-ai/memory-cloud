@@ -3,7 +3,7 @@
 import { FormEvent, useCallback, useEffect, useState } from "react";
 import { useRouter, useSearchParams } from "next/navigation";
 import { useTranslations, useLocale } from "next-intl";
-import { Check, Copy, Plug, Trash2 } from "lucide-react";
+import { Check, Copy, Pencil, Plug, Trash2 } from "lucide-react";
 
 import { PageContainer } from "@/components/common/PageContainer";
 import { PageHeader } from "@/components/common/PageHeader";
@@ -34,6 +34,14 @@ import {
   AlertDialogHeader,
   AlertDialogTitle,
 } from "@/components/ui/alert-dialog";
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+} from "@/components/ui/dialog";
 import { useToast } from "@/hooks/use-toast";
 import { useCopyFeedback } from "@/hooks/useCopyFeedback";
 import { useWorkspace } from "@/contexts/WorkspaceContext";
@@ -47,9 +55,11 @@ import {
   listConnectors,
   slackInstallUrl,
   updateConnectorRuntime,
+  updateConnectorSettings,
   type AvailableWorkerApp,
   type CreateConnectorResponse,
   type SlackPendingInstall,
+  type UpdateConnectorSettingsRequest,
   type WorkspaceConnectorSummary,
 } from "@/lib/api/workspace-connectors";
 
@@ -180,6 +190,23 @@ export default function ConnectorsPage() {
   );
   const [runtimeSaving, setRuntimeSaving] = useState<string | null>(null);
 
+  // #1376: vend-settings editor (channels / locale / LLM binding). The LLM
+  // credential fields are write-only: never prefilled, sent only when the
+  // admin fills all three (or ticks the explicit clear).
+  const [settingsFor, setSettingsFor] =
+    useState<WorkspaceConnectorSummary | null>(null);
+  const [chText, setChText] = useState("");
+  const [localeSel, setLocaleSel] = useState<"default" | "en" | "ja">(
+    "default",
+  );
+  const [litellmKey, setLitellmKey] = useState("");
+  const [llmProvider, setLlmProvider] = useState("");
+  const [llmModel, setLlmModel] = useState("");
+  const [llmApiKey, setLlmApiKey] = useState("");
+  const [llmClear, setLlmClear] = useState(false);
+  const [settingsSaving, setSettingsSaving] = useState(false);
+  const [settingsError, setSettingsError] = useState<string | null>(null);
+
   const reload = useCallback(async () => {
     try {
       setLoadError(null);
@@ -291,6 +318,91 @@ export default function ConnectorsPage() {
     }
     router.replace("/workspace/integrations/connectors");
   }, [slackError, allowed, t, toast, router]);
+
+  const openSettings = useCallback((c: WorkspaceConnectorSummary) => {
+    setSettingsFor(c);
+    setChText((c.channel_ids ?? []).join(", "));
+    setLocaleSel(c.locale === "en" || c.locale === "ja" ? c.locale : "default");
+    setLitellmKey(c.litellm_virtual_key_id ?? "");
+    setLlmProvider("");
+    setLlmModel("");
+    setLlmApiKey("");
+    setLlmClear(false);
+    setSettingsError(null);
+  }, []);
+
+  const handleSettingsSave = useCallback(async () => {
+    if (!settingsFor) return;
+    setSettingsError(null);
+
+    const patch: UpdateConnectorSettingsRequest = {};
+    const parsedChannels = chText
+      .split(/[,\s]+/)
+      .map((s) => s.trim())
+      .filter(Boolean);
+    const newChannels = parsedChannels.length ? parsedChannels : null;
+    const oldChannels = settingsFor.channel_ids?.length
+      ? settingsFor.channel_ids
+      : null;
+    if (JSON.stringify(newChannels) !== JSON.stringify(oldChannels)) {
+      patch.channel_ids = newChannels;
+    }
+    const newLocale = localeSel === "default" ? null : localeSel;
+    if (newLocale !== (settingsFor.locale ?? null)) {
+      patch.locale = newLocale;
+    }
+    const newLitellmKey = litellmKey.trim() || null;
+    if (newLitellmKey !== (settingsFor.litellm_virtual_key_id ?? null)) {
+      patch.litellm_virtual_key_id = newLitellmKey;
+    }
+    if (llmClear) {
+      patch.llm_config = null;
+    } else if (llmProvider.trim() || llmModel.trim() || llmApiKey.trim()) {
+      if (!(llmProvider.trim() && llmModel.trim() && llmApiKey.trim())) {
+        setSettingsError(t("llmIncomplete"));
+        return;
+      }
+      patch.llm_config = {
+        provider: llmProvider.trim(),
+        model: llmModel.trim(),
+        api_key: llmApiKey.trim(),
+      };
+    }
+    if (Object.keys(patch).length === 0) {
+      setSettingsError(t("noChanges"));
+      return;
+    }
+
+    setSettingsSaving(true);
+    try {
+      await updateConnectorSettings(
+        settingsFor.connector_id,
+        patch,
+        // Snapshot version rides along as the optimistic-concurrency guard
+        // (server 409s on staleness instead of silently reverting).
+        settingsFor.config_version,
+      );
+      toast({ title: t("settingsSaved") });
+      setSettingsFor(null);
+      void reload();
+    } catch (err) {
+      setSettingsError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setSettingsSaving(false);
+    }
+  }, [
+    settingsFor,
+    chText,
+    localeSel,
+    litellmKey,
+    llmProvider,
+    llmModel,
+    llmApiKey,
+    llmClear,
+    t,
+    toast,
+    reload,
+  ]);
 
   const closeCreateDialog = useCallback(() => {
     setPending(null);
@@ -605,6 +717,23 @@ export default function ConnectorsPage() {
                     )}
                   </Button>
                 </div>
+                {/* #1376: vend-settings presence indicators — an un-vendable
+                    connector (no channels / no LLM) is visible at a glance. */}
+                <p className="mt-1 flex gap-2 text-xs text-muted-foreground">
+                  <span>
+                    {c.channel_ids?.length
+                      ? t("channelsCount", { count: c.channel_ids.length })
+                      : t("channelsNone")}
+                  </span>
+                  <span>
+                    {c.llm_config_present || c.litellm_virtual_key_id
+                      ? t("llmBound")
+                      : t("llmNotBound")}
+                  </span>
+                  <span>
+                    {t("localeIndicator", { locale: c.locale ?? "—" })}
+                  </span>
+                </p>
               </div>
               <div className="flex items-center gap-4">
                 <label className="flex items-center gap-2 text-sm">
@@ -628,6 +757,14 @@ export default function ConnectorsPage() {
                 <Button
                   variant="ghost"
                   size="sm"
+                  onClick={() => openSettings(c)}
+                  aria-label={t("editSettings")}
+                >
+                  <Pencil className="h-4 w-4" />
+                </Button>
+                <Button
+                  variant="ghost"
+                  size="sm"
                   onClick={() => setToDelete(c)}
                   aria-label={tCommon("delete")}
                 >
@@ -638,6 +775,138 @@ export default function ConnectorsPage() {
           ))}
         </ul>
       )}
+
+      {/* #1376: vend-settings editor */}
+      <Dialog
+        open={settingsFor !== null}
+        onOpenChange={(o) => !o && setSettingsFor(null)}
+      >
+        <DialogContent>
+          <DialogHeader>
+            <DialogTitle>{t("settingsTitle")}</DialogTitle>
+            <DialogDescription>{t("settingsDesc")}</DialogDescription>
+          </DialogHeader>
+          <div className="space-y-4">
+            {settingsError && (
+              <Alert variant="destructive">
+                <AlertDescription>{settingsError}</AlertDescription>
+              </Alert>
+            )}
+            <div>
+              <label
+                htmlFor="conn-settings-channels"
+                className="mb-1 block text-sm font-medium"
+              >
+                {t("channelsLabel")}
+              </label>
+              <Input
+                id="conn-settings-channels"
+                aria-label={t("channelsLabel")}
+                value={chText}
+                onChange={(e) => setChText(e.target.value)}
+              />
+              <p className="mt-1 text-xs text-muted-foreground">
+                {t("channelsHelp")}
+              </p>
+            </div>
+            <div>
+              <label
+                htmlFor="conn-settings-locale"
+                className="mb-1 block text-sm font-medium"
+              >
+                {t("localeLabel")}
+              </label>
+              <Select
+                value={localeSel}
+                onValueChange={(v) =>
+                  setLocaleSel(v as "default" | "en" | "ja")
+                }
+              >
+                <SelectTrigger
+                  id="conn-settings-locale"
+                  aria-label={t("localeLabel")}
+                >
+                  <SelectValue />
+                </SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="default">{t("localeDefault")}</SelectItem>
+                  <SelectItem value="en">English</SelectItem>
+                  <SelectItem value="ja">日本語</SelectItem>
+                </SelectContent>
+              </Select>
+            </div>
+            <div>
+              <label
+                htmlFor="conn-settings-litellm"
+                className="mb-1 block text-sm font-medium"
+              >
+                {t("litellmKeyLabel")}
+              </label>
+              <Input
+                id="conn-settings-litellm"
+                aria-label={t("litellmKeyLabel")}
+                value={litellmKey}
+                onChange={(e) => setLitellmKey(e.target.value)}
+              />
+            </div>
+            <div className="space-y-2">
+              <p className="text-sm font-medium">
+                {t("llmLabel")}
+                {settingsFor?.llm_config_present
+                  ? ` — ${t("llmBound")}`
+                  : ` — ${t("llmNotBound")}`}
+              </p>
+              <p className="text-xs text-muted-foreground">{t("llmHelp")}</p>
+              <Input
+                aria-label={t("llmProvider")}
+                placeholder={t("llmProvider")}
+                value={llmProvider}
+                disabled={llmClear}
+                onChange={(e) => setLlmProvider(e.target.value)}
+              />
+              <Input
+                aria-label={t("llmModel")}
+                placeholder={t("llmModel")}
+                value={llmModel}
+                disabled={llmClear}
+                onChange={(e) => setLlmModel(e.target.value)}
+              />
+              <Input
+                aria-label={t("llmApiKey")}
+                placeholder={t("llmApiKey")}
+                type="password"
+                value={llmApiKey}
+                disabled={llmClear}
+                onChange={(e) => setLlmApiKey(e.target.value)}
+              />
+              <label className="flex items-center gap-2 text-sm">
+                <Switch
+                  checked={llmClear}
+                  onCheckedChange={setLlmClear}
+                  aria-label={t("llmClear")}
+                />
+                <span>{t("llmClear")}</span>
+              </label>
+            </div>
+          </div>
+          <DialogFooter>
+            <Button
+              variant="outline"
+              onClick={() => setSettingsFor(null)}
+              disabled={settingsSaving}
+            >
+              {tCommon("cancel")}
+            </Button>
+            <Button
+              onClick={() => void handleSettingsSave()}
+              disabled={settingsSaving}
+            >
+              {settingsSaving && <InlineSpinner aria-hidden="true" />}
+              {t("settingsSave")}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
 
       {/* Create dialog (after Slack OAuth) */}
       <AlertDialog

@@ -287,6 +287,11 @@ async def test_list_workspace_connectors_returns_summaries():
     c.runtime_config = None
     c.created_at = datetime(2026, 6, 2, 0, 0, 0)
     c.created_by = "user-1"
+    # #1376: settings surfaced for the admin-card presence indicators.
+    c.channel_ids = ["C01"]
+    c.locale = "ja"
+    c.litellm_virtual_key_id = None
+    c.llm_config_encrypted = "ENC:x"
 
     # list_connectors now returns ConnectorListItem(connector, resource_id) so the
     # summary exposes the public slug, not the internal resource_pk DB key (#991).
@@ -302,6 +307,13 @@ async def test_list_workspace_connectors_returns_summaries():
     assert result[0].app_key == "default"
     assert result[0].resource_id == "my-resource-slug"
     assert not hasattr(result[0], "resource_pk")
+    # #1376: presence indicators for the admin card; the LLM bundle itself is
+    # write-only and must never be listed.
+    assert result[0].channel_ids == ["C01"]
+    assert result[0].locale == "ja"
+    assert result[0].llm_config_present is True
+    assert result[0].litellm_virtual_key_id is None
+    assert "ENC:" not in result[0].model_dump_json()
     service_cls.return_value.list_connectors.assert_awaited_once_with(ws_id)
 
 
@@ -467,5 +479,141 @@ async def test_rotate_kmc_key_422_when_no_kmc_key():
             await rotate_connector_kmc_key(uuid4(), admin, db)
 
     assert exc.value.status_code == 422
+    db.rollback.assert_awaited_once()
+    db.commit.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_update_settings_route_passes_only_provided_fields():
+    """#1376: absent request fields never reach the service (PATCH semantics)."""
+    from api.routes.workspace_connectors import (
+        WorkspaceConnectorSettingsUpdateRequest,
+        update_workspace_connector_settings,
+    )
+    from services.connector_provisioning import ConnectorSettingsUpdateResult
+
+    db = MagicMock()
+    db.commit = AsyncMock()
+    workspace_id = uuid4()
+    connector_id = uuid4()
+    admin = {"user_id": "user-1", "current_workspace_id": workspace_id}
+    request = WorkspaceConnectorSettingsUpdateRequest.model_validate(
+        {"channel_ids": ["C01"], "expected_config_version": 3}
+    )
+
+    with patch("api.routes.workspace_connectors.ConnectorProvisioningService") as service_cls:
+        service_cls.return_value.update_connector_settings = AsyncMock(
+            return_value=ConnectorSettingsUpdateResult(
+                channel_ids=["C01"],
+                litellm_virtual_key_id=None,
+                llm_config_present=False,
+                locale=None,
+                config_version=4,
+            )
+        )
+        response = await update_workspace_connector_settings(connector_id, request, admin, db)
+
+    assert response.connector_id == connector_id
+    assert response.channel_ids == ["C01"]
+    assert response.config_version == 4
+    db.commit.assert_awaited_once()
+    service_cls.return_value.update_connector_settings.assert_awaited_once_with(
+        workspace_id=workspace_id,
+        connector_id=connector_id,
+        user_id="user-1",
+        expected_config_version=3,
+        channel_ids=["C01"],
+    )
+
+
+@pytest.mark.asyncio
+async def test_update_settings_route_distinguishes_explicit_null_from_absent():
+    """#1376: explicit null (clear) is forwarded; untouched fields are not."""
+    from api.routes.workspace_connectors import (
+        WorkspaceConnectorSettingsUpdateRequest,
+        update_workspace_connector_settings,
+    )
+    from services.connector_provisioning import ConnectorSettingsUpdateResult
+
+    db = MagicMock()
+    db.commit = AsyncMock()
+    workspace_id = uuid4()
+    admin = {"user_id": "user-1", "current_workspace_id": workspace_id}
+    request = WorkspaceConnectorSettingsUpdateRequest.model_validate(
+        {"llm_config": None, "locale": None}
+    )
+
+    with patch("api.routes.workspace_connectors.ConnectorProvisioningService") as service_cls:
+        service_cls.return_value.update_connector_settings = AsyncMock(
+            return_value=ConnectorSettingsUpdateResult(
+                channel_ids=["C-kept"],
+                litellm_virtual_key_id="vk-kept",
+                llm_config_present=False,
+                locale=None,
+                config_version=9,
+            )
+        )
+        await update_workspace_connector_settings(uuid4(), request, admin, db)
+
+    kwargs = service_cls.return_value.update_connector_settings.await_args.kwargs
+    assert kwargs["llm_config"] is None
+    assert kwargs["locale"] is None
+    assert "channel_ids" not in kwargs
+    assert "litellm_virtual_key_id" not in kwargs
+
+
+@pytest.mark.asyncio
+async def test_update_settings_response_never_echoes_llm_config():
+    """#1376: the LLM bundle is write-only — only a presence flag comes back."""
+    from api.routes.workspace_connectors import (
+        WorkspaceConnectorSettingsUpdateRequest,
+        update_workspace_connector_settings,
+    )
+    from services.connector_provisioning import ConnectorSettingsUpdateResult
+
+    db = MagicMock()
+    db.commit = AsyncMock()
+    admin = {"user_id": "user-1", "current_workspace_id": uuid4()}
+    request = WorkspaceConnectorSettingsUpdateRequest.model_validate(
+        {"llm_config": {"provider": "openai", "model": "gpt", "api_key": "sk-secret"}}
+    )
+
+    with patch("api.routes.workspace_connectors.ConnectorProvisioningService") as service_cls:
+        service_cls.return_value.update_connector_settings = AsyncMock(
+            return_value=ConnectorSettingsUpdateResult(
+                channel_ids=None,
+                litellm_virtual_key_id=None,
+                llm_config_present=True,
+                locale=None,
+                config_version=2,
+            )
+        )
+        response = await update_workspace_connector_settings(uuid4(), request, admin, db)
+
+    assert response.llm_config_present is True
+    assert "sk-secret" not in response.model_dump_json()
+
+
+@pytest.mark.asyncio
+async def test_update_settings_route_rolls_back_on_conflict():
+    from api.routes.workspace_connectors import (
+        WorkspaceConnectorSettingsUpdateRequest,
+        update_workspace_connector_settings,
+    )
+    from utils.exceptions import ConflictError
+
+    db = MagicMock()
+    db.rollback = AsyncMock()
+    db.commit = AsyncMock()
+    admin = {"user_id": "user-1", "current_workspace_id": uuid4()}
+    request = WorkspaceConnectorSettingsUpdateRequest.model_validate({"channel_ids": ["C01"]})
+
+    with patch("api.routes.workspace_connectors.ConnectorProvisioningService") as service_cls:
+        service_cls.return_value.update_connector_settings = AsyncMock(
+            side_effect=ConflictError("stale")
+        )
+        with pytest.raises(ConflictError):
+            await update_workspace_connector_settings(uuid4(), request, admin, db)
+
     db.rollback.assert_awaited_once()
     db.commit.assert_not_awaited()

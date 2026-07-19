@@ -542,3 +542,192 @@ class TestTeamUniquenessGuard:
         assert db.execute.await_count == 1
         lock_sql = str(db.execute.await_args_list[0].args[0])
         assert "pg_advisory_xact_lock" in lock_sql
+
+
+class _SettingsConn(SimpleNamespace):
+    """Connector stub with a real-ish write-only llm_config setter (#1376)."""
+
+    def set_llm_config(self, config):
+        self.llm_config_encrypted = "ENC:test" if config else None
+
+
+def _settings_conn(**over):
+    base = {
+        "id": uuid4(),
+        "workspace_id": uuid4(),
+        "channel_ids": ["C-old"],
+        "litellm_virtual_key_id": None,
+        "llm_config_encrypted": None,
+        "locale": None,
+        "config_version": 3,
+    }
+    base.update(over)
+    return _SettingsConn(**base)
+
+
+@pytest.mark.asyncio
+async def test_update_settings_partial_update_bumps_revision():
+    """#1376: only provided fields change; locale rides the #1377 normalizer."""
+    conn = _settings_conn(llm_config_encrypted="ENC:kept")
+    db = MagicMock()
+    db.execute = AsyncMock(return_value=_result(one=conn))
+    db.flush = AsyncMock()
+
+    with patch("services.connector_provisioning.logger.info") as log_info:
+        result = await ConnectorProvisioningService(db).update_connector_settings(
+            workspace_id=conn.workspace_id,
+            connector_id=conn.id,
+            user_id="admin-1",
+            channel_ids=["C01", "C02"],
+            locale="ja-JP",
+        )
+
+    assert conn.channel_ids == ["C01", "C02"]
+    assert conn.locale == "ja"
+    assert conn.llm_config_encrypted == "ENC:kept"  # untouched
+    assert conn.litellm_virtual_key_id is None  # untouched
+    assert conn.config_version == 4
+    assert result.config_version == 4
+    assert result.llm_config_present is True
+    assert result.locale == "ja"
+    statement = db.execute.await_args.args[0]
+    assert "workspace_connectors.workspace_id" in str(statement)
+    assert "FOR UPDATE" in str(statement)
+    assert log_info.call_args.kwargs["changed_fields"] == ["channel_ids", "locale"]
+
+
+@pytest.mark.asyncio
+async def test_update_settings_null_clears_provided_fields():
+    """#1376: explicit null clears; a tuned connector is not a one-way door."""
+    conn = _settings_conn(llm_config_encrypted="ENC:x", litellm_virtual_key_id="vk-1", locale="ja")
+    db = MagicMock()
+    db.execute = AsyncMock(return_value=_result(one=conn))
+    db.flush = AsyncMock()
+
+    result = await ConnectorProvisioningService(db).update_connector_settings(
+        workspace_id=conn.workspace_id,
+        connector_id=conn.id,
+        user_id="admin-1",
+        channel_ids=None,
+        litellm_virtual_key_id=None,
+        llm_config=None,
+        locale=None,
+    )
+
+    assert conn.channel_ids is None
+    assert conn.litellm_virtual_key_id is None
+    assert conn.llm_config_encrypted is None
+    assert conn.locale is None
+    assert conn.config_version == 4
+    assert result.llm_config_present is False
+
+
+@pytest.mark.asyncio
+async def test_update_settings_sets_llm_config_write_only():
+    """#1376: llm bundle is stored encrypted and never appears in the log."""
+    conn = _settings_conn()
+    db = MagicMock()
+    db.execute = AsyncMock(return_value=_result(one=conn))
+    db.flush = AsyncMock()
+
+    with patch("services.connector_provisioning.logger.info") as log_info:
+        result = await ConnectorProvisioningService(db).update_connector_settings(
+            workspace_id=conn.workspace_id,
+            connector_id=conn.id,
+            user_id="admin-1",
+            llm_config={"provider": "openai", "model": "gpt", "api_key": "sk-secret"},
+        )
+
+    assert conn.llm_config_encrypted == "ENC:test"
+    assert result.llm_config_present is True
+    assert "sk-secret" not in str(log_info.call_args)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("bad", [[], ["", "C1"], ["   "], [123]])
+async def test_update_settings_rejects_bad_channel_ids(bad):
+    """#1376: empty list / blank or non-string ids 422 BEFORE any DB work —
+    an empty selection would re-create the un-vendable connector this
+    endpoint exists to repair (clearing is the explicit null)."""
+    db = MagicMock()
+    db.execute = AsyncMock()
+
+    with pytest.raises(ValidationError) as exc:
+        await ConnectorProvisioningService(db).update_connector_settings(
+            workspace_id=uuid4(),
+            connector_id=uuid4(),
+            user_id="admin-1",
+            channel_ids=bad,
+        )
+
+    assert "channel_ids" in str(exc.value).lower()
+    db.execute.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_update_settings_rejects_non_contract_locale():
+    db = MagicMock()
+    db.execute = AsyncMock()
+
+    with pytest.raises(ValidationError):
+        await ConnectorProvisioningService(db).update_connector_settings(
+            workspace_id=uuid4(),
+            connector_id=uuid4(),
+            user_id="admin-1",
+            locale="fr",
+        )
+
+    db.execute.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_update_settings_requires_at_least_one_field():
+    """#1376: an empty PATCH must not silently bump config_version."""
+    db = MagicMock()
+    db.execute = AsyncMock()
+
+    with pytest.raises(ValidationError):
+        await ConnectorProvisioningService(db).update_connector_settings(
+            workspace_id=uuid4(),
+            connector_id=uuid4(),
+            user_id="admin-1",
+        )
+
+    db.execute.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_update_settings_stale_expected_version_conflicts():
+    conn = _settings_conn(config_version=5)
+    db = MagicMock()
+    db.execute = AsyncMock(return_value=_result(one=conn))
+    db.flush = AsyncMock()
+
+    with pytest.raises(ConflictError):
+        await ConnectorProvisioningService(db).update_connector_settings(
+            workspace_id=conn.workspace_id,
+            connector_id=conn.id,
+            user_id="admin-1",
+            channel_ids=["C01"],
+            expected_config_version=4,
+        )
+
+    assert conn.channel_ids == ["C-old"]  # no mutation on conflict
+    assert conn.config_version == 5
+    db.flush.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_update_settings_hides_cross_workspace_as_not_found():
+    from utils.exceptions import NotFoundException
+
+    db = MagicMock()
+    db.execute = AsyncMock(return_value=_result(one=None))
+
+    with pytest.raises(NotFoundException):
+        await ConnectorProvisioningService(db).update_connector_settings(
+            workspace_id=uuid4(),
+            connector_id=uuid4(),
+            user_id="admin-1",
+            channel_ids=["C01"],
+        )

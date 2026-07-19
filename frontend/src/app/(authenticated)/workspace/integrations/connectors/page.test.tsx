@@ -22,6 +22,7 @@ const mockListConnectors = vi.fn();
 const mockListAvailableWorkerApps = vi.fn();
 const mockCreateConnector = vi.fn();
 const mockUpdateConnectorRuntime = vi.fn();
+const mockUpdateConnectorSettings = vi.fn();
 vi.mock("@/lib/api/workspace-connectors", () => ({
   listConnectors: (...args: unknown[]) => mockListConnectors(...args),
   listAvailableWorkerApps: (...args: unknown[]) =>
@@ -30,6 +31,8 @@ vi.mock("@/lib/api/workspace-connectors", () => ({
   createConnector: (...args: unknown[]) => mockCreateConnector(...args),
   updateConnectorRuntime: (...args: unknown[]) =>
     mockUpdateConnectorRuntime(...args),
+  updateConnectorSettings: (...args: unknown[]) =>
+    mockUpdateConnectorSettings(...args),
   getSlackPendingInstall: vi.fn(),
   slackInstallUrl: () => "https://slack.example/install",
 }));
@@ -272,6 +275,82 @@ describe("ConnectorsPage RBAC gate", () => {
     );
     expect(mockRouterReplace).toHaveBeenCalledWith(
       "/workspace/integrations/connectors",
+    );
+  });
+
+  it("renders vend-settings indicators on the connector row (#1376)", async () => {
+    setWorkspace("admin");
+    mockListConnectors.mockResolvedValue([
+      {
+        connector_id: "connector-1",
+        connector_type: "slack",
+        app_key: "default",
+        resource_id: "slack-t01",
+        context_id: "context-1",
+        config_version: 3,
+        created_at: "2026-07-19T00:00:00Z",
+        created_by: "user-1",
+        runtime: { vision_enabled: true },
+        channel_ids: ["C1", "C2"],
+        locale: "ja",
+        litellm_virtual_key_id: null,
+        llm_config_present: true,
+      },
+    ]);
+
+    render(<ConnectorsPage />);
+
+    // i18n mock returns keys; params are dropped.
+    expect(await screen.findByText("channelsCount")).toBeInTheDocument();
+    expect(screen.getByText("llmBound")).toBeInTheDocument();
+    expect(
+      screen.getByRole("button", { name: "editSettings" }),
+    ).toBeInTheDocument();
+  });
+
+  it("submits only changed settings with the version guard (#1376)", async () => {
+    setWorkspace("admin");
+    mockListConnectors.mockResolvedValue([
+      {
+        connector_id: "connector-1",
+        connector_type: "slack",
+        app_key: "default",
+        resource_id: "slack-t01",
+        context_id: "context-1",
+        config_version: 3,
+        created_at: "2026-07-19T00:00:00Z",
+        created_by: "user-1",
+        runtime: { vision_enabled: true },
+        channel_ids: ["C1"],
+        locale: null,
+        litellm_virtual_key_id: null,
+        llm_config_present: false,
+      },
+    ]);
+    mockUpdateConnectorSettings.mockResolvedValue({
+      connector_id: "connector-1",
+      channel_ids: ["C1", "C2"],
+      litellm_virtual_key_id: null,
+      llm_config_present: false,
+      locale: null,
+      config_version: 4,
+    });
+
+    render(<ConnectorsPage />);
+
+    fireEvent.click(
+      await screen.findByRole("button", { name: "editSettings" }),
+    );
+    const channelsInput = await screen.findByLabelText("channelsLabel");
+    fireEvent.change(channelsInput, { target: { value: "C1, C2" } });
+    fireEvent.click(screen.getByRole("button", { name: "settingsSave" }));
+
+    await waitFor(() =>
+      expect(mockUpdateConnectorSettings).toHaveBeenCalledWith(
+        "connector-1",
+        { channel_ids: ["C1", "C2"] },
+        3,
+      ),
     );
   });
 
