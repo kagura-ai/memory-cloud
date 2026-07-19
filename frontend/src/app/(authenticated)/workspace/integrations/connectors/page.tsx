@@ -132,6 +132,7 @@ export default function ConnectorsPage() {
     [copyToTarget, toast, tCommon],
   );
   const installHandle = searchParams.get("slack_install");
+  const slackError = searchParams.get("slack_error");
 
   const [connectors, setConnectors] = useState<
     WorkspaceConnectorSummary[] | null
@@ -266,6 +267,27 @@ export default function ConnectorsPage() {
       cancelled = true;
     };
   }, [installHandle, allowed, t, toast, router]);
+
+  // #1375: a cancelled/failed Slack OAuth consent redirects back with
+  // ?slack_error=cancelled|failed (allowlisted by the backend). Surface a
+  // notice and strip the param so refresh/back doesn't re-trigger it. Cancel
+  // is a user choice (informational toast); anything else is destructive.
+  useEffect(() => {
+    if (!slackError) return;
+    if (slackError === "cancelled") {
+      toast({
+        title: t("slackCancelledTitle"),
+        description: t("slackCancelledDesc"),
+      });
+    } else {
+      toast({
+        variant: "destructive",
+        title: t("slackFailedTitle"),
+        description: t("slackFailedDesc"),
+      });
+    }
+    router.replace("/workspace/integrations/connectors");
+  }, [slackError, t, toast, router]);
 
   const closeCreateDialog = useCallback(() => {
     setPending(null);
