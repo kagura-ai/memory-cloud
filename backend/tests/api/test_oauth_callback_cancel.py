@@ -19,8 +19,6 @@ from __future__ import annotations
 import os
 from unittest.mock import MagicMock, patch
 
-import pytest
-from fastapi import HTTPException
 from fastapi.responses import RedirectResponse
 
 from api.routes import auth as auth_module
@@ -84,17 +82,23 @@ class TestCallbackCancelShortCircuit:
 
 
 class TestCallbackMalformed:
-    """No ``error`` and no ``code``/``state`` → clean 400, not a pydantic 422."""
+    """No ``error`` and no ``code``/``state`` → friendly redirect, not raw JSON (#1381)."""
 
-    async def test_google_malformed_returns_400(self):
-        with pytest.raises(HTTPException) as exc:
-            await google_callback(None, code=None, state=None, error=None, error_description=None)
-        assert exc.value.status_code == 400
+    async def test_google_malformed_redirects_failed(self):
+        resp = await google_callback(
+            None, code=None, state=None, error=None, error_description=None
+        )
+        assert isinstance(resp, RedirectResponse)
+        assert resp.status_code == 303
+        assert "/login?error=oauth_failed" in _location(resp)
 
-    async def test_github_malformed_returns_400(self):
-        with pytest.raises(HTTPException) as exc:
-            await github_callback(None, code=None, state=None, error=None, error_description=None)
-        assert exc.value.status_code == 400
+    async def test_github_malformed_redirects_failed(self):
+        resp = await github_callback(
+            None, code=None, state=None, error=None, error_description=None
+        )
+        assert isinstance(resp, RedirectResponse)
+        assert resp.status_code == 303
+        assert "/login?error=oauth_failed" in _location(resp)
 
 
 class TestCancelRedirectHelper:

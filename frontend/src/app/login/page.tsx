@@ -96,6 +96,13 @@ function LoginContent() {
       if (searchParams.get("link_hint") === "true") {
         setNotice(t("linkHint"));
       }
+    } else if (errorParam === "oauth_failed") {
+      // #1381: the OAuth callback redirects non-cancel failures here with a
+      // well-known token (never raw IdP text) — map it to an i18n'd banner.
+      setError(t("oauthFailed"));
+    } else if (errorParam === "oauth_expired") {
+      // #1381: expired/replayed sign-in link — retryable, so say so.
+      setError(t("oauthExpired"));
     } else if (errorParam) {
       setError(decodeURIComponent(errorParam));
     }

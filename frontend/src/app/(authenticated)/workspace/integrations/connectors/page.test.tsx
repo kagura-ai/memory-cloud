@@ -281,6 +281,27 @@ describe("ConnectorsPage RBAC gate", () => {
     );
   });
 
+  it("shows a destructive expired notice for slack_error=expired (#1381)", async () => {
+    setWorkspace("admin");
+    mockSearchParamsGet.mockImplementation((key: string) =>
+      key === "slack_error" ? "expired" : null,
+    );
+    render(<ConnectorsPage />);
+
+    await waitFor(() =>
+      expect(mockToast).toHaveBeenCalledWith(
+        expect.objectContaining({
+          variant: "destructive",
+          title: "slackExpiredTitle",
+          description: "slackExpiredDesc",
+        }),
+      ),
+    );
+    expect(mockRouterReplace).toHaveBeenCalledWith(
+      "/workspace/integrations/connectors",
+    );
+  });
+
   it("renders vend-settings indicators on the connector row (#1376)", async () => {
     setWorkspace("admin");
     mockListConnectors.mockResolvedValue([

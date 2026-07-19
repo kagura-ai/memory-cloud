@@ -295,12 +295,13 @@ export default function ConnectorsPage() {
     };
   }, [installHandle, allowed, t, toast, router]);
 
-  // #1375: a cancelled/failed Slack OAuth consent redirects back with
-  // ?slack_error=cancelled|failed (allowlisted by the backend). Surface a
-  // notice and strip the param so refresh/back doesn't re-trigger it. Cancel
-  // is a user choice (informational toast); anything else is destructive.
-  // Gated on `allowed` like the slack_install effect — only admins can run
-  // the install flow, so only they get the outcome notice.
+  // #1375/#1381: a cancelled/failed/expired Slack OAuth consent redirects
+  // back with ?slack_error=cancelled|failed|expired (allowlisted by the
+  // backend). Surface a notice and strip the param so refresh/back doesn't
+  // re-trigger it. Cancel is a user choice (informational toast); expired is
+  // retryable (say so); anything else is destructive. Gated on `allowed`
+  // like the slack_install effect — only admins can run the install flow,
+  // so only they get the outcome notice.
   useEffect(() => {
     if (!slackError) return;
     if (!allowed) return;
@@ -308,6 +309,12 @@ export default function ConnectorsPage() {
       toast({
         title: t("slackCancelledTitle"),
         description: t("slackCancelledDesc"),
+      });
+    } else if (slackError === "expired") {
+      toast({
+        variant: "destructive",
+        title: t("slackExpiredTitle"),
+        description: t("slackExpiredDesc"),
       });
     } else {
       toast({

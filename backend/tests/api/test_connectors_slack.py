@@ -126,9 +126,8 @@ async def test_callback_exchanges_code_and_stashes_encrypted_install():
 
 
 @pytest.mark.asyncio
-async def test_callback_rejects_unknown_state():
-    from fastapi import HTTPException
-
+async def test_callback_unknown_state_redirects_expired():
+    """#1381: expired TTL or replayed (consumed) state → expired redirect, not 400 JSON."""
     from api.routes.connectors_slack import slack_callback
 
     admin = {"user_id": "u1", "current_workspace_id": uuid4()}
@@ -136,16 +135,16 @@ async def test_callback_rejects_unknown_state():
         patch("api.routes.connectors_slack.get_settings", return_value=_settings()),
         patch("api.routes.connectors_slack.get_redis_client", return_value=_FakeRedis()),
     ):
-        with pytest.raises(HTTPException) as exc:
-            await slack_callback(admin=admin, code="abc", state="missing")
-    assert exc.value.status_code == 400
+        resp = await slack_callback(admin=admin, code="abc", state="missing")
+
+    assert resp.status_code == 303
+    assert resp.headers["location"].endswith("?slack_error=expired")
 
 
 @pytest.mark.asyncio
-async def test_callback_rejects_workspace_mismatch():
-    """Admin's workspace must match the workspace stored in the CSRF state."""
-    from fastapi import HTTPException
-
+async def test_callback_workspace_mismatch_redirects_failed():
+    """#1381: workspace mismatch → generic failed redirect (no mismatch oracle in
+    the URL); the state stays in Redis so a correct-workspace tab can still finish."""
     from api.routes.connectors_slack import slack_callback
 
     stored_ws = uuid4()
@@ -157,9 +156,143 @@ async def test_callback_rejects_workspace_mismatch():
         patch("api.routes.connectors_slack.get_settings", return_value=_settings()),
         patch("api.routes.connectors_slack.get_redis_client", return_value=redis),
     ):
-        with pytest.raises(HTTPException) as exc:
-            await slack_callback(admin=admin, code="abc", state="st")
-    assert exc.value.status_code == 400
+        resp = await slack_callback(admin=admin, code="abc", state="st")
+
+    assert resp.status_code == 303
+    assert resp.headers["location"].endswith("?slack_error=failed")
+    # Pre-#1381 behavior pin: the mismatch lane does NOT consume the state.
+    assert "slack_oauth_state:st" in redis.store
+
+
+@pytest.mark.asyncio
+async def test_callback_state_read_failure_redirects_failed():
+    """#1381: Redis outage while reading the state → failed redirect, not 503 JSON."""
+    from api.routes.connectors_slack import slack_callback
+
+    class _BrokenRedis(_FakeRedis):
+        async def get(self, key):
+            raise ConnectionError("redis down")
+
+    admin = {"user_id": "u1", "current_workspace_id": uuid4()}
+    with (
+        patch("api.routes.connectors_slack.get_settings", return_value=_settings()),
+        patch("api.routes.connectors_slack.get_redis_client", return_value=_BrokenRedis()),
+    ):
+        resp = await slack_callback(admin=admin, code="abc", state="st")
+
+    assert resp.status_code == 303
+    assert resp.headers["location"].endswith("?slack_error=failed")
+
+
+@pytest.mark.asyncio
+async def test_callback_exchange_failure_redirects_failed():
+    """#1381: Slack token-exchange failure → failed redirect; raw error not reflected."""
+    from api.routes.connectors_slack import slack_callback
+
+    ws_id = uuid4()
+    redis = _FakeRedis({"slack_oauth_state:st": str(ws_id)})
+    admin = {"user_id": "u1", "current_workspace_id": ws_id}
+
+    token_resp = MagicMock()
+    token_resp.raise_for_status = MagicMock()
+    token_resp.json.return_value = {"ok": False, "error": "invalid_grant_secret_detail"}
+    http_client = MagicMock()
+    http_client.post = AsyncMock(return_value=token_resp)
+    http_ctx = MagicMock()
+    http_ctx.__aenter__ = AsyncMock(return_value=http_client)
+    http_ctx.__aexit__ = AsyncMock(return_value=False)
+
+    with (
+        patch("api.routes.connectors_slack.get_settings", return_value=_settings()),
+        patch("api.routes.connectors_slack.get_redis_client", return_value=redis),
+        patch("api.routes.connectors_slack.httpx.AsyncClient", return_value=http_ctx),
+    ):
+        resp = await slack_callback(admin=admin, code="abc", state="st")
+
+    assert resp.status_code == 303
+    location = resp.headers["location"]
+    assert location.endswith("?slack_error=failed")
+    assert "invalid_grant_secret_detail" not in location
+    # State consumed (one-time use) before the exchange.
+    assert "slack_oauth_state:st" not in redis.store
+
+
+@pytest.mark.asyncio
+async def test_callback_encrypt_failure_redirects_failed():
+    """#1381: Fernet failure while securing the bot token → failed redirect."""
+    from api.routes.connectors_slack import slack_callback
+
+    ws_id = uuid4()
+    redis = _FakeRedis({"slack_oauth_state:st": str(ws_id)})
+    admin = {"user_id": "u1", "current_workspace_id": ws_id}
+
+    token_resp = MagicMock()
+    token_resp.raise_for_status = MagicMock()
+    token_resp.json.return_value = {
+        "ok": True,
+        "access_token": "xoxb-123",
+        "team": {"id": "T01", "name": "Acme"},
+        "authed_user": {"id": "U01"},
+    }
+    http_client = MagicMock()
+    http_client.post = AsyncMock(return_value=token_resp)
+    http_ctx = MagicMock()
+    http_ctx.__aenter__ = AsyncMock(return_value=http_client)
+    http_ctx.__aexit__ = AsyncMock(return_value=False)
+
+    broken_encryptor = MagicMock()
+    broken_encryptor.encrypt.side_effect = RuntimeError("kms down")
+
+    with (
+        patch("api.routes.connectors_slack.get_settings", return_value=_settings()),
+        patch("api.routes.connectors_slack.get_redis_client", return_value=redis),
+        patch("api.routes.connectors_slack.httpx.AsyncClient", return_value=http_ctx),
+        patch("api.routes.connectors_slack.get_encryptor", return_value=broken_encryptor),
+    ):
+        resp = await slack_callback(admin=admin, code="abc", state="st")
+
+    assert resp.status_code == 303
+    assert resp.headers["location"].endswith("?slack_error=failed")
+
+
+@pytest.mark.asyncio
+async def test_callback_install_store_failure_redirects_failed():
+    """#1381: Redis outage while stashing the install bundle → failed redirect."""
+    from api.routes.connectors_slack import slack_callback
+
+    ws_id = uuid4()
+
+    class _SetexBrokenRedis(_FakeRedis):
+        async def setex(self, key, ttl, value):
+            raise ConnectionError("redis down")
+
+    redis = _SetexBrokenRedis({"slack_oauth_state:st": str(ws_id)})
+    admin = {"user_id": "u1", "current_workspace_id": ws_id}
+
+    token_resp = MagicMock()
+    token_resp.raise_for_status = MagicMock()
+    token_resp.json.return_value = {
+        "ok": True,
+        "access_token": "xoxb-123",
+        "team": {"id": "T01", "name": "Acme"},
+        "authed_user": {"id": "U01"},
+    }
+    http_client = MagicMock()
+    http_client.post = AsyncMock(return_value=token_resp)
+    http_ctx = MagicMock()
+    http_ctx.__aenter__ = AsyncMock(return_value=http_client)
+    http_ctx.__aexit__ = AsyncMock(return_value=False)
+
+    with (
+        patch("api.routes.connectors_slack.get_settings", return_value=_settings()),
+        patch("api.routes.connectors_slack.get_redis_client", return_value=redis),
+        patch("api.routes.connectors_slack.httpx.AsyncClient", return_value=http_ctx),
+        patch("api.routes.connectors_slack.get_encryptor", return_value=_fake_encryptor()),
+    ):
+        resp = await slack_callback(admin=admin, code="abc", state="st")
+
+    assert resp.status_code == 303
+    assert resp.headers["location"].endswith("?slack_error=failed")
 
 
 @pytest.mark.asyncio
