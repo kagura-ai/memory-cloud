@@ -78,10 +78,21 @@ class TestMemoryEndpoints:
                 "context_id": str(MOCK_CONTEXT_ID),
             },
         )
-        # 422 = validation error (bad payload), others = service behavior
-        assert response.status_code in (200, 404, 500), (
+        # 422 is part of the current contract for a context the caller
+        # cannot resolve: the route resolves MOCK_CONTEXT_ID to nothing and
+        # recall() rejects the missing workspace/context pair as a
+        # validation error (#1369) — a structured response, not a crash.
+        # Pin the 422 to THAT arm: a pydantic body-validation 422 would mean
+        # this payload drifted out of the recall schema, which this test
+        # must keep catching.
+        assert response.status_code in (200, 404, 422, 500), (
             f"recall returned unexpected {response.status_code}: {response.text[:200]}"
         )
+        if response.status_code == 422:
+            assert "current_workspace_id" in response.text, (
+                f"422 was not the context-resolution arm — the payload may have "
+                f"drifted out of the recall schema: {response.text[:300]}"
+            )
 
     def test_reference_accepts_valid_payload(self, auth_client):
         """POST /memory/reference with valid payload should not 500."""

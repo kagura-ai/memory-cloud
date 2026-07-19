@@ -106,14 +106,38 @@ def test_last_activity_tooltip_displays_jst_under_non_utc_browser_tz(jst_page: P
     and re-fetches before asserting. Skips only when the workspace has
     zero contexts (environmental — rarer than the data-empty case).
     """
+    # locale is pinned via the PROFILE, not just the browser context: since
+    # the authenticated layout syncs the UI locale from the user profile
+    # (#221), the browser-level ``locale="ja"`` fixture alone no longer
+    # drives the date formatting — an en-profile user would render
+    # "07/19/2026, 10:49:00 AM" and the ja-format assertion below would
+    # false-fail even though the JST conversion is correct (#1369).
     profile_response = jst_page.request.put(
         f"{API_URL}/api/v1/users/profile",
-        data={"timezone": TARGET_PROFILE_TZ},
+        data={"timezone": TARGET_PROFILE_TZ, "locale": "ja"},
     )
     assert profile_response.ok, (
         f"PUT /api/v1/users/profile failed: {profile_response.status} {profile_response.text()}"
     )
 
+    # Everything from here runs under the restore-finally: ANY assertion
+    # failure below (contexts shape, seeding, the Z-suffix wire-format pin,
+    # the tooltip wait) must not strand locale=ja/JST on the shared admin
+    # profile — later modules' English matchers would false-fail (#1369).
+    try:
+        _run_jst_tooltip_assertions(jst_page)
+    finally:
+        restore = jst_page.request.put(
+            f"{API_URL}/api/v1/users/profile",
+            data={"timezone": "UTC", "locale": "en"},
+        )
+        assert restore.ok, (
+            f"profile restore failed ({restore.status}) — locale=ja/JST leaked "
+            "into the shared admin profile; later e2e modules will false-fail"
+        )
+
+
+def _run_jst_tooltip_assertions(jst_page: Page) -> None:
     contexts_response = jst_page.request.get(f"{API_URL}/api/v1/contexts")
     assert contexts_response.ok, f"GET /api/v1/contexts failed: {contexts_response.status}"
     payload = contexts_response.json()
