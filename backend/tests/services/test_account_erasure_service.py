@@ -1078,7 +1078,7 @@ class TestErasureResiduals1365:
 
     @pytest.mark.asyncio
     async def test_sweep_pseudonymizes_all_authorship_columns(self):
-        """All 10 surviving-row authorship columns are swept, and the
+        """All 12 surviving-row authorship columns are swept, and the
         count is their sum (distinct per-column values pin the SUM)."""
         from models.auth import Context, ExternalAPIKey
         from models.file_objects import FileObject

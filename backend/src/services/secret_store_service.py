@@ -56,7 +56,7 @@ from models.secrets import (
     SecretVersion,
 )
 from utils.datetime import utcnow
-from utils.hashing import hmac_sha256_hex, sha256_hex
+from utils.hashing import SHA256_HEX_PATTERN, hmac_sha256_hex, sha256_hex
 from utils.logger import get_logger
 
 logger = get_logger(__name__)
@@ -213,10 +213,12 @@ class SecretStoreService:
             default=str,
         )
 
-    # An erasure pseudonym is a salted SHA256 hex digest (64 lowercase hex
-    # chars) — real actor/recipient identities are OAuth subs / emails and
-    # never take this shape on the append path.
-    _PSEUDONYM_RE = re.compile(r"^[0-9a-f]{64}$")
+    # An erasure pseudonym is a salted SHA256 hex digest — real
+    # actor/recipient identities are OAuth subs / emails and never take
+    # this shape on the append path. Uses the shared SHA256_HEX_PATTERN
+    # (case-insensitive) so the shape check cannot drift from the
+    # codebase-wide hex convention (Copilot review, PR #1374).
+    _PSEUDONYM_RE = re.compile(SHA256_HEX_PATTERN)
 
     def _entry_mutation_is_erasure_shaped(self, e: SecretAccessLog) -> bool:
         """True iff the row's mutable (e72 carve-out) columns look pseudonymized.
