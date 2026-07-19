@@ -463,3 +463,61 @@ async def test_update_runtime_config_survives_drifted_stored_document():
     )
     assert result.config_version == 2
     assert connector.runtime_config["vision_enabled"] is False
+
+
+class TestTeamUniquenessGuard:
+    """#1360: the #1315 app-qualified uniqueness must not re-open
+    cross-tenant pre-binding of an already-bound platform team."""
+
+    @pytest.mark.asyncio
+    async def test_cross_tenant_prebind_rejected_even_under_different_app_key(self):
+        db = MagicMock()
+        db.execute = AsyncMock(return_value=_result(one=uuid4()))  # other-tenant hit
+        svc = ConnectorProvisioningService(db)
+        svc.get_connector_for_dispatch = AsyncMock(return_value=None)  # app-qualified miss
+
+        with pytest.raises(ConflictError):
+            await svc._assert_team_unclaimed(
+                workspace_id=uuid4(),
+                connector_type="slack",
+                app_key="second-app",
+                external_team_id="T123",
+            )
+
+    @pytest.mark.asyncio
+    async def test_same_workspace_multi_app_allowed(self):
+        db = MagicMock()
+        db.execute = AsyncMock(return_value=_result(one=None))  # no OTHER-workspace row
+        svc = ConnectorProvisioningService(db)
+        svc.get_connector_for_dispatch = AsyncMock(return_value=None)
+
+        await svc._assert_team_unclaimed(
+            workspace_id=uuid4(),
+            connector_type="slack",
+            app_key="second-app",
+            external_team_id="T123",
+        )
+
+        # The cross-tenant probe excludes the caller's own workspace.
+        sql = str(db.execute.await_args.args[0])
+        assert "workspace_id !=" in sql
+
+    @pytest.mark.asyncio
+    async def test_exact_app_qualified_duplicate_rejected_first(self):
+        db = MagicMock()
+        db.execute = AsyncMock()
+        svc = ConnectorProvisioningService(db)
+        svc.get_connector_for_dispatch = AsyncMock(return_value=SimpleNamespace(id=uuid4()))
+
+        with pytest.raises(ConflictError):
+            await svc._assert_team_unclaimed(
+                workspace_id=uuid4(),
+                connector_type="slack",
+                app_key="default",
+                external_team_id="T123",
+            )
+        # Only the (type, team) advisory lock ran — the cross-tenant probe
+        # never fires once the app-qualified duplicate rejects.
+        assert db.execute.await_count == 1
+        lock_sql = str(db.execute.await_args_list[0].args[0])
+        assert "pg_advisory_xact_lock" in lock_sql

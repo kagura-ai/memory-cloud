@@ -419,6 +419,69 @@ async def test_status_noop_update_keeps_retiring_window(_fernet_env):
     assert result.retiring_valid_until == valid_until
 
 
+@pytest.mark.asyncio
+async def test_rename_only_does_not_bump_config_version(_fernet_env):
+    """#1360: display_name is admin-display-only — a rename must not bump
+    config_version (the bump flips identity_collection_revision and makes
+    every worker refetch its config on the next bootstrap poll)."""
+    from services.worker_app_identity import identity_revision
+
+    db = MagicMock()
+    db.flush = AsyncMock()
+    identity = WorkerAppIdentity(
+        id=uuid4(),
+        platform="slack",
+        app_key="sales",
+        display_name="Sales",
+        status="active",
+        active_secret_revision=2,
+        config_version=7,
+    )
+    identity.set_active_signing_secret("secret")
+    revision_before = identity_revision(identity)
+    service = WorkerAppIdentityService(db)
+    service._require_identity = AsyncMock(return_value=identity)
+
+    result = await service.update_identity(
+        platform="slack",
+        app_key="sales",
+        actor_id="admin-1",
+        display_name="Sales EMEA",
+    )
+
+    assert result.display_name == "Sales EMEA"
+    assert result.config_version == 7
+    assert identity_revision(result) == revision_before
+    assert result.updated_by == "admin-1"
+
+
+@pytest.mark.asyncio
+async def test_status_transition_still_bumps_config_version(_fernet_env):
+    db = MagicMock()
+    db.flush = AsyncMock()
+    identity = WorkerAppIdentity(
+        platform="slack",
+        app_key="sales",
+        display_name="Sales",
+        status="active",
+        active_secret_revision=2,
+        config_version=7,
+    )
+    identity.set_active_signing_secret("secret")
+    service = WorkerAppIdentityService(db)
+    service._require_identity = AsyncMock(return_value=identity)
+
+    result = await service.update_identity(
+        platform="slack",
+        app_key="sales",
+        actor_id="admin-1",
+        status="disabled",
+    )
+
+    assert result.status == "disabled"
+    assert result.config_version == 8
+
+
 def test_bootstrap_revision_changes_when_retiring_window_expires():
     identity = WorkerAppIdentity(
         id=uuid4(),

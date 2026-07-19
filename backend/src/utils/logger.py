@@ -23,18 +23,37 @@ _PG_DETAIL_RE = re.compile(r"DETAIL:.*", re.DOTALL)
 _REDACTED = "DETAIL: [redacted]"
 
 
+def _scrub_detail(value):  # noqa: ANN001, ANN202
+    """Recursively scrub DETAIL payloads from strings and containers.
+
+    Nested containers matter (#1360 review): a handler logging
+    ``results=[{"error": str(exc)}]`` would otherwise carry the failing
+    row straight past a top-level-only scrub — the JSON renderer
+    stringifies the structure AFTER the processors have run.
+    """
+    if isinstance(value, str):
+        if "DETAIL:" in value:
+            return _PG_DETAIL_RE.sub(_REDACTED, value)
+        return value
+    if isinstance(value, dict):
+        return {key: _scrub_detail(item) for key, item in value.items()}
+    if isinstance(value, list | tuple):
+        return type(value)(_scrub_detail(item) for item in value)
+    return value
+
+
 def redact_pg_detail(logger, method_name, event_dict):  # noqa: ANN001, ANN201
     """structlog processor: scrub postgres DETAIL payloads (#1359).
 
     Runs on every event so ANY logger that stringifies a DB error (the
     global SQLAlchemyError handler's ``exc_info=True``, ad-hoc
-    ``error=str(exc)`` fields) hits one chokepoint. The constraint name
-    before DETAIL survives for diagnosability; the failing-row payload
-    never reaches log aggregation.
+    ``error=str(exc)`` fields, nested dict/list fields) hits one
+    chokepoint. The constraint name before DETAIL survives for
+    diagnosability; the failing-row payload never reaches log
+    aggregation.
     """
     for key, value in event_dict.items():
-        if isinstance(value, str) and "DETAIL:" in value:
-            event_dict[key] = _PG_DETAIL_RE.sub(_REDACTED, value)
+        event_dict[key] = _scrub_detail(value)
     return event_dict
 
 

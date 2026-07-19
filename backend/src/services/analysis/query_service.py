@@ -496,13 +496,16 @@ async def get_cluster(
         next_cursor = str(rows[-1].id)
 
     # #1301: enforce-mode subtraction now happens in the page WHERE above
-    # (#1357) — for enforce agents this row filter finds nothing to drop.
-    # It stays for SHADOW scopes (predicate is None there): rows are kept
+    # (#1357) — running the row filter too would only re-fetch the bindings
+    # to drop nothing, so it is skipped for enforce (#1360 item 7). It
+    # stays for SHADOW scopes (predicate is None there): rows are kept
     # unchanged and the would-deny volume is logged (outside the MAE
-    # vocabulary, so shadow is log-only).
+    # vocabulary, so shadow is log-only); non-agent calls are a no-query
+    # no-op inside the filter.
     from services.agent_binding_service import filter_memory_rows_by_binding
 
-    rows, _ = await filter_memory_rows_by_binding(db, rows, operation=None, user_id=None)
+    if binding_predicate is None:
+        rows, _ = await filter_memory_rows_by_binding(db, rows, operation=None, user_id=None)
 
     memories_out = [
         {
@@ -547,9 +550,12 @@ async def get_cluster(
                 ).where(and_(*rep_conditions))
             )
         ).all()
-        rep_rows, _ = await filter_memory_rows_by_binding(
-            db, list(rep_rows), operation=None, user_id=None
-        )
+        # Same enforce-skip as the page rows (#1360 item 7): the SQL
+        # predicate above already subtracted for enforce agents.
+        if binding_predicate is None:
+            rep_rows, _ = await filter_memory_rows_by_binding(
+                db, list(rep_rows), operation=None, user_id=None
+            )
         # Preserve the order from ``representative_memory_ids`` so the UI
         # gets stable "top-k" semantics across repeated calls.
         rep_by_id = {r.id: r for r in rep_rows}
@@ -589,9 +595,19 @@ async def get_cluster(
     count = int(cluster.count)
     property_stats = cluster.property_stats or {}
     if binding_predicate is not None:
+        # #1360 item 12: one grouped query yields BOTH the live count and
+        # the binding-permitted count per type (FILTER clause), so a
+        # stored-count mismatch caused purely by post-analysis
+        # soft-deletes is no longer mistaken for a binding subtraction —
+        # facets drop fail-closed ONLY when the binding actually
+        # subtracted a live row.
         type_rows = (
             await db.execute(
-                select(Memory.type, func.count(Memory.id))
+                select(
+                    Memory.type,
+                    func.count(Memory.id),
+                    func.count(Memory.id).filter(binding_predicate),
+                )
                 .join(
                     MemoryAnalysisAssignment,
                     MemoryAnalysisAssignment.memory_id == Memory.id,
@@ -602,19 +618,33 @@ async def get_cluster(
                         MemoryAnalysisAssignment.cluster_id == cluster.id,
                         Memory.deleted_at.is_(None),
                         Memory.workspace_id == workspace_id,
-                        binding_predicate,
                     )
                 )
                 .group_by(Memory.type)
             )
         ).all()
-        filtered_types = {row[0]: int(row[1]) for row in type_rows}
-        filtered_count = sum(filtered_types.values())
-        if filtered_count != count:
-            count = filtered_count
-            property_stats = {"types": filtered_types}
+        live_count = sum(int(row[1]) for row in type_rows)
+        permitted_types = {row[0]: int(row[2]) for row in type_rows if int(row[2])}
+        permitted_count = sum(permitted_types.values())
+        count = permitted_count
+        if permitted_count != live_count:
+            property_stats = {"types": permitted_types}
+            # Deny-observability parity with the row-filter lever (#1360
+            # review): the SQL predicate subtracts silently — emit the
+            # aggregate operators previously got from
+            # agent_binding_row_filter_denied. Ids/counts only.
+            from auth.agent_scope import get_agent_scope
+
+            scope = get_agent_scope()
+            logger.warning(
+                "agent_binding_sql_subtraction",
+                surface="get_cluster",
+                run_id=str(run_id),
+                denied_count=live_count - permitted_count,
+                agent_id=str(scope.agent_id) if scope else None,
+            )
         elif "types" in property_stats:
-            property_stats = {**property_stats, "types": filtered_types}
+            property_stats = {**property_stats, "types": permitted_types}
 
     return {
         "run_id": str(run_id),
@@ -696,12 +726,16 @@ async def list_clusters(
     if binding_predicate is None or not clusters:
         return clusters
 
+    # #1360 item 12: live + permitted counts in ONE grouped query (FILTER
+    # clause) so post-analysis soft-delete drift is not mistaken for a
+    # binding subtraction — same rule as get_cluster.
     type_rows = (
         await db.execute(
             select(
                 MemoryAnalysisAssignment.cluster_id,
                 Memory.type,
                 func.count(Memory.id),
+                func.count(Memory.id).filter(binding_predicate),
             )
             .join(Memory, Memory.id == MemoryAnalysisAssignment.memory_id)
             .where(
@@ -709,15 +743,17 @@ async def list_clusters(
                     MemoryAnalysisAssignment.analysis_id == run_id,
                     Memory.deleted_at.is_(None),
                     Memory.workspace_id == workspace_id,
-                    binding_predicate,
                 )
             )
             .group_by(MemoryAnalysisAssignment.cluster_id, Memory.type)
         )
     ).all()
     permitted_types: dict[UUID, dict[str, int]] = {}
-    for cluster_id, mem_type, cnt in type_rows:
-        permitted_types.setdefault(cluster_id, {})[mem_type] = int(cnt)
+    live_counts: dict[UUID, int] = {}
+    for cluster_id, mem_type, live_cnt, permitted_cnt in type_rows:
+        live_counts[cluster_id] = live_counts.get(cluster_id, 0) + int(live_cnt)
+        if int(permitted_cnt):
+            permitted_types.setdefault(cluster_id, {})[mem_type] = int(permitted_cnt)
 
     all_rep_ids = {rid for c in clusters for rid in (c.representative_memory_ids or [])}
     permitted_rep_ids: set[UUID] = set()
@@ -737,21 +773,29 @@ async def list_clusters(
         permitted_rep_ids = {row[0] for row in rep_id_rows}
 
     subtracted: list[dict[str, Any]] = []
+    denied_total = 0
     for c in clusters:
         types = permitted_types.get(c.id, {})
         filtered_count = sum(types.values())
-        if filtered_count == 0:
-            # Fail-closed on the ENUMERATION surface: a cluster with zero
-            # permitted rows would still volunteer its LLM label /
-            # description — content synthesized from the denied members —
-            # and the count-0-with-label shape confirms denied rows exist.
-            # Direct drill-down (get_cluster by index) keeps the #1301
-            # contract; the list simply does not advertise it.
+        cluster_live = live_counts.get(c.id, 0)
+        denied_total += cluster_live - filtered_count
+        if filtered_count == 0 and cluster_live > 0:
+            # Fail-closed on the ENUMERATION surface: a cluster whose
+            # every LIVE row the binding denies would still volunteer its
+            # LLM label / description — content synthesized from the
+            # denied members — and the count-0-with-label shape confirms
+            # denied rows exist. A cluster emptied purely by post-analysis
+            # soft-deletes (live == 0, nothing denied) stays listed with
+            # count 0, matching the human view and the get_cluster
+            # drill-down. Direct drill-down keeps the #1301 contract; the
+            # list simply does not advertise denied-only clusters.
             continue
-        count = int(c.count)
         stats = dict(c.property_stats or {})
-        if filtered_count != count:
-            count = filtered_count
+        count = filtered_count
+        # Facets drop fail-closed ONLY on a real binding subtraction —
+        # a live-vs-stored mismatch from post-analysis soft-deletes keeps
+        # the stored facets (types still refreshed to permitted values).
+        if filtered_count != live_counts.get(c.id, 0):
             stats = {"types": types}
         elif "types" in stats:
             stats = {**stats, "types": types}
@@ -768,6 +812,21 @@ async def list_clusters(
                 "property_stats": stats,
                 "label_confidence": float(c.label_confidence),
             }
+        )
+    if denied_total > 0:
+        # Deny-observability parity with the row-filter lever (#1360
+        # review): the SQL predicate subtracts silently, so emit the
+        # aggregate the operators previously got from
+        # agent_binding_row_filter_denied. Ids/counts only.
+        from auth.agent_scope import get_agent_scope
+
+        scope = get_agent_scope()
+        logger.warning(
+            "agent_binding_sql_subtraction",
+            surface="list_clusters",
+            run_id=str(run_id),
+            denied_count=denied_total,
+            agent_id=str(scope.agent_id) if scope else None,
         )
     return subtracted
 

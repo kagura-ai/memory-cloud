@@ -24,6 +24,11 @@ vi.mock("next-intl", () => ({
   useTranslations: () => (key: string) => key,
 }));
 
+const mockToast = vi.fn();
+vi.mock("@/hooks/use-toast", () => ({
+  useToast: () => ({ toast: mockToast }),
+}));
+
 beforeEach(() => {
   mockListWorkerApps.mockResolvedValue([]);
   mockCreateWorkerApp.mockResolvedValue({});
@@ -134,6 +139,81 @@ describe("WorkerAppsPage", () => {
         expect.objectContaining({ app_key: "sales", platform: "slack" }),
         { status: "disabled" },
       ),
+    );
+  });
+it("surfaces action failures as a destructive toast (#1360)", async () => {
+    const app = {
+      platform: "slack",
+      app_key: "sales",
+      display_name: "Sales Slack App",
+      status: "active",
+      revision: "opaque-revision",
+      has_active_secret: true,
+      active_secret_revision: 2,
+      retiring_secret_revision: null,
+      retiring_valid_until: null,
+      created_at: "2026-07-17T00:00:00Z",
+      updated_at: "2026-07-17T00:00:00Z",
+    };
+    mockUseAuth.mockReturnValue({ user: { role: "admin" }, isLoading: false });
+    mockListWorkerApps.mockResolvedValue([app]);
+    mockUpdateWorkerApp.mockRejectedValue(new Error("boom"));
+
+    render(<WorkerAppsPage />);
+    await screen.findByText("sales");
+
+    fireEvent.click(screen.getByRole("button", { name: "save" }));
+
+    await waitFor(() =>
+      expect(mockToast).toHaveBeenCalledWith(
+        expect.objectContaining({
+          variant: "destructive",
+          title: "operationFailed",
+          description: "boom",
+        }),
+      ),
+    );
+    // No inline banner for an action failure (error-surface rule).
+    expect(screen.queryByText("boom")).not.toBeInTheDocument();
+  });
+
+  it("keeps another row's unsaved draft across a reload (#1360)", async () => {
+    const base = {
+      platform: "slack",
+      status: "active",
+      revision: "r",
+      has_active_secret: true,
+      active_secret_revision: 1,
+      retiring_secret_revision: null,
+      retiring_valid_until: null,
+      created_at: "2026-07-17T00:00:00Z",
+      updated_at: "2026-07-17T00:00:00Z",
+    };
+    const appA = { ...base, app_key: "alpha", display_name: "Alpha" };
+    const appB = { ...base, app_key: "beta", display_name: "Beta" };
+    mockUseAuth.mockReturnValue({ user: { role: "admin" }, isLoading: false });
+    mockListWorkerApps.mockResolvedValue([appA, appB]);
+
+    render(<WorkerAppsPage />);
+    await screen.findByText("alpha");
+
+    const inputs = screen.getAllByLabelText("displayNameFor");
+    // Draft an edit in row B, then save row A.
+    fireEvent.change(inputs[1], { target: { value: "Beta DRAFT" } });
+    fireEvent.click(screen.getAllByRole("button", { name: "save" })[0]);
+
+    await waitFor(() =>
+      expect(mockUpdateWorkerApp).toHaveBeenCalledWith(
+        expect.objectContaining({ app_key: "alpha" }),
+        { display_name: "Alpha" },
+      ),
+    );
+    // The reload after the save must NOT discard row B's draft.
+    await waitFor(() =>
+      expect(mockListWorkerApps).toHaveBeenCalledTimes(2),
+    );
+    expect(screen.getAllByLabelText("displayNameFor")[1]).toHaveValue(
+      "Beta DRAFT",
     );
   });
 });

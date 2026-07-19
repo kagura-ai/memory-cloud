@@ -114,6 +114,7 @@ class WorkerAppIdentityService:
         status: str | None = None,
     ) -> WorkerAppIdentity:
         identity = await self._require_identity(platform, app_key)
+        config_changed = False
         if display_name is not None:
             identity.display_name = display_name
         if status is not None:
@@ -166,9 +167,18 @@ class WorkerAppIdentityService:
                         retiring_secret_revision=identity.retiring_secret_revision,
                     )
                 identity.clear_retiring_secret()
+            if status != identity.status:
+                config_changed = True
             identity.status = status
         identity.updated_by = actor_id
-        identity.config_version += 1
+        # #1360: display_name is admin-display-only — it is not part of the
+        # worker-facing config, so a rename must not bump config_version
+        # (the bump changes identity_collection_revision and makes EVERY
+        # worker refetch its config on the next bootstrap poll). Only a
+        # real status transition is config-relevant here; rotate_secret
+        # bumps on its own.
+        if config_changed:
+            identity.config_version += 1
         await self.db.flush()
         return identity
 

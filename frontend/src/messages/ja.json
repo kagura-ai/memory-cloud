@@ -3932,7 +3932,8 @@
     "secretRevision": "有効なシークレットリビジョン: {revision}",
     "status_unconfigured": "未設定",
     "status_active": "有効",
-    "status_disabled": "無効"
+    "status_disabled": "無効",
+    "operationFailed": "操作に失敗しました"
   },
   "connectors": {
     "title": "ワークスペースコネクタ",

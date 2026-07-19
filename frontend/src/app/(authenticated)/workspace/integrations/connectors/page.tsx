@@ -137,6 +137,9 @@ export default function ConnectorsPage() {
     WorkspaceConnectorSummary[] | null
   >(null);
   const [loadError, setLoadError] = useState<string | null>(null);
+  // #1360: available-apps panel failure is decoupled from the primary
+  // connectors list — its own banner, never a page takedown.
+  const [appsLoadError, setAppsLoadError] = useState<string | null>(null);
   const [availableApps, setAvailableApps] = useState<
     AvailableWorkerApp[] | null
   >(null);
@@ -179,18 +182,39 @@ export default function ConnectorsPage() {
   const reload = useCallback(async () => {
     try {
       setLoadError(null);
-      const [connectorRows, appRows] = await Promise.all([
+      // #1360: allSettled, not all — the connectors list is the page's
+      // primary content and must not be taken down by a failure of the
+      // auxiliary available-apps lookup (the app selector just degrades).
+      const [connectorResult, appResult] = await Promise.allSettled([
         listConnectors(),
         listAvailableWorkerApps(),
       ]);
-      const slackApps = appRows.filter((app) => app.platform === "slack");
-      setConnectors(connectorRows);
-      setAvailableApps(slackApps);
-      setManualAppKey((current) =>
-        slackApps.some((app) => app.app_key === current)
-          ? current
-          : (slackApps[0]?.app_key ?? ""),
-      );
+      if (connectorResult.status === "rejected") {
+        throw connectorResult.reason;
+      }
+      setConnectors(connectorResult.value);
+      if (appResult.status === "fulfilled") {
+        setAppsLoadError(null);
+        const slackApps = appResult.value.filter(
+          (app) => app.platform === "slack",
+        );
+        setAvailableApps(slackApps);
+        setManualAppKey((current) =>
+          slackApps.some((app) => app.app_key === current)
+            ? current
+            : (slackApps[0]?.app_key ?? ""),
+        );
+      } else {
+        // Keep whatever list we already had (a transient refresh failure
+        // must not wipe a working selector mid-session) and surface the
+        // degradation via a panel-level banner instead of vanishing
+        // silently — null vs [] would otherwise be indistinguishable.
+        setAppsLoadError(
+          appResult.reason instanceof Error
+            ? appResult.reason.message
+            : String(appResult.reason),
+        );
+      }
     } catch (err) {
       setLoadError(err instanceof Error ? err.message : String(err));
     }
@@ -331,16 +355,17 @@ export default function ConnectorsPage() {
           },
           connector.config_version,
         );
-        setConnectors((current) =>
-          current?.map((item) =>
-            item.connector_id === connector.connector_id
-              ? {
-                  ...item,
-                  runtime: result.runtime,
-                  config_version: result.config_version,
-                }
-              : item,
-          ) ?? null,
+        setConnectors(
+          (current) =>
+            current?.map((item) =>
+              item.connector_id === connector.connector_id
+                ? {
+                    ...item,
+                    runtime: result.runtime,
+                    config_version: result.config_version,
+                  }
+                : item,
+            ) ?? null,
         );
         toast({ title: t("runtimeUpdated") });
       } catch (err) {
@@ -397,14 +422,8 @@ export default function ConnectorsPage() {
       } finally {
         setManualSubmitting(false);
       }
-    }, [
-      availableApps,
-      locale,
-      manualAppKey,
-      manualBotToken,
-      manualTeamId,
-      reload,
-    ],
+    },
+    [availableApps, locale, manualAppKey, manualBotToken, manualTeamId, reload],
   );
 
   // Resolve loading before role gating to avoid a flash of the admin UI
@@ -448,6 +467,8 @@ export default function ConnectorsPage() {
           {t("connectSlack")}
         </Button>
       </div>
+
+      {appsLoadError && !availableApps && <ErrorBanner error={appsLoadError} />}
 
       {availableApps && availableApps.length > 0 && (
         <form
@@ -568,7 +589,9 @@ export default function ConnectorsPage() {
                   )}
                   <Switch
                     checked={c.runtime?.vision_enabled ?? true}
-                    disabled={c.runtime == null || runtimeSaving === c.connector_id}
+                    disabled={
+                      c.runtime == null || runtimeSaving === c.connector_id
+                    }
                     onCheckedChange={(enabled) =>
                       void handleVisionEnabledChange(c, enabled)
                     }
