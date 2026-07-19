@@ -275,6 +275,20 @@ describe("ConnectorsPage RBAC gate", () => {
     );
   });
 
+  it("does not toast slack_error for non-admins (#1375)", async () => {
+    setWorkspace("member");
+    mockSearchParamsGet.mockImplementation((key: string) =>
+      key === "slack_error" ? "cancelled" : null,
+    );
+    render(<ConnectorsPage />);
+
+    expect(
+      await screen.findByText("errors.forbiddenWorkspace"),
+    ).toBeInTheDocument();
+    expect(mockToast).not.toHaveBeenCalled();
+    expect(mockRouterReplace).not.toHaveBeenCalled();
+  });
+
   it("keeps the connectors list when available-apps fails (#1360)", async () => {
     setWorkspace("admin");
     mockListConnectors.mockResolvedValue([

@@ -148,6 +148,11 @@ async def _exchange_slack_code(code: str) -> dict[str, Any]:
     return data
 
 
+def _connectors_page_url(frontend_url: str) -> str:
+    """Single source for the Connectors page URL used by every callback redirect."""
+    return f"{frontend_url.rstrip('/')}/workspace/integrations/connectors"
+
+
 def _error_redirect(frontend_url: str, reason: str) -> RedirectResponse:
     """303 back to the Connectors page with an allowlisted ``slack_error`` reason.
 
@@ -155,9 +160,8 @@ def _error_redirect(frontend_url: str, reason: str) -> RedirectResponse:
     is never reflected into the redirect URL (same policy as auth.py's
     ``_oauth_cancel_redirect``).
     """
-    frontend = frontend_url.rstrip("/")
     return RedirectResponse(
-        url=f"{frontend}/workspace/integrations/connectors?slack_error={reason}",
+        url=f"{_connectors_page_url(frontend_url)}?slack_error={reason}",
         status_code=303,
     )
 
@@ -187,17 +191,25 @@ async def slack_callback(
     settings = get_settings()
     redis = get_redis_client()
 
-    # #1375: cancel/error short-circuit BEFORE strict validation. The raw
-    # error text goes to the server log only; the redirect carries an
-    # allowlisted token.
-    if error is not None or code is None:
+    # #1375: cancel/error short-circuit BEFORE strict validation. Truthiness
+    # (not `is None`) on purpose: FastAPI delivers `?error=`/`?code=` as ""
+    # and an empty value must take the friendly-redirect lane, not fall
+    # through to the exchange/validation 4xx JSON. The raw error text goes to
+    # the server log only; the redirect carries an allowlisted token.
+    if error or not code:
         reason = "cancelled" if error == "access_denied" else "failed"
-        logger.info(
-            "slack_oauth_cancelled",
-            error=error or "missing_code",
-            error_description=error_description,
-            reason=reason,
-        )
+        if reason == "cancelled":
+            logger.info("slack_oauth_cancelled", error=error)
+        else:
+            # Distinct event + warning level so real integration failures
+            # (invalid_scope, malformed callbacks) never hide under the
+            # benign user-cancel event. Description is attacker-influenced
+            # free text — truncated, never reflected into the redirect.
+            logger.warning(
+                "slack_oauth_callback_failed",
+                error=error or "missing_code",
+                error_description=error_description[:256] if error_description else None,
+            )
         if state:
             # Best-effort cleanup: the state is single-use and unguessable;
             # TTL expiry is the backstop if this delete fails.
@@ -207,7 +219,7 @@ async def slack_callback(
                 logger.warning("slack_oauth_state_delete_failed", state=state[:8])
         return _error_redirect(settings.frontend_url, reason)
 
-    if state is None:
+    if not state:
         # code without state cannot be CSRF-validated; this is a browser-facing
         # route, so redirect instead of a raw 4xx dead-end.
         logger.warning("slack_oauth_callback_missing_state")
@@ -292,9 +304,8 @@ async def slack_callback(
             detail="Failed to store Slack install (storage unavailable)",
         ) from None
 
-    frontend = settings.frontend_url.rstrip("/")
     return RedirectResponse(
-        url=f"{frontend}/workspace/integrations/connectors?slack_install={handle}",
+        url=f"{_connectors_page_url(settings.frontend_url)}?slack_install={handle}",
         status_code=303,
     )
 

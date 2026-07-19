@@ -272,8 +272,11 @@ export default function ConnectorsPage() {
   // ?slack_error=cancelled|failed (allowlisted by the backend). Surface a
   // notice and strip the param so refresh/back doesn't re-trigger it. Cancel
   // is a user choice (informational toast); anything else is destructive.
+  // Gated on `allowed` like the slack_install effect — only admins can run
+  // the install flow, so only they get the outcome notice.
   useEffect(() => {
     if (!slackError) return;
+    if (!allowed) return;
     if (slackError === "cancelled") {
       toast({
         title: t("slackCancelledTitle"),
@@ -287,7 +290,7 @@ export default function ConnectorsPage() {
       });
     }
     router.replace("/workspace/integrations/connectors");
-  }, [slackError, t, toast, router]);
+  }, [slackError, allowed, t, toast, router]);
 
   const closeCreateDialog = useCallback(() => {
     setPending(null);
