@@ -575,7 +575,7 @@ def _oauth_error_redirect(provider: str, reason: str) -> RedirectResponse:
 
     if reason not in _OAUTH_ERROR_REASONS:
         reason = "oauth_failed"
-    frontend_url = os.getenv("FRONTEND_URL", "http://localhost:3000")
+    frontend_url = os.getenv("FRONTEND_URL", "http://localhost:3000").rstrip("/")
     return RedirectResponse(
         f"{frontend_url}/login?error={reason}&provider={quote(provider, safe='')}",
         status_code=303,
@@ -600,7 +600,7 @@ def _oauth_cancel_redirect(provider: str, error: str | None, state: str | None) 
     """
     from urllib.parse import quote
 
-    frontend_url = os.getenv("FRONTEND_URL", "http://localhost:3000")
+    frontend_url = os.getenv("FRONTEND_URL", "http://localhost:3000").rstrip("/")
 
     # Charset restriction is the primary defense against query-string
     # injection (``&``/``#``/CRLF); quote() below is belt-and-suspenders in

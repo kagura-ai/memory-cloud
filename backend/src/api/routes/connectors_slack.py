@@ -163,6 +163,10 @@ def _error_redirect(frontend_url: str, reason: str) -> RedirectResponse:
     is admin-retryable; everything else stays under the generic ``failed`` so
     the URL cannot become a validation oracle (#1381).
     """
+    if reason not in ("cancelled", "failed", "expired"):
+        # Defensive parity with auth.py's _oauth_error_redirect: an unknown
+        # internal token collapses instead of widening the URL vocabulary.
+        reason = "failed"
     return RedirectResponse(
         url=f"{_connectors_page_url(frontend_url)}?slack_error={reason}",
         status_code=303,

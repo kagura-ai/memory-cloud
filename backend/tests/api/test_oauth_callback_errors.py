@@ -106,16 +106,26 @@ class TestEmptyErrorParam:
 class TestManagersNotInitialized:
     """Broken deploy (managers unset) → redirect, not raw 500 JSON."""
 
-    async def test_google_redirects_failed(self):
+    @pytest.mark.parametrize("callback", [google_callback, github_callback])
+    async def test_redirects_failed(self, callback):
         with (
             patch.object(auth_module, "_oauth2_manager", None),
             patch.object(auth_module, "_session_manager", None),
         ):
-            resp = await google_callback(
-                None, code="c", state="s", error=None, error_description=None
-            )
+            resp = await callback(None, code="c", state="s", error=None, error_description=None)
         assert resp.status_code == 303
         assert "error=oauth_failed" in _location(resp)
+
+
+class TestFrontendUrlNormalization:
+    """A trailing-slash FRONTEND_URL must not produce a double-slash redirect."""
+
+    def test_trailing_slash_is_normalized(self):
+        with patch.dict(os.environ, {"FRONTEND_URL": "https://app.example.com/"}):
+            resp = _oauth_error_redirect("google", "oauth_failed")
+        loc = _location(resp)
+        assert loc.startswith("https://app.example.com/login?")
+        assert "//login" not in loc
 
 
 class TestExpiredState:
