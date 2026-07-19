@@ -107,7 +107,7 @@ def assert_run_size_within_cap(memory_count: int, *, redact_count: bool = False)
 
     Raises:
         ValidationError: 422 naming both the limit and the actual
-            count so the client can render a actionable message
+            count so the client can render an actionable message
             (count omitted when ``redact_count``).
     """
     from config.settings import get_settings
@@ -118,8 +118,8 @@ def assert_run_size_within_cap(memory_count: int, *, redact_count: bool = False)
         if redact_count:
             raise ValidationError(
                 f"This analysis run would exceed the per-run analysis "
-                f"cap of {cap}. Narrow the scope (filters, split the "
-                f"context, or archive old memories).",
+                f"cap of {cap} memories. Narrow the scope (filters, split "
+                f"the context, or archive old memories).",
                 field="memory_count",
                 limit=cap,
             )
