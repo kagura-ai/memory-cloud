@@ -39,13 +39,16 @@ def test_resources_list_page_loads_without_error_banner(page: Page):
     # The ErrorBanner uses role="alert" (see frontend/src/components/common/
     # ErrorBanner.tsx) — but so does Next.js's built-in route announcer, an
     # EMPTY live region injected on every client navigation (#1369). Only a
-    # non-empty alert is an error surface.
-    alerts = page.locator('[role="alert"]')
-    error_texts = [
-        alerts.nth(i).inner_text().strip()
-        for i in range(alerts.count())
-        if alerts.nth(i).inner_text().strip()
-    ]
+    # non-empty alert is an error surface. all_inner_texts() snapshots
+    # atomically — a per-element count()/nth() sweep races detaching toasts.
+    def _error_alert_texts() -> list[str]:
+        return [
+            text.strip()
+            for text in page.locator('[role="alert"]').all_inner_texts()
+            if text.strip()
+        ]
+
+    error_texts = _error_alert_texts()
     assert not error_texts, (
         f"Resources list page rendered an ErrorBanner ({error_texts!r}) — likely "
         "a backend failure. Check kagura-api logs for the /api/v1/resources request."
@@ -61,8 +64,13 @@ def test_resources_list_page_loads_without_error_banner(page: Page):
     try:
         table_or_empty.first.wait_for(state="attached", timeout=15000)
     except Exception as exc:
+        # A SLOW backend failure mounts the ErrorBanner after the early
+        # sweep above passed — re-check here so the diagnosis carries the
+        # banner text instead of a generic timeout.
+        late_errors = _error_alert_texts()
         raise AssertionError(
             "Neither resource table nor empty-state rendered on /workspace/resources"
+            + (f" — late ErrorBanner: {late_errors!r}" if late_errors else "")
         ) from exc
 
 

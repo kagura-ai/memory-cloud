@@ -31,25 +31,35 @@ _context_id: str | None = None
 
 
 def _get_context_id(page: Page) -> str:
-    """Resolve a context id: first existing link, else self-seed via API.
+    """Resolve a context id: ``E2E_CONTEXT_ID`` env override, else self-seed.
 
-    #1369: the previous fallback was a hardcoded UUID that only existed in
-    one historical dev database — on any fresh workspace (e.g. right after
-    ``seed_e2e_admin``) every navigation 404'd and the whole module failed.
-    A suite must be self-sufficient: when the contexts page has no
-    search-settings link yet, create a context through the API with the
-    page's own session cookies.
+    #1369: the previous logic scraped the contexts page for a
+    ``/search-settings`` link (a route #232 removed) and fell back to a
+    hardcoded UUID that only existed in one historical dev database — on
+    any fresh workspace every navigation 404'd and the whole module
+    failed. A suite must be self-sufficient: create a context through the
+    API with the page's own session cookies. Stale seeds from earlier
+    runs are deleted first so repeated local runs don't accumulate junk
+    contexts (which would also shift other modules' contexts[0] pick).
     """
     global _context_id
     if _context_id:
         return _context_id
 
-    # Env override, else self-seed a context via the API (session cookies
-    # from the authenticated page ride along on page.request).
     env_ctx = os.environ.get("E2E_CONTEXT_ID")
     if env_ctx:
         _context_id = env_ctx
         return _context_id
+
+    # Sweep leftovers from previous runs (best-effort — a failed delete
+    # must not block the suite).
+    listing = page.request.get(f"{API_URL}/api/v1/contexts")
+    if listing.ok:
+        payload = listing.json()
+        rows = payload.get("contexts") if isinstance(payload, dict) else payload
+        for row in rows or []:
+            if str(row.get("name", "")).startswith("e2e-search-settings-"):
+                page.request.delete(f"{API_URL}/api/v1/contexts/{row['id']}")
 
     resp = page.request.post(
         f"{API_URL}/api/v1/contexts",
@@ -265,7 +275,15 @@ class TestI18n:
             found = [s for s in jp_strings if s in body_text]
             assert len(found) > 0, f"No Japanese strings found. Checked: {jp_strings}"
         finally:
-            page.request.put(f"{API_URL}/api/v1/users/profile", data={"locale": "en"})
+            restore = page.request.put(f"{API_URL}/api/v1/users/profile", data={"locale": "en"})
+            assert restore.ok, (
+                f"profile locale restore failed ({restore.status}) — ja leaked "
+                "into the shared admin profile; later e2e modules will false-fail"
+            )
+            # The layout sync also wrote kagura_locale=ja into this browser
+            # context's localStorage — clear it so a later browser test in
+            # the same session starts from the (restored) en profile.
+            page.evaluate("localStorage.removeItem('kagura_locale')")
 
 
 # TestResetDialog was removed in #1369: the #158 reset-to-defaults control
