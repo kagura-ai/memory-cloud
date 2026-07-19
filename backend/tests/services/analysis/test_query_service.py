@@ -1304,3 +1304,116 @@ async def test_soft_delete_emptied_cluster_stays_listed_for_enforce_agent(
         assert (row["count"] if isinstance(row, dict) else row.count) == 0
     finally:
         set_agent_scope(None)
+
+
+# ===========================================================================
+# #1366 — binding-visible count for agent-facing response payloads
+# ===========================================================================
+
+
+@pytest.mark.asyncio
+async def test_count_binding_visible_subtracts_denied_for_enforce_agent(
+    db_session, fixture_workspace_id, fixture_context_id
+):
+    """Enforce agent (only ``note`` readable) sees 2, not the true 5 —
+    while the cap-lane count keeps reporting the true total."""
+    from auth.agent_scope import set_agent_scope
+
+    for _ in range(2):
+        await _make_typed_memory(
+            db_session,
+            workspace_id=fixture_workspace_id,
+            context_id=fixture_context_id,
+            mem_type="note",
+        )
+    for _ in range(3):
+        await _make_typed_memory(
+            db_session,
+            workspace_id=fixture_workspace_id,
+            context_id=fixture_context_id,
+            mem_type="decision",
+        )
+    await _enforce_scope(
+        db_session, workspace_id=fixture_workspace_id, context_id=fixture_context_id
+    )
+    try:
+        visible = await query_service.count_context_memories_binding_visible(
+            db_session, workspace_id=fixture_workspace_id, context_id=fixture_context_id
+        )
+        true_count = await query_service.count_context_memories(
+            db_session, workspace_id=fixture_workspace_id, context_id=fixture_context_id
+        )
+        assert visible == 2
+        assert true_count == 5
+    finally:
+        set_agent_scope(None)
+
+
+@pytest.mark.asyncio
+async def test_count_binding_visible_equals_true_count_without_scope(
+    db_session, fixture_workspace_id, fixture_context_id
+):
+    for _ in range(3):
+        await _make_typed_memory(
+            db_session,
+            workspace_id=fixture_workspace_id,
+            context_id=fixture_context_id,
+            mem_type="decision",
+        )
+    visible = await query_service.count_context_memories_binding_visible(
+        db_session, workspace_id=fixture_workspace_id, context_id=fixture_context_id
+    )
+    assert visible == 3
+
+
+@pytest.mark.asyncio
+async def test_count_binding_visible_shadow_scope_keeps_true_count(
+    db_session, fixture_workspace_id, fixture_context_id
+):
+    """Shadow mode must observe no change (enforcement ramp invariant)."""
+    from uuid import uuid4 as _uuid4
+
+    from auth.agent_scope import AgentScope, set_agent_scope
+    from models.agent import Agent, AgentContextBinding
+
+    for _ in range(3):
+        await _make_typed_memory(
+            db_session,
+            workspace_id=fixture_workspace_id,
+            context_id=fixture_context_id,
+            mem_type="decision",
+        )
+    agent = Agent(
+        id=_uuid4(),
+        workspace_id=fixture_workspace_id,
+        name=f"shadow-bot-{_uuid4().hex[:8]}",
+        owner_user_id="test_user",
+        status="active",
+        enforcement_mode="shadow",
+    )
+    db_session.add(agent)
+    await db_session.flush()
+    db_session.add(
+        AgentContextBinding(
+            id=_uuid4(),
+            agent_id=agent.id,
+            context_id=fixture_context_id,
+            can_read=True,
+            write_policy="deny",
+            is_default=False,
+            allowed_memory_types=["note"],
+            allowed_source_types=None,
+            created_by="test_user",
+        )
+    )
+    await db_session.flush()
+    set_agent_scope(
+        AgentScope(agent_id=agent.id, enforcement_mode="shadow", workspace_id=fixture_workspace_id)
+    )
+    try:
+        visible = await query_service.count_context_memories_binding_visible(
+            db_session, workspace_id=fixture_workspace_id, context_id=fixture_context_id
+        )
+        assert visible == 3
+    finally:
+        set_agent_scope(None)

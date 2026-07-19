@@ -305,6 +305,35 @@ async def binding_memory_sql_predicate(db: AsyncSession) -> Any | None:
     return and_(membership_gate, not_(or_(*denied_clauses)))
 
 
+# #1366: the run-level aggregate fields withheld from enforce-mode agents.
+# Single source of truth shared by BOTH serialization lanes (REST
+# ``AnalysisRow.redacted_for_agent_scope`` and MCP ``_serialize_run_row``)
+# so a future aggregate added to one lane's redaction cannot silently stay
+# exposed on the other.
+REDACTED_RUN_AGGREGATE_FIELDS: tuple[str, ...] = (
+    "input_count",
+    "cost_estimated_cents",
+    "cost_actual_cents",
+)
+
+
+def agent_scope_is_enforce() -> bool:
+    """True iff the current request's credential is an ENFORCE-mode agent (#1366).
+
+    The cheap (no-DB, contextvar-only) companion to
+    :func:`binding_memory_sql_predicate`, sharing its exact activation
+    condition: non-agent credentials and shadow-mode scopes return False
+    (the enforcement ramp must observe no behavioral change in shadow).
+    Serializer-level redaction of aggregate fields (run ``input_count``
+    / cost columns) keys off this so the decision cannot drift from the
+    SQL lane's.
+    """
+    from auth.agent_scope import get_agent_scope
+
+    scope = get_agent_scope()
+    return scope is not None and scope.enforcement_mode != AGENT_ENFORCEMENT_SHADOW
+
+
 async def filter_memory_rows_by_binding(
     db: AsyncSession,
     rows: list[Any],

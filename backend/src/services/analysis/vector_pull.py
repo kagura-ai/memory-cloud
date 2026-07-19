@@ -234,7 +234,16 @@ async def pull_memories_with_vectors(
         ).scalar()
         or 0
     )
-    assert_run_size_within_cap(matched_count)
+    # #1366: ALWAYS redact the count here. This message is persisted
+    # verbatim into ``memory_analyses.error`` by the orchestrator's
+    # ``_mark_failed`` and later served to arbitrary principals —
+    # including enforce-mode agents whose aggregate counts are withheld
+    # at serialization. ``error`` is not (and should not be) scrubbed
+    # per-reader, so the count must never enter the stored message. The
+    # pre-flight 422 on the API paths keeps naming the count for
+    # non-agent callers; this rare defense-in-depth failure names only
+    # the cap.
+    assert_run_size_within_cap(matched_count, redact_count=True)
 
     memory_rows = list((await db.execute(stmt)).all())
 

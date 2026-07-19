@@ -202,13 +202,33 @@ class AnalysisRow(TZAwareBaseModel):
     triggered_by: str
     started_at: datetime
     finished_at: datetime | None
-    input_count: int
+    # #1366: nullable ONLY for enforce-mode agent credentials, where the
+    # run aggregates (input_count includes binding-denied rows; cost
+    # scales with total volume) act as an existence oracle and are
+    # withheld. Non-agent callers always receive an int.
+    input_count: int | None
     cost_estimated_cents: int | None
     cost_actual_cents: int | None
     error: str | None
     cancellation_reason: str | None
 
     model_config = {"populate_by_name": True, "from_attributes": True}
+
+    def redacted_for_agent_scope(self) -> AnalysisRow:
+        """Withhold aggregate fields for enforce-mode agents (#1366).
+
+        Mirrors ``_serialize_run_row`` in ``mcp_server/tools/analysis.py``
+        so REST and MCP consumers see the same redaction. No-op (returns
+        self) for non-agent and shadow scopes.
+        """
+        from services.agent_binding_service import (
+            REDACTED_RUN_AGGREGATE_FIELDS,
+            agent_scope_is_enforce,
+        )
+
+        if not agent_scope_is_enforce():
+            return self
+        return self.model_copy(update=dict.fromkeys(REDACTED_RUN_AGGREGATE_FIELDS))
 
 
 class AnalysisListResponse(BaseModel):
@@ -371,6 +391,9 @@ async def preview_analysis(
     # 200ms — the actual run will apply filters. The user-facing modal
     # text in #497 says "estimate based on full context size; actual
     # cost may be lower if filters apply".
+    from services.agent_binding_service import agent_scope_is_enforce
+
+    is_enforce = agent_scope_is_enforce()
     memory_count = await query_service.count_context_memories(
         db,
         workspace_id=workspace_id,
@@ -378,7 +401,15 @@ async def preview_analysis(
     )
     # #1244: run-size cap — surface the rejection at preview time so the
     # user is not shown a price for a run that start would refuse.
-    assert_run_size_within_cap(memory_count)
+    # #1366: cap decision on the TRUE count; the 422 omits the count for
+    # enforce agents (aggregate oracle).
+    assert_run_size_within_cap(memory_count, redact_count=is_enforce)
+    # #1366: the count an enforce agent sees (and its derived estimate)
+    # is binding-subtracted; non-agent/shadow callers skip the recount.
+    if is_enforce:
+        memory_count = await query_service.count_context_memories_binding_visible(
+            db, workspace_id=workspace_id, context_id=context_id
+        )
     # v1 only supports the default model in the cost estimator;
     # body.model_id is forward-compat scaffolding (preview.py:73-77).
     estimate = estimate_cost(memory_count, model_id=DEFAULT_MODEL_ID)
@@ -432,12 +463,15 @@ async def start_analysis(
     # the limit and the context's count). Same full-context count
     # semantics as /preview; vector_pull re-checks the filtered set as
     # defense in depth.
+    from services.agent_binding_service import agent_scope_is_enforce
+
     memory_count = await query_service.count_context_memories(
         db,
         workspace_id=workspace_id,
         context_id=context_id,
     )
-    assert_run_size_within_cap(memory_count)
+    # #1366: same true-count cap / redacted-message split as /preview.
+    assert_run_size_within_cap(memory_count, redact_count=agent_scope_is_enforce())
 
     params = _params_from_body(body)
     orchestrator = AnalysisOrchestrator(db)
@@ -506,7 +540,7 @@ async def list_runs(
         cursor=cursor,
     )
     return AnalysisListResponse(
-        items=[AnalysisRow.model_validate(row) for row in rows],
+        items=[AnalysisRow.model_validate(row).redacted_for_agent_scope() for row in rows],
         next_cursor=next_cursor,
     )
 
@@ -540,7 +574,7 @@ async def get_active(
             status_code=404,
             detail=f"No succeeded analysis run found for context {context_id}",
         )
-    return AnalysisRow.model_validate(row)
+    return AnalysisRow.model_validate(row).redacted_for_agent_scope()
 
 
 # ============================================================================
@@ -568,7 +602,7 @@ async def get_run(
     # context's runs even if the workspace gate passed.
     if row is None or row.context_id != context_id:
         raise HTTPException(status_code=404, detail=f"Analysis run {run_id} not found")
-    return AnalysisRow.model_validate(row)
+    return AnalysisRow.model_validate(row).redacted_for_agent_scope()
 
 
 # ============================================================================

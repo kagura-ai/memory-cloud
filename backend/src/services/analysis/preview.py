@@ -79,7 +79,7 @@ class CostEstimate:
     breakdown: dict[str, int]
 
 
-def assert_run_size_within_cap(memory_count: int) -> None:
+def assert_run_size_within_cap(memory_count: int, *, redact_count: bool = False) -> None:
     """Reject a run that would exceed ``ANALYSIS_MAX_MEMORY_COUNT`` (#1244).
 
     The pipeline materializes every matching vector into one in-RAM
@@ -98,15 +98,31 @@ def assert_run_size_within_cap(memory_count: int) -> None:
     rejected conservatively. Filter-aware counting is a v1.5
     follow-up.
 
+    ``redact_count=True`` (#1366) keeps the cap decision on the TRUE
+    count but omits the actual count from the 422 message and details —
+    for enforce-mode agents the exact total is precisely the aggregate
+    oracle the binding-scoped response counts exist to close, and the
+    cap error must not reopen it. The cap value itself stays named (it
+    is deployment config, not tenant data).
+
     Raises:
         ValidationError: 422 naming both the limit and the actual
-            count so the client can render a actionable message.
+            count so the client can render an actionable message
+            (count omitted when ``redact_count``).
     """
     from config.settings import get_settings
     from utils.exceptions import ValidationError
 
     cap = int(get_settings().analysis_max_memory_count)
     if memory_count > cap:
+        if redact_count:
+            raise ValidationError(
+                f"This analysis run would exceed the per-run analysis "
+                f"cap of {cap} memories. Narrow the scope (filters, split "
+                f"the context, or archive old memories).",
+                field="memory_count",
+                limit=cap,
+            )
         # Copilot review: phrased as the RUN's memory count, not "the
         # context has" — the vector_pull defense-in-depth re-check calls
         # this with the FILTERED match count, where context-sized wording
