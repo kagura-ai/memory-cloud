@@ -96,10 +96,14 @@ class ConnectorProvisioningResult:
 class ConnectorListItem:
     """One connector row for the workspace list view, paired with its public
     ``resource_id`` slug (resolved via a JOIN so the internal ``resource_pk``
-    DB key is never exposed on the surface — #991)."""
+    DB key is never exposed on the surface — #991). ``display_name`` (the
+    joined resource's human-readable label) and ``context_name`` (the
+    write-target context's display name) ride the same query (#1389)."""
 
     connector: WorkspaceConnector
     resource_id: str
+    display_name: str | None = None
+    context_name: str | None = None
 
 
 @dataclass(frozen=True)
@@ -642,17 +646,35 @@ class ConnectorProvisioningService:
 
         Each row is paired with its public ``resource_id`` slug via a single
         JOIN on ``resources`` (no per-row lookup / N+1), so the surface exposes
-        the slug instead of the internal ``resource_pk`` DB key (#991).
+        the slug instead of the internal ``resource_pk`` DB key (#991). The
+        human-readable identity for the list row rides the same query (#1389):
+        ``display_name`` from the resource's label and ``context_name`` from
+        the write-target context (outer join — context_id is nullable).
         """
+        from models.auth import Context
+
         result = await self.db.execute(
-            select(WorkspaceConnector, Resource.resource_id)
+            select(
+                WorkspaceConnector,
+                Resource.resource_id,
+                Resource.name,
+                # NULL-only fallback (service-layer coalesce precedent):
+                # an empty-string display_name stays authoritative.
+                func.coalesce(Context.display_name, Context.name),
+            )
             .join(Resource, WorkspaceConnector.resource_pk == Resource.id)
+            .outerjoin(Context, WorkspaceConnector.context_id == Context.id)
             .where(WorkspaceConnector.workspace_id == workspace_id)
             .order_by(WorkspaceConnector.created_at.desc())
         )
         return [
-            ConnectorListItem(connector=connector, resource_id=resource_id)
-            for connector, resource_id in result.all()
+            ConnectorListItem(
+                connector=connector,
+                resource_id=resource_id,
+                display_name=resource_name,
+                context_name=context_name,
+            )
+            for connector, resource_id, resource_name, context_name in result.all()
         ]
 
     async def _assert_team_unclaimed(

@@ -317,9 +317,13 @@ async def test_list_connectors_returns_workspace_scoped_rows_newest_first():
 
     ws_id = uuid4()
     conn_a, conn_b = SimpleNamespace(id=uuid4()), SimpleNamespace(id=uuid4())
-    # The JOIN yields (WorkspaceConnector, resource_id-slug) tuples (#991); the
-    # service maps each to a ConnectorListItem so the surface exposes the slug.
-    rows = [(conn_a, "slug-a"), (conn_b, "slug-b")]
+    # The JOIN yields (WorkspaceConnector, resource_id-slug, resource name,
+    # coalesced context name) tuples (#991, #1389) — the display_name-or-name
+    # fallback happens in SQL via func.coalesce, NULL-only semantics.
+    rows = [
+        (conn_a, "slug-a", "Sales Slack", "Sales Context"),
+        (conn_b, "slug-b", None, "slack-support"),
+    ]
 
     db = MagicMock()
     exec_result = MagicMock()
@@ -330,8 +334,18 @@ async def test_list_connectors_returns_workspace_scoped_rows_newest_first():
     result = await service.list_connectors(ws_id)
 
     assert result == [
-        ConnectorListItem(connector=conn_a, resource_id="slug-a"),
-        ConnectorListItem(connector=conn_b, resource_id="slug-b"),
+        ConnectorListItem(
+            connector=conn_a,
+            resource_id="slug-a",
+            display_name="Sales Slack",
+            context_name="Sales Context",
+        ),
+        ConnectorListItem(
+            connector=conn_b,
+            resource_id="slug-b",
+            display_name=None,
+            context_name="slack-support",
+        ),
     ]
     db.execute.assert_awaited_once()
 

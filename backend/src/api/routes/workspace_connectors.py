@@ -136,6 +136,12 @@ class WorkspaceConnectorSummary(TZAwareBaseModel):
     locale: str | None = None
     litellm_virtual_key_id: str | None = None
     llm_config_present: bool = False
+    # #1389: human-readable identity for the list row — the joined resource's
+    # label, the platform team id, and the write-target context's name. All
+    # nullable/additive so existing consumers are unaffected.
+    display_name: str | None = None
+    external_team_id: str | None = None
+    context_name: str | None = None
 
 
 class WorkspaceConnectorSettingsUpdateRequest(BaseModel):
@@ -388,6 +394,9 @@ async def list_workspace_connectors(
             locale=item.connector.locale,
             litellm_virtual_key_id=item.connector.litellm_virtual_key_id,
             llm_config_present=bool(item.connector.llm_config_encrypted),
+            display_name=item.display_name,
+            external_team_id=item.connector.external_team_id,
+            context_name=item.context_name,
         )
         for item in items
     ]

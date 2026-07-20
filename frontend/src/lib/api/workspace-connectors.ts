@@ -57,6 +57,11 @@ export interface WorkspaceConnectorSummary {
   locale: string | null;
   litellm_virtual_key_id: string | null;
   llm_config_present: boolean;
+  // #1389: human-readable identity for the list row — the resource's label,
+  // the platform team id, and the write-target context's name.
+  display_name: string | null;
+  external_team_id: string | null;
+  context_name: string | null;
 }
 
 export interface ConnectorReadiness {
@@ -82,6 +87,18 @@ export function connectorReadiness(
     missingChannels,
     missingLlm,
   };
+}
+
+// #1389: the one human-readable name for a connector, shared by every
+// surface that labels one (list row today; dialog titles/toasts as they
+// adopt names) so row and dialog can never disagree on what a connector
+// is called.
+export function connectorDisplayName(c: WorkspaceConnectorSummary): string {
+  return (
+    c.display_name ||
+    c.external_team_id ||
+    c.connector_type.charAt(0).toUpperCase() + c.connector_type.slice(1)
+  );
 }
 
 /** Create request — the registration flow fields are all optional. */
