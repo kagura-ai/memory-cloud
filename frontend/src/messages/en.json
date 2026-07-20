@@ -3445,6 +3445,14 @@
         "unknown": "(unavailable)",
         "emptyTitle": "No references yet",
         "emptyDesc": "This memory has no incoming or outgoing links. Add links when creating related memories to create explicit references."
+      },
+      "supersede": {
+        "title": "Possible duplicate",
+        "description": "This memory looks like a newer version of the one below. Marking it as superseding hides the older memory from recall.",
+        "similarity": "{value}% similar",
+        "confirm": "Mark as superseded",
+        "accepted": "Marked as superseded",
+        "acceptFailed": "Could not mark as superseded"
       }
     },
     "deleteDialog": {

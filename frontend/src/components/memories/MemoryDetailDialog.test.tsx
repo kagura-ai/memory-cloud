@@ -15,7 +15,11 @@ import { render, screen, fireEvent } from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 import { MemoryDetailDialog } from "./MemoryDetailDialog";
-import type { LinkedMemoryRef, MemoryReference } from "@/lib/types/memory";
+import type {
+  LinkedMemoryRef,
+  MemoryReference,
+  SupersedeCandidate,
+} from "@/lib/types/memory";
 
 // ---------- Mocks ------------------------------------------------------------
 
@@ -73,6 +77,18 @@ function makeLink(overrides: Partial<LinkedMemoryRef> = {}): LinkedMemoryRef {
     importance: 0.6,
     weight: 1.0,
     created_at: "2026-04-25T00:00:00Z",
+    ...overrides,
+  };
+}
+
+function makeCandidate(
+  overrides: Partial<SupersedeCandidate> = {},
+): SupersedeCandidate {
+  return {
+    memory_id: "99999999-9999-9999-9999-999999999999",
+    summary: "Older duplicate memory",
+    similarity: 0.91,
+    detected_at: "2026-07-01T00:00:00Z",
     ...overrides,
   };
 }
@@ -236,6 +252,99 @@ describe("MemoryDetailDialog — References (Issue #440)", () => {
 
     expect(screen.queryByText("references.emptyTitle")).not.toBeInTheDocument();
     expect(screen.queryByText("references.emptyDesc")).not.toBeInTheDocument();
+  });
+});
+
+describe("MemoryDetailDialog — supersede suggestion (#1403/#1416)", () => {
+  it("renders the suggestion block when a candidate is provided", () => {
+    render(
+      <MemoryDetailDialog
+        memory={makeRef()}
+        open={true}
+        onOpenChange={vi.fn()}
+        onDelete={vi.fn()}
+        supersedeCandidate={makeCandidate()}
+        onAcceptSupersede={vi.fn()}
+      />,
+    );
+
+    expect(screen.getByText("supersede.title")).toBeInTheDocument();
+    expect(screen.getByText("supersede.description")).toBeInTheDocument();
+    expect(screen.getByText("Older duplicate memory")).toBeInTheDocument();
+    expect(
+      screen.getByRole("button", { name: /supersede\.confirm/ }),
+    ).toBeInTheDocument();
+  });
+
+  it("hides the suggestion block when no candidate is provided", () => {
+    render(
+      <MemoryDetailDialog
+        memory={makeRef()}
+        open={true}
+        onOpenChange={vi.fn()}
+        onDelete={vi.fn()}
+      />,
+    );
+
+    expect(screen.queryByText("supersede.title")).not.toBeInTheDocument();
+    expect(
+      screen.queryByRole("button", { name: /supersede\.confirm/ }),
+    ).not.toBeInTheDocument();
+  });
+
+  it("invokes onAcceptSupersede when the confirm button is clicked", () => {
+    const onAccept = vi.fn();
+    render(
+      <MemoryDetailDialog
+        memory={makeRef()}
+        open={true}
+        onOpenChange={vi.fn()}
+        onDelete={vi.fn()}
+        supersedeCandidate={makeCandidate()}
+        onAcceptSupersede={onAccept}
+      />,
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: /supersede\.confirm/ }));
+    expect(onAccept).toHaveBeenCalledTimes(1);
+  });
+
+  it("disables the confirm button while accepting is in flight", () => {
+    render(
+      <MemoryDetailDialog
+        memory={makeRef()}
+        open={true}
+        onOpenChange={vi.fn()}
+        onDelete={vi.fn()}
+        supersedeCandidate={makeCandidate()}
+        onAcceptSupersede={vi.fn()}
+        supersedeAccepting={true}
+      />,
+    );
+
+    expect(
+      screen.getByRole("button", { name: /supersede\.confirm/ }),
+    ).toBeDisabled();
+  });
+
+  it("opens the candidate memory when its summary row is clicked", () => {
+    const onOpen = vi.fn();
+    render(
+      <MemoryDetailDialog
+        memory={makeRef()}
+        open={true}
+        onOpenChange={vi.fn()}
+        onDelete={vi.fn()}
+        supersedeCandidate={makeCandidate()}
+        onAcceptSupersede={vi.fn()}
+        onOpenLinkedMemory={onOpen}
+      />,
+    );
+
+    fireEvent.click(
+      screen.getByRole("button", { name: /Older duplicate memory/ }),
+    );
+    expect(onOpen).toHaveBeenCalledWith("99999999-9999-9999-9999-999999999999");
   });
 });
 

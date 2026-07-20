@@ -6,18 +6,26 @@ Issue #46 Phase 5 - Rich Memory Overview
 
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, HTTPException, Query
-from pydantic import BaseModel
+from fastapi import APIRouter, Depends, HTTPException, Query, Response
+from pydantic import BaseModel, Field, field_validator
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from auth.dependencies import SessionUser
+from auth.workspace_roles import WorkspaceRole
 from db.base import get_db
 from models.memory import Memory
+from services.edge_service import VALID_EDGE_TYPES, create_declared_edge
 from services.graph_service import GraphService
 from services.permission_service import PermissionService
 from utils.datetime import to_utc_iso, utcnow
-from utils.exceptions import InternalError, MemoryCloudException
+from utils.exceptions import (
+    ConflictError,
+    InternalError,
+    MemoryCloudException,
+    NotFoundException,
+    ValidationError,
+)
 from utils.logger import get_logger
 
 logger = get_logger(__name__)
@@ -86,6 +94,47 @@ class GraphDataResponse(BaseModel):
     nodes: list[GraphNode]
     edges: list[GraphEdge]
     stats: dict
+
+
+class CreateEdgeRequest(BaseModel):
+    """Body for ``POST /graph/edges`` (#1416).
+
+    Mirrors the MCP ``create_edge`` tool's inputs (edge_type default,
+    weight/confidence ranges, overwrite semantics) so the two transports stay
+    contract-consistent. ``context_id`` scopes the write; both endpoints must be
+    live memories in that context (enforced by the route).
+    """
+
+    context_id: UUID
+    source_id: UUID
+    target_id: UUID
+    edge_type: str = "related_to"
+    # Same ranges as the MCP tool: weight 0–3 (declared assertion defaults to
+    # full 1.0), confidence 0–1.
+    weight: float = Field(default=1.0, ge=0.0, le=3.0)
+    confidence: float = Field(default=1.0, ge=0.0, le=1.0)
+    # Opt-in to re-asserting an existing declared edge with different values.
+    overwrite: bool = False
+
+    @field_validator("edge_type")
+    @classmethod
+    def _validate_edge_type(cls, v: str) -> str:
+        if v not in VALID_EDGE_TYPES:
+            raise ValueError(f"edge_type must be one of: {', '.join(sorted(VALID_EDGE_TYPES))}")
+        return v
+
+
+class CreateEdgeResponse(BaseModel):
+    """Response for ``POST /graph/edges``.
+
+    ``operation`` is one of created / updated / unchanged (conflict surfaces as a
+    409, never a 200 body). ``edge`` is the serialized post-state; ``previous``
+    is the pre-image when an existing non-protected edge was upserted.
+    """
+
+    operation: str
+    edge: dict | None
+    previous: dict | None = None
 
 
 # ============================================================================
@@ -411,3 +460,106 @@ async def get_graph_data(
     except Exception as e:
         logger.error("graph_data_failed", error=str(e), user_id=user.get("user_id"))
         raise InternalError("Failed to retrieve graph data") from e
+
+
+@router.post("/edges", response_model=CreateEdgeResponse)
+async def create_graph_edge(
+    body: CreateEdgeRequest,
+    user: SessionUser,
+    response: Response,
+    db: AsyncSession = Depends(get_db),
+):
+    """Create a user-declared edge between two memories in a context (#1416).
+
+    REST twin of the MCP ``create_edge`` tool: both call the shared
+    ``services.edge_service.create_declared_edge`` so the deterministic
+    declared-duplicate contract (#1321) and the #1403 supersede accept/self-heal
+    behave identically. The web UI's confirm→create flow for a supersede
+    suggestion posts here with ``edge_type="supersedes"``; accepting a stored
+    suggestion clears the ``supersede_candidate`` in the same transaction.
+
+    Authorization: mirrors the MCP ``create_edge`` tool and the REST
+    ``remember`` / ``patch`` writers — workspace membership at ``member`` level
+    or higher (viewers are read-only). Resolution goes through
+    ``resolve_context_for_workspace_read``, which returns a **uniform 404** on
+    every deny path (context not found, caller not a workspace member, viewer,
+    private-context non-creator, whitelist/agent-binding miss) so context
+    existence never leaks across workspace/privacy boundaries (CWE-639 / OWASP
+    A01). Both endpoints must be live memories in the resolved (workspace,
+    context) — a missing/out-of-scope/deleted endpoint is a 404, which also
+    closes the edge write-time invariant the ``/graph`` read paths defend
+    against.
+
+    Status: 201 when a new edge is created; 200 for updated / unchanged; 409
+    when a differing declared edge already exists (unless ``overwrite=true``).
+    """
+    try:
+        user_id = user["user_id"]
+
+        if body.source_id == body.target_id:
+            raise ValidationError(
+                "source_id and target_id must be different (self-loops are not supported).",
+                field="target_id",
+            )
+
+        # Write authz: member-or-higher workspace role (blocks read-only viewers),
+        # matching the MCP create_edge / remember / patch access model rather than
+        # the stricter context-role EDITOR gate. resolve_context_for_workspace_read
+        # collapses every deny reason to a uniform 404 (no existence leak).
+        context = await PermissionService(db).resolve_context_for_workspace_read(
+            user_id,
+            body.context_id,
+            required_role=WorkspaceRole.MEMBER,
+        )
+
+        # Context invariant: both endpoints must be live memories in this
+        # (workspace, context). Prevents forging an edge to an out-of-scope
+        # memory and keeps the graph read paths' defense-in-depth honest by
+        # enforcing the invariant at write time.
+        found = await db.execute(
+            select(Memory.id).where(
+                Memory.id.in_([body.source_id, body.target_id]),
+                Memory.workspace_id == context.workspace_id,
+                Memory.context_id == context.id,
+                Memory.deleted_at.is_(None),
+            )
+        )
+        found_ids = {row[0] for row in found.all()}
+        if body.source_id not in found_ids or body.target_id not in found_ids:
+            raise NotFoundException("Source or target memory in this context")
+
+        result = await create_declared_edge(
+            db,
+            user_id=user_id,
+            source_id=body.source_id,
+            target_id=body.target_id,
+            edge_type=body.edge_type,
+            weight=body.weight,
+            confidence=body.confidence,
+            workspace_id=str(context.workspace_id),
+            context_id=str(context.id),
+            overwrite=body.overwrite,
+        )
+
+        if result.operation == "conflict":
+            await db.rollback()
+            raise ConflictError(
+                "A declared edge already exists between these memories with different "
+                "values. Pass overwrite=true to re-assert it.",
+                existing_edge=result.existing,
+            )
+
+        await db.commit()
+
+        # 201 for a genuine create; 200 for an idempotent re-assert (unchanged)
+        # or an upsert over a non-declared auto-edge (updated).
+        response.status_code = 201 if result.operation == "created" else 200
+        return CreateEdgeResponse(
+            operation=result.operation, edge=result.edge, previous=result.previous
+        )
+
+    except (HTTPException, MemoryCloudException):
+        raise
+    except Exception as e:
+        logger.error("graph_edge_create_failed", error=str(e), user_id=user.get("user_id"))
+        raise InternalError("Failed to create edge") from e

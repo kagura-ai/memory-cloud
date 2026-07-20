@@ -49,6 +49,18 @@ export interface LinkedMemoryRef {
   created_at: string;
 }
 
+// #1403 mirror of backend `SupersedeCandidate` (schemas.py) — a near-duplicate
+// this memory likely supersedes, detected at ingest. A *suggestion* only: the
+// `supersedes` edge is created on explicit confirm via `POST /graph/edges`
+// (#1416), never automatically. `similarity` is cosine in [0, 1]; `detected_at`
+// is an ISO-8601 string (or null on legacy rows).
+export interface SupersedeCandidate {
+  memory_id: string;
+  summary: string;
+  similarity: number;
+  detected_at: string | null;
+}
+
 // Exact mirror of backend `ReferenceResponse` (schemas.py:222) — returned by
 // `POST /api/v1/memory/reference`.
 //
@@ -75,6 +87,9 @@ export interface MemoryReference {
   outgoing_has_more?: boolean;
   incoming_links?: LinkedMemoryRef[];
   incoming_has_more?: boolean;
+  // #1403: liveness-guarded supersede suggestion. Present only when this memory
+  // has a still-actionable near-duplicate it likely supersedes.
+  supersede_candidate?: SupersedeCandidate | null;
 }
 
 // Issue #952: minimal client mirror of backend `RememberRequest`
