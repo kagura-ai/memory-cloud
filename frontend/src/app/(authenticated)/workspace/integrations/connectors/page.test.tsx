@@ -73,6 +73,27 @@ vi.mock("@/hooks/useCopyFeedback", () => ({
   useCopyFeedback: () => ({ isCopied: () => false, copyToTarget: vi.fn() }),
 }));
 
+// #1399: the fold/label tests differ only by llm_config_present, so build the
+// stored-connector row from one factory instead of re-inlining every field.
+function makeConnector(overrides: Record<string, unknown> = {}) {
+  return {
+    connector_id: "connector-1",
+    connector_type: "slack",
+    app_key: "default",
+    resource_id: "slack-t01",
+    context_id: "context-1",
+    config_version: 3,
+    created_at: "2026-07-19T00:00:00Z",
+    created_by: "user-1",
+    runtime: { vision_enabled: true },
+    channel_ids: ["C1"],
+    locale: null,
+    litellm_virtual_key_id: null,
+    llm_config_present: false,
+    ...overrides,
+  };
+}
+
 function setWorkspace(role: string | undefined, overrides = {}) {
   mockUseWorkspace.mockReturnValue({
     currentWorkspace: role ? { id: "ws-1", current_user_role: role } : null,
@@ -793,6 +814,70 @@ describe("ConnectorsPage RBAC gate", () => {
 
     expect(await screen.findByText("llmIncomplete")).toBeInTheDocument();
     expect(mockUpdateConnectorSettings).not.toHaveBeenCalled();
+  });
+
+  it("collapses the stored LLM fields behind a replace fold with delete outside (#1399)", async () => {
+    setWorkspace("admin");
+    mockListConnectors.mockResolvedValue([
+      makeConnector({ llm_config_present: true }),
+    ]);
+
+    render(<ConnectorsPage />);
+
+    fireEvent.click(
+      await screen.findByRole("button", { name: "editSettings" }),
+    );
+    await screen.findByLabelText("channelsLabel");
+    // Configured: the write-only inputs sit inside the closed fold (present
+    // in the DOM per the <details> model, but not visible)…
+    expect(screen.getByLabelText("llmProvider")).not.toBeVisible();
+    expect(screen.getByLabelText("llmModel")).not.toBeVisible();
+    expect(screen.getByLabelText("llmApiKey")).not.toBeVisible();
+    // …while the destructive action stays one click away, outside the fold.
+    expect(screen.getByRole("button", { name: "llmDelete" })).toBeVisible();
+    // Expanding the replace fold reveals the fields.
+    fireEvent.click(screen.getByText("llmReplaceToggle"));
+    expect(screen.getByLabelText("llmProvider")).toBeVisible();
+    expect(screen.getByLabelText("llmModel")).toBeVisible();
+    expect(screen.getByLabelText("llmApiKey")).toBeVisible();
+  });
+
+  it("shows LLM fields directly with visible labels when nothing is stored (#1399)", async () => {
+    setWorkspace("admin");
+    mockListConnectors.mockResolvedValue([
+      makeConnector({ llm_config_present: false }),
+    ]);
+
+    render(<ConnectorsPage />);
+
+    fireEvent.click(
+      await screen.findByRole("button", { name: "editSettings" }),
+    );
+    await screen.findByLabelText("channelsLabel");
+    // Unconfigured: no replace fold — the goal is to get the fields filled.
+    expect(screen.queryByText("llmReplaceToggle")).not.toBeInTheDocument();
+    expect(screen.getByLabelText("llmProvider")).toBeVisible();
+    // Each field carries a visible <label> (placeholder-as-label is gone) —
+    // getByText only matches rendered text, never an aria-label attribute.
+    expect(screen.getByText("llmProvider").tagName).toBe("LABEL");
+    expect(screen.getByText("llmModel").tagName).toBe("LABEL");
+    expect(screen.getByText("llmApiKey").tagName).toBe("LABEL");
+  });
+
+  it("opens the dialog with LLM fields directly visible from the fixLlm badge (#1399)", async () => {
+    setWorkspace("admin");
+    mockListConnectors.mockResolvedValue([
+      makeConnector({ llm_config_present: false }),
+    ]);
+
+    render(<ConnectorsPage />);
+
+    // The focus-steering lane and the fold never collide: fixLlm only
+    // renders when the LLM config is missing, and a missing config means
+    // the fields render unfolded (#1399 invariant).
+    fireEvent.click(await screen.findByRole("button", { name: "fixLlm" }));
+    expect(await screen.findByText("settingsTitle")).toBeInTheDocument();
+    expect(screen.getByLabelText("llmProvider")).toBeVisible();
   });
 
   it("does not toast slack_error for non-admins (#1375)", async () => {
