@@ -18,6 +18,11 @@
 - [`get_agent_bootstrap` Contract](design/agent-bootstrap-contract.md) — Implemented composed session-start bundle and fail-soft component contract
 - [Agent Correlation Design](design/agent-otel-correlation.md) — Implemented W3C session/run/trace mapping and verified identity precedence (v0.49.0 preview)
 - [`memory_access_events` Design](design/memory-access-events.md) — Implemented append-only agent audit schema/writer and current emission coverage
+- [Multi-Platform Connectors](design/multi-platform-connectors.md) — Design note (#1390): how the connectors UI/contracts generalize for a 2nd chat provider
+- [Slack Channel Picker](design/slack-channel-picker.md) — Design note (#1391): server-proxied channel listing for connector settings
+- [Platform-Borne Connector LLM](design/platform-borne-connector-llm.md) — Design note (#1392): SaaS-default LLM lane with BYOK as override
+- [Add-On Entitlements](design/addon-entitlements.md) — Design note (#1393): grant ledger upstream of the existing addon bonus columns
+- [Admin-Definable Plan Tiers](design/admin-definable-plan-tiers.md) — Design note (#1394): DB-backed tiers beyond hardcoded S/M/L
 
 ## Guides
 
