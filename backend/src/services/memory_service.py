@@ -1133,10 +1133,12 @@ class MemoryService:
 
         # #1403: surface the liveness-guarded suggestion here too. It lives in its
         # own column, so replacing `details` on this patch never drops it, and the
-        # client sees the current suggestion in the patch response.
+        # client sees the current suggestion in the patch response. operation="update"
+        # matches the PATCH surface's MAE vocabulary so a shadow-mode binding
+        # would_deny is attributed to the right operation (not "reference").
         supersede_candidate = (
             await self._resolve_supersede_candidates(
-                {memory.id: memory}, user_id=user_id, operation="reference"
+                {memory.id: memory}, user_id=user_id, operation="update"
             )
         ).get(memory.id)
 
@@ -4415,6 +4417,42 @@ async def _create_knn_seed_edges(
             collection_name=collection_name,
         )
 
+        # #1403 option B: supersede-suggestion signal — detected from the RAW top-1
+        # neighbor (excluding self), INDEPENDENT of the calibrated/operator seed-edge
+        # threshold. Coupling it to `seed_neighbors` would let an operator seed
+        # threshold (knn_seed_min_similarity) > _SUPERSEDE_SUGGEST_THRESHOLD silently
+        # suppress a valid suggestion (e.g. a 0.87 near-duplicate filtered out before
+        # the check). Seeding runs async (decoupled from the remember response), so
+        # rather than block remember() we PERSIST the candidate onto the new memory's
+        # dedicated server-only supersede_candidate column (never the client-writable
+        # details blob) and surface it — liveness-guarded — on the next
+        # recall()/reference(). Suggestion only: the edge is never auto-created (the
+        # #1208 over-supersede prevention keeps edge authorship with the user/agent,
+        # who confirms via create_edge).
+        non_self = [c for c in candidates if str(c["id"]) != memory_id_str]
+        if non_self:
+            raw_top = max(non_self, key=lambda c: float(c["score"]))
+            raw_top_score = float(raw_top["score"])
+            if raw_top_score >= _SUPERSEDE_SUGGEST_THRESHOLD:
+                candidate = {
+                    "memory_id": str(raw_top["id"]),
+                    "similarity": round(raw_top_score, 4),
+                    "detected_at": to_utc_iso(utcnow()),
+                }
+                # Reassign the dedicated column (JSON, not a MutableDict — a
+                # reassignment is what flags it dirty). Do NOT touch updated_at:
+                # detection is a system annotation, not a user edit (#1317). Commit
+                # is safe: the caller already committed the embedding_status update
+                # before invoking this function, so nothing else is pending here.
+                memory.supersede_candidate = candidate
+                await db.commit()
+                logger.info(
+                    "supersede_candidate_detected",
+                    memory_id=memory_id_str,
+                    candidate_memory_id=candidate["memory_id"],
+                    similarity=candidate["similarity"],
+                )
+
         # Filter: exclude self, apply resolved (calibrated) similarity threshold, cap at k
         seed_neighbors = [
             c for c in candidates if str(c["id"]) != memory_id_str and c["score"] >= threshold
@@ -4428,41 +4466,6 @@ async def _create_knn_seed_edges(
                 threshold=threshold,
             )
             return
-
-        # #1403 option B: supersede-suggestion signal. When the nearest neighbor
-        # is a near-duplicate (>= _SUPERSEDE_SUGGEST_THRESHOLD, well above the
-        # calibrated seed threshold), this new memory is likely an updated version
-        # of an existing fact — a supersede candidate the user may prefer over
-        # storing a second copy. Seeding runs async (decoupled from the remember
-        # response), so rather than block remember() we PERSIST the top-1 candidate
-        # onto the new memory's dedicated server-only supersede_candidate column
-        # (never the client-writable details blob) and surface it — liveness-
-        # guarded — on the next recall()/reference(). Suggestion only: the edge is never
-        # auto-created (the #1208 over-supersede prevention keeps edge authorship
-        # with the user/agent, who confirms via create_edge).
-        top_neighbor = seed_neighbors[0]
-        top_score = float(top_neighbor["score"])
-        if top_score >= _SUPERSEDE_SUGGEST_THRESHOLD:
-            candidate = {
-                "memory_id": str(top_neighbor["id"]),
-                "similarity": round(top_score, 4),
-                "detected_at": to_utc_iso(utcnow()),
-            }
-            # Assign the dedicated server-only column (JSON, not a MutableDict — a
-            # reassignment is what flags it dirty). Do NOT touch updated_at:
-            # candidate detection is a system annotation, not a user edit (#1317).
-            # The commit here is safe: the caller already committed the
-            # embedding_status update before invoking this function, so nothing
-            # else is pending in the session at this point; the per-edge SAVEPOINTs
-            # that follow open their own nested transactions.
-            memory.supersede_candidate = candidate
-            await db.commit()
-            logger.info(
-                "supersede_candidate_detected",
-                memory_id=memory_id_str,
-                candidate_memory_id=candidate["memory_id"],
-                similarity=candidate["similarity"],
-            )
 
         edges_created = 0
         similarities: list[float] = []
