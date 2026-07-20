@@ -380,6 +380,7 @@ async def test_reference_bumps_context_but_not_on_memory_miss():
         outgoing_has_more=False,
         incoming_links=[],
         incoming_has_more=False,
+        supersede_candidate=None,  # #1403
     )
     service = MagicMock()
     service.reference = AsyncMock(return_value=reference_result)

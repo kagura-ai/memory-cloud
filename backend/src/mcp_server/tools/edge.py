@@ -9,6 +9,8 @@ from typing import Any
 from uuid import UUID
 
 from mcp.types import TextContent
+from sqlalchemy import select
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from mcp_server.tools._helpers import (
     _check_viewer_permission,
@@ -32,7 +34,11 @@ from models.memory import (
     EDGE_TYPE_REFERENCES_FILE,
     EDGE_TYPE_RELATED_TO,
     EDGE_TYPE_SUPERSEDES,
+    Memory,
 )
+from utils.logger import get_logger
+
+logger = get_logger(__name__)
 
 # Issue #461 / #741 / #782: full set of edge_types accepted by the DB CHECK
 # constraint (`models/memory.py::valid_edge_type`). Sourced from `EDGE_TYPE_*`
@@ -146,6 +152,41 @@ def _parse_float(
             "validation_error", f"{name} must be between {min_val} and {max_val}."
         )
     return f, None
+
+
+async def _accept_supersede_candidate_if_matching(
+    db: AsyncSession, *, src_id: UUID, dst_id: UUID
+) -> None:
+    """#1403: record acceptance of a suggested supersession and self-heal.
+
+    When a ``supersedes`` edge ``src → dst`` confirms a previously-suggested
+    candidate (``src.supersede_candidate.memory_id == dst``), emit the
+    ``supersede_suggestion_accepted`` telemetry (the accept side of the
+    detected/accepted adoption funnel) and clear the stored suggestion so it
+    stops surfacing on recall()/reference(). The mutation is committed by the
+    caller's ``db.commit()`` in the same transaction as the edge.
+
+    Best-effort: any failure is swallowed — telemetry/self-heal must never fail
+    the edge creation itself.
+    """
+    try:
+        result = await db.execute(select(Memory).where(Memory.id == src_id))
+        memory = result.scalar_one_or_none()
+        if memory is None or not isinstance(memory.supersede_candidate, dict):
+            return
+        cand = memory.supersede_candidate
+        if cand.get("memory_id") != str(dst_id):
+            return
+        # Clear the accepted suggestion (server-only column; None = no suggestion).
+        memory.supersede_candidate = None
+        logger.info(
+            "supersede_suggestion_accepted",
+            memory_id=str(src_id),
+            superseded_memory_id=str(dst_id),
+            similarity=cand.get("similarity"),
+        )
+    except Exception as e:
+        logger.warning("supersede_accept_check_failed", error=str(e))
 
 
 async def handle_list_edges(
@@ -394,6 +435,13 @@ async def handle_create_edge(
                 ),
                 operation_name="create_edge",
             )
+
+            # #1403: if this supersedes edge confirms a stored suggestion, record
+            # the acceptance and clear it (self-heal), in the same transaction.
+            if edge_type == EDGE_TYPE_SUPERSEDES:
+                await _accept_supersede_candidate_if_matching(
+                    db, src_id=source_uuid, dst_id=target_uuid
+                )
 
             await _log_tool_usage(
                 db, user_id, "create_edge", start_time, 200, current_context_id, workspace_id

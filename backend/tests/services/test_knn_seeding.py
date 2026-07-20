@@ -20,6 +20,9 @@ def _make_memory(workspace_id=None, context_id=None, user_id="user1"):
     memory.user_id = user_id
     memory.workspace_id = workspace_id or uuid4()
     memory.context_id = context_id or uuid4()
+    # #1403: real (non-mock) starting value for the server-only supersede
+    # suggestion column the storage path assigns to.
+    memory.supersede_candidate = None
     return memory
 
 
@@ -222,16 +225,27 @@ class TestKnnSeeding:
         assert events["supersede_candidate_detected"]["candidate_memory_id"] == dup_id
         assert events["supersede_candidate_detected"]["similarity"] == 0.95
 
+        # #1403 option B: the candidate is PERSISTED onto the server-only
+        # supersede_candidate column so recall()/reference() can surface it without
+        # re-running k-NN on the read path, committed independently of edge creation.
+        stored = memory.supersede_candidate
+        assert stored is not None
+        assert stored["memory_id"] == dup_id
+        assert stored["similarity"] == 0.95
+        assert "detected_at" in stored
+        db.commit.assert_awaited()
+
     @pytest.mark.asyncio
     async def test_no_supersede_candidate_below_threshold(self):
         """#1403: a merely-related nearest neighbor (score below the supersede-
-        suggest threshold) must NOT emit a supersede candidate — the signal
-        fires only on true near-duplicates, not on ordinary seed neighbors."""
+        suggest threshold 0.85) must NOT emit a supersede candidate nor store one
+        — the signal fires only on true near-duplicates, not on ordinary seed
+        neighbors."""
         memory = _make_memory()
         db = _make_db()
         mock_repo = _make_edge_repo()
         candidates = [
-            {"id": str(uuid4()), "score": 0.85, "payload": {}, "embedding": []},
+            {"id": str(uuid4()), "score": 0.80, "payload": {}, "embedding": []},
             {"id": str(uuid4()), "score": 0.70, "payload": {}, "embedding": []},
         ]
 
@@ -260,6 +274,61 @@ class TestKnnSeeding:
 
         emitted = [c.args[0] for c in mock_logger.info.call_args_list if c.args]
         assert "supersede_candidate_detected" not in emitted
+        # No candidate stored either — the column stays None.
+        assert memory.supersede_candidate is None
+
+    @pytest.mark.asyncio
+    async def test_supersede_candidate_independent_of_seed_threshold(self):
+        """#1403 (PR #1415 review): supersede detection uses the RAW top-1 neighbor,
+        not the seed-threshold-filtered list. A resolved/operator seed threshold
+        ABOVE the supersede threshold (0.90 > 0.85) must NOT suppress a valid
+        suggestion — and the below-seed-threshold neighbor still gets no seed edge."""
+        memory = _make_memory()
+        db = _make_db()
+        mock_repo = _make_edge_repo()
+        dup_id = str(uuid4())
+        # 0.87 is a valid supersede candidate (>= 0.85) but BELOW the resolved seed
+        # threshold 0.90 → filtered out of seed_neighbors (no edge), yet must still
+        # be detected + persisted from the raw k-NN results.
+        candidates = [
+            {"id": dup_id, "score": 0.87, "payload": {}, "embedding": []},
+            {"id": str(uuid4()), "score": 0.70, "payload": {}, "embedding": []},
+        ]
+
+        with (
+            patch(
+                "neural.config.NeuralMemoryConfig.from_db",
+                new=AsyncMock(return_value=_make_config()),
+            ),
+            patch(
+                "neural.calibration.resolve_knn_threshold",
+                new=AsyncMock(return_value=0.90),
+            ),
+            patch(
+                "db.qdrant.search_memories_qdrant",
+                new=AsyncMock(return_value=candidates),
+            ),
+            patch(
+                "repositories.neural_edge.NeuralEdgeRepository",
+                return_value=mock_repo,
+            ),
+            patch("services.memory_service.logger") as mock_logger,
+        ):
+            await _create_knn_seed_edges(
+                db=db,
+                memory=memory,
+                vector=[0.1] * 512,
+                collection_name="kagura_memories",
+                model_name="text-embedding-3-small",
+            )
+
+        events = {c.args[0]: c.kwargs for c in mock_logger.info.call_args_list if c.args}
+        assert "supersede_candidate_detected" in events
+        assert events["supersede_candidate_detected"]["candidate_memory_id"] == dup_id
+        assert memory.supersede_candidate is not None
+        assert memory.supersede_candidate["memory_id"] == dup_id
+        # 0.87 < 0.90 resolved seed threshold → no seed edge created.
+        mock_repo.create_edge_if_absent.assert_not_awaited()
 
     @pytest.mark.asyncio
     async def test_threshold_filter_excludes_low_similarity(self):
@@ -470,8 +539,10 @@ class TestKnnSeeding:
             side_effect=[MagicMock(), RuntimeError("DB error"), MagicMock()]
         )
 
+        # Top score < 0.85 supersede threshold: keeps this test isolated to edge
+        # logic (no extra candidate-storage commit, #1403).
         candidates = [
-            {"id": str(uuid4()), "score": 0.9, "payload": {}, "embedding": []},
+            {"id": str(uuid4()), "score": 0.84, "payload": {}, "embedding": []},
             {"id": str(uuid4()), "score": 0.8, "payload": {}, "embedding": []},
             {"id": str(uuid4()), "score": 0.7, "payload": {}, "embedding": []},
         ]
@@ -538,8 +609,10 @@ class TestKnnSeeding:
         # Simulate all 2 candidates already having edges (existing Hebbian edges)
         mock_repo.create_edge_if_absent = AsyncMock(return_value=None)
 
+        # Top score < 0.85 supersede threshold: no candidate-storage commit, so
+        # this test still asserts "no commit when nothing inserted" (#1403).
         candidates = [
-            {"id": str(uuid4()), "score": 0.9, "payload": {}, "embedding": []},
+            {"id": str(uuid4()), "score": 0.84, "payload": {}, "embedding": []},
             {"id": str(uuid4()), "score": 0.8, "payload": {}, "embedding": []},
         ]
 

@@ -12,6 +12,7 @@ import functools
 import hashlib
 import math
 import statistics
+from collections.abc import Mapping
 from datetime import datetime
 from typing import Any
 from uuid import UUID, uuid4
@@ -56,6 +57,7 @@ from models.schemas import (
     RelatedTagItem,
     RememberRequest,
     RememberResponse,
+    SupersedeCandidate,
     UpdateMemoryRequest,
     UpdateMemoryResponse,
 )
@@ -1129,12 +1131,24 @@ class MemoryService:
             incoming_links = []
             incoming_has_more = False
 
+        # #1403: surface the liveness-guarded suggestion here too. It lives in its
+        # own column, so replacing `details` on this patch never drops it, and the
+        # client sees the current suggestion in the patch response. operation="update"
+        # matches the PATCH surface's MAE vocabulary so a shadow-mode binding
+        # would_deny is attributed to the right operation (not "reference").
+        supersede_candidate = (
+            await self._resolve_supersede_candidates(
+                {memory.id: memory}, user_id=user_id, operation="update"
+            )
+        ).get(memory.id)
+
         return ReferenceResponse(
             memory_id=memory.id,
             summary=memory.summary,
             context_summary=memory.context_summary,
             content=memory.content,
             details=memory.details,
+            supersede_candidate=supersede_candidate,
             type=memory.type,
             scope=memory.scope,
             importance=memory.importance,
@@ -1304,12 +1318,24 @@ class MemoryService:
             context_id=memory.context_id,
         )
 
+        # #1403: resolve the (liveness-guarded, enriched) supersede suggestion for
+        # this single memory — the deliberate Layer-3 fetch is exactly where a
+        # client decides whether to confirm the supersession.
+        supersede_candidate = (
+            await self._resolve_supersede_candidates(
+                {memory.id: memory}, user_id=user_id, operation="reference"
+            )
+        ).get(memory.id)
+
         return ReferenceResponse(
             memory_id=memory.id,
             summary=memory.summary,
             context_summary=memory.context_summary,
             content=memory.content,
             details=memory.details,
+            # #1403: liveness-guarded supersede suggestion (its own server-only
+            # column — never mixed into the client-writable details blob).
+            supersede_candidate=supersede_candidate,
             type=memory.type,
             scope=memory.scope,
             importance=memory.importance,
@@ -1972,6 +1998,105 @@ class MemoryService:
         except Exception as e:
             logger.warning("supersede_shadowing_failed", error=str(e))
             return {}, {}
+
+    async def _resolve_supersede_candidates(
+        self, memories: Mapping[Any, Memory], *, user_id: str, operation: str
+    ) -> dict[UUID, SupersedeCandidate]:
+        """#1403: liveness-guarded supersede suggestions for a page of memories.
+
+        For every memory carrying a stored ``supersede_candidate`` (a server-only
+        column — never client-writable), return an enriched, still-actionable
+        ``SupersedeCandidate`` keyed by the SOURCE memory id, but only when the
+        candidate target still exists, is not soft-deleted, is in the SAME
+        (workspace, context) as the source memory, AND survives the same
+        agent-binding row filter (#1299) every other recall lane applies.
+
+        The (workspace, context) match is defense-in-depth: the column is written
+        only from a context-scoped k-NN neighbour, so the target is same-context
+        by construction — the check guarantees the read-path enrichment can never
+        surface a memory's ``summary`` across a workspace/context the caller is
+        not already reading (the source memory). The binding filter closes the
+        narrower gap where an agent-scoped credential is restricted (by type /
+        source) to a subset of an otherwise-visible context. Mirrors
+        ``_apply_supersede_shadowing``'s self-healing liveness JOIN: a suggestion
+        whose target is gone silently stops surfacing (the stored value is cleared
+        on acceptance at edge-creation time).
+
+        Fail-open, per item: a malformed stored value (or a Pydantic coercion
+        error) drops only that one suggestion; any wider error returns ``{}`` — a
+        suggestion is a read-path enhancement and must never blank
+        recall()/reference().
+        """
+        from pydantic import ValidationError as PydanticValidationError
+
+        from services.agent_binding_service import filter_memory_rows_by_binding
+
+        try:
+            pending: dict[UUID, dict] = {}
+            for memory in memories.values():
+                cand = memory.supersede_candidate
+                if not isinstance(cand, dict):
+                    continue
+                raw_target = cand.get("memory_id")
+                sim = cand.get("similarity")
+                if not raw_target or not isinstance(sim, (int, float)):
+                    continue
+                try:
+                    target_id = UUID(str(raw_target))
+                except (ValueError, TypeError):
+                    continue
+                pending[memory.id] = {"target_id": target_id, "candidate": cand, "source": memory}
+
+            if not pending:
+                return {}
+
+            target_ids = {p["target_id"] for p in pending.values()}
+            rows = await self.db.execute(
+                select(
+                    Memory.id,
+                    Memory.summary,
+                    Memory.workspace_id,
+                    Memory.context_id,
+                    Memory.type,
+                    Memory.source_type,
+                ).where(
+                    Memory.id.in_(target_ids),
+                    Memory.deleted_at.is_(None),
+                )
+            )
+            # Same agent-binding row filter every other recall lane enforces
+            # (#1299): a binding-restricted target must not leak its summary
+            # through the suggestion. Non-agent credentials → structural no-op.
+            kept_rows, _denied = await filter_memory_rows_by_binding(
+                self.db, list(rows.all()), operation=operation, user_id=user_id
+            )
+            live = {row.id: row for row in kept_rows}
+
+            resolved: dict[UUID, SupersedeCandidate] = {}
+            for source_id, p in pending.items():
+                target = live.get(p["target_id"])
+                if target is None:
+                    continue  # self-healing: target gone → drop the suggestion
+                source = p["source"]
+                if (target.workspace_id, target.context_id) != (
+                    source.workspace_id,
+                    source.context_id,
+                ):
+                    continue  # never enrich across a context the caller isn't reading
+                cand = p["candidate"]
+                try:
+                    resolved[source_id] = SupersedeCandidate(
+                        memory_id=target.id,
+                        summary=target.summary,
+                        similarity=float(cand["similarity"]),
+                        detected_at=cand.get("detected_at"),
+                    )
+                except (PydanticValidationError, ValueError, TypeError):
+                    continue  # malformed stored value → drop just this suggestion
+            return resolved
+        except Exception as e:
+            logger.warning("supersede_candidate_resolve_failed", error=str(e))
+            return {}
 
     async def _resolve_search_mode(
         self,
@@ -2876,6 +3001,18 @@ class MemoryService:
             # to consume ``search_results[:k]``; reorder only, never synthesize.
             search_results[:] = selected_results + unselected_results
 
+        # #1403: resolve liveness-guarded supersede suggestions for exactly the
+        # page that ships — one batched query, run AFTER the top-k slice + rerank
+        # so discarded candidates cost nothing (empty/fast when none carry one).
+        page_memories = {
+            sr["id"]: memories[sr["id"]]
+            for sr in search_results[: request.k]
+            if sr["id"] in memories
+        }
+        supersede_candidates = await self._resolve_supersede_candidates(
+            page_memories, user_id=user_id, operation="recall"
+        )
+
         responses = []
         for search_result in search_results[: request.k]:
             memory_id = search_result["id"]
@@ -2921,6 +3058,8 @@ class MemoryService:
                     # filtered shadowed memories out of search_results above).
                     superseded_by=shadow_map.get(memory.id),
                     contradicts=contradiction_map.get(memory.id, []),
+                    # #1403: near-duplicate this memory may supersede (or None).
+                    supersede_candidate=supersede_candidates.get(memory.id),
                 )
             )
 
@@ -4131,14 +4270,24 @@ class MemoryService:
 
 # #1403: near-duplicate threshold above which the nearest k-NN neighbor of a
 # freshly-embedded memory is surfaced as a supersede candidate — the user is
-# likely storing an updated version of an existing fact. Deliberately high (well
-# above the calibrated per-model seed threshold) so the signal fires only on
-# true near-duplicates, not merely related memories. Unlike the seed threshold
-# (D4 calibration/operator-override chain), this is a fixed first-pass heuristic;
-# graduate it to a per-model calibrated / config-driven value if the adoption
-# telemetry shows it mis-fires across embedding models with different score
-# distributions.
-_SUPERSEDE_SUGGEST_THRESHOLD = 0.92
+# likely storing an updated version of an existing fact. Well above the
+# calibrated per-model seed threshold so the signal fires only on true
+# near-duplicates, not merely related memories.
+#
+# Operating point 0.85 (option-B de-risk, 2026-07-20): on the frozen
+# update_slice_v2 corpus (100 ground-truth v1→v2 supersede pairs, measured with
+# the same embedder the k-NN seeding uses), the "top-1 neighbor >= tau" detector
+# holds precision == recall == 1.000 across the whole band tau = 0.60–0.88
+# (true v1 is the top-1 neighbor for 100/100 v2 memories; mean margin 0.249).
+# 0.85 is chosen conservatively within that band — not the precision×recall-
+# optimal midpoint — to preserve precision when real-world distractors sit
+# closer than the minimal-edit corpus pairs, trading a little recall for trust.
+# Unlike the seed threshold (D4 calibration/operator-override chain), this is a
+# fixed first-pass heuristic; graduate it to a per-model calibrated /
+# config-driven value if the adoption telemetry (supersede_candidate_detected
+# vs supersede_suggestion_accepted) shows it mis-fires across embedding models
+# with different score distributions.
+_SUPERSEDE_SUGGEST_THRESHOLD = 0.85
 
 
 async def _create_knn_seed_edges(
@@ -4268,6 +4417,42 @@ async def _create_knn_seed_edges(
             collection_name=collection_name,
         )
 
+        # #1403 option B: supersede-suggestion signal — detected from the RAW top-1
+        # neighbor (excluding self), INDEPENDENT of the calibrated/operator seed-edge
+        # threshold. Coupling it to `seed_neighbors` would let an operator seed
+        # threshold (knn_seed_min_similarity) > _SUPERSEDE_SUGGEST_THRESHOLD silently
+        # suppress a valid suggestion (e.g. a 0.87 near-duplicate filtered out before
+        # the check). Seeding runs async (decoupled from the remember response), so
+        # rather than block remember() we PERSIST the candidate onto the new memory's
+        # dedicated server-only supersede_candidate column (never the client-writable
+        # details blob) and surface it — liveness-guarded — on the next
+        # recall()/reference(). Suggestion only: the edge is never auto-created (the
+        # #1208 over-supersede prevention keeps edge authorship with the user/agent,
+        # who confirms via create_edge).
+        non_self = [c for c in candidates if str(c["id"]) != memory_id_str]
+        if non_self:
+            raw_top = max(non_self, key=lambda c: float(c["score"]))
+            raw_top_score = float(raw_top["score"])
+            if raw_top_score >= _SUPERSEDE_SUGGEST_THRESHOLD:
+                candidate = {
+                    "memory_id": str(raw_top["id"]),
+                    "similarity": round(raw_top_score, 4),
+                    "detected_at": to_utc_iso(utcnow()),
+                }
+                # Reassign the dedicated column (JSON, not a MutableDict — a
+                # reassignment is what flags it dirty). Do NOT touch updated_at:
+                # detection is a system annotation, not a user edit (#1317). Commit
+                # is safe: the caller already committed the embedding_status update
+                # before invoking this function, so nothing else is pending here.
+                memory.supersede_candidate = candidate
+                await db.commit()
+                logger.info(
+                    "supersede_candidate_detected",
+                    memory_id=memory_id_str,
+                    candidate_memory_id=candidate["memory_id"],
+                    similarity=candidate["similarity"],
+                )
+
         # Filter: exclude self, apply resolved (calibrated) similarity threshold, cap at k
         seed_neighbors = [
             c for c in candidates if str(c["id"]) != memory_id_str and c["score"] >= threshold
@@ -4281,23 +4466,6 @@ async def _create_knn_seed_edges(
                 threshold=threshold,
             )
             return
-
-        # #1403: supersede-suggestion signal. When the nearest neighbor is a
-        # near-duplicate (well above the calibrated seed threshold), this new
-        # memory is likely an updated version of an existing fact — a supersede
-        # candidate the user may prefer over storing a second copy. Seeding runs
-        # async (decoupled from the remember response), so the candidate is
-        # emitted as telemetry here; a synchronous client-facing prompt is a
-        # follow-up gated on the async-embedding hot-path trade-off.
-        top_neighbor = seed_neighbors[0]
-        top_score = float(top_neighbor["score"])
-        if top_score >= _SUPERSEDE_SUGGEST_THRESHOLD:
-            logger.info(
-                "supersede_candidate_detected",
-                memory_id=memory_id_str,
-                candidate_memory_id=str(top_neighbor["id"]),
-                similarity=round(top_score, 4),
-            )
 
         edges_created = 0
         similarities: list[float] = []
