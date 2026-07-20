@@ -13,6 +13,7 @@ import {
   render,
   screen,
   waitFor,
+  within,
 } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
@@ -378,7 +379,7 @@ describe("ConnectorsPage RBAC gate", () => {
     );
   });
 
-  it("treats llm-clear on an unbound connector as no-change (#1376)", async () => {
+  it("hides the LLM delete action when nothing is stored (#1388)", async () => {
     setWorkspace("admin");
     mockListConnectors.mockResolvedValue([
       {
@@ -403,12 +404,226 @@ describe("ConnectorsPage RBAC gate", () => {
     fireEvent.click(
       await screen.findByRole("button", { name: "editSettings" }),
     );
-    // Tick "clear LLM" with nothing bound and change nothing else.
-    fireEvent.click(await screen.findByRole("switch", { name: "llmClear" }));
+    await screen.findByLabelText("channelsLabel");
+    // No stored bundle → no destructive affordance (and the old clear
+    // switch is gone entirely).
+    expect(
+      screen.queryByRole("button", { name: "llmDelete" }),
+    ).not.toBeInTheDocument();
+    expect(
+      screen.queryByRole("switch", { name: "llmClear" }),
+    ).not.toBeInTheDocument();
+  });
+
+  it("deletes the stored LLM config via explicit confirm and refreshes the version snapshot (#1388)", async () => {
+    setWorkspace("admin");
+    mockListConnectors.mockResolvedValue([
+      {
+        connector_id: "connector-1",
+        connector_type: "slack",
+        app_key: "default",
+        resource_id: "slack-t01",
+        context_id: "context-1",
+        config_version: 3,
+        created_at: "2026-07-19T00:00:00Z",
+        created_by: "user-1",
+        runtime: { vision_enabled: true },
+        channel_ids: ["C1"],
+        locale: null,
+        litellm_virtual_key_id: null,
+        llm_config_present: true,
+      },
+    ]);
+    mockUpdateConnectorSettings.mockResolvedValue({
+      connector_id: "connector-1",
+      channel_ids: ["C1"],
+      litellm_virtual_key_id: null,
+      llm_config_present: false,
+      locale: null,
+      config_version: 4,
+    });
+
+    render(<ConnectorsPage />);
+
+    fireEvent.click(
+      await screen.findByRole("button", { name: "editSettings" }),
+    );
+    fireEvent.click(await screen.findByRole("button", { name: "llmDelete" }));
+    // Destructive action goes through an explicit confirm dialog.
+    const confirm = await screen.findByRole("alertdialog");
+    expect(
+      within(confirm).getByText("llmDeleteConfirmTitle"),
+    ).toBeInTheDocument();
+    fireEvent.click(within(confirm).getByRole("button", { name: "delete" }));
+
+    await waitFor(() =>
+      expect(mockUpdateConnectorSettings).toHaveBeenCalledWith(
+        "connector-1",
+        { llm_config: null },
+        3,
+      ),
+    );
+    await waitFor(() =>
+      expect(mockToast).toHaveBeenCalledWith(
+        expect.objectContaining({ title: "llmDeleted" }),
+      ),
+    );
+
+    // The dialog stays open on a fresh snapshot: a follow-up save must ride
+    // the bumped config_version, not 409 on the stale one.
+    const channelsInput = await screen.findByLabelText("channelsLabel");
+    fireEvent.change(channelsInput, { target: { value: "C1, C2" } });
+    fireEvent.click(screen.getByRole("button", { name: "settingsSave" }));
+    await waitFor(() =>
+      expect(mockUpdateConnectorSettings).toHaveBeenLastCalledWith(
+        "connector-1",
+        { channel_ids: ["C1", "C2"] },
+        4,
+      ),
+    );
+  });
+
+  it("shows the not-ready summary with missing items in the settings dialog (#1388)", async () => {
+    setWorkspace("admin");
+    mockListConnectors.mockResolvedValue([
+      {
+        connector_id: "connector-1",
+        connector_type: "slack",
+        app_key: "default",
+        resource_id: "slack-t01",
+        context_id: "context-1",
+        config_version: 3,
+        created_at: "2026-07-19T00:00:00Z",
+        created_by: "user-1",
+        runtime: { vision_enabled: true },
+        channel_ids: [],
+        locale: null,
+        litellm_virtual_key_id: null,
+        llm_config_present: false,
+      },
+    ]);
+
+    render(<ConnectorsPage />);
+
+    fireEvent.click(
+      await screen.findByRole("button", { name: "editSettings" }),
+    );
+    expect(await screen.findByText("notReadySummary")).toBeInTheDocument();
+    expect(screen.queryByText("readySummary")).not.toBeInTheDocument();
+  });
+
+  it("shows the ready summary once channels and LLM are stored (#1388)", async () => {
+    setWorkspace("admin");
+    mockListConnectors.mockResolvedValue([
+      {
+        connector_id: "connector-1",
+        connector_type: "slack",
+        app_key: "default",
+        resource_id: "slack-t01",
+        context_id: "context-1",
+        config_version: 3,
+        created_at: "2026-07-19T00:00:00Z",
+        created_by: "user-1",
+        runtime: { vision_enabled: true },
+        channel_ids: ["C1"],
+        locale: "ja",
+        litellm_virtual_key_id: null,
+        llm_config_present: true,
+      },
+    ]);
+
+    render(<ConnectorsPage />);
+
+    fireEvent.click(
+      await screen.findByRole("button", { name: "editSettings" }),
+    );
+    expect(await screen.findByText("readySummary")).toBeInTheDocument();
+    expect(screen.queryByText("notReadySummary")).not.toBeInTheDocument();
+  });
+
+  it("accepts provider+model without an API key and omits api_key from the bundle (#1388)", async () => {
+    setWorkspace("admin");
+    mockListConnectors.mockResolvedValue([
+      {
+        connector_id: "connector-1",
+        connector_type: "slack",
+        app_key: "default",
+        resource_id: "slack-t01",
+        context_id: "context-1",
+        config_version: 3,
+        created_at: "2026-07-19T00:00:00Z",
+        created_by: "user-1",
+        runtime: { vision_enabled: true },
+        channel_ids: ["C1"],
+        locale: null,
+        litellm_virtual_key_id: null,
+        llm_config_present: false,
+      },
+    ]);
+    mockUpdateConnectorSettings.mockResolvedValue({
+      connector_id: "connector-1",
+      channel_ids: ["C1"],
+      litellm_virtual_key_id: null,
+      llm_config_present: true,
+      locale: null,
+      config_version: 4,
+    });
+
+    render(<ConnectorsPage />);
+
+    fireEvent.click(
+      await screen.findByRole("button", { name: "editSettings" }),
+    );
+    fireEvent.change(await screen.findByLabelText("llmProvider"), {
+      target: { value: "ollama" },
+    });
+    fireEvent.change(screen.getByLabelText("llmModel"), {
+      target: { value: "llama3" },
+    });
     fireEvent.click(screen.getByRole("button", { name: "settingsSave" }));
 
-    // No-op guard: nothing to clear → no PATCH, inline notice instead.
-    expect(await screen.findByText("noChanges")).toBeInTheDocument();
+    // api_key stays absent (backend treats it as provider-dependent —
+    // e.g. local Ollama has none), matching _validate_llm_config.
+    await waitFor(() =>
+      expect(mockUpdateConnectorSettings).toHaveBeenCalledWith(
+        "connector-1",
+        { llm_config: { provider: "ollama", model: "llama3" } },
+        3,
+      ),
+    );
+  });
+
+  it("rejects a partial LLM bundle missing the model (#1388)", async () => {
+    setWorkspace("admin");
+    mockListConnectors.mockResolvedValue([
+      {
+        connector_id: "connector-1",
+        connector_type: "slack",
+        app_key: "default",
+        resource_id: "slack-t01",
+        context_id: "context-1",
+        config_version: 3,
+        created_at: "2026-07-19T00:00:00Z",
+        created_by: "user-1",
+        runtime: { vision_enabled: true },
+        channel_ids: ["C1"],
+        locale: null,
+        litellm_virtual_key_id: null,
+        llm_config_present: false,
+      },
+    ]);
+
+    render(<ConnectorsPage />);
+
+    fireEvent.click(
+      await screen.findByRole("button", { name: "editSettings" }),
+    );
+    fireEvent.change(await screen.findByLabelText("llmProvider"), {
+      target: { value: "openai" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "settingsSave" }));
+
+    expect(await screen.findByText("llmIncomplete")).toBeInTheDocument();
     expect(mockUpdateConnectorSettings).not.toHaveBeenCalled();
   });
 
