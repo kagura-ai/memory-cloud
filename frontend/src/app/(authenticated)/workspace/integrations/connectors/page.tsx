@@ -807,6 +807,61 @@ export default function ConnectorsPage() {
     ? connectorReadiness(settingsFor)
     : null;
 
+  // #1399: the LLM inputs render in two spots — directly when nothing is
+  // stored, inside the replace fold when a config is present. One definition
+  // keeps the label/id wiring and help copy from drifting between the two.
+  const llmFieldsBlock = (
+    <>
+      <p className="text-xs text-muted-foreground">{t("llmHelp")}</p>
+      <div>
+        <label
+          htmlFor="conn-settings-llm-provider"
+          className="mb-1 block text-sm font-medium"
+        >
+          {t("llmProvider")}
+        </label>
+        <Input
+          id="conn-settings-llm-provider"
+          ref={llmProviderInputRef}
+          placeholder={t("llmProviderPlaceholder")}
+          value={llmProvider}
+          onChange={(e) => setLlmProvider(e.target.value)}
+        />
+      </div>
+      <div>
+        <label
+          htmlFor="conn-settings-llm-model"
+          className="mb-1 block text-sm font-medium"
+        >
+          {t("llmModel")}
+        </label>
+        <Input
+          id="conn-settings-llm-model"
+          placeholder={t("llmModelPlaceholder")}
+          value={llmModel}
+          onChange={(e) => setLlmModel(e.target.value)}
+        />
+      </div>
+      <div>
+        <label
+          htmlFor="conn-settings-llm-apikey"
+          className="mb-1 block text-sm font-medium"
+        >
+          {t("llmApiKey")}
+        </label>
+        <Input
+          id="conn-settings-llm-apikey"
+          type="password"
+          value={llmApiKey}
+          onChange={(e) => setLlmApiKey(e.target.value)}
+        />
+      </div>
+      <p className="text-xs text-muted-foreground">
+        {t("llmApiKeyOptionalHelp")}
+      </p>
+    </>
+  );
+
   return (
     <PageContainer>
       <PageHeader title={t("title")} description={t("description")} />
@@ -1124,7 +1179,16 @@ export default function ConnectorsPage() {
             if (settingsFocus === "channels") {
               e.preventDefault();
               channelsInputRef.current?.focus();
-            } else if (settingsFocus === "llm") {
+            } else if (
+              settingsFocus === "llm" &&
+              !settingsFor?.llm_config_present
+            ) {
+              // #1399: mirror the render branch — with a stored config the
+              // provider input sits inside the closed replace fold and
+              // cannot take focus; leaving Radix's default focus intact is
+              // safer than a silent no-op. Unreachable today (fixLlm only
+              // renders when the config is missing) but enforced here
+              // rather than assumed.
               e.preventDefault();
               llmProviderInputRef.current?.focus();
             }
@@ -1240,40 +1304,35 @@ export default function ConnectorsPage() {
                   unsetLabel={t("statusUnset")}
                 />
               </div>
-              <p className="text-xs text-muted-foreground">{t("llmHelp")}</p>
-              <Input
-                ref={llmProviderInputRef}
-                aria-label={t("llmProvider")}
-                placeholder={t("llmProviderPlaceholder")}
-                value={llmProvider}
-                onChange={(e) => setLlmProvider(e.target.value)}
-              />
-              <Input
-                aria-label={t("llmModel")}
-                placeholder={t("llmModelPlaceholder")}
-                value={llmModel}
-                onChange={(e) => setLlmModel(e.target.value)}
-              />
-              <Input
-                aria-label={t("llmApiKey")}
-                placeholder={t("llmApiKey")}
-                type="password"
-                value={llmApiKey}
-                onChange={(e) => setLlmApiKey(e.target.value)}
-              />
-              <p className="text-xs text-muted-foreground">
-                {t("llmApiKeyOptionalHelp")}
-              </p>
-              {settingsFor?.llm_config_present && (
-                <Button
-                  type="button"
-                  variant="destructive-outline"
-                  onClick={() => setLlmDeleteConfirm(true)}
-                  disabled={settingsSaving || llmDeleting}
-                >
-                  {llmDeleting && <InlineSpinner aria-hidden="true" />}
-                  {t("llmDelete")}
-                </Button>
+              {settingsFor?.llm_config_present ? (
+                <>
+                  {/* #1399: destructive action stays outside the fold —
+                      one click away, never behind a disclosure. */}
+                  <Button
+                    type="button"
+                    variant="destructive-outline"
+                    onClick={() => setLlmDeleteConfirm(true)}
+                    disabled={settingsSaving || llmDeleting}
+                  >
+                    {llmDeleting && <InlineSpinner aria-hidden="true" />}
+                    {t("llmDelete")}
+                  </Button>
+                  {/* #1399: a stored config folds the write-only inputs away
+                      (empty fields under a 設定済 chip read as contradictory).
+                      Keyed by connector so the uncontrolled open state never
+                      leaks between connectors' dialogs (#1388 pattern). */}
+                  <details
+                    key={`llm-replace-${settingsFor.connector_id}`}
+                    className="rounded-md border p-3"
+                  >
+                    <summary className="cursor-pointer text-sm font-medium">
+                      {t("llmReplaceToggle")}
+                    </summary>
+                    <div className="mt-3 space-y-2">{llmFieldsBlock}</div>
+                  </details>
+                </>
+              ) : (
+                llmFieldsBlock
               )}
               {/* #1388: LiteLLM virtual key demoted to an advanced fold —
                   stored but not vended yet (kagura-bridge#179). Keyed by
