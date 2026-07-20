@@ -8,7 +8,7 @@ All constants are grouped by category with clear documentation.
 # Application Version (single source of truth for runtime)
 # ============================================================================
 
-APP_VERSION = "0.55.4"
+APP_VERSION = "0.56.0"
 
 # ============================================================================
 # Context Field Limits (#1193)
