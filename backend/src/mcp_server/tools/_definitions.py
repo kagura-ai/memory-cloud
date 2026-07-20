@@ -106,6 +106,10 @@ and explore()). Prefer this over storing a near-duplicate: a duplicate leaves th
 stale and fresh facts competing in recall, whereas a declared supersession makes
 the update authoritative. This is the strongest lever for update-correctness, so
 reach for it whenever a memory replaces an earlier one.
+If you did NOT set supersedes at store time but the new memory is in fact an
+update, you don't have to remember perfectly: the server auto-detects near-
+duplicates and surfaces a `supersede_candidate` on the next recall()/reference()
+of the memory — confirm it then via create_edge(edge_type="supersedes").
 
 CHUNKING BEST PRACTICES for long documents:
 • Optimal summary length: 100-250 characters (max: 500)
@@ -326,6 +330,7 @@ Returns summaries and context (Layers 1-2) optimized for quick understanding.
 Agent-facing signals in the response:
 • Each result carries `updated_at` — the last time that fact was changed (null if never edited since creation). Use it to self-assess staleness without extra calls; an old `updated_at` means the fact may be out of date.
 • The response carries a top-level `confidence` object — a cheap TRIAGE hint for "is anything relevant here, or should I go external?", NOT a correctness verdict. `level` (high/moderate/low/none) is driven by `top_score` (best hit's absolute semantic cosine) and `prominence` ((top_score − mean background cosine) / mean background cosine; a ratio → robust to a model's cosine scale, not a global cutoff). How to act on it: `none`/`low` → likely nothing relevant, prefer an external source over forcing an answer from these results (this signal is reliable even without a reranker). `high`/`moderate` → relevant memory is likely present, so READ the returned summaries and judge from their content — `level` measures topical match strength, so a closely-related "near-miss" (an adjacent topic) can also read `high`; it does NOT guarantee the exact fact you asked for is stored. Treat the returned content as the source of truth and `level` only as the hint for whether to bother reading; to actually separate a near-miss from an exact match, pass `use_rerank=true` (cross-encoder), since plain cosine cannot. (`relative_margin` is kept for transparency but inflates on off-topic queries — do NOT use it to decide relevance.) Example: `confidence: {"level": "high", "top_score": 0.92, "prominence": 0.55, "result_count": 20}`; an empty pool returns `{"level": "none", "top_score": null, "result_count": 0}`.
+• A result may carry `supersede_candidate` — a near-duplicate this memory likely SUPERSEDES. At ingest the server detected that this memory's nearest neighbour is a near-identical earlier fact, i.e. this memory reads like the updated version of it. Shape: `{memory_id, summary, similarity, detected_at}` (the candidate is the OLDER fact). It is a SUGGESTION, never an auto-applied edge. If this memory really is the update, ACCEPT it: `create_edge(source_id=<this result's memory_id>, target_id=<supersede_candidate.memory_id>, edge_type="supersedes", context_id=...)` — that shadows the stale candidate out of default recall (the strongest update-correctness lever). If it is only similar, not a replacement, ignore it; the suggestion self-heals (it disappears once you accept it, or once the candidate is deleted). It is liveness-guarded — you only ever see a candidate you can already read.
 
 IMPORTANT: Always specify context_id to ensure you're searching the intended context. Use list_contexts() to discover available context IDs.
 
@@ -334,7 +339,7 @@ Search modes: Use search_mode to control the search strategy.
 • semantic: Vector similarity only — best when you know the exact concept but not the exact words.
 • keyword: BM25 only — best for hiragana queries, exact term matching, or when semantic search returns noise. Particularly effective for Japanese hiragana-only queries where embedding models struggle.
 
-Returns: {status, results: [{memory_id, summary, context_summary, type, importance, scope, score, tags, created_at, updated_at}], count, related_tags, context_id, context_name, context_display_name, context_is_private, context_is_locked, confidence (see above), explore_hints (only when include_explore_hints=true)}. results carry Layers 1-2 only — call reference(memory_id) for full Layer-3 content.""",
+Returns: {status, results: [{memory_id, summary, context_summary, type, importance, scope, score, tags, created_at, updated_at, superseded_by, contradicts, supersede_candidate (see Agent-facing signals above; null unless a still-actionable near-duplicate suggestion exists)}], count, related_tags, context_id, context_name, context_display_name, context_is_private, context_is_locked, confidence (see above), explore_hints (only when include_explore_hints=true)}. results carry Layers 1-2 only — call reference(memory_id) for full Layer-3 content.""",
             "inputSchema": {
                 "type": "object",
                 # ``query`` is the only unconditional requirement. The handler
@@ -409,7 +414,7 @@ Returns all 3 layers: summary, context_summary, and complete details/content.
 
 IMPORTANT: Always specify context_id to ensure you're retrieving from the intended context. Use list_contexts() to discover available context IDs.
 
-Returns: {status, memory: {memory_id, summary, context_summary, content, details, type, scope, importance, tags, context, created_at, updated_at, client, source_uri, source_type, outgoing_links: [{memory_id, summary, type, importance, weight, created_at}], outgoing_has_more, incoming_links: [...], incoming_has_more}} — all three layers plus declared-link references and provenance. updated_at is a staleness cue (an old value means the fact may be out of date).""",
+Returns: {status, memory: {memory_id, summary, context_summary, content, details, type, scope, importance, tags, context, created_at, updated_at, client, source_uri, source_type, outgoing_links: [{memory_id, summary, type, importance, weight, created_at}], outgoing_has_more, incoming_links: [...], incoming_has_more, supersede_candidate}} — all three layers plus declared-link references and provenance. updated_at is a staleness cue (an old value means the fact may be out of date). supersede_candidate, when present, is a near-duplicate this memory likely supersedes — {memory_id, summary, similarity, detected_at} of the OLDER fact; a suggestion only. To accept it, call create_edge(source_id=<this memory_id>, target_id=<supersede_candidate.memory_id>, edge_type="supersedes"). It is liveness-guarded and self-heals (disappears once accepted or once the candidate is deleted); null when there is none.""",
             "inputSchema": {
                 "type": "object",
                 "required": ["memory_id", "context_id"],
@@ -764,7 +769,7 @@ Returns: {status, operation: "created"|"updated"|"unchanged", edge: {source_id, 
                             "supersedes",
                             "contradicts",
                         ],
-                        "description": "Type of relationship (default: 'related_to'). #1208: 'supersedes' (src = newer memory, dst = the outdated one it replaces — dst is shadowed out of default recall while src lives) and 'contradicts' (both sides stay visible, annotated — contradiction never hides).",
+                        "description": "Type of relationship (default: 'related_to'). #1208: 'supersedes' (src = newer memory, dst = the outdated one it replaces — dst is shadowed out of default recall while src lives) and 'contradicts' (both sides stay visible, annotated — contradiction never hides). Creating a 'supersedes' edge is also how you ACCEPT a `supersede_candidate` suggestion surfaced by recall()/reference() — source_id = the memory carrying the suggestion, target_id = its supersede_candidate.memory_id (the server clears the suggestion once the edge exists).",
                         "default": "related_to",
                     },
                     "weight": {
