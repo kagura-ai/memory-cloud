@@ -1578,6 +1578,19 @@ class MemoryService:
                         return_fresh_edge=False,
                     )
                     created += 1
+                    # #1403: count declared-supersedes adoption. The supersedes
+                    # edge is the dominant stale-suppression lever (F3 factorial:
+                    # +0.78, update_success@10 0.76 -> 1.00) and the one mechanism
+                    # users must explicitly invoke — emit a dedicated event so its
+                    # adoption is visible in telemetry, not buried in the generic
+                    # declared_links_created count.
+                    logger.info(
+                        "declared_supersedes_created",
+                        user_id=user_id,
+                        memory_id=str(memory_id),
+                        superseded_memory_id=str(supersedes_target),
+                        context_id=context_id,
+                    )
                 else:
                     logger.warning(
                         "supersedes_target_not_found",
@@ -4116,6 +4129,18 @@ class MemoryService:
         return hints
 
 
+# #1403: near-duplicate threshold above which the nearest k-NN neighbor of a
+# freshly-embedded memory is surfaced as a supersede candidate — the user is
+# likely storing an updated version of an existing fact. Deliberately high (well
+# above the calibrated per-model seed threshold) so the signal fires only on
+# true near-duplicates, not merely related memories. Unlike the seed threshold
+# (D4 calibration/operator-override chain), this is a fixed first-pass heuristic;
+# graduate it to a per-model calibrated / config-driven value if the adoption
+# telemetry shows it mis-fires across embedding models with different score
+# distributions.
+_SUPERSEDE_SUGGEST_THRESHOLD = 0.92
+
+
 async def _create_knn_seed_edges(
     db: AsyncSession,
     memory: Memory,
@@ -4256,6 +4281,23 @@ async def _create_knn_seed_edges(
                 threshold=threshold,
             )
             return
+
+        # #1403: supersede-suggestion signal. When the nearest neighbor is a
+        # near-duplicate (well above the calibrated seed threshold), this new
+        # memory is likely an updated version of an existing fact — a supersede
+        # candidate the user may prefer over storing a second copy. Seeding runs
+        # async (decoupled from the remember response), so the candidate is
+        # emitted as telemetry here; a synchronous client-facing prompt is a
+        # follow-up gated on the async-embedding hot-path trade-off.
+        top_neighbor = seed_neighbors[0]
+        top_score = float(top_neighbor["score"])
+        if top_score >= _SUPERSEDE_SUGGEST_THRESHOLD:
+            logger.info(
+                "supersede_candidate_detected",
+                memory_id=memory_id_str,
+                candidate_memory_id=str(top_neighbor["id"]),
+                similarity=round(top_score, 4),
+            )
 
         edges_created = 0
         similarities: list[float] = []

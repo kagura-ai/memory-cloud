@@ -180,6 +180,88 @@ class TestKnnSeeding:
             assert call.kwargs["dst_id"] != memory.id
 
     @pytest.mark.asyncio
+    async def test_supersede_candidate_detected_on_near_duplicate(self):
+        """#1403: when the nearest neighbor is a near-duplicate (score >= the
+        supersede-suggest threshold), a supersede_candidate_detected telemetry
+        event names it — the signal a client can turn into a 'does this
+        supersede X?' prompt (seeding is async, so the response can't carry it)."""
+        memory = _make_memory()
+        db = _make_db()
+        mock_repo = _make_edge_repo()
+        dup_id = str(uuid4())
+        candidates = [
+            {"id": dup_id, "score": 0.95, "payload": {}, "embedding": []},
+            {"id": str(uuid4()), "score": 0.70, "payload": {}, "embedding": []},
+        ]
+
+        with (
+            patch(
+                "neural.config.NeuralMemoryConfig.from_db",
+                new=AsyncMock(return_value=_make_config(min_similarity=0.6)),
+            ),
+            patch(
+                "db.qdrant.search_memories_qdrant",
+                new=AsyncMock(return_value=candidates),
+            ),
+            patch(
+                "repositories.neural_edge.NeuralEdgeRepository",
+                return_value=mock_repo,
+            ),
+            patch("services.memory_service.logger") as mock_logger,
+        ):
+            await _create_knn_seed_edges(
+                db=db,
+                memory=memory,
+                vector=[0.1] * 512,
+                collection_name="kagura_memories",
+                model_name="text-embedding-3-small",
+            )
+
+        events = {c.args[0]: c.kwargs for c in mock_logger.info.call_args_list if c.args}
+        assert "supersede_candidate_detected" in events
+        assert events["supersede_candidate_detected"]["candidate_memory_id"] == dup_id
+        assert events["supersede_candidate_detected"]["similarity"] == 0.95
+
+    @pytest.mark.asyncio
+    async def test_no_supersede_candidate_below_threshold(self):
+        """#1403: a merely-related nearest neighbor (score below the supersede-
+        suggest threshold) must NOT emit a supersede candidate — the signal
+        fires only on true near-duplicates, not on ordinary seed neighbors."""
+        memory = _make_memory()
+        db = _make_db()
+        mock_repo = _make_edge_repo()
+        candidates = [
+            {"id": str(uuid4()), "score": 0.85, "payload": {}, "embedding": []},
+            {"id": str(uuid4()), "score": 0.70, "payload": {}, "embedding": []},
+        ]
+
+        with (
+            patch(
+                "neural.config.NeuralMemoryConfig.from_db",
+                new=AsyncMock(return_value=_make_config(min_similarity=0.6)),
+            ),
+            patch(
+                "db.qdrant.search_memories_qdrant",
+                new=AsyncMock(return_value=candidates),
+            ),
+            patch(
+                "repositories.neural_edge.NeuralEdgeRepository",
+                return_value=mock_repo,
+            ),
+            patch("services.memory_service.logger") as mock_logger,
+        ):
+            await _create_knn_seed_edges(
+                db=db,
+                memory=memory,
+                vector=[0.1] * 512,
+                collection_name="kagura_memories",
+                model_name="text-embedding-3-small",
+            )
+
+        emitted = [c.args[0] for c in mock_logger.info.call_args_list if c.args]
+        assert "supersede_candidate_detected" not in emitted
+
+    @pytest.mark.asyncio
     async def test_threshold_filter_excludes_low_similarity(self):
         """Neighbors with score < min_similarity are excluded."""
         memory = _make_memory()
