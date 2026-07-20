@@ -13,6 +13,7 @@ Verifies:
 import pytest
 
 from models.memory import (
+    EDGE_ORIGIN_DECLARED,
     EDGE_ORIGIN_HEBBIAN,
     EDGE_ORIGIN_SEMANTIC,
 )
@@ -195,6 +196,145 @@ async def test_upsert_promotes_hebbian_to_semantic(db_session, sample_memory_pai
     edge = await repo.get_edge(src.user_id, src.id, dst.id)
     assert edge is not None
     assert edge.origin == EDGE_ORIGIN_SEMANTIC  # promoted
+
+
+@pytest.mark.asyncio
+async def test_upsert_declared_wins_over_existing_semantic(db_session, sample_memory_pair):
+    """#1406: a user-asserted ``declared`` upsert MUST overwrite an existing
+    ``semantic`` seed origin.
+
+    When ingest-time k-NN cold-start seeding has already linked a
+    near-duplicate pair (``origin='semantic'``) and the user then declares a
+    supersession over it (``remember(supersedes=...)`` -> the
+    ``origin=EDGE_ORIGIN_DECLARED`` write path), the upsert must land the
+    edge as ``origin='declared'``. The old sticky-origin rule preserved any
+    existing non-hebbian origin, silently keeping ``semantic`` and leaving the
+    declared supersede outside the #457/#741 ``protect_declared_link`` shield.
+    """
+    src, dst = sample_memory_pair
+    repo = NeuralEdgeRepository(db_session)
+
+    # Existing seed edge: k-NN cold-start seeding wrote origin='semantic'.
+    await repo.create_or_update_edge(
+        user_id=src.user_id,
+        src_id=src.id,
+        dst_id=dst.id,
+        edge_type="related_to",
+        weight=0.5,
+        confidence=1.0,
+        workspace_id=str(src.workspace_id),
+        context_id=str(src.context_id),
+        origin=EDGE_ORIGIN_SEMANTIC,
+    )
+
+    # User declares a supersession over the same pair.
+    await repo.create_or_update_edge(
+        user_id=src.user_id,
+        src_id=src.id,
+        dst_id=dst.id,
+        edge_type="supersedes",
+        weight=1.0,
+        confidence=1.0,
+        workspace_id=str(src.workspace_id),
+        context_id=str(src.context_id),
+        origin=EDGE_ORIGIN_DECLARED,
+    )
+
+    edge = await repo.get_edge(src.user_id, src.id, dst.id)
+    assert edge is not None
+    assert edge.edge_type == "supersedes"
+    assert edge.origin == EDGE_ORIGIN_DECLARED  # user assertion wins over seed
+
+
+@pytest.mark.asyncio
+async def test_upsert_declared_survives_later_semantic_reseed(db_session, sample_memory_pair):
+    """#1406 guard: an existing ``declared`` origin is NOT downgraded by a
+    subsequent ``semantic`` upsert — the incoming-declared arm must not
+    weaken the existing sticky protection for machine-origin writes.
+    """
+    src, dst = sample_memory_pair
+    repo = NeuralEdgeRepository(db_session)
+
+    # Existing user-declared supersede edge.
+    await repo.create_or_update_edge(
+        user_id=src.user_id,
+        src_id=src.id,
+        dst_id=dst.id,
+        edge_type="supersedes",
+        weight=1.0,
+        confidence=1.0,
+        workspace_id=str(src.workspace_id),
+        context_id=str(src.context_id),
+        origin=EDGE_ORIGIN_DECLARED,
+    )
+
+    # A later machine reseed with semantic origin must not overwrite it.
+    await repo.create_or_update_edge(
+        user_id=src.user_id,
+        src_id=src.id,
+        dst_id=dst.id,
+        edge_type="related_to",
+        weight=0.6,
+        confidence=1.0,
+        workspace_id=str(src.workspace_id),
+        context_id=str(src.context_id),
+        origin=EDGE_ORIGIN_SEMANTIC,
+    )
+
+    edge = await repo.get_edge(src.user_id, src.id, dst.id)
+    assert edge is not None
+    assert edge.origin == EDGE_ORIGIN_DECLARED  # declared preserved, not demoted
+
+
+@pytest.mark.asyncio
+async def test_upsert_declared_wins_under_protect_link_flips_both_columns(
+    db_session, sample_memory_pair
+):
+    """#1406 co-management: with ``protect_declared_link=True`` an incoming
+    ``declared`` origin landing over an existing ``semantic`` seed must flip
+    ``edge_type`` AND ``origin`` together.
+
+    This is the property the issue calls out — a declared supersede must not
+    land with ``origin='semantic'`` (outside the #457/#741 shield) while its
+    ``edge_type`` becomes ``supersedes``. The ``edge_type_set`` arm keys on the
+    EXISTING origin ('semantic', not 'declared') so it takes the incoming
+    edge_type, and the ``origin_set`` arm keys on the INCOMING origin
+    ('declared') so it takes 'declared' — both columns move as one.
+    """
+    src, dst = sample_memory_pair
+    repo = NeuralEdgeRepository(db_session)
+
+    # Existing semantic seed edge.
+    await repo.create_or_update_edge(
+        user_id=src.user_id,
+        src_id=src.id,
+        dst_id=dst.id,
+        edge_type="related_to",
+        weight=0.5,
+        confidence=1.0,
+        workspace_id=str(src.workspace_id),
+        context_id=str(src.context_id),
+        origin=EDGE_ORIGIN_SEMANTIC,
+    )
+
+    # Incoming declared supersede via a protect_declared_link writer.
+    await repo.create_or_update_edge(
+        user_id=src.user_id,
+        src_id=src.id,
+        dst_id=dst.id,
+        edge_type="supersedes",
+        weight=1.0,
+        confidence=1.0,
+        workspace_id=str(src.workspace_id),
+        context_id=str(src.context_id),
+        origin=EDGE_ORIGIN_DECLARED,
+        protect_declared_link=True,
+    )
+
+    edge = await repo.get_edge(src.user_id, src.id, dst.id)
+    assert edge is not None
+    assert edge.edge_type == "supersedes"  # edge_type flipped to incoming
+    assert edge.origin == EDGE_ORIGIN_DECLARED  # origin flipped together
 
 
 @pytest.mark.asyncio
