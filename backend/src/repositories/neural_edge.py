@@ -174,9 +174,12 @@ class NeuralEdgeRepository:
                 discard the return value (Hebbian via GraphService.add_edge,
                 Sleep edge_discovery) pass False to skip the extra SELECT.
             origin: Edge origin (``EDGE_ORIGIN_HEBBIAN`` default). On upsert,
-                non-hebbian origins are preserved — only ``hebbian`` rows can
-                be overwritten. Sleep/declared writers should pass the explicit
-                enum value.
+                an existing non-hebbian origin is preserved against a
+                non-``declared`` incoming origin — only ``hebbian`` rows can be
+                overwritten by hebbian/semantic writers. An incoming
+                ``declared`` origin always wins, regardless of the existing
+                origin (#1406: user assertion outranks machine provenance).
+                Sleep/declared writers should pass the explicit enum value.
 
         Returns:
             Created or updated edge. When ``return_fresh_edge=False`` the
@@ -238,7 +241,19 @@ class NeuralEdgeRepository:
         # symmetric arm of the protect_declared_link CASE above — when the
         # existing row has origin='declared', its origin is preserved
         # alongside its edge_type, keeping the two columns co-managed.
+        #
+        # Issue #1406: an INCOMING user-asserted 'declared' origin outranks any
+        # existing machine provenance — user assertion beats machine guess. When
+        # ingest-time k-NN seeding has already linked a near-duplicate pair with
+        # origin='semantic', a later remember(supersedes=...) declaration must
+        # land the edge as origin='declared', otherwise the sticky-origin arm
+        # below would preserve 'semantic' and leave the declared supersede
+        # outside the #457/#741 protect_declared_link shield. The existing
+        # hebbian-cannot-overwrite guarantee is unchanged: a hebbian incoming
+        # origin never matches this arm and still falls through to the sticky
+        # arm (existing non-hebbian preserved).
         origin_set = case(
+            (stmt.excluded.origin == EDGE_ORIGIN_DECLARED, stmt.excluded.origin),
             (NeuralMemoryEdge.origin != EDGE_ORIGIN_HEBBIAN, NeuralMemoryEdge.origin),
             else_=stmt.excluded.origin,
         )
