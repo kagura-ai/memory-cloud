@@ -21,7 +21,12 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { useToast } from "@/hooks/use-toast";
 import { useTranslations } from "next-intl";
 import { referenceMemory } from "@/lib/api/memory";
-import type { LinkedMemoryRef, MemoryReference } from "@/lib/types/memory";
+import { graphApi } from "@/lib/api/graph";
+import type {
+  LinkedMemoryRef,
+  MemoryReference,
+  SupersedeCandidate,
+} from "@/lib/types/memory";
 
 export type DialogTarget = "detail" | "delete" | "edit";
 
@@ -51,6 +56,10 @@ function linkedRefsFromMemoryReference(ref: MemoryReference): LinkedRefsState {
 export interface UseMemoryDetailDialogOpts {
   memoryIdParam: string | null;
   setMemoryIdParam: (id: string | null) => void;
+  // #1416: the context the memories live in — required to POST the supersede
+  // confirm edge. Optional so callers that never surface a supersede
+  // suggestion don't have to thread it (the accept action no-ops without it).
+  contextId?: string;
 }
 
 export interface UseMemoryDetailDialogResult {
@@ -60,6 +69,14 @@ export interface UseMemoryDetailDialogResult {
   detailNotFound: boolean;
   deleteOpen: boolean;
   editOpen: boolean;
+
+  // #1403/#1416: the current memory's supersede suggestion (null once accepted
+  // this session or when there is none), a pending flag for the confirm button,
+  // and the accept action (POSTs a `supersedes` edge, self-healing the
+  // suggestion server-side).
+  supersedeCandidate: SupersedeCandidate | null;
+  supersedeAccepting: boolean;
+  acceptSupersede: () => void;
 
   // Dialog onOpenChange handlers — wire directly to MemoryDetailDialog /
   // EditMemoryDialog / DeleteMemoryDialog props of the same name.
@@ -82,9 +99,10 @@ export interface UseMemoryDetailDialogResult {
 export function useMemoryDetailDialog(
   opts: UseMemoryDetailDialogOpts,
 ): UseMemoryDetailDialogResult {
-  const { memoryIdParam, setMemoryIdParam } = opts;
+  const { memoryIdParam, setMemoryIdParam, contextId } = opts;
   const { toast } = useToast();
   const t = useTranslations("contextDetail.memoriesPanel");
+  const tDetail = useTranslations("contextDetail.detailDialog");
 
   const [hydrated, setHydrated] = useState<MemoryReference | null>(null);
   const [linkedRefs, setLinkedRefs] =
@@ -248,6 +266,52 @@ export function useMemoryDetailDialog(
     if (memoryIdParam) setMemoryIdParam(null);
   }, [memoryIdParam, setMemoryIdParam]);
 
+  // #1403/#1416: supersede suggestion + confirm→create_edge accept flow.
+  const [supersedeAccepting, setSupersedeAccepting] = useState(false);
+  // Key of the (source→target) suggestion accepted in this session, so the
+  // block hides immediately on success without waiting for a re-fetch (the
+  // server also self-heals the stored suggestion once the edge exists).
+  const [acceptedSupersedeKey, setAcceptedSupersedeKey] = useState<
+    string | null
+  >(null);
+
+  const rawSupersedeCandidate = hydrated?.supersede_candidate ?? null;
+  const supersedeKey =
+    hydrated && rawSupersedeCandidate
+      ? `${hydrated.memory_id}->${rawSupersedeCandidate.memory_id}`
+      : null;
+  const supersedeCandidate =
+    rawSupersedeCandidate && supersedeKey !== acceptedSupersedeKey
+      ? rawSupersedeCandidate
+      : null;
+
+  const acceptSupersede = useCallback(() => {
+    if (!hydrated || !rawSupersedeCandidate || !contextId) return;
+    const sourceId = hydrated.memory_id;
+    const targetId = rawSupersedeCandidate.memory_id;
+    setSupersedeAccepting(true);
+    void (async () => {
+      try {
+        await graphApi.createEdge({
+          context_id: contextId,
+          source_id: sourceId,
+          target_id: targetId,
+          edge_type: "supersedes",
+        });
+        setAcceptedSupersedeKey(`${sourceId}->${targetId}`);
+        toast({ title: tDetail("supersede.accepted") });
+      } catch (err) {
+        toast({
+          variant: "destructive",
+          title: tDetail("supersede.acceptFailed"),
+          description: err instanceof Error ? err.message : undefined,
+        });
+      } finally {
+        setSupersedeAccepting(false);
+      }
+    })();
+  }, [hydrated, rawSupersedeCandidate, contextId, toast, tDetail]);
+
   return {
     hydrated,
     linkedRefs,
@@ -264,5 +328,8 @@ export function useMemoryDetailDialog(
     handleDetailDelete,
     applyEditSuccess,
     applyDeleteSuccess,
+    supersedeCandidate,
+    supersedeAccepting,
+    acceptSupersede,
   };
 }

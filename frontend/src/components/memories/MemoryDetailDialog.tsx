@@ -25,11 +25,17 @@ import {
   Check,
   Copy,
   FileQuestion,
+  GitMerge,
   Link2Off,
   Pencil,
   Trash2,
 } from "lucide-react";
-import type { LinkedMemoryRef, MemoryReference } from "@/lib/types/memory";
+import { InlineSpinner } from "@/components/common/LoadingState";
+import type {
+  LinkedMemoryRef,
+  MemoryReference,
+  SupersedeCandidate,
+} from "@/lib/types/memory";
 import { formatDateTime } from "@/lib/utils/datetime";
 import { useAuth } from "@/contexts/AuthContext";
 import { useCopyFeedback } from "@/hooks/useCopyFeedback";
@@ -58,6 +64,13 @@ interface MemoryDetailDialogProps {
   incomingLinks?: LinkedMemoryRef[];
   incomingHasMore?: boolean;
   onOpenLinkedMemory?: (memoryId: string) => void;
+  // #1403/#1416: supersede suggestion + confirm action. Optional — omit (or
+  // pass null) to hide the suggestion block. `onAcceptSupersede` POSTs the
+  // `supersedes` edge; `supersedeAccepting` drives the confirm button's
+  // pending state.
+  supersedeCandidate?: SupersedeCandidate | null;
+  onAcceptSupersede?: () => void;
+  supersedeAccepting?: boolean;
 }
 
 export function MemoryDetailDialog({
@@ -72,6 +85,9 @@ export function MemoryDetailDialog({
   incomingLinks,
   incomingHasMore = false,
   onOpenLinkedMemory,
+  supersedeCandidate,
+  onAcceptSupersede,
+  supersedeAccepting = false,
 }: MemoryDetailDialogProps) {
   const { user } = useAuth();
   const locale = useLocale();
@@ -287,6 +303,58 @@ export function MemoryDetailDialog({
                   <code className="text-xs bg-slate-100 dark:bg-slate-800 px-2 py-1 rounded break-all">
                     {memory.source_uri}
                   </code>
+                </div>
+              </div>
+            </>
+          )}
+
+          {/* Supersede suggestion (#1403/#1416) — a near-duplicate this memory
+              likely supersedes, surfaced for the user to confirm. Confirming
+              POSTs a `supersedes` edge (self-healing the suggestion). This is an
+              informational suggestion, not an error, so it uses a subtle
+              highlighted block rather than ErrorBanner. */}
+          {supersedeCandidate && (
+            <>
+              <Separator />
+              <div>
+                <label className="text-sm font-medium text-slate-500 dark:text-slate-400">
+                  {t("supersede.title")}
+                </label>
+                <div className="mt-2 space-y-3 rounded-lg border border-amber-300/60 bg-amber-50 p-3 dark:border-amber-800/60 dark:bg-amber-950/30">
+                  <p className="text-sm text-slate-700 dark:text-slate-300">
+                    {t("supersede.description")}
+                  </p>
+                  <button
+                    type="button"
+                    onClick={() =>
+                      onOpenLinkedMemory?.(supersedeCandidate.memory_id)
+                    }
+                    disabled={!onOpenLinkedMemory}
+                    className="flex w-full items-center gap-2 rounded bg-white/70 px-2 py-1.5 text-left text-sm transition hover:bg-white disabled:cursor-default disabled:hover:bg-white/70 dark:bg-slate-900/40 dark:hover:bg-slate-900 dark:disabled:hover:bg-slate-900/40"
+                  >
+                    <span className="flex-1 truncate">
+                      {supersedeCandidate.summary}
+                    </span>
+                    <code className="shrink-0 rounded bg-slate-100 px-1.5 py-0.5 text-xs dark:bg-slate-800">
+                      {t("supersede.similarity", {
+                        value: Math.round(supersedeCandidate.similarity * 100),
+                      })}
+                    </code>
+                  </button>
+                  <div className="flex justify-end">
+                    <Button
+                      size="sm"
+                      onClick={onAcceptSupersede}
+                      disabled={supersedeAccepting || !onAcceptSupersede}
+                    >
+                      {supersedeAccepting ? (
+                        <InlineSpinner size="sm" className="mr-2" />
+                      ) : (
+                        <GitMerge className="mr-2 h-4 w-4" />
+                      )}
+                      {t("supersede.confirm")}
+                    </Button>
+                  </div>
                 </div>
               </div>
             </>

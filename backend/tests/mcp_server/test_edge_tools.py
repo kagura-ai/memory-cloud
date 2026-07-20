@@ -22,12 +22,16 @@ from uuid import uuid4
 import pytest
 
 from mcp_server.tools._definitions import get_tool_definitions
-from mcp_server.tools.edge import (
-    _accept_supersede_candidate_if_matching,
-    handle_create_edge,
-    handle_update_edge,
-)
+from mcp_server.tools.edge import handle_create_edge, handle_update_edge
 from models.memory import EDGE_ORIGIN_DECLARED
+
+# #1416: the supersede self-heal moved into the shared edge-write service
+# (`create_declared_edge` is used by both the MCP tool and the REST
+# POST /graph/edges endpoint). The unit tests below exercise the helper at its
+# canonical home and patch its logger there.
+from services.edge_service import (
+    accept_supersede_candidate_if_matching as _accept_supersede_candidate_if_matching,
+)
 
 
 def _mock_edge(src_id, dst_id, *, edge_type="neural_association", weight=0.5, origin="hebbian"):
@@ -722,7 +726,7 @@ class TestSupersedeAcceptanceTelemetry:
         memory.supersede_candidate = {"memory_id": str(dst_id), "similarity": 0.9}
         db = self._db_returning(memory)
 
-        with patch("mcp_server.tools.edge.logger") as mock_logger:
+        with patch("services.edge_service.logger") as mock_logger:
             await _accept_supersede_candidate_if_matching(db, src_id=src_id, dst_id=dst_id)
 
         # Self-heal: the accepted suggestion is cleared.
@@ -743,7 +747,7 @@ class TestSupersedeAcceptanceTelemetry:
         memory.supersede_candidate = candidate
         db = self._db_returning(memory)
 
-        with patch("mcp_server.tools.edge.logger") as mock_logger:
+        with patch("services.edge_service.logger") as mock_logger:
             await _accept_supersede_candidate_if_matching(db, src_id=src_id, dst_id=dst_id)
 
         assert memory.supersede_candidate == candidate  # untouched
@@ -758,7 +762,7 @@ class TestSupersedeAcceptanceTelemetry:
         memory.supersede_candidate = None
         db = self._db_returning(memory)
 
-        with patch("mcp_server.tools.edge.logger") as mock_logger:
+        with patch("services.edge_service.logger") as mock_logger:
             await _accept_supersede_candidate_if_matching(db, src_id=src_id, dst_id=dst_id)
 
         assert memory.supersede_candidate is None
