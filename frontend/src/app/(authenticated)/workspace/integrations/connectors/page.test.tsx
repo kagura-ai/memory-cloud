@@ -24,6 +24,7 @@ const mockListAvailableWorkerApps = vi.fn();
 const mockCreateConnector = vi.fn();
 const mockUpdateConnectorRuntime = vi.fn();
 const mockUpdateConnectorSettings = vi.fn();
+const mockGetSlackPendingInstall = vi.fn();
 vi.mock("@/lib/api/workspace-connectors", async (importOriginal) => {
   const actual =
     await importOriginal<typeof import("@/lib/api/workspace-connectors")>();
@@ -40,10 +41,18 @@ vi.mock("@/lib/api/workspace-connectors", async (importOriginal) => {
       mockUpdateConnectorRuntime(...args),
     updateConnectorSettings: (...args: unknown[]) =>
       mockUpdateConnectorSettings(...args),
-    getSlackPendingInstall: vi.fn(),
+    getSlackPendingInstall: (...args: unknown[]) =>
+      mockGetSlackPendingInstall(...args),
     slackInstallUrl: () => "https://slack.example/install",
   };
 });
+
+// #1409: the create dialog offers an existing-context picker sourced from
+// getContexts(); mock it like the connector helpers.
+const mockGetContexts = vi.fn();
+vi.mock("@/lib/api/contexts", () => ({
+  getContexts: (...args: unknown[]) => mockGetContexts(...args),
+}));
 
 const mockRouterReplace = vi.fn();
 const mockSearchParamsGet = vi.fn<(key: string) => string | null>();
@@ -129,6 +138,15 @@ beforeEach(() => {
       config_version: 2,
     }),
   );
+  // #1409: default to a no-op pending install + empty context list; the
+  // create-dialog tests arm these per-test.
+  mockGetSlackPendingInstall.mockResolvedValue({
+    team_id: "T01",
+    team_name: "Acme",
+    installing_admin_user_id: "user-1",
+    app_key: "default",
+  });
+  mockGetContexts.mockResolvedValue({ contexts: [], total: 0 });
 });
 
 afterEach(() => {
@@ -924,5 +942,149 @@ describe("ConnectorsPage RBAC gate", () => {
     expect(screen.queryByText("manualBindTitle")).not.toBeInTheDocument();
     // ...and the degradation is surfaced, not silent.
     expect(screen.getByText("apps down")).toBeInTheDocument();
+  });
+
+  // #1409: the create dialog opens after the Slack OAuth callback returns
+  // ?slack_install=<handle>. Arm the search param + pending-install lookup.
+  function armInstall() {
+    mockSearchParamsGet.mockImplementation((key: string) =>
+      key === "slack_install" ? "handle-1" : null,
+    );
+  }
+
+  it("connects a Slack connector to an existing context (context_id, no auto-create) (#1409)", async () => {
+    setWorkspace("admin");
+    armInstall();
+    mockGetContexts.mockResolvedValue({
+      contexts: [
+        { id: "ctx-existing", name: "slack-kagura-ai", display_name: null },
+      ],
+      total: 1,
+    });
+
+    render(<ConnectorsPage />);
+
+    // Dialog opens defaulted to connect-existing; submit uses the preselected
+    // first context without interacting with the Radix Select popover.
+    fireEvent.click(
+      await screen.findByRole("button", { name: "createConnector" }),
+    );
+
+    await waitFor(() =>
+      expect(mockCreateConnector).toHaveBeenCalledWith(
+        expect.objectContaining({ context_id: "ctx-existing" }),
+      ),
+    );
+    // Exactly one write-target field: existing mode must NOT auto-create.
+    const arg = mockCreateConnector.mock.calls[0][0];
+    expect(arg).not.toHaveProperty("auto_create_context_name");
+  });
+
+  it("creates a new context when switched to create-new mode (auto_create_context_name, no context_id) (#1409)", async () => {
+    setWorkspace("admin");
+    armInstall();
+    mockGetContexts.mockResolvedValue({
+      contexts: [{ id: "ctx-1", name: "existing", display_name: "Existing" }],
+      total: 1,
+    });
+
+    render(<ConnectorsPage />);
+
+    // Switch away from the existing-connect default to the create-new field.
+    fireEvent.click(
+      await screen.findByRole("button", { name: "contextModeNew" }),
+    );
+    fireEvent.change(await screen.findByLabelText("contextName"), {
+      target: { value: "brand-new-ctx" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "createConnector" }));
+
+    await waitFor(() =>
+      expect(mockCreateConnector).toHaveBeenCalledWith(
+        expect.objectContaining({ auto_create_context_name: "brand-new-ctx" }),
+      ),
+    );
+    const arg = mockCreateConnector.mock.calls[0][0];
+    expect(arg).not.toHaveProperty("context_id");
+  });
+
+  it("defaults the write-target toggle to connect-existing when contexts exist (#1409)", async () => {
+    setWorkspace("admin");
+    armInstall();
+    mockGetContexts.mockResolvedValue({
+      contexts: [{ id: "ctx-1", name: "existing", display_name: "Existing" }],
+      total: 1,
+    });
+
+    render(<ConnectorsPage />);
+
+    // Existing-connect is the pressed default…
+    const existing = await screen.findByRole("button", {
+      name: "contextModeExisting",
+    });
+    expect(existing).toHaveAttribute("aria-pressed", "true");
+    // …so the create-new name field is not rendered until the user switches.
+    expect(screen.queryByLabelText("contextName")).not.toBeInTheDocument();
+  });
+
+  it("keeps the legacy create-new flow when the workspace has no contexts (#1409)", async () => {
+    setWorkspace("admin");
+    armInstall();
+    // beforeEach default: mockGetContexts → { contexts: [], total: 0 }.
+
+    render(<ConnectorsPage />);
+
+    // Zero contexts → no mode toggle; the original single name field is the
+    // only write-target control, so the first-connector flow is unchanged.
+    await screen.findByRole("button", { name: "createConnector" });
+    expect(
+      screen.queryByRole("button", { name: "contextModeExisting" }),
+    ).not.toBeInTheDocument();
+    expect(
+      screen.queryByRole("button", { name: "contextModeNew" }),
+    ).not.toBeInTheDocument();
+
+    fireEvent.change(await screen.findByLabelText("contextName"), {
+      target: { value: "slack-first-ctx" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "createConnector" }));
+
+    await waitFor(() =>
+      expect(mockCreateConnector).toHaveBeenCalledWith(
+        expect.objectContaining({
+          auto_create_context_name: "slack-first-ctx",
+        }),
+      ),
+    );
+    const arg = mockCreateConnector.mock.calls[0][0];
+    expect(arg).not.toHaveProperty("context_id");
+  });
+
+  it("surfaces a create error inside the dialog instead of silently closing (#1409)", async () => {
+    setWorkspace("admin");
+    armInstall();
+    mockGetContexts.mockResolvedValue({
+      contexts: [{ id: "ctx-1", name: "existing", display_name: "Existing" }],
+      total: 1,
+    });
+    mockCreateConnector.mockRejectedValue(
+      new Error("Context 'existing' already exists in this workspace"),
+    );
+
+    render(<ConnectorsPage />);
+
+    fireEvent.click(
+      await screen.findByRole("button", { name: "createConnector" }),
+    );
+
+    // The 4xx is shown in-dialog (the old AlertDialogAction auto-close
+    // swallowed it — #1409 "silent no-op").
+    expect(
+      await screen.findByText(
+        "Context 'existing' already exists in this workspace",
+      ),
+    ).toBeInTheDocument();
+    // The dialog stays open on failure.
+    expect(screen.getByText("createTitle")).toBeInTheDocument();
   });
 });

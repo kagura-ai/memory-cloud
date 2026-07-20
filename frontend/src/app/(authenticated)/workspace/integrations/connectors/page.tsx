@@ -73,6 +73,7 @@ import { useConsumeSearchParams } from "@/hooks/useConsumeSearchParams";
 import { useWorkspace } from "@/contexts/WorkspaceContext";
 import { hasWorkspaceRole, WorkspaceRole } from "@/lib/auth/rbac";
 import { API_BASE_URL } from "@/lib/api/base";
+import { getContexts, type Context } from "@/lib/api/contexts";
 import {
   connectorDisplayName,
   connectorReadiness,
@@ -240,6 +241,12 @@ export default function ConnectorsPage() {
   const [pending, setPending] = useState<SlackPendingInstall | null>(null);
   const [displayName, setDisplayName] = useState("");
   const [contextName, setContextName] = useState("");
+  // #1409: write-target selection. "existing" binds the connector to an
+  // already-existing context (send context_id); "new" auto-creates one (send
+  // auto_create_context_name). Exactly one is sent — the backend rejects both.
+  const [contextMode, setContextMode] = useState<"existing" | "new">("new");
+  const [availableContexts, setAvailableContexts] = useState<Context[]>([]);
+  const [selectedContextId, setSelectedContextId] = useState("");
   const [submitting, setSubmitting] = useState(false);
   const [createError, setCreateError] = useState<string | null>(null);
 
@@ -353,6 +360,25 @@ export default function ConnectorsPage() {
       try {
         const info = await getSlackPendingInstall(installHandle);
         if (cancelled) return;
+        // #1409: load the workspace's contexts so the operator can bind this
+        // connector to an existing context instead of always minting a new
+        // one (the cause of duplicate slack-* contexts + the silent same-name
+        // create failure). The server re-validates workspace membership on the
+        // submitted context_id, so listing the workspace's own contexts is
+        // sufficient. A load failure degrades to create-new only — it must
+        // never block the install dialog.
+        let contexts: Context[] = [];
+        try {
+          const ctxResp = await getContexts();
+          contexts = ctxResp.contexts;
+        } catch {
+          contexts = [];
+        }
+        if (cancelled) return;
+        setAvailableContexts(contexts);
+        // Default to connecting to an existing context when any exist.
+        setContextMode(contexts.length > 0 ? "existing" : "new");
+        setSelectedContextId(contexts[0]?.id ?? "");
         setPending(info);
         const seed = info.team_name || info.team_id;
         setDisplayName(info.team_name || info.team_id);
@@ -379,7 +405,13 @@ export default function ConnectorsPage() {
     return () => {
       cancelled = true;
     };
-  }, [installHandle, allowed, t, toast, router]);
+    // t / toast / router are stable (next-intl memoizes the translator, the
+    // Next router is a singleton). Keeping them out of the deps means this
+    // effect initializes the dialog exactly once per install handle instead
+    // of re-fetching + resetting the form (mode, name, PII) on every unrelated
+    // re-render — which would clobber the operator's write-target choice (#1409).
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [installHandle, allowed]);
 
   // #1375/#1381: a cancelled/failed/expired Slack OAuth consent redirects
   // back with ?slack_error=cancelled|failed|expired (allowlisted by the
@@ -608,7 +640,13 @@ export default function ConnectorsPage() {
         app_key: pending.app_key,
         resource_id: toResourceId(pending.team_id),
         display_name: displayName || undefined,
-        auto_create_context_name: contextName || undefined,
+        // #1409: send EXACTLY ONE write-target field. Existing mode binds the
+        // chosen context_id (backend re-validates workspace membership);
+        // create-new mode auto-creates. Sending both is a backend
+        // ValidationError, so the branches are mutually exclusive.
+        ...(contextMode === "existing"
+          ? { context_id: selectedContextId }
+          : { auto_create_context_name: contextName || undefined }),
         slack_install_handle: installHandle,
         pii_guardrail_config: {
           enabled: piiEnabled,
@@ -634,6 +672,8 @@ export default function ConnectorsPage() {
     pending,
     displayName,
     contextName,
+    contextMode,
+    selectedContextId,
     piiEnabled,
     piiDetectors,
     piiRedaction,
@@ -806,6 +846,37 @@ export default function ConnectorsPage() {
   const settingsReadiness = settingsFor
     ? connectorReadiness(settingsFor)
     : null;
+
+  // #1409: the create dialog's submit needs a valid write target for the
+  // active mode — a selected context_id when connecting to an existing one,
+  // a non-empty name when auto-creating.
+  const createBindingReady =
+    contextMode === "existing" ? !!selectedContextId : !!contextName;
+
+  // #1409/#1399: the create-new context-name field renders in two spots
+  // (create-new mode when the workspace has contexts, and the zero-contexts
+  // fallback). One definition keeps the visible <label htmlFor> (the #1399
+  // a11y convention) + help copy from drifting; only one branch renders per
+  // pass, so the shared id="conn-context-name" never collides in the DOM.
+  const contextNameField = (
+    <div>
+      <label
+        htmlFor="conn-context-name"
+        className="mb-1 block text-sm font-medium"
+      >
+        {t("contextName")}
+      </label>
+      <Input
+        id="conn-context-name"
+        value={contextName}
+        maxLength={CONNECTOR_NAME_MAX}
+        onChange={(e) => setContextName(e.target.value)}
+      />
+      <p className="mt-1 text-xs text-muted-foreground">
+        {t("contextNameHelp")}
+      </p>
+    </div>
+  );
 
   // #1399: the LLM inputs render in two spots — directly when nothing is
   // stored, inside the replace fold when a config is present. One definition
@@ -1420,20 +1491,27 @@ export default function ConnectorsPage() {
         </AlertDialogContent>
       </AlertDialog>
 
-      {/* Create dialog (after Slack OAuth) */}
-      <AlertDialog
+      {/* Create dialog (after Slack OAuth). A real Dialog (not AlertDialog):
+          the submit is a form action that must keep the dialog open on
+          failure so the error Alert is seen — an AlertDialogAction auto-closes
+          on click and swallowed the create error (the #1409 "silent" report). */}
+      <Dialog
         open={pending !== null}
-        onOpenChange={(o) => !o && closeCreateDialog()}
+        // Block escape/overlay close mid-submit so an in-flight failure isn't
+        // swallowed with the dialog (mirrors the settings dialog).
+        onOpenChange={(o) => {
+          if (!o && !submitting) closeCreateDialog();
+        }}
       >
-        <AlertDialogContent>
-          <AlertDialogHeader>
-            <AlertDialogTitle>{t("createTitle")}</AlertDialogTitle>
-            <AlertDialogDescription>
+        <DialogContent className="max-h-[85vh] overflow-y-auto">
+          <DialogHeader>
+            <DialogTitle>{t("createTitle")}</DialogTitle>
+            <DialogDescription>
               {t("createDesc", {
                 team: pending?.team_name || pending?.team_id || "",
               })}
-            </AlertDialogDescription>
-          </AlertDialogHeader>
+            </DialogDescription>
+          </DialogHeader>
           <div className="space-y-4">
             {createError && (
               <Alert variant="destructive">
@@ -1453,22 +1531,73 @@ export default function ConnectorsPage() {
                 onChange={(e) => setDisplayName(e.target.value)}
               />
             </div>
+            {/* #1409: write-target selection. When the workspace already has
+                contexts, offer connect-to-existing (default) vs create-new;
+                with none, keep the original single create-name field so the
+                first-connector flow is unchanged and fully backward compatible. */}
             <div>
-              <label
-                htmlFor="conn-context-name"
-                className="mb-1 block text-sm font-medium"
-              >
-                {t("contextName")}
-              </label>
-              <Input
-                id="conn-context-name"
-                value={contextName}
-                maxLength={CONNECTOR_NAME_MAX}
-                onChange={(e) => setContextName(e.target.value)}
-              />
-              <p className="mt-1 text-xs text-muted-foreground">
-                {t("contextNameHelp")}
+              <p className="mb-1 block text-sm font-medium">
+                {t("contextTargetLabel")}
               </p>
+              {availableContexts.length > 0 ? (
+                <>
+                  <div
+                    role="group"
+                    aria-label={t("contextTargetLabel")}
+                    className="mb-2 inline-flex rounded-lg bg-muted p-1"
+                  >
+                    <Button
+                      type="button"
+                      size="sm"
+                      variant={contextMode === "existing" ? "default" : "ghost"}
+                      aria-pressed={contextMode === "existing"}
+                      onClick={() => setContextMode("existing")}
+                    >
+                      {t("contextModeExisting")}
+                    </Button>
+                    <Button
+                      type="button"
+                      size="sm"
+                      variant={contextMode === "new" ? "default" : "ghost"}
+                      aria-pressed={contextMode === "new"}
+                      onClick={() => setContextMode("new")}
+                    >
+                      {t("contextModeNew")}
+                    </Button>
+                  </div>
+                  {contextMode === "existing" ? (
+                    <div>
+                      <Select
+                        value={selectedContextId}
+                        onValueChange={setSelectedContextId}
+                      >
+                        <SelectTrigger
+                          id="conn-existing-context"
+                          aria-label={t("contextExistingLabel")}
+                        >
+                          <SelectValue
+                            placeholder={t("contextExistingPlaceholder")}
+                          />
+                        </SelectTrigger>
+                        <SelectContent>
+                          {availableContexts.map((ctx) => (
+                            <SelectItem key={ctx.id} value={ctx.id}>
+                              {ctx.display_name || ctx.name}
+                            </SelectItem>
+                          ))}
+                        </SelectContent>
+                      </Select>
+                      <p className="mt-1 text-xs text-muted-foreground">
+                        {t("contextExistingHelp")}
+                      </p>
+                    </div>
+                  ) : (
+                    contextNameField
+                  )}
+                </>
+              ) : (
+                contextNameField
+              )}
             </div>
 
             {/* #890: PII guardrail configuration */}
@@ -1558,26 +1687,28 @@ export default function ConnectorsPage() {
               )}
             </div>
           </div>
-          <AlertDialogFooter>
-            <AlertDialogCancel
+          <DialogFooter>
+            <Button
+              variant="outline"
               onClick={closeCreateDialog}
               disabled={submitting}
             >
               {tCommon("cancel")}
-            </AlertDialogCancel>
-            <AlertDialogAction
-              onClick={handleCreate}
+            </Button>
+            <Button
+              onClick={() => void handleCreate()}
               disabled={
                 submitting ||
-                !contextName ||
+                !createBindingReady ||
                 (piiEnabled && piiDetectors.length === 0)
               }
             >
+              {submitting && <InlineSpinner aria-hidden="true" />}
               {t("createConnector")}
-            </AlertDialogAction>
-          </AlertDialogFooter>
-        </AlertDialogContent>
-      </AlertDialog>
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
 
       {/* One-time credentials reveal */}
       <AlertDialog
