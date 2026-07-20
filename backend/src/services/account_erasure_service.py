@@ -50,9 +50,11 @@ from models.auth import (
     APIKey,
     AuditLog,
     Context,
+    ContextMember,
     ExternalAPIKey,
     OAuth2AuthorizationCode,
     OAuth2Client,
+    OAuth2DeviceCode,
     OAuth2Token,
     User,
     Workspace,
@@ -982,6 +984,12 @@ class AccountErasureService:
         counts["oauth_clients"] = await self._count_and_delete(
             OAuth2Client, OAuth2Client.owner_id == user_id
         )
+        # #1365 review sweep: device-authorization-flow rows cascade on client
+        # deletion only, so the subject's raw sub in user_id survives an
+        # OAuth-token erasure. Transient per-user rows — delete the subject's.
+        counts["oauth_device_codes"] = await self._count_and_delete(
+            OAuth2DeviceCode, OAuth2DeviceCode.user_id == user_id
+        )
 
         # Direct per-user tables.
         counts["external_api_keys"] = await self._count_and_delete(
@@ -993,6 +1001,14 @@ class AccountErasureService:
         )
         counts["usage_stats"] = await self._count_and_delete(
             UsageStats, UsageStats.user_id == user_id
+        )
+        # #1365 review sweep: LLM call/cost telemetry has NO FK cascade at all,
+        # so the caller's raw sub in user_id would outlive erasure entirely.
+        # Per-user telemetry — delete the subject's rows (mirrors usage_stats).
+        from models.llm_call_log import LLMCallLog
+
+        counts["llm_call_logs"] = await self._count_and_delete(
+            LLMCallLog, LLMCallLog.user_id == user_id
         )
         # #1228: diagnostic cross-context read attributions are per-user
         # data too (context_id FK cascades on context deletion, but the
@@ -1009,6 +1025,14 @@ class AccountErasureService:
             WorkspaceInvitation,
             (WorkspaceInvitation.invited_by == user_id)
             | (WorkspaceInvitation.email == target.email),
+        )
+        # #1365 review sweep (F8): per-context ACL grants. The subject's own
+        # memberships are dead after erasure — delete them (mirrors
+        # workspace_members). ``invited_by`` on OTHERS' surviving rows, and the
+        # surviving-row ``WorkspaceMember.invited_by`` / ``WorkspaceInvitation
+        # .accepted_by`` links (F9), are pseudonymized in the authorship sweep.
+        counts["context_members"] = await self._count_and_delete(
+            ContextMember, ContextMember.user_id == user_id
         )
 
         # Pseudonymize plan_changes.changed_by — keep the audit trail but
@@ -1094,11 +1118,22 @@ class AccountErasureService:
             # attested_by: another user's sub lands here when they attest a
             # pubkey — same surviving-row shape (code-review finder, #1365).
             (RecipientPubkey, RecipientPubkey.attested_by),
+            # identity_id: the OWNER of the recipient key — the primary subject
+            # column of the recipient-key table, missed by the created_by/
+            # attested_by sweep though it holds the same raw sub (F7).
+            (RecipientPubkey, RecipientPubkey.identity_id),
             (SecretGrant, SecretGrant.granted_by),
             (Context, Context.created_by),
             # updated_by on keys OWNED BY OTHERS survives the user_id delete
             # above (code-review finder, #1365).
             (ExternalAPIKey, ExternalAPIKey.updated_by),
+            # F8/F9 surviving-row authorship: invited_by on OTHERS' context/
+            # workspace memberships, and accepted_by on invitations a DIFFERENT
+            # user created but the erased subject accepted, all outlive the
+            # user_id/invited_by deletes above with the raw sub intact.
+            (ContextMember, ContextMember.invited_by),
+            (WorkspaceMember, WorkspaceMember.invited_by),
+            (WorkspaceInvitation, WorkspaceInvitation.accepted_by),
         )
         authorship_total = 0
         for model, column in authorship_sweeps:
@@ -1119,6 +1154,33 @@ class AccountErasureService:
         # trigger_from/until) derived from it. Runs AFTER the workspace
         # cascade so the count reflects only survivors.
         counts["memories_scrubbed"] = await self._scrub_surviving_memories(user_id)
+
+        # #1365 review sweep: neural graph edges, analysis runs, retrieval
+        # feedback, and sleep reports for the erased subject that OUTLIVE the
+        # sole-owner cascade (co-owned/transferred workspaces — sole-owner rows
+        # were already cascade-deleted with their contexts). Pseudonymize the
+        # subject link with the SAME deterministic pseudonym as
+        # _scrub_surviving_memories so the surviving graph stays internally
+        # consistent (edges/analyses still line up with their pseudonymized
+        # memories) while the raw sub is gone. Runs AFTER the workspace cascade
+        # so counts reflect only survivors.
+        from models.analysis import MemoryAnalysis
+        from models.memory import NeuralMemoryEdge
+        from models.retrieval_feedback import RetrievalFeedback
+        from models.sleep import SleepReport
+
+        counts["neural_edges_pseudonymized"] = await self._pseudonymize_field(
+            NeuralMemoryEdge, NeuralMemoryEdge.user_id, user_id
+        )
+        counts["memory_analyses_pseudonymized"] = await self._pseudonymize_field(
+            MemoryAnalysis, MemoryAnalysis.triggered_by, user_id
+        )
+        counts["retrieval_feedback_pseudonymized"] = await self._pseudonymize_field(
+            RetrievalFeedback, RetrievalFeedback.user_id, user_id
+        )
+        counts["sleep_reports_pseudonymized"] = await self._pseudonymize_field(
+            SleepReport, SleepReport.user_id, user_id
+        )
 
         # memory_access_events (#1278, RFC-0002 P0-5): no-FK append-only audit
         # rows survive entity deletion, so the subject's rows must be
@@ -1413,19 +1475,36 @@ class AccountErasureService:
         await self.db.commit()
 
     async def _finalize(self, request: ErasureRequest, summary: dict[str, Any]) -> None:
-        """Mark the erasure_requests row complete.
+        """Mark the erasure_requests row complete and pseudonymize its own PII.
 
         Done with an UPDATE rather than ORM mutation because the request
         object's session may have been touched by intermediate commits.
+
+        #1365 review (F10): the row is retained for 5 years as *pseudonymized*
+        accountability evidence (its own model docstring + the user-facing
+        erasure runbook promise it is non-identifying), but nothing was ever
+        pseudonymizing it. Now that the subject is actually erased, break the
+        links: overwrite ``user_id`` (always the erased subject) with the
+        deterministic pseudonym, and NULL the request metadata (``ip_address`` /
+        ``user_agent``). ``initiated_by`` is pseudonymized ONLY on self-service
+        (where it equals the erased subject); on an admin force-erase it is the
+        acting admin's sub — legitimate accountability evidence, kept. Only the
+        success path pseudonymizes: a failed/cancelled request means the user was
+        NOT erased, so that row legitimately keeps identifying info.
         """
+        pseudonym = self._pseudonym(request.user_id)
+        values: dict[str, Any] = {
+            "status": STATUS_COMPLETE,
+            "completed_at": utcnow(),
+            "deleted_data_summary": summary,
+            "user_id": pseudonym,
+            "ip_address": None,
+            "user_agent": None,
+        }
+        if request.initiated_by == request.user_id:
+            values["initiated_by"] = pseudonym
         await self.db.execute(
-            update(ErasureRequest)
-            .where(ErasureRequest.id == request.id)
-            .values(
-                status=STATUS_COMPLETE,
-                completed_at=utcnow(),
-                deleted_data_summary=summary,
-            )
+            update(ErasureRequest).where(ErasureRequest.id == request.id).values(**values)
         )
         await self.db.commit()
 
