@@ -59,6 +59,31 @@ export interface WorkspaceConnectorSummary {
   llm_config_present: boolean;
 }
 
+export interface ConnectorReadiness {
+  ready: boolean;
+  missingChannels: boolean;
+  missingLlm: boolean;
+}
+
+// #1388: vend-readiness rule, mirrored from what the worker actually needs
+// to serve a connector today: an ingest channel selection plus a stored BYO
+// LLM bundle. litellm_virtual_key_id is stored but not vended yet
+// (kagura-bridge#179), so it must NOT count toward readiness — a connector
+// with only a virtual key would read "ready" while the worker gets llm=null.
+// Single source for every readiness surface (dialog summary, row indicators);
+// the #1392 platform-LLM lane changes this rule in exactly one place.
+export function connectorReadiness(
+  c: WorkspaceConnectorSummary,
+): ConnectorReadiness {
+  const missingChannels = !c.channel_ids?.length;
+  const missingLlm = !c.llm_config_present;
+  return {
+    ready: !missingChannels && !missingLlm,
+    missingChannels,
+    missingLlm,
+  };
+}
+
 /** Create request — the registration flow fields are all optional. */
 export interface CreateConnectorRequest {
   connector_type: ConnectorType;

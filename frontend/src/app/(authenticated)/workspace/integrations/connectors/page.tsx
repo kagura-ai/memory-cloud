@@ -1,9 +1,17 @@
 "use client";
 
-import { FormEvent, useCallback, useEffect, useState } from "react";
+import { FormEvent, useCallback, useEffect, useRef, useState } from "react";
 import { useRouter, useSearchParams } from "next/navigation";
 import { useTranslations, useLocale } from "next-intl";
-import { Check, Copy, Pencil, Plug, Trash2 } from "lucide-react";
+import {
+  AlertTriangle,
+  Check,
+  CheckCircle2,
+  Copy,
+  Pencil,
+  Plug,
+  Trash2,
+} from "lucide-react";
 
 import { PageContainer } from "@/components/common/PageContainer";
 import { PageHeader } from "@/components/common/PageHeader";
@@ -13,6 +21,7 @@ import {
   TableLoadingState,
 } from "@/components/common/LoadingState";
 import { EmptyState } from "@/components/ui/empty-state";
+import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Switch } from "@/components/ui/switch";
@@ -49,6 +58,7 @@ import { useWorkspace } from "@/contexts/WorkspaceContext";
 import { hasWorkspaceRole, WorkspaceRole } from "@/lib/auth/rbac";
 import { API_BASE_URL } from "@/lib/api/base";
 import {
+  connectorReadiness,
   createConnector,
   deleteConnector,
   getSlackPendingInstall,
@@ -100,6 +110,23 @@ function curlSample(resourceId: string, token: string): string {
     `  -H 'Content-Type: application/json' \\`,
     `  -d '{"op":"upsert","doc_id":"test-1","payload":{"text":"hello"}}'`,
   ].join("\n");
+}
+
+// #1388: one status chip shape for the settings-dialog sections.
+function StatusChip({
+  set,
+  setLabel,
+  unsetLabel,
+}: {
+  set: boolean;
+  setLabel: string;
+  unsetLabel: string;
+}) {
+  return (
+    <Badge variant={set ? "secondary" : "outline"}>
+      {set ? setLabel : unsetLabel}
+    </Badge>
+  );
 }
 
 function toResourceId(seed: string): string {
@@ -203,9 +230,17 @@ export default function ConnectorsPage() {
   const [llmProvider, setLlmProvider] = useState("");
   const [llmModel, setLlmModel] = useState("");
   const [llmApiKey, setLlmApiKey] = useState("");
-  const [llmClear, setLlmClear] = useState(false);
   const [settingsSaving, setSettingsSaving] = useState(false);
   const [settingsError, setSettingsError] = useState<string | null>(null);
+  // #1388: deleting the stored LLM bundle is an explicit destructive action
+  // (confirm dialog + immediate PATCH), not a latched save-time toggle.
+  const [llmDeleteConfirm, setLlmDeleteConfirm] = useState(false);
+  const [llmDeleting, setLlmDeleting] = useState(false);
+  // Focus target after the delete confirm closes: the delete button (the
+  // Radix focus-return trigger) unmounts once the PATCH resolves, and the
+  // footer buttons are disabled while it is in flight, so the dialog
+  // container (tabIndex=-1) is the only stable target.
+  const settingsContentRef = useRef<HTMLDivElement | null>(null);
 
   const reload = useCallback(async () => {
     try {
@@ -337,8 +372,30 @@ export default function ConnectorsPage() {
     setLlmProvider("");
     setLlmModel("");
     setLlmApiKey("");
-    setLlmClear(false);
     setSettingsError(null);
+  }, []);
+
+  // #1388: after a PATCH failure (usually a 409 from a stale snapshot),
+  // re-sync the dialog snapshot from the server so a retry rides the fresh
+  // config_version instead of looping on the same conflict. Form drafts
+  // (chText etc.) live in separate state and are deliberately untouched.
+  const resyncSettingsSnapshot = useCallback(async () => {
+    try {
+      const fetched = await listConnectors();
+      // config_version is monotonic, so gate every merge on it: a slow
+      // resync response must never clobber a newer local patch (e.g. a
+      // delete that succeeded while this fetch was in flight).
+      const newerOnly = (item: WorkspaceConnectorSummary) => {
+        const fresh = fetched.find((c) => c.connector_id === item.connector_id);
+        return fresh && fresh.config_version > item.config_version
+          ? fresh
+          : item;
+      };
+      setConnectors((current) => (current ? current.map(newerOnly) : fetched));
+      setSettingsFor((prev) => (prev ? newerOnly(prev) : prev));
+    } catch {
+      // Best-effort: keep the stale snapshot; close-and-reopen still works.
+    }
   }, []);
 
   const handleSettingsSave = useCallback(async () => {
@@ -375,20 +432,18 @@ export default function ConnectorsPage() {
     if (newLitellmKey !== (settingsFor.litellm_virtual_key_id ?? null)) {
       patch.litellm_virtual_key_id = newLitellmKey;
     }
-    if (llmClear) {
-      // Clearing an already-empty binding is a no-op, not a PATCH.
-      if (settingsFor.llm_config_present) {
-        patch.llm_config = null;
-      }
-    } else if (llmProvider.trim() || llmModel.trim() || llmApiKey.trim()) {
-      if (!(llmProvider.trim() && llmModel.trim() && llmApiKey.trim())) {
+    if (llmProvider.trim() || llmModel.trim() || llmApiKey.trim()) {
+      // Provider and model are the backend's universal minimum
+      // (_validate_llm_config); api_key is provider-dependent (local
+      // Ollama has none) and is omitted from the bundle when empty.
+      if (!(llmProvider.trim() && llmModel.trim())) {
         setSettingsError(t("llmIncomplete"));
         return;
       }
       patch.llm_config = {
         provider: llmProvider.trim(),
         model: llmModel.trim(),
-        api_key: llmApiKey.trim(),
+        ...(llmApiKey.trim() ? { api_key: llmApiKey.trim() } : {}),
       };
     }
     if (Object.keys(patch).length === 0) {
@@ -410,6 +465,9 @@ export default function ConnectorsPage() {
       void reload();
     } catch (err) {
       setSettingsError(err instanceof Error ? err.message : String(err));
+      // Recover from a stale-snapshot 409: without the re-sync every retry
+      // re-sends the same stale expected_config_version and loops.
+      void resyncSettingsSnapshot();
     } finally {
       setSettingsSaving(false);
     }
@@ -421,11 +479,56 @@ export default function ConnectorsPage() {
     llmProvider,
     llmModel,
     llmApiKey,
-    llmClear,
     t,
     toast,
     reload,
+    resyncSettingsSnapshot,
   ]);
+
+  // #1388: immediate destructive PATCH behind an explicit confirm. On
+  // success the dialog stays open on a refreshed snapshot — the returned
+  // config_version replaces the stale one so a follow-up save doesn't 409 —
+  // and the list row is patched in place from the response (same pattern as
+  // the vision toggle) instead of refetching both list endpoints.
+  const handleLlmDelete = useCallback(async () => {
+    if (!settingsFor) return;
+    setLlmDeleting(true);
+    setSettingsError(null);
+    try {
+      const result = await updateConnectorSettings(
+        settingsFor.connector_id,
+        { llm_config: null },
+        settingsFor.config_version,
+      );
+      toast({ title: t("llmDeleted") });
+      const applyResult = (item: WorkspaceConnectorSummary) => ({
+        ...item,
+        channel_ids: result.channel_ids,
+        litellm_virtual_key_id: result.litellm_virtual_key_id,
+        llm_config_present: result.llm_config_present,
+        locale: result.locale,
+        config_version: result.config_version,
+      });
+      setSettingsFor((prev) =>
+        prev && prev.connector_id === settingsFor.connector_id
+          ? applyResult(prev)
+          : prev,
+      );
+      setConnectors(
+        (current) =>
+          current?.map((item) =>
+            item.connector_id === settingsFor.connector_id
+              ? applyResult(item)
+              : item,
+          ) ?? null,
+      );
+    } catch (err) {
+      setSettingsError(err instanceof Error ? err.message : String(err));
+      void resyncSettingsSnapshot();
+    } finally {
+      setLlmDeleting(false);
+    }
+  }, [settingsFor, t, toast, resyncSettingsSnapshot]);
 
   const closeCreateDialog = useCallback(() => {
     setPending(null);
@@ -618,6 +721,12 @@ export default function ConnectorsPage() {
     );
   }
 
+  // #1388: stored-state readiness for the settings dialog summary (not the
+  // form draft — the dialog exists to repair un-vendable connectors, #1376).
+  const settingsReadiness = settingsFor
+    ? connectorReadiness(settingsFor)
+    : null;
+
   return (
     <PageContainer>
       <PageHeader title={t("title")} description={t("description")} />
@@ -749,7 +858,10 @@ export default function ConnectorsPage() {
                       : t("channelsNone")}
                   </span>
                   <span>
-                    {c.llm_config_present || c.litellm_virtual_key_id
+                    {/* #1388: same rule as the dialog readiness summary —
+                        a litellm-only connector must not read as bound
+                        while the worker still gets llm=null. */}
+                    {!connectorReadiness(c).missingLlm
                       ? t("llmBound")
                       : t("llmNotBound")}
                   </span>
@@ -802,14 +914,18 @@ export default function ConnectorsPage() {
       {/* #1376: vend-settings editor */}
       <Dialog
         open={settingsFor !== null}
-        // Escape/overlay-close is blocked mid-save: the error Alert lives in
-        // this dialog, so closing while the PATCH is in flight would swallow
-        // a failure (#1376 review).
+        // Escape/overlay-close is blocked mid-save AND mid-delete: the error
+        // Alert lives in this dialog, so closing while a PATCH is in flight
+        // would swallow a failure (#1376 review, extended for #1388).
         onOpenChange={(o) => {
-          if (!o && !settingsSaving) setSettingsFor(null);
+          if (!o && !settingsSaving && !llmDeleting) setSettingsFor(null);
         }}
       >
-        <DialogContent>
+        <DialogContent
+          ref={settingsContentRef}
+          tabIndex={-1}
+          className="max-h-[85vh] overflow-y-auto"
+        >
           <DialogHeader>
             <DialogTitle>{t("settingsTitle")}</DialogTitle>
             <DialogDescription>{t("settingsDesc")}</DialogDescription>
@@ -820,83 +936,116 @@ export default function ConnectorsPage() {
                 <AlertDescription>{settingsError}</AlertDescription>
               </Alert>
             )}
-            <div>
-              <label
-                htmlFor="conn-settings-channels"
-                className="mb-1 block text-sm font-medium"
-              >
-                {t("channelsLabel")}
-              </label>
-              <Input
-                id="conn-settings-channels"
-                aria-label={t("channelsLabel")}
-                value={chText}
-                onChange={(e) => setChText(e.target.value)}
-              />
-              <p className="mt-1 text-xs text-muted-foreground">
-                {t("channelsHelp")}
-              </p>
-            </div>
-            <div>
-              <label
-                htmlFor="conn-settings-locale"
-                className="mb-1 block text-sm font-medium"
-              >
-                {t("localeLabel")}
-              </label>
-              <Select
-                value={localeSel}
-                onValueChange={(v) =>
-                  setLocaleSel(v as "default" | "en" | "ja")
-                }
-              >
-                <SelectTrigger
-                  id="conn-settings-locale"
-                  aria-label={t("localeLabel")}
+            {/* #1388: vend-readiness summary — say up front whether the
+                connector runs. */}
+            {settingsReadiness && (
+              <Alert>
+                {settingsReadiness.ready ? (
+                  <CheckCircle2 className="h-4 w-4" />
+                ) : (
+                  <AlertTriangle className="h-4 w-4" />
+                )}
+                <AlertDescription>
+                  {settingsReadiness.ready
+                    ? t("readySummary")
+                    : t("notReadySummary", {
+                        missing: [
+                          settingsReadiness.missingChannels
+                            ? t("missingChannels")
+                            : null,
+                          settingsReadiness.missingLlm ? t("missingLlm") : null,
+                        ]
+                          .filter(Boolean)
+                          .join(t("missingListSeparator")),
+                      })}
+                </AlertDescription>
+              </Alert>
+            )}
+            {/* Section 1 — ingest scope */}
+            <section className="space-y-2">
+              <div className="flex items-center justify-between">
+                <p className="text-sm font-medium">{t("sectionIngest")}</p>
+                <StatusChip
+                  set={!!settingsFor?.channel_ids?.length}
+                  setLabel={t("statusSet")}
+                  unsetLabel={t("statusUnset")}
+                />
+              </div>
+              <div>
+                <label
+                  htmlFor="conn-settings-channels"
+                  className="mb-1 block text-sm font-medium"
                 >
-                  <SelectValue />
-                </SelectTrigger>
-                <SelectContent>
-                  <SelectItem value="default">{t("localeDefault")}</SelectItem>
-                  <SelectItem value="en">English</SelectItem>
-                  <SelectItem value="ja">日本語</SelectItem>
-                </SelectContent>
-              </Select>
-            </div>
-            <div>
-              <label
-                htmlFor="conn-settings-litellm"
-                className="mb-1 block text-sm font-medium"
-              >
-                {t("litellmKeyLabel")}
-              </label>
-              <Input
-                id="conn-settings-litellm"
-                aria-label={t("litellmKeyLabel")}
-                value={litellmKey}
-                onChange={(e) => setLitellmKey(e.target.value)}
-              />
-            </div>
-            <div className="space-y-2">
-              <p className="text-sm font-medium">
-                {t("llmLabel")}
-                {settingsFor?.llm_config_present
-                  ? ` — ${t("llmBound")}`
-                  : ` — ${t("llmNotBound")}`}
-              </p>
+                  {t("channelsLabel")}
+                </label>
+                <Input
+                  id="conn-settings-channels"
+                  aria-label={t("channelsLabel")}
+                  placeholder="C0123ABC456, C0456DEF789"
+                  value={chText}
+                  onChange={(e) => setChText(e.target.value)}
+                />
+                <p className="mt-1 text-xs text-muted-foreground">
+                  {t("channelsHelp")}
+                </p>
+              </div>
+            </section>
+            {/* Section 2 — language */}
+            <section className="space-y-2 border-t pt-4">
+              <p className="text-sm font-medium">{t("sectionLanguage")}</p>
+              <div>
+                <label
+                  htmlFor="conn-settings-locale"
+                  className="mb-1 block text-sm font-medium"
+                >
+                  {t("localeLabel")}
+                </label>
+                <Select
+                  value={localeSel}
+                  onValueChange={(v) =>
+                    setLocaleSel(v as "default" | "en" | "ja")
+                  }
+                >
+                  <SelectTrigger
+                    id="conn-settings-locale"
+                    aria-label={t("localeLabel")}
+                  >
+                    <SelectValue />
+                  </SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value="default">
+                      {t("localeDefault")}
+                    </SelectItem>
+                    <SelectItem value="en">English</SelectItem>
+                    <SelectItem value="ja">日本語</SelectItem>
+                  </SelectContent>
+                </Select>
+                <p className="mt-1 text-xs text-muted-foreground">
+                  {t("localeHelp")}
+                </p>
+              </div>
+            </section>
+            {/* Section 3 — LLM used for summarization */}
+            <section className="space-y-2 border-t pt-4">
+              <div className="flex items-center justify-between">
+                <p className="text-sm font-medium">{t("sectionLlm")}</p>
+                <StatusChip
+                  set={!!settingsFor?.llm_config_present}
+                  setLabel={t("statusSet")}
+                  unsetLabel={t("statusUnset")}
+                />
+              </div>
               <p className="text-xs text-muted-foreground">{t("llmHelp")}</p>
               <Input
                 aria-label={t("llmProvider")}
-                placeholder={t("llmProvider")}
+                placeholder={t("llmProviderPlaceholder")}
                 value={llmProvider}
-                disabled={llmClear}
                 onChange={(e) => setLlmProvider(e.target.value)}
               />
               <Input
                 aria-label={t("llmModel")}
-                placeholder={t("llmModel")}
+                placeholder={t("llmModelPlaceholder")}
                 value={llmModel}
-                disabled={llmClear}
                 onChange={(e) => setLlmModel(e.target.value)}
               />
               <Input
@@ -904,30 +1053,64 @@ export default function ConnectorsPage() {
                 placeholder={t("llmApiKey")}
                 type="password"
                 value={llmApiKey}
-                disabled={llmClear}
                 onChange={(e) => setLlmApiKey(e.target.value)}
               />
-              <label className="flex items-center gap-2 text-sm">
-                <Switch
-                  checked={llmClear}
-                  onCheckedChange={setLlmClear}
-                  aria-label={t("llmClear")}
-                />
-                <span>{t("llmClear")}</span>
-              </label>
-            </div>
+              <p className="text-xs text-muted-foreground">
+                {t("llmApiKeyOptionalHelp")}
+              </p>
+              {settingsFor?.llm_config_present && (
+                <Button
+                  type="button"
+                  variant="destructive-outline"
+                  onClick={() => setLlmDeleteConfirm(true)}
+                  disabled={settingsSaving || llmDeleting}
+                >
+                  {llmDeleting && <InlineSpinner aria-hidden="true" />}
+                  {t("llmDelete")}
+                </Button>
+              )}
+              {/* #1388: LiteLLM virtual key demoted to an advanced fold —
+                  stored but not vended yet (kagura-bridge#179). Keyed by
+                  connector so the uncontrolled <details> open state never
+                  leaks from one connector's dialog into another's. */}
+              <details
+                key={settingsFor?.connector_id ?? "none"}
+                className="rounded-md border p-3"
+              >
+                <summary className="cursor-pointer text-sm font-medium">
+                  {t("advancedSettings")}
+                </summary>
+                <div className="mt-3">
+                  <label
+                    htmlFor="conn-settings-litellm"
+                    className="mb-1 block text-sm font-medium"
+                  >
+                    {t("litellmKeyLabel")}
+                  </label>
+                  <Input
+                    id="conn-settings-litellm"
+                    aria-label={t("litellmKeyLabel")}
+                    value={litellmKey}
+                    onChange={(e) => setLitellmKey(e.target.value)}
+                  />
+                  <p className="mt-1 text-xs text-muted-foreground">
+                    {t("litellmKeyNote")}
+                  </p>
+                </div>
+              </details>
+            </section>
           </div>
           <DialogFooter>
             <Button
               variant="outline"
               onClick={() => setSettingsFor(null)}
-              disabled={settingsSaving}
+              disabled={settingsSaving || llmDeleting}
             >
               {tCommon("cancel")}
             </Button>
             <Button
               onClick={() => void handleSettingsSave()}
-              disabled={settingsSaving}
+              disabled={settingsSaving || llmDeleting}
             >
               {settingsSaving && <InlineSpinner aria-hidden="true" />}
               {t("settingsSave")}
@@ -935,6 +1118,42 @@ export default function ConnectorsPage() {
           </DialogFooter>
         </DialogContent>
       </Dialog>
+
+      {/* #1388: destructive confirm for deleting the stored LLM bundle.
+          Errors surface in the settings dialog's Alert (the PATCH runs
+          while that dialog stays open). */}
+      <AlertDialog
+        open={llmDeleteConfirm}
+        onOpenChange={(o) => !o && setLlmDeleteConfirm(false)}
+      >
+        <AlertDialogContent
+          // Confirmed delete: the trigger (delete button) will unmount when
+          // the in-flight PATCH resolves, so Radix's focus-return would drop
+          // to document.body while the settings dialog is still open. Park
+          // focus on the dialog container instead. llmDeleting is already
+          // true here (set synchronously in the action's onClick); a
+          // cancelled confirm leaves it false and keeps default focus-return.
+          onCloseAutoFocus={(e) => {
+            if (llmDeleting) {
+              e.preventDefault();
+              settingsContentRef.current?.focus();
+            }
+          }}
+        >
+          <AlertDialogHeader>
+            <AlertDialogTitle>{t("llmDeleteConfirmTitle")}</AlertDialogTitle>
+            <AlertDialogDescription>
+              {t("llmDeleteConfirmDesc")}
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel>{tCommon("cancel")}</AlertDialogCancel>
+            <AlertDialogAction onClick={() => void handleLlmDelete()}>
+              {tCommon("delete")}
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
 
       {/* Create dialog (after Slack OAuth) */}
       <AlertDialog
