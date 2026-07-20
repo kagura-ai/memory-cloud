@@ -61,6 +61,50 @@ dict `20260116`, embedding `text-embedding-3-small` (512 dims). Source:
   harness policy, treat sub-0.02 single-arm drift as noise and rank-order
   changes in the top-5 as the signal worth reviewing.
 
+## Reconsidering the 60/40 hybrid default on knowledge-base corpora (#1404)
+
+The 16-doc result above is a **small, exact-match-heavy** corpus where hybrid's
+two-signal recovery decisively wins. That does **not** generalize to the larger
+knowledge-base corpus family, and the evidence there is now twice-replicated:
+
+On the frozen **kagura_L** corpus (300 docs / 240 held-out queries, KB-style
+content), `hybrid − max(keyword, semantic)` held-out P@5:
+
+- **prereg-v1** (v0.43/v0.44): null, significantly **negative** at the larger
+  embedder ("Two Wins, Two Nulls" §7).
+- **prereg-v2** (v0.53.0 run0): **−0.0117**, BCa 95% [−0.0258, 0.0025],
+  σ_d = 0.111, **achieved power 1.00 at δ = 0.05** — a construct null, not
+  underpowered. Arm means: `semantic` 0.1800 > `hybrid_neural` 0.1725 >
+  `hybrid` 0.1683 ≫ `keyword` 0.1142.
+- The #1212 query-intent router, once enabled, effectively *learns* this: it
+  routed **243/280** held-out queries to semantic, 36 to keyword, 1 to hybrid,
+  and edged the best static arm by only +0.005.
+
+Artifacts: "Two Wins, Two Nulls" §7 + §14.1 (kagura-memory-eval `paper/draft-full.md`;
+`results/v053/f1-v053-*.json`, `router-calibration-2026-07-19.json`).
+
+### Decision (an experiment + a decision, not a blind flip)
+
+1. **Keep `ContextSearchConfig.semantic_weight = 0.60` (60/40) as the fleet
+   default for now.** The evidence favors a higher semantic weight (or
+   semantic-with-keyword-fallback) on KB corpora, but a fleet default change
+   must ship with a **paired kagura_L CI** (the harness + BCa machinery take
+   minutes), not on this reasoning alone — the same discipline the reinforce
+   (#1207) and graph-boost (#1213/#1405) defaults were held to.
+2. **The principled mechanism is the query-intent router, not a static
+   re-weight.** `routing_mode='active'` (#1212) converges to per-query semantic
+   on KB corpora and keyword on exact-match ones, so it dominates any single
+   static arm across corpus families. It already ships **default-off until the
+   stage-3 calibration gate shows it beating semantic-only** (see
+   [`router-calibration-gate.md`](router-calibration-gate.md) and the
+   `routing_mode` field comment in `backend/src/models/config.py`) — the same
+   bar hybrid failed. Promoting the router to default (or raising the semantic
+   weight) is gated on that run, tracked by #1404.
+3. **Caveat to carry:** this null is one corpus family. Short,
+   exact-match-heavy workloads (like the 16-doc corpus above) genuinely favor
+   the keyword/hybrid signals — which is precisely the router's case, and why
+   per-query routing is the principled default rather than any fixed weight.
+
 ## Reproduce it
 
 ```bash
