@@ -4029,13 +4029,14 @@
     "missingLlm": "LLM 未設定",
     "llmProviderPlaceholder": "openai / anthropic / ollama",
     "llmModelPlaceholder": "gpt-4o-mini など",
-    "llmApiKeyOptionalHelp": "ローカル Ollama などキー不要のプロバイダでは API キーは空のままで構いません。",
+    "llmApiKeyOptionalHelp": "保存すると LLM 設定全体が置き換わります。キーが必要なプロバイダでは API キーも再入力してください(ローカル Ollama などキー不要のプロバイダでは空で構いません)。",
     "llmDelete": "LLM 設定を削除",
     "llmDeleteConfirmTitle": "保存済みの LLM 設定を削除しますか?",
     "llmDeleteConfirmDesc": "新しいプロバイダとモデルを保存するまで要約処理は停止します。保存済みの資格情報は直ちに削除されます。",
     "llmDeleted": "LLM 設定を削除しました",
     "advancedSettings": "詳細設定",
     "litellmKeyNote": "保存されますが、現在の取り込み処理ではまだ使用されません(将来の機能向け)。",
+    "missingListSeparator": "・",
     "errors": {
       "noWorkspaceSelected": "ワークスペースが選択されていません。コネクタを管理するにはワークスペースを選択してください。",
       "forbiddenWorkspace": "コネクタを管理するにはワークスペースのオーナーまたは管理者権限が必要です。"

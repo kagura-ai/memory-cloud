@@ -1,6 +1,6 @@
 "use client";
 
-import { FormEvent, useCallback, useEffect, useState } from "react";
+import { FormEvent, useCallback, useEffect, useRef, useState } from "react";
 import { useRouter, useSearchParams } from "next/navigation";
 import { useTranslations, useLocale } from "next-intl";
 import {
@@ -58,6 +58,7 @@ import { useWorkspace } from "@/contexts/WorkspaceContext";
 import { hasWorkspaceRole, WorkspaceRole } from "@/lib/auth/rbac";
 import { API_BASE_URL } from "@/lib/api/base";
 import {
+  connectorReadiness,
   createConnector,
   deleteConnector,
   getSlackPendingInstall,
@@ -111,23 +112,21 @@ function curlSample(resourceId: string, token: string): string {
   ].join("\n");
 }
 
-// #1388: vend-readiness rule, mirrored from what the worker actually needs
-// to serve a connector today: an ingest channel selection plus a stored BYO
-// LLM bundle. litellm_virtual_key_id is stored but not vended yet
-// (kagura-bridge#179), so it must NOT count toward readiness — a connector
-// with only a virtual key would read "ready" while the worker gets llm=null.
-function connectorReadiness(c: WorkspaceConnectorSummary): {
-  ready: boolean;
-  missingChannels: boolean;
-  missingLlm: boolean;
-} {
-  const missingChannels = !c.channel_ids?.length;
-  const missingLlm = !c.llm_config_present;
-  return {
-    ready: !missingChannels && !missingLlm,
-    missingChannels,
-    missingLlm,
-  };
+// #1388: one status chip shape for the settings-dialog sections.
+function StatusChip({
+  set,
+  setLabel,
+  unsetLabel,
+}: {
+  set: boolean;
+  setLabel: string;
+  unsetLabel: string;
+}) {
+  return (
+    <Badge variant={set ? "secondary" : "outline"}>
+      {set ? setLabel : unsetLabel}
+    </Badge>
+  );
 }
 
 function toResourceId(seed: string): string {
@@ -237,6 +236,11 @@ export default function ConnectorsPage() {
   // (confirm dialog + immediate PATCH), not a latched save-time toggle.
   const [llmDeleteConfirm, setLlmDeleteConfirm] = useState(false);
   const [llmDeleting, setLlmDeleting] = useState(false);
+  // Focus target after the delete confirm closes: the delete button (the
+  // Radix focus-return trigger) unmounts once the PATCH resolves, and the
+  // footer buttons are disabled while it is in flight, so the dialog
+  // container (tabIndex=-1) is the only stable target.
+  const settingsContentRef = useRef<HTMLDivElement | null>(null);
 
   const reload = useCallback(async () => {
     try {
@@ -371,6 +375,29 @@ export default function ConnectorsPage() {
     setSettingsError(null);
   }, []);
 
+  // #1388: after a PATCH failure (usually a 409 from a stale snapshot),
+  // re-sync the dialog snapshot from the server so a retry rides the fresh
+  // config_version instead of looping on the same conflict. Form drafts
+  // (chText etc.) live in separate state and are deliberately untouched.
+  const resyncSettingsSnapshot = useCallback(async () => {
+    try {
+      const fetched = await listConnectors();
+      // config_version is monotonic, so gate every merge on it: a slow
+      // resync response must never clobber a newer local patch (e.g. a
+      // delete that succeeded while this fetch was in flight).
+      const newerOnly = (item: WorkspaceConnectorSummary) => {
+        const fresh = fetched.find((c) => c.connector_id === item.connector_id);
+        return fresh && fresh.config_version > item.config_version
+          ? fresh
+          : item;
+      };
+      setConnectors((current) => (current ? current.map(newerOnly) : fetched));
+      setSettingsFor((prev) => (prev ? newerOnly(prev) : prev));
+    } catch {
+      // Best-effort: keep the stale snapshot; close-and-reopen still works.
+    }
+  }, []);
+
   const handleSettingsSave = useCallback(async () => {
     if (!settingsFor) return;
     setSettingsError(null);
@@ -438,6 +465,9 @@ export default function ConnectorsPage() {
       void reload();
     } catch (err) {
       setSettingsError(err instanceof Error ? err.message : String(err));
+      // Recover from a stale-snapshot 409: without the re-sync every retry
+      // re-sends the same stale expected_config_version and loops.
+      void resyncSettingsSnapshot();
     } finally {
       setSettingsSaving(false);
     }
@@ -452,11 +482,14 @@ export default function ConnectorsPage() {
     t,
     toast,
     reload,
+    resyncSettingsSnapshot,
   ]);
 
   // #1388: immediate destructive PATCH behind an explicit confirm. On
   // success the dialog stays open on a refreshed snapshot — the returned
-  // config_version replaces the stale one so a follow-up save doesn't 409.
+  // config_version replaces the stale one so a follow-up save doesn't 409 —
+  // and the list row is patched in place from the response (same pattern as
+  // the vision toggle) instead of refetching both list endpoints.
   const handleLlmDelete = useCallback(async () => {
     if (!settingsFor) return;
     setLlmDeleting(true);
@@ -468,22 +501,34 @@ export default function ConnectorsPage() {
         settingsFor.config_version,
       );
       toast({ title: t("llmDeleted") });
+      const applyResult = (item: WorkspaceConnectorSummary) => ({
+        ...item,
+        channel_ids: result.channel_ids,
+        litellm_virtual_key_id: result.litellm_virtual_key_id,
+        llm_config_present: result.llm_config_present,
+        locale: result.locale,
+        config_version: result.config_version,
+      });
       setSettingsFor((prev) =>
         prev && prev.connector_id === settingsFor.connector_id
-          ? {
-              ...prev,
-              llm_config_present: result.llm_config_present,
-              config_version: result.config_version,
-            }
+          ? applyResult(prev)
           : prev,
       );
-      void reload();
+      setConnectors(
+        (current) =>
+          current?.map((item) =>
+            item.connector_id === settingsFor.connector_id
+              ? applyResult(item)
+              : item,
+          ) ?? null,
+      );
     } catch (err) {
       setSettingsError(err instanceof Error ? err.message : String(err));
+      void resyncSettingsSnapshot();
     } finally {
       setLlmDeleting(false);
     }
-  }, [settingsFor, t, toast, reload]);
+  }, [settingsFor, t, toast, resyncSettingsSnapshot]);
 
   const closeCreateDialog = useCallback(() => {
     setPending(null);
@@ -676,6 +721,12 @@ export default function ConnectorsPage() {
     );
   }
 
+  // #1388: stored-state readiness for the settings dialog summary (not the
+  // form draft — the dialog exists to repair un-vendable connectors, #1376).
+  const settingsReadiness = settingsFor
+    ? connectorReadiness(settingsFor)
+    : null;
+
   return (
     <PageContainer>
       <PageHeader title={t("title")} description={t("description")} />
@@ -807,7 +858,10 @@ export default function ConnectorsPage() {
                       : t("channelsNone")}
                   </span>
                   <span>
-                    {c.llm_config_present || c.litellm_virtual_key_id
+                    {/* #1388: same rule as the dialog readiness summary —
+                        a litellm-only connector must not read as bound
+                        while the worker still gets llm=null. */}
+                    {!connectorReadiness(c).missingLlm
                       ? t("llmBound")
                       : t("llmNotBound")}
                   </span>
@@ -860,14 +914,18 @@ export default function ConnectorsPage() {
       {/* #1376: vend-settings editor */}
       <Dialog
         open={settingsFor !== null}
-        // Escape/overlay-close is blocked mid-save: the error Alert lives in
-        // this dialog, so closing while the PATCH is in flight would swallow
-        // a failure (#1376 review).
+        // Escape/overlay-close is blocked mid-save AND mid-delete: the error
+        // Alert lives in this dialog, so closing while a PATCH is in flight
+        // would swallow a failure (#1376 review, extended for #1388).
         onOpenChange={(o) => {
-          if (!o && !settingsSaving) setSettingsFor(null);
+          if (!o && !settingsSaving && !llmDeleting) setSettingsFor(null);
         }}
       >
-        <DialogContent className="max-h-[85vh] overflow-y-auto">
+        <DialogContent
+          ref={settingsContentRef}
+          tabIndex={-1}
+          className="max-h-[85vh] overflow-y-auto"
+        >
           <DialogHeader>
             <DialogTitle>{t("settingsTitle")}</DialogTitle>
             <DialogDescription>{t("settingsDesc")}</DialogDescription>
@@ -878,48 +936,40 @@ export default function ConnectorsPage() {
                 <AlertDescription>{settingsError}</AlertDescription>
               </Alert>
             )}
-            {/* #1388: vend-readiness summary (stored state, not the form
-                draft) — this dialog exists to repair un-vendable connectors
-                (#1376), so say up front whether the connector runs. */}
-            {settingsFor &&
-              (() => {
-                const readiness = connectorReadiness(settingsFor);
-                return readiness.ready ? (
-                  <Alert>
-                    <CheckCircle2 className="h-4 w-4" />
-                    <AlertDescription>{t("readySummary")}</AlertDescription>
-                  </Alert>
+            {/* #1388: vend-readiness summary — say up front whether the
+                connector runs. */}
+            {settingsReadiness && (
+              <Alert>
+                {settingsReadiness.ready ? (
+                  <CheckCircle2 className="h-4 w-4" />
                 ) : (
-                  <Alert>
-                    <AlertTriangle className="h-4 w-4" />
-                    <AlertDescription>
-                      {t("notReadySummary", {
+                  <AlertTriangle className="h-4 w-4" />
+                )}
+                <AlertDescription>
+                  {settingsReadiness.ready
+                    ? t("readySummary")
+                    : t("notReadySummary", {
                         missing: [
-                          readiness.missingChannels
+                          settingsReadiness.missingChannels
                             ? t("missingChannels")
                             : null,
-                          readiness.missingLlm ? t("missingLlm") : null,
+                          settingsReadiness.missingLlm ? t("missingLlm") : null,
                         ]
                           .filter(Boolean)
-                          .join(" / "),
+                          .join(t("missingListSeparator")),
                       })}
-                    </AlertDescription>
-                  </Alert>
-                );
-              })()}
+                </AlertDescription>
+              </Alert>
+            )}
             {/* Section 1 — ingest scope */}
             <section className="space-y-2">
               <div className="flex items-center justify-between">
                 <p className="text-sm font-medium">{t("sectionIngest")}</p>
-                <Badge
-                  variant={
-                    settingsFor?.channel_ids?.length ? "secondary" : "outline"
-                  }
-                >
-                  {settingsFor?.channel_ids?.length
-                    ? t("statusSet")
-                    : t("statusUnset")}
-                </Badge>
+                <StatusChip
+                  set={!!settingsFor?.channel_ids?.length}
+                  setLabel={t("statusSet")}
+                  unsetLabel={t("statusUnset")}
+                />
               </div>
               <div>
                 <label
@@ -979,15 +1029,11 @@ export default function ConnectorsPage() {
             <section className="space-y-2 border-t pt-4">
               <div className="flex items-center justify-between">
                 <p className="text-sm font-medium">{t("sectionLlm")}</p>
-                <Badge
-                  variant={
-                    settingsFor?.llm_config_present ? "secondary" : "outline"
-                  }
-                >
-                  {settingsFor?.llm_config_present
-                    ? t("statusSet")
-                    : t("statusUnset")}
-                </Badge>
+                <StatusChip
+                  set={!!settingsFor?.llm_config_present}
+                  setLabel={t("statusSet")}
+                  unsetLabel={t("statusUnset")}
+                />
               </div>
               <p className="text-xs text-muted-foreground">{t("llmHelp")}</p>
               <Input
@@ -1015,8 +1061,7 @@ export default function ConnectorsPage() {
               {settingsFor?.llm_config_present && (
                 <Button
                   type="button"
-                  variant="outline"
-                  className="border-destructive/50 text-red-800 dark:text-red-300"
+                  variant="destructive-outline"
                   onClick={() => setLlmDeleteConfirm(true)}
                   disabled={settingsSaving || llmDeleting}
                 >
@@ -1025,8 +1070,13 @@ export default function ConnectorsPage() {
                 </Button>
               )}
               {/* #1388: LiteLLM virtual key demoted to an advanced fold —
-                  stored but not vended yet (kagura-bridge#179). */}
-              <details className="rounded-md border p-3">
+                  stored but not vended yet (kagura-bridge#179). Keyed by
+                  connector so the uncontrolled <details> open state never
+                  leaks from one connector's dialog into another's. */}
+              <details
+                key={settingsFor?.connector_id ?? "none"}
+                className="rounded-md border p-3"
+              >
                 <summary className="cursor-pointer text-sm font-medium">
                   {t("advancedSettings")}
                 </summary>
@@ -1054,7 +1104,7 @@ export default function ConnectorsPage() {
             <Button
               variant="outline"
               onClick={() => setSettingsFor(null)}
-              disabled={settingsSaving}
+              disabled={settingsSaving || llmDeleting}
             >
               {tCommon("cancel")}
             </Button>
@@ -1076,7 +1126,20 @@ export default function ConnectorsPage() {
         open={llmDeleteConfirm}
         onOpenChange={(o) => !o && setLlmDeleteConfirm(false)}
       >
-        <AlertDialogContent>
+        <AlertDialogContent
+          // Confirmed delete: the trigger (delete button) will unmount when
+          // the in-flight PATCH resolves, so Radix's focus-return would drop
+          // to document.body while the settings dialog is still open. Park
+          // focus on the dialog container instead. llmDeleting is already
+          // true here (set synchronously in the action's onClick); a
+          // cancelled confirm leaves it false and keeps default focus-return.
+          onCloseAutoFocus={(e) => {
+            if (llmDeleting) {
+              e.preventDefault();
+              settingsContentRef.current?.focus();
+            }
+          }}
+        >
           <AlertDialogHeader>
             <AlertDialogTitle>{t("llmDeleteConfirmTitle")}</AlertDialogTitle>
             <AlertDialogDescription>

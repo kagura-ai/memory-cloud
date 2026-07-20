@@ -24,19 +24,25 @@ const mockListAvailableWorkerApps = vi.fn();
 const mockCreateConnector = vi.fn();
 const mockUpdateConnectorRuntime = vi.fn();
 const mockUpdateConnectorSettings = vi.fn();
-vi.mock("@/lib/api/workspace-connectors", () => ({
-  listConnectors: (...args: unknown[]) => mockListConnectors(...args),
-  listAvailableWorkerApps: (...args: unknown[]) =>
-    mockListAvailableWorkerApps(...args),
-  deleteConnector: vi.fn(),
-  createConnector: (...args: unknown[]) => mockCreateConnector(...args),
-  updateConnectorRuntime: (...args: unknown[]) =>
-    mockUpdateConnectorRuntime(...args),
-  updateConnectorSettings: (...args: unknown[]) =>
-    mockUpdateConnectorSettings(...args),
-  getSlackPendingInstall: vi.fn(),
-  slackInstallUrl: () => "https://slack.example/install",
-}));
+vi.mock("@/lib/api/workspace-connectors", async (importOriginal) => {
+  const actual =
+    await importOriginal<typeof import("@/lib/api/workspace-connectors")>();
+  return {
+    // Pure helper — use the real readiness rule, not a mock.
+    connectorReadiness: actual.connectorReadiness,
+    listConnectors: (...args: unknown[]) => mockListConnectors(...args),
+    listAvailableWorkerApps: (...args: unknown[]) =>
+      mockListAvailableWorkerApps(...args),
+    deleteConnector: vi.fn(),
+    createConnector: (...args: unknown[]) => mockCreateConnector(...args),
+    updateConnectorRuntime: (...args: unknown[]) =>
+      mockUpdateConnectorRuntime(...args),
+    updateConnectorSettings: (...args: unknown[]) =>
+      mockUpdateConnectorSettings(...args),
+    getSlackPendingInstall: vi.fn(),
+    slackInstallUrl: () => "https://slack.example/install",
+  };
+});
 
 const mockRouterReplace = vi.fn();
 const mockSearchParamsGet = vi.fn<(key: string) => string | null>();
@@ -331,6 +337,34 @@ describe("ConnectorsPage RBAC gate", () => {
     expect(
       screen.getByRole("button", { name: "editSettings" }),
     ).toBeInTheDocument();
+  });
+
+  it("does not count a litellm-only connector as LLM-bound on the row (#1388)", async () => {
+    setWorkspace("admin");
+    mockListConnectors.mockResolvedValue([
+      {
+        connector_id: "connector-1",
+        connector_type: "slack",
+        app_key: "default",
+        resource_id: "slack-t01",
+        context_id: "context-1",
+        config_version: 3,
+        created_at: "2026-07-19T00:00:00Z",
+        created_by: "user-1",
+        runtime: { vision_enabled: true },
+        channel_ids: ["C1"],
+        locale: null,
+        litellm_virtual_key_id: "vk-1",
+        llm_config_present: false,
+      },
+    ]);
+
+    render(<ConnectorsPage />);
+
+    // The virtual key is stored but not vended (kagura-bridge#179): the row
+    // must agree with the dialog readiness rule instead of contradicting it.
+    expect(await screen.findByText("llmNotBound")).toBeInTheDocument();
+    expect(screen.queryByText("llmBound")).not.toBeInTheDocument();
   });
 
   it("submits only changed settings with the version guard (#1376)", async () => {

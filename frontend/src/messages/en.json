@@ -4029,13 +4029,14 @@
     "missingLlm": "LLM not set",
     "llmProviderPlaceholder": "openai / anthropic / ollama",
     "llmModelPlaceholder": "e.g. gpt-4o-mini",
-    "llmApiKeyOptionalHelp": "The API key is optional for providers without keys (e.g. local Ollama).",
+    "llmApiKeyOptionalHelp": "Saving replaces the whole LLM configuration — re-enter the API key unless the provider needs none (e.g. local Ollama).",
     "llmDelete": "Delete LLM configuration",
     "llmDeleteConfirmTitle": "Delete the stored LLM configuration?",
     "llmDeleteConfirmDesc": "Summarization stops until a new provider and model are saved. The stored credentials are removed immediately.",
     "llmDeleted": "LLM configuration deleted",
     "advancedSettings": "Advanced settings",
     "litellmKeyNote": "Stored but not used by ingestion yet (reserved for an upcoming feature).",
+    "missingListSeparator": " / ",
     "errors": {
       "noWorkspaceSelected": "No workspace selected. Select a workspace to manage its connectors.",
       "forbiddenWorkspace": "Workspace owner or admin role required to manage connectors."
