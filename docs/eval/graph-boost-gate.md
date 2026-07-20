@@ -47,6 +47,37 @@ CIs (`stats.paired_bca_ci`, 10k resamples, seed 1213):
 `ship` requires all four. Verdicts are recorded either way in the results
 JSON — a clean "does not beat placebo" is a valid close per the issue.
 
+## Measured result (prereg-v2 F2/H2b, v0.53.0): `no_effect` — stays OFF
+
+One pre-registered run on the frozen **kagura_l** corpus (warm graph: 767
+edges, replay 1760 queries, Sleep clean; 60 probes ≥ the 50-probe power
+floor) closed the gate at **`no_effect`** — a powered, placebo-valid null,
+**not** an inert or underpowered mechanism:
+
+- boosted_real − unboosted P@5 = **+0.0067** [0.000, 0.023]
+- boosted_real − rewired-placebo P@5 = **+0.0067** [−0.003, 0.020] — the lift
+  is **indistinguishable from a degree-preserving configuration-model
+  placebo**, i.e. a density artifact, not edge-specific signal
+- non-graph slice non-inferior (Δ −0.0036, ε 0.01)
+
+Meanwhile the same warm graph's **`explore()` lane** strengthened on v0.53
+(prereg-v2 H2, **ALIVE**): real-warm recovery@10 beats the rewired placebo by
+**+0.3583** [0.250, 0.475] and shuffled-gold by +0.3417. The graph carries
+real, edge-specific companion structure — recall ranking just isn't where it
+pays.
+
+**Disposition (evidence-backed, #1405):**
+
+1. `KAGURA_GRAPH_BOOST_ENABLED` stays **default-off**. Do not promote it to
+   the fleet default without new evidence on a *different* workload — the
+   shipped gate machinery above already encodes the right decision rule, so
+   the flag's status is an evidence-backed null, not "not yet enabled".
+2. Redirect graph investment to the **explore lane** (product exposure of
+   `explore()` / `include_explore_hints`), where the +0.36 effect lives.
+
+Artifacts: `results/v053/graph-boost-2026-07-19.json`,
+`h2-inferential-v053-run0-2026-07-19.json`; paper "Two Wins, Two Nulls" §14.2.
+
 The runner uses the frozen **kagura_l** corpus (300 docs, 60 multi-gold
 cross-source probes) — not the 5-probe golden corpus, which is below the
 inferential floor. The placebo rewires **only the hebbian edges** (the boost
