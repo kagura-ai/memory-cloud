@@ -15,17 +15,18 @@
   [#1277](https://github.com/kagura-ai/memory-cloud/issues/1277)) for the semantics of the
   correlation columns this table stores
 
-`MemoryAccessEvent` (`memory_access_events`) is the append-only audit row for the eight
+`MemoryAccessEvent` (`memory_access_events`) is the append-only audit row for the nine
 memory operations performed under verified agent identity: **recall / reference / remember /
-update / forget / load_pinned / bootstrap / feedback**. Rows store identifiers, outcome,
+update / forget / load_pinned / bootstrap / feedback / explore** (`explore` appended in
+#1401, migration `e74_1401`). Rows store identifiers, outcome,
 latency, policy decision, and keyed (HMAC) hashes — **never** raw prompts, retrieved
 content, secrets, or PII. This document restates every RFC-0002 decision the schema depends
 on (D20–D25, D29, D34) so it is self-contained, records the CSO review of the deny-logging
 layer, and settles the one question RFC-0002 deferred to F3 (the deny-capture layer).
 
 The v0.49.0 implementation emits bootstrap, load-pinned, feedback, recall, reference, and
-remember events. The schema already reserves all eight operations; `update`/`forget`
-emission plus denied/`would_deny` persistence remain in #1286.
+remember events. The schema reserves all nine operations (`explore` added in #1401);
+`update`/`forget` emission plus denied/`would_deny` persistence remain in #1286.
 
 ## Scope and non-goals
 
@@ -139,7 +140,7 @@ CREATE TABLE memory_access_events (
                                                      -- raw query NEVER stored
     event_metadata     JSONB NULL,
     CONSTRAINT valid_mae_operation CHECK (operation IN
-        ('recall','reference','remember','update','forget','load_pinned','bootstrap','feedback')),
+        ('recall','reference','remember','update','forget','load_pinned','bootstrap','feedback','explore')),
     CONSTRAINT valid_mae_outcome   CHECK (outcome IN ('success','denied','error','partial')),
     CONSTRAINT valid_mae_surface   CHECK (surface IN ('mcp','rest')),
     CONSTRAINT valid_mae_principal CHECK (principal_type IN ('api_key','oauth','session')),

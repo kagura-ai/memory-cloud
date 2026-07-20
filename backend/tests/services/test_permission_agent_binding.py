@@ -494,6 +494,12 @@ class TestReadLaneRowFilterThreading:
         with self._deny_can_access() as can_access, pytest.raises(NotFoundException):
             await MemoryService.explore(svc, ExploreRequest(memory_id=mem.id), "u")
         kw = can_access.await_args.kwargs
+        # #1401: explore's seed gate threads its audit identity like the
+        # reference / forget siblings ('explore' entered the MAE vocabulary in
+        # e74_1401), so an enforce-mode deny here persists a row instead of
+        # staying log-only.
+        assert kw["operation"] == "explore"
+        assert kw["memory_id"] == mem.id
         assert kw["memory_type"] == "code"
         assert kw["memory_source_type"] == "file"
 
@@ -596,8 +602,8 @@ class TestCanAccessMemoryDenyCapture:
 
     @pytest.mark.asyncio
     async def test_no_operation_rbac_deny_emits_nothing(self):
-        # Un-threaded callers (explore — not in the MAE vocabulary yet) keep
-        # the pre-#1286 shape: deny without a row.
+        # Un-threaded callers (internal maintenance paths outside the MAE
+        # operation vocabulary) keep the pre-#1286 shape: deny without a row.
         set_agent_scope(
             AgentScope(agent_id=AGENT_ID, enforcement_mode="enforce", workspace_id=uuid.uuid4())
         )

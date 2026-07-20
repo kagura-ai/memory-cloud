@@ -284,6 +284,122 @@ class TestContextResolution:
                 )
         assert e.value.code == "context_not_found"
 
+    @staticmethod
+    def _resolver_capturing(decision):
+        """A resolve_context_for_workspace_read double honoring the #1402
+        decision-out contract: append the evaluated decision to the caller's
+        ``binding_decision_out`` holder (as the real resolver does for agent-
+        bound requests), then return a context. ``decision=None`` models a
+        non-agent request that captures nothing."""
+
+        async def _side(*_args, **kwargs):
+            holder = kwargs.get("binding_decision_out")
+            if holder is not None and decision is not None:
+                holder.append(decision)
+            return _context()
+
+        return _side
+
+    @pytest.mark.asyncio
+    async def test_resolve_context_threads_bootstrap_operation(self):
+        """#1402: bootstrap must thread operation='bootstrap' into the read
+        resolver so an enforce-mode binding deny at that pre-gate persists a
+        binding_denied audit row (previously un-threaded → silent)."""
+        svc = AgentBootstrapService(MagicMock())
+        resolver = AsyncMock(return_value=_context())
+        with (
+            patch(
+                "services.agent_binding_service.AgentBindingService.get_binding_for_context",
+                new=AsyncMock(return_value=None),
+            ),
+            patch(
+                "services.permission_service.PermissionService.resolve_context_for_workspace_read",
+                new=resolver,
+            ),
+        ):
+            await svc.resolve_context(
+                agent=_agent(),
+                params=BootstrapParams(agent_id=AGENT_ID, context_id=CONTEXT_ID),
+                principal=self._principal(),
+            )
+        assert resolver.await_args.kwargs.get("operation") == "bootstrap"
+        # The decision-out holder must be threaded so the success row can carry
+        # the real decision (#1402 code-review).
+        assert isinstance(resolver.await_args.kwargs.get("binding_decision_out"), list)
+
+    @pytest.mark.asyncio
+    async def test_resolve_context_stamps_allowed_decision(self):
+        """#1402: on an enforce-mode allow, the principal carries
+        policy_decision='allowed' so the bootstrap success MAE row is no longer
+        NULL (the surface that rehydrates cognitive state was the one audited op
+        whose rows never carried a binding decision)."""
+        svc = AgentBootstrapService(MagicMock())
+        principal = self._principal()
+        with (
+            patch(
+                "services.agent_binding_service.AgentBindingService.get_binding_for_context",
+                new=AsyncMock(return_value=None),
+            ),
+            patch(
+                "services.permission_service.PermissionService.resolve_context_for_workspace_read",
+                new=self._resolver_capturing("allowed"),
+            ),
+        ):
+            await svc.resolve_context(
+                agent=_agent(),
+                params=BootstrapParams(agent_id=AGENT_ID, context_id=CONTEXT_ID),
+                principal=principal,
+            )
+        assert principal.metadata.get("policy_decision") == "allowed"
+
+    @pytest.mark.asyncio
+    async def test_resolve_context_stamps_real_would_deny_decision(self):
+        """#1402 (code-review): a shadow would-deny that PROCEEDS must stamp the
+        REAL decision on the success row, not a flat 'allowed' — otherwise the
+        canonical bootstrap row contradicts the paired would_deny ramp row that
+        evaluate_context_access emits on the shadow path."""
+        svc = AgentBootstrapService(MagicMock())
+        principal = self._principal()
+        with (
+            patch(
+                "services.agent_binding_service.AgentBindingService.get_binding_for_context",
+                new=AsyncMock(return_value=None),
+            ),
+            patch(
+                "services.permission_service.PermissionService.resolve_context_for_workspace_read",
+                new=self._resolver_capturing("would_deny"),
+            ),
+        ):
+            await svc.resolve_context(
+                agent=_agent(),
+                params=BootstrapParams(agent_id=AGENT_ID, context_id=CONTEXT_ID),
+                principal=principal,
+            )
+        assert principal.metadata.get("policy_decision") == "would_deny"
+
+    @pytest.mark.asyncio
+    async def test_resolve_context_no_policy_decision_without_binding(self):
+        """#1402: a non-agent principal (resolver captures no decision) leaves
+        policy_decision NULL — binding evaluation is not applicable."""
+        svc = AgentBootstrapService(MagicMock())
+        principal = self._principal()
+        with (
+            patch(
+                "services.agent_binding_service.AgentBindingService.get_binding_for_context",
+                new=AsyncMock(return_value=None),
+            ),
+            patch(
+                "services.permission_service.PermissionService.resolve_context_for_workspace_read",
+                new=self._resolver_capturing(None),
+            ),
+        ):
+            await svc.resolve_context(
+                agent=_agent(),
+                params=BootstrapParams(agent_id=AGENT_ID, context_id=CONTEXT_ID),
+                principal=principal,
+            )
+        assert principal.metadata.get("policy_decision") is None
+
 
 class TestAuditOnBehalfOf:
     """#1276 code-review: operator (owner/admin) bootstraps MUST persist an

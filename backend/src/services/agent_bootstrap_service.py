@@ -293,14 +293,36 @@ class AgentBootstrapService:
         # first (with #963 key-workspace forwarding + allowed_context_ids), and
         # the AgentContextBinding intersection is applied inside it because the
         # per-request agent scope is set — it MAY narrow, MUST NOT widen.
+        decision_holder: list[str] = []
         try:
             context = await PermissionService(self.db).resolve_context_for_workspace_read(
                 user_id=principal.user_id,
                 context_id=context_id,
                 key_workspace_id=principal.key_workspace_id,
+                # #1402: thread the MAE operation so an enforce-mode agent-binding
+                # deny at this pre-gate persists a binding_denied row (in shadow
+                # mode, a would_deny row). Without it bootstrap — the surface that
+                # rehydrates an agent's whole cognitive state — was the one audited
+                # operation whose binding denials were silent.
+                operation="bootstrap",
+                # #1402: capture the evaluated decision so the success audit row
+                # reflects the REAL decision (allowed vs shadow would_deny), not a
+                # flat "allowed" that would contradict the paired would_deny row
+                # emitted inside evaluate_context_access on the shadow ramp.
+                binding_decision_out=decision_holder,
             )
         except NotFoundException as exc:
             raise BootstrapError("context_not_found", "Context not found.") from exc
+
+        # #1402: stamp the evaluated binding decision on the (later) bootstrap
+        # success audit row (written in mcp_server/tools/agent_bootstrap.py from
+        # principal.metadata["policy_decision"]). A hard binding_denied raised
+        # above; on the allow / shadow-would-deny path evaluate_context_access
+        # emits no success row itself, so the success row must carry the decision.
+        # decision_holder is populated only for agent-bound requests — non-agent
+        # principals leave policy_decision NULL (binding evaluation not applicable).
+        if decision_holder:
+            principal.metadata["policy_decision"] = decision_holder[0]
 
         return context, {"context_id": str(context_id), "is_default": is_default}
 
