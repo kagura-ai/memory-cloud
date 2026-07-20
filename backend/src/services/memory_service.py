@@ -4417,29 +4417,56 @@ async def _create_knn_seed_edges(
         # next recall()/reference(). Suggestion only: the edge is never auto-created
         # (the #1208 over-supersede prevention keeps edge authorship with the
         # user/agent, who confirms via create_edge).
+        # edge_repo is shared by the supersede detection (below) and the seed
+        # idempotency guard (further down).
+        edge_repo = NeuralEdgeRepository(db)
+
         non_self = [c for c in candidates if str(c["id"]) != memory_id_str]
         if non_self:
             raw_top = max(non_self, key=lambda c: float(c["score"]))
             raw_top_score = float(raw_top["score"])
             if raw_top_score >= _SUPERSEDE_SUGGEST_THRESHOLD:
-                candidate = {
-                    "memory_id": str(raw_top["id"]),
-                    "similarity": round(raw_top_score, 4),
-                    "detected_at": to_utc_iso(utcnow()),
-                }
-                # Reassign the dedicated column (JSON, not a MutableDict — a
-                # reassignment is what flags it dirty). Do NOT touch updated_at:
-                # detection is a system annotation, not a user edit (#1317). Commit
-                # is safe: the caller already committed the embedding_status update
-                # before invoking this function, so nothing else is pending here.
-                memory.supersede_candidate = candidate
-                await db.commit()
-                logger.info(
-                    "supersede_candidate_detected",
-                    memory_id=memory_id_str,
-                    candidate_memory_id=candidate["memory_id"],
-                    similarity=candidate["similarity"],
+                # Don't resurrect an ACCEPTED suggestion. If a 'supersedes' edge
+                # from this memory to the candidate already exists, the user
+                # already actioned the suggestion and _accept_supersede_candidate
+                # _if_matching cleared the column. Since detection now runs
+                # independent of the seed guard (F2), a re-embed (update_memory
+                # edit / sleep reindex / backfill) would otherwise re-populate the
+                # candidate and re-surface it on recall — breaking the
+                # accept-and-clear self-heal contract (#1403 review F2 guard).
+                from models.memory import EDGE_TYPE_SUPERSEDES
+
+                existing_super = await edge_repo.get_edge(
+                    memory.user_id,
+                    memory.id,
+                    UUID(str(raw_top["id"])),
+                    workspace_id=workspace_id_str,
+                    context_id=context_id_str,
                 )
+                already_superseded = (
+                    existing_super is not None
+                    and existing_super.edge_type == EDGE_TYPE_SUPERSEDES
+                )
+                if not already_superseded:
+                    candidate = {
+                        "memory_id": str(raw_top["id"]),
+                        "similarity": round(raw_top_score, 4),
+                        "detected_at": to_utc_iso(utcnow()),
+                    }
+                    # Reassign the dedicated column (JSON, not a MutableDict — a
+                    # reassignment is what flags it dirty). Do NOT touch
+                    # updated_at: detection is a system annotation, not a user
+                    # edit (#1317). Commit is safe: the caller already committed
+                    # the embedding_status update before invoking this function,
+                    # so nothing else is pending here.
+                    memory.supersede_candidate = candidate
+                    await db.commit()
+                    logger.info(
+                        "supersede_candidate_detected",
+                        memory_id=memory_id_str,
+                        candidate_memory_id=candidate["memory_id"],
+                        similarity=candidate["similarity"],
+                    )
 
         # Idempotency guard (SEEDING ONLY — the supersede detection above
         # deliberately runs first): process_pending_embedding is called on both new
@@ -4449,7 +4476,6 @@ async def _create_knn_seed_edges(
         # constraint — downgrading `neural_association` weight=1.5 to
         # `semantic_similarity` weight=0.3. Skip seeding if the memory already
         # has any outgoing edges.
-        edge_repo = NeuralEdgeRepository(db)
         existing_edges = await edge_repo.get_outgoing_edges(
             user_id=memory.user_id,
             src_id=memory.id,
