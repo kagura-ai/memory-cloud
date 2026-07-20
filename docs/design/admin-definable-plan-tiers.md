@@ -22,8 +22,11 @@ plan_definitions
 ```
 
 - **Seed `free`/`basic`/`pro`** from today's dataclass values (display names
-  S/M/L) for full backward compatibility — existing `workspaces.plan_tier`
-  values keep resolving.
+  S/M/L) for full backward compatibility — existing `workspaces.plan_name`
+  values keep resolving. Note: `plan_name` today carries
+  `CheckConstraint("plan_name IN ('free','basic','pro')")` — the migration
+  that introduces `plan_definitions` must replace that constraint with an FK
+  to `plan_definitions.key`, or dynamic tiers can never be assigned.
 - `PlanTier` (the frozen dataclass) stays as the in-process shape;
   `get_plan_tier()` becomes a cached DB read that materializes a `PlanTier`
   from the row. Every quota consumer (`effective_*`, quota services) is
@@ -77,7 +80,7 @@ runtime-editable data is the wrong binding.
 - Key vocabulary is the whole cross-service contract — **no pricing data in
   this repo** (same boundary as the [add-on lane](addon-entitlements.md)).
 - Workspace migration between tiers is an explicit admin/billing action
-  (`workspaces.plan_tier` update), never implicit via key edits.
+  (`workspaces.plan_name` update), never implicit via key edits.
 
 ## Interaction with add-ons
 
