@@ -29,7 +29,7 @@
 
 <p align="center">
   Claude、ChatGPT、Gemini、その他あらゆる MCP 互換クライアントで動作。<br>
-  <a href="https://github.com/kagura-ai/kagura-memory-python-sdk"><strong>Python SDK (KaguraClient / KaguraAgent)</strong></a>
+  <a href="https://github.com/kagura-ai/kagura-memory-python-sdk"><strong>Python SDK（KaguraClient・REST クライアント・FileIngestor）</strong></a>
 </p>
 
 <p align="center">
@@ -319,7 +319,7 @@ MCP ツールに加えてフル REST API を提供:
 - [Deployment](docs/deployment.md) — Caddy リバースプロキシを用いた production 配備
 - [Contributing](CONTRIBUTING.md) — 開発セットアップ、コードスタイル、PR ワークフロー
 - [Security](SECURITY.md) — 脆弱性報告、セキュリティ設計
-- [Python SDK](https://github.com/kagura-ai/kagura-memory-python-sdk) — `KaguraClient` と `KaguraAgent`
+- [Python SDK](https://github.com/kagura-ai/kagura-memory-python-sdk) — `KaguraClient`（MCP）に加え、リソース・ファイル・シークレット・ワークスペース・エージェント bootstrap の REST クライアントと、ドキュメント取り込みの `FileIngestor`
 - **プロジェクトサイト**: [www.kagura-ai.com/ja](https://www.kagura-ai.com/ja/) — 概要、ユースケース、スタート手順
 
 ## コントリビューション
