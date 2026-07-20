@@ -1,6 +1,7 @@
 """Tests for MemoryService."""
 
 from datetime import datetime
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 from uuid import uuid4
 
@@ -744,6 +745,156 @@ class TestDeclaredLinks:
         mock_repo.create_or_update_edge.assert_not_awaited()
         emitted = [c.args[0] for c in mock_logger.info.call_args_list if c.args]
         assert "declared_supersedes_created" not in emitted
+
+
+class TestSupersedeCandidateExposure:
+    """#1403 option B: read-time exposure of the stored supersede candidate
+    (server-only column) on recall()/reference(), with the self-healing liveness
+    guard and the (workspace, context) scoping."""
+
+    WS = uuid4()
+    CTX = uuid4()
+
+    @pytest.fixture
+    def service(self):
+        return MemoryService(MagicMock())
+
+    @classmethod
+    def _mem(cls, candidate, *, workspace_id=None, context_id=None):
+        m = MagicMock()
+        m.id = uuid4()
+        m.supersede_candidate = candidate
+        m.workspace_id = workspace_id or cls.WS
+        m.context_id = context_id or cls.CTX
+        return m
+
+    @staticmethod
+    def _candidate(target_id, similarity=0.93, detected_at="2026-07-20T00:00:00Z"):
+        return {
+            "memory_id": str(target_id),
+            "similarity": similarity,
+            "detected_at": detected_at,
+        }
+
+    @classmethod
+    def _target_row(
+        cls, target_id, summary="the older fact", *, workspace_id=None, context_id=None
+    ):
+        return SimpleNamespace(
+            id=target_id,
+            summary=summary,
+            workspace_id=workspace_id or cls.WS,
+            context_id=context_id or cls.CTX,
+        )
+
+    def _mock_rows(self, service, rows):
+        result = MagicMock()
+        result.all = MagicMock(return_value=rows)
+        service.db.execute = AsyncMock(return_value=result)
+
+    @pytest.mark.asyncio
+    async def test_resolve_enriches_live_candidate(self, service):
+        """A stored candidate whose target is live and same-context is returned as
+        a SupersedeCandidate enriched with the target's summary."""
+        target_id = uuid4()
+        source = self._mem(self._candidate(target_id, similarity=0.91))
+        self._mock_rows(service, [self._target_row(target_id)])
+
+        resolved = await service._resolve_supersede_candidates(
+            {str(source.id): source}, user_id="u1", operation="recall"
+        )
+
+        assert source.id in resolved
+        cand = resolved[source.id]
+        assert cand.memory_id == target_id
+        assert cand.summary == "the older fact"
+        assert cand.similarity == 0.91
+        assert cand.detected_at is not None
+
+    @pytest.mark.asyncio
+    async def test_resolve_drops_dead_target(self, service):
+        """Self-healing: a candidate pointing at a deleted/missing memory (not in
+        the live set) is dropped — the suggestion silently stops surfacing."""
+        target_id = uuid4()
+        source = self._mem(self._candidate(target_id))
+        self._mock_rows(service, [])  # target not live
+
+        resolved = await service._resolve_supersede_candidates(
+            {str(source.id): source}, user_id="u1", operation="recall"
+        )
+
+        assert resolved == {}
+
+    @pytest.mark.asyncio
+    async def test_resolve_drops_cross_context_target(self, service):
+        """Security: even a live target is dropped when it is in a DIFFERENT
+        (workspace, context) than the source — the enrichment must never surface a
+        memory's summary across a context the caller isn't already reading."""
+        target_id = uuid4()
+        source = self._mem(self._candidate(target_id))
+        # Same workspace, different context → refused.
+        self._mock_rows(service, [self._target_row(target_id, context_id=uuid4())])
+
+        resolved = await service._resolve_supersede_candidates(
+            {str(source.id): source}, user_id="u1", operation="recall"
+        )
+
+        assert resolved == {}
+
+    @pytest.mark.asyncio
+    async def test_resolve_no_candidates_runs_no_query(self, service):
+        """When no memory in the page carries a candidate, no liveness query runs
+        (the read path stays free)."""
+        plain = self._mem(None)
+        service.db.execute = AsyncMock()
+
+        resolved = await service._resolve_supersede_candidates(
+            {str(plain.id): plain}, user_id="u1", operation="recall"
+        )
+
+        assert resolved == {}
+        service.db.execute.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_resolve_ignores_malformed_candidate(self, service):
+        """A stored candidate missing similarity or memory_id is ignored (old /
+        malformed values must not blow up recall)."""
+        source = self._mem({"memory_id": str(uuid4())})  # no similarity
+        service.db.execute = AsyncMock()
+
+        resolved = await service._resolve_supersede_candidates(
+            {str(source.id): source}, user_id="u1", operation="recall"
+        )
+
+        assert resolved == {}
+        service.db.execute.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_resolve_drops_candidate_with_bad_detected_at(self, service):
+        """Per-item fail-open: a non-ISO detected_at raises inside SupersedeCandidate
+        coercion and drops ONLY that suggestion, never blanking the whole call."""
+        target_id = uuid4()
+        source = self._mem(self._candidate(target_id, detected_at="not-a-real-date"))
+        self._mock_rows(service, [self._target_row(target_id)])
+
+        resolved = await service._resolve_supersede_candidates(
+            {str(source.id): source}, user_id="u1", operation="recall"
+        )
+
+        assert resolved == {}
+
+    @pytest.mark.asyncio
+    async def test_resolve_fails_open_on_db_error(self, service):
+        """Fail-open: a query error returns {} rather than blanking recall."""
+        target_id = uuid4()
+        source = self._mem(self._candidate(target_id))
+        service.db.execute = AsyncMock(side_effect=RuntimeError("boom"))
+
+        resolved = await service._resolve_supersede_candidates(
+            {str(source.id): source}, user_id="u1", operation="recall"
+        )
+
+        assert resolved == {}
 
 
 class TestTagCooccurrenceSeeding:

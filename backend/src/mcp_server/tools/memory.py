@@ -673,6 +673,13 @@ async def handle_recall(
                     # opposing memories (never hidden, both sides annotated).
                     "superseded_by": str(r.superseded_by) if r.superseded_by else None,
                     "contradicts": [str(c) for c in r.contradicts],
+                    # #1403: liveness-guarded near-duplicate this memory may
+                    # supersede — a client can offer confirm→create_edge.
+                    "supersede_candidate": (
+                        r.supersede_candidate.model_dump(mode="json")
+                        if r.supersede_candidate
+                        else None
+                    ),
                 }
                 for r in result.results
             ]
@@ -923,6 +930,13 @@ async def handle_reference(
                 "outgoing_has_more": result.outgoing_has_more,
                 "incoming_links": [ref.model_dump(mode="json") for ref in result.incoming_links],
                 "incoming_has_more": result.incoming_has_more,
+                # #1403: liveness-guarded supersede suggestion (from the
+                # server-only supersede_candidate column, not the details blob).
+                "supersede_candidate": (
+                    result.supersede_candidate.model_dump(mode="json")
+                    if result.supersede_candidate
+                    else None
+                ),
             }
 
             await _log_tool_usage(

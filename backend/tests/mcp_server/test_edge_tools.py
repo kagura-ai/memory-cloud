@@ -22,7 +22,11 @@ from uuid import uuid4
 import pytest
 
 from mcp_server.tools._definitions import get_tool_definitions
-from mcp_server.tools.edge import handle_create_edge, handle_update_edge
+from mcp_server.tools.edge import (
+    _accept_supersede_candidate_if_matching,
+    handle_create_edge,
+    handle_update_edge,
+)
 from models.memory import EDGE_ORIGIN_DECLARED
 
 
@@ -695,3 +699,68 @@ class TestCreateEdgeDuplicateSemantics:
         assert overwrite_schema["type"] == "boolean"
         assert overwrite_schema["default"] is False
         assert "operation" in create_edge["description"]
+
+
+class TestSupersedeAcceptanceTelemetry:
+    """#1403 option B: creating a supersedes edge that confirms a stored
+    suggestion records the acceptance and self-heals (clears the suggestion)."""
+
+    @staticmethod
+    def _db_returning(memory):
+        db = MagicMock()
+        result = MagicMock()
+        result.scalar_one_or_none = MagicMock(return_value=memory)
+        db.execute = AsyncMock(return_value=result)
+        return db
+
+    @pytest.mark.asyncio
+    async def test_matching_candidate_accepted_and_cleared(self):
+        """When src.supersede_candidate.memory_id == dst, the acceptance event
+        fires and the stored candidate column is cleared to None."""
+        src_id, dst_id = uuid4(), uuid4()
+        memory = MagicMock()
+        memory.supersede_candidate = {"memory_id": str(dst_id), "similarity": 0.9}
+        db = self._db_returning(memory)
+
+        with patch("mcp_server.tools.edge.logger") as mock_logger:
+            await _accept_supersede_candidate_if_matching(db, src_id=src_id, dst_id=dst_id)
+
+        # Self-heal: the accepted suggestion is cleared.
+        assert memory.supersede_candidate is None
+        events = {c.args[0]: c.kwargs for c in mock_logger.info.call_args_list if c.args}
+        assert "supersede_suggestion_accepted" in events
+        assert events["supersede_suggestion_accepted"]["superseded_memory_id"] == str(dst_id)
+        assert events["supersede_suggestion_accepted"]["memory_id"] == str(src_id)
+
+    @pytest.mark.asyncio
+    async def test_non_matching_candidate_untouched(self):
+        """A supersedes edge to a DIFFERENT target than the stored candidate is
+        not an acceptance — nothing is cleared and no event fires."""
+        src_id, dst_id = uuid4(), uuid4()
+        other = uuid4()
+        memory = MagicMock()
+        candidate = {"memory_id": str(other), "similarity": 0.9}
+        memory.supersede_candidate = candidate
+        db = self._db_returning(memory)
+
+        with patch("mcp_server.tools.edge.logger") as mock_logger:
+            await _accept_supersede_candidate_if_matching(db, src_id=src_id, dst_id=dst_id)
+
+        assert memory.supersede_candidate == candidate  # untouched
+        emitted = [c.args[0] for c in mock_logger.info.call_args_list if c.args]
+        assert "supersede_suggestion_accepted" not in emitted
+
+    @pytest.mark.asyncio
+    async def test_no_stored_candidate_is_noop(self):
+        """No stored candidate → no acceptance event, no mutation."""
+        src_id, dst_id = uuid4(), uuid4()
+        memory = MagicMock()
+        memory.supersede_candidate = None
+        db = self._db_returning(memory)
+
+        with patch("mcp_server.tools.edge.logger") as mock_logger:
+            await _accept_supersede_candidate_if_matching(db, src_id=src_id, dst_id=dst_id)
+
+        assert memory.supersede_candidate is None
+        emitted = [c.args[0] for c in mock_logger.info.call_args_list if c.args]
+        assert "supersede_suggestion_accepted" not in emitted

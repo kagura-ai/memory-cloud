@@ -208,6 +208,26 @@ class RecallRequest(BaseModel):
     )
 
 
+class SupersedeCandidate(TZAwareBaseModel):
+    """#1403: a near-duplicate the memory likely supersedes (a suggestion — never
+    an auto-created edge).
+
+    Detected at ingest by the k-NN seeding (top-1 neighbor at cosine >=
+    _SUPERSEDE_SUGGEST_THRESHOLD) and stored on the new memory. Surfaced —
+    liveness-guarded — on recall()/reference() so a client can offer a
+    confirm→create_edge(edge_type="supersedes") action. It disappears on its own
+    once the target is deleted (self-healing) or the suggestion is accepted (the
+    stored key is cleared when the matching supersedes edge is created). The
+    #1208 over-supersede prevention is preserved: the edge is only ever created
+    on explicit user/agent confirmation, never by this suggestion.
+    """
+
+    memory_id: UUID
+    summary: str
+    similarity: float
+    detected_at: datetime | None = None
+
+
 class MemoryResponse(TZAwareBaseModel):
     """Response schema for single memory."""
 
@@ -239,6 +259,9 @@ class MemoryResponse(TZAwareBaseModel):
     # direction) — contradiction never hides, it annotates both sides.
     superseded_by: UUID | None = None
     contradicts: list[UUID] = Field(default_factory=list)
+    # #1403: liveness-guarded supersede suggestion (top-1 near-duplicate detected
+    # at ingest). None unless this memory has a still-actionable candidate.
+    supersede_candidate: SupersedeCandidate | None = None
 
     class Config:
         from_attributes = True
@@ -476,6 +499,9 @@ class ReferenceResponse(TZAwareBaseModel):
     outgoing_has_more: bool = False
     incoming_links: list[LinkedMemoryRef] = Field(default_factory=list)
     incoming_has_more: bool = False
+    # #1403: liveness-guarded supersede suggestion (from the server-only
+    # supersede_candidate column, never the client-writable details blob).
+    supersede_candidate: SupersedeCandidate | None = None
 
 
 class ExportedSearchConfig(BaseModel):

@@ -250,6 +250,16 @@ class Memory(Base):
         server_default=SOURCE_TYPE_MANUAL,
     )
 
+    # #1403: server-only supersede suggestion — the top-1 near-duplicate found at
+    # ingest by the k-NN seeding (cosine >= _SUPERSEDE_SUGGEST_THRESHOLD), stored
+    # as {memory_id, similarity, detected_at}. A DEDICATED column, NOT a key inside
+    # the client-writable ``details`` blob: putting it in ``details`` would let a
+    # client forge the ``memory_id`` (leaking another memory's summary via the
+    # read-path enrichment, bypassing can_access_memory) or silently drop it on a
+    # ``details`` replace. Surfaced — liveness-guarded — on recall()/reference(),
+    # and cleared when the suggested supersedes edge is created. NULL = none.
+    supersede_candidate: Mapped[dict[str, Any] | None] = mapped_column(JSON, nullable=True)
+
     # Migration 061: Generated columns for efficient resource memory lookups
     # These columns are automatically computed from details JSONB field
     resource_id: Mapped[str | None] = mapped_column(
