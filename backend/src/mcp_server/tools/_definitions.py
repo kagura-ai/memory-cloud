@@ -98,6 +98,15 @@ Supports 3-layer architecture:
 - context_summary: Why this matters and how to use it
 - details: Complete data, code, or structured information
 
+UPDATING A FACT (supersedes) — the primary way to keep memory current:
+When you store the NEWER version of something you previously remembered, pass
+supersedes=<old_memory_id>. The old memory is SHADOWED out of default recall
+(not deleted — it stays restorable and reachable via recall(include_superseded=true)
+and explore()). Prefer this over storing a near-duplicate: a duplicate leaves the
+stale and fresh facts competing in recall, whereas a declared supersession makes
+the update authoritative. This is the strongest lever for update-correctness, so
+reach for it whenever a memory replaces an earlier one.
+
 CHUNKING BEST PRACTICES for long documents:
 • Optimal summary length: 100-250 characters (max: 500)
 • For long documents (>2000 chars): Create multiple semantic memories

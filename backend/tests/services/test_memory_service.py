@@ -660,6 +660,91 @@ class TestDeclaredLinks:
         # The empty requested_ids list means no DB query at all
         service.db.execute.assert_not_called()
 
+    @pytest.mark.asyncio
+    async def test_supersedes_emits_declared_supersedes_telemetry(self, service):
+        """#1403: creating a declared supersedes edge emits a dedicated
+        declared_supersedes_created event so adoption of the dominant stale-
+        suppression lever is visible in telemetry (not buried in the generic
+        declared_links_created count)."""
+        memory_id = uuid4()
+        target_id = uuid4()
+        request = RememberRequest(
+            summary="Updated version of a previously stored fact",
+            content="fresh content",
+            type="note",
+            supersedes=target_id,
+        )
+        # The target-existence validation query returns the predecessor row.
+        mock_result = MagicMock()
+        mock_result.scalar_one_or_none = MagicMock(return_value=target_id)
+        service.db.execute = AsyncMock(return_value=mock_result)
+        service.db.commit = AsyncMock()
+
+        mock_repo = MagicMock()
+        mock_repo.create_or_update_edge = AsyncMock()
+
+        with (
+            patch(
+                "repositories.neural_edge.NeuralEdgeRepository",
+                return_value=mock_repo,
+            ),
+            patch("services.memory_service.logger") as mock_logger,
+        ):
+            await service._create_declared_links(
+                memory_id=memory_id,
+                request=request,
+                user_id="test_user",
+                workspace_id=str(uuid4()),
+                context_id=str(uuid4()),
+            )
+
+        # The supersedes edge was created…
+        mock_repo.create_or_update_edge.assert_awaited_once()
+        # …and its adoption telemetry fired, naming the superseded predecessor.
+        events = {c.args[0]: c.kwargs for c in mock_logger.info.call_args_list if c.args}
+        assert "declared_supersedes_created" in events
+        assert events["declared_supersedes_created"]["superseded_memory_id"] == str(target_id)
+        assert events["declared_supersedes_created"]["memory_id"] == str(memory_id)
+
+    @pytest.mark.asyncio
+    async def test_supersedes_missing_target_emits_no_telemetry(self, service):
+        """#1403: when the supersedes target does not exist (validation query
+        returns None), no edge is created and the declared_supersedes_created
+        adoption event must NOT fire — it counts only real supersessions."""
+        request = RememberRequest(
+            summary="Update pointing at a non-existent predecessor",
+            content="fresh content",
+            type="note",
+            supersedes=uuid4(),
+        )
+        # Target-existence validation returns None (predecessor absent).
+        mock_result = MagicMock()
+        mock_result.scalar_one_or_none = MagicMock(return_value=None)
+        service.db.execute = AsyncMock(return_value=mock_result)
+        service.db.commit = AsyncMock()
+
+        mock_repo = MagicMock()
+        mock_repo.create_or_update_edge = AsyncMock()
+
+        with (
+            patch(
+                "repositories.neural_edge.NeuralEdgeRepository",
+                return_value=mock_repo,
+            ),
+            patch("services.memory_service.logger") as mock_logger,
+        ):
+            await service._create_declared_links(
+                memory_id=uuid4(),
+                request=request,
+                user_id="test_user",
+                workspace_id=str(uuid4()),
+                context_id=str(uuid4()),
+            )
+
+        mock_repo.create_or_update_edge.assert_not_awaited()
+        emitted = [c.args[0] for c in mock_logger.info.call_args_list if c.args]
+        assert "declared_supersedes_created" not in emitted
+
 
 class TestTagCooccurrenceSeeding:
     """Unit tests for _create_tag_cooccurrence_seed_edges (Issue #223).
