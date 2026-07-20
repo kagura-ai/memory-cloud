@@ -29,7 +29,7 @@
 
 <p align="center">
   Works with Claude, ChatGPT, Gemini, and any MCP-compatible client.<br>
-  <a href="https://github.com/kagura-ai/kagura-memory-python-sdk"><strong>Python SDK (KaguraClient / KaguraAgent)</strong></a>
+  <a href="https://github.com/kagura-ai/kagura-memory-python-sdk"><strong>Python SDK (KaguraClient, REST clients & FileIngestor)</strong></a>
 </p>
 
 <p align="center">
@@ -308,7 +308,7 @@ This project is designed to be developed **with** Claude Code and Kagura Memory 
 - [Deployment](docs/deployment.md) — Production deployment with Caddy reverse proxy
 - [Contributing](CONTRIBUTING.md) — Development setup, code style, PR workflow
 - [Security](SECURITY.md) — Vulnerability reporting, security design
-- [Python SDK](https://github.com/kagura-ai/kagura-memory-python-sdk) — `KaguraClient` and `KaguraAgent` for Python
+- [Python SDK](https://github.com/kagura-ai/kagura-memory-python-sdk) — `KaguraClient` (MCP) plus REST clients for resources, files, secrets, workspaces, and agent bootstrap, and a document `FileIngestor`
 - **Project site**: [www.kagura-ai.com](https://www.kagura-ai.com) — overview, use cases, getting started paths
 
 ## Contributing

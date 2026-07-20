@@ -1282,7 +1282,7 @@ All errors follow this format:
 
 ## SDKs and Examples
 
-- **Python SDK**: [`kagura-memory-python-sdk`](https://github.com/kagura-ai/kagura-memory-python-sdk) — `KaguraClient` (sync HTTP client) and `KaguraAgent` (LLM agent integration). Supports OAuth2 device flow via `kagura auth login` against the pre-seeded `kagura-cli` public client.
+- **Python SDK**: [`kagura-memory-python-sdk`](https://github.com/kagura-ai/kagura-memory-python-sdk) — `KaguraClient` (MCP JSON-RPC) plus REST clients (`ResourceClient`, `FilesClient`, `SecretClient`, `WorkspaceClient`, `AgentsClient`) and a document `FileIngestor`. Supports OAuth2 device flow via `kagura auth login` against the pre-seeded `kagura-cli` public client.
 - **JavaScript SDK**: Planned
 - **Example Code**: [README Quick Start](../README.md#quick-start) and the [Python SDK](https://github.com/kagura-ai/kagura-memory-python-sdk)
 
