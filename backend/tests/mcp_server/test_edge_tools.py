@@ -764,3 +764,109 @@ class TestSupersedeAcceptanceTelemetry:
         assert memory.supersede_candidate is None
         emitted = [c.args[0] for c in mock_logger.info.call_args_list if c.args]
         assert "supersede_suggestion_accepted" not in emitted
+
+    @staticmethod
+    def _update_edge_env(existing, post_update):
+        """Standard fully-mocked environment for a handle_update_edge call."""
+        mock_db = AsyncMock()
+        mock_db.commit = AsyncMock()
+        mock_db.rollback = AsyncMock()
+
+        async def mock_get_db():
+            yield mock_db
+
+        mock_repo = MagicMock()
+        mock_repo.get_edge = AsyncMock(return_value=existing)
+        mock_repo.create_or_update_edge = AsyncMock(return_value=post_update)
+
+        mock_ctx = MagicMock()
+        mock_ctx.id = uuid4()
+        mock_ctx.workspace_id = uuid4()
+        return mock_get_db, mock_repo, mock_ctx
+
+    @pytest.mark.asyncio
+    async def test_update_edge_to_supersedes_records_acceptance(self):
+        """#1403 F4: retyping an edge to 'supersedes' via update_edge (not only
+        create_edge) must confirm/clear a stored suggestion — else a suggestion
+        accepted through update_edge keeps resurfacing on recall/reference."""
+        src_id, dst_id, context_id, workspace_id = uuid4(), uuid4(), uuid4(), uuid4()
+        existing = _mock_edge(src_id, dst_id, edge_type="related_to", weight=0.5)
+        post_update = _mock_edge(src_id, dst_id, edge_type="supersedes", weight=0.5)
+        mock_get_db, mock_repo, mock_ctx = self._update_edge_env(existing, post_update)
+
+        with (
+            patch("db.base.get_db", new=mock_get_db),
+            patch("repositories.neural_edge.NeuralEdgeRepository", return_value=mock_repo),
+            patch(
+                "mcp_server.tools.edge._resolve_context",
+                new_callable=AsyncMock,
+                return_value=mock_ctx,
+            ),
+            patch(
+                "mcp_server.tools.edge._check_viewer_permission",
+                new_callable=AsyncMock,
+                return_value=None,
+            ),
+            patch("mcp_server.tools.edge._log_tool_usage", new_callable=AsyncMock),
+            patch(
+                "mcp_server.tools.edge._accept_supersede_candidate_if_matching",
+                new_callable=AsyncMock,
+            ) as accept,
+        ):
+            result = await handle_update_edge(
+                {
+                    "source_id": str(src_id),
+                    "target_id": str(dst_id),
+                    "edge_type": "supersedes",
+                    "context_id": str(context_id),
+                },
+                "user-f4",
+                workspace_id,
+            )
+
+        assert json.loads(result[0].text)["status"] == "success"
+        accept.assert_awaited_once()
+        assert accept.await_args.kwargs["src_id"] == src_id
+        assert accept.await_args.kwargs["dst_id"] == dst_id
+
+    @pytest.mark.asyncio
+    async def test_update_edge_non_supersedes_skips_acceptance(self):
+        """A weight-only update (edge stays non-'supersedes') must not touch the
+        supersede-candidate machinery."""
+        src_id, dst_id, context_id, workspace_id = uuid4(), uuid4(), uuid4(), uuid4()
+        existing = _mock_edge(src_id, dst_id, edge_type="related_to", weight=0.5)
+        post_update = _mock_edge(src_id, dst_id, edge_type="related_to", weight=0.8)
+        mock_get_db, mock_repo, mock_ctx = self._update_edge_env(existing, post_update)
+
+        with (
+            patch("db.base.get_db", new=mock_get_db),
+            patch("repositories.neural_edge.NeuralEdgeRepository", return_value=mock_repo),
+            patch(
+                "mcp_server.tools.edge._resolve_context",
+                new_callable=AsyncMock,
+                return_value=mock_ctx,
+            ),
+            patch(
+                "mcp_server.tools.edge._check_viewer_permission",
+                new_callable=AsyncMock,
+                return_value=None,
+            ),
+            patch("mcp_server.tools.edge._log_tool_usage", new_callable=AsyncMock),
+            patch(
+                "mcp_server.tools.edge._accept_supersede_candidate_if_matching",
+                new_callable=AsyncMock,
+            ) as accept,
+        ):
+            result = await handle_update_edge(
+                {
+                    "source_id": str(src_id),
+                    "target_id": str(dst_id),
+                    "weight": 0.8,
+                    "context_id": str(context_id),
+                },
+                "user-f4",
+                workspace_id,
+            )
+
+        assert json.loads(result[0].text)["status"] == "success"
+        accept.assert_not_awaited()
