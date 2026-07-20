@@ -89,6 +89,18 @@ export function connectorReadiness(
   };
 }
 
+// #1389: the one human-readable name for a connector, shared by every
+// surface that labels one (list row today; dialog titles/toasts as they
+// adopt names) so row and dialog can never disagree on what a connector
+// is called.
+export function connectorDisplayName(c: WorkspaceConnectorSummary): string {
+  return (
+    c.display_name ||
+    c.external_team_id ||
+    c.connector_type.charAt(0).toUpperCase() + c.connector_type.slice(1)
+  );
+}
+
 /** Create request — the registration flow fields are all optional. */
 export interface CreateConnectorRequest {
   connector_type: ConnectorType;

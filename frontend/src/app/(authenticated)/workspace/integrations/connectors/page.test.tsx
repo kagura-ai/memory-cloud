@@ -28,8 +28,9 @@ vi.mock("@/lib/api/workspace-connectors", async (importOriginal) => {
   const actual =
     await importOriginal<typeof import("@/lib/api/workspace-connectors")>();
   return {
-    // Pure helper — use the real readiness rule, not a mock.
+    // Pure helpers — use the real rules, not mocks.
     connectorReadiness: actual.connectorReadiness,
+    connectorDisplayName: actual.connectorDisplayName,
     listConnectors: (...args: unknown[]) => mockListConnectors(...args),
     listAvailableWorkerApps: (...args: unknown[]) =>
       mockListAvailableWorkerApps(...args),
@@ -828,8 +829,9 @@ describe("ConnectorsPage RBAC gate", () => {
     render(<ConnectorsPage />);
 
     // Primary content still renders (the i18n mock drops params, so
-    // match the row's static bits rather than the resource id).
-    expect(await screen.findByText("slack")).toBeInTheDocument();
+    // match the row's static bits rather than the resource id). The
+    // type fallback title is capitalized by connectorDisplayName (#1389).
+    expect(await screen.findByText("Slack")).toBeInTheDocument();
     expect(
       screen.getByRole("switch", { name: "visionEnabledFor" }),
     ).toBeInTheDocument();

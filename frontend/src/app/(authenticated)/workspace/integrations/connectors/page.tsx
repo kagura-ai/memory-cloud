@@ -1,6 +1,13 @@
 "use client";
 
-import { FormEvent, useCallback, useEffect, useRef, useState } from "react";
+import {
+  FormEvent,
+  ReactNode,
+  useCallback,
+  useEffect,
+  useRef,
+  useState,
+} from "react";
 import { useRouter, useSearchParams } from "next/navigation";
 import { useTranslations, useLocale } from "next-intl";
 import {
@@ -67,6 +74,7 @@ import { useWorkspace } from "@/contexts/WorkspaceContext";
 import { hasWorkspaceRole, WorkspaceRole } from "@/lib/auth/rbac";
 import { API_BASE_URL } from "@/lib/api/base";
 import {
+  connectorDisplayName,
   connectorReadiness,
   createConnector,
   deleteConnector,
@@ -121,7 +129,8 @@ function curlSample(resourceId: string, token: string): string {
   ].join("\n");
 }
 
-// #1388: one status chip shape for the settings-dialog sections.
+// #1388: one status chip shape for the settings-dialog sections and the
+// list-row aggregate badge — set/unset color language defined once.
 function StatusChip({
   set,
   setLabel,
@@ -135,6 +144,32 @@ function StatusChip({
     <Badge variant={set ? "secondary" : "outline"}>
       {set ? setLabel : unsetLabel}
     </Badge>
+  );
+}
+
+// #1389: a missing vend-setting rendered as an affordance — a badge-shaped
+// button that opens the settings dialog at the relevant section.
+function MissingBadgeButton({
+  onClick,
+  label,
+  children,
+}: {
+  onClick: () => void;
+  label: string;
+  children: ReactNode;
+}) {
+  return (
+    <button
+      type="button"
+      className={cn(
+        badgeVariants({ variant: "outline" }),
+        "cursor-pointer hover:bg-accent",
+      )}
+      onClick={onClick}
+      aria-label={label}
+    >
+      {children}
+    </button>
   );
 }
 
@@ -666,7 +701,7 @@ export default function ConnectorsPage() {
         setRuntimeSaving(null);
       }
     },
-    [t, toast],
+    [t, toast, reload],
   );
 
   const handleManualCreate = useCallback(
@@ -675,19 +710,25 @@ export default function ConnectorsPage() {
       if (!manualAppKey || !manualTeamId || !manualBotToken) return;
       // #1389: client-side shape checks (UX only — the backend stays the
       // authority). A bot token is always `xoxb-`-prefixed; pasting a user
-      // token (xoxp-) or an app token (xapp-) is the common first-run mistake.
+      // token (xoxp-) or an app token (xapp-) is the common first-run
+      // mistake. Team IDs are uppercase alphanumeric, T-prefixed — or
+      // E-prefixed for an Enterprise Grid org install.
       if (!manualBotToken.startsWith("xoxb-")) {
         setManualError(t("manualBotTokenInvalid"));
         return;
       }
-      if (!/^T[A-Z0-9]+$/i.test(manualTeamId.trim())) {
+      const teamId = manualTeamId.trim();
+      if (!/^[TE][A-Z0-9]+$/.test(teamId)) {
         setManualError(t("manualTeamIdInvalid"));
         return;
       }
       setManualSubmitting(true);
       setManualError(null);
       try {
-        const resourceId = toResourceId(`${manualAppKey}-${manualTeamId}`);
+        // Submit the trimmed ID — event dispatch matches external_team_id
+        // exactly, so a pasted trailing space/newline would create a
+        // connector that silently never receives events.
+        const resourceId = toResourceId(`${manualAppKey}-${teamId}`);
         const app = availableApps?.find(
           (candidate) => candidate.app_key === manualAppKey,
         );
@@ -695,11 +736,9 @@ export default function ConnectorsPage() {
           connector_type: "slack",
           app_key: manualAppKey,
           resource_id: resourceId,
-          display_name: app
-            ? `${app.display_name} / ${manualTeamId}`
-            : manualTeamId,
+          display_name: app ? `${app.display_name} / ${teamId}` : teamId,
           auto_create_context_name: resourceId,
-          external_team_id: manualTeamId,
+          external_team_id: teamId,
           oauth_tokens: { bot_token: manualBotToken },
           pii_guardrail_config: {
             enabled: true,
@@ -776,25 +815,29 @@ export default function ConnectorsPage() {
           descriptor — Slack live, Discord/Teams disabled coming-soon — so
           Slack-hardcoded JSX stops multiplying (#1390). */}
       <div className="mb-4 flex flex-wrap justify-end gap-2">
-        {CONNECTOR_PROVIDERS.map((provider) =>
-          provider.enabled ? (
-            <Button
-              key={provider.key}
-              // Today the only enabled provider is Slack (oauth flow); a
-              // second enabled provider gets its own install URL via the
-              // descriptor when it lands (#1390).
-              onClick={() => (window.location.href = slackInstallUrl())}
-            >
-              <provider.icon className="h-4 w-4" aria-hidden="true" />
-              {t("connectProvider", { name: provider.name })}
-            </Button>
-          ) : (
-            <Button key={provider.key} variant="outline" disabled>
-              <provider.icon className="h-4 w-4" aria-hidden="true" />
-              {provider.name} — {t("comingSoon")}
-            </Button>
-          ),
-        )}
+        {CONNECTOR_PROVIDERS.map((provider) => (
+          <Button
+            key={provider.key}
+            variant={provider.enabled ? "default" : "outline"}
+            disabled={!provider.enabled}
+            onClick={
+              provider.enabled
+                ? () => {
+                    // Routing lives in the descriptor: a provider enabled
+                    // without its own flow yields a no-op, never another
+                    // provider's OAuth screen.
+                    const url = provider.installUrl?.();
+                    if (url) window.location.href = url;
+                  }
+                : undefined
+            }
+          >
+            <provider.icon className="h-4 w-4" aria-hidden="true" />
+            {provider.enabled
+              ? t("connectProvider", { name: provider.name })
+              : `${provider.name} — ${t("comingSoon")}`}
+          </Button>
+        ))}
       </div>
 
       {appsLoadError && !availableApps && <ErrorBanner error={appsLoadError} />}
@@ -889,131 +932,126 @@ export default function ConnectorsPage() {
           onAction={() => (window.location.href = slackInstallUrl())}
         />
       ) : (
-        <ul className="divide-y rounded-md border">
-          {connectors.map((c) => {
-            // #1388/#1389: one readiness rule for the aggregate badge and
-            // the per-part chips — shared with the settings dialog.
-            const readiness = connectorReadiness(c);
-            return (
-              <li
-                key={c.connector_id}
-                className="flex items-center justify-between p-4"
-              >
-                <div className="min-w-0">
-                  {/* #1389: human names first — resource label, then the
-                      platform team id, then the bare type as last resort. */}
-                  <p className="font-medium">
-                    {c.display_name || c.external_team_id || c.connector_type}
-                  </p>
-                  <p className="text-xs text-muted-foreground">
-                    {t("appIdentity", { appKey: c.app_key })}
-                  </p>
-                  <div className="flex items-center gap-1 text-sm text-muted-foreground">
-                    <span>
-                      {c.context_name
-                        ? t("contextBoundName", { name: c.context_name })
-                        : c.context_id
-                          ? t("contextBound", { id: c.context_id })
-                          : t("contextNotReady")}
-                    </span>
-                    {/* UUID demoted behind the copy affordance (#1389). */}
-                    {c.context_id && (
+        // One provider for the whole list so Radix's shared skip-delay
+        // grouping works across rows (per-row providers would isolate it).
+        <TooltipProvider delayDuration={200}>
+          <ul className="divide-y rounded-md border">
+            {connectors.map((c) => {
+              // #1388/#1389: one readiness rule for the aggregate badge and
+              // the per-part chips — shared with the settings dialog.
+              const readiness = connectorReadiness(c);
+              return (
+                <li
+                  key={c.connector_id}
+                  className="flex items-center justify-between p-4"
+                >
+                  <div className="min-w-0">
+                    {/* #1389: human names first — resource label, then the
+                      platform team id, then the capitalized type. */}
+                    <p className="font-medium">{connectorDisplayName(c)}</p>
+                    <p className="text-xs text-muted-foreground">
+                      {t("appIdentity", { appKey: c.app_key })}
+                    </p>
+                    <div className="flex items-center gap-1 text-sm text-muted-foreground">
+                      <span>
+                        {c.context_name
+                          ? t("contextBoundName", { name: c.context_name })
+                          : c.context_id
+                            ? t("contextBound", { id: c.context_id })
+                            : t("contextNotReady")}
+                      </span>
+                      {/* UUID demoted behind the copy affordance (#1389). */}
+                      {c.context_id && (
+                        <Button
+                          type="button"
+                          variant="ghost"
+                          size="sm"
+                          aria-label={t("copyContextId")}
+                          onClick={() =>
+                            handleCopy(c.context_id!, `ctx-${c.connector_id}`)
+                          }
+                        >
+                          {isCopied(`ctx-${c.connector_id}`) ? (
+                            <Check className="h-4 w-4" />
+                          ) : (
+                            <Copy className="h-4 w-4" />
+                          )}
+                        </Button>
+                      )}
+                    </div>
+                    {/* #893: connector_id is non-secret — show it in the list
+                      (support / log correlation / CLI target) with a copy
+                      button, instead of in the one-time reveal. */}
+                    <div className="mt-1 flex items-center gap-1 text-xs text-muted-foreground">
+                      <span className="font-mono break-all">
+                        {t("connectorIdLabel", { id: c.connector_id })}
+                      </span>
                       <Button
                         type="button"
                         variant="ghost"
                         size="sm"
-                        aria-label={t("copyContextId")}
+                        aria-label={t("copyConnectorId")}
                         onClick={() =>
-                          handleCopy(c.context_id!, `ctx-${c.connector_id}`)
+                          handleCopy(c.connector_id, `cid-${c.connector_id}`)
                         }
                       >
-                        {isCopied(`ctx-${c.connector_id}`) ? (
+                        {isCopied(`cid-${c.connector_id}`) ? (
                           <Check className="h-4 w-4" />
                         ) : (
                           <Copy className="h-4 w-4" />
                         )}
                       </Button>
-                    )}
-                  </div>
-                  {/* #893: connector_id is non-secret — show it in the list
-                      (support / log correlation / CLI target) with a copy
-                      button, instead of in the one-time reveal. */}
-                  <div className="mt-1 flex items-center gap-1 text-xs text-muted-foreground">
-                    <span className="font-mono break-all">
-                      {t("connectorIdLabel", { id: c.connector_id })}
-                    </span>
-                    <Button
-                      type="button"
-                      variant="ghost"
-                      size="sm"
-                      aria-label={t("copyConnectorId")}
-                      onClick={() =>
-                        handleCopy(c.connector_id, `cid-${c.connector_id}`)
-                      }
-                    >
-                      {isCopied(`cid-${c.connector_id}`) ? (
-                        <Check className="h-4 w-4" />
-                      ) : (
-                        <Copy className="h-4 w-4" />
-                      )}
-                    </Button>
-                  </div>
-                  {/* #1376/#1389: vend-settings status badges — the aggregate
+                    </div>
+                    {/* #1376/#1389: vend-settings status badges — the aggregate
                       readiness first, then per-part chips. Missing parts are
                       buttons that open the settings dialog at that section. */}
-                  <div className="mt-2 flex flex-wrap items-center gap-1.5">
-                    <Badge variant={readiness.ready ? "secondary" : "outline"}>
-                      {readiness.ready
-                        ? t("runningBadge")
-                        : t("needsSetupBadge")}
-                    </Badge>
-                    {readiness.missingChannels ? (
-                      <button
-                        type="button"
-                        className={cn(
-                          badgeVariants({ variant: "outline" }),
-                          "cursor-pointer hover:bg-accent",
-                        )}
-                        onClick={() => openSettings(c, "channels")}
-                        aria-label={t("fixChannels")}
-                      >
-                        {t("channelsNone")}
-                      </button>
-                    ) : (
-                      <Badge variant="secondary">
-                        {t("channelsCount", {
-                          count: c.channel_ids?.length ?? 0,
-                        })}
+                    <div className="mt-2 flex flex-wrap items-center gap-1.5">
+                      <StatusChip
+                        set={readiness.ready}
+                        setLabel={t("runningBadge")}
+                        unsetLabel={t("needsSetupBadge")}
+                      />
+                      {readiness.missingChannels ? (
+                        <MissingBadgeButton
+                          onClick={() => openSettings(c, "channels")}
+                          label={t("fixChannels")}
+                        >
+                          {t("channelsNone")}
+                        </MissingBadgeButton>
+                      ) : (
+                        <Badge variant="secondary">
+                          {t("channelsCount", {
+                            count: c.channel_ids?.length ?? 0,
+                          })}
+                        </Badge>
+                      )}
+                      {readiness.missingLlm ? (
+                        <MissingBadgeButton
+                          onClick={() => openSettings(c, "llm")}
+                          label={t("fixLlm")}
+                        >
+                          {t("llmNotBound")}
+                        </MissingBadgeButton>
+                      ) : (
+                        <Badge variant="secondary">{t("llmBound")}</Badge>
+                      )}
+                      <Badge variant="outline">
+                        {c.locale === "en" || c.locale === "ja"
+                          ? c.locale
+                          : t("localeDefault")}
                       </Badge>
-                    )}
-                    {readiness.missingLlm ? (
-                      <button
-                        type="button"
-                        className={cn(
-                          badgeVariants({ variant: "outline" }),
-                          "cursor-pointer hover:bg-accent",
-                        )}
-                        onClick={() => openSettings(c, "llm")}
-                        aria-label={t("fixLlm")}
-                      >
-                        {t("llmNotBound")}
-                      </button>
-                    ) : (
-                      <Badge variant="secondary">{t("llmBound")}</Badge>
-                    )}
-                    <Badge variant="outline">
-                      {c.locale === "en" || c.locale === "ja"
-                        ? c.locale
-                        : t("localeDefault")}
-                    </Badge>
+                    </div>
                   </div>
-                </div>
-                <div className="flex items-center gap-4">
-                  <label className="flex items-center gap-2 text-sm">
-                    <span>{t("visionEnabled")}</span>
-                    {/* #1389: first-run users can't tell what the toggle
+                  <div className="flex items-center gap-4">
+                    {/* NOT a <label>: it would wrap two labelable elements
+                      (the tooltip button + the Switch) and the label's
+                      activation target would be the tooltip button, so
+                      clicking the text could never toggle the switch. The
+                      Switch carries its own aria-label. */}
+                    <div className="flex items-center gap-2 text-sm">
+                      <span>{t("visionEnabled")}</span>
+                      {/* #1389: first-run users can't tell what the toggle
                         does — say it on demand. */}
-                    <TooltipProvider delayDuration={200}>
                       <Tooltip>
                         <TooltipTrigger asChild>
                           <button
@@ -1026,44 +1064,44 @@ export default function ConnectorsPage() {
                         </TooltipTrigger>
                         <TooltipContent>{t("visionTooltip")}</TooltipContent>
                       </Tooltip>
-                    </TooltipProvider>
-                    {runtimeSaving === c.connector_id && (
-                      <InlineSpinner aria-hidden="true" />
-                    )}
-                    <Switch
-                      checked={c.runtime?.vision_enabled ?? true}
-                      disabled={
-                        c.runtime == null || runtimeSaving === c.connector_id
-                      }
-                      onCheckedChange={(enabled) =>
-                        void handleVisionEnabledChange(c, enabled)
-                      }
-                      aria-label={t("visionEnabledFor", {
-                        id: c.connector_id,
-                      })}
-                    />
-                  </label>
-                  <Button
-                    variant="ghost"
-                    size="sm"
-                    onClick={() => openSettings(c)}
-                    aria-label={t("editSettings")}
-                  >
-                    <Pencil className="h-4 w-4" />
-                  </Button>
-                  <Button
-                    variant="ghost"
-                    size="sm"
-                    onClick={() => setToDelete(c)}
-                    aria-label={tCommon("delete")}
-                  >
-                    <Trash2 className="h-4 w-4" />
-                  </Button>
-                </div>
-              </li>
-            );
-          })}
-        </ul>
+                      {runtimeSaving === c.connector_id && (
+                        <InlineSpinner aria-hidden="true" />
+                      )}
+                      <Switch
+                        checked={c.runtime?.vision_enabled ?? true}
+                        disabled={
+                          c.runtime == null || runtimeSaving === c.connector_id
+                        }
+                        onCheckedChange={(enabled) =>
+                          void handleVisionEnabledChange(c, enabled)
+                        }
+                        aria-label={t("visionEnabledFor", {
+                          id: c.connector_id,
+                        })}
+                      />
+                    </div>
+                    <Button
+                      variant="ghost"
+                      size="sm"
+                      onClick={() => openSettings(c)}
+                      aria-label={t("editSettings")}
+                    >
+                      <Pencil className="h-4 w-4" />
+                    </Button>
+                    <Button
+                      variant="ghost"
+                      size="sm"
+                      onClick={() => setToDelete(c)}
+                      aria-label={tCommon("delete")}
+                    >
+                      <Trash2 className="h-4 w-4" />
+                    </Button>
+                  </div>
+                </li>
+              );
+            })}
+          </ul>
+        </TooltipProvider>
       )}
 
       {/* #1376: vend-settings editor */}

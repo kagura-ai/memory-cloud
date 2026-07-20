@@ -1,6 +1,8 @@
 import type { LucideIcon } from "lucide-react";
 import { MessageCircle, Slack, Users } from "lucide-react";
 
+import { slackInstallUrl } from "@/lib/api/workspace-connectors";
+
 // #1389/#1390: frontend provider descriptor so the connect CTA and row
 // rendering stop multiplying Slack-hardcoded JSX. This is deliberately a
 // UI-only skeleton — backend routing, callback params, and i18n keys stay
@@ -18,6 +20,13 @@ export interface ConnectorProviderDescriptor {
   connectFlow: "oauth" | "manual";
   /** false → rendered as a disabled "coming soon" affordance. */
   enabled: boolean;
+  /**
+   * Starts this provider's connect flow. Present iff enabled — routing
+   * lives in the descriptor so flipping a provider's `enabled` without
+   * wiring its own flow yields a dead button, never another provider's
+   * OAuth consent screen.
+   */
+  installUrl?: () => string;
 }
 
 export const CONNECTOR_PROVIDERS: ConnectorProviderDescriptor[] = [
@@ -27,6 +36,7 @@ export const CONNECTOR_PROVIDERS: ConnectorProviderDescriptor[] = [
     icon: Slack,
     connectFlow: "oauth",
     enabled: true,
+    installUrl: slackInstallUrl,
   },
   {
     key: "discord",

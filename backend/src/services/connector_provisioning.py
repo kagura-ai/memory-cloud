@@ -658,8 +658,9 @@ class ConnectorProvisioningService:
                 WorkspaceConnector,
                 Resource.resource_id,
                 Resource.name,
-                Context.display_name,
-                Context.name,
+                # NULL-only fallback (service-layer coalesce precedent):
+                # an empty-string display_name stays authoritative.
+                func.coalesce(Context.display_name, Context.name),
             )
             .join(Resource, WorkspaceConnector.resource_pk == Resource.id)
             .outerjoin(Context, WorkspaceConnector.context_id == Context.id)
@@ -671,15 +672,9 @@ class ConnectorProvisioningService:
                 connector=connector,
                 resource_id=resource_id,
                 display_name=resource_name,
-                context_name=context_display_name or context_name,
+                context_name=context_name,
             )
-            for (
-                connector,
-                resource_id,
-                resource_name,
-                context_display_name,
-                context_name,
-            ) in result.all()
+            for connector, resource_id, resource_name, context_name in result.all()
         ]
 
     async def _assert_team_unclaimed(
