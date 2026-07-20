@@ -18,6 +18,7 @@ from uuid import uuid4
 
 import pytest
 
+from mcp_server.tools import explore as explore_tools
 from mcp_server.tools import feedback as feedback_tools
 from mcp_server.tools import memory as memory_tools
 from mcp_server.tools._helpers import _ContextNotFoundError
@@ -78,6 +79,18 @@ CASES = [
         {"context_id": _CTX, "memory_id": _MID, "helpful": True},
         "_resolve_context_for_read",
         "feedback",
+    ),
+    (
+        # #1400/#1401: explore is a READ surface — it must resolve via the
+        # read-path helper (ACCESS_READ) AND thread operation="explore" so an
+        # enforce-mode binding deny persists an audit row (explore was
+        # previously on the WRITE resolver with operation=None → both wrongly
+        # denied read-only agents and left zero audit evidence).
+        explore_tools,
+        "handle_explore",
+        {"memory_id": _MID, "context_id": _CTX},
+        "_resolve_context_for_read",
+        "explore",
     ),
     (
         memory_tools,

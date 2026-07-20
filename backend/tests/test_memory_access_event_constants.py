@@ -22,7 +22,7 @@ def _check(name: str) -> str:
     return c.sqltext.text
 
 
-def test_operation_tuple_is_the_eight_audited_ops():
+def test_operation_tuple_is_the_audited_ops():
     assert MAE_OPERATIONS == (
         "recall",
         "reference",
@@ -32,13 +32,14 @@ def test_operation_tuple_is_the_eight_audited_ops():
         "load_pinned",
         "bootstrap",
         "feedback",
+        "explore",  # #1401 (appended, never reordered)
     )
 
 
 def test_check_literals_byte_identical_to_migration():
     assert _check("valid_mae_operation") == (
         "operation IN ('recall', 'reference', 'remember', 'update', 'forget', "
-        "'load_pinned', 'bootstrap', 'feedback')"
+        "'load_pinned', 'bootstrap', 'feedback', 'explore')"
     )
     assert _check("valid_mae_outcome") == "outcome IN ('success', 'denied', 'error', 'partial')"
     assert _check("valid_mae_surface") == "surface IN ('mcp', 'rest')"

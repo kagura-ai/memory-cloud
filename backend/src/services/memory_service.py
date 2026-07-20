@@ -3644,14 +3644,19 @@ class MemoryService:
         from services.permission_service import CallerId, MemoryAuthorId, PermissionService
 
         perm_service = PermissionService(self.db)
-        # #1286 (P0-5): no operation threaded — "explore" is outside the
-        # MAE_OPERATIONS vocabulary; its denies stay log-only until the
-        # vocabulary grows (CHECK widening = a migration, out of scope here).
+        # #1401: "explore" is now in the MAE_OPERATIONS vocabulary (e74_1401),
+        # so thread it (with the requested memory_id) here too. This seed gate
+        # authorizes the seed's OWN stored context — a second deny surface
+        # distinct from the declared-context pre-gate in handle_explore — so an
+        # enforce-mode binding / #1299 row-filter deny here must persist its
+        # audit row, exactly like the reference / forget-by-id siblings.
         can_access = await perm_service.can_access_memory(
             user_id=CallerId(user_id),
             memory_user_id=MemoryAuthorId(seed_memory.user_id),
             workspace_id=seed_memory.workspace_id,
             context_id=seed_memory.context_id,
+            operation="explore",
+            memory_id=request.memory_id,
             memory_type=seed_memory.type,  # #1299: per-memory type/source filter
             memory_source_type=seed_memory.source_type,
         )

@@ -15,7 +15,7 @@ from mcp_server.tools._helpers import (
     _ContextNotFoundError,
     _error_response,
     _log_tool_usage,
-    _resolve_context,
+    _resolve_context_for_read,
     _resolve_context_id,
     _validate_memory_id,
     execute_with_timeout,
@@ -48,7 +48,14 @@ async def handle_explore(
     async for db in get_db():
         try:
             current_context_id = _resolve_context_id(args["context_id"])
-            await _resolve_context(db, user_id, current_context_id)
+            # #1400/#1401: explore is a READ surface. Resolve via the read-path
+            # helper (ACCESS_READ) so a read-only bound agent (can_read=true,
+            # write_policy=deny) is allowed on its own bound context — mirroring
+            # recall/reference/load_pinned — instead of being denied by the
+            # WRITE gate. operation="explore" threads MAE audit identity so an
+            # enforce-mode binding deny at this pre-gate persists its audit row
+            # (explore was previously outside the MAE vocabulary → invisible).
+            await _resolve_context_for_read(db, user_id, current_context_id, operation="explore")
 
             service = MemoryService(db)
             result = await execute_with_timeout(

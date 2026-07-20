@@ -246,6 +246,7 @@ class PermissionService:
         required_role: WorkspaceRole | str = WorkspaceRole.VIEWER,
         key_workspace_id: UUID | None = None,
         operation: str | None = None,
+        binding_decision_out: list[str] | None = None,
     ) -> Context:
         """Resolve a ``context_id`` to a Context the caller can read, with uniform 404.
 
@@ -409,15 +410,21 @@ class PermissionService:
         # writers pass admin/owner. WorkspaceRole is a StrEnum, so the
         # comparison holds for both str and enum callers.
         access = "read" if required_role == WorkspaceRole.VIEWER else "write"
-        await self._apply_agent_binding_filter(
+        decision = await self._apply_agent_binding_filter(
             context_id, access=access, user_id=user_id, operation=operation
         )
+        # #1402: surface the evaluated binding decision (``allowed`` /
+        # ``would_deny``) to callers that stamp it on their OWN success audit
+        # row (agent bootstrap), without changing the return shape for the
+        # other read callers. ``None`` when no agent scope applies.
+        if binding_decision_out is not None and decision is not None:
+            binding_decision_out.append(decision)
 
         return context
 
     async def _apply_agent_binding_filter(
         self, context_id: UUID, *, access: str, user_id: str, operation: str | None = None
-    ) -> None:
+    ) -> str | None:
         """Deny with the uniform 404 when the agent binding subtracts access.
 
         Reads the per-request agent scope (#1275, set at API-key verify for
@@ -434,12 +441,19 @@ class PermissionService:
         the MCP face (the #1291/#1292 parity class). ``None`` (callers
         outside the MAE vocabulary — context CRUD/metadata reads) keeps the
         log-only behavior.
+
+        Returns the evaluated binding decision (``allowed`` or ``would_deny``)
+        when an agent scope applies and the request is permitted (or shadow-
+        proceeds), or ``None`` when no agent scope applies. A hard deny raises
+        ``NotFoundException`` instead of returning. Callers that stamp the
+        decision on their own audit row (#1402, agent bootstrap) read it; the
+        others ignore it (byte-compat).
         """
         from auth.agent_scope import get_agent_scope
 
         scope = get_agent_scope()
         if scope is None:
-            return
+            return None
 
         from services.agent_binding_service import AgentBindingService
 
@@ -457,6 +471,7 @@ class PermissionService:
                 user_id=user_id,
             )
             raise NotFoundException("Context", str(context_id))
+        return decision
 
     async def check_workspace_owner(self, user_id: str, workspace_id: UUID) -> WorkspaceMember:
         """Check if user is workspace owner.
