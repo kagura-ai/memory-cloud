@@ -57,6 +57,26 @@ def redact_pg_detail(logger, method_name, event_dict):  # noqa: ANN001, ANN201
     return event_dict
 
 
+class _RedactingStdlibFormatter(logging.Formatter):
+    """stdlib ``logging`` formatter that scrubs postgres DETAIL payloads (#1359).
+
+    ``redact_pg_detail`` only runs inside the structlog pipeline, but ~30
+    modules log via plain ``logging.getLogger(__name__)`` — including the
+    secret store, the MCP transport/dispatch catch-alls, and the auth layer —
+    whose asyncpg CHECK/IntegrityError text (both the interpolated message and
+    the ``exc_info`` traceback) would otherwise reach stdout unredacted,
+    defeating #1359 for that whole subset. Scrubbing the fully-rendered record
+    catches the message and the appended traceback in one place, regardless of
+    how the error reached the record (``msg``/``args``/``exc_info``).
+    """
+
+    def format(self, record: logging.LogRecord) -> str:  # noqa: A003
+        rendered = super().format(record)
+        if "DETAIL:" in rendered:
+            return _PG_DETAIL_RE.sub(_REDACTED, rendered)
+        return rendered
+
+
 def _redacting_console_traceback(sio, exc_info) -> None:
     """Console exception formatter that scrubs DETAIL from tracebacks.
 
@@ -80,12 +100,21 @@ def setup_logger(log_level: str = "INFO", enable_colors: bool = True) -> None:
     level_str = os.getenv("LOG_LEVEL", log_level).upper()
     level = getattr(logging, level_str, logging.INFO)
 
-    # Configure stdlib logging
-    logging.basicConfig(
-        format="%(message)s",
-        stream=sys.stdout,
-        level=level,
-    )
+    # Configure stdlib logging. Route the root logger through a redacting
+    # formatter so DB-error DETAIL payloads logged via plain
+    # ``logging.getLogger(__name__)`` (the secret store, MCP transport, auth,
+    # neural, etc.) are scrubbed just like the structlog pipeline — closing the
+    # #1359 gap where basicConfig(format="%(message)s") shipped them verbatim.
+    root_logger = logging.getLogger()
+    root_logger.setLevel(level)
+    # Idempotent: replace any handler a prior setup_logger()/basicConfig()
+    # left behind so repeated calls (reload, tests) neither double-log nor keep
+    # a non-redacting handler.
+    for handler in list(root_logger.handlers):
+        root_logger.removeHandler(handler)
+    stdlib_handler = logging.StreamHandler(sys.stdout)
+    stdlib_handler.setFormatter(_RedactingStdlibFormatter("%(message)s"))
+    root_logger.addHandler(stdlib_handler)
 
     # Determine if colors should be enabled
     use_colors = enable_colors and (os.getenv("LOG_COLORIZE", "true").lower() == "true")

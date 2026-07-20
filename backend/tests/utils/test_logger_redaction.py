@@ -9,6 +9,7 @@ aggregation. The redaction lives in the structlog pipeline (single
 chokepoint for every logger) on BOTH render branches.
 """
 
+import logging
 import uuid
 
 import pytest
@@ -88,6 +89,28 @@ def test_console_pipeline_scrubs_detail_from_rendered_exception(
     assert "35.6812" not in out
     assert "secret content" not in out
     assert "[redacted]" in out
+
+
+def test_stdlib_logging_path_scrubs_detail(monkeypatch, capsys, _structlog_reset):
+    """#1359 gap: ~30 modules log via plain ``logging.getLogger`` (secret store,
+    MCP transport, auth) — those must be redacted too, not just structlog.
+
+    Reproduces the exposure the review found: before the fix, the root logger's
+    ``basicConfig(format="%(message)s")`` shipped the asyncpg DETAIL row
+    (content + coordinates) to stdout verbatim from stdlib call sites.
+    """
+    monkeypatch.setenv("LOG_COLORIZE", "false")
+    setup_logger(enable_colors=False)
+    std_logger = logging.getLogger(f"stdlib-redaction-test-{uuid.uuid4().hex}")
+    try:
+        raise RuntimeError(_ASYNCPG_STYLE_MESSAGE)
+    except RuntimeError as exc:
+        std_logger.error("secret_put_failed: %s", exc, exc_info=True)
+    out = capsys.readouterr().out
+    assert "35.6812" not in out
+    assert "secret content" not in out
+    assert "DETAIL: [redacted]" in out
+    assert "valid_location_range" in out  # constraint name survives for diagnosis
 
 
 def test_json_path_orders_redaction_after_format_exc_info(monkeypatch):
