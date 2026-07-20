@@ -292,10 +292,18 @@ async def test_list_workspace_connectors_returns_summaries():
     c.locale = "ja"
     c.litellm_virtual_key_id = None
     c.llm_config_encrypted = "ENC:x"
+    c.external_team_id = "T0123ABC"
 
     # list_connectors now returns ConnectorListItem(connector, resource_id) so the
     # summary exposes the public slug, not the internal resource_pk DB key (#991).
-    item = SimpleNamespace(connector=c, resource_id="my-resource-slug")
+    # #1389: the human-readable identity (resource label + context name) rides
+    # the same list item.
+    item = SimpleNamespace(
+        connector=c,
+        resource_id="my-resource-slug",
+        display_name="Sales Slack / T0123ABC",
+        context_name="slack-sales",
+    )
 
     with patch("api.routes.workspace_connectors.ConnectorProvisioningService") as service_cls:
         service_cls.return_value.list_connectors = AsyncMock(return_value=[item])
@@ -314,6 +322,10 @@ async def test_list_workspace_connectors_returns_summaries():
     assert result[0].llm_config_present is True
     assert result[0].litellm_virtual_key_id is None
     assert "ENC:" not in result[0].model_dump_json()
+    # #1389: human-readable row identity is exposed additively.
+    assert result[0].display_name == "Sales Slack / T0123ABC"
+    assert result[0].external_team_id == "T0123ABC"
+    assert result[0].context_name == "slack-sales"
     service_cls.return_value.list_connectors.assert_awaited_once_with(ws_id)
 
 

@@ -128,7 +128,7 @@ describe("ConnectorsPage RBAC gate", () => {
       expect(mockListConnectors).not.toHaveBeenCalled();
       expect(mockListAvailableWorkerApps).not.toHaveBeenCalled();
       // No connect action surfaced.
-      expect(screen.queryByText("connectSlack")).not.toBeInTheDocument();
+      expect(screen.queryByText("connectProvider")).not.toBeInTheDocument();
     },
   );
 
@@ -138,7 +138,7 @@ describe("ConnectorsPage RBAC gate", () => {
       setWorkspace(role);
       render(<ConnectorsPage />);
 
-      expect(await screen.findByText("connectSlack")).toBeInTheDocument();
+      expect(await screen.findByText("connectProvider")).toBeInTheDocument();
       await waitFor(() => expect(mockListConnectors).toHaveBeenCalled());
       expect(
         screen.queryByText("errors.forbiddenWorkspace"),
@@ -150,7 +150,7 @@ describe("ConnectorsPage RBAC gate", () => {
     setWorkspace(undefined, { currentWorkspace: null, loading: true });
     render(<ConnectorsPage />);
 
-    expect(screen.queryByText("connectSlack")).not.toBeInTheDocument();
+    expect(screen.queryByText("connectProvider")).not.toBeInTheDocument();
     expect(
       screen.queryByText("errors.forbiddenWorkspace"),
     ).not.toBeInTheDocument();
@@ -337,6 +337,139 @@ describe("ConnectorsPage RBAC gate", () => {
     expect(
       screen.getByRole("button", { name: "editSettings" }),
     ).toBeInTheDocument();
+  });
+
+  it("renders human names first on the row and demotes UUIDs (#1389)", async () => {
+    setWorkspace("admin");
+    mockListConnectors.mockResolvedValue([
+      {
+        connector_id: "connector-1",
+        connector_type: "slack",
+        app_key: "default",
+        resource_id: "slack-t01",
+        context_id: "context-1",
+        config_version: 3,
+        created_at: "2026-07-20T00:00:00Z",
+        created_by: "user-1",
+        runtime: { vision_enabled: true },
+        channel_ids: ["C1"],
+        locale: "ja",
+        litellm_virtual_key_id: null,
+        llm_config_present: true,
+        display_name: "Sales Slack / T0123ABC",
+        external_team_id: "T0123ABC",
+        context_name: "slack-sales",
+      },
+    ]);
+
+    render(<ConnectorsPage />);
+
+    // Row title is the human-readable name, not the connector type.
+    expect(
+      await screen.findByText("Sales Slack / T0123ABC"),
+    ).toBeInTheDocument();
+    // Context shown by name (i18n mock drops params → key text).
+    expect(screen.getByText("contextBoundName")).toBeInTheDocument();
+    // The context UUID is demoted behind a copy affordance.
+    expect(
+      screen.getByRole("button", { name: "copyContextId" }),
+    ).toBeInTheDocument();
+    // Aggregate readiness badge: channels + LLM stored → active.
+    expect(screen.getByText("runningBadge")).toBeInTheDocument();
+    expect(screen.queryByText("needsSetupBadge")).not.toBeInTheDocument();
+  });
+
+  it("marks an un-vendable row 要設定 and opens settings from a missing badge (#1389)", async () => {
+    setWorkspace("admin");
+    mockListConnectors.mockResolvedValue([
+      {
+        connector_id: "connector-1",
+        connector_type: "slack",
+        app_key: "default",
+        resource_id: "slack-t01",
+        context_id: "context-1",
+        config_version: 3,
+        created_at: "2026-07-20T00:00:00Z",
+        created_by: "user-1",
+        runtime: { vision_enabled: true },
+        channel_ids: [],
+        locale: null,
+        litellm_virtual_key_id: null,
+        llm_config_present: false,
+        display_name: null,
+        external_team_id: "T0123ABC",
+        context_name: null,
+      },
+    ]);
+
+    render(<ConnectorsPage />);
+
+    // Fallback title chain: no display_name → team id.
+    expect(await screen.findByText("T0123ABC")).toBeInTheDocument();
+    expect(screen.getByText("needsSetupBadge")).toBeInTheDocument();
+    // A missing badge is an affordance: clicking opens the settings dialog.
+    fireEvent.click(screen.getByRole("button", { name: "fixChannels" }));
+    expect(await screen.findByText("settingsTitle")).toBeInTheDocument();
+  });
+
+  it("renders the provider picker with disabled coming-soon providers (#1389)", async () => {
+    setWorkspace("admin");
+    render(<ConnectorsPage />);
+
+    // Enabled provider keeps a live connect CTA…
+    const slackCta = await screen.findAllByRole("button", {
+      name: /connectProvider/,
+    });
+    expect(slackCta.length).toBeGreaterThan(0);
+    // …while Discord / Teams render as disabled coming-soon affordances.
+    const discord = screen.getByRole("button", { name: /Discord/ });
+    const teams = screen.getByRole("button", { name: /Microsoft Teams/ });
+    expect(discord).toBeDisabled();
+    expect(teams).toBeDisabled();
+  });
+
+  it("rejects a manual bind token without the xoxb- prefix client-side (#1389)", async () => {
+    setWorkspace("admin");
+    mockListAvailableWorkerApps.mockResolvedValue([
+      { platform: "slack", app_key: "sales", display_name: "Sales Slack App" },
+    ]);
+
+    render(<ConnectorsPage />);
+
+    await screen.findByText("manualBindTitle");
+    fireEvent.change(screen.getByLabelText("manualTeamId"), {
+      target: { value: "T01" },
+    });
+    fireEvent.change(screen.getByLabelText("manualBotToken"), {
+      target: { value: "xoxp-user-token" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "manualBind" }));
+
+    expect(
+      await screen.findByText("manualBotTokenInvalid"),
+    ).toBeInTheDocument();
+    expect(mockCreateConnector).not.toHaveBeenCalled();
+  });
+
+  it("rejects a manual bind team ID without the T prefix client-side (#1389)", async () => {
+    setWorkspace("admin");
+    mockListAvailableWorkerApps.mockResolvedValue([
+      { platform: "slack", app_key: "sales", display_name: "Sales Slack App" },
+    ]);
+
+    render(<ConnectorsPage />);
+
+    await screen.findByText("manualBindTitle");
+    fireEvent.change(screen.getByLabelText("manualTeamId"), {
+      target: { value: "W123" },
+    });
+    fireEvent.change(screen.getByLabelText("manualBotToken"), {
+      target: { value: "xoxb-install-token" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "manualBind" }));
+
+    expect(await screen.findByText("manualTeamIdInvalid")).toBeInTheDocument();
+    expect(mockCreateConnector).not.toHaveBeenCalled();
   });
 
   it("does not count a litellm-only connector as LLM-bound on the row (#1388)", async () => {

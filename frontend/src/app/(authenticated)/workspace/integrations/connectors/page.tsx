@@ -8,6 +8,7 @@ import {
   Check,
   CheckCircle2,
   Copy,
+  Info,
   Pencil,
   Plug,
   Trash2,
@@ -21,8 +22,14 @@ import {
   TableLoadingState,
 } from "@/components/common/LoadingState";
 import { EmptyState } from "@/components/ui/empty-state";
-import { Badge } from "@/components/ui/badge";
+import { Badge, badgeVariants } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
+import {
+  Tooltip,
+  TooltipContent,
+  TooltipProvider,
+  TooltipTrigger,
+} from "@/components/ui/tooltip";
 import { Input } from "@/components/ui/input";
 import { Switch } from "@/components/ui/switch";
 import { Alert, AlertDescription } from "@/components/ui/alert";
@@ -51,6 +58,8 @@ import {
   DialogHeader,
   DialogTitle,
 } from "@/components/ui/dialog";
+import { cn } from "@/lib/utils/cn";
+import { CONNECTOR_PROVIDERS } from "@/lib/connectors/providers";
 import { useToast } from "@/hooks/use-toast";
 import { useCopyFeedback } from "@/hooks/useCopyFeedback";
 import { useConsumeSearchParams } from "@/hooks/useConsumeSearchParams";
@@ -241,6 +250,13 @@ export default function ConnectorsPage() {
   // footer buttons are disabled while it is in flight, so the dialog
   // container (tabIndex=-1) is the only stable target.
   const settingsContentRef = useRef<HTMLDivElement | null>(null);
+  // #1389: a missing row badge opens the settings dialog at its section —
+  // the requested section's input takes the dialog's initial focus.
+  const [settingsFocus, setSettingsFocus] = useState<"channels" | "llm" | null>(
+    null,
+  );
+  const channelsInputRef = useRef<HTMLInputElement | null>(null);
+  const llmProviderInputRef = useRef<HTMLInputElement | null>(null);
 
   const reload = useCallback(async () => {
     try {
@@ -364,16 +380,22 @@ export default function ConnectorsPage() {
     { enabled: allowed, cleanUrl: "/workspace/integrations/connectors" },
   );
 
-  const openSettings = useCallback((c: WorkspaceConnectorSummary) => {
-    setSettingsFor(c);
-    setChText((c.channel_ids ?? []).join(", "));
-    setLocaleSel(c.locale === "en" || c.locale === "ja" ? c.locale : "default");
-    setLitellmKey(c.litellm_virtual_key_id ?? "");
-    setLlmProvider("");
-    setLlmModel("");
-    setLlmApiKey("");
-    setSettingsError(null);
-  }, []);
+  const openSettings = useCallback(
+    (c: WorkspaceConnectorSummary, focus: "channels" | "llm" | null = null) => {
+      setSettingsFor(c);
+      setSettingsFocus(focus);
+      setChText((c.channel_ids ?? []).join(", "));
+      setLocaleSel(
+        c.locale === "en" || c.locale === "ja" ? c.locale : "default",
+      );
+      setLitellmKey(c.litellm_virtual_key_id ?? "");
+      setLlmProvider("");
+      setLlmModel("");
+      setLlmApiKey("");
+      setSettingsError(null);
+    },
+    [],
+  );
 
   // #1388: after a PATCH failure (usually a 409 from a stale snapshot),
   // re-sync the dialog snapshot from the server so a retry rides the fresh
@@ -651,6 +673,17 @@ export default function ConnectorsPage() {
     async (event: FormEvent) => {
       event.preventDefault();
       if (!manualAppKey || !manualTeamId || !manualBotToken) return;
+      // #1389: client-side shape checks (UX only — the backend stays the
+      // authority). A bot token is always `xoxb-`-prefixed; pasting a user
+      // token (xoxp-) or an app token (xapp-) is the common first-run mistake.
+      if (!manualBotToken.startsWith("xoxb-")) {
+        setManualError(t("manualBotTokenInvalid"));
+        return;
+      }
+      if (!/^T[A-Z0-9]+$/i.test(manualTeamId.trim())) {
+        setManualError(t("manualTeamIdInvalid"));
+        return;
+      }
       setManualSubmitting(true);
       setManualError(null);
       try {
@@ -686,7 +719,15 @@ export default function ConnectorsPage() {
         setManualSubmitting(false);
       }
     },
-    [availableApps, locale, manualAppKey, manualBotToken, manualTeamId, reload],
+    [
+      availableApps,
+      locale,
+      manualAppKey,
+      manualBotToken,
+      manualTeamId,
+      reload,
+      t,
+    ],
   );
 
   // Resolve loading before role gating to avoid a flash of the admin UI
@@ -731,70 +772,108 @@ export default function ConnectorsPage() {
     <PageContainer>
       <PageHeader title={t("title")} description={t("description")} />
 
-      <div className="mb-4 flex justify-end">
-        <Button onClick={() => (window.location.href = slackInstallUrl())}>
-          {t("connectSlack")}
-        </Button>
+      {/* #1389: provider picker rendered from the CONNECTOR_PROVIDERS
+          descriptor — Slack live, Discord/Teams disabled coming-soon — so
+          Slack-hardcoded JSX stops multiplying (#1390). */}
+      <div className="mb-4 flex flex-wrap justify-end gap-2">
+        {CONNECTOR_PROVIDERS.map((provider) =>
+          provider.enabled ? (
+            <Button
+              key={provider.key}
+              // Today the only enabled provider is Slack (oauth flow); a
+              // second enabled provider gets its own install URL via the
+              // descriptor when it lands (#1390).
+              onClick={() => (window.location.href = slackInstallUrl())}
+            >
+              <provider.icon className="h-4 w-4" aria-hidden="true" />
+              {t("connectProvider", { name: provider.name })}
+            </Button>
+          ) : (
+            <Button key={provider.key} variant="outline" disabled>
+              <provider.icon className="h-4 w-4" aria-hidden="true" />
+              {provider.name} — {t("comingSoon")}
+            </Button>
+          ),
+        )}
       </div>
 
       {appsLoadError && !availableApps && <ErrorBanner error={appsLoadError} />}
 
+      {/* #1389: the manual-bind form is the advanced/secondary path — folded
+          by default so first-run users see explanation + one primary CTA. */}
       {availableApps && availableApps.length > 0 && (
-        <form
-          onSubmit={handleManualCreate}
-          className="mb-6 grid gap-3 rounded-md border p-4 md:grid-cols-4"
-        >
-          <div className="md:col-span-4">
-            <h2 className="font-medium">{t("manualBindTitle")}</h2>
-            <p className="text-sm text-muted-foreground">
-              {t("manualBindDescription")}
-            </p>
-          </div>
-          {manualError && (
-            <Alert variant="destructive" className="md:col-span-4">
-              <AlertDescription>{manualError}</AlertDescription>
-            </Alert>
-          )}
-          <Select value={manualAppKey} onValueChange={setManualAppKey}>
-            <SelectTrigger aria-label={t("manualAppIdentity")}>
-              <SelectValue placeholder={t("manualAppIdentity")} />
-            </SelectTrigger>
-            <SelectContent>
-              {availableApps.map((app) => (
-                <SelectItem key={app.app_key} value={app.app_key}>
-                  {app.display_name} ({app.app_key})
-                </SelectItem>
-              ))}
-            </SelectContent>
-          </Select>
-          <Input
-            aria-label={t("manualTeamId")}
-            placeholder={t("manualTeamId")}
-            value={manualTeamId}
-            onChange={(event) => setManualTeamId(event.target.value)}
-            required
-          />
-          <Input
-            aria-label={t("manualBotToken")}
-            placeholder={t("manualBotToken")}
-            type="password"
-            autoComplete="new-password"
-            value={manualBotToken}
-            onChange={(event) => setManualBotToken(event.target.value)}
-            required
-          />
-          <Button
-            type="submit"
-            disabled={
-              manualSubmitting ||
-              !manualAppKey ||
-              !manualTeamId ||
-              !manualBotToken
-            }
+        <details className="mb-6 rounded-md border">
+          <summary className="cursor-pointer p-4 font-medium">
+            {t("manualBindTitle")}
+          </summary>
+          <form
+            onSubmit={handleManualCreate}
+            className="grid gap-3 p-4 pt-0 md:grid-cols-4"
           >
-            {t("manualBind")}
-          </Button>
-        </form>
+            <div className="md:col-span-4">
+              <p className="text-sm text-muted-foreground">
+                {t("manualBindIntro")}
+              </p>
+              <p className="mt-1 text-sm text-muted-foreground">
+                {t("manualBindDescription")}
+              </p>
+            </div>
+            {manualError && (
+              <Alert variant="destructive" className="md:col-span-4">
+                <AlertDescription>{manualError}</AlertDescription>
+              </Alert>
+            )}
+            <Select value={manualAppKey} onValueChange={setManualAppKey}>
+              <SelectTrigger aria-label={t("manualAppIdentity")}>
+                <SelectValue placeholder={t("manualAppIdentity")} />
+              </SelectTrigger>
+              <SelectContent>
+                {availableApps.map((app) => (
+                  <SelectItem key={app.app_key} value={app.app_key}>
+                    {app.display_name} ({app.app_key})
+                  </SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
+            <div>
+              <Input
+                aria-label={t("manualTeamId")}
+                placeholder={t("manualTeamId")}
+                value={manualTeamId}
+                onChange={(event) => setManualTeamId(event.target.value)}
+                required
+              />
+              <p className="mt-1 text-xs text-muted-foreground">
+                {t("manualTeamIdHelp")}
+              </p>
+            </div>
+            <div>
+              <Input
+                aria-label={t("manualBotToken")}
+                placeholder={t("manualBotToken")}
+                type="password"
+                autoComplete="new-password"
+                value={manualBotToken}
+                onChange={(event) => setManualBotToken(event.target.value)}
+                required
+              />
+              <p className="mt-1 text-xs text-muted-foreground">
+                {t("manualBotTokenHelp")}
+              </p>
+            </div>
+            <Button
+              type="submit"
+              disabled={
+                manualSubmitting ||
+                !manualAppKey ||
+                !manualTeamId ||
+                !manualBotToken
+              }
+            >
+              {t("manualBind")}
+            </Button>
+          </form>
+        </details>
       )}
 
       {loadError ? (
@@ -806,108 +885,184 @@ export default function ConnectorsPage() {
           icon={Plug}
           title={t("emptyTitle")}
           description={t("emptyDesc")}
-          actionLabel={t("connectSlack")}
+          actionLabel={t("connectProvider", { name: "Slack" })}
           onAction={() => (window.location.href = slackInstallUrl())}
         />
       ) : (
         <ul className="divide-y rounded-md border">
-          {connectors.map((c) => (
-            <li
-              key={c.connector_id}
-              className="flex items-center justify-between p-4"
-            >
-              <div className="min-w-0">
-                <p className="font-medium capitalize">{c.connector_type}</p>
-                <p className="text-xs text-muted-foreground">
-                  {t("appIdentity", { appKey: c.app_key })}
-                </p>
-                <p className="text-sm text-muted-foreground">
-                  {c.context_id
-                    ? t("contextBound", { id: c.context_id })
-                    : t("contextNotReady")}
-                </p>
-                {/* #893: connector_id is non-secret — show it in the list
-                    (support / log correlation / CLI target) with a copy button,
-                    instead of in the one-time reveal. */}
-                <div className="mt-1 flex items-center gap-1 text-xs text-muted-foreground">
-                  <span className="font-mono break-all">
-                    {t("connectorIdLabel", { id: c.connector_id })}
-                  </span>
+          {connectors.map((c) => {
+            // #1388/#1389: one readiness rule for the aggregate badge and
+            // the per-part chips — shared with the settings dialog.
+            const readiness = connectorReadiness(c);
+            return (
+              <li
+                key={c.connector_id}
+                className="flex items-center justify-between p-4"
+              >
+                <div className="min-w-0">
+                  {/* #1389: human names first — resource label, then the
+                      platform team id, then the bare type as last resort. */}
+                  <p className="font-medium">
+                    {c.display_name || c.external_team_id || c.connector_type}
+                  </p>
+                  <p className="text-xs text-muted-foreground">
+                    {t("appIdentity", { appKey: c.app_key })}
+                  </p>
+                  <div className="flex items-center gap-1 text-sm text-muted-foreground">
+                    <span>
+                      {c.context_name
+                        ? t("contextBoundName", { name: c.context_name })
+                        : c.context_id
+                          ? t("contextBound", { id: c.context_id })
+                          : t("contextNotReady")}
+                    </span>
+                    {/* UUID demoted behind the copy affordance (#1389). */}
+                    {c.context_id && (
+                      <Button
+                        type="button"
+                        variant="ghost"
+                        size="sm"
+                        aria-label={t("copyContextId")}
+                        onClick={() =>
+                          handleCopy(c.context_id!, `ctx-${c.connector_id}`)
+                        }
+                      >
+                        {isCopied(`ctx-${c.connector_id}`) ? (
+                          <Check className="h-4 w-4" />
+                        ) : (
+                          <Copy className="h-4 w-4" />
+                        )}
+                      </Button>
+                    )}
+                  </div>
+                  {/* #893: connector_id is non-secret — show it in the list
+                      (support / log correlation / CLI target) with a copy
+                      button, instead of in the one-time reveal. */}
+                  <div className="mt-1 flex items-center gap-1 text-xs text-muted-foreground">
+                    <span className="font-mono break-all">
+                      {t("connectorIdLabel", { id: c.connector_id })}
+                    </span>
+                    <Button
+                      type="button"
+                      variant="ghost"
+                      size="sm"
+                      aria-label={t("copyConnectorId")}
+                      onClick={() =>
+                        handleCopy(c.connector_id, `cid-${c.connector_id}`)
+                      }
+                    >
+                      {isCopied(`cid-${c.connector_id}`) ? (
+                        <Check className="h-4 w-4" />
+                      ) : (
+                        <Copy className="h-4 w-4" />
+                      )}
+                    </Button>
+                  </div>
+                  {/* #1376/#1389: vend-settings status badges — the aggregate
+                      readiness first, then per-part chips. Missing parts are
+                      buttons that open the settings dialog at that section. */}
+                  <div className="mt-2 flex flex-wrap items-center gap-1.5">
+                    <Badge variant={readiness.ready ? "secondary" : "outline"}>
+                      {readiness.ready
+                        ? t("runningBadge")
+                        : t("needsSetupBadge")}
+                    </Badge>
+                    {readiness.missingChannels ? (
+                      <button
+                        type="button"
+                        className={cn(
+                          badgeVariants({ variant: "outline" }),
+                          "cursor-pointer hover:bg-accent",
+                        )}
+                        onClick={() => openSettings(c, "channels")}
+                        aria-label={t("fixChannels")}
+                      >
+                        {t("channelsNone")}
+                      </button>
+                    ) : (
+                      <Badge variant="secondary">
+                        {t("channelsCount", {
+                          count: c.channel_ids?.length ?? 0,
+                        })}
+                      </Badge>
+                    )}
+                    {readiness.missingLlm ? (
+                      <button
+                        type="button"
+                        className={cn(
+                          badgeVariants({ variant: "outline" }),
+                          "cursor-pointer hover:bg-accent",
+                        )}
+                        onClick={() => openSettings(c, "llm")}
+                        aria-label={t("fixLlm")}
+                      >
+                        {t("llmNotBound")}
+                      </button>
+                    ) : (
+                      <Badge variant="secondary">{t("llmBound")}</Badge>
+                    )}
+                    <Badge variant="outline">
+                      {c.locale === "en" || c.locale === "ja"
+                        ? c.locale
+                        : t("localeDefault")}
+                    </Badge>
+                  </div>
+                </div>
+                <div className="flex items-center gap-4">
+                  <label className="flex items-center gap-2 text-sm">
+                    <span>{t("visionEnabled")}</span>
+                    {/* #1389: first-run users can't tell what the toggle
+                        does — say it on demand. */}
+                    <TooltipProvider delayDuration={200}>
+                      <Tooltip>
+                        <TooltipTrigger asChild>
+                          <button
+                            type="button"
+                            aria-label={t("visionTooltipLabel")}
+                            className="text-muted-foreground"
+                          >
+                            <Info className="h-3.5 w-3.5" aria-hidden="true" />
+                          </button>
+                        </TooltipTrigger>
+                        <TooltipContent>{t("visionTooltip")}</TooltipContent>
+                      </Tooltip>
+                    </TooltipProvider>
+                    {runtimeSaving === c.connector_id && (
+                      <InlineSpinner aria-hidden="true" />
+                    )}
+                    <Switch
+                      checked={c.runtime?.vision_enabled ?? true}
+                      disabled={
+                        c.runtime == null || runtimeSaving === c.connector_id
+                      }
+                      onCheckedChange={(enabled) =>
+                        void handleVisionEnabledChange(c, enabled)
+                      }
+                      aria-label={t("visionEnabledFor", {
+                        id: c.connector_id,
+                      })}
+                    />
+                  </label>
                   <Button
-                    type="button"
                     variant="ghost"
                     size="sm"
-                    aria-label={t("copyConnectorId")}
-                    onClick={() =>
-                      handleCopy(c.connector_id, `cid-${c.connector_id}`)
-                    }
+                    onClick={() => openSettings(c)}
+                    aria-label={t("editSettings")}
                   >
-                    {isCopied(`cid-${c.connector_id}`) ? (
-                      <Check className="h-4 w-4" />
-                    ) : (
-                      <Copy className="h-4 w-4" />
-                    )}
+                    <Pencil className="h-4 w-4" />
+                  </Button>
+                  <Button
+                    variant="ghost"
+                    size="sm"
+                    onClick={() => setToDelete(c)}
+                    aria-label={tCommon("delete")}
+                  >
+                    <Trash2 className="h-4 w-4" />
                   </Button>
                 </div>
-                {/* #1376: vend-settings presence indicators — an un-vendable
-                    connector (no channels / no LLM) is visible at a glance. */}
-                <p className="mt-1 flex gap-2 text-xs text-muted-foreground">
-                  <span>
-                    {c.channel_ids?.length
-                      ? t("channelsCount", { count: c.channel_ids.length })
-                      : t("channelsNone")}
-                  </span>
-                  <span>
-                    {/* #1388: same rule as the dialog readiness summary —
-                        a litellm-only connector must not read as bound
-                        while the worker still gets llm=null. */}
-                    {!connectorReadiness(c).missingLlm
-                      ? t("llmBound")
-                      : t("llmNotBound")}
-                  </span>
-                  <span>
-                    {t("localeIndicator", { locale: c.locale ?? "—" })}
-                  </span>
-                </p>
-              </div>
-              <div className="flex items-center gap-4">
-                <label className="flex items-center gap-2 text-sm">
-                  <span>{t("visionEnabled")}</span>
-                  {runtimeSaving === c.connector_id && (
-                    <InlineSpinner aria-hidden="true" />
-                  )}
-                  <Switch
-                    checked={c.runtime?.vision_enabled ?? true}
-                    disabled={
-                      c.runtime == null || runtimeSaving === c.connector_id
-                    }
-                    onCheckedChange={(enabled) =>
-                      void handleVisionEnabledChange(c, enabled)
-                    }
-                    aria-label={t("visionEnabledFor", {
-                      id: c.connector_id,
-                    })}
-                  />
-                </label>
-                <Button
-                  variant="ghost"
-                  size="sm"
-                  onClick={() => openSettings(c)}
-                  aria-label={t("editSettings")}
-                >
-                  <Pencil className="h-4 w-4" />
-                </Button>
-                <Button
-                  variant="ghost"
-                  size="sm"
-                  onClick={() => setToDelete(c)}
-                  aria-label={tCommon("delete")}
-                >
-                  <Trash2 className="h-4 w-4" />
-                </Button>
-              </div>
-            </li>
-          ))}
+              </li>
+            );
+          })}
         </ul>
       )}
 
@@ -925,6 +1080,17 @@ export default function ConnectorsPage() {
           ref={settingsContentRef}
           tabIndex={-1}
           className="max-h-[85vh] overflow-y-auto"
+          // #1389: a missing row badge opens the dialog at its section —
+          // steer Radix's initial focus to that section's first input.
+          onOpenAutoFocus={(e) => {
+            if (settingsFocus === "channels") {
+              e.preventDefault();
+              channelsInputRef.current?.focus();
+            } else if (settingsFocus === "llm") {
+              e.preventDefault();
+              llmProviderInputRef.current?.focus();
+            }
+          }}
         >
           <DialogHeader>
             <DialogTitle>{t("settingsTitle")}</DialogTitle>
@@ -980,6 +1146,7 @@ export default function ConnectorsPage() {
                 </label>
                 <Input
                   id="conn-settings-channels"
+                  ref={channelsInputRef}
                   aria-label={t("channelsLabel")}
                   placeholder="C0123ABC456, C0456DEF789"
                   value={chText}
@@ -1037,6 +1204,7 @@ export default function ConnectorsPage() {
               </div>
               <p className="text-xs text-muted-foreground">{t("llmHelp")}</p>
               <Input
+                ref={llmProviderInputRef}
                 aria-label={t("llmProvider")}
                 placeholder={t("llmProviderPlaceholder")}
                 value={llmProvider}

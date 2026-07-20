@@ -57,6 +57,11 @@ export interface WorkspaceConnectorSummary {
   locale: string | null;
   litellm_virtual_key_id: string | null;
   llm_config_present: boolean;
+  // #1389: human-readable identity for the list row — the resource's label,
+  // the platform team id, and the write-target context's name.
+  display_name: string | null;
+  external_team_id: string | null;
+  context_name: string | null;
 }
 
 export interface ConnectorReadiness {
