@@ -70,6 +70,8 @@ import { CONNECTOR_PROVIDERS } from "@/lib/connectors/providers";
 import { useToast } from "@/hooks/use-toast";
 import { useCopyFeedback } from "@/hooks/useCopyFeedback";
 import { useConsumeSearchParams } from "@/hooks/useConsumeSearchParams";
+import { useSystemFeatures } from "@/hooks/useSystemFeatures";
+import { ChannelPicker, parseChannelIds } from "./ChannelPicker";
 import { useWorkspace } from "@/contexts/WorkspaceContext";
 import { hasWorkspaceRole, WorkspaceRole } from "@/lib/auth/rbac";
 import { API_BASE_URL } from "@/lib/api/base";
@@ -201,6 +203,13 @@ export default function ConnectorsPage() {
     currentWorkspace?.current_user_role,
     WorkspaceRole.Admin,
   );
+
+  // #1426: managed (hosted SaaS) mode. When true the shared worker/bridge
+  // provides the pre-compile LLM and only OAuth is offered, so hide the BYO
+  // "link existing Slack app" form and stop treating a missing per-connector
+  // LLM as un-vendable. Missing flag → false (OSS/self-host default-off).
+  const features = useSystemFeatures();
+  const managedConnectors = features?.managed_connectors === true;
 
   // Copy with the shared per-key feedback hook (unmount-safe, 2000ms standard);
   // surface clipboard failures via the destructive-toast channel.
@@ -492,10 +501,7 @@ export default function ConnectorsPage() {
     setSettingsError(null);
 
     const patch: UpdateConnectorSettingsRequest = {};
-    const parsedChannels = chText
-      .split(/[,\s]+/)
-      .map((s) => s.trim())
-      .filter(Boolean);
+    const parsedChannels = parseChannelIds(chText);
     const newChannels = parsedChannels.length ? parsedChannels : null;
     const oldChannels = settingsFor.channel_ids?.length
       ? settingsFor.channel_ids
@@ -844,7 +850,7 @@ export default function ConnectorsPage() {
   // #1388: stored-state readiness for the settings dialog summary (not the
   // form draft — the dialog exists to repair un-vendable connectors, #1376).
   const settingsReadiness = settingsFor
-    ? connectorReadiness(settingsFor)
+    ? connectorReadiness(settingsFor, { llmRequired: !managedConnectors })
     : null;
 
   // #1409: the create dialog's submit needs a valid write target for the
@@ -969,8 +975,10 @@ export default function ConnectorsPage() {
       {appsLoadError && !availableApps && <ErrorBanner error={appsLoadError} />}
 
       {/* #1389: the manual-bind form is the advanced/secondary path — folded
-          by default so first-run users see explanation + one primary CTA. */}
-      {availableApps && availableApps.length > 0 && (
+          by default so first-run users see explanation + one primary CTA.
+          #1426: on managed (hosted SaaS) it is hidden entirely — BYO apps are a
+          self-host affordance; SaaS tenants use OAuth only. */}
+      {!managedConnectors && availableApps && availableApps.length > 0 && (
         <details className="mb-6 rounded-md border">
           <summary className="cursor-pointer p-4 font-medium">
             {t("manualBindTitle")}
@@ -1065,7 +1073,9 @@ export default function ConnectorsPage() {
             {connectors.map((c) => {
               // #1388/#1389: one readiness rule for the aggregate badge and
               // the per-part chips — shared with the settings dialog.
-              const readiness = connectorReadiness(c);
+              const readiness = connectorReadiness(c, {
+                llmRequired: !managedConnectors,
+              });
               return (
                 <li
                   key={c.connector_id}
@@ -1311,23 +1321,20 @@ export default function ConnectorsPage() {
                 />
               </div>
               <div>
-                <label
-                  htmlFor="conn-settings-channels"
-                  className="mb-1 block text-sm font-medium"
-                >
+                <p className="mb-1 block text-sm font-medium">
                   {t("channelsLabel")}
-                </label>
-                <Input
-                  id="conn-settings-channels"
-                  ref={channelsInputRef}
-                  aria-label={t("channelsLabel")}
-                  placeholder="C0123ABC456, C0456DEF789"
-                  value={chText}
-                  onChange={(e) => setChText(e.target.value)}
-                />
-                <p className="mt-1 text-xs text-muted-foreground">
-                  {t("channelsHelp")}
                 </p>
+                {settingsFor && (
+                  // #1391: pick from the connector's Slack channels (server-side
+                  // proxy); manual-ID entry stays as a fallback lane. Reads/writes
+                  // the same chText, so the channel_ids PATCH is unchanged.
+                  <ChannelPicker
+                    connectorId={settingsFor.connector_id}
+                    value={parseChannelIds(chText)}
+                    onChange={(ids) => setChText(ids.join(", "))}
+                    inputRef={channelsInputRef}
+                  />
+                )}
               </div>
             </section>
             {/* Section 2 — language */}
@@ -1365,76 +1372,88 @@ export default function ConnectorsPage() {
                 </p>
               </div>
             </section>
-            {/* Section 3 — LLM used for summarization */}
-            <section className="space-y-2 border-t pt-4">
-              <div className="flex items-center justify-between">
+            {/* Section 3 — LLM used for summarization. #1426: on managed
+                (hosted SaaS) the shared worker/bridge provides the pre-compile
+                LLM, so per-connector LLM config is neither required nor shown —
+                a one-line note replaces the whole section. */}
+            {managedConnectors ? (
+              <section className="space-y-2 border-t pt-4">
                 <p className="text-sm font-medium">{t("sectionLlm")}</p>
-                <StatusChip
-                  set={!!settingsFor?.llm_config_present}
-                  setLabel={t("statusSet")}
-                  unsetLabel={t("statusUnset")}
-                />
-              </div>
-              {settingsFor?.llm_config_present ? (
-                <>
-                  {/* #1399: destructive action stays outside the fold —
+                <p className="text-sm text-muted-foreground">
+                  {t("llmManagedNote")}
+                </p>
+              </section>
+            ) : (
+              <section className="space-y-2 border-t pt-4">
+                <div className="flex items-center justify-between">
+                  <p className="text-sm font-medium">{t("sectionLlm")}</p>
+                  <StatusChip
+                    set={!!settingsFor?.llm_config_present}
+                    setLabel={t("statusSet")}
+                    unsetLabel={t("statusUnset")}
+                  />
+                </div>
+                {settingsFor?.llm_config_present ? (
+                  <>
+                    {/* #1399: destructive action stays outside the fold —
                       one click away, never behind a disclosure. */}
-                  <Button
-                    type="button"
-                    variant="destructive-outline"
-                    onClick={() => setLlmDeleteConfirm(true)}
-                    disabled={settingsSaving || llmDeleting}
-                  >
-                    {llmDeleting && <InlineSpinner aria-hidden="true" />}
-                    {t("llmDelete")}
-                  </Button>
-                  {/* #1399: a stored config folds the write-only inputs away
+                    <Button
+                      type="button"
+                      variant="destructive-outline"
+                      onClick={() => setLlmDeleteConfirm(true)}
+                      disabled={settingsSaving || llmDeleting}
+                    >
+                      {llmDeleting && <InlineSpinner aria-hidden="true" />}
+                      {t("llmDelete")}
+                    </Button>
+                    {/* #1399: a stored config folds the write-only inputs away
                       (empty fields under a 設定済 chip read as contradictory).
                       Keyed by connector so the uncontrolled open state never
                       leaks between connectors' dialogs (#1388 pattern). */}
-                  <details
-                    key={`llm-replace-${settingsFor.connector_id}`}
-                    className="rounded-md border p-3"
-                  >
-                    <summary className="cursor-pointer text-sm font-medium">
-                      {t("llmReplaceToggle")}
-                    </summary>
-                    <div className="mt-3 space-y-2">{llmFieldsBlock}</div>
-                  </details>
-                </>
-              ) : (
-                llmFieldsBlock
-              )}
-              {/* #1388: LiteLLM virtual key demoted to an advanced fold —
+                    <details
+                      key={`llm-replace-${settingsFor.connector_id}`}
+                      className="rounded-md border p-3"
+                    >
+                      <summary className="cursor-pointer text-sm font-medium">
+                        {t("llmReplaceToggle")}
+                      </summary>
+                      <div className="mt-3 space-y-2">{llmFieldsBlock}</div>
+                    </details>
+                  </>
+                ) : (
+                  llmFieldsBlock
+                )}
+                {/* #1388: LiteLLM virtual key demoted to an advanced fold —
                   stored but not vended yet (kagura-bridge#179). Keyed by
                   connector so the uncontrolled <details> open state never
                   leaks from one connector's dialog into another's. */}
-              <details
-                key={settingsFor?.connector_id ?? "none"}
-                className="rounded-md border p-3"
-              >
-                <summary className="cursor-pointer text-sm font-medium">
-                  {t("advancedSettings")}
-                </summary>
-                <div className="mt-3">
-                  <label
-                    htmlFor="conn-settings-litellm"
-                    className="mb-1 block text-sm font-medium"
-                  >
-                    {t("litellmKeyLabel")}
-                  </label>
-                  <Input
-                    id="conn-settings-litellm"
-                    aria-label={t("litellmKeyLabel")}
-                    value={litellmKey}
-                    onChange={(e) => setLitellmKey(e.target.value)}
-                  />
-                  <p className="mt-1 text-xs text-muted-foreground">
-                    {t("litellmKeyNote")}
-                  </p>
-                </div>
-              </details>
-            </section>
+                <details
+                  key={settingsFor?.connector_id ?? "none"}
+                  className="rounded-md border p-3"
+                >
+                  <summary className="cursor-pointer text-sm font-medium">
+                    {t("advancedSettings")}
+                  </summary>
+                  <div className="mt-3">
+                    <label
+                      htmlFor="conn-settings-litellm"
+                      className="mb-1 block text-sm font-medium"
+                    >
+                      {t("litellmKeyLabel")}
+                    </label>
+                    <Input
+                      id="conn-settings-litellm"
+                      aria-label={t("litellmKeyLabel")}
+                      value={litellmKey}
+                      onChange={(e) => setLitellmKey(e.target.value)}
+                    />
+                    <p className="mt-1 text-xs text-muted-foreground">
+                      {t("litellmKeyNote")}
+                    </p>
+                  </div>
+                </details>
+              </section>
+            )}
           </div>
           <DialogFooter>
             <Button

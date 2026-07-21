@@ -738,6 +738,26 @@ class ConnectorProvisioningService:
                 f"A {connector_type} connector for team '{external_team_id}' already exists.",
             )
 
+    async def get_connector(
+        self, workspace_id: UUID, connector_id: UUID
+    ) -> WorkspaceConnector | None:
+        """Read-only workspace-predicated connector lookup (no row lock) (#1391).
+
+        Mirrors the settings-PATCH authorization invariant — a connector from
+        another workspace is indistinguishable from a missing one, so both
+        return ``None`` and the caller raises a uniform 404 (no cross-tenant
+        existence oracle). Unlike ``_get_connector_for_update`` this takes no
+        ``SELECT FOR UPDATE`` because the channel-list endpoint is read-only and
+        cannot mutate connector state.
+        """
+        result = await self.db.execute(
+            select(WorkspaceConnector).where(
+                WorkspaceConnector.id == connector_id,
+                WorkspaceConnector.workspace_id == workspace_id,
+            )
+        )
+        return result.scalar_one_or_none()
+
     async def get_connector_for_dispatch(
         self, connector_type: str, external_team_id: str, app_key: str = "default"
     ) -> WorkspaceConnector | None:

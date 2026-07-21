@@ -510,6 +510,19 @@ class Settings(BaseSettings):
             "paths. Surfaced to the frontend via GET /api/v1/system/info features.byok."
         ),
     )
+    enable_managed_connectors: bool = Field(
+        default=False,
+        description=(
+            "Managed-connectors (hosted SaaS) mode for the chat-connector UI (#1426). "
+            "OFF by default for OSS / self-hosted, where the operator runs their own "
+            "worker: the connectors page shows the 'link existing Slack app' (BYO) "
+            "form and treats a per-connector LLM as required. When true (managed "
+            "SaaS), the shared worker/bridge provides the pre-compile LLM and only "
+            "the OAuth path is offered, so the web UI hides the BYO manual-bind form "
+            "and stops flagging a missing per-connector LLM. Surfaced to the frontend "
+            "via GET /api/v1/system/info features.managed_connectors."
+        ),
+    )
     enable_owner_key_member_management: bool = Field(
         default=True,
         description=(

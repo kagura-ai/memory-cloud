@@ -77,11 +77,18 @@ export interface ConnectorReadiness {
 // with only a virtual key would read "ready" while the worker gets llm=null.
 // Single source for every readiness surface (dialog summary, row indicators);
 // the #1392 platform-LLM lane changes this rule in exactly one place.
+//
+// #1426: on managed (hosted SaaS) deployments the shared worker/bridge provides
+// the pre-compile LLM, so a per-connector LLM is NOT required — pass
+// llmRequired=false (from features.managed_connectors) and a missing LLM stops
+// counting against readiness. Defaults true so OSS/self-host is unchanged.
 export function connectorReadiness(
   c: WorkspaceConnectorSummary,
+  opts: { llmRequired?: boolean } = {},
 ): ConnectorReadiness {
+  const { llmRequired = true } = opts;
   const missingChannels = !c.channel_ids?.length;
-  const missingLlm = !c.llm_config_present;
+  const missingLlm = llmRequired && !c.llm_config_present;
   return {
     ready: !missingChannels && !missingLlm,
     missingChannels,
@@ -240,6 +247,36 @@ export async function updateConnectorSettings(
         ? { expected_config_version: expectedConfigVersion }
         : {}),
     },
+  );
+}
+
+// #1391: one Slack channel from the connector's channel picker. id/name/private
+// only (data minimization); the bot token never leaves the server.
+export interface ConnectorChannel {
+  id: string;
+  name: string;
+  is_private: boolean;
+}
+
+export interface ConnectorChannelsPage {
+  channels: ConnectorChannel[];
+  next_cursor: string | null;
+}
+
+// #1391: list a connector's public Slack channels for the settings-dialog
+// picker. Server-side proxy of Slack conversations.list. Throws on non-2xx —
+// the picker degrades to manual channel-ID entry on any failure (missing scope
+// / rate limit / transport), per the design's fallback lane.
+export async function listConnectorChannels(
+  connectorId: string,
+  opts: { cursor?: string; q?: string } = {},
+): Promise<ConnectorChannelsPage> {
+  const params = new URLSearchParams();
+  if (opts.cursor) params.set("cursor", opts.cursor);
+  if (opts.q) params.set("q", opts.q);
+  const qs = params.toString();
+  return apiClient.get<ConnectorChannelsPage>(
+    `/api/v1/workspace-connectors/${connectorId}/channels${qs ? `?${qs}` : ""}`,
   );
 }
 
