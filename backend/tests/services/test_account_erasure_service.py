@@ -1211,9 +1211,7 @@ class TestErasureResiduals1365:
 
         svc.db.execute = AsyncMock(side_effect=_exec)
         svc.db.commit = AsyncMock()
-        request = SimpleNamespace(
-            id=uuid4(), user_id="oauth-sub-123", initiated_by="oauth-sub-123"
-        )
+        request = SimpleNamespace(id=uuid4(), user_id="oauth-sub-123", initiated_by="oauth-sub-123")
 
         await svc._finalize(request, {"users": 1})
 

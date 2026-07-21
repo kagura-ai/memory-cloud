@@ -305,9 +305,7 @@ class TestKnnSeeding:
         # accepted and cleared. existing_edges non-empty so seeding is skipped too.
         accepted_edge = MagicMock()
         accepted_edge.edge_type = EDGE_TYPE_SUPERSEDES
-        mock_repo = _make_edge_repo(
-            existing_edges=[MagicMock()], edge_to_candidate=accepted_edge
-        )
+        mock_repo = _make_edge_repo(existing_edges=[MagicMock()], edge_to_candidate=accepted_edge)
         candidates = [
             {"id": dup_id, "score": 0.95, "payload": {}, "embedding": []},
             {"id": str(uuid4()), "score": 0.70, "payload": {}, "embedding": []},

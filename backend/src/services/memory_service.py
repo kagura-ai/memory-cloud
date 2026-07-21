@@ -4444,8 +4444,7 @@ async def _create_knn_seed_edges(
                     context_id=context_id_str,
                 )
                 already_superseded = (
-                    existing_super is not None
-                    and existing_super.edge_type == EDGE_TYPE_SUPERSEDES
+                    existing_super is not None and existing_super.edge_type == EDGE_TYPE_SUPERSEDES
                 )
                 if not already_superseded:
                     candidate = {

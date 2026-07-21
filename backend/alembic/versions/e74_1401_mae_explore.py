@@ -63,9 +63,7 @@ def upgrade() -> None:
             f"ADD CONSTRAINT valid_mae_operation CHECK ({_NEW_CHECK}) NOT VALID"
         )
     )
-    op.execute(
-        sa.text("ALTER TABLE memory_access_events VALIDATE CONSTRAINT valid_mae_operation")
-    )
+    op.execute(sa.text("ALTER TABLE memory_access_events VALIDATE CONSTRAINT valid_mae_operation"))
 
 
 def downgrade() -> None:
@@ -82,6 +80,4 @@ def downgrade() -> None:
             f"ADD CONSTRAINT valid_mae_operation CHECK ({_OLD_CHECK}) NOT VALID"
         )
     )
-    op.execute(
-        sa.text("ALTER TABLE memory_access_events VALIDATE CONSTRAINT valid_mae_operation")
-    )
+    op.execute(sa.text("ALTER TABLE memory_access_events VALIDATE CONSTRAINT valid_mae_operation"))
