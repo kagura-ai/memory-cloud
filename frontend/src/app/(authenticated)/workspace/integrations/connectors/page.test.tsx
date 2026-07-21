@@ -265,7 +265,9 @@ describe("ConnectorsPage RBAC gate", () => {
     fireEvent.click(screen.getByRole("button", { name: "manualBind" }));
 
     // The success dialog must guide the two remaining Slack-side actions
-    // (invite bot + select channels) — "created" is not "done".
+    // (invite bot + select channels) — "created" is not "done". The dialog is
+    // the same JSX for both the OAuth and manual-bind create paths, so covering
+    // one entry point covers the shared checklist.
     expect(await screen.findByText("nextStepsTitle")).toBeInTheDocument();
     expect(screen.getByText("nextStepInviteBot")).toBeInTheDocument();
     expect(screen.getByText("nextStepSelectChannels")).toBeInTheDocument();
