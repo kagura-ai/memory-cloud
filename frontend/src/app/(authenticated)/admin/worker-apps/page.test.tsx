@@ -1,4 +1,10 @@
-import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import {
+  cleanup,
+  fireEvent,
+  render,
+  screen,
+  waitFor,
+} from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import WorkerAppsPage from "./page";
@@ -53,6 +59,21 @@ describe("WorkerAppsPage", () => {
     expect(await screen.findByText("emptyTitle")).toBeInTheDocument();
     await waitFor(() => expect(mockListWorkerApps).toHaveBeenCalledOnce());
     expect(screen.getByText("create")).toBeInTheDocument();
+  });
+
+  it("shows the persona/purpose notice and field guidance (#1427)", async () => {
+    mockUseAuth.mockReturnValue({
+      user: { role: "admin" },
+      isLoading: false,
+    });
+
+    render(<WorkerAppsPage />);
+    await screen.findByText("emptyTitle");
+
+    // Persona notice + the app-key and signing-secret-vs-bot-token help.
+    expect(screen.getByText("purposeNotice")).toBeInTheDocument();
+    expect(screen.getByText("appKeyHelp")).toBeInTheDocument();
+    expect(screen.getByText("signingSecretHelp")).toBeInTheDocument();
   });
 
   it("fails closed in the UI for a non-system-admin", async () => {
@@ -141,7 +162,7 @@ describe("WorkerAppsPage", () => {
       ),
     );
   });
-it("surfaces action failures as a destructive toast (#1360)", async () => {
+  it("surfaces action failures as a destructive toast (#1360)", async () => {
     const app = {
       platform: "slack",
       app_key: "sales",
@@ -209,9 +230,7 @@ it("surfaces action failures as a destructive toast (#1360)", async () => {
       ),
     );
     // The reload after the save must NOT discard row B's draft.
-    await waitFor(() =>
-      expect(mockListWorkerApps).toHaveBeenCalledTimes(2),
-    );
+    await waitFor(() => expect(mockListWorkerApps).toHaveBeenCalledTimes(2));
     expect(screen.getAllByLabelText("displayNameFor")[1]).toHaveValue(
       "Beta DRAFT",
     );

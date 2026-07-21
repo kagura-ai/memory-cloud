@@ -125,6 +125,10 @@ export default function WorkerAppsPage() {
     <PageContainer>
       <PageHeader title={t("title")} description={t("description")} />
 
+      <Alert className="mb-4">
+        <AlertDescription>{t("purposeNotice")}</AlertDescription>
+      </Alert>
+
       <Alert className="mb-6">
         <AlertDescription>{t("secretNotice")}</AlertDescription>
       </Alert>
@@ -135,6 +139,7 @@ export default function WorkerAppsPage() {
       >
         <Input
           aria-label={t("appKey")}
+          aria-describedby="worker-app-key-help"
           placeholder={t("appKeyPlaceholder")}
           pattern="[a-z0-9][a-z0-9_-]{0,63}"
           value={appKey}
@@ -150,6 +155,7 @@ export default function WorkerAppsPage() {
         />
         <Input
           aria-label={t("signingSecret")}
+          aria-describedby="worker-signing-secret-help"
           placeholder={t("signingSecret")}
           type="password"
           autoComplete="new-password"
@@ -160,6 +166,18 @@ export default function WorkerAppsPage() {
         <Button type="submit" disabled={busyKey !== null}>
           {t("create")}
         </Button>
+        <p
+          id="worker-app-key-help"
+          className="text-sm text-muted-foreground md:col-span-4"
+        >
+          {t("appKeyHelp")}
+        </p>
+        <p
+          id="worker-signing-secret-help"
+          className="text-sm text-muted-foreground md:col-span-4"
+        >
+          {t("signingSecretHelp")}
+        </p>
       </form>
 
       {loadError ? (
