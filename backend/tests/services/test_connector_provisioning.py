@@ -575,6 +575,10 @@ def _settings_conn(**over):
         "locale": None,
         "config_version": 3,
         "context_id": uuid4(),
+        # Truthy = already provisioned for a context (has a write key), so a
+        # re-point is allowed. Tests that exercise the no-credentials guard
+        # override this to a falsy value.
+        "kmc_api_key_encrypted": "ENC:kmc",
     }
     base.update(over)
     return _SettingsConn(**base)
@@ -845,6 +849,32 @@ async def test_update_settings_clear_context_to_null():
     assert log_info.call_args.kwargs["changed_fields"] == ["context_id"]
     # Only the connector-lock SELECT ran — null clear needs no context lookup.
     assert db.execute.await_count == 1
+
+
+@pytest.mark.asyncio
+async def test_update_settings_repoint_without_write_credentials_rejected():
+    """#1428: re-pointing a context-less connector (no KMC write key) to a
+    context is rejected — it would 200 yet leave the connector un-worker-usable
+    (GET /workers/config needs both context_id and the key). No mutation, no
+    config bump."""
+    conn = _settings_conn(context_id=None, kmc_api_key_encrypted=None)
+    new_ctx = uuid4()
+    db = MagicMock()
+    db.execute = AsyncMock(side_effect=[_result(one=new_ctx), _result(one=conn)])
+    db.flush = AsyncMock()
+
+    with pytest.raises(ValidationError) as exc:
+        await ConnectorProvisioningService(db).update_connector_settings(
+            workspace_id=conn.workspace_id,
+            connector_id=conn.id,
+            user_id="admin-1",
+            context_id=new_ctx,
+        )
+
+    assert "write credentials" in str(exc.value).lower()
+    assert conn.context_id is None  # untouched
+    assert conn.config_version == 3  # not bumped
+    db.flush.assert_not_awaited()
 
 
 @pytest.mark.asyncio

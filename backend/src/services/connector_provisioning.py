@@ -1042,6 +1042,26 @@ class ConnectorProvisioningService:
             workspace_id, connector_id, expected_config_version
         )
 
+        # A connector created without a context never had its workspace-scoped
+        # KMC write key / resource token minted (CREATE only mints them when a
+        # write-target context is present). Re-pointing such a connector to a
+        # context would set context_id but leave it un-worker-usable — GET
+        # /workers/config requires BOTH context_id and the KMC key — so the
+        # PATCH would 200 yet silently do nothing. Reject and steer to recreate
+        # (#1428). Non-null → non-null re-point is fine: the key is
+        # workspace-scoped, not bound to the old context.
+        if (
+            context_id is not _UNSET
+            and context_id is not None
+            and not connector.kmc_api_key_encrypted
+        ):
+            raise ValidationError(
+                "This connector has no write credentials (it was created "
+                "without a context). Re-create it bound to the target context "
+                "instead of re-pointing.",
+                field="context_id",
+            )
+
         if channel_ids is not _UNSET:
             connector.channel_ids = channel_ids
         if litellm_virtual_key_id is not _UNSET:

@@ -505,9 +505,12 @@ async def update_workspace_connector_settings(
             **kwargs,
         )
         await db.commit()
-    except NotFoundException as exc:
+    except NotFoundException:
+        # Re-raise as-is so a bad context_id re-point (#1428) surfaces as
+        # "Context not found" rather than being masked as "Connector". Both
+        # ids are caller-supplied (URL / body), so this leaks nothing.
         await db.rollback()
-        raise NotFoundException("Connector") from exc
+        raise
     except (ConflictError, ValidationError):
         await db.rollback()
         raise

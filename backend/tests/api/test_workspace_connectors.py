@@ -670,6 +670,36 @@ async def test_update_settings_route_rolls_back_on_conflict():
     db.commit.assert_not_awaited()
 
 
+@pytest.mark.asyncio
+async def test_update_settings_route_context_not_found_not_masked_as_connector():
+    """#1428: a bad context_id surfaces as "Context" NotFound, not masked as
+    "Connector" by the route's catch-all (regression the re-point path exposes)."""
+    from api.routes.workspace_connectors import (
+        WorkspaceConnectorSettingsUpdateRequest,
+        update_workspace_connector_settings,
+    )
+    from utils.exceptions import NotFoundException
+
+    db = MagicMock()
+    db.rollback = AsyncMock()
+    db.commit = AsyncMock()
+    bad_ctx = uuid4()
+    admin = {"user_id": "user-1", "current_workspace_id": uuid4()}
+    request = WorkspaceConnectorSettingsUpdateRequest.model_validate({"context_id": str(bad_ctx)})
+
+    with patch("api.routes.workspace_connectors.ConnectorProvisioningService") as service_cls:
+        service_cls.return_value.update_connector_settings = AsyncMock(
+            side_effect=NotFoundException("Context", str(bad_ctx))
+        )
+        with pytest.raises(NotFoundException) as exc:
+            await update_workspace_connector_settings(uuid4(), request, admin, db)
+
+    assert "Context" in str(exc.value)
+    assert "Connector" not in str(exc.value)
+    db.rollback.assert_awaited_once()
+    db.commit.assert_not_awaited()
+
+
 def test_update_settings_request_forbids_unknown_fields():
     """#1376 review: a silently-dropped typo'd field name would read as a
     successful partial update — unknown keys must 422 at the request layer."""
