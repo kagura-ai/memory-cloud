@@ -34,3 +34,4 @@
 - [Troubleshooting](troubleshooting.md) — Environment-specific setup fixes (e.g. WSL2 + Claude Code MCP OAuth callback)
 - [Agent Credential Runbook](ops/agent-credential-runbook.md) — Mint, rotate, revoke, expire, and kill-switch agent-bound workload keys
 - [`memory_access_events` Retention Plan](ops/memory-access-events-retention.md) — Capacity triggers and partitioning/retention plan for the live audit table
+- [Slack Public Distribution](ops/slack-public-distribution.md) — Operator checklist to activate distribution so external tenants can OAuth-connect Slack (fixes `invalid_team_for_non_distributed_app`)
