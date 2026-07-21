@@ -144,7 +144,7 @@ export function ChannelPicker({
         onChange={(e) => setQuery(e.target.value)}
       />
 
-      {unlisted.length > 0 && (
+      {channels !== null && unlisted.length > 0 && (
         <div className="flex flex-wrap gap-1">
           {unlisted.map((id) => (
             <Badge key={id} variant="secondary" className="gap-1">

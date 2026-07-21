@@ -501,10 +501,7 @@ export default function ConnectorsPage() {
     setSettingsError(null);
 
     const patch: UpdateConnectorSettingsRequest = {};
-    const parsedChannels = chText
-      .split(/[,\s]+/)
-      .map((s) => s.trim())
-      .filter(Boolean);
+    const parsedChannels = parseChannelIds(chText);
     const newChannels = parsedChannels.length ? parsedChannels : null;
     const oldChannels = settingsFor.channel_ids?.length
       ? settingsFor.channel_ids
@@ -1324,9 +1321,9 @@ export default function ConnectorsPage() {
                 />
               </div>
               <div>
-                <label className="mb-1 block text-sm font-medium">
+                <p className="mb-1 block text-sm font-medium">
                   {t("channelsLabel")}
-                </label>
+                </p>
                 {settingsFor && (
                   // #1391: pick from the connector's Slack channels (server-side
                   // proxy); manual-ID entry stays as a fallback lane. Reads/writes
