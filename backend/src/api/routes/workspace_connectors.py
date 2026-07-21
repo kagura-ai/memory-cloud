@@ -173,6 +173,11 @@ class WorkspaceConnectorSettingsUpdateRequest(BaseModel):
         "contract ('en' | 'ja'); common BCP-47 forms are normalized "
         "(ja-JP → ja). Null clears (#1377).",
     )
+    context_id: UUID | None = Field(
+        None,
+        description="Re-point the write-target context (#1428). Must be a live "
+        "context in this workspace; null clears the binding (no write target).",
+    )
     expected_config_version: int | None = Field(default=None, ge=0)
 
 
@@ -185,6 +190,7 @@ class WorkspaceConnectorSettingsUpdateResponse(BaseModel):
     llm_config_present: bool
     locale: str | None
     config_version: int
+    context_id: UUID | None
 
 
 class WorkspaceConnectorRuntimeUpdateRequest(BaseModel):
@@ -499,9 +505,12 @@ async def update_workspace_connector_settings(
             **kwargs,
         )
         await db.commit()
-    except NotFoundException as exc:
+    except NotFoundException:
+        # Re-raise as-is so a bad context_id re-point (#1428) surfaces as
+        # "Context not found" rather than being masked as "Connector". Both
+        # ids are caller-supplied (URL / body), so this leaks nothing.
         await db.rollback()
-        raise NotFoundException("Connector") from exc
+        raise
     except (ConflictError, ValidationError):
         await db.rollback()
         raise
@@ -523,6 +532,7 @@ async def update_workspace_connector_settings(
         llm_config_present=settings_result.llm_config_present,
         locale=settings_result.locale,
         config_version=settings_result.config_version,
+        context_id=settings_result.context_id,
     )
 
 

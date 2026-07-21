@@ -521,6 +521,7 @@ async def test_update_settings_route_passes_only_provided_fields():
                 llm_config_present=False,
                 locale=None,
                 config_version=4,
+                context_id=None,
             )
         )
         response = await update_workspace_connector_settings(connector_id, request, admin, db)
@@ -563,6 +564,7 @@ async def test_update_settings_route_distinguishes_explicit_null_from_absent():
                 llm_config_present=False,
                 locale=None,
                 config_version=9,
+                context_id=None,
             )
         )
         await update_workspace_connector_settings(uuid4(), request, admin, db)
@@ -598,12 +600,49 @@ async def test_update_settings_response_never_echoes_llm_config():
                 llm_config_present=True,
                 locale=None,
                 config_version=2,
+                context_id=None,
             )
         )
         response = await update_workspace_connector_settings(uuid4(), request, admin, db)
 
     assert response.llm_config_present is True
     assert "sk-secret" not in response.model_dump_json()
+
+
+@pytest.mark.asyncio
+async def test_update_settings_route_forwards_context_id_repoint():
+    """#1428: a context_id in the PATCH body reaches the service and the new
+    binding comes back in the response."""
+    from api.routes.workspace_connectors import (
+        WorkspaceConnectorSettingsUpdateRequest,
+        update_workspace_connector_settings,
+    )
+    from services.connector_provisioning import ConnectorSettingsUpdateResult
+
+    db = MagicMock()
+    db.commit = AsyncMock()
+    workspace_id = uuid4()
+    new_ctx = uuid4()
+    admin = {"user_id": "user-1", "current_workspace_id": workspace_id}
+    request = WorkspaceConnectorSettingsUpdateRequest.model_validate({"context_id": str(new_ctx)})
+
+    with patch("api.routes.workspace_connectors.ConnectorProvisioningService") as service_cls:
+        service_cls.return_value.update_connector_settings = AsyncMock(
+            return_value=ConnectorSettingsUpdateResult(
+                channel_ids=["C-kept"],
+                litellm_virtual_key_id=None,
+                llm_config_present=False,
+                locale=None,
+                config_version=5,
+                context_id=new_ctx,
+            )
+        )
+        response = await update_workspace_connector_settings(uuid4(), request, admin, db)
+
+    kwargs = service_cls.return_value.update_connector_settings.await_args.kwargs
+    assert kwargs["context_id"] == new_ctx
+    assert response.context_id == new_ctx
+    db.commit.assert_awaited_once()
 
 
 @pytest.mark.asyncio
@@ -627,6 +666,36 @@ async def test_update_settings_route_rolls_back_on_conflict():
         with pytest.raises(ConflictError):
             await update_workspace_connector_settings(uuid4(), request, admin, db)
 
+    db.rollback.assert_awaited_once()
+    db.commit.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_update_settings_route_context_not_found_not_masked_as_connector():
+    """#1428: a bad context_id surfaces as "Context" NotFound, not masked as
+    "Connector" by the route's catch-all (regression the re-point path exposes)."""
+    from api.routes.workspace_connectors import (
+        WorkspaceConnectorSettingsUpdateRequest,
+        update_workspace_connector_settings,
+    )
+    from utils.exceptions import NotFoundException
+
+    db = MagicMock()
+    db.rollback = AsyncMock()
+    db.commit = AsyncMock()
+    bad_ctx = uuid4()
+    admin = {"user_id": "user-1", "current_workspace_id": uuid4()}
+    request = WorkspaceConnectorSettingsUpdateRequest.model_validate({"context_id": str(bad_ctx)})
+
+    with patch("api.routes.workspace_connectors.ConnectorProvisioningService") as service_cls:
+        service_cls.return_value.update_connector_settings = AsyncMock(
+            side_effect=NotFoundException("Context", str(bad_ctx))
+        )
+        with pytest.raises(NotFoundException) as exc:
+            await update_workspace_connector_settings(uuid4(), request, admin, db)
+
+    assert "Context" in str(exc.value)
+    assert "Connector" not in str(exc.value)
     db.rollback.assert_awaited_once()
     db.commit.assert_not_awaited()
 
