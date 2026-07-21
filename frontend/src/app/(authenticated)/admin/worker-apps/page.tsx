@@ -125,6 +125,10 @@ export default function WorkerAppsPage() {
     <PageContainer>
       <PageHeader title={t("title")} description={t("description")} />
 
+      <Alert className="mb-4">
+        <AlertDescription>{t("purposeNotice")}</AlertDescription>
+      </Alert>
+
       <Alert className="mb-6">
         <AlertDescription>{t("secretNotice")}</AlertDescription>
       </Alert>
@@ -160,6 +164,12 @@ export default function WorkerAppsPage() {
         <Button type="submit" disabled={busyKey !== null}>
           {t("create")}
         </Button>
+        <p className="text-sm text-muted-foreground md:col-span-4">
+          {t("appKeyHelp")}
+        </p>
+        <p className="text-sm text-muted-foreground md:col-span-4">
+          {t("signingSecretHelp")}
+        </p>
       </form>
 
       {loadError ? (
