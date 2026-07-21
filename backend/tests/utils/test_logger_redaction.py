@@ -91,15 +91,29 @@ def test_console_pipeline_scrubs_detail_from_rendered_exception(
     assert "[redacted]" in out
 
 
-def test_stdlib_logging_path_scrubs_detail(monkeypatch, capsys, _structlog_reset):
+@pytest.fixture
+def _root_handlers_reset():
+    """Snapshot/restore the stdlib root handlers so a test can drive
+    setup_logger()'s handler wiring in isolation."""
+    root = logging.getLogger()
+    saved = root.handlers[:]
+    yield root
+    root.handlers[:] = saved
+
+
+def test_stdlib_logging_path_scrubs_detail(
+    monkeypatch, capsys, _structlog_reset, _root_handlers_reset
+):
     """#1359 gap: ~30 modules log via plain ``logging.getLogger`` (secret store,
     MCP transport, auth) — those must be redacted too, not just structlog.
 
     Reproduces the exposure the review found: before the fix, the root logger's
     ``basicConfig(format="%(message)s")`` shipped the asyncpg DETAIL row
-    (content + coordinates) to stdout verbatim from stdlib call sites.
+    (content + coordinates) to stdout verbatim from stdlib call sites. With no
+    pre-existing handler, setup_logger() installs a redacting stdout handler.
     """
     monkeypatch.setenv("LOG_COLORIZE", "false")
+    _root_handlers_reset.handlers.clear()  # fresh root → setup_logger adds our handler
     setup_logger(enable_colors=False)
     std_logger = logging.getLogger(f"stdlib-redaction-test-{uuid.uuid4().hex}")
     try:
@@ -111,6 +125,38 @@ def test_stdlib_logging_path_scrubs_detail(monkeypatch, capsys, _structlog_reset
     assert "secret content" not in out
     assert "DETAIL: [redacted]" in out
     assert "valid_location_range" in out  # constraint name survives for diagnosis
+
+
+def test_stdlib_logging_preserves_existing_root_handlers(
+    monkeypatch, _structlog_reset, _root_handlers_reset
+):
+    """#1359 Copilot review: setup_logger() must NOT clobber host (uvicorn)
+    root handlers. It wraps their formatter so DETAIL is redacted while the
+    handler's destination and format prefix are preserved."""
+    import io
+
+    monkeypatch.setenv("LOG_COLORIZE", "false")
+    root = _root_handlers_reset
+    root.handlers.clear()
+    sink = io.StringIO()
+    host_handler = logging.StreamHandler(sink)
+    host_handler.setFormatter(logging.Formatter("HOST %(message)s"))
+    root.addHandler(host_handler)
+
+    setup_logger(enable_colors=False)
+
+    # Same handler object kept (destination preserved), not replaced.
+    assert host_handler in root.handlers
+    std_logger = logging.getLogger(f"stdlib-preserve-{uuid.uuid4().hex}")
+    try:
+        raise RuntimeError(_ASYNCPG_STYLE_MESSAGE)
+    except RuntimeError as exc:
+        std_logger.error("boom: %s", exc, exc_info=True)
+    out = sink.getvalue()
+    assert "HOST " in out  # host format prefix preserved
+    assert "35.6812" not in out  # ...but DETAIL still redacted
+    assert "secret content" not in out
+    assert "DETAIL: [redacted]" in out
 
 
 def test_json_path_orders_redaction_after_format_exc_info(monkeypatch):

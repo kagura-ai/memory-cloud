@@ -68,10 +68,19 @@ class _RedactingStdlibFormatter(logging.Formatter):
     defeating #1359 for that whole subset. Scrubbing the fully-rendered record
     catches the message and the appended traceback in one place, regardless of
     how the error reached the record (``msg``/``args``/``exc_info``).
+
+    It WRAPS an inner formatter rather than owning the format string, so it can
+    be layered over a host runtime's existing handler formatter (uvicorn, etc.)
+    without changing the destination or the ``fmt``/date style — it only scrubs
+    the final rendered text (Copilot review, #1359).
     """
 
+    def __init__(self, inner: logging.Formatter | None = None) -> None:
+        super().__init__()
+        self._inner = inner if inner is not None else logging.Formatter("%(message)s")
+
     def format(self, record: logging.LogRecord) -> str:  # noqa: A003
-        rendered = super().format(record)
+        rendered = self._inner.format(record)
         if "DETAIL:" in rendered:
             return _PG_DETAIL_RE.sub(_REDACTED, rendered)
         return rendered
@@ -100,21 +109,26 @@ def setup_logger(log_level: str = "INFO", enable_colors: bool = True) -> None:
     level_str = os.getenv("LOG_LEVEL", log_level).upper()
     level = getattr(logging, level_str, logging.INFO)
 
-    # Configure stdlib logging. Route the root logger through a redacting
-    # formatter so DB-error DETAIL payloads logged via plain
+    # Configure stdlib logging so DB-error DETAIL payloads logged via plain
     # ``logging.getLogger(__name__)`` (the secret store, MCP transport, auth,
     # neural, etc.) are scrubbed just like the structlog pipeline — closing the
     # #1359 gap where basicConfig(format="%(message)s") shipped them verbatim.
+    #
+    # Preserve any handlers the host runtime (uvicorn) already installed on the
+    # root logger — wrap their formatter with the redactor rather than clearing
+    # them, so destinations/format are untouched and only DETAIL is scrubbed
+    # (Copilot review). Only install our own handler when root has none yet.
     root_logger = logging.getLogger()
     root_logger.setLevel(level)
-    # Idempotent: replace any handler a prior setup_logger()/basicConfig()
-    # left behind so repeated calls (reload, tests) neither double-log nor keep
-    # a non-redacting handler.
-    for handler in list(root_logger.handlers):
-        root_logger.removeHandler(handler)
-    stdlib_handler = logging.StreamHandler(sys.stdout)
-    stdlib_handler.setFormatter(_RedactingStdlibFormatter("%(message)s"))
-    root_logger.addHandler(stdlib_handler)
+    if root_logger.handlers:
+        for handler in root_logger.handlers:
+            # Idempotent: don't double-wrap on a repeated setup_logger() call.
+            if not isinstance(handler.formatter, _RedactingStdlibFormatter):
+                handler.setFormatter(_RedactingStdlibFormatter(handler.formatter))
+    else:
+        stdlib_handler = logging.StreamHandler(sys.stdout)
+        stdlib_handler.setFormatter(_RedactingStdlibFormatter(logging.Formatter("%(message)s")))
+        root_logger.addHandler(stdlib_handler)
 
     # Determine if colors should be enabled
     use_colors = enable_colors and (os.getenv("LOG_COLORIZE", "true").lower() == "true")
