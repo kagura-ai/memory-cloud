@@ -78,7 +78,11 @@ export function MemoriesTabPanel({ contextId }: MemoriesTabPanelProps) {
   // committed to state.
   const requestIdRef = useRef(0);
 
-  const dialog = useMemoryDetailDialog({ memoryIdParam, setMemoryIdParam });
+  const dialog = useMemoryDetailDialog({
+    memoryIdParam,
+    setMemoryIdParam,
+    contextId,
+  });
 
   // #830: multi-tag AND drill-down set, URL-driven (?tags=a&tags=b) so it's
   // shareable and survives refresh. Normalized: trim, drop blanks, de-dupe
@@ -418,6 +422,9 @@ export function MemoriesTabPanel({ contextId }: MemoriesTabPanelProps) {
         incomingLinks={dialog.linkedRefs.incoming}
         incomingHasMore={dialog.linkedRefs.incomingHasMore}
         onOpenLinkedMemory={dialog.openDetail}
+        supersedeCandidate={dialog.supersedeCandidate}
+        onAcceptSupersede={dialog.acceptSupersede}
+        supersedeAccepting={dialog.supersedeAccepting}
       />
       {dialog.hydrated && (
         <DeleteMemoryDialog

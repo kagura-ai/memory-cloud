@@ -109,7 +109,11 @@ export function GraphTabPanel({ contextId }: GraphTabPanelProps) {
   // (and detach if we ever fall back to loading mid-life).
   const [containerEl, setContainerEl] = useState<HTMLDivElement | null>(null);
 
-  const dialog = useMemoryDetailDialog({ memoryIdParam, setMemoryIdParam });
+  const dialog = useMemoryDetailDialog({
+    memoryIdParam,
+    setMemoryIdParam,
+    contextId,
+  });
 
   // --- Data fetch ---
   const fetchData = useCallback(async () => {
@@ -299,6 +303,9 @@ export function GraphTabPanel({ contextId }: GraphTabPanelProps) {
         incomingLinks={dialog.linkedRefs.incoming}
         incomingHasMore={dialog.linkedRefs.incomingHasMore}
         onOpenLinkedMemory={dialog.openDetail}
+        supersedeCandidate={dialog.supersedeCandidate}
+        onAcceptSupersede={dialog.acceptSupersede}
+        supersedeAccepting={dialog.supersedeAccepting}
       />
       {dialog.hydrated && (
         <DeleteMemoryDialog

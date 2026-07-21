@@ -9,8 +9,6 @@ from typing import Any
 from uuid import UUID
 
 from mcp.types import TextContent
-from sqlalchemy import select
-from sqlalchemy.ext.asyncio import AsyncSession
 
 from mcp_server.tools._helpers import (
     _check_viewer_permission,
@@ -24,81 +22,23 @@ from mcp_server.tools._helpers import (
     _validate_memory_id,
     execute_with_timeout,
 )
-from models.memory import (
-    EDGE_ORIGIN_DECLARED,
-    EDGE_TYPE_CONTINUES_FROM,
-    EDGE_TYPE_CONTRADICTS,
-    EDGE_TYPE_DEPENDS_ON,
-    EDGE_TYPE_LEARNED_FROM,
-    EDGE_TYPE_NEURAL_ASSOCIATION,
-    EDGE_TYPE_REFERENCES_FILE,
-    EDGE_TYPE_RELATED_TO,
-    EDGE_TYPE_SUPERSEDES,
-    Memory,
+from models.memory import EDGE_ORIGIN_DECLARED
+from services.edge_service import (
+    VALID_EDGE_TYPES,
+    create_declared_edge,
 )
-from utils.logger import get_logger
-
-logger = get_logger(__name__)
-
-# Issue #461 / #741 / #782: full set of edge_types accepted by the DB CHECK
-# constraint (`models/memory.py::valid_edge_type`). Sourced from `EDGE_TYPE_*`
-# constants so this set cannot drift from the schema literal.
-#   - neural_association: runtime Hebbian co-activation, or the post-#741
-#     catch-all for any provenance not expressible as a relation
-#     (tag_cooccurrence + semantic_similarity merged here).
-#   - related_to / depends_on / learned_from: LLM-emittable relation types
-#     (#374 → see `services/sleep/edge_discovery.py::LLM_EMITTABLE_EDGE_TYPES`).
-#   - continues_from / references_file (#782): producer-asserted structural
-#     relation types emitted by the kagura-chat-bridge ingest pipeline.
-#     NOT emitted by the sleep LLM judge (excluded from
-#     `services/sleep/edge_discovery.py::LLM_EMITTABLE_EDGE_TYPES`); the MCP
-#     boundary does not separately enforce this — clients may pass them.
-#     Their provenance is origin='declared' (pinned below for both
-#     handle_create_edge and handle_update_edge); the MCP-only invariant
-#     does not extend to GraphService.add_edge — that path is the internal
-#     Hebbian-default writer and callers wanting a non-Hebbian origin must
-#     pass it explicitly via the optional `origin=` parameter (#782).
-#   - supersedes / contradicts (#1208): fact-succession relations. Direction
-#     convention: src = superseding (newer), dst = superseded (older) — a
-#     memory that is the dst of a live supersedes edge is shadowed out of
-#     recall (include_superseded=true opts back in); contradicts never hides.
-#     NOT in LLM_EMITTABLE_EDGE_TYPES (the sleep judge must not invent
-#     supersession); origin='declared' when asserted via this MCP path.
-# Provenance for what was previously edge_type='semantic_similarity' /
-# 'declared_link' / 'tag_cooccurrence' now lives on `origin` and
-# `edge_metadata['source']` (see migration `e20_741` docstring).
-VALID_EDGE_TYPES = frozenset(
-    {
-        EDGE_TYPE_NEURAL_ASSOCIATION,
-        EDGE_TYPE_RELATED_TO,
-        EDGE_TYPE_DEPENDS_ON,
-        EDGE_TYPE_LEARNED_FROM,
-        EDGE_TYPE_CONTINUES_FROM,
-        EDGE_TYPE_REFERENCES_FILE,
-        EDGE_TYPE_SUPERSEDES,
-        EDGE_TYPE_CONTRADICTS,
-    }
+from services.edge_service import (
+    edge_to_dict as _edge_to_dict,
 )
 
-
-def _edge_to_dict(edge: Any) -> dict[str, Any]:
-    """Convert NeuralMemoryEdge to JSON-serializable dict.
-
-    ``origin`` is included (#1321) so callers can see the provenance the
-    duplicate contract keys on — e.g. that re-asserting a semantic edge
-    updates its values but does NOT promote it to 'declared' (the repo's
-    sticky-origin upsert keeps non-hebbian origins).
-    """
-    return {
-        "source_id": str(edge.src_id),
-        "target_id": str(edge.dst_id),
-        "edge_type": edge.edge_type,
-        "weight": edge.weight,
-        "confidence": edge.confidence,
-        "origin": edge.origin,
-        "created_at": edge.created_at.isoformat() if edge.created_at else None,
-        "last_updated": edge.last_updated.isoformat() if edge.last_updated else None,
-    }
+# The declared-edge write core (`create_declared_edge`), the DB-accepted
+# `VALID_EDGE_TYPES` set, the `_edge_to_dict` serializer, and the #1403
+# supersede self-heal now live in `services/edge_service.py` so the REST
+# `POST /graph/edges` endpoint (#1416) shares the exact same path. This module
+# keeps the MCP-transport wrapper: TextContent framing, usage telemetry, the
+# per-tool timeout, and the context-resolution / viewer-permission gates.
+# `VALID_EDGE_TYPES` is re-exported here for backward compatibility with
+# existing importers (e.g. tests/test_edge_type_constants.py).
 
 
 def _validate_edge_endpoints(
@@ -152,41 +92,6 @@ def _parse_float(
             "validation_error", f"{name} must be between {min_val} and {max_val}."
         )
     return f, None
-
-
-async def _accept_supersede_candidate_if_matching(
-    db: AsyncSession, *, src_id: UUID, dst_id: UUID
-) -> None:
-    """#1403: record acceptance of a suggested supersession and self-heal.
-
-    When a ``supersedes`` edge ``src → dst`` confirms a previously-suggested
-    candidate (``src.supersede_candidate.memory_id == dst``), emit the
-    ``supersede_suggestion_accepted`` telemetry (the accept side of the
-    detected/accepted adoption funnel) and clear the stored suggestion so it
-    stops surfacing on recall()/reference(). The mutation is committed by the
-    caller's ``db.commit()`` in the same transaction as the edge.
-
-    Best-effort: any failure is swallowed — telemetry/self-heal must never fail
-    the edge creation itself.
-    """
-    try:
-        result = await db.execute(select(Memory).where(Memory.id == src_id))
-        memory = result.scalar_one_or_none()
-        if memory is None or not isinstance(memory.supersede_candidate, dict):
-            return
-        cand = memory.supersede_candidate
-        if cand.get("memory_id") != str(dst_id):
-            return
-        # Clear the accepted suggestion (server-only column; None = no suggestion).
-        memory.supersede_candidate = None
-        logger.info(
-            "supersede_suggestion_accepted",
-            memory_id=str(src_id),
-            superseded_memory_id=str(dst_id),
-            similarity=cand.get("similarity"),
-        )
-    except Exception as e:
-        logger.warning("supersede_accept_check_failed", error=str(e))
 
 
 async def handle_list_edges(
@@ -345,7 +250,6 @@ async def handle_create_edge(
         )
 
     from db.base import get_db
-    from repositories.neural_edge import NeuralEdgeRepository
 
     start_time = time.time()
     current_context_id = None
@@ -361,40 +265,27 @@ async def handle_create_edge(
             ws_id = str(workspace_id) if workspace_id else str(context.workspace_id)
             ctx_id = str(current_context_id)
 
-            repo = NeuralEdgeRepository(db)
-
-            existing = await repo.get_edge(
-                user_id,
-                source_uuid,
-                target_uuid,
-                workspace_id=ws_id,
-                context_id=ctx_id,
+            # Shared declared-edge core (#1321 duplicate contract + #1403 supersede
+            # self-heal), also used by the REST POST /graph/edges endpoint (#1416).
+            # Wrapped in the per-tool timeout so a hung DB can't stall the tool;
+            # the transaction and telemetry stay owned here (transport concerns).
+            result = await execute_with_timeout(
+                create_declared_edge(
+                    db,
+                    user_id=user_id,
+                    source_id=source_uuid,
+                    target_id=target_uuid,
+                    edge_type=edge_type,
+                    weight=weight,
+                    confidence=confidence,
+                    workspace_id=ws_id,
+                    context_id=ctx_id,
+                    overwrite=overwrite,
+                ),
+                operation_name="create_edge",
             )
 
-            if existing is not None and existing.origin == EDGE_ORIGIN_DECLARED and not overwrite:
-                # Snapshot while the instance is still live: Session.rollback()
-                # below expires ALL loaded ORM state regardless of
-                # expire_on_commit, and a post-rollback attribute access on the
-                # async session raises MissingGreenlet (sync lazy refresh).
-                existing_snapshot = _edge_to_dict(existing)
-                if (
-                    existing.edge_type == edge_type
-                    and existing.weight == weight
-                    and existing.confidence == confidence
-                ):
-                    # Idempotent re-assert: same declared edge, same values —
-                    # succeed without writing so timeout-retries are safe.
-                    await _log_tool_usage(
-                        db,
-                        user_id,
-                        "create_edge",
-                        start_time,
-                        200,
-                        current_context_id,
-                        workspace_id,
-                    )
-                    await db.commit()
-                    return _success_response(edge=existing_snapshot, operation="unchanged")
+            if result.operation == "conflict":
                 await db.rollback()
                 await _log_tool_usage(
                     db, user_id, "create_edge", start_time, 409, current_context_id, workspace_id
@@ -404,45 +295,7 @@ async def handle_create_edge(
                     f"A declared edge already exists from {args.get('source_id')} to "
                     f"{args.get('target_id')} with different values. Use update_edge to "
                     "modify it, or pass overwrite=true to re-assert it.",
-                    existing_edge=existing_snapshot,
-                )
-
-            previous = (
-                {
-                    "edge_type": existing.edge_type,
-                    "weight": existing.weight,
-                    "confidence": existing.confidence,
-                    "origin": existing.origin,
-                }
-                if existing is not None
-                else None
-            )
-
-            edge = await execute_with_timeout(
-                repo.create_or_update_edge(
-                    user_id=user_id,
-                    src_id=source_uuid,
-                    dst_id=target_uuid,
-                    edge_type=edge_type,
-                    weight=weight,
-                    confidence=confidence,
-                    workspace_id=ws_id,
-                    context_id=ctx_id,
-                    origin=EDGE_ORIGIN_DECLARED,
-                    # Without explicit overwrite, keep the declared-type guard on
-                    # the upsert itself: if a declared edge appears between the
-                    # get_edge above and this statement (race), its edge_type and
-                    # origin survive rather than being silently retyped.
-                    protect_declared_link=not overwrite,
-                ),
-                operation_name="create_edge",
-            )
-
-            # #1403: if this supersedes edge confirms a stored suggestion, record
-            # the acceptance and clear it (self-heal), in the same transaction.
-            if edge_type == EDGE_TYPE_SUPERSEDES:
-                await _accept_supersede_candidate_if_matching(
-                    db, src_id=source_uuid, dst_id=target_uuid
+                    existing_edge=result.existing,
                 )
 
             await _log_tool_usage(
@@ -450,11 +303,13 @@ async def handle_create_edge(
             )
             await db.commit()
 
-            if previous is not None:
+            if result.operation == "unchanged":
+                return _success_response(edge=result.edge, operation="unchanged")
+            if result.previous is not None:
                 return _success_response(
-                    edge=_edge_to_dict(edge), operation="updated", previous=previous
+                    edge=result.edge, operation="updated", previous=result.previous
                 )
-            return _success_response(edge=_edge_to_dict(edge), operation="created")
+            return _success_response(edge=result.edge, operation="created")
         except _ContextNotFoundError as e:
             await db.rollback()
             return e.to_response()

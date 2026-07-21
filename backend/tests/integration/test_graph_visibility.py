@@ -23,6 +23,7 @@ from uuid import uuid4
 import pytest
 import pytest_asyncio
 from fastapi.testclient import TestClient
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from api.main import app
@@ -717,3 +718,181 @@ async def test_mcp_list_edges_soft_deleted_context_returns_not_found(
             Context.__table__.update().where(Context.id == ctx_id).values(deleted_at=None)
         )
         await db_session.commit()
+
+
+# ============================================================================
+# POST /graph/edges — the REST edge-create endpoint (#1416)
+# ============================================================================
+#
+# The web UI's supersede-suggestion confirm flow (#1403) posts here. These pin
+# the endpoint's authorization (EDITOR write, cross-workspace 404), the
+# context-invariant endpoint check, and the #1403 accept/self-heal end to end.
+# They reuse ``visibility_scenario`` (memory_ids: [0]=owner/shared/src,
+# [1]=owner/shared/dst, [2]=member/shared/src, [3]=member/shared/dst,
+# [4]=owner/private/src, [5]=owner/private/dst) — [0]→[3] is an unlinked pair
+# in the shared context, so it exercises a genuine "created".
+
+
+async def _edge_id(db_session, src_id, dst_id):
+    """Look up a created edge's id (for teardown registration)."""
+    return (
+        await db_session.execute(
+            select(NeuralMemoryEdge.id).where(
+                NeuralMemoryEdge.src_id == src_id,
+                NeuralMemoryEdge.dst_id == dst_id,
+            )
+        )
+    ).scalar_one()
+
+
+@pytest.mark.asyncio
+async def test_create_edge_owner_creates_in_shared_context(visibility_scenario, db_session):
+    """An EDITOR (workspace owner) creates a declared edge between two memories
+    in a shared context → 201 created, origin='declared'."""
+    src_id = visibility_scenario["memory_ids"][0]
+    dst_id = visibility_scenario["memory_ids"][3]
+    _as(visibility_scenario["owner_a_id"], visibility_scenario["ws_a_id"])
+
+    with TestClient(app, raise_server_exceptions=False) as client:
+        response = client.post(
+            "/api/v1/graph/edges",
+            json={
+                "context_id": str(visibility_scenario["ctx_shared_id"]),
+                "source_id": str(src_id),
+                "target_id": str(dst_id),
+                "edge_type": "related_to",
+            },
+        )
+
+    assert response.status_code == 201, response.text
+    body = response.json()
+    assert body["operation"] == "created"
+    assert body["edge"]["origin"] == "declared"
+
+    # Register the new edge for fixture teardown (deleted before its memories).
+    visibility_scenario["edge_ids"].append(await _edge_id(db_session, src_id, dst_id))
+
+
+@pytest.mark.asyncio
+async def test_create_edge_plain_member_creates_in_shared_context(visibility_scenario, db_session):
+    """A plain workspace *member* (role=member, no explicit context-editor grant)
+    can create an edge in a shared context — the endpoint uses the
+    workspace-membership write model (member+), matching MCP create_edge /
+    remember / patch, not a stricter context-role EDITOR gate. Regression guard
+    against 403-ing the common collaborator on the supersede-confirm flow."""
+    src_id = visibility_scenario["memory_ids"][2]  # member_a's memory, ctx_shared
+    dst_id = visibility_scenario["memory_ids"][0]  # owner_a's memory, ctx_shared
+    _as(visibility_scenario["member_a_id"], visibility_scenario["ws_a_id"])
+
+    with TestClient(app, raise_server_exceptions=False) as client:
+        response = client.post(
+            "/api/v1/graph/edges",
+            json={
+                "context_id": str(visibility_scenario["ctx_shared_id"]),
+                "source_id": str(src_id),
+                "target_id": str(dst_id),
+                "edge_type": "related_to",
+            },
+        )
+
+    assert response.status_code == 201, response.text
+    assert response.json()["operation"] == "created"
+    visibility_scenario["edge_ids"].append(await _edge_id(db_session, src_id, dst_id))
+
+
+@pytest.mark.asyncio
+async def test_create_edge_self_loop_rejected(visibility_scenario):
+    """source_id == target_id is a 422 (self-loops unsupported), no write."""
+    src_id = visibility_scenario["memory_ids"][0]
+    _as(visibility_scenario["owner_a_id"], visibility_scenario["ws_a_id"])
+
+    with TestClient(app, raise_server_exceptions=False) as client:
+        response = client.post(
+            "/api/v1/graph/edges",
+            json={
+                "context_id": str(visibility_scenario["ctx_shared_id"]),
+                "source_id": str(src_id),
+                "target_id": str(src_id),
+            },
+        )
+
+    assert response.status_code == 422, response.text
+
+
+@pytest.mark.asyncio
+async def test_create_edge_cross_workspace_probe_returns_404(visibility_scenario):
+    """A non-member of workspace A gets a uniform 404 (no existence leak), no write."""
+    src_id = visibility_scenario["memory_ids"][0]
+    dst_id = visibility_scenario["memory_ids"][3]
+    _as(visibility_scenario["outsider_b_id"], visibility_scenario["ws_b_id"])
+
+    with TestClient(app, raise_server_exceptions=False) as client:
+        response = client.post(
+            "/api/v1/graph/edges",
+            json={
+                "context_id": str(visibility_scenario["ctx_shared_id"]),
+                "source_id": str(src_id),
+                "target_id": str(dst_id),
+            },
+        )
+
+    assert response.status_code == 404, response.text
+
+
+@pytest.mark.asyncio
+async def test_create_edge_target_in_other_context_returns_404(visibility_scenario):
+    """The context invariant: a target memory that lives in a DIFFERENT context
+    than the request's context_id is a 404 — the edge cannot span contexts."""
+    src_id = visibility_scenario["memory_ids"][0]  # ctx_shared
+    dst_id = visibility_scenario["memory_ids"][4]  # ctx_private
+    _as(visibility_scenario["owner_a_id"], visibility_scenario["ws_a_id"])
+
+    with TestClient(app, raise_server_exceptions=False) as client:
+        response = client.post(
+            "/api/v1/graph/edges",
+            json={
+                "context_id": str(visibility_scenario["ctx_shared_id"]),
+                "source_id": str(src_id),
+                "target_id": str(dst_id),
+            },
+        )
+
+    assert response.status_code == 404, response.text
+
+
+@pytest.mark.asyncio
+async def test_create_supersedes_edge_accepts_stored_candidate(visibility_scenario, db_session):
+    """#1403 accept path end to end: a stored supersede_candidate on the source
+    memory is cleared (self-healed) when the confirming supersedes edge is
+    created via REST."""
+    src_id = visibility_scenario["memory_ids"][0]
+    dst_id = visibility_scenario["memory_ids"][3]
+
+    # Seed the server-only supersede_candidate column on the source memory.
+    await db_session.execute(
+        Memory.__table__.update()
+        .where(Memory.id == src_id)
+        .values(supersede_candidate={"memory_id": str(dst_id), "similarity": 0.9})
+    )
+    await db_session.commit()
+
+    _as(visibility_scenario["owner_a_id"], visibility_scenario["ws_a_id"])
+    with TestClient(app, raise_server_exceptions=False) as client:
+        response = client.post(
+            "/api/v1/graph/edges",
+            json={
+                "context_id": str(visibility_scenario["ctx_shared_id"]),
+                "source_id": str(src_id),
+                "target_id": str(dst_id),
+                "edge_type": "supersedes",
+            },
+        )
+
+    assert response.status_code == 201, response.text
+    visibility_scenario["edge_ids"].append(await _edge_id(db_session, src_id, dst_id))
+
+    # Self-heal: the accepted suggestion is cleared on the source memory.
+    stored = (
+        await db_session.execute(select(Memory.supersede_candidate).where(Memory.id == src_id))
+    ).scalar_one()
+    assert stored is None
