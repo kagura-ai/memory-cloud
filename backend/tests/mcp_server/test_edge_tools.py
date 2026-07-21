@@ -813,7 +813,7 @@ class TestSupersedeAcceptanceTelemetry:
             ),
             patch("mcp_server.tools.edge._log_tool_usage", new_callable=AsyncMock),
             patch(
-                "mcp_server.tools.edge._accept_supersede_candidate_if_matching",
+                "mcp_server.tools.edge.accept_supersede_candidate_if_matching",
                 new_callable=AsyncMock,
             ) as accept,
         ):
@@ -857,7 +857,7 @@ class TestSupersedeAcceptanceTelemetry:
             ),
             patch("mcp_server.tools.edge._log_tool_usage", new_callable=AsyncMock),
             patch(
-                "mcp_server.tools.edge._accept_supersede_candidate_if_matching",
+                "mcp_server.tools.edge.accept_supersede_candidate_if_matching",
                 new_callable=AsyncMock,
             ) as accept,
         ):

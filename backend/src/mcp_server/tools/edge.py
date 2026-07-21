@@ -22,9 +22,10 @@ from mcp_server.tools._helpers import (
     _validate_memory_id,
     execute_with_timeout,
 )
-from models.memory import EDGE_ORIGIN_DECLARED
+from models.memory import EDGE_ORIGIN_DECLARED, EDGE_TYPE_SUPERSEDES
 from services.edge_service import (
     VALID_EDGE_TYPES,
+    accept_supersede_candidate_if_matching,
     create_declared_edge,
 )
 from services.edge_service import (
@@ -418,7 +419,7 @@ async def handle_update_edge(
             # suggestion confirmed via update_edge (not just create_edge) stops
             # resurfacing on recall/reference.
             if edge.edge_type == EDGE_TYPE_SUPERSEDES:
-                await _accept_supersede_candidate_if_matching(
+                await accept_supersede_candidate_if_matching(
                     db, src_id=source_uuid, dst_id=target_uuid
                 )
 
