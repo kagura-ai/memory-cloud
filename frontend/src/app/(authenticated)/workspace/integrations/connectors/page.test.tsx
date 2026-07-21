@@ -25,6 +25,7 @@ const mockCreateConnector = vi.fn();
 const mockUpdateConnectorRuntime = vi.fn();
 const mockUpdateConnectorSettings = vi.fn();
 const mockGetSlackPendingInstall = vi.fn();
+const mockListConnectorChannels = vi.fn();
 vi.mock("@/lib/api/workspace-connectors", async (importOriginal) => {
   const actual =
     await importOriginal<typeof import("@/lib/api/workspace-connectors")>();
@@ -32,6 +33,8 @@ vi.mock("@/lib/api/workspace-connectors", async (importOriginal) => {
     // Pure helpers — use the real rules, not mocks.
     connectorReadiness: actual.connectorReadiness,
     connectorDisplayName: actual.connectorDisplayName,
+    listConnectorChannels: (...args: unknown[]) =>
+      mockListConnectorChannels(...args),
     listConnectors: (...args: unknown[]) => mockListConnectors(...args),
     listAvailableWorkerApps: (...args: unknown[]) =>
       mockListAvailableWorkerApps(...args),
@@ -124,6 +127,10 @@ beforeEach(() => {
   // per-test mockResolvedValue never leaks into later tests (#1376 review).
   mockUpdateConnectorSettings.mockReset();
   mockUseSystemFeatures.mockReturnValue({}); // #1426: non-managed by default
+  // #1391: default the channel list to unavailable so the picker falls back to
+  // the manual-ID lane (the shape existing channel tests exercise). The
+  // select-mode test overrides with a resolved page.
+  mockListConnectorChannels.mockRejectedValue(new Error("not-mocked"));
   mockSearchParamsGet.mockReturnValue(null);
   mockListConnectors.mockResolvedValue([]);
   mockListAvailableWorkerApps.mockResolvedValue([]);
@@ -306,6 +313,47 @@ describe("ConnectorsPage RBAC gate", () => {
     fireEvent.click(screen.getByRole("button", { name: "editSettings" }));
     expect(await screen.findByText("llmManagedNote")).toBeInTheDocument();
     expect(screen.queryByText("llmDelete")).not.toBeInTheDocument();
+  });
+
+  it("picks channels from the server list and saves channel_ids (#1391)", async () => {
+    setWorkspace("admin");
+    mockListConnectorChannels.mockResolvedValue({
+      channels: [
+        { id: "C1", name: "general", is_private: false },
+        { id: "C2", name: "random", is_private: false },
+      ],
+      next_cursor: null,
+    });
+    mockListConnectors.mockResolvedValue([
+      makeConnector({ channel_ids: [], llm_config_present: true }),
+    ]);
+    mockUpdateConnectorSettings.mockResolvedValue({
+      connector_id: "connector-1",
+      channel_ids: ["C2"],
+      litellm_virtual_key_id: null,
+      llm_config_present: true,
+      locale: null,
+      config_version: 4,
+      context_id: "context-1",
+    });
+
+    render(<ConnectorsPage />);
+    await screen.findByText("connectProvider");
+    fireEvent.click(
+      await screen.findByRole("button", { name: "editSettings" }),
+    );
+
+    // Picker loaded the server list — select #random, then save.
+    fireEvent.click(await screen.findByRole("button", { name: /random/ }));
+    fireEvent.click(screen.getByRole("button", { name: "settingsSave" }));
+
+    await waitFor(() =>
+      expect(mockUpdateConnectorSettings).toHaveBeenCalledWith(
+        "connector-1",
+        expect.objectContaining({ channel_ids: ["C2"] }),
+        expect.anything(),
+      ),
+    );
   });
 
   it("updates the tenant-local vision kill-switch from the connector row", async () => {

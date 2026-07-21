@@ -71,6 +71,7 @@ import { useToast } from "@/hooks/use-toast";
 import { useCopyFeedback } from "@/hooks/useCopyFeedback";
 import { useConsumeSearchParams } from "@/hooks/useConsumeSearchParams";
 import { useSystemFeatures } from "@/hooks/useSystemFeatures";
+import { ChannelPicker, parseChannelIds } from "./ChannelPicker";
 import { useWorkspace } from "@/contexts/WorkspaceContext";
 import { hasWorkspaceRole, WorkspaceRole } from "@/lib/auth/rbac";
 import { API_BASE_URL } from "@/lib/api/base";
@@ -1323,23 +1324,20 @@ export default function ConnectorsPage() {
                 />
               </div>
               <div>
-                <label
-                  htmlFor="conn-settings-channels"
-                  className="mb-1 block text-sm font-medium"
-                >
+                <label className="mb-1 block text-sm font-medium">
                   {t("channelsLabel")}
                 </label>
-                <Input
-                  id="conn-settings-channels"
-                  ref={channelsInputRef}
-                  aria-label={t("channelsLabel")}
-                  placeholder="C0123ABC456, C0456DEF789"
-                  value={chText}
-                  onChange={(e) => setChText(e.target.value)}
-                />
-                <p className="mt-1 text-xs text-muted-foreground">
-                  {t("channelsHelp")}
-                </p>
+                {settingsFor && (
+                  // #1391: pick from the connector's Slack channels (server-side
+                  // proxy); manual-ID entry stays as a fallback lane. Reads/writes
+                  // the same chText, so the channel_ids PATCH is unchanged.
+                  <ChannelPicker
+                    connectorId={settingsFor.connector_id}
+                    value={parseChannelIds(chText)}
+                    onChange={(ids) => setChText(ids.join(", "))}
+                    inputRef={channelsInputRef}
+                  />
+                )}
               </div>
             </section>
             {/* Section 2 — language */}

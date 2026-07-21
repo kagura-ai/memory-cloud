@@ -188,6 +188,27 @@ class ConflictError(MemoryCloudException):
         super().__init__(message, status_code=409, error_code="RES-002", **details)
 
 
+class ConnectorScopeError(MemoryCloudException):
+    """The connector's Slack bot token lacks a scope required for this call (409).
+
+    Issue #1391: ``GET /workspace-connectors/{id}/channels`` proxies Slack's
+    ``conversations.list`` to back the settings channel picker. Legacy installs
+    (or manual binds of older apps) whose bot token predates the
+    ``channels:read`` scope get Slack's ``missing_scope`` error; the endpoint
+    maps it to this structured 409 so the picker degrades to manual-ID entry
+    instead of surfacing a raw 5xx. ``CONNECTOR-SCOPE`` is the stable code the
+    frontend routes on. It is also used when the connector carries no bot token
+    at all (never OAuth-installed / token cleared) — the client fallback is the
+    same manual-entry lane, so a single signal keeps that contract simple.
+    """
+
+    def __init__(
+        self,
+        message: str = ("The connector's Slack token is missing a required scope (channels:read)."),
+    ) -> None:
+        super().__init__(message, status_code=409, error_code="CONNECTOR-SCOPE")
+
+
 class ExportTooLargeError(MemoryCloudException):
     """Context has more memories than a single export can return (413).
 

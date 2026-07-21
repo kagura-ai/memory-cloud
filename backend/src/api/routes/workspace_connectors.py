@@ -2,16 +2,18 @@
 
 from __future__ import annotations
 
+import json
 from datetime import datetime
-from typing import Any, Literal
+from typing import Annotated, Any, Literal
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, HTTPException, Response, status
+from fastapi import APIRouter, Depends, HTTPException, Query, Response, status
 from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from auth.dependencies import WorkspaceAdmin
 from db.base import get_db
+from db.redis import get_cache, get_redis_client
 from models.api_base import TZAwareBaseModel
 from models.schemas import validate_pii_guardrail_config
 from models.worker_runtime import WorkerRuntimeConfig
@@ -19,9 +21,16 @@ from services.connector_provisioning import (
     ConnectorProvisioningService,
     ConnectorRuntimeUpdateResult,
 )
+from services.slack_channels import (
+    SlackChannel,
+    SlackChannelsPage,
+    SlackRateLimited,
+    fetch_slack_channels,
+)
 from utils.exceptions import (
     BadRequestError,
     ConflictError,
+    ConnectorScopeError,
     InternalError,
     MemoryCloudException,
     NotFoundException,
@@ -32,6 +41,17 @@ from utils.logger import get_logger
 logger = get_logger(__name__)
 
 router = APIRouter(prefix="/workspace-connectors", tags=["workspace-connectors"])
+
+# #1391: short server-side cache per connector+cursor for the Slack channel
+# picker. conversations.list is Slack rate-limit Tier 2 (~20 req/min per token),
+# so an admin repeatedly opening the settings dialog must not burn the budget
+# the ai-worker may also need. Keyed by cursor (NOT ``q``) so the client-side
+# ``q`` filter reuses the same cached page.
+_CHANNELS_CACHE_TTL_SECONDS = 60
+# Defensive caps on caller-supplied query params (Slack cursors are opaque
+# base64; the picker search box is short).
+_CHANNELS_CURSOR_MAX_LEN = 1024
+_CHANNELS_QUERY_MAX_LEN = 100
 
 
 class WorkspaceConnectorCreateRequest(BaseModel):
@@ -237,6 +257,25 @@ class AvailableWorkerApp(BaseModel):
     platform: str
     app_key: str
     display_name: str
+
+
+class ConnectorChannel(BaseModel):
+    """One selectable channel for the settings picker (#1391).
+
+    Minimized by design: id + name (plus the private flag for display). No
+    member counts, topics, or other metadata reach the browser.
+    """
+
+    id: str
+    name: str
+    is_private: bool
+
+
+class ConnectorChannelsResponse(BaseModel):
+    """A page of channels plus Slack's opaque forward cursor (#1391)."""
+
+    channels: list[ConnectorChannel]
+    next_cursor: str | None = None
 
 
 @router.post(
@@ -558,6 +597,117 @@ async def list_available_worker_apps(
         )
         for identity in identities
     ]
+
+
+@router.get("/{connector_id}/channels", response_model=ConnectorChannelsResponse)
+async def list_connector_channels(
+    connector_id: UUID,
+    admin: WorkspaceAdmin,
+    cursor: Annotated[str | None, Query(max_length=_CHANNELS_CURSOR_MAX_LEN)] = None,
+    q: Annotated[str | None, Query(max_length=_CHANNELS_QUERY_MAX_LEN)] = None,
+    db: AsyncSession = Depends(get_db),
+) -> ConnectorChannelsResponse:
+    """List a Slack connector's public channels for the settings picker (#1391).
+
+    Server-side proxy of Slack ``conversations.list`` using the connector's
+    Fernet-decrypted bot token — the token never reaches the browser. Read-only
+    and workspace-admin scoped; a cross-workspace / unknown connector is a
+    uniform 404. The optional ``q`` filters the fetched page by name
+    (case-insensitive substring); Slack's API has no name filter.
+
+    Errors degrade gracefully to the manual-ID entry lane rather than 5xx:
+    a token missing the ``channels:read`` scope (legacy installs) is a 409
+    ``CONNECTOR-SCOPE``; Slack rate-limiting is a 429 with ``Retry-After``.
+    """
+    workspace_id = admin.get("current_workspace_id")
+    if workspace_id is None:
+        raise BadRequestError("No workspace selected. Please select a workspace first.")
+
+    connector = await ConnectorProvisioningService(db).get_connector(workspace_id, connector_id)
+    if connector is None:
+        # Cross-workspace and unknown connectors are indistinguishable — no
+        # cross-tenant existence oracle (same contract as the settings PATCH).
+        # Omit the id (matches the runtime-PATCH 404) for a uniform message.
+        raise NotFoundException("Connector")
+    if connector.connector_type != "slack":
+        # v1 picker is Slack-only; other providers arrive with their own
+        # hierarchy shapes (design non-goal). Non-existence-leaking 400.
+        raise BadRequestError(
+            "Channel listing is only available for Slack connectors.",
+            error_code="CONNECTOR-CHANNELS-001",
+        )
+
+    tokens = connector.get_oauth_tokens() or {}
+    bot_token = tokens.get("bot_token")
+    if not bot_token:
+        # No bot token at all (never OAuth-installed / cleared). The client
+        # fallback is the same manual-entry lane as a missing scope.
+        raise ConnectorScopeError(
+            "This connector has no Slack bot token; enter channel IDs manually."
+        )
+
+    cache_key = f"slack_channels:{connector_id}:{cursor or ''}"
+    page: SlackChannelsPage | None = None
+    cached = await get_cache(cache_key)
+    if cached is not None:
+        try:
+            payload = json.loads(cached)
+            page = SlackChannelsPage(
+                channels=[SlackChannel(**c) for c in payload["channels"]],
+                next_cursor=payload.get("next_cursor"),
+            )
+        except (ValueError, KeyError, TypeError):
+            # A corrupt / schema-drifted cache entry must never fail the
+            # request — treat it as a miss and refetch.
+            page = None
+
+    if page is None:
+        try:
+            page = await fetch_slack_channels(bot_token=bot_token, cursor=cursor)
+        except SlackRateLimited as exc:
+            # Surface Slack's Tier-2 rate limit as a 429 with Retry-After
+            # passthrough so the frontend shows the manual-entry fallback
+            # rather than spinning. HTTPException carries the header through
+            # http_exception_handler (the MemoryCloudException handler drops
+            # response headers).
+            headers = {"Retry-After": str(exc.retry_after)} if exc.retry_after is not None else None
+            raise HTTPException(
+                status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+                detail="Slack rate limit reached; please retry shortly.",
+                headers=headers,
+            ) from exc
+
+        # Best-effort cache write of the minimized page (no token, no extra
+        # metadata). A Redis outage here must not fail an otherwise-good fetch.
+        try:
+            await get_redis_client().setex(
+                cache_key,
+                _CHANNELS_CACHE_TTL_SECONDS,
+                json.dumps(
+                    {
+                        "channels": [
+                            {"id": c.id, "name": c.name, "is_private": c.is_private}
+                            for c in page.channels
+                        ],
+                        "next_cursor": page.next_cursor,
+                    }
+                ),
+            )
+        except Exception:
+            logger.warning("slack_channels_cache_write_failed", connector_id=str(connector_id))
+
+    channels = page.channels
+    if q:
+        needle = q.strip().lower()
+        if needle:
+            channels = [c for c in channels if needle in c.name.lower()]
+
+    return ConnectorChannelsResponse(
+        channels=[
+            ConnectorChannel(id=c.id, name=c.name, is_private=c.is_private) for c in channels
+        ],
+        next_cursor=page.next_cursor,
+    )
 
 
 @router.delete("/{connector_id}", status_code=status.HTTP_204_NO_CONTENT)

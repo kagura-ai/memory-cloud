@@ -250,6 +250,36 @@ export async function updateConnectorSettings(
   );
 }
 
+// #1391: one Slack channel from the connector's channel picker. id/name/private
+// only (data minimization); the bot token never leaves the server.
+export interface ConnectorChannel {
+  id: string;
+  name: string;
+  is_private: boolean;
+}
+
+export interface ConnectorChannelsPage {
+  channels: ConnectorChannel[];
+  next_cursor: string | null;
+}
+
+// #1391: list a connector's public Slack channels for the settings-dialog
+// picker. Server-side proxy of Slack conversations.list. Throws on non-2xx —
+// the picker degrades to manual channel-ID entry on any failure (missing scope
+// / rate limit / transport), per the design's fallback lane.
+export async function listConnectorChannels(
+  connectorId: string,
+  opts: { cursor?: string; q?: string } = {},
+): Promise<ConnectorChannelsPage> {
+  const params = new URLSearchParams();
+  if (opts.cursor) params.set("cursor", opts.cursor);
+  if (opts.q) params.set("q", opts.q);
+  const qs = params.toString();
+  return apiClient.get<ConnectorChannelsPage>(
+    `/api/v1/workspace-connectors/${connectorId}/channels${qs ? `?${qs}` : ""}`,
+  );
+}
+
 export async function getSlackPendingInstall(
   handle: string,
 ): Promise<SlackPendingInstall> {
