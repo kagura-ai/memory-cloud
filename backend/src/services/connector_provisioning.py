@@ -199,8 +199,10 @@ class ConnectorProvisioningService:
         except ValueError as ve:
             raise ValidationError(str(ve), field="locale") from ve
 
-        # #1376 review: same un-vendable guard as the settings PATCH.
+        # #1376 review: same un-vendable guards as the settings PATCH — CREATE
+        # must not be able to store a shape PATCH would reject.
         self._validate_llm_config(llm_config)
+        self._validate_channel_ids(channel_ids)
 
         normalized_runtime_config = None
         if runtime_config is not None:
@@ -916,6 +918,34 @@ class ConnectorProvisioningService:
                 field="llm_config",
             )
 
+    @staticmethod
+    def _validate_channel_ids(channel_ids: list[Any] | None) -> None:
+        """Reject a channel_ids list that could never vend cleanly (#1376).
+
+        Shared by CREATE (``provision_connector``) and PATCH
+        (``update_connector_settings``) so a connector can never be *born* via
+        CREATE in a shape PATCH refuses to produce — and so non-string/oversized
+        ids never reach ``GET /workers/config`` and the worker contract.
+        ``None`` is the canonical "no channels" state and is allowed; the only
+        other valid shape is a non-empty list of non-blank id strings.
+        """
+        if channel_ids is None:
+            return
+        if (
+            not channel_ids
+            or len(channel_ids) > _MAX_CHANNEL_IDS
+            or not all(
+                isinstance(cid, str) and cid.strip() and len(cid) <= _MAX_CHANNEL_ID_CHARS
+                for cid in channel_ids
+            )
+        ):
+            raise ValidationError(
+                "channel_ids must be a non-empty list of non-blank channel "
+                f"id strings (max {_MAX_CHANNEL_IDS} ids, "
+                f"{_MAX_CHANNEL_ID_CHARS} chars each); pass null to clear",
+                field="channel_ids",
+            )
+
     async def update_connector_settings(
         self,
         *,
@@ -963,21 +993,8 @@ class ConnectorProvisioningService:
                 field="body",
             )
 
-        if channel_ids is not _UNSET and channel_ids is not None:
-            if (
-                not channel_ids
-                or len(channel_ids) > _MAX_CHANNEL_IDS
-                or not all(
-                    isinstance(cid, str) and cid.strip() and len(cid) <= _MAX_CHANNEL_ID_CHARS
-                    for cid in channel_ids
-                )
-            ):
-                raise ValidationError(
-                    "channel_ids must be a non-empty list of non-blank channel "
-                    f"id strings (max {_MAX_CHANNEL_IDS} ids, "
-                    f"{_MAX_CHANNEL_ID_CHARS} chars each); pass null to clear",
-                    field="channel_ids",
-                )
+        if channel_ids is not _UNSET:
+            self._validate_channel_ids(channel_ids)
 
         if llm_config is not _UNSET:
             self._validate_llm_config(llm_config)

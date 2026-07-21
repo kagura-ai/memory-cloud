@@ -62,7 +62,7 @@ def _make_db():
     return db
 
 
-def _make_edge_repo(existing_edges=None, created_edge=None):
+def _make_edge_repo(existing_edges=None, created_edge=None, edge_to_candidate=None):
     """Build a NeuralEdgeRepository mock.
 
     Args:
@@ -72,9 +72,13 @@ def _make_edge_repo(existing_edges=None, created_edge=None):
         created_edge: Return value for create_edge_if_absent.
             Default MagicMock() simulates successful insert.
             None simulates ON CONFLICT DO NOTHING (edge already existed).
+        edge_to_candidate: Return value for get_edge (the #1403 already-accepted
+            check). Default None = no A->candidate edge yet, so a detected
+            candidate is populated.
     """
     repo = MagicMock()
     repo.get_outgoing_edges = AsyncMock(return_value=existing_edges or [])
+    repo.get_edge = AsyncMock(return_value=edge_to_candidate)
     repo.create_edge_if_absent = AsyncMock(
         return_value=created_edge if created_edge is not None else MagicMock()
     )
@@ -234,6 +238,106 @@ class TestKnnSeeding:
         assert stored["similarity"] == 0.95
         assert "detected_at" in stored
         db.commit.assert_awaited()
+
+    @pytest.mark.asyncio
+    async def test_supersede_candidate_detected_even_with_existing_declared_edge(self):
+        """#1403 review F2: a memory created with linked_memory_ids/
+        linked_source_uris/supersedes gets a declared edge synchronously (via
+        _create_declared_links) BEFORE this async task runs, so the seed
+        idempotency guard (existing_edges) fires. Detection must still run — it
+        only reads candidates and writes the server-only supersede_candidate
+        column — while SEEDING stays skipped. Regression: detection used to sit
+        behind the guard and was silently skipped for exactly this workflow (the
+        one most likely to be a supersede)."""
+        memory = _make_memory()
+        db = _make_db()
+        # Non-empty outgoing edges: a declared link already exists (the F2 trigger).
+        mock_repo = _make_edge_repo(existing_edges=[MagicMock()])
+        dup_id = str(uuid4())
+        candidates = [
+            {"id": dup_id, "score": 0.95, "payload": {}, "embedding": []},
+            {"id": str(uuid4()), "score": 0.70, "payload": {}, "embedding": []},
+        ]
+
+        with (
+            patch(
+                "neural.config.NeuralMemoryConfig.from_db",
+                new=AsyncMock(return_value=_make_config(min_similarity=0.6)),
+            ),
+            patch(
+                "db.qdrant.search_memories_qdrant",
+                new=AsyncMock(return_value=candidates),
+            ),
+            patch(
+                "repositories.neural_edge.NeuralEdgeRepository",
+                return_value=mock_repo,
+            ),
+        ):
+            await _create_knn_seed_edges(
+                db=db,
+                memory=memory,
+                vector=[0.1] * 512,
+                collection_name="kagura_memories",
+                model_name="text-embedding-3-small",
+            )
+
+        # Detection still fires and persists despite the pre-existing edge...
+        stored = memory.supersede_candidate
+        assert stored is not None
+        assert stored["memory_id"] == dup_id
+        # ...but SEEDING is still skipped by the idempotency guard.
+        mock_repo.create_edge_if_absent.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_supersede_candidate_not_repopulated_when_already_accepted(self):
+        """#1403 F2 regression guard: once a suggestion is accepted (a
+        'supersedes' edge from the memory to the candidate exists and the column
+        was cleared), a later re-embed must NOT re-populate the candidate — that
+        would resurface an already-actioned suggestion on recall. Because
+        detection now runs independent of the seed guard, this needs its own
+        already-superseded check."""
+        from models.memory import EDGE_TYPE_SUPERSEDES
+
+        memory = _make_memory()
+        db = _make_db()
+        dup_id = str(uuid4())
+        # An existing 'supersedes' edge memory -> dup: the suggestion was already
+        # accepted and cleared. existing_edges non-empty so seeding is skipped too.
+        accepted_edge = MagicMock()
+        accepted_edge.edge_type = EDGE_TYPE_SUPERSEDES
+        mock_repo = _make_edge_repo(existing_edges=[MagicMock()], edge_to_candidate=accepted_edge)
+        candidates = [
+            {"id": dup_id, "score": 0.95, "payload": {}, "embedding": []},
+            {"id": str(uuid4()), "score": 0.70, "payload": {}, "embedding": []},
+        ]
+
+        with (
+            patch(
+                "neural.config.NeuralMemoryConfig.from_db",
+                new=AsyncMock(return_value=_make_config(min_similarity=0.6)),
+            ),
+            patch(
+                "db.qdrant.search_memories_qdrant",
+                new=AsyncMock(return_value=candidates),
+            ),
+            patch(
+                "repositories.neural_edge.NeuralEdgeRepository",
+                return_value=mock_repo,
+            ),
+        ):
+            await _create_knn_seed_edges(
+                db=db,
+                memory=memory,
+                vector=[0.1] * 512,
+                collection_name="kagura_memories",
+                model_name="text-embedding-3-small",
+            )
+
+        # The already-accepted check queried the A->candidate edge...
+        mock_repo.get_edge.assert_awaited_once()
+        # ...found a 'supersedes' edge, so the candidate is NOT re-populated.
+        assert memory.supersede_candidate is None
+        db.commit.assert_not_called()
 
     @pytest.mark.asyncio
     async def test_no_supersede_candidate_below_threshold(self):
@@ -684,11 +788,16 @@ class TestKnnSeeding:
 
     @pytest.mark.asyncio
     async def test_idempotent_skip_when_edges_already_exist(self):
-        """Idempotency guard: if memory already has outgoing edges, skip seeding.
+        """Idempotency guard: if memory already has outgoing edges, skip SEEDING.
 
         This prevents update_memory() re-embeds from overwriting existing
         Hebbian-learned edges via ON CONFLICT DO UPDATE on the
         (user_id, src_id, dst_id) unique constraint.
+
+        Note (#1403 F2): the Qdrant search now runs BEFORE this guard because
+        supersede detection depends on it, so ``search`` IS called — but with an
+        only-related (below-threshold) neighbor there is no supersede commit, and
+        the guard still skips edge creation.
         """
         memory = _make_memory()
         db = _make_db()
@@ -696,6 +805,9 @@ class TestKnnSeeding:
         # Simulate an existing edge (e.g., from prior Hebbian learning)
         existing_edge = MagicMock()
         mock_repo = _make_edge_repo(existing_edges=[existing_edge])
+        # A merely-related neighbor (below the 0.85 supersede threshold) so no
+        # supersede_candidate is detected/committed on this path.
+        candidates = [{"id": str(uuid4()), "score": 0.5, "payload": {}, "embedding": []}]
 
         with (
             patch(
@@ -704,7 +816,7 @@ class TestKnnSeeding:
             ),
             patch(
                 "db.qdrant.search_memories_qdrant",
-                new=AsyncMock(),
+                new=AsyncMock(return_value=candidates),
             ) as mock_search,
             patch(
                 "repositories.neural_edge.NeuralEdgeRepository",
@@ -719,11 +831,13 @@ class TestKnnSeeding:
                 model_name="text-embedding-3-small",
             )
 
-        # Idempotency guard: get_outgoing_edges was called, returned existing edges,
-        # so Qdrant search and edge creation are skipped
+        # Guard: get_outgoing_edges returned existing edges, so edge SEEDING is
+        # skipped. The search runs (supersede detection needs it) but finds no
+        # near-duplicate, so nothing is committed.
         mock_repo.get_outgoing_edges.assert_called_once()
-        mock_search.assert_not_called()
+        mock_search.assert_called_once()
         mock_repo.create_edge_if_absent.assert_not_called()
+        assert memory.supersede_candidate is None
         db.commit.assert_not_called()
 
     @pytest.mark.asyncio

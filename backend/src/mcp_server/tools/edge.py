@@ -22,9 +22,10 @@ from mcp_server.tools._helpers import (
     _validate_memory_id,
     execute_with_timeout,
 )
-from models.memory import EDGE_ORIGIN_DECLARED
+from models.memory import EDGE_ORIGIN_DECLARED, EDGE_TYPE_SUPERSEDES
 from services.edge_service import (
     VALID_EDGE_TYPES,
+    accept_supersede_candidate_if_matching,
     create_declared_edge,
 )
 from services.edge_service import (
@@ -199,8 +200,10 @@ async def handle_create_edge(
     - existing ``origin != 'declared'`` (hebbian/semantic auto-edge): upsert
       proceeds — a user assertion may update an automatic edge's values —
       and the response carries ``operation: "updated"`` plus the pre-image.
-      The repo's sticky-origin CASE promotes hebbian rows to 'declared' but
-      keeps 'semantic' rows semantic (both are decay-exempt); the response's
+      Since create_edge asserts ``origin='declared'``, the repo's #1406
+      origin CASE makes that assertion win over the row's existing provenance:
+      an existing 'hebbian' OR 'semantic' row is promoted to 'declared' (a
+      user assertion outranks machine provenance). The response's
       ``edge.origin`` field makes the outcome visible.
     - existing ``origin == 'declared'`` with identical edge_type/weight/
       confidence: no write, ``operation: "unchanged"`` (keeps client
@@ -409,6 +412,16 @@ async def handle_update_edge(
                 ),
                 operation_name="update_edge",
             )
+
+            # #1403: like handle_create_edge, an update that retypes the edge to
+            # 'supersedes' may confirm a stored suggestion — record the
+            # acceptance and clear the candidate in the same transaction, so a
+            # suggestion confirmed via update_edge (not just create_edge) stops
+            # resurfacing on recall/reference.
+            if edge.edge_type == EDGE_TYPE_SUPERSEDES:
+                await accept_supersede_candidate_if_matching(
+                    db, src_id=source_uuid, dst_id=target_uuid
+                )
 
             await _log_tool_usage(
                 db, user_id, "update_edge", start_time, 200, current_context_id, workspace_id

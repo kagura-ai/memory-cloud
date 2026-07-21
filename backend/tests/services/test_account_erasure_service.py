@@ -1078,9 +1078,19 @@ class TestErasureResiduals1365:
 
     @pytest.mark.asyncio
     async def test_sweep_pseudonymizes_all_authorship_columns(self):
-        """All 12 surviving-row authorship columns are swept, and the
-        count is their sum (distinct per-column values pin the SUM)."""
-        from models.auth import Context, ExternalAPIKey
+        """All 16 surviving-row authorship columns are swept, and the
+        count is their sum (distinct per-column values pin the SUM).
+
+        The last four (identity_id, ContextMember/WorkspaceMember.invited_by,
+        WorkspaceInvitation.accepted_by) were added by the v0.54..v0.57 review
+        (F7/F8/F9) — surviving-row identity links the earlier sweep missed."""
+        from models.auth import (
+            Context,
+            ContextMember,
+            ExternalAPIKey,
+            WorkspaceInvitation,
+            WorkspaceMember,
+        )
         from models.file_objects import FileObject
         from models.resource import (
             Resource,
@@ -1108,6 +1118,10 @@ class TestErasureResiduals1365:
             (SecretGrant, "granted_by"): 10,
             (Context, "created_by"): 11,
             (ExternalAPIKey, "updated_by"): 12,
+            (RecipientPubkey, "identity_id"): 13,
+            (ContextMember, "invited_by"): 14,
+            (WorkspaceMember, "invited_by"): 15,
+            (WorkspaceInvitation, "accepted_by"): 16,
         }
 
         async def _by_column(model, column, user_id, extra_values=None):
@@ -1130,6 +1144,104 @@ class TestErasureResiduals1365:
             if (c.args[0], c.args[1].key) in expected
         }
         assert swept == set(expected)
+
+    @pytest.mark.asyncio
+    async def test_sweep_deletes_new_no_cascade_per_user_tables(self):
+        """v0.54..v0.57 review sweep: per-user rows with no user-scoped cascade
+        (or dead ACL grants) must be deleted so the raw sub can't outlive
+        erasure — context_members (F8), oauth_device_codes, llm_call_logs."""
+        from models.auth import ContextMember, OAuth2DeviceCode
+        from models.llm_call_log import LLMCallLog
+
+        svc = _service()
+        svc._count_and_delete = AsyncMock(return_value=0)
+        svc._pseudonymize_field = AsyncMock(return_value=0)
+        svc._erase_secret_access_log = AsyncMock(return_value=0)
+        svc.db.delete = AsyncMock()
+        svc.db.commit = AsyncMock()
+        target = _user()
+
+        await svc._delete_postgres(target)
+
+        deleted_models = {c.args[0] for c in svc._count_and_delete.await_args_list}
+        assert ContextMember in deleted_models
+        assert OAuth2DeviceCode in deleted_models
+        assert LLMCallLog in deleted_models
+
+    @pytest.mark.asyncio
+    async def test_sweep_pseudonymizes_surviving_graph_and_analysis(self):
+        """v0.54..v0.57 review sweep: neural edges, analysis runs, retrieval
+        feedback, and sleep reports that outlive the sole-owner cascade in
+        co-owned/transferred workspaces must have the subject link pseudonymized
+        (same deterministic pseudonym as the scrubbed memories)."""
+        from models.analysis import MemoryAnalysis
+        from models.memory import NeuralMemoryEdge
+        from models.retrieval_feedback import RetrievalFeedback
+        from models.sleep import SleepReport
+
+        svc = _service()
+        svc._count_and_delete = AsyncMock(return_value=0)
+        svc._pseudonymize_field = AsyncMock(return_value=0)
+        svc._erase_secret_access_log = AsyncMock(return_value=0)
+        svc.db.delete = AsyncMock()
+        svc.db.commit = AsyncMock()
+        target = _user()
+
+        await svc._delete_postgres(target)
+
+        pseudonymized = {
+            (c.args[0], c.args[1].key) for c in svc._pseudonymize_field.await_args_list
+        }
+        assert (NeuralMemoryEdge, "user_id") in pseudonymized
+        assert (MemoryAnalysis, "triggered_by") in pseudonymized
+        assert (RetrievalFeedback, "user_id") in pseudonymized
+        assert (SleepReport, "user_id") in pseudonymized
+
+    @pytest.mark.asyncio
+    async def test_finalize_pseudonymizes_request_self_row(self):
+        """F10: on completion the retained erasure_requests row's own user_id is
+        pseudonymized and ip/user_agent nulled; self-service also pseudonymizes
+        initiated_by (the subject's own sub). The raw sub must not survive."""
+        svc = _service()
+        captured: dict = {}
+
+        async def _exec(stmt):
+            captured["stmt"] = stmt
+            return SimpleNamespace(rowcount=1)
+
+        svc.db.execute = AsyncMock(side_effect=_exec)
+        svc.db.commit = AsyncMock()
+        request = SimpleNamespace(id=uuid4(), user_id="oauth-sub-123", initiated_by="oauth-sub-123")
+
+        await svc._finalize(request, {"users": 1})
+
+        params = captured["stmt"].compile().params
+        assert params["user_id"] != "oauth-sub-123"  # pseudonymized
+        assert params["initiated_by"] != "oauth-sub-123"  # self-service pseudonymized
+        assert params["ip_address"] is None
+        assert params["user_agent"] is None
+
+    @pytest.mark.asyncio
+    async def test_finalize_keeps_admin_initiator_on_force_erase(self):
+        """F10: on an admin force-erase, initiated_by is the acting admin's sub
+        (legitimate accountability evidence) and must be kept, while the erased
+        subject's own user_id is still pseudonymized."""
+        svc = _service()
+        captured: dict = {}
+
+        async def _exec(stmt):
+            captured["stmt"] = stmt
+            return SimpleNamespace(rowcount=1)
+
+        svc.db.execute = AsyncMock(side_effect=_exec)
+        svc.db.commit = AsyncMock()
+        request = SimpleNamespace(id=uuid4(), user_id="erased-sub", initiated_by="admin-sub")
+
+        await svc._finalize(request, {"users": 1})
+
+        params = captured["stmt"].compile().params
+        assert params["user_id"] != "erased-sub"  # pseudonymized
+        assert "initiated_by" not in params  # admin sub kept out of the UPDATE
 
     @pytest.mark.asyncio
     async def test_sweep_calls_secret_access_log_erasure(self):

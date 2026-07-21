@@ -679,6 +679,29 @@ async def test_update_settings_rejects_bad_channel_ids(bad):
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("bad", [[], ["", "C1"], ["   "], [123]])
+async def test_provision_connector_rejects_bad_channel_ids(bad):
+    """#1376: CREATE validates channel_ids with the SAME guard as PATCH, so a
+    connector can't be *born* in a shape PATCH refuses to produce (and junk /
+    non-string ids never reach GET /workers/config). Rejected BEFORE any DB
+    work — mirrors ``test_update_settings_rejects_bad_channel_ids``."""
+    db = MagicMock()
+    db.execute = AsyncMock()
+
+    with pytest.raises(ValidationError) as exc:
+        await ConnectorProvisioningService(db).provision_connector(
+            workspace_id=uuid4(),
+            user_id="admin-1",
+            connector_type="slack",
+            resource_id="r-1",
+            channel_ids=bad,
+        )
+
+    assert "channel_ids" in str(exc.value).lower()
+    db.execute.assert_not_awaited()
+
+
+@pytest.mark.asyncio
 async def test_update_settings_rejects_non_contract_locale():
     db = MagicMock()
     db.execute = AsyncMock()
