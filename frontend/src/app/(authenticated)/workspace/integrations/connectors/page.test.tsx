@@ -82,6 +82,13 @@ vi.mock("@/hooks/useCopyFeedback", () => ({
   useCopyFeedback: () => ({ isCopied: () => false, copyToTarget: vi.fn() }),
 }));
 
+// #1426: managed (hosted SaaS) mode flag. Default {} = non-managed so existing
+// tests are unaffected; managed-mode tests override.
+const mockUseSystemFeatures = vi.fn();
+vi.mock("@/hooks/useSystemFeatures", () => ({
+  useSystemFeatures: () => mockUseSystemFeatures(),
+}));
+
 // #1399: the fold/label tests differ only by llm_config_present, so build the
 // stored-connector row from one factory instead of re-inlining every field.
 function makeConnector(overrides: Record<string, unknown> = {}) {
@@ -116,6 +123,7 @@ beforeEach(() => {
   // clearAllMocks does NOT reset implementations — re-arm defaults here so a
   // per-test mockResolvedValue never leaks into later tests (#1376 review).
   mockUpdateConnectorSettings.mockReset();
+  mockUseSystemFeatures.mockReturnValue({}); // #1426: non-managed by default
   mockSearchParamsGet.mockReturnValue(null);
   mockListConnectors.mockResolvedValue([]);
   mockListAvailableWorkerApps.mockResolvedValue([]);
@@ -271,6 +279,33 @@ describe("ConnectorsPage RBAC gate", () => {
     expect(await screen.findByText("nextStepsTitle")).toBeInTheDocument();
     expect(screen.getByText("nextStepInviteBot")).toBeInTheDocument();
     expect(screen.getByText("nextStepSelectChannels")).toBeInTheDocument();
+  });
+
+  it("managed mode hides the BYO form and drops the LLM requirement (#1426)", async () => {
+    setWorkspace("admin");
+    mockUseSystemFeatures.mockReturnValue({ managed_connectors: true });
+    mockListAvailableWorkerApps.mockResolvedValue([
+      { platform: "slack", app_key: "sales", display_name: "Sales Slack App" },
+    ]);
+    // Channels set, no per-connector LLM: un-vendable under self-host rules,
+    // but ready under managed (platform provides the LLM).
+    mockListConnectors.mockResolvedValue([
+      makeConnector({ channel_ids: ["C1"], llm_config_present: false }),
+    ]);
+
+    render(<ConnectorsPage />);
+    await screen.findByText("connectProvider");
+
+    // BYO "link existing app" form is hidden even though app identities exist.
+    expect(screen.queryByText("manualBindTitle")).not.toBeInTheDocument();
+    // Row reads ready (not 要設定) and no missing-LLM affordance.
+    expect(await screen.findByText("runningBadge")).toBeInTheDocument();
+    expect(screen.queryByText("llmNotBound")).not.toBeInTheDocument();
+
+    // Settings dialog shows the platform-managed LLM note, not the LLM inputs.
+    fireEvent.click(screen.getByRole("button", { name: "editSettings" }));
+    expect(await screen.findByText("llmManagedNote")).toBeInTheDocument();
+    expect(screen.queryByText("llmDelete")).not.toBeInTheDocument();
   });
 
   it("updates the tenant-local vision kill-switch from the connector row", async () => {

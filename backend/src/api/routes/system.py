@@ -131,6 +131,10 @@ async def system_info():
             # Issue #1167: default-on. When false the web UI hides the
             # external-keys console + workspace cost dashboard (their APIs 404).
             "byok": settings.enable_byok,
+            # Issue #1426: default-off (OSS/self-host). When true (managed SaaS)
+            # the connectors UI hides the BYO manual-bind form and stops
+            # requiring a per-connector LLM (the shared worker provides it).
+            "managed_connectors": settings.enable_managed_connectors,
         },
     }
 

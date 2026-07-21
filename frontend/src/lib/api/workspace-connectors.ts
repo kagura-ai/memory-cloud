@@ -77,11 +77,18 @@ export interface ConnectorReadiness {
 // with only a virtual key would read "ready" while the worker gets llm=null.
 // Single source for every readiness surface (dialog summary, row indicators);
 // the #1392 platform-LLM lane changes this rule in exactly one place.
+//
+// #1426: on managed (hosted SaaS) deployments the shared worker/bridge provides
+// the pre-compile LLM, so a per-connector LLM is NOT required — pass
+// llmRequired=false (from features.managed_connectors) and a missing LLM stops
+// counting against readiness. Defaults true so OSS/self-host is unchanged.
 export function connectorReadiness(
   c: WorkspaceConnectorSummary,
+  opts: { llmRequired?: boolean } = {},
 ): ConnectorReadiness {
+  const { llmRequired = true } = opts;
   const missingChannels = !c.channel_ids?.length;
-  const missingLlm = !c.llm_config_present;
+  const missingLlm = llmRequired && !c.llm_config_present;
   return {
     ready: !missingChannels && !missingLlm,
     missingChannels,
