@@ -9,6 +9,14 @@ import type { NextConfig } from "next";
 // standalone bundle for Docker.
 const nextConfig: NextConfig = {
   ...(process.env.NODE_ENV === "production" ? { output: "standalone" } : {}),
+  // WSL2 dev trap: when a Windows browser reaches the dev server via the
+  // WSL IP (localhost forwarding broken in NAT mode), Next blocks the
+  // cross-origin /_next asset requests from the unlisted origin and the
+  // page silently never hydrates (no buttons, no API calls). Opt in per
+  // environment with a comma-separated hostname list; dev-only knob.
+  ...(process.env.NEXT_DEV_ALLOWED_ORIGINS
+    ? { allowedDevOrigins: process.env.NEXT_DEV_ALLOWED_ORIGINS.split(",") }
+    : {}),
   reactStrictMode: true,
 };
 
