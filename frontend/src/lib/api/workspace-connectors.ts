@@ -211,6 +211,9 @@ export interface UpdateConnectorSettingsRequest {
   // Write-only BYO LLM bundle — never returned (a presence flag is).
   llm_config?: Record<string, unknown> | null;
   locale?: string | null;
+  // #1428: re-point the write-target context in place (no delete→recreate).
+  // Must be a live context in this workspace; null clears the binding.
+  context_id?: string | null;
 }
 
 export interface UpdateConnectorSettingsResponse {
@@ -220,6 +223,7 @@ export interface UpdateConnectorSettingsResponse {
   llm_config_present: boolean;
   locale: string | null;
   config_version: number;
+  context_id: string | null;
 }
 
 export async function updateConnectorSettings(

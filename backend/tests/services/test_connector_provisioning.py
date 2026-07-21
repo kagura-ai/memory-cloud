@@ -574,6 +574,7 @@ def _settings_conn(**over):
         "llm_config_encrypted": None,
         "locale": None,
         "config_version": 3,
+        "context_id": uuid4(),
     }
     base.update(over)
     return _SettingsConn(**base)
@@ -768,6 +769,82 @@ async def test_update_settings_hides_cross_workspace_as_not_found():
             user_id="admin-1",
             channel_ids=["C01"],
         )
+
+
+@pytest.mark.asyncio
+async def test_update_settings_repoint_context_binds_and_bumps():
+    """#1428: a valid same-workspace context re-points the write target in
+    place (no delete→recreate) and context_id counts as a provided field."""
+    conn = _settings_conn()
+    new_ctx = uuid4()
+    db = MagicMock()
+    # First execute: context validation SELECT (found). Second: connector lock.
+    db.execute = AsyncMock(side_effect=[_result(one=new_ctx), _result(one=conn)])
+    db.flush = AsyncMock()
+
+    with patch("services.connector_provisioning.logger.info") as log_info:
+        result = await ConnectorProvisioningService(db).update_connector_settings(
+            workspace_id=conn.workspace_id,
+            connector_id=conn.id,
+            user_id="admin-1",
+            context_id=new_ctx,
+        )
+
+    assert conn.context_id == new_ctx
+    assert conn.channel_ids == ["C-old"]  # untouched
+    assert conn.config_version == 4
+    assert result.context_id == new_ctx
+    assert result.config_version == 4
+    assert log_info.call_args.kwargs["changed_fields"] == ["context_id"]
+    db.flush.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_update_settings_repoint_cross_workspace_context_not_found():
+    """#1428: a context outside the workspace (or soft-deleted) surfaces as
+    NotFound BEFORE the connector row is locked or mutated."""
+    from utils.exceptions import NotFoundException
+
+    conn = _settings_conn()
+    original_ctx = conn.context_id
+    db = MagicMock()
+    db.execute = AsyncMock(return_value=_result(one=None))  # context not found
+    db.flush = AsyncMock()
+
+    with pytest.raises(NotFoundException):
+        await ConnectorProvisioningService(db).update_connector_settings(
+            workspace_id=conn.workspace_id,
+            connector_id=conn.id,
+            user_id="admin-1",
+            context_id=uuid4(),
+        )
+
+    assert conn.context_id == original_ctx  # no mutation
+    db.flush.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_update_settings_clear_context_to_null():
+    """#1428: explicit null clears the binding (no context-validation query)."""
+    conn = _settings_conn()
+    db = MagicMock()
+    db.execute = AsyncMock(return_value=_result(one=conn))
+    db.flush = AsyncMock()
+
+    with patch("services.connector_provisioning.logger.info") as log_info:
+        result = await ConnectorProvisioningService(db).update_connector_settings(
+            workspace_id=conn.workspace_id,
+            connector_id=conn.id,
+            user_id="admin-1",
+            context_id=None,
+        )
+
+    assert conn.context_id is None
+    assert result.context_id is None
+    assert conn.config_version == 4
+    assert log_info.call_args.kwargs["changed_fields"] == ["context_id"]
+    # Only the connector-lock SELECT ran — null clear needs no context lookup.
+    assert db.execute.await_count == 1
 
 
 @pytest.mark.asyncio

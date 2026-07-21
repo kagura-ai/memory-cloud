@@ -133,6 +133,7 @@ class ConnectorSettingsUpdateResult:
     llm_config_present: bool
     locale: str | None
     config_version: int
+    context_id: UUID | None
 
 
 # Sentinel distinguishing "field not provided" from an explicit null (clear)
@@ -957,15 +958,23 @@ class ConnectorProvisioningService:
         litellm_virtual_key_id: str | None = _UNSET,
         llm_config: dict[str, Any] | None = _UNSET,
         locale: str | None = _UNSET,
+        context_id: UUID | None = _UNSET,
     ) -> ConnectorSettingsUpdateResult:
-        """PATCH-update connector vend settings (#1376).
+        """PATCH-update connector vend settings (#1376, #1428).
 
         Fields left at ``_UNSET`` are untouched; an explicit ``None`` clears.
         Repairs UI-created connectors born un-vendable (the create endpoint is
-        the only other writer of these columns). Shares the runtime PATCH's
+        the only other writer of these columns) and re-points the write-target
+        ``context_id`` in place (#1428) — the CREATE path was previously the
+        only writer of the binding, so changing where an already-registered
+        Slack team writes meant delete→recreate. Shares the runtime PATCH's
         contract: workspace-predicated ``SELECT FOR UPDATE``, optional
         ``expected_config_version`` optimistic lock (409 on staleness), and a
         ``config_version`` bump so the worker refetches.
+
+        A non-null ``context_id`` must name a live context in the SAME
+        workspace (soft-deleted contexts are rejected); an explicit ``None``
+        clears the binding back to the legacy no-context state.
 
         Raises:
             ValidationError: no field provided, malformed ``channel_ids``
@@ -974,7 +983,8 @@ class ConnectorProvisioningService:
                 the explicit null the vend already coalesces to ``[]``), an
                 un-vendable ``llm_config`` shape, or a locale outside the
                 worker contract.
-            NotFoundException: unknown or cross-workspace connector.
+            NotFoundException: unknown or cross-workspace connector, or a
+                ``context_id`` that is not a live context in this workspace.
             ConflictError: stale ``expected_config_version``.
         """
         provided_names = sorted(
@@ -984,12 +994,14 @@ class ConnectorProvisioningService:
                 ("litellm_virtual_key_id", litellm_virtual_key_id),
                 ("llm_config", llm_config),
                 ("locale", locale),
+                ("context_id", context_id),
             )
             if value is not _UNSET
         )
         if not provided_names:
             raise ValidationError(
-                "Provide at least one of channel_ids, litellm_virtual_key_id, llm_config, locale",
+                "Provide at least one of channel_ids, litellm_virtual_key_id, "
+                "llm_config, locale, context_id",
                 field="body",
             )
 
@@ -1007,6 +1019,25 @@ class ConnectorProvisioningService:
             except ValueError as ve:
                 raise ValidationError(str(ve), field="locale") from ve
 
+        # Re-point validation runs BEFORE the connector row lock so a bad
+        # target fails without holding SELECT FOR UPDATE. A cross-workspace or
+        # soft-deleted context surfaces as NotFound — no existence disclosure
+        # beyond "not a context you can bind here" (#1428).
+        if context_id is not _UNSET and context_id is not None:
+            from models.auth import Context
+
+            target = (
+                await self.db.execute(
+                    select(Context.id).where(
+                        Context.id == context_id,
+                        Context.workspace_id == workspace_id,
+                        Context.deleted_at.is_(None),
+                    )
+                )
+            ).scalar_one_or_none()
+            if target is None:
+                raise NotFoundException("Context", str(context_id))
+
         connector = await self._get_connector_for_update(
             workspace_id, connector_id, expected_config_version
         )
@@ -1019,6 +1050,8 @@ class ConnectorProvisioningService:
             connector.set_llm_config(llm_config)
         if locale is not _UNSET:
             connector.locale = locale
+        if context_id is not _UNSET:
+            connector.context_id = context_id
         connector.config_version += 1
         await self.db.flush()
 
@@ -1037,6 +1070,7 @@ class ConnectorProvisioningService:
             llm_config_present=bool(connector.llm_config_encrypted),
             locale=connector.locale,
             config_version=connector.config_version,
+            context_id=connector.context_id,
         )
 
     async def rotate_kmc_key(
