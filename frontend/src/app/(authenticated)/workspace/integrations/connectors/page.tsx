@@ -1726,6 +1726,16 @@ export default function ConnectorsPage() {
             </AlertDialogDescription>
           </AlertDialogHeader>
           <div className="space-y-3 text-sm">
+            {/* #1426: the worker fetches credentials itself, but the user still
+                has two Slack-side actions before anything is ingested — surface
+                them as a short checklist so "created" doesn't read as "done". */}
+            <div className="rounded-md border p-3">
+              <p className="mb-2 font-medium">{t("nextStepsTitle")}</p>
+              <ol className="list-decimal space-y-1 pl-5 text-muted-foreground">
+                <li>{t("nextStepInviteBot")}</li>
+                <li>{t("nextStepSelectChannels")}</li>
+              </ol>
+            </div>
             {/* #893: developer/CLI credentials collapsed by default — only
                 needed for manual curl/CLI testing or a self-hosted worker. */}
             <details className="rounded-md border p-3">

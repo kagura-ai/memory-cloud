@@ -247,6 +247,32 @@ describe("ConnectorsPage RBAC gate", () => {
     await waitFor(() => expect(tokenInput).toHaveValue(""));
   });
 
+  it("surfaces the post-connect next-steps checklist after creation (#1426)", async () => {
+    setWorkspace("admin");
+    mockListAvailableWorkerApps.mockResolvedValue([
+      { platform: "slack", app_key: "sales", display_name: "Sales Slack App" },
+    ]);
+
+    render(<ConnectorsPage />);
+
+    await screen.findByText("manualBindTitle");
+    fireEvent.change(screen.getByLabelText("manualTeamId"), {
+      target: { value: "T01" },
+    });
+    fireEvent.change(screen.getByLabelText("manualBotToken"), {
+      target: { value: "xoxb-install-token" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "manualBind" }));
+
+    // The success dialog must guide the two remaining Slack-side actions
+    // (invite bot + select channels) — "created" is not "done". The dialog is
+    // the same JSX for both the OAuth and manual-bind create paths, so covering
+    // one entry point covers the shared checklist.
+    expect(await screen.findByText("nextStepsTitle")).toBeInTheDocument();
+    expect(screen.getByText("nextStepInviteBot")).toBeInTheDocument();
+    expect(screen.getByText("nextStepSelectChannels")).toBeInTheDocument();
+  });
+
   it("updates the tenant-local vision kill-switch from the connector row", async () => {
     setWorkspace("admin");
     mockListConnectors.mockResolvedValue([
