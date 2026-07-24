@@ -89,6 +89,18 @@ function canManageWorkspaceRole(role: string | undefined): boolean {
   return role === "owner" || role === "admin";
 }
 
+// Destructive-action guard (spec §1.3): a key used within this window is
+// probably wired into a live MCP/SDK/worker client — warn before breaking it.
+export const RECENT_USE_WARNING_WINDOW_MS = 24 * 60 * 60 * 1000;
+
+export function isRecentlyUsed(lastUsedAt: string | null): boolean {
+  if (!lastUsedAt) return false;
+  // Future timestamps (server/client clock skew) also warn — fail-safe.
+  return (
+    Date.now() - new Date(lastUsedAt).getTime() < RECENT_USE_WARNING_WINDOW_MS
+  );
+}
+
 export function APIKeysTabPanel() {
   const t = useTranslations("apiKeys");
   const tCommon = useTranslations("common");
@@ -444,6 +456,23 @@ export function APIKeysTabPanel() {
 
   const apiKeys = credentials?.api_keys || [];
   const viewerCanManage = canManageWorkspaceRole(credentials?.target_user_role);
+  const selectedKey = apiKeys.find((k) => k.id === selectedKeyId) ?? null;
+  const boundRevokeKey = apiKeys.find((k) => k.id === boundRevokeKeyId) ?? null;
+
+  // Amber informational notice (NOT an error — matches the publicBindWarning
+  // pattern) rendered inside the destructive dialogs when the target key
+  // authenticated within the warning window.
+  const renderRecentUseWarning = (apiKey: MemberAPIKey | null) =>
+    apiKey && isRecentlyUsed(apiKey.last_used_at) ? (
+      <div className="rounded-md border border-amber-200 dark:border-amber-800 bg-amber-50 dark:bg-amber-900/20 p-2 text-xs text-amber-800 dark:text-amber-200 flex items-start gap-2">
+        <AlertTriangle className="w-4 h-4 shrink-0" aria-hidden="true" />
+        <span>
+          {t("recentUseWarning", {
+            time: formatRelativeTime(apiKey.last_used_at!, locale),
+          })}
+        </span>
+      </div>
+    ) : null;
 
   // Issue #943: shared render helpers so the desktop table and the mobile card
   // fallback render identical name/status/actions/secret affordances from one
@@ -1042,6 +1071,7 @@ export function APIKeysTabPanel() {
               {t("regenerateApiKeyDesc")}
             </AlertDialogDescription>
           </AlertDialogHeader>
+          {renderRecentUseWarning(selectedKey)}
           <AlertDialogFooter>
             <AlertDialogCancel disabled={regenerating}>
               {tCommon("cancel")}
@@ -1068,6 +1098,7 @@ export function APIKeysTabPanel() {
               {t("deleteApiKeyDesc")}
             </AlertDialogDescription>
           </AlertDialogHeader>
+          {renderRecentUseWarning(selectedKey)}
           <AlertDialogFooter>
             <AlertDialogCancel disabled={deleting}>
               {tCommon("cancel")}
@@ -1102,6 +1133,7 @@ export function APIKeysTabPanel() {
               {t("publicBindRevokeDesc")}
             </AlertDialogDescription>
           </AlertDialogHeader>
+          {renderRecentUseWarning(boundRevokeKey)}
           <AlertDialogFooter>
             <AlertDialogCancel disabled={deleting}>
               {tCommon("cancel")}

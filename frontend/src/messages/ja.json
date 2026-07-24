@@ -1765,6 +1765,7 @@
     "roleHelpData": "APIキーは所有者のワークスペースロールの権限で動作します。あなたのキーは記憶の読み書きのみ可能で、ワークスペース管理APIは呼び出せません。",
     "setupKeyHint": "初期セットアップで作成",
     "setupKeyHintTitle": "初期セットアップ(create_admin)が作成したキーの既定名です。.mcp.json に設定されています。",
+    "recentUseWarning": "このキーは{time}に使用されています。使用中のクライアント(MCP / SDK / ワーカー)の接続が切れます。",
     "hideInTime": "{time}後に非表示",
     "hideAt": "{date}に非表示",
     "prefix": "プレフィックス",

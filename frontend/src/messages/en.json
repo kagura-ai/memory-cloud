@@ -1765,6 +1765,7 @@
     "roleHelpData": "API keys act with their owner's workspace role. Your keys can read and write memory but cannot call workspace-management APIs.",
     "setupKeyHint": "Created by initial setup",
     "setupKeyHintTitle": "Default name of the key minted by create_admin during initial setup — it is wired into .mcp.json.",
+    "recentUseWarning": "This key was used {time}. Clients using it (MCP / SDK / workers) will lose their connection.",
     "hideInTime": "Hide in {time}",
     "hideAt": "Will be hidden at {date}",
     "prefix": "Prefix",

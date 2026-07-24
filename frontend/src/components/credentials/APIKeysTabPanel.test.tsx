@@ -11,10 +11,20 @@
  * "Last used" assertions are scoped to the table via `within(getByRole("table"))`.
  */
 
-import { render, screen, waitFor, within } from "@testing-library/react";
+import {
+  fireEvent,
+  render,
+  screen,
+  waitFor,
+  within,
+} from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
-import { APIKeysTabPanel } from "./APIKeysTabPanel";
+import {
+  APIKeysTabPanel,
+  isRecentlyUsed,
+  RECENT_USE_WARNING_WINDOW_MS,
+} from "./APIKeysTabPanel";
 import type { MemberAPIKey } from "@/lib/api/member-credentials";
 
 // ---------- Mocks ------------------------------------------------------------
@@ -210,5 +220,89 @@ describe("APIKeysTabPanel — role badge + provenance (key clarity Phase 1)", ()
 
     expect(await screen.findByText("roleHelpData")).toBeInTheDocument();
     expect(screen.queryByText("roleHelpManage")).not.toBeInTheDocument();
+  });
+});
+
+describe("isRecentlyUsed (key clarity Phase 1)", () => {
+  it("is false for a never-used key", () => {
+    expect(isRecentlyUsed(null)).toBe(false);
+  });
+
+  it("is true for a key used one hour ago", () => {
+    const oneHourAgo = new Date(Date.now() - 60 * 60 * 1000).toISOString();
+    expect(isRecentlyUsed(oneHourAgo)).toBe(true);
+  });
+
+  it("is false for a key used 25 hours ago", () => {
+    const twentyFiveHoursAgo = new Date(
+      Date.now() - RECENT_USE_WARNING_WINDOW_MS - 60 * 60 * 1000,
+    ).toISOString();
+    expect(isRecentlyUsed(twentyFiveHoursAgo)).toBe(false);
+  });
+
+  it("is true for a slightly-future timestamp (clock skew fail-safe)", () => {
+    const oneMinuteAhead = new Date(Date.now() + 60 * 1000).toISOString();
+    expect(isRecentlyUsed(oneMinuteAhead)).toBe(true);
+  });
+});
+
+describe("APIKeysTabPanel — recent-use warning on destructive dialogs", () => {
+  it("shows the warning in the regenerate dialog for a recently used key", async () => {
+    mockGetMemberCredentials.mockResolvedValue({
+      api_keys: [
+        makeKey({
+          last_used_at: new Date(Date.now() - 5 * 60 * 1000).toISOString(),
+        }),
+      ],
+      target_user_role: "owner",
+    });
+
+    render(<APIKeysTabPanel />);
+    await screen.findByRole("table");
+
+    fireEvent.click(screen.getAllByText("regenerate")[0]);
+
+    expect(await screen.findByText("recentUseWarning")).toBeInTheDocument();
+  });
+
+  it("does NOT show the warning for a key last used 3 days ago", async () => {
+    mockGetMemberCredentials.mockResolvedValue({
+      api_keys: [
+        makeKey({
+          last_used_at: new Date(
+            Date.now() - 3 * 24 * 60 * 60 * 1000,
+          ).toISOString(),
+        }),
+      ],
+      target_user_role: "owner",
+    });
+
+    render(<APIKeysTabPanel />);
+    await screen.findByRole("table");
+
+    fireEvent.click(screen.getAllByText("regenerate")[0]);
+
+    expect(
+      await screen.findByText("regenerateApiKeyTitle"),
+    ).toBeInTheDocument();
+    expect(screen.queryByText("recentUseWarning")).not.toBeInTheDocument();
+  });
+
+  it("shows the warning in the delete dialog for a recently used key", async () => {
+    mockGetMemberCredentials.mockResolvedValue({
+      api_keys: [
+        makeKey({
+          last_used_at: new Date(Date.now() - 5 * 60 * 1000).toISOString(),
+        }),
+      ],
+      target_user_role: "owner",
+    });
+
+    render(<APIKeysTabPanel />);
+    await screen.findByRole("table");
+
+    fireEvent.click(screen.getAllByText("delete")[0]);
+
+    expect(await screen.findByText("recentUseWarning")).toBeInTheDocument();
   });
 });
