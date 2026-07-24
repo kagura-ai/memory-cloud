@@ -143,3 +143,72 @@ describe("APIKeysTabPanel — table view (#943)", () => {
     expect(within(table).queryByText("—")).not.toBeInTheDocument();
   });
 });
+
+describe("APIKeysTabPanel — role badge + provenance (key clarity Phase 1)", () => {
+  it("shows the manage badge on keys when the viewer is admin/owner", async () => {
+    mockGetMemberCredentials.mockResolvedValue({
+      api_keys: [makeKey()],
+      target_user_role: "owner",
+    });
+
+    render(<APIKeysTabPanel />);
+
+    const table = await screen.findByRole("table");
+    expect(within(table).getByText("roleBadgeManage")).toBeInTheDocument();
+    expect(within(table).queryByText("roleBadgeData")).not.toBeInTheDocument();
+  });
+
+  it("shows the data-only badge when the viewer is a member", async () => {
+    mockGetMemberCredentials.mockResolvedValue({
+      api_keys: [makeKey()],
+      target_user_role: "member",
+    });
+
+    render(<APIKeysTabPanel />);
+
+    const table = await screen.findByRole("table");
+    expect(within(table).getByText("roleBadgeData")).toBeInTheDocument();
+    expect(
+      within(table).queryByText("roleBadgeManage"),
+    ).not.toBeInTheDocument();
+  });
+
+  it("shows the public-bind badge INSTEAD of the role badge on bound keys", async () => {
+    mockGetMemberCredentials.mockResolvedValue({
+      api_keys: [makeKey({ bound_context_id: "ctx-1" })],
+      target_user_role: "owner",
+    });
+
+    render(<APIKeysTabPanel />);
+
+    const table = await screen.findByRole("table");
+    expect(within(table).getByText("publicBindBadge")).toBeInTheDocument();
+    expect(
+      within(table).queryByText("roleBadgeManage"),
+    ).not.toBeInTheDocument();
+  });
+
+  it("marks the admin-cli key with the setup provenance hint", async () => {
+    mockGetMemberCredentials.mockResolvedValue({
+      api_keys: [makeKey({ name: "admin-cli" })],
+      target_user_role: "owner",
+    });
+
+    render(<APIKeysTabPanel />);
+
+    const table = await screen.findByRole("table");
+    expect(within(table).getByText("setupKeyHint")).toBeInTheDocument();
+  });
+
+  it("renders the role help line matching the viewer role", async () => {
+    mockGetMemberCredentials.mockResolvedValue({
+      api_keys: [makeKey()],
+      target_user_role: "viewer",
+    });
+
+    render(<APIKeysTabPanel />);
+
+    expect(await screen.findByText("roleHelpData")).toBeInTheDocument();
+    expect(screen.queryByText("roleHelpManage")).not.toBeInTheDocument();
+  });
+});
