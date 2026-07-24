@@ -305,4 +305,23 @@ describe("APIKeysTabPanel — recent-use warning on destructive dialogs", () => 
 
     expect(await screen.findByText("recentUseWarning")).toBeInTheDocument();
   });
+
+  it("shows the warning in the public-bound revoke dialog for a recently used bound key", async () => {
+    mockGetMemberCredentials.mockResolvedValue({
+      api_keys: [
+        makeKey({
+          bound_context_id: "ctx-1",
+          last_used_at: new Date(Date.now() - 5 * 60 * 1000).toISOString(),
+        }),
+      ],
+      target_user_role: "owner",
+    });
+
+    render(<APIKeysTabPanel />);
+    await screen.findByRole("table");
+
+    fireEvent.click(screen.getAllByLabelText("publicBindRevoke")[0]);
+
+    expect(await screen.findByText("recentUseWarning")).toBeInTheDocument();
+  });
 });

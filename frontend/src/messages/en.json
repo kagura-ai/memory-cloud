@@ -1705,7 +1705,7 @@
     "description": "Manage your API keys for MCP integration with Claude Code and other clients",
     "featureGuide": {
       "title": "What are API Keys?",
-      "overview": "API Keys authenticate MCP clients (Claude Code, Claude Desktop, Gemini CLI) to access your workspace memories. Each key is tied to your user account and workspace, and acts with its owner's workspace role: admin / owner keys can also call workspace-management APIs.",
+      "overview": "API Keys authenticate MCP clients (Claude Code, Claude Desktop, Gemini CLI) to access your workspace memories. Each key is tied to your user account and workspace, and acts with its owner's workspace role: admin / owner keys can also call workspace-management APIs (public-bound keys excepted).",
       "useCases": "Use cases: connect Claude Code to your memory workspace, integrate with CI/CD pipelines, build custom MCP clients.",
       "howItWorks": "Create an API key → Add it to your .mcp.json config → Your MCP client can now remember, recall, and explore memories in this workspace."
     },
@@ -1761,7 +1761,7 @@
     "roleBadgeManageTitle": "This key acts with its owner's workspace role (admin / owner): it can also call workspace-management APIs (connectors, secrets, members).",
     "roleBadgeData": "Data only",
     "roleBadgeDataTitle": "This key acts with its owner's workspace role (member / viewer): memory read/write only.",
-    "roleHelpManage": "API keys act with their owner's workspace role. Because you are an admin / owner, every key below can also call workspace-management APIs (connectors, secrets, members).",
+    "roleHelpManage": "API keys act with their owner's workspace role. Because you are an admin / owner, the keys below can also call workspace-management APIs (connectors, secrets, members) — except public-bound keys.",
     "roleHelpData": "API keys act with their owner's workspace role. Your keys can read and write memory but cannot call workspace-management APIs.",
     "setupKeyHint": "Created by initial setup",
     "setupKeyHintTitle": "Default name of the key minted by create_admin during initial setup — it is wired into .mcp.json.",
