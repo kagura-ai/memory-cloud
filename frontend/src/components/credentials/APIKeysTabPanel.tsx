@@ -101,6 +101,14 @@ export function isRecentlyUsed(lastUsedAt: string | null): boolean {
   );
 }
 
+// isRecentlyUsed deliberately treats future timestamps (clock skew) as
+// recent, but formatDistanceToNow would render them as "in 1 minute" —
+// "this key was used in 1 minute" is nonsense. Clamp to now for display.
+// (Invalid dates never reach this: NaN fails the isRecentlyUsed compare.)
+export function clampIsoToNow(iso: string): string {
+  return new Date(iso).getTime() > Date.now() ? new Date().toISOString() : iso;
+}
+
 export function APIKeysTabPanel() {
   const t = useTranslations("apiKeys");
   const tCommon = useTranslations("common");
@@ -468,7 +476,10 @@ export function APIKeysTabPanel() {
         <AlertTriangle className="w-4 h-4 shrink-0" aria-hidden="true" />
         <span>
           {t("recentUseWarning", {
-            time: formatRelativeTime(apiKey.last_used_at!, locale),
+            time: formatRelativeTime(
+              clampIsoToNow(apiKey.last_used_at!),
+              locale,
+            ),
           })}
         </span>
       </div>

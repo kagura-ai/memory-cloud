@@ -22,6 +22,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 
 import {
   APIKeysTabPanel,
+  clampIsoToNow,
   isRecentlyUsed,
   RECENT_USE_WARNING_WINDOW_MS,
 } from "./APIKeysTabPanel";
@@ -243,6 +244,19 @@ describe("isRecentlyUsed (key clarity Phase 1)", () => {
   it("is true for a slightly-future timestamp (clock skew fail-safe)", () => {
     const oneMinuteAhead = new Date(Date.now() + 60 * 1000).toISOString();
     expect(isRecentlyUsed(oneMinuteAhead)).toBe(true);
+  });
+});
+
+describe("clampIsoToNow (clock-skew display guard)", () => {
+  it("returns past timestamps unchanged", () => {
+    const oneHourAgo = new Date(Date.now() - 60 * 60 * 1000).toISOString();
+    expect(clampIsoToNow(oneHourAgo)).toBe(oneHourAgo);
+  });
+
+  it("clamps future timestamps to now so the warning never reads 'in X'", () => {
+    const oneMinuteAhead = new Date(Date.now() + 60 * 1000).toISOString();
+    const clamped = clampIsoToNow(oneMinuteAhead);
+    expect(new Date(clamped).getTime()).toBeLessThanOrEqual(Date.now());
   });
 });
 
