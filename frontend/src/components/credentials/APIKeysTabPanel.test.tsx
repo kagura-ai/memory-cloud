@@ -11,10 +11,21 @@
  * "Last used" assertions are scoped to the table via `within(getByRole("table"))`.
  */
 
-import { render, screen, waitFor, within } from "@testing-library/react";
+import {
+  fireEvent,
+  render,
+  screen,
+  waitFor,
+  within,
+} from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
-import { APIKeysTabPanel } from "./APIKeysTabPanel";
+import {
+  APIKeysTabPanel,
+  clampIsoToNow,
+  isRecentlyUsed,
+  RECENT_USE_WARNING_WINDOW_MS,
+} from "./APIKeysTabPanel";
 import type { MemberAPIKey } from "@/lib/api/member-credentials";
 
 // ---------- Mocks ------------------------------------------------------------
@@ -141,5 +152,190 @@ describe("APIKeysTabPanel — table view (#943)", () => {
     );
     // A populated last_used_at must not collapse to the em-dash placeholder.
     expect(within(table).queryByText("—")).not.toBeInTheDocument();
+  });
+});
+
+describe("APIKeysTabPanel — role badge + provenance (key clarity Phase 1)", () => {
+  it("shows the manage badge on keys when the viewer is admin/owner", async () => {
+    mockGetMemberCredentials.mockResolvedValue({
+      api_keys: [makeKey()],
+      target_user_role: "owner",
+    });
+
+    render(<APIKeysTabPanel />);
+
+    const table = await screen.findByRole("table");
+    expect(within(table).getByText("roleBadgeManage")).toBeInTheDocument();
+    expect(within(table).queryByText("roleBadgeData")).not.toBeInTheDocument();
+  });
+
+  it("shows the data-only badge when the viewer is a member", async () => {
+    mockGetMemberCredentials.mockResolvedValue({
+      api_keys: [makeKey()],
+      target_user_role: "member",
+    });
+
+    render(<APIKeysTabPanel />);
+
+    const table = await screen.findByRole("table");
+    expect(within(table).getByText("roleBadgeData")).toBeInTheDocument();
+    expect(
+      within(table).queryByText("roleBadgeManage"),
+    ).not.toBeInTheDocument();
+  });
+
+  it("shows the public-bind badge INSTEAD of the role badge on bound keys", async () => {
+    mockGetMemberCredentials.mockResolvedValue({
+      api_keys: [makeKey({ bound_context_id: "ctx-1" })],
+      target_user_role: "owner",
+    });
+
+    render(<APIKeysTabPanel />);
+
+    const table = await screen.findByRole("table");
+    expect(within(table).getByText("publicBindBadge")).toBeInTheDocument();
+    expect(
+      within(table).queryByText("roleBadgeManage"),
+    ).not.toBeInTheDocument();
+  });
+
+  it("marks the admin-cli key with the setup provenance hint", async () => {
+    mockGetMemberCredentials.mockResolvedValue({
+      api_keys: [makeKey({ name: "admin-cli" })],
+      target_user_role: "owner",
+    });
+
+    render(<APIKeysTabPanel />);
+
+    const table = await screen.findByRole("table");
+    expect(within(table).getByText("setupKeyHint")).toBeInTheDocument();
+  });
+
+  it("renders the role help line matching the viewer role", async () => {
+    mockGetMemberCredentials.mockResolvedValue({
+      api_keys: [makeKey()],
+      target_user_role: "viewer",
+    });
+
+    render(<APIKeysTabPanel />);
+
+    expect(await screen.findByText("roleHelpData")).toBeInTheDocument();
+    expect(screen.queryByText("roleHelpManage")).not.toBeInTheDocument();
+  });
+});
+
+describe("isRecentlyUsed (key clarity Phase 1)", () => {
+  it("is false for a never-used key", () => {
+    expect(isRecentlyUsed(null)).toBe(false);
+  });
+
+  it("is true for a key used one hour ago", () => {
+    const oneHourAgo = new Date(Date.now() - 60 * 60 * 1000).toISOString();
+    expect(isRecentlyUsed(oneHourAgo)).toBe(true);
+  });
+
+  it("is false for a key used 25 hours ago", () => {
+    const twentyFiveHoursAgo = new Date(
+      Date.now() - RECENT_USE_WARNING_WINDOW_MS - 60 * 60 * 1000,
+    ).toISOString();
+    expect(isRecentlyUsed(twentyFiveHoursAgo)).toBe(false);
+  });
+
+  it("is true for a slightly-future timestamp (clock skew fail-safe)", () => {
+    const oneMinuteAhead = new Date(Date.now() + 60 * 1000).toISOString();
+    expect(isRecentlyUsed(oneMinuteAhead)).toBe(true);
+  });
+});
+
+describe("clampIsoToNow (clock-skew display guard)", () => {
+  it("returns past timestamps unchanged", () => {
+    const oneHourAgo = new Date(Date.now() - 60 * 60 * 1000).toISOString();
+    expect(clampIsoToNow(oneHourAgo)).toBe(oneHourAgo);
+  });
+
+  it("clamps future timestamps to now so the warning never reads 'in X'", () => {
+    const oneMinuteAhead = new Date(Date.now() + 60 * 1000).toISOString();
+    const clamped = clampIsoToNow(oneMinuteAhead);
+    expect(new Date(clamped).getTime()).toBeLessThanOrEqual(Date.now());
+  });
+});
+
+describe("APIKeysTabPanel — recent-use warning on destructive dialogs", () => {
+  it("shows the warning in the regenerate dialog for a recently used key", async () => {
+    mockGetMemberCredentials.mockResolvedValue({
+      api_keys: [
+        makeKey({
+          last_used_at: new Date(Date.now() - 5 * 60 * 1000).toISOString(),
+        }),
+      ],
+      target_user_role: "owner",
+    });
+
+    render(<APIKeysTabPanel />);
+    await screen.findByRole("table");
+
+    fireEvent.click(screen.getAllByText("regenerate")[0]);
+
+    expect(await screen.findByText("recentUseWarning")).toBeInTheDocument();
+  });
+
+  it("does NOT show the warning for a key last used 3 days ago", async () => {
+    mockGetMemberCredentials.mockResolvedValue({
+      api_keys: [
+        makeKey({
+          last_used_at: new Date(
+            Date.now() - 3 * 24 * 60 * 60 * 1000,
+          ).toISOString(),
+        }),
+      ],
+      target_user_role: "owner",
+    });
+
+    render(<APIKeysTabPanel />);
+    await screen.findByRole("table");
+
+    fireEvent.click(screen.getAllByText("regenerate")[0]);
+
+    expect(
+      await screen.findByText("regenerateApiKeyTitle"),
+    ).toBeInTheDocument();
+    expect(screen.queryByText("recentUseWarning")).not.toBeInTheDocument();
+  });
+
+  it("shows the warning in the delete dialog for a recently used key", async () => {
+    mockGetMemberCredentials.mockResolvedValue({
+      api_keys: [
+        makeKey({
+          last_used_at: new Date(Date.now() - 5 * 60 * 1000).toISOString(),
+        }),
+      ],
+      target_user_role: "owner",
+    });
+
+    render(<APIKeysTabPanel />);
+    await screen.findByRole("table");
+
+    fireEvent.click(screen.getAllByText("delete")[0]);
+
+    expect(await screen.findByText("recentUseWarning")).toBeInTheDocument();
+  });
+
+  it("shows the warning in the public-bound revoke dialog for a recently used bound key", async () => {
+    mockGetMemberCredentials.mockResolvedValue({
+      api_keys: [
+        makeKey({
+          bound_context_id: "ctx-1",
+          last_used_at: new Date(Date.now() - 5 * 60 * 1000).toISOString(),
+        }),
+      ],
+      target_user_role: "owner",
+    });
+
+    render(<APIKeysTabPanel />);
+    await screen.findByRole("table");
+
+    fireEvent.click(screen.getAllByLabelText("publicBindRevoke")[0]);
+
+    expect(await screen.findByText("recentUseWarning")).toBeInTheDocument();
   });
 });

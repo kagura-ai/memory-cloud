@@ -79,6 +79,36 @@ import type { MemberAPIKey } from "@/lib/api/member-credentials";
 // Auto-refresh interval: 5 minutes (refresh before 10-minute visibility expiry)
 const CREDENTIALS_REFRESH_INTERVAL_MS = 5 * 60 * 1000;
 
+// Key-clarity Phase 1 (docs/design/2026-07-24-workspace-management-key-separation.md):
+// a key's effective power is derived from its OWNER's live workspace role —
+// admin/owner keys can also call workspace-management APIs. Phase 2 replaces
+// this derivation with a per-key can_manage_workspace capability.
+const SETUP_KEY_NAME = "admin-cli";
+
+function canManageWorkspaceRole(role: string | undefined): boolean {
+  return role === "owner" || role === "admin";
+}
+
+// Destructive-action guard (spec §1.3): a key used within this window is
+// probably wired into a live MCP/SDK/worker client — warn before breaking it.
+export const RECENT_USE_WARNING_WINDOW_MS = 24 * 60 * 60 * 1000;
+
+export function isRecentlyUsed(lastUsedAt: string | null): boolean {
+  if (!lastUsedAt) return false;
+  // Future timestamps (server/client clock skew) also warn — fail-safe.
+  return (
+    Date.now() - new Date(lastUsedAt).getTime() < RECENT_USE_WARNING_WINDOW_MS
+  );
+}
+
+// isRecentlyUsed deliberately treats future timestamps (clock skew) as
+// recent, but formatDistanceToNow would render them as "in 1 minute" —
+// "this key was used in 1 minute" is nonsense. Clamp to now for display.
+// (Invalid dates never reach this: NaN fails the isRecentlyUsed compare.)
+export function clampIsoToNow(iso: string): string {
+  return new Date(iso).getTime() > Date.now() ? new Date().toISOString() : iso;
+}
+
 export function APIKeysTabPanel() {
   const t = useTranslations("apiKeys");
   const tCommon = useTranslations("common");
@@ -433,22 +463,67 @@ export function APIKeysTabPanel() {
   }
 
   const apiKeys = credentials?.api_keys || [];
+  const viewerCanManage = canManageWorkspaceRole(credentials?.target_user_role);
+  const selectedKey = apiKeys.find((k) => k.id === selectedKeyId) ?? null;
+  const boundRevokeKey = apiKeys.find((k) => k.id === boundRevokeKeyId) ?? null;
+
+  // Amber informational notice (NOT an error — matches the publicBindWarning
+  // pattern) rendered inside the destructive dialogs when the target key
+  // authenticated within the warning window.
+  const renderRecentUseWarning = (apiKey: MemberAPIKey | null) =>
+    apiKey && isRecentlyUsed(apiKey.last_used_at) ? (
+      <div className="rounded-md border border-amber-200 dark:border-amber-800 bg-amber-50 dark:bg-amber-900/20 p-2 text-xs text-amber-800 dark:text-amber-200 flex items-start gap-2">
+        <AlertTriangle className="w-4 h-4 shrink-0" aria-hidden="true" />
+        <span>
+          {t("recentUseWarning", {
+            time: formatRelativeTime(
+              clampIsoToNow(apiKey.last_used_at!),
+              locale,
+            ),
+          })}
+        </span>
+      </div>
+    ) : null;
 
   // Issue #943: shared render helpers so the desktop table and the mobile card
   // fallback render identical name/status/actions/secret affordances from one
   // source (no behavior change vs the previous card-only layout).
   const renderNameCell = (apiKey: MemberAPIKey) => (
-    <div className="flex items-center gap-2">
+    <div className="flex items-center gap-2 flex-wrap">
       <span className="font-semibold text-gray-900 dark:text-gray-100">
         {apiKey.name}
       </span>
-      {/* Issue #626: public-bound attribution badge — independent of revocation. */}
-      {apiKey.bound_context_id && (
+      {/* Issue #626: public-bound attribution badge — shown INSTEAD of the
+          role badge: bound keys cannot authenticate on management surfaces
+          at all, so a manage badge on them would be wrong. */}
+      {apiKey.bound_context_id ? (
         <span
           className="text-xs bg-amber-100 dark:bg-amber-900/30 text-amber-800 dark:text-amber-200 px-2 py-0.5 rounded border border-amber-200 dark:border-amber-800"
           title={t("publicBindBadgeTitle")}
         >
           {t("publicBindBadge")}
+        </span>
+      ) : viewerCanManage ? (
+        <span
+          className="text-xs bg-purple-100 dark:bg-purple-900/30 text-purple-800 dark:text-purple-200 px-2 py-0.5 rounded border border-purple-200 dark:border-purple-800"
+          title={t("roleBadgeManageTitle")}
+        >
+          {t("roleBadgeManage")}
+        </span>
+      ) : (
+        <span
+          className="text-xs bg-gray-100 dark:bg-gray-800 text-gray-600 dark:text-gray-300 px-2 py-0.5 rounded border border-gray-200 dark:border-gray-700"
+          title={t("roleBadgeDataTitle")}
+        >
+          {t("roleBadgeData")}
+        </span>
+      )}
+      {apiKey.name === SETUP_KEY_NAME && (
+        <span
+          className="text-xs text-gray-400 dark:text-gray-500"
+          title={t("setupKeyHintTitle")}
+        >
+          {t("setupKeyHint")}
         </span>
       )}
     </div>
@@ -712,6 +787,14 @@ export function APIKeysTabPanel() {
               {t("createApiKey")}
             </ActionButton>
           </div>
+
+          {/* Key-clarity Phase 1: role-derived power, spelled out once per
+              panel so the badge glossary is self-explanatory. */}
+          {credentials && (
+            <p className="text-xs text-gray-500 dark:text-gray-400">
+              {viewerCanManage ? t("roleHelpManage") : t("roleHelpData")}
+            </p>
+          )}
 
           {/* API Keys Display. Issue #943: table on desktop, card fallback on
               narrow viewports (a table needs horizontal room). Both render from
@@ -999,6 +1082,7 @@ export function APIKeysTabPanel() {
               {t("regenerateApiKeyDesc")}
             </AlertDialogDescription>
           </AlertDialogHeader>
+          {renderRecentUseWarning(selectedKey)}
           <AlertDialogFooter>
             <AlertDialogCancel disabled={regenerating}>
               {tCommon("cancel")}
@@ -1025,6 +1109,7 @@ export function APIKeysTabPanel() {
               {t("deleteApiKeyDesc")}
             </AlertDialogDescription>
           </AlertDialogHeader>
+          {renderRecentUseWarning(selectedKey)}
           <AlertDialogFooter>
             <AlertDialogCancel disabled={deleting}>
               {tCommon("cancel")}
@@ -1059,6 +1144,7 @@ export function APIKeysTabPanel() {
               {t("publicBindRevokeDesc")}
             </AlertDialogDescription>
           </AlertDialogHeader>
+          {renderRecentUseWarning(boundRevokeKey)}
           <AlertDialogFooter>
             <AlertDialogCancel disabled={deleting}>
               {tCommon("cancel")}
