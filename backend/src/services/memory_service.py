@@ -11,10 +11,11 @@ import asyncio
 import functools
 import hashlib
 import math
+import os
 import statistics
 from collections.abc import Mapping
 from datetime import datetime
-from typing import Any
+from typing import Any, NamedTuple
 from uuid import UUID, uuid4
 
 from sqlalchemy import and_, or_, select
@@ -120,6 +121,31 @@ _CONF_STRONG_ABS_COSINE = 0.85
 _CONF_ABS_MODERATE_COSINE = 0.50
 _CONF_ABS_LOW_COSINE = 0.30
 _CONF_BG_EPS = 1e-3
+
+
+class _RecallPlan(NamedTuple):
+    """Effective query parameters resolved once at the top of ``recall()``.
+
+    Attributes:
+        request: The request with a concrete ``search_mode`` (#1212). Use this
+            downstream, never the caller's original — it is a ``model_copy``, so
+            a caller reusing one RecallRequest never sees it rewritten (#1220).
+        effective_workspace_id: The workspace that pays for and scopes the
+            search — the context owner's on a #708 shared-context read,
+            otherwise the caller's.
+        is_shared_context_read: True when #708 Option A routing is in effect.
+        neural_enabled: ENABLE_NEURAL_MEMORY flag, read once.
+        search_context_id: Single context id, or the #81 cross-context list.
+        search_config: Prefetched per-context search config, or None when the
+            read failed or the call is cross-context (#1220 fail-open).
+    """
+
+    request: RecallRequest
+    effective_workspace_id: UUID
+    is_shared_context_read: bool
+    neural_enabled: bool
+    search_context_id: str | list[str]
+    search_config: Any
 
 
 def _log_embedding_task_result(task: asyncio.Task, memory_id: str) -> None:
@@ -2173,7 +2199,6 @@ class MemoryService:
         if the placebo gate (tests/eval/graph_boost_gate.py) passes.
         """
         import math
-        import os
 
         enabled = os.getenv("KAGURA_GRAPH_BOOST_ENABLED", "").lower() in ("1", "true")
         try:
@@ -2496,6 +2521,903 @@ class MemoryService:
         }
         return plan, evidence
 
+    async def _recall_prepare(
+        self,
+        request: RecallRequest,
+        *,
+        current_context_id: UUID,
+        current_workspace_id: UUID,
+        context_workspace_id: UUID | None,
+        context_ids: list[UUID] | None,
+    ) -> _RecallPlan:
+        """Resolve the effective query parameters before any search work happens.
+
+        Folds together four small resolutions that every later phase depends on:
+        the #708 paying workspace, the neural feature flag, the #81 search scope,
+        the #1220 one-shot search-config prefetch, and the #1212 search-mode
+        resolution.
+
+        Args:
+            request: The incoming recall request.
+            current_context_id: The single declared context.
+            current_workspace_id: Caller's active workspace.
+            context_workspace_id: Context owner workspace (#708 Option A).
+            context_ids: #81 cross-context list, or None.
+
+        Returns:
+            A _RecallPlan; ``plan.request`` is a copy with a concrete
+            ``search_mode`` and MUST be used downstream in place of ``request``.
+        """
+        # #708 Option A: route embedding cost (key + spend cap + paid_by +
+        # search + graph) to the context's owner workspace. Rate-limit gating
+        # stays on the caller upstream — do NOT change it here. The H1 BYOK gate
+        # is deferred until we know hybrid_search will actually fire (after the
+        # analysis_cluster short-circuit), so no-cost reads (empty cluster, etc.)
+        # do not get falsely 404'd.
+        is_shared_context_read = (
+            context_workspace_id is not None and context_workspace_id != current_workspace_id
+        )
+        effective_workspace_id = (
+            context_workspace_id if is_shared_context_read else current_workspace_id
+        )
+
+        # Check if Neural Memory is enabled
+        neural_enabled = os.getenv("ENABLE_NEURAL_MEMORY", "false").lower() == "true"
+
+        # Issue #81: Cross-context recall — pass list of context IDs to search service
+        search_context_id: str | list[str] = (
+            [str(cid) for cid in context_ids] if context_ids else str(current_context_id)
+        )
+
+        # #1220 (advisor rec): ONE read-only config fetch threads into both the
+        # router below and the reinforce re-rank later — previously each issued
+        # its own get_by_context SELECT per recall (the #341 class of duplicated
+        # hot-path reads). Fail-open: a config read failure must never break
+        # recall (None = routing off; reinforce re-reads).
+        search_config = None
+        if not context_ids:
+            try:
+                from repositories.config_repository import ContextSearchConfigRepository
+
+                search_config = await ContextSearchConfigRepository(self.db).get_by_context(
+                    current_context_id
+                )
+            except Exception as exc:
+                logger.warning(
+                    "search_config_prefetch_failed",
+                    context_id=str(current_context_id),
+                    error=str(exc),
+                )
+
+        # #1212: resolve the effective search mode exactly once, before any
+        # downstream read of request.search_mode (BYOK charge gate, hybrid
+        # search, neural checks). After this line it is always a concrete
+        # mode string; None (caller omitted it) never flows further.
+        # #1220 (advisor rec): model_copy instead of in-place mutation — a
+        # caller that reuses one RecallRequest across calls must never see
+        # its search_mode silently rewritten.
+        resolved_request = request.model_copy(
+            update={
+                "search_mode": await self._resolve_search_mode(
+                    request,
+                    current_context_id,
+                    cross_context=bool(context_ids),
+                    config=search_config,
+                )
+            }
+        )
+
+        return _RecallPlan(
+            request=resolved_request,
+            effective_workspace_id=effective_workspace_id,  # type: ignore[arg-type]
+            is_shared_context_read=is_shared_context_read,
+            neural_enabled=neural_enabled,
+            search_context_id=search_context_id,
+            search_config=search_config,
+        )
+
+    async def _empty_recall_response(
+        self,
+        *,
+        request: RecallRequest,
+        selection_config: RecallSelectionConfig | None,
+        search_config: Any,
+        context_id: UUID,
+    ) -> RecallResponse:
+        """Build the zero-candidate ``recall()`` response.
+
+        Shared by both no-result exits — the #496 empty-``analysis_cluster``
+        short-circuit and the no-search-hits exit — so the empty-recall contract
+        (#1047 "none" confidence, opt-in empty hints, #1306 evidence over an
+        empty pool) is written exactly once instead of drifting between two
+        copies.
+
+        Args:
+            request: The recall request (read for ``include_explore_hints``).
+            selection_config: #1306 evaluation seam config, or None.
+            search_config: Prefetched per-context search config (may be None).
+            context_id: Context the evidence is stamped against.
+
+        Returns:
+            An empty RecallResponse carrying the full empty-recall contract.
+        """
+        selection_evidence: dict[str, Any] | None = None
+        if selection_config is not None:
+            _, selection_evidence = await self._build_selection_evidence(
+                selection_config,
+                eligible_ids=(),
+                request=request,
+                search_config=search_config,
+                context_id=context_id,
+            )
+        return RecallResponse(
+            results=[],
+            explore_hints=[] if request.include_explore_hints else None,
+            confidence=self._compute_recall_confidence([]),  # #1047: "none"
+            selection_evidence=selection_evidence,
+        )
+
+    async def _recall_check_agent_bindings(
+        self,
+        *,
+        current_context_id: UUID,
+        context_ids: list[UUID] | None,
+        user_id: str,
+    ) -> None:
+        """#1291: apply the subtractive agent-binding read gate at the service layer.
+
+        The MCP handler gates this path via ``_resolve_context_for_read``, but the
+        REST ``/memory/recall`` route calls this service method directly and so
+        bypassed the filter before #1291. Gating HERE means an agent-bound
+        credential cannot read a binding-denied context via ANY caller.
+
+        No-op for non-agent credentials (``get_agent_scope()`` is None → one
+        contextvar read, no DB query). Covers the single declared context and
+        each entry on the #81 cross-context list — exactly the set searched
+        downstream.
+
+        Args:
+            current_context_id: The single declared context.
+            context_ids: #81 cross-context list, or None for single-context.
+            user_id: Caller identity, recorded on deny-capture audit rows.
+
+        Raises:
+            NotFoundException: when any searched context is binding-denied. The
+                uniform "Context" 404 matches the MCP path's response so the
+                deny does not leak existence.
+        """
+        from services.agent_binding_service import agent_binding_permits
+
+        for gated_cid in context_ids if context_ids else [current_context_id]:
+            if not await agent_binding_permits(
+                self.db,
+                gated_cid,
+                "read",
+                operation="recall",  # #1286 (P0-5): deny-capture audit identity
+                user_id=user_id,
+            ):
+                raise NotFoundException("Context", str(gated_cid))
+
+    async def _recall_resolve_cluster_filter(
+        self, request: RecallRequest, *, effective_workspace_id: UUID
+    ) -> list[UUID] | None:
+        """Issue #496: resolve ``filters.analysis_cluster`` to its member memory ids.
+
+        Pre-resolving the cluster lets recall both (a) short-circuit an empty
+        cluster before paying for the embedding + search round-trip and (b)
+        expand the candidate pool to cover the whole cluster — without which a
+        small cluster may end up with zero overlap with Qdrant's top-N
+        candidates. The actual ``Memory.id IN ...`` filter is applied at the PG
+        SELECT during hydration; rerank / hybrid scoring see only cluster members.
+
+        Args:
+            request: The recall request carrying ``filters``.
+            effective_workspace_id: #708-aware paying workspace. Passing it means
+                a stolen ``run_id`` from a foreign workspace resolves to nothing
+                (same shape as cluster-not-found), so recall short-circuits to
+                empty without leaking existence.
+
+        Returns:
+            ``None`` when the filter is absent (no cluster scoping), otherwise
+            the cluster's member ids — possibly an empty list, which the caller
+            turns into an immediate empty response.
+
+        Raises:
+            ValidationError: on a malformed filter. Deliberately
+                ``ValidationError`` (a ``MemoryCloudException`` subclass) rather
+                than a plain ``ValueError``: only the former is caught by the
+                global ``memory_cloud_exception_handler``, so a client sending
+                ``analysis_cluster: "abc"`` gets a 422 with the structured
+                ``{error, message, details}`` envelope instead of an internal 500.
+        """
+        if not request.filters:
+            return None
+        cluster_filter = request.filters.get("analysis_cluster")
+        if not cluster_filter:
+            return None
+
+        from services.analysis import query_service as _analysis_query_service
+
+        if not isinstance(cluster_filter, dict):
+            raise ValidationError(
+                "filters.analysis_cluster must be an object with run_id + cluster_index",
+                field="filters.analysis_cluster",
+            )
+        run_id_raw = cluster_filter.get("run_id")
+        cluster_index_raw = cluster_filter.get("cluster_index")
+        if run_id_raw is None or cluster_index_raw is None:
+            raise ValidationError(
+                "filters.analysis_cluster requires 'run_id' and 'cluster_index'",
+                field="filters.analysis_cluster",
+            )
+        try:
+            cluster_run_id = UUID(str(run_id_raw))
+            cluster_index_int = int(cluster_index_raw)
+        except (ValueError, TypeError) as e:
+            raise ValidationError(
+                "filters.analysis_cluster: 'run_id' must be a UUID and "
+                "'cluster_index' must be an integer",
+                field="filters.analysis_cluster",
+            ) from e
+        member_ids = await _analysis_query_service.get_memory_ids_in_cluster(
+            self.db,
+            workspace_id=effective_workspace_id,
+            run_id=cluster_run_id,
+            cluster_index=cluster_index_int,
+        )
+        # Normalize "cluster unknown" (None) and "cluster empty" ([]) to the
+        # same empty list — both mean "no candidates" to the caller, and the
+        # non-None return still signals that cluster scoping is active.
+        return member_ids or []
+
+    async def _recall_enforce_shared_byok(
+        self,
+        request: RecallRequest,
+        *,
+        user_id: str,
+        current_context_id: UUID,
+        current_workspace_id: UUID,
+        context_workspace_id: UUID,
+    ) -> None:
+        """#708 Option A H1 gate, deferred until a search will actually fire.
+
+        Probes the source workspace for a BYOK key applicable to this context
+        BEFORE the embedding API call is issued, so the ``OPENAI_API_KEY`` env
+        fallback in ``_get_user_api_key`` cannot silently bypass PR #711's
+        BYOK-only spend cap.
+
+        The probe MUST use the per-context embedding model — the same source of
+        truth ``SearchService.hybrid_search`` uses to pick its embed client.
+        Probing with the global default would falsely deny self-hosted-backed
+        contexts (provider mismatch) and falsely pass OpenAI-backed contexts when
+        the platform default is self-hosted (the gate would skip entirely).
+
+        Called only after the ``analysis_cluster`` short-circuit, so no-cost
+        reads (empty cluster, etc.) are never falsely 404'd.
+
+        Args:
+            request: The recall request (read for the resolved ``search_mode``).
+            user_id: Caller identity, for the deny log line.
+            current_context_id: Context being read.
+            current_workspace_id: Caller's own workspace.
+            context_workspace_id: Context owner workspace — the one that pays.
+
+        Raises:
+            NotFoundException: uniform 404 when the source workspace has no
+                applicable BYOK key. Deliberately indistinguishable from
+                "context does not exist" so the deny leaks neither existence nor
+                configuration state (CWE-639 / OWASP A01).
+        """
+        from repositories.config_repository import ContextSearchConfigRepository
+
+        ctx_config = await ContextSearchConfigRepository(self.db).create_or_get(current_context_id)
+        byok_embed_svc = EmbeddingService(self.db, model=ctx_config.embedding_model)
+        # Only gate when the embedding API call would actually fire and produce a
+        # charge against the source workspace. ``keyword`` mode skips
+        # ``embed_with_usage`` entirely (BM25-only); a self-hosted backend is
+        # free/local (no platform-key fallback path).
+        will_charge_embedding_cost = (
+            request.search_mode != "keyword" and byok_embed_svc.provider != "self_hosted"
+        )
+        if will_charge_embedding_cost and not await byok_embed_svc.has_byok_key(
+            str(context_workspace_id),
+            context_id=str(current_context_id),
+        ):
+            logger.warning(
+                "shared_context_read_no_byok_deny",
+                caller_user_id=user_id,
+                caller_workspace_id=str(current_workspace_id),
+                context_id=str(current_context_id),
+                paid_by_workspace_id=str(context_workspace_id),
+                embedding_model=ctx_config.embedding_model,
+                embedding_provider=byok_embed_svc.provider,
+                reason="missing_byok",
+            )
+            raise NotFoundException("Context", str(current_context_id))
+
+    async def _recall_hydrate_memories(
+        self,
+        request: RecallRequest,
+        *,
+        memory_ids: list[str],
+        cluster_memory_ids: list[UUID] | None,
+    ) -> dict[str, Memory]:
+        """Hydrate the search hits from PostgreSQL, keyed by every id they may carry.
+
+        ``memory_ids`` are Qdrant point ids. For ``remember()``-written memories
+        the point id equals ``Memory.id`` (see ``add_memory_to_qdrant`` /
+        ``summary_embedding_id == id``). Resource-projected memories
+        (``ResourceIndexer._apply_upsert``) instead store the point under
+        ``uuid5(resource_id:doc_id:vN) != Memory.id`` and record the link in
+        ``Memory.summary_embedding_id`` (the authoritative "Qdrant point id"
+        column). Matching on ``Memory.id`` alone silently drops every resource hit
+        during hydration → recall returns 0 in all modes (Issue #972).
+
+        So the SELECT resolves via either identifier, and the returned dict is
+        keyed by BOTH the row id and the point id — keying by both (rather than
+        only the point id) keeps the lookup robust when ``summary_embedding_id``
+        is unset or divergent. For normal memories the two coincide (one key);
+        across rows they never collide because both id spaces are globally unique
+        UUIDs.
+
+        Also applies the #214 source post-filters, the #887 trust-tier read
+        filter and the #496 cluster scope.
+
+        Args:
+            request: The recall request carrying ``filters``.
+            memory_ids: Qdrant point ids from the hybrid search.
+            cluster_memory_ids: #496 cluster scope, or None when not scoped.
+                Guaranteed non-empty here — the caller short-circuits an empty
+                cluster before reaching hydration.
+
+        Returns:
+            Point-id / row-id → Memory, excluding soft-deleted rows.
+        """
+        pg_conditions = [
+            or_(
+                Memory.id.in_(memory_ids),
+                Memory.summary_embedding_id.in_(memory_ids),
+            ),
+            Memory.deleted_at.is_(None),
+        ]
+        if request.filters:
+            # Issue #214: source_uri_prefix and source_type post-filters
+            if prefix := request.filters.get("source_uri_prefix"):
+                escaped = prefix.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+                pg_conditions.append(Memory.source_uri.like(f"{escaped}%", escape="\\"))
+            if stype := request.filters.get("source_type"):
+                pg_conditions.append(Memory.source_type == stype)
+            # Issue #887: trust-tier read filter. ``trusted`` excludes
+            # external-origin memories from behaviour-influencing reads (OWASP
+            # LLM01/LLM03 — external content is data, not instructions).
+            if request.filters.get("trust_tier") == "trusted":
+                # Authoritative check: the memory's context must itself be
+                # trusted. ``Context.trust_tier`` is the server-side trust
+                # signal (connector contexts = 'external'), so a non-connector
+                # row that somehow lives in an external context is still
+                # excluded — this does not rely on the per-row source_type.
+                pg_conditions.append(
+                    Memory.context_id.in_(
+                        select(Context.id).where(Context.trust_tier == CONTEXT_TRUST_TIER_TRUSTED)
+                    )
+                )
+                # Defense-in-depth: also drop any connector-sourced row.
+                pg_conditions.append(Memory.source_type != SOURCE_TYPE_CONNECTOR)
+        if cluster_memory_ids is not None:
+            pg_conditions.append(Memory.id.in_(cluster_memory_ids))
+
+        result = await self.db.execute(select(Memory).where(*pg_conditions))
+        memories: dict[str, Memory] = {}
+        for m in result.scalars().all():
+            memories[str(m.id)] = m
+            if m.summary_embedding_id is not None:
+                memories[str(m.summary_embedding_id)] = m
+        return memories
+
+    async def _recall_filter_rows_by_binding(
+        self,
+        search_results: list[dict],
+        memories: dict[str, Memory],
+        *,
+        user_id: str,
+    ) -> tuple[dict[str, Memory], int]:
+        """#1299: per-memory type/source binding filter over the FULL candidate pool.
+
+        Applied at the service layer (REST, MCP, share-key and the bootstrap
+        recall lane all pass through here) BEFORE shadowing, rerank and the
+        top-k slice, so a denied row can never survive into the slice.
+
+        Enforcement is subtractive: the candidate pool is already bounded to ~k
+        by hybrid_search's own top-k truncation, so removing denied rows MAY
+        return fewer than k results — there is no backfill (matching the
+        deletion / supersede-shadowing precedent). Shadow mode keeps every row
+        and records the per-context would_deny aggregate inside the helper.
+
+        Args:
+            search_results: Candidate pool, pruned in place.
+            memories: Hydrated point-id → Memory map.
+            user_id: Caller identity for the binding lookup.
+
+        Returns:
+            (surviving memory map, number of rows filtered out).
+        """
+        if not memories:
+            return memories, 0
+
+        from services.agent_binding_service import filter_memory_rows_by_binding
+
+        unique_rows = list({m.id: m for m in memories.values()}.values())
+        kept_rows, binding_row_filtered = await filter_memory_rows_by_binding(
+            self.db, unique_rows, operation="recall", user_id=user_id
+        )
+        if not binding_row_filtered:
+            return memories, 0
+
+        kept_ids = {m.id for m in kept_rows}
+        search_results[:] = [
+            r for r in search_results if r["id"] not in memories or memories[r["id"]].id in kept_ids
+        ]
+        return {key: m for key, m in memories.items() if m.id in kept_ids}, binding_row_filtered
+
+    async def _recall_apply_selection_plan(
+        self,
+        search_results: list[dict],
+        memories: dict[str, Memory],
+        *,
+        selection_config: RecallSelectionConfig,
+        request: RecallRequest,
+        search_config: Any,
+        context_id: UUID,
+    ) -> dict[str, Any]:
+        """#1306: stamp selection evidence and reorder the pool to match the plan.
+
+        Every subtractive gate (trusted context/source, agent row binding,
+        deletion, cluster scope, supersede shadowing) has already run by this
+        point, so the pool seen here is precisely the authorized eligible pool
+        used by this query.
+
+        Args:
+            search_results: Candidate pool, reordered in place.
+            memories: Hydrated point-id → Memory map.
+            selection_config: The evaluation seam config.
+            request: The recall request (``k`` bounds the plan).
+            search_config: Prefetched per-context search config (may be None).
+            context_id: Context the evidence is stamped against.
+
+        Returns:
+            The identity-only evidence dict.
+        """
+        eligible_results: list[dict[str, Any]] = []
+        eligible_ids: list[str] = []
+        seen_memory_ids: set[UUID] = set()
+        for search_result in search_results:
+            memory = memories.get(search_result["id"])
+            if memory is None or memory.id in seen_memory_ids:
+                continue
+            seen_memory_ids.add(memory.id)
+            eligible_results.append(search_result)
+            eligible_ids.append(str(memory.id))
+
+        # The over-fetch upstream (neural k*4, cluster buffers) can exceed
+        # candidate_pool_k, but the stamped policy promises a bounded registered
+        # pool. Truncate on the EVIDENCE side only, in production rank order —
+        # eligible_results / search_results stay untouched so response building
+        # and neural co-activation keep seeing exactly what production saw.
+        registered_pool = tuple(eligible_ids[: selection_config.candidate_pool_k])
+
+        plan, selection_evidence = await self._build_selection_evidence(
+            selection_config,
+            eligible_ids=registered_pool,
+            request=request,
+            search_config=search_config,
+            context_id=context_id,
+        )
+        by_memory_id = {str(memories[result["id"]].id): result for result in eligible_results}
+        selected_set = set(plan.selected_ids)
+        selected_results = [by_memory_id[memory_id] for memory_id in plan.selected_ids]
+        unselected_results = [
+            result for memory_id, result in by_memory_id.items() if memory_id not in selected_set
+        ]
+        # The normal response builder and neural co-activation path continue to
+        # consume ``search_results[:k]``; reorder only, never synthesize.
+        search_results[:] = selected_results + unselected_results
+        return selection_evidence
+
+    async def _recall_build_responses(
+        self,
+        request: RecallRequest,
+        search_results: list[dict],
+        memories: dict[str, Memory],
+        *,
+        shadow_map: dict[UUID, UUID],
+        contradiction_map: dict[UUID, list[UUID]],
+        user_id: str,
+    ) -> list[MemoryResponse]:
+        """Build the page that ships: supersede hints, access stats, response rows.
+
+        Args:
+            request: The recall request (``k`` is the page size).
+            search_results: Ranked candidate pool.
+            memories: Hydrated point-id → Memory map.
+            shadow_map: #1208 dst → superseding src annotations.
+            contradiction_map: #1208 memory → contradicting opponents.
+            user_id: Caller identity for the supersede-candidate lookup.
+
+        Returns:
+            Up to ``request.k`` MemoryResponse rows, skipping hits with no
+            hydrated PostgreSQL row.
+        """
+        # #1403: resolve liveness-guarded supersede suggestions for exactly the
+        # page that ships — one batched query, run AFTER the top-k slice +
+        # rerank so discarded candidates cost nothing (empty/fast when none
+        # carry one).
+        page = search_results[: request.k]
+        page_memories = {sr["id"]: memories[sr["id"]] for sr in page if sr["id"] in memories}
+        supersede_candidates = await self._resolve_supersede_candidates(
+            page_memories, user_id=user_id, operation="recall"
+        )
+
+        client = request.filters.get("client", "api") if request.filters else "api"
+        responses: list[MemoryResponse] = []
+        for search_result in page:
+            memory = memories.get(search_result["id"])
+
+            if not memory:
+                continue
+
+            # Issue #1047: snapshot updated_at BEFORE update_access_stats.
+            # #1317 removed the column's onupdate, so the access-stats flush
+            # no longer touches (or expires) updated_at — the DB value is now
+            # correct by construction; the snapshot stays as a cheap guard
+            # against any future in-session dirtying of the row.
+            snapshot_updated_at = memory.updated_at
+
+            # Update access stats
+            await self.memory_repo.update_access_stats(memory.id, client=client)
+
+            # Check for auto-promotion
+            await self._check_and_promote(memory)
+
+            responses.append(
+                MemoryResponse(
+                    memory_id=memory.id,
+                    summary=memory.summary,
+                    context_summary=memory.context_summary,
+                    type=memory.type,
+                    importance=memory.importance,
+                    scope=memory.scope,
+                    created_at=memory.created_at,
+                    updated_at=snapshot_updated_at,  # #1047: staleness cue (pre-bump snapshot)
+                    client=memory.client,
+                    tags=memory.tags or [],
+                    context=memory.context,
+                    score=search_result.get("hybrid_score", search_result["score"]),
+                    source_uri=memory.source_uri,
+                    source_type=memory.source_type,
+                    # #1208: succession annotations. superseded_by is only
+                    # non-None under include_superseded=true (default recall
+                    # filtered shadowed memories out of search_results above).
+                    superseded_by=shadow_map.get(memory.id),
+                    contradicts=contradiction_map.get(memory.id, []),
+                    # #1403: near-duplicate this memory may supersede (or None).
+                    supersede_candidate=supersede_candidates.get(memory.id),
+                )
+            )
+        return responses
+
+    async def _recall_run_hebbian_learning(
+        self,
+        request: RecallRequest,
+        search_results: list[dict],
+        memories: dict[str, Memory],
+        *,
+        user_id: str,
+        current_context_id: UUID,
+        effective_workspace_id: UUID,
+    ) -> None:
+        """Best-effort Hebbian graph update — builds the graph ``explore()`` reads.
+
+        Issue #120: the neural graph is for ``explore()`` only. ``recall()``
+        itself ranks on pure hybrid-search scores (no UnifiedScorer); Hebbian
+        learning still runs here so the graph keeps accumulating co-activation
+        evidence from real queries.
+
+        Fail-open: any error is logged and swallowed — a graph problem must never
+        break a recall.
+
+        Args:
+            request: The recall request (``query`` keys the #983 event dedup).
+            search_results: Ranked candidate pool.
+            memories: Hydrated point-id → Memory map.
+            user_id: Graph owner.
+            current_context_id: Context whose embedding keys the #982 edge gate.
+            effective_workspace_id: #708-aware workspace for graph mutations.
+        """
+        try:
+            from neural.co_activation import CoActivationTracker
+            from neural.config import NeuralMemoryConfig
+            from neural.hebbian import HebbianLearner
+            from neural.models import ActivationState, NeuralMemoryNode
+            from repositories.graph import GraphRepository
+            from services.graph_service import GraphService
+
+            config = await NeuralMemoryConfig.from_db(self.db)
+            graph_repo = GraphRepository(self.db)
+            await graph_repo.get_or_create(user_id)
+
+            graph_service = GraphService(
+                user_id=user_id,
+                db=self.db,
+                workspace_id=str(effective_workspace_id) if effective_workspace_id else None,
+                context_id=str(current_context_id) if current_context_id else None,
+            )
+
+            co_activation_tracker = CoActivationTracker(config)
+            await co_activation_tracker.load_from_redis(user_id)
+            # #983: the learner reads/writes the cliff pending_weight on the
+            # tracker's records so it survives this per-recall instance.
+            hebbian_learner = HebbianLearner(graph_service, config, co_activation_tracker)
+
+            # Only co-activate top-k results for higher-quality edges
+            coactivation_k = min(config.top_k_coactivation, request.k, len(search_results))
+            top_results = search_results[:coactivation_k]
+
+            # Build NeuralMemoryNode list and score map from top results
+            nodes_dict: dict[str, NeuralMemoryNode] = {}
+            score_map: dict[str, float] = {}
+            for search_result in top_results:
+                memory = memories.get(search_result["id"])
+                if not memory:
+                    continue
+                mid = str(memory.id)
+                embedding = search_result.get("embedding", [])
+                score_map[mid] = search_result.get("hybrid_score", search_result["score"])
+                nodes_dict[mid] = NeuralMemoryNode(
+                    id=mid,
+                    user_id=user_id,
+                    kind=memory.type,
+                    text=memory.summary,
+                    embedding=embedding,
+                    created_at=memory.created_at,
+                    last_used_at=memory.last_used_at,
+                    use_count=memory.access_count or 0,
+                    importance=memory.importance,
+                    confidence=memory.confidence,
+                    long_term=(memory.scope == "persistent"),
+                )
+
+            # Score-weighted activation: clamp to [0, 1] for Hebbian stability
+            activated_nodes = [
+                ActivationState(node_id=nid, activation=min(1.0, max(0.0, score_map.get(nid, 0.0))))
+                for nid in nodes_dict
+            ]
+
+            # Co-activation tracking with semantic gating
+            embedding_map = {
+                nid: node.embedding for nid, node in nodes_dict.items() if node.embedding
+            }
+            # Resolve the calibrated edge-gate threshold (#982). The gate is
+            # keyed on the context's embedding (model, dimensions); both the
+            # co-activation tracker and the Hebbian learner use the same
+            # resolved value so they agree on which pairs may form edges.
+            # Best-effort: on any failure (or no edge_gate calibration row)
+            # this stays None and the gate falls back to the config absolute
+            # ``min_similarity_for_edge`` inside record_activation/queue_update.
+            edge_threshold: float | None = None
+            edge_dims = next((len(e) for e in embedding_map.values() if e), None)
+            if edge_dims and current_context_id is not None:
+                # Resolve in an ISOLATED session: a transient DB error here
+                # must not abort the recall's own transaction (which still
+                # has the neural graph writes below to commit). The lookup
+                # is READ-ONLY (get_by_context, never create_or_get) so the
+                # recall hot path never writes a config row. Missing config
+                # or any failure leaves edge_threshold=None → the gate falls
+                # back to the absolute config value in the gating calls.
+                from db.base import get_db
+                from neural.calibration import resolve_edge_threshold
+                from repositories.config_repository import (
+                    ContextSearchConfigRepository,
+                )
+
+                try:
+                    async for edge_db in get_db():
+                        ctx_search_cfg = await ContextSearchConfigRepository(
+                            edge_db
+                        ).get_by_context(current_context_id)
+                        if ctx_search_cfg is not None:
+                            edge_threshold = await resolve_edge_threshold(
+                                db=edge_db,
+                                config=config,
+                                model_name=ctx_search_cfg.embedding_model,
+                                dimensions=edge_dims,
+                            )
+                        break
+                except Exception:  # noqa: BLE001 — best-effort; never break recall
+                    logger.debug("edge_threshold_resolve_failed", exc_info=True)
+                    edge_threshold = None
+
+            # 2D edge gate (#983): when enabled, lower the recording gate
+            # to the floor so band pairs accumulate same-event evidence,
+            # and hand those counts to the Hebbian gate below. The floor
+            # is clamped to the effective threshold so it can only widen
+            # the band downward, never tighten the 1-D gate.
+            edge_floor: float | None = None
+            if config.edge_gate_repetition_enabled:
+                effective_threshold = (
+                    edge_threshold if edge_threshold is not None else config.min_similarity_for_edge
+                )
+                edge_floor = min(config.min_similarity_for_edge_floor, effective_threshold)
+
+            # Distinct-query evidence dedup (#983): the same query
+            # replayed N times re-produces its top-k — one ranking
+            # accident is one observation, however often it repeats.
+            query_event_key = hashlib.sha256(request.query.encode("utf-8")).hexdigest()[:16]
+
+            updated_records = co_activation_tracker.record_activation(
+                user_id,
+                activated_nodes,
+                embeddings=embedding_map,
+                similarity_threshold=edge_threshold,
+                floor_threshold=edge_floor,
+                event_key=query_event_key,
+            )
+            co_activation_counts = (
+                {(r.node_id_1, r.node_id_2): r.same_event_count for r in updated_records}
+                if edge_floor is not None
+                else None
+            )
+            # NOTE: save_to_redis is deferred until AFTER apply_updates so
+            # the persisted records also capture the cliff pending_weight
+            # the Hebbian pass writes (#983).
+
+            # Add nodes to graph
+            nodes_added = 0
+            for node_id, node in nodes_dict.items():
+                if not await graph_service.has_node(node_id):
+                    await graph_service.add_node(
+                        node_id=node_id,
+                        node_type="memory",
+                        data={
+                            "user_id": user_id,
+                            "kind": node.kind,
+                            "text": node.text,
+                            "created_at": node.created_at,
+                            "importance": node.importance,
+                            "confidence": node.confidence,
+                            "long_term": node.long_term,
+                        },
+                    )
+                    nodes_added += 1
+
+            # Hebbian updates (same calibrated gate as co-activation above;
+            # band pairs may be admitted by repetition evidence, #983)
+            await hebbian_learner.queue_update(
+                user_id,
+                activated_nodes,
+                nodes_dict,
+                similarity_threshold=edge_threshold,
+                floor_threshold=edge_floor,
+                co_activation_counts=co_activation_counts,
+            )
+            edges_updated = await hebbian_learner.apply_updates(user_id)
+
+            # #983: persist co-activation records now — this captures both
+            # the same-event evidence (record_activation) and the cliff
+            # pending_weight (apply_updates) in a single round-trip.
+            await co_activation_tracker.save_to_redis(user_id)
+
+            logger.info(
+                "graph_updated",
+                user_id=user_id,
+                nodes_added=nodes_added,
+                edges_updated=edges_updated,
+            )
+        except Exception as exc:
+            logger.warning("hebbian_update_failed", error=str(exc))
+
+    async def _recall_finalize(
+        self,
+        request: RecallRequest,
+        search_results: list[dict],
+        responses: list[MemoryResponse],
+        *,
+        user_id: str,
+        current_context_id: UUID,
+        effective_workspace_id: UUID,
+        neural_enabled: bool,
+        binding_row_filtered: int,
+        selection_evidence: dict[str, Any] | None,
+    ) -> RecallResponse:
+        """Assemble the final response: hints, tags, confidence, audit row.
+
+        Args:
+            request: The recall request.
+            search_results: The full candidate pool (wider than the returned page
+                when neural over-fetch is on) — the confidence distribution is
+                computed over all of it.
+            responses: The page being returned.
+            user_id: Caller identity.
+            current_context_id: Context that was searched.
+            effective_workspace_id: #708-aware search workspace.
+            neural_enabled: Whether the neural graph is available to hint from.
+            binding_row_filtered: #1299 subtracted-row count, for the audit row.
+            selection_evidence: #1306 evidence dict, or None.
+
+        Returns:
+            The completed RecallResponse.
+        """
+        # Issue #216: Generate explore hints (best-effort, opt-in)
+        explore_hints = [] if request.include_explore_hints else None
+        if request.include_explore_hints and responses:
+            try:
+                explore_hints = await self._generate_explore_hints(
+                    responses,
+                    user_id,
+                    current_context_id,
+                    effective_workspace_id,
+                    neural_enabled=neural_enabled,
+                )
+            except Exception as exc:
+                logger.warning("explore_hints_generation_failed", error=str(exc))
+
+        # Issue #104: Aggregate related tags from results
+        related_tags = self._aggregate_related_tags(responses, limit=10)
+
+        logger.info("recall_completed", user_id=user_id, results=len(responses))
+
+        # Issue #1047/#1052: relevance confidence from the full candidate pool's
+        # score distribution (search_results, which holds up to candidates_k >> k
+        # when neural is on). ``candidate_scores`` are the normalized hybrid scores
+        # (ranking order); ``semantic_scores`` are the RAW per-memory cosines that
+        # carry absolute match strength for absence detection (#1052). See
+        # _compute_recall_confidence.
+        candidate_scores = [
+            score
+            for r in search_results
+            if (score := r.get("hybrid_score", r.get("score"))) is not None
+        ]
+        semantic_scores = [
+            r["semantic_score_raw"]
+            for r in search_results
+            if r.get("semantic_score_raw") is not None
+        ]
+        # #1278/#1281 item 7: audit the recall (no-op unless verified agent
+        # identity). result_count + a keyed hash of the query; raw query never
+        # stored. effective_workspace_id is the #708-aware search workspace.
+        # #1299: enforce-mode row filtering is not a request deny — the count
+        # rides this success row so the subtraction stays observable without
+        # corrupting the deny metrics.
+        from services.agent_binding_service import ROW_FILTER_KIND
+        from services.memory_access_event_writer import emit_memory_access_event
+
+        await emit_memory_access_event(
+            operation="recall",
+            outcome="success",
+            workspace_id=effective_workspace_id,
+            user_id=user_id,
+            context_id=current_context_id,
+            result_count=len(responses),
+            query=request.query,
+            extra_metadata=(
+                {
+                    "filter_kind": ROW_FILTER_KIND,
+                    "binding_row_filtered_count": binding_row_filtered,
+                }
+                if binding_row_filtered
+                else None
+            ),
+        )
+
+        return RecallResponse(
+            results=responses,
+            related_tags=related_tags,
+            explore_hints=explore_hints,
+            confidence=self._compute_recall_confidence(
+                candidate_scores, semantic_scores=semantic_scores or None
+            ),
+            selection_evidence=selection_evidence,
+        )
+
     async def recall(
         self,
         request: RecallRequest,
@@ -2545,8 +3467,6 @@ class MemoryService:
         Returns:
             RecallResponse with search results
         """
-        import os
-
         logger.info(
             "recall_request",
             user_id=user_id,
@@ -2564,204 +3484,57 @@ class MemoryService:
             raise ValueError("selection evidence requires trusted-tier recall")
 
         # #1291: recall does NOT pass through
-        # ``PermissionService.resolve_context_for_workspace_read`` — the MCP
-        # handler gates that path via ``_resolve_context_for_read``, but the REST
-        # ``/memory/recall`` route calls this service method directly and so
-        # bypassed the subtractive agent-binding filter before this fix. Apply
-        # the gate HERE (service layer) so an agent-bound credential cannot read
-        # a binding-denied context via ANY caller. No-op for non-agent
-        # credentials (``get_agent_scope()`` is None → one contextvar read, no
-        # DB query); deny raises the uniform ``NotFoundException("Context")``
-        # matching the MCP path's 404. Covers the single declared context and
-        # each entry on the #81 cross-context list (exactly the set searched
-        # below).
-        from services.agent_binding_service import agent_binding_permits
-
-        for _gated_cid in context_ids if context_ids else [current_context_id]:
-            if not await agent_binding_permits(
-                self.db,
-                _gated_cid,
-                "read",
-                operation="recall",  # #1286 (P0-5): deny-capture audit identity
-                user_id=user_id,
-            ):
-                raise NotFoundException("Context", str(_gated_cid))
-
-        # #708 Option A: route embedding cost (key + spend cap + paid_by
-        # + search + graph) to the context's owner workspace. Rate-limit
-        # gating stays on the caller upstream — do NOT change it here.
-        # The H1 BYOK gate is deferred until we know hybrid_search will
-        # actually fire (after the analysis_cluster short-circuit below),
-        # so no-cost reads (empty cluster, etc.) do not get falsely 404'd.
-        effective_workspace_id = current_workspace_id
-        is_shared_context_read = (
-            context_workspace_id is not None and context_workspace_id != current_workspace_id
-        )
-        if is_shared_context_read:
-            effective_workspace_id = context_workspace_id  # type: ignore[assignment]
-
-        # Check if Neural Memory is enabled
-        neural_enabled = os.getenv("ENABLE_NEURAL_MEMORY", "false").lower() == "true"
-
-        # Issue #81: Cross-context recall — pass list of context IDs to search service
-        search_context_id: str | list[str] = str(current_context_id)
-        if context_ids:
-            search_context_id = [str(cid) for cid in context_ids]
-
-        # #1220 (advisor rec): ONE read-only config fetch threads into both
-        # the router below and the reinforce re-rank later — previously each
-        # issued its own get_by_context SELECT per recall (the #341 class of
-        # duplicated hot-path reads). Fail-open: a config read failure must
-        # never break recall (None = routing off; reinforce re-reads).
-        search_config = None
-        if not context_ids:
-            try:
-                from repositories.config_repository import ContextSearchConfigRepository
-
-                search_config = await ContextSearchConfigRepository(self.db).get_by_context(
-                    current_context_id
-                )
-            except Exception as exc:
-                logger.warning(
-                    "search_config_prefetch_failed",
-                    context_id=str(current_context_id),
-                    error=str(exc),
-                )
-
-        # #1212: resolve the effective search mode exactly once, before any
-        # downstream read of request.search_mode (BYOK charge gate, hybrid
-        # search, neural checks). After this line it is always a concrete
-        # mode string; None (caller omitted it) never flows further.
-        # #1220 (advisor rec): model_copy instead of in-place mutation — a
-        # caller that reuses one RecallRequest across calls must never see
-        # its search_mode silently rewritten.
-        request = request.model_copy(
-            update={
-                "search_mode": await self._resolve_search_mode(
-                    request,
-                    current_context_id,
-                    cross_context=bool(context_ids),
-                    config=search_config,
-                )
-            }
+        # ``PermissionService.resolve_context_for_workspace_read`` — the gate is
+        # applied at the service layer so it covers every caller. See the helper.
+        await self._recall_check_agent_bindings(
+            current_context_id=current_context_id,
+            context_ids=context_ids,
+            user_id=user_id,
         )
 
-        # Issue #496: ``analysis_cluster`` filter pre-resolves the cluster's
-        # memory_ids so we can both (a) short-circuit empty clusters before
-        # paying for the embedding+search round-trip and (b) expand the
-        # candidate pool to cover the whole cluster — without this, a small
-        # cluster may end up with zero overlap with Qdrant's top-N candidates.
-        # The actual ``Memory.id IN ...`` filter is applied at the PG SELECT
-        # below alongside the existing source_uri_prefix / source_type
-        # post-filters; rerank / hybrid scoring see only cluster members.
-        cluster_memory_ids: list[UUID] | None = None
-        if request.filters and (cluster_filter := request.filters.get("analysis_cluster")):
-            from services.analysis import query_service as _analysis_query_service
+        # Resolve the effective query parameters once (#708 paying workspace,
+        # neural flag, #81 search scope, #1220 config prefetch, #1212 search
+        # mode). ``plan.request`` supersedes the caller's request from here on.
+        plan = await self._recall_prepare(
+            request,
+            current_context_id=current_context_id,
+            current_workspace_id=current_workspace_id,
+            context_workspace_id=context_workspace_id,
+            context_ids=context_ids,
+        )
+        request = plan.request
+        effective_workspace_id = plan.effective_workspace_id
+        is_shared_context_read = plan.is_shared_context_read
+        neural_enabled = plan.neural_enabled
+        search_config = plan.search_config
 
-            # Issue #496 Copilot review fix: guard against non-dict shape so a
-            # client sending ``analysis_cluster: "abc"`` (string) or a list
-            # surfaces as a clean 422 ``ValidationError`` instead of an
-            # internal 500 ``AttributeError`` on ``.get(...)``.
-            #
-            # ``ValidationError`` (a ``MemoryCloudException`` subclass) is the
-            # right exception type — plain ``ValueError`` is NOT caught by
-            # the global ``memory_cloud_exception_handler``, so the recall
-            # route would 500 instead of returning 422 with the structured
-            # ``{error, message, details}`` envelope. Caught by Copilot
-            # review (loop 5).
-            if not isinstance(cluster_filter, dict):
-                raise ValidationError(
-                    "filters.analysis_cluster must be an object with run_id + cluster_index",
-                    field="filters.analysis_cluster",
-                )
-            run_id_raw = cluster_filter.get("run_id")
-            cluster_index_raw = cluster_filter.get("cluster_index")
-            if run_id_raw is None or cluster_index_raw is None:
-                raise ValidationError(
-                    "filters.analysis_cluster requires 'run_id' and 'cluster_index'",
-                    field="filters.analysis_cluster",
-                )
-            try:
-                cluster_run_id = UUID(str(run_id_raw))
-                cluster_index_int = int(cluster_index_raw)
-            except (ValueError, TypeError) as e:
-                raise ValidationError(
-                    "filters.analysis_cluster: 'run_id' must be a UUID and "
-                    "'cluster_index' must be an integer",
-                    field="filters.analysis_cluster",
-                ) from e
-            # Issue #496 security fix: pass current_workspace_id so a
-            # stolen ``run_id`` from a foreign workspace returns None
-            # (same shape as cluster-not-found) and the recall short-
-            # circuits to empty results without leaking existence.
-            cluster_memory_ids = await _analysis_query_service.get_memory_ids_in_cluster(
-                self.db,
-                workspace_id=effective_workspace_id,
-                run_id=cluster_run_id,
-                cluster_index=cluster_index_int,
+        # Issue #496: pre-resolve the ``analysis_cluster`` filter. A non-None
+        # return means cluster scoping is active; an empty list means the
+        # cluster is empty or unknown, so short-circuit before paying for the
+        # embedding + search round-trip.
+        cluster_memory_ids = await self._recall_resolve_cluster_filter(
+            request, effective_workspace_id=effective_workspace_id
+        )
+        if cluster_memory_ids is not None and not cluster_memory_ids:
+            return await self._empty_recall_response(
+                request=request,
+                selection_config=selection_config,
+                search_config=search_config,
+                context_id=current_context_id,
             )
-            if not cluster_memory_ids:
-                # Cluster empty or unknown — return immediately with no candidates.
-                return RecallResponse(
-                    results=[],
-                    explore_hints=[] if request.include_explore_hints else None,
-                    confidence=self._compute_recall_confidence([]),  # #1047: "none"
-                    selection_evidence=(
-                        (
-                            await self._build_selection_evidence(
-                                selection_config,
-                                eligible_ids=(),
-                                request=request,
-                                search_config=search_config,
-                                context_id=current_context_id,
-                            )
-                        )[1]
-                        if selection_config is not None
-                        else None
-                    ),
-                )
 
         # #708 Option A H1 gate (deferred): we now know hybrid_search will
         # actually fire (the analysis_cluster short-circuit above did not
-        # trigger). Probe the source workspace for a BYOK key applicable
-        # to this context BEFORE issuing the embedding API call, so the
-        # OPENAI_API_KEY env fallback in ``_get_user_api_key`` cannot
-        # silently bypass PR #711's BYOK-only spend cap.
-        #
-        # The probe MUST use the per-context embedding model (same source
-        # of truth ``SearchService.hybrid_search`` uses to pick its embed
-        # client at line 168). Probing with the global default would
-        # falsely deny self-hosted-backed contexts (provider mismatch) and
-        # falsely pass OpenAI-backed contexts when the platform default is
-        # self-hosted (gate would skip entirely).
+        # trigger), so the BYOK probe can run without falsely 404'ing no-cost
+        # reads.
         if is_shared_context_read:
-            from repositories.config_repository import ContextSearchConfigRepository
-
-            ctx_config_repo = ContextSearchConfigRepository(self.db)
-            ctx_config = await ctx_config_repo.create_or_get(current_context_id)
-            byok_embed_svc = EmbeddingService(self.db, model=ctx_config.embedding_model)
-            # Only gate when the embedding API call would actually fire and
-            # produce a charge against the source workspace. ``keyword``
-            # mode skips ``embed_with_usage`` entirely (BM25-only); a
-            # self-hosted backend is free/local (no platform-key fallback path).
-            will_charge_embedding_cost = (
-                request.search_mode != "keyword" and byok_embed_svc.provider != "self_hosted"
+            await self._recall_enforce_shared_byok(
+                request,
+                user_id=user_id,
+                current_context_id=current_context_id,
+                current_workspace_id=current_workspace_id,
+                context_workspace_id=context_workspace_id,  # type: ignore[arg-type]
             )
-            if will_charge_embedding_cost and not await byok_embed_svc.has_byok_key(
-                str(context_workspace_id),
-                context_id=str(current_context_id),
-            ):
-                logger.warning(
-                    "shared_context_read_no_byok_deny",
-                    caller_user_id=user_id,
-                    caller_workspace_id=str(current_workspace_id),
-                    context_id=str(current_context_id),
-                    paid_by_workspace_id=str(context_workspace_id),
-                    embedding_model=ctx_config.embedding_model,
-                    embedding_provider=byok_embed_svc.provider,
-                    reason="missing_byok",
-                )
-                raise NotFoundException("Context", str(current_context_id))
 
         # 1. Primary Retrieval: Hybrid Search (Semantic + BM25)
         # Fetch more candidates when neural is enabled for better hybrid merge
@@ -2782,7 +3555,7 @@ class MemoryService:
             query=request.query,
             user_id=user_id,
             workspace_id=str(effective_workspace_id),
-            context_id=search_context_id,
+            context_id=plan.search_context_id,
             k=candidates_k,
             use_rerank=request.use_rerank,
             filters=request.filters,
@@ -2806,116 +3579,27 @@ class MemoryService:
         memory_ids = [r["id"] for r in search_results]
 
         if not memory_ids:
-            return RecallResponse(
-                results=[],
-                explore_hints=[] if request.include_explore_hints else None,
-                confidence=self._compute_recall_confidence([]),  # #1047: "none"
-                selection_evidence=(
-                    (
-                        await self._build_selection_evidence(
-                            selection_config,
-                            eligible_ids=(),
-                            request=request,
-                            search_config=search_config,
-                            context_id=current_context_id,
-                        )
-                    )[1]
-                    if selection_config is not None
-                    else None
-                ),
+            return await self._empty_recall_response(
+                request=request,
+                selection_config=selection_config,
+                search_config=search_config,
+                context_id=current_context_id,
             )
 
-        # Fetch memories from PostgreSQL (exclude soft-deleted)
-        #
-        # ``memory_ids`` are Qdrant point ids. For ``remember()``-written
-        # memories the point id equals ``Memory.id`` (see
-        # ``add_memory_to_qdrant`` / ``summary_embedding_id == id`` at line 348).
-        # Resource-projected memories (``ResourceIndexer._apply_upsert``) instead
-        # store the point under ``uuid5(resource_id:doc_id:vN) != Memory.id`` and
-        # record the link in ``Memory.summary_embedding_id`` (the authoritative
-        # "Qdrant point id" column). Matching on ``Memory.id`` alone silently
-        # drops every resource hit during hydration → recall returns 0 in all
-        # modes (Issue #972). Resolve via either identifier; the per-row lookup
-        # dict below is keyed by both so ``memories.get(point_id)`` succeeds for
-        # both kinds.
-        pg_conditions = [
-            or_(
-                Memory.id.in_(memory_ids),
-                Memory.summary_embedding_id.in_(memory_ids),
-            ),
-            Memory.deleted_at.is_(None),
-        ]
-        # Issue #214: source_uri_prefix and source_type post-filters
-        if request.filters:
-            if prefix := request.filters.get("source_uri_prefix"):
-                escaped = prefix.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
-                pg_conditions.append(Memory.source_uri.like(f"{escaped}%", escape="\\"))
-            if stype := request.filters.get("source_type"):
-                pg_conditions.append(Memory.source_type == stype)
-            # Issue #887: trust-tier read filter. ``trusted`` excludes
-            # external-origin memories from behaviour-influencing reads (OWASP
-            # LLM01/LLM03 — external content is data, not instructions).
-            if request.filters.get("trust_tier") == "trusted":
-                # Authoritative check: the memory's context must itself be
-                # trusted. ``Context.trust_tier`` is the server-side trust
-                # signal (connector contexts = 'external'), so a non-connector
-                # row that somehow lives in an external context is still
-                # excluded — this does not rely on the per-row source_type.
-                pg_conditions.append(
-                    Memory.context_id.in_(
-                        select(Context.id).where(Context.trust_tier == CONTEXT_TRUST_TIER_TRUSTED)
-                    )
-                )
-                # Defense-in-depth: also drop any connector-sourced row.
-                pg_conditions.append(Memory.source_type != SOURCE_TYPE_CONNECTOR)
-        # Issue #496: cluster-scoped recall — restrict to the
-        # cluster's member memories. ``cluster_memory_ids`` was
-        # pre-resolved above and is guaranteed non-empty by the
-        # short-circuit (empty cluster returns early without
-        # reaching this block).
-        if cluster_memory_ids is not None:
-            pg_conditions.append(Memory.id.in_(cluster_memory_ids))
-        result = await self.db.execute(select(Memory).where(*pg_conditions))
-        memories_list = list(result.scalars().all())
-        # Key by both the row id and the Qdrant point id (summary_embedding_id)
-        # so a search hit resolves whether it carries a ``remember()`` point id
-        # (== Memory.id) or a resource-projected point id (#972). Keying by both
-        # (rather than only the point id) keeps the lookup robust when
-        # summary_embedding_id is unset/divergent. For normal memories the two
-        # coincide (one key); across rows they never collide because both id
-        # spaces are globally unique UUIDs.
-        memories: dict[str, Memory] = {}
-        for m in memories_list:
-            memories[str(m.id)] = m
-            if m.summary_embedding_id is not None:
-                memories[str(m.summary_embedding_id)] = m
+        # Fetch memories from PostgreSQL (exclude soft-deleted), applying the
+        # #214 source post-filters, the #887 trust-tier filter and the #496
+        # cluster scope. Keyed by both the row id and the Qdrant point id (#972).
+        memories = await self._recall_hydrate_memories(
+            request,
+            memory_ids=memory_ids,
+            cluster_memory_ids=cluster_memory_ids,
+        )
 
-        # #1299: per-memory type/source binding filter — applied to the FULL
-        # candidate pool at the service layer (REST, MCP, share-key and the
-        # bootstrap recall lane all pass through here) BEFORE shadowing,
-        # rerank and the top-k slice, so a denied row can never survive into
-        # the slice. Enforcement is subtractive: the candidate pool is already
-        # bounded to ~k by hybrid_search's own top-k truncation, so removing
-        # denied rows MAY return fewer than k results — there is no backfill
-        # (matching the deletion/supersede-shadowing precedent). Shadow mode
-        # keeps every row and records the per-context would_deny aggregate
-        # inside the helper.
-        binding_row_filtered = 0
-        if memories:
-            from services.agent_binding_service import filter_memory_rows_by_binding
-
-            unique_rows = list({m.id: m for m in memories.values()}.values())
-            kept_rows, binding_row_filtered = await filter_memory_rows_by_binding(
-                self.db, unique_rows, operation="recall", user_id=user_id
-            )
-            if binding_row_filtered:
-                kept_ids = {m.id for m in kept_rows}
-                search_results[:] = [
-                    r
-                    for r in search_results
-                    if r["id"] not in memories or memories[r["id"]].id in kept_ids
-                ]
-                memories = {key: m for key, m in memories.items() if m.id in kept_ids}
+        # #1299: per-memory type/source binding filter over the FULL candidate
+        # pool, before shadowing / rerank / the top-k slice.
+        memories, binding_row_filtered = await self._recall_filter_rows_by_binding(
+            search_results, memories, user_id=user_id
+        )
 
         # === Issue #120: Neural Memory graph is for explore() only ===
         # recall uses pure hybrid search scores (no UnifiedScorer).
@@ -2960,368 +3644,49 @@ class MemoryService:
 
         selection_evidence: dict[str, Any] | None = None
         if selection_config is not None:
-            # All subtractive gates (trusted context/source, agent row binding,
-            # deletion, cluster scope, supersede shadowing) have run.  Therefore
-            # this is precisely the authorized eligible pool used by this query.
-            eligible_results: list[dict[str, Any]] = []
-            eligible_ids: list[str] = []
-            seen_memory_ids: set[UUID] = set()
-            for search_result in search_results:
-                memory = memories.get(search_result["id"])
-                if memory is None or memory.id in seen_memory_ids:
-                    continue
-                seen_memory_ids.add(memory.id)
-                eligible_results.append(search_result)
-                eligible_ids.append(str(memory.id))
-
-            # The over-fetch above (neural k*4, cluster buffers) can exceed
-            # candidate_pool_k, but the stamped policy promises a bounded
-            # registered pool. Truncate on the EVIDENCE side only, in
-            # production rank order — eligible_results / search_results stay
-            # untouched so response building and neural co-activation keep
-            # seeing exactly what production saw.
-            registered_pool = tuple(eligible_ids[: selection_config.candidate_pool_k])
-
-            plan, selection_evidence = await self._build_selection_evidence(
-                selection_config,
-                eligible_ids=registered_pool,
+            # #1306: every subtractive gate has run, so the pool is exactly the
+            # authorized eligible pool for this query. Stamps evidence and
+            # reorders search_results in place.
+            selection_evidence = await self._recall_apply_selection_plan(
+                search_results,
+                memories,
+                selection_config=selection_config,
                 request=request,
                 search_config=search_config,
                 context_id=current_context_id,
             )
-            by_memory_id = {str(memories[result["id"]].id): result for result in eligible_results}
-            selected_set = set(plan.selected_ids)
-            selected_results = [by_memory_id[memory_id] for memory_id in plan.selected_ids]
-            unselected_results = [
-                result
-                for memory_id, result in by_memory_id.items()
-                if memory_id not in selected_set
-            ]
-            # The normal response builder and neural co-activation path continue
-            # to consume ``search_results[:k]``; reorder only, never synthesize.
-            search_results[:] = selected_results + unselected_results
 
-        # #1403: resolve liveness-guarded supersede suggestions for exactly the
-        # page that ships — one batched query, run AFTER the top-k slice + rerank
-        # so discarded candidates cost nothing (empty/fast when none carry one).
-        page_memories = {
-            sr["id"]: memories[sr["id"]]
-            for sr in search_results[: request.k]
-            if sr["id"] in memories
-        }
-        supersede_candidates = await self._resolve_supersede_candidates(
-            page_memories, user_id=user_id, operation="recall"
+        responses = await self._recall_build_responses(
+            request,
+            search_results,
+            memories,
+            shadow_map=shadow_map,
+            contradiction_map=contradiction_map,
+            user_id=user_id,
         )
-
-        responses = []
-        for search_result in search_results[: request.k]:
-            memory_id = search_result["id"]
-            memory = memories.get(memory_id)
-
-            if not memory:
-                continue
-
-            # Issue #1047: snapshot updated_at BEFORE update_access_stats.
-            # #1317 removed the column's onupdate, so the access-stats flush
-            # no longer touches (or expires) updated_at — the DB value is now
-            # correct by construction; the snapshot stays as a cheap guard
-            # against any future in-session dirtying of the row.
-            snapshot_updated_at = memory.updated_at
-
-            # Update access stats
-            await self.memory_repo.update_access_stats(
-                memory.id,
-                client=request.filters.get("client", "api") if request.filters else "api",
-            )
-
-            # Check for auto-promotion
-            await self._check_and_promote(memory)
-
-            responses.append(
-                MemoryResponse(
-                    memory_id=memory.id,
-                    summary=memory.summary,
-                    context_summary=memory.context_summary,
-                    type=memory.type,
-                    importance=memory.importance,
-                    scope=memory.scope,
-                    created_at=memory.created_at,
-                    updated_at=snapshot_updated_at,  # #1047: staleness cue (pre-bump snapshot)
-                    client=memory.client,
-                    tags=memory.tags or [],
-                    context=memory.context,
-                    score=search_result.get("hybrid_score", search_result["score"]),
-                    source_uri=memory.source_uri,
-                    source_type=memory.source_type,
-                    # #1208: succession annotations. superseded_by is only
-                    # non-None under include_superseded=true (default recall
-                    # filtered shadowed memories out of search_results above).
-                    superseded_by=shadow_map.get(memory.id),
-                    contradicts=contradiction_map.get(memory.id, []),
-                    # #1403: near-duplicate this memory may supersede (or None).
-                    supersede_candidate=supersede_candidates.get(memory.id),
-                )
-            )
 
         # Hebbian learning: build graph for explore() (best-effort, does not affect recall)
         if neural_enabled and request.search_mode != "keyword":
-            try:
-                from neural.co_activation import CoActivationTracker
-                from neural.config import NeuralMemoryConfig
-                from neural.hebbian import HebbianLearner
-                from neural.models import ActivationState, NeuralMemoryNode
-                from repositories.graph import GraphRepository
-                from services.graph_service import GraphService
-
-                config = await NeuralMemoryConfig.from_db(self.db)
-                graph_repo = GraphRepository(self.db)
-                await graph_repo.get_or_create(user_id)
-
-                graph_service = GraphService(
-                    user_id=user_id,
-                    db=self.db,
-                    workspace_id=str(effective_workspace_id) if effective_workspace_id else None,
-                    context_id=str(current_context_id) if current_context_id else None,
-                )
-
-                co_activation_tracker = CoActivationTracker(config)
-                await co_activation_tracker.load_from_redis(user_id)
-                # #983: the learner reads/writes the cliff pending_weight on the
-                # tracker's records so it survives this per-recall instance.
-                hebbian_learner = HebbianLearner(graph_service, config, co_activation_tracker)
-
-                # Only co-activate top-k results for higher-quality edges
-                coactivation_k = min(config.top_k_coactivation, request.k, len(search_results))
-                top_results = search_results[:coactivation_k]
-
-                # Build NeuralMemoryNode list and score map from top results
-                nodes_dict: dict[str, NeuralMemoryNode] = {}
-                score_map: dict[str, float] = {}
-                for search_result in top_results:
-                    memory = memories.get(search_result["id"])
-                    if not memory:
-                        continue
-                    mid = str(memory.id)
-                    embedding = search_result.get("embedding", [])
-                    score_map[mid] = search_result.get("hybrid_score", search_result["score"])
-                    nodes_dict[mid] = NeuralMemoryNode(
-                        id=mid,
-                        user_id=user_id,
-                        kind=memory.type,
-                        text=memory.summary,
-                        embedding=embedding,
-                        created_at=memory.created_at,
-                        last_used_at=memory.last_used_at,
-                        use_count=memory.access_count or 0,
-                        importance=memory.importance,
-                        confidence=memory.confidence,
-                        long_term=(memory.scope == "persistent"),
-                    )
-
-                # Score-weighted activation: clamp to [0, 1] for Hebbian stability
-                activated_nodes = [
-                    ActivationState(
-                        node_id=nid, activation=min(1.0, max(0.0, score_map.get(nid, 0.0)))
-                    )
-                    for nid in nodes_dict
-                ]
-
-                # Co-activation tracking with semantic gating
-                embedding_map = {
-                    nid: node.embedding for nid, node in nodes_dict.items() if node.embedding
-                }
-                # Resolve the calibrated edge-gate threshold (#982). The gate is
-                # keyed on the context's embedding (model, dimensions); both the
-                # co-activation tracker and the Hebbian learner use the same
-                # resolved value so they agree on which pairs may form edges.
-                # Best-effort: on any failure (or no edge_gate calibration row)
-                # this stays None and the gate falls back to the config absolute
-                # ``min_similarity_for_edge`` inside record_activation/queue_update.
-                edge_threshold: float | None = None
-                edge_dims = next((len(e) for e in embedding_map.values() if e), None)
-                if edge_dims and current_context_id is not None:
-                    # Resolve in an ISOLATED session: a transient DB error here
-                    # must not abort the recall's own transaction (which still
-                    # has the neural graph writes below to commit). The lookup
-                    # is READ-ONLY (get_by_context, never create_or_get) so the
-                    # recall hot path never writes a config row. Missing config
-                    # or any failure leaves edge_threshold=None → the gate falls
-                    # back to the absolute config value in the gating calls.
-                    from db.base import get_db
-                    from neural.calibration import resolve_edge_threshold
-                    from repositories.config_repository import (
-                        ContextSearchConfigRepository,
-                    )
-
-                    try:
-                        async for edge_db in get_db():
-                            ctx_search_cfg = await ContextSearchConfigRepository(
-                                edge_db
-                            ).get_by_context(current_context_id)
-                            if ctx_search_cfg is not None:
-                                edge_threshold = await resolve_edge_threshold(
-                                    db=edge_db,
-                                    config=config,
-                                    model_name=ctx_search_cfg.embedding_model,
-                                    dimensions=edge_dims,
-                                )
-                            break
-                    except Exception:  # noqa: BLE001 — best-effort; never break recall
-                        logger.debug("edge_threshold_resolve_failed", exc_info=True)
-                        edge_threshold = None
-
-                # 2D edge gate (#983): when enabled, lower the recording gate
-                # to the floor so band pairs accumulate same-event evidence,
-                # and hand those counts to the Hebbian gate below. The floor
-                # is clamped to the effective threshold so it can only widen
-                # the band downward, never tighten the 1-D gate.
-                edge_floor: float | None = None
-                if config.edge_gate_repetition_enabled:
-                    effective_threshold = (
-                        edge_threshold
-                        if edge_threshold is not None
-                        else config.min_similarity_for_edge
-                    )
-                    edge_floor = min(config.min_similarity_for_edge_floor, effective_threshold)
-
-                # Distinct-query evidence dedup (#983): the same query
-                # replayed N times re-produces its top-k — one ranking
-                # accident is one observation, however often it repeats.
-                query_event_key = hashlib.sha256(request.query.encode("utf-8")).hexdigest()[:16]
-
-                updated_records = co_activation_tracker.record_activation(
-                    user_id,
-                    activated_nodes,
-                    embeddings=embedding_map,
-                    similarity_threshold=edge_threshold,
-                    floor_threshold=edge_floor,
-                    event_key=query_event_key,
-                )
-                co_activation_counts = (
-                    {(r.node_id_1, r.node_id_2): r.same_event_count for r in updated_records}
-                    if edge_floor is not None
-                    else None
-                )
-                # NOTE: save_to_redis is deferred until AFTER apply_updates so
-                # the persisted records also capture the cliff pending_weight
-                # the Hebbian pass writes (#983).
-
-                # Add nodes to graph
-                nodes_added = 0
-                for node_id, node in nodes_dict.items():
-                    if not await graph_service.has_node(node_id):
-                        await graph_service.add_node(
-                            node_id=node_id,
-                            node_type="memory",
-                            data={
-                                "user_id": user_id,
-                                "kind": node.kind,
-                                "text": node.text,
-                                "created_at": node.created_at,
-                                "importance": node.importance,
-                                "confidence": node.confidence,
-                                "long_term": node.long_term,
-                            },
-                        )
-                        nodes_added += 1
-
-                # Hebbian updates (same calibrated gate as co-activation above;
-                # band pairs may be admitted by repetition evidence, #983)
-                await hebbian_learner.queue_update(
-                    user_id,
-                    activated_nodes,
-                    nodes_dict,
-                    similarity_threshold=edge_threshold,
-                    floor_threshold=edge_floor,
-                    co_activation_counts=co_activation_counts,
-                )
-                edges_updated = await hebbian_learner.apply_updates(user_id)
-
-                # #983: persist co-activation records now — this captures both
-                # the same-event evidence (record_activation) and the cliff
-                # pending_weight (apply_updates) in a single round-trip.
-                await co_activation_tracker.save_to_redis(user_id)
-
-                logger.info(
-                    "graph_updated",
-                    user_id=user_id,
-                    nodes_added=nodes_added,
-                    edges_updated=edges_updated,
-                )
-            except Exception as exc:
-                logger.warning("hebbian_update_failed", error=str(exc))
+            await self._recall_run_hebbian_learning(
+                request,
+                search_results,
+                memories,
+                user_id=user_id,
+                current_context_id=current_context_id,
+                effective_workspace_id=effective_workspace_id,
+            )
 
         await self.db.commit()
 
-        # Issue #216: Generate explore hints (best-effort, opt-in)
-        explore_hints = [] if request.include_explore_hints else None
-        if request.include_explore_hints and responses:
-            try:
-                explore_hints = await self._generate_explore_hints(
-                    responses,
-                    user_id,
-                    current_context_id,
-                    effective_workspace_id,
-                    neural_enabled=neural_enabled,
-                )
-            except Exception as exc:
-                logger.warning("explore_hints_generation_failed", error=str(exc))
-
-        # Issue #104: Aggregate related tags from results
-        related_tags = self._aggregate_related_tags(responses, limit=10)
-
-        logger.info("recall_completed", user_id=user_id, results=len(responses))
-
-        # Issue #1047/#1052: relevance confidence from the full candidate pool's
-        # score distribution (search_results, which holds up to candidates_k >> k
-        # when neural is on). ``candidate_scores`` are the normalized hybrid scores
-        # (ranking order); ``semantic_scores`` are the RAW per-memory cosines that
-        # carry absolute match strength for absence detection (#1052). See
-        # _compute_recall_confidence.
-        candidate_scores = [
-            r.get("hybrid_score", r["score"])
-            for r in search_results
-            if r.get("hybrid_score", r.get("score")) is not None
-        ]
-        semantic_scores = [
-            r["semantic_score_raw"]
-            for r in search_results
-            if r.get("semantic_score_raw") is not None
-        ]
-        # #1278/#1281 item 7: audit the recall (no-op unless verified agent
-        # identity). result_count + a keyed hash of the query; raw query never
-        # stored. effective_workspace_id is the #708-aware search workspace.
-        # #1299: enforce-mode row filtering is not a request deny — the count
-        # rides this success row so the subtraction stays observable without
-        # corrupting the deny metrics.
-        from services.agent_binding_service import ROW_FILTER_KIND
-        from services.memory_access_event_writer import emit_memory_access_event
-
-        await emit_memory_access_event(
-            operation="recall",
-            outcome="success",
-            workspace_id=effective_workspace_id,
+        return await self._recall_finalize(
+            request,
+            search_results,
+            responses,
             user_id=user_id,
-            context_id=current_context_id,
-            result_count=len(responses),
-            query=request.query,
-            extra_metadata=(
-                {
-                    "filter_kind": ROW_FILTER_KIND,
-                    "binding_row_filtered_count": binding_row_filtered,
-                }
-                if binding_row_filtered
-                else None
-            ),
-        )
-
-        return RecallResponse(
-            results=responses,
-            related_tags=related_tags,
-            explore_hints=explore_hints,
-            confidence=self._compute_recall_confidence(
-                candidate_scores, semantic_scores=semantic_scores or None
-            ),
+            current_context_id=current_context_id,
+            effective_workspace_id=effective_workspace_id,
+            neural_enabled=neural_enabled,
+            binding_row_filtered=binding_row_filtered,
             selection_evidence=selection_evidence,
         )
 
