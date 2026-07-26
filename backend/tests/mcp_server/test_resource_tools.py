@@ -922,3 +922,49 @@ class TestSetupResourceHappyPath:
             )
         data = _json_of(result)
         assert data["error"] == "resource_id_conflict"
+
+
+class TestDatabaseSessionUnavailable:
+    """#1440: every handler must return an error envelope when get_db() yields nothing.
+
+    Each handler declares ``-> list[TextContent]`` and drives its work inside
+    ``async for db in get_db():``. If that generator yields nothing, control
+    falls off the end and the function returns ``None`` — which then propagates
+    into the MCP transport where a list is expected, surfacing far from the
+    cause. Five of the six handlers in this module close with the
+    ``internal_error`` fall-through; ``handle_setup_resource`` was missed.
+    """
+
+    @pytest.mark.asyncio
+    async def test_setup_resource_returns_envelope_not_none(self):
+        async def empty_get_db():
+            return
+            yield  # pragma: no cover - makes this an async generator
+
+        with patch("db.base.get_db", new=empty_get_db):
+            result = await handle_setup_resource(
+                {"name": "ctx-1440", "resource_id": "res1440"}, "user", uuid4()
+            )
+
+        assert result is not None, "handler returned None instead of an error envelope"
+        data = _json_of(result)
+        assert data["status"] == "error"
+        assert data["error"] == "internal_error"
+
+    @pytest.mark.asyncio
+    async def test_ingest_events_already_has_the_guard(self):
+        """Pins the sibling that was already correct, so the pair cannot drift."""
+
+        async def empty_get_db():
+            return
+            yield  # pragma: no cover - makes this an async generator
+
+        with patch("db.base.get_db", new=empty_get_db):
+            result = await handle_ingest_events(
+                {"resource_id": "res1440", "events": [{"op": "upsert", "doc_id": "d1"}]},
+                "user",
+                uuid4(),
+            )
+
+        assert result is not None
+        assert _json_of(result)["error"] == "internal_error"

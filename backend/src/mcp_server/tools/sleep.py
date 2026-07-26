@@ -3,7 +3,6 @@
 Issue #164: get_sleep_history, get_sleep_report, rollback_sleep_run.
 """
 
-import logging
 import time
 from typing import Any
 from uuid import UUID
@@ -20,8 +19,16 @@ from mcp_server.tools._helpers import (
     _resolve_context_id,
     _success_response,
 )
+from utils.logger import get_logger
 
-logger = logging.getLogger(__name__)
+# #1440: bind through ``utils.logger.get_logger`` (structlog) like the rest of
+# the project. This module previously used stdlib ``logging.getLogger``, whose
+# ``Logger._log()`` rejects unknown kwargs — so the structlog-style
+# ``logger.warning("event", key=value)`` call in the shadow-merge rollback path
+# raised TypeError and was swallowed into ``rollback_summary["errors"]``,
+# turning a benign edge mismatch into a reported ``partial_rollback``. Identical
+# bug class to the one fixed in ``api/routes/auth.py`` (PR #522).
+logger = get_logger(__name__)
 
 
 def _report_to_summary(report: Any) -> dict[str, Any]:

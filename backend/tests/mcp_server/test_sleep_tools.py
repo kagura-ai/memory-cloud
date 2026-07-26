@@ -494,3 +494,97 @@ class TestRollbackSleepRun:
         data = json.loads(result[0].text)
         assert data["status"] == "error"
         assert data["error"] == "no_actions"
+
+
+class TestShadowMergeRollbackEdgeMismatch:
+    """#1440: the edge-mismatch branch must log a warning, not fail the rollback.
+
+    ``mcp_server.tools.sleep`` bound the STDLIB logger (``logging.getLogger``)
+    while calling it with structlog-style kwargs, so this branch raised
+    ``TypeError: Logger._log() got an unexpected keyword argument 'src_id'``.
+    The per-action ``except`` swallowed it into ``rollback_summary["errors"]``,
+    so an edge mismatch — a benign "log it and carry on" condition — was
+    reported to the operator as ``partial_rollback``, the report was marked
+    ``failed``, and the recorded reason was Python internals rather than the
+    actual mismatch. Same bug class the comment at ``api/routes/auth.py:50``
+    documents being fixed in PR #522.
+    """
+
+    @pytest.fixture
+    def user_id(self):
+        return "user-1440"
+
+    @pytest.fixture
+    def workspace_id(self):
+        return uuid4()
+
+    @pytest.mark.asyncio
+    async def test_edge_mismatch_does_not_raise(self, user_id, workspace_id):
+        report_id = uuid4()
+        report = MagicMock()
+        report.id = report_id
+        report.user_id = user_id
+        report.status = "completed"
+        report.context_id = uuid4()
+
+        # One shadow-mode merge action whose edge revert comes back False.
+        action = MagicMock()
+        action.action_type = "merge"
+        action.memory_id = uuid4()
+        action.target_id = uuid4()
+        action.details = {"mode": "shadow", "prior_edge": None}
+
+        mock_report_result = MagicMock()
+        mock_report_result.scalar_one_or_none.return_value = report
+        mock_actions_result = MagicMock()
+        mock_actions_result.scalars.return_value.all.return_value = [action]
+
+        mock_db = AsyncMock()
+        results = [mock_report_result, mock_actions_result]
+
+        async def _execute(*_args, **_kwargs):
+            if results:
+                return results.pop(0)
+            generic = MagicMock()
+            generic.rowcount = 1
+            generic.scalars.return_value.all.return_value = []
+            generic.scalar_one_or_none.return_value = None
+            return generic
+
+        mock_db.execute.side_effect = _execute
+        mock_db.rollback = AsyncMock()
+
+        async def mock_get_db():
+            yield mock_db
+
+        with (
+            patch("db.base.get_db", new=mock_get_db),
+            patch(
+                "mcp_server.tools.sleep._check_viewer_permission",
+                new_callable=AsyncMock,
+                return_value=None,
+            ),
+            patch(
+                "services.sleep.undo.revert_shadow_merge_edge",
+                new_callable=AsyncMock,
+                return_value=False,  # edge mismatch -> the warning branch
+            ),
+        ):
+            result = await handle_rollback_sleep_run(
+                {"report_id": str(report_id)}, user_id, workspace_id
+            )
+
+        data = json.loads(result[0].text)
+        recorded_errors = data.get("rollback_summary", {}).get("errors", [])
+
+        # The warning call itself must not become a rollback error.
+        assert not any("Logger._log()" in e for e in recorded_errors), (
+            f"the logger.warning(...) call raised instead of logging: {recorded_errors}"
+        )
+        # An edge mismatch is a degraded-but-successful rollback, not a failure.
+        assert data.get("error") != "partial_rollback", (
+            f"edge mismatch was misreported as a failed rollback: {data}"
+        )
+        assert recorded_errors == [], f"unexpected rollback errors: {recorded_errors}"
+        # The mismatch is still not counted as a reversal.
+        assert data["rollback_summary"]["merges_reversed"] == 0
