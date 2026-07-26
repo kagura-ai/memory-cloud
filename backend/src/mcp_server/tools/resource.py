@@ -966,6 +966,12 @@ async def handle_setup_resource(
             )
             return _error_response("setup_resource_error", error_str)
 
+    # #1440: an exhausted ``get_db()`` generator must still produce the declared
+    # ``list[TextContent]``. Without this the function fell off the end and
+    # returned None into the MCP transport. Mirrors the fall-through every other
+    # handler in this module already has.
+    return _error_response("internal_error", "Database session unavailable")
+
 
 async def handle_setup_connector(
     args: dict[str, Any], user_id: str, workspace_id: UUID | None
