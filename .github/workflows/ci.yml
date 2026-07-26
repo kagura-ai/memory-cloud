@@ -55,14 +55,16 @@ jobs:
           cache: pip
           cache-dependency-path: backend/pyproject.toml
 
-      # The optional extras are NOT decoration here. google-genai and ollama
-      # live in `llm_providers`; with a lean `.[dev]` install pyright reports
-      # them as unresolved imports and stops analysing those modules — which is
-      # exactly how #1443 (Gemini list_models always returning its hardcoded
-      # fallback) stayed hidden. Install what production imports so the gate
-      # sees what production runs.
+      # EVERY optional extra, not just dev. This is load-bearing, not
+      # thoroughness for its own sake: pyright silently stops analysing a module
+      # whose imports it cannot resolve, so a missing extra turns real findings
+      # into a single "unresolved import" line. google-genai/ollama
+      # (`llm_providers`) hid #1443 — Gemini list_models always returning its
+      # hardcoded fallback — behind exactly that. lancedb/pyarrow (`lite`) were
+      # missed on the first attempt at this job and CI caught it.
+      # If a new extra is added to pyproject.toml, add it here too.
       - name: Install dependencies
-        run: cd backend && pip install -e ".[dev,llm_providers,neural]"
+        run: cd backend && pip install -e ".[dev,llm_providers,neural,lite]"
 
       - name: Type check
         run: cd backend && pyright src/
