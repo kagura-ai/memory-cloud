@@ -4,11 +4,12 @@ Issue #164: get_sleep_history, get_sleep_report, rollback_sleep_run.
 """
 
 import time
-from typing import Any
+from typing import Any, cast
 from uuid import UUID
 
 from mcp.types import TextContent
 from sqlalchemy import select
+from sqlalchemy.engine import CursorResult
 
 from mcp_server.tools._helpers import (
     _check_viewer_permission,
@@ -425,7 +426,10 @@ async def handle_rollback_sleep_run(
                                 # (the per-merge undo path returns 410 for the
                                 # same state; run-level rollback must not
                                 # report a restore that never happened).
-                                if restore_result.rowcount == 0 or loser is None:
+                                # Result[Any] at type level, CursorResult at
+                                # runtime — .rowcount lives on the latter (#1442).
+                                restore_rows = cast(CursorResult[Any], restore_result).rowcount
+                                if restore_rows == 0 or loser is None:
                                     rollback_summary["errors"].append(
                                         f"merge loser {action.target_id} not restorable — "
                                         "purged by the retention policy "

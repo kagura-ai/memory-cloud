@@ -30,7 +30,14 @@ from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError, SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from auth import oauth_endpoints
+# #1442: spelled as an explicit submodule import rather than
+# ``from auth import oauth_endpoints``. This file is itself named ``auth.py``,
+# so within ``api/routes/`` the bare form is ambiguous between the top-level
+# ``auth`` package and this sibling module — pyright resolves it to the sibling
+# and reports every ``oauth_endpoints.*`` call as an unknown attribute. Runtime
+# always resolved it correctly (absolute import); this makes the intent explicit
+# for readers and analyzers alike.
+import auth.oauth_endpoints as oauth_endpoints
 from auth.dependencies import SessionUser
 from auth.oauth2 import OAuth2Manager
 from auth.password import verify_password

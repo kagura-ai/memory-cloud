@@ -242,20 +242,56 @@ class TestGeminiProvider:
 
     @pytest.mark.asyncio
     async def test_list_models_returns_models(self):
+        """#1443: the SDK returns an AsyncPager, which IS the iterable of models.
+
+        This test previously stubbed the result as ``MagicMock(models=[...])``
+        — an API shape ``google.genai.pagers.AsyncPager`` does not have (it
+        exposes ``page`` / ``next_page`` and ``__aiter__``, never ``.models``).
+        Asserting against that fabricated shape let the provider's real
+        ``response.models`` AttributeError go unnoticed: it was swallowed by the
+        surrounding ``except Exception`` and every call silently returned the
+        hardcoded fallback list. The stub below matches the real contract.
+        """
         provider = GeminiProvider(api_key="gemini-test")
         mock_model = MagicMock()
         mock_model.name = "models/gemini-3.1-pro"
         mock_model.display_name = "Gemini 3.1 Pro"
-        mock_list = MagicMock()
-        mock_list.models = [mock_model]
+
+        class _AsyncPagerStub:
+            """Mirrors ``google.genai.pagers.AsyncPager``'s iteration protocol.
+
+            The real pager implements ``__aiter__`` as a plain ``def`` that
+            resets the cursor and returns ``self``, with the awaiting done in
+            ``__anext__`` — and exposes no ``.models``. Modelled that way here
+            rather than as an async generator: the whole point of this stub is
+            to pin the SDK's actual contract, so it should not paraphrase it.
+            """
+
+            def __init__(self, items):
+                self._items = list(items)
+                self._idx = 0
+
+            def __aiter__(self):
+                self._idx = 0
+                return self
+
+            async def __anext__(self):
+                if self._idx >= len(self._items):
+                    raise StopAsyncIteration
+                item = self._items[self._idx]
+                self._idx += 1
+                return item
 
         mock_client = MagicMock()
-        mock_client.aio.models.list = AsyncMock(return_value=mock_list)
+        mock_client.aio.models.list = AsyncMock(return_value=_AsyncPagerStub([mock_model]))
         provider._client = mock_client
         models = await provider.list_models()
 
         # IDs are normalized by stripping the "models/" prefix.
-        assert models == [{"id": "gemini-3.1-pro", "name": "Gemini 3.1 Pro"}]
+        assert models == [{"id": "gemini-3.1-pro", "name": "Gemini 3.1 Pro"}], (
+            "expected the live model list; the hardcoded fallback means the "
+            "pager was not iterated correctly"
+        )
 
 
 # ============================================================================

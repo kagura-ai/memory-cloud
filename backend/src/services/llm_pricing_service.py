@@ -63,9 +63,9 @@ _PRICING_CACHE_TTL_SECONDS: Final = 3600
 _PRICING_CACHE_MAXSIZE: Final = 1024
 # key: (provider, model, unit_type, started_at.date(), context_tokens)
 # value: (price_per_unit, unit_denominator) | None
-_pricing_cache: TTLCache[tuple[str, str, str, date, int], tuple[float, float] | None] = TTLCache(
-    maxsize=_PRICING_CACHE_MAXSIZE, ttl=_PRICING_CACHE_TTL_SECONDS
-)
+_pricing_cache: TTLCache[tuple[str, str, str, date, int], tuple[float, float] | None] = TTLCache[
+    tuple[str, str, str, date, int], tuple[float, float] | None
+](maxsize=_PRICING_CACHE_MAXSIZE, ttl=_PRICING_CACHE_TTL_SECONDS)
 
 
 def clear_pricing_cache() -> None:

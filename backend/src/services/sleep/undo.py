@@ -13,11 +13,12 @@ and the error says so explicitly.
 
 from __future__ import annotations
 
-from typing import Any
+from typing import Any, cast
 from uuid import UUID
 
 from sqlalchemy import select
 from sqlalchemy import update as sa_update
+from sqlalchemy.engine import CursorResult
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from models.memory import Memory
@@ -87,7 +88,9 @@ async def revert_shadow_merge_edge(
                 NeuralMemoryEdge.edge_type == EDGE_TYPE_SUPERSEDES,
             )
         )
-    return (result.rowcount or 0) > 0
+    # DML through AsyncSession.execute() is typed Result[Any] but is a
+    # CursorResult at runtime, which is what carries .rowcount (#1442).
+    return (cast(CursorResult[Any], result).rowcount or 0) > 0
 
 
 class UndoMergeError(Exception):

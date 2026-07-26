@@ -119,13 +119,18 @@ class GeminiProvider(LLMProvider):
     async def list_models(self) -> list[dict]:
         """List available Gemini models."""
         try:
+            # #1443: ``aio.models.list()`` returns an ``AsyncPager``, which IS
+            # the async-iterable of models — it has no ``.models`` attribute.
+            # Reading ``response.models`` raised AttributeError, was swallowed
+            # by the ``except`` below, and made every call return the hardcoded
+            # fallback list instead of the caller's actual models.
             response = await self._ensure_client().aio.models.list()
             return [
                 {
                     "id": _strip_models_prefix(m.name),
                     "name": m.display_name or _strip_models_prefix(m.name),
                 }
-                for m in response.models
+                async for m in response
                 if getattr(m, "name", None)
             ]
         except Exception as e:

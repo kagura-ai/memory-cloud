@@ -152,12 +152,16 @@ def _split_oversize_cluster(
         edges: an early cap-blocked pair may still end up same-component via
         other edges, and same-component skips are never counted).
     """
+
+    def _ordered(pair: tuple[UUID, UUID, float]) -> tuple[UUID, UUID, float]:
+        # Explicit 3-tuple instead of ``(*sorted(...), score)``: the splat form
+        # widens every slot to ``UUID | float``, which makes ``-p[2]`` untypable
+        # even though the score is always a float (#1442).
+        a, b = sorted((pair[0], pair[1]), key=str)
+        return a, b, pair[2]
+
     internal = sorted(
-        (
-            (*sorted((p[0], p[1]), key=str), p[2])
-            for p in pairs
-            if p[0] in cluster and p[1] in cluster
-        ),
+        (_ordered(p) for p in pairs if p[0] in cluster and p[1] in cluster),
         key=lambda p: (-p[2], str(p[0]), str(p[1])),
     )
 

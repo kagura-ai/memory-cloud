@@ -42,6 +42,7 @@ from sqlalchemy.engine import CursorResult
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from auth.workspace_roles import WorkspaceRole
 from config.settings import get_settings
 from db.qdrant import delete_user_points
 from db.redis import clear_co_activations, clear_user_rate_limits, get_redis_client
@@ -943,7 +944,7 @@ class AccountErasureService:
             if locked_ws.owner_user_id != user_id:
                 continue
             locked_ws.owner_user_id = new_owner.user_id
-            new_owner.role = "owner"
+            new_owner.role = WorkspaceRole.OWNER
             # Bump the ownership epoch on every owner change (#1102) so the #1100
             # consumer invalidates external credentials (billing-handoff tokens /
             # sessions) bound to the erased previous owner.

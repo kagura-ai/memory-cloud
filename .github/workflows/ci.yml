@@ -31,6 +31,44 @@ jobs:
       - name: Models no-Column guard
         run: make lint-models-no-column
 
+  # Static type gate for the backend (#1442). The frontend has run
+  # `tsc --noEmit` since day one; pyright was configured in
+  # backend/pyproject.toml with a tier-by-tier plan (#599, #612) and a
+  # `make type-check` target, but nothing enforced it — so it drifted red.
+  # Two of the findings it had accumulated were real functional bugs that
+  # ruff and the 6k-test suite both missed (#1440), plus a third (#1443).
+  #
+  # This is a HARD gate on purpose. `continue-on-error` would have surfaced
+  # those bugs exactly as well as having no check at all.
+  #
+  # Kept as its own job rather than folded into `lint`: pyright needs the
+  # project's real dependency tree installed, while `lint` only needs ruff
+  # and stays fast.
+  type-check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+          cache-dependency-path: backend/pyproject.toml
+
+      # EVERY optional extra, not just dev. This is load-bearing, not
+      # thoroughness for its own sake: pyright silently stops analysing a module
+      # whose imports it cannot resolve, so a missing extra turns real findings
+      # into a single "unresolved import" line. google-genai/ollama
+      # (`llm_providers`) hid #1443 — Gemini list_models always returning its
+      # hardcoded fallback — behind exactly that. lancedb/pyarrow (`lite`) were
+      # missed on the first attempt at this job and CI caught it.
+      # If a new extra is added to pyproject.toml, add it here too.
+      - name: Install dependencies
+        run: cd backend && pip install -e ".[dev,llm_providers,neural,lite]"
+
+      - name: Type check
+        run: cd backend && pyright src/
+
   # Shell-script quality gate for the blue-green deploy script. shellcheck
   # catches the `set -e` / quoting bug class behind #986 (a bare
   # `var=$(curl ...)` dying silently); the bats suite pins the three

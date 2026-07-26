@@ -11,7 +11,7 @@ Each context maps to a separate Qdrant collection for memory isolation.
 from __future__ import annotations
 
 from datetime import datetime
-from typing import Any
+from typing import Any, cast
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
@@ -1507,7 +1507,11 @@ async def update_context_member_role(
             )
 
     # Update role
-    member.role = body.role
+    # body.role is constrained to owner|editor|viewer by the request schema's
+    # regex; the column is Mapped[ContextRole] (a StrEnum). Cast rather than
+    # convert so this stays a pure typing fix with no new runtime validation
+    # — unifying the request schemas onto the enums is a separate change (#1442).
+    member.role = cast(ContextRole, body.role)
     member.updated_at = func.now()
 
     await db.commit()

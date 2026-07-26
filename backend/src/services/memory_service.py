@@ -15,7 +15,7 @@ import os
 import statistics
 from collections.abc import Mapping
 from datetime import datetime
-from typing import Any, NamedTuple
+from typing import Any, NamedTuple, cast
 from uuid import UUID, uuid4
 
 from sqlalchemy import and_, or_, select
@@ -1991,7 +1991,13 @@ class MemoryService:
                 )
                 .order_by(superseder.created_at.asc(), superseder.id.asc())
             )
-            shadow_map: dict[UUID, UUID] = dict(rows.all())
+            # dict() over a Row sequence infers dict[bytes, bytes]; the rows
+            # are (dst_id, src_id) UUID pairs. Cast rather than switching to
+            # .tuples() so the executed call is unchanged (#1442).
+            shadow_map: dict[UUID, UUID] = cast(
+                dict[UUID, UUID],
+                dict(rows.all()),  # type: ignore[arg-type]
+            )
 
             c_rows = await self.db.execute(
                 select(NeuralMemoryEdge.src_id, NeuralMemoryEdge.dst_id).where(
