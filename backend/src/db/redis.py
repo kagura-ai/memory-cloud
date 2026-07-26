@@ -3,6 +3,8 @@
 Singleton pattern for connection pooling.
 """
 
+from typing import cast
+
 import redis.asyncio as aioredis
 
 from config.database import REDIS_URL
@@ -66,7 +68,10 @@ async def get_cache(key: str) -> str | None:
     """
     client = get_redis_client()
     try:
-        return await client.get(key)
+        # get_redis_client() builds the client with decode_responses=True, so
+        # values really are str; the redis-py stub is not parameterized on that
+        # flag and widens to bytes | str (#1442).
+        return cast("str | None", await client.get(key))
     except Exception as e:
         logger.error("redis_get_failed", key=key, error=str(e))
         return None

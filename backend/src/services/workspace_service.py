@@ -5,7 +5,7 @@ Issue #115 Phase B-2: Workspace-level Multi-tenancy
 Manages workspaces, memberships, and workspace-level operations.
 """
 
-from typing import Any
+from typing import Any, cast
 from uuid import UUID
 
 from sqlalchemy import and_, func, or_, select
@@ -714,7 +714,10 @@ class WorkspaceService:
                 )
 
         old_role = member.role
-        member.role = new_role
+        # new_role is validated by the caller's request schema; column is
+        # Mapped[WorkspaceRole] (StrEnum). See the note in api/routes/contexts.py
+        # — cast only, no behaviour change (#1442).
+        member.role = cast("WorkspaceRole", new_role)
         member.updated_at = func.now()
 
         # Issue #234: Clear allowed_context_ids on role change
