@@ -907,14 +907,14 @@ class SecretStoreService:
             .group_by(SecretVersion.secret_id)
         )
         # (secret_id, max_version) rows — see the note in memory_service (#1442).
-        ver_map = cast("dict[UUID, int]", dict(ver_rows.all()))  # type: ignore[arg-type]
+        ver_map = cast(dict[UUID, int], dict(ver_rows.all()))  # type: ignore[arg-type]
 
         grant_rows = await self.db.execute(
             select(SecretGrant.secret_id, func.count())
             .where(SecretGrant.secret_id.in_(ids), SecretGrant.revoked_at.is_(None))
             .group_by(SecretGrant.secret_id)
         )
-        grant_map = cast("dict[UUID, int]", dict(grant_rows.all()))  # type: ignore[arg-type]
+        grant_map = cast(dict[UUID, int], dict(grant_rows.all()))  # type: ignore[arg-type]
 
         return [
             {

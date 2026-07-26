@@ -258,14 +258,29 @@ class TestGeminiProvider:
         mock_model.display_name = "Gemini 3.1 Pro"
 
         class _AsyncPagerStub:
-            """Async-iterable, with no ``.models`` — like the real AsyncPager."""
+            """Mirrors ``google.genai.pagers.AsyncPager``'s iteration protocol.
+
+            The real pager implements ``__aiter__`` as a plain ``def`` that
+            resets the cursor and returns ``self``, with the awaiting done in
+            ``__anext__`` — and exposes no ``.models``. Modelled that way here
+            rather than as an async generator: the whole point of this stub is
+            to pin the SDK's actual contract, so it should not paraphrase it.
+            """
 
             def __init__(self, items):
-                self._items = items
+                self._items = list(items)
+                self._idx = 0
 
-            async def __aiter__(self):
-                for item in self._items:
-                    yield item
+            def __aiter__(self):
+                self._idx = 0
+                return self
+
+            async def __anext__(self):
+                if self._idx >= len(self._items):
+                    raise StopAsyncIteration
+                item = self._items[self._idx]
+                self._idx += 1
+                return item
 
         mock_client = MagicMock()
         mock_client.aio.models.list = AsyncMock(return_value=_AsyncPagerStub([mock_model]))

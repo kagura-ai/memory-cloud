@@ -1511,7 +1511,7 @@ async def update_context_member_role(
     # regex; the column is Mapped[ContextRole] (a StrEnum). Cast rather than
     # convert so this stays a pure typing fix with no new runtime validation
     # — unifying the request schemas onto the enums is a separate change (#1442).
-    member.role = cast("ContextRole", body.role)
+    member.role = cast(ContextRole, body.role)
     member.updated_at = func.now()
 
     await db.commit()

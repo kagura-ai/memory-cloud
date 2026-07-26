@@ -1995,7 +1995,7 @@ class MemoryService:
             # are (dst_id, src_id) UUID pairs. Cast rather than switching to
             # .tuples() so the executed call is unchanged (#1442).
             shadow_map: dict[UUID, UUID] = cast(
-                "dict[UUID, UUID]",
+                dict[UUID, UUID],
                 dict(rows.all()),  # type: ignore[arg-type]
             )
 

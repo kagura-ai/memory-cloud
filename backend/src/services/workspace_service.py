@@ -717,7 +717,7 @@ class WorkspaceService:
         # new_role is validated by the caller's request schema; column is
         # Mapped[WorkspaceRole] (StrEnum). See the note in api/routes/contexts.py
         # — cast only, no behaviour change (#1442).
-        member.role = cast("WorkspaceRole", new_role)
+        member.role = cast(WorkspaceRole, new_role)
         member.updated_at = func.now()
 
         # Issue #234: Clear allowed_context_ids on role change

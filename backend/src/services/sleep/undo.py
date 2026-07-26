@@ -90,7 +90,7 @@ async def revert_shadow_merge_edge(
         )
     # DML through AsyncSession.execute() is typed Result[Any] but is a
     # CursorResult at runtime, which is what carries .rowcount (#1442).
-    return (cast("CursorResult[Any]", result).rowcount or 0) > 0
+    return (cast(CursorResult[Any], result).rowcount or 0) > 0
 
 
 class UndoMergeError(Exception):

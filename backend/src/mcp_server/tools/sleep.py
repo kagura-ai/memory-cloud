@@ -428,7 +428,7 @@ async def handle_rollback_sleep_run(
                                 # report a restore that never happened).
                                 # Result[Any] at type level, CursorResult at
                                 # runtime — .rowcount lives on the latter (#1442).
-                                restore_rows = cast("CursorResult[Any]", restore_result).rowcount
+                                restore_rows = cast(CursorResult[Any], restore_result).rowcount
                                 if restore_rows == 0 or loser is None:
                                     rollback_summary["errors"].append(
                                         f"merge loser {action.target_id} not restorable — "
