@@ -338,6 +338,10 @@ _UNDO_ERROR_STATUS = {
     "action_not_found": 404,
     "memory_purged": 410,
     "already_restored": 409,
+    # #1450: distinct from ``already_restored`` — same 409, but the merge is
+    # still in effect rather than already undone, so the error_code is what
+    # tells an operator whether anything needs doing.
+    "edge_retyped": 409,
     "not_a_merge": 400,
     "not_merge_deleted": 409,
 }
