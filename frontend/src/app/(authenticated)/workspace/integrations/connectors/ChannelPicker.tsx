@@ -225,13 +225,22 @@ export function ChannelPicker({
                       {c.name}
                     </span>
                     {!c.is_member && (
-                      <Badge
-                        variant="outline"
-                        className="ml-auto shrink-0 text-muted-foreground"
-                        title={t("channelsBotNotInChannelHint")}
-                      >
-                        {t("channelsBotNotInChannel")}
-                      </Badge>
+                      <>
+                        <Badge
+                          variant="outline"
+                          className="ml-auto shrink-0 text-muted-foreground"
+                        >
+                          {t("channelsBotNotInChannel")}
+                        </Badge>
+                        {/* The badge alone says "not joined"; the why belongs
+                            in the row's accessible name too. `title` is not
+                            reliably surfaced to keyboard or screen-reader
+                            users, so the explanation is real text instead
+                            (Copilot review). */}
+                        <span className="sr-only">
+                          {t("channelsBotNotInChannelHint")}
+                        </span>
+                      </>
                     )}
                   </button>
                 </li>

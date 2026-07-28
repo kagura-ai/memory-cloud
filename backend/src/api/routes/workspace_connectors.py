@@ -262,8 +262,10 @@ class AvailableWorkerApp(BaseModel):
 class ConnectorChannel(BaseModel):
     """One selectable channel for the settings picker (#1391).
 
-    Minimized by design: id + name (plus display flags). No member counts,
-    topics, or other metadata reach the browser.
+    Minimized by design: identity (id, name) plus the two flags the picker has
+    to render — ``is_private`` and, since #1451, ``is_member``. Everything else
+    Slack returns (member counts, topics, purpose, creator, timestamps) is
+    dropped and never reaches the browser.
     """
 
     id: str
