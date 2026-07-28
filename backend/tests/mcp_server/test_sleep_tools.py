@@ -16,6 +16,7 @@ from mcp_server.tools.sleep import (
     handle_rollback_sleep_run,
 )
 from services.sleep.prompts import EDGE_DISCOVERY_PROMPT_REVISION
+from services.sleep.undo import ShadowEdgeRevert
 
 
 class TestGetSleepHistory:
@@ -518,22 +519,9 @@ class TestShadowMergeRollbackEdgeMismatch:
     def workspace_id(self):
         return uuid4()
 
-    @pytest.mark.asyncio
-    async def test_edge_mismatch_does_not_raise(self, user_id, workspace_id):
-        report_id = uuid4()
-        report = MagicMock()
-        report.id = report_id
-        report.user_id = user_id
-        report.status = "completed"
-        report.context_id = uuid4()
-
-        # One shadow-mode merge action whose edge revert comes back False.
-        action = MagicMock()
-        action.action_type = "merge"
-        action.memory_id = uuid4()
-        action.target_id = uuid4()
-        action.details = {"mode": "shadow", "prior_edge": None}
-
+    @staticmethod
+    def _rollback_db_for_shadow_merge(report, action):
+        """AsyncSession double that yields one shadow merge action (#1440)."""
         mock_report_result = MagicMock()
         mock_report_result.scalar_one_or_none.return_value = report
         mock_actions_result = MagicMock()
@@ -553,6 +541,26 @@ class TestShadowMergeRollbackEdgeMismatch:
 
         mock_db.execute.side_effect = _execute
         mock_db.rollback = AsyncMock()
+        return mock_db
+
+    @pytest.mark.asyncio
+    async def test_edge_mismatch_does_not_raise(self, user_id, workspace_id):
+        report_id = uuid4()
+        report = MagicMock()
+        report.id = report_id
+        report.user_id = user_id
+        report.status = "completed"
+        report.context_id = uuid4()
+
+        # One shadow-mode merge action whose edge was ALREADY undone — the
+        # benign half of what used to be a single `False` (#1450).
+        action = MagicMock()
+        action.action_type = "merge"
+        action.memory_id = uuid4()
+        action.target_id = uuid4()
+        action.details = {"mode": "shadow", "prior_edge": None}
+
+        mock_db = self._rollback_db_for_shadow_merge(report, action)
 
         async def mock_get_db():
             yield mock_db
@@ -567,7 +575,7 @@ class TestShadowMergeRollbackEdgeMismatch:
             patch(
                 "services.sleep.undo.revert_shadow_merge_edge",
                 new_callable=AsyncMock,
-                return_value=False,  # edge mismatch -> the warning branch
+                return_value=ShadowEdgeRevert.ALREADY_UNDONE,
             ),
         ):
             result = await handle_rollback_sleep_run(
@@ -588,3 +596,60 @@ class TestShadowMergeRollbackEdgeMismatch:
         assert recorded_errors == [], f"unexpected rollback errors: {recorded_errors}"
         # The mismatch is still not counted as a reversal.
         assert data["rollback_summary"]["merges_reversed"] == 0
+        # …nor as something that could not be reversed (#1450).
+        assert data["rollback_summary"]["merges_unreversible"] == 0
+
+    @pytest.mark.asyncio
+    async def test_retyped_edge_is_reported_not_silently_successful(self, user_id, workspace_id):
+        """#1450: a merge the rollback could NOT reverse must reach the response.
+
+        Before this, the retyped-edge case took the same log-and-continue path
+        as "already undone", so the run answered ``status=success`` /
+        ``errors=[]`` while the action had not been reversed — a zero counter was
+        the only trace, and only for someone who thought to look.
+        """
+        report_id = uuid4()
+        report = MagicMock()
+        report.id = report_id
+        report.user_id = user_id
+        report.status = "completed"
+        report.context_id = uuid4()
+
+        action = MagicMock()
+        action.action_type = "merge"
+        action.memory_id = uuid4()
+        action.target_id = uuid4()
+        action.details = {"mode": "shadow", "prior_edge": None}
+
+        mock_db = self._rollback_db_for_shadow_merge(report, action)
+
+        async def mock_get_db():
+            yield mock_db
+
+        with (
+            patch("db.base.get_db", new=mock_get_db),
+            patch(
+                "mcp_server.tools.sleep._check_viewer_permission",
+                new_callable=AsyncMock,
+                return_value=None,
+            ),
+            patch(
+                "services.sleep.undo.revert_shadow_merge_edge",
+                new_callable=AsyncMock,
+                return_value=ShadowEdgeRevert.BLOCKED_BY_NEWER_STATE,
+            ),
+        ):
+            result = await handle_rollback_sleep_run(
+                {"report_id": str(report_id)}, user_id, workspace_id
+            )
+
+        data = json.loads(result[0].text)
+        summary = data["rollback_summary"]
+
+        assert summary["merges_unreversible"] == 1
+        assert summary["merges_reversed"] == 0
+        # Visible in the response, not only in a log line.
+        assert any("not reversed" in e for e in summary["errors"]), summary["errors"]
+        assert data.get("error") == "partial_rollback", (
+            f"an un-reversed merge was reported as a clean rollback: {data}"
+        )

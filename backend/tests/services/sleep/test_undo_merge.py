@@ -134,15 +134,27 @@ def _shadow_action(prior_edge=None) -> MagicMock:
     return action
 
 
-def _shadow_db(first_row, revert_rowcount: int) -> AsyncMock:
+def _shadow_db(
+    first_row,
+    revert_rowcount: int,
+    current_edge_type: str | None = None,
+) -> AsyncMock:
     """AsyncMock db: 1st execute -> (action, report) join, 2nd -> the edge
-    revert (UPDATE restore or verified DELETE) with the given rowcount."""
+    revert (UPDATE restore or verified DELETE) with the given rowcount.
+
+    #1450: when the revert matches no row, the helper reads the edge back to
+    tell "already undone" from "a later writer got there first", so a third
+    execute is served — ``current_edge_type`` is what that read finds (None =
+    no edge at all).
+    """
     db = AsyncMock()
     join_result = MagicMock()
     join_result.first.return_value = first_row
     revert_result = MagicMock()
     revert_result.rowcount = revert_rowcount
-    db.execute.side_effect = [join_result, revert_result]
+    current_result = MagicMock()
+    current_result.scalar_one_or_none.return_value = current_edge_type
+    db.execute.side_effect = [join_result, revert_result, current_result]
     db.add = MagicMock()
     return db
 
@@ -202,13 +214,94 @@ async def test_shadow_undo_without_snapshot_deletes() -> None:
 
 @pytest.mark.asyncio
 async def test_shadow_undo_gone_edge_is_already_restored() -> None:
-    """Edge already gone (or retyped by a later writer) → stable error,
-    nothing audited."""
+    """Edge already gone → benign no-op, stable error, nothing audited."""
     action = _shadow_action(prior_edge=None)
-    db = _shadow_db((action, _report()), revert_rowcount=0)
+    db = _shadow_db((action, _report()), revert_rowcount=0, current_edge_type=None)
 
     with pytest.raises(UndoMergeError) as exc:
         await undo_merge_action(db, 42, acting_user_id="admin-user")
 
     assert exc.value.code == "already_restored"
     db.add.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_shadow_undo_retyped_edge_is_not_already_restored() -> None:
+    """#1450: a later writer's edge is NOT "already undone".
+
+    Both matched zero rows and so shared one ``already_restored`` code, but the
+    outcomes differ: nothing to do vs. the undo did not happen and someone has
+    to look at the newer edge. Same 409, distinguishable ``error_code``.
+    """
+    action = _shadow_action(prior_edge=None)
+    db = _shadow_db(
+        (action, _report()),
+        revert_rowcount=0,
+        current_edge_type="neural_association",
+    )
+
+    with pytest.raises(UndoMergeError) as exc:
+        await undo_merge_action(db, 42, acting_user_id="admin-user")
+
+    assert exc.value.code == "edge_changed"
+    assert "not reversed" in exc.value.message
+    db.add.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_shadow_undo_snapshot_already_restored_is_benign() -> None:
+    """#1450: with a snapshot, "already undone" means the edge is back at the
+    snapshot's type — that must not read as a later writer's interference."""
+    prior = {"edge_type": "neural_association", "origin": "hebbian"}
+    action = _shadow_action(prior_edge=prior)
+    db = _shadow_db(
+        (action, _report()),
+        revert_rowcount=0,
+        current_edge_type="neural_association",
+    )
+
+    with pytest.raises(UndoMergeError) as exc:
+        await undo_merge_action(db, 42, acting_user_id="admin-user")
+
+    assert exc.value.code == "already_restored"
+
+
+@pytest.mark.asyncio
+async def test_shadow_undo_snapshot_overwritten_is_blocked() -> None:
+    """#1450: with a snapshot, an edge of some OTHER type means the snapshot
+    can no longer be restored from here — blocked, not already-undone."""
+    prior = {"edge_type": "neural_association", "origin": "hebbian"}
+    action = _shadow_action(prior_edge=prior)
+    db = _shadow_db(
+        (action, _report()),
+        revert_rowcount=0,
+        current_edge_type="contradicts",
+    )
+
+    with pytest.raises(UndoMergeError) as exc:
+        await undo_merge_action(db, 42, acting_user_id="admin-user")
+
+    assert exc.value.code == "edge_changed"
+
+
+@pytest.mark.asyncio
+async def test_shadow_undo_snapshot_edge_deleted_is_blocked_without_claiming_shadow() -> None:
+    """#1450 (review): with a snapshot, a DELETED edge is also un-restorable.
+
+    Still blocked — the pre-merge weight/origin/metadata cannot be put back —
+    but the message must not claim a live shadow edge is in the way. Reaching
+    ANY blocked state means the guarded statement found no ``supersedes`` row,
+    so nothing is shadowing the loser; what is lost is the edge state the merge
+    overwrote. The first wording of this error said "the merge is still in
+    effect", which is false in every blocked case.
+    """
+    prior = {"edge_type": "neural_association", "origin": "hebbian"}
+    action = _shadow_action(prior_edge=prior)
+    db = _shadow_db((action, _report()), revert_rowcount=0, current_edge_type=None)
+
+    with pytest.raises(UndoMergeError) as exc:
+        await undo_merge_action(db, 42, acting_user_id="admin-user")
+
+    assert exc.value.code == "edge_changed"
+    assert "changed or removed" in exc.value.message
+    assert "still in effect" not in exc.value.message

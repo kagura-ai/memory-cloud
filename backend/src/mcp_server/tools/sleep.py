@@ -27,8 +27,13 @@ from utils.logger import get_logger
 # ``Logger._log()`` rejects unknown kwargs — so the structlog-style
 # ``logger.warning("event", key=value)`` call in the shadow-merge rollback path
 # raised TypeError and was swallowed into ``rollback_summary["errors"]``,
-# turning a benign edge mismatch into a reported ``partial_rollback``. Identical
+# turning an edge mismatch into a reported ``partial_rollback``. Identical
 # bug class to the one fixed in ``api/routes/auth.py`` (PR #522).
+#
+# #1450 follow-up: that mismatch was never one situation. Only "already undone"
+# is benign; "a later writer changed or removed the edge" means the action was
+# not reversed at all, and #1440's fix made THAT case silent. The helper now
+# returns a tri-state and the two are handled apart, below.
 logger = get_logger(__name__)
 
 
@@ -328,6 +333,11 @@ async def handle_rollback_sleep_run(
             rollback_summary = {
                 "edges_deleted": 0,
                 "merges_reversed": 0,
+                # #1450: recorded merges the rollback could NOT reverse because a
+                # later writer changed the edge. Counted separately from
+                # ``merges_reversed`` so "0 reversed" stops being the only hint
+                # that something was left standing.
+                "merges_unreversible": 0,
                 "importance_restored": 0,
                 "promotions_reversed": 0,
                 "archives_restored": 0,
@@ -392,6 +402,7 @@ async def handle_rollback_sleep_run(
                                 # so the two paths cannot drift.
                                 if action.memory_id:
                                     from services.sleep.undo import (
+                                        ShadowEdgeRevert,
                                         revert_shadow_merge_edge,
                                     )
 
@@ -402,11 +413,37 @@ async def handle_rollback_sleep_run(
                                         loser_id=action.target_id,
                                         prior_edge=(action.details or {}).get("prior_edge"),
                                     )
-                                    if reverted:
+                                    if reverted is ShadowEdgeRevert.RESTORED:
                                         rollback_summary["merges_reversed"] += 1
-                                    else:
+                                    elif reverted is ShadowEdgeRevert.ALREADY_UNDONE:
+                                        # Benign: the edge is already in its
+                                        # post-undo state. Nothing to reverse,
+                                        # nothing to report (#1441).
                                         logger.warning(
-                                            "shadow_merge_rollback_edge_mismatch",
+                                            "shadow_merge_rollback_already_undone",
+                                            src_id=str(action.memory_id),
+                                            dst_id=str(action.target_id),
+                                        )
+                                    else:
+                                        # #1450: a later writer changed or removed
+                                        # the edge, so this action was NOT
+                                        # reversed. Both zero-row causes used to
+                                        # land in the branch above, which made an
+                                        # unreversed merge indistinguishable from
+                                        # a clean rollback outside of a stdout
+                                        # warning. Same treatment as its sibling
+                                        # below (a loser that could not be
+                                        # restored): it is an error, so the run
+                                        # reports partial_rollback, not success.
+                                        rollback_summary["merges_unreversible"] += 1
+                                        rollback_summary["errors"].append(
+                                            f"shadow merge {action.memory_id} → "
+                                            f"{action.target_id} not reversed — the edge "
+                                            "was changed or removed by a later writer, so "
+                                            "the pre-merge state could not be restored"
+                                        )
+                                        logger.warning(
+                                            "shadow_merge_rollback_blocked_by_newer_state",
                                             src_id=str(action.memory_id),
                                             dst_id=str(action.target_id),
                                         )

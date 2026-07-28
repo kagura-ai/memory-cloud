@@ -13,6 +13,7 @@ and the error says so explicitly.
 
 from __future__ import annotations
 
+from enum import StrEnum
 from typing import Any, cast
 from uuid import UUID
 
@@ -29,6 +30,35 @@ from utils.logger import get_logger
 logger = get_logger(__name__)
 
 
+class ShadowEdgeRevert(StrEnum):
+    """Outcome of undoing one shadow merge's supersedes edge (#1450).
+
+    This was a ``bool`` until #1450. ``False`` meant two materially different
+    things — "there was nothing left to do" and "a recorded merge action could
+    NOT be reversed because newer state is in the way" — and both callers
+    collapsed them, so a rollback that left a merge standing still reported
+    success. The three states are kept apart here so neither caller can
+    re-conflate them.
+    """
+
+    RESTORED = "restored"
+    """The pre-merge edge was restored, or the merge-created edge was deleted."""
+
+    ALREADY_UNDONE = "already_undone"
+    """Nothing to do: the edge is already in its post-undo state. Benign."""
+
+    BLOCKED_BY_NEWER_STATE = "blocked_by_newer_state"
+    """A later writer changed or removed the edge, so the pre-merge state could
+    not be restored without discarding that newer state. NOT benign — the
+    recorded action was not reversed.
+
+    Note this does NOT mean a ``supersedes`` edge is still shadowing the loser:
+    reaching this state means the guarded statement found none. What is left
+    un-reversed is the edge state the merge overwrote (or, without a snapshot,
+    an edge the merge created that a later writer has since repurposed and that
+    this undo must not delete)."""
+
+
 async def revert_shadow_merge_edge(
     db: AsyncSession,
     *,
@@ -36,7 +66,7 @@ async def revert_shadow_merge_edge(
     winner_id: UUID,
     loser_id: UUID,
     prior_edge: dict[str, Any] | None,
-) -> bool:
+) -> ShadowEdgeRevert:
     """Undo ONE shadow-mode merge's supersedes edge (#1208).
 
     Shared by run-level rollback and per-merge undo so the two paths cannot
@@ -52,10 +82,14 @@ async def revert_shadow_merge_edge(
       on (user, src, dst) regardless of edge_type, so a blind delete could
       remove an unrelated association written since.
 
+    When the guarded statement matches no row, the current edge is read back to
+    tell the two zero-row causes apart (#1450). ``unique_edge`` is keyed on
+    (user, src, dst), so there is at most one row to inspect.
+
     Returns:
-        True if an edge was restored or deleted; False if nothing matched
-        (the shadow merge was already undone, or the edge was retyped by a
-        later writer).
+        A :class:`ShadowEdgeRevert`. Callers MUST treat
+        ``BLOCKED_BY_NEWER_STATE`` as a failure to reverse — the recorded action
+        could not be undone without discarding newer edge state.
     """
     from sqlalchemy import delete as sa_delete
 
@@ -90,7 +124,34 @@ async def revert_shadow_merge_edge(
         )
     # DML through AsyncSession.execute() is typed Result[Any] but is a
     # CursorResult at runtime, which is what carries .rowcount (#1442).
-    return (cast(CursorResult[Any], result).rowcount or 0) > 0
+    if (cast(CursorResult[Any], result).rowcount or 0) > 0:
+        return ShadowEdgeRevert.RESTORED
+
+    current_type = (
+        await db.execute(
+            select(NeuralMemoryEdge.edge_type).where(
+                NeuralMemoryEdge.user_id == user_id,
+                NeuralMemoryEdge.src_id == winner_id,
+                NeuralMemoryEdge.dst_id == loser_id,
+            )
+        )
+    ).scalar_one_or_none()
+
+    if prior_edge:
+        # The undo target is the snapshot's type. Finding exactly that means a
+        # previous undo already landed; anything else — a different type, or no
+        # edge at all — means the snapshot can no longer be restored from here.
+        expected = prior_edge.get("edge_type") or "neural_association"
+        if current_type == expected:
+            return ShadowEdgeRevert.ALREADY_UNDONE
+        return ShadowEdgeRevert.BLOCKED_BY_NEWER_STATE
+
+    # The merge created the edge, so the undo target is "no edge". Absent is
+    # the desired end state; a surviving edge of some other type is a later
+    # writer's association that this undo must not delete.
+    if current_type is None:
+        return ShadowEdgeRevert.ALREADY_UNDONE
+    return ShadowEdgeRevert.BLOCKED_BY_NEWER_STATE
 
 
 class UndoMergeError(Exception):
@@ -99,7 +160,7 @@ class UndoMergeError(Exception):
     Attributes:
         code: Stable machine-readable reason (``action_not_found`` |
             ``not_a_merge`` | ``memory_purged`` | ``already_restored`` |
-            ``not_merge_deleted``).
+            ``edge_changed`` | ``not_merge_deleted``).
         message: Human-readable explanation.
     """
 
@@ -241,11 +302,24 @@ async def undo_merge_action(
             loser_id=loser_id,
             prior_edge=(action.details or {}).get("prior_edge"),
         )
-        if not reverted:
+        # #1450: these were one 409 ``already_restored`` until the two zero-row
+        # causes were told apart. Both stay 409 (the caller's request conflicts
+        # with current state either way) but the codes differ, because the
+        # remedies do: "already undone" is a no-op, "blocked" means the merge is
+        # STILL IN EFFECT and someone must look at the newer edge.
+        if reverted is ShadowEdgeRevert.ALREADY_UNDONE:
             raise UndoMergeError(
                 "already_restored",
                 f"No supersedes edge {winner_id} → {loser_id} exists — this shadow "
-                "merge was already undone, or the edge was since retyped.",
+                "merge was already undone.",
+            )
+        if reverted is ShadowEdgeRevert.BLOCKED_BY_NEWER_STATE:
+            raise UndoMergeError(
+                "edge_changed",
+                f"The edge {winner_id} → {loser_id} was changed or removed by a later "
+                "writer, so this shadow merge's pre-merge edge state could not be "
+                "restored without discarding that newer state. The merge was not "
+                "reversed; the edge needs a look before retrying.",
             )
         undo_action = SleepAction(
             report_id=action.report_id,
