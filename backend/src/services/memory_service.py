@@ -778,10 +778,20 @@ class MemoryService:
     def _update_guard_size(memory: Any, request: UpdateMemoryRequest) -> None:
         """Reject an update that would push the row past ``MAX_CONTENT_SIZE``.
 
-        Note the truthy ``or`` fallbacks, which differ from the PATCH sibling's
-        explicit ``is None`` checks: this path has no omitted-vs-explicit-null
-        distinction to preserve (``None`` means "leave alone" outright), so the
-        shorter form is equivalent here and is left as-is.
+        Preserved as-is from before the #1439 split, including a known quirk:
+        the truthy ``or`` fallbacks are NOT equivalent to the PATCH sibling's
+        explicit ``is None`` checks. ``context_summary`` has no ``min_length``
+        and ``details`` is a free dict, so ``""`` and ``{}`` are valid values
+        that :meth:`_update_apply_fields` does write to the row — but they are
+        falsy, so this guard falls back to the stored value and sizes the row as
+        if the field were untouched. An update that CLEARS a large
+        ``context_summary`` can therefore be rejected for being too big while
+        actually shrinking the row.
+
+        Left alone deliberately: #1439 is a behaviour-preserving decomposition,
+        and this fails in the safe direction (a spurious rejection, never an
+        oversized row). Tracked separately — do not "tidy" it into ``is None``
+        here without a test for the clearing case.
 
         Raises:
             QuotaExceededError: the post-update size exceeds the limit.
