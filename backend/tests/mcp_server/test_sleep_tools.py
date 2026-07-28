@@ -605,7 +605,7 @@ class TestShadowMergeRollbackEdgeMismatch:
 
         Before this, the retyped-edge case took the same log-and-continue path
         as "already undone", so the run answered ``status=success`` /
-        ``errors=[]`` while the merge was still in effect — a zero counter was
+        ``errors=[]`` while the action had not been reversed — a zero counter was
         the only trace, and only for someone who thought to look.
         """
         report_id = uuid4()

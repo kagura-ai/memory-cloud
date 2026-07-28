@@ -88,8 +88,8 @@ async def revert_shadow_merge_edge(
 
     Returns:
         A :class:`ShadowEdgeRevert`. Callers MUST treat
-        ``BLOCKED_BY_NEWER_STATE`` as a failure to reverse — it is the case
-        where the merge is still in effect.
+        ``BLOCKED_BY_NEWER_STATE`` as a failure to reverse — the recorded action
+        could not be undone without discarding newer edge state.
     """
     from sqlalchemy import delete as sa_delete
 

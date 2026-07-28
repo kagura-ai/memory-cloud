@@ -230,8 +230,8 @@ async def test_shadow_undo_retyped_edge_is_not_already_restored() -> None:
     """#1450: a later writer's edge is NOT "already undone".
 
     Both matched zero rows and so shared one ``already_restored`` code, but the
-    outcomes differ: nothing to do vs. the merge is still in effect and someone
-    has to look at the newer edge. Same 409, distinguishable ``error_code``.
+    outcomes differ: nothing to do vs. the undo did not happen and someone has
+    to look at the newer edge. Same 409, distinguishable ``error_code``.
     """
     action = _shadow_action(prior_edge=None)
     db = _shadow_db(
