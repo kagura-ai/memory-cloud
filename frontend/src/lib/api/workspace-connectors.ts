@@ -62,6 +62,16 @@ export interface WorkspaceConnectorSummary {
   display_name: string | null;
   external_team_id: string | null;
   context_name: string | null;
+  // #1449: ingest outcome, not liveness. A worker heartbeat says the process is
+  // up — which stayed true through the whole 6-day ingest outage. These say
+  // whether memories are actually landing. Reported as fact, never graded: a
+  // low-traffic tenant with no recent writes is healthy.
+  last_memory_at: string | null;
+  memories_last_7d: number;
+  // Another connector writes to the same context, so the two figures above are
+  // the pair's combined traffic. Without this a dead connector could read as
+  // healthy off its sibling — the one case where these numbers can mislead.
+  ingest_context_shared: boolean;
 }
 
 export interface ConnectorReadiness {

@@ -10,11 +10,11 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Any
 from uuid import UUID
 
-from sqlalchemy import delete, func, select, text, update
+from sqlalchemy import case, delete, func, select, text, update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.exc import DBAPIError
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -23,6 +23,7 @@ from auth.resource_tokens import ResourceTokenManager
 from models.auth import Workspace
 from models.resource import Resource, ResourceSchema, ResourceToken, WorkspaceConnector
 from services.resource_lookup import resolve_resource_pk, upsert_resource
+from utils.datetime import utcnow
 from utils.exceptions import ConflictError, MemoryCloudException, NotFoundException, ValidationError
 from utils.logger import get_logger
 
@@ -104,6 +105,16 @@ class ConnectorListItem:
     resource_id: str
     display_name: str | None = None
     context_name: str | None = None
+    # #1449: ingest OUTCOME, not liveness. A worker heartbeat says the process
+    # is up, which is exactly what stayed true through the 6-day 2026-07-21..27
+    # ingest outage. When a connector last actually wrote a memory is already
+    # in this database and was simply never surfaced.
+    last_memory_at: datetime | None = None
+    memories_last_7d: int = 0
+    # True when another connector in this workspace writes to the SAME context,
+    # so the two figures above cover both and cannot be read as this connector's
+    # own traffic (#1449 review).
+    ingest_context_shared: bool = False
 
 
 @dataclass(frozen=True)
@@ -670,15 +681,84 @@ class ConnectorProvisioningService:
             .where(WorkspaceConnector.workspace_id == workspace_id)
             .order_by(WorkspaceConnector.created_at.desc())
         )
+        rows = result.all()
+        bound_contexts = [c.context_id for c, _, _, _ in rows if c.context_id is not None]
+        activity = await self._ingest_activity(workspace_id, set(bound_contexts))
+        # #1449 review: two connectors may write to the SAME context, and the
+        # aggregate cannot tell their memories apart — a broken connector would
+        # then read as healthy off its sibling's traffic, which is the exact
+        # masking this feature exists to remove. Attributing by the memory's
+        # ``resource_id`` instead would fix that but introduces the opposite
+        # failure: connectors on the legacy kmc/remember fallback write no
+        # ``details.resource_id`` at all (#895) and would report a false zero.
+        # Under-reporting is a false alarm; over-reporting hides an outage — so
+        # keep the never-under-reporting key and mark the ambiguity instead.
+        shared = {ctx for ctx in bound_contexts if bound_contexts.count(ctx) > 1}
         return [
             ConnectorListItem(
                 connector=connector,
                 resource_id=resource_id,
                 display_name=resource_name,
                 context_name=context_name,
+                last_memory_at=activity.get(connector.context_id, (None, 0))[0],
+                memories_last_7d=activity.get(connector.context_id, (None, 0))[1],
+                ingest_context_shared=connector.context_id in shared,
             )
-            for connector, resource_id, resource_name, context_name in result.all()
+            for connector, resource_id, resource_name, context_name in rows
         ]
+
+    async def _ingest_activity(
+        self, workspace_id: UUID, context_ids: set[UUID]
+    ) -> dict[UUID, tuple[datetime | None, int]]:
+        """Last write + 7-day write count per context (#1449).
+
+        One grouped aggregate for the whole list — never per row. Contexts that
+        have never been written to are simply absent from the result; the caller
+        renders that as "no writes yet", not as an error (a low-traffic tenant
+        legitimately has none, and a permanently-red row gets ignored exactly
+        like a permanently-firing alert).
+
+        ``workspace_id`` is redundant with ``context_id`` but kept as
+        defence-in-depth: it stops a drifted context row from leaking another
+        tenant's counts into this workspace's list. It also lets Postgres use
+        the partial ``idx_memories_ws_ctx`` (workspace_id, context_id) WHERE
+        deleted_at IS NULL index.
+
+        Soft-deleted memories are excluded deliberately (review): a memory
+        written and later deleted did prove the pipeline worked, so counting it
+        would be defensible — but the two errors are not symmetric. Excluding
+        can only make a working connector look quieter than it is (a false
+        alarm the operator investigates); including could keep a row looking
+        fresh off memories that are gone, which is the outage-masking direction
+        this feature exists to remove.
+
+        Cost note: the partial index narrows to the right rows, but
+        ``max(created_at)`` still visits all of them. A context with millions of
+        live memories makes this page slower; a covering index on
+        (workspace_id, context_id, created_at) is the follow-up if that shows up.
+        """
+        if not context_ids:
+            return {}
+
+        from models.memory import Memory
+
+        cutoff = utcnow() - timedelta(days=7)
+        result = await self.db.execute(
+            select(
+                Memory.context_id,
+                func.max(Memory.created_at),
+                # COUNT over a CASE, not a WHERE: the same scan yields both the
+                # all-time last write and the recent count.
+                func.count(case((Memory.created_at >= cutoff, 1))),
+            )
+            .where(
+                Memory.workspace_id == workspace_id,
+                Memory.context_id.in_(context_ids),
+                Memory.deleted_at.is_(None),
+            )
+            .group_by(Memory.context_id)
+        )
+        return {row[0]: (row[1], row[2] or 0) for row in result.all() if row[0] is not None}
 
     async def _assert_team_unclaimed(
         self,

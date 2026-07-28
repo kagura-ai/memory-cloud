@@ -1,5 +1,6 @@
 """Tests for workspace connector setup API (Issue #851, F6-b of #755)."""
 
+from datetime import UTC, datetime
 from unittest.mock import AsyncMock, MagicMock, patch
 from uuid import uuid4
 
@@ -269,7 +270,6 @@ async def test_update_runtime_maps_unexpected_failure_to_canonical_internal_erro
 
 @pytest.mark.asyncio
 async def test_list_workspace_connectors_returns_summaries():
-    from datetime import datetime
     from types import SimpleNamespace
 
     from api.routes.workspace_connectors import list_workspace_connectors
@@ -303,6 +303,10 @@ async def test_list_workspace_connectors_returns_summaries():
         resource_id="my-resource-slug",
         display_name="Sales Slack / T0123ABC",
         context_name="slack-sales",
+        # #1449: ingest outcome for the row.
+        last_memory_at=datetime(2026, 7, 19, 12, 0, tzinfo=UTC),
+        memories_last_7d=0,
+        ingest_context_shared=False,
     )
 
     with patch("api.routes.workspace_connectors.ConnectorProvisioningService") as service_cls:
@@ -326,6 +330,14 @@ async def test_list_workspace_connectors_returns_summaries():
     assert result[0].display_name == "Sales Slack / T0123ABC"
     assert result[0].external_team_id == "T0123ABC"
     assert result[0].context_name == "slack-sales"
+    # #1449: the outage that motivated this looked exactly like the row below —
+    # a connector listing as normal whose context had not been written to in
+    # days. The fact is carried on the row; nothing here grades it.
+    assert result[0].last_memory_at == datetime(2026, 7, 19, 12, 0, tzinfo=UTC)
+    assert result[0].memories_last_7d == 0
+    # TZAwareBaseModel: the wire form must carry the UTC marker or a JST client
+    # renders the staleness 9 hours off.
+    assert "2026-07-19T12:00:00Z" in result[0].model_dump_json()
     service_cls.return_value.list_connectors.assert_awaited_once_with(ws_id)
 
 
@@ -414,7 +426,6 @@ async def test_delete_workspace_connector_404_when_missing():
 
 @pytest.mark.asyncio
 async def test_rotate_kmc_key_returns_new_key_on_success():
-    from datetime import datetime
 
     from api.routes.workspace_connectors import rotate_connector_kmc_key
     from services.connector_provisioning import KmcKeyRotationResult

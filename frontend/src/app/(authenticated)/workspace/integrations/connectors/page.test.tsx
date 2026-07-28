@@ -109,6 +109,10 @@ function makeConnector(overrides: Record<string, unknown> = {}) {
     locale: null,
     litellm_virtual_key_id: null,
     llm_config_present: false,
+    // #1449: ingest outcome for the row.
+    last_memory_at: null,
+    memories_last_7d: 0,
+    ingest_context_shared: false,
     ...overrides,
   };
 }
@@ -459,6 +463,73 @@ describe("ConnectorsPage RBAC gate", () => {
     expect(
       screen.queryByText("channelsNotJoinedWarning"),
     ).not.toBeInTheDocument();
+  });
+
+  it("states ingest activity as fact, without grading it (#1449)", async () => {
+    setWorkspace("admin");
+    // A connector that has not written in days — the exact shape of the
+    // 2026-07-21..27 outage, which every screen rendered as normal.
+    mockListConnectors.mockResolvedValue([
+      makeConnector({
+        last_memory_at: "2026-07-19T00:00:00Z",
+        memories_last_7d: 0,
+      }),
+    ]);
+
+    render(<ConnectorsPage />);
+
+    expect(await screen.findByText(/ingestLastWrite/)).toBeInTheDocument();
+    expect(screen.queryByText("ingestNeverWritten")).not.toBeInTheDocument();
+    // Silence was the bug; a permanently-red row would be the next one. The
+    // fact is shown, the judgement is left to the operator — so no error
+    // channel (banner/toast) fires for a quiet connector.
+    expect(mockToast).not.toHaveBeenCalled();
+    expect(
+      screen.queryByText("errors.forbiddenWorkspace"),
+    ).not.toBeInTheDocument();
+  });
+
+  it("distinguishes never-written from written-but-quiet (#1449)", async () => {
+    setWorkspace("admin");
+    mockListConnectors.mockResolvedValue([
+      makeConnector({ last_memory_at: null, memories_last_7d: 0 }),
+    ]);
+
+    render(<ConnectorsPage />);
+
+    expect(await screen.findByText(/ingestNeverWritten/)).toBeInTheDocument();
+  });
+
+  it("says so when the figures cover a shared context (#1449)", async () => {
+    setWorkspace("admin");
+    // Two connectors on one context: the numbers are the pair's combined
+    // traffic, so a dead connector could otherwise read as healthy off its
+    // sibling — the one way these figures mislead.
+    mockListConnectors.mockResolvedValue([
+      makeConnector({
+        last_memory_at: "2026-07-27T00:00:00Z",
+        memories_last_7d: 12,
+        ingest_context_shared: true,
+      }),
+    ]);
+
+    render(<ConnectorsPage />);
+
+    expect(await screen.findByText(/ingestSharedContext/)).toBeInTheDocument();
+  });
+
+  it("keeps the exact timestamp available for log correlation (#1449)", async () => {
+    setWorkspace("admin");
+    mockListConnectors.mockResolvedValue([
+      makeConnector({ last_memory_at: "2026-07-19T03:04:05Z" }),
+    ]);
+
+    render(<ConnectorsPage />);
+
+    // "6 days ago" scans fast but cannot be lined up against an outage window;
+    // the absolute UTC time rides along in the title (review finding).
+    const line = await screen.findByText(/ingestLastWrite/);
+    expect(line).toHaveAttribute("title", expect.stringContaining("2026"));
   });
 
   it("updates the tenant-local vision kill-switch from the connector row", async () => {

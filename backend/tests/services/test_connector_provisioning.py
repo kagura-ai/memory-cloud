@@ -1,5 +1,6 @@
 """Tests for connector provisioning service (Issue #851, F6-b of #755)."""
 
+from datetime import UTC, datetime
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 from uuid import uuid4
@@ -316,7 +317,10 @@ async def test_list_connectors_returns_workspace_scoped_rows_newest_first():
     from services.connector_provisioning import ConnectorListItem
 
     ws_id = uuid4()
-    conn_a, conn_b = SimpleNamespace(id=uuid4()), SimpleNamespace(id=uuid4())
+    ctx_a = uuid4()
+    conn_a = SimpleNamespace(id=uuid4(), context_id=ctx_a)
+    # #1449: a context-less connector must not break the activity join.
+    conn_b = SimpleNamespace(id=uuid4(), context_id=None)
     # The JOIN yields (WorkspaceConnector, resource_id-slug, resource name,
     # coalesced context name) tuples (#991, #1389) — the display_name-or-name
     # fallback happens in SQL via func.coalesce, NULL-only semantics.
@@ -324,11 +328,14 @@ async def test_list_connectors_returns_workspace_scoped_rows_newest_first():
         (conn_a, "slug-a", "Sales Slack", "Sales Context"),
         (conn_b, "slug-b", None, "slack-support"),
     ]
+    last_write = datetime(2026, 7, 19, 12, 0, tzinfo=UTC)
 
     db = MagicMock()
-    exec_result = MagicMock()
-    exec_result.all.return_value = rows
-    db.execute = AsyncMock(return_value=exec_result)
+    list_result = MagicMock()
+    list_result.all.return_value = rows
+    activity_result = MagicMock()
+    activity_result.all.return_value = [(ctx_a, last_write, 3)]
+    db.execute = AsyncMock(side_effect=[list_result, activity_result])
 
     service = ConnectorProvisioningService(db)
     result = await service.list_connectors(ws_id)
@@ -339,6 +346,8 @@ async def test_list_connectors_returns_workspace_scoped_rows_newest_first():
             resource_id="slug-a",
             display_name="Sales Slack",
             context_name="Sales Context",
+            last_memory_at=last_write,
+            memories_last_7d=3,
         ),
         ConnectorListItem(
             connector=conn_b,
@@ -347,6 +356,120 @@ async def test_list_connectors_returns_workspace_scoped_rows_newest_first():
             context_name="slack-support",
         ),
     ]
+
+
+@pytest.mark.asyncio
+async def test_list_connectors_reports_never_written_context_as_zero():
+    """#1449: a context with no memories is absent from the aggregate.
+
+    It must read as "nothing written yet" — the honest fact — and NOT as an
+    error. A brand-new or low-traffic connector legitimately has no writes, and
+    a row that is permanently red gets ignored exactly like an alert that fires
+    permanently (the same trap kagura-bridge#214 hit with AiWorkerNoSuccessfulAcks).
+    """
+    from services.connector_provisioning import ConnectorListItem
+
+    ws_id = uuid4()
+    conn = SimpleNamespace(id=uuid4(), context_id=uuid4())
+
+    db = MagicMock()
+    list_result = MagicMock()
+    list_result.all.return_value = [(conn, "slug", "Name", "Ctx")]
+    activity_result = MagicMock()
+    activity_result.all.return_value = []  # never written to
+    db.execute = AsyncMock(side_effect=[list_result, activity_result])
+
+    result = await ConnectorProvisioningService(db).list_connectors(ws_id)
+
+    assert result == [
+        ConnectorListItem(
+            connector=conn,
+            resource_id="slug",
+            display_name="Name",
+            context_name="Ctx",
+            last_memory_at=None,
+            memories_last_7d=0,
+        )
+    ]
+
+
+@pytest.mark.asyncio
+async def test_ingest_activity_query_is_scoped_and_grouped():
+    """#1449 (review): assert the SQL, not just that values move around.
+
+    The plumbing tests above would stay green if the workspace predicate were
+    dropped (cross-tenant counts), if the 7-day COUNT became ``count(*)`` (every
+    row counted as recent), or if the GROUP BY were lost. Compile the statement
+    and check the parts that carry those guarantees.
+    """
+    ws_id = uuid4()
+    conn = SimpleNamespace(id=uuid4(), context_id=uuid4())
+
+    db = MagicMock()
+    list_result = MagicMock()
+    list_result.all.return_value = [(conn, "slug", "Name", "Ctx")]
+    activity_result = MagicMock()
+    activity_result.all.return_value = []
+    db.execute = AsyncMock(side_effect=[list_result, activity_result])
+
+    await ConnectorProvisioningService(db).list_connectors(ws_id)
+
+    stmt = str(db.execute.await_args_list[1].args[0])
+    assert "memories.workspace_id = " in stmt, "tenant scope dropped"
+    assert "memories.context_id IN " in stmt
+    assert "memories.deleted_at IS NULL" in stmt
+    assert "GROUP BY memories.context_id" in stmt
+    # The recency filter must live inside the COUNT, not replace the scan —
+    # a bare count(*) would report every all-time memory as written this week.
+    assert "count(CASE WHEN (memories.created_at >= " in stmt
+    assert "max(memories.created_at)" in stmt
+
+
+@pytest.mark.asyncio
+async def test_list_connectors_flags_a_context_two_connectors_share():
+    """#1449 (review): a shared context makes the figures the pair's combined
+    traffic, so a dead connector could read as healthy off its sibling — the one
+    way these numbers mislead. Mark it rather than let it pass as own traffic."""
+    ws_id = uuid4()
+    shared_ctx = uuid4()
+    conn_a = SimpleNamespace(id=uuid4(), context_id=shared_ctx)
+    conn_b = SimpleNamespace(id=uuid4(), context_id=shared_ctx)
+    conn_solo = SimpleNamespace(id=uuid4(), context_id=uuid4())
+
+    db = MagicMock()
+    list_result = MagicMock()
+    list_result.all.return_value = [
+        (conn_a, "a", None, None),
+        (conn_b, "b", None, None),
+        (conn_solo, "c", None, None),
+    ]
+    activity_result = MagicMock()
+    activity_result.all.return_value = []
+    db.execute = AsyncMock(side_effect=[list_result, activity_result])
+
+    result = await ConnectorProvisioningService(db).list_connectors(ws_id)
+
+    assert [r.ingest_context_shared for r in result] == [True, True, False]
+
+
+@pytest.mark.asyncio
+async def test_list_connectors_skips_the_activity_query_without_contexts():
+    """#1449: no bound contexts → no second round trip. The aggregate is one
+    grouped query for the whole page, never per row, and an empty ``IN ()`` is
+    not worth issuing at all."""
+    ws_id = uuid4()
+    conn = SimpleNamespace(id=uuid4(), context_id=None)
+
+    db = MagicMock()
+    list_result = MagicMock()
+    list_result.all.return_value = [(conn, "slug", "Name", None)]
+    db.execute = AsyncMock(return_value=list_result)
+
+    result = await ConnectorProvisioningService(db).list_connectors(ws_id)
+
+    assert db.execute.await_count == 1
+    assert result[0].last_memory_at is None
+    assert result[0].memories_last_7d == 0
     db.execute.assert_awaited_once()
 
 
