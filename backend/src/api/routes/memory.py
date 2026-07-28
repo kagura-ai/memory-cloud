@@ -580,7 +580,9 @@ def _list_q_pattern(q: str | None) -> tuple[str | None, str | None]:
     Returns:
         ``(normalized, pattern)``. ``normalized`` is for logging (presence and
         length only — search strings can carry PII); ``pattern`` goes to
-        ``ilike(..., escape="\\\\")``. Both are ``None`` when there is no filter.
+        ``Memory.summary.ilike()`` with a single backslash as the ``escape``
+        character, matching what this function inserts. Both are ``None`` when
+        there is no filter.
     """
     normalized = (q or "").strip() or None
     if not normalized:
