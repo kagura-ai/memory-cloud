@@ -277,7 +277,18 @@ class NeuralMemoryConfig:
     sleep_importance_reeval_enabled: bool = True  # Phase 3 on/off
 
     def __post_init__(self) -> None:
-        """Validate configuration parameters."""
+        """Validate configuration parameters.
+
+        #1439 audit, confirmed not-a-refactor: this scores 49 on the branch-node
+        complexity metric, high enough to appear alongside functions that were
+        decomposed. It is deliberately left whole. The count comes from a flat
+        sequence of independent ``if not X: raise ValueError(...)`` guards with
+        near-zero nesting — the metric counts branches, and a validation table
+        is nothing but branches. Splitting it would scatter one contract across
+        several methods and make "what does a valid config look like" harder to
+        read, not easier. Re-measuring will surface it again; this note is here
+        so the answer does not have to be re-derived each time.
+        """
         # #1160 back-compat: 'ollama' was renamed to 'self_hosted' in a clean
         # cutover. A stale SLEEP_LLM_PROVIDER=ollama env (documented as valid in
         # v0.41) or an un-migrated neural_config row would otherwise fail EVERY
