@@ -48,9 +48,15 @@ class ShadowEdgeRevert(StrEnum):
     """Nothing to do: the edge is already in its post-undo state. Benign."""
 
     BLOCKED_BY_NEWER_STATE = "blocked_by_newer_state"
-    """A later writer changed the edge, so the merge could not be reversed
-    without clobbering that newer state. NOT benign — the recorded action
-    still stands."""
+    """A later writer changed or removed the edge, so the pre-merge state could
+    not be restored without discarding that newer state. NOT benign — the
+    recorded action was not reversed.
+
+    Note this does NOT mean a ``supersedes`` edge is still shadowing the loser:
+    reaching this state means the guarded statement found none. What is left
+    un-reversed is the edge state the merge overwrote (or, without a snapshot,
+    an edge the merge created that a later writer has since repurposed and that
+    this undo must not delete)."""
 
 
 async def revert_shadow_merge_edge(
@@ -154,7 +160,7 @@ class UndoMergeError(Exception):
     Attributes:
         code: Stable machine-readable reason (``action_not_found`` |
             ``not_a_merge`` | ``memory_purged`` | ``already_restored`` |
-            ``edge_retyped`` | ``not_merge_deleted``).
+            ``edge_changed`` | ``not_merge_deleted``).
         message: Human-readable explanation.
     """
 
@@ -309,10 +315,11 @@ async def undo_merge_action(
             )
         if reverted is ShadowEdgeRevert.BLOCKED_BY_NEWER_STATE:
             raise UndoMergeError(
-                "edge_retyped",
-                f"The edge {winner_id} → {loser_id} was changed by a later writer, "
-                "so this shadow merge could not be reversed without discarding that "
-                "newer state. The merge is still in effect.",
+                "edge_changed",
+                f"The edge {winner_id} → {loser_id} was changed or removed by a later "
+                "writer, so this shadow merge's pre-merge edge state could not be "
+                "restored without discarding that newer state. The merge was not "
+                "reversed; the edge needs a look before retrying.",
             )
         undo_action = SleepAction(
             report_id=action.report_id,

@@ -31,9 +31,9 @@ from utils.logger import get_logger
 # bug class to the one fixed in ``api/routes/auth.py`` (PR #522).
 #
 # #1450 follow-up: that mismatch was never one situation. Only "already undone"
-# is benign; "a later writer retyped the edge" means the merge is still in
-# effect, and #1440's fix made THAT case silent. The helper now returns a
-# tri-state and the two are handled apart, below.
+# is benign; "a later writer changed or removed the edge" means the action was
+# not reversed at all, and #1440's fix made THAT case silent. The helper now
+# returns a tri-state and the two are handled apart, below.
 logger = get_logger(__name__)
 
 
@@ -425,22 +425,22 @@ async def handle_rollback_sleep_run(
                                             dst_id=str(action.target_id),
                                         )
                                     else:
-                                        # #1450: a later writer changed the edge,
-                                        # so this merge is STILL IN EFFECT. Both
-                                        # zero-row causes used to land in the
-                                        # branch above, which made an unreversed
-                                        # merge indistinguishable from a clean
-                                        # rollback outside of a stdout warning.
-                                        # Same treatment as its sibling below
-                                        # (a loser that could not be restored):
-                                        # it is an error, so the run reports
-                                        # partial_rollback rather than success.
+                                        # #1450: a later writer changed or removed
+                                        # the edge, so this action was NOT
+                                        # reversed. Both zero-row causes used to
+                                        # land in the branch above, which made an
+                                        # unreversed merge indistinguishable from
+                                        # a clean rollback outside of a stdout
+                                        # warning. Same treatment as its sibling
+                                        # below (a loser that could not be
+                                        # restored): it is an error, so the run
+                                        # reports partial_rollback, not success.
                                         rollback_summary["merges_unreversible"] += 1
                                         rollback_summary["errors"].append(
                                             f"shadow merge {action.memory_id} → "
-                                            f"{action.target_id} not reversible — the edge "
-                                            "was changed by a later writer; the merge is "
-                                            "still in effect"
+                                            f"{action.target_id} not reversed — the edge "
+                                            "was changed or removed by a later writer, so "
+                                            "the pre-merge state could not be restored"
                                         )
                                         logger.warning(
                                             "shadow_merge_rollback_blocked_by_newer_state",

@@ -243,8 +243,8 @@ async def test_shadow_undo_retyped_edge_is_not_already_restored() -> None:
     with pytest.raises(UndoMergeError) as exc:
         await undo_merge_action(db, 42, acting_user_id="admin-user")
 
-    assert exc.value.code == "edge_retyped"
-    assert "still in effect" in exc.value.message
+    assert exc.value.code == "edge_changed"
+    assert "not reversed" in exc.value.message
     db.add.assert_not_called()
 
 
@@ -281,4 +281,27 @@ async def test_shadow_undo_snapshot_overwritten_is_blocked() -> None:
     with pytest.raises(UndoMergeError) as exc:
         await undo_merge_action(db, 42, acting_user_id="admin-user")
 
-    assert exc.value.code == "edge_retyped"
+    assert exc.value.code == "edge_changed"
+
+
+@pytest.mark.asyncio
+async def test_shadow_undo_snapshot_edge_deleted_is_blocked_without_claiming_shadow() -> None:
+    """#1450 (review): with a snapshot, a DELETED edge is also un-restorable.
+
+    Still blocked — the pre-merge weight/origin/metadata cannot be put back —
+    but the message must not claim a live shadow edge is in the way. Reaching
+    ANY blocked state means the guarded statement found no ``supersedes`` row,
+    so nothing is shadowing the loser; what is lost is the edge state the merge
+    overwrote. The first wording of this error said "the merge is still in
+    effect", which is false in every blocked case.
+    """
+    prior = {"edge_type": "neural_association", "origin": "hebbian"}
+    action = _shadow_action(prior_edge=prior)
+    db = _shadow_db((action, _report()), revert_rowcount=0, current_edge_type=None)
+
+    with pytest.raises(UndoMergeError) as exc:
+        await undo_merge_action(db, 42, acting_user_id="admin-user")
+
+    assert exc.value.code == "edge_changed"
+    assert "changed or removed" in exc.value.message
+    assert "still in effect" not in exc.value.message

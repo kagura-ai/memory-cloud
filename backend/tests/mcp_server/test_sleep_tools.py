@@ -649,7 +649,7 @@ class TestShadowMergeRollbackEdgeMismatch:
         assert summary["merges_unreversible"] == 1
         assert summary["merges_reversed"] == 0
         # Visible in the response, not only in a log line.
-        assert any("still in effect" in e for e in summary["errors"]), summary["errors"]
+        assert any("not reversed" in e for e in summary["errors"]), summary["errors"]
         assert data.get("error") == "partial_rollback", (
             f"an un-reversed merge was reported as a clean rollback: {data}"
         )

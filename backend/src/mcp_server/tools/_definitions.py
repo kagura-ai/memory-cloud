@@ -1424,7 +1424,7 @@ Requires action recording (reports created before this feature have no actions t
 
 Returns: {status, report_id, rollback_summary: {edges_deleted, merges_reversed, merges_unreversible, importance_restored, promotions_reversed, archives_restored, errors}}. Re-embedding is best-effort - check rollback_summary.errors.
 
-merges_unreversible (#1450) counts shadow merges left standing because a later writer changed the edge — reversing them would discard that newer state. Those runs report error='partial_rollback'; a rollback is only complete when this is 0.""",
+merges_unreversible (#1450) counts shadow merges this run did NOT reverse because a later writer changed or removed the edge — restoring the pre-merge state would have discarded that newer state. Those runs report error='partial_rollback'; a rollback is only complete when this is 0.""",
             "inputSchema": {
                 "type": "object",
                 "required": ["report_id"],

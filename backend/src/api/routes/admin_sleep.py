@@ -338,10 +338,10 @@ _UNDO_ERROR_STATUS = {
     "action_not_found": 404,
     "memory_purged": 410,
     "already_restored": 409,
-    # #1450: distinct from ``already_restored`` — same 409, but the merge is
-    # still in effect rather than already undone, so the error_code is what
+    # #1450: distinct from ``already_restored`` — same 409, but the undo did
+    # not happen rather than having happened already, so the error_code is what
     # tells an operator whether anything needs doing.
-    "edge_retyped": 409,
+    "edge_changed": 409,
     "not_a_merge": 400,
     "not_merge_deleted": 409,
 }
@@ -354,7 +354,17 @@ _UNDO_ERROR_STATUS = {
     responses={
         400: {"description": "The action is not a dedup merge."},
         404: {"description": "Action not found or not owned by the caller."},
-        409: {"description": "Memory already restored, or deleted by something else."},
+        409: {
+            "description": (
+                "Conflicts with current state. ``SLEEP-UNDO-already_restored``: "
+                "the memory or shadow edge is already back in its post-undo "
+                "state (no-op). ``SLEEP-UNDO-not_merge_deleted``: the memory was "
+                "deleted by something other than this merge. "
+                "``SLEEP-UNDO-edge_changed`` (#1450): a later writer changed or "
+                "removed the shadow edge, so the pre-merge state could not be "
+                "restored — unlike the other two, the undo did NOT happen."
+            )
+        },
         410: {
             "description": "The merge loser was hard-deleted by the retention "
             "policy (sleep_merge_retention_days) — no longer restorable."
