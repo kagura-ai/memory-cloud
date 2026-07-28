@@ -564,6 +564,164 @@ async def get_memory_stats(
     return result
 
 
+def _list_q_pattern(q: str | None) -> tuple[str | None, str | None]:
+    """Normalize the ``q`` substring filter into (normalized, LIKE pattern).
+
+    Strips surrounding whitespace and treats empty / whitespace-only values as
+    "no filter", so a caller bound to an empty input box doesn't pin results to
+    rows whose summary literally contains spaces.
+
+    SQL LIKE wildcards in the user's input are escaped so a literal ``%`` or
+    ``_`` matches as a character: without it ``q="50%"`` matches every summary
+    containing "50" followed by anything, and ``q="_"`` matches every
+    single-character row. Backslash is escaped first, or it would double-escape
+    the escape character itself.
+
+    Returns:
+        ``(normalized, pattern)``. ``normalized`` is for logging (presence and
+        length only — search strings can carry PII); ``pattern`` goes to
+        ``ilike(..., escape="\\\\")``. Both are ``None`` when there is no filter.
+    """
+    normalized = (q or "").strip() or None
+    if not normalized:
+        return None, None
+    escaped = normalized.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+    return normalized, f"%{escaped}%"
+
+
+def _list_tags(tags: list[str] | None) -> list[str] | None:
+    """Normalize the tag filter (#618) to the write-path caps.
+
+    Drops blank / over-length (>64 char) entries, de-dups order-preserving, and
+    caps at 100 tags, so an oversized query string can never reach the DB. An
+    all-blank list collapses to ``None`` — a stray ``?tags=`` must not pin
+    results to the empty set.
+    """
+    if not tags:
+        return None
+    cleaned = list(dict.fromkeys(s for t in tags if (s := t.strip()) and len(s) <= 64))[:100]
+    return cleaned or None
+
+
+def _list_tag_filter(tags_normalized: list[str] | None, tags_match: str) -> Any | None:
+    """ANY (#618, PG ``&&`` overlap) or ALL (#830, PG ``@>`` contains) tag match.
+
+    NULL-tags rows never match either operator, so they are excluded in both
+    modes.
+    """
+    if tags_normalized is None:
+        return None
+    if tags_match == "all":
+        return Memory.tags.contains(tags_normalized)
+    return Memory.tags.overlap(tags_normalized)
+
+
+def _list_window_filters(trigger_from: str | None, trigger_until: str | None) -> list[Any]:
+    """Time Memory (#877) window-overlap predicates.
+
+    A stored window [trigger_from, trigger_until] overlaps the query window
+    [qfrom, quntil] iff ``trigger_from <= quntil AND trigger_until >= qfrom``.
+    The columns are TEXT fixed-width ISO, so string comparison IS chronological
+    comparison — but only if the caller's bounds are the same fixed-width form.
+    ``parse_query_bound`` re-normalizes them (and resolves the ``now``
+    shortcut); a malformed bound is a 422, not silently wrong results.
+
+    ``isinstance(str)`` rather than ``is not None`` skips the unset ``Query()``
+    FieldInfo sentinel that direct-call unit tests pass.
+
+    Raises:
+        HTTPException: 422 when a bound is not a parseable window bound.
+    """
+    from utils.time_trigger import TriggerValidationError, parse_query_bound
+
+    try:
+        qfrom = parse_query_bound(trigger_from) if isinstance(trigger_from, str) else None
+        quntil = parse_query_bound(trigger_until) if isinstance(trigger_until, str) else None
+    except TriggerValidationError as e:
+        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=str(e)) from e
+
+    filters: list[Any] = []
+    if qfrom is not None:
+        filters.append(Memory.trigger_until >= qfrom)
+    if quntil is not None:
+        filters.append(Memory.trigger_from <= quntil)
+    return filters
+
+
+def _list_geo_filters(
+    lat_min: float | None,
+    lat_max: float | None,
+    lon_min: float | None,
+    lon_max: float | None,
+) -> list[Any]:
+    """WHERE-axis bbox predicates (#1334). Bounds may be one-sided.
+
+    ``isinstance`` rather than ``is not None`` skips the unset ``Query()``
+    FieldInfo sentinel that direct-call unit tests pass.
+    """
+    filters: list[Any] = []
+    if isinstance(lat_min, int | float):
+        filters.append(Memory.location_lat >= lat_min)
+    if isinstance(lat_max, int | float):
+        filters.append(Memory.location_lat <= lat_max)
+
+    lon_lo = lon_min if isinstance(lon_min, int | float) else None
+    lon_hi = lon_max if isinstance(lon_max, int | float) else None
+    if lon_lo is not None and lon_hi is not None and lon_lo > lon_hi:
+        # Antimeridian-crossing box (map viewport panned across ±180°): the
+        # wrapped range is the union of the two edge ranges, same two-ranges-ORed
+        # convention as utils.geo_location.bbox_lon_ranges (#1331). Without this
+        # branch the AND of the two bounds is unsatisfiable and a valid viewport
+        # silently returns empty.
+        filters.append(or_(Memory.location_lon >= lon_lo, Memory.location_lon <= lon_hi))
+    else:
+        if lon_lo is not None:
+            filters.append(Memory.location_lon >= lon_lo)
+        if lon_hi is not None:
+            filters.append(Memory.location_lon <= lon_hi)
+
+    if filters:
+        # Pair-completeness: a bbox-filtered result must contain only plottable
+        # rows. A half-populated pair (raw-SQL writer artifact where the e69
+        # regex guard NULLed one coordinate) would match a one-sided bound yet
+        # serialize location=None — require both columns so filter and
+        # serialization semantics agree (mirrors services/geo_memory.py's
+        # explicit IS NOT NULL; it also keeps the query eligible for the partial
+        # index, whose predicate covers lat and deleted_at only).
+        filters.append(Memory.location_lat.is_not(None))
+        filters.append(Memory.location_lon.is_not(None))
+    return filters
+
+
+def _list_memory_item(m: Memory) -> MemoryListItem:
+    """Serialize one row for the list response.
+
+    ``created_at`` / ``updated_at`` are stored naive UTC (DateTime without
+    ``timezone=True``), so the serialized form is tagged ``Z`` — JS clients
+    parse naive ISO as local time and would render JST-shifted timestamps.
+    ``updated_at`` is nullable (set explicitly by edit paths; #1317 removed the
+    column's ``onupdate``), so fresh rows fall back to ``created_at`` — the
+    frontend renders both as the row "updated" timestamp.
+
+    ``location`` (#1334) surfaces the generated columns so the UI can plot pins.
+    A half-populated pair serializes as ``None`` rather than a partial point.
+    """
+    return MemoryListItem(
+        id=str(m.id),
+        summary=m.summary,
+        type=m.type,
+        scope=m.scope,
+        importance=m.importance,
+        created_at=to_utc_iso(m.created_at) or "",
+        updated_at=to_utc_iso(m.updated_at or m.created_at) or "",
+        location=(
+            MemoryListItemLocation(lat=m.location_lat, lon=m.location_lon)
+            if m.location_lat is not None and m.location_lon is not None
+            else None
+        ),
+    )
+
+
 @router.get("/list", response_model=MemoryListResponse)
 async def list_memories(
     user: APIKeyOrSessionUser,
@@ -688,211 +846,57 @@ async def list_memories(
             )
             owner_filter = user_id if context.is_private else None
 
-        # Normalize the substring filter: strip surrounding whitespace and
-        # treat empty / whitespace-only values as "no filter" so callers
-        # that bind an empty input box don't accidentally pin results to
-        # rows whose summary literally contains spaces. Independent of
-        # ``owner_filter`` — applies uniformly to both private and shared
-        # context paths.
-        q_normalized = (q or "").strip() or None
-
-        # Escape SQL LIKE wildcards in user input so a literal ``%`` or
-        # ``_`` is matched as a character, not as a wildcard. Without this,
-        # ``q="50%"`` matches every summary containing "50" followed by
-        # anything, and ``q="_"`` matches every single-character row.
-        # Escape backslash first to avoid double-escaping the escape itself.
-        q_pattern: str | None = None
-        if q_normalized:
-            q_escaped = q_normalized.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
-            q_pattern = f"%{q_escaped}%"
-
-        # Normalize the tag filter (#618): strip blanks, drop whitespace-only
-        # entries, de-dup (order-preserving). An all-blank list collapses to
-        # None so a stray ``?tags=`` doesn't pin results to the empty set.
-        tags_normalized: list[str] | None = None
-        if tags:
-            # Bound the filter to the write-path caps (<=64 chars/tag, <=100
-            # tags): drop blank / over-length entries, de-dup (order-preserving),
-            # then cap — so an oversized query string can't reach the DB.
-            cleaned = list(dict.fromkeys(s for t in tags if (s := t.strip()) and len(s) <= 64))[
-                :100
-            ]
-            tags_normalized = cleaned or None
+        q_normalized, q_pattern = _list_q_pattern(q)
+        tags_normalized = _list_tags(tags)
 
         # #1301: agent-binding read filter, SQL form (P0-2 context default-deny
-        # + per-memory type/source subtraction) — applied to BOTH the page
-        # query and the count query below so ``total`` never acts as an
-        # existence oracle over denied rows and pagination stays exact. None
-        # for non-agent credentials and shadow-mode scopes.
+        # + per-memory type/source subtraction). None for non-agent credentials
+        # and shadow-mode scopes.
         binding_predicate = await binding_memory_sql_predicate(db)
 
-        # Build query. Exclude soft-deleted rows — POST /forget sets
-        # ``deleted_at`` rather than removing the row, and the list view
-        # must not surface tombstones.
-        query = select(Memory).where(Memory.deleted_at.is_(None))
+        # ONE predicate list, applied to BOTH the page query and the count.
+        # #1456: these used to be two hand-maintained sequences of ``if x:
+        # query = query.where(...)`` / ``if x: count_query = ...``. They agreed,
+        # but only by hand — and ``total`` must never act as an existence oracle
+        # over rows the page filter excludes, nor pagination go inexact. Sharing
+        # the list makes that structural instead of a review obligation (the
+        # tag / window / geo blocks were already shared for exactly this reason;
+        # this finishes the job).
+        #
+        # Soft-deleted rows are excluded: POST /forget sets ``deleted_at``
+        # rather than removing the row, and the list must not surface tombstones.
+        filters: list[Any] = [Memory.deleted_at.is_(None)]
         if binding_predicate is not None:
-            query = query.where(binding_predicate)
+            filters.append(binding_predicate)
         if owner_filter is not None:
-            query = query.where(Memory.user_id == owner_filter)
-
+            filters.append(Memory.user_id == owner_filter)
         if scope:
-            query = query.where(Memory.scope == scope)
-
+            filters.append(Memory.scope == scope)
         if type:
-            query = query.where(Memory.type == type)
-
+            filters.append(Memory.type == type)
         if context_id is not None:
-            query = query.where(Memory.context_id == context_id)
-
+            filters.append(Memory.context_id == context_id)
         if q_pattern is not None:
-            query = query.where(Memory.summary.ilike(q_pattern, escape="\\"))
-
-        # Tag filter (#618 ANY / #830 ALL). Built once and applied to BOTH the
-        # data and count queries so the total always reflects the same filter
-        # (the two used to carry duplicate predicates — easy to let drift).
-        # NULL-tags rows never match either operator, so they're excluded in
-        # both modes.
-        tag_filter = None
-        if tags_normalized is not None:
-            if tags_match == "all":
-                # ALL-match (#830): row's tags contain every requested tag
-                # (PG array contains ``@>``).
-                tag_filter = Memory.tags.contains(tags_normalized)
-            else:
-                # ANY-match (default, #618): row has at least one of the
-                # requested tags (PG array overlap ``&&``).
-                tag_filter = Memory.tags.overlap(tags_normalized)
+            filters.append(Memory.summary.ilike(q_pattern, escape="\\"))
+        tag_filter = _list_tag_filter(tags_normalized, tags_match)
         if tag_filter is not None:
-            query = query.where(tag_filter)
+            filters.append(tag_filter)
+        filters.extend(_list_window_filters(trigger_from, trigger_until))
+        filters.extend(_list_geo_filters(lat_min, lat_max, lon_min, lon_max))
 
-        # Time Memory (#877) window overlap, built once and applied to BOTH
-        # queries (same anti-drift rationale as tag_filter above). A stored
-        # window [trigger_from, trigger_until] overlaps the query window
-        # [qfrom, quntil] iff trigger_from <= quntil AND trigger_until >= qfrom.
-        # The columns are TEXT fixed-width ISO, so string comparison ==
-        # chronological comparison — but ONLY if the caller's bounds are the
-        # same fixed-width form. parse_query_bound re-normalizes them (and
-        # resolves the 'now' shortcut); a malformed bound is a 422, not silent
-        # wrong results. isinstance(str) (not `is not None`) skips the unset
-        # Query() FieldInfo sentinel that direct-call unit tests pass.
-        from utils.time_trigger import TriggerValidationError, parse_query_bound
-
-        try:
-            qfrom = parse_query_bound(trigger_from) if isinstance(trigger_from, str) else None
-            quntil = parse_query_bound(trigger_until) if isinstance(trigger_until, str) else None
-        except TriggerValidationError as e:
-            raise HTTPException(
-                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=str(e)
-            ) from e
-
-        window_filters = []
-        if qfrom is not None:
-            window_filters.append(Memory.trigger_until >= qfrom)
-        if quntil is not None:
-            window_filters.append(Memory.trigger_from <= quntil)
-        for wf in window_filters:
-            query = query.where(wf)
-
-        # WHERE-axis bbox filter (#1334), built once and applied to BOTH
-        # queries (anti-drift, same rationale as tag_filter / window_filters).
-        # Bounds may be one-sided (time-axis mirror). isinstance (not
-        # `is not None`) skips the unset Query() FieldInfo sentinel that
-        # direct-call unit tests pass.
-        geo_filters = []
-        if isinstance(lat_min, int | float):
-            geo_filters.append(Memory.location_lat >= lat_min)
-        if isinstance(lat_max, int | float):
-            geo_filters.append(Memory.location_lat <= lat_max)
-        lon_lo = lon_min if isinstance(lon_min, int | float) else None
-        lon_hi = lon_max if isinstance(lon_max, int | float) else None
-        if lon_lo is not None and lon_hi is not None and lon_lo > lon_hi:
-            # Antimeridian-crossing box (map viewport panned across ±180°):
-            # the wrapped range is the union of the two edge ranges, same
-            # two-ranges-ORed convention as utils.geo_location.bbox_lon_ranges
-            # (#1331). Without this branch the AND of the two bounds is
-            # unsatisfiable and a valid viewport silently returns empty.
-            geo_filters.append(or_(Memory.location_lon >= lon_lo, Memory.location_lon <= lon_hi))
-        else:
-            if lon_lo is not None:
-                geo_filters.append(Memory.location_lon >= lon_lo)
-            if lon_hi is not None:
-                geo_filters.append(Memory.location_lon <= lon_hi)
-        if geo_filters:
-            # Pair-completeness: a bbox-filtered result must contain only
-            # plottable rows. A half-populated pair (raw-SQL writer artifact
-            # where the e69 regex guard NULLed one coordinate) would match a
-            # one-sided bound yet serialize location=None below — require
-            # both columns so filter and serialization semantics agree
-            # (mirrors services/geo_memory.py's explicit IS NOT NULL; the
-            # explicit location_lat IS NOT NULL also keeps the query
-            # eligible for the partial index, whose predicate covers lat
-            # and deleted_at only).
-            geo_filters.append(Memory.location_lat.is_not(None))
-            geo_filters.append(Memory.location_lon.is_not(None))
-        for gf in geo_filters:
-            query = query.where(gf)
-
-        # Get total count (with same filters as data query)
-        count_query = select(func.count(Memory.id)).where(Memory.deleted_at.is_(None))
-        if binding_predicate is not None:
-            count_query = count_query.where(binding_predicate)
-        if owner_filter is not None:
-            count_query = count_query.where(Memory.user_id == owner_filter)
-        if scope:
-            count_query = count_query.where(Memory.scope == scope)
-        if type:
-            count_query = count_query.where(Memory.type == type)
-        if context_id is not None:
-            count_query = count_query.where(Memory.context_id == context_id)
-        if q_pattern is not None:
-            count_query = count_query.where(Memory.summary.ilike(q_pattern, escape="\\"))
-        if tag_filter is not None:
-            count_query = count_query.where(tag_filter)
-        for wf in window_filters:
-            count_query = count_query.where(wf)
-        for gf in geo_filters:
-            count_query = count_query.where(gf)
-        count_result = await db.execute(count_query)
+        count_result = await db.execute(select(func.count(Memory.id)).where(*filters))
         total = count_result.scalar() or 0
 
-        # Get memories. order_by=trigger_from (#877) sorts ascending for
-        # upcoming-first Time Memory listing; default stays created_at desc.
+        # order_by=trigger_from (#877) sorts ascending for upcoming-first Time
+        # Memory listing; default stays created_at desc.
         order_clause = (
             Memory.trigger_from.asc() if order_by == "trigger_from" else Memory.created_at.desc()
         )
-        result = await db.execute(query.order_by(order_clause).limit(limit).offset(offset))
+        result = await db.execute(
+            select(Memory).where(*filters).order_by(order_clause).limit(limit).offset(offset)
+        )
         memories = list(result.scalars().all())
-
-        # Convert to response. Memory.created_at / updated_at are stored as
-        # naive UTC datetimes (DateTime without timezone=True). Tag the
-        # serialized form with "Z" so JS clients (which parse naive ISO as
-        # local time) don't render JST-shifted relative timestamps.
-        # ``updated_at`` is nullable (set explicitly by edit paths — #1317
-        # removed the column's onupdate), so fall back to ``created_at`` for
-        # fresh rows that haven't been touched since insert. The frontend
-        # renders both as the row "updated" timestamp, so created_at is the
-        # correct fallback rather than null/empty.
-        # ``location`` (#1334) surfaces the generated columns so the UI can
-        # plot pins. A half-populated pair (raw-SQL writer artifact where the
-        # e69 regex guard NULLed one coordinate) serializes as None rather
-        # than a partial point.
-        memory_items = [
-            MemoryListItem(
-                id=str(m.id),
-                summary=m.summary,
-                type=m.type,
-                scope=m.scope,
-                importance=m.importance,
-                created_at=to_utc_iso(m.created_at) or "",
-                updated_at=to_utc_iso(m.updated_at or m.created_at) or "",
-                location=(
-                    MemoryListItemLocation(lat=m.location_lat, lon=m.location_lon)
-                    if m.location_lat is not None and m.location_lon is not None
-                    else None
-                ),
-            )
-            for m in memories
-        ]
+        memory_items = [_list_memory_item(m) for m in memories]
 
         has_more = offset + len(memories) < total
 
