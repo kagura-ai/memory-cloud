@@ -929,3 +929,59 @@ class TestRollbackActionDispatch:
         assert any("sleep_merge_retention_days" in e for e in summary["errors"]), summary
         re_embed.assert_not_awaited()
         assert data.get("error") == "partial_rollback"
+
+    @pytest.mark.asyncio
+    async def test_prefetch_is_scoped_to_the_caller(self, user_id, workspace_id):
+        """#1460 review: the re-embed cache must not reach another user's rows.
+
+        ``SleepAction.memory_id`` / ``target_id`` are plain UUID columns, not
+        foreign keys, so a corrupted or tampered action can name any row. Every
+        rollback WRITE is user-scoped already, but the archive undo re-embeds
+        straight from this cache without re-checking — an unscoped prefetch
+        would push another user's summary and content into the caller's Qdrant
+        space.
+        """
+        captured = []
+
+        report_id = uuid4()
+        report = MagicMock()
+        report.id = report_id
+        report.user_id = user_id
+        report.status = "completed"
+        report.context_id = uuid4()
+        report.workspace_id = uuid4()
+
+        action = self._action("archive", id=1)
+        config_result = MagicMock()
+        config_result.scalar_one_or_none.return_value = None
+        prefetch_result = MagicMock()
+        prefetch_result.scalars.return_value.all.return_value = []
+        db = self._db(report, [action], [config_result, prefetch_result])
+
+        original = db.execute.side_effect
+
+        async def _capture(*args, **kwargs):
+            if args:
+                captured.append(str(args[0]))
+            return await original(*args, **kwargs)
+
+        db.execute.side_effect = _capture
+
+        async def mock_get_db():
+            yield db
+
+        with (
+            patch("db.base.get_db", new=mock_get_db),
+            patch(
+                "mcp_server.tools.sleep._check_viewer_permission",
+                new_callable=AsyncMock,
+                return_value=None,
+            ),
+        ):
+            await handle_rollback_sleep_run({"report_id": str(report_id)}, user_id, workspace_id)
+
+        prefetch_sql = [s for s in captured if "memories.id IN" in s]
+        assert prefetch_sql, f"no prefetch query issued; saw: {captured}"
+        assert "memories.user_id = " in prefetch_sql[0], (
+            f"re-embed prefetch is not scoped to the caller: {prefetch_sql[0]}"
+        )

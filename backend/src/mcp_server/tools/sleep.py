@@ -468,11 +468,20 @@ async def _resolve_rollback_workspace_id(db: Any, report: Any) -> str:
     return str(ctx_ws) if ctx_ws else ""
 
 
-async def _prefetch_rollback_memories(db: Any, actions: list[Any]) -> dict[UUID, Any]:
+async def _prefetch_rollback_memories(db: Any, actions: list[Any], user_id: str) -> dict[UUID, Any]:
     """Rows the rollback will re-embed, fetched in one query.
 
     #1208: shadow-mode merges never deleted the loser's vector, so they need no
     re-embed — their undo is reverting the edge.
+
+    Scoped to ``user_id`` (Copilot review on #1460). ``SleepAction.memory_id`` /
+    ``target_id`` are plain UUID columns, not foreign keys, so a corrupted or
+    tampered action can name any row. Every rollback WRITE is already
+    user-scoped, but the archive undo re-embeds from THIS cache without
+    re-checking, which would push another user's summary and content into the
+    caller's Qdrant space. Every sleep phase selects with
+    ``Memory.user_id == user_id``, so a legitimate action can only ever name the
+    report owner's rows — the predicate costs nothing and closes the gap.
     """
     from models.memory import Memory
 
@@ -484,7 +493,9 @@ async def _prefetch_rollback_memories(db: Any, actions: list[Any]) -> dict[UUID,
             re_embed_ids.add(a.memory_id)
     if not re_embed_ids:
         return {}
-    mem_result = await db.execute(select(Memory).where(Memory.id.in_(list(re_embed_ids))))
+    mem_result = await db.execute(
+        select(Memory).where(Memory.id.in_(list(re_embed_ids)), Memory.user_id == user_id)
+    )
     return {m.id: m for m in mem_result.scalars().all()}
 
 
@@ -587,7 +598,7 @@ async def handle_rollback_sleep_run(
                 ctx_id_str=str(report.context_id) if report.context_id else "",
                 collection_name=collection_name,
                 embedding_svc=EmbeddingService(db, model=embedding_model),
-                memory_cache=await _prefetch_rollback_memories(db, actions),
+                memory_cache=await _prefetch_rollback_memories(db, actions, user_id),
                 edge_repo=NeuralEdgeRepository(db),
             )
 
