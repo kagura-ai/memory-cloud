@@ -1,11 +1,13 @@
 """Tests for the ai-worker config endpoint (Spec 2026-06-02, Plan 3)."""
 
 from datetime import timedelta
+from json import JSONDecodeError
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 from uuid import uuid4
 
 import pytest
+from cryptography.fernet import InvalidToken
 from fastapi import Response
 
 from api.routes.workers import (
@@ -355,6 +357,18 @@ async def test_get_worker_config_404_when_context_not_ready():
     assert exc.value.status_code == 404
 
 
+# What a failed secret read actually looks like. ``Encryptor.decrypt`` wraps
+# Fernet's ``InvalidToken`` into a ``ValueError`` (utils/encryption.py), so that
+# is the real shape; the bare ``InvalidToken`` case guards the readiness
+# boundary against that wrapping ever going away, and ``JSONDecodeError`` covers
+# a decryptable-but-unparseable document.
+_DECRYPT_FAILURES = [
+    pytest.param(ValueError("Invalid encrypted value or wrong encryption key"), id="wrapped"),
+    pytest.param(InvalidToken(), id="raw-invalid-token"),
+    pytest.param(JSONDecodeError("Expecting value", "", 0), id="unparseable"),
+]
+
+
 def _llm_gate_conn(llm_config):
     """A connector complete in every respect except its LLM bundle (#1447)."""
     conn = MagicMock()
@@ -459,16 +473,15 @@ async def test_get_worker_config_404_in_managed_mode_when_bundle_is_broken():
 
 
 @pytest.mark.asyncio
-async def test_get_worker_config_404_when_llm_config_undecryptable():
+@pytest.mark.parametrize("failure", _DECRYPT_FAILURES)
+async def test_get_worker_config_404_when_llm_config_undecryptable(failure):
     """#1447: a bundle that cannot be decrypted or parsed (rotated Fernet key,
     corrupted ciphertext) must take the 404 path the worker already handles,
     not a 500 it has no rule for."""
-    from cryptography.fernet import InvalidToken
-
     from utils.exceptions import WorkerConnectorNotReadyError
 
     conn = _llm_gate_conn(None)
-    conn.get_llm_config.side_effect = InvalidToken()
+    conn.get_llm_config.side_effect = failure
 
     with (
         patch("api.routes.workers.get_settings", return_value=_settings()),
@@ -491,17 +504,16 @@ async def test_get_worker_config_404_when_llm_config_undecryptable():
 
 
 @pytest.mark.asyncio
-async def test_get_worker_config_404_when_kmc_key_undecryptable():
+@pytest.mark.parametrize("failure", _DECRYPT_FAILURES)
+async def test_get_worker_config_404_when_kmc_key_undecryptable(failure):
     """#1447 (review round 2): moving readiness above the 304 put the KMC
     decrypt on the cache-hit path too, so a rotated encryption key would have
     turned a previously-quiet 304 into a 500. A credential we cannot read is a
     credential the connector does not have — not-ready, like every other gate."""
-    from cryptography.fernet import InvalidToken
-
     from utils.exceptions import WorkerConnectorNotReadyError
 
     conn = _llm_gate_conn(dict(_VENDABLE_LLM))
-    conn.get_kmc_api_key.side_effect = InvalidToken()
+    conn.get_kmc_api_key.side_effect = failure
 
     with (
         patch("api.routes.workers.get_settings", return_value=_settings()),
