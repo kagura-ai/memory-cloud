@@ -66,6 +66,7 @@ import {
   DialogTitle,
 } from "@/components/ui/dialog";
 import { cn } from "@/lib/utils/cn";
+import { formatDateTime, formatRelativeTime } from "@/lib/utils/datetime";
 import { CONNECTOR_PROVIDERS } from "@/lib/connectors/providers";
 import { useToast } from "@/hooks/use-toast";
 import { useCopyFeedback } from "@/hooks/useCopyFeedback";
@@ -1115,6 +1116,34 @@ export default function ConnectorsPage() {
                         </Button>
                       )}
                     </div>
+                    {/* #1449: ingest outcome. The 2026-07-21..27 outage was
+                      invisible from every screen while this very date sat in
+                      the database. Stated as fact and never coloured — no
+                      traffic is a normal state for a quiet workspace, and a row
+                      that is permanently red gets ignored just like an alert
+                      that fires permanently. */}
+                    <p
+                      className="mt-1 text-xs text-muted-foreground"
+                      // Relative time scans fast ("6 days ago"); the exact UTC
+                      // timestamp is what an operator lines up against logs and
+                      // an outage window, so keep both (review finding).
+                      title={
+                        c.last_memory_at
+                          ? formatDateTime(c.last_memory_at, "UTC", locale)
+                          : undefined
+                      }
+                    >
+                      {c.last_memory_at
+                        ? t("ingestLastWrite", {
+                            when: formatRelativeTime(c.last_memory_at, locale),
+                          })
+                        : t("ingestNeverWritten")}
+                      {" · "}
+                      {t("ingestLast7d", { count: c.memories_last_7d })}
+                      {c.ingest_context_shared && (
+                        <> · {t("ingestSharedContext")}</>
+                      )}
+                    </p>
                     {/* #893: connector_id is non-secret — show it in the list
                       (support / log correlation / CLI target) with a copy
                       button, instead of in the one-time reveal. */}

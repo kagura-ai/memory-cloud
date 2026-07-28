@@ -162,6 +162,20 @@ class WorkspaceConnectorSummary(TZAwareBaseModel):
     display_name: str | None = None
     external_team_id: str | None = None
     context_name: str | None = None
+    # #1449: ingest outcome for the row. The 2026-07-21..27 outage was invisible
+    # from every screen — the worker's /health said "ok", the connector listed
+    # as normal, Slack's webhook answered 200 — while the write-target context
+    # had not been touched since 2026-07-19. That date was in this database the
+    # whole time. Deliberately reported as fact, never coloured as an error: a
+    # low-traffic tenant with no recent writes is healthy, and a row that is
+    # always red gets ignored exactly like an alert that always fires.
+    last_memory_at: datetime | None = None
+    memories_last_7d: int = 0
+    # Another connector writes to the same context, so the two figures above
+    # are the pair's combined traffic, not this connector's (#1449 review).
+    # Surfaced rather than silently averaged away: a shared context is the one
+    # case where a dead connector could read as healthy off its sibling.
+    ingest_context_shared: bool = False
 
 
 class WorkspaceConnectorSettingsUpdateRequest(BaseModel):
@@ -448,6 +462,9 @@ async def list_workspace_connectors(
             display_name=item.display_name,
             external_team_id=item.connector.external_team_id,
             context_name=item.context_name,
+            last_memory_at=item.last_memory_at,
+            memories_last_7d=item.memories_last_7d,
+            ingest_context_shared=item.ingest_context_shared,
         )
         for item in items
     ]
