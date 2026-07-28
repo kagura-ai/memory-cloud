@@ -135,6 +135,34 @@ def _etag(revision: str) -> str:
     return f'"{revision}"'
 
 
+# The keys the bridge's ``LLMConfig`` requires to construct a client. Note the
+# asymmetry with ``ConnectorProvisioningService._validate_llm_config``, which
+# deliberately does NOT require ``api_key`` (provider-dependent — local ollama
+# has none): a bundle can be valid to *store* and still be un-vendable. This
+# gate follows the consumer, not the writer.
+_VENDABLE_LLM_KEYS = ("provider", "model", "api_key")
+
+
+def _is_vendable_llm_config(config: Any) -> bool:
+    """Whether an LLM bundle is complete enough for the worker to use (#1447).
+
+    Args:
+        config: The decrypted ``llm_config`` document, or ``None`` when unset.
+            Typed ``Any`` because the column stores arbitrary decrypted JSON —
+            a drifted row may hold a non-dict, which must be rejected here
+            rather than 500 in response validation.
+
+    Returns:
+        True when every key in :data:`_VENDABLE_LLM_KEYS` is a non-blank
+        string. Extra keys pass through opaquely (provider-specific options).
+    """
+    if not isinstance(config, dict):
+        return False
+    return all(
+        isinstance(config.get(key), str) and config[key].strip() for key in _VENDABLE_LLM_KEYS
+    )
+
+
 def _vend_locale(connector: Any) -> WorkerLocale | None:
     """Best-effort normalization of a stored locale to ``WORKER_LOCALES``.
 
@@ -244,8 +272,10 @@ async def get_worker_config(
 ) -> WorkerConnectorConfig | Response:
     """Return the connector config for a platform team (worker dispatch).
 
-    404 when no connector serves the team, or the connector has no write-target
-    context yet (registration incomplete) — the worker treats both as not-ready.
+    404 when no connector serves the team, the connector has no write-target
+    context yet (registration incomplete), it has no KMC write key, or its
+    ``llm_config`` cannot vend (#1447) — the worker treats all of them as
+    not-ready and skips the team rather than failing the dispatch.
     """
     selected_app_key = app_key or "default"
     app_config_version = 0
@@ -276,6 +306,84 @@ async def get_worker_config(
     if connector is None or connector.context_id is None:
         raise WorkerConnectorNotReadyError()
 
+    # #1447: readiness is decided BEFORE the conditional-GET short-circuit. A 304
+    # asserts "your cached representation is still valid" — but when the resource
+    # would now be a 404, the cached 200 body is precisely what has to be thrown
+    # away. ``config_revision`` is derived from ids + config_version only, so any
+    # readiness change that does not bump config_version (a deployment flipping
+    # ``enable_managed_connectors``, a rotated encryption key) would otherwise
+    # keep a poisoned config alive behind a matching ETag indefinitely. The cost
+    # is decrypting on the 304 path too, which is negligible beside the connector
+    # lookup already performed above.
+    #
+    # Because the decrypt now also runs on the cache-hit path, a corrupt or
+    # unrotatable ciphertext must not become a 500 there (review round 2): a
+    # credential we cannot read is a credential the connector does not have.
+    try:
+        kmc_api_key = connector.get_kmc_api_key()
+    except Exception as exc:
+        logger.warning(
+            "worker_config_kmc_key_undecryptable",
+            connector_id=str(connector.id),
+            error_type=type(exc).__name__,
+        )
+        raise WorkerConnectorNotReadyError() from None
+    if not kmc_api_key:
+        raise WorkerConnectorNotReadyError()
+
+    # #1447: an un-vendable LLM bundle is a not-ready connector, not a ready one
+    # with a hole in it. Vending 200 here poisons the tenant: the worker rejects
+    # the config, the Slack webhook still answers 200, and events are dropped
+    # with no retry and no error anywhere — a 2026-07-21..27 production outage
+    # ran 6 days that way. 404 is the state the worker already handles (skip).
+    #
+    # Managed SaaS (#1426) is the documented exception: there the shared bridge
+    # supplies the pre-compile LLM, which is exactly what
+    # ``enable_managed_connectors`` already means ("stops flagging a missing
+    # per-connector LLM"). This aligns the vend gate with the flag the admin UI
+    # has been honouring all along.
+    #
+    # The carve-out covers an ABSENT bundle only. A present-but-broken one is
+    # not-ready in every mode: the worker would try to use it and fail closed,
+    # and silently falling back to the shared LLM would hide a half-finished
+    # BYO setup. (It also keeps a drifted non-dict document from reaching
+    # response validation, where it raises a 500 instead of a 404.)
+    try:
+        llm_config = connector.get_llm_config()
+    except Exception as exc:
+        # A stored bundle that cannot be decrypted or parsed (rotated Fernet key,
+        # corrupted ciphertext) is un-vendable in exactly the same sense — it must
+        # take the 404 path the worker already handles, not surface as a 500 the
+        # worker has no rule for. Same fail-soft principle as the undecryptable
+        # signing secret in ``get_worker_apps`` above.
+        #
+        # The catch is deliberately broad: a readiness boundary that lets an
+        # unanticipated exception through takes the tenant down, which is the
+        # failure mode this whole change exists to remove. ``error_type`` is
+        # logged so a masked programming error (a renamed column, a changed
+        # return type) is still visible rather than reading as a benign
+        # not-ready connector.
+        logger.warning(
+            "worker_config_llm_undecryptable",
+            connector_id=str(connector.id),
+            error_type=type(exc).__name__,
+        )
+        raise WorkerConnectorNotReadyError() from None
+
+    managed = get_settings().enable_managed_connectors
+    if not _is_vendable_llm_config(llm_config) and not (managed and llm_config is None):
+        # Fires on every poll while the connector stays broken, which is the
+        # intended cadence for a state an operator must act on (and is the same
+        # cadence as ``connector_kmc_key_expired`` below). #1449 adds the durable
+        # admin-UI surface so this log is not the only place it shows up.
+        logger.warning(
+            "worker_config_llm_not_vendable",
+            connector_id=str(connector.id),
+            # Key names only — never the bundle, which holds the API key.
+            present_keys=sorted(llm_config) if isinstance(llm_config, dict) else [],
+        )
+        raise WorkerConnectorNotReadyError()
+
     config_revision = opaque_revision(
         connector.id,
         connector.config_version,
@@ -287,10 +395,6 @@ async def get_worker_config(
     if if_none_match == etag:
         return Response(status_code=status.HTTP_304_NOT_MODIFIED, headers=headers)
     response.headers.update(headers)
-
-    kmc_api_key = connector.get_kmc_api_key()
-    if not kmc_api_key:
-        raise WorkerConnectorNotReadyError()
 
     from utils.datetime import utcnow
 
@@ -344,7 +448,7 @@ async def get_worker_config(
         slack=slack,
         kmc={"mcp_url": get_settings().kmc_mcp_url, "api_key": kmc_api_key},
         resource=resource_block,
-        llm=connector.get_llm_config(),
+        llm=llm_config,
         pii_guardrail_config=connector.pii_guardrail_config,
         # Lenient rehydrate (#1350 review): a stored document drifted across
         # releases must degrade to "no runtime block, worker defaults" — a

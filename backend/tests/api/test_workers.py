@@ -16,9 +16,22 @@ from api.routes.workers import (
 )
 from utils.datetime import utcnow
 
+# #1447: the minimum bundle the bridge's ``LLMConfig`` accepts. A connector
+# missing any of these cannot vend, so the readiness gate rejects it.
+_VENDABLE_LLM = {"provider": "anthropic", "model": "m", "api_key": "sk"}
 
-def _settings(token: str = "wt-secret", mcp_url: str = "https://mcp.example/mcp"):
-    return SimpleNamespace(worker_service_token=token, kmc_mcp_url=mcp_url)
+
+def _settings(
+    token: str = "wt-secret",
+    mcp_url: str = "https://mcp.example/mcp",
+    managed_connectors: bool = False,
+):
+    return SimpleNamespace(
+        worker_service_token=token,
+        kmc_mcp_url=mcp_url,
+        # #1447: mirrors the production default (OSS / self-host, BYO LLM).
+        enable_managed_connectors=managed_connectors,
+    )
 
 
 def test_worker_config_omits_only_absent_runtime_block():
@@ -145,7 +158,9 @@ def _minimal_ready_conn(locale):
     conn.get_kmc_api_key.return_value = "kagura_writekey"
     conn.kmc_api_key_expires_at = None
     conn.get_resource_token.return_value = None
-    conn.get_llm_config.return_value = None
+    # #1447: "ready" now includes a vendable LLM bundle — a connector without
+    # one is not-ready and never reaches the locale/runtime assertions below.
+    conn.get_llm_config.return_value = dict(_VENDABLE_LLM)
     return conn
 
 
@@ -202,7 +217,7 @@ async def test_get_worker_config_revision_changes_when_runtime_revision_changes(
     conn.get_kmc_api_key.return_value = "kagura_writekey"
     conn.kmc_api_key_expires_at = None
     conn.get_resource_token.return_value = None
-    conn.get_llm_config.return_value = None
+    conn.get_llm_config.return_value = dict(_VENDABLE_LLM)
 
     with (
         patch("api.routes.workers.get_settings", return_value=_settings()),
@@ -266,7 +281,7 @@ async def test_get_worker_config_includes_resource_block_when_token_present():
     conn.get_kmc_api_key.return_value = "kagura_writekey"
     conn.kmc_api_key_expires_at = None
     conn.get_resource_token.return_value = "kgr_resource_token"
-    conn.get_llm_config.return_value = None
+    conn.get_llm_config.return_value = dict(_VENDABLE_LLM)
 
     with (
         patch("api.routes.workers.get_settings", return_value=_settings()),
@@ -340,6 +355,229 @@ async def test_get_worker_config_404_when_context_not_ready():
     assert exc.value.status_code == 404
 
 
+def _llm_gate_conn(llm_config):
+    """A connector complete in every respect except its LLM bundle (#1447)."""
+    conn = MagicMock()
+    conn.id = uuid4()
+    conn.workspace_id = uuid4()
+    conn.context_id = uuid4()
+    conn.connector_type = "slack"
+    conn.locale = None
+    conn.external_team_id = "T01"
+    conn.config_version = 1
+    conn.channel_ids = ["C01"]
+    conn.pii_guardrail_config = None
+    conn.runtime_config = None
+    conn.get_oauth_tokens.return_value = {"bot_token": "xoxb-x"}
+    conn.get_kmc_api_key.return_value = "kagura_writekey"
+    conn.kmc_api_key_expires_at = None
+    conn.get_resource_token.return_value = None
+    conn.get_llm_config.return_value = llm_config
+    return conn
+
+
+async def _vend_with_llm(llm_config, *, managed: bool = False):
+    with (
+        patch(
+            "api.routes.workers.get_settings",
+            return_value=_settings(managed_connectors=managed),
+        ),
+        patch("api.routes.workers.ConnectorProvisioningService") as svc,
+        patch("api.routes.workers.WorkerAppIdentityService") as app_svc,
+    ):
+        app_svc.return_value.get_identity = AsyncMock(return_value=None)
+        svc.return_value.get_connector_for_dispatch = AsyncMock(
+            return_value=_llm_gate_conn(llm_config)
+        )
+        return await get_worker_config(
+            response=Response(),
+            platform="slack",
+            team_id="T01",
+            app_key=None,
+            if_none_match=None,
+            _=None,
+            db=MagicMock(),
+        )
+
+
+@pytest.mark.asyncio
+async def test_get_worker_config_404_when_llm_config_absent():
+    """#1447: ``llm: null`` used to vend 200; the worker then fails closed on
+    every event and drops it, so the tenant loses data silently. Not-ready is
+    the honest answer — the worker treats 404 as "skip", not as a failure."""
+    from utils.exceptions import WorkerConnectorNotReadyError
+
+    with pytest.raises(WorkerConnectorNotReadyError) as exc:
+        await _vend_with_llm(None)
+    assert exc.value.status_code == 404
+    assert exc.value.error_code == "WORKER-CONNECTOR-001"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "llm_config",
+    [
+        pytest.param({"provider": "anthropic", "model": "m"}, id="no-api-key"),
+        pytest.param({"provider": "anthropic", "model": "m", "api_key": "  "}, id="blank-api-key"),
+        pytest.param({"provider": "anthropic", "api_key": "sk"}, id="no-model"),
+        pytest.param({"model": "m", "api_key": "sk"}, id="no-provider"),
+        pytest.param({}, id="empty"),
+        pytest.param("anthropic", id="not-a-dict"),
+    ],
+)
+async def test_get_worker_config_404_when_llm_config_cannot_vend(llm_config):
+    """#1447: ``_validate_llm_config`` deliberately does not require ``api_key``
+    (local ollama has none), but the bridge's ``LLMConfig`` does — so a bundle
+    that stores fine is still un-vendable. The gate follows the bridge."""
+    from utils.exceptions import WorkerConnectorNotReadyError
+
+    with pytest.raises(WorkerConnectorNotReadyError) as exc:
+        await _vend_with_llm(llm_config)
+    assert exc.value.status_code == 404
+
+
+@pytest.mark.asyncio
+async def test_get_worker_config_vends_without_llm_in_managed_mode():
+    """#1447: managed SaaS (#1426) is the one deployment where ``llm: null`` is
+    legitimate — the shared bridge supplies the pre-compile LLM (bridge #216).
+    The gate must not fail those tenants closed."""
+    result = await _vend_with_llm(None, managed=True)
+    assert result.llm is None
+    assert result.kmc["api_key"] == "kagura_writekey"
+
+
+@pytest.mark.asyncio
+async def test_get_worker_config_404_in_managed_mode_when_bundle_is_broken():
+    """#1447: the managed carve-out covers an ABSENT bundle, not a broken one.
+    A half-configured BYO bundle would fail the worker closed anyway; silently
+    falling back to the shared LLM would hide the misconfiguration."""
+    from utils.exceptions import WorkerConnectorNotReadyError
+
+    with pytest.raises(WorkerConnectorNotReadyError) as exc:
+        await _vend_with_llm({"provider": "anthropic", "model": "m"}, managed=True)
+    assert exc.value.status_code == 404
+
+
+@pytest.mark.asyncio
+async def test_get_worker_config_404_when_llm_config_undecryptable():
+    """#1447: a bundle that cannot be decrypted or parsed (rotated Fernet key,
+    corrupted ciphertext) must take the 404 path the worker already handles,
+    not a 500 it has no rule for."""
+    from cryptography.fernet import InvalidToken
+
+    from utils.exceptions import WorkerConnectorNotReadyError
+
+    conn = _llm_gate_conn(None)
+    conn.get_llm_config.side_effect = InvalidToken()
+
+    with (
+        patch("api.routes.workers.get_settings", return_value=_settings()),
+        patch("api.routes.workers.ConnectorProvisioningService") as svc,
+        patch("api.routes.workers.WorkerAppIdentityService") as app_svc,
+    ):
+        app_svc.return_value.get_identity = AsyncMock(return_value=None)
+        svc.return_value.get_connector_for_dispatch = AsyncMock(return_value=conn)
+        with pytest.raises(WorkerConnectorNotReadyError) as exc:
+            await get_worker_config(
+                response=Response(),
+                platform="slack",
+                team_id="T01",
+                app_key=None,
+                if_none_match=None,
+                _=None,
+                db=MagicMock(),
+            )
+    assert exc.value.status_code == 404
+
+
+@pytest.mark.asyncio
+async def test_get_worker_config_404_when_kmc_key_undecryptable():
+    """#1447 (review round 2): moving readiness above the 304 put the KMC
+    decrypt on the cache-hit path too, so a rotated encryption key would have
+    turned a previously-quiet 304 into a 500. A credential we cannot read is a
+    credential the connector does not have — not-ready, like every other gate."""
+    from cryptography.fernet import InvalidToken
+
+    from utils.exceptions import WorkerConnectorNotReadyError
+
+    conn = _llm_gate_conn(dict(_VENDABLE_LLM))
+    conn.get_kmc_api_key.side_effect = InvalidToken()
+
+    with (
+        patch("api.routes.workers.get_settings", return_value=_settings()),
+        patch("api.routes.workers.ConnectorProvisioningService") as svc,
+        patch("api.routes.workers.WorkerAppIdentityService") as app_svc,
+    ):
+        app_svc.return_value.get_identity = AsyncMock(return_value=None)
+        svc.return_value.get_connector_for_dispatch = AsyncMock(return_value=conn)
+        with pytest.raises(WorkerConnectorNotReadyError) as exc:
+            await get_worker_config(
+                response=Response(),
+                platform="slack",
+                team_id="T01",
+                app_key=None,
+                if_none_match=None,
+                _=None,
+                db=MagicMock(),
+            )
+    assert exc.value.status_code == 404
+
+
+@pytest.mark.asyncio
+async def test_get_worker_config_404_beats_304_when_llm_becomes_unvendable():
+    """#1447 (review): a matching ETag must not resurrect a poisoned config.
+
+    ``config_revision`` covers ids + config_version only, so a readiness change
+    that does not bump config_version — a deployment flipping
+    ``enable_managed_connectors``, a rotated encryption key — leaves the worker
+    holding a still-matching ETag. If readiness were evaluated after the
+    conditional-GET short-circuit, that worker would keep its cached ``llm:
+    null`` config forever and never see the 404 this fix exists to deliver.
+    """
+    from utils.exceptions import WorkerConnectorNotReadyError
+
+    conn = _llm_gate_conn(dict(_VENDABLE_LLM))
+    with (
+        patch("api.routes.workers.get_settings", return_value=_settings()),
+        patch("api.routes.workers.ConnectorProvisioningService") as svc,
+        patch("api.routes.workers.WorkerAppIdentityService") as app_svc,
+    ):
+        app_svc.return_value.get_identity = AsyncMock(return_value=None)
+        svc.return_value.get_connector_for_dispatch = AsyncMock(return_value=conn)
+        ready = await get_worker_config(
+            response=Response(),
+            platform="slack",
+            team_id="T01",
+            app_key=None,
+            if_none_match=None,
+            _=None,
+            db=MagicMock(),
+        )
+
+        # The bundle goes away without any config_version bump — the worker's
+        # cached ETag still matches byte for byte.
+        conn.get_llm_config.return_value = None
+
+        with pytest.raises(WorkerConnectorNotReadyError) as exc:
+            await get_worker_config(
+                response=Response(),
+                platform="slack",
+                team_id="T01",
+                app_key=None,
+                if_none_match=f'"{ready.config_revision}"',
+                _=None,
+                db=MagicMock(),
+            )
+    assert exc.value.status_code == 404
+
+
+@pytest.mark.asyncio
+async def test_get_worker_config_vends_complete_llm_bundle_unchanged():
+    """#1447 regression guard: a ready connector's response is untouched."""
+    result = await _vend_with_llm(dict(_VENDABLE_LLM))
+    assert result.llm == _VENDABLE_LLM
+
+
 @pytest.mark.asyncio
 async def test_get_worker_config_uses_app_qualified_selector():
     db = MagicMock()
@@ -362,7 +600,7 @@ async def test_get_worker_config_uses_app_qualified_selector():
     conn.get_kmc_api_key.return_value = "kmc-key"
     conn.get_oauth_tokens.return_value = {"bot_token": "xoxb"}
     conn.get_resource_token.return_value = None
-    conn.get_llm_config.return_value = None
+    conn.get_llm_config.return_value = dict(_VENDABLE_LLM)
 
     with (
         patch("api.routes.workers.WorkerAppIdentityService") as app_service,
@@ -391,7 +629,11 @@ async def test_get_worker_config_uses_app_qualified_selector():
 
     assert result.app_key == "sales"
     assert not_modified.status_code == 304
-    assert conn.get_kmc_api_key.call_count == 1
+    # #1447: was 1 — readiness now runs BEFORE the 304 short-circuit, so the key
+    # is read on the cache-hit path too. That decrypt-per-poll is the deliberate
+    # price of never answering 304 for a connector that has become not-ready
+    # (see test_get_worker_config_404_beats_304_when_llm_becomes_unvendable).
+    assert conn.get_kmc_api_key.call_count == 2
     connector_service.return_value.get_connector_for_dispatch.assert_awaited_with(
         connector_type="slack", external_team_id="T01", app_key="sales"
     )
