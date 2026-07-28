@@ -686,7 +686,7 @@ class MemoryService:
         if request.content is not None and request.content != memory.content:
             needs_reembed = True
 
-        self._update_guard_size(memory, request)
+        self._update_guard_size(memory, request, normalized_summary, normalized_ctx_summary)
         effective_details = self._update_apply_fields(
             memory, request, normalized_summary, normalized_ctx_summary
         )
@@ -775,34 +775,46 @@ class MemoryService:
         return memory
 
     @staticmethod
-    def _update_guard_size(memory: Any, request: UpdateMemoryRequest) -> None:
+    def _update_guard_size(
+        memory: Any,
+        request: UpdateMemoryRequest,
+        normalized_summary: str | None,
+        normalized_ctx_summary: str | None,
+    ) -> None:
         """Reject an update that would push the row past ``MAX_CONTENT_SIZE``.
 
-        Preserved as-is from before the #1439 split, including a known quirk:
-        the truthy ``or`` fallbacks are NOT equivalent to the PATCH sibling's
-        explicit ``is None`` checks. ``context_summary`` has no ``min_length``
-        and ``details`` is a free dict, so ``""`` and ``{}`` are valid values
-        that :meth:`_update_apply_fields` does write to the row — but they are
-        falsy, so this guard falls back to the stored value and sizes the row as
-        if the field were untouched. An update that CLEARS a large
-        ``context_summary`` can therefore be rejected for being too big while
-        actually shrinking the row.
+        Sizes the row as it will be AFTER the update, using explicit ``is None``
+        rather than truthy fallbacks (#1458). On this surface ``None`` means
+        "leave this field alone", but ``""`` and ``{}`` are values a client can
+        legitimately send — ``context_summary`` has no ``min_length`` and
+        ``details`` is a free dict — and :meth:`_update_apply_fields` does write
+        them. Under the old ``or`` fallbacks those fell through to the STORED
+        value, so an update that CLEARED a large ``context_summary`` was
+        measured as though it had not, and could be rejected for being too big
+        while actually shrinking the row.
 
-        Left alone deliberately: #1439 is a behaviour-preserving decomposition,
-        and this fails in the safe direction (a spurious rejection, never an
-        oversized row). Tracked separately — do not "tidy" it into ``is None``
-        here without a test for the clearing case.
+        Takes the normalized summaries rather than the raw request fields so the
+        measurement matches what actually lands on the row. (Both are bounded by
+        ``max_length`` 500 / 2000, so the difference cannot move a 1 MB verdict —
+        it is for correctness, not headroom.) Mirrors ``_patch_guard_size``.
 
         Raises:
             QuotaExceededError: the post-update size exceeds the limit.
         """
         from config.constants import MAX_CONTENT_SIZE
 
+        next_summary = normalized_summary if normalized_summary is not None else memory.summary
+        next_ctx_summary = (
+            normalized_ctx_summary if normalized_ctx_summary is not None else memory.context_summary
+        )
+        next_content = request.content if request.content is not None else memory.content
+        next_details = request.details if request.details is not None else memory.details
+
         content_size = (
-            len(request.summary or memory.summary or "")
-            + len(request.context_summary or memory.context_summary or "")
-            + len(request.content or memory.content or "")
-            + len(str(request.details or memory.details or ""))
+            len(next_summary if next_summary is not None else "")
+            + len(next_ctx_summary if next_ctx_summary is not None else "")
+            + len(next_content if next_content is not None else "")
+            + len(str(next_details) if next_details is not None else "")
         )
         if content_size > MAX_CONTENT_SIZE:
             from utils.exceptions import QuotaExceededError
