@@ -133,6 +133,18 @@ export function ChannelPicker({
   // shown as removable chips so a save never silently drops them.
   const listedIds = new Set((channels ?? []).map((c) => c.id));
   const unlisted = value.filter((id) => !listedIds.has(id));
+  // #1451: selections that Slack will never deliver events for. Counted only
+  // over channels we actually fetched — an unlisted id (private channel, manual
+  // entry) has unknown membership, and claiming it is not ingesting would be a
+  // guess dressed as a fact.
+  const notJoinedCount = (channels ?? []).filter(
+    (c) => selected.has(c.id) && !c.is_member,
+  ).length;
+  // …but silence about the unknown ones would repeat the very failure this
+  // issue is about. A selected id we have not fetched yet (it lives on a later
+  // Slack page) is unverified, not verified-fine, so say so instead of letting
+  // the absence of a warning read as an all-clear (review finding).
+  const unverifiedCount = cursor !== null ? unlisted.length : 0;
 
   return (
     <div className="space-y-2">
@@ -160,6 +172,20 @@ export function ChannelPicker({
             </Badge>
           ))}
         </div>
+      )}
+
+      {notJoinedCount > 0 && (
+        // amber-700 (not -600) clears WCAG AA at this 12px size on the light
+        // background; -500 is the dark-theme counterpart (review finding).
+        <p role="status" className="text-xs text-amber-700 dark:text-amber-500">
+          {t("channelsNotJoinedWarning", { count: notJoinedCount })}
+        </p>
+      )}
+
+      {unverifiedCount > 0 && (
+        <p role="status" className="text-xs text-muted-foreground">
+          {t("channelsMembershipUnverified", { count: unverifiedCount })}
+        </p>
       )}
 
       <div className="max-h-48 overflow-y-auto rounded-md border">
@@ -198,6 +224,15 @@ export function ChannelPicker({
                       {c.is_private ? "🔒 " : "#"}
                       {c.name}
                     </span>
+                    {!c.is_member && (
+                      <Badge
+                        variant="outline"
+                        className="ml-auto shrink-0 text-muted-foreground"
+                        title={t("channelsBotNotInChannelHint")}
+                      >
+                        {t("channelsBotNotInChannel")}
+                      </Badge>
+                    )}
                   </button>
                 </li>
               );

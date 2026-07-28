@@ -256,6 +256,9 @@ export interface ConnectorChannel {
   id: string;
   name: string;
   is_private: boolean;
+  // #1451: false = the bot has not joined, so Slack delivers no messages from
+  // this channel and selecting it ingests nothing — silently.
+  is_member: boolean;
 }
 
 export interface ConnectorChannelsPage {
