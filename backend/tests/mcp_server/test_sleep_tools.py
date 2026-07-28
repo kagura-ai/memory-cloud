@@ -3,6 +3,7 @@
 Issue #164: get_sleep_history, get_sleep_report, rollback_sleep_run.
 """
 
+import contextlib
 import json
 from datetime import UTC, datetime
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -653,3 +654,278 @@ class TestShadowMergeRollbackEdgeMismatch:
         assert data.get("error") == "partial_rollback", (
             f"an un-reversed merge was reported as a clean rollback: {data}"
         )
+
+
+class TestRollbackActionDispatch:
+    """#1456: the per-action dispatch, after if/elif became a handler table.
+
+    The old chain fell through silently for any action_type it did not name,
+    and the rewrite must keep that: ``undo_merge`` rows are written onto the
+    SAME report by the per-merge undo path (services/sleep/undo.py), so a
+    rollback run reads them back and MUST ignore them. Turning that silence
+    into an error — or worse, into a handler lookup that raises — would make
+    every report that had one memory individually undone un-rollbackable.
+    """
+
+    @staticmethod
+    def _db(report, actions, extra=None):
+        """AsyncSession double.
+
+        ``extra`` is appended to the positional result queue, which the handler
+        drains in order: report → actions → embedding config (report has a
+        context) → workspace fallback (only when the report has no
+        workspace_id) → re-embed prefetch. Pass results for the queries a given
+        test needs to control; anything past the queue gets a permissive
+        generic result.
+        """
+        report_result = MagicMock()
+        report_result.scalar_one_or_none.return_value = report
+        actions_result = MagicMock()
+        actions_result.scalars.return_value.all.return_value = actions
+
+        db = AsyncMock()
+        queued = [report_result, actions_result, *(extra or [])]
+
+        async def _execute(*_args, **_kwargs):
+            if queued:
+                return queued.pop(0)
+            generic = MagicMock()
+            generic.rowcount = 1
+            generic.scalars.return_value.all.return_value = []
+            generic.scalar_one_or_none.return_value = None
+            return generic
+
+        db.execute.side_effect = _execute
+        db.rollback = AsyncMock()
+        return db
+
+    @staticmethod
+    def _action(action_type, **kw):
+        a = MagicMock()
+        a.action_type = action_type
+        a.id = kw.pop("id", 1)
+        a.memory_id = kw.pop("memory_id", uuid4())
+        a.target_id = kw.pop("target_id", uuid4())
+        a.details = kw.pop("details", {})
+        return a
+
+    async def _run(self, actions, user_id, workspace_id):
+        report_id = uuid4()
+        report = MagicMock()
+        report.id = report_id
+        report.user_id = user_id
+        report.status = "completed"
+        report.context_id = uuid4()
+        # Real UUIDs: the edge repository parses these, so a bare MagicMock
+        # surfaces as "badly formed hexadecimal UUID string" inside a handler.
+        report.workspace_id = uuid4()
+        db = self._db(report, actions)
+
+        async def mock_get_db():
+            yield db
+
+        with (
+            patch("db.base.get_db", new=mock_get_db),
+            patch(
+                "mcp_server.tools.sleep._check_viewer_permission",
+                new_callable=AsyncMock,
+                return_value=None,
+            ),
+            patch(
+                "mcp_server.tools.sleep._re_embed_to_qdrant",
+                new_callable=AsyncMock,
+                return_value=None,
+            ),
+        ):
+            result = await handle_rollback_sleep_run(
+                {"report_id": str(report_id)}, user_id, workspace_id
+            )
+        return json.loads(result[0].text)
+
+    @pytest.fixture
+    def user_id(self):
+        return "user-1456"
+
+    @pytest.fixture
+    def workspace_id(self):
+        return uuid4()
+
+    @pytest.mark.asyncio
+    async def test_unknown_action_type_is_skipped_not_an_error(self, user_id, workspace_id):
+        """An ``undo_merge`` row must not fail the run or inflate any counter."""
+        data = await self._run(
+            [self._action("undo_merge", details={"undone_action_id": 7})],
+            user_id,
+            workspace_id,
+        )
+
+        assert data.get("error") != "partial_rollback", data
+        summary = data["rollback_summary"]
+        assert summary["errors"] == []
+        assert all(
+            summary[k] == 0
+            for k in (
+                "edges_deleted",
+                "merges_reversed",
+                "merges_unreversible",
+                "importance_restored",
+                "promotions_reversed",
+                "archives_restored",
+            )
+        ), summary
+
+    @pytest.mark.asyncio
+    async def test_each_action_type_reaches_its_own_undoer(self, user_id, workspace_id):
+        """Every non-merge counter moves exactly once, nothing bleeds across.
+
+        ``merge`` is covered separately below — it needs the re-embed prefetch
+        primed, and it is the branch most worth pinning on its own (review).
+        """
+        actions = [
+            self._action("create_edge", id=1),
+            self._action("promote", id=2),
+            self._action("archive", id=3),
+            self._action("update_importance", id=4, details={"old_importance": 0.4}),
+            # Unknown type mixed in — it must not disturb its neighbours.
+            self._action("undo_merge", id=5),
+        ]
+        data = await self._run(actions, user_id, workspace_id)
+
+        summary = data["rollback_summary"]
+        assert summary["errors"] == [], summary
+        assert summary["edges_deleted"] == 1
+        assert summary["promotions_reversed"] == 1
+        assert summary["archives_restored"] == 1
+        assert summary["importance_restored"] == 1
+        assert summary["merges_reversed"] == 0
+
+    @pytest.mark.asyncio
+    async def test_one_failing_action_does_not_abandon_the_rest(self, user_id, workspace_id):
+        """Per-action isolation: the loop keeps going and records the failure."""
+        boom = self._action("create_edge", id=1)
+        ok = self._action("promote", id=2)
+
+        report_id = uuid4()
+        report = MagicMock()
+        report.id = report_id
+        report.user_id = user_id
+        report.status = "completed"
+        report.context_id = uuid4()
+        report.workspace_id = uuid4()
+        db = self._db(report, [boom, ok])
+
+        async def mock_get_db():
+            yield db
+
+        class _ExplodingEdgeRepo:
+            def __init__(self, _db):
+                pass
+
+            async def delete_edge(self, **_kw):
+                raise RuntimeError("edge store unavailable")
+
+        with (
+            patch("db.base.get_db", new=mock_get_db),
+            patch(
+                "mcp_server.tools.sleep._check_viewer_permission",
+                new_callable=AsyncMock,
+                return_value=None,
+            ),
+            patch("repositories.neural_edge.NeuralEdgeRepository", new=_ExplodingEdgeRepo),
+        ):
+            result = await handle_rollback_sleep_run(
+                {"report_id": str(report_id)}, user_id, workspace_id
+            )
+
+        data = json.loads(result[0].text)
+        summary = data["rollback_summary"]
+        # The failure is recorded…
+        assert any("edge store unavailable" in e for e in summary["errors"]), summary
+        # …and the following action still ran.
+        assert summary["promotions_reversed"] == 1, summary
+        assert data.get("error") == "partial_rollback"
+
+    async def _run_with_extra(self, actions, extra, user_id, workspace_id, patch_re_embed=True):
+        report_id = uuid4()
+        report = MagicMock()
+        report.id = report_id
+        report.user_id = user_id
+        report.status = "completed"
+        report.context_id = uuid4()
+        report.workspace_id = uuid4()
+        db = self._db(report, actions, extra)
+
+        async def mock_get_db():
+            yield db
+
+        stack = [
+            patch("db.base.get_db", new=mock_get_db),
+            patch(
+                "mcp_server.tools.sleep._check_viewer_permission",
+                new_callable=AsyncMock,
+                return_value=None,
+            ),
+        ]
+        re_embed = AsyncMock(return_value=None)
+        if patch_re_embed:
+            stack.append(patch("mcp_server.tools.sleep._re_embed_to_qdrant", new=re_embed))
+
+        with contextlib.ExitStack() as es:
+            for cm in stack:
+                es.enter_context(cm)
+            result = await handle_rollback_sleep_run(
+                {"report_id": str(report_id)}, user_id, workspace_id
+            )
+        return json.loads(result[0].text), re_embed
+
+    @pytest.mark.asyncio
+    async def test_hard_merge_restores_the_loser_and_re_embeds(self, user_id, workspace_id):
+        """#1456: the non-shadow merge branch — the one the mixed test omits.
+
+        A restored loser must be un-deleted AND re-embedded: the merge hard-
+        deleted its vector, so a row restored without a vector is invisible to
+        every search path.
+        """
+        loser_id = uuid4()
+        loser = MagicMock()
+        loser.id = loser_id
+
+        config_result = MagicMock()
+        config_result.scalar_one_or_none.return_value = None  # no per-context config
+        prefetch_result = MagicMock()
+        prefetch_result.scalars.return_value.all.return_value = [loser]
+
+        action = self._action("merge", id=1, target_id=loser_id, details={})
+        data, re_embed = await self._run_with_extra(
+            [action], [config_result, prefetch_result], user_id, workspace_id
+        )
+
+        summary = data["rollback_summary"]
+        assert summary["errors"] == [], summary
+        assert summary["merges_reversed"] == 1, summary
+        re_embed.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_hard_merge_reports_a_purged_loser_instead_of_a_phantom_restore(
+        self, user_id, workspace_id
+    ):
+        """#1209 semantics survive the extraction: a loser the retention policy
+        purged is an ERROR, not a counted reversal. Reporting a restore that
+        never happened is the failure mode this branch exists to prevent."""
+        loser_id = uuid4()
+        config_result = MagicMock()
+        config_result.scalar_one_or_none.return_value = None
+        prefetch_result = MagicMock()
+        prefetch_result.scalars.return_value.all.return_value = []  # purged
+
+        action = self._action("merge", id=1, target_id=loser_id, details={})
+        data, re_embed = await self._run_with_extra(
+            [action], [config_result, prefetch_result], user_id, workspace_id
+        )
+
+        summary = data["rollback_summary"]
+        assert summary["merges_reversed"] == 0, summary
+        assert any("not restorable" in e for e in summary["errors"]), summary
+        assert any("sleep_merge_retention_days" in e for e in summary["errors"]), summary
+        re_embed.assert_not_awaited()
+        assert data.get("error") == "partial_rollback"

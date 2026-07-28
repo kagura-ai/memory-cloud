@@ -4,7 +4,7 @@ Issue #164: get_sleep_history, get_sleep_report, rollback_sleep_run.
 """
 
 import time
-from typing import Any, cast
+from typing import Any, NamedTuple, cast
 from uuid import UUID
 
 from mcp.types import TextContent
@@ -247,16 +247,254 @@ async def handle_get_sleep_report(
     return _error_response("db_error", "Database unavailable.")
 
 
+class _RollbackCtx(NamedTuple):
+    """Per-run values every action handler needs (#1456).
+
+    Bundled so the handlers take ``(db, action, ctx, summary)`` instead of eight
+    positional arguments each. Everything here is resolved once, before the
+    dispatch loop.
+    """
+
+    user_id: str
+    ws_id: str
+    ctx_id_str: str
+    collection_name: str
+    embedding_svc: Any
+    # Rows pre-fetched for re-embedding, keyed by id. A miss means the row is
+    # gone (retention purge) — the merge handler treats that as an error rather
+    # than reporting a restore that never happened.
+    memory_cache: dict[UUID, Any]
+    edge_repo: Any
+
+
+async def _undo_create_edge(
+    db: Any, action: Any, ctx: _RollbackCtx, summary: dict[str, Any]
+) -> None:
+    """Delete an edge the run created."""
+    if not (action.memory_id and action.target_id):
+        return
+    await ctx.edge_repo.delete_edge(
+        user_id=ctx.user_id,
+        src_id=action.memory_id,
+        dst_id=action.target_id,
+        workspace_id=ctx.ws_id or None,
+        context_id=ctx.ctx_id_str or None,
+    )
+    summary["edges_deleted"] += 1
+
+
+async def _undo_shadow_merge(
+    db: Any, action: Any, ctx: _RollbackCtx, summary: dict[str, Any]
+) -> None:
+    """Revert a #1208 shadow merge's supersedes edge.
+
+    The loser was never deleted, so undoing the merge means reverting the edge
+    (winner=memory_id → loser=target_id): restore the pre-merge edge from the
+    ``prior_edge`` snapshot, or verified-delete it when the merge created the
+    edge. Shared helper with per-merge undo so the two paths cannot drift.
+    """
+    from services.sleep.undo import ShadowEdgeRevert, revert_shadow_merge_edge
+
+    if not action.memory_id:
+        return
+
+    reverted = await revert_shadow_merge_edge(
+        db,
+        user_id=ctx.user_id,
+        winner_id=action.memory_id,
+        loser_id=action.target_id,
+        prior_edge=(action.details or {}).get("prior_edge"),
+    )
+    if reverted is ShadowEdgeRevert.RESTORED:
+        summary["merges_reversed"] += 1
+    elif reverted is ShadowEdgeRevert.ALREADY_UNDONE:
+        # Benign: the edge is already in its post-undo state. Nothing to
+        # reverse, nothing to report (#1441).
+        logger.warning(
+            "shadow_merge_rollback_already_undone",
+            src_id=str(action.memory_id),
+            dst_id=str(action.target_id),
+        )
+    else:
+        # #1450: a later writer changed or removed the edge, so this action was
+        # NOT reversed. Both zero-row causes used to land in the branch above,
+        # which made an unreversed merge indistinguishable from a clean rollback
+        # outside of a stdout warning. Same treatment as the hard-merge sibling
+        # below (a loser that could not be restored): an error, so the run
+        # reports partial_rollback rather than success.
+        summary["merges_unreversible"] += 1
+        summary["errors"].append(
+            f"shadow merge {action.memory_id} → {action.target_id} not reversed — "
+            "the edge was changed or removed by a later writer, so the pre-merge "
+            "state could not be restored"
+        )
+        logger.warning(
+            "shadow_merge_rollback_blocked_by_newer_state",
+            src_id=str(action.memory_id),
+            dst_id=str(action.target_id),
+        )
+
+
+async def _undo_merge(db: Any, action: Any, ctx: _RollbackCtx, summary: dict[str, Any]) -> None:
+    """Restore a merge loser (row + vector), or revert a shadow merge's edge."""
+    from sqlalchemy import update as sa_update
+
+    from models.memory import Memory
+
+    if not action.target_id:
+        return
+    if (action.details or {}).get("mode") == "shadow":
+        await _undo_shadow_merge(db, action, ctx, summary)
+        return
+
+    restore_result = await db.execute(
+        sa_update(Memory)
+        .where(Memory.id == action.target_id, Memory.user_id == ctx.user_id)
+        .values(deleted_at=None, deleted_by=None)
+    )
+    loser = ctx.memory_cache.get(action.target_id)
+    # #1209: a loser hard-deleted by the merge retention window matches 0 rows —
+    # record it as an error instead of a phantom "reversed" (the per-merge undo
+    # path returns 409 for the same state; run-level rollback must not report a
+    # restore that never happened). Result[Any] at type level, CursorResult at
+    # runtime — .rowcount lives on the latter (#1442).
+    restore_rows = cast(CursorResult[Any], restore_result).rowcount
+    if restore_rows == 0 or loser is None:
+        summary["errors"].append(
+            f"merge loser {action.target_id} not restorable — purged by the "
+            "retention policy (sleep_merge_retention_days)"
+        )
+        return
+
+    await _re_embed_to_qdrant(
+        loser, ctx.user_id, ctx.embedding_svc, ctx.ws_id, ctx.ctx_id_str, ctx.collection_name
+    )
+    summary["merges_reversed"] += 1
+
+
+async def _undo_update_importance(
+    db: Any, action: Any, ctx: _RollbackCtx, summary: dict[str, Any]
+) -> None:
+    """Restore the pre-run importance, best-effort syncing the Qdrant payload."""
+    from sqlalchemy import update as sa_update
+
+    from db.qdrant import update_memory_payload_in_qdrant
+    from models.memory import Memory
+    from utils.datetime import utcnow
+
+    old_importance = (action.details or {}).get("old_importance")
+    if not (action.memory_id and old_importance is not None):
+        return
+
+    await db.execute(
+        sa_update(Memory)
+        .where(Memory.id == action.memory_id, Memory.user_id == ctx.user_id)
+        .values(importance=old_importance, updated_at=utcnow())
+    )
+    try:
+        await update_memory_payload_in_qdrant(
+            memory_id=action.memory_id,
+            payload_updates={"importance": old_importance},
+            collection_name=ctx.collection_name,
+        )
+    except Exception:
+        pass  # Non-fatal: Qdrant payload sync
+    summary["importance_restored"] += 1
+
+
+async def _undo_promote(db: Any, action: Any, ctx: _RollbackCtx, summary: dict[str, Any]) -> None:
+    """Send a promoted memory back to the working scope."""
+    from sqlalchemy import update as sa_update
+
+    from models.memory import Memory
+    from utils.datetime import utcnow
+
+    if not action.memory_id:
+        return
+    await db.execute(
+        sa_update(Memory)
+        .where(Memory.id == action.memory_id, Memory.user_id == ctx.user_id)
+        .values(scope="working", promoted_at=None, updated_at=utcnow())
+    )
+    summary["promotions_reversed"] += 1
+
+
+async def _undo_archive(db: Any, action: Any, ctx: _RollbackCtx, summary: dict[str, Any]) -> None:
+    """Un-delete an archived memory and rebuild its vector."""
+    from sqlalchemy import update as sa_update
+
+    from models.memory import Memory
+
+    if not action.memory_id:
+        return
+    await db.execute(
+        sa_update(Memory)
+        .where(Memory.id == action.memory_id, Memory.user_id == ctx.user_id)
+        .values(deleted_at=None, deleted_by=None)
+    )
+    mem = ctx.memory_cache.get(action.memory_id)
+    if mem:
+        await _re_embed_to_qdrant(
+            mem, ctx.user_id, ctx.embedding_svc, ctx.ws_id, ctx.ctx_id_str, ctx.collection_name
+        )
+    summary["archives_restored"] += 1
+
+
+# Action type → undoer. An action type absent from this table is skipped
+# silently, which is the pre-existing behaviour of the if/elif chain this
+# replaces — ``undo_merge`` rows (written by the per-merge undo onto the same
+# report) rely on it.
+_UNDO_HANDLERS = {
+    "create_edge": _undo_create_edge,
+    "merge": _undo_merge,
+    "update_importance": _undo_update_importance,
+    "promote": _undo_promote,
+    "archive": _undo_archive,
+}
+
+
+async def _resolve_rollback_workspace_id(db: Any, report: Any) -> str:
+    """Report's workspace id, falling back to its context's (#1456 extract)."""
+    if report.workspace_id:
+        return str(report.workspace_id)
+    if not report.context_id:
+        return ""
+    from models.auth import Context
+
+    ctx_result = await db.execute(
+        select(Context.workspace_id).where(Context.id == report.context_id)
+    )
+    ctx_ws = ctx_result.scalar_one_or_none()
+    return str(ctx_ws) if ctx_ws else ""
+
+
+async def _prefetch_rollback_memories(db: Any, actions: list[Any]) -> dict[UUID, Any]:
+    """Rows the rollback will re-embed, fetched in one query.
+
+    #1208: shadow-mode merges never deleted the loser's vector, so they need no
+    re-embed — their undo is reverting the edge.
+    """
+    from models.memory import Memory
+
+    re_embed_ids: set[UUID] = set()
+    for a in actions:
+        if a.action_type == "merge" and a.target_id and (a.details or {}).get("mode") != "shadow":
+            re_embed_ids.add(a.target_id)
+        elif a.action_type == "archive" and a.memory_id:
+            re_embed_ids.add(a.memory_id)
+    if not re_embed_ids:
+        return {}
+    mem_result = await db.execute(select(Memory).where(Memory.id.in_(list(re_embed_ids))))
+    return {m.id: m for m in mem_result.scalars().all()}
+
+
 async def handle_rollback_sleep_run(
     args: dict[str, Any], user_id: str, workspace_id: UUID | None
 ) -> list[TextContent]:
     """Rollback all actions from a completed sleep maintenance run."""
-    from sqlalchemy import update as sa_update
-
     from db.base import get_db
-    from db.qdrant import get_collection_name, update_memory_payload_in_qdrant
+    from db.qdrant import get_collection_name
     from models.config import ContextSearchConfig
-    from models.memory import Memory
     from models.sleep import SleepAction, SleepReport
     from repositories.neural_edge import NeuralEdgeRepository
     from services.embedding_service import EmbeddingService
@@ -329,7 +567,6 @@ async def handle_rollback_sleep_run(
                     )
                     embedding_model = search_config.embedding_model
 
-            edge_repo = NeuralEdgeRepository(db)
             rollback_summary = {
                 "edges_deleted": 0,
                 "merges_reversed": 0,
@@ -344,206 +581,26 @@ async def handle_rollback_sleep_run(
                 "errors": [],
             }
 
-            ctx_id_str = str(report.context_id) if report.context_id else ""
-            # Resolve workspace_id — required by add_memory_to_qdrant
-            ws_id = str(report.workspace_id) if report.workspace_id else ""
-            if not ws_id and report.context_id:
-                from models.auth import Context
-
-                ctx_stmt = select(Context.workspace_id).where(Context.id == report.context_id)
-                ctx_result = await db.execute(ctx_stmt)
-                ctx_ws = ctx_result.scalar_one_or_none()
-                if ctx_ws:
-                    ws_id = str(ctx_ws)
-            embedding_svc = EmbeddingService(db, model=embedding_model)
-
-            # Pre-fetch all memories that need re-embedding (merge/archive).
-            # #1208: shadow-mode merges never deleted the loser's vector, so
-            # they need no re-embed — their undo is deleting the edge below.
-            re_embed_ids: set[UUID] = set()
-            for a in actions:
-                if (
-                    a.action_type == "merge"
-                    and a.target_id
-                    and (a.details or {}).get("mode") != "shadow"
-                ):
-                    re_embed_ids.add(a.target_id)
-                elif a.action_type == "archive" and a.memory_id:
-                    re_embed_ids.add(a.memory_id)
-            memory_cache: dict[UUID, Any] = {}
-            if re_embed_ids:
-                mem_stmt = select(Memory).where(Memory.id.in_(list(re_embed_ids)))
-                mem_result = await db.execute(mem_stmt)
-                memory_cache = {m.id: m for m in mem_result.scalars().all()}
+            ctx = _RollbackCtx(
+                user_id=user_id,
+                ws_id=await _resolve_rollback_workspace_id(db, report),
+                ctx_id_str=str(report.context_id) if report.context_id else "",
+                collection_name=collection_name,
+                embedding_svc=EmbeddingService(db, model=embedding_model),
+                memory_cache=await _prefetch_rollback_memories(db, actions),
+                edge_repo=NeuralEdgeRepository(db),
+            )
 
             for action in actions:
+                handler = _UNDO_HANDLERS.get(action.action_type)
+                if handler is None:
+                    continue
                 try:
-                    if action.action_type == "create_edge":
-                        if action.memory_id and action.target_id:
-                            await edge_repo.delete_edge(
-                                user_id=user_id,
-                                src_id=action.memory_id,
-                                dst_id=action.target_id,
-                                workspace_id=ws_id or None,
-                                context_id=ctx_id_str or None,
-                            )
-                            rollback_summary["edges_deleted"] += 1
-
-                    elif action.action_type == "merge":
-                        if action.target_id:
-                            if (action.details or {}).get("mode") == "shadow":
-                                # #1208 shadow-mode merge: the loser was never
-                                # deleted — undoing the merge means reverting
-                                # the supersedes edge (winner=memory_id →
-                                # loser=target_id): restore the pre-merge
-                                # edge from the prior_edge snapshot, or
-                                # verified-delete it when the merge created
-                                # the edge. Shared helper with per-merge undo
-                                # so the two paths cannot drift.
-                                if action.memory_id:
-                                    from services.sleep.undo import (
-                                        ShadowEdgeRevert,
-                                        revert_shadow_merge_edge,
-                                    )
-
-                                    reverted = await revert_shadow_merge_edge(
-                                        db,
-                                        user_id=user_id,
-                                        winner_id=action.memory_id,
-                                        loser_id=action.target_id,
-                                        prior_edge=(action.details or {}).get("prior_edge"),
-                                    )
-                                    if reverted is ShadowEdgeRevert.RESTORED:
-                                        rollback_summary["merges_reversed"] += 1
-                                    elif reverted is ShadowEdgeRevert.ALREADY_UNDONE:
-                                        # Benign: the edge is already in its
-                                        # post-undo state. Nothing to reverse,
-                                        # nothing to report (#1441).
-                                        logger.warning(
-                                            "shadow_merge_rollback_already_undone",
-                                            src_id=str(action.memory_id),
-                                            dst_id=str(action.target_id),
-                                        )
-                                    else:
-                                        # #1450: a later writer changed or removed
-                                        # the edge, so this action was NOT
-                                        # reversed. Both zero-row causes used to
-                                        # land in the branch above, which made an
-                                        # unreversed merge indistinguishable from
-                                        # a clean rollback outside of a stdout
-                                        # warning. Same treatment as its sibling
-                                        # below (a loser that could not be
-                                        # restored): it is an error, so the run
-                                        # reports partial_rollback, not success.
-                                        rollback_summary["merges_unreversible"] += 1
-                                        rollback_summary["errors"].append(
-                                            f"shadow merge {action.memory_id} → "
-                                            f"{action.target_id} not reversed — the edge "
-                                            "was changed or removed by a later writer, so "
-                                            "the pre-merge state could not be restored"
-                                        )
-                                        logger.warning(
-                                            "shadow_merge_rollback_blocked_by_newer_state",
-                                            src_id=str(action.memory_id),
-                                            dst_id=str(action.target_id),
-                                        )
-                            else:
-                                restore_result = await db.execute(
-                                    sa_update(Memory)
-                                    .where(
-                                        Memory.id == action.target_id,
-                                        Memory.user_id == user_id,
-                                    )
-                                    .values(deleted_at=None, deleted_by=None)
-                                )
-                                loser = memory_cache.get(action.target_id)
-                                # #1209: a loser hard-deleted by the merge
-                                # retention window matches 0 rows — record it
-                                # as an error instead of a phantom "reversed"
-                                # (the per-merge undo path returns 410 for the
-                                # same state; run-level rollback must not
-                                # report a restore that never happened).
-                                # Result[Any] at type level, CursorResult at
-                                # runtime — .rowcount lives on the latter (#1442).
-                                restore_rows = cast(CursorResult[Any], restore_result).rowcount
-                                if restore_rows == 0 or loser is None:
-                                    rollback_summary["errors"].append(
-                                        f"merge loser {action.target_id} not restorable — "
-                                        "purged by the retention policy "
-                                        "(sleep_merge_retention_days)"
-                                    )
-                                else:
-                                    await _re_embed_to_qdrant(
-                                        loser,
-                                        user_id,
-                                        embedding_svc,
-                                        ws_id,
-                                        ctx_id_str,
-                                        collection_name,
-                                    )
-                                    rollback_summary["merges_reversed"] += 1
-
-                    elif action.action_type == "update_importance":
-                        details = action.details or {}
-                        old_importance = details.get("old_importance")
-                        if action.memory_id and old_importance is not None:
-                            await db.execute(
-                                sa_update(Memory)
-                                .where(
-                                    Memory.id == action.memory_id,
-                                    Memory.user_id == user_id,
-                                )
-                                .values(importance=old_importance, updated_at=utcnow())
-                            )
-                            try:
-                                await update_memory_payload_in_qdrant(
-                                    memory_id=action.memory_id,
-                                    payload_updates={"importance": old_importance},
-                                    collection_name=collection_name,
-                                )
-                            except Exception:
-                                pass  # Non-fatal: Qdrant payload sync
-                            rollback_summary["importance_restored"] += 1
-
-                    elif action.action_type == "promote":
-                        if action.memory_id:
-                            await db.execute(
-                                sa_update(Memory)
-                                .where(
-                                    Memory.id == action.memory_id,
-                                    Memory.user_id == user_id,
-                                )
-                                .values(
-                                    scope="working",
-                                    promoted_at=None,
-                                    updated_at=utcnow(),
-                                )
-                            )
-                            rollback_summary["promotions_reversed"] += 1
-
-                    elif action.action_type == "archive":
-                        if action.memory_id:
-                            await db.execute(
-                                sa_update(Memory)
-                                .where(
-                                    Memory.id == action.memory_id,
-                                    Memory.user_id == user_id,
-                                )
-                                .values(deleted_at=None, deleted_by=None)
-                            )
-                            mem = memory_cache.get(action.memory_id)
-                            if mem:
-                                await _re_embed_to_qdrant(
-                                    mem,
-                                    user_id,
-                                    embedding_svc,
-                                    ws_id,
-                                    ctx_id_str,
-                                    collection_name,
-                                )
-                            rollback_summary["archives_restored"] += 1
-
+                    await handler(db, action, ctx, rollback_summary)
                 except Exception as e:
+                    # Per-action isolation: one failed undo must not abandon the
+                    # rest of the run. The error lands in the summary, which is
+                    # what flips the report to partial_rollback below.
                     logger.warning(
                         f"rollback_action_failed: action={action.id} "
                         f"type={action.action_type} error={e}"
