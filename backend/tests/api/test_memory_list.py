@@ -14,6 +14,7 @@ from uuid import uuid4
 import pytest
 
 from api.routes.memory import list_memories
+from models.memory import Memory
 from utils.exceptions import NotFoundException
 
 MOCK_USER = {"user_id": "test_user_123"}
@@ -61,6 +62,19 @@ def _where_sql(mock_db, call_index: int) -> str:
     stmt = mock_db.execute.call_args_list[call_index].args[0]
     whereclause = stmt.whereclause
     return str(whereclause.compile(compile_kwargs={"literal_binds": False}))
+
+
+def _where_sql_and_params(mock_db, call_index: int) -> tuple[str, dict]:
+    """WHERE clause AND its bound values (#1456 review).
+
+    ``_where_sql`` renders binds as ``:user_id_1`` placeholders, so two filter
+    sets that differ only in VALUE compile to identical text — a count scoped to
+    one user and a page scoped to another would look equal. Comparing the
+    ``params`` map alongside the SQL closes that hole.
+    """
+    stmt = mock_db.execute.call_args_list[call_index].args[0]
+    compiled = stmt.whereclause.compile(compile_kwargs={"literal_binds": False})
+    return str(compiled), dict(compiled.params)
 
 
 class TestListMemoriesContextFilter:
@@ -675,3 +689,93 @@ async def test_context_id_forwards_api_key_workspace():
     mock_perm_instance.resolve_context_for_workspace_read.assert_awaited_once_with(
         user_id="test_user_123", context_id=context_id, key_workspace_id=ws
     )
+
+
+@pytest.mark.asyncio
+async def test_count_and_page_queries_carry_identical_filters():
+    """#1456: the count and the page must filter by exactly the same predicates.
+
+    These were two hand-maintained sequences of ``if x: query = query.where(...)``
+    / ``if x: count_query = count_query.where(...)``. They agreed, but only
+    because someone kept them in step — and a drifted pair is not a cosmetic
+    bug: ``total`` becomes an existence oracle over rows the page filter hides,
+    and pagination (``has_more``) goes wrong against a total the page can never
+    reach. The refactor builds one list and applies it to both; this asserts the
+    property directly rather than trusting that the two blocks still match.
+
+    Every filter is engaged at once — including the #1301 binding predicate,
+    which an earlier version of this test stubbed to ``None`` and therefore did
+    not cover at all (review finding). A predicate dropped from one side shows
+    up here regardless of which one it is.
+    """
+    mem = _mock_memory_row()
+    mock_db = _db_with_rows(total=1, rows=[mem])
+    context_id = uuid4()
+
+    mock_context = MagicMock()
+    mock_context.is_private = True
+    mock_perm_instance = MagicMock()
+    mock_perm_instance.resolve_context_for_workspace_read = AsyncMock(return_value=mock_context)
+
+    with (
+        patch("api.routes.memory.PermissionService", return_value=mock_perm_instance),
+        patch(
+            "api.routes.memory.binding_memory_sql_predicate",
+            # A real predicate, not None: otherwise the branch that appends it
+            # is never taken and this guard would miss a future edit that put
+            # the binding filter on only one of the two queries (#1301).
+            new=AsyncMock(return_value=Memory.type != "agent_private"),
+        ),
+    ):
+        await list_memories(
+            user=MOCK_USER,
+            db=mock_db,
+            scope="persistent",
+            type="note",
+            context_id=context_id,
+            q="hello%",
+            tags=["a", "b"],
+            tags_match="all",
+            trigger_from="2026-07-01T00:00:00",
+            trigger_until="2026-07-31T00:00:00",
+            lat_min=35.0,
+            lat_max=36.0,
+            lon_min=139.0,
+            lon_max=140.0,
+            order_by="created_at",
+            limit=50,
+            offset=0,
+        )
+
+    count_where, count_params = _where_sql_and_params(mock_db, 0)
+    page_where, page_params = _where_sql_and_params(mock_db, 1)
+    assert count_where == page_where, (
+        "count and page queries filter differently — total would not describe "
+        f"the rows the page can return.\ncount: {count_where}\npage:  {page_where}"
+    )
+    # Same SQL shape is not enough. Binds render as ``:user_id_1`` placeholders,
+    # so a count scoped to one user and a page scoped to another compile to
+    # identical text; only the bound VALUES tell them apart (review finding).
+    assert count_params == page_params, (
+        "count and page filter on the same columns but different values — "
+        f"total would describe a different row set.\ncount: {count_params}\n"
+        f"page:  {page_params}"
+    )
+    # Sanity: the comparison is meaningful only if the filters actually landed.
+    for fragment in (
+        "deleted_at IS NULL",
+        "memories.user_id =",
+        "memories.scope =",
+        "memories.type =",
+        "memories.context_id =",
+        "lower(memories.summary) LIKE",
+        "memories.tags @>",
+        "memories.trigger_until >=",
+        "memories.trigger_from <=",
+        "memories.location_lat >=",
+        "memories.location_lon <=",
+        "memories.location_lat IS NOT NULL",
+        # #1301 binding predicate — the one this test used to skip.
+        "memories.type !=",
+    ):
+        assert fragment in page_where, f"expected filter missing: {fragment}\n{page_where}"
