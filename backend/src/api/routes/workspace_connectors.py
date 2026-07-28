@@ -262,13 +262,19 @@ class AvailableWorkerApp(BaseModel):
 class ConnectorChannel(BaseModel):
     """One selectable channel for the settings picker (#1391).
 
-    Minimized by design: id + name (plus the private flag for display). No
-    member counts, topics, or other metadata reach the browser.
+    Minimized by design: identity (id, name) plus the two flags the picker has
+    to render — ``is_private`` and, since #1451, ``is_member``. Everything else
+    Slack returns (member counts, topics, purpose, creator, timestamps) is
+    dropped and never reaches the browser.
     """
 
     id: str
     name: str
     is_private: bool
+    # #1451: false means Slack will never deliver this channel's messages to the
+    # bot, so selecting it ingests nothing — silently. The picker surfaces this
+    # so a selection that cannot work is visible at the moment it is made.
+    is_member: bool
 
 
 class ConnectorChannelsResponse(BaseModel):
@@ -686,7 +692,12 @@ async def list_connector_channels(
                 json.dumps(
                     {
                         "channels": [
-                            {"id": c.id, "name": c.name, "is_private": c.is_private}
+                            {
+                                "id": c.id,
+                                "name": c.name,
+                                "is_private": c.is_private,
+                                "is_member": c.is_member,
+                            }
                             for c in page.channels
                         ],
                         "next_cursor": page.next_cursor,
@@ -704,7 +715,8 @@ async def list_connector_channels(
 
     return ConnectorChannelsResponse(
         channels=[
-            ConnectorChannel(id=c.id, name=c.name, is_private=c.is_private) for c in channels
+            ConnectorChannel(id=c.id, name=c.name, is_private=c.is_private, is_member=c.is_member)
+            for c in channels
         ],
         next_cursor=page.next_cursor,
     )

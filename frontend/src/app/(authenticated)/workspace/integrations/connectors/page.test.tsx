@@ -319,8 +319,8 @@ describe("ConnectorsPage RBAC gate", () => {
     setWorkspace("admin");
     mockListConnectorChannels.mockResolvedValue({
       channels: [
-        { id: "C1", name: "general", is_private: false },
-        { id: "C2", name: "random", is_private: false },
+        { id: "C1", name: "general", is_private: false, is_member: true },
+        { id: "C2", name: "random", is_private: false, is_member: true },
       ],
       next_cursor: null,
     });
@@ -354,6 +354,111 @@ describe("ConnectorsPage RBAC gate", () => {
         expect.anything(),
       ),
     );
+  });
+
+  it("flags channels the bot has not joined, and warns once one is selected (#1451)", async () => {
+    setWorkspace("admin");
+    mockListConnectorChannels.mockResolvedValue({
+      channels: [
+        { id: "C1", name: "joined", is_private: false, is_member: true },
+        { id: "C2", name: "not-joined", is_private: false, is_member: false },
+      ],
+      next_cursor: null,
+    });
+    mockListConnectors.mockResolvedValue([
+      makeConnector({ channel_ids: [], llm_config_present: true }),
+    ]);
+
+    render(<ConnectorsPage />);
+    await screen.findByText("connectProvider");
+    fireEvent.click(
+      await screen.findByRole("button", { name: "editSettings" }),
+    );
+
+    // The badge marks the un-joined channel — and only that one.
+    expect(
+      await screen.findByText("channelsBotNotInChannel"),
+    ).toBeInTheDocument();
+    expect(screen.getAllByText("channelsBotNotInChannel")).toHaveLength(1);
+
+    // Nothing is selected yet, so there is nothing to warn about.
+    expect(
+      screen.queryByText("channelsNotJoinedWarning"),
+    ).not.toBeInTheDocument();
+
+    // Selecting the joined channel still warns about nothing.
+    fireEvent.click(await screen.findByRole("button", { name: /joined$/ }));
+    expect(
+      screen.queryByText("channelsNotJoinedWarning"),
+    ).not.toBeInTheDocument();
+
+    // Selecting the un-joined one surfaces the warning.
+    fireEvent.click(screen.getByRole("button", { name: /not-joined/ }));
+    expect(
+      await screen.findByText("channelsNotJoinedWarning"),
+    ).toBeInTheDocument();
+  });
+
+  it("says membership is unverified for selections on unloaded pages (#1451)", async () => {
+    setWorkspace("admin");
+    // A saved selection that lives on a later Slack page: not in the loaded
+    // list, and more pages exist. Staying silent here would read as an
+    // all-clear — the exact failure mode #1451 is about.
+    mockListConnectorChannels.mockResolvedValue({
+      channels: [
+        { id: "C1", name: "general", is_private: false, is_member: true },
+      ],
+      next_cursor: "PAGE2",
+    });
+    mockListConnectors.mockResolvedValue([
+      makeConnector({ channel_ids: ["C450"], llm_config_present: true }),
+    ]);
+
+    render(<ConnectorsPage />);
+    await screen.findByText("connectProvider");
+    fireEvent.click(
+      await screen.findByRole("button", { name: "editSettings" }),
+    );
+
+    expect(
+      await screen.findByText("channelsMembershipUnverified"),
+    ).toBeInTheDocument();
+    // Nothing is *known* to be un-joined, so the harder warning stays off.
+    expect(
+      screen.queryByText("channelsNotJoinedWarning"),
+    ).not.toBeInTheDocument();
+  });
+
+  it("does not claim unverified when the whole list is loaded (#1451)", async () => {
+    setWorkspace("admin");
+    // next_cursor null → we have seen every public channel. A leftover id is a
+    // private channel or manual entry, whose membership this proxy cannot know
+    // either way, so neither message applies.
+    mockListConnectorChannels.mockResolvedValue({
+      channels: [
+        { id: "C1", name: "general", is_private: false, is_member: true },
+      ],
+      next_cursor: null,
+    });
+    mockListConnectors.mockResolvedValue([
+      makeConnector({ channel_ids: ["CPRIVATE"], llm_config_present: true }),
+    ]);
+
+    render(<ConnectorsPage />);
+    await screen.findByText("connectProvider");
+    fireEvent.click(
+      await screen.findByRole("button", { name: "editSettings" }),
+    );
+
+    // The unlisted chip is still rendered (the save must not drop the id)…
+    expect(await screen.findByText("CPRIVATE")).toBeInTheDocument();
+    // …but we make no membership claim about it.
+    expect(
+      screen.queryByText("channelsMembershipUnverified"),
+    ).not.toBeInTheDocument();
+    expect(
+      screen.queryByText("channelsNotJoinedWarning"),
+    ).not.toBeInTheDocument();
   });
 
   it("updates the tenant-local vision kill-switch from the connector row", async () => {

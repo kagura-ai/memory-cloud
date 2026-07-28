@@ -50,6 +50,15 @@ class SlackChannel:
     id: str
     name: str
     is_private: bool
+    # #1451: Slack does not deliver ``message`` events for channels the bot has
+    # not joined, so selecting one ingests nothing and reports nothing.
+    # ``conversations.list`` carries this for public channels — it was simply
+    # being dropped here; the parser still treats an absent key defensively
+    # (absent → not a member, the reading that cannot promise delivery we
+    # cannot verify). Deliberately has NO default here: a cache entry written
+    # before this field existed must raise on rehydrate so the route refetches,
+    # rather than silently defaulting joined channels to "not a member".
+    is_member: bool
 
 
 @dataclass(frozen=True)
@@ -150,6 +159,7 @@ async def fetch_slack_channels(
             id=str(item["id"]),
             name=str(item.get("name") or ""),
             is_private=bool(item.get("is_private", False)),
+            is_member=bool(item.get("is_member", False)),
         )
         for item in (data.get("channels") or [])
         if item.get("id")

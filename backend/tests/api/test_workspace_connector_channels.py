@@ -156,8 +156,8 @@ async def test_cache_hit_skips_slack_call_and_applies_q():
     cached = json.dumps(
         {
             "channels": [
-                {"id": "C01", "name": "general", "is_private": False},
-                {"id": "C02", "name": "random", "is_private": False},
+                {"id": "C01", "name": "general", "is_private": False, "is_member": True},
+                {"id": "C02", "name": "random", "is_private": False, "is_member": False},
             ],
             "next_cursor": "NEXT",
         }
@@ -181,6 +181,89 @@ async def test_cache_hit_skips_slack_call_and_applies_q():
     http_client.get.assert_not_awaited()  # served from cache
     assert [c.id for c in result.channels] == ["C02"]
     assert result.next_cursor == "NEXT"
+
+
+@pytest.mark.asyncio
+async def test_pre_1451_cache_entry_is_refetched_not_defaulted():
+    """#1451: entries cached before ``is_member`` existed must miss, not default.
+
+    ``SlackChannel`` has no default for ``is_member`` precisely so a legacy
+    payload raises on rehydrate and falls through to a live fetch. Defaulting it
+    to False would paint every already-joined channel as "bot not in channel" —
+    a wrong warning is worse than the silence this issue set out to fix.
+    """
+    admin = _admin()
+    connector_id = uuid4()
+    legacy_cached = json.dumps(
+        {
+            "channels": [{"id": "C01", "name": "general", "is_private": False}],
+            "next_cursor": None,
+        }
+    )
+    resp = _slack_response(
+        json_body={
+            "ok": True,
+            "channels": [{"id": "C01", "name": "general", "is_private": False, "is_member": True}],
+            "response_metadata": {"next_cursor": ""},
+        }
+    )
+    ctx, http_client = _http_ctx(resp)
+
+    with (
+        patch("api.routes.workspace_connectors.ConnectorProvisioningService") as svc,
+        patch("services.slack_channels.httpx.AsyncClient", return_value=ctx),
+        patch(
+            "api.routes.workspace_connectors.get_cache",
+            AsyncMock(return_value=legacy_cached),
+        ),
+        patch("api.routes.workspace_connectors.get_redis_client", return_value=_FakeRedis()),
+    ):
+        svc.return_value.get_connector = AsyncMock(return_value=_connector())
+        result = await list_connector_channels(
+            connector_id, admin, cursor=None, q=None, db=MagicMock()
+        )
+
+    http_client.get.assert_awaited_once()  # legacy entry treated as a miss
+    assert [(c.id, c.is_member) for c in result.channels] == [("C01", True)]
+
+
+@pytest.mark.asyncio
+async def test_bot_membership_passes_through_from_slack():
+    """#1451: ``is_member`` reaches the picker verbatim — Slack does not deliver
+    message events for channels the bot has not joined, so a selection there
+    ingests nothing and reports nothing."""
+    admin = _admin()
+    resp = _slack_response(
+        json_body={
+            "ok": True,
+            "channels": [
+                {"id": "C01", "name": "joined", "is_private": False, "is_member": True},
+                {"id": "C02", "name": "not-joined", "is_private": False, "is_member": False},
+                # Absent (older Slack payloads / odd shapes) → treated as not a
+                # member, the conservative reading: we cannot prove delivery.
+                {"id": "C03", "name": "unknown", "is_private": False},
+            ],
+            "response_metadata": {"next_cursor": ""},
+        }
+    )
+    ctx, _ = _http_ctx(resp)
+
+    with (
+        patch("api.routes.workspace_connectors.ConnectorProvisioningService") as svc,
+        patch("services.slack_channels.httpx.AsyncClient", return_value=ctx),
+        patch("api.routes.workspace_connectors.get_cache", AsyncMock(return_value=None)),
+        patch("api.routes.workspace_connectors.get_redis_client", return_value=_FakeRedis()),
+    ):
+        svc.return_value.get_connector = AsyncMock(return_value=_connector())
+        result = await list_connector_channels(
+            connector_id=uuid4(), admin=admin, cursor=None, q=None, db=MagicMock()
+        )
+
+    assert [(c.id, c.is_member) for c in result.channels] == [
+        ("C01", True),
+        ("C02", False),
+        ("C03", False),
+    ]
 
 
 # ---------------------------------------------------------------------------
