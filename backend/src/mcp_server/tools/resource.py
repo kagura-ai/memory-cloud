@@ -14,7 +14,7 @@ Provides 5 tools for managing resources via MCP:
 import logging
 import re
 import time
-from typing import Any
+from typing import Any, NamedTuple
 from uuid import UUID
 
 from mcp.types import TextContent
@@ -687,6 +687,150 @@ async def handle_ingest_events(
     return _error_response("internal_error", "Database session unavailable")
 
 
+class _SetupPreflight(NamedTuple):
+    """What ``setup_resource``'s gates produce for the creation steps (#1456)."""
+
+    plan: Any
+    plan_name: str
+    embedding_model: str
+    embedding_dimensions: int
+
+
+async def _setup_resource_preflight(
+    db: Any, user_id: str, workspace_id: Any, name: str, resource_id: str
+) -> tuple[list[TextContent] | None, _SetupPreflight | None]:
+    """Run every gate that can refuse a ``setup_resource`` before it writes.
+
+    Steps 1-6 of the handler: role, context-name validity, name collision,
+    resource_id collision, plan tier, context quota, embedding model. All of
+    them only read, so failing here leaves nothing to roll back — which is why
+    they are grouped ahead of the creation steps rather than interleaved.
+
+    Returns:
+        ``(error_response, None)`` when a gate refuses, else
+        ``(None, preflight)`` with what the creation steps need.
+    """
+    from sqlalchemy import select
+
+    from config.constants import EMBEDDING_MODEL_REGISTRY
+    from config.plan_tiers import get_plan_tier
+    from config.settings import get_settings
+    from models.auth import Context, Workspace
+    from services.context_service import ContextService
+    from services.quota_service import QuotaService
+    from utils.exceptions import ValidationError
+
+    # 1. Role check: owner/admin only
+    role_err = await _check_owner_admin_role(db, user_id, workspace_id)
+    if role_err:
+        return role_err, None
+
+    # 2. Validate context name
+    try:
+        ContextService.validate_context_name(name)
+    except ValidationError as ve:
+        return _error_response("validation_error", str(ve)), None
+
+    # 3. Check context name doesn't already exist
+    context_service = ContextService(db)
+    existing = await context_service.get_context_by_name_for_workspace(workspace_id, name)
+    if existing:
+        return (
+            _error_response(
+                "validation_error",
+                f"Context '{name}' already exists in this workspace.",
+            ),
+            None,
+        )
+
+    # 4. Check resource_id not already bound to an existing context in this
+    # workspace. The DB constraint `unique_context_resource_id_per_workspace`
+    # also enforces this, but an explicit pre-insert lookup returns a clean
+    # `resource_id_conflict` instead of relying on exception-based control flow.
+    resource_dup_result = await db.execute(
+        select(Context.id).where(
+            Context.workspace_id == workspace_id,
+            Context.resource_id == resource_id,
+            Context.deleted_at.is_(None),
+        )
+    )
+    if resource_dup_result.scalar_one_or_none():
+        return (
+            _error_response(
+                "resource_id_conflict",
+                f"resource_id '{resource_id}' is already in use in this workspace.",
+                help="Choose a different resource_id, or update the existing context.",
+            ),
+            None,
+        )
+
+    ws_result = await db.execute(select(Workspace.plan_name).where(Workspace.id == workspace_id))
+    plan_name = ws_result.scalar_one_or_none()
+    if not plan_name:
+        return _error_response("workspace_not_found", "Workspace not found."), None
+
+    plan = get_plan_tier(plan_name)
+    # setup_resource creates a shared + public context; both require Pro. Basic
+    # has max_resource_tokens>0 but does NOT allow shared/public contexts.
+    if not plan.allows_shared_contexts or plan.max_resource_tokens == 0:
+        return (
+            _error_response(
+                "plan_required",
+                "setup_resource requires PRO plan (public/shared contexts + resource tokens).",
+            ),
+            None,
+        )
+
+    # 5. Check context creation quota
+    can_create, error_msg = await QuotaService(db).check_context_creation_allowed(workspace_id)
+    if not can_create:
+        return (
+            _error_response(
+                "quota_exceeded",
+                error_msg or "Context creation limit reached.",
+                help="Delete unused contexts or upgrade your plan.",
+            ),
+            None,
+        )
+
+    # 6. Determine embedding model
+    settings = get_settings()
+    actual_embedding_model = settings.embedding_model
+    if actual_embedding_model in EMBEDDING_MODEL_REGISTRY:
+        actual_dimensions = EMBEDDING_MODEL_REGISTRY[actual_embedding_model][0]
+    else:
+        actual_dimensions = settings.embedding_dimensions
+
+    return None, _SetupPreflight(
+        plan=plan,
+        plan_name=plan_name,
+        embedding_model=actual_embedding_model,
+        embedding_dimensions=actual_dimensions,
+    )
+
+
+def _resolve_event_quota(args: dict[str, Any]) -> tuple[list[TextContent] | None, int]:
+    """Validate ``quota_events_per_hour`` (#1456 extract).
+
+    Returns:
+        ``(error_response, 0)`` when the value is not an integer in [1, 10000],
+        else ``(None, quota)``.
+    """
+    try:
+        quota = int(args.get("quota_events_per_hour", 1000))
+    except (ValueError, TypeError):
+        return _error_response("validation_error", "quota_events_per_hour must be an integer."), 0
+    if quota < 1 or quota > 10000:
+        return (
+            _error_response(
+                "validation_error",
+                "quota_events_per_hour must be between 1 and 10000.",
+            ),
+            0,
+        )
+    return None, quota
+
+
 async def handle_setup_resource(
     args: dict[str, Any], user_id: str, workspace_id: UUID | None
 ) -> list[TextContent]:
@@ -708,91 +852,20 @@ async def handle_setup_resource(
     start_time = time.time()
     async for db in get_db():
         try:
-            # 1. Role check: owner/admin only
-            role_err = await _check_owner_admin_role(db, user_id, workspace_id)
-            if role_err:
-                return role_err
+            preflight_error, preflight = await _setup_resource_preflight(
+                db, user_id, workspace_id, name, resource_id
+            )
+            if preflight_error:
+                return preflight_error
+            assert preflight is not None  # the pair is exclusive
+            plan = preflight.plan
+            plan_name = preflight.plan_name
+            actual_embedding_model = preflight.embedding_model
+            actual_dimensions = preflight.embedding_dimensions
 
-            # 2. Validate context name
-            from services.context_service import ContextService
-            from utils.exceptions import ValidationError
-
-            try:
-                ContextService.validate_context_name(name)
-            except ValidationError as ve:
-                return _error_response("validation_error", str(ve))
-
-            # 3. Check context name doesn't already exist
-            context_service = ContextService(db)
-            existing = await context_service.get_context_by_name_for_workspace(workspace_id, name)
-            if existing:
-                return _error_response(
-                    "validation_error",
-                    f"Context '{name}' already exists in this workspace.",
-                )
-
-            # 4. Check resource_id not already bound to an existing context in this workspace.
-            # DB constraint `unique_context_resource_id_per_workspace` also enforces this,
-            # but an explicit pre-insert lookup returns a clean `resource_id_conflict`
-            # instead of relying on exception-based control flow.
             from sqlalchemy import func, select
 
-            from config.plan_tiers import get_plan_tier
-            from models.auth import Context, Workspace
-
-            resource_dup_result = await db.execute(
-                select(Context.id).where(
-                    Context.workspace_id == workspace_id,
-                    Context.resource_id == resource_id,
-                    Context.deleted_at.is_(None),
-                )
-            )
-            if resource_dup_result.scalar_one_or_none():
-                return _error_response(
-                    "resource_id_conflict",
-                    f"resource_id '{resource_id}' is already in use in this workspace.",
-                    help="Choose a different resource_id, or update the existing context.",
-                )
-
-            ws_result = await db.execute(
-                select(Workspace.plan_name).where(Workspace.id == workspace_id)
-            )
-            plan_name = ws_result.scalar_one_or_none()
-            if not plan_name:
-                return _error_response("workspace_not_found", "Workspace not found.")
-
-            plan = get_plan_tier(plan_name)
-            # setup_resource creates a shared + public context; both require Pro.
-            # Basic has max_resource_tokens>0 but does NOT allow shared/public contexts.
-            if not plan.allows_shared_contexts or plan.max_resource_tokens == 0:
-                return _error_response(
-                    "plan_required",
-                    "setup_resource requires PRO plan (public/shared contexts + resource tokens).",
-                )
-
-            # 5. Check context creation quota
-            from services.quota_service import QuotaService
-
-            can_create, error_msg = await QuotaService(db).check_context_creation_allowed(
-                workspace_id
-            )
-            if not can_create:
-                return _error_response(
-                    "quota_exceeded",
-                    error_msg or "Context creation limit reached.",
-                    help="Delete unused contexts or upgrade your plan.",
-                )
-
-            # 6. Determine embedding model
-            from config.constants import EMBEDDING_MODEL_REGISTRY
-            from config.settings import get_settings
-
-            settings = get_settings()
-            actual_embedding_model = settings.embedding_model
-            if actual_embedding_model in EMBEDDING_MODEL_REGISTRY:
-                actual_dimensions = EMBEDDING_MODEL_REGISTRY[actual_embedding_model][0]
-            else:
-                actual_dimensions = settings.embedding_dimensions
+            from models.auth import Context
 
             # 7a. Upsert Resource entity (Issue #390 Phase 2). Every satellite
             # table write (IndexerState, ResourceEvent, ResourceSchema,
@@ -877,17 +950,9 @@ async def handle_setup_resource(
                 )
 
             # 11. Validate and create resource token
-            try:
-                quota_events_per_hour = int(args.get("quota_events_per_hour", 1000))
-            except (ValueError, TypeError):
-                return _error_response(
-                    "validation_error", "quota_events_per_hour must be an integer."
-                )
-            if quota_events_per_hour < 1 or quota_events_per_hour > 10000:
-                return _error_response(
-                    "validation_error",
-                    "quota_events_per_hour must be between 1 and 10000.",
-                )
+            quota_error, quota_events_per_hour = _resolve_event_quota(args)
+            if quota_error:
+                return quota_error
 
             from auth.resource_tokens import ResourceTokenManager
 
