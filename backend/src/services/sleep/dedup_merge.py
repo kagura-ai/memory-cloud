@@ -26,6 +26,7 @@ from __future__ import annotations
 import math
 import random
 import string
+from dataclasses import dataclass
 from datetime import datetime
 from typing import TYPE_CHECKING, Any
 from uuid import UUID
@@ -61,6 +62,21 @@ logger = get_logger(__name__)
 # Maximum cluster size to process in one run.
 # Larger clusters are deferred to the next sleep cycle.
 MAX_CLUSTER_SIZE = 5
+
+
+def _pair_key(a: UUID, b: UUID) -> tuple[UUID, UUID]:
+    """Canonical unordered key for a memory pair.
+
+    Ordered by ``str`` so ``(a, b)`` and ``(b, a)`` collide on one entry.
+
+    The 2-tuple return type is the point (#1456 review): built inline as
+    ``tuple(sorted([...]))`` the keys infer as ``tuple[UUID, ...]``, under which
+    a future 1- or 3-tuple key type-checks and then silently misses every
+    lookup — ``pair_scores.get(key, 0.0)`` would hand the judge and the audit
+    row a 0.0 that looks like a real score.
+    """
+    x, y = sorted([a, b], key=str)
+    return x, y
 
 
 def _fmt_minute(dt: datetime | None) -> str | None:
@@ -191,6 +207,27 @@ def _split_oversize_cluster(
     return [g for g in groups.values() if len(g) >= 2], skipped_pairs
 
 
+@dataclass
+class _MergeTally:
+    """Per-run merge outcome counters (#1456).
+
+    These were five loose locals threaded through a 197-line loop. They are
+    NOT interchangeable and the details payload keeps them apart on purpose:
+    ``guarded`` is a pure sub-threshold veto (#1229), ``unverifiable`` means no
+    score could be computed at all (#1231, fail-closed), ``rescued`` counts
+    pairs the top-10 candidate cap would have false-positive vetoed, and
+    ``settled_skipped`` counts judge re-nominations of pairs a supersedes edge
+    already settled (#1232). Folding any of them together would destroy the
+    signal the others exist to isolate.
+    """
+
+    merged: int = 0
+    guarded: int = 0
+    rescued: int = 0
+    unverifiable: int = 0
+    settled_skipped: int = 0
+
+
 class DedupMergePhase:
     """Detect and merge duplicate memories."""
 
@@ -234,6 +271,208 @@ class DedupMergePhase:
         # judge can re-nominate these via third-party co-clustering; they
         # must be skipped — never guarded, never rescued into a re-merge.
         self._settled_pair_keys: set[tuple[UUID, UUID]] = set()
+
+    def _backfill_cluster_scores(
+        self,
+        cluster_memories: list[Memory],
+        pair_scores: dict[tuple[UUID, UUID], float],
+        backfilled_keys: set[tuple[UUID, UUID]],
+    ) -> None:
+        """Complete the in-cluster pairwise scores BEFORE judging (#1231).
+
+        The per-memory top-10 neighbor search saturates in dense duplicate
+        clusters, so genuinely >=threshold pairs can be missing from
+        ``pair_scores`` — the LLM judge would be shown 0.0 (biasing keep_both)
+        and the rule-based path could never nominate them. Clusters are capped
+        at ``MAX_CLUSTER_SIZE``, so this is at most C(5,2)=10 local cosines over
+        vectors already embedded during discovery.
+
+        Settled pairs (#1208/#1232) stay unscored on purpose: their succession
+        is already recorded.
+
+        Mutates ``pair_scores`` and ``backfilled_keys`` in place.
+        """
+        for i, mem_x in enumerate(cluster_memories):
+            for mem_y in cluster_memories[i + 1 :]:
+                key = _pair_key(mem_x.id, mem_y.id)
+                if key in pair_scores or key in self._settled_pair_keys:
+                    continue
+                direct = self._direct_pair_similarity(mem_x.id, mem_y.id)
+                if direct is not None:
+                    pair_scores[key] = direct
+                    backfilled_keys.add(key)
+
+    def _plan_cluster_merges(
+        self,
+        merge_decisions: list[tuple[UUID, UUID]],
+        memory_map: dict[UUID, Memory],
+        pair_scores: dict[tuple[UUID, UUID], float],
+        backfilled_keys: set[tuple[UUID, UUID]],
+        threshold: float,
+        tally: _MergeTally,
+        snapshot_audit: bool,
+    ) -> list[tuple[UUID, UUID, Memory | None, Memory | None, dict[str, Any] | None]]:
+        """Pass 1: filter the judge's picks and snapshot their inputs (#1229).
+
+        Eligibility is deterministic and judged on the SCORE, not on cluster
+        membership: union-find clusters chain transitively AND candidate
+        generation can regress, so the judge can nominate pairs whose true
+        pairwise cosine is far below the threshold — observed 0.43-0.66 under
+        0.92, destroying distinct facts. A merge executes only when the pair's
+        direct similarity meets the configured threshold.
+
+        Every snapshot MUST be taken BEFORE any merge in the cluster executes
+        (#1229): decisions share members (one winner, several losers), and a
+        merge UPDATE fires ``onupdate=func.now()``, expiring attributes on the
+        shared in-session instances — a later read would attempt a synchronous
+        refresh, raising ``MissingGreenlet`` under the async engine and killing
+        the whole phase. Returning an ordered work list pairs each snapshot
+        structurally with its merge, so no keyed lookup can fall out of sync.
+
+        Returns:
+            ``(winner_id, loser_id, winner, loser, audit)`` tuples to execute.
+        """
+        merge_jobs: list[
+            tuple[UUID, UUID, Memory | None, Memory | None, dict[str, Any] | None]
+        ] = []
+        for winner_id, loser_id in merge_decisions:
+            pair_key = _pair_key(winner_id, loser_id)
+            if pair_key in self._settled_pair_keys:
+                # #1232: a supersedes edge already settles this pair — the judge
+                # re-nominated it because members co-cluster via third parties.
+                # Skipping is correct, but it is neither a sub-threshold guard
+                # nor unverifiable; executing would re-merge (re-writing audit
+                # rows and breaking undo's prior_edge snapshot) on every run.
+                tally.settled_skipped += 1
+                logger.debug(
+                    "dedup_merge_skipped_already_settled",
+                    winner_id=str(winner_id),
+                    loser_id=str(loser_id),
+                )
+                continue
+
+            pair_similarity = pair_scores.get(pair_key)
+            if pair_similarity is None:
+                # #1231 defense-in-depth: the per-cluster pre-fill normally
+                # leaves only vector-unavailable pairs unscored, but judge
+                # nominations outside the cluster's member list land here too.
+                pair_similarity = self._direct_pair_similarity(winner_id, loser_id)
+                if pair_similarity is not None:
+                    # Backfill so the audit record carries the true score
+                    # instead of the 0.0 fallback.
+                    pair_scores[pair_key] = pair_similarity
+                    backfilled_keys.add(pair_key)
+            if pair_similarity is None:
+                # Fail-closed, but distinct from a genuine sub-threshold veto:
+                # without vectors the score is unknowable this run, and folding
+                # these into llm_merge_guarded would dilute the cross-merge
+                # signal that counter exists to expose (#1231).
+                tally.unverifiable += 1
+                logger.warning(
+                    "dedup_merge_vetoed_vector_unavailable",
+                    winner_id=str(winner_id),
+                    loser_id=str(loser_id),
+                    threshold=threshold,
+                )
+                continue
+            if pair_similarity < threshold:
+                tally.guarded += 1
+                logger.warning(
+                    "dedup_merge_vetoed_below_threshold",
+                    winner_id=str(winner_id),
+                    loser_id=str(loser_id),
+                    pair_similarity=pair_similarity,
+                    threshold=threshold,
+                )
+                continue
+            if pair_key in backfilled_keys:
+                tally.rescued += 1
+                logger.info(
+                    "dedup_merge_rescued_by_direct_check",
+                    winner_id=str(winner_id),
+                    loser_id=str(loser_id),
+                    pair_similarity=pair_similarity,
+                    threshold=threshold,
+                )
+
+            winner = memory_map.get(winner_id)
+            loser = memory_map.get(loser_id)
+            audit: dict[str, Any] | None = None
+            if snapshot_audit and winner and loser:
+                audit = {
+                    "winner_tags": list(winner.tags or []),
+                    "loser_tags": list(loser.tags or []),
+                    "loser_summary": (loser.summary or "")[:200],
+                    "winner_source": getattr(winner, "source_type", None),
+                    "loser_source": getattr(loser, "source_type", None),
+                    "winner_recency": _fmt_minute(self._recency_key(winner)),
+                    "loser_recency": _fmt_minute(self._recency_key(loser)),
+                }
+            merge_jobs.append((winner_id, loser_id, winner, loser, audit))
+        return merge_jobs
+
+    async def _execute_merge_jobs(
+        self,
+        merge_jobs: list[tuple[UUID, UUID, Memory | None, Memory | None, dict[str, Any] | None]],
+        *,
+        shadow_mode: bool,
+        user_id: str,
+        workspace_id: Any,
+        context_id: Any,
+        pair_scores: dict[tuple[UUID, UUID], float],
+        result: PhaseResult,
+        tally: _MergeTally,
+        reporter: Any,
+        report_id: Any,
+    ) -> None:
+        """Pass 2: run the planned merges and record their audit rows.
+
+        #1208: shadow mode records a supersedes edge and leaves the loser
+        alive-but-shadowed instead of soft-deleting it — the non-destructive
+        counterpart of update-by-removal. Nothing on either row changes, so no
+        reindex is needed; remove mode marks the winner changed.
+        """
+        for winner_id, loser_id, winner, loser, audit in merge_jobs:
+            prior_edge: dict[str, Any] | None = None
+            if shadow_mode:
+                prior_edge = await self._execute_shadow_merge(
+                    winner, loser, user_id, workspace_id, context_id
+                )
+            else:
+                await self._execute_merge(winner, loser, user_id, workspace_id, context_id)
+                result.changed_memory_ids.add(winner_id)
+            tally.merged += 1
+
+            if audit is None:
+                continue
+            pair_key = _pair_key(winner_id, loser_id)
+            meta = self._decision_meta.get((winner_id, loser_id), {})
+            await reporter.add_action(
+                report_id=report_id,
+                phase="dedup_merge",
+                action_type="merge",
+                memory_id=winner_id,
+                target_id=loser_id,
+                details={
+                    "similarity": pair_scores.get(pair_key, 0.0),
+                    "winner_tags": audit["winner_tags"],
+                    "loser_tags": audit["loser_tags"],
+                    "loser_summary": audit["loser_summary"],
+                    "merge_reason": meta.get("merge_reason", "unspecified"),
+                    "judge_confidence": meta.get("judge_confidence"),
+                    "winner_override": "override_reason" in meta,
+                    "override_reason": meta.get("override_reason"),
+                    "winner_source": audit["winner_source"],
+                    "loser_source": audit["loser_source"],
+                    "winner_recency": audit["winner_recency"],
+                    "loser_recency": audit["loser_recency"],
+                    # #1208: how this merge disposed of the loser, plus the
+                    # pre-merge state of any edge the shadow upsert retyped —
+                    # undo restores it from here.
+                    "mode": "shadow" if shadow_mode else "remove",
+                    **({"prior_edge": prior_edge} if shadow_mode else {}),
+                },
+            )
 
     async def execute(
         self,
@@ -354,12 +593,8 @@ class DedupMergePhase:
 
         # Step 4: Process each cluster
         memory_map = {m.id: m for m in memories}
-        pair_scores = {tuple(sorted([a, b], key=str)): s for a, b, s in pairs}
-        merged_count = 0
-        merge_guarded_count = 0
-        merge_rescued_count = 0
-        merge_unverifiable_count = 0
-        settled_skipped_count = 0
+        pair_scores = {_pair_key(a, b): s for a, b, s in pairs}
+        tally = _MergeTally()
         # #1231: pair keys whose score came from the on-demand direct check
         # rather than candidate discovery — merges on these are "rescues"
         # the top-10 candidate cap would previously have vetoed.
@@ -373,24 +608,7 @@ class DedupMergePhase:
             if len(cluster_memories) < 2:
                 continue
 
-            # #1231: complete the in-cluster pairwise scores BEFORE judging.
-            # The per-memory top-10 neighbor search saturates in dense
-            # duplicate clusters, so genuinely >=threshold pairs can be
-            # missing from pair_scores — the LLM judge would be shown 0.0
-            # (biasing keep_both) and the rule-based path could never
-            # nominate them. Clusters are capped at MAX_CLUSTER_SIZE, so
-            # this is at most C(5,2)=10 local cosines over vectors already
-            # embedded during discovery. Settled pairs (#1208/#1232) stay
-            # unscored on purpose: their succession is already recorded.
-            for i, mem_x in enumerate(cluster_memories):
-                for mem_y in cluster_memories[i + 1 :]:
-                    key = tuple(sorted([mem_x.id, mem_y.id], key=str))
-                    if key in pair_scores or key in self._settled_pair_keys:
-                        continue
-                    direct = self._direct_pair_similarity(mem_x.id, mem_y.id)
-                    if direct is not None:
-                        pair_scores[key] = direct
-                        backfilled_keys.add(key)
+            self._backfill_cluster_scores(cluster_memories, pair_scores, backfilled_keys)
 
             merge_decisions = await self._judge_cluster(
                 cluster_memories,
@@ -403,163 +621,29 @@ class DedupMergePhase:
                 config,
             )
 
-            # #1208: shadow-mode merges record a supersedes edge and leave the
-            # loser alive-but-shadowed instead of soft-deleting it — the
-            # non-destructive counterpart of update-by-removal. Default OFF
-            # preserves the pre-#1208 removal behavior byte-identically.
             shadow_mode = bool(getattr(config, "sleep_dedup_supersede_enabled", False))
 
-            # #1209/#1229: every merge is explainable and its inputs are
-            # snapshotted — merge_reason (judge rationale or rule id),
-            # override info (recency/source), and both sides' provenance +
-            # recency keys, proving what the decision (judge + deterministic
-            # rules) actually saw. The snapshots MUST all be taken BEFORE
-            # ANY merge in the cluster executes (#1229): decisions share
-            # members (one winner, several losers), and a merge UPDATE fires
-            # onupdate=func.now(), expiring attributes on the shared
-            # in-session instances — a later read would attempt a
-            # synchronous refresh, raising MissingGreenlet under the async
-            # engine and killing the whole phase. Pass 1 builds an ordered
-            # work list so each snapshot is structurally paired with its
-            # merge — no keyed lookup to fall out of sync.
-            merge_jobs: list[
-                tuple[UUID, UUID, Memory | None, Memory | None, dict[str, Any] | None]
-            ] = []
-            for winner_id, loser_id in merge_decisions:
-                # #1229 (runs 6-7): union-find clusters chain transitively
-                # AND candidate generation can regress (the score_threshold
-                # filter was silently dropped for years), so the judge can
-                # nominate pairs whose true pairwise cosine is far below the
-                # threshold — observed 0.43-0.66 under 0.92 — destroying
-                # distinct facts (update.stale_only_zero breach). Eligibility
-                # is deterministic and judged on the SCORE, not membership:
-                # a merge executes only when the pair's direct similarity
-                # meets the configured threshold.
-                pair_key = tuple(sorted([winner_id, loser_id], key=str))
-                if pair_key in self._settled_pair_keys:
-                    # #1232: a supersedes edge already settles this pair —
-                    # the judge re-nominated it because members co-cluster
-                    # via third parties. Skipping is correct, but it is
-                    # neither a sub-threshold guard nor unverifiable;
-                    # executing would re-merge (re-writing audit rows and
-                    # breaking undo's prior_edge snapshot) on every run.
-                    settled_skipped_count += 1
-                    logger.debug(
-                        "dedup_merge_skipped_already_settled",
-                        winner_id=str(winner_id),
-                        loser_id=str(loser_id),
-                    )
-                    continue
-                pair_similarity = pair_scores.get(pair_key)
-                if pair_similarity is None:
-                    # #1231 defense-in-depth: the per-cluster pre-fill above
-                    # normally leaves only vector-unavailable pairs
-                    # unscored, but judge nominations outside the cluster's
-                    # member list would land here too.
-                    pair_similarity = self._direct_pair_similarity(winner_id, loser_id)
-                    if pair_similarity is not None:
-                        # Backfill so the audit record carries the true
-                        # score instead of the 0.0 fallback.
-                        pair_scores[pair_key] = pair_similarity
-                        backfilled_keys.add(pair_key)
-                if pair_similarity is None:
-                    # Fail-closed, but distinct from a genuine sub-threshold
-                    # veto: without vectors the score is unknowable this
-                    # run, and folding these into llm_merge_guarded would
-                    # dilute the cross-merge signal that counter exists to
-                    # expose (#1231).
-                    merge_unverifiable_count += 1
-                    logger.warning(
-                        "dedup_merge_vetoed_vector_unavailable",
-                        winner_id=str(winner_id),
-                        loser_id=str(loser_id),
-                        threshold=threshold,
-                    )
-                    continue
-                if pair_similarity < threshold:
-                    merge_guarded_count += 1
-                    logger.warning(
-                        "dedup_merge_vetoed_below_threshold",
-                        winner_id=str(winner_id),
-                        loser_id=str(loser_id),
-                        pair_similarity=pair_similarity,
-                        threshold=threshold,
-                    )
-                    continue
-                if pair_key in backfilled_keys:
-                    merge_rescued_count += 1
-                    logger.info(
-                        "dedup_merge_rescued_by_direct_check",
-                        winner_id=str(winner_id),
-                        loser_id=str(loser_id),
-                        pair_similarity=pair_similarity,
-                        threshold=threshold,
-                    )
-                winner = memory_map.get(winner_id)
-                loser = memory_map.get(loser_id)
-                audit: dict[str, Any] | None = None
-                if reporter and report_id and winner and loser:
-                    audit = {
-                        "winner_tags": list(winner.tags or []),
-                        "loser_tags": list(loser.tags or []),
-                        "loser_summary": (loser.summary or "")[:200],
-                        "winner_source": getattr(winner, "source_type", None),
-                        "loser_source": getattr(loser, "source_type", None),
-                        "winner_recency": _fmt_minute(self._recency_key(winner)),
-                        "loser_recency": _fmt_minute(self._recency_key(loser)),
-                    }
-                merge_jobs.append((winner_id, loser_id, winner, loser, audit))
-
-            for winner_id, loser_id, winner, loser, audit in merge_jobs:
-                prior_edge: dict[str, Any] | None = None
-                if shadow_mode:
-                    prior_edge = await self._execute_shadow_merge(
-                        winner,
-                        loser,
-                        user_id,
-                        workspace_id,
-                        context_id,
-                    )
-                    # Nothing on either row changed — no reindex needed.
-                else:
-                    await self._execute_merge(
-                        winner,
-                        loser,
-                        user_id,
-                        workspace_id,
-                        context_id,
-                    )
-                    result.changed_memory_ids.add(winner_id)
-                merged_count += 1
-                if audit is not None:
-                    pair_key = tuple(sorted([winner_id, loser_id], key=str))
-                    meta = self._decision_meta.get((winner_id, loser_id), {})
-                    await reporter.add_action(
-                        report_id=report_id,
-                        phase="dedup_merge",
-                        action_type="merge",
-                        memory_id=winner_id,
-                        target_id=loser_id,
-                        details={
-                            "similarity": pair_scores.get(pair_key, 0.0),
-                            "winner_tags": audit["winner_tags"],
-                            "loser_tags": audit["loser_tags"],
-                            "loser_summary": audit["loser_summary"],
-                            "merge_reason": meta.get("merge_reason", "unspecified"),
-                            "judge_confidence": meta.get("judge_confidence"),
-                            "winner_override": "override_reason" in meta,
-                            "override_reason": meta.get("override_reason"),
-                            "winner_source": audit["winner_source"],
-                            "loser_source": audit["loser_source"],
-                            "winner_recency": audit["winner_recency"],
-                            "loser_recency": audit["loser_recency"],
-                            # #1208: how this merge disposed of the loser,
-                            # plus the pre-merge state of any edge the shadow
-                            # upsert retyped — undo restores it from here.
-                            "mode": "shadow" if shadow_mode else "remove",
-                            **({"prior_edge": prior_edge} if shadow_mode else {}),
-                        },
-                    )
+            merge_jobs = self._plan_cluster_merges(
+                merge_decisions,
+                memory_map,
+                pair_scores,
+                backfilled_keys,
+                threshold,
+                tally,
+                snapshot_audit=bool(reporter and report_id),
+            )
+            await self._execute_merge_jobs(
+                merge_jobs,
+                shadow_mode=shadow_mode,
+                user_id=user_id,
+                workspace_id=workspace_id,
+                context_id=context_id,
+                pair_scores=pair_scores,
+                result=result,
+                tally=tally,
+                reporter=reporter,
+                report_id=report_id,
+            )
 
             result.memories_processed += len(cluster_memories)
 
@@ -579,7 +663,7 @@ class DedupMergePhase:
             # Distinguishes "0 merges: nothing matched" from "0 merges:
             # work was deferred".
             "deferred_pairs": deferred_pairs,
-            "merged": merged_count,
+            "merged": tally.merged,
             # #1208: pairs skipped because a supersedes edge already settled
             # them (shadow mode only; always 0 in remove mode).
             "settled_pairs_skipped": settled_pairs_skipped,
@@ -588,18 +672,18 @@ class DedupMergePhase:
             # similarity is below threshold (transitive-chain cross-merges).
             # Since #1231 this is a pure sub-threshold signal: pairs missing
             # from the candidate list get an on-demand direct check first.
-            "llm_merge_guarded": merge_guarded_count,
+            "llm_merge_guarded": tally.guarded,
             # #1231: judge picks missing from the candidate list whose
             # on-demand direct cosine met the threshold — merges the top-10
             # candidate cap used to false-positive veto.
-            "llm_merge_rescued": merge_rescued_count,
+            "llm_merge_rescued": tally.rescued,
             # #1231: vetoes where no direct score could be computed (vector
             # unavailable — embed failed). Fail-closed, kept out of
             # llm_merge_guarded so that counter stays sub-threshold-only.
-            "llm_merge_unverifiable": merge_unverifiable_count,
+            "llm_merge_unverifiable": tally.unverifiable,
             # #1232: judge re-nominations of pairs a supersedes edge already
             # settled (shadow mode) — skipped, never guarded/rescued.
-            "settled_decisions_skipped": settled_skipped_count,
+            "settled_decisions_skipped": tally.settled_skipped,
             # #1195/#1198: LLM winner picks flipped by the deterministic
             # winner rules — a direct measure of residual judge misdirection
             # the prompt alone would have let through.
@@ -625,7 +709,7 @@ class DedupMergePhase:
         logger.info(
             "dedup_merge_phase_completed",
             candidates=len(pairs),
-            merged=merged_count,
+            merged=tally.merged,
             llm_calls=result.llm_calls_used,
         )
 
