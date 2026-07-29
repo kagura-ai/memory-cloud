@@ -252,8 +252,12 @@ named `blue` with no blue container:
 If you hit that error, look at what is actually running and write it back:
 
 ```bash
+# Which color is actually up?
 docker ps --format '{{.Names}}' | grep kagura-api-
-echo <blue|green> > /opt/kagura-memory/active-color
+
+# Write that one back — run whichever line matches:
+echo blue  > /opt/kagura-memory/active-color
+echo green > /opt/kagura-memory/active-color
 ```
 
 Once everything is healthy, enable the systemd unit so the stack comes back

@@ -89,12 +89,21 @@ get_active_color() {
     # say so instead of guessing (#1448).
     if [ ! -s "$MARKER_FILE" ]; then
         error "Marker file $MARKER_FILE is missing or empty. It must name the
-       color serving traffic right now. Recover with:
+       color serving traffic right now. Find it, then write it back:
            docker ps --format '{{.Names}}' | grep kagura-api-
-           echo <blue|green> > $MARKER_FILE"
+           echo blue  > $MARKER_FILE
+           echo green > $MARKER_FILE"
     fi
+    # -s says non-empty, not readable: a root-owned or IO-failing marker passes
+    # that check and then dies inside the command substitution, where `set -e`
+    # aborts with no message of ours (Copilot review on #1462). An operator
+    # mid-incident needs the reason, so catch the read explicitly.
     local color
-    color="$(cat "$MARKER_FILE")"
+    if ! color="$(cat "$MARKER_FILE" 2>/dev/null)"; then
+        error "Marker file $MARKER_FILE exists but could not be read.
+       Check ownership and permissions:
+           ls -l $MARKER_FILE"
+    fi
     # Validate — must be exactly "blue" or "green"
     if [ "$color" != "blue" ] && [ "$color" != "green" ]; then
         error "Marker file $MARKER_FILE contains invalid value: '$color'. Expected 'blue' or 'green'."

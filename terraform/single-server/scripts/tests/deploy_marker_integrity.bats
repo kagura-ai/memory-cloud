@@ -133,3 +133,38 @@ teardown() {
     [ "$status" -eq 1 ] || return 1
     [ -z "$output" ] || return 1
 }
+
+@test "an existing but unreadable marker gets its own error, not a bare abort" {
+    # A directory passes `-s` (non-empty) but `cat` fails on it — the same shape
+    # as a root-owned file or an IO error, without needing to drop privileges.
+    # Before this branch, `set -e` killed the run inside the command
+    # substitution with no message of ours (Copilot review on #1462).
+    MARKER_FILE="$TMP/as-a-directory"
+    mkdir -p "$MARKER_FILE/x"
+    run get_active_color
+    [ "$status" -ne 0 ] || return 1
+    [[ "$output" == *"could not be read"* ]] || return 1
+    [[ "$output" == *"ls -l"* ]] || return 1
+}
+
+@test "recovery instructions are safe to paste" {
+    # `echo <blue|green> > file` looks like a placeholder but `<` and `|` are
+    # shell operators — pasted mid-incident it redirects and pipes instead of
+    # writing (Copilot review on #1462). Both the error text and the README
+    # must spell the two commands out.
+    run bash -o pipefail -c 'grep -nE "echo <" "$1"' _ "$DEPLOY_SH"
+    [ "$status" -eq 1 ] || return 1
+    [ -z "$output" ] || return 1
+
+    run get_active_color
+    [[ "$output" == *"echo blue"* ]] || return 1
+    [[ "$output" == *"echo green"* ]] || return 1
+}
+
+@test "the README recovery snippet is safe to paste too" {
+    readme="$BATS_TEST_DIRNAME/../../README.md"
+    [ -r "$readme" ] || return 1
+    run bash -o pipefail -c 'grep -nE "echo <" "$1"' _ "$readme"
+    [ "$status" -eq 1 ] || return 1
+    [ -z "$output" ] || return 1
+}
