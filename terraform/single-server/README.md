@@ -231,6 +231,35 @@ echo "blue" > /opt/kagura-memory/active-color
 
 The first build takes several minutes (backend + frontend images).
 
+### The active-color marker (#1448)
+
+`/opt/kagura-memory/active-color` names the color **serving traffic right now** —
+never the one a switch is heading toward. Every writer updates it only after the
+new color is up and has passed readiness (`deploy.sh` Step 5; rollback after
+`wait_for_readiness`), and the old color is drained only after Caddy has been
+pointed away. An interrupted run therefore leaves the marker on the color that
+is still serving, which is the recoverable state.
+
+`deploy.sh` reads it to derive **both** colors, so a marker that disagrees with
+reality makes the next deploy build the color that is live and drain the one
+that is not. Two guards exist because of a 65-hour incident where the marker
+named `blue` with no blue container:
+
+- a missing or empty marker is a hard error, not a silent fallback to `blue`
+- `--status` reports a marker whose color is not running, and `deploy` refuses
+  to start from one
+
+If you hit that error, look at what is actually running and write it back:
+
+```bash
+# Which color is actually up?
+docker ps --format '{{.Names}}' | grep kagura-api-
+
+# Write that one back — run whichever line matches:
+echo blue  > /opt/kagura-memory/active-color
+echo green > /opt/kagura-memory/active-color
+```
+
 Once everything is healthy, enable the systemd unit so the stack comes back
 after a reboot:
 
