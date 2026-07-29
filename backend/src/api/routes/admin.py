@@ -132,6 +132,152 @@ class RoleUpdateRequest(BaseModel):
 # ============================================================================
 
 
+def _apply_user_list_filters(
+    stmt: Any,
+    *,
+    search: str | None,
+    role: str | None,
+    workspace_id: str | None,
+    plan: str | None,
+) -> tuple[Any, bool]:
+    """Apply the admin user-list filters (#164), returning (stmt, joined).
+
+    ``WorkspaceMember.user_id`` is not a FK to ``User.user_id`` (it stores the
+    OAuth ``sub`` claim as a plain string), so SQLAlchemy cannot infer the ON
+    clause — it is passed explicitly or the join raises
+    ``InvalidRequestError("Don't know how to join …")``.
+
+    Both join branches also filter ``Workspace.deleted_at IS NULL``:
+    ``WorkspaceMember`` rows persist after a workspace is soft-deleted
+    (membership is kept for tombstone visibility), so a bare ``workspace_id``
+    filter would surface users of a soft-deleted workspace — the #681 class.
+
+    Returns:
+        The filtered statement, and whether a JOIN-based filter was applied.
+        The caller needs the flag for ``.distinct()``: without it a user owning
+        K matching workspaces produces K rows and inflates ``total`` into a
+        count of workspace matches, breaking pagination.
+    """
+    from uuid import UUID
+
+    if search:
+        search_pattern = f"%{search}%"
+        stmt = stmt.where(or_(User.email.ilike(search_pattern), User.name.ilike(search_pattern)))
+
+    if role:
+        stmt = stmt.where(User.role == role)
+
+    join_filter_applied = workspace_id is not None or plan is not None
+    if workspace_id:
+        stmt = (
+            stmt.join(WorkspaceMember, WorkspaceMember.user_id == User.user_id)
+            .join(Workspace, Workspace.id == WorkspaceMember.workspace_id)
+            .where(
+                WorkspaceMember.workspace_id == UUID(workspace_id),
+                Workspace.deleted_at.is_(None),  # #681 pattern: soft-delete safe
+            )
+        )
+
+    if plan:
+        if not workspace_id:  # not already joined
+            stmt = stmt.join(WorkspaceMember, WorkspaceMember.user_id == User.user_id).join(
+                Workspace, Workspace.id == WorkspaceMember.workspace_id
+            )
+        stmt = stmt.where(
+            Workspace.plan_name == plan,
+            Workspace.deleted_at.is_(None),  # #681: exclude soft-deleted
+        )
+
+    return stmt, join_filter_applied
+
+
+async def _fetch_memory_counts(db: AsyncSession, user_ids: list[str]) -> dict[str, dict[str, int]]:
+    """Live memory count per user, in ONE query (#164 N+1 fix)."""
+    if not user_ids:
+        return {}
+    result = await db.execute(
+        select(Memory.user_id, func.count(Memory.id).label("memory_count"))
+        .where(Memory.user_id.in_(user_ids), Memory.deleted_at.is_(None))
+        .group_by(Memory.user_id)
+    )
+    return {row.user_id: {"memory_count": row.memory_count or 0} for row in result.all()}
+
+
+async def _fetch_workspace_caps(db: AsyncSession, user_ids: list[str]) -> dict[str, dict[str, int]]:
+    """Owned-workspace count + slot bonus per user, in ONE query (#695).
+
+    Mirrors ``plan_resolver.get_user_workspace_cap_summary`` but joined for
+    every listed user — calling the per-user helper in the render loop would
+    re-introduce the N+1 pattern fixed for memory counts. LEFT OUTER JOIN so
+    users with zero owned workspaces still surface (count = 0), and the join
+    predicate excludes soft-deleted workspaces (#681: cap math counts only live
+    workspaces).
+    """
+    if not user_ids:
+        return {}
+    result = await db.execute(
+        select(
+            User.user_id,
+            User.workspace_slot_bonus,
+            func.count(Workspace.id).label("owned_count"),
+        )
+        .outerjoin(
+            Workspace,
+            and_(
+                Workspace.owner_user_id == User.user_id,
+                Workspace.deleted_at.is_(None),
+            ),
+        )
+        .where(User.user_id.in_(user_ids))
+        .group_by(User.id, User.user_id, User.workspace_slot_bonus)
+    )
+    caps: dict[str, dict[str, int]] = {}
+    for row in result.all():
+        bonus = int(row.workspace_slot_bonus or 0)
+        caps[row.user_id] = {
+            "owned_count": int(row.owned_count or 0),
+            "workspace_slot_bonus": bonus,
+            "base_cap": BASE_CAP,
+            "cap": BASE_CAP + bonus,
+        }
+    return caps
+
+
+async def _attach_user_workspaces(db: AsyncSession, user_infos: list, users_list: list) -> None:
+    """Fill each response row's ``workspaces`` list, in ONE query (#1456).
+
+    Soft-deleted workspaces are excluded (#681). Users with no live membership
+    get an empty list rather than being skipped, so the field is always present.
+    """
+    user_ids = [u.user_id for u in users_list]
+    result = await db.execute(
+        select(WorkspaceMember, Workspace)
+        .join(Workspace, Workspace.id == WorkspaceMember.workspace_id)
+        .where(
+            WorkspaceMember.user_id.in_(user_ids),
+            Workspace.deleted_at.is_(None),  # #681: exclude soft-deleted
+        )
+        .order_by(WorkspaceMember.role.desc())
+    )
+
+    by_user_id = {u.user_id: u for u in users_list}
+    user_workspaces_map: dict[str, list[dict[str, Any]]] = {}
+    for member, workspace in result.all():
+        user_obj = by_user_id.get(member.user_id)
+        user_workspaces_map.setdefault(member.user_id, []).append(
+            {
+                "workspace_id": str(workspace.id),
+                "workspace_name": workspace.name,
+                "role": member.role,
+                "is_primary": bool(user_obj and user_obj.current_workspace_id == workspace.id),
+                "joined_at": to_utc_iso(member.joined_at),
+            }
+        )
+
+    for user_info in user_infos:
+        user_info.workspaces = user_workspaces_map.get(user_info.id, [])
+
+
 @router.get("/users", response_model=UserListResponse)
 async def list_users(
     user: dict = Depends(require_admin),
@@ -167,64 +313,11 @@ async def list_users(
         List of users with memory counts, storage usage, and optionally workspace info
     """
     try:
-        from uuid import UUID
-
-        # Build base query
-        stmt = select(User)
-
-        # Issue #164: Apply search filter
-        if search:
-            search_pattern = f"%{search}%"
-            stmt = stmt.where(
-                or_(User.email.ilike(search_pattern), User.name.ilike(search_pattern))
-            )
-
-        # Issue #164: Apply role filter
-        if role:
-            stmt = stmt.where(User.role == role)
-
-        # Issue #164: Apply workspace_id / plan filter
-        # WorkspaceMember.user_id is not a FK to User.user_id (it stores the
-        # OAuth ``sub`` claim as a plain string), so SQLAlchemy cannot infer
-        # the ON clause from the schema. Pass it explicitly — otherwise the
-        # join raises InvalidRequestError("Don't know how to join …").
-        #
-        # Both branches JOIN Workspace and filter ``deleted_at IS NULL``.
-        # WorkspaceMember rows persist after a workspace is soft-deleted
-        # (membership is preserved for tombstone visibility), so the
-        # ``workspace_id`` filter without the soft-delete predicate would
-        # surface users for a soft-deleted workspace — the same #681 class.
-        #
-        # ``.distinct()`` deduplicates: a user with N matching workspaces
-        # would otherwise produce N rows and inflate ``total`` to count
-        # workspace matches rather than distinct users, breaking pagination.
-        join_filter_applied = workspace_id is not None or plan is not None
-        if workspace_id:
-            stmt = (
-                stmt.join(WorkspaceMember, WorkspaceMember.user_id == User.user_id)
-                .join(Workspace, Workspace.id == WorkspaceMember.workspace_id)
-                .where(
-                    WorkspaceMember.workspace_id == UUID(workspace_id),
-                    Workspace.deleted_at.is_(None),  # #681 pattern: soft-delete safe
-                )
-            )
-
-        # Issue #164: Apply plan filter (via workspace)
-        if plan:
-            if not workspace_id:  # If not already joined
-                stmt = stmt.join(WorkspaceMember, WorkspaceMember.user_id == User.user_id).join(
-                    Workspace, Workspace.id == WorkspaceMember.workspace_id
-                )
-            stmt = stmt.where(
-                Workspace.plan_name == plan,
-                Workspace.deleted_at.is_(None),  # #681: exclude soft-deleted
-            )
-
+        stmt, join_filter_applied = _apply_user_list_filters(
+            select(User), search=search, role=role, workspace_id=workspace_id, plan=plan
+        )
         # Deduplicate the user list / count when any JOIN-based filter is
-        # active. A user owning K matching workspaces would otherwise
-        # produce K rows in ``users_list`` and inflate ``total`` to count
-        # workspace matches rather than distinct users — breaking
-        # pagination and the admin list contract.
+        # active — see the helper's docstring for why total breaks without it.
         if join_filter_applied:
             stmt = stmt.distinct()
 
@@ -246,60 +339,9 @@ async def list_users(
         result = await db.execute(stmt.limit(limit).offset(offset))
         users_list = list(result.scalars().all())
 
-        # Issue #164: Fix N+1 query - Bulk aggregation for memory stats
         user_ids = [u.user_id for u in users_list]
-        memory_stats_dict = {}
-
-        if user_ids:
-            # Single query for all memory stats
-            memory_stats_result = await db.execute(
-                select(
-                    Memory.user_id,
-                    func.count(Memory.id).label("memory_count"),
-                )
-                .where(Memory.user_id.in_(user_ids), Memory.deleted_at.is_(None))
-                .group_by(Memory.user_id)
-            )
-
-            for row in memory_stats_result.all():
-                memory_stats_dict[row.user_id] = {
-                    "memory_count": row.memory_count or 0,
-                }
-
-        # Issue #695: Bulk-fetch (owned_count, workspace_slot_bonus) per user.
-        # Mirrors the per-user logic in ``plan_resolver.get_user_workspace_cap_summary``
-        # but joined for all listed users in one query — calling the per-user
-        # helper in the loop would re-introduce the N+1 pattern fixed for
-        # memory_stats above. LEFT OUTER JOIN so users with zero owned
-        # workspaces still surface (count = 0), and the join predicate
-        # excludes soft-deleted workspaces (#681 pattern: cap math counts
-        # only live workspaces).
-        cap_stats_dict: dict[str, dict[str, int]] = {}
-        if user_ids:
-            cap_stats_result = await db.execute(
-                select(
-                    User.user_id,
-                    User.workspace_slot_bonus,
-                    func.count(Workspace.id).label("owned_count"),
-                )
-                .outerjoin(
-                    Workspace,
-                    and_(
-                        Workspace.owner_user_id == User.user_id,
-                        Workspace.deleted_at.is_(None),
-                    ),
-                )
-                .where(User.user_id.in_(user_ids))
-                .group_by(User.id, User.user_id, User.workspace_slot_bonus)
-            )
-            for row in cap_stats_result.all():
-                bonus = int(row.workspace_slot_bonus or 0)
-                cap_stats_dict[row.user_id] = {
-                    "owned_count": int(row.owned_count or 0),
-                    "workspace_slot_bonus": bonus,
-                    "base_cap": BASE_CAP,
-                    "cap": BASE_CAP + bonus,
-                }
+        memory_stats_dict = await _fetch_memory_counts(db, user_ids)
+        cap_stats_dict = await _fetch_workspace_caps(db, user_ids)
 
         # Issue #246: current_context_id removed - skip context lookup
         # from models.auth import Context
@@ -353,41 +395,7 @@ async def list_users(
 
         # Issue #164: Load workspace memberships if requested
         if include_workspaces and users_list:
-            user_ids = [u.user_id for u in users_list]
-            workspace_memberships_result = await db.execute(
-                select(WorkspaceMember, Workspace)
-                .join(Workspace, Workspace.id == WorkspaceMember.workspace_id)
-                .where(
-                    WorkspaceMember.user_id.in_(user_ids),
-                    Workspace.deleted_at.is_(None),  # #681: exclude soft-deleted
-                )
-                .order_by(WorkspaceMember.role.desc())
-            )
-            workspace_memberships = workspace_memberships_result.all()
-
-            # Build dict: {user_id: [workspace_info, ...]}
-            user_workspaces_map = {}
-            for member, workspace in workspace_memberships:
-                if member.user_id not in user_workspaces_map:
-                    user_workspaces_map[member.user_id] = []
-
-                # Find user to check if primary workspace
-                user_obj = next((u for u in users_list if u.user_id == member.user_id), None)
-                is_primary = user_obj and user_obj.current_workspace_id == workspace.id
-
-                user_workspaces_map[member.user_id].append(
-                    {
-                        "workspace_id": str(workspace.id),
-                        "workspace_name": workspace.name,
-                        "role": member.role,
-                        "is_primary": is_primary,
-                        "joined_at": to_utc_iso(member.joined_at),
-                    }
-                )
-
-            # Attach workspace info to user_infos
-            for user_info in user_infos:
-                user_info.workspaces = user_workspaces_map.get(user_info.id, [])
+            await _attach_user_workspaces(db, user_infos, users_list)
 
         logger.info(
             "admin_list_users",
