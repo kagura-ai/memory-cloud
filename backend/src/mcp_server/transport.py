@@ -37,6 +37,78 @@ def _sanitize_challenge_attr_value(value: str) -> str:
     return value.replace("\r", " ").replace("\n", " ").replace('"', "'")
 
 
+async def _send_json_error(
+    send: Send,
+    status: int,
+    payload: dict[str, Any],
+    extra_headers: list[list[bytes]] | None = None,
+) -> None:
+    """Send a JSON error response on the raw ASGI ``send`` channel (#1456).
+
+    ``mcp_asgi_app`` had seven copies of the same eight-line
+    ``json.dumps(...).encode()`` → ``http.response.start`` →
+    ``http.response.body`` sequence, each one a place a status code or a
+    ``content-type`` could quietly drift from its siblings.
+
+    Args:
+        send: ASGI send callable.
+        status: HTTP status code.
+        payload: JSON-serializable body.
+        extra_headers: Appended after ``content-type`` — the 401 path needs
+            ``www-authenticate``.
+    """
+    headers: list[list[bytes]] = [[b"content-type", b"application/json"]]
+    if extra_headers:
+        headers.extend(extra_headers)
+    await send({"type": "http.response.start", "status": status, "headers": headers})
+    await send({"type": "http.response.body", "body": json.dumps(payload).encode("utf-8")})
+
+
+def _extract_session_id(
+    method: str, path: str, headers: dict[bytes, bytes], query_string: bytes
+) -> str | None:
+    """Resolve the MCP session id from the request (#1456 extract).
+
+    Priority is unchanged: URL path, then the ``mcp-session-id`` header, then a
+    ``session_id`` query parameter. The path form only applies to the legacy
+    ``POST /mcp/messages/{session_id}/`` shape.
+
+    Returns:
+        The session id, or ``None`` when the request carries none.
+    """
+    if method == "POST" and path.startswith("/mcp/messages/"):
+        # /mcp/messages/mcp-xxx/ -> mcp-xxx
+        path_parts = path.strip("/").split("/")
+        if len(path_parts) >= 3:  # ['mcp', 'messages', 'session_id']
+            logger.info(f"MCP session_id from path: {path_parts[2]}")
+            return path_parts[2]
+
+    session_id_header = headers.get(b"mcp-session-id")
+    if session_id_header:
+        session_id = session_id_header.decode("utf-8")
+        logger.info(f"MCP session_id from header: {session_id}")
+        return session_id
+
+    query = query_string.decode("utf-8")
+    if "session_id=" in query:
+        for param in query.split("&"):
+            if param.startswith("session_id="):
+                session_id = param.split("=", 1)[1]
+                logger.info(f"MCP session_id from query: {session_id}")
+                return session_id
+
+    return None
+
+
+def _normalize_mcp_path(path: str) -> str:
+    """Strip the ``/mcp`` mount prefix for the downstream handlers (#1456)."""
+    if path.startswith("/mcp/"):
+        return path[4:]
+    if path == "/mcp":
+        return "/"
+    return path
+
+
 async def _get_user_workspace_id(user_id: str) -> "UUID | None":
     """Get user's current workspace ID.
 
@@ -96,22 +168,15 @@ async def handle_streamable_http_post(
         body = json.loads(body_bytes.decode("utf-8"))
     except json.JSONDecodeError as e:
         logger.error(f"MCP POST invalid JSON: {e}")
-        error_response = json.dumps(
+        await _send_json_error(
+            send,
+            400,
             {
                 "jsonrpc": "2.0",
                 "error": {"code": -32700, "message": "Parse error"},
                 "id": None,
-            }
-        ).encode()
-
-        await send(
-            {
-                "type": "http.response.start",
-                "status": 400,
-                "headers": [[b"content-type", b"application/json"]],
-            }
+            },
         )
-        await send({"type": "http.response.body", "body": error_response})
         return
 
     # Check if this is a notification (no "id" field)
@@ -465,22 +530,15 @@ async def mcp_asgi_app(scope: Scope, receive: Receive, send: Send) -> None:
                     logger.warning(
                         f"MCP workspace mismatch (API Key): url={workspace_id_from_url}, key={workspace_id}"
                     )
-                    error_response = json.dumps(
+                    await _send_json_error(
+                        send,
+                        403,
                         {
                             "error": "workspace_mismatch",
                             "error_description": "API key workspace does not match URL workspace. "
                             "Use an API key scoped to this workspace.",
-                        }
-                    ).encode("utf-8")
-
-                    await send(
-                        {
-                            "type": "http.response.start",
-                            "status": 403,
-                            "headers": [[b"content-type", b"application/json"]],
-                        }
+                        },
                     )
-                    await send({"type": "http.response.body", "body": error_response})
                     return
             else:
                 # OAuth2 authentication: Allow workspace switching if user is a member
@@ -512,41 +570,27 @@ async def mcp_asgi_app(scope: Scope, receive: Receive, send: Send) -> None:
                             logger.warning(
                                 f"MCP OAuth2 not a member: url={workspace_id_from_url}, user={user_id}"
                             )
-                            error_response = json.dumps(
+                            await _send_json_error(
+                                send,
+                                403,
                                 {
                                     "error": "access_denied",
                                     "error_description": "You are not a member of this workspace.",
-                                }
-                            ).encode("utf-8")
-
-                            await send(
-                                {
-                                    "type": "http.response.start",
-                                    "status": 403,
-                                    "headers": [[b"content-type", b"application/json"]],
-                                }
+                                },
                             )
-                            await send({"type": "http.response.body", "body": error_response})
                             return
                         break
 
                 except ValueError:
                     logger.warning(f"MCP invalid workspace UUID in URL: {workspace_id_from_url}")
-                    error_response = json.dumps(
+                    await _send_json_error(
+                        send,
+                        400,
                         {
                             "error": "invalid_request",
                             "error_description": "Invalid workspace ID in URL.",
-                        }
-                    ).encode("utf-8")
-
-                    await send(
-                        {
-                            "type": "http.response.start",
-                            "status": 400,
-                            "headers": [[b"content-type", b"application/json"]],
-                        }
+                        },
                     )
-                    await send({"type": "http.response.body", "body": error_response})
                     return
 
     except Exception as auth_error:
@@ -606,34 +650,8 @@ async def mcp_asgi_app(scope: Scope, receive: Receive, send: Send) -> None:
         await send({"type": "http.response.body", "body": error_response})
         return
 
-    # Get or create session
-    # Priority order: 1) URL path, 2) Header, 3) Query parameter
-    session_id = None
-
-    # For POST requests, extract session_id from path (/messages/{session_id}/)
-    if method == "POST" and path.startswith("/mcp/messages/"):
-        # Extract session_id from path: /mcp/messages/mcp-xxx/ -> mcp-xxx
-        path_parts = path.strip("/").split("/")
-        if len(path_parts) >= 3:  # ['mcp', 'messages', 'session_id']
-            session_id = path_parts[2]
-            logger.info(f"MCP session_id from path: {session_id}")
-
-    # If not found in path, try header
-    if not session_id:
-        session_id_header = headers.get(b"mcp-session-id")
-        if session_id_header:
-            session_id = session_id_header.decode("utf-8")
-            logger.info(f"MCP session_id from header: {session_id}")
-
-    # If still not found, try query parameter
-    if not session_id:
-        query_string = scope.get("query_string", b"").decode("utf-8")
-        if "session_id=" in query_string:
-            for param in query_string.split("&"):
-                if param.startswith("session_id="):
-                    session_id = param.split("=", 1)[1]
-                    logger.info(f"MCP session_id from query: {session_id}")
-                    break
+    # Get or create session. Priority: URL path, header, query parameter.
+    session_id = _extract_session_id(method, path, headers, scope.get("query_string", b""))
 
     session_manager = get_session_manager()
 
@@ -665,7 +683,9 @@ async def mcp_asgi_app(scope: Scope, receive: Receive, send: Send) -> None:
                     f"MCP POST /mcp with invalid session: {session_id}, "
                     f"active_sessions={active_count}"
                 )
-                error_response = json.dumps(
+                await _send_json_error(
+                    send,
+                    404,
                     {
                         "jsonrpc": "2.0",
                         "error": {
@@ -678,17 +698,8 @@ async def mcp_asgi_app(scope: Scope, receive: Receive, send: Send) -> None:
                             },
                         },
                         "id": None,
-                    }
-                ).encode()
-
-                await send(
-                    {
-                        "type": "http.response.start",
-                        "status": 404,
-                        "headers": [[b"content-type", b"application/json"]],
-                    }
+                    },
                 )
-                await send({"type": "http.response.body", "body": error_response})
                 return
             logger.info(f"MCP POST /mcp: using existing session: {session.session_id}")
 
@@ -699,7 +710,9 @@ async def mcp_asgi_app(scope: Scope, receive: Receive, send: Send) -> None:
                 # Session not found - return helpful error (Issue #50)
                 logger.warning(f"MCP POST to non-existent session: {session_id}")
 
-                error_response = json.dumps(
+                await _send_json_error(
+                    send,
+                    404,
                     {
                         "jsonrpc": "2.0",
                         "error": {
@@ -712,35 +725,19 @@ async def mcp_asgi_app(scope: Scope, receive: Receive, send: Send) -> None:
                             },
                         },
                         "id": None,
-                    }
-                ).encode("utf-8")
-
-                await send(
-                    {
-                        "type": "http.response.start",
-                        "status": 404,
-                        "headers": [[b"content-type", b"application/json"]],
-                    }
+                    },
                 )
-                await send({"type": "http.response.body", "body": error_response})
                 return
         else:
             # No session_id provided for POST
-            error_response = json.dumps(
+            await _send_json_error(
+                send,
+                400,
                 {
                     "error": "Missing session_id",
                     "message": "POST requests require a valid session_id. Please connect using /mcp first.",
-                }
-            ).encode("utf-8")
-
-            await send(
-                {
-                    "type": "http.response.start",
-                    "status": 400,
-                    "headers": [[b"content-type", b"application/json"]],
-                }
+                },
             )
-            await send({"type": "http.response.body", "body": error_response})
             return
     elif method == "GET" and path == "/mcp":
         # NEW: Streamable HTTP GET endpoint (optional SSE stream)
@@ -755,18 +752,11 @@ async def mcp_asgi_app(scope: Scope, receive: Receive, send: Send) -> None:
             logger.info(f"MCP GET /mcp: session={session.session_id}")
         except Exception as e:
             logger.error(f"MCP GET /mcp session creation failed: {e}", exc_info=True)
-            error_response = json.dumps(
-                {"error": "Internal error", "message": f"Failed to create session: {str(e)}"}
-            ).encode()
-
-            await send(
-                {
-                    "type": "http.response.start",
-                    "status": 500,
-                    "headers": [[b"content-type", b"application/json"]],
-                }
+            await _send_json_error(
+                send,
+                500,
+                {"error": "Internal error", "message": f"Failed to create session: {str(e)}"},
             )
-            await send({"type": "http.response.body", "body": error_response})
             return
     else:
         # LEGACY: GET /sse - create session if needed
@@ -779,26 +769,15 @@ async def mcp_asgi_app(scope: Scope, receive: Receive, send: Send) -> None:
             )
         except Exception as e:
             logger.error(f"MCP session creation failed: {e}", exc_info=True)
-            error_response = json.dumps(
-                {"error": "Internal error", "message": f"Failed to create session: {str(e)}"}
-            ).encode()
-
-            await send(
-                {
-                    "type": "http.response.start",
-                    "status": 500,
-                    "headers": [[b"content-type", b"application/json"]],
-                }
+            await _send_json_error(
+                send,
+                500,
+                {"error": "Internal error", "message": f"Failed to create session: {str(e)}"},
             )
-            await send({"type": "http.response.body", "body": error_response})
             return
 
     # Normalize path (remove /mcp prefix if present)
-    normalized_path = path
-    if path.startswith("/mcp/"):
-        normalized_path = path[4:]
-    elif path == "/mcp":
-        normalized_path = "/"
+    normalized_path = _normalize_mcp_path(path)
 
     # Create modified scope with normalized path
     modified_scope = dict(scope)
