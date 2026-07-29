@@ -45,7 +45,7 @@ async def _send_json_error(
 ) -> None:
     """Send a JSON error response on the raw ASGI ``send`` channel (#1456).
 
-    ``mcp_asgi_app`` had seven copies of the same eight-line
+    ``mcp_asgi_app`` and its POST handler had nine copies of the same
     ``json.dumps(...).encode()`` → ``http.response.start`` →
     ``http.response.body`` sequence, each one a place a status code or a
     ``content-type`` could quietly drift from its siblings.
@@ -755,7 +755,11 @@ async def mcp_asgi_app(scope: Scope, receive: Receive, send: Send) -> None:
             await _send_json_error(
                 send,
                 500,
-                {"error": "Internal error", "message": f"Failed to create session: {str(e)}"},
+                {"error": "Internal error", "message": "Failed to create session."},
+                # #1456 review: the exception text stays in the log line
+                # above (with exc_info) and out of the client body — it can
+                # carry driver/DSN/path detail an MCP client has no business
+                # seeing, and nothing actionable for it either way.
             )
             return
     else:
@@ -772,7 +776,11 @@ async def mcp_asgi_app(scope: Scope, receive: Receive, send: Send) -> None:
             await _send_json_error(
                 send,
                 500,
-                {"error": "Internal error", "message": f"Failed to create session: {str(e)}"},
+                {"error": "Internal error", "message": "Failed to create session."},
+                # #1456 review: the exception text stays in the log line
+                # above (with exc_info) and out of the client body — it can
+                # carry driver/DSN/path detail an MCP client has no business
+                # seeing, and nothing actionable for it either way.
             )
             return
 
