@@ -377,10 +377,135 @@ async def handle_create_context(
     return _error_response("internal_error", "Database session unavailable")
 
 
+# Fields ``update_context`` accepts, and the subset that requires OWNER rather
+# than editor access. Kept as module constants so the permission split is one
+# readable line instead of two inline set literals (#1456).
+_UPDATABLE_CONTEXT_FIELDS = (
+    "summary",
+    "usage_guide",
+    "display_name",
+    "description",
+    "resource_id",
+    "is_public",
+    "is_locked",
+)
+_OWNER_ONLY_CONTEXT_FIELDS = frozenset(
+    {"summary", "usage_guide", "resource_id", "is_public", "is_locked"}
+)
+
+
+async def _apply_public_flag(db: Any, context: Any, is_public: Any) -> list[TextContent] | None:
+    """Set ``is_public``, enforcing the plan gate and the resource-id lock.
+
+    Returns:
+        An error response to send instead of continuing, or ``None`` on success.
+    """
+    if is_public and not context.is_public:
+        # Making public: check the plan allows it.
+        from config.plan_tiers import get_plan_tier
+        from models.auth import Workspace
+
+        ws = await db.get(Workspace, context.workspace_id)
+        if ws:
+            plan = get_plan_tier(ws.plan_name)
+            if not plan.allows_shared_contexts:
+                return _error_response(
+                    "plan_required",
+                    "Public contexts require a higher tier plan.",
+                )
+    if not is_public and context.is_public and context.resource_id:
+        return _error_response(
+            "cannot_make_private",
+            "Cannot make private: context has a resource_id. Revoke tokens and remove resource_id first.",
+        )
+    context.is_public = is_public
+    return None
+
+
+async def _apply_resource_id(
+    db: Any, context: Any, rid: str, user_id: str
+) -> list[TextContent] | None:
+    """Set ``resource_id``, revoking tokens issued against the previous one.
+
+    A resource_id change orphans every token minted under the old slug, so they
+    are revoked here rather than left live against an id this context no longer
+    answers to.
+
+    Returns:
+        An error response to send instead of continuing, or ``None`` on success.
+    """
+    import re as _re
+
+    if not _re.match(r"^[a-z0-9_-]+$", rid) or len(rid) > 255:
+        return _error_response(
+            "invalid_resource_id",
+            "resource_id must be lowercase alphanumeric, underscores, and hyphens only (max 255 chars).",
+        )
+
+    old_rid = context.resource_id
+    if old_rid and old_rid != rid:
+        from sqlalchemy import select as _select
+
+        from auth.resource_tokens import ResourceTokenManager
+        from models.resource import ResourceToken
+
+        token_mgr = ResourceTokenManager(db)
+        old_tokens = await db.execute(
+            _select(ResourceToken).where(
+                ResourceToken.resource_id == old_rid,
+                ResourceToken.created_by == user_id,
+                ResourceToken.is_active == True,  # noqa: E712
+            )
+        )
+        for token in old_tokens.scalars().all():
+            await token_mgr.revoke_token(token.id)
+
+    context.resource_id = rid
+    return None
+
+
+async def _apply_context_updates(
+    db: Any, context: Any, args: dict[str, Any], user_id: str
+) -> list[TextContent] | None:
+    """Write the requested fields onto the context row (#1456 extract).
+
+    Only keys PRESENT in ``args`` are touched — absence means "leave alone", so
+    a caller updating one field cannot blank the rest.
+
+    Returns:
+        An error response to send instead of committing, or ``None`` on success.
+    """
+    if "display_name" in args:
+        context.display_name = args["display_name"]
+    if "description" in args:
+        context.description = args["description"]
+    if "summary" in args:
+        context.summary = args["summary"]
+    if "usage_guide" in args:
+        context.usage_guide = args["usage_guide"]
+    if "is_public" in args:
+        error = await _apply_public_flag(db, context, args["is_public"])
+        if error:
+            return error
+    if "resource_id" in args:
+        error = await _apply_resource_id(db, context, args["resource_id"], user_id)
+        if error:
+            return error
+    # Issue #85: lock/unlock context.
+    if "is_locked" in args:
+        context.is_locked = args["is_locked"]
+    return None
+
+
 async def handle_update_context(
     args: dict[str, Any], user_id: str, workspace_id: UUID | None
 ) -> list[TextContent]:
-    """Update an existing context's metadata."""
+    """Update an existing context's metadata.
+
+    Field application lives in :func:`_apply_context_updates` (#1456); the two
+    fields with their own gates — ``is_public`` (plan tier) and ``resource_id``
+    (format + token revocation) — have helpers of their own.
+    """
     if "context_id" not in args:
         return _error_response(
             "missing_fields",
@@ -405,20 +530,7 @@ async def handle_update_context(
             ctx_uuid = _UUID(args["context_id"])
 
             perm_service = PermissionService(db)
-            owner_fields = {"summary", "usage_guide", "resource_id", "is_public", "is_locked"}
-            requested_fields = {
-                k
-                for k in (
-                    "summary",
-                    "usage_guide",
-                    "display_name",
-                    "description",
-                    "resource_id",
-                    "is_public",
-                    "is_locked",
-                )
-                if k in args
-            }
+            requested_fields = {k for k in _UPDATABLE_CONTEXT_FIELDS if k in args}
 
             if not requested_fields:
                 return _error_response(
@@ -429,7 +541,7 @@ async def handle_update_context(
             # Mirrors handle_delete_context. Uses exc.message (not str(exc))
             # so AuthorizationError's CWE-639 uniform-message contract holds.
             try:
-                if requested_fields & owner_fields:
+                if requested_fields & _OWNER_ONLY_CONTEXT_FIELDS:
                     # Owner-only fields → require context owner
                     context = await perm_service.check_context_owner(user_id, ctx_uuid)
                 else:
@@ -451,71 +563,9 @@ async def handle_update_context(
                     help="You need owner access for summary/usage_guide/resource_id/is_public/is_locked, or editor access for display_name/description.",
                 )
 
-            # Apply updates
-            if "display_name" in args:
-                context.display_name = args["display_name"]
-            if "description" in args:
-                context.description = args["description"]
-            if "summary" in args:
-                context.summary = args["summary"]
-            if "usage_guide" in args:
-                context.usage_guide = args["usage_guide"]
-            if "is_public" in args:
-                is_public = args["is_public"]
-                if is_public and not context.is_public:
-                    # Making public: check plan allows it
-                    from config.plan_tiers import get_plan_tier
-                    from models.auth import Workspace
-
-                    ws = await db.get(Workspace, context.workspace_id)
-                    if ws:
-                        plan = get_plan_tier(ws.plan_name)
-                        if not plan.allows_shared_contexts:
-                            return _error_response(
-                                "plan_required",
-                                "Public contexts require a higher tier plan.",
-                            )
-                if not is_public and context.is_public and context.resource_id:
-                    return _error_response(
-                        "cannot_make_private",
-                        "Cannot make private: context has a resource_id. Revoke tokens and remove resource_id first.",
-                    )
-                context.is_public = is_public
-
-            if "resource_id" in args:
-                import re as _re
-
-                rid = args["resource_id"]
-                if not _re.match(r"^[a-z0-9_-]+$", rid) or len(rid) > 255:
-                    return _error_response(
-                        "invalid_resource_id",
-                        "resource_id must be lowercase alphanumeric, underscores, and hyphens only (max 255 chars).",
-                    )
-
-                # Revoke old tokens if resource_id is changing
-                old_rid = context.resource_id
-                if old_rid and old_rid != rid:
-                    from sqlalchemy import select as _select
-
-                    from auth.resource_tokens import ResourceTokenManager
-                    from models.resource import ResourceToken
-
-                    token_mgr = ResourceTokenManager(db)
-                    old_tokens = await db.execute(
-                        _select(ResourceToken).where(
-                            ResourceToken.resource_id == old_rid,
-                            ResourceToken.created_by == user_id,
-                            ResourceToken.is_active == True,  # noqa: E712
-                        )
-                    )
-                    for token in old_tokens.scalars().all():
-                        await token_mgr.revoke_token(token.id)
-
-                context.resource_id = rid
-
-            # Issue #85: Lock/unlock context
-            if "is_locked" in args:
-                context.is_locked = args["is_locked"]
+            error = await _apply_context_updates(db, context, args, user_id)
+            if error:
+                return error
 
             try:
                 await db.commit()
