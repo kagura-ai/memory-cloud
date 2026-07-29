@@ -73,14 +73,62 @@ on_exit() {
     fi
 }
 
+# The marker names the color that is LIVE right now — never the one a switch is
+# heading toward. Every writer updates it only AFTER the new color is up and has
+# passed its readiness check (deploy Step 5; rollback after wait_for_readiness),
+# and the old color is drained only after Caddy has been pointed away. Keep that
+# order: writing the marker first would publish a color that cannot serve, and
+# an interrupted run would leave it that way (#1448).
 get_active_color() {
+    # A missing marker used to default to "blue" silently. That is the one
+    # failure mode this file cannot absorb: with no marker, every reader
+    # *agrees* on a color nobody selected, so a host whose marker was lost
+    # (fresh volume, interrupted bootstrap, unclean shutdown truncating the
+    # file) looks healthy while Caddy and the deploy script disagree with
+    # reality. The bootstrap in README.md writes it explicitly; if it is gone,
+    # say so instead of guessing (#1448).
+    if [ ! -s "$MARKER_FILE" ]; then
+        error "Marker file $MARKER_FILE is missing or empty. It must name the
+       color serving traffic right now. Recover with:
+           docker ps --format '{{.Names}}' | grep kagura-api-
+           echo <blue|green> > $MARKER_FILE"
+    fi
     local color
-    color="$(cat "$MARKER_FILE" 2>/dev/null || echo "blue")"
+    color="$(cat "$MARKER_FILE")"
     # Validate — must be exactly "blue" or "green"
     if [ "$color" != "blue" ] && [ "$color" != "green" ]; then
         error "Marker file $MARKER_FILE contains invalid value: '$color'. Expected 'blue' or 'green'."
     fi
     echo "$color"
+}
+
+# Report a marker that names a color with no running container (#1448).
+#
+# That state means a switch was interrupted after the marker moved but before
+# the color it names came up — or that the color died afterwards. It is not
+# cosmetic: `get_inactive_color` is derived from the marker, so the next deploy
+# would build the color that IS live and drain the one that is not. Downstream,
+# kagura-bridge's connect-level cross-color fallback (kagura-ai/kagura-bridge#211)
+# masks the mismatch instead of surfacing it — it absorbed 4162 calls over 65
+# hours in the 2026-07-21..24 incident, turning a safety net into the normal
+# path and burying every other warning in its noise.
+#
+# Reports rather than exits: this runs on the read-only status path, where the
+# operator needs the diagnosis, not a dead command.
+check_marker_matches_live() {
+    local color="$1"
+    if is_container_running "$color"; then
+        return 0
+    fi
+    log "WARNING: marker says '$color' but kagura-api-${color} is NOT running."
+    log "         A switch was likely interrupted, or the live color died."
+    log "         Traffic is only being served via cross-color fallback, if at all."
+    local other
+    if [ "$color" = "blue" ]; then other="green"; else other="blue"; fi
+    if is_container_running "$other"; then
+        log "         kagura-api-${other} IS running — it is probably the real live color."
+    fi
+    return 1
 }
 
 get_inactive_color() {
@@ -102,6 +150,10 @@ cmd_status() {
     active="$(get_active_color)"
     log "Active color: $active"
     log "Marker file:  $MARKER_FILE"
+
+    # #1448: the whole point of a status command is to catch this before the
+    # next deploy computes its target color from a marker that is lying.
+    check_marker_matches_live "$active" || true
 
     # Show container states
     dc ps --format "table {{.Name}}\t{{.Status}}" 2>/dev/null \
@@ -147,6 +199,15 @@ cmd_deploy() {
     active="$(get_active_color)"
     inactive="$(get_inactive_color)"
     log "Current active: $active — deploying to: $inactive"
+
+    # #1448: both colors below are derived from the marker. If it names a color
+    # that is not running, this deploy would build the color that IS serving and
+    # drain the one that is not — the opposite of what was asked. Surface it and
+    # stop; recovering is a one-line marker write, guessing is not recoverable.
+    if ! check_marker_matches_live "$active"; then
+        error "Refusing to deploy from a marker that does not match reality.
+       Point $MARKER_FILE at the color actually serving traffic, then re-run."
+    fi
 
     # Step 1: Build new image
     DEPLOY_STAGE="Step 1/7: build api-${inactive} image"
