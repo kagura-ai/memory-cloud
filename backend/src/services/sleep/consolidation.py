@@ -18,6 +18,7 @@ from __future__ import annotations
 import os
 import random
 import string
+from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING
 from uuid import UUID
@@ -114,6 +115,31 @@ def _archival_eligible(memory: Memory, age_days: int, cutoff: datetime | None) -
     )
 
 
+@dataclass(frozen=True)
+class _NeuralThresholds:
+    """Graph-metric promotion thresholds, read once per run from the env."""
+
+    centrality: float
+    hub: int
+    weight: float
+
+
+@dataclass
+class _ConsolidationTally:
+    """Per-run outcome counters, split by which pass decided (#1456).
+
+    Rule-path and LLM-path totals are reported separately in ``result.details``
+    — collapsing them would hide whether the judge is doing anything the rules
+    were not already doing.
+    """
+
+    promoted: int = 0
+    deleted: int = 0
+    llm_promoted: int = 0
+    llm_archived: int = 0
+    llm_archive_guarded: int = 0
+
+
 class ConsolidationPhase:
     """Consolidate working memories with optional LLM judgment."""
 
@@ -131,6 +157,205 @@ class ConsolidationPhase:
         # dedup phase established the pattern in #475).
         self._tokens_used: int = 0
         self._llm_breakdown: LLMCallBreakdown | None = None
+
+    @staticmethod
+    def _should_promote(
+        memory: Memory,
+        age_days: int,
+        neural_metrics: dict | None,
+        thresholds: _NeuralThresholds,
+    ) -> bool:
+        """Rule-based promotion verdict, gated on ADOPTION (#1049).
+
+        ``reference_count`` (adoption) replaces the surfacing-inflated
+        ``access_count``; the thresholds are the module constants, re-tuned for
+        the sparser adoption scale. Neural-metric criteria are unchanged.
+        Importance-only promotion (high importance + aged) is access-agnostic
+        and stays as-is.
+        """
+        adoption = memory.reference_count or 0
+        return bool(
+            (
+                adoption >= ADOPTION_PROMOTE_WITH_IMPORTANCE
+                and memory.importance >= PROMOTE_IMPORTANCE_FLOOR
+            )
+            or (adoption >= ADOPTION_PROMOTE_MIN)
+            or (
+                memory.importance >= PROMOTE_HIGH_IMPORTANCE
+                and age_days >= PROMOTE_HIGH_IMPORTANCE_MIN_AGE_DAYS
+            )
+            or (age_days >= AGED_PROMOTE_MIN_AGE_DAYS and adoption >= AGED_PROMOTE_ADOPTION_MIN)
+            or (neural_metrics and neural_metrics["centrality"] >= thresholds.centrality)
+            or (neural_metrics and neural_metrics["edge_count"] >= thresholds.hub)
+            or (neural_metrics and neural_metrics["avg_edge_weight"] >= thresholds.weight)
+        )
+
+    async def _rule_pass(
+        self,
+        working: list[Memory],
+        *,
+        user_id: str,
+        graph_service: GraphService,
+        has_graph: bool,
+        thresholds: _NeuralThresholds,
+        adoption_delete_cutoff: datetime | None,
+        result: PhaseResult,
+        tally: _ConsolidationTally,
+        reporter: SleepReporter | None,
+        report_id: UUID | None,
+    ) -> list[Memory]:
+        """Deterministic triage of every working memory (#1456 extract).
+
+        Promote, archive, or defer. Archival gates on adoption==0 AND is
+        grandfathered — only memories created at/after the cutoff are eligible
+        (RELEASE BLOCKER, see ``_adoption_delete_cutoff``); ``cutoff=None``
+        disables adoption-based deletion entirely.
+
+        Returns:
+            The memories that matched neither rule — the LLM pass adjudicates
+            these, and only these.
+        """
+        borderline: list[Memory] = []
+        for memory in working:
+            age_days = (utcnow() - memory.created_at).days
+
+            neural_metrics = None
+            if has_graph:
+                neural_metrics = await graph_service.get_node_metrics(str(memory.id))
+
+            should_delete = _archival_eligible(memory, age_days, adoption_delete_cutoff) and (
+                not neural_metrics or neural_metrics["is_isolated"]
+            )
+
+            if self._should_promote(memory, age_days, neural_metrics, thresholds):
+                await self.memory_repo.promote_to_persistent(memory.id)
+                tally.promoted += 1
+                result.changed_memory_ids.add(memory.id)
+                await self._record_action(
+                    reporter,
+                    report_id,
+                    "promote",
+                    memory.id,
+                    "rule",
+                    memory.importance,
+                    memory.access_count,
+                    age_days,
+                    memory.reference_count or 0,
+                )
+            elif should_delete:
+                try:
+                    await delete_memory_from_qdrant(user_id, memory.id, self.collection_name)
+                    await self.memory_repo.delete(memory.id)
+                    tally.deleted += 1
+                    await self._record_action(
+                        reporter,
+                        report_id,
+                        "archive",
+                        memory.id,
+                        "rule",
+                        memory.importance,
+                        memory.access_count,
+                        age_days,
+                        memory.reference_count or 0,
+                    )
+                except Exception as e:
+                    logger.warning(
+                        "consolidation_delete_failed",
+                        memory_id=str(memory.id),
+                        error=str(e),
+                    )
+            else:
+                borderline.append(memory)
+        return borderline
+
+    async def _llm_pass(
+        self,
+        borderline: list[Memory],
+        *,
+        config: NeuralMemoryConfig,
+        user_id: str,
+        workspace_id: str | None,
+        context_id: str | None,
+        budget: SleepBudget,
+        graph_service: GraphService,
+        has_graph: bool,
+        adoption_delete_cutoff: datetime | None,
+        result: PhaseResult,
+        tally: _ConsolidationTally,
+        reporter: SleepReporter | None,
+        report_id: UUID | None,
+    ) -> None:
+        """Adjudicate the deferred memories in LLM batches (#1456 extract)."""
+        for batch_start in range(0, len(borderline), BATCH_SIZE):
+            if not budget.can_afford(llm_calls=1):
+                break
+
+            batch = borderline[batch_start : batch_start + BATCH_SIZE]
+            decisions = await self._llm_judge_batch(
+                batch, user_id, context_id, workspace_id, budget, config
+            )
+
+            batch_map = {m.id: m for m in batch}
+            for memory_id, action in decisions.items():
+                mem = batch_map.get(memory_id)
+                if not mem:
+                    logger.warning(
+                        "consolidation_llm_unknown_memory",
+                        memory_id=str(memory_id),
+                    )
+                    continue
+                mem_age_days = (utcnow() - mem.created_at).days
+                if action == "promote":
+                    await self.memory_repo.promote_to_persistent(memory_id)
+                    tally.llm_promoted += 1
+                    result.changed_memory_ids.add(memory_id)
+                    await self._record_action(
+                        reporter,
+                        report_id,
+                        "promote",
+                        memory_id,
+                        "llm",
+                        mem.importance,
+                        mem.access_count,
+                        mem_age_days,
+                        mem.reference_count or 0,
+                    )
+                elif action == "archive":
+                    # #1233: unreachable via _llm_judge_batch (the prompt no
+                    # longer offers "archive" and the parser rejects it) — kept
+                    # as a defensive backstop so any future decision source
+                    # still cannot archive an ineligible memory.
+                    # #1229: the LLM only chooses AMONG deterministically
+                    # archival-eligible candidates (shared predicate with the
+                    # rule path — see _archival_eligible).
+                    if not _archival_eligible(mem, mem_age_days, adoption_delete_cutoff):
+                        tally.llm_archive_guarded += 1
+                        logger.info(
+                            "consolidation_llm_archive_guarded",
+                            memory_id=str(memory_id),
+                            age_days=mem_age_days,
+                            adoption=mem.reference_count or 0,
+                            cutoff_set=adoption_delete_cutoff is not None,
+                        )
+                        continue
+                    neural = None
+                    if has_graph:
+                        neural = await graph_service.get_node_metrics(str(memory_id))
+                    if not neural or neural["is_isolated"]:
+                        await delete_memory_from_qdrant(user_id, memory_id, self.collection_name)
+                        await self.memory_repo.delete(memory_id)
+                        tally.llm_archived += 1
+                        await self._record_action(
+                            reporter,
+                            report_id,
+                            "archive",
+                            memory_id,
+                            "llm",
+                            mem.importance,
+                            mem.access_count,
+                            mem_age_days,
+                            mem.reference_count or 0,
+                        )
 
     async def execute(
         self,
@@ -170,170 +395,41 @@ class ConsolidationPhase:
         # Issue #1049: grandfather cutoff for the adoption==0 archival path (read once).
         adoption_delete_cutoff = _adoption_delete_cutoff()
 
-        promoted = 0
-        deleted = 0
-        borderline: list[Memory] = []
+        tally = _ConsolidationTally()
+        thresholds = _NeuralThresholds(
+            centrality=centrality_threshold, hub=hub_threshold, weight=weight_threshold
+        )
 
-        for memory in working:
-            age_days = (utcnow() - memory.created_at).days
+        borderline = await self._rule_pass(
+            working,
+            user_id=user_id,
+            graph_service=graph_service,
+            has_graph=has_graph,
+            thresholds=thresholds,
+            adoption_delete_cutoff=adoption_delete_cutoff,
+            result=result,
+            tally=tally,
+            reporter=reporter,
+            report_id=report_id,
+        )
 
-            # Get neural metrics if graph exists
-            neural_metrics = None
-            if has_graph:
-                neural_metrics = await graph_service.get_node_metrics(str(memory.id))
-
-            # === Fast path: rule-based, gated on ADOPTION (#1049) ===
-            # ``reference_count`` (adoption) replaces the surfacing-inflated
-            # ``access_count``. Thresholds are the named module constants above,
-            # re-tuned for the sparser adoption scale. Neural-metric criteria are
-            # unchanged. importance-only promotion (high importance + aged) is
-            # access-agnostic and stays as-is.
-            adoption = memory.reference_count or 0
-            should_promote = (
-                (
-                    adoption >= ADOPTION_PROMOTE_WITH_IMPORTANCE
-                    and memory.importance >= PROMOTE_IMPORTANCE_FLOOR
-                )
-                or (adoption >= ADOPTION_PROMOTE_MIN)
-                or (
-                    memory.importance >= PROMOTE_HIGH_IMPORTANCE
-                    and age_days >= PROMOTE_HIGH_IMPORTANCE_MIN_AGE_DAYS
-                )
-                or (age_days >= AGED_PROMOTE_MIN_AGE_DAYS and adoption >= AGED_PROMOTE_ADOPTION_MIN)
-                or (neural_metrics and neural_metrics["centrality"] >= centrality_threshold)
-                or (neural_metrics and neural_metrics["edge_count"] >= hub_threshold)
-                or (neural_metrics and neural_metrics["avg_edge_weight"] >= weight_threshold)
-            )
-
-            # Archival now gates on adoption==0, AND is grandfathered: only memories
-            # created at/after the cutoff are eligible (RELEASE BLOCKER — see
-            # ``_adoption_delete_cutoff``). cutoff=None → no adoption-based deletion.
-            should_delete = _archival_eligible(memory, age_days, adoption_delete_cutoff) and (
-                not neural_metrics or neural_metrics["is_isolated"]
-            )
-
-            if should_promote:
-                await self.memory_repo.promote_to_persistent(memory.id)
-                promoted += 1
-                result.changed_memory_ids.add(memory.id)
-                await self._record_action(
-                    reporter,
-                    report_id,
-                    "promote",
-                    memory.id,
-                    "rule",
-                    memory.importance,
-                    memory.access_count,
-                    age_days,
-                    memory.reference_count or 0,
-                )
-            elif should_delete:
-                try:
-                    await delete_memory_from_qdrant(user_id, memory.id, self.collection_name)
-                    await self.memory_repo.delete(memory.id)
-                    deleted += 1
-                    await self._record_action(
-                        reporter,
-                        report_id,
-                        "archive",
-                        memory.id,
-                        "rule",
-                        memory.importance,
-                        memory.access_count,
-                        age_days,
-                        memory.reference_count or 0,
-                    )
-                except Exception as e:
-                    logger.warning(
-                        "consolidation_delete_failed",
-                        memory_id=str(memory.id),
-                        error=str(e),
-                    )
-            else:
-                borderline.append(memory)
-
-        # === LLM path for borderline cases ===
-        llm_promoted = 0
-        llm_archived = 0
-        # #1229: archive verdicts refused because the memory was not
-        # deterministically archival-eligible (visibility — never silent).
-        llm_archive_guarded = 0
         llm_enabled = config.sleep_llm_provider != ""
-
         if borderline and llm_enabled:
-            for batch_start in range(0, len(borderline), BATCH_SIZE):
-                if not budget.can_afford(llm_calls=1):
-                    break
-
-                batch = borderline[batch_start : batch_start + BATCH_SIZE]
-                decisions = await self._llm_judge_batch(
-                    batch, user_id, context_id, workspace_id, budget, config
-                )
-
-                batch_map = {m.id: m for m in batch}
-                for memory_id, action in decisions.items():
-                    mem = batch_map.get(memory_id)
-                    if not mem:
-                        logger.warning(
-                            "consolidation_llm_unknown_memory",
-                            memory_id=str(memory_id),
-                        )
-                        continue
-                    mem_age_days = (utcnow() - mem.created_at).days
-                    if action == "promote":
-                        await self.memory_repo.promote_to_persistent(memory_id)
-                        llm_promoted += 1
-                        result.changed_memory_ids.add(memory_id)
-                        await self._record_action(
-                            reporter,
-                            report_id,
-                            "promote",
-                            memory_id,
-                            "llm",
-                            mem.importance,
-                            mem.access_count,
-                            mem_age_days,
-                            mem.reference_count or 0,
-                        )
-                    elif action == "archive":
-                        # #1233: unreachable via _llm_judge_batch (the prompt
-                        # no longer offers "archive" and the parser rejects
-                        # it) — kept as a defensive backstop so any future
-                        # decision source still cannot archive an ineligible
-                        # memory.
-                        # #1229: the LLM only chooses AMONG deterministically
-                        # archival-eligible candidates (shared predicate with
-                        # the rule path above — see _archival_eligible).
-                        if not _archival_eligible(mem, mem_age_days, adoption_delete_cutoff):
-                            llm_archive_guarded += 1
-                            logger.info(
-                                "consolidation_llm_archive_guarded",
-                                memory_id=str(memory_id),
-                                age_days=mem_age_days,
-                                adoption=mem.reference_count or 0,
-                                cutoff_set=adoption_delete_cutoff is not None,
-                            )
-                            continue
-                        neural = None
-                        if has_graph:
-                            neural = await graph_service.get_node_metrics(str(memory_id))
-                        if not neural or neural["is_isolated"]:
-                            await delete_memory_from_qdrant(
-                                user_id, memory_id, self.collection_name
-                            )
-                            await self.memory_repo.delete(memory_id)
-                            llm_archived += 1
-                            await self._record_action(
-                                reporter,
-                                report_id,
-                                "archive",
-                                memory_id,
-                                "llm",
-                                mem.importance,
-                                mem.access_count,
-                                mem_age_days,
-                                mem.reference_count or 0,
-                            )
+            await self._llm_pass(
+                borderline,
+                config=config,
+                user_id=user_id,
+                workspace_id=workspace_id,
+                context_id=context_id,
+                budget=budget,
+                graph_service=graph_service,
+                has_graph=has_graph,
+                adoption_delete_cutoff=adoption_delete_cutoff,
+                result=result,
+                tally=tally,
+                reporter=reporter,
+                report_id=report_id,
+            )
 
         result.memories_processed = len(working)
         result.llm_calls_used = budget.llm_calls_used - llm_calls_before
@@ -344,21 +440,21 @@ class ConsolidationPhase:
             result.llm_breakdown = [self._llm_breakdown]
         result.details = {
             "working_count": len(working),
-            "rule_promoted": promoted,
-            "rule_deleted": deleted,
+            "rule_promoted": tally.promoted,
+            "rule_deleted": tally.deleted,
             "borderline": len(borderline),
-            "llm_promoted": llm_promoted,
-            "llm_archived": llm_archived,
+            "llm_promoted": tally.llm_promoted,
+            "llm_archived": tally.llm_archived,
             # #1229: LLM archive verdicts blocked by the eligibility guard.
-            "llm_archive_guarded": llm_archive_guarded,
+            "llm_archive_guarded": tally.llm_archive_guarded,
             "llm_call_failures": self._llm_failures,  # #1183
         }
 
         logger.info(
             "consolidation_completed",
             working=len(working),
-            promoted=promoted + llm_promoted,
-            deleted=deleted + llm_archived,
+            promoted=tally.promoted + tally.llm_promoted,
+            deleted=tally.deleted + tally.llm_archived,
         )
 
         return result
