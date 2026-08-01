@@ -7,7 +7,7 @@ from typing import Literal, cast, get_args
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator
 
-# #1377: the worker Locale contract, mirroring kagura-bridge's
+# #1377: the worker Locale contract, mirroring the connector worker's
 # WorkerConfigResponse.locale (Literal["en", "ja"]). A non-conforming vended
 # value fails bridge-side validation of the WHOLE config body — the tenant
 # fails closed with only a generic config_unavailable in the logs. This is the

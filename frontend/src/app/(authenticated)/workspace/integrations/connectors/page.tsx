@@ -1453,7 +1453,7 @@ export default function ConnectorsPage() {
                   llmFieldsBlock
                 )}
                 {/* #1388: LiteLLM virtual key demoted to an advanced fold —
-                  stored but not vended yet (kagura-bridge#179). Keyed by
+                  stored but not vended to the worker yet. Keyed by
                   connector so the uncontrolled <details> open state never
                   leaks from one connector's dialog into another's. */}
                 <details

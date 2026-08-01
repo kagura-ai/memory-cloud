@@ -819,7 +819,7 @@ describe("ConnectorsPage RBAC gate", () => {
 
     render(<ConnectorsPage />);
 
-    // The virtual key is stored but not vended (kagura-bridge#179): the row
+    // The virtual key is stored but not vended to the worker: the row
     // must agree with the dialog readiness rule instead of contradicting it.
     expect(await screen.findByText("llmNotBound")).toBeInTheDocument();
     expect(screen.queryByText("llmBound")).not.toBeInTheDocument();

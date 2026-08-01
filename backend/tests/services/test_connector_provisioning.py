@@ -365,7 +365,8 @@ async def test_list_connectors_reports_never_written_context_as_zero():
     It must read as "nothing written yet" — the honest fact — and NOT as an
     error. A brand-new or low-traffic connector legitimately has no writes, and
     a row that is permanently red gets ignored exactly like an alert that fires
-    permanently (the same trap kagura-bridge#214 hit with AiWorkerNoSuccessfulAcks).
+    permanently — a "no successful writes" alarm that cannot distinguish "idle"
+    from "broken" trains operators to dismiss it.
     """
     from services.connector_provisioning import ConnectorListItem
 

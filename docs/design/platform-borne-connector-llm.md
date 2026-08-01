@@ -27,10 +27,9 @@ the `llm` block resolves in this order:
   **virtual key** so usage is metered per tenant. `litellm_virtual_key_id`
   identifies that key; the vend hands the worker a proxy base URL + the
   virtual key instead of a raw provider credential.
-- Must align with the kagura-bridge dedicated-LLM-credential vend design
-  ([kagura-bridge#179](https://github.com/kagura-ai/kagura-bridge/issues/179))
-  — reference only; no cross-repo scope in this note. The convergence
-  requirement: one vend shape both consumers can read
+- Must align with the downstream connector worker's dedicated-LLM-credential
+  vend design — reference only; no cross-repo scope in this note. The
+  convergence requirement: one vend shape both consumers can read
   (`{mode: "byok" | "virtual-key" | "platform", ...}` rather than an opaque
   dict whose meaning depends on who filled it).
 
@@ -81,4 +80,4 @@ count — #1388/#1389). When a platform lane exists:
 - Sleep/analysis LLM provider selection is a separate lane (BYOK-scoped
   today) and out of scope.
 
-Refs: #1376, #1380, #1388, #1389, #1393, kagura-bridge#179.
+Refs: #1376, #1380, #1388, #1389, #1393.

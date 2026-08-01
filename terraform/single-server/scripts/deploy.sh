@@ -116,11 +116,11 @@ get_active_color() {
 # That state means a switch was interrupted after the marker moved but before
 # the color it names came up — or that the color died afterwards. It is not
 # cosmetic: `get_inactive_color` is derived from the marker, so the next deploy
-# would build the color that IS live and drain the one that is not. Downstream,
-# kagura-bridge's connect-level cross-color fallback (kagura-ai/kagura-bridge#211)
-# masks the mismatch instead of surfacing it — it absorbed 4162 calls over 65
-# hours in the 2026-07-21..24 incident, turning a safety net into the normal
-# path and burying every other warning in its noise.
+# would build the color that IS live and drain the one that is not. Downstream
+# consumers that implement a connect-level failover to the other color then mask
+# the mismatch instead of surfacing it: the failover carries the traffic, so the
+# system keeps looking healthy while a safety net quietly serves as the normal
+# path and its warnings drown out every other signal.
 #
 # Reports rather than exits: this runs on the read-only status path, where the
 # operator needs the diagnosis, not a dead command.

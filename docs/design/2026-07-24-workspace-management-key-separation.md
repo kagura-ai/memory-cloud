@@ -19,7 +19,7 @@ Two related problems, one operational and one structural:
    invisible even though it is real.
 2. **Ambient authority (structural).** A key's power is derived entirely
    from its owner's current workspace role. Every key an admin/owner mints —
-   including keys intended purely for data-plane automation (kagura-bridge
+   including keys intended purely for data-plane automation (connector workers
    writers, CI ingest, `.mcp.json`) — can also call connector setup, secret
    management, and member management. There is no way to mint a
    least-privilege data-only key as an owner.
@@ -64,7 +64,7 @@ Two related problems, one operational and one structural:
 Honest security accounting (drove the phase split): with grandfathering, the
 automatic day-one security gain is **zero**. The capability model's real
 security value is *enabling* data-only owner keys (de-privileging
-kagura-bridge / CI credentials) — an opt-in gain realized only when keys are
+connector-worker / CI credentials) — an opt-in gain realized only when keys are
 rotated. Operational clarity, the acute problem, does not need the schema
 change at all. Hence Phase 1 ships clarity; Phase 2 ships the mechanism.
 
