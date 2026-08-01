@@ -154,6 +154,16 @@ class User(Base):
         Integer, nullable=False, default=0, server_default="0"
     )
 
+    # Issue #1470: the user's shareable referral code. Lazily minted on the
+    # first GET /referrals/me (``secrets.token_urlsafe``), so there is no
+    # backfill and users who never open the page never get a row update.
+    # Deliberately NOT ``user_id``: that column holds the OAuth ``sub`` claim,
+    # which is the primary auth identifier for sessions, API keys and MCP auth
+    # and must never appear in a URL the user is encouraged to share.
+    referral_code: Mapped[str | None] = mapped_column(
+        String(24), nullable=True, unique=True, index=True
+    )
+
     # Relationships
     current_workspace: Mapped["Workspace | None"] = relationship(
         "Workspace", foreign_keys=[current_workspace_id]
@@ -1578,6 +1588,36 @@ class Workspace(Base):
         Integer, nullable=False, server_default="0"
     )  # Spec 2026-06-02: extra ai-worker connector seats addon
 
+    # Issue #1470: memory-quota bonus earned through the referral program.
+    #
+    # DO NOT add this column to any of the three addon collections:
+    #   - ``internal_billing._ADDON_COLUMNS``
+    #   - ``admin_plans._ADDON_FIELD_SPECS``
+    #   - ``AddonCalculatorService.recalculate_workspace_bonuses``'s bonuses dict
+    #
+    # It is deliberately named WITHOUT the ``addon_`` prefix and kept outside
+    # that machinery, because each of those paths would destroy it:
+    #   1. ``internal_billing.py`` zeroes every column in ``_ADDON_COLUMNS`` on
+    #      any billing push that carries ``addons`` (full-replace semantics).
+    #      Billing knows nothing about referrals, so the reward would silently
+    #      evaporate at the exact moment a referred user converts to paid.
+    #   2. ``addon_*`` columns are a CACHE of ``SUM(WorkspaceAddon.quantity x
+    #      unit_value)`` and are rewritten with that absolute value on every
+    #      recalc; a referral-written value with no backing ``WorkspaceAddon``
+    #      row is reset to 0 and reported as drift by
+    #      ``GET /admin/plans/addon-cache-consistency``. (#665 fixed exactly
+    #      this bug for admin grants — see ``admin_plans.py`` cmd_deploy notes.)
+    #   3. ``ADDON_UNIT_VALUES["extra_memory"]`` is 10000 and the admin quota
+    #      PUT rejects non-multiples, so the reward amount is not even
+    #      expressible through that path.
+    #
+    # This column's own source of truth is the ``referral_grants`` ledger; it is
+    # recomputed as an absolute SUM over non-revoked rows, never incremented.
+    # ``tests/api/test_referral_addon_isolation.py`` guards the three absences.
+    referral_memory_bonus: Mapped[int] = mapped_column(
+        Integer, nullable=False, server_default="0"
+    )  # Issue #1470
+
     # Issue #1095: provenance of the current entitlement. ``admin_grant`` (default)
     # = locally-owned, protected from the external billing reconciler;
     # ``external_billing`` = billing-owned, reconcilable. See the module-level
@@ -1619,8 +1659,22 @@ class Workspace(Base):
 
     @property
     def effective_memory_limit(self) -> int:
-        """Memory limit including addon bonus."""
-        return _zero_floor(self._plan_tier.memory_limit, self.addon_memory_bonus)
+        """Memory limit including addon bonus and the referral bonus (#1470).
+
+        The two bonuses are summed *before* ``_zero_floor`` so the zero-base
+        guard still applies to the total: a tier with ``memory_limit == 0``
+        cannot be lifted above 0 by a referral any more than by an addon.
+
+        Each operand is coalesced individually rather than relying on
+        ``_zero_floor``'s single ``or 0``: both columns are ``nullable=False``
+        with ``server_default="0"``, but a transient (unflushed) ORM object can
+        still carry ``None``, and ``None + 0`` raises before the helper is ever
+        reached.
+        """
+        return _zero_floor(
+            self._plan_tier.memory_limit,
+            (self.addon_memory_bonus or 0) + (self.referral_memory_bonus or 0),
+        )
 
     @property
     def effective_mcp_calls_per_day(self) -> int:
@@ -1815,6 +1869,12 @@ class Workspace(Base):
             f"entitlement_source IN ({', '.join(repr(s) for s in ENTITLEMENT_SOURCES)})",
             name="valid_entitlement_source",
         ),
+        # Issue #1470: keep the ORM CHECK in lockstep with alembic e76_1470 so
+        # ``Base.metadata.create_all()``-built schemas (used by some tests)
+        # reject a negative referral bonus too. Mirrors the
+        # ``workspace_slot_bonus_nonneg`` precedent; tests/test_schema_drift.py
+        # verifies the SQL text matches the migration's ADD CONSTRAINT.
+        CheckConstraint("referral_memory_bonus >= 0", name="referral_memory_bonus_nonneg"),
     )
 
     def __repr__(self) -> str:

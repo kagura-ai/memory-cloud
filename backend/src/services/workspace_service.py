@@ -181,6 +181,28 @@ class WorkspaceService:
             f"default context: {default_context.id if default_context else 'none'}"
         )
 
+        # Issue #1470: a referral grant can be earned before the beneficiary owns
+        # any workspace — ``api/routes/auth.py`` skips personal-workspace bootstrap
+        # entirely when the user has pending team invitations. Those grants are
+        # recorded with a NULL workspace_id and applied here, once a workspace
+        # exists. This is the single funnel: ``ensure_personal_workspace`` and
+        # ``create_personal_workspace`` both route through this method.
+        #
+        # Non-blocking on purpose: workspace creation must never fail because a
+        # bonus could not be applied. The grant row survives either way, so a
+        # later workspace creation (or an admin) can still resolve it.
+        try:
+            from services.referral_service import ReferralService
+
+            await ReferralService(self.db).apply_pending_grants(owner_user_id)
+        except Exception as exc:  # pragma: no cover - defensive
+            logger.warning(
+                "referral_pending_grants_apply_failed",
+                workspace_id=str(workspace.id),
+                owner_user_id=owner_user_id,
+                error=str(exc),
+            )
+
         return workspace
 
     async def ensure_personal_workspace(

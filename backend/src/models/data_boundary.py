@@ -87,6 +87,13 @@ OPERATIONAL_TABLES: frozenset[str] = frozenset(
         "workspace_members",
         "workspace_invitations",
         "workspace_addons",
+        # Referral payout ledger (#1470) — entitlement plumbing in the same
+        # family as workspace_addons / plan_changes: it records how much quota
+        # was granted and why, not anything the user authored and nothing the
+        # system learned. Erasure NULLs its user FKs (ON DELETE SET NULL) so the
+        # row survives as an anonymous accounting record; that is deliberate, and
+        # it is why the table needs no entry in account_erasure_service's sweep.
+        "referral_grants",
         "workspace_connectors",
         # Global external-app verification control plane (#1315). Contains
         # Fernet ciphertext and lifecycle metadata, never user-authored memory.

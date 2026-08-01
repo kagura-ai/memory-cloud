@@ -265,6 +265,14 @@ openapi_tags = [
             "workspace owner + Pro tier + per-day quota + workspace allowlist."
         ),
     },
+    {
+        "name": "referrals",
+        "description": (
+            "Referral program (Issue #1470): the caller's own referral code and "
+            "standing, plus code redemption. Session auth only, and the whole "
+            "surface 404s unless the deployment sets ENABLE_REFERRALS."
+        ),
+    },
     # Public API
     {"name": "public-search", "description": "Public REST API for search"},
     {"name": "mcp-api", "description": "MCP server tools listing and status"},
@@ -280,6 +288,10 @@ openapi_tags = [
         "description": "Admin: per-context memory health diagnosis and signal breakdown",
     },
     {"name": "admin-neural", "description": "Admin: trigger Neural Memory recalibration"},
+    {
+        "name": "admin-referrals",
+        "description": "Admin: referral grant ledger and per-grant revocation",
+    },
     {
         "name": "admin-signup-gate",
         "description": "Admin: signup-gate configuration and allowlist management",
@@ -581,6 +593,7 @@ from api.routes import (  # noqa: E402
     admin_memory_health,  # Issue #1211: consolidated memory-health report
     admin_neural,  # Issue #406: Manual kNN calibration recalibrate trigger
     admin_plans,
+    admin_referrals,  # Issue #1470: referral ledger + per-grant revoke
     admin_signup_gate,  # Issue #358: admin-configurable signup gate
     admin_sleep,  # Issue #247: Manual Sleep Maintenance trigger
     agent_state,  # Issue #906: REST surface for the agent session-state lane
@@ -610,6 +623,7 @@ from api.routes import (  # noqa: E402
     neural_config,
     oauth,
     public_search,  # Issue #238: Public Search API
+    referrals,  # Issue #1470: user-facing referral code + redeem
     resource_indexer,  # Issue #326: Indexer status visibility API
     resource_ingest,  # Issue #238: Resource Ingest API
     resource_schema,  # Issue #238: Schema Management API
@@ -709,6 +723,12 @@ app.include_router(admin_neural.router, prefix="/api/v1")
 
 # Admin signup gate (Issue #358: admin-configurable signup gate)
 app.include_router(admin_signup_gate.router, prefix="/api/v1")
+
+# Referral program (Issue #1470). The user-facing routes 404 unless
+# settings.enable_referrals; the admin ledger/revoke stays reachable regardless
+# so an operator can unwind grants after flipping the kill switch off.
+app.include_router(referrals.router, prefix="/api/v1")
+app.include_router(admin_referrals.router, prefix="/api/v1")
 
 # BM25 IDF Drift admin (Issue #343 - cron disabled by default until v0.14.0)
 app.include_router(bm25_drift.router, prefix="/api/v1")

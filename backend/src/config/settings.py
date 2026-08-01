@@ -15,6 +15,19 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 
 from utils.media_types import MEDIA_TYPE_RE, normalize_media_type
 
+# Issue #1470: the total memory quota one inviter's referral chain may mint.
+#
+# Derived from the FREE -> BASIC memory gap: ``PLAN_BASIC.memory_limit (10000) -
+# PLAN_FREE.memory_limit (1000)``. If a fully-used referral chain could close
+# that gap, the referral program would BE the paid tier, for free.
+#
+# Hardcoded rather than imported from ``config.plan_tiers`` because that module
+# calls ``get_settings()`` at import time (``_apply_settings_overrides``), so
+# importing it here would be circular. The coupling is instead pinned by
+# ``tests/api/test_referrals.py::test_payout_budget_matches_the_free_to_basic_gap``,
+# which fails if the tier values move and this constant does not.
+REFERRAL_TOTAL_PAYOUT_BUDGET_MEMORIES = 9000
+
 
 def _validate_handoff_base_url(value: str) -> str:
     """Validate/normalize the optional billing handoff base URL (#1118).
@@ -510,6 +523,63 @@ class Settings(BaseSettings):
             "paths. Surfaced to the frontend via GET /api/v1/system/info features.byok."
         ),
     )
+    enable_referrals: bool = Field(
+        default=False,
+        description=(
+            "Enable the referral program (#1470) — a user invites another user "
+            "and both sides earn a memory-quota bonus. OFF by default: it mints "
+            "entitlement, so it must be an explicit opt-in for OSS / self-hosted. "
+            "This is also the KILL SWITCH: flipping it false stops all new "
+            "redemptions (already-granted bonuses are unaffected and are reversed "
+            "individually via the admin revoke endpoint). Surfaced to the frontend "
+            "via GET /api/v1/system/info features.referrals."
+        ),
+    )
+    # Issue #1470: referral reward tuning. The ``le=`` bounds are the first
+    # safety rail — an operator typo becomes a fail-closed startup error rather
+    # than a payout incident. They are NOT sufficient on their own: per-field
+    # bounds cannot express a *product* constraint, and the product of these
+    # ceilings (10 x 2000 = 20000) would blow past the FREE -> BASIC memory gap.
+    # ``_validate_referral_payout_budget`` below is the guard that actually
+    # holds the tier ladder; see REFERRAL_TOTAL_PAYOUT_BUDGET_MEMORIES.
+    #
+    # The referrer and referee amounts are SEPARATE fields on purpose — setting
+    # the referrer side to 0 during an abuse burst removes the farming incentive
+    # while the onboarding gift keeps working, which a single on/off flag cannot
+    # express.
+    referral_referee_reward_memories: int = Field(
+        default=500,
+        ge=0,
+        le=2000,
+        description="Memory-quota bonus granted to the invited user on redemption (#1470).",
+    )
+    referral_referrer_reward_memories: int = Field(
+        default=500,
+        ge=0,
+        le=2000,
+        description="Memory-quota bonus granted to the inviter per successful referral (#1470).",
+    )
+    referral_max_grants_per_referrer: int = Field(
+        default=3,
+        ge=0,
+        le=10,
+        description=(
+            "Lifetime cap on successful referrals per inviter (#1470). Launched at "
+            "3 rather than 5 because raising the cap is non-breaking while lowering "
+            "it strands users who already earned the higher slots."
+        ),
+    )
+    referral_redeem_window_hours: int = Field(
+        default=72,
+        ge=1,
+        le=720,
+        description=(
+            "How long after signup a user may redeem a referral code (#1470). This "
+            "is the 'is this genuinely a new user' check: it is cheap, observable "
+            "from users.created_at, and it stops an established account from "
+            "redeeming a code long after the fact."
+        ),
+    )
     enable_managed_connectors: bool = Field(
         default=False,
         description=(
@@ -963,6 +1033,41 @@ class Settings(BaseSettings):
                     "(ISO 8601 timestamp when ops accepted the Resend DPA — "
                     "see https://resend.com/legal/dpa)"
                 )
+        return self
+
+    @model_validator(mode="after")
+    def _validate_referral_payout_budget(self) -> "Settings":
+        """Fail-fast when the referral config could close the FREE -> BASIC gap (#1470).
+
+        The per-field ``le=`` bounds cannot express this: they bound each knob
+        independently, but the thing that matters is the PRODUCT
+        ``max_grants x reward``. At the individual ceilings that product reaches
+        10 x 2000 = 20000, more than double the 9000-memory gap — i.e. an
+        operator could hand out the paid tier for free without ever exceeding a
+        single field's bound.
+
+        Checked against the larger of the two reward sides because a chain pays
+        the referrer once per referral; bounding on the max keeps the guard
+        correct no matter which side is set higher.
+
+        Only enforced when the program is enabled, so an OSS deployment that
+        never turns referrals on is not forced to keep the numbers coherent.
+        """
+        if not self.enable_referrals:
+            return self
+        worst_case = self.referral_max_grants_per_referrer * max(
+            self.referral_referrer_reward_memories,
+            self.referral_referee_reward_memories,
+        )
+        if worst_case > REFERRAL_TOTAL_PAYOUT_BUDGET_MEMORIES:
+            raise ValueError(
+                "Referral config would mint up to "
+                f"{worst_case} memories per inviter, above the "
+                f"{REFERRAL_TOTAL_PAYOUT_BUDGET_MEMORIES}-memory budget "
+                "(the FREE->BASIC gap). Lower REFERRAL_MAX_GRANTS_PER_REFERRER "
+                "or the reward amounts — otherwise a fully-used referral chain "
+                "hands out the paid tier for free."
+            )
         return self
 
     @model_validator(mode="after")

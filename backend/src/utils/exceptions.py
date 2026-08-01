@@ -426,6 +426,87 @@ class BonusBelowZeroError(MemoryCloudException):
         )
 
 
+class ReferralError(MemoryCloudException):
+    """Base for referral-redemption refusals (#1470).
+
+    Every subclass is a 400 with a distinct ``REFERRAL-*`` code so SDK
+    consumers and the web UI can route on the reason without string-matching
+    the message. All of them describe a *business-rule* refusal on a
+    well-formed request, which is why they are 400 rather than 422.
+
+    Deliberately uniform and vague about the referrer: none of these messages
+    reveal whether a submitted code exists, who owns it, or how many slots it
+    has left. A farmer probing codes learns nothing beyond "not usable".
+    """
+
+    def __init__(self, message: str, *, error_code: str, **details: Any) -> None:
+        super().__init__(message, status_code=400, error_code=error_code, **details)
+
+
+class ReferralCodeInvalidError(ReferralError):
+    """The submitted referral code does not resolve to a usable referrer (400)."""
+
+    def __init__(self) -> None:
+        super().__init__(
+            "This referral code is not valid.",
+            error_code="REFERRAL-001",
+        )
+
+
+class ReferralSelfError(ReferralError):
+    """A user submitted their own referral code (400).
+
+    Also enforced by the ``ck_referral_grants_not_self`` CHECK; this app-level
+    guard exists so the caller gets a routable code instead of a generic
+    IntegrityError.
+    """
+
+    def __init__(self) -> None:
+        super().__init__(
+            "You cannot redeem your own referral code.",
+            error_code="REFERRAL-002",
+        )
+
+
+class ReferralAlreadyRedeemedError(ReferralError):
+    """This user has already been referred (400).
+
+    The authoritative guard is ``uq_referral_grants_referred_user``; a
+    concurrent double-submit surfaces here via the zero-row
+    ``ON CONFLICT DO NOTHING`` result rather than as a 500.
+    """
+
+    def __init__(self) -> None:
+        super().__init__(
+            "You have already redeemed a referral code.",
+            error_code="REFERRAL-003",
+        )
+
+
+class ReferralWindowClosedError(ReferralError):
+    """The account is too old to redeem a referral code (400)."""
+
+    def __init__(self, *, window_hours: int) -> None:
+        super().__init__(
+            f"Referral codes can only be redeemed within {window_hours} hours of signup.",
+            error_code="REFERRAL-004",
+            window_hours=window_hours,
+        )
+
+
+class ReferralCapReachedError(ReferralError):
+    """The referrer has used every referral slot they have (400).
+
+    Message intentionally does not name the referrer or the cap value.
+    """
+
+    def __init__(self) -> None:
+        super().__init__(
+            "This referral code is not valid.",
+            error_code="REFERRAL-005",
+        )
+
+
 # Rate Limiting & Quota Errors (429)
 
 
