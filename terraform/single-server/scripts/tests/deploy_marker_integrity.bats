@@ -2,11 +2,11 @@
 # =============================================================================
 # #1448: the active-color marker must never quietly disagree with reality.
 #
-# Production ran 65 hours with the marker naming `blue` while no blue container
-# existed. Every control-plane call reached the API only through kagura-bridge's
-# connect-level cross-color fallback (kagura-ai/kagura-bridge#211) — 4162 times —
-# turning a safety net into the normal path and filling 99.7% of the bridge log
-# with one warning.
+# Production once ran for an extended period with the marker naming `blue` while
+# no blue container existed. Control-plane calls still reached the API, but only
+# via a downstream consumer's connect-level failover to the other color — turning
+# a safety net into the normal path and burying every other signal under a single
+# repeated warning.
 #
 # The issue proposed reordering the switch (start → health → marker → drain).
 # That order was ALREADY implemented (deploy Step 2→7, and rollback starts and

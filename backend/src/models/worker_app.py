@@ -2,7 +2,7 @@
 
 An app identity represents one platform application (for example one Slack
 app), not one customer installation.  ``app_key`` is the stable, non-secret
-selector shared with kagura-bridge.  Signing secrets remain server-custody
+selector shared with the connector worker.  Signing secrets remain server-custody
 credentials: only Fernet ciphertext is persisted and plaintext is exposed
 solely by the service-token-protected worker bootstrap endpoint.
 """

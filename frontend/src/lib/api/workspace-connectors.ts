@@ -82,8 +82,8 @@ export interface ConnectorReadiness {
 
 // #1388: vend-readiness rule, mirrored from what the worker actually needs
 // to serve a connector today: an ingest channel selection plus a stored BYO
-// LLM bundle. litellm_virtual_key_id is stored but not vended yet
-// (kagura-bridge#179), so it must NOT count toward readiness — a connector
+// LLM bundle. litellm_virtual_key_id is stored but not vended to the worker
+// yet, so it must NOT count toward readiness — a connector
 // with only a virtual key would read "ready" while the worker gets llm=null.
 // Single source for every readiness surface (dialog summary, row indicators);
 // the #1392 platform-LLM lane changes this rule in exactly one place.
