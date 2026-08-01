@@ -1046,18 +1046,21 @@ class Settings(BaseSettings):
         operator could hand out the paid tier for free without ever exceeding a
         single field's bound.
 
-        Checked against the larger of the two reward sides because a chain pays
-        the referrer once per referral; bounding on the max keeps the guard
-        correct no matter which side is set higher.
+        The formula counts what actually accrues to ONE workspace, which is what
+        ``ReferralService._recompute_workspace_bonus`` sums: a user is the
+        referee at most once (``UNIQUE(referred_user_id)``) and the referrer up
+        to ``max_grants`` times. Using ``max(referrer, referee)`` instead would
+        undercount by a whole referee reward and let an in-bounds config close
+        the gap anyway.
 
         Only enforced when the program is enabled, so an OSS deployment that
         never turns referrals on is not forced to keep the numbers coherent.
         """
         if not self.enable_referrals:
             return self
-        worst_case = self.referral_max_grants_per_referrer * max(
-            self.referral_referrer_reward_memories,
-            self.referral_referee_reward_memories,
+        worst_case = (
+            self.referral_max_grants_per_referrer * self.referral_referrer_reward_memories
+            + self.referral_referee_reward_memories
         )
         if worst_case > REFERRAL_TOTAL_PAYOUT_BUDGET_MEMORIES:
             raise ValueError(

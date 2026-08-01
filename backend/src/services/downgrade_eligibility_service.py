@@ -262,7 +262,14 @@ class DowngradeEligibilityService:
         check(
             DowngradeDimension.MEMORIES,
             usage.memories,
-            _zero_floor(tier.memory_limit, workspace.addon_memory_bonus),
+            # #1470: must mirror ``Workspace.effective_memory_limit`` exactly —
+            # the referral bonus survives a plan change (it is locally-owned,
+            # not billing-derived), so omitting it here would tell the user to
+            # delete memories they are still entitled to keep.
+            _zero_floor(
+                tier.memory_limit,
+                (workspace.addon_memory_bonus or 0) + (workspace.referral_memory_bonus or 0),
+            ),
             DowngradeCleanup.DELETE_MEMORIES,
         )
         # Resource tokens are tier-fixed (no addon → effective == base).

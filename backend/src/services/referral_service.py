@@ -29,6 +29,7 @@ from typing import Any, cast
 
 from sqlalchemy import CursorResult, func, select, update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from config.settings import get_settings
@@ -107,21 +108,34 @@ class ReferralService:
 
         # Retry on the UNIQUE index rather than pre-checking: the pre-check
         # would be racy anyway, and the index is the authority.
+        #
+        # Each attempt runs inside a SAVEPOINT. Without one, a unique collision
+        # aborts the whole transaction and every subsequent statement fails with
+        # InFailedSQLTransactionError — i.e. the loop would look like it retries
+        # but could not. ``begin_nested`` releases the savepoint on success and
+        # rolls back only to it on IntegrityError, leaving the outer transaction
+        # (which may belong to the caller) usable.
         for _ in range(_MAX_CODE_MINT_ATTEMPTS):
             candidate = secrets.token_urlsafe(_REFERRAL_CODE_BYTES)
-            result = await self.db.execute(
-                update(User)
-                .where(User.user_id == user_id, User.referral_code.is_(None))
-                .values(referral_code=candidate)
-                .returning(User.referral_code)
-            )
-            minted = result.scalar_one_or_none()
+            try:
+                async with self.db.begin_nested():
+                    result = await self.db.execute(
+                        update(User)
+                        .where(User.user_id == user_id, User.referral_code.is_(None))
+                        .values(referral_code=candidate)
+                        .returning(User.referral_code)
+                    )
+                    minted = result.scalar_one_or_none()
+            except IntegrityError:
+                # Candidate collided with an existing code (2^96 odds) — try again.
+                continue
+
             if minted:
                 await self.db.commit()
                 return minted
-            # Either someone else minted concurrently (re-read wins) or the
-            # candidate collided. Re-read before deciding.
-            await self.db.rollback()
+
+            # Zero rows updated => the ``referral_code IS NULL`` predicate failed,
+            # i.e. a concurrent request already minted one. Re-read and use it.
             existing = await self.db.scalar(
                 select(User.referral_code).where(User.user_id == user_id)
             )
@@ -160,6 +174,12 @@ class ReferralService:
         if referee is None:
             raise ReferralCodeInvalidError()
 
+        # Caller-state checks FIRST, before the code is ever looked up. Ordering
+        # is load-bearing for the enumeration story: if the window check ran
+        # after code resolution, receiving REFERRAL-004 rather than -001 would
+        # itself prove the submitted code exists.
+        self._assert_within_redeem_window(referee)
+
         normalized = (code or "").strip()
         if not normalized:
             raise ReferralCodeInvalidError()
@@ -172,17 +192,25 @@ class ReferralService:
         if referrer_id == referred_user_id:
             raise ReferralSelfError()
 
-        self._assert_within_redeem_window(referee)
-
-        # Lock the referrer row for the duration of the cap check + insert. No
-        # lock-ordering hazard: this is the only row lock the redemption path
-        # takes.
+        # Lock the referrer row for the duration of the cap check + insert, so
+        # two invitees redeeming the same code cannot both see the last free
+        # slot. Taken before any workspace lock, and the workspace locks
+        # themselves are UUID-ordered (``_recompute_workspace_bonuses``), so the
+        # global lock order is: referrer user row, then workspaces ascending.
         await self.db.execute(
             select(User.user_id).where(User.user_id == referrer_id).with_for_update()
         )
 
         used = await self._count_active_grants(referrer_id)
         if used >= self.settings.referral_max_grants_per_referrer:
+            # Logged with the true reason; the client sees REFERRAL-001, the
+            # same code an unknown referral code returns.
+            logger.info(
+                "referral_cap_reached",
+                referrer_user_id=referrer_id,
+                referred_user_id=referred_user_id,
+                used=used,
+            )
             raise ReferralCapReachedError()
 
         referrer_workspace_id = await self._resolve_owned_workspace_id(referrer_id)
@@ -208,8 +236,7 @@ class ReferralService:
             # paid, so there is nothing to roll back.
             raise ReferralAlreadyRedeemedError()
 
-        for workspace_id in (referrer_workspace_id, referred_workspace_id):
-            await self._recompute_workspace_bonus(workspace_id)
+        await self._recompute_workspace_bonuses(referrer_workspace_id, referred_workspace_id)
 
         await self.db.commit()
 
@@ -276,14 +303,40 @@ class ReferralService:
             .limit(1)
         )
 
+    async def _recompute_workspace_bonuses(self, *workspace_ids: uuid.UUID | None) -> None:
+        """Recompute several workspaces in a deadlock-free, de-duplicated order.
+
+        Callers pass workspaces by ROLE (referrer, then referee). Locking in that
+        order deadlocks on mutual referrals: A-invites-B locks (Wa, Wb) while
+        B-invites-A locks (Wb, Wa). Sorting by UUID gives a total order shared by
+        every transaction in the system, and de-duplication avoids locking (and
+        recomputing) the same workspace twice when both sides resolve to one
+        workspace — reachable after an ownership transfer.
+        """
+        for workspace_id in sorted({w for w in workspace_ids if w is not None}):
+            await self._recompute_workspace_bonus(workspace_id)
+
     async def _recompute_workspace_bonus(self, workspace_id: uuid.UUID | None) -> None:
         """Rewrite ``referral_memory_bonus`` as the absolute SUM of live grants.
 
         Absolute, never incremental — see the module docstring. A workspace with
         no grants converges to 0, which is also how revocation takes effect.
+
+        The SELECT-then-UPDATE pair is not atomic on its own: under READ
+        COMMITTED the UPDATE's row lock serializes the write but not the SUM, so
+        two concurrent recomputes would each stamp a value computed from their
+        own pre-commit snapshot and the later commit would silently drop the
+        other's ledger change. Locking the workspace row first makes the read and
+        the write one critical section. Prefer ``_recompute_workspace_bonuses``
+        over calling this directly with more than one workspace — that wrapper
+        supplies the ordering that keeps these locks deadlock-free.
         """
         if workspace_id is None:
             return
+
+        await self.db.execute(
+            select(Workspace.id).where(Workspace.id == workspace_id).with_for_update()
+        )
 
         referrer_total = func.coalesce(
             func.sum(ReferralGrant.referrer_bonus_memories).filter(
@@ -313,9 +366,16 @@ class ReferralService:
     async def apply_pending_grants(self, user_id: str) -> int:
         """Attach a workspace to this user's grants that were recorded without one.
 
-        Called after workspace creation. Grants earned while the user owned no
-        workspace (pending team invitations suppress personal-workspace
-        bootstrap) would otherwise stay invisible forever.
+        Called after workspace creation. Two states are re-homed here:
+
+        - grants earned while the user owned NO workspace (pending team
+          invitations suppress personal-workspace bootstrap), and
+        - grants pointing at a workspace the user has since SOFT-DELETED.
+
+        The second case matters because the bonus rides on a specific workspace
+        row: without re-homing, deleting that workspace strands the grant
+        forever while ``get_summary`` keeps reporting it as earned — the user
+        sees a bonus they no longer have anywhere.
 
         Args:
             user_id: The user whose grants should be re-resolved.
@@ -327,6 +387,11 @@ class ReferralService:
         if workspace_id is None:
             return 0
 
+        # Workspaces the grant may currently point at that no longer count:
+        # soft-deleted ones. Collected as a subquery so the UPDATE stays a
+        # single statement.
+        dead_workspaces = select(Workspace.id).where(Workspace.deleted_at.is_not(None))
+
         updated = 0
         for user_col, workspace_col in (
             (ReferralGrant.referrer_user_id, ReferralGrant.referrer_workspace_id),
@@ -336,7 +401,8 @@ class ReferralService:
                 update(ReferralGrant)
                 .where(
                     user_col == user_id,
-                    workspace_col.is_(None),
+                    workspace_col.is_(None) | workspace_col.in_(dead_workspaces),
+                    workspace_col.is_not(workspace_id),
                     ReferralGrant.revoked_at.is_(None),
                 )
                 .values({workspace_col.key: workspace_id})
@@ -445,8 +511,9 @@ class ReferralService:
             grant.revoked_at = utcnow()
             grant.revoked_reason = reason
             await self.db.flush()
-            for workspace_id in (grant.referrer_workspace_id, grant.referred_workspace_id):
-                await self._recompute_workspace_bonus(workspace_id)
+            await self._recompute_workspace_bonuses(
+                grant.referrer_workspace_id, grant.referred_workspace_id
+            )
             logger.info(
                 "referral_revoked",
                 grant_id=str(grant_id),

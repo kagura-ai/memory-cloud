@@ -32,6 +32,7 @@ def _make_ws(plan_name: str = "pro"):
     ws.addon_connector_bonus = 0
     ws.addon_sleep_contexts_bonus = 0
     ws.addon_storage_bonus_mb = 0
+    ws.referral_memory_bonus = 0  # #1470: stacks into the memory limit, not an addon
     return ws
 
 

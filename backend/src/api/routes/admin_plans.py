@@ -979,12 +979,20 @@ async def _count_addon_usage(db: AsyncSession, workspace_id: UUID, guard_kind: s
     raise ValueError(f"unknown guard_kind: {guard_kind!r}")
 
 
-def _effective_for_guard(plan_tier, guard_kind: str, requested_bonus: int) -> int:
+def _effective_for_guard(
+    plan_tier, guard_kind: str, requested_bonus: int, extra_bonus: int = 0
+) -> int:
     """New effective limit for an LD-7 guard, mirroring ``_zero_floor``.
 
     A tier with base ``0`` always yields ``0`` regardless of the addon —
     matches the runtime ``Workspace.effective_*`` properties so admins
     cannot bypass the tier gate via a manual grant (#569 defense).
+
+    ``extra_bonus`` carries entitlement that stacks into the same effective
+    limit but lives OUTSIDE the addon machinery — today only #1470's
+    ``Workspace.referral_memory_bonus`` on the ``memory`` guard. Without it the
+    guard computes a limit lower than the one actually in force and rejects
+    admin reductions that are in fact safe.
     """
     base_map = {
         "memory": plan_tier.memory_limit,
@@ -995,7 +1003,7 @@ def _effective_for_guard(plan_tier, guard_kind: str, requested_bonus: int) -> in
     base = base_map[guard_kind]
     if base == 0:
         return 0
-    return base + requested_bonus
+    return base + requested_bonus + extra_bonus
 
 
 @router.put("/workspaces/{workspace_id}/quotas")
@@ -1137,7 +1145,13 @@ async def update_workspace_quotas(
         #     touched persistent-addon field — admin-only path, acceptable.
         if spec.guard_kind is not None:
             usage_count = await _count_addon_usage(db, ws_uuid, spec.guard_kind)
-            new_effective = _effective_for_guard(plan_tier, spec.guard_kind, requested)
+            # #1470: the referral bonus stacks into effective_memory_limit but is
+            # not an addon, so the guard must be told about it explicitly or it
+            # under-computes the post-change limit for the ``memory`` kind.
+            extra_bonus = (
+                (workspace.referral_memory_bonus or 0) if spec.guard_kind == "memory" else 0
+            )
+            new_effective = _effective_for_guard(plan_tier, spec.guard_kind, requested, extra_bonus)
             if usage_count > new_effective:
                 raise HTTPException(
                     status_code=400,

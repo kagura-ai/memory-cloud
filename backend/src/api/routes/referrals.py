@@ -27,8 +27,6 @@ from utils.logger import get_logger
 
 logger = get_logger(__name__)
 
-router = APIRouter(prefix="/referrals", tags=["referrals"])
-
 
 def _require_enabled() -> None:
     """404 the whole surface when the program is switched off for this deployment."""
@@ -37,6 +35,18 @@ def _require_enabled() -> None:
             status_code=status.HTTP_404_NOT_FOUND,
             detail="Referral program is not enabled",
         )
+
+
+# Declared as a ROUTER-level dependency, listed first, so it is evaluated before
+# the per-route auth dependency. As an in-body call it ran *after* auth, which
+# meant an unauthenticated caller got 401 while an authenticated one got 404 —
+# i.e. the "the whole surface is absent" contract silently only held for
+# logged-in users, and the 401/404 split advertised the endpoint's existence.
+router = APIRouter(
+    prefix="/referrals",
+    tags=["referrals"],
+    dependencies=[Depends(_require_enabled)],
+)
 
 
 class ReferralSummaryResponse(BaseModel):
@@ -91,7 +101,6 @@ async def get_my_referral(
     Returns:
         The caller's referral summary.
     """
-    _require_enabled()
     service = ReferralService(db)
     summary = await service.get_summary(user["user_id"])
     return ReferralSummaryResponse(
@@ -125,7 +134,6 @@ async def redeem_referral(
     Returns:
         The created grant.
     """
-    _require_enabled()
     service = ReferralService(db)
     grant = await service.redeem(referred_user_id=user["user_id"], code=payload.code)
     return ReferralGrantResponse(

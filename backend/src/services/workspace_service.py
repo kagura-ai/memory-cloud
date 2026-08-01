@@ -191,17 +191,28 @@ class WorkspaceService:
         # Non-blocking on purpose: workspace creation must never fail because a
         # bonus could not be applied. The grant row survives either way, so a
         # later workspace creation (or an admin) can still resolve it.
-        try:
-            from services.referral_service import ReferralService
+        #
+        # The rollback in the handler is NOT optional. A failure here (e.g. a
+        # constraint violation) leaves the session in an aborted transaction, and
+        # swallowing the exception without rolling back would hand the caller a
+        # session where every subsequent statement fails with
+        # InFailedSQLTransactionError — turning a cosmetic bonus problem into a
+        # broken request. The workspace itself is already committed above.
+        from config.settings import get_settings
 
-            await ReferralService(self.db).apply_pending_grants(owner_user_id)
-        except Exception as exc:  # pragma: no cover - defensive
-            logger.warning(
-                "referral_pending_grants_apply_failed",
-                workspace_id=str(workspace.id),
-                owner_user_id=owner_user_id,
-                error=str(exc),
-            )
+        if get_settings().enable_referrals:
+            try:
+                from services.referral_service import ReferralService
+
+                await ReferralService(self.db).apply_pending_grants(owner_user_id)
+            except Exception as exc:  # pragma: no cover - defensive
+                await self.db.rollback()
+                logger.warning(
+                    "referral_pending_grants_apply_failed",
+                    workspace_id=str(workspace.id),
+                    owner_user_id=owner_user_id,
+                    error=str(exc),
+                )
 
         return workspace
 

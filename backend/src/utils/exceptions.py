@@ -437,6 +437,15 @@ class ReferralError(MemoryCloudException):
     Deliberately uniform and vague about the referrer: none of these messages
     reveal whether a submitted code exists, who owns it, or how many slots it
     has left. A farmer probing codes learns nothing beyond "not usable".
+
+    That uniformity has to hold for the ``error_code`` too, not just the message
+    — a distinct code IS an oracle. So every refusal whose reachability depends
+    on the SUBMITTED CODE (unknown code, exhausted referrer) goes out as
+    ``REFERRAL-001``; only refusals about the CALLER'S OWN state
+    (``REFERRAL-002`` self-referral, ``-003`` already redeemed, ``-004`` window
+    closed) get a distinguishing code, and ``ReferralService.redeem`` checks
+    those before it ever looks the code up so their reachability leaks nothing
+    either. The precise reason is kept in the structured log.
     """
 
     def __init__(self, message: str, *, error_code: str, **details: Any) -> None:
@@ -497,13 +506,17 @@ class ReferralWindowClosedError(ReferralError):
 class ReferralCapReachedError(ReferralError):
     """The referrer has used every referral slot they have (400).
 
-    Message intentionally does not name the referrer or the cap value.
+    Emits ``REFERRAL-001`` — byte-identical to ``ReferralCodeInvalidError`` on
+    the wire, message AND code. A dedicated ``REFERRAL-005`` would tell a prober
+    "this code exists but is exhausted", which is exactly the code-enumeration
+    signal the uniform messages were meant to deny. The class stays distinct so
+    the server can log (and test) the real reason.
     """
 
     def __init__(self) -> None:
         super().__init__(
             "This referral code is not valid.",
-            error_code="REFERRAL-005",
+            error_code="REFERRAL-001",
         )
 
 
