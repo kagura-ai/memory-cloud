@@ -373,8 +373,18 @@ cd terraform/single-server
 ```
 
 The script handles building, migrations, readiness checks, Caddy reload,
-and draining automatically. Use `./scripts/deploy.sh --status` to see
-which color is active, or `./scripts/deploy.sh --rollback` to switch back.
+the bridge-worker restart, and draining automatically. Use
+`./scripts/deploy.sh --status` to see which color is active, or
+`./scripts/deploy.sh --rollback` to switch back.
+
+> **No manual bridge restart.** Both the deploy and the rollback path restart
+> the co-resident `kagura-bridge-worker-1` right after the Caddy switch (Step
+> 6b), because the worker pins its API connections to a color and a flip would
+> otherwise leave it talking to the color being drained — surviving only on
+> kagura-bridge's cross-color fallback, which masks the mismatch instead of
+> reporting it ([#1476](https://github.com/kagura-ai/memory-cloud/issues/1476)).
+> A host without that container logs a skip; a restart that fails logs a
+> warning and does **not** abort the deploy.
 
 Tunable environment variables:
 
@@ -384,6 +394,7 @@ Tunable environment variables:
 | `DRAIN_TIMEOUT` | 30 | Seconds to drain old container |
 | `WORKERS_GATE_TIMEOUT` | 30 | Seconds to wait for the post-switch security gate (`/api/v1/workers/*` blocked at Caddy) before aborting and leaving the old color running |
 | `WORKERS_GATE_INTERVAL` | 2 | Seconds between security-gate retries |
+| `BRIDGE_WORKER_CONTAINER` | `kagura-bridge-worker-1` | Co-resident chat-bridge worker to restart after a color flip. Not a compose service of this stack, so it is addressed by container name; skipped when not running |
 
 ### Update the frontend (in-place rebuild)
 
