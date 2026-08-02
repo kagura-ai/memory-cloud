@@ -4105,8 +4105,8 @@
     "memoryLinkTemplate": "Memory link template",
     "memoryLinkTemplateTooltipLabel": "About the memory link template",
     "memoryLinkTemplateTooltip": "When set, the worker turns each recalled memory into a link using this URL template. Leave it empty and no link is rendered.",
-    "memoryLinkTemplatePlaceholder": "https://example.com/contexts/{context_id}/memories/{memory_id}",
-    "memoryLinkTemplateHelp": "Must be an http:// or https:// URL and include both {context_id} and {memory_id}. Leave empty to render no link."
+    "memoryLinkTemplatePlaceholder": "https://example.com/contexts/'{context_id}'/memories/'{memory_id}'",
+    "memoryLinkTemplateHelp": "Must be an http:// or https:// URL and include both '{context_id}' and '{memory_id}'. Leave empty to render no link."
   },
   "accountDeletion": {
     "title": "Delete account",

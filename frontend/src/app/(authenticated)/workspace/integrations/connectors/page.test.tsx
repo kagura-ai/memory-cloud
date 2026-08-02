@@ -668,6 +668,32 @@ describe("ConnectorsPage RBAC gate", () => {
       // A surviving draft would win the draft-or-server fallback and keep the
       // stale text on screen, defeating the reload.
       await waitFor(async () => expect(await field()).toHaveValue(TEMPLATE));
+      // A conflict is a user-ACTION failure, not field validation → toast.
+      expect(mockToast).toHaveBeenCalledWith(
+        expect.objectContaining({ variant: "destructive" }),
+      );
+    });
+
+    it("does not mark the field invalid on a 409", async () => {
+      arm();
+      mockUpdateConnectorRuntime.mockRejectedValueOnce(
+        new ApiError({ message: "modified by another request", status: 409 }),
+      );
+      render(<ConnectorsPage />);
+
+      fireEvent.change(await field(), { target: { value: TEMPLATE } });
+      fireEvent.click(screen.getByRole("button", { name: "save" }));
+
+      await waitFor(() =>
+        expect(mockToast).toHaveBeenCalledWith(
+          expect.objectContaining({ variant: "destructive" }),
+        ),
+      );
+      // The typed value may be perfectly valid — a conflict says nothing about
+      // it. aria-invalid would tell a screen-reader user to fix input that
+      // needs no fixing.
+      expect(await field()).not.toHaveAttribute("aria-invalid");
+      expect(screen.queryByRole("alert")).not.toBeInTheDocument();
     });
 
     it("does not reload on a plain validation failure", async () => {
@@ -691,7 +717,6 @@ describe("ConnectorsPage RBAC gate", () => {
       // ...and the text they must correct stays in the field.
       expect(await field()).toHaveValue("ftp://nope");
     });
-
 
     it("a slow save on one row does not re-enable another row mid-flight", async () => {
       setWorkspace("admin");

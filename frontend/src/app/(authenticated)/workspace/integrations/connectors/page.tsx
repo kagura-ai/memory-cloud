@@ -834,10 +834,6 @@ export default function ConnectorsPage() {
         // length cap) and its message names the offending rule, so it belongs
         // next to the input the admin has to correct.
         const message = err instanceof Error ? err.message : String(err);
-        setLinkErrors((current) => ({
-          ...current,
-          [connector.connector_id]: message,
-        }));
         // A 409 means our snapshot is stale — refetch so the field shows what
         // the server actually holds before the admin retries.
         //
@@ -846,15 +842,33 @@ export default function ConnectorsPage() {
         // detail string, which need not contain "409" or "conflict" at all.
         // Matching on text would silently miss real conflicts.
         if (err instanceof ApiError && err.status === 409) {
-          // Drop the draft first. The input renders draft-or-server, so a
-          // surviving draft would win the fallback and keep showing the stale
-          // text the reload was meant to replace.
+          // Deliberately NOT routed through linkErrors. That state drives
+          // aria-invalid, and a conflict says nothing about the value the
+          // admin typed — it may be perfectly valid. Marking the field invalid
+          // would tell a screen-reader user to fix input that needs no fixing.
+          // A concurrency failure is a user-ACTION failure, which the repo's
+          // error-surface rule routes to a toast.
           setLinkDrafts((current) => {
+            // Drop the draft first: the input renders draft-or-server, so a
+            // surviving draft wins the fallback and keeps the stale text the
+            // reload was meant to replace.
             const { [connector.connector_id]: _stale, ...rest } = current;
             return rest;
           });
+          toast({
+            variant: "destructive",
+            title: t("runtimeUpdateFailed"),
+            description: message,
+          });
           void reload();
+          return;
         }
+        // Everything else is the backend rejecting the VALUE (scheme, missing
+        // placeholder, length) — field-adjacent, where the admin can fix it.
+        setLinkErrors((current) => ({
+          ...current,
+          [connector.connector_id]: message,
+        }));
       } finally {
         endRuntimeSave(connector.connector_id);
       }
