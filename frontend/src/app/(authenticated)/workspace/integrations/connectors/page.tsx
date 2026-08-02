@@ -313,6 +313,10 @@ export default function ConnectorsPage() {
     "default",
   );
   const [litellmKey, setLitellmKey] = useState("");
+  // #1471: runtime.memory_link_template. Lives in the settings dialog for
+  // proximity, but saves through the RUNTIME endpoint, not the vend-settings
+  // one — see handleSettingsSave for why the two writes must be sequenced.
+  const [memoryLinkTemplate, setMemoryLinkTemplate] = useState("");
   const [llmProvider, setLlmProvider] = useState("");
   const [llmModel, setLlmModel] = useState("");
   const [llmApiKey, setLlmApiKey] = useState("");
@@ -491,6 +495,7 @@ export default function ConnectorsPage() {
         c.locale === "en" || c.locale === "ja" ? c.locale : "default",
       );
       setLitellmKey(c.litellm_virtual_key_id ?? "");
+      setMemoryLinkTemplate(c.runtime?.memory_link_template ?? "");
       setLlmProvider("");
       setLlmModel("");
       setLlmApiKey("");
@@ -567,20 +572,44 @@ export default function ConnectorsPage() {
         ...(llmApiKey.trim() ? { api_key: llmApiKey.trim() } : {}),
       };
     }
-    if (Object.keys(patch).length === 0) {
+    // #1471: memory_link_template is a RUNTIME field, so it rides the other
+    // endpoint. Empty input clears the override to null rather than storing "".
+    const newLinkTemplate = memoryLinkTemplate.trim() || null;
+    const linkTemplateChanged =
+      newLinkTemplate !== (settingsFor.runtime?.memory_link_template ?? null);
+
+    if (Object.keys(patch).length === 0 && !linkTemplateChanged) {
       setSettingsError(t("noChanges"));
       return;
     }
 
     setSettingsSaving(true);
     try {
-      await updateConnectorSettings(
-        settingsFor.connector_id,
-        patch,
-        // Snapshot version rides along as the optimistic-concurrency guard
-        // (server 409s on staleness instead of silently reverting).
-        settingsFor.config_version,
-      );
+      // Both endpoints consume AND bump config_version, so writing one
+      // invalidates the snapshot the other would send. Chain them: take the
+      // fresh version out of the first response and hand it to the second.
+      // Doing them independently from the same snapshot 409s the second write.
+      let version = settingsFor.config_version;
+      if (Object.keys(patch).length > 0) {
+        const settingsResult = await updateConnectorSettings(
+          settingsFor.connector_id,
+          patch,
+          // Snapshot version rides along as the optimistic-concurrency guard
+          // (server 409s on staleness instead of silently reverting).
+          version,
+        );
+        version = settingsResult.config_version;
+      }
+      if (linkTemplateChanged) {
+        // Spread the CURRENT runtime: this endpoint is a complete normalized
+        // replacement, so a partial body silently resets every other tuned
+        // field (buffer, flush, lifecycle, …) to worker defaults.
+        await updateConnectorRuntime(
+          settingsFor.connector_id,
+          { ...settingsFor.runtime, memory_link_template: newLinkTemplate },
+          version,
+        );
+      }
       toast({ title: t("settingsSaved") });
       setSettingsFor(null);
       void reload();
@@ -597,6 +626,7 @@ export default function ConnectorsPage() {
     chText,
     localeSel,
     litellmKey,
+    memoryLinkTemplate,
     llmProvider,
     llmModel,
     llmApiKey,
@@ -1704,6 +1734,28 @@ export default function ConnectorsPage() {
                     />
                     <p className="mt-1 text-xs text-muted-foreground">
                       {t("litellmKeyNote")}
+                    </p>
+                  </div>
+                  {/* #1471: memory_link_template was persistable via the API and
+                    readable in the frontend type, but had no input — so the
+                    feature could only be turned on by hand. Empty clears to
+                    null; the server validates the scheme and template syntax. */}
+                  <div className="mt-3">
+                    <label
+                      htmlFor="conn-settings-memory-link"
+                      className="mb-1 block text-sm font-medium"
+                    >
+                      {t("memoryLinkTemplateLabel")}
+                    </label>
+                    <Input
+                      id="conn-settings-memory-link"
+                      aria-label={t("memoryLinkTemplateLabel")}
+                      value={memoryLinkTemplate}
+                      onChange={(e) => setMemoryLinkTemplate(e.target.value)}
+                      placeholder={t("memoryLinkTemplatePlaceholder")}
+                    />
+                    <p className="mt-1 text-xs text-muted-foreground">
+                      {t("memoryLinkTemplateNote")}
                     </p>
                   </div>
                 </details>

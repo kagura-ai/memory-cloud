@@ -1626,4 +1626,177 @@ describe("ConnectorsPage RBAC gate", () => {
     // The dialog stays open on failure.
     expect(screen.getByText("createTitle")).toBeInTheDocument();
   });
+  // ── #1471: memory_link_template is now writable from the UI ──────────
+
+  function connectorWithRuntime(runtime: Record<string, unknown>) {
+    return {
+      connector_id: "connector-1",
+      connector_type: "slack",
+      app_key: "default",
+      resource_id: "slack-t01",
+      context_id: "context-1",
+      config_version: 3,
+      created_at: "2026-07-19T00:00:00Z",
+      created_by: "user-1",
+      runtime,
+      channel_ids: ["C1"],
+      locale: null,
+      litellm_virtual_key_id: null,
+      llm_config_present: false,
+    };
+  }
+
+  it("saves memory_link_template through the runtime endpoint, spreading the existing runtime (#1471)", async () => {
+    setWorkspace("admin");
+    // A tuned runtime: the spread must preserve every one of these. The
+    // endpoint is a COMPLETE replacement, so a partial body would silently
+    // reset them to worker defaults.
+    mockListConnectors.mockResolvedValue([
+      connectorWithRuntime({
+        vision_enabled: false,
+        memory_link_template: null,
+        entity_max: 12,
+      }),
+    ]);
+    mockUpdateConnectorRuntime.mockResolvedValue({
+      connector_id: "connector-1",
+      runtime: {},
+      stored: true,
+      config_version: 4,
+    });
+
+    render(<ConnectorsPage />);
+    fireEvent.click(
+      await screen.findByRole("button", { name: "editSettings" }),
+    );
+    fireEvent.change(await screen.findByLabelText("memoryLinkTemplateLabel"), {
+      target: { value: "https://m.example/c/{context_id}?memoryId={memory_id}" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "settingsSave" }));
+
+    await waitFor(() =>
+      expect(mockUpdateConnectorRuntime).toHaveBeenCalledWith(
+        "connector-1",
+        {
+          vision_enabled: false,
+          entity_max: 12,
+          memory_link_template:
+            "https://m.example/c/{context_id}?memoryId={memory_id}",
+        },
+        3,
+      ),
+    );
+    // Nothing else changed, so the vend-settings endpoint must not be touched.
+    expect(mockUpdateConnectorSettings).not.toHaveBeenCalled();
+  });
+
+  it("chains config_version when both endpoints are written (#1471)", async () => {
+    // THE trap this feature introduces: both endpoints consume AND bump
+    // config_version. Sending the same snapshot version to both makes the
+    // second write 409. The second call must ride the version the FIRST
+    // response returned.
+    setWorkspace("admin");
+    mockListConnectors.mockResolvedValue([
+      connectorWithRuntime({ vision_enabled: true, memory_link_template: null }),
+    ]);
+    mockUpdateConnectorSettings.mockResolvedValue({
+      connector_id: "connector-1",
+      channel_ids: ["C1", "C2"],
+      litellm_virtual_key_id: null,
+      llm_config_present: false,
+      locale: null,
+      config_version: 4,
+    });
+    mockUpdateConnectorRuntime.mockResolvedValue({
+      connector_id: "connector-1",
+      runtime: {},
+      stored: true,
+      config_version: 5,
+    });
+
+    render(<ConnectorsPage />);
+    fireEvent.click(
+      await screen.findByRole("button", { name: "editSettings" }),
+    );
+    fireEvent.change(await screen.findByLabelText("channelsLabel"), {
+      target: { value: "C1, C2" },
+    });
+    fireEvent.change(screen.getByLabelText("memoryLinkTemplateLabel"), {
+      target: { value: "https://m.example/{context_id}/{memory_id}" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "settingsSave" }));
+
+    await waitFor(() =>
+      expect(mockUpdateConnectorSettings).toHaveBeenCalledWith(
+        "connector-1",
+        { channel_ids: ["C1", "C2"] },
+        3,
+      ),
+    );
+    // 4, not 3 — the version the settings write returned.
+    await waitFor(() =>
+      expect(mockUpdateConnectorRuntime).toHaveBeenCalledWith(
+        "connector-1",
+        expect.objectContaining({
+          memory_link_template: "https://m.example/{context_id}/{memory_id}",
+        }),
+        4,
+      ),
+    );
+  });
+
+  it("clears memory_link_template to null on empty input (#1471)", async () => {
+    // "" must not be stored — it would fail the server's scheme validation and
+    // is semantically "no override", which is null.
+    setWorkspace("admin");
+    mockListConnectors.mockResolvedValue([
+      connectorWithRuntime({
+        vision_enabled: true,
+        memory_link_template: "https://m.example/{context_id}/{memory_id}",
+      }),
+    ]);
+    mockUpdateConnectorRuntime.mockResolvedValue({
+      connector_id: "connector-1",
+      runtime: {},
+      stored: true,
+      config_version: 4,
+    });
+
+    render(<ConnectorsPage />);
+    fireEvent.click(
+      await screen.findByRole("button", { name: "editSettings" }),
+    );
+    fireEvent.change(await screen.findByLabelText("memoryLinkTemplateLabel"), {
+      target: { value: "   " },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "settingsSave" }));
+
+    await waitFor(() =>
+      expect(mockUpdateConnectorRuntime).toHaveBeenCalledWith(
+        "connector-1",
+        expect.objectContaining({ memory_link_template: null }),
+        3,
+      ),
+    );
+  });
+
+  it("does not write anything when the template is untouched (#1471)", async () => {
+    setWorkspace("admin");
+    mockListConnectors.mockResolvedValue([
+      connectorWithRuntime({
+        vision_enabled: true,
+        memory_link_template: "https://m.example/{context_id}/{memory_id}",
+      }),
+    ]);
+
+    render(<ConnectorsPage />);
+    fireEvent.click(
+      await screen.findByRole("button", { name: "editSettings" }),
+    );
+    fireEvent.click(await screen.findByRole("button", { name: "settingsSave" }));
+
+    expect(await screen.findByText("noChanges")).toBeInTheDocument();
+    expect(mockUpdateConnectorRuntime).not.toHaveBeenCalled();
+    expect(mockUpdateConnectorSettings).not.toHaveBeenCalled();
+  });
 });
