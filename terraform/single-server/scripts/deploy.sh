@@ -166,6 +166,16 @@ is_container_running() {
 
 # Is the co-resident bridge worker running on this host right now?
 #
+#   0 — running
+#   1 — definitively not running (docker answered, the name was not in the list)
+#   2 — could not be determined (the docker query itself failed)
+#
+# 1 and 2 are kept apart deliberately. Collapsing them would let an unreachable
+# or permission-denied docker daemon read as "no bridge on this host", so the
+# deploy would print a benign skip and move on having never attempted the
+# restart — a silent absorption of exactly the kind this whole step exists to
+# stop.
+#
 # Deliberately NOT `docker ps ... | grep -qx`: `grep -q` exits at the first
 # match and can SIGPIPE `docker ps`, which under `set -o pipefail` surfaces as a
 # failed pipeline — i.e. a *running* container intermittently reported as
@@ -175,9 +185,12 @@ is_container_running() {
 # satisfies the check for `kagura-bridge-worker-1`.
 bridge_worker_is_running() {
     local names name
-    names="$("$DOCKER" ps --format '{{.Names}}' 2>/dev/null || true)"
+    # `|| return 2` also exempts the assignment from `set -e`.
+    names="$("$DOCKER" ps --format '{{.Names}}' 2>/dev/null)" || return 2
     while IFS= read -r name; do
-        if [ "$name" = "$BRIDGE_WORKER_CONTAINER" ]; then
+        # An empty `names` still feeds the loop one empty line, so guard -n
+        # rather than letting "" match an empty container name.
+        if [ -n "$name" ] && [ "$name" = "$BRIDGE_WORKER_CONTAINER" ]; then
             return 0
         fi
     done <<< "$names"
@@ -200,11 +213,24 @@ bridge_worker_is_running() {
 # Call it AFTER Caddy has been switched: restarting while the old color still
 # serves would just re-pin the worker to the color being drained.
 restart_bridge_worker() {
+    # `|| presence=$?` keeps a non-zero return from killing the run under `set -e`.
+    local presence=0
+    bridge_worker_is_running || presence=$?
+
     # Presence-gated: deploy.sh is also the OSS single-server script, and a host
     # without the bridge stack must log a skip, not an error.
-    if ! bridge_worker_is_running; then
+    if [ "$presence" -eq 1 ]; then
         log "  ${BRIDGE_WORKER_CONTAINER} is not running on this host — skipping bridge restart."
         return 0
+    fi
+
+    # presence == 2: docker could not be queried. Try the restart anyway rather
+    # than skipping — if docker is genuinely down the restart fails and drops
+    # into the loud warning below, which is the honest outcome; if only the
+    # query was broken, the restart still does its job.
+    if [ "$presence" -ne 0 ]; then
+        log "WARNING: could not query docker to check for ${BRIDGE_WORKER_CONTAINER}."
+        log "         Attempting the restart anyway rather than silently skipping it."
     fi
 
     log "  Restarting ${BRIDGE_WORKER_CONTAINER} (active API color changed)..."

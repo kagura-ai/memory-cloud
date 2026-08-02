@@ -215,47 +215,98 @@ teardown() {
     [[ "$output" == *"SURVIVED"* ]] || return 1
 }
 
+@test "a docker query that FAILS is not reported as 'no bridge on this host'" {
+    # The whole point of this step is to stop a color flip from being silently
+    # absorbed. If an unreachable or permission-denied docker daemon rendered as
+    # the benign "not running on this host" skip, the deploy would report
+    # success having never attempted the restart — the same class of silent
+    # absorption, just relocated. "Cannot tell" must be loud and must still try.
+    broken_docker() { return 1; }
+    DOCKER=broken_docker
+
+    run restart_bridge_worker
+
+    [ "$status" -eq 0 ] || return 1
+    [[ "$output" == *"could not query docker"* ]] || return 1
+    [[ "$output" != *"not running on this host"* ]] || return 1
+    # ...and it must have attempted the restart rather than given up.
+    [[ "$output" == *"Restarting kagura-bridge-worker-1"* ]] || return 1
+}
+
+@test "bridge_worker_is_running separates 'absent' (1) from 'cannot tell' (2)" {
+    printf 'kagura-api-blue\n' > "$PS_FILE"
+    run bridge_worker_is_running
+    [ "$status" -eq 1 ] || return 1
+
+    broken_docker() { return 1; }
+    DOCKER=broken_docker
+    run bridge_worker_is_running
+    [ "$status" -eq 2 ] || return 1
+}
+
 # --- Call sites -------------------------------------------------------------
 # Static checks: calling cmd_deploy/cmd_rollback for real would build images and
 # start containers. What matters is that the call exists and sits AFTER the
 # Caddy switch — restarting before it would re-pin the worker to the old color,
 # which is worse than not restarting at all, and no runtime assertion here could
 # tell the two orders apart.
+#
+# `^ *restart_bridge_worker *$` matches only a BARE CALL on its own line, so
+# commenting the call out (`# restart_bridge_worker`) or merely naming it in
+# prose fails these — a plain substring count would not.
 
-@test "cmd_deploy restarts the bridge worker" {
-    run bash -o pipefail -c 'sed -n "/^cmd_deploy()/,/^}/p" "$1" | grep -c "restart_bridge_worker"' _ "$DEPLOY_SH"
-    [ "$status" -eq 0 ] || return 1
-    [ "$output" -ge 1 ] || return 1
+# Count bare calls to $2 inside function $1 of deploy.sh. Prints the count.
+count_calls_in() {
+    local fn="$1" callee="$2"
+    sed -n "/^${fn}()/,/^}/p" "$DEPLOY_SH" | grep -cE "^ *${callee} *$" || true
+}
+
+# Print the 1-based line number of the first bare call to $2 within function $1,
+# or nothing when there is none.
+first_call_line_in() {
+    local fn="$1" callee="$2"
+    sed -n "/^${fn}()/,/^}/p" "$DEPLOY_SH" \
+        | grep -nE "^ *${callee} *$" | head -1 | cut -d: -f1
+}
+
+@test "the call-site helpers actually see the function bodies (guard not vacuous)" {
+    # If a rename broke the sed range, every count below would read 0 and the
+    # negative assertions would pass for the wrong reason.
+    [ "$(count_calls_in cmd_deploy verify_internal_blocked)" -eq 1 ] || return 1
+    [ "$(count_calls_in cmd_rollback verify_internal_blocked)" -eq 1 ] || return 1
+    [ -n "$(sed -n '/^cmd_deploy_web()/,/^}/p' "$DEPLOY_SH")" ] || return 1
+}
+
+@test "cmd_deploy restarts the bridge worker exactly once" {
+    [ "$(count_calls_in cmd_deploy restart_bridge_worker)" -eq 1 ] || return 1
 }
 
 @test "cmd_deploy restarts it AFTER the Caddy switch, not before" {
-    run bash -o pipefail -c '
-        body=$(sed -n "/^cmd_deploy()/,/^}/p" "$1")
-        switch=$(printf "%s\n" "$body" | grep -n "^ *reload_caddy" | head -1 | cut -d: -f1)
-        restart=$(printf "%s\n" "$body" | grep -n "^ *restart_bridge_worker" | head -1 | cut -d: -f1)
-        [ -n "$switch" ] && [ -n "$restart" ] && [ "$restart" -gt "$switch" ]
-    ' _ "$DEPLOY_SH"
-    [ "$status" -eq 0 ] || return 1
+    local switch restart
+    switch="$(first_call_line_in cmd_deploy reload_caddy)"
+    restart="$(first_call_line_in cmd_deploy restart_bridge_worker)"
+    [ -n "$switch" ] || return 1
+    [ -n "$restart" ] || return 1
+    # Exactly one switch, so "after the first reload_caddy" IS "after the
+    # switch" — asserted rather than assumed.
+    [ "$(count_calls_in cmd_deploy reload_caddy)" -eq 1 ] || return 1
+    [ "$restart" -gt "$switch" ] || return 1
 }
 
 @test "rollback flips the color too, so it restarts the bridge worker as well" {
-    run bash -o pipefail -c 'sed -n "/^cmd_rollback()/,/^}/p" "$1" | grep -c "restart_bridge_worker"' _ "$DEPLOY_SH"
-    [ "$status" -eq 0 ] || return 1
-    [ "$output" -ge 1 ] || return 1
+    [ "$(count_calls_in cmd_rollback restart_bridge_worker)" -eq 1 ] || return 1
 }
 
 @test "cmd_rollback restarts it AFTER the Caddy switch, not before" {
-    run bash -o pipefail -c '
-        body=$(sed -n "/^cmd_rollback()/,/^}/p" "$1")
-        switch=$(printf "%s\n" "$body" | grep -n "^ *reload_caddy" | head -1 | cut -d: -f1)
-        restart=$(printf "%s\n" "$body" | grep -n "^ *restart_bridge_worker" | head -1 | cut -d: -f1)
-        [ -n "$switch" ] && [ -n "$restart" ] && [ "$restart" -gt "$switch" ]
-    ' _ "$DEPLOY_SH"
-    [ "$status" -eq 0 ] || return 1
+    local switch restart
+    switch="$(first_call_line_in cmd_rollback reload_caddy)"
+    restart="$(first_call_line_in cmd_rollback restart_bridge_worker)"
+    [ -n "$switch" ] || return 1
+    [ -n "$restart" ] || return 1
+    [ "$(count_calls_in cmd_rollback reload_caddy)" -eq 1 ] || return 1
+    [ "$restart" -gt "$switch" ] || return 1
 }
 
 @test "--web does not touch the bridge worker (it never changes the API color)" {
-    run bash -o pipefail -c 'sed -n "/^cmd_deploy_web()/,/^}/p" "$1" | grep -c "restart_bridge_worker"' _ "$DEPLOY_SH"
-    # grep -c prints 0 and exits 1 when there are no matches.
-    [ "$output" = "0" ] || return 1
+    [ "$(count_calls_in cmd_deploy_web restart_bridge_worker)" -eq 0 ] || return 1
 }
