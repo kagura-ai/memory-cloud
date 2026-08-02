@@ -1062,10 +1062,14 @@ class Settings(BaseSettings):
             self.referral_max_grants_per_referrer * self.referral_referrer_reward_memories
             + self.referral_referee_reward_memories
         )
-        if worst_case > REFERRAL_TOTAL_PAYOUT_BUDGET_MEMORIES:
+        # EXCLUSIVE bound: the budget IS the gap, so equality means a
+        # fully-used chain lands exactly ON the BASIC limit — the paid tier,
+        # for free. ">=" is what makes "cannot reach BASIC" true rather than
+        # "cannot exceed BASIC".
+        if worst_case >= REFERRAL_TOTAL_PAYOUT_BUDGET_MEMORIES:
             raise ValueError(
                 "Referral config would mint up to "
-                f"{worst_case} memories per inviter, above the "
+                f"{worst_case} memories per inviter, reaching the "
                 f"{REFERRAL_TOTAL_PAYOUT_BUDGET_MEMORIES}-memory budget "
                 "(the FREE->BASIC gap). Lower REFERRAL_MAX_GRANTS_PER_REFERRER "
                 "or the reward amounts — otherwise a fully-used referral chain "

@@ -95,11 +95,40 @@ class TestPayoutBudget:
 
     def test_defaults_are_within_budget(self) -> None:
         settings = get_settings()
-        assert _worst_case(settings) <= REFERRAL_TOTAL_PAYOUT_BUDGET_MEMORIES
+        # Strictly under: the budget is the gap itself, so landing ON it means
+        # landing on BASIC's limit.
+        assert _worst_case(settings) < REFERRAL_TOTAL_PAYOUT_BUDGET_MEMORIES
+
+    def test_a_config_that_lands_exactly_on_basic_is_rejected(self) -> None:
+        """Equality is not "within budget" — it IS the paid tier.
+
+        4 x 2000 + 1000 = 9000 exactly. FREE base 1000 + 9000 = 10000 =
+        BASIC's memory_limit, so a config that exactly closes the gap hands out
+        BASIC for free. The guard therefore has to be an EXCLUSIVE bound; with
+        ``>`` this config would have been accepted.
+        """
+        assert 4 * 2000 + 1000 == REFERRAL_TOTAL_PAYOUT_BUDGET_MEMORIES
+        with pytest.raises(ValidationError, match="reaching the"):
+            Settings(
+                enable_referrals=True,
+                referral_max_grants_per_referrer=4,
+                referral_referrer_reward_memories=2000,
+                referral_referee_reward_memories=1000,
+            )
+
+    def test_one_memory_under_the_budget_is_accepted(self) -> None:
+        """The bound is exclusive, not a blanket ban near the gap."""
+        settings = Settings(
+            enable_referrals=True,
+            referral_max_grants_per_referrer=4,
+            referral_referrer_reward_memories=2000,
+            referral_referee_reward_memories=999,
+        )
+        assert _worst_case(settings) == REFERRAL_TOTAL_PAYOUT_BUDGET_MEMORIES - 1
 
     def test_over_budget_config_fails_closed_at_load(self) -> None:
         """An operator cannot dial away the tier ladder one field at a time."""
-        with pytest.raises(ValidationError, match="above the"):
+        with pytest.raises(ValidationError, match="reaching the"):
             Settings(
                 enable_referrals=True,
                 referral_max_grants_per_referrer=10,
@@ -115,7 +144,7 @@ class TestPayoutBudget:
         that took ``max(referrer, referee)`` would wave this through — and the
         FREE base plus 10000 lands exactly on BASIC's limit.
         """
-        with pytest.raises(ValidationError, match="above the"):
+        with pytest.raises(ValidationError, match="reaching the"):
             Settings(
                 enable_referrals=True,
                 referral_max_grants_per_referrer=4,
@@ -164,19 +193,22 @@ class TestEffectiveMemoryLimit:
         ws = Workspace(plan_name="basic", addon_memory_bonus=0, referral_memory_bonus=0)
         assert ws.effective_memory_limit == 10000
 
-    def test_budget_at_the_free_to_basic_gap_does_not_reach_basic(self) -> None:
-        """A fully-used chain at the payout budget must stay under BASIC.
+    def test_any_config_the_validator_accepts_stays_under_basic(self) -> None:
+        """The ladder invariant, stated as the validator enforces it.
 
-        This is the ladder invariant the payout budget exists to hold: the
-        referral program must never be a way to get the paid tier for free.
+        The budget EQUALS the gap, so ``free_base + budget`` lands exactly on
+        BASIC. That is why the validator rejects ``worst_case >= budget`` rather
+        than ``>``: the strictest config it accepts is one memory short of
+        BASIC, never at it.
         """
-        free_base = Workspace(
+        free_only = Workspace(
             plan_name="free", addon_memory_bonus=0, referral_memory_bonus=0
         ).effective_memory_limit
-        basic_base = Workspace(
+        basic_only = Workspace(
             plan_name="basic", addon_memory_bonus=0, referral_memory_bonus=0
         ).effective_memory_limit
-        assert free_base + REFERRAL_TOTAL_PAYOUT_BUDGET_MEMORIES <= basic_base
+        max_accepted = REFERRAL_TOTAL_PAYOUT_BUDGET_MEMORIES - 1
+        assert free_only + max_accepted < basic_only
 
     def test_zero_floor_still_applies(self) -> None:
         """A tier that excludes memories cannot be lifted by a referral.

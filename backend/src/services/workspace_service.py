@@ -198,21 +198,24 @@ class WorkspaceService:
         # session where every subsequent statement fails with
         # InFailedSQLTransactionError — turning a cosmetic bonus problem into a
         # broken request. The workspace itself is already committed above.
-        from config.settings import get_settings
+        # Deliberately NOT gated on ``settings.enable_referrals``. This call
+        # mints nothing — it only re-homes ledger rows that were already earned
+        # and recomputes a cache from them. Gating it would strand grants earned
+        # while the program was on if the kill switch is flipped off before the
+        # beneficiary creates a workspace, contradicting the documented
+        # "already-granted bonuses are unaffected by the kill switch".
+        try:
+            from services.referral_service import ReferralService
 
-        if get_settings().enable_referrals:
-            try:
-                from services.referral_service import ReferralService
-
-                await ReferralService(self.db).apply_pending_grants(owner_user_id)
-            except Exception as exc:  # pragma: no cover - defensive
-                await self.db.rollback()
-                logger.warning(
-                    "referral_pending_grants_apply_failed",
-                    workspace_id=str(workspace.id),
-                    owner_user_id=owner_user_id,
-                    error=str(exc),
-                )
+            await ReferralService(self.db).apply_pending_grants(owner_user_id)
+        except Exception as exc:  # pragma: no cover - defensive
+            await self.db.rollback()
+            logger.warning(
+                "referral_pending_grants_apply_failed",
+                workspace_id=str(workspace.id),
+                owner_user_id=owner_user_id,
+                error=str(exc),
+            )
 
         return workspace
 
