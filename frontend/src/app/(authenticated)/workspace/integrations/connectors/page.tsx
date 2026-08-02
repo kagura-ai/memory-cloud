@@ -75,7 +75,7 @@ import { useSystemFeatures } from "@/hooks/useSystemFeatures";
 import { ChannelPicker, parseChannelIds } from "./ChannelPicker";
 import { useWorkspace } from "@/contexts/WorkspaceContext";
 import { hasWorkspaceRole, WorkspaceRole } from "@/lib/auth/rbac";
-import { API_BASE_URL, ApiError } from "@/lib/api/base";
+import { API_BASE_URL } from "@/lib/api/base";
 import { getContexts, type Context } from "@/lib/api/contexts";
 import {
   connectorDisplayName,
@@ -293,15 +293,6 @@ export default function ConnectorsPage() {
       return next;
     });
   }, []);
-
-  // #1471: memory_link_template was persistable and readable but had no UI.
-  // Draft text is keyed by connector_id — the list renders every connector at
-  // once, so a single shared string would leak one row's edit into the others.
-  // A row with no entry falls back to the server value, which is what keeps a
-  // reload (or another admin's change) visible instead of pinned to a stale
-  // draft.
-  const [linkDrafts, setLinkDrafts] = useState<Record<string, string>>({});
-  const [linkErrors, setLinkErrors] = useState<Record<string, string>>({});
 
   // #1376: vend-settings editor (channels / locale / LLM binding). The LLM
   // credential fields are write-only: never prefilled, sent only when the
@@ -806,106 +797,6 @@ export default function ConnectorsPage() {
     [t, toast, reload, beginRuntimeSave, endRuntimeSave],
   );
 
-  const handleMemoryLinkTemplateSave = useCallback(
-    async (connector: WorkspaceConnectorSummary) => {
-      if (!connector.runtime) return;
-      // Same draft-or-server fallback the input renders. Falling back to ""
-      // instead would turn a save with no local edit into a destructive CLEAR
-      // of the stored template.
-      const draft = (
-        linkDrafts[connector.connector_id] ??
-        connector.runtime.memory_link_template ??
-        ""
-      ).trim();
-      beginRuntimeSave(connector.connector_id);
-      setLinkErrors((current) => {
-        const { [connector.connector_id]: _dropped, ...rest } = current;
-        return rest;
-      });
-      try {
-        const result = await updateConnectorRuntime(
-          connector.connector_id,
-          {
-            // Spread, never a partial body: this endpoint is a COMPLETE
-            // normalized replacement, so omitting the tuned blocks (buffer,
-            // flush, lifecycle, continuity, …) silently resets them to worker
-            // defaults (#1348).
-            ...connector.runtime,
-            // Empty clears the override. "" would be stored as a template that
-            // renders an empty link; null is the documented "render no link".
-            memory_link_template: draft === "" ? null : draft,
-          },
-          // Same optimistic-concurrency guard as the vision toggle — a
-          // concurrent admin edit must 409 rather than be overwritten.
-          connector.config_version,
-        );
-        setConnectors(
-          (current) =>
-            current?.map((item) =>
-              item.connector_id === connector.connector_id
-                ? {
-                    ...item,
-                    runtime: result.runtime,
-                    config_version: result.config_version,
-                  }
-                : item,
-            ) ?? null,
-        );
-        // Drop the draft so the row re-reads the server value. Keeping it would
-        // mask a server-side normalization of what was just saved.
-        setLinkDrafts((current) => {
-          const { [connector.connector_id]: _saved, ...rest } = current;
-          return rest;
-        });
-        toast({ title: t("runtimeUpdated") });
-      } catch (err) {
-        // Field-adjacent message, not a toast: the backend owns the template
-        // rules (http(s) scheme, both {context_id} and {memory_id} present,
-        // length cap) and its message names the offending rule, so it belongs
-        // next to the input the admin has to correct.
-        const message = err instanceof Error ? err.message : String(err);
-        // A 409 means our snapshot is stale — refetch so the field shows what
-        // the server actually holds before the admin retries.
-        //
-        // Keyed off ApiError.status, NOT the message text: apiClient throws
-        // ApiError with a numeric status, and its message is the backend's
-        // detail string, which need not contain "409" or "conflict" at all.
-        // Matching on text would silently miss real conflicts.
-        if (err instanceof ApiError && err.status === 409) {
-          // Deliberately NOT routed through linkErrors. That state drives
-          // aria-invalid, and a conflict says nothing about the value the
-          // admin typed — it may be perfectly valid. Marking the field invalid
-          // would tell a screen-reader user to fix input that needs no fixing.
-          // A concurrency failure is a user-ACTION failure, which the repo's
-          // error-surface rule routes to a toast.
-          setLinkDrafts((current) => {
-            // Drop the draft first: the input renders draft-or-server, so a
-            // surviving draft wins the fallback and keeps the stale text the
-            // reload was meant to replace.
-            const { [connector.connector_id]: _stale, ...rest } = current;
-            return rest;
-          });
-          toast({
-            variant: "destructive",
-            title: t("runtimeUpdateFailed"),
-            description: message,
-          });
-          void reload();
-          return;
-        }
-        // Everything else is the backend rejecting the VALUE (scheme, missing
-        // placeholder, length) — field-adjacent, where the admin can fix it.
-        setLinkErrors((current) => ({
-          ...current,
-          [connector.connector_id]: message,
-        }));
-      } finally {
-        endRuntimeSave(connector.connector_id);
-      }
-    },
-    [linkDrafts, t, toast, reload, beginRuntimeSave, endRuntimeSave],
-  );
-
   const handleManualCreate = useCallback(
     async (event: FormEvent) => {
       event.preventDefault();
@@ -1236,17 +1127,10 @@ export default function ConnectorsPage() {
               // server fallback separately in the input and in the Save
               // button's disabled test is how "unchanged" silently became
               // "draft is empty", leaving Save enabled on first render.
-              const storedLinkTemplate = c.runtime?.memory_link_template ?? "";
-              const linkValue =
-                linkDrafts[c.connector_id] ?? storedLinkTemplate;
-              const linkUnchanged = linkValue.trim() === storedLinkTemplate;
               return (
                 <li
                   key={c.connector_id}
-                  // #1471: flex-wrap so the full-width runtime editor below
-                  // drops onto its own line instead of squeezing into the
-                  // horizontal control strip.
-                  className="flex flex-wrap items-center justify-between p-4"
+                  className="flex items-center justify-between p-4"
                 >
                   <div className="min-w-0">
                     {/* #1389: human names first — resource label, then the
@@ -1428,96 +1312,6 @@ export default function ConnectorsPage() {
                       <Trash2 className="h-4 w-4" />
                     </Button>
                   </div>
-                  {/* #1471: memory_link_template had no editor at all, so the
-                    feature could never be turned on from the UI and its absence
-                    was silent (the worker renders no link rather than a broken
-                    one). Full width on its own row — a URL template does not fit
-                    the compact control strip above. */}
-                  {c.runtime && (
-                    <div className="mt-3 w-full space-y-1.5 border-t pt-3">
-                      {/* The tooltip trigger sits OUTSIDE the <label>: nesting
-                        a button inside it would make the button the label's
-                        activation target (clicking the text would open the
-                        tooltip instead of focusing the input) and would fold
-                        the button's name into the input's accessible name. */}
-                      <div className="flex items-center gap-2">
-                        <label
-                          htmlFor={`memory-link-template-${c.connector_id}`}
-                          className="text-sm"
-                        >
-                          {t("memoryLinkTemplate")}
-                        </label>
-                        <Tooltip>
-                          <TooltipTrigger asChild>
-                            <button
-                              type="button"
-                              aria-label={t("memoryLinkTemplateTooltipLabel")}
-                              className="text-muted-foreground"
-                            >
-                              <Info
-                                className="h-3.5 w-3.5"
-                                aria-hidden="true"
-                              />
-                            </button>
-                          </TooltipTrigger>
-                          <TooltipContent>
-                            {t("memoryLinkTemplateTooltip")}
-                          </TooltipContent>
-                        </Tooltip>
-                      </div>
-                      <div className="flex items-center gap-2">
-                        <Input
-                          id={`memory-link-template-${c.connector_id}`}
-                          value={linkValue}
-                          onChange={(e) =>
-                            setLinkDrafts((current) => ({
-                              ...current,
-                              [c.connector_id]: e.target.value,
-                            }))
-                          }
-                          placeholder={t("memoryLinkTemplatePlaceholder")}
-                          disabled={runtimeSaving.has(c.connector_id)}
-                          aria-describedby={
-                            linkErrors[c.connector_id]
-                              ? `memory-link-template-error-${c.connector_id}`
-                              : `memory-link-template-help-${c.connector_id}`
-                          }
-                          aria-invalid={
-                            linkErrors[c.connector_id] ? true : undefined
-                          }
-                        />
-                        {runtimeSaving.has(c.connector_id) && (
-                          <InlineSpinner aria-hidden="true" />
-                        )}
-                        <Button
-                          size="sm"
-                          variant="secondary"
-                          disabled={
-                            runtimeSaving.has(c.connector_id) || linkUnchanged
-                          }
-                          onClick={() => void handleMemoryLinkTemplateSave(c)}
-                        >
-                          {tCommon("save")}
-                        </Button>
-                      </div>
-                      {linkErrors[c.connector_id] ? (
-                        <p
-                          id={`memory-link-template-error-${c.connector_id}`}
-                          className="text-sm text-destructive"
-                          role="alert"
-                        >
-                          {linkErrors[c.connector_id]}
-                        </p>
-                      ) : (
-                        <p
-                          id={`memory-link-template-help-${c.connector_id}`}
-                          className="text-xs text-muted-foreground"
-                        >
-                          {t("memoryLinkTemplateHelp")}
-                        </p>
-                      )}
-                    </div>
-                  )}
                 </li>
               );
             })}
