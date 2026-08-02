@@ -75,7 +75,7 @@ import { useSystemFeatures } from "@/hooks/useSystemFeatures";
 import { ChannelPicker, parseChannelIds } from "./ChannelPicker";
 import { useWorkspace } from "@/contexts/WorkspaceContext";
 import { hasWorkspaceRole, WorkspaceRole } from "@/lib/auth/rbac";
-import { API_BASE_URL } from "@/lib/api/base";
+import { API_BASE_URL, ApiError } from "@/lib/api/base";
 import { getContexts, type Context } from "@/lib/api/contexts";
 import {
   connectorDisplayName,
@@ -276,7 +276,23 @@ export default function ConnectorsPage() {
   const [toDelete, setToDelete] = useState<WorkspaceConnectorSummary | null>(
     null,
   );
-  const [runtimeSaving, setRuntimeSaving] = useState<string | null>(null);
+  // #1471: a SET of in-flight connector ids, not a single slot. With one slot
+  // a second row's save overwrites the first on ACQUIRE, and whichever request
+  // lands first then releases it — re-enabling controls for a request still in
+  // flight. Guarding only the release is not enough; the acquire races too.
+  const [runtimeSaving, setRuntimeSaving] = useState<ReadonlySet<string>>(
+    () => new Set(),
+  );
+  const beginRuntimeSave = useCallback((connectorId: string) => {
+    setRuntimeSaving((current) => new Set(current).add(connectorId));
+  }, []);
+  const endRuntimeSave = useCallback((connectorId: string) => {
+    setRuntimeSaving((current) => {
+      const next = new Set(current);
+      next.delete(connectorId);
+      return next;
+    });
+  }, []);
 
   // #1471: memory_link_template was persistable and readable but had no UI.
   // Draft text is keyed by connector_id — the list renders every connector at
@@ -718,7 +734,7 @@ export default function ConnectorsPage() {
 
   const handleVisionEnabledChange = useCallback(
     async (connector: WorkspaceConnectorSummary, enabled: boolean) => {
-      setRuntimeSaving(connector.connector_id);
+      beginRuntimeSave(connector.connector_id);
       try {
         // Pass the snapshot's config_version so a concurrent admin change
         // 409s (and we reload) instead of being silently overwritten by
@@ -754,10 +770,10 @@ export default function ConnectorsPage() {
         // refetch so the switch reflects the server state.
         void reload();
       } finally {
-        setRuntimeSaving(null);
+        endRuntimeSave(connector.connector_id);
       }
     },
-    [t, toast, reload],
+    [t, toast, reload, beginRuntimeSave, endRuntimeSave],
   );
 
   const handleMemoryLinkTemplateSave = useCallback(
@@ -771,7 +787,7 @@ export default function ConnectorsPage() {
         connector.runtime.memory_link_template ??
         ""
       ).trim();
-      setRuntimeSaving(connector.connector_id);
+      beginRuntimeSave(connector.connector_id);
       setLinkErrors((current) => {
         const { [connector.connector_id]: _dropped, ...rest } = current;
         return rest;
@@ -824,14 +840,26 @@ export default function ConnectorsPage() {
         }));
         // A 409 means our snapshot is stale — refetch so the field shows what
         // the server actually holds before the admin retries.
-        if (message.includes("409") || /conflict/i.test(message)) {
+        //
+        // Keyed off ApiError.status, NOT the message text: apiClient throws
+        // ApiError with a numeric status, and its message is the backend's
+        // detail string, which need not contain "409" or "conflict" at all.
+        // Matching on text would silently miss real conflicts.
+        if (err instanceof ApiError && err.status === 409) {
+          // Drop the draft first. The input renders draft-or-server, so a
+          // surviving draft would win the fallback and keep showing the stale
+          // text the reload was meant to replace.
+          setLinkDrafts((current) => {
+            const { [connector.connector_id]: _stale, ...rest } = current;
+            return rest;
+          });
           void reload();
         }
       } finally {
-        setRuntimeSaving(null);
+        endRuntimeSave(connector.connector_id);
       }
     },
-    [linkDrafts, t, toast, reload],
+    [linkDrafts, t, toast, reload, beginRuntimeSave, endRuntimeSave],
   );
 
   const handleManualCreate = useCallback(
@@ -1323,13 +1351,13 @@ export default function ConnectorsPage() {
                         </TooltipTrigger>
                         <TooltipContent>{t("visionTooltip")}</TooltipContent>
                       </Tooltip>
-                      {runtimeSaving === c.connector_id && (
+                      {runtimeSaving.has(c.connector_id) && (
                         <InlineSpinner aria-hidden="true" />
                       )}
                       <Switch
                         checked={c.runtime?.vision_enabled ?? true}
                         disabled={
-                          c.runtime == null || runtimeSaving === c.connector_id
+                          c.runtime == null || runtimeSaving.has(c.connector_id)
                         }
                         onCheckedChange={(enabled) =>
                           void handleVisionEnabledChange(c, enabled)
@@ -1404,7 +1432,7 @@ export default function ConnectorsPage() {
                             }))
                           }
                           placeholder={t("memoryLinkTemplatePlaceholder")}
-                          disabled={runtimeSaving === c.connector_id}
+                          disabled={runtimeSaving.has(c.connector_id)}
                           aria-describedby={
                             linkErrors[c.connector_id]
                               ? `memory-link-template-error-${c.connector_id}`
@@ -1414,14 +1442,14 @@ export default function ConnectorsPage() {
                             linkErrors[c.connector_id] ? true : undefined
                           }
                         />
-                        {runtimeSaving === c.connector_id && (
+                        {runtimeSaving.has(c.connector_id) && (
                           <InlineSpinner aria-hidden="true" />
                         )}
                         <Button
                           size="sm"
                           variant="secondary"
                           disabled={
-                            runtimeSaving === c.connector_id || linkUnchanged
+                            runtimeSaving.has(c.connector_id) || linkUnchanged
                           }
                           onClick={() => void handleMemoryLinkTemplateSave(c)}
                         >

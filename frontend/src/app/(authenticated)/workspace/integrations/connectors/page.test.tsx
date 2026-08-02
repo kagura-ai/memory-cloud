@@ -17,6 +17,8 @@ import {
 } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
+import { ApiError } from "@/lib/api/base";
+
 import ConnectorsPage from "./page";
 
 const mockListConnectors = vi.fn();
@@ -635,24 +637,46 @@ describe("ConnectorsPage RBAC gate", () => {
       expect(await field()).toHaveAttribute("aria-invalid", "true");
     });
 
-    it("reloads on a 409 so the field shows what the server actually holds", async () => {
-      arm();
+    it("reloads on a 409 and drops the draft so the server value shows", async () => {
+      arm({ memory_link_template: null });
+      // A real conflict arrives as ApiError with a numeric status; its message
+      // is the backend's detail string and need NOT mention 409 or "conflict".
+      // Matching on message text would silently miss this.
       mockUpdateConnectorRuntime.mockRejectedValueOnce(
-        new Error("409 Conflict: config_version is stale"),
+        new ApiError({
+          message: "Connector was modified by another request",
+          status: 409,
+        }),
       );
       render(<ConnectorsPage />);
       await waitFor(() => expect(mockListConnectors).toHaveBeenCalledTimes(1));
 
-      fireEvent.change(await field(), { target: { value: TEMPLATE } });
+      // The refetch returns what the other admin stored.
+      mockListConnectors.mockResolvedValue([
+        makeConnector({
+          config_version: 8,
+          runtime: { ...RUNTIME, memory_link_template: TEMPLATE },
+        }),
+      ]);
+
+      fireEvent.change(await field(), {
+        target: { value: "https://mine.example/{context_id}/{memory_id}" },
+      });
       fireEvent.click(screen.getByRole("button", { name: "save" }));
 
       await waitFor(() => expect(mockListConnectors).toHaveBeenCalledTimes(2));
+      // A surviving draft would win the draft-or-server fallback and keep the
+      // stale text on screen, defeating the reload.
+      await waitFor(async () => expect(await field()).toHaveValue(TEMPLATE));
     });
 
     it("does not reload on a plain validation failure", async () => {
       arm();
       mockUpdateConnectorRuntime.mockRejectedValueOnce(
-        new Error("memory_link_template must start with http:// or https://"),
+        new ApiError({
+          message: "memory_link_template must start with http:// or https://",
+          status: 400,
+        }),
       );
       render(<ConnectorsPage />);
       await waitFor(() => expect(mockListConnectors).toHaveBeenCalledTimes(1));
@@ -664,6 +688,40 @@ describe("ConnectorsPage RBAC gate", () => {
       // A 400 leaves our snapshot valid — refetching would throw away the
       // admin's in-progress text for no reason.
       expect(mockListConnectors).toHaveBeenCalledTimes(1);
+      // ...and the text they must correct stays in the field.
+      expect(await field()).toHaveValue("ftp://nope");
+    });
+
+
+    it("a slow save on one row does not re-enable another row mid-flight", async () => {
+      setWorkspace("admin");
+      mockListConnectors.mockResolvedValue([
+        makeConnector({ connector_id: "connector-1", runtime: RUNTIME }),
+        makeConnector({
+          connector_id: "connector-2",
+          resource_id: "slack-t02",
+          runtime: RUNTIME,
+        }),
+      ]);
+      // Row 1's request never settles; row 2's resolves immediately.
+      mockUpdateConnectorRuntime.mockImplementationOnce(
+        () => new Promise(() => {}),
+      );
+      render(<ConnectorsPage />);
+
+      const fields = await screen.findAllByLabelText("memoryLinkTemplate");
+
+      // Re-query the buttons after each edit: Save starts disabled, and a
+      // reference captured while disabled would swallow the click.
+      fireEvent.change(fields[0], { target: { value: TEMPLATE } });
+      fireEvent.click(screen.getAllByRole("button", { name: "save" })[0]);
+      await waitFor(() => expect(fields[0]).toBeDisabled());
+
+      fireEvent.change(fields[1], { target: { value: TEMPLATE } });
+      fireEvent.click(screen.getAllByRole("button", { name: "save" })[1]);
+
+      // Row 2 finishing must not release the slot row 1 still holds.
+      await waitFor(() => expect(fields[0]).toBeDisabled());
     });
 
     it("keeps each row's draft separate", async () => {
