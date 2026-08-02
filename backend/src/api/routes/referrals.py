@@ -29,12 +29,16 @@ logger = get_logger(__name__)
 
 
 def _require_enabled() -> None:
-    """404 the whole surface when the program is switched off for this deployment."""
+    """404 the whole surface when the program is switched off for this deployment.
+
+    The detail is Starlette's default ``"Not Found"`` string, deliberately: a
+    feature-specific message ("referral program is not enabled") would make the
+    route distinguishable from one that does not exist at all, which is the same
+    enumeration leak the uniform ``REFERRAL-001`` refusals close. The reason the
+    deployment said no belongs in the operator's config, not in the response.
+    """
     if not get_settings().enable_referrals:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail="Referral program is not enabled",
-        )
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Not Found")
 
 
 # Declared as a ROUTER-level dependency, listed first, so it is evaluated before

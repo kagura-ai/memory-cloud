@@ -11,6 +11,7 @@ Split in two:
 
 from __future__ import annotations
 
+import re
 from datetime import UTC, datetime
 from unittest.mock import AsyncMock, MagicMock
 from uuid import uuid4
@@ -189,6 +190,49 @@ class TestEffectiveMemoryLimit:
         assert ws.effective_memory_limit == 0
 
 
+class TestPendingGrantSQL:
+    """The re-homing UPDATE must emit SQL PostgreSQL actually accepts (#1470).
+
+    None of the other tests touch a database, so a predicate that only fails at
+    execution time would ship silently. Compiling the statement is the cheap
+    assertion that catches it.
+    """
+
+    def _sql(self) -> str:
+        from sqlalchemy.dialects import postgresql
+
+        from models.referral import ReferralGrant
+        from services.referral_service import build_pending_grant_update
+
+        stmt = build_pending_grant_update(
+            ReferralGrant.referrer_user_id,
+            ReferralGrant.referrer_workspace_id,
+            "user_1",
+            uuid4(),
+        )
+        return str(stmt.compile(dialect=postgresql.dialect()))
+
+    def test_uses_null_safe_inequality(self) -> None:
+        assert "IS DISTINCT FROM" in self._sql()
+
+    def test_does_not_emit_is_not_against_a_uuid(self) -> None:
+        """``IS NOT <uuid>`` is a PostgreSQL syntax error.
+
+        PostgreSQL allows ``IS NOT`` only against NULL / TRUE / FALSE / UNKNOWN.
+        SQLAlchemy's ``is_not()`` happily compiles it for any operand.
+        """
+        sql = self._sql()
+        assert "IS NOT DISTINCT FROM" not in sql  # wrong polarity
+        # The only legitimate IS NOT in this statement is the NULL check on
+        # workspaces.deleted_at inside the dead-workspace subquery.
+        assert sql.count("IS NOT NULL") == 1
+        assert re.search(r"IS NOT (?!NULL|DISTINCT|TRUE|FALSE|UNKNOWN)", sql) is None
+
+    def test_matches_rows_whose_workspace_is_unset(self) -> None:
+        """The NULL branch is the whole point — assert it survives compilation."""
+        assert "IS NULL" in self._sql()
+
+
 class TestEntitlementConsistency:
     """Every consumer of the memory limit must agree with the ORM property (#1470).
 
@@ -313,6 +357,20 @@ class TestKillSwitch:
         )
         response = client.get("/api/v1/admin/referrals")
         assert response.status_code == 200
+
+    def test_disabled_404_is_indistinguishable_from_a_missing_route(
+        self, client, monkeypatch
+    ) -> None:
+        """A feature-specific detail would make the route enumerable.
+
+        "Referral program is not enabled" tells a prober the endpoint exists and
+        what it is — the same leak the uniform REFERRAL-001 refusals close.
+        """
+        monkeypatch.setattr(get_settings(), "enable_referrals", False)
+        disabled = client.get("/api/v1/referrals/me")
+        missing = client.get("/api/v1/this-route-does-not-exist")
+        assert disabled.status_code == missing.status_code == 404
+        assert disabled.json() == missing.json()
 
     def test_disabled_surface_404s_for_unauthenticated_callers_too(self, monkeypatch) -> None:
         """The kill switch must be evaluated BEFORE auth.
@@ -451,12 +509,81 @@ class TestAdminRevoke:
     def test_revoke_404s_for_unknown_grant(self, client, monkeypatch) -> None:
         monkeypatch.setattr(
             "services.referral_service.ReferralService.revoke",
-            AsyncMock(return_value=None),
+            AsyncMock(return_value=(None, False)),
         )
         response = client.post(
             f"/api/v1/admin/referrals/{uuid4()}/revoke", json={"reason": "abuse"}
         )
         assert response.status_code == 404
+
+    def _revoke_client(self, monkeypatch, grant, changed: bool) -> tuple[TestClient, list[dict]]:
+        """A client whose session can actually commit, capturing AuditLog rows.
+
+        The shared ``client`` fixture yields a bare ``MagicMock`` session, so
+        ``await db.commit()`` raises — fine for the paths that reject before
+        committing, not for these.
+        """
+
+        async def mock_admin():
+            return _admin_user()
+
+        db = MagicMock()
+        db.commit = AsyncMock()
+        db.rollback = AsyncMock()
+
+        async def mock_db():
+            yield db
+
+        added: list[dict] = []
+
+        def capture(**kwargs):
+            added.append(kwargs)
+            return MagicMock()
+
+        monkeypatch.setattr(
+            "services.referral_service.ReferralService.revoke",
+            AsyncMock(return_value=(grant, changed)),
+        )
+        monkeypatch.setattr("api.routes.admin_referrals.AuditLog", capture)
+        app.dependency_overrides[require_admin] = mock_admin
+        app.dependency_overrides[get_db] = mock_db
+        return TestClient(app, raise_server_exceptions=False), added
+
+    def test_first_revoke_writes_an_audit_row(self, monkeypatch) -> None:
+        grant = _mock_grant()
+        client, added = self._revoke_client(monkeypatch, grant, changed=True)
+        try:
+            response = client.post(
+                f"/api/v1/admin/referrals/{grant.id}/revoke", json={"reason": "farming"}
+            )
+            assert response.status_code == 200
+            assert len(added) == 1
+            assert added[0]["user_metadata"]["reason"] == "farming"
+        finally:
+            app.dependency_overrides.clear()
+
+    def test_retried_revoke_writes_no_second_audit_row(self, monkeypatch) -> None:
+        """A no-op retry must not record a reason the ledger never stored.
+
+        ``ReferralService.revoke`` keeps the ORIGINAL ``revoked_reason`` on a
+        repeat call, so auditing unconditionally would leave an audit trail
+        claiming a revocation happened for a reason written nowhere.
+        """
+        grant = _mock_grant()
+        grant.revoked_at = datetime(2026, 8, 1, tzinfo=UTC)
+        grant.revoked_reason = "farming"
+        client, added = self._revoke_client(monkeypatch, grant, changed=False)
+        try:
+            response = client.post(
+                f"/api/v1/admin/referrals/{grant.id}/revoke",
+                json={"reason": "a different reason"},
+            )
+            assert response.status_code == 200
+            assert added == []
+            # The row is still returned, so the retry looks successful to the admin.
+            assert response.json()["revoked_reason"] == "farming"
+        finally:
+            app.dependency_overrides.clear()
 
     def test_non_admin_is_rejected(self) -> None:
         """The signup-gate router never got this test; this one does.

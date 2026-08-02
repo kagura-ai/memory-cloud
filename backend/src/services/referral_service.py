@@ -55,6 +55,53 @@ _REFERRAL_CODE_BYTES = 12
 _MAX_CODE_MINT_ATTEMPTS = 5
 
 
+def build_pending_grant_update(
+    user_col: Any,
+    workspace_col: Any,
+    user_id: str,
+    workspace_id: uuid.UUID,
+) -> Any:
+    """Build the UPDATE that re-homes one side of a user's unresolved grants.
+
+    Extracted from :meth:`ReferralService.apply_pending_grants` so the emitted
+    SQL is assertable without a live database — see
+    ``tests/api/test_referrals.py::TestPendingGrantSQL``. The predicate mixes
+    three-valued logic in a way that is easy to get wrong and that only fails at
+    runtime, which is exactly the class of defect a compile-time assertion
+    catches cheaply.
+
+    Selects grants for ``user_id`` whose workspace on this side is either unset
+    or points at a soft-deleted workspace, and is not already the target.
+
+    Args:
+        user_col: ``referrer_user_id`` or ``referred_user_id``.
+        workspace_col: The matching ``*_workspace_id`` column.
+        user_id: Owner of the grants being re-homed.
+        workspace_id: The live workspace to point them at.
+
+    Returns:
+        A SQLAlchemy ``Update`` statement.
+    """
+    # Workspaces a grant may currently point at that no longer count. A subquery
+    # keeps this a single statement.
+    dead_workspaces = select(Workspace.id).where(Workspace.deleted_at.is_not(None))
+    return (
+        update(ReferralGrant)
+        .where(
+            user_col == user_id,
+            workspace_col.is_(None) | workspace_col.in_(dead_workspaces),
+            # NULL-safe inequality, and it has to be. ``!=`` evaluates to NULL
+            # (not TRUE) for exactly the NULL rows this UPDATE exists to fix, so
+            # it would silently match nothing. ``is_not`` emits SQL
+            # ``IS NOT <uuid>``, which PostgreSQL accepts only for
+            # NULL / TRUE / FALSE / UNKNOWN — a syntax error against a UUID.
+            workspace_col.is_distinct_from(workspace_id),
+            ReferralGrant.revoked_at.is_(None),
+        )
+        .values({workspace_col.key: workspace_id})
+    )
+
+
 @dataclass(frozen=True)
 class ReferralSummary:
     """What a user sees about their own referral standing."""
@@ -387,25 +434,13 @@ class ReferralService:
         if workspace_id is None:
             return 0
 
-        # Workspaces the grant may currently point at that no longer count:
-        # soft-deleted ones. Collected as a subquery so the UPDATE stays a
-        # single statement.
-        dead_workspaces = select(Workspace.id).where(Workspace.deleted_at.is_not(None))
-
         updated = 0
         for user_col, workspace_col in (
             (ReferralGrant.referrer_user_id, ReferralGrant.referrer_workspace_id),
             (ReferralGrant.referred_user_id, ReferralGrant.referred_workspace_id),
         ):
             result = await self.db.execute(
-                update(ReferralGrant)
-                .where(
-                    user_col == user_id,
-                    workspace_col.is_(None) | workspace_col.in_(dead_workspaces),
-                    workspace_col.is_not(workspace_id),
-                    ReferralGrant.revoked_at.is_(None),
-                )
-                .values({workspace_col.key: workspace_id})
+                build_pending_grant_update(user_col, workspace_col, user_id, workspace_id)
             )
             # ``AsyncSession.execute`` is typed as returning ``Result``, which has
             # no ``rowcount``; a DML statement always yields a ``CursorResult`` at
@@ -490,34 +525,47 @@ class ReferralService:
     # Revocation
     # ------------------------------------------------------------------
 
-    async def revoke(self, *, grant_id: uuid.UUID, reason: str) -> ReferralGrant | None:
+    async def revoke(
+        self, *, grant_id: uuid.UUID, reason: str
+    ) -> tuple[ReferralGrant | None, bool]:
         """Revoke a grant and recompute both sides' bonuses.
 
-        Idempotent: revoking an already-revoked grant leaves ``revoked_at``
-        untouched and still returns the row, so an admin retry is harmless.
+        Idempotent: revoking an already-revoked grant leaves ``revoked_at`` and
+        the original ``revoked_reason`` untouched, so an admin retry (or a
+        double-click) changes nothing.
+
+        The ``changed`` flag exists because "idempotent" has to cover the side
+        effects too. Callers that write an audit row must key off it: auditing
+        unconditionally would stamp a *new* reason onto a no-op, producing an
+        audit trail that disagrees with the ``revoked_reason`` actually stored on
+        the row — the log would claim a revocation happened for a reason that was
+        never recorded anywhere.
 
         Args:
             grant_id: The ledger row to revoke.
             reason: Required free text; recorded on the row and in the audit log.
 
         Returns:
-            The grant, or ``None`` if no such row exists.
+            ``(grant, changed)``. ``grant`` is ``None`` if no such row exists;
+            ``changed`` is True only when this call performed the revocation.
         """
         grant = await self.db.get(ReferralGrant, grant_id)
         if grant is None:
-            return None
+            return None, False
 
-        if grant.revoked_at is None:
-            grant.revoked_at = utcnow()
-            grant.revoked_reason = reason
-            await self.db.flush()
-            await self._recompute_workspace_bonuses(
-                grant.referrer_workspace_id, grant.referred_workspace_id
-            )
-            logger.info(
-                "referral_revoked",
-                grant_id=str(grant_id),
-                referrer_user_id=grant.referrer_user_id,
-                referred_user_id=grant.referred_user_id,
-            )
-        return grant
+        if grant.revoked_at is not None:
+            return grant, False
+
+        grant.revoked_at = utcnow()
+        grant.revoked_reason = reason
+        await self.db.flush()
+        await self._recompute_workspace_bonuses(
+            grant.referrer_workspace_id, grant.referred_workspace_id
+        )
+        logger.info(
+            "referral_revoked",
+            grant_id=str(grant_id),
+            referrer_user_id=grant.referrer_user_id,
+            referred_user_id=grant.referred_user_id,
+        )
+        return grant, True

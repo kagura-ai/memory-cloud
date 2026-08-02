@@ -163,29 +163,34 @@ async def revoke_referral_grant(
     actor_id = user.get("user_id", "unknown")
 
     async with db_transaction(db, "revoke_referral_grant", "Failed to revoke referral grant"):
-        grant = await service.revoke(grant_id=grant_id, reason=payload.reason)
+        grant, changed = await service.revoke(grant_id=grant_id, reason=payload.reason)
         if grant is None:
             raise HTTPException(
                 status_code=status.HTTP_404_NOT_FOUND,
                 detail="Referral grant not found",
             )
-        audit = AuditLog(
-            user_email=user.get("email", actor_id),
-            user_id=actor_id,
-            action="referral_grant_revoke",
-            resource=f"referral_grant:{grant_id}",
-            old_value_hash=str(grant.referrer_bonus_memories + grant.referred_bonus_memories),
-            new_value_hash="0",
-            user_metadata={
-                "actor_user_id": actor_id,
-                "referrer_user_id": grant.referrer_user_id,
-                "referred_user_id": grant.referred_user_id,
-                "referrer_bonus_memories": grant.referrer_bonus_memories,
-                "referred_bonus_memories": grant.referred_bonus_memories,
-                "reason": payload.reason,
-            },
-        )
-        db.add(audit)
+        # Audit ONLY the call that actually revoked. Writing a row on a retry
+        # would record ``payload.reason`` against a grant whose stored
+        # ``revoked_reason`` is the original one — an audit trail that disagrees
+        # with the ledger, claiming a revocation for a reason never recorded.
+        if changed:
+            audit = AuditLog(
+                user_email=user.get("email", actor_id),
+                user_id=actor_id,
+                action="referral_grant_revoke",
+                resource=f"referral_grant:{grant_id}",
+                old_value_hash=str(grant.referrer_bonus_memories + grant.referred_bonus_memories),
+                new_value_hash="0",
+                user_metadata={
+                    "actor_user_id": actor_id,
+                    "referrer_user_id": grant.referrer_user_id,
+                    "referred_user_id": grant.referred_user_id,
+                    "referrer_bonus_memories": grant.referrer_bonus_memories,
+                    "referred_bonus_memories": grant.referred_bonus_memories,
+                    "reason": payload.reason,
+                },
+            )
+            db.add(audit)
         await db.commit()
 
     return _to_response(grant)
