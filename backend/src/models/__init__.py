@@ -16,6 +16,7 @@ import models.llm_call_log  # noqa: F401  # Issue #474: comprehensive call ledge
 import models.llm_pricing  # noqa: F401
 import models.measurement  # noqa: F401  # Issue #1333: HOW-MUCH measurement lane
 import models.memory_access_event  # noqa: F401  # Issue #1278: agent access audit (P0-5)
+import models.referral  # noqa: F401  # Issue #1470: referral program ledger
 import models.retrieval_feedback  # noqa: F401  # Issue #888: retrieval feedback signal
 import models.secrets  # noqa: F401  # Issue #1128: zero-knowledge secret store
 import models.sleep  # noqa: F401

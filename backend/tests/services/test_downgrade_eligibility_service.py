@@ -26,8 +26,24 @@ BASIC = PLAN_TIERS["basic"]
 PRO = PLAN_TIERS["pro"]
 
 
-def _ws(plan_name="pro", *, member=0, context=0, memory=0, connector=0, sleep=0, storage_mb=0):
-    """A minimal workspace stand-in carrying the addon bonuses the math reads."""
+def _ws(
+    plan_name="pro",
+    *,
+    member=0,
+    context=0,
+    memory=0,
+    connector=0,
+    sleep=0,
+    storage_mb=0,
+    referral_memory=0,
+):
+    """A minimal workspace stand-in carrying the bonuses the math reads.
+
+    ``referral_memory`` (#1470) is NOT an addon — it stacks into the same
+    effective memory limit from outside the addon machinery, so the downgrade
+    math has to read it too or it tells users to delete memories they are still
+    entitled to keep.
+    """
     return types.SimpleNamespace(
         id=uuid4(),
         plan_name=plan_name,
@@ -37,6 +53,7 @@ def _ws(plan_name="pro", *, member=0, context=0, memory=0, connector=0, sleep=0,
         addon_connector_bonus=connector,
         addon_sleep_contexts_bonus=sleep,
         addon_storage_bonus_mb=storage_mb,
+        referral_memory_bonus=referral_memory,
     )
 
 
@@ -130,6 +147,38 @@ def test_addons_are_kept_and_raise_the_target_effective_limit():
     over = _svc()._evaluate_tier(ws, _usage(contexts=9), BASIC)
     b = _by_dim(over)["contexts"]
     assert (b.limit, b.overage) == (8, 1)  # base(3) + addon(5) = 8
+
+
+def test_referral_bonus_is_kept_and_raises_the_target_memory_limit():
+    """#1470: the referral bonus survives a downgrade and must raise the limit.
+
+    It is locally-owned entitlement, not billing-derived, so a plan change does
+    not take it away. Omitting it here would block an otherwise-eligible
+    downgrade and tell the user to delete memories they still have room for.
+    """
+    # FREE memory base 1000, +1500 referral → effective 2500.
+    ws = _ws(referral_memory=1500)
+    assert _svc()._evaluate_tier(ws, _usage(memories=2500), FREE).eligible is True
+    over = _svc()._evaluate_tier(ws, _usage(memories=2501), FREE)
+    b = _by_dim(over)["memories"]
+    assert (b.limit, b.overage) == (2500, 1)
+
+
+def test_referral_bonus_stacks_with_the_memory_addon():
+    """Both bonuses accrue to the same limit; neither may shadow the other."""
+    ws = _ws(memory=10000, referral_memory=1500)
+    # FREE base 1000 + addon 10000 + referral 1500 = 12500.
+    result = _svc()._evaluate_tier(ws, _usage(memories=12501), FREE)
+    assert _by_dim(result)["memories"].limit == 12500
+
+
+def test_referral_bonus_cannot_lift_a_zero_base_dimension():
+    """The bonus rides the same ``_zero_floor`` guard the addons do (#569)."""
+    ws = _ws(plan_name="pro", referral_memory=1500)
+    # PRO analysis_runs_per_day is a separate dimension; the referral bonus is
+    # memory-only, so a huge referral must not leak into any other check.
+    result = _svc()._evaluate_tier(ws, _usage(contexts=25), FREE)
+    assert _by_dim(result)["contexts"].limit == FREE.max_contexts_per_workspace
 
 
 def test_multiple_blockers_collected():

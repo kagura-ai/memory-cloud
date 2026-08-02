@@ -54,6 +54,7 @@ PARAM_DEFAULTS = {
     "client_id": "1",
     "invitation_id": "1",
     "token_id": "1",
+    "grant_id": "00000000-0000-0000-0000-000000000003",  # Issue #1470: referral ledger row
     "resource_id": "test-resource",
     "token": "dummy-token",
     "key": "test-key",

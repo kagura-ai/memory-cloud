@@ -69,6 +69,24 @@ EFFECTIVE_PROPERTIES = [
 ]
 
 
+def _mock_workspace(tier: MagicMock, addon_attr: str, addon_value: int | None) -> MagicMock:
+    """Build a stand-in workspace exposing exactly the columns a property reads.
+
+    ``MagicMock`` auto-creates attributes, so any column an ``effective_*``
+    property reads but the test does not set would arrive as a MagicMock and
+    make the arithmetic silently produce another MagicMock instead of an int.
+    ``effective_memory_limit`` reads a SECOND column (#1470's
+    ``referral_memory_bonus``, deliberately outside the addon machinery), so it
+    is zeroed here for every case; the referral stacking itself is covered by
+    ``tests/api/test_referrals.py::TestEffectiveMemoryLimit``.
+    """
+    ws = MagicMock()
+    ws._plan_tier = tier
+    ws.referral_memory_bonus = 0
+    setattr(ws, addon_attr, addon_value)
+    return ws
+
+
 class TestZeroBaseBypassClosed:
     """For every ``effective_*_limit``, a synthetic tier with base=0 and
     a positive addon must still report effective=0. This is the core
@@ -87,9 +105,7 @@ class TestZeroBaseBypassClosed:
     def test_zero_base_with_addon_returns_zero(self, prop_name, tier_attr, addon_attr, addon_scale):
         tier = MagicMock()
         setattr(tier, tier_attr, 0)
-        ws = MagicMock()
-        ws._plan_tier = tier
-        setattr(ws, addon_attr, 5)  # any positive addon must be ignored
+        ws = _mock_workspace(tier, addon_attr, 5)  # any positive addon must be ignored
         assert getattr(Workspace, prop_name).fget(ws) == 0
 
     @pytest.mark.parametrize(
@@ -100,9 +116,7 @@ class TestZeroBaseBypassClosed:
     def test_nonzero_base_stacks_addon(self, prop_name, tier_attr, addon_attr, addon_scale):
         tier = MagicMock()
         setattr(tier, tier_attr, 100)
-        ws = MagicMock()
-        ws._plan_tier = tier
-        setattr(ws, addon_attr, 5)
+        ws = _mock_workspace(tier, addon_attr, 5)
         assert getattr(Workspace, prop_name).fget(ws) == 100 + 5 * addon_scale
 
     @pytest.mark.parametrize(
@@ -120,9 +134,7 @@ class TestZeroBaseBypassClosed:
         """
         tier = MagicMock()
         setattr(tier, tier_attr, 100)
-        ws = MagicMock()
-        ws._plan_tier = tier
-        setattr(ws, addon_attr, None)
+        ws = _mock_workspace(tier, addon_attr, None)
         assert getattr(Workspace, prop_name).fget(ws) == 100
 
 

@@ -97,6 +97,7 @@ _MODEL_MODULES: tuple[str, ...] = (
     "models.llm_pricing",
     "models.memory",
     "models.neural",
+    "models.referral",
     "models.resource",
     "models.signup_gate",
     "models.sleep",

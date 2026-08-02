@@ -135,6 +135,11 @@ async def system_info():
             # the connectors UI hides the BYO manual-bind form and stops
             # requiring a per-connector LLM (the shared worker provides it).
             "managed_connectors": settings.enable_managed_connectors,
+            # Issue #1470: default-off. When false the referral endpoints 404
+            # and the web UI hides the invite card. Only the deployment-level
+            # availability is exposed here — never the reward amounts, which
+            # would tell a farmer exactly what a fresh account is worth.
+            "referrals": settings.enable_referrals,
         },
     }
 
