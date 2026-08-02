@@ -515,6 +515,39 @@ class TestRedeem:
         assert invalid.message == capped.message
         assert invalid.error_code == capped.error_code
 
+    def test_missing_user_row_is_404_not_a_referral_refusal(
+        self, client, referrals_enabled, monkeypatch
+    ) -> None:
+        """A missing ``users`` row is resource-not-found, not a code refusal.
+
+        The caller is session-authenticated; an absent row means an erased
+        account with a live session. Answering ``REFERRAL-001`` ("this referral
+        code is not valid") would be a lie for ``GET /referrals/me``, where no
+        code was submitted at all, and would blur what the REFERRAL-* codes mean.
+        """
+        from utils.exceptions import NotFoundException
+
+        monkeypatch.setattr(
+            "services.referral_service.ReferralService.get_summary",
+            AsyncMock(side_effect=NotFoundException("User", "user_referee")),
+        )
+        response = client.get("/api/v1/referrals/me")
+        assert response.status_code == 404
+        assert "REFERRAL-" not in response.text
+
+    def test_missing_user_row_on_redeem_is_also_404(
+        self, client, referrals_enabled, monkeypatch
+    ) -> None:
+        from utils.exceptions import NotFoundException
+
+        monkeypatch.setattr(
+            "services.referral_service.ReferralService.redeem",
+            AsyncMock(side_effect=NotFoundException("User", "user_referee")),
+        )
+        response = client.post("/api/v1/referrals/redeem", json={"code": "abc123"})
+        assert response.status_code == 404
+        assert "REFERRAL-" not in response.text
+
     def test_caller_state_refusals_keep_distinct_codes(self) -> None:
         """Refusals about the CALLER's own state may stay distinguishable.
 

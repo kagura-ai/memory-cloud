@@ -37,6 +37,7 @@ from models.auth import User, Workspace
 from models.referral import ReferralGrant
 from utils.datetime import utcnow
 from utils.exceptions import (
+    NotFoundException,
     ReferralAlreadyRedeemedError,
     ReferralCapReachedError,
     ReferralCodeInvalidError,
@@ -143,13 +144,19 @@ class ReferralService:
             The user's referral code.
 
         Raises:
-            ReferralCodeInvalidError: If the user does not exist.
+            NotFoundException: If the user row does not exist.
             RuntimeError: If a unique code could not be minted (astronomically
                 unlikely; surfaced rather than looped forever).
         """
         user = await self.db.scalar(select(User).where(User.user_id == user_id))
         if user is None:
-            raise ReferralCodeInvalidError()
+            # 404, not a REFERRAL-* refusal. The caller is session-authenticated
+            # and submitted no code — a missing ``users`` row is a
+            # resource-not-found condition (an erased account with a live
+            # session), and answering "this referral code is not valid" would be
+            # a lie about a code that was never sent. Keeps the REFERRAL-* codes
+            # meaning "your redemption was refused".
+            raise NotFoundException("User", user_id)
         if user.referral_code:
             return user.referral_code
 
@@ -211,6 +218,7 @@ class ReferralService:
             The created :class:`ReferralGrant`.
 
         Raises:
+            NotFoundException: The redeeming user's own row is missing.
             ReferralCodeInvalidError: Code does not resolve to a user.
             ReferralSelfError: The code belongs to the redeeming user.
             ReferralWindowClosedError: The account is older than the redeem window.
@@ -219,7 +227,10 @@ class ReferralService:
         """
         referee = await self.db.scalar(select(User).where(User.user_id == referred_user_id))
         if referee is None:
-            raise ReferralCodeInvalidError()
+            # See get_or_create_referral_code: the redeemer's own missing row is
+            # 404, independent of whatever code they submitted. It leaks nothing
+            # about the code — it is a fact about the caller.
+            raise NotFoundException("User", referred_user_id)
 
         # Caller-state checks FIRST, before the code is ever looked up. Ordering
         # is load-bearing for the enumeration story: if the window check ran
