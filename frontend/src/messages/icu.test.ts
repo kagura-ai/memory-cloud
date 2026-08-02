@@ -77,20 +77,26 @@ describe.each([
     expect(broken).toEqual([]);
   });
 
-  it("renders the referral-free connector link-template strings literally", () => {
-    const t = createTranslator({
-      locale,
-      messages: messages as Messages,
-      namespace: "connectors",
-    });
+  // Every connector message that documents the link-template syntax. Adding a
+  // key here is the checklist item when a new string shows literal braces —
+  // the sweep above cannot infer intent, so this list is the actual guard.
+  it.each(["memoryLinkTemplatePlaceholder", "memoryLinkTemplateNote"])(
+    "renders literal braces in connectors.%s",
+    (key) => {
+      const t = createTranslator({
+        locale,
+        messages: messages as Messages,
+        namespace: "connectors",
+      });
 
-    // The exact regression: these are shown to an admin as documentation of the
-    // template syntax, so the braces must reach the screen.
-    expect(t("memoryLinkTemplatePlaceholder" as never)).toContain("{context_id}");
-    expect(t("memoryLinkTemplatePlaceholder" as never)).toContain("{memory_id}");
-    expect(t("memoryLinkTemplateHelp" as never)).toContain("{context_id}");
-    expect(t("memoryLinkTemplateHelp" as never)).toContain("{memory_id}");
-    // ...and the ICU quoting must not leak into the rendered output.
-    expect(t("memoryLinkTemplatePlaceholder" as never)).not.toContain("'{");
-  });
+      const rendered = t(key as never);
+      // A FORMATTING_ERROR makes next-intl fall back to the KEY, so this also
+      // catches the crash rather than just the wrong text.
+      expect(rendered).not.toBe(`connectors.${key}`);
+      expect(rendered).toContain("{context_id}");
+      expect(rendered).toContain("{memory_id}");
+      // ...and the ICU quoting must not leak into the rendered output.
+      expect(rendered).not.toContain("'{");
+    },
+  );
 });

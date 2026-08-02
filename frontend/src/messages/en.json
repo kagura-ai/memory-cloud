@@ -4084,7 +4084,7 @@
     "litellmKeyNote": "Stored but not used by ingestion yet (reserved for an upcoming feature).",
     "memoryLinkTemplateLabel": "Memory link template",
     "memoryLinkTemplatePlaceholder": "https://example.com/contexts/'{context_id}'/memories/'{memory_id}'",
-    "memoryLinkTemplateNote": "Makes recalled memories clickable in chat. Keep {context_id} and {memory_id} as placeholders — they are filled per result. Leave empty to show no link (a broken link is worse than none).",
+    "memoryLinkTemplateNote": "Makes recalled memories clickable in chat. Keep '{context_id}' and '{memory_id}' as placeholders — they are filled per result. Leave empty to show no link (a broken link is worse than none).",
     "missingListSeparator": " / ",
     "connectProvider": "Connect {name}",
     "comingSoon": "Coming soon",
@@ -4104,11 +4104,7 @@
     "errors": {
       "noWorkspaceSelected": "No workspace selected. Select a workspace to manage its connectors.",
       "forbiddenWorkspace": "Workspace owner or admin role required to manage connectors."
-    },
-    "memoryLinkTemplate": "Memory link template",
-    "memoryLinkTemplateTooltipLabel": "About the memory link template",
-    "memoryLinkTemplateTooltip": "When set, the worker turns each recalled memory into a link using this URL template. Leave it empty and no link is rendered.",
-    "memoryLinkTemplateHelp": "Must be an http:// or https:// URL and include both '{context_id}' and '{memory_id}'. Leave empty to render no link."
+    }
   },
   "accountDeletion": {
     "title": "Delete account",
