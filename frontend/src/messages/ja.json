@@ -4082,6 +4082,9 @@
     "llmDeleted": "LLM 設定を削除しました",
     "advancedSettings": "詳細設定",
     "litellmKeyNote": "保存されますが、現在の取り込み処理ではまだ使用されません(将来の機能向け)。",
+    "memoryLinkTemplateLabel": "記憶リンクのテンプレート",
+    "memoryLinkTemplatePlaceholder": "https://example.com/contexts/'{context_id}'/memories/'{memory_id}'",
+    "memoryLinkTemplateNote": "チャットの検索結果から記憶へリンクできるようになります。{context_id} と {memory_id} はプレースホルダのまま残してください（結果ごとに埋められます）。空欄にするとリンクを表示しません（壊れたリンクより無い方が良いため）。",
     "missingListSeparator": "・",
     "connectProvider": "{name} を接続",
     "comingSoon": "近日対応",
@@ -4105,7 +4108,6 @@
     "memoryLinkTemplate": "メモリリンクのテンプレート",
     "memoryLinkTemplateTooltipLabel": "メモリリンクのテンプレートについて",
     "memoryLinkTemplateTooltip": "設定すると、ワーカーが想起した各メモリをこの URL テンプレートでリンク化します。空のままならリンクは表示されません。",
-    "memoryLinkTemplatePlaceholder": "https://example.com/contexts/'{context_id}'/memories/'{memory_id}'",
     "memoryLinkTemplateHelp": "http:// または https:// の URL で、'{context_id}' と '{memory_id}' の両方を含める必要があります。空にするとリンクを表示しません。"
   },
   "accountDeletion": {
