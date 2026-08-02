@@ -4101,7 +4101,12 @@
     "errors": {
       "noWorkspaceSelected": "ワークスペースが選択されていません。コネクタを管理するにはワークスペースを選択してください。",
       "forbiddenWorkspace": "コネクタを管理するにはワークスペースのオーナーまたは管理者権限が必要です。"
-    }
+    },
+    "memoryLinkTemplate": "メモリリンクのテンプレート",
+    "memoryLinkTemplateTooltipLabel": "メモリリンクのテンプレートについて",
+    "memoryLinkTemplateTooltip": "設定すると、ワーカーが想起した各メモリをこの URL テンプレートでリンク化します。空のままならリンクは表示されません。",
+    "memoryLinkTemplatePlaceholder": "https://example.com/contexts/'{context_id}'/memories/'{memory_id}'",
+    "memoryLinkTemplateHelp": "http:// または https:// の URL で、'{context_id}' と '{memory_id}' の両方を含める必要があります。空にするとリンクを表示しません。"
   },
   "accountDeletion": {
     "title": "アカウントの削除",

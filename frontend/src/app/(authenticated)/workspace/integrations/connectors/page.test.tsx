@@ -17,6 +17,8 @@ import {
 } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
+import { ApiError } from "@/lib/api/base";
+
 import ConnectorsPage from "./page";
 
 const mockListConnectors = vi.fn();
@@ -530,6 +532,258 @@ describe("ConnectorsPage RBAC gate", () => {
     // the absolute UTC time rides along in the title (review finding).
     const line = await screen.findByText(/ingestLastWrite/);
     expect(line).toHaveAttribute("title", expect.stringContaining("2026"));
+  });
+
+  // #1471: memory_link_template was persistable and readable but had no editor,
+  // so the feature could only be enabled by hand-calling the API — and its
+  // absence was silent (the worker renders no link rather than a broken one).
+  describe("memory_link_template editor (#1471)", () => {
+    const TEMPLATE =
+      "https://example.com/contexts/{context_id}/memories/{memory_id}";
+
+    // A runtime with tuned sub-blocks: the endpoint is a COMPLETE normalized
+    // replacement, so these are exactly what a partial body would silently
+    // reset to worker defaults.
+    const RUNTIME = {
+      vision_enabled: true,
+      mention_answer_enabled: true,
+      answer_timeout_sec: 12,
+      memory_link_template: null,
+      buffer: { max_events: 40 },
+      continuity: { time_window_minutes: 30 },
+    };
+
+    function arm(runtimeOverrides: Record<string, unknown> = {}) {
+      setWorkspace("admin");
+      mockListConnectors.mockResolvedValue([
+        makeConnector({
+          config_version: 7,
+          runtime: { ...RUNTIME, ...runtimeOverrides },
+        }),
+      ]);
+    }
+
+    async function field() {
+      return screen.findByLabelText("memoryLinkTemplate");
+    }
+
+    it("saves by MERGING into the existing runtime, not replacing it", async () => {
+      arm();
+      render(<ConnectorsPage />);
+
+      fireEvent.change(await field(), { target: { value: TEMPLATE } });
+      fireEvent.click(screen.getByRole("button", { name: "save" }));
+
+      await waitFor(() =>
+        expect(mockUpdateConnectorRuntime).toHaveBeenCalledWith(
+          "connector-1",
+          {
+            // Every tuned field must ride along — a partial body would reset
+            // buffer/continuity/answer_timeout_sec to worker defaults (#1348).
+            ...RUNTIME,
+            memory_link_template: TEMPLATE,
+          },
+          // Optimistic-concurrency guard from the row's snapshot.
+          7,
+        ),
+      );
+    });
+
+    it("sends null (not an empty string) when the field is cleared", async () => {
+      arm({ memory_link_template: TEMPLATE });
+      render(<ConnectorsPage />);
+
+      fireEvent.change(await field(), { target: { value: "  " } });
+      fireEvent.click(screen.getByRole("button", { name: "save" }));
+
+      await waitFor(() =>
+        expect(mockUpdateConnectorRuntime).toHaveBeenCalledWith(
+          "connector-1",
+          expect.objectContaining({ memory_link_template: null }),
+          7,
+        ),
+      );
+    });
+
+    it("prefills from the server value and disables save until it changes", async () => {
+      arm({ memory_link_template: TEMPLATE });
+      render(<ConnectorsPage />);
+
+      expect(await field()).toHaveValue(TEMPLATE);
+      expect(screen.getByRole("button", { name: "save" })).toBeDisabled();
+
+      fireEvent.change(await field(), { target: { value: `${TEMPLATE}?x=1` } });
+      expect(screen.getByRole("button", { name: "save" })).toBeEnabled();
+    });
+
+    it("surfaces the server-side validation message next to the field", async () => {
+      arm();
+      mockUpdateConnectorRuntime.mockRejectedValueOnce(
+        new Error(
+          "memory_link_template must contain {memory_id} placeholder(s)",
+        ),
+      );
+      render(<ConnectorsPage />);
+
+      fireEvent.change(await field(), {
+        target: { value: "https://example.com/{context_id}" },
+      });
+      fireEvent.click(screen.getByRole("button", { name: "save" }));
+
+      // Field-adjacent, per the error-surface rule: the backend owns the
+      // template rules and names the offending one.
+      const alert = await screen.findByRole("alert");
+      expect(alert).toHaveTextContent("{memory_id}");
+      expect(await field()).toHaveAttribute("aria-invalid", "true");
+    });
+
+    it("reloads on a 409 and drops the draft so the server value shows", async () => {
+      arm({ memory_link_template: null });
+      // A real conflict arrives as ApiError with a numeric status; its message
+      // is the backend's detail string and need NOT mention 409 or "conflict".
+      // Matching on message text would silently miss this.
+      mockUpdateConnectorRuntime.mockRejectedValueOnce(
+        new ApiError({
+          message: "Connector was modified by another request",
+          status: 409,
+        }),
+      );
+      render(<ConnectorsPage />);
+      await waitFor(() => expect(mockListConnectors).toHaveBeenCalledTimes(1));
+
+      // The refetch returns what the other admin stored.
+      mockListConnectors.mockResolvedValue([
+        makeConnector({
+          config_version: 8,
+          runtime: { ...RUNTIME, memory_link_template: TEMPLATE },
+        }),
+      ]);
+
+      fireEvent.change(await field(), {
+        target: { value: "https://mine.example/{context_id}/{memory_id}" },
+      });
+      fireEvent.click(screen.getByRole("button", { name: "save" }));
+
+      await waitFor(() => expect(mockListConnectors).toHaveBeenCalledTimes(2));
+      // A surviving draft would win the draft-or-server fallback and keep the
+      // stale text on screen, defeating the reload.
+      await waitFor(async () => expect(await field()).toHaveValue(TEMPLATE));
+      // A conflict is a user-ACTION failure, not field validation → toast.
+      expect(mockToast).toHaveBeenCalledWith(
+        expect.objectContaining({ variant: "destructive" }),
+      );
+    });
+
+    it("does not mark the field invalid on a 409", async () => {
+      arm();
+      mockUpdateConnectorRuntime.mockRejectedValueOnce(
+        new ApiError({ message: "modified by another request", status: 409 }),
+      );
+      render(<ConnectorsPage />);
+
+      fireEvent.change(await field(), { target: { value: TEMPLATE } });
+      fireEvent.click(screen.getByRole("button", { name: "save" }));
+
+      await waitFor(() =>
+        expect(mockToast).toHaveBeenCalledWith(
+          expect.objectContaining({ variant: "destructive" }),
+        ),
+      );
+      // The typed value may be perfectly valid — a conflict says nothing about
+      // it. aria-invalid would tell a screen-reader user to fix input that
+      // needs no fixing.
+      expect(await field()).not.toHaveAttribute("aria-invalid");
+      expect(screen.queryByRole("alert")).not.toBeInTheDocument();
+    });
+
+    it("does not reload on a plain validation failure", async () => {
+      arm();
+      mockUpdateConnectorRuntime.mockRejectedValueOnce(
+        new ApiError({
+          message: "memory_link_template must start with http:// or https://",
+          status: 400,
+        }),
+      );
+      render(<ConnectorsPage />);
+      await waitFor(() => expect(mockListConnectors).toHaveBeenCalledTimes(1));
+
+      fireEvent.change(await field(), { target: { value: "ftp://nope" } });
+      fireEvent.click(screen.getByRole("button", { name: "save" }));
+
+      await screen.findByRole("alert");
+      // A 400 leaves our snapshot valid — refetching would throw away the
+      // admin's in-progress text for no reason.
+      expect(mockListConnectors).toHaveBeenCalledTimes(1);
+      // ...and the text they must correct stays in the field.
+      expect(await field()).toHaveValue("ftp://nope");
+    });
+
+    it("a slow save on one row does not re-enable another row mid-flight", async () => {
+      setWorkspace("admin");
+      mockListConnectors.mockResolvedValue([
+        makeConnector({ connector_id: "connector-1", runtime: RUNTIME }),
+        makeConnector({
+          connector_id: "connector-2",
+          resource_id: "slack-t02",
+          runtime: RUNTIME,
+        }),
+      ]);
+      // Row 1's request never settles; row 2's resolves immediately.
+      mockUpdateConnectorRuntime.mockImplementationOnce(
+        () => new Promise(() => {}),
+      );
+      render(<ConnectorsPage />);
+
+      const fields = await screen.findAllByLabelText("memoryLinkTemplate");
+
+      // Re-query the buttons after each edit: Save starts disabled, and a
+      // reference captured while disabled would swallow the click.
+      fireEvent.change(fields[0], { target: { value: TEMPLATE } });
+      fireEvent.click(screen.getAllByRole("button", { name: "save" })[0]);
+      await waitFor(() => expect(fields[0]).toBeDisabled());
+
+      fireEvent.change(fields[1], { target: { value: TEMPLATE } });
+      fireEvent.click(screen.getAllByRole("button", { name: "save" })[1]);
+
+      // Row 2 finishing must not release the slot row 1 still holds.
+      await waitFor(() => expect(fields[0]).toBeDisabled());
+    });
+
+    it("keeps each row's draft separate", async () => {
+      setWorkspace("admin");
+      mockListConnectors.mockResolvedValue([
+        makeConnector({ connector_id: "connector-1", runtime: RUNTIME }),
+        makeConnector({
+          connector_id: "connector-2",
+          resource_id: "slack-t02",
+          runtime: RUNTIME,
+        }),
+      ]);
+      render(<ConnectorsPage />);
+
+      const fields = await screen.findAllByLabelText("memoryLinkTemplate");
+      expect(fields).toHaveLength(2);
+      fireEvent.change(fields[0], { target: { value: TEMPLATE } });
+
+      expect(fields[0]).toHaveValue(TEMPLATE);
+      // A single shared draft string would leak row 1's edit into row 2.
+      expect(fields[1]).toHaveValue("");
+    });
+
+    it("is not rendered for a connector with no stored runtime block", async () => {
+      setWorkspace("admin");
+      mockListConnectors.mockResolvedValue([makeConnector({ runtime: null })]);
+      render(<ConnectorsPage />);
+
+      // The vision switch renders for every row (disabled without a runtime
+      // block), so its presence means the row is on screen.
+      await screen.findByRole("switch", { name: "visionEnabledFor" });
+      // There is nothing to merge into, so offering an editor would send a
+      // body that resets every other runtime field to worker defaults.
+      expect(
+        screen.queryByLabelText("memoryLinkTemplate"),
+      ).not.toBeInTheDocument();
+    });
   });
 
   it("updates the tenant-local vision kill-switch from the connector row", async () => {
