@@ -47,6 +47,19 @@ WORKERS_GATE_INTERVAL="${WORKERS_GATE_INTERVAL:-2}"   # seconds between security
 # leaves it unset and resolves to the real curl — behaviour is unchanged.
 CURL="${CURL:-curl}"
 
+# docker indirection, same pattern as CURL above: only the bridge-restart step
+# goes through "$DOCKER" so the bats suite can stub it
+# (tests/deploy_bridge_restart.bats). Every other docker call in this file
+# either runs through dc() or belongs to a flow the suite never exercises.
+DOCKER="${DOCKER:-docker}"
+
+# The chat-bridge worker is NOT a service in this repo's docker-compose.prod.yml
+# — it is a separate co-resident stack sharing this VM and docker network. That
+# is why the restart below uses plain `docker` and not dc(): compose would not
+# know the container. Overridable so a host that names it differently (or a test)
+# can point at the right one (#1476).
+BRIDGE_WORKER_CONTAINER="${BRIDGE_WORKER_CONTAINER:-kagura-bridge-worker-1}"
+
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
@@ -151,6 +164,91 @@ is_container_running() {
     docker inspect --format '{{.State.Running}}' "$container" 2>/dev/null | grep -q "true"
 }
 
+# Is the co-resident bridge worker running on this host right now?
+#
+#   0 — running
+#   1 — definitively not running (docker answered, the name was not in the list)
+#   2 — could not be determined (the docker query itself failed)
+#
+# 1 and 2 are kept apart deliberately. Collapsing them would let an unreachable
+# or permission-denied docker daemon read as "no bridge on this host", so the
+# deploy would print a benign skip and move on having never attempted the
+# restart — a silent absorption of exactly the kind this whole step exists to
+# stop.
+#
+# Deliberately NOT `docker ps ... | grep -qx`: `grep -q` exits at the first
+# match and can SIGPIPE `docker ps`, which under `set -o pipefail` surfaces as a
+# failed pipeline — i.e. a *running* container intermittently reported as
+# absent. That is the exact shape of the #986 silent-death bug. Capture first,
+# then compare whole lines, so no pipeline status is involved. Whole-line
+# equality also means a container named `kagura-bridge-worker-10` never
+# satisfies the check for `kagura-bridge-worker-1`.
+bridge_worker_is_running() {
+    local names name
+    # `|| return 2` also exempts the assignment from `set -e`.
+    names="$("$DOCKER" ps --format '{{.Names}}' 2>/dev/null)" || return 2
+    while IFS= read -r name; do
+        # An empty `names` still feeds the loop one empty line, so guard -n
+        # rather than letting "" match an empty container name.
+        if [ -n "$name" ] && [ "$name" = "$BRIDGE_WORKER_CONTAINER" ]; then
+            return 0
+        fi
+    done <<< "$names"
+    return 1
+}
+
+# Restart the chat-bridge worker after the active API color changes (#1476).
+#
+# The worker resolves the API container by color when it connects and then holds
+# those connections. A flip leaves it talking to the color this script is about
+# to drain, and it stays up only through kagura-bridge's connect-level
+# cross-color fallback (kagura-ai/kagura-bridge#211) — which absorbed 4162 calls
+# over 65 hours in the 2026-07-21..24 incident, turning a safety net into the
+# normal path and burying every other warning in its noise. The same gap left
+# Slack ingest down for ~30 hours on 2026-07-29 before anyone noticed.
+#
+# Nothing else in the system knows a flip happened, so this is the only place
+# the restart can be triggered from.
+#
+# Call it AFTER Caddy has been switched: restarting while the old color still
+# serves would just re-pin the worker to the color being drained.
+restart_bridge_worker() {
+    # `|| presence=$?` keeps a non-zero return from killing the run under `set -e`.
+    local presence=0
+    bridge_worker_is_running || presence=$?
+
+    # Presence-gated: deploy.sh is also the OSS single-server script, and a host
+    # without the bridge stack must log a skip, not an error.
+    if [ "$presence" -eq 1 ]; then
+        log "  ${BRIDGE_WORKER_CONTAINER} is not running on this host — skipping bridge restart."
+        return 0
+    fi
+
+    # presence == 2: docker could not be queried. Try the restart anyway rather
+    # than skipping — if docker is genuinely down the restart fails and drops
+    # into the loud warning below, which is the honest outcome; if only the
+    # query was broken, the restart still does its job.
+    if [ "$presence" -ne 0 ]; then
+        log "WARNING: could not query docker to check for ${BRIDGE_WORKER_CONTAINER}."
+        log "         Attempting the restart anyway rather than silently skipping it."
+    fi
+
+    log "  Restarting ${BRIDGE_WORKER_CONTAINER} (active API color changed)..."
+    if "$DOCKER" restart "$BRIDGE_WORKER_CONTAINER" > /dev/null 2>&1; then
+        log "  ${BRIDGE_WORKER_CONTAINER} restarted."
+        return 0
+    fi
+
+    # Non-fatal on purpose. By this point the API cutover has completed and the
+    # new color is serving; a bridge that will not come back is a bridge
+    # problem. Aborting here would report a healthy deploy as failed and invite
+    # an unnecessary rollback. Say it loudly instead.
+    log "WARNING: ${BRIDGE_WORKER_CONTAINER} failed to restart. Chat ingest may still be"
+    log "         pinned to the drained API color. Restart it manually:"
+    log "             docker restart ${BRIDGE_WORKER_CONTAINER}"
+    return 0
+}
+
 # ---------------------------------------------------------------------------
 # Commands
 # ---------------------------------------------------------------------------
@@ -197,6 +295,12 @@ cmd_rollback() {
     reload_caddy
     verify_workers_blocked
     verify_internal_blocked
+
+    # A rollback is a color flip too, so the bridge worker is left pointing at
+    # the color we just switched away from — same failure as an ordinary deploy
+    # (#1476). The issue only named cmd_deploy; this path needs it just as much.
+    DEPLOY_STAGE="rollback: restart bridge worker"
+    restart_bridge_worker
 
     DEPLOY_STAGE="rollback complete (active: ${inactive})"
     log "Rollback complete. Active: $inactive"
@@ -259,6 +363,13 @@ cmd_deploy() {
     reload_caddy
     verify_workers_blocked
     verify_internal_blocked
+
+    # Step 6b: Restart the co-resident bridge worker now that the color moved.
+    # Numbered 6b rather than renumbering to /8 because it rides on Step 6's
+    # switch — it is only correct once Caddy points at the new color.
+    DEPLOY_STAGE="Step 6b/7: restart ${BRIDGE_WORKER_CONTAINER}"
+    log "Step 6b/7: Restarting the bridge worker after the color switch..."
+    restart_bridge_worker
 
     # Step 7: Drain and stop old container
     # Disable restart policy first — otherwise `restart: always` revives
@@ -570,12 +681,13 @@ main() {
             echo "  --generate-caddyfile  Render ./Caddyfile from Caddyfile.tpl (bootstrap; no deploy)"
             echo ""
             echo "Environment variables:"
-            echo "  READINESS_TIMEOUT      Seconds to wait for API /readiness (default: 60)"
-            echo "  DRAIN_TIMEOUT          Seconds to drain old API container (default: 30)"
-            echo "  WEB_READINESS_TIMEOUT  Seconds to wait for web /api/health (default: 30)"
-            echo "  WEB_READINESS_INTERVAL Seconds between web health checks (default: 2)"
-            echo "  WORKERS_GATE_TIMEOUT   Seconds to wait for an edge-blocked path (/api/v1/workers/*, /internal/*) to 404 at Caddy (default: 30)"
-            echo "  WORKERS_GATE_INTERVAL  Seconds between security-gate checks; shared by the workers + internal gates (default: 2)"
+            echo "  READINESS_TIMEOUT        Seconds to wait for API /readiness (default: 60)"
+            echo "  DRAIN_TIMEOUT            Seconds to drain old API container (default: 30)"
+            echo "  WEB_READINESS_TIMEOUT    Seconds to wait for web /api/health (default: 30)"
+            echo "  WEB_READINESS_INTERVAL   Seconds between web health checks (default: 2)"
+            echo "  WORKERS_GATE_TIMEOUT     Seconds to wait for an edge-blocked path (/api/v1/workers/*, /internal/*) to 404 at Caddy (default: 30)"
+            echo "  WORKERS_GATE_INTERVAL    Seconds between security-gate checks; shared by the workers + internal gates (default: 2)"
+            echo "  BRIDGE_WORKER_CONTAINER  Co-resident chat-bridge worker restarted after a color flip; skipped when absent (default: kagura-bridge-worker-1)"
             ;;
         "")
             cmd_deploy
