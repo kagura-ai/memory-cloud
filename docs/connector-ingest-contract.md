@@ -1,8 +1,6 @@
 # Connector Ingest Contract (ai-worker → memory-cloud)
 
-This document is the **written contract** that an external worker (e.g.
-[`kagura-chat-bridge`](https://github.com/kagura-ai/kagura-chat-bridge))
-follows when it pushes chat-connector messages (Slack / Discord / Teams) into
+This document is the **written contract** that an external connector worker follows when it pushes chat-connector messages (Slack / Discord / Teams) into
 Kagura Memory Cloud through the **existing Resource Foundation** ingest path.
 
 There is **no new ingest API** for connectors. Connectors reuse the same
@@ -13,9 +11,8 @@ Resource Foundation ingest endpoints that all other resource sources use —
 doc only pins down the connector-specific rules layered on top of those endpoints.
 
 > **Scope.** This is the F6-c (#852) guidance deliverable of epic #755. The
-> worker-side write-path decision and its e2e/smoke verification are tracked in
-> [ai-worker#91](https://github.com/kagura-ai/kagura-chat-bridge/issues/91),
-> not here.
+> worker-side write-path decision and its e2e/smoke verification are tracked on
+> the consumer side, not here.
 
 ## Prerequisites (already shipped)
 
