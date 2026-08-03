@@ -107,6 +107,12 @@ class WorkerRuntimeLifecycleConfig(BaseModel):
     dormant_summary: str = Field(
         default="[dormant] (channel archived)", min_length=1, max_length=_MAX_SUMMARY_CHARS
     )
+    # Sentinel written when a source message is EDITED, distinct from the
+    # deletion one so the record does not claim the message was removed while it
+    # still exists upstream.
+    edited_summary: str = Field(
+        default="[stale] (source message edited)", min_length=1, max_length=_MAX_SUMMARY_CHARS
+    )
 
 
 class WorkerRuntimeContinuityConfig(BaseModel):
@@ -130,6 +136,14 @@ class WorkerRuntimeConfig(BaseModel):
     lifecycle: WorkerRuntimeLifecycleConfig = Field(default_factory=WorkerRuntimeLifecycleConfig)
     continuity: WorkerRuntimeContinuityConfig = Field(default_factory=WorkerRuntimeContinuityConfig)
     vision_enabled: bool = True
+    # Both default OFF and are DORMANT capabilities on the consumer side: each
+    # one, once enabled, changes what the consumer returns or ingests, so the
+    # flip is an operational decision taken per connector after measuring the
+    # impact. This model must carry them or they cannot be set at all — the
+    # config is `extra="forbid"`, so an unknown key is a 422 rather than a
+    # forward-compatible pass-through.
+    team_scope_filter_enabled: bool = False
+    channel_allowlist_enabled: bool = False
     mention_answer_enabled: bool = False
     answer_relevance_threshold: float = Field(default=0.35, ge=0.0, le=1.0, allow_inf_nan=False)
     answer_timeout_sec: float = Field(
