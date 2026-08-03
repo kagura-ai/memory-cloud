@@ -37,14 +37,22 @@ jobs:
       # comment explaining WHY a guard exists naturally names the system the
       # guard protects against, and reviewers read that as good context.
       #
-      # Container names are exempt: `BRIDGE_WORKER_CONTAINER` must address a
-      # real container for the color flip to restart it. A deployment fact is
-      # not a repository reference.
+      # DEPLOYMENT FACTS ARE EXEMPT. A container name and an on-host path have
+      # to be literal for the operation to work at all — `BRIDGE_WORKER_CONTAINER`
+      # must address a real container, and a recovery procedure printed to an
+      # operator mid-incident must name the real file. Neither is a repository
+      # reference, and gating them would push people to write unusable runbooks.
+      #
+      # What this catches is the trail INTO the private repository: its name in
+      # prose, links to its issues, and production incident specifics.
       - name: No private-repo references
         run: |
+          # `:!.github/workflows/ci.yml` excludes THIS file: the patterns below
+          # necessarily contain the string they search for.
           if git grep -nIE 'kagura-(chat-)?bridge' -- \
-               ':!*BRIDGE_WORKER_CONTAINER*' \
-             | grep -vE 'kagura-bridge-worker[-0-9]*' ; then
+               ':!*BRIDGE_WORKER_CONTAINER*' ':!.github/workflows/ci.yml' \
+             | grep -vE 'kagura-bridge-worker[-0-9]*' \
+             | grep -vE '/opt/kagura-bridge[/[:space:]"]' ; then
             echo
             echo "ERROR: this public repository must not name the private consumer."
             echo "Describe it by role ('the connector worker', 'a co-resident"
