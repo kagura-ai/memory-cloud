@@ -53,11 +53,12 @@ CURL="${CURL:-curl}"
 # either runs through dc() or belongs to a flow the suite never exercises.
 DOCKER="${DOCKER:-docker}"
 
-# The chat-bridge worker is NOT a service in this repo's docker-compose.prod.yml
-# — it is a separate co-resident stack sharing this VM and docker network. That
-# is why the restart below uses plain `docker` and not dc(): compose would not
-# know the container. Overridable so a host that names it differently (or a test)
-# can point at the right one (#1476).
+# The co-resident consumer worker is NOT a service in this repo's
+# docker-compose.prod.yml — it is a separate stack sharing this VM and docker
+# network. That is why the restart below uses plain `docker` and not dc():
+# compose would not know the container. The default is the container name as
+# deployed on this host; override it for a host that names it differently, or
+# for a test (#1476).
 BRIDGE_WORKER_CONTAINER="${BRIDGE_WORKER_CONTAINER:-kagura-bridge-worker-1}"
 
 # ---------------------------------------------------------------------------
@@ -181,8 +182,8 @@ is_container_running() {
 # failed pipeline — i.e. a *running* container intermittently reported as
 # absent. That is the exact shape of the #986 silent-death bug. Capture first,
 # then compare whole lines, so no pipeline status is involved. Whole-line
-# equality also means a container named `kagura-bridge-worker-10` never
-# satisfies the check for `kagura-bridge-worker-1`.
+# equality also means a container whose name merely starts with the configured
+# one (a `…-10` where `…-1` is configured) never satisfies the check.
 bridge_worker_is_running() {
     local names name
     # `|| return 2` also exempts the assignment from `set -e`.
@@ -197,15 +198,18 @@ bridge_worker_is_running() {
     return 1
 }
 
-# Restart the chat-bridge worker after the active API color changes (#1476).
+# Restart the co-resident consumer worker after the active API color changes
+# (#1476).
 #
-# The worker resolves the API container by color when it connects and then holds
-# those connections. A flip leaves it talking to the color this script is about
-# to drain, and it stays up only through kagura-bridge's connect-level
-# cross-color fallback (kagura-ai/kagura-bridge#211) — which absorbed 4162 calls
-# over 65 hours in the 2026-07-21..24 incident, turning a safety net into the
-# normal path and burying every other warning in its noise. The same gap left
-# Slack ingest down for ~30 hours on 2026-07-29 before anyone noticed.
+# Such a worker resolves the API container by color when it connects and then
+# holds those connections. A flip leaves it talking to the color this script is
+# about to drain. If it implements a connect-level failover to the other color it
+# stays up — but on the safety net rather than the normal path, which has twice
+# masked a prolonged outage here instead of surfacing it.
+#
+# A restart is also what makes a marker-based resolver correct: a fresh container
+# re-opens the marker and therefore reads the current inode, which a long-lived
+# process holding a single-file bind mount never does.
 #
 # Nothing else in the system knows a flip happened, so this is the only place
 # the restart can be triggered from.
@@ -243,7 +247,7 @@ restart_bridge_worker() {
     # new color is serving; a bridge that will not come back is a bridge
     # problem. Aborting here would report a healthy deploy as failed and invite
     # an unnecessary rollback. Say it loudly instead.
-    log "WARNING: ${BRIDGE_WORKER_CONTAINER} failed to restart. Chat ingest may still be"
+    log "WARNING: ${BRIDGE_WORKER_CONTAINER} failed to restart. It may still be"
     log "         pinned to the drained API color. Restart it manually:"
     log "             docker restart ${BRIDGE_WORKER_CONTAINER}"
     return 0
@@ -687,7 +691,7 @@ main() {
             echo "  WEB_READINESS_INTERVAL   Seconds between web health checks (default: 2)"
             echo "  WORKERS_GATE_TIMEOUT     Seconds to wait for an edge-blocked path (/api/v1/workers/*, /internal/*) to 404 at Caddy (default: 30)"
             echo "  WORKERS_GATE_INTERVAL    Seconds between security-gate checks; shared by the workers + internal gates (default: 2)"
-            echo "  BRIDGE_WORKER_CONTAINER  Co-resident chat-bridge worker restarted after a color flip; skipped when absent (default: kagura-bridge-worker-1)"
+            echo "  BRIDGE_WORKER_CONTAINER  Co-resident consumer worker restarted after a color flip; skipped when absent"
             ;;
         "")
             cmd_deploy
