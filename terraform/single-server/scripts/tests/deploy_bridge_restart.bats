@@ -1,15 +1,14 @@
 #!/usr/bin/env bats
 # =============================================================================
 # #1476: after a blue-green color flip, deploy.sh must restart the co-resident
-# chat-bridge worker.
+# consumer worker.
 #
-# The worker resolves the API container by color when it connects and then holds
-# those connections. Without this restart it keeps talking to the color being
-# drained and survives only through kagura-bridge's connect-level cross-color
-# fallback — which absorbed 4162 calls over 65 hours in the 2026-07-21..24
-# incident, and let Slack ingest sit dead for ~30 hours on 2026-07-29 before
-# anyone noticed. The step was missing across v0.61.0, v0.62.0 and v0.63.0, each
-# needing the operator to remember a manual `docker restart`.
+# Such a worker resolves the API container by color when it connects and then
+# holds those connections. Without this restart it keeps talking to the color
+# being drained; if it implements a connect-level failover it survives, but on
+# the safety net rather than the normal path — which has twice masked a
+# prolonged outage instead of surfacing it. The step was missing across three
+# releases, each needing the operator to remember a manual `docker restart`.
 #
 # The three properties that make it safe to run unconditionally, and which this
 # file pins:

@@ -31,6 +31,36 @@ jobs:
       - name: Models no-Column guard
         run: make lint-models-no-column
 
+      # This repository is PUBLIC; the connector worker that consumes its
+      # workers lane is not. Scrubbing its name has now been needed twice
+      # (#1469, #1484) and it keeps coming back for a structural reason: a
+      # comment explaining WHY a guard exists naturally names the system the
+      # guard protects against, and reviewers read that as good context.
+      #
+      # DEPLOYMENT FACTS ARE EXEMPT. A container name and an on-host path have
+      # to be literal for the operation to work at all — `BRIDGE_WORKER_CONTAINER`
+      # must address a real container, and a recovery procedure printed to an
+      # operator mid-incident must name the real file. Neither is a repository
+      # reference, and gating them would push people to write unusable runbooks.
+      #
+      # What this catches is the trail INTO the private repository: its name in
+      # prose, links to its issues, and production incident specifics.
+      - name: No private-repo references
+        run: |
+          # `:!.github/workflows/ci.yml` excludes THIS file: the patterns below
+          # necessarily contain the string they search for.
+          if git grep -nIE 'kagura-(chat-)?bridge' -- \
+               ':!*BRIDGE_WORKER_CONTAINER*' ':!.github/workflows/ci.yml' \
+             | grep -vE 'kagura-bridge-worker[-0-9]*' \
+             | grep -vE '/opt/kagura-bridge[/[:space:]"]' ; then
+            echo
+            echo "ERROR: this public repository must not name the private consumer."
+            echo "Describe it by role ('the connector worker', 'a co-resident"
+            echo "consumer') instead. Container names used to address a running"
+            echo "container are exempt and are filtered above."
+            exit 1
+          fi
+
   # Static type gate for the backend (#1442). The frontend has run
   # `tsc --noEmit` since day one; pyright was configured in
   # backend/pyproject.toml with a tier-by-tier plan (#599, #612) and a

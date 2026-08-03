@@ -169,7 +169,7 @@ get_inactive_color() {
 # Publish a new active color WITHOUT changing the marker file's inode (#1480).
 #
 # This file is bind-mounted into co-resident stacks as a SINGLE FILE
-# (kagura-bridge mounts it read-only to follow the active color). A single-file
+# (a co-resident consumer mounts it read-only to follow the active color). A single-file
 # bind mount resolves to an inode at container start: replacing the file with
 # `mv` publishes a NEW inode, and the running container keeps reading the OLD
 # one forever. It sees the color it booted with, no matter how many times this
@@ -181,7 +181,7 @@ get_inactive_color() {
 #   mv  + `docker restart`       -> container reads the new color
 #   cp  + container left running -> container reads the new color, NO restart
 #
-# So `mv` is what forced kagura-bridge onto a static KMC_INTERNAL_URL pin, which
+# So `mv` is what forced that consumer onto a static internal-URL pin, which
 # in turn is what made deploy Step 6b's `docker restart` unable to re-point it
 # (a restart cannot re-read an .env). Writing in place fixes it at the source.
 #
@@ -193,7 +193,7 @@ get_inactive_color() {
 # the marker truncated where `mv` could not. That is deliberate and is the
 # behaviour #1448 asked for — get_active_color() treats an empty or malformed
 # marker as a loud, recoverable error with recovery steps, never as a guess.
-# kagura-bridge's reader fails closed the same way. A single writer (this
+# the consumer's reader fails closed the same way. A single writer (this
 # script), 6 bytes, versus a defect that silently degraded production for 65
 # hours: in-place wins.
 write_marker() {
@@ -313,7 +313,7 @@ bridge_pinned_url() {
 
 # Has the worker fallen back to the other color since the deploy touched it?
 #
-# kagura-bridge logs `control_plane.cross_color_fallback` when its primary
+# The consumer logs `control_plane.cross_color_fallback` when its primary
 # upstream refuses a connection and it retries the other color. That line is the
 # ONLY reliable outward sign of a stranded worker: its /health keeps returning
 # {"status":"ok"} the whole time, which is why the condition once ran 65 hours
@@ -428,11 +428,9 @@ verify_bridge_upstream() {
 #
 # The worker resolves the API container by color when it connects and then holds
 # those connections. A flip leaves it talking to the color this script is about
-# to drain, and it stays up only through kagura-bridge's connect-level
-# cross-color fallback (kagura-ai/kagura-bridge#211) — which absorbed 4162 calls
-# over 65 hours in the 2026-07-21..24 incident, turning a safety net into the
-# normal path and burying every other warning in its noise. The same gap left
-# Slack ingest down for ~30 hours on 2026-07-29 before anyone noticed.
+# to drain. If it implements a connect-level failover to the other color it stays
+# up — but on the safety net rather than the normal path, which has twice masked
+# a prolonged outage here instead of surfacing it.
 #
 # Nothing else in the system knows a flip happened, so this is the only place
 # the restart can be triggered from.

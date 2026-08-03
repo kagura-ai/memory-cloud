@@ -3,7 +3,7 @@
 import pytest
 from pydantic import ValidationError
 
-from models.worker_runtime import WorkerRuntimeConfig
+from models.worker_runtime import WorkerRuntimeConfig, WorkerRuntimeLifecycleConfig
 
 
 def test_worker_runtime_config_materializes_worker_compatible_defaults() -> None:
@@ -155,3 +155,75 @@ class TestNormalizeWorkerLocale:
 
         with pytest.raises(ValueError):
             normalize_worker_locale(raw)
+
+
+# ── field parity with the consumer's contract ────────────────────────
+
+
+def test_runtime_config_carries_every_field_the_consumer_can_read():
+    """`WorkerRuntimeConfig` is `extra="forbid"`, so a field the consumer supports
+    but this model lacks cannot be set AT ALL — the PATCH 422s rather than passing
+    it through.
+
+    That is not hypothetical: `edited_summary`, `team_scope_filter_enabled` and
+    `channel_allowlist_enabled` shipped on the consumer side and were silently
+    unsettable here until this test existed. Each is a dormant capability whose
+    whole point is that an operator can flip it per connector.
+
+    Pinned as an explicit list rather than by importing the consumer's model —
+    that lives in a different repository, so the contract is asserted here and
+    reviewed when it changes.
+    """
+    expected = {
+        "buffer",
+        "flush",
+        "supervisor",
+        "lifecycle",
+        "continuity",
+        "vision_enabled",
+        "team_scope_filter_enabled",
+        "channel_allowlist_enabled",
+        "mention_answer_enabled",
+        "answer_relevance_threshold",
+        "answer_timeout_sec",
+        "memory_link_template",
+        "entity_extraction_enabled",
+        "entity_max",
+    }
+    actual = set(WorkerRuntimeConfig.model_fields)
+
+    assert actual == expected, (
+        "runtime contract drifted. Adding a field here is additive and safe; "
+        f"only in model={actual - expected}, only in contract={expected - actual}"
+    )
+
+
+def test_lifecycle_block_carries_every_sentinel():
+    """Same reasoning, for the nested lifecycle block."""
+    expected = {"deletion_mode", "redacted_summary", "dormant_summary", "edited_summary"}
+
+    assert set(WorkerRuntimeLifecycleConfig.model_fields) == expected
+
+
+def test_the_dormant_flags_default_off():
+    """Their defaults are load-bearing: enabling either changes what the consumer
+    returns or ingests, so a wrong default here would flip behaviour for every
+    connector that has never been configured."""
+    cfg = WorkerRuntimeConfig()
+
+    assert cfg.team_scope_filter_enabled is False
+    assert cfg.channel_allowlist_enabled is False
+
+
+def test_the_new_fields_round_trip_through_validation():
+    cfg = WorkerRuntimeConfig.model_validate(
+        {
+            "team_scope_filter_enabled": True,
+            "channel_allowlist_enabled": True,
+            "lifecycle": {"edited_summary": "[stale]"},
+        }
+    )
+
+    assert cfg.team_scope_filter_enabled is True
+    assert cfg.channel_allowlist_enabled is True
+    assert cfg.lifecycle.edited_summary == "[stale]"

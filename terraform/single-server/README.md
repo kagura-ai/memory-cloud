@@ -378,35 +378,34 @@ the bridge-worker restart, and draining automatically. Use
 `./scripts/deploy.sh --verify-bridge` to check the chat-bridge worker is on
 that color, or `./scripts/deploy.sh --rollback` to switch back.
 
-> **The bridge worker.** Both the deploy and the rollback path restart the
-> co-resident `kagura-bridge-worker-1` right after the Caddy switch (Step 6b),
-> because a flip would otherwise leave it talking to the color being drained —
-> surviving only on kagura-bridge's cross-color fallback, which masks the
-> mismatch instead of reporting it
+> **The co-resident consumer worker.** Both the deploy and the rollback path
+> restart it right after the Caddy switch (Step 6b), because a flip would
+> otherwise leave it talking to the color being drained — surviving only on a
+> connect-level failover, which masks the mismatch instead of reporting it
 > ([#1476](https://github.com/kagura-ai/memory-cloud/issues/1476)). A host
 > without that container logs a skip; a restart that fails logs a warning and
 > does **not** abort the deploy.
 >
 > **The restart alone is not always enough**
 > ([#1480](https://github.com/kagura-ai/memory-cloud/issues/1480)). If the
-> bridge's `deploy/.env` sets a static `KMC_INTERNAL_URL`, that value wins over
-> the marker template and is baked into the container at create time — so
-> `docker restart` brings the worker back on the *same old color*. Step 6b now
-> **verifies** where the worker actually landed and prints a loud
-> `BRIDGE NOT VERIFIED` block when it cannot prove the new color. The deploy
-> still succeeds (the API cutover is independent and already done), but it will
-> not read as clean. Check any time with:
+> consumer's env sets a static internal URL, that value wins over the marker
+> template and is baked into the container at create time — so `docker restart`
+> brings the worker back on the *same old color*. Step 6b now **verifies** where
+> the worker actually landed and prints a loud `BRIDGE NOT VERIFIED` block when
+> it cannot prove the new color. The deploy still succeeds (the API cutover is
+> independent and already done), but it will not read as clean. Check any time
+> with:
 >
 > ```bash
 > ./scripts/deploy.sh --verify-bridge   # exits non-zero if not on the active color
 > ```
 >
-> **To make it fully automatic**, leave `KMC_INTERNAL_URL` blank in the bridge's
-> `deploy/.env` so the worker follows `KMC_INTERNAL_URL_TEMPLATE` + the marker.
-> That works because this script now publishes the marker **in place** — see
-> `write_marker()`. A single-file bind mount tracks the *inode*, so the old
-> `mv` published a new inode the running container never saw; `cp` keeps the
-> inode and the change is visible immediately, with no restart at all.
+> **To make it fully automatic**, leave the static internal URL blank in the
+> consumer's env so it follows the marker template. That works because this
+> script now publishes the marker **in place** — see `write_marker()`. A
+> single-file bind mount tracks the *inode*, so the old `mv` published a new
+> inode the running container never saw; `cp` keeps the inode and the change is
+> visible immediately, with no restart at all.
 
 Tunable environment variables:
 
@@ -416,7 +415,7 @@ Tunable environment variables:
 | `DRAIN_TIMEOUT` | 30 | Seconds to drain old container |
 | `WORKERS_GATE_TIMEOUT` | 30 | Seconds to wait for the post-switch security gate (`/api/v1/workers/*` blocked at Caddy) before aborting and leaving the old color running |
 | `WORKERS_GATE_INTERVAL` | 2 | Seconds between security-gate retries |
-| `BRIDGE_WORKER_CONTAINER` | `kagura-bridge-worker-1` | Co-resident chat-bridge worker to restart after a color flip. Not a compose service of this stack, so it is addressed by container name; skipped when not running |
+| `BRIDGE_WORKER_CONTAINER` | (host-specific) | Co-resident consumer worker to restart after a color flip. Not a compose service of this stack, so it is addressed by container name; skipped when not running |
 
 ### Update the frontend (in-place rebuild)
 
@@ -504,7 +503,7 @@ then flips Caddy back and reloads. Safe to run at any time after a deploy.
 ### Caddy extension point (sibling services)
 
 Other services co-resident on this VM (for example
-`kagura-chat-bridge`'s webhook receiver at `aw.kagura-ai.com`) can publish
+a consumer worker's webhook receiver on its own subdomain) can publish
 their own HTTPS vhost through this server's Caddy **without any further change
 to the memory-cloud repository**. The mechanism is a one-time extension point:
 

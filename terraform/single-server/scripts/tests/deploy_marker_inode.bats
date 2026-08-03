@@ -3,7 +3,7 @@
 # #1480: the active-color marker must be published WITHOUT changing its inode.
 #
 # The marker is bind-mounted into co-resident stacks as a SINGLE FILE
-# (kagura-bridge mounts it read-only to follow the active color). A single-file
+# (a co-resident consumer mounts it read-only to follow the active color). A single-file
 # bind mount resolves to an inode at container start, so replacing the file via
 # `mv` publishes a new inode that the running container never sees — it keeps
 # reading the color it booted with.
@@ -13,7 +13,7 @@
 #   mv + `docker restart`   -> container reads the new color
 #   cp + container running  -> container reads the new color, with NO restart
 #
-# That is why kagura-bridge was forced onto a static KMC_INTERNAL_URL pin, and
+# That is why the consumer was forced onto a static internal-URL pin, and
 # why #1477's Step 6b `docker restart` could not re-point it (a restart cannot
 # re-read an .env). Publishing in place removes the original cause.
 #
