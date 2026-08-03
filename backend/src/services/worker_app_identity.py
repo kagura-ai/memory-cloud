@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 from datetime import timedelta
 from hashlib import sha256
 
@@ -16,6 +17,47 @@ from utils.logger import get_logger
 logger = get_logger(__name__)
 
 MAX_RETIRING_WINDOW_SECONDS = 86_400
+
+# Per-platform signing-secret shape (#1478).
+#
+# A placeholder string was once submitted to the rotate endpoint, accepted with
+# 200, encrypted and stored as the ACTIVE secret. Every webhook then failed
+# verification, and when the retiring window elapsed there was no value left
+# that could verify anything. The field's only constraint was `min_length=1`.
+#
+# Validation lives here rather than on the request models because `platform` is
+# a path parameter on rotate and a body field on create — only the service sees
+# it uniformly. Both routes funnel through this module, so a caller cannot
+# bypass the check by picking a different entry point, and neither can a future
+# UI: a form validator is advisory, this is the boundary.
+#
+# An unknown platform keeps the caller's length bounds and no shape, so adding
+# Discord/Teams is additive and never rejects a valid credential for a format
+# that has not been described yet.
+_SIGNING_SECRET_SHAPES: dict[str, re.Pattern[str]] = {
+    # Slack signing secrets are 32 lowercase hex characters.
+    "slack": re.compile(r"^[0-9a-f]{32}$"),
+}
+
+
+def validate_signing_secret(platform: str, signing_secret: str) -> None:
+    """Reject a secret that cannot be a credential for ``platform``.
+
+    Raises :class:`ValidationError`. The message carries the expected shape and
+    the OBSERVED LENGTH only — never the submitted value. An admin who pastes
+    the wrong thing must not get it reflected back into a response body or a
+    log line, because the wrong thing is very often the right secret for
+    somewhere else.
+    """
+    shape = _SIGNING_SECRET_SHAPES.get(platform)
+    if shape is None:
+        return
+    if shape.fullmatch(signing_secret) is None:
+        raise ValidationError(
+            f"signing_secret for platform {platform!r} must match "
+            f"{shape.pattern} (received {len(signing_secret)} characters)",
+            field="signing_secret",
+        )
 
 
 def opaque_revision(*parts: object) -> str:
@@ -87,6 +129,7 @@ class WorkerAppIdentityService:
         signing_secret: str,
         actor_id: str,
     ) -> WorkerAppIdentity:
+        validate_signing_secret(platform, signing_secret)
         if await self.get_identity(platform, app_key) is not None:
             raise ConflictError("Worker app identity already exists")
         identity = WorkerAppIdentity(
@@ -191,6 +234,10 @@ class WorkerAppIdentityService:
         retiring_for_seconds: int,
         actor_id: str,
     ) -> WorkerAppIdentity:
+        # Validate BEFORE any mutation: a rejected rotation must leave the
+        # existing active/retiring pair exactly as it was. #1478's outage was
+        # made worse by the bad value displacing the working one.
+        validate_signing_secret(platform, signing_secret)
         if not 0 <= retiring_for_seconds <= MAX_RETIRING_WINDOW_SECONDS:
             raise ValidationError(
                 f"retiring_for_seconds must be between 0 and {MAX_RETIRING_WINDOW_SECONDS}",
