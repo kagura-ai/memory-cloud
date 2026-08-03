@@ -340,15 +340,16 @@ url_host() {
     printf '%s' "$host"
 }
 
-# Prove the worker is actually talking to $1, rather than assuming a restart
-# achieved it. Returns non-zero when the bridge step must NOT be called clean.
-verify_bridge_upstream() {
-    local color="${1:-}" window="${2:-5m}" pin fallbacks
+# Check the worker's CONFIGURED upstream. Usable the instant `docker restart`
+# returns, because a container's env is static — it does not wait for the worker
+# to finish booting.
+verify_bridge_pin() {
+    local color="${1:-}" pin
 
     # An empty color would make every comparison below trivially permissive,
     # "verifying" a worker against nothing. Refuse rather than pass.
     if [ -z "$color" ]; then
-        log "WARNING: verify_bridge_upstream called with no color — nothing verified."
+        log "WARNING: verify_bridge_pin called with no color — nothing verified."
         return 1
     fi
 
@@ -383,11 +384,20 @@ verify_bridge_upstream() {
         # below is the only outward evidence, so say that rather than claim the
         # upstream was confirmed.
         log "  ${BRIDGE_WORKER_CONTAINER} has no static pin — it follows the marker (now ${color})."
-        log "  (Resolved upstream is not readable from here; judging by fallback logs only.)"
+        log "  (Resolved upstream is not readable from here; the fallback check is the evidence.)"
     fi
+    return 0
+}
 
-    # Even a correct-looking pin can be stranded, so check the worker's own
-    # verdict too.
+# Check the worker's OWN verdict: has it fallen back to the other color?
+#
+# TIMING IS LOAD-BEARING. Run this only once the old color is STOPPED. Before
+# the drain, a stranded worker can still reach the color it is pinned to, so it
+# has no reason to log a fallback and this check cannot fire — it would report
+# clean by construction, which is the very defect #1480 is about. After Step 7
+# the old color is gone, so a stranded worker surfaces immediately.
+verify_bridge_fallback() {
+    local window="${1:-5m}" fallbacks
     if ! fallbacks="$(bridge_fallback_count "$window")"; then
         # "Could not ask" is not "fine" — the same distinction bridge presence
         # detection already makes. A silent skip here would be a false clean.
@@ -397,11 +407,21 @@ verify_bridge_upstream() {
     fi
     if [ "${fallbacks:-0}" -gt 0 ]; then
         log "WARNING: ${BRIDGE_WORKER_CONTAINER} logged ${fallbacks} cross-color fallback event(s)"
-        log "         in the last ${window}. It is reaching the API only via the safety net."
+        log "         in the last ${window}. It is reaching the API only via the safety net,"
+        log "         which means it is NOT on the live color."
         log "         Inspect: docker logs --since 30m ${BRIDGE_WORKER_CONTAINER} | grep cross_color_fallback"
         return 1
     fi
     return 0
+}
+
+# Both halves, for callers that are not mid-deploy (--verify-bridge), where the
+# old color is already stopped and the fallback signal is meaningful.
+verify_bridge_upstream() {
+    local color="${1:-}" window="${2:-5m}" ok=0
+    verify_bridge_pin "$color" || ok=1
+    verify_bridge_fallback "$window" || ok=1
+    return "$ok"
 }
 
 # Restart the chat-bridge worker after the active API color changes (#1476).
@@ -450,8 +470,10 @@ restart_bridge_worker() {
     if "$DOCKER" restart "$BRIDGE_WORKER_CONTAINER" > /dev/null 2>&1; then
         log "  ${BRIDGE_WORKER_CONTAINER} restarted."
         # The restart happened. That is NOT the same as the worker now talking
-        # to the new color — the whole of #1480. Prove it or degrade the run.
-        if ! verify_bridge_upstream "$new_color"; then
+        # to the new color — the whole of #1480. Check the configured upstream
+        # now; the worker's own fallback verdict is only meaningful after the
+        # old color is drained, so that half runs at the end of Step 7.
+        if ! verify_bridge_pin "$new_color"; then
             BRIDGE_STEP_DEGRADED=1
         fi
         return 0
@@ -614,6 +636,18 @@ cmd_deploy() {
     docker update --restart=no "kagura-api-${active}" 2>/dev/null || true
     dc stop "api-${active}" || true
     log "api-${active} stopped (restart policy disabled)."
+
+    # NOW the fallback signal means something: api-${active} is gone, so a
+    # worker still pointed at it must fall back, and that is observable. Running
+    # this at Step 6b instead would report clean by construction, because the
+    # old color was still answering (#1480).
+    if bridge_worker_is_running; then
+        DEPLOY_STAGE="Step 7/7: verify ${BRIDGE_WORKER_CONTAINER} after drain"
+        log "  Checking ${BRIDGE_WORKER_CONTAINER} now that api-${active} is stopped..."
+        if ! verify_bridge_fallback "${BRIDGE_FALLBACK_WINDOW:-5m}"; then
+            BRIDGE_STEP_DEGRADED=1
+        fi
+    fi
 
     DEPLOY_STAGE="deploy complete (active: ${inactive})"
     log "=== DEPLOY COMPLETE ==="

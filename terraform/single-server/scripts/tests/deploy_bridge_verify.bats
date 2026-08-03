@@ -66,7 +66,7 @@ teardown() {
 
 @test "a pin naming the new color verifies clean" {
     printf 'PATH=/usr/bin\nKMC_INTERNAL_URL=http://api-green:8080\nLOG_LEVEL=INFO\n' > "$ENV_FILE_OUT"
-    run verify_bridge_upstream green
+    run verify_bridge_pin green
     [ "$status" -eq 0 ] || return 1
     [[ "$output" == *"matches api-green"* ]] || return 1
 }
@@ -259,4 +259,64 @@ teardown() {
 @test "--verify-bridge is a real dispatch target, not just help text" {
     run bash -o pipefail -c 'grep -c -- "--verify-bridge)" "$1"' _ "$DEPLOY_SH"
     [ "$output" -ge 1 ] || return 1
+}
+
+# --- timing: the fallback check must run AFTER the drain --------------------
+# This is the property that makes the log half capable of firing at all. Before
+# Step 7 stops the old color, a stranded worker can still reach the color it is
+# pinned to, so it has no reason to log a fallback. Checking there would report
+# clean by construction — the exact defect #1480 is about, reintroduced one
+# level down.
+
+@test "the pin check rides the restart; the fallback check waits for the drain" {
+    # Line-number ordering inside cmd_deploy. NB: a sed range like
+    # /Step 6b/,/Draining/ is wrong here — "Step 6b" appears in a later comment
+    # too, so the range restarts and swallows the post-drain block. Compare
+    # positions of the actual CODE lines instead.
+    local body restart_line stop_line fall_line fall_count
+    body="$(sed -n '/^cmd_deploy()/,/^}/p' "$DEPLOY_SH")"
+    restart_line="$(printf '%s\n' "$body" | grep -n '^ *restart_bridge_worker ' | head -1 | cut -d: -f1)"
+    stop_line="$(printf '%s\n' "$body" | grep -n 'stopped (restart policy disabled)' | head -1 | cut -d: -f1)"
+    # Anchor on the `if !` so comments mentioning the function do not count.
+    fall_count="$(printf '%s\n' "$body" | grep -c '^ *if ! verify_bridge_fallback' || true)"
+    fall_line="$(printf '%s\n' "$body" | grep -n '^ *if ! verify_bridge_fallback' | head -1 | cut -d: -f1)"
+
+    [ -n "$restart_line" ] || return 1
+    [ -n "$stop_line" ] || return 1
+    [ "$fall_count" = "1" ] || return 1
+    [ -n "$fall_line" ] || return 1
+    # The restart (which carries the pin check) happens before the drain...
+    [ "$restart_line" -lt "$stop_line" ] || return 1
+    # ...and the fallback check strictly after the old color is stopped, or it
+    # could not observe a fallback at all.
+    [ "$fall_line" -gt "$stop_line" ] || return 1
+}
+
+@test "restart_bridge_worker is what carries the pin check" {
+    # cmd_deploy never calls verify_bridge_pin directly — it goes through the
+    # restart helper. Pin that, so the previous test's ordering claim about
+    # "the restart carries the pin check" stays true.
+    local hits
+    hits="$(sed -n '/^restart_bridge_worker()/,/^}/p' "$DEPLOY_SH" | grep -c 'verify_bridge_pin' || true)"
+    [ "$hits" -ge 1 ] || return 1
+}
+
+@test "verify_bridge_upstream still runs BOTH halves for --verify-bridge" {
+    # Standalone runs are not mid-deploy, so the old color is already stopped
+    # and both signals are meaningful. Splitting the helpers must not quietly
+    # drop one from the standalone path.
+    printf 'KMC_INTERNAL_URL=http://api-blue:8080\n' > "$ENV_FILE_OUT"
+    printf '%s\n' '{"event":"control_plane.cross_color_fallback"}' > "$LOGS_FILE"
+    run verify_bridge_upstream green
+    [ "$status" -ne 0 ] || return 1
+    [[ "$output" == *"NOT api-green"* ]] || return 1
+    [[ "$output" == *"cross-color fallback"* ]] || return 1
+}
+
+@test "a post-drain fallback marks the run degraded" {
+    # The deploy path sets the flag from Step 7, not only from Step 6b.
+    printf '%s\n' '{"event":"control_plane.cross_color_fallback"}' > "$LOGS_FILE"
+    local rc=0
+    verify_bridge_fallback 5m || rc=$?
+    [ "$rc" -ne 0 ] || return 1
 }
