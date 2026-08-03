@@ -2,9 +2,7 @@
 
 This document is the **written contract** for `pii_guardrail_config` — the
 PII-scrubbing configuration that Kagura Memory Cloud stores on a connector and
-that an external worker (e.g.
-[`kagura-chat-bridge`](https://github.com/kagura-ai/kagura-chat-bridge))
-**consumes** in its pre-compile stage to scrub personal data **before** chat
+that an external connector worker **consumes** in its pre-compile stage to scrub personal data **before** chat
 messages are ingested.
 
 It is the sibling of
@@ -15,9 +13,8 @@ on the way in.
 > **Scope.** This is the memory-cloud-side guidance deliverable of F6-d (#853),
 > the final slice of epic #755. The worker-side pre-compile scrubbing
 > implementation, the Discord/Teams connector smoke tests, and the epic-closing
-> acceptance are tracked in
-> [ai-worker#91](https://github.com/kagura-ai/kagura-chat-bridge/issues/91),
-> **not** here. This doc does not close #755.
+> acceptance are tracked on the consumer side, **not** here. This doc does not
+> close #755.
 
 ## Responsibility split (what lives where)
 

@@ -51,7 +51,7 @@ logger = get_logger(__name__)
 #   - related_to / depends_on / learned_from: LLM-emittable relation types
 #     (#374 → see `services/sleep/edge_discovery.py::LLM_EMITTABLE_EDGE_TYPES`).
 #   - continues_from / references_file (#782): producer-asserted structural
-#     relation types emitted by the kagura-chat-bridge ingest pipeline.
+#     relation types emitted by the connector-worker ingest pipeline.
 #   - supersedes / contradicts (#1208): fact-succession relations. Direction
 #     convention: src = superseding (newer), dst = superseded (older) — a
 #     memory that is the dst of a live supersedes edge is shadowed out of

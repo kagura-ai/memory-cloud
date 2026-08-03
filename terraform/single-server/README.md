@@ -483,7 +483,7 @@ then flips Caddy back and reloads. Safe to run at any time after a deploy.
 ### Caddy extension point (sibling services)
 
 Other services co-resident on this VM (for example
-`kagura-chat-bridge`'s webhook receiver at `aw.kagura-ai.com`) can publish
+a consumer worker's webhook receiver on its own subdomain) can publish
 their own HTTPS vhost through this server's Caddy **without any further change
 to the memory-cloud repository**. The mechanism is a one-time extension point:
 

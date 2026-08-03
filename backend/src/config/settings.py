@@ -145,7 +145,7 @@ class Settings(BaseSettings):
         default=100,
         description="Max registered agents per workspace (Issue #1274)",
     )
-    # ai-worker (kagura-chat-bridge) service auth. The worker presents this
+    # connector-worker service auth. The worker presents this
     # as a Bearer token to GET /api/v1/workers/config (Spec 2026-06-02). Empty
     # disables the worker config endpoint (fail-closed). Use: openssl rand -hex 32.
     #

@@ -31,6 +31,28 @@ jobs:
       - name: Models no-Column guard
         run: make lint-models-no-column
 
+      # This repository is PUBLIC; the connector worker that consumes its
+      # workers lane is not. Scrubbing its name has now been needed twice
+      # (#1469, #1484) and it keeps coming back for a structural reason: a
+      # comment explaining WHY a guard exists naturally names the system the
+      # guard protects against, and reviewers read that as good context.
+      #
+      # Container names are exempt: `BRIDGE_WORKER_CONTAINER` must address a
+      # real container for the color flip to restart it. A deployment fact is
+      # not a repository reference.
+      - name: No private-repo references
+        run: |
+          if git grep -nIE 'kagura-(chat-)?bridge' -- \
+               ':!*BRIDGE_WORKER_CONTAINER*' \
+             | grep -vE 'kagura-bridge-worker[-0-9]*' ; then
+            echo
+            echo "ERROR: this public repository must not name the private consumer."
+            echo "Describe it by role ('the connector worker', 'a co-resident"
+            echo "consumer') instead. Container names used to address a running"
+            echo "container are exempt and are filtered above."
+            exit 1
+          fi
+
   # Static type gate for the backend (#1442). The frontend has run
   # `tsc --noEmit` since day one; pyright was configured in
   # backend/pyproject.toml with a tier-by-tier plan (#599, #612) and a

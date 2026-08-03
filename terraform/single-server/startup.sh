@@ -93,7 +93,7 @@ install -d -m 0700 /var/lib/kagura/origin-ca
 install -d -m 0755 /var/lib/kagura/volumes
 
 # Caddy extension point for sibling services co-resident on this VM (e.g.
-# kagura-chat-bridge). They drop *.caddy vhost files here; the caddy
+# a consumer worker). They drop *.caddy vhost files here; the caddy
 # container bind-mounts this read-only and Caddyfile imports it. root-owned
 # 0755: world-readable so the container can read it, root-write so only an
 # operator with sudo can add vhost files. See README "Caddy extension point".
