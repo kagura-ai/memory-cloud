@@ -198,17 +198,40 @@ get_inactive_color() {
 # hours: in-place wins.
 write_marker() {
     local color="$1"
+
+    # Remember what was published, so a half-finished write can be reported
+    # accurately — and undone. `cp` opens the destination with O_TRUNC, so a
+    # failure part-way through (ENOSPC, EIO, a read-only remount) leaves the
+    # LIVE marker truncated. `mv` could not do that; this is the real cost of
+    # preserving the inode, and it is handled rather than hand-waved.
+    #
+    # Read with `read`, not `cat ... || fallback`: #1448's guard bans that shape
+    # outright because it is how a silent default color creeps back in, and it
+    # is exactly the shape one reaches for here. `read` also avoids a subshell.
+    local previous=""
+    if [ -s "$MARKER_FILE" ]; then
+        IFS= read -r previous < "$MARKER_FILE" 2>/dev/null || previous=""
+    fi
+
     # Stage first so a failed write never truncates the live marker, then copy
     # ONTO the original inode rather than renaming over it.
     if ! echo "$color" > "${MARKER_FILE}.tmp"; then
         rm -f "${MARKER_FILE}.tmp"
-        error "Could not stage marker at ${MARKER_FILE}.tmp — check disk and permissions."
+        error "Could not stage marker at ${MARKER_FILE}.tmp — check disk and permissions.
+       The live marker was NOT touched."
     fi
     if ! cp "${MARKER_FILE}.tmp" "$MARKER_FILE"; then
         rm -f "${MARKER_FILE}.tmp"
-        error "Could not write marker $MARKER_FILE. Traffic may already be switched.
-       Write it by hand to match the color actually serving:
-           echo $color > $MARKER_FILE"
+        # Best-effort restore. It may itself fail on a full or read-only
+        # filesystem, so the message must not promise it worked.
+        if [ -n "$previous" ]; then
+            echo "$previous" > "$MARKER_FILE" 2>/dev/null || true
+        fi
+        error "Could not write marker $MARKER_FILE, and it may now be TRUNCATED.
+       Caddy has NOT been switched, so traffic is still on '${previous:-unknown}'.
+       Restoring '${previous:-unknown}' was attempted — verify and fix by hand:
+           cat $MARKER_FILE
+           echo ${previous:-blue} > $MARKER_FILE"
     fi
     rm -f "${MARKER_FILE}.tmp"
 
@@ -302,18 +325,41 @@ bridge_fallback_count() {
     printf '%s\n' "$logs" | grep -c 'control_plane.cross_color_fallback' || true
 }
 
+# Extract the host from a URL, with no port and no path: http://api-blue:8080
+# -> api-blue. Used so the color check is an EXACT host comparison.
+#
+# A substring test (`case $pin in *api-blue*`) reports a pin of
+# `http://api-blue2:8080` as a match for api-blue, which is a false clean —
+# precisely the failure class this file exists to remove.
+url_host() {
+    local url="${1:-}" host
+    host="${url#*://}"   # strip scheme, if any
+    host="${host%%/*}"   # strip path
+    host="${host%%\?*}"  # strip query
+    host="${host%%:*}"   # strip port
+    printf '%s' "$host"
+}
+
 # Prove the worker is actually talking to $1, rather than assuming a restart
 # achieved it. Returns non-zero when the bridge step must NOT be called clean.
 verify_bridge_upstream() {
-    local color="$1" pin fallbacks
+    local color="${1:-}" window="${2:-5m}" pin fallbacks
+
+    # An empty color would make every comparison below trivially permissive,
+    # "verifying" a worker against nothing. Refuse rather than pass.
+    if [ -z "$color" ]; then
+        log "WARNING: verify_bridge_upstream called with no color — nothing verified."
+        return 1
+    fi
+
     if ! pin="$(bridge_pinned_url)"; then
         log "  Could not read ${BRIDGE_WORKER_CONTAINER} config — upstream NOT verified."
         return 1
     fi
 
     if [ -n "$pin" ]; then
-        case "$pin" in
-            *"api-${color}"*)
+        case "$(url_host "$pin")" in
+            "api-${color}")
                 log "  ${BRIDGE_WORKER_CONTAINER} upstream pin is ${pin} — matches api-${color}."
                 ;;
             *)
@@ -332,15 +378,27 @@ verify_bridge_upstream() {
                 ;;
         esac
     else
+        # Honest scope: with no pin the worker resolves from the marker, and
+        # this script cannot read what it resolved TO. The fallback-log check
+        # below is the only outward evidence, so say that rather than claim the
+        # upstream was confirmed.
         log "  ${BRIDGE_WORKER_CONTAINER} has no static pin — it follows the marker (now ${color})."
+        log "  (Resolved upstream is not readable from here; judging by fallback logs only.)"
     fi
 
     # Even a correct-looking pin can be stranded, so check the worker's own
-    # verdict too. Non-fatal if the log query itself fails.
-    if fallbacks="$(bridge_fallback_count 5m)" && [ "${fallbacks:-0}" -gt 0 ]; then
+    # verdict too.
+    if ! fallbacks="$(bridge_fallback_count "$window")"; then
+        # "Could not ask" is not "fine" — the same distinction bridge presence
+        # detection already makes. A silent skip here would be a false clean.
+        log "WARNING: could not read ${BRIDGE_WORKER_CONTAINER} logs — fallback state UNKNOWN."
+        log "         Treating as not verified rather than assuming healthy."
+        return 1
+    fi
+    if [ "${fallbacks:-0}" -gt 0 ]; then
         log "WARNING: ${BRIDGE_WORKER_CONTAINER} logged ${fallbacks} cross-color fallback event(s)"
-        log "         in the last 5m. It is reaching the API only via the safety net."
-        log "         Inspect: docker logs --since 10m ${BRIDGE_WORKER_CONTAINER} | grep cross_color_fallback"
+        log "         in the last ${window}. It is reaching the API only via the safety net."
+        log "         Inspect: docker logs --since 30m ${BRIDGE_WORKER_CONTAINER} | grep cross_color_fallback"
         return 1
     fi
     return 0
@@ -799,7 +857,10 @@ cmd_verify_bridge() {
         error "Could not query docker for ${BRIDGE_WORKER_CONTAINER}."
     fi
 
-    if verify_bridge_upstream "$active"; then
+    # Wider log window than the deploy path: this runs at an arbitrary time, so
+    # a fallback that started half an hour ago is exactly what it should catch.
+    # Mid-deploy the worker was restarted seconds earlier, where 5m is right.
+    if verify_bridge_upstream "$active" "${BRIDGE_FALLBACK_WINDOW:-30m}"; then
         log "Bridge upstream verified: api-${active}"
         return 0
     fi

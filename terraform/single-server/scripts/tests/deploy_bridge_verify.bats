@@ -109,6 +109,33 @@ teardown() {
     [ "$status" -ne 0 ] || return 1
 }
 
+@test "a host that merely STARTS WITH the color name is not a match" {
+    # `*api-blue*` matches api-blue2. The comparison must be on the exact host,
+    # or a worker pointed at a different service verifies clean.
+    printf 'KMC_INTERNAL_URL=http://api-blue2:8080\n' > "$ENV_FILE_OUT"
+    run verify_bridge_upstream blue
+    [ "$status" -ne 0 ] || return 1
+    [[ "$output" == *"NOT api-blue"* ]] || return 1
+}
+
+@test "url_host strips scheme, port, path and query" {
+    [ "$(url_host http://api-blue:8080)" = "api-blue" ] || return 1
+    [ "$(url_host http://api-blue:8080/api/v1/x)" = "api-blue" ] || return 1
+    [ "$(url_host http://api-blue)" = "api-blue" ] || return 1
+    [ "$(url_host https://api-green:443/p?q=1)" = "api-green" ] || return 1
+    [ "$(url_host api-blue:8080)" = "api-blue" ] || return 1
+    # ...and must not conflate distinct hosts.
+    [ "$(url_host http://api-blue2:8080)" != "api-blue" ] || return 1
+}
+
+@test "an empty color verifies nothing instead of passing everything" {
+    # With color="" a substring check becomes *api-* and any pin looks fine.
+    printf 'KMC_INTERNAL_URL=http://api-blue:8080\n' > "$ENV_FILE_OUT"
+    run verify_bridge_upstream ""
+    [ "$status" -ne 0 ] || return 1
+    [[ "$output" == *"no color"* ]] || return 1
+}
+
 @test "an unreadable docker inspect is 'not verified', never 'verified'" {
     export INSPECT_RC=1
     run verify_bridge_upstream green
@@ -133,6 +160,40 @@ teardown() {
     printf '%s\n' '{"event":"multi_tenant_supervisor.start"}' > "$LOGS_FILE"
     run verify_bridge_upstream green
     [ "$status" -eq 0 ] || return 1
+}
+
+@test "an unreadable log stream is NOT treated as clean" {
+    # "Could not ask" must never render as "healthy" — the same distinction the
+    # presence check already makes. Silently skipping the only outward signal
+    # would hand back a false clean.
+    printf 'KMC_INTERNAL_URL=http://api-green:8080\n' > "$ENV_FILE_OUT"
+    mock_docker() {
+        case "${1:-}" in
+            ps)      cat "$PS_FILE" ;;
+            inspect) cat "$ENV_FILE_OUT" ;;
+            logs)    return 1 ;;
+            *)       return 0 ;;
+        esac
+    }
+    run verify_bridge_upstream green
+    [ "$status" -ne 0 ] || return 1
+    [[ "$output" == *"fallback state UNKNOWN"* ]] || return 1
+}
+
+@test "the fallback log window is caller-controlled" {
+    # The deploy restarted the worker seconds ago, so 5m is right there; a
+    # standalone --verify-bridge run needs a much wider window or it reports
+    # clean on a worker that has been stranded for half an hour.
+    printf 'KMC_INTERNAL_URL=http://api-green:8080\n' > "$ENV_FILE_OUT"
+    printf '%s\n' '{"event":"control_plane.cross_color_fallback"}' > "$LOGS_FILE"
+    run verify_bridge_upstream green 30m
+    [ "$status" -ne 0 ] || return 1
+    [[ "$output" == *"last 30m"* ]] || return 1
+}
+
+@test "--verify-bridge uses a wider window than the deploy path" {
+    run bash -o pipefail -c 'sed -n "/^cmd_verify_bridge()/,/^}/p" "$1" | grep -c "BRIDGE_FALLBACK_WINDOW:-30m"' _ "$DEPLOY_SH"
+    [ "$output" -ge 1 ] || return 1
 }
 
 # --- degraded reporting -----------------------------------------------------

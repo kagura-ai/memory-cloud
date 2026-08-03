@@ -134,6 +134,47 @@ inode_of() { stat -c '%i' "$1"; }
     [ "$hits" -ge 1 ] || return 1
 }
 
+@test "a failed cp reports that the marker may be truncated" {
+    # `cp` opens the destination with O_TRUNC, so a mid-write failure damages
+    # the LIVE marker — the real cost of preserving the inode. The operator must
+    # be told that, or they cannot tell a stale marker from a broken one.
+    #
+    # Deterministic cp failure without needing a full disk or a uid trick:
+    # destination is a directory ALREADY CONTAINING a directory of the source's
+    # basename, so `cp src dir` cannot write dir/src. Staging still succeeds, so
+    # this reaches the cp branch rather than the staging branch.
+    MARKER_FILE="$TMP/x"
+    mkdir -p "$TMP/x/x.tmp"
+    run write_marker "green"
+    [ "$status" -ne 0 ] || return 1
+    [[ "$output" == *"TRUNCATED"* ]] || return 1
+}
+
+@test "the truncation error NAMES the previous color, so recovery is possible" {
+    # Behavioural, not a grep for `local previous`: a static check still passes
+    # when the captured value is never actually read, and being able to name the
+    # old color is the only thing that makes the message actionable.
+    #
+    # Injection: marker is readable (0444) so `previous` is captured, but not
+    # writable, so `cp` fails while staging into $TMP still succeeds. That is
+    # the cp branch specifically, with a real previous value in hand.
+    if [ "$(id -u)" -eq 0 ]; then
+        skip "a 0444 file is still writable by root, so cp would not fail"
+    fi
+    MARKER_FILE="$TMP/ro-marker"
+    printf 'blue\n' > "$MARKER_FILE"
+    chmod 0444 "$MARKER_FILE"
+
+    run write_marker "green"
+
+    chmod 0644 "$MARKER_FILE"
+    [ "$status" -ne 0 ] || return 1
+    [[ "$output" == *"TRUNCATED"* ]] || return 1
+    # The whole point: tell the operator what to put back.
+    [[ "$output" == *"blue"* ]] || return 1
+    [[ "$output" != *"unknown"* ]] || return 1
+}
+
 @test "a marker path that cannot be staged is a loud error" {
     # Parent directory does not exist, so the staging redirect fails. Chosen
     # over a permission trick because it behaves the same as root and non-root,
