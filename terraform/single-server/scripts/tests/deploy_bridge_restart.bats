@@ -88,7 +88,7 @@ teardown() {
 @test "the bridge worker is restarted when it is running" {
     printf 'kagura-api-blue\nkagura-bridge-worker-1\nkagura-web\n' > "$PS_FILE"
 
-    run restart_bridge_worker
+    run restart_bridge_worker green
 
     [ "$status" -eq 0 ] || return 1
     [[ "$output" == *"Restarting kagura-bridge-worker-1"* ]] || return 1
@@ -100,7 +100,7 @@ teardown() {
     BRIDGE_WORKER_CONTAINER="bridge-staging"
     printf 'bridge-staging\n' > "$PS_FILE"
 
-    run restart_bridge_worker
+    run restart_bridge_worker green
 
     [ "$status" -eq 0 ] || return 1
     [ "$(cat "$RESTART_LOG")" = "bridge-staging" ] || return 1
@@ -111,7 +111,7 @@ teardown() {
 @test "a host with no bridge container logs a skip and succeeds" {
     printf 'kagura-api-blue\nkagura-web\nkagura-postgres\n' > "$PS_FILE"
 
-    run restart_bridge_worker
+    run restart_bridge_worker green
 
     [ "$status" -eq 0 ] || return 1
     [[ "$output" == *"not running on this host"* ]] || return 1
@@ -122,7 +122,7 @@ teardown() {
 @test "an empty docker ps is a skip, not a crash" {
     : > "$PS_FILE"
 
-    run restart_bridge_worker
+    run restart_bridge_worker green
 
     [ "$status" -eq 0 ] || return 1
     [[ "$output" == *"not running on this host"* ]] || return 1
@@ -136,7 +136,7 @@ teardown() {
     # present when it is not.
     printf 'kagura-bridge-worker-10\nold-kagura-bridge-worker-1\n' > "$PS_FILE"
 
-    run restart_bridge_worker
+    run restart_bridge_worker green
 
     [ "$status" -eq 0 ] || return 1
     [[ "$output" == *"not running on this host"* ]] || return 1
@@ -164,7 +164,7 @@ teardown() {
     printf 'kagura-bridge-worker-1\n' > "$PS_FILE"
     export RESTART_RC=1
 
-    run restart_bridge_worker
+    run restart_bridge_worker green
 
     [ "$status" -eq 0 ] || return 1
     [[ "$output" == *"WARNING"* ]] || return 1
@@ -189,7 +189,7 @@ teardown() {
         set -euo pipefail
         source "'"$DEPLOY_SH"'"
         trap - EXIT
-        restart_bridge_worker >/dev/null 2>&1
+        restart_bridge_worker green >/dev/null 2>&1
         echo "STEP7_REACHED"
     '
 
@@ -207,7 +207,7 @@ teardown() {
         DOCKER=broken_docker
         source "'"$DEPLOY_SH"'"
         trap - EXIT
-        restart_bridge_worker >/dev/null 2>&1
+        restart_bridge_worker green >/dev/null 2>&1
         echo "SURVIVED"
     '
 
@@ -224,7 +224,7 @@ teardown() {
     broken_docker() { return 1; }
     DOCKER=broken_docker
 
-    run restart_bridge_worker
+    run restart_bridge_worker green
 
     [ "$status" -eq 0 ] || return 1
     [[ "$output" == *"could not query docker"* ]] || return 1
@@ -251,14 +251,14 @@ teardown() {
 # which is worse than not restarting at all, and no runtime assertion here could
 # tell the two orders apart.
 #
-# `^ *restart_bridge_worker *$` matches only a BARE CALL on its own line, so
+# The regex anchors a call to the start of a line (arguments allowed), so
 # commenting the call out (`# restart_bridge_worker`) or merely naming it in
 # prose fails these — a plain substring count would not.
 
 # Count bare calls to $2 inside function $1 of deploy.sh. Prints the count.
 count_calls_in() {
     local fn="$1" callee="$2"
-    sed -n "/^${fn}()/,/^}/p" "$DEPLOY_SH" | grep -cE "^ *${callee} *$" || true
+    sed -n "/^${fn}()/,/^}/p" "$DEPLOY_SH" | grep -cE "^ *${callee}( +[^ ].*)? *$" || true
 }
 
 # Print the 1-based line number of the first bare call to $2 within function $1,
@@ -266,7 +266,7 @@ count_calls_in() {
 first_call_line_in() {
     local fn="$1" callee="$2"
     sed -n "/^${fn}()/,/^}/p" "$DEPLOY_SH" \
-        | grep -nE "^ *${callee} *$" | head -1 | cut -d: -f1
+        | grep -nE "^ *${callee}( +[^ ].*)? *$" | head -1 | cut -d: -f1
 }
 
 @test "the call-site helpers actually see the function bodies (guard not vacuous)" {

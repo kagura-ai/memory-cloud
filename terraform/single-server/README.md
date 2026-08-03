@@ -374,17 +374,39 @@ cd terraform/single-server
 
 The script handles building, migrations, readiness checks, Caddy reload,
 the bridge-worker restart, and draining automatically. Use
-`./scripts/deploy.sh --status` to see which color is active, or
-`./scripts/deploy.sh --rollback` to switch back.
+`./scripts/deploy.sh --status` to see which color is active,
+`./scripts/deploy.sh --verify-bridge` to check the chat-bridge worker is on
+that color, or `./scripts/deploy.sh --rollback` to switch back.
 
-> **No manual bridge restart.** Both the deploy and the rollback path restart
-> the co-resident `kagura-bridge-worker-1` right after the Caddy switch (Step
-> 6b), because the worker pins its API connections to a color and a flip would
-> otherwise leave it talking to the color being drained — surviving only on
-> kagura-bridge's cross-color fallback, which masks the mismatch instead of
-> reporting it ([#1476](https://github.com/kagura-ai/memory-cloud/issues/1476)).
-> A host without that container logs a skip; a restart that fails logs a
-> warning and does **not** abort the deploy.
+> **The bridge worker.** Both the deploy and the rollback path restart the
+> co-resident `kagura-bridge-worker-1` right after the Caddy switch (Step 6b),
+> because a flip would otherwise leave it talking to the color being drained —
+> surviving only on kagura-bridge's cross-color fallback, which masks the
+> mismatch instead of reporting it
+> ([#1476](https://github.com/kagura-ai/memory-cloud/issues/1476)). A host
+> without that container logs a skip; a restart that fails logs a warning and
+> does **not** abort the deploy.
+>
+> **The restart alone is not always enough**
+> ([#1480](https://github.com/kagura-ai/memory-cloud/issues/1480)). If the
+> bridge's `deploy/.env` sets a static `KMC_INTERNAL_URL`, that value wins over
+> the marker template and is baked into the container at create time — so
+> `docker restart` brings the worker back on the *same old color*. Step 6b now
+> **verifies** where the worker actually landed and prints a loud
+> `BRIDGE NOT VERIFIED` block when it cannot prove the new color. The deploy
+> still succeeds (the API cutover is independent and already done), but it will
+> not read as clean. Check any time with:
+>
+> ```bash
+> ./scripts/deploy.sh --verify-bridge   # exits non-zero if not on the active color
+> ```
+>
+> **To make it fully automatic**, leave `KMC_INTERNAL_URL` blank in the bridge's
+> `deploy/.env` so the worker follows `KMC_INTERNAL_URL_TEMPLATE` + the marker.
+> That works because this script now publishes the marker **in place** — see
+> `write_marker()`. A single-file bind mount tracks the *inode*, so the old
+> `mv` published a new inode the running container never saw; `cp` keeps the
+> inode and the change is visible immediately, with no restart at all.
 
 Tunable environment variables:
 

@@ -72,6 +72,13 @@ dc() { docker compose -f "$COMPOSE_FILE" --env-file "$ENV_FILE" "$@"; }
 # Updated at the head of each step; read only by on_exit().
 DEPLOY_STAGE="startup"
 
+# Set to 1 when the bridge step could not be PROVEN good (#1480). The deploy
+# still succeeds — the API cutover is independent and already done — but the
+# summary must not read as clean. Deliberately not an abort: failing a completed
+# cutover because a co-resident stack is unhappy would invite a needless
+# rollback, which is how #1476's manual step got skipped in the first place.
+BRIDGE_STEP_DEGRADED=0
+
 # Single final-status line on EVERY exit path (success or abort), so a run can
 # never "exit 0-ish" silently again (#986). error() and any set -e death both
 # route through here because the trap fires on EXIT regardless of cause.
@@ -159,6 +166,70 @@ get_inactive_color() {
     if [ "$active" = "blue" ]; then echo "green"; else echo "blue"; fi
 }
 
+# Publish a new active color WITHOUT changing the marker file's inode (#1480).
+#
+# This file is bind-mounted into co-resident stacks as a SINGLE FILE
+# (kagura-bridge mounts it read-only to follow the active color). A single-file
+# bind mount resolves to an inode at container start: replacing the file with
+# `mv` publishes a NEW inode, and the running container keeps reading the OLD
+# one forever. It sees the color it booted with, no matter how many times this
+# script rewrites the marker.
+#
+# That is not a hypothesis. Measured on docker 29.3.1 with a single-file bind
+# mount of this exact shape:
+#   mv  + container left running -> container still reads the OLD color
+#   mv  + `docker restart`       -> container reads the new color
+#   cp  + container left running -> container reads the new color, NO restart
+#
+# So `mv` is what forced kagura-bridge onto a static KMC_INTERNAL_URL pin, which
+# in turn is what made deploy Step 6b's `docker restart` unable to re-point it
+# (a restart cannot re-read an .env). Writing in place fixes it at the source.
+#
+# generate_caddyfile() 160 lines below already made exactly this trade for the
+# Caddyfile, for verbatim this reason — see its `tmp + cp (not mv)` comment.
+# This is that same fix, applied to the file that needed it more.
+#
+# The cost, stated plainly: `cp` is not atomic, so a crash mid-write can leave
+# the marker truncated where `mv` could not. That is deliberate and is the
+# behaviour #1448 asked for — get_active_color() treats an empty or malformed
+# marker as a loud, recoverable error with recovery steps, never as a guess.
+# kagura-bridge's reader fails closed the same way. A single writer (this
+# script), 6 bytes, versus a defect that silently degraded production for 65
+# hours: in-place wins.
+write_marker() {
+    local color="$1"
+    # Stage first so a failed write never truncates the live marker, then copy
+    # ONTO the original inode rather than renaming over it.
+    if ! echo "$color" > "${MARKER_FILE}.tmp"; then
+        rm -f "${MARKER_FILE}.tmp"
+        error "Could not stage marker at ${MARKER_FILE}.tmp — check disk and permissions."
+    fi
+    if ! cp "${MARKER_FILE}.tmp" "$MARKER_FILE"; then
+        rm -f "${MARKER_FILE}.tmp"
+        error "Could not write marker $MARKER_FILE. Traffic may already be switched.
+       Write it by hand to match the color actually serving:
+           echo $color > $MARKER_FILE"
+    fi
+    rm -f "${MARKER_FILE}.tmp"
+
+    # Read back before claiming success. `cp file dir` SUCCEEDS by copying into
+    # the directory, so a marker path that is somehow a directory would leave
+    # the published color unchanged while cp exits 0 — the same "reported the
+    # action, not the outcome" mistake this issue is about.
+    #
+    # Read through get_active_color rather than cat: it is the same validated
+    # reader every other consumer uses, so this cannot accidentally accept a
+    # value the rest of the script would reject. It also keeps this function
+    # clear of the `cat ... || fallback` shape that #1448's guard forbids.
+    local published
+    published="$(get_active_color)"
+    if [ "$published" != "$color" ]; then
+        error "Marker $MARKER_FILE reads back as '$published', not '$color'.
+       Traffic may already be switched — write it by hand to match reality:
+           echo $color > $MARKER_FILE"
+    fi
+}
+
 is_container_running() {
     local container="kagura-api-$1"
     docker inspect --format '{{.State.Running}}' "$container" 2>/dev/null | grep -q "true"
@@ -197,6 +268,84 @@ bridge_worker_is_running() {
     return 1
 }
 
+# Print the worker's STATIC upstream pin, or nothing when it has none.
+#
+# Empty output means the variable is absent or set-but-empty — in both cases the
+# worker resolves the color from the bind-mounted marker instead, which is the
+# configuration we want. Returns non-zero only when docker could not be asked.
+bridge_pinned_url() {
+    local env_lines line
+    env_lines="$("$DOCKER" inspect "$BRIDGE_WORKER_CONTAINER" \
+        --format '{{range .Config.Env}}{{println .}}{{end}}' 2>/dev/null)" || return 1
+    while IFS= read -r line; do
+        case "$line" in
+            KMC_INTERNAL_URL=*)
+                printf '%s' "${line#KMC_INTERNAL_URL=}"
+                return 0
+                ;;
+        esac
+    done <<< "$env_lines"
+    return 0
+}
+
+# Has the worker fallen back to the other color since the deploy touched it?
+#
+# kagura-bridge logs `control_plane.cross_color_fallback` when its primary
+# upstream refuses a connection and it retries the other color. That line is the
+# ONLY reliable outward sign of a stranded worker: its /health keeps returning
+# {"status":"ok"} the whole time, which is why the condition once ran 65 hours
+# unnoticed. Treat it as a deploy signal, not log noise (#1480).
+bridge_fallback_count() {
+    local since="${1:-5m}" logs
+    logs="$("$DOCKER" logs --since "$since" "$BRIDGE_WORKER_CONTAINER" 2>&1)" || return 1
+    # grep -c exits 1 on zero matches; `|| true` keeps that out of `set -e`.
+    printf '%s\n' "$logs" | grep -c 'control_plane.cross_color_fallback' || true
+}
+
+# Prove the worker is actually talking to $1, rather than assuming a restart
+# achieved it. Returns non-zero when the bridge step must NOT be called clean.
+verify_bridge_upstream() {
+    local color="$1" pin fallbacks
+    if ! pin="$(bridge_pinned_url)"; then
+        log "  Could not read ${BRIDGE_WORKER_CONTAINER} config — upstream NOT verified."
+        return 1
+    fi
+
+    if [ -n "$pin" ]; then
+        case "$pin" in
+            *"api-${color}"*)
+                log "  ${BRIDGE_WORKER_CONTAINER} upstream pin is ${pin} — matches api-${color}."
+                ;;
+            *)
+                log "WARNING: ${BRIDGE_WORKER_CONTAINER} is pinned to '${pin}', NOT api-${color}."
+                log "         A restart CANNOT fix this — the pin is baked into the container"
+                log "         from deploy/.env, and 'docker restart' does not re-read that file."
+                log "         Chat ingest is now riding the cross-color fallback (#1480)."
+                log "         Re-point and RECREATE (not restart):"
+                log "             sudo sed -i 's|^KMC_INTERNAL_URL=.*|KMC_INTERNAL_URL=http://api-${color}:8080|' \\"
+                log "                 /opt/kagura-bridge/src/deploy/.env"
+                log "             cd /opt/kagura-bridge/src && docker compose -f deploy/compose.yml \\"
+                log "                 --env-file deploy/.env up -d --no-deps --force-recreate worker"
+                log "         Better: blank KMC_INTERNAL_URL so the worker follows the marker,"
+                log "         which this script now writes in place (#1480)."
+                return 1
+                ;;
+        esac
+    else
+        log "  ${BRIDGE_WORKER_CONTAINER} has no static pin — it follows the marker (now ${color})."
+    fi
+
+    # Even a correct-looking pin can be stranded, so check the worker's own
+    # verdict too. Non-fatal if the log query itself fails.
+    if fallbacks="$(bridge_fallback_count 5m)" && [ "${fallbacks:-0}" -gt 0 ]; then
+        log "WARNING: ${BRIDGE_WORKER_CONTAINER} logged ${fallbacks} cross-color fallback event(s)"
+        log "         in the last 5m. It is reaching the API only via the safety net."
+        log "         Inspect: docker logs --since 10m ${BRIDGE_WORKER_CONTAINER} | grep cross_color_fallback"
+        return 1
+    fi
+    return 0
+}
+
 # Restart the chat-bridge worker after the active API color changes (#1476).
 #
 # The worker resolves the API container by color when it connects and then holds
@@ -212,7 +361,13 @@ bridge_worker_is_running() {
 #
 # Call it AFTER Caddy has been switched: restarting while the old color still
 # serves would just re-pin the worker to the color being drained.
+#
+# $1 is the color that is now live. It is REQUIRED: #1480 was possible because
+# this step reported "restarted." without ever checking where the worker ended
+# up. A restart is the action; landing on $1 is the outcome, and only the
+# outcome is worth reporting.
 restart_bridge_worker() {
+    local new_color="$1"
     # `|| presence=$?` keeps a non-zero return from killing the run under `set -e`.
     local presence=0
     bridge_worker_is_running || presence=$?
@@ -236,6 +391,11 @@ restart_bridge_worker() {
     log "  Restarting ${BRIDGE_WORKER_CONTAINER} (active API color changed)..."
     if "$DOCKER" restart "$BRIDGE_WORKER_CONTAINER" > /dev/null 2>&1; then
         log "  ${BRIDGE_WORKER_CONTAINER} restarted."
+        # The restart happened. That is NOT the same as the worker now talking
+        # to the new color — the whole of #1480. Prove it or degrade the run.
+        if ! verify_bridge_upstream "$new_color"; then
+            BRIDGE_STEP_DEGRADED=1
+        fi
         return 0
     fi
 
@@ -243,10 +403,25 @@ restart_bridge_worker() {
     # new color is serving; a bridge that will not come back is a bridge
     # problem. Aborting here would report a healthy deploy as failed and invite
     # an unnecessary rollback. Say it loudly instead.
+    BRIDGE_STEP_DEGRADED=1
     log "WARNING: ${BRIDGE_WORKER_CONTAINER} failed to restart. Chat ingest may still be"
     log "         pinned to the drained API color. Restart it manually:"
     log "             docker restart ${BRIDGE_WORKER_CONTAINER}"
     return 0
+}
+
+# Print the closing bridge verdict. Called from the deploy/rollback summary so
+# a degraded bridge is the LAST thing an operator reads, not a line scrolled off
+# the top by Step 7's drain (#1480).
+report_bridge_state() {
+    if [ "${BRIDGE_STEP_DEGRADED:-0}" -eq 0 ]; then
+        return 0
+    fi
+    log ""
+    log "*** BRIDGE NOT VERIFIED — the API cutover succeeded, chat ingest did not. ***"
+    log "    The API is serving normally. The bridge worker is NOT confirmed to be"
+    log "    on the new color; see the WARNING above for the exact remediation."
+    log "    Re-check at any time with: $0 --verify-bridge"
 }
 
 # ---------------------------------------------------------------------------
@@ -286,10 +461,10 @@ cmd_rollback() {
         wait_for_readiness "$inactive"
     fi
 
-    # Write marker BEFORE switching Caddy (atomic: same filesystem mv)
+    # Write marker BEFORE switching Caddy. In place, so co-resident readers that
+    # bind-mount it as a single file actually see the change (#1480).
     log "Switching Caddy: api-${active} -> api-${inactive}"
-    echo "$inactive" > "${MARKER_FILE}.tmp"
-    mv "${MARKER_FILE}.tmp" "$MARKER_FILE"
+    write_marker "$inactive"
     DEPLOY_STAGE="rollback: switch Caddy -> api-${inactive} (incl. security gate)"
     generate_caddyfile "api-${inactive}"
     reload_caddy
@@ -300,10 +475,11 @@ cmd_rollback() {
     # the color we just switched away from — same failure as an ordinary deploy
     # (#1476). The issue only named cmd_deploy; this path needs it just as much.
     DEPLOY_STAGE="rollback: restart bridge worker"
-    restart_bridge_worker
+    restart_bridge_worker "$inactive"
 
     DEPLOY_STAGE="rollback complete (active: ${inactive})"
     log "Rollback complete. Active: $inactive"
+    report_bridge_state
 }
 
 cmd_deploy() {
@@ -350,11 +526,11 @@ cmd_deploy() {
     log "Step 4/7: Running database migrations on api-${inactive}..."
     dc exec -T "api-${inactive}" alembic upgrade head
 
-    # Step 5: Write marker BEFORE switching Caddy (crash-safe ordering)
+    # Step 5: Write marker BEFORE switching Caddy (crash-safe ordering), and
+    # write it IN PLACE so single-file bind-mount readers see it (#1480).
     DEPLOY_STAGE="Step 5/7: update marker -> ${inactive}"
     log "Step 5/7: Updating marker -> ${inactive}"
-    echo "$inactive" > "${MARKER_FILE}.tmp"
-    mv "${MARKER_FILE}.tmp" "$MARKER_FILE"
+    write_marker "$inactive"
 
     # Step 6: Switch Caddy upstream
     DEPLOY_STAGE="Step 6/7: switch Caddy upstream -> api-${inactive} (incl. security gate)"
@@ -369,7 +545,7 @@ cmd_deploy() {
     # switch — it is only correct once Caddy points at the new color.
     DEPLOY_STAGE="Step 6b/7: restart ${BRIDGE_WORKER_CONTAINER}"
     log "Step 6b/7: Restarting the bridge worker after the color switch..."
-    restart_bridge_worker
+    restart_bridge_worker "$inactive"
 
     # Step 7: Drain and stop old container
     # Disable restart policy first — otherwise `restart: always` revives
@@ -385,6 +561,7 @@ cmd_deploy() {
     log "=== DEPLOY COMPLETE ==="
     log "Active: $inactive"
     log "To rollback: $0 --rollback"
+    report_bridge_state
 }
 
 cmd_deploy_web() {
@@ -602,6 +779,33 @@ verify_internal_blocked() {
     _verify_path_blocked "/internal/*" "/internal/workspaces/probe/plan"
 }
 
+cmd_verify_bridge() {
+    # Read-only. Exits non-zero when the bridge worker is not provably on the
+    # active color, so cron/monitoring can consume it — this is the "somewhere"
+    # that criterion 3 of #1480 asks for. A non-zero exit is safe HERE precisely
+    # because nothing is mid-flight; inside a deploy the same condition only
+    # warns, because the API cutover has already succeeded by then.
+    local active
+    active="$(get_active_color)"
+    log "Verifying ${BRIDGE_WORKER_CONTAINER} against active color: ${active}"
+
+    local presence=0
+    bridge_worker_is_running || presence=$?
+    if [ "$presence" -eq 1 ]; then
+        log "  ${BRIDGE_WORKER_CONTAINER} is not running on this host — nothing to verify."
+        return 0
+    fi
+    if [ "$presence" -ne 0 ]; then
+        error "Could not query docker for ${BRIDGE_WORKER_CONTAINER}."
+    fi
+
+    if verify_bridge_upstream "$active"; then
+        log "Bridge upstream verified: api-${active}"
+        return 0
+    fi
+    error "Bridge worker is NOT verified against api-${active} — see the warning above."
+}
+
 cmd_generate_caddyfile() {
     # Bootstrap helper: render ./Caddyfile from Caddyfile.tpl WITHOUT deploying.
     #
@@ -670,14 +874,19 @@ main() {
         --generate-caddyfile)
             cmd_generate_caddyfile
             ;;
+        --verify-bridge)
+            DEPLOY_STAGE="verify bridge upstream"
+            cmd_verify_bridge
+            ;;
         --help|-h)
             DEPLOY_STAGE="readonly"
-            echo "Usage: $0 [--rollback|--status|--web|--generate-caddyfile|--help]"
+            echo "Usage: $0 [--rollback|--status|--web|--verify-bridge|--generate-caddyfile|--help]"
             echo ""
             echo "  (no args)             Deploy to the inactive API color (zero-downtime blue-green)"
             echo "  --rollback            Switch back to the previous API color"
             echo "  --status              Show current active API color and container states"
             echo "  --web                 Rebuild + restart kagura-web in place"
+            echo "  --verify-bridge       Check the bridge worker is on the active color; exits non-zero if not"
             echo "  --generate-caddyfile  Render ./Caddyfile from Caddyfile.tpl (bootstrap; no deploy)"
             echo ""
             echo "Environment variables:"
