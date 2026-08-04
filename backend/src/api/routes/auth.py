@@ -25,7 +25,7 @@ from typing import Any
 import httpx
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response
 from fastapi.responses import RedirectResponse
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError, SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -936,6 +936,78 @@ async def logout(request: Request, response: Response):
         response.delete_cookie(key="kagura_session", path="/")
 
     return {"success": True, "message": "Logged out successfully"}
+
+
+class AccountSwitchRequest(BaseModel):
+    """Which already-signed-in account to make active (#1488)."""
+
+    user_id: str = Field(..., min_length=1, max_length=255)
+
+
+@router.get("/accounts")
+async def list_signed_in_accounts(request: Request, user: SessionUser):
+    """List the accounts signed in on THIS browser session (#1488 Phase 2).
+
+    Reads only from the caller's own session container, so it can never
+    enumerate anyone else's identities. Returns the active one flagged, which
+    is what the sidebar switcher renders.
+    """
+    if not _session_manager:
+        raise HTTPException(status_code=500, detail="Session manager not initialized")
+
+    # `SessionUser` (require_session_auth -> get_current_user -> the cookie the
+    # middleware resolved) has already established that a session exists, so an
+    # absent cookie here is a contradiction rather than an anonymous caller.
+    # Answer 401 as the dependency itself would, instead of an empty list that
+    # would read as "signed in with no accounts".
+    session_id = request.cookies.get("kagura_session")
+    if not session_id:
+        raise HTTPException(status_code=401, detail="Not authenticated")
+
+    accounts = _session_manager.list_accounts(session_id)
+    # Never ship anything but display fields — this is read by a menu.
+    return {
+        "accounts": [
+            {
+                "user_id": a.get("user_id") or a.get("sub"),
+                "email": a.get("email"),
+                "name": a.get("name"),
+                "picture": a.get("picture"),
+                "is_active": a.get("is_active", False),
+            }
+            for a in accounts
+        ]
+    }
+
+
+@router.post("/accounts/switch")
+async def switch_active_account(
+    body: AccountSwitchRequest,
+    request: Request,
+    user: SessionUser,
+):
+    """Make another already-signed-in account active (#1488 Phase 2).
+
+    The security boundary is `switch_account`'s membership check: the target
+    must already be in THIS session's container. A caller naming an arbitrary
+    user id gets 404, not that user's session — there is no lookup anywhere in
+    this path, so no id a caller invents can widen their access.
+
+    404 rather than 403 on a non-member: whether some other account exists is
+    not this caller's business to learn.
+    """
+    if not _session_manager:
+        raise HTTPException(status_code=500, detail="Session manager not initialized")
+
+    session_id = request.cookies.get("kagura_session")
+    if not session_id:
+        raise HTTPException(status_code=401, detail="Not authenticated")
+
+    if not _session_manager.switch_account(session_id, body.user_id):
+        raise HTTPException(status_code=404, detail="Account not found in this session")
+
+    logger.info(f"Switched active account on session {session_id[:8]}...")
+    return {"success": True, "active_user_id": body.user_id}
 
 
 @router.get("/me")

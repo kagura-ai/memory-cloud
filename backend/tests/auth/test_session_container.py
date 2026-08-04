@@ -41,9 +41,25 @@ class FakeRedis:
 
     def __init__(self) -> None:
         self.store: dict[str, str] = {}
+        # Counted so tests can assert the hot path does not rewrite records.
+        self.writes: dict[str, int] = {}
+        self.expires: dict[str, int] = {}
 
     def setex(self, key: str, _ttl: int, value: str) -> None:
         self.store[key] = value
+        self.writes[key] = self.writes.get(key, 0) + 1
+
+    def expire(self, key: str, _ttl: int) -> bool:
+        """Renew the TTL WITHOUT touching the value — like the real thing.
+
+        Modelling this faithfully is the point: the hot read path switched from
+        SETEX to EXPIRE precisely so it stops rewriting the record (#1488). A
+        fake that quietly rewrote here would hide the very property under test.
+        """
+        if key not in self.store:
+            return False
+        self.expires[key] = self.expires.get(key, 0) + 1
+        return True
 
     def get(self, key: str) -> str | None:
         return self.store.get(key)
@@ -344,3 +360,151 @@ class TestUpdateRefusesCorruptRecords:
         """Guard must not have become 'refuse everything'."""
         sid = manager.create_session(USER)
         assert manager.update_session(sid, {"role": "admin"}) is True
+
+
+OTHER = {"sub": "google_2", "user_id": "google_2", "email": "b@example.com", "role": "member"}
+
+
+class TestHotPathDoesNotRewrite:
+    """The Phase 2 prerequisite, as a property.
+
+    Refreshing the rolling TTL used to SETEX the whole record. With two
+    accounts that is an unlocked read-modify-write on every page load, able to
+    discard a concurrent add_account. EXPIRE renews the TTL without touching
+    the value, so there is nothing to clobber.
+    """
+
+    def test_reading_a_container_uses_expire_not_setex(self, manager):
+        sid = manager.create_session(USER)
+        writes_after_create = manager._redis.writes[f"session:{sid}"]
+        manager.get_session(sid)
+        manager.get_session(sid)
+        assert manager._redis.writes[f"session:{sid}"] == writes_after_create
+        assert manager._redis.expires[f"session:{sid}"] == 2
+
+    def test_a_concurrent_read_cannot_discard_an_added_account(self, manager):
+        """The race, played out in order."""
+        sid = manager.create_session(USER)
+        # A request reads the session (as middleware does on every call)...
+        manager.get_session(sid)
+        # ...meanwhile another account is added...
+        assert manager.add_account(sid, OTHER) is True
+        # ...and a further read must not roll it back.
+        manager.get_session(sid)
+        assert set(raw(manager, sid)["accounts"]) == {"google_1", "google_2"}
+
+    def test_migrating_a_legacy_record_still_writes_once(self, manager):
+        """The one write left on the read path."""
+        manager._redis.store["session:legacy"] = json.dumps({**USER})
+        manager.get_session("legacy")
+        assert manager._redis.writes["session:legacy"] == 1
+        manager.get_session("legacy")  # already a container now
+        assert manager._redis.writes["session:legacy"] == 1
+
+
+class TestAddAccount:
+    def test_adds_and_activates(self, manager):
+        sid = manager.create_session(USER)
+        assert manager.add_account(sid, OTHER) is True
+        stored = raw(manager, sid)
+        assert set(stored["accounts"]) == {"google_1", "google_2"}
+        assert stored["active"] == "google_2"
+        # Callers see the newly active identity.
+        assert manager.get_session(sid)["user_id"] == "google_2"
+
+    def test_re_adding_is_idempotent(self, manager):
+        """Signing in again must not create a duplicate entry."""
+        sid = manager.create_session(USER)
+        manager.add_account(sid, OTHER)
+        manager.add_account(sid, {**OTHER, "email": "changed@example.com"})
+        stored = raw(manager, sid)
+        assert set(stored["accounts"]) == {"google_1", "google_2"}
+        assert stored["accounts"]["google_2"]["email"] == "changed@example.com"
+
+    def test_refuses_an_identity_with_no_id(self, manager):
+        sid = manager.create_session(USER)
+        assert manager.add_account(sid, {"email": "x@y"}) is False
+        assert set(raw(manager, sid)["accounts"]) == {"google_1"}
+
+    def test_refuses_a_missing_session(self, manager):
+        assert manager.add_account("nope", OTHER) is False
+
+
+class TestSwitchAccount:
+    def test_switches_between_members(self, manager):
+        sid = manager.create_session(USER)
+        manager.add_account(sid, OTHER)
+        assert manager.switch_account(sid, "google_1") is True
+        assert manager.get_session(sid)["user_id"] == "google_1"
+
+    def test_REFUSES_an_account_not_in_this_session(self, manager):
+        """The security boundary of the entire feature.
+
+        Without this a caller could name any user id and the session would
+        start acting as them. Membership in this session's own container is the
+        only thing that may authorise a switch — never a lookup.
+        """
+        sid = manager.create_session(USER)
+        assert manager.switch_account(sid, "someone-elses-id") is False
+        assert manager.get_session(sid)["user_id"] == "google_1"
+        assert "someone-elses-id" not in raw(manager, sid)["accounts"]
+
+    def test_a_refused_switch_does_not_touch_the_record(self, manager):
+        sid = manager.create_session(USER)
+        before = manager._redis.store[f"session:{sid}"]
+        manager.switch_account(sid, "intruder")
+        assert manager._redis.store[f"session:{sid}"] == before
+
+
+class TestRemoveAccount:
+    def test_removing_one_leaves_the_other_signed_in(self, manager):
+        sid = manager.create_session(USER)
+        manager.add_account(sid, OTHER)
+        assert manager.remove_account(sid, "google_2") is True
+        assert manager.get_session(sid)["user_id"] == "google_1"
+
+    def test_removing_the_active_account_promotes_another(self, manager):
+        sid = manager.create_session(USER)
+        manager.add_account(sid, OTHER)  # google_2 is active
+        assert manager.remove_account(sid, "google_2") is True
+        assert raw(manager, sid)["active"] == "google_1"
+
+    def test_removing_the_last_account_ends_the_session(self, manager):
+        """Must delete, not leave an empty container that fails every request."""
+        sid = manager.create_session(USER)
+        assert manager.remove_account(sid, "google_1") is True
+        assert manager.get_session(sid) is None
+        assert f"session:{sid}" not in manager._redis.store
+
+    def test_removing_a_non_member_is_a_no_op(self, manager):
+        sid = manager.create_session(USER)
+        assert manager.remove_account(sid, "stranger") is False
+        assert manager.get_session(sid) is not None
+
+
+class TestListAccounts:
+    def test_lists_members_and_flags_the_active_one(self, manager):
+        sid = manager.create_session(USER)
+        manager.add_account(sid, OTHER)
+        accounts = manager.list_accounts(sid)
+        assert {a["user_id"] for a in accounts} == {"google_1", "google_2"}
+        assert [a["user_id"] for a in accounts if a["is_active"]] == ["google_2"]
+
+    def test_empty_for_a_missing_session(self, manager):
+        assert manager.list_accounts("nope") == []
+
+    def test_empty_for_a_corrupt_session(self, manager):
+        manager._redis.store["session:bad"] = json.dumps(
+            {"v": 2, "accounts": {"a": {"user_id": "a"}}, "active": "missing"}
+        )
+        assert manager.list_accounts("bad") == []
+
+
+class TestOneSessionPerUserWithTwoAccounts:
+    def test_deleting_a_users_sessions_finds_a_shared_container(self, manager):
+        """#114 still applies to an account that shares a container."""
+        sid = manager.create_session(USER)
+        manager.add_account(sid, OTHER)
+        # Either member must locate the container.
+        assert manager.delete_user_sessions("google_1") == 1
+        assert manager.get_session(sid) is None

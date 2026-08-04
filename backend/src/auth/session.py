@@ -318,7 +318,8 @@ class SessionManager:
             # Read BOTH shapes (#1488). Sessions minted before this change are
             # flat and still live in Redis; refusing them would log every
             # signed-in user out the moment this deploys.
-            container = stored if is_container(stored) else to_container(stored)
+            was_legacy = not is_container(stored)
+            container = stored if not was_legacy else to_container(stored)
 
             # A record whose active account is missing or id-less is corrupt;
             # treat it as no session at all rather than authenticating a shell.
@@ -329,25 +330,40 @@ class SessionManager:
                 logger.warning(f"Discarding unusable session record: {session_id[:10]}...")
                 return None
 
-            # Update last accessed time and refresh TTL. This is also where a
-            # legacy record gets rewritten in the new shape — migration happens
-            # by being used, with no backfill job.
+            # Refresh the rolling TTL.
             #
-            # PHASE 2 PREREQUISITE: this is a read-modify-write of the WHOLE
-            # record with no lock, purely to refresh `last_accessed`. With one
-            # account there is nothing to lose. Once a container can hold
-            # several, a concurrent "add account" could be clobbered by any
-            # ordinary request that happens to read first and write second.
-            # Phase 2 must make this a targeted update (Lua/WATCH, or write the
-            # timestamp outside the record) before adding a second account.
+            # This used to SETEX the whole record just to bump `last_accessed`.
+            # That is an unlocked read-modify-write, and it was safe only while
+            # a container held ONE account. With two, any ordinary request could
+            # read first, write second, and silently discard a concurrent
+            # "add account" — and since a request arrives on every page load,
+            # that race would be routine rather than theoretical. Phase 1 flagged
+            # this as the prerequisite for Phase 2; this is it.
+            #
+            # EXPIRE renews the TTL without touching the value, so the hot path
+            # no longer writes the record and there is nothing to clobber.
+            #
+            # The trade, stated plainly: STORED `last_accessed` now advances on
+            # writes rather than on every request. Nothing reads it — no route,
+            # no service, no UI; only a docstring mentions it — so this costs
+            # nothing today, and the returned projection still reports the
+            # current time so callers see an accurate value. If true
+            # per-request last-access is ever needed it must be added
+            # deliberately with an atomic mechanism, not by restoring the
+            # whole-record rewrite.
             if update_access:
-                container["last_accessed"] = utcnow().isoformat()
-                self._redis.setex(
-                    f"session:{session_id}",
-                    self.session_ttl,
-                    json.dumps(container),
-                )
-                projected["last_accessed"] = container["last_accessed"]
+                if was_legacy:
+                    # One-time: a flat record must be written once to become a
+                    # container. The only write left on the read path, and it
+                    # happens at most once per record.
+                    self._redis.setex(
+                        f"session:{session_id}",
+                        self.session_ttl,
+                        json.dumps(container),
+                    )
+                else:
+                    self._redis.expire(f"session:{session_id}", self.session_ttl)
+                projected["last_accessed"] = utcnow().isoformat()
 
             # Callers see the flat shape they always have.
             return projected
@@ -377,6 +393,144 @@ class SessionManager:
         except Exception as e:
             logger.error(f"Failed to delete session: {e}")
             return False
+
+    # ------------------------------------------------------------------
+    # Multi-account operations (#1488 Phase 2)
+    # ------------------------------------------------------------------
+    #
+    # These are the only writers that change `accounts` or `active`. They all
+    # go through _mutate_container so the read-modify-write lives in ONE place;
+    # the hot read path no longer writes at all (see get_session), so these are
+    # the only writers that can race each other. They are rare — a login or an
+    # explicit switch — and each is a single user action, so last-writer-wins
+    # between two of them is acceptable in a way it was not for every page load.
+
+    def _mutate_container(self, session_id: str, mutate) -> bool:
+        """Read a session, apply ``mutate`` to the container, write it back.
+
+        Returns False when the session is missing or unusable. ``mutate`` may
+        return False to abort the write.
+        """
+        try:
+            raw = self._redis.get(f"session:{session_id}")
+            if not raw:
+                return False
+            stored = json.loads(raw)  # type: ignore[arg-type]
+            container = stored if is_container(stored) else to_container(stored)
+
+            # Same rule as get_session/update_session: a record whose active
+            # account cannot be resolved is unusable, and writing to it would
+            # only corrupt it further.
+            if project_active(container) is None:
+                logger.warning(f"Refusing to mutate unusable session: {session_id[:10]}...")
+                return False
+
+            if mutate(container) is False:
+                return False
+
+            container["last_accessed"] = utcnow().isoformat()
+            self._redis.setex(
+                f"session:{session_id}",
+                self.session_ttl,
+                json.dumps(container),
+            )
+            return True
+        except Exception as e:
+            logger.error(f"Failed to mutate session: {e}")
+            return False
+
+    def list_accounts(self, session_id: str) -> list[dict[str, Any]]:
+        """Identities signed in on this session, active one flagged.
+
+        Returns [] for a missing or unusable session — the UI shows no switcher
+        rather than an error, which is the right failure for a menu.
+        """
+        try:
+            raw = self._redis.get(f"session:{session_id}")
+            if not raw:
+                return []
+            stored = json.loads(raw)  # type: ignore[arg-type]
+            container = stored if is_container(stored) else to_container(stored)
+            if project_active(container) is None:
+                return []
+            active = container.get("active")
+            return [
+                {**identity, "is_active": account_id == active}
+                for account_id, identity in container.get("accounts", {}).items()
+            ]
+        except Exception as e:
+            logger.error(f"Failed to list accounts: {e}")
+            return []
+
+    def add_account(self, session_id: str, user_info: dict[str, Any]) -> bool:
+        """Add an identity to an existing session and make it active.
+
+        This is what a login performs INSTEAD of minting a fresh session when
+        the browser already has one. Re-adding an account that is already
+        present refreshes its identity and activates it, so "sign in again" is
+        idempotent rather than creating a duplicate entry.
+        """
+        account_id = _account_id(user_info)
+        if not account_id:
+            logger.warning("Refusing to add an account with no id")
+            return False
+
+        def _add(container: dict[str, Any]) -> None:
+            container.setdefault("accounts", {})[account_id] = dict(user_info)
+            container["active"] = account_id
+
+        return self._mutate_container(session_id, _add)
+
+    def switch_account(self, session_id: str, account_id: str) -> bool:
+        """Make an already-signed-in account the active one.
+
+        Refuses an account that is not in the container. That refusal is the
+        security boundary of this whole feature: without it, a caller could
+        name ANY user id and the session would start acting as them. The check
+        is membership in this session's own container — never a lookup.
+        """
+
+        def _switch(container: dict[str, Any]) -> bool:
+            if account_id not in container.get("accounts", {}):
+                logger.warning(
+                    f"Refusing to switch session {session_id[:10]}... to a non-member account"
+                )
+                return False
+            container["active"] = account_id
+            return True
+
+        return self._mutate_container(session_id, _switch)
+
+    def remove_account(self, session_id: str, account_id: str) -> bool:
+        """Sign one account out, leaving the others signed in.
+
+        Removing the LAST account leaves nothing to be active, so the whole
+        session is deleted — that is a full sign-out, and it must not leave an
+        empty container behind for `project_active` to reject on every request.
+        Removing the ACTIVE account promotes an arbitrary remaining one.
+        """
+        try:
+            raw = self._redis.get(f"session:{session_id}")
+            if not raw:
+                return False
+            stored = json.loads(raw)  # type: ignore[arg-type]
+            container = stored if is_container(stored) else to_container(stored)
+            accounts = container.get("accounts", {})
+            if account_id not in accounts:
+                return False
+            if len(accounts) <= 1:
+                return self.delete_session(session_id)
+        except Exception as e:
+            logger.error(f"Failed to read session for account removal: {e}")
+            return False
+
+        def _remove(container: dict[str, Any]) -> None:
+            accounts = container.get("accounts", {})
+            accounts.pop(account_id, None)
+            if container.get("active") == account_id:
+                container["active"] = next(iter(accounts))
+
+        return self._mutate_container(session_id, _remove)
 
     def update_session(self, session_id: str, updates: dict[str, Any]) -> bool:
         """Update session data.
