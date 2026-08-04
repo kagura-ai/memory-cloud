@@ -250,3 +250,49 @@ class TestTheInvalidationCannotEatTheSessionItIsAddingTo:
         assert refusals, f"{fn_name}: no add_account_failed refusal found"
         invalidate_at = min(c.lineno for c in calls["delete_user_sessions"])
         assert min(refusals) < invalidate_at, fn_name
+
+
+class TestTheAddFlowActuallyOffersAChoice:
+    """#1488: the login leg must ask Google for the account chooser.
+
+    Pinned separately from the callback ordering above because this defect had
+    the same *symptom* as a broken switcher while every mechanism worked: the
+    intent was recorded, the callback honoured it, `add_account` returned True
+    — and the container still held one account, because Google had handed back
+    the identity it already held. Reported as "adding an account does not let
+    me switch".
+    """
+
+    def test_google_login_requests_the_chooser_only_when_adding(self):
+        calls = self._authorization_url_calls()
+        assert calls, "google_login no longer builds an authorization URL"
+        for call in calls:
+            kwargs = {kw.arg for kw in call.keywords}
+            assert "select_account" in kwargs, (
+                "google_login calls get_authorization_url_web without "
+                "select_account; an add-account login will re-consent with the "
+                "identity already signed in and never add a second account."
+            )
+
+    @staticmethod
+    def _authorization_url_calls() -> list[ast.Call]:
+        import inspect
+        import textwrap
+
+        tree = ast.parse(textwrap.dedent(inspect.getsource(auth_routes.google_login)))
+        return [
+            n
+            for n in ast.walk(tree)
+            if isinstance(n, ast.Call)
+            and isinstance(n.func, ast.Attribute)
+            and n.func.attr == "get_authorization_url_web"
+        ]
+
+    def test_the_chooser_is_tied_to_the_add_account_flag(self):
+        """Not hardcoded True — an ordinary login must keep its single click."""
+        for call in self._authorization_url_calls():
+            for kw in call.keywords:
+                if kw.arg == "select_account":
+                    assert isinstance(kw.value, ast.Name) and kw.value.id == "add_account", (
+                        "select_account must follow the add_account flag, not be a constant"
+                    )

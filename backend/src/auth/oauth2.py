@@ -5,6 +5,7 @@ import logging
 import os
 from datetime import UTC
 from typing import Any, cast
+from urllib.parse import quote
 
 from cryptography.fernet import Fernet
 from google.auth.transport.requests import Request
@@ -291,12 +292,15 @@ class OAuth2Manager:
     # Web OAuth2 Flow (Issue #650)
     # ========================================================================
 
-    def get_authorization_url_web(self, redirect_uri: str, state: str) -> str:
+    def get_authorization_url_web(
+        self, redirect_uri: str, state: str, select_account: bool = False
+    ) -> str:
         """Get OAuth2 authorization URL for Web flow.
 
         Args:
             redirect_uri: Callback URL (e.g., https://your-domain.com/auth/callback)
             state: CSRF state token
+            select_account: Ask Google to show the account chooser (#1488).
 
         Returns:
             Authorization URL to redirect user to
@@ -316,6 +320,20 @@ class OAuth2Manager:
         scopes = self.WEB_SCOPES[self.provider]
         scope_str = " ".join(scopes)
 
+        # `prompt=consent` alone re-consents with whoever is ALREADY signed in at
+        # Google, with no chooser. For an ordinary login that is what we want.
+        #
+        # For "add another account" (#1488) it is exactly wrong: a user with one
+        # Google session is handed back the identity they already have, the
+        # callback re-adds it idempotently, and the switcher still shows a single
+        # account. From the UI that is indistinguishable from the feature being
+        # broken — which is how it was reported.
+        #
+        # `select_account` is added rather than substituted: dropping `consent`
+        # would stop Google issuing a refresh token, which the manual-refresh
+        # flow (#515) depends on. Google accepts a space-separated list.
+        prompt = quote("select_account consent") if select_account else "consent"
+
         auth_url = (
             f"{oauth_endpoints.google_auth_url()}?"
             f"client_id={client_id}&"
@@ -324,7 +342,7 @@ class OAuth2Manager:
             f"scope={scope_str}&"
             f"state={state}&"
             f"access_type=offline&"
-            f"prompt=consent"
+            f"prompt={prompt}"
         )
 
         return auth_url
