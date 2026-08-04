@@ -508,3 +508,69 @@ class TestOneSessionPerUserWithTwoAccounts:
         # Either member must locate the container.
         assert manager.delete_user_sessions("google_1") == 1
         assert manager.get_session(sid) is None
+
+
+class TestAddingAnAccountMustNotDestroyItsOwnSession:
+    """The #1488 Phase 3 defect, pinned behaviourally.
+
+    `delete_user_sessions` matches by MEMBERSHIP and deletes whole containers.
+    The add-another-account login calls it for the incoming identity — so when
+    that identity was already in the caller's container (re-authenticating an
+    account already signed in, which `prompt=consent` makes routine for anyone
+    with a single account at the IdP), it destroyed the very session the flow
+    exists to append to, evicting every other account with it. The user clicked
+    "add an account" and was signed out of all of them.
+
+    The fix is an exclusion, not a skip: #114 must still invalidate every OTHER
+    session for that identity. Both halves are pinned below, because dropping
+    either one is a silent regression — over-deleting logs the user out, and
+    under-deleting reopens the session-fixation window.
+    """
+
+    def test_the_session_being_added_to_is_spared(self, manager):
+        sid = manager.create_session(USER)
+        assert manager.delete_user_sessions("google_1", exclude_session_id=sid) == 0
+        assert manager.get_session(sid) is not None
+
+    def test_other_sessions_for_that_identity_still_die(self, manager):
+        """#114 is preserved, not traded away for the fix."""
+        keep = manager.create_session(USER)
+        elsewhere = manager.create_session(USER)
+        assert manager.delete_user_sessions("google_1", exclude_session_id=keep) == 1
+        assert manager.get_session(elsewhere) is None
+        assert manager.get_session(keep) is not None
+
+    def test_a_shared_container_is_spared_whole(self, manager):
+        """The eviction that made this critical: OTHER's session must survive too."""
+        sid = manager.create_session(USER)
+        manager.add_account(sid, OTHER)
+        manager.delete_user_sessions("google_1", exclude_session_id=sid)
+        assert {a["user_id"] for a in manager.list_accounts(sid)} == {"google_1", "google_2"}
+
+    def test_the_whole_re_add_sequence_the_callback_performs(self, manager):
+        """End to end, in the order the OAuth callback runs it.
+
+        Under the old ordering this ended with get_session(sid) is None and the
+        browser holding a cookie for a deleted session.
+        """
+        sid = manager.create_session(USER)
+        manager.add_account(sid, OTHER)
+
+        # The callback returns with USER's sub — already a member.
+        manager.delete_user_sessions(USER["sub"], exclude_session_id=sid)
+        assert manager.add_account(sid, USER) is True
+
+        assert manager.get_session(sid)["user_id"] == "google_1"
+        assert {a["user_id"] for a in manager.list_accounts(sid)} == {"google_1", "google_2"}
+
+    def test_omitting_the_exclusion_still_deletes_everything(self, manager):
+        """An ordinary login passes no exclusion and must be unchanged."""
+        sid = manager.create_session(USER)
+        assert manager.delete_user_sessions("google_1") == 1
+        assert manager.get_session(sid) is None
+
+    def test_an_exclusion_naming_an_unrelated_session_changes_nothing(self, manager):
+        mine = manager.create_session(USER)
+        unrelated = manager.create_session({**USER, "sub": "google_9", "user_id": "google_9"})
+        assert manager.delete_user_sessions("google_1", exclude_session_id=unrelated) == 1
+        assert manager.get_session(mine) is None

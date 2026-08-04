@@ -628,7 +628,7 @@ class SessionManager:
             logger.error(f"Failed to cleanup sessions: {e}")
             return -1
 
-    def delete_user_sessions(self, user_id: str) -> int:
+    def delete_user_sessions(self, user_id: str, exclude_session_id: str | None = None) -> int:
         """Delete all sessions for a specific user.
 
         Issue #114: Invalidate old sessions on new login to prevent
@@ -636,6 +636,13 @@ class SessionManager:
 
         Args:
             user_id: User ID (OAuth2 sub claim) to delete sessions for
+            exclude_session_id: A session to spare. Required by the
+                "add another account" login (#1488): that flow APPENDS to a
+                live session, and this method deletes whole CONTAINERS by
+                membership — so without an exclusion, re-authenticating an
+                identity the container already holds would destroy the very
+                session being added to, evicting every other account with it.
+                #114 still holds: every OTHER session for the user is deleted.
 
         Returns:
             Number of sessions deleted
@@ -650,6 +657,7 @@ class SessionManager:
             Uses SCAN instead of KEYS for non-blocking iteration (O(1) per call).
             Uses pipeline for atomic batch deletion.
         """
+        excluded_key = f"session:{exclude_session_id}" if exclude_session_id else None
         try:
             keys_to_delete: list[str] = []
 
@@ -659,6 +667,8 @@ class SessionManager:
             while True:
                 cursor, keys = self._redis.scan(cursor, match="session:*", count=100)
                 for key in keys:
+                    if excluded_key is not None and key == excluded_key:
+                        continue
                     try:
                         data = self._redis.get(key)
                         if data:

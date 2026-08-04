@@ -9,7 +9,7 @@ Provides web-based OAuth2 authentication flow:
 2. GET /auth/google/callback - Handle Google callback
 3. GET /auth/github/login - Redirect to GitHub OAuth2
 4. GET /auth/github/callback - Handle GitHub callback
-5. POST /auth/logout - Delete session and logout
+5. POST /auth/logout?scope=current|all - Sign out one account, or the session
 
 Security features:
 - CSRF protection via state parameter
@@ -20,7 +20,7 @@ Security features:
 
 import os
 import secrets
-from typing import Any
+from typing import Any, Literal
 
 import httpx
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response
@@ -814,14 +814,34 @@ async def google_callback(
         #
         # The value is the same: Google OAuth2 user identifier (sub claim)
 
+        # #1488: "add another account" keeps the CURRENT session and appends to
+        # it; a normal login mints a fresh one.
+        #
+        # Read BEFORE the #114 invalidation below, which needs to know which
+        # session it must not destroy. The earlier ordering — invalidate, then
+        # read the intent — was wrong whenever the returning identity was
+        # ALREADY in the caller's container: `delete_user_sessions` matches by
+        # membership and deletes whole containers, so it wiped the session this
+        # flow exists to append to, taking every other signed-in account with
+        # it. Re-adding is a supported, tested operation (see
+        # `SessionManager.add_account`), and `prompt=consent` means a user with
+        # one account at the IdP hits it every time.
+        #
+        # An intent that cannot be honoured must NOT fall through to
+        # create_session: that replaces the cookie and discards every other
+        # account already signed in, which is the opposite of what was asked.
+        intent, add_to_session = _take_add_account_intent(state, request)
+        if intent == "unusable":
+            return _oauth_error_redirect("google", "add_account_failed")
+
         # Issue #114: Invalidate old sessions before creating new one
         # This prevents session fixation attacks and ensures only one active session per user
         #
-        # #1488: this runs for an ADD too. It deletes the incoming user's OTHER
-        # sessions, which is exactly what #114 asks for, and cannot touch the
-        # session we are adding into because that container does not hold this
-        # user yet (membership matching, see session_owns_user).
-        deleted_count = _session_manager.delete_user_sessions(user_info["sub"])
+        # #1488: every OTHER session for this identity still goes — #114 is
+        # unchanged. Only the container being added to is spared.
+        deleted_count = _session_manager.delete_user_sessions(
+            user_info["sub"], exclude_session_id=add_to_session
+        )
         if deleted_count > 0:
             logger.info(f"Invalidated {deleted_count} old session(s) for {user_info['email']}")
 
@@ -834,15 +854,6 @@ async def google_callback(
             "role": role.value,
         }
 
-        # #1488: "add another account" keeps the CURRENT session and appends to
-        # it; a normal login mints a fresh one.
-        #
-        # An intent that cannot be honoured must NOT fall through to
-        # create_session: that replaces the cookie and discards every other
-        # account already signed in, which is the opposite of what was asked.
-        intent, add_to_session = _take_add_account_intent(state, request)
-        if intent == "unusable":
-            return _oauth_error_redirect("google", "add_account_failed")
         if intent == "add" and add_to_session:
             if not _session_manager.add_account(add_to_session, session_data):
                 # The session died between the check and the write. Refuse for
@@ -936,23 +947,54 @@ async def google_callback(
 
 
 @router.post("/logout")
-async def logout(request: Request, response: Response):
-    """Logout user and delete session + clear cookie.
+async def logout(
+    request: Request,
+    response: Response,
+    scope: Literal["current", "all"] = Query(
+        "all",
+        description=(
+            "'all' ends the whole browser session (every signed-in account). "
+            "'current' signs out only the active account, leaving the others."
+        ),
+    ),
+):
+    """Sign out — either the active account, or every account (#1488 Phase 4).
 
     Issue #93-2: Implement proper logout
     Issue #115: Cookie name changed from 'session_id' to 'kagura_session'
 
-    Args:
-        request: FastAPI request (to read cookie)
-        response: FastAPI response (to clear cookie)
+    Once one session can hold several accounts, "log out" stops having a single
+    meaning, and the two meanings are not interchangeable: ending the session
+    when the user meant "sign out of this one" evicts accounts they never
+    touched, and the reverse leaves them signed in when they asked not to be.
+    `scope` names which one is intended.
 
-    Returns:
-        Success message
+    **The default is ``all``**, so every existing caller — and any older
+    frontend still deployed during a rollout — keeps the exact behaviour it had
+    before this route learned about accounts.
+
+    Carried as a query parameter rather than a body: `apiClient.post()` sends
+    `Content-Type: application/json` with no body when called without one, and
+    a body-typed parameter makes that pairing a parsing edge case for no gain.
+    `/auth/login?return_to=` and `/auth/google/login?add_account=1` in this same
+    router already read state-changing input this way.
+
+    Deliberately NOT behind an auth dependency, as before. Logging out with an
+    expired session must succeed rather than 401 — the user's intent is already
+    satisfied, and a client that cannot log out of a dead session is stuck.
+
+    Returns ``session_ended`` because the caller's next move depends on it:
+    False means another account is now active and the page should be reloaded
+    as them; True means go to /login. Two paths reach True with
+    ``scope="current"`` — the active account was the last one, and the removal
+    could not be completed. The second is a deliberate fail-safe: refusing to
+    remove one account is not a reason to leave the user signed in as it, so it
+    degrades to a full sign-out, which always satisfies the request.
 
     Example:
         POST /auth/logout
         Cookie: kagura_session=...
-        Response: {"success": true}
+        Response: {"success": true, "scope": "all", "session_ended": true}
         Set-Cookie: kagura_session=; Max-Age=0
     """
     if not _session_manager:
@@ -961,15 +1003,60 @@ async def logout(request: Request, response: Response):
     # Read session_id from cookie (Issue #115: renamed to kagura_session)
     session_id = request.cookies.get("kagura_session")
 
-    if session_id:
-        # Delete session from Redis
-        _session_manager.delete_session(session_id)
-        logger.info(f"User logged out: session={session_id[:8]}...")
+    if not session_id:
+        # Nothing to end. Idempotent success — see the docstring.
+        return {
+            "success": True,
+            "scope": scope,
+            "session_ended": True,
+            "message": "Logged out successfully",
+        }
 
-        # Clear cookie in browser
-        response.delete_cookie(key="kagura_session", path="/")
+    if scope == "current":
+        active = _session_manager.get_session(session_id, update_access=False)
+        account_id = (active.get("user_id") or active.get("sub")) if active else None
 
-    return {"success": True, "message": "Logged out successfully"}
+        # No account_id means the session is already gone or unusable; that is
+        # not a failure, it just leaves nothing to remove and the full sign-out
+        # below is exactly right.
+        if account_id:
+            if _session_manager.remove_account(session_id, str(account_id)):
+                # `remove_account` deletes the whole session when it removed the
+                # last account, so a surviving record is what distinguishes
+                # "switched to the remaining account" from "that was the last
+                # one". Ask, rather than assume, so this stays correct if the
+                # promotion rule ever changes.
+                remaining = _session_manager.get_session(session_id, update_access=False)
+                if remaining:
+                    logger.info(f"Signed one account out of session {session_id[:8]}...")
+                    # The session lives on, so the cookie MUST survive — clearing
+                    # it here would strand the remaining accounts in Redis and
+                    # log the user out anyway, which is the bug this branch
+                    # exists to prevent.
+                    return {
+                        "success": True,
+                        "scope": "current",
+                        "session_ended": False,
+                        "active_user_id": remaining.get("user_id") or remaining.get("sub"),
+                        "message": "Signed out of the active account",
+                    }
+            else:
+                logger.warning(
+                    f"Falling back to a full sign-out for session {session_id[:8]}...: "
+                    "the active account could not be removed"
+                )
+
+    # Full sign-out: `scope="all"`, the last account, or the fail-safe above.
+    _session_manager.delete_session(session_id)
+    logger.info(f"User logged out: session={session_id[:8]}...")
+    response.delete_cookie(key="kagura_session", path="/")
+
+    return {
+        "success": True,
+        "scope": scope,
+        "session_ended": True,
+        "message": "Logged out successfully",
+    }
 
 
 class AccountSwitchRequest(BaseModel):
@@ -1454,8 +1541,18 @@ async def github_callback(
 
         db_user_id = user_info["sub"]
 
+        # #1488: append when this flow was started as "add another account";
+        # otherwise mint a fresh one. See the Google callback for why the intent
+        # is read BEFORE the #114 invalidation, and why an unusable intent
+        # refuses instead of falling back to a replacing login.
+        intent, add_to_session = _take_add_account_intent(state, request)
+        if intent == "unusable":
+            return _oauth_error_redirect("github", "add_account_failed")
+
         # 5. Create session using GitHub sub as user_id
-        deleted_count = _session_manager.delete_user_sessions(db_user_id)
+        deleted_count = _session_manager.delete_user_sessions(
+            db_user_id, exclude_session_id=add_to_session
+        )
         if deleted_count > 0:
             logger.info(f"Invalidated {deleted_count} old session(s) for {user_info['email']}")
 
@@ -1467,12 +1564,6 @@ async def github_callback(
             "picture": user_info.get("picture"),
             "role": role.value,
         }
-        # #1488: append when this flow was started as "add another account";
-        # otherwise mint a fresh one. See the Google callback for why an
-        # unusable intent refuses instead of falling back to a replacing login.
-        intent, add_to_session = _take_add_account_intent(state, request)
-        if intent == "unusable":
-            return _oauth_error_redirect("github", "add_account_failed")
         if intent == "add" and add_to_session:
             if not _session_manager.add_account(add_to_session, session_data):
                 logger.warning("add_account_write_failed")
