@@ -15,6 +15,7 @@ import {
   getAuthUrl,
   getGitHubAuthUrl,
   loginWithPassword,
+  logout,
   verifyMfa,
 } from "./auth";
 
@@ -114,5 +115,54 @@ describe("verifyMfa — return_to encoding delegates to returnToParam (smoke)", 
       "/api/v1/auth/mfa/verify?return_to=%2Ffoo%3Fbar%3Dbaz",
       { mfa_session_token: "session-token", totp_code: "123456" },
     );
+  });
+});
+
+describe("logout — scope (#1488 Phase 4)", () => {
+  it("defaults to ending the whole session", async () => {
+    // Callers written before multi-account existed call logout() bare. If this
+    // ever defaulted to "current" they would silently start leaving accounts
+    // signed in — a security-relevant change with no visible symptom.
+    mockApiClientPost.mockResolvedValue({ success: true, session_ended: true });
+    await logout();
+    expect(mockApiClientPost).toHaveBeenCalledWith(
+      "/api/v1/auth/logout?scope=all",
+    );
+  });
+
+  it("sends the requested scope", async () => {
+    mockApiClientPost.mockResolvedValue({ success: true, session_ended: false });
+    await logout("current");
+    expect(mockApiClientPost).toHaveBeenCalledWith(
+      "/api/v1/auth/logout?scope=current",
+    );
+  });
+
+  it("reports a surviving session so the caller reloads instead of leaving", async () => {
+    mockApiClientPost.mockResolvedValue({
+      success: true,
+      session_ended: false,
+      active_user_id: "bob",
+    });
+    await expect(logout("current")).resolves.toEqual({
+      session_ended: false,
+      active_user_id: "bob",
+    });
+  });
+
+  it("reads a pre-#1488 response as a full sign-out", async () => {
+    // During a blue/green rollout the old backend answers `{success: true}`
+    // with no `session_ended`. It only ever ended the whole session, so `true`
+    // describes what happened — not a blind default.
+    mockApiClientPost.mockResolvedValue({ success: true });
+    await expect(logout()).resolves.toEqual({
+      session_ended: true,
+      active_user_id: null,
+    });
+  });
+
+  it("propagates a failure rather than reporting a sign-out that did not happen", async () => {
+    mockApiClientPost.mockRejectedValue(new Error("network"));
+    await expect(logout("all")).rejects.toThrow("network");
   });
 });

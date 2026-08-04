@@ -19,6 +19,8 @@ the OAuth round trip around it is already covered by the callback suites.
 
 from __future__ import annotations
 
+import ast
+
 import pytest
 
 from api.routes import auth as auth_routes
@@ -158,3 +160,93 @@ class TestWiring:
             src = inspect.getsource(fn)
             assert 'intent == "unusable"' in src, fn.__name__
             assert "add_account_failed" in src, fn.__name__
+
+
+class TestTheInvalidationCannotEatTheSessionItIsAddingTo:
+    """Composition pin for the ordering defect (#1488 Phase 4 fix).
+
+    The behaviour lives in `SessionManager.delete_user_sessions`'s exclusion
+    and is covered there, exhaustively and by mutation, in
+    tests/auth/test_session_container.py::TestAddingAnAccountMustNotDestroyItsOwnSession.
+    What THAT cannot see is whether the callbacks actually pass the exclusion,
+    and whether they learn the session id early enough to have one to pass.
+
+    Pinned by source ORDER rather than substring presence. The bug was not a
+    missing call — every symbol involved was already there and the grep-style
+    assertions above all passed while the flow was broken. It was that
+    `delete_user_sessions` ran BEFORE `_take_add_account_intent`, so the id to
+    spare was not known yet. Comparing positions is the smallest assertion that
+    fails on the real regression.
+
+    Following this repo's existing convention for the OAuth callbacks (see
+    tests/api/test_oauth_callback_safe_redirect.py): they depend on Authlib, the
+    OAuth2 manager, a live DB and Redis, and there is no full-callback
+    integration fixture to model from.
+
+    Measured on the AST, not the text. The first text-search version of this
+    class failed against CORRECT code, because the first textual occurrence of
+    `delete_user_sessions` in the fixed callback is inside the comment
+    explaining the fix. An assertion a prose edit can break is not measuring
+    the code.
+    """
+
+    @staticmethod
+    def _calls(fn) -> dict[str, list[ast.Call]]:
+        """Every call in ``fn``, grouped by the name being called."""
+        import inspect
+        import textwrap
+
+        tree = ast.parse(textwrap.dedent(inspect.getsource(fn)))
+        found: dict[str, list[ast.Call]] = {}
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.Call):
+                continue
+            func = node.func
+            name = (
+                func.attr
+                if isinstance(func, ast.Attribute)
+                else func.id
+                if isinstance(func, ast.Name)
+                else None
+            )
+            if name:
+                found.setdefault(name, []).append(node)
+        return found
+
+    @pytest.mark.parametrize("fn_name", ["google_callback", "github_callback"])
+    def test_the_intent_is_read_before_the_invalidation(self, fn_name):
+        fn = getattr(auth_routes, fn_name)
+        calls = self._calls(fn)
+        intent_at = min(c.lineno for c in calls["_take_add_account_intent"])
+        invalidate_at = min(c.lineno for c in calls["delete_user_sessions"])
+        assert intent_at < invalidate_at, (
+            f"{fn_name}: delete_user_sessions runs before the add-account intent "
+            "is known, so it cannot be told which session to spare — re-adding an "
+            "already-signed-in account destroys the whole container. See #1488."
+        )
+
+    @pytest.mark.parametrize("fn_name", ["google_callback", "github_callback"])
+    def test_the_invalidation_is_told_what_to_spare(self, fn_name):
+        fn = getattr(auth_routes, fn_name)
+        for call in self._calls(fn)["delete_user_sessions"]:
+            kwargs = {kw.arg for kw in call.keywords}
+            assert "exclude_session_id" in kwargs, (
+                f"{fn_name}: delete_user_sessions is called without "
+                "exclude_session_id; an add-account login will delete the "
+                "session it is appending to."
+            )
+
+    @pytest.mark.parametrize("fn_name", ["google_callback", "github_callback"])
+    def test_an_unusable_intent_refuses_before_anything_is_deleted(self, fn_name):
+        """Order matters here too: refusing after the delete would sign the user
+        out on the way to reporting that it could not add an account."""
+        fn = getattr(auth_routes, fn_name)
+        calls = self._calls(fn)
+        refusals = [
+            c.lineno
+            for c in calls.get("_oauth_error_redirect", [])
+            if any(isinstance(a, ast.Constant) and a.value == "add_account_failed" for a in c.args)
+        ]
+        assert refusals, f"{fn_name}: no add_account_failed refusal found"
+        invalidate_at = min(c.lineno for c in calls["delete_user_sessions"])
+        assert min(refusals) < invalidate_at, fn_name

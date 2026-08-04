@@ -566,17 +566,27 @@ export default function ContextsPage() {
         }
       />
 
-      {/* Quota Warning (Issue #188) - Below header */}
+      {/* Quota Warning (Issue #188) - Below header.
+
+          #1488 Phase 4: the GATE was widened in #1487 from "free plan and one
+          context" to "any plan at the cap the server sent", but this banner
+          kept asserting the old rule verbatim — so a Pro workspace at 20/20
+          was told "Free plan allows 1 context. Upgrade to Basic or Pro", which
+          is false three ways and is the same misleading-explanation failure
+          #1487 was filed for. State the plan and the cap actually in force. */}
       {isQuotaReached && (
         <div className="mb-6 text-sm text-yellow-600 dark:text-yellow-400 bg-yellow-50 dark:bg-yellow-900/20 border border-yellow-200 dark:border-yellow-800 rounded-lg p-3">
-          ⚠️ {t("quotaWarning")}{" "}
+          ⚠️{" "}
+          {t("quotaReachedDetail", {
+            plan: currentWorkspace?.plan_name ?? "current",
+            limit: maxContexts ?? 0,
+          })}{" "}
           <a
             href="/workspace/settings/plan"
             className="underline hover:text-yellow-700 dark:hover:text-yellow-300 font-medium"
           >
-            {t("upgradePrompt")}
-          </a>{" "}
-          {t("upgradeToCreateMore")}
+            {t("quotaReachedPlansLink")}
+          </a>
         </div>
       )}
 
@@ -1009,7 +1019,18 @@ export default function ContextsPage() {
                   <Button
                     size="sm"
                     className="bg-blue-600 hover:bg-blue-700 text-white"
-                    onClick={() => setCreateDialogOpen(true)}
+                    // Same quota routing as the amber branch above and the
+                    // header control. "No contexts visible" does not mean "no
+                    // contexts exist": the cap counts the workspace's contexts,
+                    // and a member can see zero of them while every slot is
+                    // taken by other people's private ones. Without this the
+                    // page renders the quota banner AND an enabled Create in
+                    // the same view, and the create fails at the server.
+                    onClick={() =>
+                      isQuotaReached
+                        ? setQuotaDialogOpen(true)
+                        : setCreateDialogOpen(true)
+                    }
                   >
                     <Plus className="h-4 w-4 mr-2" />
                     {t("create")}

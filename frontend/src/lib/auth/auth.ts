@@ -125,12 +125,48 @@ export async function getCurrentUser(): Promise<User | null> {
 }
 
 /**
- * Logout current user
- * Clears session on backend
+ * Which sign-out the user asked for (#1488 Phase 4).
+ *
+ * - `all` — end the browser session; every signed-in account goes.
+ * - `current` — sign out only the active account, leaving the others.
  */
-export async function logout(): Promise<void> {
+export type LogoutScope = "current" | "all";
+
+export interface LogoutResult {
+  /**
+   * False means another account is now active and the page must be reloaded
+   * as them; true means there is no session left, so go to /login.
+   *
+   * Absent on a backend that predates #1488 Phase 4 — `logout()` fills in
+   * `true`, which is what that backend always did.
+   */
+  session_ended: boolean;
+  active_user_id?: string | null;
+}
+
+/**
+ * Sign out of the active account, or of the whole session.
+ *
+ * Defaults to `all`, so callers written before multi-account existed keep
+ * their exact previous behaviour without being touched.
+ *
+ * The scope rides as a query param because `apiClient.post()` sends no body
+ * when called without one; see the route's docstring for the full reasoning.
+ */
+export async function logout(
+  scope: LogoutScope = "all",
+): Promise<LogoutResult> {
   try {
-    await apiClient.post("/api/v1/auth/logout");
+    const res = await apiClient.post<Partial<LogoutResult>>(
+      `/api/v1/auth/logout?scope=${scope}`,
+    );
+    // An older backend answers `{success: true}` with no `session_ended`. It
+    // only ever performed a full sign-out, so reading a missing field as
+    // `true` describes what actually happened rather than defaulting blindly.
+    return {
+      session_ended: res?.session_ended ?? true,
+      active_user_id: res?.active_user_id ?? null,
+    };
   } catch (error) {
     console.error("Logout failed:", error);
     throw error;
