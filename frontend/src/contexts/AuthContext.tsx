@@ -17,14 +17,17 @@ import { useRouter } from "next/navigation";
 import {
   getCurrentUser,
   logout as logoutApi,
+  type LogoutScope,
   type User,
 } from "@/lib/auth/auth";
+import { clearIdentityScopedClientState } from "@/lib/auth/clearClientState";
 
 interface AuthContextType {
   user: User | null;
   isLoading: boolean;
   isAuthenticated: boolean;
-  logout: () => Promise<void>;
+  /** Defaults to "all" — see the implementation for the two outcomes. */
+  logout: (scope?: LogoutScope) => Promise<void>;
   refetchUser: () => Promise<void>;
 }
 
@@ -72,18 +75,46 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     fetchUser();
   }, []);
 
-  const logout = async () => {
-    // Push to /login directly instead of '/' to bypass the RootPage redirect.
-    // RootPage's synchronous Server Component redirect interacts badly with
-    // Next.js 16 Turbopack perf instrumentation, raising a TypeError on
-    // `performance.measure('​RootPage', ...)` with a negative time stamp
-    // when the navigation happens via client-side router.push.
+  /**
+   * Sign out — of the active account, or of every account (#1488 Phase 4).
+   *
+   * Defaults to "all", so the callers that predate multi-account behave
+   * exactly as they did.
+   *
+   * Two outcomes, and they need different navigations:
+   *
+   * - the session ENDED → there is no identity left, so go to /login;
+   * - the session SURVIVED (another account is now active) → a hard reload,
+   *   for the same reason switching accounts does one (see
+   *   `useAccountSwitcher.switchTo`): the active workspace is a per-user
+   *   column and several providers cache per-user data, so a client-side
+   *   route change would leave the departed account's workspace and contexts
+   *   on screen under the new identity.
+   *
+   * Push to /login directly instead of '/' to bypass the RootPage redirect.
+   * RootPage's synchronous Server Component redirect interacts badly with
+   * Next.js 16 Turbopack perf instrumentation, raising a TypeError on
+   * `performance.measure('​RootPage', ...)` with a negative time stamp
+   * when the navigation happens via client-side router.push.
+   */
+  const logout = async (scope: LogoutScope = "all") => {
     try {
-      await logoutApi();
+      const result = await logoutApi(scope);
+      // Both outcomes change who the cached data belongs to.
+      clearIdentityScopedClientState();
+
+      if (!result.session_ended) {
+        window.location.assign("/");
+        return;
+      }
       setUser(null);
       router.push("/login");
     } catch (error) {
       console.error("Logout failed:", error);
+      // Conservative on failure: never leave the UI looking signed in when the
+      // user asked to leave. If the session is in fact still alive, /login
+      // bounces back — self-correcting, unlike a stale authenticated view.
+      clearIdentityScopedClientState();
       setUser(null);
       router.push("/login");
     }
