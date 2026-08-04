@@ -155,6 +155,8 @@
     "ownerOnly": "オーナー",
     "profileSettings": "プロフィール設定",
     "logOut": "ログアウト",
+    "signOutThisAccount": "{name} からサインアウト",
+    "signOutAllAccounts": "すべてのアカウントからサインアウト",
     "toggleMenu": "メニュー切替",
     "signupGate": "サインアップゲート",
     "viewDetails": "詳細を見る",
@@ -169,6 +171,8 @@
     "storage": "ストレージ",
     "signedInAccounts": "サインイン中",
     "addAnotherAccount": "別のアカウントを追加",
+    "addWithGoogle": "Google アカウントを追加",
+    "addWithGitHub": "GitHub アカウントを追加",
     "activeAccount": "使用中のアカウント"
   },
   "storage": {
@@ -1481,6 +1485,8 @@
     "invalidName": "コンテキスト名は小文字、数字、ハイフン、アンダースコアのみ使用できます",
     "quotaReached": "プランのコンテキスト上限に達しました",
     "quotaWarning": "無料プランでは1つのコンテキストまで利用できます。",
+    "quotaReachedDetail": "コンテキストの上限に達しました — {plan} プランではこのワークスペースで {limit} 個までです。",
+    "quotaReachedPlansLink": "プランを見る",
     "upgradePrompt": "BasicまたはProにアップグレード",
     "upgradeToCreateMore": "して、より多くのコンテキストを作成できます。",
     "contextLimitReached": "コンテキスト上限に達しました。{plan}プランではワークスペースごとに{limit}個のコンテキストまで利用できます。複数のコンテキストを使用するにはBasicまたはProプランにアップグレードしてください。",

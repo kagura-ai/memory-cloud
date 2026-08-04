@@ -13,24 +13,40 @@
 import { useCallback, useState } from "react";
 
 import { buildOAuthRedirect } from "@/lib/auth/buildOAuthRedirect";
+import { clearIdentityScopedClientState } from "@/lib/auth/clearClientState";
+import { getAuthConfig } from "@/lib/auth/auth";
 import {
   listAccounts,
   switchAccount,
   type SignedInAccount,
 } from "@/lib/api/accounts";
 
+/** OAuth providers a second account can be added with. */
+export type AddableProvider = "google" | "github";
+
 export interface UseAccountSwitcher {
   accounts: SignedInAccount[];
+  /**
+   * Which providers this deployment can actually add an account with.
+   *
+   * Empty until read, and empty on a deployment with no OAuth configured —
+   * the menu must offer nothing rather than an item that navigates the whole
+   * tab onto a raw 500 JSON page.
+   */
+  addableProviders: AddableProvider[];
   /** Non-null while a switch is in flight — disables the rows. */
   switchingTo: string | null;
   /** Re-read the list. Call on every menu open. */
   refresh: () => Promise<void>;
   switchTo: (userId: string) => Promise<void>;
-  addAccount: () => void;
+  addAccount: (provider: AddableProvider) => void;
 }
 
 export function useAccountSwitcher(): UseAccountSwitcher {
   const [accounts, setAccounts] = useState<SignedInAccount[]>([]);
+  const [addableProviders, setAddableProviders] = useState<AddableProvider[]>(
+    [],
+  );
   const [switchingTo, setSwitchingTo] = useState<string | null>(null);
 
   const refresh = useCallback(async () => {
@@ -41,6 +57,20 @@ export function useAccountSwitcher(): UseAccountSwitcher {
       // exactly as it did before this feature — degraded, never broken.
       setAccounts([]);
     }
+    try {
+      // Read alongside the account list rather than assuming Google. The OSS
+      // default is password login with no OAuth client configured at all, and
+      // the login endpoint answers 500 in that case — as a full-page
+      // navigation, that throws the user out of the SPA onto raw JSON.
+      const config = await getAuthConfig();
+      const available: AddableProvider[] = [];
+      if (config.google_oauth_enabled) available.push("google");
+      if (config.github_oauth_enabled) available.push("github");
+      setAddableProviders(available);
+    } catch {
+      // Offer nothing rather than something that might 500.
+      setAddableProviders([]);
+    }
   }, []);
 
   const switchTo = useCallback(
@@ -48,6 +78,11 @@ export function useAccountSwitcher(): UseAccountSwitcher {
       setSwitchingTo(userId);
       try {
         await switchAccount(userId);
+        // The reload below resets React state, but not localStorage — keys
+        // written without a user id (the workspace preselect, onboarding
+        // progress) would otherwise follow the previous account into this one
+        // (#1488 Phase 4).
+        clearIdentityScopedClientState();
         // Hard navigation, deliberately. The active workspace is a per-user
         // column and several providers cache per-user data, so a client-side
         // refresh would leave the previous account's workspace and contexts on
@@ -64,7 +99,12 @@ export function useAccountSwitcher(): UseAccountSwitcher {
     [refresh],
   );
 
-  const addAccount = useCallback(() => {
+  const addAccount = useCallback((provider: AddableProvider) => {
+    // The identity is about to change, so the same client state a switch or a
+    // sign-out drops has to go here too — otherwise the workspace preselect and
+    // onboarding progress of the account we are leaving greet a brand-new one.
+    clearIdentityScopedClientState();
+
     // Build through the shared helper, not by concatenation. It guards three
     // traps this flow has no reason to re-learn: NEXT_PUBLIC_API_URL may
     // already carry an `/api/v1` suffix (yielding `/api/v1/api/v1/...`), the
@@ -74,10 +114,17 @@ export function useAccountSwitcher(): UseAccountSwitcher {
     // `add_account=1` is appended after: it makes the OAuth callback APPEND to
     // this session instead of replacing it. Without it there is never a second
     // account to switch to.
-    const url = new URL(buildOAuthRedirect("google", "/"));
+    const url = new URL(buildOAuthRedirect(provider, "/"));
     url.searchParams.set("add_account", "1");
     window.location.assign(url.toString());
   }, []);
 
-  return { accounts, switchingTo, refresh, switchTo, addAccount };
+  return {
+    accounts,
+    addableProviders,
+    switchingTo,
+    refresh,
+    switchTo,
+    addAccount,
+  };
 }

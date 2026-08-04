@@ -1,4 +1,4 @@
-import { render, screen, within } from "@testing-library/react";
+import { render, screen, within, act } from "@testing-library/react";
 import { describe, it, expect, vi, beforeEach } from "vitest";
 
 // Hoisted so the vi.mock factory below can reference it (vi.mock is hoisted).
@@ -209,4 +209,45 @@ describe("Sidebar", () => {
     // useSystemFeatures.test.tsx, so this assertion only guards the version path.
     expect(mockSystemInfoGet).not.toHaveBeenCalled();
   });
+});
+
+describe("the sidebar subtree survives a state change (#1488 Phase 4)", () => {
+  /**
+   * Regression guard for a defect that made the Phase 3 account switcher
+   * unreachable in production.
+   *
+   * `SidebarContent` was a component defined INSIDE `Sidebar`. Every render
+   * produced a new function, and a new function is a new component type to
+   * React, so the whole subtree unmounted and remounted on any state change.
+   * That discards state React does not own — including the Radix
+   * `DropdownMenu`'s uncontrolled open flag, so the user menu closed itself.
+   *
+   * Opening that menu cannot be driven under happy-dom in this repo, so this
+   * asserts the ROOT CAUSE instead of the symptom: after a state change, the
+   * DOM nodes must be the same objects. A remount replaces them.
+   *
+   * The trigger here is the cross-tab `storage` listener (`setCollapsedSections`)
+   * because it is deterministic and needs no open menu. Any `Sidebar` state
+   * change would do — `setAccounts` from `refreshAccounts()` is the one that
+   * actually fired on every menu open.
+   */
+  it("keeps the same DOM nodes when Sidebar state updates", () => {
+    render(<Sidebar />);
+    const before = screen.getByTestId("kagura-logo");
+    const navBefore = before.closest("aside");
+
+    act(() => {
+      window.dispatchEvent(
+        new StorageEvent("storage", {
+          key: "sidebar-collapsed-sections",
+          newValue: JSON.stringify({ admin: true }),
+        }),
+      );
+    });
+
+    const after = screen.getByTestId("kagura-logo");
+    expect(after).toBe(before);
+    expect(after.closest("aside")).toBe(navBefore);
+  });
+
 });

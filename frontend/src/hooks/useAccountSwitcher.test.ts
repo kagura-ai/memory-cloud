@@ -11,10 +11,23 @@ import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 
 const mockListAccounts = vi.hoisted(() => vi.fn());
 const mockSwitchAccount = vi.hoisted(() => vi.fn());
+const mockGetAuthConfig = vi.hoisted(() => vi.fn());
+const mockClearState = vi.hoisted(() => vi.fn());
 
 vi.mock("@/lib/api/accounts", () => ({
   listAccounts: (...a: unknown[]) => mockListAccounts(...a),
   switchAccount: (...a: unknown[]) => mockSwitchAccount(...a),
+}));
+
+vi.mock("@/lib/auth/auth", async () => ({
+  ...(await vi.importActual<typeof import("@/lib/auth/auth")>(
+    "@/lib/auth/auth",
+  )),
+  getAuthConfig: () => mockGetAuthConfig(),
+}));
+
+vi.mock("@/lib/auth/clearClientState", () => ({
+  clearIdentityScopedClientState: () => mockClearState(),
 }));
 
 import { useAccountSwitcher } from "./useAccountSwitcher";
@@ -44,6 +57,11 @@ beforeEach(() => {
   vi.clearAllMocks();
   mockListAccounts.mockResolvedValue([ALICE, BOB]);
   mockSwitchAccount.mockResolvedValue(undefined);
+  mockGetAuthConfig.mockResolvedValue({
+    password_login_enabled: false,
+    google_oauth_enabled: true,
+    github_oauth_enabled: false,
+  });
   assignSpy = vi.fn();
   Object.defineProperty(window, "location", {
     configurable: true,
@@ -139,7 +157,7 @@ describe("useAccountSwitcher", () => {
     // instead of string building.
     vi.stubEnv("NEXT_PUBLIC_API_URL", "https://api.example.com/api/v1");
     const { result } = renderHook(() => useAccountSwitcher());
-    act(() => result.current.addAccount());
+    act(() => result.current.addAccount("google"));
     const url = assignSpy.mock.calls[0][0] as string;
     expect(url).not.toContain("/api/v1/api/v1");
     expect(url).toContain("https://api.example.com/api/v1/auth/google/login");
@@ -150,10 +168,91 @@ describe("useAccountSwitcher", () => {
     // Without add_account=1 the callback REPLACES the session and there is
     // never a second account to switch to.
     const { result } = renderHook(() => useAccountSwitcher());
-    act(() => result.current.addAccount());
+    act(() => result.current.addAccount("google"));
     const url = assignSpy.mock.calls[0][0] as string;
     expect(url).toContain("add_account=1");
     expect(url).toContain("/api/v1/auth/google/login");
     expect(url).toContain(encodeURIComponent("https://app.test/"));
+  });
+  it("offers only the providers this deployment actually has", async () => {
+    // The whole point: a full-page navigation to an unconfigured provider's
+    // login endpoint answers 500 with raw JSON and throws the user out of the
+    // SPA. The OSS default is password login with NO OAuth configured.
+    mockGetAuthConfig.mockResolvedValue({
+      password_login_enabled: true,
+      google_oauth_enabled: false,
+      github_oauth_enabled: false,
+    });
+    const { result } = renderHook(() => useAccountSwitcher());
+    await act(() => result.current.refresh());
+    expect(result.current.addableProviders).toEqual([]);
+  });
+
+  it("offers github when only github is configured", async () => {
+    mockGetAuthConfig.mockResolvedValue({
+      password_login_enabled: false,
+      google_oauth_enabled: false,
+      github_oauth_enabled: true,
+    });
+    const { result } = renderHook(() => useAccountSwitcher());
+    await act(() => result.current.refresh());
+    expect(result.current.addableProviders).toEqual(["github"]);
+  });
+
+  it("offers both when both are configured", async () => {
+    mockGetAuthConfig.mockResolvedValue({
+      password_login_enabled: false,
+      google_oauth_enabled: true,
+      github_oauth_enabled: true,
+    });
+    const { result } = renderHook(() => useAccountSwitcher());
+    await act(() => result.current.refresh());
+    expect(result.current.addableProviders).toEqual(["google", "github"]);
+  });
+
+  it("offers nothing when the config cannot be read", async () => {
+    // Fail closed: an item that might 500 is worse than no item.
+    mockGetAuthConfig.mockRejectedValue(new Error("boom"));
+    const { result } = renderHook(() => useAccountSwitcher());
+    await act(() => result.current.refresh());
+    expect(result.current.addableProviders).toEqual([]);
+  });
+
+  it("a failed provider read does not blank the account list", async () => {
+    // The two reads are independent; one failing must not take the other down.
+    mockGetAuthConfig.mockRejectedValue(new Error("boom"));
+    const { result } = renderHook(() => useAccountSwitcher());
+    await act(() => result.current.refresh());
+    expect(result.current.accounts).toEqual([ALICE, BOB]);
+  });
+
+  it("builds a github URL when github is chosen", async () => {
+    const { result } = renderHook(() => useAccountSwitcher());
+    act(() => result.current.addAccount("github"));
+    const url = assignSpy.mock.calls[0][0] as string;
+    expect(url).toContain("/api/v1/auth/github/login");
+    expect(url).toContain("add_account=1");
+  });
+
+  it("clears identity-scoped client state before leaving to add an account", async () => {
+    // The account arriving next is a DIFFERENT identity, so the workspace
+    // preselect and onboarding progress of the current one must not greet it.
+    const { result } = renderHook(() => useAccountSwitcher());
+    act(() => result.current.addAccount("google"));
+    expect(mockClearState).toHaveBeenCalled();
+  });
+
+  it("clears identity-scoped client state on a switch", async () => {
+    const { result } = renderHook(() => useAccountSwitcher());
+    await act(() => result.current.switchTo("bob"));
+    expect(mockClearState).toHaveBeenCalled();
+  });
+
+  it("does NOT clear client state when the switch was rejected", async () => {
+    // Nothing changed identity, so nothing should be thrown away.
+    mockSwitchAccount.mockRejectedValueOnce(new Error("404"));
+    const { result } = renderHook(() => useAccountSwitcher());
+    await act(() => result.current.switchTo("bob"));
+    expect(mockClearState).not.toHaveBeenCalled();
   });
 });

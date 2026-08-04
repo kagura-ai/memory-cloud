@@ -29,6 +29,7 @@ import {
   Role,
   WorkspaceRole,
 } from "@/lib/auth/rbac";
+import type { LogoutScope } from "@/lib/auth/auth";
 import { getContexts } from "@/lib/api/contexts";
 import { listExternalAPIKeys } from "@/lib/api/external-keys";
 import { useAccountSwitcher } from "@/hooks/useAccountSwitcher";
@@ -486,6 +487,7 @@ export function Sidebar() {
   // the hook; this component only renders them.
   const {
     accounts,
+    addableProviders,
     switchingTo,
     refresh: refreshAccounts,
     switchTo: switchToAccount,
@@ -509,11 +511,29 @@ export function Sidebar() {
       });
   };
 
-  const handleLogout = async () => {
-    await logout();
+  // Defaults to "all" so every pre-#1488 call site is unchanged.
+  const handleLogout = async (scope: LogoutScope = "all") => {
+    await logout(scope);
   };
 
-  const SidebarContent = () => (
+  // An ELEMENT, not a component (#1488 Phase 4).
+  //
+  // This used to be `const SidebarContent = () => (...)` — a component defined
+  // inside `Sidebar`. Every render of `Sidebar` created a new function, and a
+  // new function is a new component TYPE to React, so the entire subtree was
+  // unmounted and remounted on any state change here. That destroys the state
+  // React does not own, which includes the Radix `DropdownMenu`'s uncontrolled
+  // open flag: the user menu closed itself.
+  //
+  // Latent before #1488 (the version fetch on first open did it once), the
+  // account switcher made it fire on EVERY open — `handleUserMenuOpenChange`
+  // calls `refreshAccounts()`, whose `setAccounts` re-renders `Sidebar` the
+  // moment GET /auth/accounts resolves, closing the menu ~200ms after it
+  // opened. The Phase 3 switcher was effectively unreachable.
+  //
+  // Holding the JSX in a variable fixes it at the root: an element is
+  // reconciled by position and type like any other child, so nothing remounts.
+  const sidebarContent = (
     <>
       {/* Kagura Logo (formerly in Header) */}
       <Link
@@ -931,13 +951,51 @@ export function Sidebar() {
                 </>
               )}
 
-              {/* Add another account */}
-              <DropdownMenuItem onClick={handleAddAccount}>
-                <UserPlus className="mr-2 h-4 w-4" />
-                <span>{t("addAnotherAccount")}</span>
-              </DropdownMenuItem>
-
-              <DropdownMenuSeparator />
+              {/* Add another account.
+                  Offered only for providers this deployment actually has. The
+                  item is a full-page navigation to the API's OAuth login, and
+                  on an instance without that provider configured the endpoint
+                  answers 500 with raw JSON — which would throw the user out of
+                  the SPA onto an error page with only the back button to
+                  recover. The OSS default is password login with no OAuth at
+                  all, so "assume Google" is wrong by default, not just at the
+                  edges. */}
+              {addableProviders.length === 1 && (
+                <>
+                  <DropdownMenuItem
+                    onClick={() => handleAddAccount(addableProviders[0])}
+                  >
+                    <UserPlus className="mr-2 h-4 w-4" />
+                    <span>{t("addAnotherAccount")}</span>
+                  </DropdownMenuItem>
+                  <DropdownMenuSeparator />
+                </>
+              )}
+              {addableProviders.length > 1 && (
+                <>
+                  <DropdownMenuSub>
+                    <DropdownMenuSubTrigger>
+                      <UserPlus className="mr-2 h-4 w-4" />
+                      <span>{t("addAnotherAccount")}</span>
+                    </DropdownMenuSubTrigger>
+                    <DropdownMenuSubContent>
+                      {addableProviders.map((provider) => (
+                        <DropdownMenuItem
+                          key={provider}
+                          onClick={() => handleAddAccount(provider)}
+                        >
+                          {t(
+                            provider === "google"
+                              ? "addWithGoogle"
+                              : "addWithGitHub",
+                          )}
+                        </DropdownMenuItem>
+                      ))}
+                    </DropdownMenuSubContent>
+                  </DropdownMenuSub>
+                  <DropdownMenuSeparator />
+                </>
+              )}
 
               {/* Profile Settings */}
               <DropdownMenuItem
@@ -1014,14 +1072,44 @@ export function Sidebar() {
 
               <DropdownMenuSeparator />
 
-              {/* Log Out */}
-              <DropdownMenuItem
-                onClick={handleLogout}
-                className="text-red-600 dark:text-red-400"
-              >
-                <LogOut className="mr-2 h-4 w-4" />
-                <span>{t("logOut")}</span>
-              </DropdownMenuItem>
+              {/* Sign out (#1488 Phase 4).
+                  With one account "log out" is unambiguous, so it stays a
+                  single item reading exactly as before. With more than one it
+                  splits, because the two acts differ: signing out of the
+                  active account leaves the others usable, while signing out of
+                  all ends the session. Offering only the wide one would evict
+                  accounts the user never mentioned; offering only the narrow
+                  one would leave them signed in on a shared machine. */}
+              {accounts.length > 1 ? (
+                <>
+                  <DropdownMenuItem
+                    onClick={() => handleLogout("current")}
+                    className="text-red-600 dark:text-red-400"
+                  >
+                    <LogOut className="mr-2 h-4 w-4 shrink-0" />
+                    <span className="truncate">
+                      {t("signOutThisAccount", {
+                        name: user.email || user.name,
+                      })}
+                    </span>
+                  </DropdownMenuItem>
+                  <DropdownMenuItem
+                    onClick={() => handleLogout("all")}
+                    className="text-red-600 dark:text-red-400"
+                  >
+                    <LogOut className="mr-2 h-4 w-4 shrink-0" />
+                    <span>{t("signOutAllAccounts")}</span>
+                  </DropdownMenuItem>
+                </>
+              ) : (
+                <DropdownMenuItem
+                  onClick={() => handleLogout("all")}
+                  className="text-red-600 dark:text-red-400"
+                >
+                  <LogOut className="mr-2 h-4 w-4" />
+                  <span>{t("logOut")}</span>
+                </DropdownMenuItem>
+              )}
             </DropdownMenuContent>
           </DropdownMenu>
         )}
@@ -1066,7 +1154,7 @@ export function Sidebar() {
           isOpen ? "translate-x-0" : "-translate-x-full md:translate-x-0",
         )}
       >
-        <SidebarContent />
+        {sidebarContent}
       </aside>
     </>
   );
