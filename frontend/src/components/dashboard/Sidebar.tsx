@@ -31,6 +31,7 @@ import {
 } from "@/lib/auth/rbac";
 import { getContexts } from "@/lib/api/contexts";
 import { listExternalAPIKeys } from "@/lib/api/external-keys";
+import { useAccountSwitcher } from "@/hooks/useAccountSwitcher";
 import { Avatar, AvatarFallback, AvatarImage } from "@/components/ui/avatar";
 import { KaguraLogo } from "@/components/icons/KaguraLogo";
 import {
@@ -71,6 +72,8 @@ import {
   ExternalLink,
   Plug,
   HardDrive,
+  UserPlus,
+  Check,
 } from "lucide-react";
 import { apiClient } from "@/lib/api/base";
 // Issue #246: ContextSelector removed - use /contexts link instead
@@ -479,8 +482,24 @@ export function Sidebar() {
   const [systemVersion, setSystemVersion] = useState<string | null>(null);
   const versionFetchedRef = useRef(false);
 
+  // Accounts signed in on THIS browser session (#1488). The decisions live in
+  // the hook; this component only renders them.
+  const {
+    accounts,
+    switchingTo,
+    refresh: refreshAccounts,
+    switchTo: switchToAccount,
+    addAccount: handleAddAccount,
+  } = useAccountSwitcher();
+
   const handleUserMenuOpenChange = (open: boolean) => {
-    if (!open || versionFetchedRef.current) return;
+    if (!open) return;
+
+    // Re-read on every open: another tab may have added or switched an
+    // account, and a stale list would offer a switch the server rejects.
+    void refreshAccounts();
+
+    if (versionFetchedRef.current) return;
     versionFetchedRef.current = true; // fetch at most once per session
     apiClient
       .get<{ version: string }>("/api/v1/system/info")
@@ -856,7 +875,70 @@ export function Sidebar() {
                 </div>
               </button>
             </DropdownMenuTrigger>
-            <DropdownMenuContent className="w-56" align="end" side="top">
+            <DropdownMenuContent className="w-64" align="end" side="top">
+              {/* Account switcher (#1488).
+                  Rows render only when this session actually holds more than
+                  one account — with a single account there is nothing to switch
+                  between and the trigger above already shows who you are, so
+                  the rows would be pure noise. "Add another account" is always
+                  offered, since that is how a second one gets here. */}
+              {accounts.length > 1 && (
+                <>
+                  <DropdownMenuLabel className="text-xs font-normal text-slate-500 dark:text-slate-400">
+                    {t("signedInAccounts")}
+                  </DropdownMenuLabel>
+                  {accounts.map((account) => (
+                    <DropdownMenuItem
+                      key={account.user_id}
+                      disabled={account.is_active || switchingTo !== null}
+                      onClick={() => {
+                        if (!account.is_active) {
+                          void switchToAccount(account.user_id);
+                        }
+                      }}
+                      className="gap-2"
+                    >
+                      <Avatar className="h-6 w-6 shrink-0">
+                        <AvatarImage
+                          src={account.picture ?? undefined}
+                          alt={account.name ?? ""}
+                        />
+                        <AvatarFallback className="text-[10px]">
+                          {(account.name ?? account.email ?? "?")
+                            .substring(0, 2)
+                            .toUpperCase()}
+                        </AvatarFallback>
+                      </Avatar>
+                      <div className="flex-1 overflow-hidden">
+                        <p className="truncate text-sm">
+                          {account.name ?? account.email}
+                        </p>
+                        {account.name && account.email && (
+                          <p className="truncate text-xs text-slate-500 dark:text-slate-400">
+                            {account.email}
+                          </p>
+                        )}
+                      </div>
+                      {account.is_active && (
+                        <Check
+                          className="h-4 w-4 shrink-0 text-brand-green-600"
+                          aria-label={t("activeAccount")}
+                        />
+                      )}
+                    </DropdownMenuItem>
+                  ))}
+                  <DropdownMenuSeparator />
+                </>
+              )}
+
+              {/* Add another account */}
+              <DropdownMenuItem onClick={handleAddAccount}>
+                <UserPlus className="mr-2 h-4 w-4" />
+                <span>{t("addAnotherAccount")}</span>
+              </DropdownMenuItem>
+
+              <DropdownMenuSeparator />
+
               {/* Profile Settings */}
               <DropdownMenuItem
                 onClick={() => {
