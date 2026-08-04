@@ -76,6 +76,7 @@ def client(monkeypatch):
     app.dependency_overrides[require_session_auth] = lambda: dict(ALICE)
 
     c = TestClient(app)
+    c.app = app  # type: ignore[attr-defined]
     c.manager = manager  # type: ignore[attr-defined]
     c.fake = fake  # type: ignore[attr-defined]
     return c
@@ -98,15 +99,24 @@ class TestListAccounts:
 
     def test_returns_display_fields_only(self, client):
         """A menu must not become a data-leak surface."""
-        client.manager.create_session({**ALICE, "role": "admin", "secret": "x"})
         sid = client.manager.create_session({**ALICE, "role": "admin", "secret": "x"})
         client.cookies.set("kagura_session", sid)
         account = client.get("/auth/accounts").json()["accounts"][0]
         assert set(account) == {"user_id", "email", "name", "picture", "is_active"}
 
-    def test_no_cookie_yields_no_accounts(self, client):
+    def test_unauthenticated_is_401_not_an_empty_list(self, client):
+        """Exercises the REAL dependency, not the override.
+
+        `SessionUser` -> require_session_auth -> get_current_user reads the
+        session the middleware resolved from the cookie, so an anonymous caller
+        never reaches the handler. A test that overrides that dependency and
+        then asserts `{"accounts": []}` is asserting something production cannot
+        produce — the override is the only reason it passes. Clear it so the
+        assertion means what it says.
+        """
+        client.app.dependency_overrides.clear()
         client.cookies.clear()
-        assert client.get("/auth/accounts").json() == {"accounts": []}
+        assert client.get("/auth/accounts").status_code == 401
 
 
 class TestSwitch:
@@ -137,6 +147,8 @@ class TestSwitch:
         assert client.post("/auth/accounts/switch", json={"user_id": "bob"}).status_code == 404
 
     def test_requires_a_session_cookie(self, client):
+        """Also through the real dependency — see the note on the GET case."""
+        client.app.dependency_overrides.clear()
         client.cookies.clear()
         assert client.post("/auth/accounts/switch", json={"user_id": "alice"}).status_code == 401
 

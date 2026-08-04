@@ -955,9 +955,14 @@ async def list_signed_in_accounts(request: Request, user: SessionUser):
     if not _session_manager:
         raise HTTPException(status_code=500, detail="Session manager not initialized")
 
+    # `SessionUser` (require_session_auth -> get_current_user -> the cookie the
+    # middleware resolved) has already established that a session exists, so an
+    # absent cookie here is a contradiction rather than an anonymous caller.
+    # Answer 401 as the dependency itself would, instead of an empty list that
+    # would read as "signed in with no accounts".
     session_id = request.cookies.get("kagura_session")
     if not session_id:
-        return {"accounts": []}
+        raise HTTPException(status_code=401, detail="Not authenticated")
 
     accounts = _session_manager.list_accounts(session_id)
     # Never ship anything but display fields — this is read by a menu.
