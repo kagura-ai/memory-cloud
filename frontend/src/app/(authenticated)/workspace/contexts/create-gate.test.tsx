@@ -44,8 +44,15 @@ vi.mock("next/navigation", () => ({
   usePathname: () => "/workspace/contexts",
 }));
 
+// Echoes interpolation vars, not just the key. The quota banner's whole bug
+// was that it stated a plan and a limit that were not the workspace's own, and
+// a mock that drops vars cannot see the difference (#1488 Phase 4).
 vi.mock("next-intl", () => ({
-  useTranslations: (_ns?: string) => (k: string) => k,
+  useTranslations:
+    (_ns?: string) => (k: string, vars?: Record<string, unknown>) =>
+      vars && Object.keys(vars).length > 0
+        ? `${k}:${JSON.stringify(vars)}`
+        : k,
   useLocale: () => "en",
 }));
 
@@ -172,14 +179,14 @@ describe("New Context control", () => {
     // is the whole of #1487.
     setup({ plan: "pro", maxContexts: 20, contextCount: 20, hasKey: true });
     render(<ContextsPage />);
-    expect(await screen.findByText(/quotaWarning/)).toBeInTheDocument();
+    expect(await screen.findByText(/quotaReachedDetail/)).toBeInTheDocument();
   });
 
   it("does not warn about the cap when there is room", async () => {
     setup({ plan: "pro", maxContexts: 20, contextCount: 3, hasKey: true });
     render(<ContextsPage />);
     await waitFor(async () => expect(await newContextButton()).toBeTruthy());
-    expect(screen.queryByText(/quotaWarning/)).not.toBeInTheDocument();
+    expect(screen.queryByText(/quotaReachedDetail/)).not.toBeInTheDocument();
   });
 
   it("is enabled for a free workspace whose cap was raised by config", async () => {
@@ -205,7 +212,7 @@ describe("New Context control", () => {
     render(<ContextsPage />);
     // Seeing 1 of 20 must still register as "at the cap" — otherwise the UI
     // promises a create the server rejects.
-    expect(await screen.findByText(/quotaWarning/)).toBeInTheDocument();
+    expect(await screen.findByText(/quotaReachedDetail/)).toBeInTheDocument();
   });
 
   it("does not block when the server did not send a cap", async () => {
@@ -214,5 +221,28 @@ describe("New Context control", () => {
     await waitFor(async () =>
       expect(await newContextButton()).not.toBeDisabled(),
     );
+  });
+
+  it("names the workspace's OWN plan and cap, not the free-plan rule", async () => {
+    // The defect this replaces: the gate was widened in #1487 to "any plan at
+    // the server-sent cap", but the banner kept asserting the rule it no longer
+    // used — a Pro workspace at 20/20 was told "Free plan allows 1 context.
+    // Upgrade to Basic or Pro". Every clause of that was false, and telling a
+    // paying user a wrong reason is the same failure #1487 was filed for.
+    setup({ plan: "pro", maxContexts: 20, contextCount: 20, hasKey: true });
+    render(<ContextsPage />);
+
+    const banner = await screen.findByText(/quotaReachedDetail/);
+    expect(banner.textContent).toContain('"plan":"pro"');
+    expect(banner.textContent).toContain('"limit":20');
+  });
+
+  it("states a basic workspace's own cap too", async () => {
+    setup({ plan: "basic", maxContexts: 3, contextCount: 3, hasKey: true });
+    render(<ContextsPage />);
+
+    const banner = await screen.findByText(/quotaReachedDetail/);
+    expect(banner.textContent).toContain('"plan":"basic"');
+    expect(banner.textContent).toContain('"limit":3');
   });
 });
