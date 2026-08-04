@@ -494,8 +494,10 @@ def _get_enabled_providers() -> list[ProviderInfo]:
 
 @google_router.get("/login")
 async def google_login(
+    request: Request,
     redirect_uri: str | None = None,
     return_to: str | None = None,
+    add_account: bool = False,
 ):
     """Initiate Google OAuth2 login flow.
 
@@ -535,6 +537,14 @@ async def google_login(
         # Issue #102: Store return_to for later redirect after callback
         if return_to:
             _session_manager._redis.setex(f"oauth2_return_to:{state}", 300, return_to)
+
+        # #1488: "add another account" — remember WHICH session this flow may
+        # append to. Only meaningful when the caller already has one; without a
+        # cookie there is nothing to add to and this degrades to a normal login.
+        if add_account:
+            current_session = request.cookies.get("kagura_session")
+            if current_session:
+                _remember_add_account_intent(state, current_session)
 
     # Get authorization URL
     redirect = redirect_uri or os.getenv("GOOGLE_REDIRECT_URI")
@@ -806,6 +816,11 @@ async def google_callback(
 
         # Issue #114: Invalidate old sessions before creating new one
         # This prevents session fixation attacks and ensures only one active session per user
+        #
+        # #1488: this runs for an ADD too. It deletes the incoming user's OTHER
+        # sessions, which is exactly what #114 asks for, and cannot touch the
+        # session we are adding into because that container does not hold this
+        # user yet (membership matching, see session_owns_user).
         deleted_count = _session_manager.delete_user_sessions(user_info["sub"])
         if deleted_count > 0:
             logger.info(f"Invalidated {deleted_count} old session(s) for {user_info['email']}")
@@ -818,7 +833,16 @@ async def google_callback(
             "picture": user_info.get("picture"),
             "role": role.value,
         }
-        session_id = _session_manager.create_session(session_data)
+
+        # #1488: "add another account" keeps the CURRENT session and appends to
+        # it; a normal login mints a fresh one. Deciding here rather than at the
+        # cookie write keeps the two paths from diverging further down.
+        add_to_session = _take_add_account_intent(state, request)
+        if add_to_session and _session_manager.add_account(add_to_session, session_data):
+            session_id = add_to_session
+            logger.info(f"Added account to existing session: {user_info['email']}")
+        else:
+            session_id = _session_manager.create_session(session_data)
 
         # Issue #212: Auto-create personal workspace on first login
         # Skip if user has pending invitations (they'll get workspace via invitation)
@@ -942,6 +966,60 @@ class AccountSwitchRequest(BaseModel):
     """Which already-signed-in account to make active (#1488)."""
 
     user_id: str = Field(..., min_length=1, max_length=255)
+
+
+# --- adding a second account to an existing session (#1488 Phase 2/3) -------
+#
+# A normal login REPLACES: it deletes the user's old sessions and mints a new
+# cookie. To sign a second account into the SAME browser session we need a
+# login that ADDS instead, or the switcher can never have anything to switch
+# between.
+#
+# The intent travels the same way `return_to` does — a short-lived Redis key
+# beside the CSRF state — but it stores the SESSION ID it is allowed to add to,
+# and the callback additionally requires the request's cookie to still match
+# that id. State alone is therefore not enough: the callback must come from the
+# browser that actually holds the session, so a leaked state cannot graft an
+# account onto someone else's session.
+_ADD_ACCOUNT_KEY = "oauth2_add_to_session:{state}"
+_ADD_ACCOUNT_TTL = 300
+
+
+def _remember_add_account_intent(state: str, session_id: str) -> None:
+    """Record that this OAuth flow should ADD to ``session_id``."""
+    if _session_manager:
+        _session_manager._redis.setex(
+            _ADD_ACCOUNT_KEY.format(state=state), _ADD_ACCOUNT_TTL, session_id
+        )
+
+
+def _take_add_account_intent(state: str, request: Request) -> str | None:
+    """Return the session to add to, or None for a normal (replacing) login.
+
+    Consumes the key either way — an intent is single-use, like the state.
+
+    Returns None unless the request's own cookie still names the same session,
+    so possession of ``state`` is not sufficient authority.
+    """
+    if not _session_manager:
+        return None
+    key = _ADD_ACCOUNT_KEY.format(state=state)
+    intended = _session_manager._redis.get(key)
+    if not intended:
+        return None
+    _session_manager._redis.delete(key)
+
+    cookie_session = request.cookies.get("kagura_session")
+    if not cookie_session or cookie_session != intended:
+        logger.warning("add_account_intent_rejected_cookie_mismatch")
+        return None
+    # The session must still be alive; a dead one would silently fall back to a
+    # replacing login, which is a surprising outcome to hand a user who asked
+    # to add an account.
+    if _session_manager.get_session(cookie_session, update_access=False) is None:
+        logger.warning("add_account_intent_rejected_dead_session")
+        return None
+    return cookie_session
 
 
 @router.get("/accounts")
@@ -1124,7 +1202,9 @@ def build_github_authorization_url(*, client_id: str, redirect_uri: str, state: 
 
 @github_router.get("/login")
 async def github_login(
+    request: Request,
     return_to: str | None = None,
+    add_account: bool = False,
 ):
     """Initiate GitHub OAuth2 login flow."""
     if not _session_manager:
@@ -1139,6 +1219,13 @@ async def github_login(
 
     if return_to:
         _session_manager._redis.setex(f"oauth2_return_to:{state}", 300, return_to)
+
+    # #1488: see the Google login for why the session id (not just a flag) is
+    # what gets stored.
+    if add_account:
+        current_session = request.cookies.get("kagura_session")
+        if current_session:
+            _remember_add_account_intent(state, current_session)
 
     redirect_uri = os.getenv(
         "GITHUB_REDIRECT_URI",
@@ -1362,7 +1449,14 @@ async def github_callback(
             "picture": user_info.get("picture"),
             "role": role.value,
         }
-        session_id = _session_manager.create_session(session_data)
+        # #1488: append to the current session when this flow was started as
+        # "add another account"; otherwise mint a fresh one.
+        add_to_session = _take_add_account_intent(state, request)
+        if add_to_session and _session_manager.add_account(add_to_session, session_data):
+            session_id = add_to_session
+            logger.info(f"Added account to existing session: {user_info['email']}")
+        else:
+            session_id = _session_manager.create_session(session_data)
 
         # 6. Auto-create personal workspace
         try:

@@ -166,7 +166,10 @@
     "version": "v{version}",
     "kaguraLogoAria": "Kagura Memory Cloud",
     "connectors": "Connectors",
-    "storage": "Storage"
+    "storage": "Storage",
+    "signedInAccounts": "Signed in",
+    "addAnotherAccount": "Add another account",
+    "activeAccount": "Active account"
   },
   "storage": {
     "list": {
