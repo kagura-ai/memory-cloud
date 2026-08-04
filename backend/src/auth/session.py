@@ -62,6 +62,34 @@ def is_container(data: dict[str, Any]) -> bool:
     return isinstance(data.get("accounts"), dict) and "active" in data
 
 
+def session_owns_user(container: dict[str, Any], user_id: str) -> bool:
+    """Does this container hold a session for ``user_id``? (#114)
+
+    Deliberately checks the account KEY *and* each identity's `user_id`/`sub`,
+    rather than trusting the key alone.
+
+    Today every login writes `sub == user_id` (see the three create_session call
+    sites), so the key always matches and the extra check is redundant. It is
+    here because the failure mode if that ever stops holding is SILENT: an
+    account keyed one way and a deletion requested the other way would make
+    this return False, `delete_user_sessions` would return 0, log "invalidated
+    0 sessions", and the previous session would survive the login — quietly
+    reopening the session-fixation window #114 exists to close. Nothing would
+    fail, so nothing would be noticed.
+
+    Matching on identity content as well makes the guarantee independent of the
+    keying choice.
+    """
+    accounts = container.get("accounts", {})
+    if user_id in accounts:
+        return True
+    return any(
+        isinstance(identity, dict)
+        and (identity.get("user_id") == user_id or identity.get("sub") == user_id)
+        for identity in accounts.values()
+    )
+
+
 def to_container(flat: dict[str, Any]) -> dict[str, Any]:
     """Lift a legacy flat record into the container shape.
 
@@ -80,14 +108,23 @@ def to_container(flat: dict[str, Any]) -> dict[str, Any]:
     }
 
 
-def project_active(container: dict[str, Any]) -> dict[str, Any]:
-    """Return the flat view callers expect: active identity + envelope times.
+def project_active(container: dict[str, Any]) -> dict[str, Any] | None:
+    """Return the flat view callers expect, or None if the record is unusable.
 
-    If `active` names an account that is not present the record is unusable —
-    return an empty identity rather than raising, so a corrupt record logs the
-    user out instead of 500-ing every request they make.
+    Returns None — not an empty-ish dict — when `active` names an account that
+    is not present, or the active identity carries no id.
+
+    That distinction is the whole point. `SessionMiddleware` only checks for a
+    falsy result before setting `request.state.user`, and `get_current_user`
+    only rejects None. A dict holding just `created_at`/`last_accessed` is
+    TRUTHY, so returning one would authenticate a principal with no `user_id`
+    and no `sub` — routes would then either 500 on `user["user_id"]` or run
+    authorization against an empty identity. A corrupt record must log the user
+    out, which means None.
     """
-    identity = container.get("accounts", {}).get(container.get("active"), {})
+    identity = container.get("accounts", {}).get(container.get("active"))
+    if not isinstance(identity, dict) or not _account_id(identity):
+        return None
     return {
         **identity,
         "created_at": container.get("created_at"),
@@ -277,9 +314,26 @@ class SessionManager:
             # signed-in user out the moment this deploys.
             container = stored if is_container(stored) else to_container(stored)
 
+            # A record whose active account is missing or id-less is corrupt;
+            # treat it as no session at all rather than authenticating a shell.
+            # Checked BEFORE the refresh so a corrupt record is not also given a
+            # fresh 7-day TTL.
+            projected = project_active(container)
+            if projected is None:
+                logger.warning(f"Discarding unusable session record: {session_id[:10]}...")
+                return None
+
             # Update last accessed time and refresh TTL. This is also where a
             # legacy record gets rewritten in the new shape — migration happens
             # by being used, with no backfill job.
+            #
+            # PHASE 2 PREREQUISITE: this is a read-modify-write of the WHOLE
+            # record with no lock, purely to refresh `last_accessed`. With one
+            # account there is nothing to lose. Once a container can hold
+            # several, a concurrent "add account" could be clobbered by any
+            # ordinary request that happens to read first and write second.
+            # Phase 2 must make this a targeted update (Lua/WATCH, or write the
+            # timestamp outside the record) before adding a second account.
             if update_access:
                 container["last_accessed"] = utcnow().isoformat()
                 self._redis.setex(
@@ -287,9 +341,10 @@ class SessionManager:
                     self.session_ttl,
                     json.dumps(container),
                 )
+                projected["last_accessed"] = container["last_accessed"]
 
             # Callers see the flat shape they always have.
-            return project_active(container)
+            return projected
 
         except Exception as e:
             logger.error(f"Failed to get session: {e}")
@@ -451,7 +506,7 @@ class SessionManager:
                             # Legacy flat records are still matched the old way
                             # — they are what is in Redis at deploy time.
                             if is_container(session_data):
-                                belongs = user_id in session_data.get("accounts", {})
+                                belongs = session_owns_user(session_data, user_id)
                             else:
                                 # Support both "sub" (OAuth2) and "user_id" (internal)
                                 belongs = (

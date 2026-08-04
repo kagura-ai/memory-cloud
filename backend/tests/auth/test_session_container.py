@@ -185,6 +185,41 @@ class TestOneSessionPerUserStillHolds:
         assert manager.get_session(first) is None
         assert manager.get_session(second) is not None
 
+    def test_deletion_works_when_sub_and_user_id_DIFFER(self, manager):
+        """The silent-failure case, pinned.
+
+        Every login today writes `sub == user_id`, so the account key always
+        matches whatever the caller passes and this is unreachable. It is
+        pinned anyway because the failure is invisible: the container would be
+        keyed by `user_id`, an OAuth login would ask to delete by `sub`,
+        `delete_user_sessions` would find nothing, return 0, log success — and
+        leave the old session alive across a login. That is the session-fixation
+        window #114 exists to close, reopened with no error anywhere.
+        """
+        divergent = {"sub": "oauth-sub-1", "user_id": "internal-7", "email": "d@example.com"}
+        sid = manager.create_session(divergent)
+        # Keyed by user_id (see _account_id's preference order)...
+        assert "internal-7" in raw(manager, sid)["accounts"]
+        # ...but deleting by the OAuth sub must still find it.
+        assert manager.delete_user_sessions("oauth-sub-1") == 1
+        assert manager.get_session(sid) is None
+
+    def test_divergent_legacy_record_migrates_then_still_deletes_by_sub(self, manager):
+        """Same, via the migration path — how a real record would get there."""
+        manager._redis.store["session:legacy"] = json.dumps(
+            {"sub": "oauth-sub-1", "user_id": "internal-7", "email": "d@example.com"}
+        )
+        manager.get_session("legacy")  # migrate
+        assert is_container(raw(manager, "legacy"))
+        assert manager.delete_user_sessions("oauth-sub-1") == 1
+
+    def test_a_different_user_is_still_not_matched(self, manager):
+        """The hardening must not become 'delete everything'."""
+        divergent = {"sub": "oauth-sub-1", "user_id": "internal-7"}
+        sid = manager.create_session(divergent)
+        assert manager.delete_user_sessions("someone-else") == 0
+        assert manager.get_session(sid) is not None
+
 
 class TestUpdateSession:
     def test_updates_land_on_the_active_identity(self, manager):
@@ -219,11 +254,47 @@ class TestHelpers:
         assert container["active"] == "gh_9"
         assert "gh_9" in container["accounts"]
 
-    def test_a_corrupt_active_pointer_does_not_raise(self):
-        """Prefer logging the user out over 500-ing every request."""
-        projected = project_active({"accounts": {"a": {"x": 1}}, "active": "missing"})
-        assert projected.get("x") is None
+    def test_a_corrupt_active_pointer_yields_no_session(self):
+        """None, not an empty-ish dict.
+
+        `SessionMiddleware` only checks falsiness and `get_current_user` only
+        rejects None, so returning `{"created_at": ..., "last_accessed": ...}`
+        would authenticate a principal with no id — routes would then 500 on
+        `user["user_id"]` or authorize against an empty identity. A corrupt
+        record must read as "not logged in".
+        """
+        assert project_active({"accounts": {"a": {"user_id": "a"}}, "active": "missing"}) is None
+
+    def test_an_identity_without_an_id_yields_no_session(self):
+        assert project_active({"accounts": {"": {"email": "x@y"}}, "active": ""}) is None
 
     def test_is_container_rejects_a_flat_record(self):
         assert is_container(USER) is False
         assert is_container(to_container(USER)) is True
+
+
+class TestCorruptRecordsAreNotAuthenticated:
+    """A record that cannot name a user must read as 'no session'."""
+
+    def test_dangling_active_returns_none(self, manager):
+        manager._redis.store["session:bad"] = json.dumps(
+            {
+                "v": 2,
+                "accounts": {"a": {"user_id": "a"}},
+                "active": "missing",
+                "created_at": "c",
+                "last_accessed": "l",
+            }
+        )
+        assert manager.get_session("bad") is None
+
+    def test_a_corrupt_record_is_not_given_a_fresh_ttl(self, manager):
+        """Refusing it must also stop renewing it, or it lives for another week."""
+        before = json.dumps({"v": 2, "accounts": {"a": {"user_id": "a"}}, "active": "missing"})
+        manager._redis.store["session:bad"] = before
+        manager.get_session("bad")
+        assert manager._redis.store["session:bad"] == before
+
+    def test_legacy_record_with_no_id_at_all_returns_none(self, manager):
+        manager._redis.store["session:bad"] = json.dumps({"email": "x@y", "role": "member"})
+        assert manager.get_session("bad") is None
