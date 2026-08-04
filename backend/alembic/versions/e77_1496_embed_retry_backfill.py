@@ -21,13 +21,14 @@ path, which then classifies each one correctly on its own:
 
 - a configuration failure is refunded again and keeps self-healing until the
   credential is fixed;
-- a genuine poison row burns four fresh attempts and re-sticks, exactly as
-  intended.
+- a genuine poison row burns three fresh attempts and re-sticks, exactly as
+  intended (eligibility is ``retry_count < MAX``, so from 0 the row is claimed
+  at 0, 1 and 2).
 
 So the change is self-limiting: it does not decide which rows deserve another
-chance, it lets the corrected logic decide. The one-time cost is ~4 sweep
-attempts per affected row, bounded globally by the sweep's ``limit(20)`` per
-30s tick.
+chance, it lets the corrected logic decide. The one-time cost is at most 3
+sweep attempts per affected row, bounded globally by the sweep's ``limit(20)``
+per 30s tick.
 
 Deliberately does NOT touch ``embedding_status``. These rows really did fail;
 flipping them to ``pending`` would claim an outcome that has not happened yet

@@ -226,3 +226,19 @@ def test_the_backfill_target_still_matches_the_ceiling():
     that migration is already applied and cannot follow it — a later reader
     needs to know the two were equal when it ran."""
     assert MAX_EMBEDDING_RETRIES == 3
+
+
+def test_a_reset_row_gets_exactly_three_attempts():
+    """Pin the number the #1496 migration docstring quotes.
+
+    Eligibility is `retry_count < MAX`, so from 0 a row is claimed at 0, 1 and
+    2 — three attempts, then it is terminal again. The first draft of that
+    docstring said four; a reviewer caught it. Written down here so the prose
+    and the constant cannot drift apart again.
+    """
+    attempts = 0
+    count = 0
+    while count < MAX_EMBEDDING_RETRIES:
+        count += 1  # the claim increments on re-claim
+        attempts += 1
+    assert attempts == 3
