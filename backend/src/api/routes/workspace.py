@@ -15,7 +15,7 @@ from datetime import timedelta
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel
-from sqlalchemy import and_, func, select
+from sqlalchemy import and_, func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from api.routes.usage import (
@@ -728,6 +728,28 @@ async def get_embedding_status(
     ]
     if context_id:
         conditions.append(Memory.context_id == context_id)
+
+    # #1496: scope to the contexts this caller may actually see.
+    #
+    # Every other stats path in this file applies this rule (see the privacy
+    # check in the workspace-stats loop above); this one did not, and it
+    # returns up to 50 failed memories WITH their summaries. A workspace member
+    # could therefore read the first 200 characters of another member's PRIVATE
+    # context contents by asking for the embedding queue.
+    #
+    # Same three-way rule as /api/v1/contexts: an owner sees everything, shared
+    # contexts are visible to all members, and a private context is visible
+    # only to whoever created it.
+    user_id = user.get("user_id")
+    owner_result = await db.execute(
+        select(Workspace.owner_user_id).where(Workspace.id == workspace_id)
+    )
+    if owner_result.scalar_one_or_none() != user_id:
+        accessible = select(Context.id).where(
+            Context.workspace_id == workspace_id,
+            or_(Context.is_private.is_(False), Context.created_by == user_id),
+        )
+        conditions.append(Memory.context_id.in_(accessible))
 
     # Count by status
     status_stmt = (
