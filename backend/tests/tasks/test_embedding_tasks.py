@@ -6,6 +6,7 @@ Covers sweep logic and scheduler registration.  All heavy dependencies
 
 from __future__ import annotations
 
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 from uuid import uuid4
 
@@ -33,16 +34,89 @@ class TestScheduleEmbeddingTasks:
 class TestSweepPendingEmbeddings:
     @pytest.mark.asyncio
     async def test_no_stale_memories_exits_early(self):
-        """When query returns nothing, function returns after the empty check."""
+        """When the candidate query returns nothing, the sweep does no work.
+
+        #1496 added a backlog count that runs BEFORE the candidate query — on
+        purpose, because "nothing to sweep" is exactly the state that needs
+        reporting when every failed row has gone terminal. So the sweep now
+        issues two statements and still processes nothing.
+        """
         mock_db = MagicMock()
         mock_result = MagicMock()
         mock_result.all.return_value = []
+        # The backlog count reads .one(); a healthy deployment reports zero.
+        mock_result.one.return_value = SimpleNamespace(unsearchable=0, stalled=0)
+        mock_db.execute = AsyncMock(return_value=mock_result)
+
+        with (
+            patch("db.base.get_db", mock_get_db_factory(mock_db)),
+            patch("services.memory_service.process_pending_embedding", new=AsyncMock()) as proc,
+        ):
+            await sweep_pending_embeddings()
+
+        assert mock_db.execute.await_count == 2, (
+            "expected the #1496 backlog count plus the candidate query"
+        )
+        proc.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_reports_the_unsearchable_backlog(self):
+        """The signal #1496 exists for.
+
+        A failed embedding never reaches Qdrant, and BM25 lives there too, so
+        these rows are missing from recall in both modes while still being
+        counted and billed. Nothing surfaced that before; the only way to find
+        it was to query the database by hand.
+        """
+        mock_db = MagicMock()
+        mock_result = MagicMock()
+        mock_result.all.return_value = []
+        mock_result.one.return_value = SimpleNamespace(unsearchable=467, stalled=467)
         mock_db.execute = AsyncMock(return_value=mock_result)
 
         with patch("db.base.get_db", mock_get_db_factory(mock_db)):
+            with patch("tasks.embedding_tasks.logger") as log:
+                await sweep_pending_embeddings()
+
+        warnings = [
+            c for c in log.warning.call_args_list if c.args[0] == "embedding_unsearchable_backlog"
+        ]
+        assert warnings, "the backlog was not reported"
+        assert warnings[0].kwargs == {"unsearchable": 467, "stalled": 467}
+
+    @pytest.mark.asyncio
+    async def test_a_healthy_deployment_stays_quiet(self):
+        """Absence of the line has to mean something, or it is not a signal."""
+        mock_db = MagicMock()
+        mock_result = MagicMock()
+        mock_result.all.return_value = []
+        mock_result.one.return_value = SimpleNamespace(unsearchable=0, stalled=0)
+        mock_db.execute = AsyncMock(return_value=mock_result)
+
+        with patch("db.base.get_db", mock_get_db_factory(mock_db)):
+            with patch("tasks.embedding_tasks.logger") as log:
+                await sweep_pending_embeddings()
+
+        assert not [
+            c for c in log.warning.call_args_list if c.args[0] == "embedding_unsearchable_backlog"
+        ]
+
+    @pytest.mark.asyncio
+    async def test_a_failing_backlog_query_does_not_stop_the_sweep(self):
+        """The count is a diagnostic. It must never be why embeddings stop."""
+        ids = [uuid4()]
+        mock_db = MagicMock()
+        good = MagicMock()
+        good.all.return_value = [(i,) for i in ids]
+        mock_db.execute = AsyncMock(side_effect=[RuntimeError("boom"), good])
+
+        with (
+            patch("db.base.get_db", mock_get_db_factory(mock_db)),
+            patch("services.memory_service.process_pending_embedding", new=AsyncMock()) as proc,
+        ):
             await sweep_pending_embeddings()
 
-        mock_db.execute.assert_called_once()
+        proc.assert_called_once()
 
     @pytest.mark.asyncio
     async def test_processes_pending_ids(self):

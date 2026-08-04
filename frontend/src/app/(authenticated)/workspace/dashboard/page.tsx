@@ -242,10 +242,45 @@ export default function WorkspaceStatsPage() {
         </div>
       ) : stats ? (
         <>
+          {/* #1496: memories that were saved but cannot be found.
+              A failed embedding never reaches Qdrant, and the BM25 sparse
+              vectors live there too, so recall misses these in BOTH semantic
+              and keyword mode — while the count above still includes them and
+              quota is still charged for them. Every number the user could see
+              agreed with every other one, and all of them counted rows rather
+              than searchability, which is why 467 of these accumulated on
+              production with nobody noticing.
+
+              An informational Alert, not ErrorBanner and not a toast: nothing
+              the user did failed, and the house rule carves warnings out of
+              the error channels. Placed directly above the count it qualifies
+              — burying it would repeat the original mistake. */}
+          {(stats.unsearchable_memories ?? 0) > 0 && (
+            <Alert className="mb-6">
+              <AlertCircle className="h-4 w-4" />
+              <AlertTitle>{t("unsearchableTitle")}</AlertTitle>
+              <AlertDescription>
+                {t("unsearchableBody", {
+                  count: stats.unsearchable_memories ?? 0,
+                  total: stats.total_memories,
+                })}
+                {(stats.stalled_memories ?? 0) > 0 && (
+                  <>
+                    {" "}
+                    {t("unsearchableStalled", {
+                      count: stats.stalled_memories ?? 0,
+                    })}
+                  </>
+                )}
+              </AlertDescription>
+            </Alert>
+          )}
+
           <KpiCards
             totalMemories={stats.total_memories}
             contextCount={stats.context_count}
             contextStats={contextStats}
+            unsearchableCount={stats.unsearchable_memories ?? 0}
           />
 
           {memoryTimeline && (

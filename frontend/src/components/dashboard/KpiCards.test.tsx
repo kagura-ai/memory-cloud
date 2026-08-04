@@ -4,7 +4,11 @@ import { KpiCards } from "./KpiCards";
 import type { ContextStatsResponse } from "@/lib/api/workspaces";
 
 vi.mock("next-intl", () => ({
-  useTranslations: (_ns: string) => (key: string) => key,
+  useTranslations:
+    (_ns: string) => (key: string, vars?: Record<string, unknown>) =>
+      vars && Object.keys(vars).length > 0
+        ? `${key}:${JSON.stringify(vars)}`
+        : key,
 }));
 
 const mockContextStats: ContextStatsResponse = {
@@ -67,5 +71,55 @@ describe("KpiCards", () => {
     // API calls and active users should show 0
     const zeros = screen.getAllByText("0");
     expect(zeros.length).toBeGreaterThanOrEqual(4);
+  });
+});
+
+describe("unsearchable memories (#1496)", () => {
+  /**
+   * The Total Memories card counts rows, not searchability. A failed embedding
+   * never reaches Qdrant — and BM25 lives there too — so those memories are
+   * missing from recall in both modes while still being counted here and
+   * charged against quota. 467 accumulated on production precisely because
+   * every number the user could see agreed with every other one.
+   *
+   * The qualification belongs on this card because this is the number that is
+   * misleading without it.
+   */
+  it("says nothing when every memory is searchable", () => {
+    render(
+      <KpiCards
+        totalMemories={300}
+        contextCount={2}
+        contextStats={mockContextStats}
+      />,
+    );
+    expect(screen.queryByText(/unsearchableSubtext/)).toBeNull();
+  });
+
+  it("qualifies the memory count when some are not searchable", () => {
+    render(
+      <KpiCards
+        totalMemories={300}
+        contextCount={2}
+        contextStats={mockContextStats}
+        unsearchableCount={418}
+      />,
+    );
+    const subtext = screen.getByText(/unsearchableSubtext/);
+    expect(subtext.textContent).toContain('"count":418');
+  });
+
+  it("defaults to silent when the backend does not send the field", () => {
+    // An older backend during a blue/green rollout omits it entirely; the
+    // dashboard must not imply everything is fine OR that anything is wrong.
+    render(
+      <KpiCards
+        totalMemories={300}
+        contextCount={2}
+        contextStats={mockContextStats}
+        unsearchableCount={undefined}
+      />,
+    );
+    expect(screen.queryByText(/unsearchableSubtext/)).toBeNull();
   });
 });

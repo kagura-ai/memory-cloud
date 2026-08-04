@@ -1772,3 +1772,98 @@ class WorkspaceService:
         )
 
         return stats_by_context
+
+    async def get_unsearchable_memory_stats(
+        self,
+        user_id: str,
+        contexts: list[Context],
+        is_workspace_owner: bool = False,
+    ) -> dict[str, tuple[int, int]]:
+        """Memories that were saved but cannot be found (#1496).
+
+        A failed embedding never reaches Qdrant, and the BM25 sparse vectors
+        live there too — so these rows are missing from recall in BOTH semantic
+        and keyword mode. They are still counted by `get_collection_memory_stats`
+        and still charged against quota, which is exactly why the gap was
+        invisible from inside the product: every number the user could see
+        agreed with every other number, and all of them were counting rows
+        rather than searchability.
+
+        Deliberately counts ``failed`` only. Including ``pending`` would fire a
+        warning seconds after every normal write, while the embedding is simply
+        in flight — which would train the user to ignore it.
+
+        Args:
+            user_id: User ID (for private context filtering)
+            contexts: List of Context objects to get stats for
+            is_workspace_owner: If True, count across all contexts (owner view)
+
+        Returns:
+            Dict mapping context_id (str) to (unsearchable, stalled), where
+            ``stalled`` is the subset that has exhausted its retry budget and
+            so will not recover on its own.
+
+        Note:
+            Shares `_visibility_conditions` with `get_collection_memory_stats`
+            so the two numbers obey the same privacy rules by construction. A
+            count that leaked across the private-context boundary would be a
+            side channel: "this context you cannot see has 418 broken memories"
+            is still information about it.
+        """
+        from config.constants import MAX_EMBEDDING_RETRIES
+
+        conditions = self._visibility_conditions(user_id, contexts, is_workspace_owner)
+        if conditions is None:
+            return {}
+
+        result = await self.db.execute(
+            select(
+                Memory.context_id,
+                func.count(Memory.id).label("unsearchable"),
+                func.count(Memory.id)
+                .filter(Memory.embedding_retry_count >= MAX_EMBEDDING_RETRIES)
+                .label("stalled"),
+            )
+            .where(*conditions, Memory.embedding_status == "failed")
+            .group_by(Memory.context_id)
+        )
+        return {str(row.context_id): (row.unsearchable, row.stalled) for row in result.all()}
+
+    def _visibility_conditions(
+        self,
+        user_id: str,
+        contexts: list[Context],
+        is_workspace_owner: bool,
+    ) -> list | None:
+        """The privacy filter both per-context stat queries must agree on.
+
+        Returns None when the caller can see no contexts at all, so callers can
+        skip the query rather than emitting `IN ()`.
+        """
+        if is_workspace_owner:
+            private_context_ids = [c.id for c in contexts if c.is_private]
+        else:
+            private_context_ids = [
+                c.id for c in contexts if c.is_private and c.created_by == user_id
+            ]
+        shared_context_ids = [c.id for c in contexts if not c.is_private]
+
+        all_context_ids = private_context_ids + shared_context_ids
+        if not all_context_ids:
+            return None
+
+        conditions = [
+            Memory.context_id.in_(all_context_ids),
+            Memory.deleted_at.is_(None),
+        ]
+        if not is_workspace_owner and private_context_ids:
+            conditions.append(
+                or_(
+                    Memory.context_id.in_(shared_context_ids),
+                    and_(
+                        Memory.context_id.in_(private_context_ids),
+                        Memory.user_id == user_id,
+                    ),
+                )
+            )
+        return conditions

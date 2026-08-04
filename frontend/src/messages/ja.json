@@ -926,7 +926,8 @@
     "showDetails": "詳細を表示",
     "hideDetails": "詳細を非表示",
     "adminMemberActivity": "管理者: メンバーアクティビティ",
-    "selectContextForActivity": "特定のコンテキストを選択するとユーザー別アクティビティを表示します。メンバー使用状況はチームワークスペースで表示されます。"
+    "selectContextForActivity": "特定のコンテキストを選択するとユーザー別アクティビティを表示します。メンバー使用状況はチームワークスペースで表示されます。",
+    "unsearchableSubtext": "うち {count} 件は検索不可"
   },
   "profile": {
     "title": "プロフィール設定",
@@ -1353,7 +1354,10 @@
         "loadError": "Sleep レポートの読み込みに失敗しました",
         "notFound": "Sleep レポートが見つかりません。"
       }
-    }
+    },
+    "unsearchableTitle": "検索できないメモリーがあります",
+    "unsearchableBody": "{total} 件のうち {count} 件は保存されていますが、検索インデックスを作成できなかったため recall の結果に出てきません。データは失われていません。インデックス作成が成功すれば検索できるようになります。",
+    "unsearchableStalled": "うち {count} 件は自動リトライが停止しており、再インデックスには管理者の操作が必要です。"
   },
   "contexts": {
     "title": "コンテキスト",

@@ -15,6 +15,52 @@ from utils.logger import get_logger
 logger = get_logger(__name__)
 
 
+async def _log_unsearchable_backlog(db) -> None:
+    """Emit how many memories are saved but not searchable (#1496).
+
+    A failed embedding never reaches Qdrant, and the BM25 sparse vectors live
+    there too — so these rows are missing from recall in BOTH semantic and
+    keyword mode. They are still counted by the dashboard and charged against
+    quota, which is why the discrepancy is invisible from inside the product.
+
+    Before this, the only way to discover the condition was to query the
+    database by hand. It was found that way, with 467 rows already stuck.
+
+    Best-effort: this is a diagnostic, and it must never be the reason the
+    sweep does not run. Two counts over the existing partial index.
+    """
+    from sqlalchemy import func
+
+    from config.constants import MAX_EMBEDDING_RETRIES
+    from models.memory import Memory
+
+    try:
+        row = (
+            await db.execute(
+                select(
+                    func.count().label("unsearchable"),
+                    func.count()
+                    .filter(Memory.embedding_retry_count >= MAX_EMBEDDING_RETRIES)
+                    .label("stalled"),
+                ).where(
+                    Memory.embedding_status == "failed",
+                    Memory.deleted_at.is_(None),
+                )
+            )
+        ).one()
+    except Exception as e:  # pragma: no cover - diagnostic must not break the sweep
+        logger.debug("unsearchable_backlog_query_failed", error=str(e))
+        return
+
+    unsearchable, stalled = row.unsearchable, row.stalled
+    if unsearchable:
+        logger.warning(
+            "embedding_unsearchable_backlog",
+            unsearchable=unsearchable,
+            stalled=stalled,
+        )
+
+
 async def sweep_pending_embeddings() -> None:
     """Find and process memories stuck in pending/processing/failed status.
 
@@ -39,6 +85,18 @@ async def sweep_pending_embeddings() -> None:
     async for db in get_db():
         try:
             now = utcnow()
+
+            # #1496: report the backlog BEFORE the candidate query, because the
+            # `if not pending_ids: return` below is exactly the state that
+            # needs reporting — a deployment whose failed rows have all gone
+            # terminal has nothing to sweep and would otherwise say nothing at
+            # all while a growing share of its memories are unsearchable.
+            #
+            # `stalled` is the number nothing will ever retry on its own.
+            # Emitted only when non-zero, so a healthy deployment stays quiet
+            # and the line's presence is itself the signal.
+            await _log_unsearchable_backlog(db)
+
             pending_cutoff = now - timedelta(seconds=10)
             stale_cutoff = now - timedelta(seconds=60)
             result = await db.execute(

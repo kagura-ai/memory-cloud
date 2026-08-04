@@ -75,6 +75,8 @@ from services.recall_selection import (
 from services.search_service import SearchService
 from utils.datetime import to_utc_iso, utcnow
 from utils.exceptions import (
+    ConfigurationError,
+    EmbeddingSpendCapExceeded,
     MemoryGoneError,
     NotFoundException,
     QuotaExceededError,
@@ -5403,6 +5405,67 @@ async def _create_tag_cooccurrence_seed_edges(
         )
 
 
+def is_configuration_failure(exc: BaseException) -> bool:
+    """Is this failure a fixable STATE of the workspace, not a poison row? (#1496)
+
+    `MAX_EMBEDDING_RETRIES` is terminal by design, for the class its own comment
+    names: rows that can never succeed however often they are retried (bad
+    input, oversized text). Burning the budget on those is exactly right.
+
+    "No embedding credential is configured" is not that class. It is a state,
+    and it is fixable — but under the old behaviour a workspace with no key
+    burned all three attempts in about three minutes and then stayed broken
+    permanently, because the sweep only claims rows with `retry_count < MAX`.
+    Adding the key afterwards changed nothing. That is how #1496's production
+    deployment accumulated 467 memories that were saved, counted, billed
+    against quota, and invisible to recall in both semantic and keyword mode.
+
+    Branching on these two types is safe because `EmbeddingService`
+    re-raises them UNWRAPPED, above its blanket `except Exception ->
+    OpenAIError`, so they arrive at the failure handler intact. Both are also
+    raised BEFORE the provider call — the spend-cap gate and the credential
+    lookup both precede `client.embeddings.create` — so re-probing one costs no
+    tokens and no HTTP request, which is what makes an unbounded retry
+    affordable here.
+
+    KNOWN GAP: a *revoked or wrong* key surfaces as a plain `OpenAIError`,
+    because the blanket wrapper erases the provider SDK's type. That is also a
+    configuration state and it still goes terminal. Reading the SDK's status
+    codes to catch it would couple us to `openai` internals that this project
+    does not pin an upper bound on, so it is deliberately left for its own
+    issue rather than guessed at here.
+    """
+    return isinstance(exc, ConfigurationError | EmbeddingSpendCapExceeded)
+
+
+def embedding_failure_values(exc: BaseException, now: datetime) -> dict[str, Any]:
+    """Column values to stamp on a memory whose embedding failed (#1496).
+
+    Extracted from `process_pending_embedding` so the decision that matters —
+    whether this failure spends the retry budget — is testable without a live
+    session, a Qdrant client and a `get_db()` loop. The handler applies whatever
+    this returns; a composition test pins that it still does.
+
+    Omitting `embedding_retry_count` leaves the claim's increment standing, so
+    the row counts down to terminal as before. Setting it to 0 (rather than
+    refunding the increment) is exact: the claim adds 1 via a CASE on the
+    pre-UPDATE status, so `-1` would over-decrement a re-claimed stale
+    `processing` row. It also matches the doctrine the success path already
+    states — the budget is per failure-episode, not a lifetime tally.
+    """
+    values: dict[str, Any] = {
+        "embedding_status": "failed",
+        "embedding_error": str(exc)[:500],
+        # #1317: the column's onupdate is gone — stamp the failure time
+        # explicitly; the #979 retry backoff (embedding_retry_eligible_clause)
+        # anchors on it.
+        "updated_at": now,
+    }
+    if is_configuration_failure(exc):
+        values["embedding_retry_count"] = 0
+    return values
+
+
 def embedding_retry_eligible_clause(now: datetime):
     """SQLAlchemy clause: a ``failed`` embedding eligible for #979 auto-requeue.
 
@@ -5632,21 +5695,44 @@ async def process_pending_embedding(memory_id: UUID) -> None:
 
         except Exception as e:
             await db.rollback()
+
+            # #1496: a CONFIGURATION failure must not spend the retry budget.
+            #
+            # The decision lives in `embedding_failure_values` so it can be
+            # tested without a live session and a Qdrant client; see its
+            # docstring for why a configuration failure must not spend the
+            # budget, and `is_configuration_failure` for which failures those
+            # are (and the one known gap).
+            from config.constants import MAX_EMBEDDING_RETRIES
+
+            values = embedding_failure_values(e, utcnow())
+
+            final_count: int | None = None
             try:
-                await db.execute(
+                result = await db.execute(
                     update(Memory)
                     .where(Memory.id == memory_id)
-                    .values(
-                        embedding_status="failed",
-                        embedding_error=str(e)[:500],
-                        # #1317: the column's onupdate is gone — stamp the
-                        # failure time explicitly; the #979 retry backoff
-                        # (embedding_retry_eligible_clause) anchors on it.
-                        updated_at=utcnow(),
-                    )
+                    .values(**values)
+                    .returning(Memory.embedding_retry_count)
                 )
+                final_count = result.scalar_one_or_none()
                 await db.commit()
             except Exception:
                 logger.warning("embedding_status_update_failed", memory_id=str(memory_id))
 
-            logger.error("embedding_failed", memory_id=str(memory_id), error=str(e))
+            # #1496: the transition that matters to an operator is the one into
+            # a state nothing will ever retry. Give it its OWN event name so it
+            # is greppable and alertable, and so its absence means something.
+            # `embedding_failed` fires on every attempt and drowns it.
+            common = {
+                "memory_id": str(memory_id),
+                "error": str(e),
+                # The class is what turns "read 467 messages" into one grep.
+                "error_class": type(e).__name__,
+                "error_code": getattr(e, "error_code", None),
+                "retry_count": final_count,
+            }
+            if final_count is not None and final_count >= MAX_EMBEDDING_RETRIES:
+                logger.error("embedding_budget_exhausted", **common)
+            else:
+                logger.warning("embedding_failed", **common)
