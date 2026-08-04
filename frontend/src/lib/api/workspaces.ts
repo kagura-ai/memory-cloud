@@ -117,6 +117,14 @@ export interface DashboardContextStats {
   created_by_name: string | null;
   memory_count: number;
   is_private?: boolean;
+  /**
+   * #1496: saved but not searchable. A failed embedding never reaches Qdrant,
+   * and BM25 lives there too, so recall misses these in both modes.
+   * Optional — an older backend does not send it.
+   */
+  unsearchable_count?: number;
+  /** Subset of the above that has stopped retrying on its own (#1496). */
+  stalled_count?: number;
 }
 
 export interface PrivateContextAggregation {
@@ -130,6 +138,9 @@ export interface WorkspaceStats {
   contexts: DashboardContextStats[];
   private_aggregation?: PrivateContextAggregation | null;
   plan_name: string;
+  /** #1496: totals across the contexts this caller can see. */
+  unsearchable_memories?: number;
+  stalled_memories?: number;
 }
 
 export interface ContextStatsResponse {

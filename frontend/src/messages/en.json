@@ -926,7 +926,8 @@
     "showDetails": "Show Details",
     "hideDetails": "Hide Details",
     "adminMemberActivity": "Admin: Member Activity",
-    "selectContextForActivity": "Select a specific context to view per-user activity. Member usage appears for team workspaces."
+    "selectContextForActivity": "Select a specific context to view per-user activity. Member usage appears for team workspaces.",
+    "unsearchableSubtext": "{count} not searchable"
   },
   "profile": {
     "title": "Profile Settings",
@@ -1353,7 +1354,10 @@
         "loadError": "Failed to load sleep reports",
         "notFound": "Sleep report not found."
       }
-    }
+    },
+    "unsearchableTitle": "Some memories aren't searchable yet",
+    "unsearchableBody": "{count} of your {total} memories were saved, but their search index couldn't be built — recall won't return them. Nothing was lost: they're still in your workspace and become searchable as soon as indexing succeeds.",
+    "unsearchableStalled": "{count} of them have stopped retrying automatically and need an administrator to re-index them."
   },
   "contexts": {
     "title": "Contexts",

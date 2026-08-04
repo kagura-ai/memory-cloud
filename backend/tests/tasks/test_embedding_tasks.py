@@ -6,8 +6,8 @@ Covers sweep logic and scheduler registration.  All heavy dependencies
 
 from __future__ import annotations
 
-from unittest.mock import AsyncMock, MagicMock, patch
 from types import SimpleNamespace
+from unittest.mock import AsyncMock, MagicMock, patch
 from uuid import uuid4
 
 import pytest

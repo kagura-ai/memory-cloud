@@ -70,6 +70,11 @@ class ContextStats(BaseModel):
     created_by_name: str | None
     memory_count: int
     is_private: bool = False  # Issue #165: Privacy flag for UI display
+    # #1496: saved but not searchable — a failed embedding never reaches
+    # Qdrant, and BM25 lives there too, so recall misses these in both modes.
+    # `stalled` is the subset nothing will retry on its own.
+    unsearchable_count: int = 0
+    stalled_count: int = 0
 
 
 class WorkspaceStatsResponse(BaseModel):
@@ -84,6 +89,10 @@ class WorkspaceStatsResponse(BaseModel):
     contexts: list[ContextStats]  # Only accessible contexts
     private_aggregation: PrivateContextAggregation | None = None  # Inaccessible private contexts
     plan_name: str  # Issue #149: Plan tier display
+    # #1496: totals across the contexts this caller can see. Additive with
+    # defaults so an older frontend is unaffected.
+    unsearchable_memories: int = 0
+    stalled_memories: int = 0
 
 
 # ============================================================================
@@ -172,12 +181,22 @@ async def get_workspace_stats(
             contexts=contexts_list,
             is_workspace_owner=is_workspace_owner,
         )
+        # #1496: same privacy rules, by construction (shared _visibility_conditions).
+        unsearchable_by_context = await workspace_service.get_unsearchable_memory_stats(
+            user_id=user_id,
+            contexts=contexts_list,
+            is_workspace_owner=is_workspace_owner,
+        )
 
         # Separate accessible and inaccessible contexts
         accessible_contexts: list[ContextStats] = []
         inaccessible_count = 0
         inaccessible_memories = 0
         total_memories = 0
+        # #1496: accumulated over ACCESSIBLE contexts only — reporting a total
+        # that included contexts the caller cannot see would be a side channel.
+        total_unsearchable = 0
+        total_stalled = 0
 
         # Critical Fix: Avoid N+1 query - batch fetch all context creators
         creator_ids = {ctx.created_by for ctx in contexts_list if ctx.created_by}
@@ -190,6 +209,7 @@ async def get_workspace_stats(
         for context in contexts_list:
             # Single Collection Migration: Use context.id, memory count only
             memory_count, _ = stats_by_collection.get(str(context.id), (0, 0))
+            unsearchable, stalled = unsearchable_by_context.get(str(context.id), (0, 0))
 
             # Privacy check (same pattern as /api/v1/contexts)
             is_accessible = (
@@ -215,8 +235,12 @@ async def get_workspace_stats(
                         created_by_name=created_by_name,
                         memory_count=memory_count,
                         is_private=context.is_private,
+                        unsearchable_count=unsearchable,
+                        stalled_count=stalled,
                     )
                 )
+                total_unsearchable += unsearchable
+                total_stalled += stalled
             else:
                 # Aggregate inaccessible private contexts
                 inaccessible_count += 1
@@ -250,6 +274,8 @@ async def get_workspace_stats(
             contexts=accessible_contexts,  # Only accessible
             private_aggregation=private_aggregation,  # Aggregated inaccessible
             plan_name=workspace.plan_name,  # Issue #149
+            unsearchable_memories=total_unsearchable,  # #1496, accessible only
+            stalled_memories=total_stalled,  # #1496
         )
 
     except HTTPException:
