@@ -97,6 +97,11 @@ class WorkspaceResponse(BaseModel):
     plan_name: str
     member_count: int
     context_count: int
+    # The effective context cap, so clients never re-derive it (#1487). The web
+    # UI used to hardcode "free means 1", which ignored the PLAN_*_MAX_CONTEXTS
+    # settings overrides, the purchasable addon bonus, and basic/pro entirely.
+    # Serve the same number the create path enforces, from the same property.
+    max_contexts: int
     created_at: str
     current_user_role: str | None = None  # Current user's role in this workspace
     analyses_enabled: bool = False  # Memory Analysis allowlist (#497)
@@ -383,6 +388,7 @@ async def create_workspace(
         plan_name=workspace.plan_name,
         member_count=stats["member_count"],
         context_count=stats["context_count"],
+        max_contexts=workspace.effective_max_contexts,
         created_at=to_utc_iso(workspace.created_at) or "",
         analyses_enabled=check_workspace_in_allowlist(workspace.id),
     )
@@ -419,6 +425,7 @@ async def list_workspaces(
                 plan_name=workspace.plan_name,
                 member_count=stats["member_count"],
                 context_count=stats["context_count"],
+                max_contexts=workspace.effective_max_contexts,
                 created_at=to_utc_iso(workspace.created_at) or "",
                 current_user_role=user_role,
                 analyses_enabled=check_workspace_in_allowlist(workspace.id),
@@ -455,6 +462,7 @@ async def get_workspace(
         plan_name=workspace.plan_name,
         member_count=stats["member_count"],
         context_count=stats["context_count"],
+        max_contexts=workspace.effective_max_contexts,
         created_at=to_utc_iso(workspace.created_at) or "",
         analyses_enabled=check_workspace_in_allowlist(workspace.id),
     )
@@ -496,6 +504,7 @@ async def update_workspace(
         plan_name=workspace.plan_name,
         member_count=stats["member_count"],
         context_count=stats["context_count"],
+        max_contexts=workspace.effective_max_contexts,
         created_at=to_utc_iso(workspace.created_at) or "",
         analyses_enabled=check_workspace_in_allowlist(workspace.id),
     )

@@ -125,9 +125,35 @@ export default function ContextsPage() {
   const [contexts, setContexts] = useState<Context[]>([]);
   const [loading, setLoading] = useState(true);
 
-  // Check if context quota is reached (Issue #188)
+  // Check if context quota is reached (Issue #188, corrected in #1487).
+  //
+  // This used to be `plan_name === "free" && contexts.length >= 1`, which
+  // re-implemented the server's quota in the browser and got it wrong four
+  // ways: it ignored the PLAN_*_MAX_CONTEXTS settings overrides, ignored the
+  // purchasable addon bonus, never gated basic (3) or pro (20) at all, and hid
+  // the quota dialog behind a control it had already disabled.
+  //
+  // The server now sends the effective cap it actually enforces, so read it.
+  // `undefined` (older API, or workspace still loading) means "do not block" —
+  // the create call is still authoritative and returns a clear error.
+  //
+  // Count with max(list, workspace stat) rather than either alone, because the
+  // two are wrong in opposite directions:
+  //   - `contexts.length` is ACCESS-FILTERED — GET /contexts hides other users'
+  //     private contexts, so an admin can see 1 of 20 and think there is room,
+  //     while the server counts all 20 and rejects.
+  //   - `context_count` matches the server's own query exactly (workspace_id +
+  //     deleted_at IS NULL, the same as the create check) but comes from the
+  //     workspace payload, so it can lag by one right after a create.
+  // Taking the larger never under-counts, which is the direction that produces
+  // a promise the server then breaks.
+  const maxContexts = currentWorkspace?.max_contexts;
+  const usedContexts = Math.max(
+    contexts.length,
+    currentWorkspace?.context_count ?? 0,
+  );
   const isQuotaReached =
-    currentWorkspace?.plan_name === "free" && contexts.length >= 1;
+    maxContexts !== undefined && usedContexts >= maxContexts;
   const [error, setError] = useState<string | null>(null);
   const [actionLoading, setActionLoading] = useState<string | null>(null);
   const [hasOpenAIKey, setHasOpenAIKey] = useState<boolean | null>(null); // Issue #165: API key check
@@ -476,7 +502,21 @@ export default function ContextsPage() {
                   <Button
                     size="sm"
                     className={colors.button.primary}
-                    disabled={hasOpenAIKey === false || isQuotaReached}
+                    // #1487: NOT disabled — on either condition.
+                    //
+                    // A missing BYOK key must not gate this: context creation
+                    // has no server-side key precondition (the create path
+                    // makes the row, the search config and the collection with
+                    // no embedding call and no key lookup) and the probe was
+                    // added as *guidance* (#181), not an entitlement gate.
+                    //
+                    // A reached quota must not gate it either. This is the
+                    // dropdown TRIGGER, and the only way to reach the quota
+                    // dialog is a menu item inside it — disabling the trigger
+                    // is what made that dialog dead code in the first place.
+                    // The items below already route to the dialog when the
+                    // quota is reached, so creation stays blocked while the
+                    // explanation stays reachable.
                   >
                     <Plus className="h-4 w-4 mr-2" />
                     {t("newContext")}
@@ -538,6 +578,34 @@ export default function ContextsPage() {
           </a>{" "}
           {t("upgradeToCreateMore")}
         </div>
+      )}
+
+      {/* #1487: the missing-key notice used to live ONLY in the
+          `contexts.length === 0` empty state, so a workspace that already had
+          contexts saw a disabled button and no explanation whatsoever — which
+          is exactly how this got reported as a plan/quota problem. Creation is
+          no longer blocked on the key, but the guidance still has to be
+          reachable, so surface it here for the non-empty case too. */}
+      {hasOpenAIKey === false && contexts.length > 0 && (
+        <Alert className="mb-6 bg-amber-50 dark:bg-amber-900/20 border-amber-200 dark:border-amber-800">
+          <AlertTriangle className="h-4 w-4 text-amber-600 dark:text-amber-500" />
+          <AlertTitle className="text-amber-900 dark:text-amber-100">
+            {t("setupNeededOpenAI")}
+          </AlertTitle>
+          <AlertDescription className="text-amber-800 dark:text-amber-200">
+            {t("openAIKeyRequired")}
+            <div className="mt-3">
+              <Button
+                variant="outline"
+                size="sm"
+                className="border-amber-300 dark:border-amber-700 text-amber-900 dark:text-amber-100 hover:bg-amber-100 dark:hover:bg-amber-800"
+                onClick={() => setApiKeyDialogOpen(true)}
+              >
+                {t("configureApiKey")} →
+              </Button>
+            </div>
+          </AlertDescription>
+        </Alert>
       )}
 
       {/* Advanced Create Dialog */}
@@ -901,22 +969,32 @@ export default function ContextsPage() {
                   >
                     {t("configureApiKey")} →
                   </Button>
-                  <Button
-                    variant="outline"
-                    size="sm"
-                    disabled
-                    className="opacity-50 cursor-not-allowed"
-                    onClick={() => {
-                      toast({
-                        title: t("apiKeyRequired"),
-                        description: t("apiKeyRequiredDesc"),
-                        variant: "destructive",
-                      });
-                    }}
-                  >
-                    <Plus className="h-4 w-4 mr-2" />
-                    {t("create")}
-                  </Button>
+                  {/* #1487: was hard-disabled on the missing key. Creation has
+                      no server-side key precondition, so let it through — the
+                      amber notice above already says what to configure.
+                      It must still honour the SAME gates as the header control,
+                      though: this branch sits outside `canManageContexts`, so
+                      without them a viewer would get a create button the header
+                      correctly hides, and a workspace at its cap would get one
+                      the header correctly disables. */}
+                  {canManageContexts && (
+                    <Button
+                      variant="outline"
+                      size="sm"
+                      className="border-amber-300 dark:border-amber-700 text-amber-900 dark:text-amber-100 hover:bg-amber-100 dark:hover:bg-amber-800"
+                      // Route to the quota dialog rather than going dead, for
+                      // the same reason as the header trigger: a disabled
+                      // control with no reachable explanation is the bug.
+                      onClick={() =>
+                        isQuotaReached
+                          ? setQuotaDialogOpen(true)
+                          : setQuickCreateDialogOpen(true)
+                      }
+                    >
+                      <Plus className="h-4 w-4 mr-2" />
+                      {t("create")}
+                    </Button>
+                  )}
                 </div>
               </>
             ) : !currentWorkspace?.current_user_role ? null : !hasWorkspaceRole(

@@ -870,16 +870,16 @@ async def google_callback(
         redirect_url = _safe_redirect_url(return_to_url)
 
         redirect = RedirectResponse(url=redirect_url, status_code=303)
-        # Issue #115: Cookie name changed from 'session_id' to 'kagura_session'
-        redirect.set_cookie(
-            key="kagura_session",
-            value=session_id,
-            path="/",  # Available for all paths
-            httponly=True,
-            secure=False,  # False for local development (HTTP), True for production (HTTPS)
-            samesite="lax",  # CSRF protection
-            max_age=_session_manager.session_ttl,
-        )
+        # Issue #115: Cookie name changed from 'session_id' to 'kagura_session'.
+        #
+        # #1487: use the shared helper instead of open-coding set_cookie. This
+        # site hardcoded `secure=False` behind a comment saying it should be
+        # True in production, so the session cookie from an OAuth login shipped
+        # WITHOUT the Secure attribute over HTTPS, while the password/MFA path
+        # set it correctly. Funnelling every login through one writer removes
+        # the divergence — and gives multi-account (#1488) a single place to
+        # change.
+        _set_session_cookie(redirect, session_id)
 
         logger.info(f"OAuth2 login successful: {user_info['email']} (role={role})")
 
@@ -1322,15 +1322,10 @@ async def github_callback(
         redirect_url = _safe_redirect_url(return_to_url)
 
         redirect = RedirectResponse(url=redirect_url, status_code=303)
-        redirect.set_cookie(
-            key="kagura_session",
-            value=session_id,
-            path="/",
-            httponly=True,
-            secure=False,
-            samesite="lax",
-            max_age=_session_manager.session_ttl,
-        )
+        # #1487: same as the Google callback above — this hardcoded
+        # `secure=False`, so the OAuth session cookie had no Secure attribute in
+        # production. Route it through the shared helper.
+        _set_session_cookie(redirect, session_id)
 
         logger.info(f"GitHub OAuth2 login successful: {user_info['email']} (role={role})")
         return redirect

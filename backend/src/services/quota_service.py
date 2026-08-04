@@ -452,9 +452,16 @@ class QuotaService:
                 raise QuotaExceededError(error)
             return False, error
 
-        # Get effective limit (plan base + addon bonus)
+        # Get effective limit (plan base + addon bonus).
+        #
+        # Go through the model property rather than adding the two numbers here
+        # (#1487): `effective_max_contexts` applies `_zero_floor`, so a tier
+        # whose base is 0 cannot be lifted by an addon. This was the only
+        # context-cap site doing raw addition, which meant the number enforced on
+        # create could disagree with the number every other site — and now the
+        # API response — reports.
         plan = get_plan_tier(workspace.plan_name)
-        max_contexts = plan.max_contexts_per_workspace + (workspace.addon_context_bonus or 0)
+        max_contexts = workspace.effective_max_contexts
 
         # Count current contexts
         context_count_result = await self.db.execute(
