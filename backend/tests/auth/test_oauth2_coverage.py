@@ -487,6 +487,53 @@ class TestAuthorizationUrlWeb:
         with pytest.raises(ValueError, match="GOOGLE_CLIENT_ID"):
             manager.get_authorization_url_web(redirect_uri="https://x/cb", state="s")
 
+    def test_add_account_asks_google_for_the_account_chooser(
+        self, manager: OAuth2Manager, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """#1488: without this, "add another account" can never add one.
+
+        `prompt=consent` re-consents with whoever is ALREADY signed in at
+        Google and shows no chooser. A user with a single Google session is
+        therefore handed back the identity they already have; the callback
+        re-adds it idempotently, the container still holds one account, and the
+        switcher has nothing to switch to. Reported as "adding an account does
+        not let me switch" — the flow ran perfectly and produced nothing.
+        """
+        monkeypatch.setenv("GOOGLE_CLIENT_ID", "cid")
+        url = manager.get_authorization_url_web(
+            redirect_uri="https://x/cb", state="s", select_account=True
+        )
+        assert "select_account" in url
+
+    def test_the_chooser_does_not_cost_us_the_refresh_token(
+        self, manager: OAuth2Manager, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """`consent` is ADDED to, not replaced by, `select_account`.
+
+        Substituting it would stop Google issuing a refresh token, silently
+        breaking the manual-refresh flow (#515) — a regression with no symptom
+        until someone tries to refresh.
+        """
+        monkeypatch.setenv("GOOGLE_CLIENT_ID", "cid")
+        url = manager.get_authorization_url_web(
+            redirect_uri="https://x/cb", state="s", select_account=True
+        )
+        assert "consent" in url
+        assert "access_type=offline" in url
+
+    def test_an_ordinary_login_still_gets_no_chooser(
+        self, manager: OAuth2Manager, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Only the add-account flow opts in.
+
+        Showing the chooser on every sign-in would make the common case — one
+        account, one click — worse for everyone.
+        """
+        monkeypatch.setenv("GOOGLE_CLIENT_ID", "cid")
+        url = manager.get_authorization_url_web(redirect_uri="https://x/cb", state="s")
+        assert "select_account" not in url
+        assert "prompt=consent" in url
+
     def test_consumes_endpoint_override(
         self, manager: OAuth2Manager, monkeypatch: pytest.MonkeyPatch
     ) -> None:

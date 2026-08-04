@@ -551,7 +551,12 @@ async def google_login(
     if not redirect:
         raise HTTPException(status_code=500, detail="GOOGLE_REDIRECT_URI not configured")
 
-    auth_url = _oauth2_manager.get_authorization_url_web(redirect, state)
+    # #1488: "add another account" must show Google's account chooser. Without
+    # it, a user with one Google session is returned the identity they already
+    # have and the switcher never gains a second account.
+    auth_url = _oauth2_manager.get_authorization_url_web(
+        redirect, state, select_account=add_account
+    )
 
     # Issue #102: Auto-redirect for browser/iOS users
     if return_to:
