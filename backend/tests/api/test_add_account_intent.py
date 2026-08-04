@@ -69,10 +69,16 @@ def mgr(monkeypatch):
 class TestIntentIsHonouredForTheRightBrowser:
     def test_round_trip(self, mgr):
         auth_routes._remember_add_account_intent("st1", "sess-A")
-        assert auth_routes._take_add_account_intent("st1", FakeRequest("sess-A")) == "sess-A"
+        assert auth_routes._take_add_account_intent("st1", FakeRequest("sess-A")) == (
+            "add",
+            "sess-A",
+        )
 
     def test_absent_intent_means_a_normal_login(self, mgr):
-        assert auth_routes._take_add_account_intent("nope", FakeRequest("sess-A")) is None
+        assert auth_routes._take_add_account_intent("nope", FakeRequest("sess-A")) == (
+            "none",
+            None,
+        )
 
 
 class TestStateAloneIsNotAuthority:
@@ -84,31 +90,45 @@ class TestStateAloneIsNotAuthority:
         could switch into it.
         """
         auth_routes._remember_add_account_intent("st1", "sess-A")
-        assert auth_routes._take_add_account_intent("st1", FakeRequest("sess-EVIL")) is None
+        status, sid = auth_routes._take_add_account_intent("st1", FakeRequest("sess-EVIL"))
+        assert (status, sid) == ("unusable", None)
 
     def test_no_cookie_at_all_cannot_use_the_intent(self, mgr):
         auth_routes._remember_add_account_intent("st1", "sess-A")
-        assert auth_routes._take_add_account_intent("st1", FakeRequest(None)) is None
+        assert auth_routes._take_add_account_intent("st1", FakeRequest(None)) == (
+            "unusable",
+            None,
+        )
 
     def test_a_dead_session_is_refused(self, mgr):
-        """Falling back to a replacing login would surprise someone who asked
-        to ADD an account — they would silently lose the other one."""
+        """Must be UNUSABLE, never NONE.
+
+        `none` makes the caller mint a fresh session, which replaces the cookie
+        and discards every other account already signed in — the opposite of
+        what someone asking to *add* an account wants. Two-valued, that bug is
+        invisible; this assertion is the reason the status is named.
+        """
         auth_routes._remember_add_account_intent("st1", "sess-GONE")
-        assert auth_routes._take_add_account_intent("st1", FakeRequest("sess-GONE")) is None
+        assert auth_routes._take_add_account_intent("st1", FakeRequest("sess-GONE")) == (
+            "unusable",
+            None,
+        )
 
 
 class TestSingleUse:
     def test_intent_is_consumed_on_success(self, mgr):
         auth_routes._remember_add_account_intent("st1", "sess-A")
-        assert auth_routes._take_add_account_intent("st1", FakeRequest("sess-A")) == "sess-A"
-        assert auth_routes._take_add_account_intent("st1", FakeRequest("sess-A")) is None
+        assert auth_routes._take_add_account_intent("st1", FakeRequest("sess-A"))[0] == "add"
+        assert auth_routes._take_add_account_intent("st1", FakeRequest("sess-A"))[0] == "none"
 
     def test_intent_is_consumed_even_when_rejected(self, mgr):
         """A rejected attempt must not leave a reusable key behind."""
         auth_routes._remember_add_account_intent("st1", "sess-A")
-        assert auth_routes._take_add_account_intent("st1", FakeRequest("sess-EVIL")) is None
+        assert auth_routes._take_add_account_intent("st1", FakeRequest("sess-EVIL"))[0] == (
+            "unusable"
+        )
         # ...and the legitimate browser cannot use it afterwards either.
-        assert auth_routes._take_add_account_intent("st1", FakeRequest("sess-A")) is None
+        assert auth_routes._take_add_account_intent("st1", FakeRequest("sess-A"))[0] == "none"
 
 
 class TestWiring:
@@ -125,3 +145,16 @@ class TestWiring:
             src = inspect.getsource(fn)
             assert "_take_add_account_intent" in src, fn.__name__
             assert "add_account(" in src, fn.__name__
+
+    def test_neither_callback_replaces_the_session_on_an_unusable_intent(self):
+        """The destructive fallback, pinned.
+
+        Falling through to create_session here mints a new cookie and drops
+        every other signed-in account. Both callbacks must refuse instead.
+        """
+        import inspect
+
+        for fn in (auth_routes.google_callback, auth_routes.github_callback):
+            src = inspect.getsource(fn)
+            assert 'intent == "unusable"' in src, fn.__name__
+            assert "add_account_failed" in src, fn.__name__

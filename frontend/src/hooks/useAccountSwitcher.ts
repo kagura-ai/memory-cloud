@@ -12,6 +12,7 @@
 
 import { useCallback, useState } from "react";
 
+import { buildOAuthRedirect } from "@/lib/auth/buildOAuthRedirect";
 import {
   listAccounts,
   switchAccount,
@@ -64,13 +65,18 @@ export function useAccountSwitcher(): UseAccountSwitcher {
   );
 
   const addAccount = useCallback(() => {
-    // `add_account=1` makes the OAuth callback APPEND to this session instead
-    // of replacing it. Without it there is never a second account to switch to.
-    const returnTo = `${window.location.origin}/`;
-    const base = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8080";
-    window.location.assign(
-      `${base}/api/v1/auth/google/login?add_account=1&return_to=${encodeURIComponent(returnTo)}`,
-    );
+    // Build through the shared helper, not by concatenation. It guards three
+    // traps this flow has no reason to re-learn: NEXT_PUBLIC_API_URL may
+    // already carry an `/api/v1` suffix (yielding `/api/v1/api/v1/...`), the
+    // backend redirects to `return_to` verbatim so it must be absolute and
+    // same-origin (CWE-601), and the env var may end in trailing slashes.
+    //
+    // `add_account=1` is appended after: it makes the OAuth callback APPEND to
+    // this session instead of replacing it. Without it there is never a second
+    // account to switch to.
+    const url = new URL(buildOAuthRedirect("google", "/"));
+    url.searchParams.set("add_account", "1");
+    window.location.assign(url.toString());
   }, []);
 
   return { accounts, switchingTo, refresh, switchTo, addAccount };

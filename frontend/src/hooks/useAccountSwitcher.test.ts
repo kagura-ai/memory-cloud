@@ -35,6 +35,10 @@ const BOB = {
 };
 
 let assignSpy: ReturnType<typeof vi.fn>;
+// Stubbing window.location without restoring it leaks into every test file
+// that runs afterwards in the same worker — capture the descriptor and put it
+// back.
+const realLocation = Object.getOwnPropertyDescriptor(window, "location");
 
 beforeEach(() => {
   vi.clearAllMocks();
@@ -43,11 +47,20 @@ beforeEach(() => {
   assignSpy = vi.fn();
   Object.defineProperty(window, "location", {
     configurable: true,
-    value: { assign: assignSpy, origin: "https://app.test" },
+    value: {
+      assign: assignSpy,
+      origin: "https://app.test",
+      href: "https://app.test/",
+    },
   });
 });
 
-afterEach(() => vi.restoreAllMocks());
+afterEach(() => {
+  if (realLocation) {
+    Object.defineProperty(window, "location", realLocation);
+  }
+  vi.restoreAllMocks();
+});
 
 describe("useAccountSwitcher", () => {
   it("starts empty and only reads when asked", () => {
@@ -117,6 +130,20 @@ describe("useAccountSwitcher", () => {
       resolveSwitch();
       await pending;
     });
+  });
+
+  it("does not duplicate /api/v1 when the env var already carries it", async () => {
+    // Some deployments set NEXT_PUBLIC_API_URL=https://api.example.com/api/v1.
+    // Concatenating would yield /api/v1/api/v1/auth/... and break the flow;
+    // buildOAuthRedirect strips the suffix, which is why it is used here
+    // instead of string building.
+    vi.stubEnv("NEXT_PUBLIC_API_URL", "https://api.example.com/api/v1");
+    const { result } = renderHook(() => useAccountSwitcher());
+    act(() => result.current.addAccount());
+    const url = assignSpy.mock.calls[0][0] as string;
+    expect(url).not.toContain("/api/v1/api/v1");
+    expect(url).toContain("https://api.example.com/api/v1/auth/google/login");
+    vi.unstubAllEnvs();
   });
 
   it("the add flow carries the flag that makes the callback append", async () => {

@@ -835,10 +835,20 @@ async def google_callback(
         }
 
         # #1488: "add another account" keeps the CURRENT session and appends to
-        # it; a normal login mints a fresh one. Deciding here rather than at the
-        # cookie write keeps the two paths from diverging further down.
-        add_to_session = _take_add_account_intent(state, request)
-        if add_to_session and _session_manager.add_account(add_to_session, session_data):
+        # it; a normal login mints a fresh one.
+        #
+        # An intent that cannot be honoured must NOT fall through to
+        # create_session: that replaces the cookie and discards every other
+        # account already signed in, which is the opposite of what was asked.
+        intent, add_to_session = _take_add_account_intent(state, request)
+        if intent == "unusable":
+            return _oauth_error_redirect("google", "add_account_failed")
+        if intent == "add" and add_to_session:
+            if not _session_manager.add_account(add_to_session, session_data):
+                # The session died between the check and the write. Refuse for
+                # the same reason — better a retryable error than a silent loss.
+                logger.warning("add_account_write_failed")
+                return _oauth_error_redirect("google", "add_account_failed")
             session_id = add_to_session
             logger.info(f"Added account to existing session: {user_info['email']}")
         else:
@@ -993,33 +1003,41 @@ def _remember_add_account_intent(state: str, session_id: str) -> None:
         )
 
 
-def _take_add_account_intent(state: str, request: Request) -> str | None:
-    """Return the session to add to, or None for a normal (replacing) login.
+def _take_add_account_intent(state: str, request: Request) -> tuple[str, str | None]:
+    """Classify this callback: normal login, add-to-session, or refuse.
 
-    Consumes the key either way — an intent is single-use, like the state.
+    Returns ``(status, session_id)`` where status is one of:
 
-    Returns None unless the request's own cookie still names the same session,
-    so possession of ``state`` is not sufficient authority.
+    - ``"none"``     — no intent recorded; this is an ordinary login.
+    - ``"add"``      — append to ``session_id``.
+    - ``"unusable"`` — an intent WAS recorded but cannot be honoured.
+
+    The three-way answer is load-bearing. Collapsing "unusable" into "none"
+    makes the caller mint a fresh session, which REPLACES the cookie and
+    silently discards every other account already signed in — the exact
+    outcome someone asking to *add* an account must not get. Two-valued, that
+    bug is invisible; named, the caller cannot fall into it.
+
+    Consumes the key on every path — an intent is single-use, like the state.
     """
     if not _session_manager:
-        return None
+        return ("none", None)
     key = _ADD_ACCOUNT_KEY.format(state=state)
     intended = _session_manager._redis.get(key)
     if not intended:
-        return None
+        return ("none", None)
     _session_manager._redis.delete(key)
 
+    # Possession of `state` is not authority: the callback must arrive from the
+    # browser that actually holds the session.
     cookie_session = request.cookies.get("kagura_session")
     if not cookie_session or cookie_session != intended:
         logger.warning("add_account_intent_rejected_cookie_mismatch")
-        return None
-    # The session must still be alive; a dead one would silently fall back to a
-    # replacing login, which is a surprising outcome to hand a user who asked
-    # to add an account.
+        return ("unusable", None)
     if _session_manager.get_session(cookie_session, update_access=False) is None:
         logger.warning("add_account_intent_rejected_dead_session")
-        return None
-    return cookie_session
+        return ("unusable", None)
+    return ("add", cookie_session)
 
 
 @router.get("/accounts")
@@ -1449,10 +1467,16 @@ async def github_callback(
             "picture": user_info.get("picture"),
             "role": role.value,
         }
-        # #1488: append to the current session when this flow was started as
-        # "add another account"; otherwise mint a fresh one.
-        add_to_session = _take_add_account_intent(state, request)
-        if add_to_session and _session_manager.add_account(add_to_session, session_data):
+        # #1488: append when this flow was started as "add another account";
+        # otherwise mint a fresh one. See the Google callback for why an
+        # unusable intent refuses instead of falling back to a replacing login.
+        intent, add_to_session = _take_add_account_intent(state, request)
+        if intent == "unusable":
+            return _oauth_error_redirect("github", "add_account_failed")
+        if intent == "add" and add_to_session:
+            if not _session_manager.add_account(add_to_session, session_data):
+                logger.warning("add_account_write_failed")
+                return _oauth_error_redirect("github", "add_account_failed")
             session_id = add_to_session
             logger.info(f"Added account to existing session: {user_info['email']}")
         else:
