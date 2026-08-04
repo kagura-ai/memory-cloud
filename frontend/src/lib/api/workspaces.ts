@@ -20,6 +20,16 @@ export interface Workspace {
   plan_name: string;
   member_count: number;
   context_count: number;
+  /**
+   * Effective context cap for this workspace (#1487) — the same number the
+   * create path enforces, already including the plan tier, any
+   * PLAN_*_MAX_CONTEXTS override and the purchasable addon bonus.
+   *
+   * Optional because an older API build does not send it. Treat `undefined` as
+   * "unknown, do not block": the create call is authoritative either way, and
+   * blocking on a guess is what #1487 was about.
+   */
+  max_contexts?: number;
   created_at: string;
   current_user_role?: string | null; // Current user's role in this workspace
   /**
