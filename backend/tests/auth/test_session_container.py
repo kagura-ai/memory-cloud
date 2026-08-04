@@ -298,3 +298,49 @@ class TestCorruptRecordsAreNotAuthenticated:
     def test_legacy_record_with_no_id_at_all_returns_none(self, manager):
         manager._redis.store["session:bad"] = json.dumps({"email": "x@y", "role": "member"})
         assert manager.get_session("bad") is None
+
+
+class TestMigrationLosesNothing:
+    def test_updated_at_survives_migration(self, manager):
+        """`updated_at` is an envelope key, so it is stripped from the identity.
+
+        Carrying only created_at/last_accessed would drop it for every record
+        update_session had ever touched — silent information loss.
+        """
+        manager._redis.store["session:legacy"] = json.dumps(
+            {
+                **USER,
+                "created_at": "2020-01-01T00:00:00",
+                "last_accessed": "2020-01-02T00:00:00",
+                "updated_at": "2020-01-03T00:00:00",
+            }
+        )
+        manager.get_session("legacy")
+        assert raw(manager, "legacy")["updated_at"] == "2020-01-03T00:00:00"
+
+    def test_absent_updated_at_is_not_invented(self, manager):
+        manager._redis.store["session:legacy"] = json.dumps({**USER})
+        manager.get_session("legacy")
+        assert "updated_at" not in raw(manager, "legacy")
+
+
+class TestUpdateRefusesCorruptRecords:
+    def test_update_does_not_resurrect_a_dangling_active(self, manager):
+        """Writing under the dangling pointer would corrupt it further."""
+        manager._redis.store["session:bad"] = json.dumps(
+            {
+                "v": 2,
+                "accounts": {"a": {"user_id": "a"}},
+                "active": "missing",
+                "created_at": "c",
+                "last_accessed": "l",
+            }
+        )
+        assert manager.update_session("bad", {"role": "admin"}) is False
+        # ...and no phantom account was created.
+        assert "missing" not in raw(manager, "bad")["accounts"]
+
+    def test_update_on_a_healthy_record_still_works(self, manager):
+        """Guard must not have become 'refuse everything'."""
+        sid = manager.create_session(USER)
+        assert manager.update_session(sid, {"role": "admin"}) is True

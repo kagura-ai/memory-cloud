@@ -99,13 +99,19 @@ def to_container(flat: dict[str, Any]) -> dict[str, Any]:
     identity = {k: v for k, v in flat.items() if k not in _ENVELOPE_KEYS}
     account_id = _account_id(identity) or ""
     now = utcnow().isoformat()
-    return {
+    container: dict[str, Any] = {
         "v": _SESSION_VERSION,
         "accounts": {account_id: identity},
         "active": account_id,
         "created_at": flat.get("created_at", now),
         "last_accessed": flat.get("last_accessed", now),
     }
+    # `updated_at` is an envelope key, so it was stripped from the identity
+    # above. Carry it across explicitly or migration silently loses it for any
+    # record that update_session had touched.
+    if "updated_at" in flat:
+        container["updated_at"] = flat["updated_at"]
+    return container
 
 
 def project_active(container: dict[str, Any]) -> dict[str, Any] | None:
@@ -394,6 +400,15 @@ class SessionManager:
                 return False
             stored = json.loads(raw)  # type: ignore[arg-type]
             container = stored if is_container(stored) else to_container(stored)
+
+            # Refuse a record whose active account is missing or id-less, for
+            # the same reason get_session discards it. Without this the
+            # `setdefault(...)[active] = identity` below would CREATE a new
+            # empty account under the dangling pointer — corrupting the record
+            # further while reporting success.
+            if project_active(container) is None:
+                logger.warning(f"Refusing to update unusable session: {session_id[:10]}...")
+                return False
 
             # Updates apply to the ACTIVE account's identity. Envelope keys are
             # the container's, so they are set on the container instead — a
