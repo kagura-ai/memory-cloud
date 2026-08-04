@@ -81,14 +81,73 @@ class TestCreateCheckUsesTheSameNumber:
         `plan.max_contexts_per_workspace + bonus` and `effective_max_contexts`
         differ only when the base is 0 — rare, and therefore exactly the case a
         value-only test would miss on every tier we normally exercise.
+
+        Scoped to the FUNCTION, not the module: a module-wide string search
+        passes when the phrase appears in an unrelated helper or a comment,
+        which is precisely how a source-matching guard goes vacuous.
         """
-        source = inspect.getsource(quota_service)
-        assert "workspace.effective_max_contexts" in source, (
+        source = inspect.getsource(quota_service.QuotaService.check_context_creation_allowed)
+        # Strip comments so prose about the property cannot satisfy the check.
+        code = "\n".join(line for line in source.splitlines() if not line.lstrip().startswith("#"))
+        assert "workspace.effective_max_contexts" in code, (
             "the create check must resolve the cap through the model property"
         )
-        assert "plan.max_contexts_per_workspace + (" not in source, (
+        assert "max_contexts_per_workspace" not in code, (
             "raw addition bypasses _zero_floor and can disagree with the API"
         )
+
+    @pytest.mark.asyncio
+    async def test_enforced_cap_equals_the_reported_cap(self):
+        """Behavioural: the number enforced IS `effective_max_contexts`.
+
+        The source check above pins how; this pins what. Together they survive
+        a refactor that keeps the value but changes the expression, and a
+        refactor that keeps the expression but changes the value.
+        """
+        from unittest.mock import AsyncMock, MagicMock
+
+        ws = Workspace(name="w", plan_name="pro", addon_context_bonus=0)
+        ws.id = "11111111-1111-1111-1111-111111111111"
+
+        svc = quota_service.QuotaService(db=MagicMock())
+
+        # First execute() resolves the workspace, second returns the count.
+        ws_result = MagicMock()
+        ws_result.scalar_one_or_none.return_value = ws
+        count_result = MagicMock()
+        # Exactly at the cap -> must deny; one below -> must allow.
+        count_result.scalar.return_value = ws.effective_max_contexts
+        svc.db.execute = AsyncMock(side_effect=[ws_result, count_result])
+
+        allowed, error = await svc.check_context_creation_allowed(ws.id, raise_on_denied=False)
+        assert allowed is False
+        assert error is not None
+        # The message must quote the SAME cap the API reports, or the UI and the
+        # error text disagree — which is how this was misread as a plan problem.
+        assert str(ws.effective_max_contexts) in error
+
+        count_result.scalar.return_value = ws.effective_max_contexts - 1
+        svc.db.execute = AsyncMock(side_effect=[ws_result, count_result])
+        allowed, _ = await svc.check_context_creation_allowed(ws.id, raise_on_denied=False)
+        assert allowed is True
+
+    @pytest.mark.asyncio
+    async def test_a_pro_workspace_with_three_contexts_is_allowed(self):
+        """The exact reported state, end to end through the real check."""
+        from unittest.mock import AsyncMock, MagicMock
+
+        ws = Workspace(name="personal", plan_name="pro", addon_context_bonus=0)
+        ws.id = "22222222-2222-2222-2222-222222222222"
+
+        svc = quota_service.QuotaService(db=MagicMock())
+        ws_result = MagicMock()
+        ws_result.scalar_one_or_none.return_value = ws
+        count_result = MagicMock()
+        count_result.scalar.return_value = 3
+        svc.db.execute = AsyncMock(side_effect=[ws_result, count_result])
+
+        allowed, error = await svc.check_context_creation_allowed(ws.id, raise_on_denied=False)
+        assert allowed is True, f"pro/3 contexts must be allowed, got: {error}"
 
     def test_zero_base_cannot_be_lifted_by_an_addon(self):
         """What the raw addition got wrong, as a value.

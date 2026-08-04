@@ -136,9 +136,24 @@ export default function ContextsPage() {
   // The server now sends the effective cap it actually enforces, so read it.
   // `undefined` (older API, or workspace still loading) means "do not block" —
   // the create call is still authoritative and returns a clear error.
+  //
+  // Count with max(list, workspace stat) rather than either alone, because the
+  // two are wrong in opposite directions:
+  //   - `contexts.length` is ACCESS-FILTERED — GET /contexts hides other users'
+  //     private contexts, so an admin can see 1 of 20 and think there is room,
+  //     while the server counts all 20 and rejects.
+  //   - `context_count` matches the server's own query exactly (workspace_id +
+  //     deleted_at IS NULL, the same as the create check) but comes from the
+  //     workspace payload, so it can lag by one right after a create.
+  // Taking the larger never under-counts, which is the direction that produces
+  // a promise the server then breaks.
   const maxContexts = currentWorkspace?.max_contexts;
+  const usedContexts = Math.max(
+    contexts.length,
+    currentWorkspace?.context_count ?? 0,
+  );
   const isQuotaReached =
-    maxContexts !== undefined && contexts.length >= maxContexts;
+    maxContexts !== undefined && usedContexts >= maxContexts;
   const [error, setError] = useState<string | null>(null);
   const [actionLoading, setActionLoading] = useState<string | null>(null);
   const [hasOpenAIKey, setHasOpenAIKey] = useState<boolean | null>(null); // Issue #165: API key check
@@ -950,16 +965,24 @@ export default function ContextsPage() {
                   </Button>
                   {/* #1487: was hard-disabled on the missing key. Creation has
                       no server-side key precondition, so let it through — the
-                      amber notice above already says what to configure. */}
-                  <Button
-                    variant="outline"
-                    size="sm"
-                    className="border-amber-300 dark:border-amber-700 text-amber-900 dark:text-amber-100 hover:bg-amber-100 dark:hover:bg-amber-800"
-                    onClick={() => setQuickCreateDialogOpen(true)}
-                  >
-                    <Plus className="h-4 w-4 mr-2" />
-                    {t("create")}
-                  </Button>
+                      amber notice above already says what to configure.
+                      It must still honour the SAME gates as the header control,
+                      though: this branch sits outside `canManageContexts`, so
+                      without them a viewer would get a create button the header
+                      correctly hides, and a workspace at its cap would get one
+                      the header correctly disables. */}
+                  {canManageContexts && (
+                    <Button
+                      variant="outline"
+                      size="sm"
+                      disabled={isQuotaReached}
+                      className="border-amber-300 dark:border-amber-700 text-amber-900 dark:text-amber-100 hover:bg-amber-100 dark:hover:bg-amber-800"
+                      onClick={() => setQuickCreateDialogOpen(true)}
+                    >
+                      <Plus className="h-4 w-4 mr-2" />
+                      {t("create")}
+                    </Button>
+                  )}
                 </div>
               </>
             ) : !currentWorkspace?.current_user_role ? null : !hasWorkspaceRole(
