@@ -155,10 +155,31 @@ describe("New Context control", () => {
     expect(await screen.findByText("setupNeededOpenAI")).toBeInTheDocument();
   });
 
-  it("is DISABLED only when the server-sent cap is actually reached", async () => {
+  it("stays CLICKABLE at the cap, so the quota explanation is reachable", async () => {
+    // The trigger must not be disabled: the only route to the quota dialog is
+    // a menu item inside this dropdown, so disabling the trigger is what made
+    // that dialog dead code. Creation is still blocked — by the item handlers,
+    // which open the dialog instead of the create form.
     setup({ plan: "pro", maxContexts: 20, contextCount: 20, hasKey: true });
     render(<ContextsPage />);
-    await waitFor(async () => expect(await newContextButton()).toBeDisabled());
+    await waitFor(async () =>
+      expect(await newContextButton()).not.toBeDisabled(),
+    );
+  });
+
+  it("warns on screen when the cap is reached", async () => {
+    // Whatever the control does, the reason has to be visible — a silent block
+    // is the whole of #1487.
+    setup({ plan: "pro", maxContexts: 20, contextCount: 20, hasKey: true });
+    render(<ContextsPage />);
+    expect(await screen.findByText(/quotaWarning/)).toBeInTheDocument();
+  });
+
+  it("does not warn about the cap when there is room", async () => {
+    setup({ plan: "pro", maxContexts: 20, contextCount: 3, hasKey: true });
+    render(<ContextsPage />);
+    await waitFor(async () => expect(await newContextButton()).toBeTruthy());
+    expect(screen.queryByText(/quotaWarning/)).not.toBeInTheDocument();
   });
 
   it("is enabled for a free workspace whose cap was raised by config", async () => {
@@ -182,7 +203,9 @@ describe("New Context control", () => {
       hasKey: true,
     });
     render(<ContextsPage />);
-    await waitFor(async () => expect(await newContextButton()).toBeDisabled());
+    // Seeing 1 of 20 must still register as "at the cap" — otherwise the UI
+    // promises a create the server rejects.
+    expect(await screen.findByText(/quotaWarning/)).toBeInTheDocument();
   });
 
   it("does not block when the server did not send a cap", async () => {

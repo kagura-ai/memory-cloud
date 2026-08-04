@@ -502,15 +502,21 @@ export default function ContextsPage() {
                   <Button
                     size="sm"
                     className={colors.button.primary}
-                    // #1487: a missing BYOK key must NOT disable this. Context
-                    // creation has no server-side key precondition — the create
-                    // path makes the row, the search config and the collection
-                    // with no embedding call and no key lookup — and the probe
-                    // was added as *guidance* (#181), not as an entitlement
-                    // gate. Disabling it here stranded paid workspaces behind a
-                    // dead button with no reason on screen. The key notice
-                    // below still tells them what to configure.
-                    disabled={isQuotaReached}
+                    // #1487: NOT disabled — on either condition.
+                    //
+                    // A missing BYOK key must not gate this: context creation
+                    // has no server-side key precondition (the create path
+                    // makes the row, the search config and the collection with
+                    // no embedding call and no key lookup) and the probe was
+                    // added as *guidance* (#181), not an entitlement gate.
+                    //
+                    // A reached quota must not gate it either. This is the
+                    // dropdown TRIGGER, and the only way to reach the quota
+                    // dialog is a menu item inside it — disabling the trigger
+                    // is what made that dialog dead code in the first place.
+                    // The items below already route to the dialog when the
+                    // quota is reached, so creation stays blocked while the
+                    // explanation stays reachable.
                   >
                     <Plus className="h-4 w-4 mr-2" />
                     {t("newContext")}
@@ -975,9 +981,15 @@ export default function ContextsPage() {
                     <Button
                       variant="outline"
                       size="sm"
-                      disabled={isQuotaReached}
                       className="border-amber-300 dark:border-amber-700 text-amber-900 dark:text-amber-100 hover:bg-amber-100 dark:hover:bg-amber-800"
-                      onClick={() => setQuickCreateDialogOpen(true)}
+                      // Route to the quota dialog rather than going dead, for
+                      // the same reason as the header trigger: a disabled
+                      // control with no reachable explanation is the bug.
+                      onClick={() =>
+                        isQuotaReached
+                          ? setQuotaDialogOpen(true)
+                          : setQuickCreateDialogOpen(true)
+                      }
                     >
                       <Plus className="h-4 w-4 mr-2" />
                       {t("create")}

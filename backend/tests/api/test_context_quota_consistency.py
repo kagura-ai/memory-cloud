@@ -39,13 +39,26 @@ class TestResponseCarriesTheCap:
         assert field.is_required(), "max_contexts must be populated by every handler"
 
     def test_every_handler_populates_it(self):
-        """A handler that forgets it would 500 at runtime, not fail a test."""
+        """A handler that forgets it would 500 at runtime, not fail a test.
+
+        Count constructions EXPLICITLY rather than counting every occurrence
+        and subtracting one for the class statement. `class
+        WorkspaceResponse(BaseModel):` does contain the substring
+        `WorkspaceResponse(`, so the arithmetic worked — but only by
+        coincidence, and a reader (human or bot) cannot tell that from the
+        assertion. Excluding the definition by shape says what is meant.
+        """
         source = inspect.getsource(__import__("api.routes.workspaces", fromlist=["x"]))
-        constructions = source.count("WorkspaceResponse(")
+        lines = source.splitlines()
+        constructions = [
+            line
+            for line in lines
+            if "WorkspaceResponse(" in line and not line.lstrip().startswith("class ")
+        ]
         populated = source.count("max_contexts=workspace.effective_max_contexts")
-        # -1 for the class definition line `class WorkspaceResponse(BaseModel)`.
-        assert populated == constructions - 1, (
-            f"{constructions - 1} WorkspaceResponse constructions but "
+        assert constructions, "no WorkspaceResponse constructions found — test is stale"
+        assert populated == len(constructions), (
+            f"{len(constructions)} WorkspaceResponse constructions but "
             f"{populated} populate max_contexts"
         )
 
