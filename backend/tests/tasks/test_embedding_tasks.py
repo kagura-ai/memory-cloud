@@ -78,7 +78,9 @@ class TestSweepPendingEmbeddings:
             with patch("tasks.embedding_tasks.logger") as log:
                 await sweep_pending_embeddings()
 
-        warnings = [c for c in log.warning.call_args_list if c.args[0] == "embedding_unsearchable_backlog"]
+        warnings = [
+            c for c in log.warning.call_args_list if c.args[0] == "embedding_unsearchable_backlog"
+        ]
         assert warnings, "the backlog was not reported"
         assert warnings[0].kwargs == {"unsearchable": 467, "stalled": 467}
 

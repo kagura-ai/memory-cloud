@@ -38,14 +38,17 @@ elapsed backoff, so the reset alone is enough to make them claimable.
 Downgrade is a no-op: the pre-migration counter values are not preserved, and
 restoring them would only re-strand the rows.
 
-Revision ID: e77_1496_embedding_retry_backfill
+Revision ID: e77_1496_embed_retry_backfill
 Revises: e76_1470_referral_program
 """
 
 from alembic import op
 
 # revision identifiers, used by Alembic.
-revision: str = "e77_1496_embedding_retry_backfill"
+# NOTE: alembic_version.version_num is varchar(32). The first draft of this
+# revision id was 33 characters and CI's migration run failed with
+# StringDataRightTruncationError — keep new ids comfortably under the limit.
+revision: str = "e77_1496_embed_retry_backfill"
 down_revision: str | None = "e76_1470_referral_program"
 branch_labels: str | None = None
 depends_on: str | None = None
