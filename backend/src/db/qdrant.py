@@ -1046,11 +1046,17 @@ async def copy_context_points(
     memory_id_mapping: dict[str, str],
     collection_name: str = KAGURA_MEMORIES_COLLECTION,
     batch_size: int = 100,
-) -> int:
+) -> set[str]:
     """Copy Qdrant points from source context to target context (Issue #90).
 
     Retrieves points by ID, creates new points with updated context_id and new IDs.
     Processes in batches for memory efficiency.
+
+    #1497: returns the NEW ids actually upserted, not a count. Two branches here
+    skip a memory silently — a source point that does not exist, and one stored
+    without a vector — and a bare count cannot say WHICH. The caller needs that
+    to avoid marking a target row ``success`` when nothing was copied for it,
+    which would manufacture a row no automatic path can ever repair.
 
     Args:
         workspace_id: Workspace ID
@@ -1061,7 +1067,9 @@ async def copy_context_points(
         batch_size: Points per batch
 
     Returns:
-        Number of points copied
+        The set of new memory ids whose vector was upserted. A caller comparing
+        this against ``memory_id_mapping.values()`` learns exactly which rows
+        have no vector in the target.
 
     Raises:
         QdrantError: If copy fails
@@ -1072,7 +1080,7 @@ async def copy_context_points(
         )
 
     client = get_qdrant_client()
-    copied = 0
+    upserted: set[str] = set()
 
     try:
         old_ids = list(memory_id_mapping.keys())
@@ -1124,13 +1132,13 @@ async def copy_context_points(
                     collection_name=collection_name,
                     points=new_points,
                 )
-                copied += len(new_points)
+                upserted.update(str(p.id) for p in new_points)
 
             logger.debug(
                 "context_points_copy_batch",
                 batch=i // batch_size + 1,
                 copied_in_batch=len(new_points),
-                total_copied=copied,
+                total_copied=len(upserted),
             )
 
         logger.info(
@@ -1139,10 +1147,10 @@ async def copy_context_points(
             workspace_id=workspace_id,
             source_context_id=source_context_id,
             target_context_id=target_context_id,
-            count=copied,
+            count=len(upserted),
         )
 
-        return copied
+        return upserted
 
     except Exception as e:
         logger.error(

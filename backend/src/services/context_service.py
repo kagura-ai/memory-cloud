@@ -870,6 +870,14 @@ class ContextService:
                 "Source context is locked. Unlock it first via update_context(is_locked=false)."
             )
 
+        # #1497: delete_context refuses a default context — but it is called AFTER
+        # the rows and vectors have been copied, so the merge half-completed and
+        # then raised. Check it up front, with the other pre-flights.
+        if delete_source and source.is_default:
+            raise ValidationError(
+                "Cannot delete the default context. Merge with delete_source=false."
+            )
+
         # Validate same embedding model (single query for both configs)
         settings = get_settings()
         cfg_result = await self.db.execute(
@@ -893,32 +901,41 @@ class ContextService:
                 "Only same-model merge is supported."
             )
 
-        # Fetch source memories (non-deleted, with successful embeddings)
+        # #1497: EVERY live memory moves, not only the embedded ones.
+        #
+        # This used to filter on ``embedding_status == "success"`` and then, with
+        # delete_source=True, soft-delete the source anyway — so a pending or
+        # failed memory was neither copied nor kept. It stayed parented to a
+        # context the user had just removed, and the caller was told how many
+        # were "merged" without being told what was left behind.
+        #
+        # The filter did protect something real: the Qdrant copy needs a vector,
+        # and a non-success row has no point. But that is a reason to copy the
+        # row WITHOUT a vector, not to discard it. #1496 established that
+        # ``failed`` is a recoverable state — the sweep re-embeds those rows once
+        # a credential exists — so discarding them throws away data that would
+        # have come back on its own.
         result = await self.db.execute(
             select(Memory).where(
                 Memory.context_id == source_context_id,
                 Memory.deleted_at.is_(None),
-                Memory.embedding_status == "success",
             )
         )
         source_memories = result.scalars().all()
 
-        if not source_memories:
-            # Still honor delete_source even if no memories to copy
-            if delete_source:
-                await self.delete_context(user_id, source_context_id)
-            return {
-                "merged": 0,
-                "source_id": str(source_context_id),
-                "target_id": str(target_context_id),
-            }
-
-        # Build ID mapping and copy memories in PostgreSQL
+        # Build ID mapping and copy memories in PostgreSQL.
+        #
+        # #1497: only rows that HAVE a vector go into the mapping — that dict is
+        # what drives the Qdrant copy, and asking it to fetch a point that was
+        # never written just logs a skip.
         memory_id_mapping: dict[str, str] = {}
+        rows_by_new_id: dict[str, Memory] = {}
 
         for mem in source_memories:
             new_id = uuid4()
-            memory_id_mapping[str(mem.id)] = str(new_id)
+            embedded = mem.embedding_status == "success"
+            if embedded:
+                memory_id_mapping[str(mem.id)] = str(new_id)
 
             # Normalize nested context JSON to reference target context
             ctx_json = mem.context
@@ -945,31 +962,86 @@ class ContextService:
                 scope=mem.scope,
                 long_term=mem.long_term,
                 promoted_at=mem.promoted_at,
+                # The usage-stat cluster resets as one group: this is a NEW
+                # memory in a new context, with no history of its own. Splitting
+                # it (carrying reference_count while zeroing access_count) would
+                # break the access_count >= reference_count invariant documented
+                # on the model.
                 access_count=0,
+                reference_count=0,
                 client=mem.client,
                 client_version=mem.client_version,
                 source=mem.source,
-                embedding_status="success",
+                # #1497: provenance must survive the copy. source_type defaults
+                # to "manual", and a row that arrived from a connector is
+                # EXCLUDED from the pinned/bootstrap lane precisely because it is
+                # not manual (repositories/memory.py, OWASP LLM01/LLM03). Letting
+                # the default apply would silently promote connector content into
+                # a lane that exists to keep it out — and merging into a trusted
+                # context clears the other half of that gate at the same moment.
+                source_type=mem.source_type,
+                source_uri=mem.source_uri,
+                delivery_mode=mem.delivery_mode,
+                # #1497: a row with no vector is copied as `pending` so the #1496
+                # sweep embeds it into its NEW home — process_pending_embedding
+                # resolves the collection from context_id, so the copy lands in
+                # the target's collection.
+                #
+                # `pending` rather than the source's own status, deliberately: a
+                # failed row may have exhausted its retry budget, and copying
+                # that verbatim would produce a memory born terminal that nothing
+                # ever retries. A new row in a new context is a new episode,
+                # which is what the budget already means elsewhere.
+                embedding_status="success" if embedded else "pending",
+                embedding_retry_count=0,
+                embedding_error=None,
                 created_at=mem.created_at,
                 updated_at=utcnow(),
             )
             self.db.add(new_mem)
+            rows_by_new_id[str(new_id)] = new_mem
 
         await self.db.flush()
 
-        # Copy Qdrant points — rollback PG on failure for consistency
-        collection = get_collection_name(src_model, src_dims)
-        try:
-            copied = await copy_context_points(
-                workspace_id=str(source.workspace_id),
-                source_context_id=str(source_context_id),
-                target_context_id=str(target_context_id),
-                memory_id_mapping=memory_id_mapping,
-                collection_name=collection,
-            )
-        except Exception:
+        # Copy Qdrant points — rollback PG on failure for consistency.
+        # Guarded: with no embedded source rows there is nothing to fetch, and
+        # skipping the call also keeps this path working on backends that do not
+        # implement it.
+        upserted: set[str] = set()
+        if memory_id_mapping:
+            collection = get_collection_name(src_model, src_dims)
+            try:
+                upserted = await copy_context_points(
+                    workspace_id=str(source.workspace_id),
+                    source_context_id=str(source_context_id),
+                    target_context_id=str(target_context_id),
+                    memory_id_mapping=memory_id_mapping,
+                    collection_name=collection,
+                )
+            except Exception:
+                await self.db.rollback()
+                raise
+
+        # #1497: a row we intended to mark `success` but whose vector did not
+        # actually land must not claim to be embedded. Without this it would be
+        # a brand-new memory that is invisible to search and that no automatic
+        # path can repair, since the sweep only ever claims pending/processing/
+        # failed — exactly the #1496 shape, manufactured by the merge itself.
+        unvectored = 0
+        for new_id in memory_id_mapping.values():
+            if new_id not in upserted:
+                rows_by_new_id[new_id].embedding_status = "pending"
+                unvectored += 1
+
+        # #1497: never remove the source unless every row reached the target.
+        # True by construction above, so this is an assertion rather than a
+        # branch — which is the point: if someone narrows the selection again,
+        # the merge refuses to delete instead of quietly resurrecting this bug.
+        if delete_source and len(rows_by_new_id) != len(source_memories):
             await self.db.rollback()
-            raise
+            raise ValidationError(
+                "Merge did not transfer every memory; refusing to delete the source context."
+            )
 
         # Optional: delete source (_commit=False for atomic transaction)
         if delete_source:
@@ -977,16 +1049,29 @@ class ContextService:
 
         await self.db.commit()
 
+        # `merged` counts ROWS transferred, which is what the caller can see in
+        # the context's memory count. It used to count Qdrant points, so a
+        # source full of unembedded memories reported 0 while the UI had just
+        # shown their real number.
+        merged = len(rows_by_new_id)
+        pending = merged - len(upserted)
+
         logger.info(
             "contexts_merged",
             source_context_id=str(source_context_id),
             target_context_id=str(target_context_id),
-            merged=copied,
+            merged=merged,
+            pending_embedding=pending,
+            unvectored=unvectored,
             delete_source=delete_source,
         )
 
         return {
-            "merged": copied,
+            "merged": merged,
+            # #1497: name what is not searchable YET rather than leaving the
+            # caller to infer it. These rows transferred; only their index is
+            # deferred, and the sweep builds it in the new context.
+            "pending_embedding": pending,
             "source_id": str(source_context_id),
             "target_id": str(target_context_id),
         }
