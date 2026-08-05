@@ -761,7 +761,8 @@ class TestCopyContextPoints:
             )
         ]
         copied = await copy_context_points(WS, "src-ctx", "tgt-ctx", mapping)
-        assert copied == 1
+        # #1497: the ids that actually landed, not a count.
+        assert copied == {"new1"}
         new_point = mock_client.upsert.await_args.kwargs["points"][0]
         assert new_point.id == "new1"
         assert new_point.payload["context_id"] == "tgt-ctx"
@@ -771,7 +772,7 @@ class TestCopyContextPoints:
         """Retrieve returning [] yields zero copied, no upsert."""
         mock_client.retrieve.return_value = []
         copied = await copy_context_points(WS, "s", "t", {"old1": "new1"})
-        assert copied == 0
+        assert copied == set()
         mock_client.upsert.assert_not_awaited()
 
     async def test_skips_point_not_in_mapping_and_without_vector(self, mock_client):
@@ -782,7 +783,7 @@ class TestCopyContextPoints:
             SimpleNamespace(id="old1", vector=None, payload={}),
         ]
         copied = await copy_context_points(WS, "s", "t", mapping)
-        assert copied == 0
+        assert copied == set()
         mock_client.upsert.assert_not_awaited()
 
     async def test_batching_two_batches(self, mock_client):
@@ -794,7 +795,7 @@ class TestCopyContextPoints:
 
         mock_client.retrieve.side_effect = fake_retrieve
         copied = await copy_context_points(WS, "s", "t", mapping, batch_size=2)
-        assert copied == 3
+        assert len(copied) == 3
         assert mock_client.retrieve.await_count == 2
 
     async def test_copy_failure_wrapped(self, mock_client):
