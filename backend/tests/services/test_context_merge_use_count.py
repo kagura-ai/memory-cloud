@@ -135,7 +135,7 @@ async def test_merge_contexts_copies_memory_without_dropped_use_count():
 # ---------------------------------------------------------------------------
 
 
-def _merge_harness(memories, *, upsert=None):
+def _merge_harness(memories, *, upsert=None, live_count=None):
     """Drive the real copy loop over `memories`. Returns (result, added_rows)."""
     user_id = "user-merge"
     source_id = uuid4()
@@ -156,16 +156,22 @@ def _merge_harness(memories, *, upsert=None):
     mem_result.scalars.return_value.all.return_value = [
         m(user_id, source_id) if callable(m) else m for m in memories
     ]
-    mock_db.execute.side_effect = [cfg_result, mem_result]
+    # #1497: with delete_source the guard issues a third statement — an
+    # independent count of live rows still in the source.
+    live_result = MagicMock()
+    live_result.scalar_one.return_value = (
+        live_count if live_count is not None else len(mem_result.scalars.return_value.all())
+    )
+    mock_db.execute.side_effect = [cfg_result, mem_result, live_result]
     mock_db.add = MagicMock()
 
     service = ContextService(mock_db)
     return service, mock_db, source_ctx, target_ctx, source_id, target_id, user_id
 
 
-async def _run_merge(memories, *, upsert=None, delete_source=False):
+async def _run_merge(memories, *, upsert=None, delete_source=False, live_count=None):
     (service, mock_db, source_ctx, target_ctx, source_id, target_id, user_id) = _merge_harness(
-        memories
+        memories, live_count=live_count
     )
     delete_called = AsyncMock()
     with (
@@ -335,3 +341,48 @@ async def test_the_selection_does_not_filter_on_embedding_status():
     assert "context_id" in where and "deleted_at" in where, (
         "the selection lost its context/liveness scoping"
     )
+
+
+@pytest.mark.asyncio
+async def test_the_delete_guard_counts_live_rows_independently():
+    """The guard must not measure the copy against its own selection.
+
+    Reviewed finding on #1499: the first version compared
+    `len(rows_by_new_id) != len(source_memories)`. Narrow the SELECT and both
+    sides shrink together, so it passes while rows are left behind — a
+    tautology dressed as a safety check, guarding against precisely the
+    regression it could not see.
+
+    Here the source holds 16 live rows but only 1 was selected. The merge must
+    refuse to delete.
+    """
+    from utils.exceptions import ValidationError
+
+    with pytest.raises(ValidationError, match="refusing to delete"):
+        await _run_merge([_source_memory], delete_source=True, live_count=16)
+
+
+@pytest.mark.asyncio
+async def test_a_complete_transfer_still_deletes_the_source():
+    """The guard must not become a blanket refusal — delete_source has to keep
+    working for the case it was designed for."""
+    _, rows, delete_called, _ = await _run_merge(
+        [_source_memory, _source_memory], delete_source=True, live_count=2
+    )
+    assert len(rows) == 2
+    delete_called.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_an_unembedded_row_counts_as_transferred():
+    """A row copied as `pending` HAS moved; only its index is deferred.
+
+    Gating on vectors instead of rows would refuse deletes for merges that lost
+    nothing at all.
+    """
+    _, _, delete_called, _ = await _run_merge(
+        [lambda u, c: _source_memory(u, c, embedding_status="failed")],
+        delete_source=True,
+        live_count=1,
+    )
+    delete_called.assert_awaited_once()

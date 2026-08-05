@@ -1033,15 +1033,30 @@ class ContextService:
                 rows_by_new_id[new_id].embedding_status = "pending"
                 unvectored += 1
 
-        # #1497: never remove the source unless every row reached the target.
-        # True by construction above, so this is an assertion rather than a
-        # branch — which is the point: if someone narrows the selection again,
-        # the merge refuses to delete instead of quietly resurrecting this bug.
-        if delete_source and len(rows_by_new_id) != len(source_memories):
-            await self.db.rollback()
-            raise ValidationError(
-                "Merge did not transfer every memory; refusing to delete the source context."
+        # #1497: never remove the source unless every LIVE row reached the target.
+        #
+        # Counted independently, straight from the table — NOT against
+        # `source_memories`. Comparing the copy to the selection that produced it
+        # is a tautology: narrow the SELECT and both sides shrink together, so
+        # the guard passes while rows are left behind. That is exactly the
+        # regression it exists to stop, and the first version of this check made
+        # exactly that mistake (caught in review on #1499).
+        if delete_source:
+            live_result = await self.db.execute(
+                select(func.count())
+                .select_from(Memory)
+                .where(
+                    Memory.context_id == source_context_id,
+                    Memory.deleted_at.is_(None),
+                )
             )
+            live_rows = live_result.scalar_one()
+            if live_rows != len(rows_by_new_id):
+                await self.db.rollback()
+                raise ValidationError(
+                    f"Merge transferred {len(rows_by_new_id)} of {live_rows} memories; "
+                    "refusing to delete the source context."
+                )
 
         # Optional: delete source (_commit=False for atomic transaction)
         if delete_source:
