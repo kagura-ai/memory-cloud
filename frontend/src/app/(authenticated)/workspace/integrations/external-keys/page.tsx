@@ -194,6 +194,12 @@ export default function ExternalKeysPage() {
   const [canEmbed, setCanEmbed] = useState<boolean | null>(null);
   useEffect(() => {
     if (!currentWorkspaceId) return;
+    // Issue #1167: the key-status route is behind `require_byok_enabled` and
+    // 404s with BYOK off, so probing there is a guaranteed-failing request.
+    // Sidebar and the contexts page already skip it; this surface was the odd
+    // one out. Also covers `systemFeatures === null` (still loading), where the
+    // answer is simply not known yet.
+    if (!byokEnabled) return;
     let cancelled = false;
     checkOpenAIKeyStatus(currentWorkspaceId)
       .then((s) => {
@@ -205,7 +211,7 @@ export default function ExternalKeysPage() {
     return () => {
       cancelled = true;
     };
-  }, [currentWorkspaceId, keys]);
+  }, [currentWorkspaceId, byokEnabled, keys]);
 
   const handleProviderChange = (provider: string) => {
     const selectedProvider = PROVIDERS.find((p) => p.value === provider);
