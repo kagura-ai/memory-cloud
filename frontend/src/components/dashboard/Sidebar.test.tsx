@@ -5,6 +5,17 @@ import { describe, it, expect, vi, beforeEach } from "vitest";
 const mockSystemInfoGet = vi.hoisted(() =>
   vi.fn().mockResolvedValue({ version: "9.9.9" }),
 );
+// #1495: the nav warning now asks the server whether embedding is AVAILABLE
+// instead of counting the workspace's own key rows — a workspace served by the
+// platform credential owns none and is perfectly healthy.
+const mockKeyStatus = vi.hoisted(() =>
+  vi.fn().mockResolvedValue({
+    has_key: false,
+    embedding_available: true,
+    can_configure: true,
+    external_keys_url: "/integrations/external-keys",
+  }),
+);
 
 // Mock next-intl to return the translation key (matches KpiCards.test.tsx pattern)
 vi.mock("next-intl", () => ({
@@ -59,6 +70,10 @@ vi.mock("@/lib/api/contexts", () => ({
 
 vi.mock("@/lib/api/external-keys", () => ({
   listExternalAPIKeys: vi.fn().mockResolvedValue([]),
+}));
+
+vi.mock("@/lib/api/workspaces", () => ({
+  checkOpenAIKeyStatus: (...args: unknown[]) => mockKeyStatus(...args),
 }));
 
 vi.mock("@/lib/api/base", () => ({
@@ -159,9 +174,13 @@ describe("Sidebar", () => {
     expect(listExternalAPIKeys).not.toHaveBeenCalled();
   });
 
-  it("still probes external keys for owners when byok is on (#1167)", () => {
+  it("still probes embedding availability for owners when byok is on (#1167)", () => {
+    // #1495 changed WHICH probe: the nav used to count the workspace's own key
+    // rows, which warned every workspace served by the platform credential
+    // that it was broken. The #1167 rule this pins — owners probe, others do
+    // not — is unchanged.
     render(<Sidebar />);
-    expect(listExternalAPIKeys).toHaveBeenCalledTimes(1);
+    expect(mockKeyStatus).toHaveBeenCalledTimes(1);
   });
 
   it("orders the workspace group: stores first, reporting last (#1167)", () => {

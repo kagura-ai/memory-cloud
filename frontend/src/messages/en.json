@@ -2296,7 +2296,9 @@
       "voyageDesc": "Optional reranker",
       "cohere": "Cohere",
       "cohereDesc": "Optional reranker"
-    }
+    },
+    "embeddingManaged": "Embedding is handled for you",
+    "embeddingManagedDesc": "This workspace has no API key of its own and does not need one — embeddings are generated with the platform credential. Add your own key only if you want the usage billed to your account."
   },
   "errors": {
     "generic": "An error occurred",

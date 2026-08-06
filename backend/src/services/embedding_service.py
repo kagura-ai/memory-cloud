@@ -46,6 +46,34 @@ logger = get_logger(__name__)
 KeySource = Literal["workspace", "context", "env"]
 
 
+def platform_fallback_allowed(plan_name: str) -> bool:
+    """May a workspace on this plan embed on the platform OPENAI_API_KEY? (#1030)
+
+    The single definition of that rule. Two callers need it and they must not
+    drift apart:
+
+    - the embedding path's cap gate, which DENIES the call when this is False;
+    - the key-status endpoint the web UI asks before deciding whether to warn
+      that embedding is unavailable (#1495).
+
+    Duplicating the condition in the second caller is the exact defect #1495
+    exists to fix — a surface re-deriving a rule it does not own, and telling
+    the user something the server does not agree with. Here they share one
+    function instead.
+
+    Says nothing about whether a platform key is actually CONFIGURED, only
+    whether this plan would be allowed to use one. Callers check both.
+    """
+    from config.plan_tiers import has_feature
+    from config.settings import get_settings
+
+    if not get_settings().embedding_platform_fallback_requires_managed_plan:
+        # Pre-#1030 behaviour: every tier may use the env fallback. Kept as the
+        # default so OSS / dev / self-host deployments are unchanged.
+        return True
+    return has_feature(plan_name, "managed_embeddings")
+
+
 class EmbeddingService:
     """Service for generating embeddings using OpenAI or a self-hosted OpenAI-compatible backend (Ollama, vLLM, ...).
 
@@ -303,9 +331,7 @@ class EmbeddingService:
         # No BYOK on a plan WITHOUT managed embeddings (Free / S) → the call
         # would fall back to the platform OPENAI_API_KEY env.
         if not has_byok and not has_feature(cap_workspace.plan_name, "managed_embeddings"):
-            from config.settings import get_settings
-
-            if get_settings().embedding_platform_fallback_requires_managed_plan:
+            if not platform_fallback_allowed(cap_workspace.plan_name):
                 # Issue #1030: Free is "BYOK required or self-host Ollama". Deny
                 # the platform fallback with a clear, actionable error rather
                 # than silently embedding on the platform key. Paid tiers

@@ -1244,8 +1244,39 @@ async def check_openai_key_status(
         f"has_key={openai_key is not None}, can_configure={can_configure}"
     )
 
+    # #1495: whether the workspace can EMBED is a different question from
+    # whether it owns a key. The resolution chain ends at a platform
+    # OPENAI_API_KEY, so a workspace with none of its own is served fine when
+    # the deployment sets one — which is the documented deployment path and
+    # what the Pro tier's managed_embeddings feature describes.
+    #
+    # The comment on this route already recorded the hazard ("would report
+    # has_key=false in deployments where env keys serve embeddings") and #1167
+    # handled the ENABLE_BYOK=false case by 404ing. This closes the other half:
+    # BYOK enabled AND a platform key set, where every warning driven by
+    # has_key fires against a workspace that is working perfectly.
+    # The plan gate is NOT re-implemented here. #1030 lets a deployment restrict
+    # the platform fallback to plans carrying managed_embeddings, and a second
+    # copy of that condition would drift from the one the embedding path
+    # enforces — which is precisely the defect this field exists to fix. One
+    # function, both callers.
+    import os
+
+    from services.embedding_service import platform_fallback_allowed
+
+    ws_row = (
+        await db.execute(select(Workspace.plan_name).where(Workspace.id == workspace_id))
+    ).scalar_one_or_none()
+
+    embedding_available = openai_key is not None or (
+        bool(os.getenv("OPENAI_API_KEY"))
+        and ws_row is not None
+        and platform_fallback_allowed(ws_row)
+    )
+
     return OpenAIKeyStatusResponse(
         has_key=openai_key is not None,
+        embedding_available=embedding_available,
         can_configure=can_configure,
         external_keys_url="/integrations/external-keys",
     )
