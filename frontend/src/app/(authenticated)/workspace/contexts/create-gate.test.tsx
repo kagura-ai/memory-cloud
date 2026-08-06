@@ -101,6 +101,9 @@ function setup(opts: {
   contextCount?: number;
   visible?: number;
   hasKey?: boolean;
+  /** #1495: embedding availability, which a platform credential can supply
+   *  even when the workspace owns no key. Defaults to `hasKey`. */
+  canEmbed?: boolean;
   role?: string;
 }) {
   const visible = opts.visible ?? opts.contextCount ?? 0;
@@ -118,7 +121,14 @@ function setup(opts: {
     },
   });
   mockGetContexts.mockResolvedValue({ contexts: ctx(visible) });
-  mockCheckOpenAIKeyStatus.mockResolvedValue({ has_key: opts.hasKey ?? true });
+  // #1495: the gate now asks whether embedding WORKS, not whether this
+  // workspace owns a key. `canEmbed` defaults to `hasKey` so every existing
+  // case keeps its meaning — in those scenarios there is no platform
+  // credential, so the two coincide.
+  mockCheckOpenAIKeyStatus.mockResolvedValue({
+    has_key: opts.hasKey ?? true,
+    embedding_available: opts.canEmbed ?? opts.hasKey ?? true,
+  });
   mockGetEmbeddingModels.mockResolvedValue({
     models: [],
     default_model: "small",
@@ -160,6 +170,23 @@ describe("New Context control", () => {
     setup({ plan: "pro", maxContexts: 20, contextCount: 3, hasKey: false });
     render(<ContextsPage />);
     expect(await screen.findByText("setupNeededOpenAI")).toBeInTheDocument();
+  });
+
+  it("does not demand a key when the platform already supplies one", async () => {
+    // #1495. The workspace owns no key and does not need one — the deployment
+    // sets OPENAI_API_KEY, so embedding works and creation must not be gated.
+    //
+    // This is the shape #1487 shipped once already: the client re-deriving a
+    // server rule it cannot see, and telling a healthy workspace it is broken.
+    // Here it was live in production — every workspace served by the platform
+    // credential saw a red "OpenAI API key required" banner and a warning
+    // triangle while embedding 100% successfully.
+    setup({ plan: "pro", maxContexts: 20, contextCount: 3, hasKey: false, canEmbed: true });
+    render(<ContextsPage />);
+    await waitFor(async () =>
+      expect(await newContextButton()).not.toBeDisabled(),
+    );
+    expect(screen.queryByText("setupNeededOpenAI")).not.toBeInTheDocument();
   });
 
   it("stays CLICKABLE at the cap, so the quota explanation is reachable", async () => {

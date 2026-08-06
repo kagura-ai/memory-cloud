@@ -82,6 +82,7 @@ import { useToast } from "@/hooks/use-toast";
 import { InlineSpinner } from "@/components/common/LoadingState";
 import { useMemoryContext } from "@/contexts/MemoryContextContext";
 import { useWorkspace } from "@/contexts/WorkspaceContext";
+import { checkOpenAIKeyStatus } from "@/lib/api/workspaces";
 import { useSystemFeatures } from "@/hooks/useSystemFeatures";
 
 export default function ExternalKeysPage() {
@@ -180,8 +181,37 @@ export default function ExternalKeysPage() {
     setCreateDialogOpen(true);
   };
 
-  // Issue #115: Check if OpenAI key is configured (required for memory operations)
+  // Issue #115: does THIS workspace own an OpenAI key?
   const hasOpenAIKey = keys.some((k) => k.provider === "openai" && k.enabled);
+
+  // #1495: whether embeddings actually work is a different question, and only
+  // the server can answer it — the resolution chain ends at a platform
+  // OPENAI_API_KEY that no client can see. Counting key rows told every
+  // workspace served by that credential it was broken and had to buy a key.
+  //
+  // null = not yet known (or the probe failed). Stay quiet then: a false alarm
+  // is the bug being fixed here, so silence is the safer default.
+  const [canEmbed, setCanEmbed] = useState<boolean | null>(null);
+  useEffect(() => {
+    if (!currentWorkspaceId) return;
+    // Issue #1167: the key-status route is behind `require_byok_enabled` and
+    // 404s with BYOK off, so probing there is a guaranteed-failing request.
+    // Sidebar and the contexts page already skip it; this surface was the odd
+    // one out. Also covers `systemFeatures === null` (still loading), where the
+    // answer is simply not known yet.
+    if (!byokEnabled) return;
+    let cancelled = false;
+    checkOpenAIKeyStatus(currentWorkspaceId)
+      .then((s) => {
+        if (!cancelled) setCanEmbed(s.embedding_available ?? null);
+      })
+      .catch(() => {
+        if (!cancelled) setCanEmbed(null);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [currentWorkspaceId, byokEnabled, keys]);
 
   const handleProviderChange = (provider: string) => {
     const selectedProvider = PROVIDERS.find((p) => p.value === provider);
@@ -450,8 +480,9 @@ export default function ExternalKeysPage() {
         <p className="font-medium">{t("featureGuide.howItWorks")}</p>
       </FeatureGuide>
 
-      {/* Issue #115: OpenAI Required Alert */}
-      {!loading && !hasOpenAIKey && (
+      {/* #1495: fires on "embedding is unavailable", NOT on "you have no key
+          of your own" — with a platform credential configured those differ. */}
+      {!loading && canEmbed === false && (
         <Alert
           variant="destructive"
           className="mb-6 border-red-300 bg-red-50 dark:bg-red-950/50"
@@ -464,13 +495,26 @@ export default function ExternalKeysPage() {
         </Alert>
       )}
 
-      {/* Success indicator when OpenAI is configured */}
-      {!loading && hasOpenAIKey && (
+      {/* Embedding works because this workspace supplied its own key. */}
+      {!loading && canEmbed === true && hasOpenAIKey && (
         <Alert className="mb-6 border-green-300 bg-green-50 dark:bg-green-950/50">
           <CheckCircle className="h-5 w-5 text-green-600" />
           <AlertDescription className="ml-2 text-green-800 dark:text-green-200">
             <strong className="font-semibold">{t("openAIConfigured")}</strong> -{" "}
             {t("openAIConfiguredDesc")}
+          </AlertDescription>
+        </Alert>
+      )}
+
+      {/* #1495: embedding works, but on the platform credential rather than a
+          key of this workspace's own. Saying so is the whole point — otherwise
+          an empty key list reads as a broken workspace. */}
+      {!loading && canEmbed === true && !hasOpenAIKey && (
+        <Alert className="mb-6">
+          <CheckCircle className="h-5 w-5" />
+          <AlertDescription className="ml-2">
+            <strong className="font-semibold">{t("embeddingManaged")}</strong> -{" "}
+            {t("embeddingManagedDesc")}
           </AlertDescription>
         </Alert>
       )}

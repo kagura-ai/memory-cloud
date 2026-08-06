@@ -239,7 +239,15 @@ export default function ContextsPage() {
 
     try {
       const status = await checkOpenAIKeyStatus(user.current_workspace_id);
-      setHasOpenAIKey(status.has_key);
+      // #1495: gate on whether embedding WORKS, not on whether this workspace
+      // owns a key. #1167 already handled the BYOK-off case above; this closes
+      // the other half — BYOK on AND a platform credential set, where has_key
+      // is false for a workspace that embeds perfectly well. Gating creation on
+      // it is #1487 all over again.
+      //
+      // `?? null` so a server predating the field leaves the gate open rather
+      // than blocking on a question it never answered.
+      setHasOpenAIKey(status.embedding_available ?? null);
     } catch (err) {
       setHasOpenAIKey(null);
     }

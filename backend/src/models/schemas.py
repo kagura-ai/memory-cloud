@@ -1350,6 +1350,23 @@ class OpenAIKeyStatusResponse(BaseModel):
     has_key: bool = Field(..., description="Whether workspace has OpenAI API key")
     can_configure: bool = Field(..., description="Whether current user can configure keys")
     external_keys_url: str = Field(..., description="URL to external keys configuration page")
+    # #1495: `has_key` answers "does this workspace own a key", which is NOT the
+    # same question as "can this workspace embed". The server falls back to a
+    # platform OPENAI_API_KEY, so a workspace with no key of its own can be
+    # perfectly healthy — and a UI keying warnings off has_key tells it, falsely,
+    # that it is broken and must go buy an API key.
+    #
+    # Defaults to False so an older client that ignores the field, or a server
+    # response predating it, degrades to today's behaviour rather than silently
+    # claiming availability it has not checked.
+    embedding_available: bool = Field(
+        default=False,
+        description=(
+            "Whether embeddings can actually be generated for this workspace — "
+            "own key OR the platform credential. Use this for availability "
+            "warnings; use has_key only to describe the workspace's own keys."
+        ),
+    )
 
 
 # ============================================================================

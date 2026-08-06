@@ -22,6 +22,7 @@ import {
 } from "@/styles/design-tokens";
 import { useAuth } from "@/contexts/AuthContext";
 import { useWorkspace } from "@/contexts/WorkspaceContext";
+import { checkOpenAIKeyStatus } from "@/lib/api/workspaces";
 import { useSystemFeatures } from "@/hooks/useSystemFeatures";
 import {
   hasRole,
@@ -31,7 +32,6 @@ import {
 } from "@/lib/auth/rbac";
 import type { LogoutScope } from "@/lib/auth/auth";
 import { getContexts } from "@/lib/api/contexts";
-import { listExternalAPIKeys } from "@/lib/api/external-keys";
 import { useAccountSwitcher } from "@/hooks/useAccountSwitcher";
 import { Avatar, AvatarFallback, AvatarImage } from "@/components/ui/avatar";
 import { KaguraLogo } from "@/components/icons/KaguraLogo";
@@ -304,7 +304,10 @@ export function Sidebar() {
   const systemFeatures = useSystemFeatures();
   const [isOpen, setIsOpen] = useState(false);
   const [contextCount, setContextCount] = useState<number | null>(null);
-  const [hasExternalKeys, setHasExternalKeys] = useState<boolean | null>(null);
+  // #1495: whether embeddings WORK, not whether this workspace owns a key.
+  // Counting key rows warned every workspace served by the platform credential
+  // that it was broken and had to go buy an API key.
+  const [canEmbed, setCanEmbed] = useState<boolean | null>(null);
   const t = useTranslations("sidebar");
   const tNav = useTranslations("navigation");
 
@@ -354,7 +357,7 @@ export function Sidebar() {
   // Reset to null on each run so the warning icon does not show a stale
   // "0 contexts" value from the previous workspace while the new fetch is
   // in flight. Cancellation guard prevents a late fetch from clobbering a
-  // newer workspace's state (same pattern as hasExternalKeys below).
+  // newer workspace's state (same pattern as canEmbed below).
   useEffect(() => {
     setContextCount(null);
     if (!currentWorkspaceId) return;
@@ -382,11 +385,11 @@ export function Sidebar() {
   // Issue #381: external keys are owner-only. Non-owners would get 403 — skip the
   // fetch entirely for them to avoid noisy auth logs / avoidable network traffic.
   // The AlertTriangle indicator on the nav item is owner-only too, so this also
-  // keeps the `hasExternalKeys=null` path unreachable for non-owners.
+  // keeps the `canEmbed=null` path unreachable for non-owners.
   const currentWorkspaceRole = currentWorkspace?.current_user_role;
   const byokEnabled = systemFeatures?.byok === true;
   useEffect(() => {
-    setHasExternalKeys(null);
+    setCanEmbed(null);
     if (!currentWorkspaceId) return;
     if (currentWorkspaceRole !== "owner") return;
     // Issue #1167: with BYOK off the external-keys API 404s and the nav entry
@@ -394,12 +397,19 @@ export function Sidebar() {
     if (!byokEnabled) return;
 
     let cancelled = false;
-    listExternalAPIKeys()
-      .then((keys) => {
-        if (!cancelled) setHasExternalKeys(keys.length > 0);
+    // #1495: ask the server whether embedding is available, rather than
+    // re-deriving it from a key count the server does not use that way.
+    checkOpenAIKeyStatus(currentWorkspaceId)
+      .then((status) => {
+        // `?? null` — a server predating the field has told us nothing, which
+        // is not the same as telling us embedding is unavailable. Unknown must
+        // stay quiet; asserting a problem we have not confirmed IS this bug.
+        if (!cancelled) setCanEmbed(status.embedding_available ?? null);
       })
       .catch(() => {
-        if (!cancelled) setHasExternalKeys(null);
+        // null = unknown; stay quiet rather than assert a problem we could not
+        // confirm. A false warning is worse than none — that is this bug.
+        if (!cancelled) setCanEmbed(null);
       });
 
     return () => {
@@ -821,8 +831,7 @@ export function Sidebar() {
                       >
                         <Icon className="h-5 w-5 flex-shrink-0" />
                         <span className="flex-1">{itemName}</span>
-                        {item.nameKey === "externalKeys" &&
-                          hasExternalKeys === false && (
+                        {item.nameKey === "externalKeys" && canEmbed === false && (
                             <span
                               title={t("noExternalKeys", {
                                 default: "No API keys configured",

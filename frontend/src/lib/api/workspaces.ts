@@ -564,7 +564,17 @@ export async function getContextPublicAPIStats(
  * Issue #181: API key guidance in context creation
  */
 export interface OpenAIKeyStatus {
+  /** Does this workspace own an OpenAI key? Describes the workspace's keys. */
   has_key: boolean;
+  /**
+   * #1495: can embeddings actually be generated — own key OR the platform
+   * credential. This is the question availability warnings must ask; `has_key`
+   * says nothing about whether the workspace is healthy.
+   *
+   * Optional so a response from a server predating the field reads as
+   * undefined rather than false, and callers can fall back deliberately.
+   */
+  embedding_available?: boolean;
   can_configure: boolean;
   external_keys_url: string;
 }
