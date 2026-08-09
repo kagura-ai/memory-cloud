@@ -22,6 +22,16 @@ from utils.logger import get_logger
 
 logger = get_logger(__name__)
 
+# Issue #1505: the legacy consolidation path's archival floor, named so the
+# durability contract returned on every write (services/persistence.py) can be
+# derived from it instead of restating a literal that would silently rot if this
+# task were re-tuned. The sleep path's counterpart is
+# ``services.sleep.consolidation.ARCHIVE_MIN_AGE_DAYS``. At most one of the two
+# runs: this one only when SLEEP_ENABLED is off (see schedule_neural_tasks), the
+# sleep one only when SLEEP_ENABLED and ENABLE_NEURAL_MEMORY are both on — so
+# SLEEP_ENABLED=true with neural memory off leaves NEITHER running.
+LEGACY_ARCHIVE_MIN_AGE_DAYS = 30
+
 
 async def weight_decay_task():
     """Apply weight decay to all users' graphs.
@@ -178,7 +188,7 @@ async def consolidation_task():
                         )
 
                     # Deletion criteria
-                    elif age_days >= 30 and memory.access_count == 0:
+                    elif age_days >= LEGACY_ARCHIVE_MIN_AGE_DAYS and memory.access_count == 0:
                         # ================================================================
                         # BUG FIX #83-10: Delete from Qdrant to prevent orphan vectors
                         # ================================================================

@@ -18,6 +18,7 @@ from mcp_server.tools._helpers import (
     _error_response,
     _format_validation_error,
     _log_tool_usage,
+    _persistence_response_field,
     _resolve_context,
     _resolve_context_for_read,
     _resolve_context_id,
@@ -109,6 +110,9 @@ async def handle_remember(
                             "status": "success",
                             "memory_id": str(result.memory_id),
                             "scope": result.scope,
+                            # #1505: scope alone reads as "not saved yet" — say
+                            # what it actually implies for durability.
+                            **_persistence_response_field(result.persistence),
                             **_context_response_fields(current_context),
                         }
                     ),
@@ -221,6 +225,7 @@ async def handle_update_memory(
                             "operation": result.operation,
                             "re_embedded": result.re_embedded,
                             "scope": result.scope,
+                            **_persistence_response_field(result.persistence),  # #1505
                             **_context_response_fields(current_context),
                         }
                     ),

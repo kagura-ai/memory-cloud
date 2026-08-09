@@ -66,6 +66,7 @@ from repositories.memory import MemoryRepository
 from services.context_routing import resolve_collection_name
 from services.context_service import ContextService
 from services.embedding_service import EmbeddingService
+from services.persistence import persistence_info
 from services.query_router import classify_query
 from services.recall_selection import (
     RecallSelectionConfig,
@@ -612,7 +613,13 @@ class MemoryService:
                 memory_id=memory_id,
             )
 
-            return RememberResponse(memory_id=memory_id, scope=memory.scope)
+            return RememberResponse(
+                memory_id=memory_id,
+                scope=memory.scope,
+                # #1505: say what 'working' means for durability instead of
+                # leaving the caller to guess.
+                persistence=persistence_info(memory.scope),
+            )
 
         except Exception as e:
             await self.db.rollback()
@@ -733,6 +740,7 @@ class MemoryService:
             operation="updated",
             re_embedded=needs_reembed,
             scope=memory.scope,
+            persistence=persistence_info(memory.scope),  # #1505
         )
 
     async def _update_load_authorized(self, memory_id: UUID, user_id: str) -> Any:
@@ -1426,6 +1434,7 @@ class MemoryService:
             operation=operation,
             re_embedded=True,
             scope=result.scope,
+            persistence=persistence_info(result.scope),  # #1505
         )
 
     async def reference(self, memory_id: UUID, user_id: str) -> ReferenceResponse:
