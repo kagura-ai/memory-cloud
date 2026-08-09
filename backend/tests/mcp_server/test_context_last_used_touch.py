@@ -290,10 +290,10 @@ def _patched_write_handler(context, service):
 async def test_remember_bumps_context():
     ctx = _make_context(last_used_at=None)
     service = MagicMock()
-    # persistence: the #1505 durability block the handler forwards (None here —
-    # this test is about the context touch, not the block's contents).
+    # The optional write-response blocks the handler forwards (#1502/#1505);
+    # this test is about the context touch, not their contents.
     service.remember = AsyncMock(
-        return_value=SimpleNamespace(memory_id=uuid4(), scope="personal", persistence=None)
+        return_value=SimpleNamespace(memory_id=uuid4(), scope="personal", persistence=None, lint=[])
     )
 
     with _patched_write_handler(ctx, service) as db:
@@ -326,6 +326,7 @@ async def test_update_memory_bumps_context():
             scope="personal",
             persistence=None,  # #1505 block, not under test here
             supersede_candidate_dismissed=None,  # #1504, not under test here
+            lint=[],  # #1502 hints, not under test here
         )
     )
 

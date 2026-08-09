@@ -503,7 +503,10 @@ async def test_remember_tool_json_carries_the_block(sleep_pass):
     service = MagicMock()
     service.remember = AsyncMock(
         return_value=SimpleNamespace(
-            memory_id=uuid4(), scope="working", persistence=persistence_info("working")
+            memory_id=uuid4(),
+            scope="working",
+            persistence=persistence_info("working"),
+            lint=[],  # #1502 hints, not under test here
         )
     )
 
@@ -544,6 +547,7 @@ async def test_update_memory_tool_json_carries_the_block(sleep_pass):
             scope="persistent",
             persistence=persistence_info("persistent"),
             supersede_candidate_dismissed=None,  # #1504, not under test here
+            lint=[],  # #1502, not under test here
         )
     )
 
