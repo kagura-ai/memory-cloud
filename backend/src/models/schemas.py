@@ -22,6 +22,12 @@ from models.api_base import TZAwareBaseModel
 
 logger = logging.getLogger(__name__)
 
+# Summary-length guidance, named so the write-time lint (#1502) can advise the
+# caller on exactly the thresholds this schema already logs about, rather than
+# restating literals that would drift apart.
+SUMMARY_SHORT_THRESHOLD = 50
+SUMMARY_LONG_THRESHOLD = 400
+
 # ============================================================================
 # OAuth2 Token Introspection (RFC 7662, Issue #157)
 # ============================================================================
@@ -137,14 +143,14 @@ class RememberRequest(BaseModel):
         """
         length = len(v)
 
-        if length > 400:
+        if length > SUMMARY_LONG_THRESHOLD:
             logger.warning(
                 f"Summary length ({length} chars) exceeds recommended 250 chars. "
                 f"Consider splitting into multiple semantic memories for better search quality. "
                 "See docs: https://github.com/kagura-ai/memory-cloud/blob/main/"
                 "docs/chunking-guide.md"
             )
-        elif length < 50:
+        elif length < SUMMARY_SHORT_THRESHOLD:
             logger.info(
                 f"Summary length ({length} chars) is quite short. "
                 f"Consider adding more context for better semantic matching (optimal: 100-250 chars)."
@@ -197,6 +203,27 @@ class PersistenceInfo(BaseModel):
     detail: str = Field(description="One-line summary of the above for the calling agent.")
 
 
+class WriteLintHint(BaseModel):
+    """One advisory recall-ability hint about a just-written memory.
+
+    Advisory only: the memory is already stored, and hints never affect the
+    write. They exist because recall quality depends on how the summary and
+    tags were written, and nothing else tells the writer at the time.
+    """
+
+    code: str = Field(
+        description=(
+            "Stable machine-readable hint id: summary_short, summary_long, "
+            "summary_narrative, no_tags, tag_near_duplicate."
+        )
+    )
+    hint: str = Field(description="What to do differently, in one sentence.")
+    subject: str | None = Field(
+        default=None,
+        description="The specific value the hint is about (e.g. the tag), when applicable.",
+    )
+
+
 class RememberResponse(BaseModel):
     """Response schema for remember() API."""
 
@@ -206,6 +233,9 @@ class RememberResponse(BaseModel):
     # Issue #1505: durability transparency. Derived from ``scope`` at
     # construction time by ``services.persistence.persistence_info``.
     persistence: PersistenceInfo | None = None
+    # Issue #1502: advisory write-time recall-ability hints. Empty (and omitted
+    # from the MCP response) when the write looks fine — presence is the signal.
+    lint: list[WriteLintHint] = Field(default_factory=list)
 
 
 class RecallRequest(BaseModel):
@@ -770,6 +800,9 @@ class UpdateMemoryResponse(BaseModel):
     # can confirm WHICH pairing was tombstoned. None when nothing was dismissed
     # (including a dismissal that found no live suggestion — see the service).
     supersede_candidate_dismissed: UUID | None = None
+    # Issue #1502: an edit can degrade recall-ability just as a fresh write can,
+    # so the same advisory hints apply here.
+    lint: list[WriteLintHint] = Field(default_factory=list)
 
 
 class PatchMemoryRequest(BaseModel):
