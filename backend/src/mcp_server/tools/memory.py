@@ -173,6 +173,8 @@ async def handle_update_memory(
             tags=args.get("tags"),
             context=args.get("context"),
             delivery_mode=args.get("delivery_mode"),  # Issue #886 (pin/unpin)
+            # #1504: rejection path for a supersede suggestion.
+            dismiss_supersede_candidate=bool(args.get("dismiss_supersede_candidate", False)),
         )
     except ValidationError as e:
         # #1323: plain field/constraint summary — no pydantic internals.
@@ -226,6 +228,17 @@ async def handle_update_memory(
                             "re_embedded": result.re_embedded,
                             "scope": result.scope,
                             **_persistence_response_field(result.persistence),  # #1505
+                            # #1504: echo WHICH pairing was tombstoned, so the
+                            # caller can confirm it rejected what it meant to.
+                            **(
+                                {
+                                    "supersede_candidate_dismissed": str(
+                                        result.supersede_candidate_dismissed
+                                    )
+                                }
+                                if result.supersede_candidate_dismissed
+                                else {}
+                            ),
                             **_context_response_fields(current_context),
                         }
                     ),
