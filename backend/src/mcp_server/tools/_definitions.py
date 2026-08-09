@@ -258,7 +258,7 @@ IMPORTANT: Always specify context_id.
 
 Modes (supply exactly ONE): in-place edit by memory_id, OR upsert by external_id (found → update in place, not-found → create). Upsert additionally requires summary, content, and type.
 
-Returns: {status, memory_id, operation: "updated"|"created"|"replaced", re_embedded, scope, persistence?: {scope, committed, promotes_via, consolidation_archive_min_age_days, detail}, context_id, context_name, context_display_name, context_is_private, context_is_locked}. operation tells you which path ran; re_embedded is true only when summary/context_summary/content changed. persistence states what scope means for durability (omitted, never null, if the scope cannot be classified) — the write is committed before this returns either way; see the remember() description for the full lifecycle.""",
+Returns: {status, memory_id, operation: "updated"|"created"|"replaced", re_embedded, scope, persistence?: {scope, committed, promotes_via, consolidation_archive_min_age_days, detail}, supersede_candidate_dismissed? (the rejected candidate's memory_id; absent when nothing was dismissed, including a dismissal that found no live suggestion), context_id, context_name, context_display_name, context_is_private, context_is_locked}. operation tells you which path ran; re_embedded is true only when summary/context_summary/content changed. persistence states what scope means for durability (omitted, never null, if the scope cannot be classified) — the write is committed before this returns either way; see the remember() description for the full lifecycle.""",
             "inputSchema": {
                 "type": "object",
                 "required": ["context_id"],
@@ -271,6 +271,10 @@ Returns: {status, memory_id, operation: "updated"|"created"|"replaced", re_embed
                     "external_id": {
                         "type": "string",
                         "description": "External resource ID for upsert lookup (stored in details.resource_id).",
+                    },
+                    "dismiss_supersede_candidate": {
+                        "type": "boolean",
+                        "description": "Reject this memory's current supersede_candidate (requires memory_id). Use when the two memories are DELIBERATELY separate — e.g. the same conclusion recorded at two altitudes — so the suggestion stops resurfacing on every recall/reference. Neither memory is deleted or shadowed; only the suggestion is tombstoned. Detection resumes for this pair if the similarity later changes materially, and a suggestion for a DIFFERENT memory still surfaces normally. The accept path remains create_edge(edge_type='supersedes').",
                     },
                     "summary": {
                         "type": "string",

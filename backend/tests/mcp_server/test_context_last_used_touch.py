@@ -324,6 +324,7 @@ async def test_update_memory_bumps_context():
             re_embedded=False,
             scope="personal",
             persistence=None,  # #1505 block, not under test here
+            supersede_candidate_dismissed=None,  # #1504, not under test here
         )
     )
 

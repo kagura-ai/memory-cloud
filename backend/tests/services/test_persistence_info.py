@@ -543,6 +543,7 @@ async def test_update_memory_tool_json_carries_the_block(sleep_pass):
             re_embedded=False,
             scope="persistent",
             persistence=persistence_info("persistent"),
+            supersede_candidate_dismissed=None,  # #1504, not under test here
         )
     )
 

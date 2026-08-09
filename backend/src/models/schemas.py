@@ -690,6 +690,19 @@ class UpdateMemoryRequest(BaseModel):
     delivery_mode: Literal["always", "on_recall", "on_trigger"] | None = Field(
         None, description="Updated delivery mode (always pins to persistent; on_recall unpins)"
     )
+    # Issue #1504: the rejection half of the supersede-suggestion lifecycle.
+    # Acceptance clears the stored suggestion at edge-creation time; without
+    # this, judging a suggestion WRONG left it resurfacing on every recall and
+    # reference forever, with a wrong accept or a deletion as the only escapes.
+    dismiss_supersede_candidate: bool = Field(
+        default=False,
+        description=(
+            "Reject the currently-suggested supersede candidate for this memory. "
+            "The pair is tombstoned so it stops surfacing; neither memory is "
+            "deleted, and detection resumes if the similarity later changes "
+            "materially. In-place mode only."
+        ),
+    )
 
     @model_validator(mode="after")
     def validate_identifier_and_required_fields(self) -> "UpdateMemoryRequest":
@@ -700,6 +713,16 @@ class UpdateMemoryRequest(BaseModel):
             raise ValueError("Either memory_id or external_id must be provided")
         if has_memory_id and has_external_id:
             raise ValueError("Provide either memory_id or external_id, not both")
+
+        # #1504: the upsert path replaces the memory (new id, fresh detection),
+        # so there is no stored suggestion for it to dismiss. Reject rather than
+        # silently ignore — a caller passing this on the wrong mode has a
+        # mistaken model of what the flag does.
+        if has_external_id and self.dismiss_supersede_candidate:
+            raise ValueError(
+                "dismiss_supersede_candidate requires memory_id (in-place mode); "
+                "an external_id upsert replaces the memory and its suggestion."
+            )
 
         # For upsert-by-external_id mode, enforce required fields
         if has_external_id:
@@ -732,6 +755,10 @@ class UpdateMemoryResponse(BaseModel):
     # Issue #1505: same durability transparency as RememberResponse — an upsert
     # that lands as "created" starts a fresh working-scope lifecycle.
     persistence: PersistenceInfo | None = None
+    # Issue #1504: the candidate this call rejected, echoed back so the caller
+    # can confirm WHICH pairing was tombstoned. None when nothing was dismissed
+    # (including a dismissal that found no live suggestion — see the service).
+    supersede_candidate_dismissed: UUID | None = None
 
 
 class PatchMemoryRequest(BaseModel):

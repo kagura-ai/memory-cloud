@@ -699,6 +699,9 @@ class MemoryService:
         effective_details = self._update_apply_fields(
             memory, request, normalized_summary, normalized_ctx_summary
         )
+        # #1504: rejection path. Applied before the commit below so the tombstone
+        # lands in the same transaction as any other field change in this call.
+        dismissed_target = self._apply_supersede_dismissal(memory, request)
 
         if needs_reembed:
             # Async embedding via create_task (same pattern as remember)
@@ -741,7 +744,47 @@ class MemoryService:
             re_embedded=needs_reembed,
             scope=memory.scope,
             persistence=persistence_info(memory.scope),  # #1505
+            supersede_candidate_dismissed=dismissed_target,  # #1504
         )
+
+    @staticmethod
+    def _apply_supersede_dismissal(memory: Any, request: UpdateMemoryRequest) -> UUID | None:
+        """#1504: tombstone the current supersede suggestion, if one is pending.
+
+        Args:
+            memory: The loaded update target.
+            request: The update request.
+
+        Returns:
+            The dismissed candidate's memory id, or None when the flag was not
+            set or there was no live suggestion to reject. A no-op dismissal is
+            NOT an error: the suggestion may have self-healed (target deleted)
+            or been accepted between the read that showed it and this call, and
+            failing the whole update over that would be hostile.
+        """
+        if not request.dismiss_supersede_candidate:
+            return None
+
+        from services.supersede_dismissal import build_tombstone, dismissed_entry
+
+        stored = memory.supersede_candidate
+        if not isinstance(stored, dict) or not stored.get("memory_id"):
+            # Already a tombstone, or nothing pending.
+            if dismissed_entry(stored) is None:
+                logger.info("supersede_dismiss_noop", memory_id=str(memory.id))
+            return None
+
+        target_id = str(stored["memory_id"])
+        # Reassign (JSON column, not a MutableDict — reassignment is what marks
+        # it dirty), mirroring how detection and acceptance write this column.
+        memory.supersede_candidate = build_tombstone(stored)
+        logger.info(
+            "supersede_suggestion_dismissed",
+            memory_id=str(memory.id),
+            candidate_memory_id=target_id,
+            similarity=stored.get("similarity"),
+        )
+        return UUID(target_id)
 
     async def _update_load_authorized(self, memory_id: UUID, user_id: str) -> Any:
         """Load the update target, or 404 (MCP-reachable in-place update path).
@@ -4999,7 +5042,26 @@ async def _create_knn_seed_edges(
                 already_superseded = (
                     existing_super is not None and existing_super.edge_type == EDGE_TYPE_SUPERSEDES
                 )
-                if not already_superseded:
+                # #1504: don't resurrect a REJECTED suggestion either. The
+                # accept-side guard above keys on the edge; rejection leaves no
+                # edge by design (the memories stay independent), so it keys on
+                # the tombstone instead. Keeping both guards here means a
+                # re-embed cannot undo either decision.
+                from services.supersede_dismissal import is_dismissed
+
+                already_dismissed = is_dismissed(
+                    memory.supersede_candidate,
+                    target_id=str(raw_top["id"]),
+                    similarity=raw_top_score,
+                )
+                if already_dismissed:
+                    logger.info(
+                        "supersede_candidate_suppressed_by_dismissal",
+                        memory_id=memory_id_str,
+                        candidate_memory_id=str(raw_top["id"]),
+                        similarity=round(raw_top_score, 4),
+                    )
+                if not already_superseded and not already_dismissed:
                     candidate = {
                         "memory_id": str(raw_top["id"]),
                         "similarity": round(raw_top_score, 4),
