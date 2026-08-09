@@ -3647,7 +3647,61 @@ class MemoryService:
                 candidate_scores, semantic_scores=semantic_scores or None
             ),
             selection_evidence=selection_evidence,
+            # #1503: only on an empty tag-filtered recall — see the helper.
+            tag_suggestions=await self._tag_suggestions_for_empty_result(
+                request,
+                responses,
+                workspace_id=effective_workspace_id,
+                context_id=current_context_id,
+            ),
         )
+
+    @staticmethod
+    def _requested_tag_filter(filters: dict | None) -> list[str]:
+        """The non-empty string tags a caller filtered on (#1503).
+
+        Mirrors ``db.qdrant._build_tag_filter_conditions``'s own validation, so
+        a filter that builder ignores never triggers expansion or suggestions.
+        """
+        if not filters:
+            return []
+        raw = filters.get("tags")
+        if not isinstance(raw, list):
+            return []
+        return [t for t in raw if isinstance(t, str) and t]
+
+    async def _tag_suggestions_for_empty_result(
+        self,
+        request: RecallRequest,
+        responses: list,
+        *,
+        workspace_id: UUID,
+        context_id: UUID | None,
+    ) -> dict[str, list[str]] | None:
+        """#1503: near-miss tags for a tag-filtered recall that found nothing.
+
+        Deliberately narrow. It fires only on a ZERO-result recall that actually
+        filtered on tags, so the extra vocabulary query never rides a successful
+        recall, and it cannot be mistaken for "these tags also matched" on a
+        partial result. Returns None (field omitted) when there is nothing to
+        say, including when the caller is doing a cross-context recall — the
+        vocabulary read is scoped to one authorized context.
+        """
+        if responses or context_id is None:
+            return None
+        tags = self._requested_tag_filter(request.filters)
+        if not tags:
+            return None
+
+        from services.tag_resolution import suggest_tags
+
+        suggestions = await suggest_tags(
+            self.db,
+            workspace_id=workspace_id,
+            context_id=context_id,
+            tags=tags,
+        )
+        return suggestions or None
 
     async def recall(
         self,
@@ -3782,6 +3836,30 @@ class MemoryService:
         # filter does not starve a small ``k`` request.
         if cluster_memory_ids is not None:
             candidates_k = max(candidates_k, len(cluster_memory_ids) + 50)
+        # #1503: opt-in tolerance for writer-side tag drift. Widens the filter to
+        # the stored spellings that are MECHANICAL variants (case / separators /
+        # plural) of what was asked for; exact semantics stay the default. Only
+        # single-context recall — the vocabulary read is per (workspace, context)
+        # and the caller has authorized exactly this one.
+        effective_filters = request.filters
+        tag_filter = self._requested_tag_filter(request.filters)
+        if tag_filter and request.filters.get("tags_normalize") and current_context_id:
+            from services.tag_resolution import expand_tag_filter
+
+            expanded, added = await expand_tag_filter(
+                self.db,
+                workspace_id=effective_workspace_id,
+                context_id=current_context_id,
+                tags=tag_filter,
+            )
+            if added:
+                effective_filters = {**request.filters, "tags": expanded}
+                logger.info(
+                    "recall_tag_filter_expanded",
+                    requested=len(tag_filter),
+                    expanded=len(expanded),
+                )
+
         search_results = await self.search_service.hybrid_search(
             query=request.query,
             user_id=user_id,
@@ -3789,7 +3867,7 @@ class MemoryService:
             context_id=plan.search_context_id,
             k=candidates_k,
             use_rerank=request.use_rerank,
-            filters=request.filters,
+            filters=effective_filters,
             search_mode=request.search_mode,
             include_vectors=neural_enabled,
             # #708 Option A: tell SearchService this is a cross-workspace

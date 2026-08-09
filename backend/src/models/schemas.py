@@ -473,6 +473,17 @@ class RecallResponse(BaseModel):
     results: list[MemoryResponse]
     related_tags: list[RelatedTagItem] = []
     explore_hints: list[ExploreHint] | None = None
+    # Issue #1503: near-duplicate tags that DO exist in this context, populated
+    # only when a tag filter returned nothing — the signal that separates
+    # "spelled differently" from "not stored". Absent otherwise.
+    tag_suggestions: dict[str, list[str]] | None = Field(
+        default=None,
+        description=(
+            "Tags present in this context that resemble the ones filtered on, "
+            "keyed by the requested tag. Present only when a tag filter matched "
+            "no memories. Advisory: the filter itself was not widened."
+        ),
+    )
     # Issue #1047: top-level relevance confidence. None on legacy/explore paths
     # that don't compute it; recall() always populates it (incl. "none" on empty).
     confidence: RecallConfidence | None = None

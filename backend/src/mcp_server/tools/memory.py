@@ -748,6 +748,11 @@ async def handle_recall(
             if result.confidence is not None:
                 response_data["confidence"] = result.confidence.model_dump()
 
+            # #1503: only present on an empty tag-filtered recall — it tells the
+            # agent whether the topic is absent or just spelled differently.
+            if result.tag_suggestions:
+                response_data["tag_suggestions"] = result.tag_suggestions
+
             return [
                 TextContent(
                     type="text",
