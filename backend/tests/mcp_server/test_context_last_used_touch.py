@@ -152,6 +152,7 @@ def _recall_result():
     result.related_tags = []
     result.explore_hints = None
     result.confidence = None
+    result.tag_suggestions = None  # #1503 hint, not under test here
     return result
 
 
