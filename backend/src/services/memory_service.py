@@ -61,6 +61,7 @@ from models.schemas import (
     SupersedeCandidate,
     UpdateMemoryRequest,
     UpdateMemoryResponse,
+    WriteLintHint,
 )
 from repositories.memory import MemoryRepository
 from services.context_routing import resolve_collection_name
@@ -613,12 +614,22 @@ class MemoryService:
                 memory_id=memory_id,
             )
 
+            # #1502: advisory recall-ability hints. Deliberately AFTER the
+            # commit and the audit row — the memory is stored either way, and
+            # lint_write swallows its own errors, so nothing here can turn a
+            # successful write into a failure.
             return RememberResponse(
                 memory_id=memory_id,
                 scope=memory.scope,
                 # #1505: say what 'working' means for durability instead of
                 # leaving the caller to guess.
                 persistence=persistence_info(memory.scope),
+                lint=await self._lint_write(
+                    workspace_id=UUID(workspace_id_str),
+                    context_id=UUID(context_id_str),
+                    summary=request.summary,
+                    tags=request.tags,
+                ),
             )
 
         except Exception as e:
@@ -745,6 +756,15 @@ class MemoryService:
             scope=memory.scope,
             persistence=persistence_info(memory.scope),  # #1505
             supersede_candidate_dismissed=dismissed_target,  # #1504
+            # #1502: lint the memory's CURRENT state, not the patch — a partial
+            # update leaves fields untouched, and what matters for recall is
+            # what the memory now says.
+            lint=await self._lint_write(
+                workspace_id=memory.workspace_id,
+                context_id=memory.context_id,
+                summary=memory.summary,
+                tags=memory.tags,
+            ),
         )
 
     @staticmethod
@@ -1478,6 +1498,10 @@ class MemoryService:
             re_embedded=True,
             scope=result.scope,
             persistence=persistence_info(result.scope),  # #1505
+            # #1502: the upsert delegates to remember(), which already linted the
+            # same summary/tags — carry that through rather than re-reading the
+            # vocabulary a second time for one write.
+            lint=result.lint,
         )
 
     async def reference(self, memory_id: UUID, user_id: str) -> ReferenceResponse:
@@ -3654,6 +3678,34 @@ class MemoryService:
                 workspace_id=effective_workspace_id,
                 context_id=current_context_id,
             ),
+        )
+
+    async def _lint_write(
+        self,
+        *,
+        workspace_id: UUID | None,
+        context_id: UUID | None,
+        summary: str | None,
+        tags: list[str] | None,
+    ) -> list[WriteLintHint]:
+        """#1502: advisory recall-ability hints for a completed write.
+
+        Returns no hints when the write cannot be located in a context (the
+        vocabulary comparison would be meaningless) or when nothing is worth
+        saying. Never raises — ``lint_write`` swallows its own errors, and the
+        guards here cover the arguments it would otherwise be handed as None.
+        """
+        if workspace_id is None or context_id is None or not summary:
+            return []
+
+        from services.write_lint import lint_write
+
+        return await lint_write(
+            self.db,
+            workspace_id=workspace_id,
+            context_id=context_id,
+            summary=summary,
+            tags=tags,
         )
 
     @staticmethod

@@ -17,6 +17,7 @@ from mcp_server.tools._helpers import (
     _ContextNotFoundError,
     _error_response,
     _format_validation_error,
+    _lint_response_field,
     _log_tool_usage,
     _persistence_response_field,
     _resolve_context,
@@ -113,6 +114,9 @@ async def handle_remember(
                             # #1505: scope alone reads as "not saved yet" — say
                             # what it actually implies for durability.
                             **_persistence_response_field(result.persistence),
+                            # #1502: advisory recall-ability hints; absent when
+                            # the write looks fine.
+                            **_lint_response_field(result.lint),
                             **_context_response_fields(current_context),
                         }
                     ),
@@ -239,6 +243,7 @@ async def handle_update_memory(
                                 if result.supersede_candidate_dismissed
                                 else {}
                             ),
+                            **_lint_response_field(result.lint),  # #1502
                             **_context_response_fields(current_context),
                         }
                     ),

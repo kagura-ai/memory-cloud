@@ -189,6 +189,22 @@ def _persistence_response_field(persistence: Any) -> dict[str, Any]:
     return {"persistence": persistence.model_dump()}
 
 
+def _lint_response_field(lint: Any) -> dict[str, Any]:
+    """Render the Issue #1502 write-lint hints for a write-tool response.
+
+    Args:
+        lint: List of ``WriteLintHint`` from the service response (may be empty).
+
+    Returns:
+        ``{"lint": [...]}`` when there is something to say, otherwise an empty
+        dict — a clean write returns no key at all, so the field's presence is
+        itself the signal and an agent need not inspect an empty list.
+    """
+    if not lint:
+        return {}
+    return {"lint": [hint.model_dump(exclude_none=True) for hint in lint]}
+
+
 # ============================================================================
 # Context resolution
 # ============================================================================
