@@ -141,9 +141,26 @@ Multi-context management (personal/work/contexts in one collection):
 
 The more semantic metadata you provide, the better the search relevance.
 
+DURABILITY — what scope="working" means:
+A new memory is committed to the database BEFORE this call returns. It is saved;
+you do not need to re-write it or wait for anything. `scope` selects which
+consolidation lifecycle the memory is on, NOT whether it was stored:
+• "working" (the default for a normal write) — a nightly consolidation pass can
+  promote it to "persistent"; `persistence.promotes_via` names the pass this
+  server actually runs (null if none is enabled). That pass will not archive a
+  working memory before `persistence.consolidation_archive_min_age_days` old,
+  and only if it has never been adopted.
+• "persistent" — outside consolidation's reach. delivery_mode="always" pins
+  straight here on write; that is a delivery guarantee, not a stronger
+  durability guarantee than a working-scope write already has.
+That age floor is scoped to consolidation and is NOT a retention SLA: separate
+near-duplicate merge maintenance can retire a memory at any age (its tags and
+edges move to the memory it merged into), and forget() removes one on demand.
+The response carries a `persistence` block for the scope you actually got back.
+
 IMPORTANT: Always specify context_id to ensure you're using the intended context. Use list_contexts() to discover available context IDs.
 
-Returns: {status, memory_id, scope, context_id, context_name, context_display_name, context_is_private, context_is_locked}. NOTE: the embedding is generated asynchronously AFTER this returns, so the new memory is not findable via recall() for a brief moment.""",
+Returns: {status, memory_id, scope, persistence?: {scope, committed, promotes_via, consolidation_archive_min_age_days, detail}, context_id, context_name, context_display_name, context_is_private, context_is_locked}. persistence is omitted (absent, never null) if the server cannot classify the scope. NOTE: the embedding is generated asynchronously AFTER this returns, so the new memory is not findable via recall() for a brief moment.""",
             "inputSchema": {
                 "type": "object",
                 "required": ["summary", "content", "type", "context_id"],
@@ -241,7 +258,7 @@ IMPORTANT: Always specify context_id.
 
 Modes (supply exactly ONE): in-place edit by memory_id, OR upsert by external_id (found → update in place, not-found → create). Upsert additionally requires summary, content, and type.
 
-Returns: {status, memory_id, operation: "updated"|"created"|"replaced", re_embedded, scope, context_id, context_name, context_display_name, context_is_private, context_is_locked}. operation tells you which path ran; re_embedded is true only when summary/context_summary/content changed.""",
+Returns: {status, memory_id, operation: "updated"|"created"|"replaced", re_embedded, scope, persistence?: {scope, committed, promotes_via, consolidation_archive_min_age_days, detail}, context_id, context_name, context_display_name, context_is_private, context_is_locked}. operation tells you which path ran; re_embedded is true only when summary/context_summary/content changed. persistence states what scope means for durability (omitted, never null, if the scope cannot be classified) — the write is committed before this returns either way; see the remember() description for the full lifecycle.""",
             "inputSchema": {
                 "type": "object",
                 "required": ["context_id"],

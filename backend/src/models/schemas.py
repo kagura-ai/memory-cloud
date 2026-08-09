@@ -153,12 +153,59 @@ class RememberRequest(BaseModel):
         return v
 
 
+class PersistenceInfo(BaseModel):
+    """What a write's ``scope`` means for durability.
+
+    ``scope="working"`` reads as "not saved yet", which is wrong: the row is
+    committed before the write returns. This block says what the scope actually
+    implies, so a caller does not have to guess whether a memory survives until
+    consolidation promotes it.
+
+    This is NOT a retention SLA. It describes the consolidation lifecycle only;
+    other maintenance (notably near-duplicate merge) has its own rules, and an
+    explicit forget() removes a memory at any time.
+    """
+
+    scope: Literal["working", "persistent"]
+    committed: bool = Field(
+        default=True,
+        description=(
+            "The memory row is committed to PostgreSQL before this response is "
+            "returned. Always true — scope does not gate durability."
+        ),
+    )
+    promotes_via: str | None = Field(
+        default=None,
+        description=(
+            "The maintenance pass that can promote this memory to "
+            "scope='persistent' on this deployment: 'sleep_consolidation', "
+            "'legacy_consolidation', or null when the memory is already "
+            "persistent or no consolidation pass is enabled here."
+        ),
+    )
+    consolidation_archive_min_age_days: int | None = Field(
+        default=None,
+        description=(
+            "Age floor CONSOLIDATION applies before it may archive this memory; "
+            "it also requires zero adoption. Scoped to consolidation only — it "
+            "is not a retention guarantee, and does not bind near-duplicate "
+            "merge or an explicit forget(). Null when no consolidation pass is "
+            "enabled, or when the memory is persistent (consolidation acts only "
+            "on scope='working')."
+        ),
+    )
+    detail: str = Field(description="One-line summary of the above for the calling agent.")
+
+
 class RememberResponse(BaseModel):
     """Response schema for remember() API."""
 
     status: str = "success"
     memory_id: UUID
     scope: str
+    # Issue #1505: durability transparency. Derived from ``scope`` at
+    # construction time by ``services.persistence.persistence_info``.
+    persistence: PersistenceInfo | None = None
 
 
 class RecallRequest(BaseModel):
@@ -682,6 +729,9 @@ class UpdateMemoryResponse(BaseModel):
     operation: str  # "updated" | "created" | "replaced"
     re_embedded: bool
     scope: str
+    # Issue #1505: same durability transparency as RememberResponse — an upsert
+    # that lands as "created" starts a fresh working-scope lifecycle.
+    persistence: PersistenceInfo | None = None
 
 
 class PatchMemoryRequest(BaseModel):

@@ -289,7 +289,11 @@ def _patched_write_handler(context, service):
 async def test_remember_bumps_context():
     ctx = _make_context(last_used_at=None)
     service = MagicMock()
-    service.remember = AsyncMock(return_value=SimpleNamespace(memory_id=uuid4(), scope="personal"))
+    # persistence: the #1505 durability block the handler forwards (None here —
+    # this test is about the context touch, not the block's contents).
+    service.remember = AsyncMock(
+        return_value=SimpleNamespace(memory_id=uuid4(), scope="personal", persistence=None)
+    )
 
     with _patched_write_handler(ctx, service) as db:
         result = await handle_remember(
@@ -315,7 +319,11 @@ async def test_update_memory_bumps_context():
     service = MagicMock()
     service.update_memory = AsyncMock(
         return_value=SimpleNamespace(
-            memory_id=uuid4(), operation="update", re_embedded=False, scope="personal"
+            memory_id=uuid4(),
+            operation="update",
+            re_embedded=False,
+            scope="personal",
+            persistence=None,  # #1505 block, not under test here
         )
     )
 

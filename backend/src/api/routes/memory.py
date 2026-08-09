@@ -97,8 +97,21 @@ async def remember(
         {
             "status": "success",
             "memory_id": "uuid",
-            "scope": "working"
+            "scope": "working",
+            "persistence": {
+                "scope": "working",
+                "committed": true,
+                "promotes_via": "sleep_consolidation",
+                "consolidation_archive_min_age_days": 30,
+                "detail": "..."
+            }
         }
+
+    The memory is committed before this returns; ``scope`` selects the
+    consolidation lifecycle, not whether it was stored. ``persistence``
+    describes that lifecycle for this deployment and is null when the scope
+    cannot be classified. Its age floor is scoped to consolidation and is not a
+    retention guarantee — see ``services.persistence``.
 
     Example:
         POST /api/v1/memory/remember

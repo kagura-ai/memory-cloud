@@ -173,6 +173,22 @@ def _context_response_fields(context: Any) -> dict[str, Any]:
     }
 
 
+def _persistence_response_field(persistence: Any) -> dict[str, Any]:
+    """Render the Issue #1505 durability block for a write-tool response.
+
+    Args:
+        persistence: ``PersistenceInfo`` from the service response, or None.
+
+    Returns:
+        ``{"persistence": {...}}``, or an empty dict when the service could not
+        classify the scope — the block is advisory, so it is omitted rather than
+        emitted as a null the caller would have to special-case.
+    """
+    if persistence is None:
+        return {}
+    return {"persistence": persistence.model_dump()}
+
+
 # ============================================================================
 # Context resolution
 # ============================================================================
