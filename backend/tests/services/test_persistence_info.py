@@ -339,6 +339,115 @@ async def test_pinned_write_reports_persistent_persistence(service, sleep_pass):
     assert result.persistence.consolidation_archive_min_age_days is None
 
 
+# The update paths need their OWN service-level coverage. An earlier revision
+# tested them only by handing a PersistenceInfo to a mocked service and
+# asserting the handler splatted it back — which passes even when the service
+# never populates the field. Both construction sites shipped it missing, and the
+# whole suite stayed green. These drive the real methods.
+
+
+@pytest.mark.asyncio
+async def test_in_place_update_populates_persistence(service, sleep_pass):
+    """update_memory(memory_id=...) — the in-place path."""
+    from models.schemas import UpdateMemoryRequest
+
+    memory = MagicMock()
+    memory.id = uuid4()
+    memory.user_id = "test_user"
+    memory.workspace_id = uuid4()
+    memory.context_id = uuid4()
+    memory.summary = "Original summary for testing"
+    memory.context_summary = None
+    memory.content = "Original content"
+    memory.details = None
+    memory.type = "note"
+    memory.importance = 0.5
+    memory.tags = ["original"]
+    memory.context = None
+    memory.scope = "working"
+    memory.client = "mcp"
+    memory.created_at = None
+    memory.updated_at = None
+    memory.deleted_at = None
+    memory.embedding_status = "success"
+    service.memory_repo.get = AsyncMock(return_value=memory)
+
+    with (
+        patch("services.permission_service.PermissionService") as perm_cls,
+        patch("services.memory_service.update_memory_payload_in_qdrant", new=AsyncMock()),
+        patch(
+            "services.memory_service.resolve_collection_name",
+            new=AsyncMock(return_value="kagura_memories"),
+        ),
+    ):
+        perm_cls.return_value.can_access_memory = AsyncMock(return_value=True)
+        result = await service._update_in_place(
+            UpdateMemoryRequest(memory_id=memory.id, importance=0.9),
+            user_id="test_user",
+        )
+
+    assert result.persistence is not None, "_update_in_place dropped the #1505 block"
+    assert result.persistence.scope == "working"
+    assert (
+        result.persistence.consolidation_archive_min_age_days
+        == consolidation_archive_min_age_days()
+    )
+
+
+@pytest.mark.asyncio
+async def test_upsert_populates_persistence(service, sleep_pass):
+    """update_memory(external_id=...) — the create/replace path."""
+    from models.schemas import UpdateMemoryRequest
+
+    service.memory_repo.get_by_resource_id = AsyncMock(return_value=None)
+    remembered = MagicMock()
+    remembered.memory_id = uuid4()
+    remembered.scope = "working"
+    service.remember = AsyncMock(return_value=remembered)
+
+    result = await service._upsert_by_external_id(
+        UpdateMemoryRequest(
+            external_id="new-resource",
+            summary="Brand new memory for the upsert path",
+            content="content",
+            type="note",
+        ),
+        user_id="test_user",
+        client="mcp",
+        current_context_id=uuid4(),
+        current_workspace_id=uuid4(),
+    )
+
+    assert result.operation == "created"
+    assert result.persistence is not None, "_upsert_by_external_id dropped the #1505 block"
+    assert result.persistence.scope == "working"
+
+
+def test_every_write_response_construction_populates_persistence():
+    """No construction site may omit the field.
+
+    The two service-level tests above cover today's paths; this catches a NEW
+    construction site added later without it — the shape of the regression that
+    already happened once.
+    """
+    import services.memory_service as memory_service
+
+    tree = ast.parse(Path(memory_service.__file__).read_text(encoding="utf-8"))
+    sites = [
+        node
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Name)
+        and node.func.id in {"RememberResponse", "UpdateMemoryResponse"}
+    ]
+    assert len(sites) >= 3, f"expected the known write-response sites, found {len(sites)}"
+    for call in sites:
+        assert any(kw.arg == "persistence" for kw in call.keywords), (
+            f"{call.func.id} at line {call.lineno} is built without persistence — "
+            "the block would be silently absent from that response"
+        )
+
+
 # ---------------------------------------------------------------------------
 # MCP surface
 # ---------------------------------------------------------------------------

@@ -740,6 +740,7 @@ class MemoryService:
             operation="updated",
             re_embedded=needs_reembed,
             scope=memory.scope,
+            persistence=persistence_info(memory.scope),  # #1505
         )
 
     async def _update_load_authorized(self, memory_id: UUID, user_id: str) -> Any:
@@ -1433,6 +1434,7 @@ class MemoryService:
             operation=operation,
             re_embedded=True,
             scope=result.scope,
+            persistence=persistence_info(result.scope),  # #1505
         )
 
     async def reference(self, memory_id: UUID, user_id: str) -> ReferenceResponse:
