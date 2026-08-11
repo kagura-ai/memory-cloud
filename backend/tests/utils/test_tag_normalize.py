@@ -79,6 +79,24 @@ class TestIsNearDuplicate:
     def test_mechanical_variants_are_also_suggested(self):
         assert is_near_duplicate("dev-environment", "Dev_Environment")
 
+    @pytest.mark.parametrize(
+        ("a", "b"),
+        [
+            ("redis", "redi"),
+            ("https", "http"),
+            ("status", "statu"),
+            ("chaos", "chao"),
+            ("alias", "alia"),
+        ],
+    )
+    def test_non_plural_endings_are_not_stripped(self, a, b):
+        """Over-stripping merges tags an author kept distinct (review finding)."""
+        assert normalize_tag(a) != normalize_tag(b)
+
+    def test_real_plurals_still_fold(self):
+        for plural, singular in [("tags", "tag"), ("issues", "issue"), ("memories", "memory")]:
+            assert normalize_tag(plural) == normalize_tag(singular)
+
     def test_typos_within_two_edits_are_suggested(self):
         assert is_near_duplicate("troubleshooting", "troubleshootng")
         assert is_near_duplicate("authentication", "authentcation")
@@ -93,6 +111,17 @@ class TestIsNearDuplicate:
         """One edit between 3-char tags relates too many unrelated tags."""
         assert not is_near_duplicate("cat", "car")
         assert not is_near_duplicate("api", "apt")
+
+    @pytest.mark.parametrize(
+        ("a", "b"),
+        [("test", "latest"), ("prod", "reprod"), ("auth", "oauth")],
+    )
+    def test_shared_suffix_alone_does_not_suggest(self, a, b):
+        """A suffix match is weak evidence of abbreviation and adds noise.
+
+        The case this rule exists for — dev-env / dev-environment — is a prefix.
+        """
+        assert not is_near_duplicate(a, b)
 
     def test_unrelated_tags_are_not_suggested(self):
         assert not is_near_duplicate("python", "javascript")

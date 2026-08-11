@@ -284,3 +284,119 @@ class TestWiring:
         assert any(
             any(kw.arg == "supersede_candidate_dismissed" for kw in call.keywords) for call in sites
         ), "no UpdateMemoryResponse reports the dismissal"
+
+
+class TestDismissalSurvivesASameCallReEmbed:
+    """#1504 review: dismissing AND editing in one call must not lose the dismissal."""
+
+    def test_a_reembedding_call_stores_no_similarity_baseline(self):
+        """The re-embed is guaranteed to move the score past the resurface delta.
+
+        Recording the pre-edit baseline would let the detector overwrite the
+        tombstone moments after the response reported the dismissal as applied.
+        """
+        tombstone = build_tombstone(_live_candidate(similarity=0.9037), drop_baseline=True)
+        entry = dismissed_entry(tombstone)
+        assert entry is not None
+        assert entry["memory_id"] == TARGET
+        assert "similarity" not in entry
+
+    def test_that_tombstone_suppresses_at_any_recomputed_similarity(self):
+        stored = build_tombstone(_live_candidate(similarity=0.9037), drop_baseline=True)
+        for recomputed in (0.10, 0.50, 0.9037, 0.99):
+            assert is_dismissed(stored, target_id=TARGET, similarity=recomputed)
+
+    def test_it_still_does_not_suppress_a_different_pairing(self):
+        stored = build_tombstone(_live_candidate(), drop_baseline=True)
+        assert not is_dismissed(stored, target_id=OTHER, similarity=0.9037)
+
+    def test_a_non_reembedding_call_keeps_the_baseline(self):
+        entry = dismissed_entry(build_tombstone(_live_candidate(similarity=0.9037)))
+        assert entry is not None and entry["similarity"] == pytest.approx(0.9037)
+
+    def test_update_in_place_passes_the_reembed_flag(self):
+        """Wiring: the flag must be derived from needs_reembed, not hardcoded."""
+        import ast
+        from pathlib import Path
+
+        import services.memory_service as memory_service
+
+        tree = ast.parse(Path(memory_service.__file__).read_text(encoding="utf-8"))
+        fn = next(
+            n
+            for n in ast.walk(tree)
+            if isinstance(n, ast.AsyncFunctionDef) and n.name == "_update_in_place"
+        )
+        calls = [
+            c
+            for c in ast.walk(fn)
+            if isinstance(c, ast.Call)
+            and isinstance(c.func, ast.Attribute)
+            and c.func.attr == "_apply_supersede_dismissal"
+        ]
+        assert calls, "_update_in_place no longer applies the dismissal"
+        for call in calls:
+            kw = {k.arg: k.value for k in call.keywords}
+            assert isinstance(kw.get("drop_baseline"), ast.Name), (
+                "drop_baseline must come from needs_reembed"
+            )
+            assert kw["drop_baseline"].id == "needs_reembed"
+
+
+class TestMalformedStoredCandidate:
+    """#1504 review: a corrupt ADVISORY column must not fail the caller's edit."""
+
+    def _apply(self, stored):
+        from services.memory_service import MemoryService
+
+        memory = MagicMock()
+        memory.id = uuid4()
+        memory.supersede_candidate = stored
+        request = UpdateMemoryRequest(memory_id=memory.id, dismiss_supersede_candidate=True)
+        return memory, MemoryService._apply_supersede_dismissal(memory, request)
+
+    @pytest.mark.parametrize("bad", ["not-a-uuid", "", "12345", "  "])
+    def test_a_malformed_target_id_is_dropped_not_raised(self, bad):
+        memory, returned = self._apply({"memory_id": bad, "similarity": 0.9})
+        assert returned is None
+
+    def test_the_row_is_left_untouched_when_the_id_is_malformed(self):
+        stored = {"memory_id": "not-a-uuid", "similarity": 0.9}
+        memory, _ = self._apply(stored)
+        assert memory.supersede_candidate == stored, (
+            "a half-applied tombstone would be worse than none"
+        )
+
+
+class TestDismissalIsNotAContentEdit:
+    """#1504 review: updated_at is the documented staleness cue."""
+
+    def test_dismissal_only_update_restores_updated_at(self):
+        import ast
+        from pathlib import Path
+
+        import services.memory_service as memory_service
+
+        tree = ast.parse(Path(memory_service.__file__).read_text(encoding="utf-8"))
+        fn = next(
+            n
+            for n in ast.walk(tree)
+            if isinstance(n, ast.AsyncFunctionDef) and n.name == "_update_in_place"
+        )
+        restores = [
+            n
+            for n in ast.walk(fn)
+            if isinstance(n, ast.If)
+            and any(
+                isinstance(t, ast.Attribute)
+                and t.attr == "updated_at"
+                and isinstance(t.ctx, ast.Store)
+                for t in ast.walk(n)
+            )
+        ]
+        assert restores, (
+            "_update_apply_fields stamps updated_at unconditionally; a "
+            "dismissal-only call must put it back"
+        )
+        names = {n.id for r in restores for n in ast.walk(r.test) if isinstance(n, ast.Name)}
+        assert "edits_requested" in names

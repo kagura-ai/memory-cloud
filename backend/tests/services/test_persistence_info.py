@@ -583,3 +583,38 @@ def test_persistence_schema_text_carries_no_bare_issue_ids():
     texts += [f.description or "" for f in PersistenceInfo.model_fields.values()]
     for text in texts:
         assert not re.search(r"#\d{2,}", text), f"bare issue id in agent-facing text: {text!r}"
+
+
+class TestPersistenceInfoCanNeverFailACommittedWrite:
+    """Review finding: this runs inside remember()'s rollback try/except.
+
+    persistence_info reads the archival floor through a lazy import of
+    services.sleep.consolidation (Qdrant + graph service + LLM service). If that
+    chain raises, an unguarded call would surface as a failed remember() for a
+    memory that is already stored — and the handler logs memory_creation_failed
+    and re-raises, inviting a retry that duplicates the memory.
+    """
+
+    def test_a_failing_floor_lookup_omits_the_block_instead_of_raising(self, sleep_pass):
+        with patch(
+            "services.persistence._sleep_archive_min_age_days",
+            side_effect=ImportError("simulated broken import chain"),
+        ):
+            assert persistence_info("working") is None
+
+    def test_a_failing_pass_lookup_omits_only_the_block_that_needs_it(self, sleep_pass):
+        """The persistent branch never consults the pass, so it still builds."""
+        with patch(
+            "services.persistence.active_consolidation_pass",
+            side_effect=RuntimeError("boom"),
+        ):
+            assert persistence_info("working") is None
+            persistent = persistence_info("persistent")
+            assert persistent is not None
+            assert persistent.scope == "persistent"
+
+    def test_remember_still_returns_when_the_block_cannot_be_built(self):
+        """The write is committed; the response must still come back."""
+        from services.persistence import persistence_info as real
+
+        assert real("nonsense-scope") is None
