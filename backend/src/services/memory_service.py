@@ -209,6 +209,22 @@ def location_payload_from_details(details: dict | None) -> dict | None:
     return {"lat": float(lat), "lon": float(lon)}
 
 
+# The request fields ``_update_apply_fields`` writes onto the row. Named here so
+# a dismissal-only update (#1504) can tell "no content changed" from "content
+# changed", and so adding a field to that method forces a change here too.
+_UPDATE_CONTENT_FIELDS = (
+    "summary",
+    "context_summary",
+    "content",
+    "details",
+    "type",
+    "importance",
+    "tags",
+    "context",
+    "delivery_mode",
+)
+
+
 class MemoryService:
     """Memory service for core memory operations.
 
@@ -627,6 +643,7 @@ class MemoryService:
                 lint=await self._lint_write(
                     workspace_id=UUID(workspace_id_str),
                     context_id=UUID(context_id_str),
+                    user_id=user_id,
                     summary=request.summary,
                     tags=request.tags,
                 ),
@@ -706,13 +723,31 @@ class MemoryService:
         if request.content is not None and request.content != memory.content:
             needs_reembed = True
 
+        # #1504/#1505: a dismissal-only call edits no content. Capture the
+        # timestamp before _update_apply_fields stamps it unconditionally.
+        updated_at_before = memory.updated_at
+        edits_requested = any(
+            getattr(request, field) is not None for field in _UPDATE_CONTENT_FIELDS
+        )
+
         self._update_guard_size(memory, request, normalized_summary, normalized_ctx_summary)
         effective_details = self._update_apply_fields(
             memory, request, normalized_summary, normalized_ctx_summary
         )
         # #1504: rejection path. Applied before the commit below so the tombstone
         # lands in the same transaction as any other field change in this call.
-        dismissed_target = self._apply_supersede_dismissal(memory, request)
+        # A dismissal is not a content edit, so when it is the ONLY thing this
+        # call did, restore the timestamp _update_apply_fields unconditionally
+        # stamped: updated_at is the documented staleness cue ("an old value
+        # means the fact may be stale"), and rejecting a suggestion must not make
+        # a stale memory read as freshly maintained (#1317's rule for the
+        # detection half of this lifecycle).
+        dismissed_target = self._apply_supersede_dismissal(
+            memory, request, drop_baseline=needs_reembed
+        )
+
+        if request.dismiss_supersede_candidate and not edits_requested:
+            memory.updated_at = updated_at_before
 
         if needs_reembed:
             # Async embedding via create_task (same pattern as remember)
@@ -762,18 +797,29 @@ class MemoryService:
             lint=await self._lint_write(
                 workspace_id=memory.workspace_id,
                 context_id=memory.context_id,
+                user_id=user_id,
                 summary=memory.summary,
                 tags=memory.tags,
             ),
         )
 
     @staticmethod
-    def _apply_supersede_dismissal(memory: Any, request: UpdateMemoryRequest) -> UUID | None:
+    def _apply_supersede_dismissal(
+        memory: Any, request: UpdateMemoryRequest, *, drop_baseline: bool = False
+    ) -> UUID | None:
         """#1504: tombstone the current supersede suggestion, if one is pending.
 
         Args:
             memory: The loaded update target.
             request: The update request.
+            drop_baseline: Set when this same call also re-embeds the memory.
+                The tombstone normally records the similarity at dismissal so a
+                later MATERIAL change can re-surface the pair; but a re-embed in
+                this very call is guaranteed to move that score, which would let
+                the detector overwrite the tombstone moments after the response
+                reported the dismissal as applied. Storing no baseline suppresses
+                the pair unconditionally instead — the caller rejected these two
+                memories knowing they were editing one of them.
 
         Returns:
             The dismissed candidate's memory id, or None when the flag was not
@@ -795,16 +841,29 @@ class MemoryService:
             return None
 
         target_id = str(stored["memory_id"])
+        try:
+            dismissed_id = UUID(target_id)
+        except (ValueError, TypeError):
+            # The column is server-written, but the sibling read path
+            # (_resolve_supersede_candidates) already treats a malformed stored
+            # value as reachable. A corrupt ADVISORY column must not fail the
+            # caller's real edit, so drop the dismissal and leave the row alone.
+            logger.warning(
+                "supersede_dismiss_malformed_candidate",
+                memory_id=str(memory.id),
+                stored_target=target_id[:100],
+            )
+            return None
         # Reassign (JSON column, not a MutableDict — reassignment is what marks
         # it dirty), mirroring how detection and acceptance write this column.
-        memory.supersede_candidate = build_tombstone(stored)
+        memory.supersede_candidate = build_tombstone(stored, drop_baseline=drop_baseline)
         logger.info(
             "supersede_suggestion_dismissed",
             memory_id=str(memory.id),
             candidate_memory_id=target_id,
             similarity=stored.get("similarity"),
         )
-        return UUID(target_id)
+        return dismissed_id
 
     async def _update_load_authorized(self, memory_id: UUID, user_id: str) -> Any:
         """Load the update target, or 404 (MCP-reachable in-place update path).
@@ -3582,6 +3641,7 @@ class MemoryService:
         neural_enabled: bool,
         binding_row_filtered: int,
         selection_evidence: dict[str, Any] | None,
+        cross_context: bool = False,
     ) -> RecallResponse:
         """Assemble the final response: hints, tags, confidence, audit row.
 
@@ -3597,6 +3657,8 @@ class MemoryService:
             neural_enabled: Whether the neural graph is available to hint from.
             binding_row_filtered: #1299 subtracted-row count, for the audit row.
             selection_evidence: #1306 evidence dict, or None.
+            cross_context: True when the recall spanned several contexts, which
+                disables the single-context tag hints (#1503).
 
         Returns:
             The completed RecallResponse.
@@ -3675,8 +3737,10 @@ class MemoryService:
             tag_suggestions=await self._tag_suggestions_for_empty_result(
                 request,
                 responses,
+                user_id=user_id,
                 workspace_id=effective_workspace_id,
                 context_id=current_context_id,
+                cross_context=cross_context,
             ),
         )
 
@@ -3685,6 +3749,7 @@ class MemoryService:
         *,
         workspace_id: UUID | None,
         context_id: UUID | None,
+        user_id: str,
         summary: str | None,
         tags: list[str] | None,
     ) -> list[WriteLintHint]:
@@ -3692,21 +3757,31 @@ class MemoryService:
 
         Returns no hints when the write cannot be located in a context (the
         vocabulary comparison would be meaningless) or when nothing is worth
-        saying. Never raises — ``lint_write`` swallows its own errors, and the
-        guards here cover the arguments it would otherwise be handed as None.
+        saying.
+
+        Total by construction. ``lint_write`` guards its own body, but the
+        ``import`` below is outside that guard and this runs AFTER the write has
+        committed — in ``remember()`` it sits inside the ``try`` whose handler
+        rolls back and logs ``memory_creation_failed``, so an escaping exception
+        would report a stored memory as failed and invite a duplicating retry.
         """
         if workspace_id is None or context_id is None or not summary:
             return []
 
-        from services.write_lint import lint_write
+        try:
+            from services.write_lint import lint_write
 
-        return await lint_write(
-            self.db,
-            workspace_id=workspace_id,
-            context_id=context_id,
-            summary=summary,
-            tags=tags,
-        )
+            return await lint_write(
+                self.db,
+                workspace_id=workspace_id,
+                context_id=context_id,
+                user_id=user_id,
+                summary=summary,
+                tags=tags,
+            )
+        except Exception as e:  # noqa: BLE001 — advisory; never fail a committed write
+            logger.warning("write_lint_unavailable", error=str(e))
+            return []
 
     @staticmethod
     def _requested_tag_filter(filters: dict | None) -> list[str]:
@@ -3727,19 +3802,23 @@ class MemoryService:
         request: RecallRequest,
         responses: list,
         *,
+        user_id: str,
         workspace_id: UUID,
-        context_id: UUID | None,
+        context_id: UUID,
+        cross_context: bool,
     ) -> dict[str, list[str]] | None:
         """#1503: near-miss tags for a tag-filtered recall that found nothing.
 
         Deliberately narrow. It fires only on a ZERO-result recall that actually
         filtered on tags, so the extra vocabulary query never rides a successful
         recall, and it cannot be mistaken for "these tags also matched" on a
-        partial result. Returns None (field omitted) when there is nothing to
-        say, including when the caller is doing a cross-context recall — the
-        vocabulary read is scoped to one authorized context.
+        partial result.
+
+        Skipped entirely for a cross-context recall: the vocabulary read covers
+        ONE context, so suggesting from the primary alone would describe a
+        different search than the one the caller ran.
         """
-        if responses or context_id is None:
+        if responses or cross_context:
             return None
         tags = self._requested_tag_filter(request.filters)
         if not tags:
@@ -3751,6 +3830,7 @@ class MemoryService:
             self.db,
             workspace_id=workspace_id,
             context_id=context_id,
+            user_id=user_id,
             tags=tags,
         )
         return suggestions or None
@@ -3895,13 +3975,19 @@ class MemoryService:
         # and the caller has authorized exactly this one.
         effective_filters = request.filters
         tag_filter = self._requested_tag_filter(request.filters)
-        if tag_filter and request.filters.get("tags_normalize") and current_context_id:
+        if (
+            tag_filter
+            and request.filters.get("tags_normalize")
+            and current_context_id
+            and not context_ids  # one context's vocabulary cannot widen a search over many
+        ):
             from services.tag_resolution import expand_tag_filter
 
             expanded, added = await expand_tag_filter(
                 self.db,
                 workspace_id=effective_workspace_id,
                 context_id=current_context_id,
+                user_id=user_id,
                 tags=tag_filter,
             )
             if added:
@@ -4049,6 +4135,7 @@ class MemoryService:
             neural_enabled=neural_enabled,
             binding_row_filtered=binding_row_filtered,
             selection_evidence=selection_evidence,
+            cross_context=bool(context_ids),
         )
 
     async def load_pinned(

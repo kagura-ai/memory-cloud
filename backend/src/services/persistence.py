@@ -124,10 +124,27 @@ def persistence_info(scope: str) -> PersistenceInfo | None:
 
     Returns:
         PersistenceInfo describing what that scope implies for durability, or
-        None for an unrecognized scope. This block is advisory: an unexpected
-        scope must not fail a write that already committed, so the field is
-        omitted (and the anomaly logged) rather than raised.
+        None when it cannot be built. This block is advisory and is computed
+        AFTER the write has committed, so it must be total: an unrecognized
+        scope, or any failure below, omits the field rather than raising.
+
+    Note:
+        The blanket guard is not defensive padding. The archival floor is read
+        through a lazy import of ``services.sleep.consolidation``, which pulls
+        in Qdrant, the graph service and the LLM service — the first write in a
+        process pays that import, and anything wrong in that chain would
+        otherwise surface as a failed ``remember()`` for a memory that is
+        already stored, prompting the caller to retry and duplicate it.
     """
+    try:
+        return _persistence_info(scope)
+    except Exception as e:  # noqa: BLE001 — advisory; never fail a committed write
+        logger.warning("persistence_info_failed", scope=scope, error=str(e))
+        return None
+
+
+def _persistence_info(scope: str) -> PersistenceInfo | None:
+    """Build the block, or None for an unrecognized scope. May raise."""
     if scope == "persistent":
         return PersistenceInfo(
             scope="persistent",

@@ -46,28 +46,48 @@ MAX_EXPANSION_PER_TAG = 20
 MAX_SUGGESTIONS_PER_TAG = 5
 
 
-async def _fetch_vocabulary(
+async def fetch_vocabulary(
     db: AsyncSession,
     *,
     workspace_id: UUID,
     context_id: UUID,
+    user_id: str,
 ) -> dict[str, int]:
-    """Distinct tag -> memory count for one context.
+    """Distinct tag -> memory count for one context, as THIS caller may read it.
 
     ``DISTINCT id, unnest(tags)`` semantics are not needed here: the outer
     aggregate counts distinct memory ids per tag directly, so a memory carrying
     the same tag twice still counts once (the #614 lesson).
+
+    The ``user_id`` filter mirrors the one ``SearchService`` applies to recall:
+    in a context that is not shared, a caller sees only their OWN memories, so
+    aggregating over every author would let tag names and counts describe rows
+    the caller cannot read. Sharing is resolved once per call, and only a shared
+    context aggregates across authors.
+
+    Args:
+        db: Session.
+        workspace_id: Authorized workspace.
+        context_id: Authorized context.
+        user_id: Caller identity, used to scope the aggregate.
+
+    Returns:
+        ``{tag: memory_count}``, capped at ``VOCABULARY_LIMIT`` by descending count.
     """
+    from services.context_service import ContextService
+
+    shared = await ContextService(db).is_context_shared(context_id)
+
+    conditions = [
+        Memory.workspace_id == workspace_id,
+        Memory.context_id == context_id,
+        Memory.deleted_at.is_(None),
+    ]
+    if not shared:
+        conditions.append(Memory.user_id == user_id)
+
     tag = func.unnest(Memory.tags).label("tag")
-    inner = (
-        select(Memory.id.label("memory_id"), tag)
-        .where(
-            Memory.workspace_id == workspace_id,
-            Memory.context_id == context_id,
-            Memory.deleted_at.is_(None),
-        )
-        .subquery()
-    )
+    inner = select(Memory.id.label("memory_id"), tag).where(*conditions).subquery()
     stmt = (
         select(inner.c.tag, func.count(func.distinct(inner.c.memory_id)))
         .group_by(inner.c.tag)
@@ -83,6 +103,7 @@ async def expand_tag_filter(
     *,
     workspace_id: UUID,
     context_id: UUID,
+    user_id: str,
     tags: list[str],
 ) -> tuple[list[str], dict[str, list[str]]]:
     """Widen tags to every stored MECHANICAL variant of each requested tag.
@@ -91,6 +112,7 @@ async def expand_tag_filter(
         db: Session (caller must already have authorized the context).
         workspace_id: Authorized workspace.
         context_id: Authorized context.
+        user_id: Caller identity (scopes the vocabulary read).
         tags: Tags the caller filtered on.
 
     Returns:
@@ -105,7 +127,9 @@ async def expand_tag_filter(
         an enhancement and must never break a recall.
     """
     try:
-        vocabulary = await _fetch_vocabulary(db, workspace_id=workspace_id, context_id=context_id)
+        vocabulary = await fetch_vocabulary(
+            db, workspace_id=workspace_id, context_id=context_id, user_id=user_id
+        )
     except Exception as e:  # noqa: BLE001 — enhancement must not break recall
         logger.warning("tag_vocabulary_read_failed", error=str(e))
         return tags, {}
@@ -147,6 +171,7 @@ async def suggest_tags(
     *,
     workspace_id: UUID,
     context_id: UUID,
+    user_id: str,
     tags: list[str],
 ) -> dict[str, list[str]]:
     """Near-duplicate tags that exist in the context, for a filter that matched nothing.
@@ -155,6 +180,7 @@ async def suggest_tags(
         db: Session (caller must already have authorized the context).
         workspace_id: Authorized workspace.
         context_id: Authorized context.
+        user_id: Caller identity (scopes the vocabulary read).
         tags: Tags the caller filtered on.
 
     Returns:
@@ -164,7 +190,9 @@ async def suggest_tags(
         misspelled.
     """
     try:
-        vocabulary = await _fetch_vocabulary(db, workspace_id=workspace_id, context_id=context_id)
+        vocabulary = await fetch_vocabulary(
+            db, workspace_id=workspace_id, context_id=context_id, user_id=user_id
+        )
     except Exception as e:  # noqa: BLE001 — a hint must not break recall
         logger.warning("tag_vocabulary_read_failed", error=str(e))
         return {}

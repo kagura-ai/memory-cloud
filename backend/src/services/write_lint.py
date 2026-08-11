@@ -152,6 +152,7 @@ async def lint_write(
     *,
     workspace_id: UUID,
     context_id: UUID,
+    user_id: str,
     summary: str,
     tags: list[str] | None,
 ) -> list[WriteLintHint]:
@@ -161,6 +162,8 @@ async def lint_write(
         db: Session (caller must already have authorized the context).
         workspace_id: Authorized workspace.
         context_id: Authorized context.
+        user_id: Caller identity — scopes the vocabulary read so a hint can
+            never describe memories the caller cannot read.
         summary: The summary as written.
         tags: The tags as written.
 
@@ -177,10 +180,10 @@ async def lint_write(
         if tag_list:
             # Only pay for the vocabulary read when there is something to compare
             # against it; the no-tags hint needs no vocabulary at all.
-            from services.tag_resolution import _fetch_vocabulary
+            from services.tag_resolution import fetch_vocabulary
 
-            vocabulary = await _fetch_vocabulary(
-                db, workspace_id=workspace_id, context_id=context_id
+            vocabulary = await fetch_vocabulary(
+                db, workspace_id=workspace_id, context_id=context_id, user_id=user_id
             )
         hints.extend(_tag_hints(tag_list, vocabulary))
 

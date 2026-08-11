@@ -64,17 +64,43 @@ def normalize_tag(tag: str) -> str:
     return _strip_plural(folded)
 
 
+# Two-letter endings that are almost never an English plural, so stripping the
+# trailing ``s`` would truncate a real word rather than singularise it:
+# redis -> redi, status -> statu, chaos -> chao, alias -> alia, class -> clas.
+# ``es`` is deliberately ABSENT — it is a genuine plural ending (issues, boxes)
+# and excluding it would stop those folding at all.
+_NON_PLURAL_ENDINGS = ("ss", "is", "us", "os", "as")
+
+# Tags whose ending is indistinguishable from a plural by any rule (``https``
+# looks exactly like ``apps``), but which are common enough that the mangled
+# stem collides with a real tag — ``https`` folding to ``http`` would merge two
+# tags an author kept distinct. Kept deliberately tiny: an over-strip only does
+# harm when the stem is itself a real tag in the same context, so this is not a
+# list of every non-plural word ending in s.
+_NEVER_PLURAL = frozenset({"https"})
+
+
 def _strip_plural(folded: str) -> str:
     """Strip a trailing English plural, conservatively.
 
-    Only ``-ies -> -y`` and a bare trailing ``-s`` are folded, and never on a
-    stem short enough that the result would collide with unrelated tags. Words
-    ending in ``-ss`` (``class``, ``progress``) are left alone. Non-Latin tags
-    are unaffected because they do not end in ``s``.
+    Only ``-ies -> -y`` and a bare trailing ``-s`` are folded, never on a stem
+    short enough that the result would collide with unrelated tags, and never
+    when the word ends in one of ``_NON_PLURAL_ENDINGS``.
+
+    This is deliberately under-inclusive. A missed plural costs one unmatched
+    spelling; an over-strip silently merges two tags an author kept distinct,
+    and ``expand_tag_filter`` groups the whole vocabulary by this fold — so a
+    wrong merge widens a real filter. Non-Latin tags are unaffected because they
+    do not end in ``s``.
     """
     if len(folded) > 4 and folded.endswith("ies"):
         return folded[:-3] + "y"
-    if len(folded) > 3 and folded.endswith("s") and not folded.endswith("ss"):
+    if (
+        len(folded) > 3
+        and folded.endswith("s")
+        and folded not in _NEVER_PLURAL
+        and not folded.endswith(_NON_PLURAL_ENDINGS)
+    ):
         return folded[:-1]
     return folded
 
@@ -125,7 +151,11 @@ def is_near_duplicate(requested: str, candidate: str) -> bool:
     if not a or not b or a == b:
         return bool(a) and a == b
     if len(a) >= _MIN_AFFIX_LEN and len(b) >= _MIN_AFFIX_LEN:
-        if a.startswith(b) or b.startswith(a) or a.endswith(b) or b.endswith(a):
+        # Prefix only. A shared SUFFIX is far weaker evidence of abbreviation and
+        # relates plainly unrelated tags (test/latest, prod/reprod, auth/oauth),
+        # and noisy suggestions are how an agent learns to ignore the field.
+        # The case this rule exists for — dev-env / dev-environment — is a prefix.
+        if a.startswith(b) or b.startswith(a):
             return True
     if len(a) >= _MIN_EDIT_LEN and len(b) >= _MIN_EDIT_LEN:
         return _edit_distance_within(a, b, _MAX_EDIT_DISTANCE)

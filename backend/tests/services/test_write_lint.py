@@ -21,6 +21,16 @@ from services.write_lint import MAX_HINTS, lint_write
 
 WS = uuid4()
 CTX = uuid4()
+USER = "caller-1"
+
+
+@pytest.fixture(autouse=True)
+def _unshared_context():
+    """Vocabulary reads resolve context sharing; default to the scoped path."""
+    with patch("services.context_service.ContextService") as cls:
+        cls.return_value.is_context_shared = AsyncMock(return_value=False)
+        yield cls
+
 
 GOOD_SUMMARY = (
     "JWT expiry caused intermittent 401s on the dashboard. Fixed with refresh "
@@ -42,6 +52,7 @@ async def _lint(summary=GOOD_SUMMARY, tags=None, vocabulary=None):
         db,
         workspace_id=WS,
         context_id=CTX,
+        user_id=USER,
         summary=summary,
         tags=tags if tags is not None else ["auth"],
     )
@@ -136,7 +147,9 @@ class TestTagRules:
     async def test_no_tags_skips_the_vocabulary_read_entirely(self):
         """Nothing to compare — do not pay for the query."""
         db = _db_with_vocabulary({"auth": 3})
-        await lint_write(db, workspace_id=WS, context_id=CTX, summary=GOOD_SUMMARY, tags=[])
+        await lint_write(
+            db, workspace_id=WS, context_id=CTX, user_id=USER, summary=GOOD_SUMMARY, tags=[]
+        )
         db.execute.assert_not_awaited()
 
     @pytest.mark.asyncio
@@ -168,7 +181,14 @@ class TestItCanNeverBreakAWrite:
         db = MagicMock()
         db.execute = AsyncMock(side_effect=RuntimeError("boom"))
         assert (
-            await lint_write(db, workspace_id=WS, context_id=CTX, summary=GOOD_SUMMARY, tags=["x"])
+            await lint_write(
+                db,
+                workspace_id=WS,
+                context_id=CTX,
+                user_id=USER,
+                summary=GOOD_SUMMARY,
+                tags=["x"],
+            )
             == []
         )
 
@@ -217,6 +237,7 @@ class TestServiceGuards:
             out = await self._service()._lint_write(
                 workspace_id=workspace_id,
                 context_id=context_id,
+                user_id=USER,
                 summary=summary,
                 tags=["auth"],
             )
@@ -293,3 +314,50 @@ class TestWiring:
         )
         assert out["lint"][0] == {"code": "no_tags", "hint": "add tags"}
         assert out["lint"][1]["subject"] == "authh"
+
+
+class TestLintCanNeverFailACommittedWrite:
+    """#1502 review: the import sits outside lint_write's own guard."""
+
+    def _service(self):
+        from services.memory_service import MemoryService
+
+        return MemoryService(MagicMock())
+
+    @pytest.mark.asyncio
+    async def test_an_unimportable_lint_module_yields_no_hints(self):
+        """remember() runs this INSIDE the try that rolls back and re-raises."""
+        import builtins
+
+        real_import = builtins.__import__
+
+        def boom(name, *args, **kwargs):
+            if name == "services.write_lint":
+                raise ImportError("simulated broken import chain")
+            return real_import(name, *args, **kwargs)
+
+        with patch.object(builtins, "__import__", side_effect=boom):
+            out = await self._service()._lint_write(
+                workspace_id=WS,
+                context_id=CTX,
+                user_id=USER,
+                summary=GOOD_SUMMARY,
+                tags=["auth"],
+            )
+        assert out == []
+
+
+class TestVocabularyIsScopedToTheCaller:
+    @pytest.mark.asyncio
+    async def test_hint_cannot_describe_another_users_tags(self):
+        """The lint reads the same vocabulary recall does, scoped the same way."""
+        db = _db_with_vocabulary({})
+        hints = await lint_write(
+            db,
+            workspace_id=WS,
+            context_id=CTX,
+            user_id=USER,
+            summary=GOOD_SUMMARY,
+            tags=["dev-env"],
+        )
+        assert [h.code for h in hints] == []

@@ -45,13 +45,20 @@ logger = get_logger(__name__)
 RESURFACE_SIMILARITY_DELTA = 0.02
 
 
-def build_tombstone(candidate: dict[str, Any]) -> dict[str, Any]:
+def build_tombstone(candidate: dict[str, Any], *, drop_baseline: bool = False) -> dict[str, Any]:
     """Tombstone value for a rejected suggestion.
 
     Args:
         candidate: The stored suggestion being rejected — must carry
             ``memory_id``; ``similarity`` is recorded when present so
             re-detection can compare against it.
+        drop_baseline: Omit the similarity baseline, making the suppression
+            unconditional. Set when the same call also re-embeds the memory:
+            that re-embed is guaranteed to move the score past the resurface
+            delta, so recording the pre-edit baseline would let the detector
+            overwrite this tombstone moments after the caller was told the
+            dismissal applied. See :func:`is_dismissed` for how a missing
+            baseline is read.
 
     Returns:
         The value to store in ``Memory.supersede_candidate``.
@@ -61,7 +68,7 @@ def build_tombstone(candidate: dict[str, Any]) -> dict[str, Any]:
         "dismissed_at": to_utc_iso(utcnow()),
     }
     similarity = candidate.get("similarity")
-    if isinstance(similarity, (int, float)):
+    if not drop_baseline and isinstance(similarity, (int, float)):
         dismissed["similarity"] = float(similarity)
     return {"dismissed": dismissed}
 
