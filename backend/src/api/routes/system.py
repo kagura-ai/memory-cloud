@@ -501,9 +501,17 @@ async def list_embedding_models(
         )
         self_hosted_available = status_code == 200
 
-    # Build model list
+    # Build model list.
+    # #1517: only advertise what this deployment actually offers — listing a
+    # model the deployment will refuse at create_context invites a caller to
+    # pick one and hit a validation error, or worse, to plan around it.
+    from config.embedding_policy import allowed_embedding_models
+
+    offered = set(allowed_embedding_models(settings.embedding_model_allowlist))
     models = []
     for name, (dimensions, provider) in EMBEDDING_MODEL_REGISTRY.items():
+        if name not in offered:
+            continue
         available = openai_available if provider == "openai" else self_hosted_available
         models.append(
             EmbeddingModelInfo(

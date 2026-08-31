@@ -371,6 +371,18 @@ class Settings(BaseSettings):
         default="text-embedding-3-small", description="Embedding model name"
     )
     embedding_dimensions: int = Field(default=512, description="Embedding vector dimensions")
+    # #1517: which registry models THIS deployment offers. Comma-separated;
+    # empty (the default) means the whole registry, i.e. unchanged behaviour.
+    # Set it when the deployment cannot actually serve every registry entry —
+    # e.g. the Sakura fleet embeds via AI Engine, where the OpenAI models only
+    # resolve for a workspace with its own BYOK key.
+    embedding_model_allowlist: str = Field(
+        default="",
+        description=(
+            "Issue #1517: comma-separated embedding models this deployment "
+            "offers. Empty = the whole EMBEDDING_MODEL_REGISTRY."
+        ),
+    )
     # Issue #1030: when True, a workspace whose plan lacks the
     # ``managed_embeddings`` capability (Free / S) is DENIED the platform
     # ``OPENAI_API_KEY`` embedding fallback — it must supply a BYOK key or use a
