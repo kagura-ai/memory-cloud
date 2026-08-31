@@ -314,6 +314,58 @@ docker compose \
 docker compose exec ollama ollama pull nomic-embed-text
 ```
 
+## Optional: split-host layout (app VM + data VM)
+
+The compose stack can also run as two tiers on two hosts — one VM for the
+stateless app tier, one for the databases. This is what the Sakura production
+layout uses; the single-host setup above is unchanged and remains the default.
+
+| File | Tier | Services |
+| --- | --- | --- |
+| `docker-compose.prod.yml` | both (single host) | all seven |
+| `docker-compose.app.yml` | app | `api-blue`, `api-green`, `web`, `caddy` |
+| `docker-compose.data.yml` | data | `postgres`, `qdrant`, `redis` |
+| `docker-compose.data-expose.yml` | data (overlay) | publishes the DB ports on the private NIC |
+
+**On the data VM** — `DATA_BIND_ADDR` must be the private address; it has no
+default so a typo cannot silently expose PostgreSQL on every interface:
+
+```bash
+DATA_BIND_ADDR=192.168.10.20 docker compose \
+  -f docker-compose.data.yml \
+  -f docker-compose.data-expose.yml \
+  --env-file .env.prod up -d
+```
+
+**On the app VM** — point the data-tier hostnames at the data VM and deploy a
+pre-built image instead of building from a source tree:
+
+```bash
+# .env.prod
+POSTGRES_HOST=192.168.10.20
+QDRANT_HOST=192.168.10.20
+REDIS_HOST=192.168.10.20
+
+export COMPOSE_FILE=docker-compose.app.yml
+export KAGURA_IMAGE_SOURCE=registry
+export KAGURA_IMAGE_REPO=registry.example.com/kagura-api
+export KAGURA_IMAGE_TAG=v0.65.0
+./scripts/deploy.sh
+```
+
+`POSTGRES_HOST` / `QDRANT_HOST` / `REDIS_HOST` default to the compose service
+names, so on a single host the rendered config is identical to
+`docker-compose.prod.yml` — `scripts/tests/compose_tier_split_parity.bats`
+pins that, and fails CI if the two compositions ever drift apart. The only
+intended difference is the API `depends_on` edges, which cannot cross hosts;
+there, ordering is covered by `restart: always` plus the `/readiness` gate that
+`deploy.sh` already runs before switching traffic.
+
+`KAGURA_IMAGE_SOURCE` defaults to `build`, so the single-host deploy keeps
+building on the VM exactly as before. In `registry` mode the pulled image is
+re-tagged per color, which is what keeps `--rollback` meaningful: blue and
+green must never share one local tag.
+
 ## Operations
 
 ### SSH via IAP

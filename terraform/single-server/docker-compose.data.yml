@@ -1,0 +1,83 @@
+# =============================================================================
+# Kagura Memory Cloud — data tier (PostgreSQL / Qdrant / Redis)
+# =============================================================================
+# Stateful services only. Split out of docker-compose.prod.yml so the same
+# definitions can run either co-resident with the app tier (single host, the
+# GCE layout) or on a dedicated data host (the Sakura 2-VM layout).
+#
+#   single host : docker-compose.prod.yml includes this file — unchanged topology
+#   data VM     : docker compose -f docker-compose.data.yml \
+#                                -f docker-compose.data-expose.yml up -d
+#
+# NOTE: no ports are published here. Port publishing is opt-in via
+# docker-compose.data-expose.yml so the single-host layout keeps these services
+# reachable only over the compose network, exactly as before.
+# =============================================================================
+
+services:
+  postgres:
+    # Pinned by multi-arch manifest-list digest (#1302). The 18+ Docker image
+    # moved PGDATA to /var/lib/postgresql/18/docker and the volume target to
+    # /var/lib/postgresql — never start this image against the old PG15
+    # kagura_postgres_data volume. Cutover/rollback procedure:
+    # docs/ops/postgres-18-migration-runbook.md
+    image: postgres:18.4-alpine@sha256:9a8afca54e7861fd90fab5fdf4c42477a6b1cb7d293595148e674e0a3181de15
+    container_name: kagura-postgres
+    restart: always
+    environment:
+      POSTGRES_DB: kagura
+      POSTGRES_USER: kagura
+      POSTGRES_PASSWORD: ${DB_PASSWORD}
+      # Pin UTC at the OS + Postgres session layer — see
+      # .claude/rules/backend.md for the three-layer policy.
+      TZ: UTC
+      PGTZ: UTC
+    volumes:
+      - postgres_data_18:/var/lib/postgresql
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U kagura -d kagura"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+
+  qdrant:
+    image: qdrant/qdrant:v1.15.0
+    container_name: kagura-qdrant
+    restart: always
+    environment:
+      QDRANT__SERVICE__API_KEY: ${QDRANT_API_KEY}
+    volumes:
+      - qdrant_data:/qdrant/storage
+    healthcheck:
+      test: ["CMD-SHELL", "timeout 10s bash -c ':> /dev/tcp/127.0.0.1/6333' || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+
+  redis:
+    image: redis:7-alpine
+    container_name: kagura-redis
+    restart: always
+    command: ["redis-server", "--appendonly", "yes"]
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+
+volumes:
+  # The old PG15 volume (kagura_postgres_data) is deliberately NOT declared
+  # here anymore: keeping it out of the compose file protects it from
+  # `docker compose down -v` during the migration rollback window. Remove it
+  # manually (docker volume rm) only after the rollback window is formally
+  # closed — see docs/ops/postgres-18-migration-runbook.md.
+  postgres_data_18:
+    name: kagura_postgres_data_18
+  qdrant_data:
+    name: kagura_qdrant_data
+  redis_data:
+    name: kagura_redis_data
