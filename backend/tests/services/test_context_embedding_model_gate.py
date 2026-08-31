@@ -120,3 +120,57 @@ class TestOperatorConfiguredDefault:
             pytest.fail(f"operator-configured default was rejected: {exc}")
         except Exception:
             pass
+
+
+@pytest.mark.asyncio
+class TestWorkspaceCreationUnderANarrowedAllowlist:
+    """The caller the gate was moved down to catch must not be the one it breaks.
+
+    Review of #1517 found that create_workspace() manufactured
+    embedding_model="text-embedding-3-small" — a caller-supplied value as far as
+    the gate is concerned — so on a deployment whose allowlist does not include
+    it (exactly the documented Sakura setting) every workspace creation 422'd,
+    with no caller-side workaround.
+    """
+
+    async def test_create_workspace_passes_the_model_through_unchanged(self):
+        import inspect
+
+        from services.workspace_service import WorkspaceService
+
+        src = inspect.getsource(WorkspaceService.create_workspace)
+        assert '"text-embedding-3-small"' not in src, (
+            "create_workspace must not manufacture an embedding model name — it "
+            "turns the operator default into a gated caller-supplied value (#1517)."
+        )
+        assert "embedding_model=default_context_embedding_model," in src
+
+    async def test_the_operator_default_is_used_when_the_caller_names_nothing(self):
+        # With no caller-supplied model, the gate is skipped entirely and the
+        # deployment's own EMBEDDING_MODEL applies — even under a narrow allowlist.
+        service, settings = _service_with_settings("qwen3-embedding:4b")
+        settings.embedding_model = "qwen3-embedding:4b"
+        settings.embedding_dimensions = 2560
+        try:
+            await _create(service, settings, workspace_id=MagicMock(), name="default")
+        except ValidationError as exc:  # pragma: no cover - failure detail
+            pytest.fail(f"workspace default context was rejected: {exc}")
+        except Exception:
+            pass
+
+
+class TestWorkspaceRouteAcceptsServableModels:
+    def test_the_route_pattern_covers_the_whole_registry(self):
+        """A BYOK caller on a self-hosted deployment needs a legal value to send."""
+        import re
+
+        from api.routes.workspaces import WorkspaceCreate
+        from config.constants import EMBEDDING_MODEL_REGISTRY
+
+        pattern = WorkspaceCreate.model_fields["default_context_embedding_model"].metadata
+        rx = None
+        for m in pattern:
+            rx = getattr(m, "pattern", None) or rx
+        assert rx, "expected a pattern constraint on default_context_embedding_model"
+        for model in EMBEDDING_MODEL_REGISTRY:
+            assert re.match(rx, model), f"{model} is in the registry but the route rejects it"
