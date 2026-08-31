@@ -625,6 +625,13 @@ class AgentBootstrapService:
             "k": request.k,
             "trust_filter": "trusted",
         }
+        # #1515: bootstrap output is behaviour-establishing, so an agent must not
+        # be handed a keyword-only result set as if the semantic arm had run.
+        # This component is not in STATUS_ERROR — the recall succeeded — so the
+        # envelope-level `degraded` flag above would not catch it.
+        if result.degraded:
+            body["degraded"] = True
+            body["degraded_reason"] = result.degraded_reason
         evidence = getattr(result, "selection_evidence", None)
         if params.recall_evaluation is not None and isinstance(evidence, dict):
             # Identity-only metadata.  Candidate summaries/content never leave

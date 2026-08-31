@@ -205,6 +205,27 @@ def _lint_response_field(lint: Any) -> dict[str, Any]:
     return {"lint": [hint.model_dump(exclude_none=True) for hint in lint]}
 
 
+def _degraded_response_fields(result: Any) -> dict[str, Any]:
+    """Render the #1515 degraded-search flag for the recall MCP envelope.
+
+    The MCP envelope is hand-built, so a new ``RecallResponse`` field does not
+    reach agent clients on its own. Rendering it here (rather than inline in the
+    handler) keeps the projection in one testable place — the same reason
+    ``_persistence_response_field`` and ``_lint_response_field`` exist.
+
+    Args:
+        result: The ``RecallResponse`` from ``MemoryService.recall``.
+
+    Returns:
+        ``{"degraded": True, "degraded_reason": ...}`` when the semantic arm was
+        unavailable, otherwise an empty dict — a healthy search adds no keys, so
+        presence is itself the signal.
+    """
+    if not getattr(result, "degraded", None):
+        return {}
+    return {"degraded": True, "degraded_reason": getattr(result, "degraded_reason", None)}
+
+
 # ============================================================================
 # Context resolution
 # ============================================================================

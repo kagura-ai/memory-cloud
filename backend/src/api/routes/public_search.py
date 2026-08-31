@@ -7,6 +7,7 @@ Provides search endpoints for public contexts with schema-aware responses.
 
 from __future__ import annotations
 
+from typing import Any
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException, status
@@ -69,6 +70,14 @@ class PublicSearchResponse(BaseModel):
     context_id: str
     resource_id: str | None = None
     schema_version: int | None = None
+    # #1515: set only when the semantic arm was unavailable and this search was
+    # served from BM25 alone. It matters more here than on /recall: `score`
+    # silently changes basis (normalized 0-1 hybrid score vs raw unbounded
+    # BM25), and an integration thresholding on it would otherwise ingest a
+    # different distribution as if it were healthy — with a 200, so nothing
+    # signals a retry either.
+    degraded: bool | None = None
+    degraded_reason: str | None = None
 
 
 # ============================================================================
@@ -490,6 +499,7 @@ async def public_search(
         # Reranking is permitted for workspace members (existing behavior) and
         # for attributed bound-key callers (#626); anonymous traffic stays
         # rerank-disabled to avoid exposing rerank cost to unbounded callers.
+        degradation: dict[str, Any] = {}
         results = await search_service.hybrid_search(
             query=request.query,
             user_id=search_user_id,
@@ -498,6 +508,7 @@ async def public_search(
             k=request.limit,
             use_rerank=request.use_rerank and (user is not None or bound_key is not None),
             search_mode=request.search_mode,
+            degradation=degradation,
         )
 
         schema = (
@@ -550,6 +561,9 @@ async def public_search(
             context_id=str(context_id),
             resource_id=str(ctx_resource_id) if ctx_resource_id is not None else None,
             schema_version=schema_ver,
+            # #1515: None (omitted from the payload) unless the search degraded.
+            degraded=degradation.get("degraded"),
+            degraded_reason=degradation.get("reason"),
         )
 
     except Exception as e:

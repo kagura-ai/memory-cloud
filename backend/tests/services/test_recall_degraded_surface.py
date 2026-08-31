@@ -43,45 +43,53 @@ class TestResponseSchema:
 
 
 class TestMcpEnvelope:
-    """The MCP handler re-projects fields by hand, so the copy is explicit."""
+    """The MCP envelope is hand-built, so the projection is exercised directly.
 
-    @staticmethod
-    def _envelope_for(result: RecallResponse) -> dict:
-        # Mirror the handler's copy step rather than standing up the whole MCP
-        # dispatcher: this asserts the projection contract, which is the part
-        # that silently breaks when a response field is added.
-        response_data: dict = {"status": "success", "results": [], "count": 0}
-        if result.tag_suggestions:
-            response_data["tag_suggestions"] = result.tag_suggestions
-        if result.degraded:
-            response_data["degraded"] = True
-            response_data["degraded_reason"] = result.degraded_reason
-        return response_data
+    These call the SAME function the handler calls
+    (``_degraded_response_fields``, alongside the existing
+    ``_persistence_response_field`` / ``_lint_response_field``), rather than a
+    copy of it written in the test — an earlier version of this file mirrored
+    the handler's lines, which meant the tests could stay green while the real
+    projection was broken.
+    """
 
     def test_degraded_recall_is_marked_in_the_envelope(self):
-        env = self._envelope_for(
+        from mcp_server.tools._helpers import _degraded_response_fields
+
+        fields = _degraded_response_fields(
             RecallResponse(results=[], degraded=True, degraded_reason="embedding_unavailable")
         )
-        assert env["degraded"] is True
-        assert env["degraded_reason"] == "embedding_unavailable"
-        json.dumps(env)  # the handler serializes this; must stay JSON-safe
+        assert fields == {"degraded": True, "degraded_reason": "embedding_unavailable"}
+        json.dumps(fields)  # the handler serializes this; must stay JSON-safe
 
-    def test_healthy_recall_envelope_is_unchanged(self):
-        env = self._envelope_for(RecallResponse(results=[]))
-        assert "degraded" not in env
+    def test_healthy_recall_adds_no_keys(self):
+        from mcp_server.tools._helpers import _degraded_response_fields
 
-    def test_handler_source_copies_the_flag(self):
-        # The projection above is a mirror; this pins that the real handler
-        # actually performs the copy, so the mirror cannot drift into fiction.
+        assert _degraded_response_fields(RecallResponse(results=[])) == {}
+
+    def test_a_loose_mock_result_does_not_fabricate_a_degraded_flag(self):
+        """MCP tests stub `result` as a bare MagicMock, where every attribute is
+        truthy. The projection must not emit a non-serializable flag for one."""
+        from unittest.mock import MagicMock
+
+        from mcp_server.tools._helpers import _degraded_response_fields
+
+        result = MagicMock()
+        result.degraded = None
+        assert _degraded_response_fields(result) == {}
+
+    def test_the_handler_uses_the_shared_projection(self):
+        # Pins the wiring itself: the handler must call the helper these tests
+        # exercise, or they would be testing an unused function.
         import inspect
 
         from mcp_server.tools import memory as mcp_memory
 
         src = inspect.getsource(mcp_memory.handle_recall)
-        assert 'response_data["degraded"]' in src, (
-            "handle_recall must copy RecallResponse.degraded into its "
-            "hand-built envelope — MCP clients do not inherit new response "
-            "fields automatically (#1515)."
+        assert "_degraded_response_fields(result)" in src, (
+            "handle_recall must render the degraded flag through "
+            "_degraded_response_fields — MCP clients do not inherit new "
+            "response fields automatically (#1515)."
         )
 
 
