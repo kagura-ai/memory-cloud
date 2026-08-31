@@ -111,6 +111,47 @@ pull_and_tag() {
     "$DOCKER" tag "$ref" "$local_name" || error "docker tag ${ref} ${local_name} failed."
 }
 
+# `docker compose up` for a single service, with the registry-mode guard.
+#
+# The app-tier services carry `build:` and no `image:`, so if the local tag this
+# script wrote is not the one compose resolves, compose does NOT fail — it
+# builds from whatever source tree is present and the run still reports success,
+# shipping a HEAD build under a "registry" log line. --no-build turns that
+# silent substitution into a loud failure. Only added in registry mode; the
+# default build path is untouched.
+dc_up_service() {
+    local svc="$1"
+    shift
+    if [ "$KAGURA_IMAGE_SOURCE" = "registry" ]; then
+        dc up -d --no-deps --no-build "$@" "$svc"
+    else
+        dc up -d --no-deps "$@" "$svc"
+    fi
+}
+
+# Abort a registry-mode rollback that has nothing to roll back TO.
+#
+# cmd_rollback restarts the previous color from local Docker state that nothing
+# in this repo owns: the stopped container and its `<project>-api-<color>` tag.
+# On a freshly provisioned app VM — the migration's first deploys, exactly when
+# a panicked rollback is most likely — that state does not exist. Say so with
+# the remediation instead of failing deep inside compose.
+ensure_rollback_image() {
+    local color="$1"
+    [ "$KAGURA_IMAGE_SOURCE" = "registry" ] || return 0
+    local name
+    name="$(compose_image_name "api-${color}")"
+    if ! "$DOCKER" image inspect "$name" > /dev/null 2>&1; then
+        error "Cannot roll back: image ${name} is not present locally, and
+       KAGURA_IMAGE_SOURCE=registry means there is no source tree to build it
+       from. Pull the release you want to return to, tag it for this color,
+       then re-run:
+           docker pull ${KAGURA_IMAGE_REPO:-<repo>}:<previous-tag>
+           docker tag ${KAGURA_IMAGE_REPO:-<repo>}:<previous-tag> ${name}
+           $0 --rollback"
+    fi
+}
+
 # Make the image for api-$1 available locally, by build or by pull.
 acquire_api_image() {
     local color="$1"
@@ -609,7 +650,8 @@ cmd_rollback() {
         # --no-deps: never recreate shared services (postgres/redis/qdrant)
         # whose compose config may have drifted from the running containers —
         # same guard as cmd_deploy_web (see the #1302 postgres footgun).
-        dc up -d --no-deps "api-${inactive}"
+        ensure_rollback_image "$inactive"
+        dc_up_service "api-${inactive}"
         log "Waiting for api-${inactive} readiness..."
         wait_for_readiness "$inactive"
     fi
@@ -665,7 +707,7 @@ cmd_deploy() {
     # without this flag a plain deploy would recreate postgres onto the empty
     # PG18 volume and the deploy would still report green. Database cutover is
     # exclusively the runbook's job: docs/ops/postgres-18-migration-runbook.md
-    dc up -d --no-deps "api-${inactive}"
+    dc_up_service "api-${inactive}"
     docker update --restart=always "kagura-api-${inactive}" 2>/dev/null || true
 
     # Step 3: Wait for readiness (DB + Qdrant + Redis all reachable)
@@ -750,7 +792,7 @@ cmd_deploy_web() {
     # shared services (postgres/redis/qdrant/caddy/api-*) — see memory
     # savepoint 9389da56 for the footgun this guards against.
     log "Step 2/3: Restarting kagura-web (--no-deps --force-recreate)..."
-    dc up -d --no-deps --force-recreate web
+    dc_up_service web --force-recreate
 
     # Step 3: Smoke check from inside the container — the Dockerfile
     # HEALTHCHECK uses this same endpoint, so we ride that contract.

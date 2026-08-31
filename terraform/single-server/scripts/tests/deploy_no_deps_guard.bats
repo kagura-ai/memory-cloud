@@ -23,9 +23,34 @@ DEPLOY_SH="$BATS_TEST_DIRNAME/../deploy.sh"
     [ -z "$output" ]
 }
 
-@test "api colors are started via the --no-deps form (guard not vacuous)" {
+@test "every 'dc up -d' inside dc_up_service passes --no-deps" {
+    # #1513 moved the api-color start behind dc_up_service (it adds --no-build
+    # in registry mode), so the guard follows the indirection: the helper is now
+    # the single place that can drop --no-deps for BOTH api colors at once.
     [ -r "$DEPLOY_SH" ]
-    run bash -o pipefail -c 'grep -E "dc up -d --no-deps" "$1" | grep -cE "api-"' _ "$DEPLOY_SH"
+    run bash -o pipefail -c '
+        sed -n "/^dc_up_service() {/,/^}/p" "$1" | grep -E "dc up -d" | grep -v -- "--no-deps"
+    ' _ "$DEPLOY_SH"
+    [ "$status" -eq 1 ]
+    [ -z "$output" ]
+}
+
+@test "dc_up_service actually contains 'dc up -d' calls (guard not vacuous)" {
+    # Without this, the test above passes trivially if the helper is renamed
+    # or its body stops calling dc up -d.
+    [ -r "$DEPLOY_SH" ]
+    run bash -o pipefail -c '
+        sed -n "/^dc_up_service() {/,/^}/p" "$1" | grep -cE "dc up -d --no-deps"
+    ' _ "$DEPLOY_SH"
+    [ "$status" -eq 0 ]
+    [ "$output" -ge 2 ]
+}
+
+@test "api colors are started through dc_up_service (guard not vacuous)" {
+    # Both cmd_deploy (Step 2) and cmd_rollback must route through the helper;
+    # a direct `dc up` for an api color would bypass the check above.
+    [ -r "$DEPLOY_SH" ]
+    run bash -o pipefail -c 'grep -cE "dc_up_service \"api-" "$1"' _ "$DEPLOY_SH"
     [ "$status" -eq 0 ]
     [ "$output" -ge 2 ]
 }

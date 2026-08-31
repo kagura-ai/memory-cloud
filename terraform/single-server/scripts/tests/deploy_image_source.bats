@@ -149,3 +149,60 @@ setup() {
     [ "$status" -eq 0 ]
     [[ "$output" == *"/tmp/app-tier.yml"* ]]
 }
+
+# ---------------------------------------------------------------------------
+# Registry-mode safety (review findings on #1513)
+# ---------------------------------------------------------------------------
+# The app services carry `build:` and no `image:`, so a tag miss makes compose
+# build from source and still report success — shipping a HEAD build under a
+# "registry" log line. And cmd_rollback restarts the previous color from local
+# Docker state that nothing in this repo owns, which does not exist on a freshly
+# provisioned app VM.
+
+@test "registry mode passes --no-build so a tag miss fails loudly" {
+    KAGURA_IMAGE_SOURCE="registry"
+    dc_up_service "api-blue"
+    run cat "$CALLS"
+    [[ "$output" == *"dc up -d --no-deps --no-build api-blue"* ]]
+}
+
+@test "build mode does not pass --no-build" {
+    dc_up_service "api-blue"
+    run cat "$CALLS"
+    [[ "$output" == *"dc up -d --no-deps api-blue"* ]]
+    [[ "$output" != *"--no-build"* ]]
+}
+
+@test "extra flags survive the registry-mode wrapper" {
+    KAGURA_IMAGE_SOURCE="registry"
+    dc_up_service web --force-recreate
+    run cat "$CALLS"
+    [[ "$output" == *"--no-build --force-recreate web"* ]]
+}
+
+@test "rollback aborts when the previous color's image is gone in registry mode" {
+    KAGURA_IMAGE_SOURCE="registry"
+    KAGURA_IMAGE_REPO="registry.example.com/kagura-api"
+    # Stub docker so `image inspect` reports the image as absent.
+    mock_docker_missing() { [ "$1" = "image" ] && return 1; return 0; }
+    export -f mock_docker_missing
+    DOCKER=mock_docker_missing
+
+    run ensure_rollback_image "green"
+    [ "$status" -ne 0 ]
+    [[ "$output" == *"Cannot roll back"* ]]
+    # The remediation must name the exact tag compose will look for.
+    [[ "$output" == *"single-server-api-green"* ]]
+}
+
+@test "rollback proceeds when the previous image is present" {
+    KAGURA_IMAGE_SOURCE="registry"
+    run ensure_rollback_image "green"   # mock_docker returns success for everything
+    [ "$status" -eq 0 ]
+}
+
+@test "build mode rollback never consults the registry guard" {
+    # No KAGURA_IMAGE_* configured at all: the guard must be a no-op, not an abort.
+    run ensure_rollback_image "green"
+    [ "$status" -eq 0 ]
+}

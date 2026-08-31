@@ -366,6 +366,20 @@ building on the VM exactly as before. In `registry` mode the pulled image is
 re-tagged per color, which is what keeps `--rollback` meaningful: blue and
 green must never share one local tag.
 
+Two registry-mode guards worth knowing about, because both protect against a
+*silent* wrong outcome rather than a crash:
+
+- Every `compose up` on that path passes `--no-build`. The app services carry
+  `build:` and no `image:`, so without it a tag mismatch would make compose
+  build from whatever source tree is present and still report success —
+  shipping a HEAD build under a `registry` log line.
+- `--rollback` first checks that the previous color's image is actually present
+  locally, and aborts with the exact `docker pull` / `docker tag` remediation if
+  not. Rollback restarts the previous color from local Docker state that nothing
+  in this repo owns; on a freshly provisioned app VM — the migration's first
+  deploys, when a rollback is most likely — that state does not exist yet.
+  Keep the previous release's tag pullable for as long as you might roll back.
+
 ## Operations
 
 ### SSH via IAP
