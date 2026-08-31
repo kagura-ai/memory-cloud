@@ -2937,6 +2937,7 @@ class MemoryService:
         selection_config: RecallSelectionConfig | None,
         search_config: Any,
         context_id: UUID,
+        degradation: dict[str, Any] | None = None,
     ) -> RecallResponse:
         """Build the zero-candidate ``recall()`` response.
 
@@ -2969,6 +2970,11 @@ class MemoryService:
             explore_hints=[] if request.include_explore_hints else None,
             confidence=self._compute_recall_confidence([]),  # #1047: "none"
             selection_evidence=selection_evidence,
+            # #1515: a degraded search can legitimately return nothing, and that
+            # is exactly when the caller most needs to know the semantic arm was
+            # missing — otherwise an empty result reads as "nothing is stored".
+            degraded=(degradation or {}).get("degraded"),
+            degraded_reason=(degradation or {}).get("reason"),
         )
 
     async def _recall_check_agent_bindings(
@@ -3642,6 +3648,7 @@ class MemoryService:
         binding_row_filtered: int,
         selection_evidence: dict[str, Any] | None,
         cross_context: bool = False,
+        degradation: dict[str, Any] | None = None,
     ) -> RecallResponse:
         """Assemble the final response: hints, tags, confidence, audit row.
 
@@ -3729,6 +3736,9 @@ class MemoryService:
             results=responses,
             related_tags=related_tags,
             explore_hints=explore_hints,
+            # #1515: None (and therefore omitted) unless the search degraded.
+            degraded=(degradation or {}).get("degraded"),
+            degraded_reason=(degradation or {}).get("reason"),
             confidence=self._compute_recall_confidence(
                 candidate_scores, semantic_scores=semantic_scores or None
             ),
@@ -3998,6 +4008,10 @@ class MemoryService:
                     expanded=len(expanded),
                 )
 
+        # #1515: hybrid_search reports here when it had to serve the request
+        # without the semantic arm. Stays empty on the happy path.
+        degradation: dict[str, Any] = {}
+
         search_results = await self.search_service.hybrid_search(
             query=request.query,
             user_id=user_id,
@@ -4020,6 +4034,7 @@ class MemoryService:
             # ``is_shared_context`` derivation in ``SearchService.
             # hybrid_search``.
             is_shared_context_read=is_shared_context_read,
+            degradation=degradation,
         )
 
         # Get full memory data from PostgreSQL
@@ -4031,6 +4046,7 @@ class MemoryService:
                 selection_config=selection_config,
                 search_config=search_config,
                 context_id=current_context_id,
+                degradation=degradation,
             )
 
         # Fetch memories from PostgreSQL (exclude soft-deleted), applying the
@@ -4136,6 +4152,7 @@ class MemoryService:
             binding_row_filtered=binding_row_filtered,
             selection_evidence=selection_evidence,
             cross_context=bool(context_ids),
+            degradation=degradation,
         )
 
     async def load_pinned(

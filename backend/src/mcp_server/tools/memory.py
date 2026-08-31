@@ -758,6 +758,15 @@ async def handle_recall(
             if result.tag_suggestions:
                 response_data["tag_suggestions"] = result.tag_suggestions
 
+            # #1515: this envelope is hand-built, so a new RecallResponse field
+            # does NOT reach MCP clients on its own — it has to be copied.
+            # The agent needs it: served without the semantic arm, ``confidence``
+            # rests on a different basis, so a low level here means "the search
+            # was impaired", not "nothing relevant is stored".
+            if result.degraded:
+                response_data["degraded"] = True
+                response_data["degraded_reason"] = result.degraded_reason
+
             return [
                 TextContent(
                     type="text",
