@@ -41,14 +41,24 @@ NEXT_PUBLIC_ENABLE_GRAPH_VIZ=
 NEXT_PUBLIC_PLAN_DISPLAY_NAMES=
 ENVEOF
 
-    # Scrub anything from the ambient shell that compose would prefer over the
-    # env file, so the two renders are comparable (and no real key is printed).
+    # Render to JSON, not YAML: this suite has to run on the CI shell job, which
+    # installs bats and nothing else, so PyYAML cannot be assumed. `--format
+    # json` + the stdlib json module keeps the suite dependency-free.
+    #
+    # Scrub every variable compose would prefer over the env file. QDRANT_API_KEY
+    # is scrubbed so a real operator key can never be printed into a diff; the
+    # *_HOST vars are scrubbed because they are exactly what the split layout
+    # sets, and an operator who has them exported would otherwise make the
+    # single-host render disagree with itself.
     render() {
-        (cd "$WORK/single-server" && env -u QDRANT_API_KEY -u DB_PASSWORD -u KAGURA_DOMAIN \
-            docker compose -p single-server "$@" --env-file .env.prod config)
+        (cd "$WORK/single-server" \
+            && env -u QDRANT_API_KEY -u DB_PASSWORD -u KAGURA_DOMAIN \
+                   -u POSTGRES_HOST -u QDRANT_HOST -u REDIS_HOST \
+                   -u COMPOSE_PROJECT_NAME -u COMPOSE_FILE \
+                docker compose -p single-server "$@" --env-file .env.prod config --format json)
     }
-    render -f docker-compose.prod.yml                              > "$WORK/single.yml" 2>/dev/null
-    render -f docker-compose.data.yml -f docker-compose.app.yml    > "$WORK/split.yml"  2>/dev/null
+    render -f docker-compose.prod.yml                            > "$WORK/single.json" 2>/dev/null
+    render -f docker-compose.data.yml -f docker-compose.app.yml  > "$WORK/split.json"  2>/dev/null
 }
 
 teardown_file() {
@@ -62,10 +72,10 @@ require_compose() {
 
 # Compare the two renders, dropping the documented exception.
 diff_topology() {
-    python3 - "$WORK/single.yml" "$WORK/split.yml" <<'PYEOF'
-import sys, yaml, json
+    python3 - "$WORK/single.json" "$WORK/split.json" <<'PYEOF'
+import sys, json
 
-single, split = (yaml.safe_load(open(p)) for p in sys.argv[1:3])
+single, split = (json.load(open(p)) for p in sys.argv[1:3])
 for doc in (single, split):
     doc.pop("x-api-common", None)            # anchor block, not a service
     for svc in ("api-blue", "api-green"):    # cross-host depends_on: documented exception
@@ -98,8 +108,8 @@ PYEOF
 
 @test "the shared docker network name is single-server_default in both" {
     require_compose
-    for f in "$WORK/single.yml" "$WORK/split.yml"; do
-        run python3 -c "import yaml,sys; print(yaml.safe_load(open(sys.argv[1]))['networks']['default']['name'])" "$f"
+    for f in "$WORK/single.json" "$WORK/split.json"; do
+        run python3 -c "import json,sys; print(json.load(open(sys.argv[1]))['networks']['default']['name'])" "$f"
         [ "$status" -eq 0 ]
         [ "$output" = "single-server_default" ]
     done
@@ -108,10 +118,10 @@ PYEOF
 @test "data-tier hostnames default to the compose service names" {
     require_compose
     run python3 -c "
-import yaml,sys
-e=yaml.safe_load(open(sys.argv[1]))['services']['api-blue']['environment']
+import json,sys
+e=json.load(open(sys.argv[1]))['services']['api-blue']['environment']
 print(e['DATABASE_URL'].split('@')[1], e['QDRANT_URL'], e['REDIS_URL'])
-" "$WORK/split.yml"
+" "$WORK/split.json"
     [ "$status" -eq 0 ]
     [ "$output" = "postgres:5432/kagura http://qdrant:6333 redis://redis:6379" ]
 }

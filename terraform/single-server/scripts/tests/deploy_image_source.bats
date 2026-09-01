@@ -20,8 +20,16 @@
 
 setup() {
     # BATS_TEST_TMPDIR only exists on bats >= 1.4; fall back so the suite is
-    # runnable on the older bats that ships in some distro packages.
-    TMPD="${BATS_TEST_TMPDIR:-$(mktemp -d)}"
+    # runnable on the older bats that ships in some distro packages. bats owns
+    # (and removes) its own dir, so only clean up one WE created — hence the
+    # ownership flag teardown() reads.
+    if [ -n "${BATS_TEST_TMPDIR:-}" ]; then
+        TMPD="$BATS_TEST_TMPDIR"
+        TMPD_OWNED=0
+    else
+        TMPD="$(mktemp -d)"
+        TMPD_OWNED=1
+    fi
     export CALLS="$TMPD/calls"
     : > "$CALLS"
 
@@ -41,6 +49,15 @@ setup() {
 
     # Pin the project name so the expected local tags are deterministic.
     COMPOSE_PROJECT="single-server"
+}
+
+teardown() {
+    # Only remove a directory this suite created; on bats >= 1.4 the harness
+    # owns BATS_TEST_TMPDIR and cleans it up itself.
+    if [ "${TMPD_OWNED:-0}" = "1" ] && [ -n "${TMPD:-}" ]; then
+        rm -rf "$TMPD"
+    fi
+    return 0
 }
 
 @test "default image source is build" {
