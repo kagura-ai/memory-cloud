@@ -3,7 +3,7 @@
 # =============================================================================
 # Stateless services only. Split out of docker-compose.prod.yml so the same
 # definitions can run either co-resident with the data tier (single host, the
-# GCE layout) or on a dedicated app host (the Sakura 2-VM layout).
+# single-host layout) or on a dedicated app host (a split-host layout).
 #
 #   single host : docker-compose.prod.yml includes this file — unchanged topology
 #   app VM      : docker compose -f docker-compose.app.yml up -d

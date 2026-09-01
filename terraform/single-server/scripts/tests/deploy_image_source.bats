@@ -2,8 +2,8 @@
 # =============================================================================
 # Tests for the image-acquisition path added in #1513 (build vs registry).
 #
-# The split-host layout (Sakura migration M3) deploys a pre-built artifact on
-# the app VM instead of building from a source tree. These tests pin:
+# The split-host layout deploys a pre-built artifact on the app host instead
+# of building from a source tree. These tests pin:
 #   - "build" stays the default, so the single-host GCE deploy is unchanged
 #   - "registry" pulls and re-tags, and refuses to run half-configured
 #   - blue and green resolve to DIFFERENT local image names

@@ -317,8 +317,9 @@ docker compose exec ollama ollama pull nomic-embed-text
 ## Optional: split-host layout (app VM + data VM)
 
 The compose stack can also run as two tiers on two hosts — one VM for the
-stateless app tier, one for the databases. This is what the Sakura production
-layout uses; the single-host setup above is unchanged and remains the default.
+stateless app tier, one for the databases. Useful when you want the databases
+off the internet-facing host, or want to size the two tiers independently. The
+single-host setup above is unchanged and remains the default.
 
 | File | Tier | Services |
 | --- | --- | --- |

@@ -2,9 +2,8 @@
 # =============================================================================
 # Drift guard for the app/data tier split (#1513).
 #
-# docker-compose.prod.yml (single host, the GCE layout) and the pair
-# docker-compose.data.yml + docker-compose.app.yml (split host, the Sakura
-# layout) describe the same stack twice. This suite pins that the two
+# docker-compose.prod.yml (single host) and the pair docker-compose.data.yml
+# + docker-compose.app.yml (split host) describe the same stack twice. This suite pins that the two
 # compositions render to the SAME topology, so a change made to one and
 # forgotten in the other fails CI instead of surfacing during a migration.
 #

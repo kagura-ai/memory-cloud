@@ -45,6 +45,12 @@ jobs:
       #
       # What this catches is the trail INTO the private repository: its name in
       # prose, links to its issues, and production incident specifics.
+      #
+      # The fleet's own devops control plane is a second private repository, and
+      # it leaks the same way: a comment explaining why a deployment knob exists
+      # naturally names the fleet that needed it. A self-hoster reading this repo
+      # should learn what a feature DOES, not which fleet asked for it — so
+      # describe the capability ('a split-host layout'), never the deployment.
       - name: No private-repo references
         run: |
           # `:!.github/workflows/ci.yml` excludes THIS file: the patterns below
@@ -58,6 +64,13 @@ jobs:
             echo "Describe it by role ('the connector worker', 'a co-resident"
             echo "consumer') instead. Container names used to address a running"
             echo "container are exempt and are filtered above."
+            exit 1
+          fi
+          if git grep -nIE 'kagura-devops' -- ':!.github/workflows/ci.yml' ; then
+            echo
+            echo "ERROR: this public repository must not name the private devops"
+            echo "control plane or link to its issues. Describe the capability"
+            echo "instead of the fleet that asked for it."
             exit 1
           fi
 
