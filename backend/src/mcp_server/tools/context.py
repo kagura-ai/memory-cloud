@@ -305,16 +305,22 @@ async def handle_create_context(
                     help="Delete unused contexts or upgrade your plan.",
                 )
 
-            # Validate embedding_model if provided
+            # Validate embedding_model if provided.
+            # #1517: mirrors the REST check in api/routes/contexts.py — both
+            # test against what the deployment OFFERS, not the whole registry,
+            # so neither surface advertises a model the service will refuse.
+            # Keeping the two structurally paired is the #332 lesson.
             requested_model = args.get("embedding_model")
             if requested_model:
-                from config.constants import EMBEDDING_MODEL_REGISTRY
+                from config.embedding_policy import allowed_embedding_models
+                from config.settings import get_settings
 
-                if requested_model not in EMBEDDING_MODEL_REGISTRY:
+                offered = allowed_embedding_models(get_settings().embedding_model_allowlist)
+                if requested_model not in offered:
                     return _error_response(
                         "invalid_embedding_model",
                         f"Unknown embedding model: {requested_model}",
-                        help=f"Supported models: {', '.join(EMBEDDING_MODEL_REGISTRY.keys())}",
+                        help=f"Supported models: {', '.join(offered)}",
                     )
 
             # Create context

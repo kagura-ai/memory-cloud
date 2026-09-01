@@ -75,8 +75,11 @@ export interface CreateWorkspaceRequest {
   default_context_name?: string;
   default_context_summary?: string;
   default_context_usage_guide?: string;
-  default_context_embedding_model?:
-    "text-embedding-3-small" | "text-embedding-3-large";
+  // #1517: the server validates this against the embedding-model registry
+  // narrowed by the deployment's allowlist, not against a fixed pair. Pinning
+  // two OpenAI names here left typed callers unable to send a self-hosted
+  // model the deployment actually serves without a cast.
+  default_context_embedding_model?: string;
 }
 
 export interface UpdateWorkspaceRequest {
