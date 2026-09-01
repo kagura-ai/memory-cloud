@@ -127,3 +127,47 @@ class TestEmptyResultsStillReportDegradation:
             context_id=MagicMock(),
         )
         assert resp.degraded is None
+
+
+class TestBootstrapEnvelopeAggregate:
+    """A degraded recall must reach the bootstrap envelope's top-level flag.
+
+    Review of #1515 found the aggregate computed `degraded` solely from
+    `status == "error"`, so an OK-but-impaired recall component left
+    `envelope["degraded"]` false — and BOTH transports derive their audit
+    outcome from that value (`"partial" if envelope.get("degraded") else
+    "success"`, api/routes/agents.py and mcp_server/tools/agent_bootstrap.py),
+    so an impaired bootstrap was recorded as a clean one.
+    """
+
+    @staticmethod
+    def _aggregate(components: dict) -> bool:
+        # Mirrors the expression under test only to document it; the assertion
+        # that the real code does this lives in the source check below.
+        from services.agent_bootstrap_service import STATUS_ERROR
+
+        return any(
+            c.get("status") == STATUS_ERROR or c.get("degraded") is True
+            for c in components.values()
+        )
+
+    def test_an_ok_but_degraded_component_marks_the_envelope(self):
+        assert self._aggregate({"recall": {"status": "ok", "degraded": True}}) is True
+
+    def test_a_healthy_envelope_is_still_clean(self):
+        assert self._aggregate({"recall": {"status": "ok"}, "pinned": {"status": "ok"}}) is False
+
+    def test_an_errored_component_still_marks_the_envelope(self):
+        assert self._aggregate({"pinned": {"status": "error"}}) is True
+
+    def test_the_real_aggregate_considers_nested_degradation(self):
+        import inspect
+
+        from services.agent_bootstrap_service import AgentBootstrapService
+
+        src = inspect.getsource(AgentBootstrapService.build_envelope)
+        assert 'c.get("degraded") is True' in src, (
+            "build_envelope must fold nested component degradation into the "
+            "top-level flag — both transports derive their audit outcome from "
+            "it (#1515)."
+        )

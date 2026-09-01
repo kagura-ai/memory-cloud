@@ -369,7 +369,15 @@ class AgentBootstrapService:
         if "policy" in include:
             components["policy"] = {"status": STATUS_SKIPPED, "reason": "no_policy_bundle"}
 
-        degraded = any(c.get("status") == STATUS_ERROR for c in components.values())
+        # #1515: a component can be OK-but-impaired, not just error. The recall
+        # component sets ``degraded`` when it was served without the semantic
+        # arm; that must reach the top-level flag, because BOTH transports
+        # derive their audit outcome from it ("partial" vs "success") and would
+        # otherwise record an impaired bootstrap as a clean one.
+        degraded = any(
+            c.get("status") == STATUS_ERROR or c.get("degraded") is True
+            for c in components.values()
+        )
 
         return {
             "status": "success",
