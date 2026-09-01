@@ -529,15 +529,22 @@ async def create_context(
                         detail="Shared contexts require Pro plan. Upgrade your plan to share contexts with your team.",
                     )
 
-        # Validate embedding model if provided
+        # Validate embedding model if provided.
+        # #1517: check against what this deployment OFFERS, not the whole
+        # registry. Checking the registry here would reject before the
+        # service-layer gate is reached, and the "Supported:" list would
+        # advertise models the deployment refuses — the same disclosure this
+        # change removes from GET /system/embedding/models.
         if request.embedding_model:
-            from config.constants import EMBEDDING_MODEL_REGISTRY
+            from config.embedding_policy import allowed_embedding_models
+            from config.settings import get_settings
 
-            if request.embedding_model not in EMBEDDING_MODEL_REGISTRY:
+            offered = allowed_embedding_models(get_settings().embedding_model_allowlist)
+            if request.embedding_model not in offered:
                 raise HTTPException(
                     status_code=400,
                     detail=f"Unknown embedding model: {request.embedding_model}. "
-                    f"Supported: {', '.join(EMBEDDING_MODEL_REGISTRY.keys())}",
+                    f"Supported: {', '.join(offered)}",
                 )
 
         context = await service.create_context(

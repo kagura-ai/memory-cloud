@@ -5,6 +5,7 @@ Issue #115 Phase B-3: Workspace-level Multi-tenancy
 Provides REST API for workspace CRUD and member management.
 """
 
+import re
 from datetime import datetime
 from uuid import UUID
 
@@ -28,6 +29,7 @@ from auth.workspace_roles import WorkspaceRole
 from config.constants import (
     CONTEXT_SUMMARY_MAX_LENGTH,
     CONTEXT_USAGE_GUIDE_MAX_LENGTH,
+    EMBEDDING_MODEL_REGISTRY,
 )
 from db.base import get_db
 from models.api_base import TZAwareBaseModel
@@ -69,8 +71,14 @@ class WorkspaceCreate(BaseModel):
     # (single source of truth in config.constants).
     default_context_summary: str | None = Field(None, max_length=CONTEXT_SUMMARY_MAX_LENGTH)
     default_context_usage_guide: str | None = Field(None, max_length=CONTEXT_USAGE_GUIDE_MAX_LENGTH)
+    # #1517: derived from the registry rather than a hardcoded pair, which
+    # listed only the two OpenAI models. A deployment that serves a self-hosted
+    # model (e.g. qwen3-embedding:4b) otherwise had no value a BYOK caller could
+    # legally send here. The deployment allowlist narrows this
+    # further at ContextService.create_context, with a message naming what IS
+    # available.
     default_context_embedding_model: str | None = Field(
-        None, pattern=r"^(text-embedding-3-small|text-embedding-3-large)$"
+        None, pattern=rf"^({'|'.join(re.escape(m) for m in EMBEDDING_MODEL_REGISTRY)})$"
     )
 
 

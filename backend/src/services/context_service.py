@@ -176,12 +176,37 @@ class ContextService:
 
         # Determine embedding model: parameter > global setting
         from config.constants import EMBEDDING_MODEL_REGISTRY
+        from config.embedding_policy import allowed_embedding_models
 
         settings = get_settings()
+        # #1517: gate the CALLER-supplied model here rather than in the routes.
+        # This is the one point every caller funnels through — REST, MCP, and
+        # ``workspace_service``, which calls the service directly and so bypassed
+        # both route checks. Getting it wrong is unrecoverable in place: the
+        # embedding model is immutable after creation (#146).
+        if embedding_model:
+            allowed = allowed_embedding_models(settings.embedding_model_allowlist)
+            if embedding_model not in allowed:
+                # Distinguish "no such model" from "not offered here", because
+                # the fix differs: correct the name vs. ask the operator.
+                if embedding_model not in EMBEDDING_MODEL_REGISTRY:
+                    raise ValidationError(
+                        f"Unknown embedding model: {embedding_model}. "
+                        f"Supported: {', '.join(allowed)}"
+                    )
+                raise ValidationError(
+                    f"Embedding model not available on this deployment: "
+                    f"{embedding_model}. Available: {', '.join(allowed)}"
+                )
+
         actual_embedding_model = embedding_model or settings.embedding_model
         if actual_embedding_model in EMBEDDING_MODEL_REGISTRY:
             actual_dimensions = EMBEDDING_MODEL_REGISTRY[actual_embedding_model][0]
         else:
+            # Only reachable via the operator-configured default, which the
+            # gate above deliberately does not police: a self-host pointing
+            # EMBEDDING_MODEL at a custom model is a deliberate act, and
+            # EMBEDDING_DIMENSIONS is how they declare its size.
             actual_dimensions = settings.embedding_dimensions
 
         # Validate name format

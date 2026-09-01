@@ -150,7 +150,12 @@ class WorkspaceService:
                 description=f"Context '{context_name}' (auto-created)",
                 summary=default_context_summary,
                 usage_guide=default_context_usage_guide,
-                embedding_model=default_context_embedding_model or "text-embedding-3-small",
+                # #1517: pass through unchanged. Manufacturing a model name here
+                # sent a caller-supplied value into the deployment allowlist gate,
+                # so on a deployment that does not offer text-embedding-3-small
+                # EVERY workspace creation 422'd. None falls through to
+                # settings.embedding_model, which the gate deliberately does not police.
+                embedding_model=default_context_embedding_model,
                 created_by=owner_user_id,
                 create_collection=True,
             )
