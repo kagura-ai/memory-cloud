@@ -1,0 +1,30 @@
+# =============================================================================
+# Kagura Memory Cloud — data tier port publishing (split-host only)
+# =============================================================================
+# Overlay for docker-compose.data.yml, used ONLY on the dedicated data VM of a
+# split-host layout. It publishes the database ports so the app VM can reach
+# them across the private switch.
+#
+#   docker compose -f docker-compose.data.yml -f docker-compose.data-expose.yml up -d
+#
+# NEVER add this overlay to the single-host composition: there the app and data
+# tiers share a compose network and reaching these services over a published
+# host port would bypass that network for no reason.
+#
+# DATA_BIND_ADDR must be the data VM's PRIVATE address (e.g. 192.168.10.20).
+# It has no default on purpose — a missing value would bind 0.0.0.0 and expose
+# PostgreSQL, Qdrant and Redis on every interface the host has.
+# =============================================================================
+
+services:
+  postgres:
+    ports:
+      - "${DATA_BIND_ADDR:?DATA_BIND_ADDR must be set to the data VM private IP}:5432:5432"
+
+  qdrant:
+    ports:
+      - "${DATA_BIND_ADDR:?DATA_BIND_ADDR must be set to the data VM private IP}:6333:6333"
+
+  redis:
+    ports:
+      - "${DATA_BIND_ADDR:?DATA_BIND_ADDR must be set to the data VM private IP}:6379:6379"

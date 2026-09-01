@@ -1,0 +1,122 @@
+# =============================================================================
+# Kagura Memory Cloud — app tier (blue-green API / web / Caddy)
+# =============================================================================
+# Stateless services only. Split out of docker-compose.prod.yml so the same
+# definitions can run either co-resident with the data tier (single host, the
+# single-host layout) or on a dedicated app host (a split-host layout).
+#
+#   single host : docker-compose.prod.yml includes this file — unchanged topology
+#   app VM      : docker compose -f docker-compose.app.yml up -d
+#                 with POSTGRES_HOST/QDRANT_HOST/REDIS_HOST pointed at the data VM
+#
+# The data-tier hostnames default to the compose service names, so on a single
+# host the rendered config is byte-identical to the pre-split file.
+#
+# `depends_on` for the data services deliberately lives in
+# docker-compose.prod.yml, not here: on a split host those containers are on
+# another machine and cannot be depended on. Ordering is handled by
+# `restart: always` plus deploy.sh's /readiness gate, which already checks
+# Postgres, Qdrant and Redis reachability before any traffic switch.
+# =============================================================================
+
+# Shared API config — referenced by api-blue and api-green via YAML anchor.
+x-api-common: &api-common
+  build:
+    context: ../../backend
+    dockerfile: Dockerfile
+  restart: always
+  env_file:
+    - .env.prod
+  environment:
+    DATABASE_URL: postgresql+asyncpg://kagura:${DB_PASSWORD}@${POSTGRES_HOST:-postgres}:5432/kagura
+    QDRANT_URL: http://${QDRANT_HOST:-qdrant}:6333
+    QDRANT_API_KEY: ${QDRANT_API_KEY}
+    REDIS_URL: redis://${REDIS_HOST:-redis}:6379
+    API_HOST: 0.0.0.0
+    API_PORT: 8080
+    ENVIRONMENT: production
+    PYTHONUNBUFFERED: "1"
+  healthcheck:
+    test: ["CMD", "curl", "-sf", "http://localhost:8080/readiness"]
+    interval: 10s
+    timeout: 5s
+    retries: 3
+    start_period: 15s
+  command: uvicorn src.api.main:app --host 0.0.0.0 --port 8080 --log-level info
+
+services:
+  # ==========================================================================
+  # Application — blue-green API (Issue #239)
+  # ==========================================================================
+  # Two identical API services share the same image, env, and dependencies.
+  # Only one receives traffic at a time (controlled by Caddy upstream).
+  # scripts/deploy.sh automates the switchover.
+  # ==========================================================================
+
+  api-blue:
+    <<: *api-common
+    container_name: kagura-api-blue
+
+  api-green:
+    <<: *api-common
+    container_name: kagura-api-green
+
+  web:
+    build:
+      context: ../../frontend
+      dockerfile: Dockerfile
+      args:
+        NEXT_PUBLIC_API_URL: https://${KAGURA_DOMAIN}
+        NEXT_PUBLIC_APP_URL: https://${KAGURA_DOMAIN}
+        NEXT_PUBLIC_ENABLE_GRAPH_VIZ: ${NEXT_PUBLIC_ENABLE_GRAPH_VIZ:-}
+        # Per-deployment plan-tier label override (locale-aware JSON). Unset →
+        # empty → app keeps the OSS default S/M/L. Build-time only (NEXT_PUBLIC_*
+        # is inlined by `next build`); changing it needs a web image rebuild.
+        NEXT_PUBLIC_PLAN_DISPLAY_NAMES: ${NEXT_PUBLIC_PLAN_DISPLAY_NAMES:-}
+    container_name: kagura-web
+    restart: always
+    environment:
+      NODE_ENV: production
+      NEXT_TELEMETRY_DISABLED: "1"
+      PORT: "3000"
+      HOSTNAME: "0.0.0.0"
+
+  # ==========================================================================
+  # Reverse proxy — only service bound to host ports
+  # ==========================================================================
+
+  caddy:
+    image: caddy:2-alpine
+    container_name: kagura-caddy
+    restart: always
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - /var/lib/kagura/origin-ca:/etc/caddy/origin-ca:ro
+      # Extension point for sibling services co-resident on this VM. They drop
+      # *.caddy vhost files here; Caddyfile imports them. Read-only so a sibling
+      # cannot mutate it from inside this container. Adding this mount to a
+      # running stack needs `docker compose up -d caddy` (recreate) — a plain
+      # `restart` does NOT apply a new mount. See README "Caddy extension point".
+      - /opt/kagura-caddy-extra:/opt/kagura-caddy-extra:ro
+      - caddy_data:/data
+      - caddy_config:/config
+    # Make the host gateway resolvable as host.docker.internal so sibling vhosts
+    # dropped into /opt/kagura-caddy-extra can `reverse_proxy
+    # host.docker.internal:<port>` out-of-the-box — without this, that name does
+    # not resolve on a Linux VM. Configured here once so the extension point is
+    # usable with no further memory-cloud changes. See README "Caddy extension point".
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    # No hard dependency on api-blue/api-green: during normal operation only
+    # one color is active. Caddy handles upstream unavailability gracefully.
+    depends_on:
+      - web
+
+volumes:
+  caddy_data:
+    name: kagura_caddy_data
+  caddy_config:
+    name: kagura_caddy_config

@@ -28,7 +28,9 @@ set -euo pipefail
 # ---------------------------------------------------------------------------
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
-COMPOSE_FILE="$PROJECT_DIR/docker-compose.prod.yml"
+# Overridable so a split-host layout can point at the app-tier composition
+# (docker-compose.app.yml) instead of the single-host file. Default unchanged.
+COMPOSE_FILE="${COMPOSE_FILE:-$PROJECT_DIR/docker-compose.prod.yml}"
 CADDYFILE_TPL="${CADDYFILE_TPL:-$PROJECT_DIR/Caddyfile.tpl}"
 CADDYFILE="$PROJECT_DIR/Caddyfile"
 MARKER_FILE="/opt/kagura-memory/active-color"
@@ -61,12 +63,126 @@ DOCKER="${DOCKER:-docker}"
 BRIDGE_WORKER_CONTAINER="${BRIDGE_WORKER_CONTAINER:-kagura-bridge-worker-1}"
 
 # ---------------------------------------------------------------------------
+# Image source (#1513)
+# ---------------------------------------------------------------------------
+# "build"    — build the image on this host from the source tree (default;
+#              unchanged behaviour for the single-host GCE layout).
+# "registry" — pull a pre-built image and re-tag it for the target color. The
+#              split-host layout needs this: the app VM deploys a released
+#              artifact rather than carrying a source tree and a builder.
+#
+# Re-tagging (rather than putting `image:` in the compose file) is deliberate.
+# api-blue and api-green MUST resolve to different local image names: they
+# share one build context, and if both pointed at a single tag, deploying the
+# inactive color would repoint the active color's definition too and
+# `--rollback` would silently come back on the NEW image.
+KAGURA_IMAGE_SOURCE="${KAGURA_IMAGE_SOURCE:-build}"
+KAGURA_IMAGE_REPO="${KAGURA_IMAGE_REPO:-}"          # e.g. registry.example.com/kagura-api
+KAGURA_IMAGE_TAG="${KAGURA_IMAGE_TAG:-}"            # e.g. v0.65.0
+KAGURA_WEB_IMAGE_REPO="${KAGURA_WEB_IMAGE_REPO:-}"  # e.g. registry.example.com/kagura-web
+KAGURA_WEB_IMAGE_TAG="${KAGURA_WEB_IMAGE_TAG:-}"
+
+# Compose derives built image names as "<project>-<service>"; the project name
+# defaults to the directory holding the compose file (single-server).
+COMPOSE_PROJECT="${COMPOSE_PROJECT_NAME:-$(basename "$PROJECT_DIR")}"
+
+# ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
 log()   { echo "[deploy] $(date -u +%H:%M:%S) $*"; }
 error() { echo "[deploy] ERROR: $*" >&2; exit 1; }
 
 dc() { docker compose -f "$COMPOSE_FILE" --env-file "$ENV_FILE" "$@"; }
+
+# The local image name compose resolves for a service (see COMPOSE_PROJECT).
+compose_image_name() { echo "${COMPOSE_PROJECT}-$1"; }
+
+# Pull "<repo>:<tag>" and re-tag it as the local name compose expects for
+# $service. Used by both acquire_* helpers below.
+pull_and_tag() {
+    local repo="$1" tag="$2" service="$3" what="$4"
+    [ -n "$repo" ] || error "KAGURA_IMAGE_SOURCE=registry but ${what} repo is unset."
+    [ -n "$tag" ]  || error "KAGURA_IMAGE_SOURCE=registry but ${what} tag is unset."
+    local ref="${repo}:${tag}"
+    local local_name
+    local_name="$(compose_image_name "$service")"
+    log "  Pulling ${ref} -> ${local_name}"
+    "$DOCKER" pull "$ref" || error "docker pull ${ref} failed."
+    "$DOCKER" tag "$ref" "$local_name" || error "docker tag ${ref} ${local_name} failed."
+}
+
+# `docker compose up` for a single service, with the registry-mode guard.
+#
+# The app-tier services carry `build:` and no `image:`, so if the local tag this
+# script wrote is not the one compose resolves, compose does NOT fail — it
+# builds from whatever source tree is present and the run still reports success,
+# shipping a HEAD build under a "registry" log line. --no-build turns that
+# silent substitution into a loud failure. Only added in registry mode; the
+# default build path is untouched.
+dc_up_service() {
+    local svc="$1"
+    shift
+    if [ "$KAGURA_IMAGE_SOURCE" = "registry" ]; then
+        dc up -d --no-deps --no-build "$@" "$svc"
+    else
+        dc up -d --no-deps "$@" "$svc"
+    fi
+}
+
+# Abort a registry-mode rollback that has nothing to roll back TO.
+#
+# cmd_rollback restarts the previous color from local Docker state that nothing
+# in this repo owns: the stopped container and its `<project>-api-<color>` tag.
+# On a freshly provisioned app VM — the migration's first deploys, exactly when
+# a panicked rollback is most likely — that state does not exist. Say so with
+# the remediation instead of failing deep inside compose.
+ensure_rollback_image() {
+    local color="$1"
+    [ "$KAGURA_IMAGE_SOURCE" = "registry" ] || return 0
+    local name
+    name="$(compose_image_name "api-${color}")"
+    if ! "$DOCKER" image inspect "$name" > /dev/null 2>&1; then
+        error "Cannot roll back: image ${name} is not present locally, and
+       KAGURA_IMAGE_SOURCE=registry means there is no source tree to build it
+       from. Pull the release you want to return to, tag it for this color,
+       then re-run:
+           docker pull ${KAGURA_IMAGE_REPO:-<repo>}:<previous-tag>
+           docker tag ${KAGURA_IMAGE_REPO:-<repo>}:<previous-tag> ${name}
+           $0 --rollback"
+    fi
+}
+
+# Make the image for api-$1 available locally, by build or by pull.
+acquire_api_image() {
+    local color="$1"
+    case "$KAGURA_IMAGE_SOURCE" in
+        build)
+            dc build "api-${color}"
+            ;;
+        registry)
+            pull_and_tag "$KAGURA_IMAGE_REPO" "$KAGURA_IMAGE_TAG" "api-${color}" "the API image"
+            ;;
+        *)
+            error "Unknown KAGURA_IMAGE_SOURCE '${KAGURA_IMAGE_SOURCE}'. Expected 'build' or 'registry'."
+            ;;
+    esac
+}
+
+# Same for the web image. --no-cache on the build path because NEXT_PUBLIC_*
+# build args are baked into the layer (see cmd_deploy_web).
+acquire_web_image() {
+    case "$KAGURA_IMAGE_SOURCE" in
+        build)
+            dc build --no-cache web
+            ;;
+        registry)
+            pull_and_tag "$KAGURA_WEB_IMAGE_REPO" "$KAGURA_WEB_IMAGE_TAG" "web" "the web image"
+            ;;
+        *)
+            error "Unknown KAGURA_IMAGE_SOURCE '${KAGURA_IMAGE_SOURCE}'. Expected 'build' or 'registry'."
+            ;;
+    esac
+}
 
 # Tracks the current step so the EXIT trap can report *where* a run aborted.
 # Updated at the head of each step; read only by on_exit().
@@ -534,7 +650,8 @@ cmd_rollback() {
         # --no-deps: never recreate shared services (postgres/redis/qdrant)
         # whose compose config may have drifted from the running containers —
         # same guard as cmd_deploy_web (see the #1302 postgres footgun).
-        dc up -d --no-deps "api-${inactive}"
+        ensure_rollback_image "$inactive"
+        dc_up_service "api-${inactive}"
         log "Waiting for api-${inactive} readiness..."
         wait_for_readiness "$inactive"
     fi
@@ -576,10 +693,10 @@ cmd_deploy() {
        Point $MARKER_FILE at the color actually serving traffic, then re-run."
     fi
 
-    # Step 1: Build new image
-    DEPLOY_STAGE="Step 1/7: build api-${inactive} image"
-    log "Step 1/7: Building api-${inactive} image..."
-    dc build "api-${inactive}"
+    # Step 1: Make the new image available (build locally, or pull a release)
+    DEPLOY_STAGE="Step 1/7: acquire api-${inactive} image (${KAGURA_IMAGE_SOURCE})"
+    log "Step 1/7: Acquiring api-${inactive} image (source: ${KAGURA_IMAGE_SOURCE})..."
+    acquire_api_image "$inactive"
 
     # Step 2: Start the inactive color (uses new image)
     # Re-enable restart policy in case it was disabled by a previous deploy.
@@ -590,7 +707,7 @@ cmd_deploy() {
     # without this flag a plain deploy would recreate postgres onto the empty
     # PG18 volume and the deploy would still report green. Database cutover is
     # exclusively the runbook's job: docs/ops/postgres-18-migration-runbook.md
-    dc up -d --no-deps "api-${inactive}"
+    dc_up_service "api-${inactive}"
     docker update --restart=always "kagura-api-${inactive}" 2>/dev/null || true
 
     # Step 3: Wait for readiness (DB + Qdrant + Redis all reachable)
@@ -665,16 +782,17 @@ cmd_deploy_web() {
     log "=== FRONTEND REBUILD (in-place) ==="
     log "Note: brief downtime expected during container restart (build is non-blocking; the running container keeps serving until --force-recreate)."
 
-    # Step 1: --no-cache — NEXT_PUBLIC_* build args are baked into the layer;
-    # a cached layer would silently carry stale values from a prior build.
-    log "Step 1/3: Building kagura-web image (--no-cache, typically 3-5 min)..."
-    dc build --no-cache web
+    # Step 1: on the build path, --no-cache — NEXT_PUBLIC_* build args are baked
+    # into the layer; a cached layer would silently carry stale values from a
+    # prior build. On the registry path the artifact already carries them.
+    log "Step 1/3: Acquiring kagura-web image (source: ${KAGURA_IMAGE_SOURCE}; a build typically takes 3-5 min)..."
+    acquire_web_image
 
     # Step 2: In-place restart. --no-deps prevents compose from recreating
     # shared services (postgres/redis/qdrant/caddy/api-*) — see memory
     # savepoint 9389da56 for the footgun this guards against.
     log "Step 2/3: Restarting kagura-web (--no-deps --force-recreate)..."
-    dc up -d --no-deps --force-recreate web
+    dc_up_service web --force-recreate
 
     # Step 3: Smoke check from inside the container — the Dockerfile
     # HEALTHCHECK uses this same endpoint, so we ride that contract.
@@ -990,6 +1108,12 @@ main() {
             echo "  WORKERS_GATE_TIMEOUT     Seconds to wait for an edge-blocked path (/api/v1/workers/*, /internal/*) to 404 at Caddy (default: 30)"
             echo "  WORKERS_GATE_INTERVAL    Seconds between security-gate checks; shared by the workers + internal gates (default: 2)"
             echo "  BRIDGE_WORKER_CONTAINER  Co-resident chat-bridge worker restarted after a color flip; skipped when absent (default: kagura-bridge-worker-1)"
+            echo "  COMPOSE_FILE             Compose file to deploy; point at docker-compose.app.yml on a split-host app VM (default: docker-compose.prod.yml)"
+            echo "  KAGURA_IMAGE_SOURCE      'build' (default, build on this host) or 'registry' (pull a pre-built image)"
+            echo "  KAGURA_IMAGE_REPO        API image repository, registry mode only (e.g. registry.example.com/kagura-api)"
+            echo "  KAGURA_IMAGE_TAG         API image tag, registry mode only (e.g. v0.65.0)"
+            echo "  KAGURA_WEB_IMAGE_REPO    Web image repository, registry mode + --web only"
+            echo "  KAGURA_WEB_IMAGE_TAG     Web image tag, registry mode + --web only"
             ;;
         "")
             cmd_deploy
