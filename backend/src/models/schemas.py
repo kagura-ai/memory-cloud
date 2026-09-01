@@ -517,6 +517,27 @@ class RecallResponse(BaseModel):
     # Issue #1047: top-level relevance confidence. None on legacy/explore paths
     # that don't compute it; recall() always populates it (incl. "none" on empty).
     confidence: RecallConfidence | None = None
+    # #1515: set only when the semantic arm was unavailable and a hybrid recall
+    # was served from BM25 alone. Absent on the happy path (both recall routes
+    # use response_model_exclude_none=True), so this is additive for existing
+    # clients. It matters because keyword-only hits carry no raw cosine, which
+    # puts ``confidence`` on a different basis than usual — a caller that
+    # thresholds on confidence needs to know that happened.
+    degraded: bool | None = Field(
+        default=None,
+        description=(
+            "True when this result set was produced without the semantic search "
+            "arm. Absent when the search ran normally."
+        ),
+    )
+    degraded_reason: str | None = Field(
+        default=None,
+        description=(
+            "Why the search degraded: 'embedding_unavailable' (the embedding "
+            "provider failed) or 'vector_search_unavailable' (the vector store "
+            "failed). Absent when the search ran normally."
+        ),
+    )
     # #1306: internal hand-off from MemoryService to the authorized bootstrap
     # composer.  ``exclude=True`` is a defense-in-depth boundary: the ordinary
     # /memory/recall and share-key surfaces never serialize candidate identities

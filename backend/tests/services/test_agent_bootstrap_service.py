@@ -537,6 +537,9 @@ class TestEnvelope:
                 "selection_probabilities": {str(memory_id): 0.05},
                 "selection_policy": {"name": "deterministic_uniform_mixture_v1"},
             },
+            # #1515: bootstrap surfaces a degraded recall; a healthy one is None.
+            degraded=None,
+            degraded_reason=None,
         )
         svc = AgentBootstrapService(MagicMock())
         recall = AsyncMock(return_value=result)

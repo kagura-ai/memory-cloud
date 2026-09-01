@@ -23,6 +23,7 @@ from services.context_routing import resolve_routing_from_config
 from services.embedding_service import EmbeddingService
 from services.llm_call_log_writer import LLMCallLogWriter
 from services.reranker_service import RerankerService
+from utils.exceptions import ExternalServiceError, OpenAIError
 from utils.logger import get_logger
 
 logger = get_logger(__name__)
@@ -67,6 +68,7 @@ class SearchService:
         search_mode: SearchMode = "hybrid",
         include_vectors: bool = False,
         is_shared_context_read: bool = False,
+        degradation: dict[str, Any] | None = None,
     ) -> list[dict]:
         """Search with configurable mode: hybrid, semantic, or keyword.
 
@@ -216,67 +218,102 @@ class SearchService:
         semantic_results: list[dict] = []
         fulltext_results: list[dict] = []
 
+        # The mode actually served. It diverges from search_mode only when
+        # the semantic arm fails and a hybrid search degrades to keyword
+        # -only (#1515).
+        effective_search_mode: SearchMode = search_mode
+
         if search_mode in ("hybrid", "semantic"):
-            logger.debug(
-                "semantic_search_starting", query=normalized_query[:50], fetch_size=fetch_size
-            )
-            # #475 PR-3: capture token usage so we can attribute embedding
-            # cost via llm_call_log. ``embed_svc`` may be a context-specific
-            # service returned by ``resolve_routing_from_config`` above
-            # (different model than ``self.embedding_service``) — read
-            # provider/model from it directly so multi-tenant pricing
-            # routes correctly.
-            # #708 loop 7: under Option A (is_shared_context_read=True), this
-            # call MUST use a BYOK key — no OPENAI_API_KEY env fallback —
-            # otherwise a TOCTOU race between the preflight ``has_byok_key``
-            # probe in ``MemoryService.recall`` and this resolution could
-            # silently route to the uncapped platform key.
-            query_vector, embedding_tokens = await embed_svc.embed_with_usage(
-                normalized_query,
-                user_id,
-                context_id=primary_context_id,
-                workspace_id=workspace_id,
-                disallow_env_fallback=is_shared_context_read,
-            )
-            if embedding_tokens > 0:
-                # Cache hits return 0 tokens and intentionally produce no
-                # llm_call_log row (B1 pin) — the table is "API was
-                # called" event log, not cache analytics. fail_on_error
-                # is False so a writer flake never breaks recall.
-                #
-                # Issue #709: ``paid_by`` is resolved from the actual key
-                # source rather than the legacy hardcoded ``"platform"``.
-                writer = LLMCallLogWriter(self.db)
-                await writer.record(
-                    caller=_RECALL_CALLER,
-                    call_type=_EMBEDDING_CALL_TYPE,
-                    provider=embed_svc.provider,
-                    model=embed_svc.model,
-                    user_id=user_id,
-                    workspace_id=workspace_id,
-                    context_id=primary_context_id,
-                    embedding_tokens=embedding_tokens,
-                    # #708 loop 4: thread context_id so paid_by reflects the
-                    # actual key ``_get_user_api_key`` selected for THIS context.
-                    # Without it, env-fallback calls on a context whose workspace
-                    # has BYOK scoped to a DIFFERENT context would be falsely
-                    # logged as "byok" — corrupts cost-grade attribution (#524).
-                    paid_by=await embed_svc.resolve_paid_by(
-                        workspace_id, context_id=primary_context_id
-                    ),
-                    fail_on_error=False,
+            try:
+                logger.debug(
+                    "semantic_search_starting", query=normalized_query[:50], fetch_size=fetch_size
                 )
-            semantic_results = await search_memories_qdrant(
-                user_id=user_id,
-                query_vector=query_vector,
-                workspace_id=workspace_id,
-                context_id=context_id,
-                limit=fetch_size,
-                filters=filters,
-                is_shared_context=is_shared_context,
-                collection_name=collection,
-                include_vectors=include_vectors,
-            )
+                # #475 PR-3: capture token usage so we can attribute embedding
+                # cost via llm_call_log. ``embed_svc`` may be a context-specific
+                # service returned by ``resolve_routing_from_config`` above
+                # (different model than ``self.embedding_service``) — read
+                # provider/model from it directly so multi-tenant pricing
+                # routes correctly.
+                # #708 loop 7: under Option A (is_shared_context_read=True), this
+                # call MUST use a BYOK key — no OPENAI_API_KEY env fallback —
+                # otherwise a TOCTOU race between the preflight ``has_byok_key``
+                # probe in ``MemoryService.recall`` and this resolution could
+                # silently route to the uncapped platform key.
+                query_vector, embedding_tokens = await embed_svc.embed_with_usage(
+                    normalized_query,
+                    user_id,
+                    context_id=primary_context_id,
+                    workspace_id=workspace_id,
+                    disallow_env_fallback=is_shared_context_read,
+                )
+                if embedding_tokens > 0:
+                    # Cache hits return 0 tokens and intentionally produce no
+                    # llm_call_log row (B1 pin) — the table is "API was
+                    # called" event log, not cache analytics. fail_on_error
+                    # is False so a writer flake never breaks recall.
+                    #
+                    # Issue #709: ``paid_by`` is resolved from the actual key
+                    # source rather than the legacy hardcoded ``"platform"``.
+                    writer = LLMCallLogWriter(self.db)
+                    await writer.record(
+                        caller=_RECALL_CALLER,
+                        call_type=_EMBEDDING_CALL_TYPE,
+                        provider=embed_svc.provider,
+                        model=embed_svc.model,
+                        user_id=user_id,
+                        workspace_id=workspace_id,
+                        context_id=primary_context_id,
+                        embedding_tokens=embedding_tokens,
+                        # #708 loop 4: thread context_id so paid_by reflects the
+                        # actual key ``_get_user_api_key`` selected for THIS context.
+                        # Without it, env-fallback calls on a context whose workspace
+                        # has BYOK scoped to a DIFFERENT context would be falsely
+                        # logged as "byok" — corrupts cost-grade attribution (#524).
+                        paid_by=await embed_svc.resolve_paid_by(
+                            workspace_id, context_id=primary_context_id
+                        ),
+                        fail_on_error=False,
+                    )
+                semantic_results = await search_memories_qdrant(
+                    user_id=user_id,
+                    query_vector=query_vector,
+                    workspace_id=workspace_id,
+                    context_id=context_id,
+                    limit=fetch_size,
+                    filters=filters,
+                    is_shared_context=is_shared_context,
+                    collection_name=collection,
+                    include_vectors=include_vectors,
+                )
+            except ExternalServiceError as exc:
+                # The semantic arm is down (embedding provider or vector
+                # store). A hybrid search can still answer from BM25, so
+                # degrade instead of failing the whole request — but record
+                # it, because keyword-only hits carry no raw cosine and their
+                # confidence is therefore computed on a different basis.
+                #
+                # An explicitly requested "semantic" search has no arm to
+                # fall back to: returning BM25 hits there would answer a
+                # different question than the caller asked, so it re-raises.
+                if search_mode != "hybrid":
+                    raise
+                reason = (
+                    "embedding_unavailable"
+                    if isinstance(exc, OpenAIError)
+                    else "vector_search_unavailable"
+                )
+                logger.warning(
+                    "recall_degraded_to_keyword",
+                    reason=reason,
+                    error=str(exc),
+                    context_id=str(primary_context_id),
+                )
+                semantic_results = []
+                effective_search_mode = "keyword"
+                if degradation is not None:
+                    degradation["degraded"] = True
+                    degradation["reason"] = reason
+                    degradation["detail"] = str(exc)
 
         if search_mode in ("hybrid", "keyword"):
             logger.debug(
@@ -293,13 +330,16 @@ class SearchService:
                 collection_name=collection,
             )
 
-        # Merge results based on mode
-        if search_mode == "semantic":
+        # Merge results based on the mode actually served. That is
+        # effective_search_mode, not search_mode: a hybrid search whose
+        # semantic arm failed merges as keyword-only rather than blending an
+        # empty vector side into every score (#1515).
+        if effective_search_mode == "semantic":
             # Issue #1052: expose the raw cosine under the same key the hybrid path
             # uses so recall()'s confidence reads absolute match strength uniformly
             # across modes (semantic-only results already carry raw cosine in score).
             merged_results = [{**r, "semantic_score_raw": r.get("score")} for r in semantic_results]
-        elif search_mode == "keyword":
+        elif effective_search_mode == "keyword":
             merged_results = fulltext_results
         else:
             merged_results = self._merge_results(

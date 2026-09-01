@@ -153,6 +153,7 @@ def _recall_result():
     result.explore_hints = None
     result.confidence = None
     result.tag_suggestions = None  # #1503 hint, not under test here
+    result.degraded = None  # #1515 degraded-search flag, not under test here
     return result
 
 

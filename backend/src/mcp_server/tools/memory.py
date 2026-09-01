@@ -15,6 +15,7 @@ from mcp_server.tools._helpers import (
     _check_viewer_permission,
     _context_response_fields,
     _ContextNotFoundError,
+    _degraded_response_fields,
     _error_response,
     _format_validation_error,
     _lint_response_field,
@@ -757,6 +758,13 @@ async def handle_recall(
             # agent whether the topic is absent or just spelled differently.
             if result.tag_suggestions:
                 response_data["tag_suggestions"] = result.tag_suggestions
+
+            # #1515: this envelope is hand-built, so a new RecallResponse field
+            # does NOT reach MCP clients on its own — it has to be copied.
+            # The agent needs it: served without the semantic arm, ``confidence``
+            # rests on a different basis, so a low level here means "the search
+            # was impaired", not "nothing relevant is stored".
+            response_data.update(_degraded_response_fields(result))
 
             return [
                 TextContent(

@@ -79,6 +79,7 @@ from utils.datetime import to_utc_iso, utcnow
 from utils.exceptions import (
     ConfigurationError,
     EmbeddingSpendCapExceeded,
+    ExternalServiceError,
     MemoryGoneError,
     NotFoundException,
     QuotaExceededError,
@@ -2937,6 +2938,7 @@ class MemoryService:
         selection_config: RecallSelectionConfig | None,
         search_config: Any,
         context_id: UUID,
+        degradation: dict[str, Any] | None = None,
     ) -> RecallResponse:
         """Build the zero-candidate ``recall()`` response.
 
@@ -2969,6 +2971,11 @@ class MemoryService:
             explore_hints=[] if request.include_explore_hints else None,
             confidence=self._compute_recall_confidence([]),  # #1047: "none"
             selection_evidence=selection_evidence,
+            # #1515: a degraded search can legitimately return nothing, and that
+            # is exactly when the caller most needs to know the semantic arm was
+            # missing — otherwise an empty result reads as "nothing is stored".
+            degraded=(degradation or {}).get("degraded"),
+            degraded_reason=(degradation or {}).get("reason"),
         )
 
     async def _recall_check_agent_bindings(
@@ -3642,6 +3649,7 @@ class MemoryService:
         binding_row_filtered: int,
         selection_evidence: dict[str, Any] | None,
         cross_context: bool = False,
+        degradation: dict[str, Any] | None = None,
     ) -> RecallResponse:
         """Assemble the final response: hints, tags, confidence, audit row.
 
@@ -3729,6 +3737,9 @@ class MemoryService:
             results=responses,
             related_tags=related_tags,
             explore_hints=explore_hints,
+            # #1515: None (and therefore omitted) unless the search degraded.
+            degraded=(degradation or {}).get("degraded"),
+            degraded_reason=(degradation or {}).get("reason"),
             confidence=self._compute_recall_confidence(
                 candidate_scores, semantic_scores=semantic_scores or None
             ),
@@ -3998,6 +4009,10 @@ class MemoryService:
                     expanded=len(expanded),
                 )
 
+        # #1515: hybrid_search reports here when it had to serve the request
+        # without the semantic arm. Stays empty on the happy path.
+        degradation: dict[str, Any] = {}
+
         search_results = await self.search_service.hybrid_search(
             query=request.query,
             user_id=user_id,
@@ -4020,6 +4035,7 @@ class MemoryService:
             # ``is_shared_context`` derivation in ``SearchService.
             # hybrid_search``.
             is_shared_context_read=is_shared_context_read,
+            degradation=degradation,
         )
 
         # Get full memory data from PostgreSQL
@@ -4031,6 +4047,7 @@ class MemoryService:
                 selection_config=selection_config,
                 search_config=search_config,
                 context_id=current_context_id,
+                degradation=degradation,
             )
 
         # Fetch memories from PostgreSQL (exclude soft-deleted), applying the
@@ -4113,7 +4130,14 @@ class MemoryService:
         )
 
         # Hebbian learning: build graph for explore() (best-effort, does not affect recall)
-        if neural_enabled and request.search_mode != "keyword":
+        # #1515: the `!= "keyword"` clause already says keyword-only results must
+        # not feed the graph — a degraded hybrid recall IS keyword-only, so it has
+        # to be excluded on the same grounds. The semantic gates downstream fail
+        # OPEN without embeddings: co_activation and hebbian both skip their cosine
+        # check (and with it the #983 repetition gate) when a node has no vector,
+        # and a raw BM25 score clamps to full activation. The resulting edges are
+        # written into the persistent graph and outlive the outage.
+        if neural_enabled and request.search_mode != "keyword" and not degradation.get("degraded"):
             await self._recall_run_hebbian_learning(
                 request,
                 search_results,
@@ -4136,6 +4160,7 @@ class MemoryService:
             binding_row_filtered=binding_row_filtered,
             selection_evidence=selection_evidence,
             cross_context=bool(context_ids),
+            degradation=degradation,
         )
 
     async def load_pinned(
@@ -4403,6 +4428,23 @@ class MemoryService:
 
             # Issue #82: Pass project ID to recall
             search_response = await self.recall(recall_request, user_id, current_context_id)
+
+            # #1515: the pin above says the router must never choose the
+            # candidate set of a destructive operation — and degradation would
+            # do exactly that, underneath the pin. A keyword-only candidate set
+            # is a materially DIFFERENT set of memories, and this loop hard-
+            # deletes Qdrant points and neural edges, neither of which has a
+            # recovery path. Read paths trade precision for availability; a
+            # delete must not. Restore the pre-#1515 failure instead.
+            if search_response.degraded:
+                raise ExternalServiceError(
+                    "search",
+                    "Refusing to delete by query: the search was degraded "
+                    f"({search_response.degraded_reason}), so the candidate set "
+                    "is keyword-only and not the set this query would normally "
+                    "match. Retry once the embedding provider and vector store "
+                    "are healthy.",
+                )
 
             # Soft delete each found memory
             for memory_response in search_response.results:

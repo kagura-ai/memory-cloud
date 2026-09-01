@@ -2310,7 +2310,13 @@ class TestAccessEventEmission:
             return_value=MagicMock(id=ctx, workspace_id=ws)
         )
         service.recall = AsyncMock(
-            return_value=SimpleNamespace(results=[SimpleNamespace(memory_id=m) for m in ids])
+            return_value=SimpleNamespace(
+                results=[SimpleNamespace(memory_id=m) for m in ids],
+                # #1515: forget() refuses a degraded candidate set; a healthy
+                # search reports None here.
+                degraded=None,
+                degraded_reason=None,
+            )
         )
         service.memory_repo.get = AsyncMock(side_effect=lambda m: rows.get(m))
         service.memory_repo.update = AsyncMock()
