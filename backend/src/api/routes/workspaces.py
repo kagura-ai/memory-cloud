@@ -73,8 +73,8 @@ class WorkspaceCreate(BaseModel):
     default_context_usage_guide: str | None = Field(None, max_length=CONTEXT_USAGE_GUIDE_MAX_LENGTH)
     # #1517: derived from the registry rather than a hardcoded pair, which
     # listed only the two OpenAI models. A deployment that serves a self-hosted
-    # model (e.g. the Sakura fleet, qwen3-embedding:4b) otherwise had no value a
-    # BYOK caller could legally send here. The deployment allowlist narrows this
+    # model (e.g. qwen3-embedding:4b) otherwise had no value a BYOK caller could
+    # legally send here. The deployment allowlist narrows this
     # further at ContextService.create_context, with a message naming what IS
     # available.
     default_context_embedding_model: str | None = Field(

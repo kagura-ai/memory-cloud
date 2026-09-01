@@ -374,7 +374,7 @@ class Settings(BaseSettings):
     # #1517: which registry models THIS deployment offers. Comma-separated;
     # empty (the default) means the whole registry, i.e. unchanged behaviour.
     # Set it when the deployment cannot actually serve every registry entry —
-    # e.g. the Sakura fleet embeds via AI Engine, where the OpenAI models only
+    # e.g. a self-hosted embedding endpoint, where the OpenAI models only
     # resolve for a workspace with its own BYOK key.
     embedding_model_allowlist: str = Field(
         default="",

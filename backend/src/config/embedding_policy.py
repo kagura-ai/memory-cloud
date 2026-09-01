@@ -2,12 +2,12 @@
 
 ``EMBEDDING_MODEL_REGISTRY`` says which models the *code* knows how to size and
 route. That is not the same question as which models a given *deployment* will
-actually serve: after the Sakura migration this fleet embeds through Sakura AI
-Engine, where the OpenAI entries only resolve for a workspace that brings its
-own key. Advertising all of them, and accepting all of them at context
-creation, lets a caller create a context that can never embed — and because the
-embedding model is immutable after creation (#146), that context cannot be
-repaired in place.
+actually serve. A deployment whose embedding provider is a self-hosted or
+OpenAI-compatible endpoint cannot resolve the OpenAI entries at all unless the
+workspace brings its own key. Advertising all of them, and accepting all of
+them at context creation, lets a caller create a context that can never embed —
+and because the embedding model is immutable after creation (#146), that
+context cannot be repaired in place.
 
 The allowlist is a deployment-level setting, deliberately empty by default so
 existing deployments behave exactly as before.

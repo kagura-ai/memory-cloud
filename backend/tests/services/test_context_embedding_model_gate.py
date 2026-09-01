@@ -129,7 +129,7 @@ class TestWorkspaceCreationUnderANarrowedAllowlist:
     Review of #1517 found that create_workspace() manufactured
     embedding_model="text-embedding-3-small" — a caller-supplied value as far as
     the gate is concerned — so on a deployment whose allowlist does not include
-    it (exactly the documented Sakura setting) every workspace creation 422'd,
+    it — the very case the setting exists for — every workspace creation 422'd,
     with no caller-side workaround.
     """
 
