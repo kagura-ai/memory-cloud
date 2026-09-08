@@ -640,7 +640,9 @@ class MemoryService:
                 scope=memory.scope,
                 # #1505: say what 'working' means for durability instead of
                 # leaving the caller to guess.
-                persistence=persistence_info(memory.scope),
+                persistence=persistence_info(
+                    memory.scope, pinned=memory.delivery_mode == DELIVERY_MODE_ALWAYS
+                ),
                 lint=await self._lint_write(
                     workspace_id=UUID(workspace_id_str),
                     context_id=UUID(context_id_str),
@@ -790,7 +792,9 @@ class MemoryService:
             operation="updated",
             re_embedded=needs_reembed,
             scope=memory.scope,
-            persistence=persistence_info(memory.scope),  # #1505
+            persistence=persistence_info(  # #1505
+                memory.scope, pinned=memory.delivery_mode == DELIVERY_MODE_ALWAYS
+            ),
             supersede_candidate_dismissed=dismissed_target,  # #1504
             # #1502: lint the memory's CURRENT state, not the patch — a partial
             # update leaves fields untouched, and what matters for recall is
@@ -1557,7 +1561,11 @@ class MemoryService:
             operation=operation,
             re_embedded=True,
             scope=result.scope,
-            persistence=persistence_info(result.scope),  # #1505
+            persistence=persistence_info(  # #1505
+                result.scope,
+                # #1519: same input remember() used to decide pin-on-write.
+                pinned=remember_request.delivery_mode == DELIVERY_MODE_ALWAYS,
+            ),
             # #1502: the upsert delegates to remember(), which already linted the
             # same summary/tags — carry that through rather than re-reading the
             # vocabulary a second time for one write.

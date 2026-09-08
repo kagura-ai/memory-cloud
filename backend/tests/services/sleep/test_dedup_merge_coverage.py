@@ -952,6 +952,38 @@ class TestFetchActiveMemoriesRealDB:
         assert in_scope.id in ids
         assert wrong_ws.id not in ids  # filtered out by workspace_id (line 296)
 
+    async def test_excludes_pinned_rows(self, db_session):
+        """#1519: delivery_mode='always' rows never enter dedup candidacy."""
+        user = f"fetch-user-{uuid4()}"
+        plain = Memory(
+            id=uuid4(),
+            user_id=user,
+            summary="plain",
+            content="c",
+            type="note",
+            client="pytest",
+            scope="working",
+        )
+        pinned = Memory(
+            id=uuid4(),
+            user_id=user,
+            summary="pinned",
+            content="c",
+            type="note",
+            client="pytest",
+            scope="persistent",
+            delivery_mode="always",
+        )
+        db_session.add_all([plain, pinned])
+        await db_session.flush()
+
+        phase = await self._phase_for_db(db_session)
+        rows = await phase._fetch_active_memories(user, None, None, limit=500)
+
+        ids = {m.id for m in rows}
+        assert plain.id in ids
+        assert pinned.id not in ids  # pinned excluded
+
 
 # ---------------------------------------------------------------------------
 # _split_oversize_cluster (#1184)

@@ -116,11 +116,14 @@ _PROMOTION_CRITERIA = {
 }
 
 
-def persistence_info(scope: str) -> PersistenceInfo | None:
+def persistence_info(scope: str, *, pinned: bool = False) -> PersistenceInfo | None:
     """Build the durability block for a just-written memory.
 
     Args:
         scope: The memory's scope as persisted ("working" or "persistent").
+        pinned: True when the memory is ``delivery_mode='always'`` (#1519).
+            Pinned rows never enter near-duplicate merge candidacy, so the
+            merge caveat is replaced by that promise instead of repeated.
 
     Returns:
         PersistenceInfo describing what that scope implies for durability, or
@@ -137,13 +140,38 @@ def persistence_info(scope: str) -> PersistenceInfo | None:
         already stored, prompting the caller to retry and duplicate it.
     """
     try:
-        return _persistence_info(scope)
+        return _persistence_info(scope, pinned=pinned)
     except Exception as e:  # noqa: BLE001 — advisory; never fail a committed write
         logger.warning("persistence_info_failed", scope=scope, error=str(e))
         return None
 
 
-def _persistence_info(scope: str) -> PersistenceInfo | None:
+def _merge_caveat(pinned: bool, *, floor: bool) -> str:
+    """The sentence about maintenance that is NOT consolidation.
+
+    ``floor`` selects the working-scope phrasing ("not bound by that floor")
+    over the persistent one ("not scope-gated"). Pinned memories (#1519) are
+    excluded from dedup at the candidate fetch, so for them the merge caveat
+    becomes a promise and only forget() remains.
+    """
+    if pinned:
+        return (
+            "This memory is pinned (delivery_mode='always'): near-duplicate "
+            "merge never selects it; only an explicit forget() removes it"
+            + (", and that is not bound by that floor." if floor else ".")
+        )
+    if floor:
+        return (
+            "Separate maintenance (near-duplicate merge) and an explicit "
+            "forget() are not bound by that floor."
+        )
+    return (
+        "Separate maintenance (near-duplicate merge) and an explicit "
+        "forget() are not scope-gated and still apply."
+    )
+
+
+def _persistence_info(scope: str, pinned: bool = False) -> PersistenceInfo | None:
     """Build the block, or None for an unrecognized scope. May raise."""
     if scope == "persistent":
         return PersistenceInfo(
@@ -154,8 +182,7 @@ def _persistence_info(scope: str) -> PersistenceInfo | None:
             detail=(
                 "Committed and persistent. Consolidation acts only on "
                 "working-scope memories, so it will not archive this one. "
-                "Separate maintenance (near-duplicate merge) and an explicit "
-                "forget() are not scope-gated and still apply."
+                + _merge_caveat(pinned, floor=False)
             ),
         )
     if scope != "working":
@@ -187,8 +214,7 @@ def _persistence_info(scope: str) -> PersistenceInfo | None:
             "Committed and durable now — 'working' is a lifecycle label, not a "
             f"staging buffer. Promotes to persistent via {pass_name} "
             f"({_PROMOTION_CRITERIA[pass_name]}). That pass will not archive it "
-            f"before {days} days old, and only with zero adoption. Separate "
-            "maintenance (near-duplicate merge) and an explicit forget() are "
-            "not bound by that floor."
+            f"before {days} days old, and only with zero adoption. "
+            + _merge_caveat(pinned, floor=True)
         ),
     )

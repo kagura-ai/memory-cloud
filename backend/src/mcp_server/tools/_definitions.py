@@ -154,8 +154,9 @@ consolidation lifecycle the memory is on, NOT whether it was stored:
   straight here on write; that is a delivery guarantee, not a stronger
   durability guarantee than a working-scope write already has.
 That age floor is scoped to consolidation and is NOT a retention SLA: separate
-near-duplicate merge maintenance can retire a memory at any age (its tags and
-edges move to the memory it merged into), and forget() removes one on demand.
+near-duplicate merge maintenance can retire an unpinned memory at any age (its
+tags and edges move to the memory it merged into; delivery_mode="always" memories
+never enter that pass), and forget() removes one on demand.
 The response carries a `persistence` block for the scope you actually got back.
 
 IMPORTANT: Always specify context_id to ensure you're using the intended context. Use list_contexts() to discover available context IDs.

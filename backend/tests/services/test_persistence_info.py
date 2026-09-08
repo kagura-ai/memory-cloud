@@ -135,6 +135,23 @@ def test_persistent_scope_reports_no_removal_floor(sleep_pass):
     assert info.consolidation_archive_min_age_days is None
 
 
+def test_pinned_write_reports_merge_exemption(sleep_pass):
+    """#1519: pinned (delivery_mode='always') memories never enter dedup
+    candidacy, so the merge caveat must not be repeated for them."""
+    info = persistence_info("persistent", pinned=True)
+    assert info is not None
+    assert "near-duplicate merge" in info.detail
+    assert "pinned" in info.detail
+    assert "still apply" not in info.detail  # the generic caveat is replaced, not appended
+
+
+def test_unpinned_persistent_still_carries_the_merge_caveat(sleep_pass):
+    info = persistence_info("persistent")
+    assert info is not None
+    assert "near-duplicate merge" in info.detail
+    assert "pinned" not in info.detail
+
+
 def test_unknown_scope_is_omitted_rather_than_raised():
     """Advisory field: an unexpected scope must not fail an already-committed write."""
     assert persistence_info("archived") is None
@@ -211,10 +228,11 @@ def test_legacy_consolidation_compares_against_the_named_constant():
 def test_dedup_merge_still_has_no_age_or_adoption_gate():
     """Pin WHY the age field is named for consolidation only.
 
-    ``DedupMergePhase._fetch_active_memories`` selects on identity columns and
-    ``deleted_at`` alone — no age, scope, or reference_count gate — so a memory
-    written minutes ago can lose a near-duplicate merge the same night. Any
-    global "not removed before N days" wording would therefore be false.
+    ``DedupMergePhase._fetch_active_memories`` selects on identity columns,
+    ``deleted_at`` and the #1519 pinned exemption alone — no age, scope, or
+    reference_count gate — so an unpinned memory written minutes ago can lose a
+    near-duplicate merge the same night. Any global "not removed before N days"
+    wording would therefore be false.
 
     If a gate is ever added here, this test fails: revisit the response wording,
     because the promise could then legitimately be widened.
@@ -234,7 +252,18 @@ def test_dedup_merge_still_has_no_age_or_adoption_gate():
         and isinstance(node.value, ast.Name)
         and node.value.id == "Memory"
     }
-    assert referenced == {"user_id", "deleted_at", "updated_at", "workspace_id", "context_id"}, (
+    assert referenced == {
+        "user_id",
+        "deleted_at",
+        "updated_at",
+        "workspace_id",
+        "context_id",
+        # #1519: pinned rows (delivery_mode='always') are excluded from dedup
+        # candidacy. This is an exemption, not an age/adoption gate — the
+        # working-scope floor wording stays as is; persistence_info(pinned=True)
+        # carries the widened promise for pinned writes.
+        "delivery_mode",
+    }, (
         f"dedup selection columns changed to {sorted(referenced)} — if an age or "
         "adoption gate was added, the persistence wording can be widened"
     )
@@ -337,6 +366,8 @@ async def test_pinned_write_reports_persistent_persistence(service, sleep_pass):
     assert result.persistence is not None
     assert result.persistence.scope == "persistent"
     assert result.persistence.consolidation_archive_min_age_days is None
+    # #1519: the pinned flag must reach the builder through the real write path.
+    assert "pinned" in result.persistence.detail
 
 
 # The update paths need their OWN service-level coverage. An earlier revision

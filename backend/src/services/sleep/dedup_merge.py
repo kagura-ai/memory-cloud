@@ -39,7 +39,7 @@ from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from db.qdrant import delete_memory_from_qdrant, search_memories_qdrant
-from models.memory import Memory
+from models.memory import DELIVERY_MODE_ALWAYS, Memory
 from repositories.neural_edge import NeuralEdgeRepository
 from services.embedding_service import EmbeddingService
 from services.llm_service import LLMService
@@ -722,12 +722,22 @@ class DedupMergePhase:
         context_id: str | None,
         limit: int = 500,
     ) -> list[Memory]:
-        """Fetch active (non-deleted) memories, capped by limit."""
+        """Fetch active (non-deleted), unpinned memories, capped by limit.
+
+        #1519: ``delivery_mode='always'`` rows are the deterministic
+        ``load_pinned()`` lane (#886) and never enter dedup candidacy. A pinned
+        loser would silently drop out of that lane, and a pinned *winner* is no
+        better — merge folds only tags, so it would discard the newer unpinned
+        fact instead of absorbing it. Excluding them here covers every downstream
+        path at once: ``_find_similar_pairs`` restricts vector-search hits to the
+        fetched id set, so a pinned neighbour cannot re-enter that way either.
+        """
         stmt = (
             select(Memory)
             .where(
                 Memory.user_id == user_id,
                 Memory.deleted_at.is_(None),
+                Memory.delivery_mode != DELIVERY_MODE_ALWAYS,
             )
             .order_by(Memory.updated_at.desc())
             .limit(limit)
