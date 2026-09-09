@@ -280,7 +280,9 @@ class TestLLMBorderlinePath:
 
         assert result.details["llm_archive_guarded"] == 0
         assert result.details["llm_archived"] == 1
-        phase.memory_repo.delete.assert_awaited_once_with(mem.id)
+        phase.memory_repo.soft_delete.assert_awaited_once_with(
+            mem.id, deleted_by="sleep_consolidation"
+        )
 
     @pytest.mark.asyncio
     async def test_llm_keep_decision_is_noop(self):
@@ -648,7 +650,9 @@ class TestRuleDeleteFailure:
             )
 
         assert result.details["rule_deleted"] == 1
-        phase.memory_repo.delete.assert_awaited_once_with(mem.id)
+        phase.memory_repo.soft_delete.assert_awaited_once_with(
+            mem.id, deleted_by="sleep_consolidation"
+        )
         reporter.add_action.assert_awaited_once()
         _, kwargs = reporter.add_action.call_args
         assert kwargs["action_type"] == "archive"

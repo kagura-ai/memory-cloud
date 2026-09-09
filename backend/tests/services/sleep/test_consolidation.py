@@ -79,6 +79,7 @@ async def _run_execute(phase, memories, *, cutoff=None):
     phase._fetch_working_memories = AsyncMock(return_value=memories)
     phase.memory_repo.promote_to_persistent = AsyncMock()
     phase.memory_repo.delete = AsyncMock()
+    phase.memory_repo.soft_delete = AsyncMock(return_value=1)
     config = _make_config(provider="")  # LLM off → borderline memories stay put
     budget = SleepBudget()
     with (
@@ -214,7 +215,12 @@ class TestAdoptionArchivalGrandfather:
         )
         result = await _run_execute(consolidation_phase, [post], cutoff=cutoff)
         assert result.details["rule_deleted"] == 1
-        consolidation_phase.memory_repo.delete.assert_awaited_once()
+        # #1520: "archive" is a tombstone, not a row delete — rollback_sleep_run
+        # can only restore what is still there.
+        consolidation_phase.memory_repo.soft_delete.assert_awaited_once_with(
+            post.id, deleted_by="sleep_consolidation"
+        )
+        consolidation_phase.memory_repo.delete.assert_not_called()
 
 
 class TestLLMJudgeParsing:
@@ -532,6 +538,8 @@ class TestLLMArchivalEligibilityGuard:
 
         result = await self._run_llm_archive(consolidation_phase, mem, cutoff=cutoff)
 
-        consolidation_phase.memory_repo.delete.assert_awaited_once_with(mem.id)
+        consolidation_phase.memory_repo.soft_delete.assert_awaited_once_with(
+            mem.id, deleted_by="sleep_consolidation"
+        )
         assert result.details["rule_deleted"] == 1
         assert result.details["llm_archive_guarded"] == 0

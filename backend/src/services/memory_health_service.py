@@ -47,7 +47,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from models.auth import Context, ContextReadAttribution, UsageStats
 from models.config import ContextSearchConfig
-from models.memory import Memory, NeuralMemoryEdge
+from models.memory import SLEEP_TOMBSTONE_DELETED_BY, Memory, NeuralMemoryEdge
 from models.sleep import SleepReport
 from utils.datetime import to_utc_iso, utcnow
 from utils.logger import get_logger
@@ -387,10 +387,11 @@ class MemoryHealthService:
     async def _fetch_merge_backlogs(
         self, user_id: str, scope: Any = _ALL
     ) -> dict[uuid.UUID | None, dict[str, Any]]:
-        """Soft-deleted merge losers per context: count + oldest age (days)."""
+        """Sleep tombstones per context (merge losers + consolidation archives,
+        #1520): count + oldest age (days) — the rows the retention window will purge."""
         conditions = [
             Memory.user_id == user_id,
-            Memory.deleted_by == "sleep_maintenance",
+            Memory.deleted_by.in_(sorted(SLEEP_TOMBSTONE_DELETED_BY)),
             Memory.deleted_at.is_not(None),
         ]
         if scope is not _ALL:

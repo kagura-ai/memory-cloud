@@ -30,7 +30,7 @@ if TYPE_CHECKING:
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from db.qdrant import delete_memory_from_qdrant
-from models.memory import Memory
+from models.memory import DELETED_BY_SLEEP_ARCHIVE, Memory
 from repositories.memory import MemoryRepository
 from services.graph_service import GraphService
 from services.llm_service import LLMService
@@ -245,7 +245,11 @@ class ConsolidationPhase:
             elif should_delete:
                 try:
                     await delete_memory_from_qdrant(user_id, memory.id, self.collection_name)
-                    await self.memory_repo.delete(memory.id)
+                    # #1520: a tombstone, not a row delete — rollback_sleep_run's
+                    # _undo_archive can only restore what is still there.
+                    await self.memory_repo.soft_delete(
+                        memory.id, deleted_by=DELETED_BY_SLEEP_ARCHIVE
+                    )
                     tally.deleted += 1
                     await self._record_action(
                         reporter,
@@ -343,7 +347,9 @@ class ConsolidationPhase:
                         neural = await graph_service.get_node_metrics(str(memory_id))
                     if not neural or neural["is_isolated"]:
                         await delete_memory_from_qdrant(user_id, memory_id, self.collection_name)
-                        await self.memory_repo.delete(memory_id)
+                        await self.memory_repo.soft_delete(  # #1520: tombstone
+                            memory_id, deleted_by=DELETED_BY_SLEEP_ARCHIVE
+                        )
                         tally.llm_archived += 1
                         await self._record_action(
                             reporter,

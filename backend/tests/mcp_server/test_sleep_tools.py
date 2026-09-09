@@ -709,7 +709,7 @@ class TestRollbackActionDispatch:
         a.details = kw.pop("details", {})
         return a
 
-    async def _run(self, actions, user_id, workspace_id):
+    async def _run(self, actions, user_id, workspace_id, extra=None):
         report_id = uuid4()
         report = MagicMock()
         report.id = report_id
@@ -719,7 +719,7 @@ class TestRollbackActionDispatch:
         # Real UUIDs: the edge repository parses these, so a bare MagicMock
         # surfaces as "badly formed hexadecimal UUID string" inside a handler.
         report.workspace_id = uuid4()
-        db = self._db(report, actions)
+        db = self._db(report, actions, extra)
 
         async def mock_get_db():
             yield db
@@ -781,15 +781,24 @@ class TestRollbackActionDispatch:
         ``merge`` is covered separately below — it needs the re-embed prefetch
         primed, and it is the branch most worth pinning on its own (review).
         """
+        archived = MagicMock()
+        archived.id = uuid4()
         actions = [
             self._action("create_edge", id=1),
             self._action("promote", id=2),
-            self._action("archive", id=3),
+            self._action("archive", id=3, memory_id=archived.id),
             self._action("update_importance", id=4, details={"old_importance": 0.4}),
             # Unknown type mixed in — it must not disturb its neighbours.
             self._action("undo_merge", id=5),
         ]
-        data = await self._run(actions, user_id, workspace_id)
+        # #1520: an archive restore is real only when the tombstone row is
+        # still there — prime the re-embed prefetch like the merge test does.
+        # Queue after report/actions: embedding config, then the prefetch.
+        cfg = MagicMock()
+        cfg.scalar_one_or_none.return_value = None
+        prefetch = MagicMock()
+        prefetch.scalars.return_value.all.return_value = [archived]
+        data = await self._run(actions, user_id, workspace_id, extra=[cfg, prefetch])
 
         summary = data["rollback_summary"]
         assert summary["errors"] == [], summary
@@ -798,6 +807,29 @@ class TestRollbackActionDispatch:
         assert summary["archives_restored"] == 1
         assert summary["importance_restored"] == 1
         assert summary["merges_reversed"] == 0
+
+    @pytest.mark.asyncio
+    async def test_archive_undo_on_missing_row_is_an_error_not_a_restore(
+        self, user_id, workspace_id
+    ):
+        """#1520: before this fix the archive was a hard DELETE, so the undo's
+        UPDATE matched zero rows and ``archives_restored`` was incremented
+        anyway. A zero-row restore must be reported, never counted."""
+        gone = MagicMock()
+        gone.id = uuid4()
+        actions = [self._action("archive", id=1, memory_id=gone.id)]
+        cfg = MagicMock()
+        cfg.scalar_one_or_none.return_value = None
+        prefetch = MagicMock()
+        prefetch.scalars.return_value.all.return_value = [gone]
+        update_result = MagicMock()
+        update_result.rowcount = 0
+        data = await self._run(actions, user_id, workspace_id, extra=[cfg, prefetch, update_result])
+
+        summary = data["rollback_summary"]
+        assert summary["archives_restored"] == 0
+        assert len(summary["errors"]) == 1
+        assert str(gone.id) in summary["errors"][0]
 
     @pytest.mark.asyncio
     async def test_one_failing_action_does_not_abandon_the_rest(self, user_id, workspace_id):

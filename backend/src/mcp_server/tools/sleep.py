@@ -427,16 +427,27 @@ async def _undo_archive(db: Any, action: Any, ctx: _RollbackCtx, summary: dict[s
 
     if not action.memory_id:
         return
-    await db.execute(
+    restore_result = await db.execute(
         sa_update(Memory)
         .where(Memory.id == action.memory_id, Memory.user_id == ctx.user_id)
         .values(deleted_at=None, deleted_by=None)
     )
     mem = ctx.memory_cache.get(action.memory_id)
-    if mem:
-        await _re_embed_to_qdrant(
-            mem, ctx.user_id, ctx.embedding_svc, ctx.ws_id, ctx.ctx_id_str, ctx.collection_name
+    # #1520: archives are tombstones since v0.66.0; a zero-row UPDATE means the
+    # row was hard-deleted by an older archive, or purged by the retention
+    # window — report it, never count a restore that did not happen (same
+    # contract as _undo_merge).
+    restore_rows = cast(CursorResult[Any], restore_result).rowcount
+    if restore_rows == 0 or mem is None:
+        summary["errors"].append(
+            f"archived memory {action.memory_id} not restorable — hard-deleted "
+            "before the tombstone archive (v0.66.0) or purged by the retention "
+            "policy (sleep_merge_retention_days)"
         )
+        return
+    await _re_embed_to_qdrant(
+        mem, ctx.user_id, ctx.embedding_svc, ctx.ws_id, ctx.ctx_id_str, ctx.collection_name
+    )
     summary["archives_restored"] += 1
 
 

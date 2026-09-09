@@ -23,7 +23,7 @@ from __future__ import annotations
 from typing import TYPE_CHECKING
 from uuid import UUID
 
-from sqlalchemy import and_, or_, select
+from sqlalchemy import and_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 if TYPE_CHECKING:
@@ -32,7 +32,7 @@ if TYPE_CHECKING:
 
 from models.auth import Context
 from models.memory import Memory
-from services.sleep.merge_retention import _MERGE_DELETED_BY, purge_tombstones
+from services.sleep.merge_retention import purge_tombstones, user_tombstone_predicate
 from services.sleep.reporter import PhaseResult
 
 
@@ -66,10 +66,10 @@ class ForgetRetentionPhase:
         # them). With the live-context guard below, every remaining
         # non-merge tombstone is a forget() row whose point and edges were
         # already deleted at soft-delete time.
-        not_merge_loser = or_(
-            Memory.deleted_by.is_(None),
-            Memory.deleted_by != _MERGE_DELETED_BY,
-        )
+        # #1520: derived from SLEEP_TOMBSTONE_DELETED_BY (merge losers AND
+        # consolidation archives) so a new sleep tombstone class cannot land
+        # in this window by omission.
+        not_merge_loser = user_tombstone_predicate()
         # Context soft-delete (#84 recovery design) tombstones its memories
         # with deleted_by=<user sub> too — but deliberately KEEPS their
         # Qdrant points for recovery, and they are indistinguishable from

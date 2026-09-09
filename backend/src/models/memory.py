@@ -52,6 +52,18 @@ DELIVERY_MODE_ALWAYS = "always"
 DELIVERY_MODE_ON_RECALL = "on_recall"
 DELIVERY_MODE_ON_TRIGGER = "on_trigger"
 
+# ``deleted_by`` provenance for rows Sleep maintenance tombstones (#1209/#1520).
+# Merge losers and consolidation archives are both soft deletes that
+# ``rollback_sleep_run`` can restore, and both are hard-purged by the SAME
+# retention window (``sleep_merge_retention_days``). The set is the single
+# source for every lane predicate — a new sleep tombstone class is added
+# here, never as a bare string at a call site.
+DELETED_BY_SLEEP_MERGE = "sleep_maintenance"
+DELETED_BY_SLEEP_ARCHIVE = "sleep_consolidation"
+SLEEP_TOMBSTONE_DELETED_BY: frozenset[str] = frozenset(
+    {DELETED_BY_SLEEP_MERGE, DELETED_BY_SLEEP_ARCHIVE}
+)
+
 _ALL_DELIVERY_MODES: tuple[str, ...] = (
     DELIVERY_MODE_ALWAYS,
     DELIVERY_MODE_ON_RECALL,

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from typing import Any, cast
 from uuid import UUID
 
 from sqlalchemy import and_, desc, func, select
@@ -173,6 +174,28 @@ class MemoryRepository(BaseRepository[Memory]):
         logger.info("memory_deleted", memory_id=str(id))
 
         return True
+
+    async def soft_delete(self, memory_id: UUID, *, deleted_by: str) -> int:
+        """Tombstone a memory (``deleted_at`` + ``deleted_by``) without deleting the row.
+
+        #1520: the write consolidation's archive branch uses, so an archive
+        lands in the same restorable lane as a merge loser instead of being a
+        hard ``DELETE`` that ``rollback_sleep_run`` cannot undo.
+
+        Returns:
+            Rows stamped: 1, or 0 when the row is missing or already
+            tombstoned (idempotent — a second stamp must not move
+            ``deleted_at`` and shorten the retention window).
+        """
+        from sqlalchemy import update as sa_update
+        from sqlalchemy.engine import CursorResult
+
+        result = await self.db.execute(
+            sa_update(Memory)
+            .where(Memory.id == memory_id, Memory.deleted_at.is_(None))
+            .values(deleted_at=utcnow(), deleted_by=deleted_by)
+        )
+        return cast(CursorResult[Any], result).rowcount
 
     async def count(self, filters: dict | None = None) -> int:
         """Count memories.
