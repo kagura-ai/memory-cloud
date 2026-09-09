@@ -640,9 +640,7 @@ class MemoryService:
                 scope=memory.scope,
                 # #1505: say what 'working' means for durability instead of
                 # leaving the caller to guess.
-                persistence=persistence_info(
-                    memory.scope, pinned=memory.delivery_mode == DELIVERY_MODE_ALWAYS
-                ),
+                persistence=persistence_info(memory.scope, pinned=memory.is_pinned),
                 lint=await self._lint_write(
                     workspace_id=UUID(workspace_id_str),
                     context_id=UUID(context_id_str),
@@ -793,7 +791,7 @@ class MemoryService:
             re_embedded=needs_reembed,
             scope=memory.scope,
             persistence=persistence_info(  # #1505
-                memory.scope, pinned=memory.delivery_mode == DELIVERY_MODE_ALWAYS
+                memory.scope, pinned=memory.is_pinned
             ),
             supersede_candidate_dismissed=dismissed_target,  # #1504
             # #1502: lint the memory's CURRENT state, not the patch — a partial
@@ -1527,6 +1525,15 @@ class MemoryService:
             importance=request.importance if request.importance is not None else 0.5,
             tags=request.tags or [],
             context=request.context,
+            # #1519: forward the caller's pin — without it a pinned external_id
+            # row was replaced by an unpinned one and left load_pinned() silently.
+            # UpdateMemoryRequest's None means "unchanged"; RememberRequest has no
+            # None, so only a set value is forwarded and remember() keeps its default.
+            **(
+                {"delivery_mode": request.delivery_mode}
+                if request.delivery_mode is not None
+                else {}
+            ),
         )
 
         # #1286 (P0-5) audit note: the upsert path intentionally emits NO
@@ -1561,11 +1568,9 @@ class MemoryService:
             operation=operation,
             re_embedded=True,
             scope=result.scope,
-            persistence=persistence_info(  # #1505
-                result.scope,
-                # #1519: same input remember() used to decide pin-on-write.
-                pinned=remember_request.delivery_mode == DELIVERY_MODE_ALWAYS,
-            ),
+            # #1505/#1519: remember() already built the block from the row it
+            # actually wrote (pinned flag included) — reuse it like lint below.
+            persistence=result.persistence,
             # #1502: the upsert delegates to remember(), which already linted the
             # same summary/tags — carry that through rather than re-reading the
             # vocabulary a second time for one write.

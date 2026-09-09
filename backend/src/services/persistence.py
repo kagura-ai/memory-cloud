@@ -34,8 +34,10 @@ DELIBERATELY NOT CLAIMED — this is not a retention SLA:
 
 * Near-duplicate merge (``services/sleep/dedup_merge.py``) soft-deletes the
   loser of a >= 0.98-cosine pair with **no age, scope, or adoption gate**;
-  ``_fetch_active_memories`` selects on user/workspace/context and
-  ``deleted_at IS NULL`` only. A memory written minutes ago can lose a merge the
+  ``_fetch_active_memories`` selects on user/workspace/context,
+  ``deleted_at IS NULL`` and the pinned exemption only (``delivery_mode=
+  'always'`` rows never enter candidacy, #1519 — ``pinned=True`` below carries
+  that promise). An unpinned memory written minutes ago can lose a merge the
   same night (its tags and edges transfer to the winner, but its id stops
   resolving). Any global "nothing you write today can be removed" wording would
   therefore be false, which is why the age field is named for consolidation and
@@ -155,10 +157,13 @@ def _merge_caveat(pinned: bool, *, floor: bool) -> str:
     becomes a promise and only forget() remains.
     """
     if pinned:
+        # Hedged on purpose: the exemption holds only while the pin holds (an
+        # unpin re-enters candidacy), and forget() is not the only removal path
+        # (deleting the context removes it too) — so no "never", no "only".
         return (
-            "This memory is pinned (delivery_mode='always'): near-duplicate "
-            "merge never selects it; only an explicit forget() removes it"
-            + (", and that is not bound by that floor." if floor else ".")
+            "While it stays pinned (delivery_mode='always'), near-duplicate "
+            "merge does not select it; an explicit forget() still removes it"
+            + (" and is not bound by that floor." if floor else ".")
         )
     if floor:
         return (
@@ -200,7 +205,7 @@ def _persistence_info(scope: str, pinned: bool = False) -> PersistenceInfo | Non
                 "Committed and durable now — 'working' is a lifecycle label, "
                 "not a staging buffer. No consolidation pass is enabled on this "
                 "deployment, so it will stay working-scope and consolidation "
-                "will not archive it."
+                "will not archive it." + (" " + _merge_caveat(True, floor=False) if pinned else "")
             ),
         )
 

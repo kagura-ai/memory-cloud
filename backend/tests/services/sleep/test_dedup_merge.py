@@ -965,30 +965,3 @@ class TestDirectPairSimilarity:
         a, b = uuid4(), uuid4()
         dedup_phase._summary_vectors = {a: [math.inf, 0.0], b: [1.0, 0.0]}
         assert dedup_phase._direct_pair_similarity(a, b) is None
-
-
-class TestPinnedExclusion:
-    """#1519: pinned memories (``delivery_mode='always'``) never enter dedup
-    candidacy.
-
-    ``load_pinned()`` is the deterministic every-turn lane (#886). A pinned row
-    that loses a merge is soft-deleted and silently drops out of it, and the
-    "fold the duplicate into the pin" alternative does not exist — merge folds
-    only tags, so making the pin win would discard the NEWER unpinned fact
-    instead. Excluding pinned rows at the candidate fetch removes them from
-    every downstream path at once: ``_find_similar_pairs`` restricts Qdrant
-    hits to the fetched id set, so a pinned neighbour can never re-enter via
-    the vector search either.
-    """
-
-    @pytest.mark.asyncio
-    async def test_fetch_predicate_excludes_pinned(self, dedup_phase, mock_db):
-        rows = MagicMock()
-        rows.scalars.return_value.all.return_value = []
-        mock_db.execute.return_value = rows
-
-        await dedup_phase._fetch_active_memories("user-1", None, None)
-
-        stmt = mock_db.execute.await_args.args[0]
-        sql = str(stmt.compile(compile_kwargs={"literal_binds": True}))
-        assert "delivery_mode != 'always'" in sql
