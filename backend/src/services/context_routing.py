@@ -99,6 +99,23 @@ async def resolve_context_routing(
     return legacy_collection, default_service
 
 
+async def resolve_context_embedding(
+    db: AsyncSession,
+    context_id: UUID,
+) -> tuple[str, int]:
+    """The ``(embedding_model, embedding_dimensions)`` a context routes on.
+
+    Same source row and same legacy fallback as :func:`resolve_context_routing`,
+    without constructing an ``EmbeddingService``. For callers that need to
+    *reason about* a context's model (migration planning, #1525) rather than
+    embed with it.
+    """
+    config = await _fetch_config(db, context_id)
+    if config:
+        return config.embedding_model, config.embedding_dimensions
+    return _LEGACY_MODEL, _LEGACY_DIMS
+
+
 def resolve_routing_from_config(
     db: AsyncSession,
     config: ContextSearchConfig | None,
