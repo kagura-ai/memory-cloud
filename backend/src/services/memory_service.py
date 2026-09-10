@@ -15,7 +15,7 @@ import os
 import statistics
 from collections.abc import Mapping
 from datetime import datetime
-from typing import Any, NamedTuple, cast
+from typing import TYPE_CHECKING, Any, NamedTuple, cast
 from uuid import UUID, uuid4
 
 from sqlalchemy import and_, or_, select
@@ -88,6 +88,9 @@ from utils.exceptions import (
 from utils.logger import get_logger
 
 logger = get_logger(__name__)
+
+if TYPE_CHECKING:
+    from models.memory import Memory
 
 # Issue #886: upper bound for the always-load cap, matching the REST schema's
 # ``LoadPinnedRequest.cap`` le=1000. The MCP path sends the raw arg with no
@@ -5825,6 +5828,71 @@ def embedding_retry_eligible_clause(now: datetime):
     )
 
 
+def build_memory_point(memory: Memory) -> tuple[dict[str, Any], list[int], list[float]]:
+    """Build the Qdrant payload and BM25 sparse vector for a memory row.
+
+    The single definition of "what a memory looks like as a point". Used by
+    ``process_pending_embedding`` (the normal write path) and by the
+    embedding-model migration (#1525), which re-embeds a context into another
+    collection and must produce identical payloads so the new collection is a
+    drop-in for the old one. Only the dense vector differs between the two
+    callers; it is not built here.
+
+    Returns:
+        ``(payload, sparse_indices, sparse_values)``. The payload does NOT yet
+        carry the isolation fields — ``add_memory_to_qdrant`` adds
+        ``workspace_id`` / ``context_id`` / ``user_id`` itself.
+    """
+    from utils.sparse_vector import build_document_sparse_vector
+    from utils.text import normalize_for_search
+    from utils.tokenizer import tokenize_and_reading, tokenize_for_search
+
+    # Tokenize for BM25
+    normalized_summary = normalize_for_search(memory.summary) or memory.summary
+    normalized_ctx = normalize_for_search(memory.context_summary)
+    content_text = (memory.content or "")[:2000]
+
+    summary_tokens, summary_reading, _ = tokenize_and_reading(normalized_summary)
+    ctx_tokens = tokenize_for_search(normalized_ctx or "")
+    content_tokens = tokenize_for_search(content_text) if content_text else ""
+
+    sparse_indices, sparse_values = build_document_sparse_vector(
+        summary_tokens=summary_tokens,
+        context_summary_tokens=ctx_tokens,
+        content_tokens=content_tokens,
+        summary_reading=summary_reading,
+    )
+
+    payload: dict[str, Any] = {
+        "user_id": memory.user_id,
+        "summary": normalized_summary,
+        "context_summary": normalized_ctx,
+        "summary_tokens": summary_tokens,
+        "context_summary_tokens": ctx_tokens,
+        "content_tokens": content_tokens,
+        "summary_reading": summary_reading,
+        "type": memory.type,
+        "importance": memory.importance,
+        "tags": memory.tags or [],
+        "scope": memory.scope,
+        "client": memory.client or "unknown",
+        "created_at": to_utc_iso(memory.created_at or utcnow()),
+        "updated_at": to_utc_iso(memory.updated_at or memory.created_at or utcnow()),
+    }
+    if memory.context:
+        payload["context"] = memory.context
+    # WHERE axis (#1332): geo payload for filters.near. The e69
+    # generated columns are the single validated source — populated
+    # only for a complete numeric pair that passed the regex guard
+    # and range CHECK, so the payload mirrors PG exactly.
+    if memory.location_lat is not None and memory.location_lon is not None:
+        payload["location"] = {
+            "lat": memory.location_lat,
+            "lon": memory.location_lon,
+        }
+    return payload, sparse_indices, sparse_values
+
+
 async def process_pending_embedding(memory_id: UUID) -> None:
     """Process embedding generation + Qdrant upsert for a pending memory.
 
@@ -5841,9 +5909,6 @@ async def process_pending_embedding(memory_id: UUID) -> None:
     from models.memory import Memory
     from services.context_routing import resolve_context_routing
     from services.embedding_service import EmbeddingService
-    from utils.sparse_vector import build_document_sparse_vector
-    from utils.text import normalize_for_search
-    from utils.tokenizer import tokenize_and_reading, tokenize_for_search
 
     async for db in get_db():
         try:
@@ -5918,49 +5983,9 @@ async def process_pending_embedding(memory_id: UUID) -> None:
                 workspace_id=memory.workspace_id,
             )
 
-            # Tokenize for BM25
-            normalized_summary = normalize_for_search(memory.summary) or memory.summary
-            normalized_ctx = normalize_for_search(memory.context_summary)
-            content_text = (memory.content or "")[:2000]
-
-            summary_tokens, summary_reading, _ = tokenize_and_reading(normalized_summary)
-            ctx_tokens = tokenize_for_search(normalized_ctx or "")
-            content_tokens = tokenize_for_search(content_text) if content_text else ""
-
-            sparse_indices, sparse_values = build_document_sparse_vector(
-                summary_tokens=summary_tokens,
-                context_summary_tokens=ctx_tokens,
-                content_tokens=content_tokens,
-                summary_reading=summary_reading,
-            )
-
-            payload = {
-                "user_id": memory.user_id,
-                "summary": normalized_summary,
-                "context_summary": normalized_ctx,
-                "summary_tokens": summary_tokens,
-                "context_summary_tokens": ctx_tokens,
-                "content_tokens": content_tokens,
-                "summary_reading": summary_reading,
-                "type": memory.type,
-                "importance": memory.importance,
-                "tags": memory.tags or [],
-                "scope": memory.scope,
-                "client": memory.client or "unknown",
-                "created_at": to_utc_iso(memory.created_at or utcnow()),
-                "updated_at": to_utc_iso(memory.updated_at or memory.created_at or utcnow()),
-            }
-            if memory.context:
-                payload["context"] = memory.context
-            # WHERE axis (#1332): geo payload for filters.near. The e69
-            # generated columns are the single validated source — populated
-            # only for a complete numeric pair that passed the regex guard
-            # and range CHECK, so the payload mirrors PG exactly.
-            if memory.location_lat is not None and memory.location_lon is not None:
-                payload["location"] = {
-                    "lat": memory.location_lat,
-                    "lon": memory.location_lon,
-                }
+            # Payload + BM25 sparse vector (#1525: shared with the
+            # embedding-model migration so both paths write identical points).
+            payload, sparse_indices, sparse_values = build_memory_point(memory)
 
             await add_memory_to_qdrant(
                 user_id=memory.user_id,
