@@ -155,6 +155,7 @@ async def lint_write(
     user_id: str,
     summary: str,
     tags: list[str] | None,
+    memory_id: UUID | None = None,
 ) -> list[WriteLintHint]:
     """Advisory recall-ability hints for a just-written memory.
 
@@ -166,6 +167,7 @@ async def lint_write(
             never describe memories the caller cannot read.
         summary: The summary as written.
         tags: The tags as written.
+        memory_id: The written row, for the log line only.
 
     Returns:
         Up to ``MAX_HINTS`` hints, or an empty list when the write looks fine —
@@ -179,15 +181,32 @@ async def lint_write(
         vocabulary: dict[str, int] = {}
         if tag_list:
             # Only pay for the vocabulary read when there is something to compare
-            # against it; the no-tags hint needs no vocabulary at all.
-            from services.tag_resolution import fetch_vocabulary
+            # against it; the no-tags hint needs no vocabulary at all. #1512: the
+            # read is the cached snapshot from BEFORE this write (the row is
+            # already committed), so the rule fires the same on a hit and a miss.
+            from services.tag_resolution import vocabulary_before_write
 
-            vocabulary = await fetch_vocabulary(
-                db, workspace_id=workspace_id, context_id=context_id, user_id=user_id
+            vocabulary = await vocabulary_before_write(
+                db,
+                workspace_id=workspace_id,
+                context_id=context_id,
+                user_id=user_id,
+                written_tags=tag_list,
             )
         hints.extend(_tag_hints(tag_list, vocabulary))
+        hints = hints[:MAX_HINTS]
 
-        return hints[:MAX_HINTS]
+        if hints:
+            # #1512: the counts here are what the caller actually receives, so
+            # the fire rate of each rule can be read off the logs.
+            logger.info(
+                "write_lint_hints",
+                context_id=str(context_id),
+                memory_id=str(memory_id) if memory_id else None,
+                codes=[h.code for h in hints],
+                tag_near_duplicate_hints=sum(1 for h in hints if h.code == "tag_near_duplicate"),
+            )
+        return hints
     except Exception as e:  # noqa: BLE001 — advisory only; never fail a committed write
         logger.warning("write_lint_failed", error=str(e))
         return []
