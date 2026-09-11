@@ -135,6 +135,41 @@ def test_persistent_scope_reports_no_removal_floor(sleep_pass):
     assert info.consolidation_archive_min_age_days is None
 
 
+def test_pinned_write_reports_merge_exemption(sleep_pass):
+    """#1519: pinned (delivery_mode='always') memories never enter dedup
+    candidacy, so the merge caveat must not be repeated for them."""
+    info = persistence_info("persistent", pinned=True)
+    assert info is not None
+    assert "near-duplicate merge" in info.detail
+    assert "stays pinned" in info.detail  # hedged: the exemption holds while the pin holds
+    assert "only an explicit" not in info.detail  # forget() is not the only removal path
+    assert "still apply" not in info.detail  # the generic caveat is replaced, not appended
+
+
+def test_unpinned_persistent_still_carries_the_merge_caveat(sleep_pass):
+    info = persistence_info("persistent")
+    assert info is not None
+    assert "near-duplicate merge" in info.detail
+    assert "pinned" not in info.detail
+
+
+def test_pinned_working_wording_is_coherent(sleep_pass):
+    """A pinned row CAN be scope='working' (rollback_sleep_run's _undo_promote demotes
+    without touching delivery_mode). The floor sentence and the pinned sentence must
+    not contradict each other: no "only forget() removes it" next to an archival floor."""
+    info = persistence_info("working", pinned=True)
+    assert info is not None
+    assert "stays pinned" in info.detail
+    assert "near-duplicate merge" in info.detail
+    assert "only an explicit" not in info.detail
+
+
+def test_pinned_no_pass_still_mentions_exemption(no_pass):
+    info = persistence_info("working", pinned=True)
+    assert info is not None
+    assert "stays pinned" in info.detail
+
+
 def test_unknown_scope_is_omitted_rather_than_raised():
     """Advisory field: an unexpected scope must not fail an already-committed write."""
     assert persistence_info("archived") is None
@@ -211,10 +246,11 @@ def test_legacy_consolidation_compares_against_the_named_constant():
 def test_dedup_merge_still_has_no_age_or_adoption_gate():
     """Pin WHY the age field is named for consolidation only.
 
-    ``DedupMergePhase._fetch_active_memories`` selects on identity columns and
-    ``deleted_at`` alone — no age, scope, or reference_count gate — so a memory
-    written minutes ago can lose a near-duplicate merge the same night. Any
-    global "not removed before N days" wording would therefore be false.
+    ``DedupMergePhase._fetch_active_memories`` selects on identity columns,
+    ``deleted_at`` and the #1519 pinned exemption alone — no age, scope, or
+    reference_count gate — so an unpinned memory written minutes ago can lose a
+    near-duplicate merge the same night. Any global "not removed before N days"
+    wording would therefore be false.
 
     If a gate is ever added here, this test fails: revisit the response wording,
     because the promise could then legitimately be widened.
@@ -234,7 +270,18 @@ def test_dedup_merge_still_has_no_age_or_adoption_gate():
         and isinstance(node.value, ast.Name)
         and node.value.id == "Memory"
     }
-    assert referenced == {"user_id", "deleted_at", "updated_at", "workspace_id", "context_id"}, (
+    assert referenced == {
+        "user_id",
+        "deleted_at",
+        "updated_at",
+        "workspace_id",
+        "context_id",
+        # #1519: pinned rows (delivery_mode='always') are excluded from dedup
+        # candidacy. This is an exemption, not an age/adoption gate — the
+        # working-scope floor wording stays as is; persistence_info(pinned=True)
+        # carries the widened promise for pinned writes.
+        "delivery_mode",
+    }, (
         f"dedup selection columns changed to {sorted(referenced)} — if an age or "
         "adoption gate was added, the persistence wording can be widened"
     )
@@ -337,6 +384,8 @@ async def test_pinned_write_reports_persistent_persistence(service, sleep_pass):
     assert result.persistence is not None
     assert result.persistence.scope == "persistent"
     assert result.persistence.consolidation_archive_min_age_days is None
+    # #1519: the pinned flag must reach the builder through the real write path.
+    assert "pinned" in result.persistence.detail
 
 
 # The update paths need their OWN service-level coverage. An earlier revision
@@ -403,6 +452,7 @@ async def test_upsert_populates_persistence(service, sleep_pass):
     remembered = MagicMock()
     remembered.memory_id = uuid4()
     remembered.scope = "working"
+    remembered.persistence = persistence_info("working")
     service.remember = AsyncMock(return_value=remembered)
 
     result = await service._upsert_by_external_id(
@@ -421,6 +471,103 @@ async def test_upsert_populates_persistence(service, sleep_pass):
     assert result.operation == "created"
     assert result.persistence is not None, "_upsert_by_external_id dropped the #1505 block"
     assert result.persistence.scope == "working"
+
+
+@pytest.mark.asyncio
+async def test_upsert_forwards_delivery_mode_and_reuses_remember_persistence(service, sleep_pass):
+    """#1519: the upsert path delegates to remember(); the caller's pin must reach it
+    (otherwise a pinned external_id row is replaced by an unpinned one), and the
+    persistence block remember() built — with the pinned flag — is the one returned."""
+    from models.schemas import UpdateMemoryRequest
+
+    service.memory_repo.get_by_resource_id = AsyncMock(return_value=None)
+    remembered = MagicMock()
+    remembered.memory_id = uuid4()
+    remembered.scope = "persistent"
+    remembered.persistence = persistence_info("persistent", pinned=True)
+    service.remember = AsyncMock(return_value=remembered)
+
+    result = await service._upsert_by_external_id(
+        UpdateMemoryRequest(
+            external_id="pinned-resource",
+            summary="Pinned memory via the upsert path",
+            content="content",
+            type="note",
+            delivery_mode="always",
+        ),
+        user_id="test_user",
+    )
+
+    forwarded = service.remember.await_args.args[0]
+    assert forwarded.delivery_mode == "always"
+    assert result.persistence is remembered.persistence
+    assert "stays pinned" in result.persistence.detail
+
+
+@pytest.mark.asyncio
+async def test_upsert_replacement_inherits_existing_pin_when_omitted(service, sleep_pass):
+    """#1519 (Copilot review on PR #1522): UpdateMemoryRequest.delivery_mode=None
+    means "unchanged". Replacing a pinned external_id row without restating the
+    pin must forward the existing row's 'always' — otherwise RememberRequest's
+    default (on_recall) silently unpins it and forget() removes the pinned row."""
+    from models.schemas import UpdateMemoryRequest
+
+    existing = MagicMock()
+    existing.id = uuid4()
+    existing.delivery_mode = "always"
+    service.memory_repo.get_by_resource_id = AsyncMock(return_value=existing)
+    remembered = MagicMock()
+    remembered.memory_id = uuid4()
+    remembered.scope = "persistent"
+    remembered.persistence = persistence_info("persistent", pinned=True)
+    service.remember = AsyncMock(return_value=remembered)
+    service.forget = AsyncMock()
+
+    result = await service._upsert_by_external_id(
+        UpdateMemoryRequest(
+            external_id="pinned-resource",
+            summary="Replacement body, pin not restated",
+            content="content",
+            type="note",
+        ),
+        user_id="test_user",
+    )
+
+    forwarded = service.remember.await_args.args[0]
+    assert forwarded.delivery_mode == "always"
+    assert result.operation == "replaced"
+
+
+@pytest.mark.asyncio
+async def test_upsert_explicit_delivery_mode_overrides_existing_pin(service, sleep_pass):
+    """An explicit on_recall on the replacement is a deliberate unpin and wins
+    over the existing row's 'always'."""
+    from models.schemas import UpdateMemoryRequest
+
+    existing = MagicMock()
+    existing.id = uuid4()
+    existing.delivery_mode = "always"
+    service.memory_repo.get_by_resource_id = AsyncMock(return_value=existing)
+    remembered = MagicMock()
+    remembered.memory_id = uuid4()
+    remembered.scope = "persistent"
+    remembered.persistence = persistence_info("persistent")
+    service.remember = AsyncMock(return_value=remembered)
+    service.forget = AsyncMock()
+
+    await service._upsert_by_external_id(
+        UpdateMemoryRequest(
+            external_id="pinned-resource",
+            summary="Replacement that deliberately unpins",
+            content="content",
+            type="note",
+            delivery_mode="on_recall",
+        ),
+        user_id="test_user",
+    )
+
+    forwarded = service.remember.await_args.args[0]
+    assert forwarded.delivery_mode == "on_recall"
 
 
 def test_every_write_response_construction_populates_persistence():

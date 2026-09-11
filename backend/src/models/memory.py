@@ -495,6 +495,12 @@ class Memory(Base):
     def __repr__(self) -> str:
         return f"<Memory(id='{self.id}', type='{self.type}', scope='{self.scope}')>"
 
+    @property
+    def is_pinned(self) -> bool:
+        """#1519: the one Python-side definition of "pinned" — the row belongs to the
+        deterministic ``load_pinned()`` lane (``delivery_mode='always'``)."""
+        return self.delivery_mode == DELIVERY_MODE_ALWAYS
+
 
 # The ``idx_memories_summary_trgm`` GIN index (#818) uses the ``gin_trgm_ops``
 # operator class, which only exists once the ``pg_trgm`` extension is installed.

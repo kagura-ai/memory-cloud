@@ -168,7 +168,8 @@ class PersistenceInfo(BaseModel):
     consolidation promotes it.
 
     This is NOT a retention SLA. It describes the consolidation lifecycle only;
-    other maintenance (notably near-duplicate merge) has its own rules, and an
+    other maintenance (notably near-duplicate merge) has its own rules — pinned
+    memories (``delivery_mode='always'``) are exempt from it — and an
     explicit forget() removes a memory at any time.
     """
 
@@ -195,7 +196,8 @@ class PersistenceInfo(BaseModel):
             "Age floor CONSOLIDATION applies before it may archive this memory; "
             "it also requires zero adoption. Scoped to consolidation only — it "
             "is not a retention guarantee, and does not bind near-duplicate "
-            "merge or an explicit forget(). Null when no consolidation pass is "
+            "merge (which skips pinned memories) or an explicit "
+            "forget(). Null when no consolidation pass is "
             "enabled, or when the memory is persistent (consolidation acts only "
             "on scope='working')."
         ),

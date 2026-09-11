@@ -176,9 +176,12 @@ class TestShadowMergeMode:
         # (unique_edge ignores edge_type) must be retyped to supersedes.
         phase.edge_repo.get_edge = AsyncMock(return_value=None)
         phase.edge_repo.create_or_update_edge = AsyncMock()
+        phase._pinned_or_gone_since_fetch = AsyncMock(return_value=False)  # #1519
         winner, loser = _mem(uuid4()), _mem(uuid4())
 
-        prior = await phase._execute_shadow_merge(winner, loser, "u", None, None)
+        executed, prior = await phase._execute_shadow_merge(winner, loser, "u", None, None)
+
+        assert executed is True
 
         kwargs = phase.edge_repo.create_or_update_edge.await_args.kwargs
         assert kwargs["src_id"] == winner.id  # src = superseding (winner)
@@ -203,9 +206,13 @@ class TestShadowMergeMode:
         )
         phase.edge_repo.get_edge = AsyncMock(return_value=existing)
         phase.edge_repo.create_or_update_edge = AsyncMock()
+        phase._pinned_or_gone_since_fetch = AsyncMock(return_value=False)  # #1519
 
-        prior = await phase._execute_shadow_merge(_mem(uuid4()), _mem(uuid4()), "u", None, None)
+        executed, prior = await phase._execute_shadow_merge(
+            _mem(uuid4()), _mem(uuid4()), "u", None, None
+        )
 
+        assert executed is True
         assert prior == {
             "edge_type": "neural_association",
             "origin": "hebbian",
@@ -230,9 +237,13 @@ class TestShadowMergeMode:
         )
         phase.edge_repo.get_edge = AsyncMock(return_value=existing)
         phase.edge_repo.create_or_update_edge = AsyncMock()
+        phase._pinned_or_gone_since_fetch = AsyncMock(return_value=False)  # #1519
 
-        prior = await phase._execute_shadow_merge(_mem(uuid4()), _mem(uuid4()), "u", None, None)
+        executed, prior = await phase._execute_shadow_merge(
+            _mem(uuid4()), _mem(uuid4()), "u", None, None
+        )
 
+        assert executed is True
         assert prior is None
 
     @pytest.mark.asyncio

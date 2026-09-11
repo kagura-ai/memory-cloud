@@ -458,6 +458,7 @@ async def _seal_both(w, l_, *args, **kwargs):  # noqa: ANN002, ANN003
     attribute read models the post-merge expired-refresh crash (#1229)."""
     w.seal()
     l_.seal()
+    return True  # #1519: executed (not refused by the pin recheck)
 
 
 class TestMergeAuditSnapshot:
