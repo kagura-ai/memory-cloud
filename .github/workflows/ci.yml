@@ -131,6 +131,13 @@ jobs:
       - name: Bats — verify_workers_blocked regression suite
         run: bats terraform/single-server/scripts/tests/
 
+      # #1500: the CI readiness gate is a script too — same bar.
+      - name: ShellCheck wait-for-api.sh
+        run: shellcheck .github/scripts/wait-for-api.sh
+
+      - name: Bats — wait-for-api phase verdicts
+        run: bats .github/scripts/tests/
+
   backend-unit:
     runs-on: ubuntu-latest
     services:
@@ -275,6 +282,7 @@ jobs:
               - 'backend/alembic/versions/**'
               - 'backend/pyproject.toml'
               - '.github/workflows/ci.yml'
+              - '.github/scripts/**'
 
   # Integration tests + the all-routes smoke test — both require a live
   # DB and Redis. Gated by detect-changes path filter, `force-integration`
@@ -400,6 +408,9 @@ jobs:
       E2E_ADMIN_LOGIN_ID: e2e-admin
       E2E_API_URL: http://localhost:8080
       NEXT_PUBLIC_API_URL: http://localhost:8080
+      # #1500: the readiness gate reads the app's boot-phase INFO lines
+      # (application_starting / application_started) from the API log.
+      LOG_LEVEL: INFO
     services:
       postgres:
         image: postgres:18.4-alpine@sha256:9a8afca54e7861fd90fab5fdf4c42477a6b1cb7d293595148e674e0a3181de15
@@ -466,21 +477,28 @@ jobs:
         run: cd backend && python -m src.cli.seed_e2e_admin
 
       - name: Start API server
+        # Log to a file so the readiness gate below (and the on-failure dump)
+        # can see the app's own boot phases; the pid crosses steps via a file.
         run: |
           cd backend
-          python -m uvicorn src.api.main:app --host 0.0.0.0 --port 8080 --log-level warning &
-          for i in $(seq 1 30); do
-            if curl -sf http://localhost:8080/health >/dev/null; then
-              echo "API is up after $((i * 2))s"
-              exit 0
-            fi
-            sleep 2
-          done
-          echo "::error::API did not become healthy on :8080 within 60s"
-          exit 1
+          nohup python -m uvicorn src.api.main:app --host 0.0.0.0 --port 8080 --log-level warning \
+            > "$RUNNER_TEMP/api.log" 2>&1 &
+          echo "$!" > "$RUNNER_TEMP/api.pid"
+
+      - name: Wait for API readiness
+        # #1500: its own step so a slow or crashed boot is reported here as an
+        # environment failure — never as a locator timeout in the test step —
+        # and the message names the phase (import / lifespan / serving) the
+        # API was blocked in, with the log tail. 180s budget replaces the old
+        # fixed 60s.
+        run: .github/scripts/wait-for-api.sh "$(cat "$RUNNER_TEMP/api.pid")" "$RUNNER_TEMP/api.log"
 
       - name: Run authed a11y tests
         run: cd frontend && npm run test:a11y:authed
+
+      - name: Show API log
+        if: ${{ failure() }}
+        run: tail -n 100 "$RUNNER_TEMP/api.log" || true
 
       - name: Upload Playwright report
         if: ${{ failure() }}
@@ -522,6 +540,9 @@ jobs:
       E2E_ADMIN_LOGIN_ID: e2e-admin
       E2E_API_URL: http://localhost:8080
       NEXT_PUBLIC_API_URL: http://localhost:8080
+      # #1500: the readiness gate reads the app's boot-phase INFO lines
+      # (application_starting / application_started) from the API log.
+      LOG_LEVEL: INFO
       # OAuth test-IdP harness (#937): redirect the server-side GitHub exchange
       # at the Playwright-managed mock IdP on :9100.
       OAUTH_ENDPOINT_OVERRIDE_ENABLED: "true"
@@ -601,21 +622,28 @@ jobs:
         run: cd backend && python -m src.cli.seed_e2e_admin
 
       - name: Start API server
+        # Log to a file so the readiness gate below (and the on-failure dump)
+        # can see the app's own boot phases; the pid crosses steps via a file.
         run: |
           cd backend
-          python -m uvicorn src.api.main:app --host 0.0.0.0 --port 8080 --log-level warning &
-          for i in $(seq 1 30); do
-            if curl -sf http://localhost:8080/health >/dev/null; then
-              echo "API is up after $((i * 2))s"
-              exit 0
-            fi
-            sleep 2
-          done
-          echo "::error::API did not become healthy on :8080 within 60s"
-          exit 1
+          nohup python -m uvicorn src.api.main:app --host 0.0.0.0 --port 8080 --log-level warning \
+            > "$RUNNER_TEMP/api.log" 2>&1 &
+          echo "$!" > "$RUNNER_TEMP/api.pid"
+
+      - name: Wait for API readiness
+        # #1500: its own step so a slow or crashed boot is reported here as an
+        # environment failure — never as a locator timeout in the test step —
+        # and the message names the phase (import / lifespan / serving) the
+        # API was blocked in, with the log tail. 180s budget replaces the old
+        # fixed 60s.
+        run: .github/scripts/wait-for-api.sh "$(cat "$RUNNER_TEMP/api.pid")" "$RUNNER_TEMP/api.log"
 
       - name: Run OAuth account-linking E2E
         run: cd frontend && npm run test:e2e:oauth
+
+      - name: Show API log
+        if: ${{ failure() }}
+        run: tail -n 100 "$RUNNER_TEMP/api.log" || true
 
       - name: Upload Playwright report
         if: ${{ failure() }}
