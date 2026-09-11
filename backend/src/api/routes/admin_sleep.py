@@ -20,6 +20,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from starlette.responses import JSONResponse
 
 from auth.dependencies import AdminUser
+from config.constants import TOMBSTONE_PURGER_CLAUSE
 from db.base import get_db
 from models.auth import Context
 from models.sleep import SleepReport
@@ -366,8 +367,7 @@ _UNDO_ERROR_STATUS = {
             )
         },
         410: {
-            "description": "The merge loser was hard-deleted by the retention "
-            "policy (sleep_merge_retention_days) — no longer restorable."
+            "description": f"The merge loser was {TOMBSTONE_PURGER_CLAUSE} — no longer restorable."
         },
     },
 )

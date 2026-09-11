@@ -175,3 +175,22 @@ MAX_EMBEDDING_RETRIES = 3
 # Backoff before a failed embedding is eligible for auto-retry — gives a
 # transient condition time to clear and spaces retries across sweep ticks.
 EMBEDDING_RETRY_BACKOFF_SECONDS = 60
+
+# =============================================================================
+# Tombstone sweep (#1521)
+# =============================================================================
+# The platform-wide sweep (tasks/neural_tasks.cleanup_deleted_memories_task)
+# hard-deletes EVERY soft-deleted memory older than this window, regardless of
+# who tombstoned it. It runs whether or not Sleep maintenance is on, so it is
+# the outer bound on undo/rollback for merge losers, consolidation archives and
+# forget() rows alike; the Sleep retention windows can only make that shorter.
+CLEANUP_TOMBSTONE_RETENTION_DAYS_ENV = "CLEANUP_DELETED_MEMORIES_RETENTION_DAYS"
+CLEANUP_TOMBSTONE_RETENTION_DAYS_DEFAULT = 30
+# One clause, referenced by every message that explains a missing tombstone,
+# so the two purgers are always named together and the default is never
+# hand-copied.
+TOMBSTONE_PURGER_CLAUSE = (
+    "purged by the Sleep retention window (sleep_merge_retention_days) or the "
+    f"platform cleanup sweep ({CLEANUP_TOMBSTONE_RETENTION_DAYS_ENV}, default "
+    f"{CLEANUP_TOMBSTONE_RETENTION_DAYS_DEFAULT} days)"
+)

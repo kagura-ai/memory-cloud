@@ -6,11 +6,16 @@ Implements:
 """
 
 import os
+from typing import Any, cast
 
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.cron import CronTrigger
 from apscheduler.triggers.interval import IntervalTrigger
 
+from config.constants import (
+    CLEANUP_TOMBSTONE_RETENTION_DAYS_DEFAULT,
+    CLEANUP_TOMBSTONE_RETENTION_DAYS_ENV,
+)
 from db.base import get_db
 from neural.config import NeuralMemoryConfig
 from neural.decay import DecayManager
@@ -235,107 +240,85 @@ async def consolidation_task():
 
 
 def _sleep_enabled() -> bool:
-    """Whether Sleep maintenance (and therefore its retention lanes) is on.
-
-    Read at call time, not import time, so tests and operators flipping the
-    env var see the change without a restart of the scheduler module.
-    """
+    """Whether Sleep maintenance is on. Read at call time, not import time."""
     return os.getenv("SLEEP_ENABLED", "false").lower() == "true"
 
 
+def _cleanup_retention_days() -> int:
+    """The tombstone sweep window (#1521): ``CLEANUP_DELETED_MEMORIES_RETENTION_DAYS``.
+
+    Same env pattern as the other task knobs in this module. 0 disables the
+    sweep; an unparsable or negative value falls back to the default and is
+    logged, so a typo never silently turns into an aggressive purge.
+    """
+    raw = os.getenv(
+        CLEANUP_TOMBSTONE_RETENTION_DAYS_ENV, str(CLEANUP_TOMBSTONE_RETENTION_DAYS_DEFAULT)
+    )
+    try:
+        days = int(raw)
+    except ValueError:
+        days = -1
+    if days < 0:
+        logger.warning(
+            "cleanup_deleted_memories_retention_invalid",
+            value=raw,
+            fallback_days=CLEANUP_TOMBSTONE_RETENTION_DAYS_DEFAULT,
+        )
+        return CLEANUP_TOMBSTONE_RETENTION_DAYS_DEFAULT
+    return days
+
+
 async def cleanup_deleted_memories_task():
-    """Permanently delete soft-deleted memories older than 30 days that no
-    retention lane owns.
+    """Permanently delete every soft-deleted memory older than the sweep window.
 
-    Runs daily at 4 AM UTC to clean up old deleted memories from PostgreSQL.
-    Note: Qdrant entries are already deleted when memory is soft-deleted.
+    Runs daily at 4 AM UTC. Qdrant points are already removed at soft-delete
+    time (forget, merge, archive), so the PostgreSQL row is the only residue.
 
-    #1521: with ``SLEEP_ENABLED=true`` the Sleep retention phases own two
-    tombstone classes and this job must not purge them, or the documented
-    ``0 = retain forever`` default of their windows is silently false:
-
-    - sleep tombstones (merge losers + consolidation archives,
-      ``sleep_tombstone_predicate``) — bounded by ``sleep_merge_retention_days``
-    - user ``forget()`` tombstones in a LIVE context
-      (``user_tombstone_predicate`` + context alive) — bounded by
-      ``sleep_forget_retention_days``
-
-    What remains for this sweep is the residue neither lane touches: user-lane
-    tombstones whose context is soft-deleted, and rows with no context. With
-    Sleep disabled nothing else would ever purge, so the legacy 30-day sweep
-    over every tombstone is kept unchanged.
+    #1521: the window is ``CLEANUP_DELETED_MEMORIES_RETENTION_DAYS`` (default
+    30; 0 disables the sweep). It applies to every tombstone regardless of
+    ``deleted_by`` or context state — this sweep is what bounds the erasure of
+    a ``forget()`` row (#1336) and the reversibility of merges and archives in
+    deployments where Sleep never visits the row (Sleep off, ``sleep_mode=
+    'skip'``, dead contexts). The Sleep retention windows
+    (``sleep_merge_retention_days`` / ``sleep_forget_retention_days``) purge
+    earlier when set; they never extend past this one.
     """
     logger.info("cleanup_deleted_memories_task_started")
 
     try:
         from datetime import timedelta
 
+        retention_days = _cleanup_retention_days()
+        if retention_days == 0:
+            logger.info("cleanup_deleted_memories_disabled", reason="retention_days_zero")
+            return
+
         async for db in get_db():
-            memory_repo = MemoryRepository(db)
+            cutoff = utcnow() - timedelta(days=retention_days)
 
-            # Calculate cutoff date (30 days ago)
-            cutoff = utcnow() - timedelta(days=30)
+            from sqlalchemy import delete
+            from sqlalchemy.engine import CursorResult
 
-            # Find old deleted memories
-            from sqlalchemy import and_, func, or_, select
-
-            from models.auth import Context
             from models.memory import Memory
-            from services.sleep.merge_retention import user_tombstone_predicate
 
-            old_tombstone = and_(Memory.deleted_at.isnot(None), Memory.deleted_at < cutoff)
-            sleep_enabled = _sleep_enabled()
-            lane_owned = 0
-            if sleep_enabled:
-                # #1521: only the residue no Sleep lane owns. A sleep tombstone
-                # is excluded outright; a user-lane tombstone is excluded while
-                # its context is alive (the forget_retention lane's scope).
-                live_context = Memory.context_id.in_(
-                    select(Context.id).where(Context.deleted_at.is_(None))
+            # Set-based, like services.sleep.merge_retention.purge_tombstones:
+            # the predicate is evaluated at DELETE time, so a row restored by
+            # a concurrent undo/rollback (deleted_at back to NULL) survives.
+            result = await db.execute(
+                delete(Memory).where(
+                    Memory.deleted_at.is_not(None),
+                    Memory.deleted_at < cutoff,
                 )
-                unowned = and_(
-                    user_tombstone_predicate(),
-                    or_(Memory.context_id.is_(None), ~live_context),
-                )
-                total_old = (
-                    await db.execute(select(func.count()).select_from(Memory).where(old_tombstone))
-                ).scalar_one()
-                where = and_(old_tombstone, unowned)
-            else:
-                total_old = None
-                where = old_tombstone
-
-            result = await db.execute(select(Memory).where(where))
-            old_deleted = list(result.scalars().all())
-            if total_old is not None:
-                lane_owned = int(total_old) - len(old_deleted)
-
-            total_deleted = 0
-            for memory in old_deleted:
-                await memory_repo.delete(memory.id)
-                total_deleted += 1
-                # WHERE clause above filters Memory.deleted_at.isnot(None),
-                # so deleted_at is guaranteed non-None here. The assert
-                # narrows the type for pyright (which cannot infer through
-                # SQLAlchemy filter expressions).
-                assert memory.deleted_at is not None
-                logger.info(
-                    "old_deleted_memory_purged",
-                    memory_id=str(memory.id),
-                    deleted_at=to_utc_iso(memory.deleted_at),
-                    age_days=(utcnow() - memory.deleted_at).days,
-                )
-
+            )
+            # Result[Any] at type level, CursorResult at runtime (#1442).
+            purged = int(cast(CursorResult[Any], result).rowcount or 0)
             await db.commit()
 
             logger.info(
                 "cleanup_deleted_memories_task_completed",
-                purged=total_deleted,
+                purged=purged,
+                retention_days=retention_days,
                 cutoff=to_utc_iso(cutoff),
-                sleep_enabled=sleep_enabled,
-                # Tombstones past the cutoff left to the Sleep retention lanes
-                # (sleep_merge_retention_days / sleep_forget_retention_days).
-                lane_owned_skipped=lane_owned,
             )
             return
 
@@ -374,8 +357,8 @@ def schedule_neural_tasks(scheduler: AsyncIOScheduler) -> None:
     else:
         logger.info("consolidation_task_skipped", reason="sleep_maintenance_handles_this")
 
-    # Cleanup Deleted Memories: Daily at 4 AM UTC. Always scheduled; with
-    # SLEEP_ENABLED it sweeps only tombstones no retention lane owns (#1521).
+    # Cleanup Deleted Memories: Daily at 4 AM UTC. Always scheduled; the
+    # window is CLEANUP_DELETED_MEMORIES_RETENTION_DAYS (#1521, 0 disables).
     scheduler.add_job(
         cleanup_deleted_memories_task,
         trigger=CronTrigger(hour=4, minute=0),
