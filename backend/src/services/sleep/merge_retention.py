@@ -1,11 +1,14 @@
 """Merge-loser retention purge (#1209) — destructive deletion as an explicit,
 telemetered second step.
 
-Dedup merges soft-delete their losers (``deleted_by='sleep_maintenance'``),
-which keeps every merge reversible — and grows storage forever. This phase
+Dedup merges soft-delete their losers (``deleted_by='sleep_maintenance'``)
+and, since #1520, consolidation soft-deletes its archives
+(``deleted_by='sleep_consolidation'``); both keep the action reversible via
+``rollback_sleep_run`` — and grow storage forever. This phase
 implements the declared retention window: when
-``sleep_merge_retention_days > 0``, merge losers whose soft-deletion is older
-than the window are hard-deleted, and the run's audit log records a batch
+``sleep_merge_retention_days > 0``, Sleep tombstones (every ``deleted_by`` in
+``SLEEP_TOMBSTONE_DELETED_BY``) whose soft-deletion is older than the window
+are hard-deleted, and the run's audit log records a batch
 summary (one action, not one row per purge — a large backlog must not explode
 ``sleep_actions``).
 
@@ -24,21 +27,65 @@ from datetime import timedelta
 from typing import TYPE_CHECKING
 from uuid import UUID
 
-from sqlalchemy import delete, select
+from sqlalchemy import ColumnElement, Update, delete, or_, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 if TYPE_CHECKING:
     from neural.config import NeuralMemoryConfig
     from services.sleep.reporter import SleepBudget, SleepReporter
 
-from models.memory import Memory
+from models.auth import Context
+from models.memory import SLEEP_TOMBSTONE_DELETED_BY, Memory
 from services.sleep.reporter import PhaseResult
 from utils.datetime import utcnow
 from utils.logger import get_logger
 
 logger = get_logger(__name__)
 
-_MERGE_DELETED_BY = "sleep_maintenance"
+
+def sleep_tombstone_predicate() -> ColumnElement[bool]:
+    """Rows Sleep maintenance tombstoned: merge losers AND consolidation archives
+    (#1520). Both are restorable via ``rollback_sleep_run`` and both are purged
+    by ``sleep_merge_retention_days``."""
+    return Memory.deleted_by.in_(sorted(SLEEP_TOMBSTONE_DELETED_BY))
+
+
+def user_tombstone_predicate() -> ColumnElement[bool]:
+    """The complement: forget() rows (``deleted_by`` = actor sub) and legacy
+    NULL rows that predate the column. Derived from the same set so a new sleep
+    tombstone class can never fall into the user-forget window by omission."""
+    return or_(
+        Memory.deleted_by.is_(None),
+        Memory.deleted_by.not_in(sorted(SLEEP_TOMBSTONE_DELETED_BY)),
+    )
+
+
+def restore_sleep_tombstone_stmt(memory_id: UUID, user_id: str, *, deleted_by: str) -> Update:
+    """The one UPDATE that un-tombstones a sleep-maintained row (#1520 review).
+
+    ``rowcount == 1`` must mean "a sleep tombstone of exactly this class was
+    restored", never "some row for this user exists": the WHERE requires the
+    row to be deleted, to carry the named ``deleted_by`` (a user's forget()
+    tombstone under a stale archive/merge action is refused, mirroring the
+    per-merge undo's ``not_merge_deleted``), and to live in a context that is
+    not soft-deleted (a rollback must not plant a live row + vector inside a
+    deleted context, where no retention sweep can reach it).
+    """
+    live_context = or_(
+        Memory.context_id.is_(None),
+        Memory.context_id.in_(select(Context.id).where(Context.deleted_at.is_(None))),
+    )
+    return (
+        update(Memory)
+        .where(
+            Memory.id == memory_id,
+            Memory.user_id == user_id,
+            Memory.deleted_at.is_not(None),
+            Memory.deleted_by == deleted_by,
+            live_context,
+        )
+        .values(deleted_at=None, deleted_by=None)
+    )
 
 
 async def purge_tombstones(
@@ -166,7 +213,7 @@ class MergeRetentionPhase:
         return await purge_tombstones(
             self.db,
             phase_name="merge_retention",
-            deleted_by_predicate=(Memory.deleted_by == _MERGE_DELETED_BY),
+            deleted_by_predicate=sleep_tombstone_predicate(),
             retention_days=int(getattr(config, "sleep_merge_retention_days", 0) or 0),
             user_id=user_id,
             workspace_id=workspace_id,

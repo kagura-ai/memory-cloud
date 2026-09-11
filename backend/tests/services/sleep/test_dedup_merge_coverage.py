@@ -1110,6 +1110,34 @@ class TestFetchActiveMemoriesRealDB:
         assert pinned.id not in ids  # pinned excluded
 
 
+class TestSoftDeleteRealDB:
+    """#1520: the tombstone write consolidation's archive branch uses."""
+
+    async def test_soft_delete_stamps_tombstone_and_reports_rowcount(self, db_session):
+        from repositories.memory import MemoryRepository
+
+        user = f"sd-user-{uuid4()}"
+        row = Memory(
+            id=uuid4(),
+            user_id=user,
+            summary="to archive",
+            content="c",
+            type="note",
+            client="pytest",
+            scope="working",
+        )
+        db_session.add(row)
+        await db_session.flush()
+
+        repo = MemoryRepository(db_session)
+        assert await repo.soft_delete(row.id, deleted_by="sleep_consolidation") == 1
+        await db_session.refresh(row)
+        assert row.deleted_at is not None
+        assert row.deleted_by == "sleep_consolidation"
+        # A row that is not there (hard-deleted, or never existed) is 0, not an error.
+        assert await repo.soft_delete(uuid4(), deleted_by="sleep_consolidation") == 0
+
+
 # ---------------------------------------------------------------------------
 # _split_oversize_cluster (#1184)
 # ---------------------------------------------------------------------------

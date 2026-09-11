@@ -47,7 +47,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from models.auth import Context, ContextReadAttribution, UsageStats
 from models.config import ContextSearchConfig
-from models.memory import Memory, NeuralMemoryEdge
+from models.memory import DELETED_BY_SLEEP_MERGE, Memory, NeuralMemoryEdge
 from models.sleep import SleepReport
 from utils.datetime import to_utc_iso, utcnow
 from utils.logger import get_logger
@@ -390,7 +390,7 @@ class MemoryHealthService:
         """Soft-deleted merge losers per context: count + oldest age (days)."""
         conditions = [
             Memory.user_id == user_id,
-            Memory.deleted_by == "sleep_maintenance",
+            Memory.deleted_by == DELETED_BY_SLEEP_MERGE,
             Memory.deleted_at.is_not(None),
         ]
         if scope is not _ALL:

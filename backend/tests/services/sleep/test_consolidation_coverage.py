@@ -91,7 +91,7 @@ def _build_phase(memories):
         phase = ConsolidationPhase(db, llm)
     phase.memory_repo = AsyncMock()
     phase.memory_repo.promote_to_persistent = AsyncMock()
-    phase.memory_repo.delete = AsyncMock()
+    phase.memory_repo.soft_delete = AsyncMock(return_value=1)
     phase._fetch_working_memories = AsyncMock(return_value=memories)
     return phase, llm
 
@@ -162,7 +162,7 @@ class TestLLMBorderlinePath:
         assert result.details["llm_promoted"] == 0
         assert result.details["llm_archived"] == 0
         phase.memory_repo.promote_to_persistent.assert_not_called()
-        phase.memory_repo.delete.assert_not_called()
+        phase.memory_repo.soft_delete.assert_not_called()
         # complete_json must never be reached when the provider is empty.
         llm.complete_json.assert_not_called()
 
@@ -203,7 +203,7 @@ class TestLLMBorderlinePath:
 
         assert result.details["llm_archived"] == 0
         assert result.details["llm_archive_guarded"] == 0
-        phase.memory_repo.delete.assert_not_called()
+        phase.memory_repo.soft_delete.assert_not_called()
 
     @pytest.mark.asyncio
     async def test_llm_archive_connected_memory_is_protected(self):
@@ -235,7 +235,7 @@ class TestLLMBorderlinePath:
 
         assert result.details["llm_archive_guarded"] == 0
         assert result.details["llm_archived"] == 0
-        phase.memory_repo.delete.assert_not_called()
+        phase.memory_repo.soft_delete.assert_not_called()
 
     @pytest.mark.asyncio
     async def test_archive_backstop_still_deletes_eligible_isolated(self):
@@ -280,7 +280,9 @@ class TestLLMBorderlinePath:
 
         assert result.details["llm_archive_guarded"] == 0
         assert result.details["llm_archived"] == 1
-        phase.memory_repo.delete.assert_awaited_once_with(mem.id)
+        phase.memory_repo.soft_delete.assert_awaited_once_with(
+            mem.id, deleted_by="sleep_consolidation"
+        )
 
     @pytest.mark.asyncio
     async def test_llm_keep_decision_is_noop(self):
@@ -294,7 +296,7 @@ class TestLLMBorderlinePath:
         assert result.details["llm_promoted"] == 0
         assert result.details["llm_archived"] == 0
         phase.memory_repo.promote_to_persistent.assert_not_called()
-        phase.memory_repo.delete.assert_not_called()
+        phase.memory_repo.soft_delete.assert_not_called()
 
     @pytest.mark.asyncio
     async def test_budget_exhausted_skips_llm_batches(self):
@@ -586,9 +588,11 @@ class TestRuleDeleteFailure:
 
     @pytest.mark.asyncio
     async def test_qdrant_delete_failure_is_swallowed(self):
-        # adoption==0, old, isolated, post-cutoff → should_delete True. Make the
-        # qdrant delete raise → the except branch logs and the row is NOT
-        # counted as deleted (and the DB delete is never reached).
+        # adoption==0, old, isolated, post-cutoff → should_delete True. The row
+        # is stamped FIRST (#1520 review: a soft-deleted context keeps its
+        # points, so the vector must never go before the tombstone). A qdrant
+        # failure after the stamp is logged, and the tombstone still counts and
+        # is recorded — otherwise rollback could not restore a row that IS gone.
         cutoff = utcnow() - timedelta(days=90)
         mem = _make_memory(
             reference_count=0,
@@ -611,8 +615,10 @@ class TestRuleDeleteFailure:
         ):
             result = await phase.execute(_make_config(provider=""), "u", "ws", "ctx", SleepBudget())
 
-        assert result.details["rule_deleted"] == 0
-        phase.memory_repo.delete.assert_not_called()
+        assert result.details["rule_deleted"] == 1
+        phase.memory_repo.soft_delete.assert_awaited_once_with(
+            mem.id, deleted_by="sleep_consolidation"
+        )
 
     @pytest.mark.asyncio
     async def test_rule_delete_success_records_archive_action(self):
@@ -648,7 +654,9 @@ class TestRuleDeleteFailure:
             )
 
         assert result.details["rule_deleted"] == 1
-        phase.memory_repo.delete.assert_awaited_once_with(mem.id)
+        phase.memory_repo.soft_delete.assert_awaited_once_with(
+            mem.id, deleted_by="sleep_consolidation"
+        )
         reporter.add_action.assert_awaited_once()
         _, kwargs = reporter.add_action.call_args
         assert kwargs["action_type"] == "archive"

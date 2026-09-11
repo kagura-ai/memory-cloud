@@ -9,9 +9,12 @@ coordinates included, via the WHERE axis) persisted at rest forever. When
 the window are hard-deleted, audited as one batch-summary action.
 
 Selection is the complement of merge_retention's: ``deleted_by`` is the
-forgetting user's sub (or NULL on legacy rows), never the
-``sleep_maintenance`` merge sentinel — merge losers keep their own window
-(``sleep_merge_retention_days``) and undo path. The sweep mechanics
+forgetting user's sub (or NULL on legacy rows), never one of the Sleep
+sentinels in ``SLEEP_TOMBSTONE_DELETED_BY`` (merge losers and, since #1520,
+consolidation archives) — those keep their own window
+(``sleep_merge_retention_days``) and undo path. The complement is derived
+from that set (``user_tombstone_predicate``), so a new Sleep tombstone class
+can never fall into this window by omission. The sweep mechanics
 (TOCTOU-guarded DELETE, budget exemption, batch audit) are shared with
 merge_retention via ``purge_tombstones`` so the two phases cannot drift.
 
@@ -23,7 +26,7 @@ from __future__ import annotations
 from typing import TYPE_CHECKING
 from uuid import UUID
 
-from sqlalchemy import and_, or_, select
+from sqlalchemy import and_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 if TYPE_CHECKING:
@@ -32,7 +35,7 @@ if TYPE_CHECKING:
 
 from models.auth import Context
 from models.memory import Memory
-from services.sleep.merge_retention import _MERGE_DELETED_BY, purge_tombstones
+from services.sleep.merge_retention import purge_tombstones, user_tombstone_predicate
 from services.sleep.reporter import PhaseResult
 
 
@@ -58,18 +61,18 @@ class ForgetRetentionPhase:
         No-op (skipped) when the retention window is disabled (<= 0).
         """
         # NULL deleted_by = legacy user-forget rows that predate the column
-        # being written; the sentinel exclusion keeps merge losers on their
-        # own retention window. deleted_by is deliberately NOT pinned to
+        # being written; the sentinel exclusion keeps sleep tombstones (merge
+        # losers + consolidation archives, #1520) on their own retention window. deleted_by is deliberately NOT pinned to
         # this run's user sub: forget() records the ACTOR, so a teammate's
         # forget on this user's memory writes the teammate's sub — pinning
         # would strand those tombstones forever (no sleep run ever matches
         # them). With the live-context guard below, every remaining
         # non-merge tombstone is a forget() row whose point and edges were
         # already deleted at soft-delete time.
-        not_merge_loser = or_(
-            Memory.deleted_by.is_(None),
-            Memory.deleted_by != _MERGE_DELETED_BY,
-        )
+        # #1520: derived from SLEEP_TOMBSTONE_DELETED_BY (merge losers AND
+        # consolidation archives) so a new sleep tombstone class cannot land
+        # in this window by omission.
+        not_sleep_tombstone = user_tombstone_predicate()
         # Context soft-delete (#84 recovery design) tombstones its memories
         # with deleted_by=<user sub> too — but deliberately KEEPS their
         # Qdrant points for recovery, and they are indistinguishable from
@@ -85,7 +88,7 @@ class ForgetRetentionPhase:
         return await purge_tombstones(
             self.db,
             phase_name="forget_retention",
-            deleted_by_predicate=and_(not_merge_loser, in_live_context),
+            deleted_by_predicate=and_(not_sleep_tombstone, in_live_context),
             retention_days=int(getattr(config, "sleep_forget_retention_days", 0) or 0),
             user_id=user_id,
             workspace_id=workspace_id,
