@@ -504,6 +504,72 @@ async def test_upsert_forwards_delivery_mode_and_reuses_remember_persistence(ser
     assert "stays pinned" in result.persistence.detail
 
 
+@pytest.mark.asyncio
+async def test_upsert_replacement_inherits_existing_pin_when_omitted(service, sleep_pass):
+    """#1519 (Copilot review on PR #1522): UpdateMemoryRequest.delivery_mode=None
+    means "unchanged". Replacing a pinned external_id row without restating the
+    pin must forward the existing row's 'always' — otherwise RememberRequest's
+    default (on_recall) silently unpins it and forget() removes the pinned row."""
+    from models.schemas import UpdateMemoryRequest
+
+    existing = MagicMock()
+    existing.id = uuid4()
+    existing.delivery_mode = "always"
+    service.memory_repo.get_by_resource_id = AsyncMock(return_value=existing)
+    remembered = MagicMock()
+    remembered.memory_id = uuid4()
+    remembered.scope = "persistent"
+    remembered.persistence = persistence_info("persistent", pinned=True)
+    service.remember = AsyncMock(return_value=remembered)
+    service.forget = AsyncMock()
+
+    result = await service._upsert_by_external_id(
+        UpdateMemoryRequest(
+            external_id="pinned-resource",
+            summary="Replacement body, pin not restated",
+            content="content",
+            type="note",
+        ),
+        user_id="test_user",
+    )
+
+    forwarded = service.remember.await_args.args[0]
+    assert forwarded.delivery_mode == "always"
+    assert result.operation == "replaced"
+
+
+@pytest.mark.asyncio
+async def test_upsert_explicit_delivery_mode_overrides_existing_pin(service, sleep_pass):
+    """An explicit on_recall on the replacement is a deliberate unpin and wins
+    over the existing row's 'always'."""
+    from models.schemas import UpdateMemoryRequest
+
+    existing = MagicMock()
+    existing.id = uuid4()
+    existing.delivery_mode = "always"
+    service.memory_repo.get_by_resource_id = AsyncMock(return_value=existing)
+    remembered = MagicMock()
+    remembered.memory_id = uuid4()
+    remembered.scope = "persistent"
+    remembered.persistence = persistence_info("persistent")
+    service.remember = AsyncMock(return_value=remembered)
+    service.forget = AsyncMock()
+
+    await service._upsert_by_external_id(
+        UpdateMemoryRequest(
+            external_id="pinned-resource",
+            summary="Replacement that deliberately unpins",
+            content="content",
+            type="note",
+            delivery_mode="on_recall",
+        ),
+        user_id="test_user",
+    )
+
+    forwarded = service.remember.await_args.args[0]
+    assert forwarded.delivery_mode == "on_recall"
+
+
 def test_every_write_response_construction_populates_persistence():
     """No construction site may omit the field.
 

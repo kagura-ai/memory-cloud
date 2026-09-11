@@ -188,6 +188,9 @@ class TestUpsertByExternalId:
         """When external_id found, should remember new then forget old."""
         existing = MagicMock()
         existing.id = uuid4()
+        # #1519: a replacement inherits the existing row's delivery_mode when the
+        # request omits it, so the stub must carry a real value.
+        existing.delivery_mode = "on_recall"
         service.memory_repo.get_by_resource_id = AsyncMock(return_value=existing)
 
         new_memory_id = uuid4()

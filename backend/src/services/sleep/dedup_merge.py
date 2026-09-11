@@ -226,6 +226,10 @@ class _MergeTally:
     rescued: int = 0
     unverifiable: int = 0
     settled_skipped: int = 0
+    # #1519: pairs whose winner or loser was pinned (delivery_mode='always'),
+    # deleted or gone between the candidate fetch and merge execution — the
+    # execution-time recheck refused them (neither mode mutated anything).
+    skipped_pinned: int = 0
 
 
 class DedupMergePhase:
@@ -435,11 +439,21 @@ class DedupMergePhase:
         for winner_id, loser_id, winner, loser, audit in merge_jobs:
             prior_edge: dict[str, Any] | None = None
             if shadow_mode:
-                prior_edge = await self._execute_shadow_merge(
+                executed, prior_edge = await self._execute_shadow_merge(
                     winner, loser, user_id, workspace_id, context_id
                 )
             else:
-                await self._execute_merge(winner, loser, user_id, workspace_id, context_id)
+                executed = await self._execute_merge(
+                    winner, loser, user_id, workspace_id, context_id
+                )
+            # #1519: the executor re-checks pin state under a row lock and
+            # returns False when it refused — no audit row, no changed id,
+            # not counted as merged (rollback would otherwise "restore" a
+            # merge that never happened).
+            if not executed:
+                tally.skipped_pinned += 1
+                continue
+            if not shadow_mode:
                 result.changed_memory_ids.add(winner_id)
             tally.merged += 1
 
@@ -684,6 +698,9 @@ class DedupMergePhase:
             # #1232: judge re-nominations of pairs a supersedes edge already
             # settled (shadow mode) — skipped, never guarded/rescued.
             "settled_decisions_skipped": tally.settled_skipped,
+            # #1519: planned merges refused at execution because a row was
+            # pinned/deleted after the candidate fetch (both modes).
+            "skipped_pinned": tally.skipped_pinned,
             # #1195/#1198: LLM winner picks flipped by the deterministic
             # winner rules — a direct measure of residual judge misdirection
             # the prompt alone would have let through.
@@ -1198,7 +1215,7 @@ class DedupMergePhase:
         user_id: str,
         workspace_id: str | None,
         context_id: str | None,
-    ) -> dict[str, Any] | None:
+    ) -> tuple[bool, dict[str, Any] | None]:
         """#1208 shadow-mode merge: record succession, mutate nothing.
 
         Creates a ``supersedes`` edge (src=winner, dst=loser,
@@ -1217,14 +1234,19 @@ class DedupMergePhase:
         avoid burning judge budget on settled pairs).
 
         Returns:
-            Snapshot of the pre-merge edge state (type/origin/weight/
-            confidence/metadata) when the upsert retyped an existing
-            non-supersedes edge, else None. The caller stamps it into the
-            merge action's details as ``prior_edge`` so undo/rollback can
-            RESTORE the original association instead of deleting the row.
+            ``(executed, prior_edge)``. ``executed`` is False when the #1519
+            execution-time recheck refused the pair (a row was pinned or
+            deleted after the candidate fetch) — nothing was written.
+            ``prior_edge`` is a snapshot of the pre-merge edge state
+            (type/origin/weight/confidence/metadata) when the upsert retyped
+            an existing non-supersedes edge, else None. The caller stamps it
+            into the merge action's details as ``prior_edge`` so undo/rollback
+            can RESTORE the original association instead of deleting the row.
         """
         if not winner or not loser:
-            return None
+            return False, None
+        if await self._pinned_or_gone_since_fetch(winner, loser):
+            return False, None
         from models.memory import EDGE_ORIGIN_SEMANTIC, EDGE_TYPE_SUPERSEDES
 
         prior = await self.edge_repo.get_edge(
@@ -1258,7 +1280,7 @@ class DedupMergePhase:
             loser_id=str(loser.id),
             retyped_prior_edge=prior_edge is not None,
         )
-        return prior_edge
+        return True, prior_edge
 
     async def _filter_already_superseded_pairs(
         self,
@@ -1315,10 +1337,18 @@ class DedupMergePhase:
         user_id: str,
         workspace_id: str | None,
         context_id: str | None,
-    ) -> None:
-        """Execute a merge: soft-delete loser, transfer edges and tags to winner."""
+    ) -> bool:
+        """Execute a merge: soft-delete loser, transfer edges and tags to winner.
+
+        Returns:
+            True when the merge ran; False when it was refused because a row
+            was pinned/deleted after the candidate fetch (#1519) or a side is
+            missing. Nothing is written on False.
+        """
         if not winner or not loser:
-            return
+            return False
+        if await self._pinned_or_gone_since_fetch(winner, loser):
+            return False
 
         winner_tags = set(winner.tags or [])
         loser_tags = set(loser.tags or [])
@@ -1367,3 +1397,42 @@ class DedupMergePhase:
             loser_id=str(loser.id),
             merged_tags=len(merged_tags),
         )
+        return True
+
+    async def _pinned_or_gone_since_fetch(self, winner: Memory, loser: Memory) -> bool:
+        """#1519: re-check both rows under a row lock right before writing.
+
+        ``_fetch_active_memories`` excludes pinned rows, but embedding and the
+        optional LLM judge run between that fetch and execution — long enough
+        for another session to pin (``delivery_mode='always'``) or forget one
+        side. ``SELECT ... FOR UPDATE`` inside the phase transaction serializes
+        against a concurrent ``update_memory``/``forget`` so the state read here
+        is the state the merge would act on. Returns True (refuse) when either
+        row is now pinned, soft-deleted, or missing.
+        """
+        rows = (
+            await self.db.execute(
+                select(Memory.id, Memory.delivery_mode, Memory.deleted_at)
+                .where(Memory.id.in_([winner.id, loser.id]))
+                .with_for_update()
+            )
+        ).all()
+        state = {row.id: row for row in rows}
+        reasons: list[str] = []
+        for label, memory in (("winner", winner), ("loser", loser)):
+            row = state.get(memory.id)
+            if row is None:
+                reasons.append(f"{label}_missing")
+            elif row.deleted_at is not None:
+                reasons.append(f"{label}_deleted")
+            elif row.delivery_mode == DELIVERY_MODE_ALWAYS:
+                reasons.append(f"{label}_pinned")
+        if not reasons:
+            return False
+        logger.info(
+            "dedup_merge_skipped_pinned",
+            winner_id=str(winner.id),
+            loser_id=str(loser.id),
+            reasons=reasons,
+        )
+        return True

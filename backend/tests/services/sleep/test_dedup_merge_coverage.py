@@ -17,9 +17,9 @@ from unittest.mock import AsyncMock, MagicMock, patch
 from uuid import uuid4
 
 import pytest
-from sqlalchemy import select
+from sqlalchemy import select, update
 
-from models.memory import Memory
+from models.memory import DELIVERY_MODE_ALWAYS, Memory
 from services.sleep.dedup_merge import (
     AUTO_MERGE_THRESHOLD,
     MAX_CLUSTER_SIZE,
@@ -611,6 +611,131 @@ class TestExecuteMergeRealDB:
 
         del_qdrant.assert_not_called()
         phase.edge_repo.transfer_edges.assert_not_called()
+
+
+# ---------------------------------------------------------------------------
+# #1519: execution-time pin recheck (real db_session)
+# ---------------------------------------------------------------------------
+
+
+class TestPinRecheckAtExecution:
+    """#1519 (Copilot review on PR #1522): ``_fetch_active_memories`` excludes
+    pinned rows, but embedding + the LLM judge run between that fetch and the
+    merge. A row pinned (``delivery_mode='always'``) or forgotten in that
+    window must be refused at execution — in BOTH modes — with nothing
+    written and the pair reported as skipped, not merged."""
+
+    async def _phase_for_db(self, db_session):
+        with (
+            patch("services.sleep.dedup_merge.NeuralEdgeRepository"),
+            patch("services.sleep.dedup_merge.EmbeddingService"),
+        ):
+            phase = DedupMergePhase(db_session, AsyncMock())
+        phase.edge_repo = AsyncMock()
+        phase.edge_repo.transfer_edges = AsyncMock(return_value=0)
+        phase.edge_repo.get_edge = AsyncMock(return_value=None)
+        phase.edge_repo.create_or_update_edge = AsyncMock()
+        return phase
+
+    async def _pin_after_fetch(self, db_session, memory_id):
+        """Model another session pinning the row after the candidate fetch."""
+        await db_session.execute(
+            update(Memory).where(Memory.id == memory_id).values(delivery_mode=DELIVERY_MODE_ALWAYS)
+        )
+
+    async def test_remove_mode_loser_pinned_after_fetch_is_refused(self, db_session):
+        winner = await _make_db_memory(db_session, summary="w", tags=["a"])
+        loser = await _make_db_memory(db_session, summary="l", tags=["b"])
+        phase = await self._phase_for_db(db_session)
+        await self._pin_after_fetch(db_session, loser.id)
+
+        with patch(
+            "services.sleep.dedup_merge.delete_memory_from_qdrant", new_callable=AsyncMock
+        ) as del_qdrant:
+            executed = await phase._execute_merge(winner, loser, "dedup-user", None, None)
+
+        assert executed is False
+        loser_row = (
+            await db_session.execute(
+                select(Memory.deleted_at, Memory.delivery_mode).where(Memory.id == loser.id)
+            )
+        ).one()
+        assert loser_row.deleted_at is None  # still alive
+        assert loser_row.delivery_mode == DELIVERY_MODE_ALWAYS
+        w_tags = (
+            await db_session.execute(select(Memory.tags).where(Memory.id == winner.id))
+        ).scalar_one()
+        assert list(w_tags) == ["a"]  # no tag union either
+        del_qdrant.assert_not_called()
+        phase.edge_repo.transfer_edges.assert_not_called()
+
+    async def test_shadow_mode_winner_pinned_after_fetch_is_refused(self, db_session):
+        winner = await _make_db_memory(db_session, summary="w", tags=["a"])
+        loser = await _make_db_memory(db_session, summary="l", tags=["b"])
+        phase = await self._phase_for_db(db_session)
+        await self._pin_after_fetch(db_session, winner.id)
+
+        executed, prior = await phase._execute_shadow_merge(winner, loser, "dedup-user", None, None)
+
+        assert executed is False
+        assert prior is None
+        phase.edge_repo.create_or_update_edge.assert_not_called()
+
+    async def test_loser_forgotten_after_fetch_is_refused(self, db_session):
+        """The same window covers a concurrent forget(): merging into a
+        soft-deleted loser would still union its tags and transfer edges."""
+        winner = await _make_db_memory(db_session, summary="w", tags=["a"])
+        loser = await _make_db_memory(db_session, summary="l", tags=["b"])
+        phase = await self._phase_for_db(db_session)
+        await db_session.execute(
+            update(Memory).where(Memory.id == loser.id).values(deleted_at=utcnow())
+        )
+
+        with patch("services.sleep.dedup_merge.delete_memory_from_qdrant", new_callable=AsyncMock):
+            executed = await phase._execute_merge(winner, loser, "dedup-user", None, None)
+
+        assert executed is False
+        phase.edge_repo.transfer_edges.assert_not_called()
+
+    async def test_unpinned_pair_still_merges_in_both_modes(self, db_session):
+        winner = await _make_db_memory(db_session, summary="w", tags=["a"])
+        loser = await _make_db_memory(db_session, summary="l", tags=["b"])
+        phase = await self._phase_for_db(db_session)
+
+        executed, prior = await phase._execute_shadow_merge(winner, loser, "dedup-user", None, None)
+        assert executed is True
+        assert prior is None
+        phase.edge_repo.create_or_update_edge.assert_awaited_once()
+
+        with patch("services.sleep.dedup_merge.delete_memory_from_qdrant", new_callable=AsyncMock):
+            executed = await phase._execute_merge(winner, loser, "dedup-user", None, None)
+        assert executed is True
+        loser_deleted_at = (
+            await db_session.execute(select(Memory.deleted_at).where(Memory.id == loser.id))
+        ).scalar_one()
+        assert loser_deleted_at is not None
+
+    async def test_refused_merge_is_not_counted_or_audited(self, dedup_phase):
+        """Orchestration contract: a refused pair adds no audit row, no
+        changed id, and lands in ``skipped_pinned`` rather than ``merged``."""
+        mem_a = _make_memory(importance=0.8, tags=["t1"])
+        mem_b = _make_memory(importance=0.3, tags=["t2"])
+        config = _make_config(provider="")
+        dedup_phase._fetch_active_memories = AsyncMock(return_value=[mem_a, mem_b])
+        dedup_phase._find_similar_pairs = AsyncMock(return_value=[(mem_a.id, mem_b.id, 0.99)])
+        dedup_phase._execute_merge = AsyncMock(return_value=False)
+        reporter = AsyncMock()
+
+        result = await dedup_phase.execute(
+            config, "u", "ws", "ctx", SleepBudget(), reporter=reporter, report_id=uuid4()
+        )
+
+        assert result.success is True
+        assert result.details["merged"] == 0
+        assert result.details["skipped_pinned"] == 1
+        assert result.changed_memory_ids == set()
+        dedup_phase._execute_merge.assert_awaited_once()
+        reporter.add_action.assert_not_awaited()
 
 
 # ---------------------------------------------------------------------------

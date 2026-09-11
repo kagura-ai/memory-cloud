@@ -1515,6 +1515,15 @@ class MemoryService:
         # Build details with resource_id preserved (copy to avoid mutating request)
         details = {**(request.details or {}), "resource_id": request.external_id}
 
+        # #1519: forward the caller's pin — without it a pinned external_id row
+        # was replaced by an unpinned one and left load_pinned() silently.
+        # UpdateMemoryRequest's None means "unchanged", so on a replacement the
+        # row being replaced supplies the value; only a brand-new external_id
+        # (no existing row) falls through to remember()'s default.
+        delivery_mode = request.delivery_mode
+        if delivery_mode is None and existing is not None:
+            delivery_mode = existing.delivery_mode
+
         # Create new memory first (before deleting old — prevents data loss on failure)
         remember_request = RememberRequest(
             summary=request.summary,
@@ -1525,15 +1534,7 @@ class MemoryService:
             importance=request.importance if request.importance is not None else 0.5,
             tags=request.tags or [],
             context=request.context,
-            # #1519: forward the caller's pin — without it a pinned external_id
-            # row was replaced by an unpinned one and left load_pinned() silently.
-            # UpdateMemoryRequest's None means "unchanged"; RememberRequest has no
-            # None, so only a set value is forwarded and remember() keeps its default.
-            **(
-                {"delivery_mode": request.delivery_mode}
-                if request.delivery_mode is not None
-                else {}
-            ),
+            **({"delivery_mode": delivery_mode} if delivery_mode is not None else {}),
         )
 
         # #1286 (P0-5) audit note: the upsert path intentionally emits NO
