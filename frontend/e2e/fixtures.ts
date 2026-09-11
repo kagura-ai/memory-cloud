@@ -30,13 +30,23 @@ export async function assertNoColorContrastViolations(
  * the network busy indefinitely (Issue #780, surfaced by Copilot on PR #790).
  * Wait on a visible landmark instead. The default landmark set is broad enough
  * to cover form, hero, and authenticated-shell layouts.
+ *
+ * One retry on a 5xx: `next dev` compiles a route on its first request, and two
+ * routes compiling at once can make the first response a 500 ("Unexpected end
+ * of JSON input") that the next request no longer reproduces (#1500). The
+ * `setup` project warms every route first (e2e/warmup.setup.ts); this is the
+ * backstop for a route that was not on that list.
  */
 export async function gotoAndWaitStable(
   page: Page,
   path: string,
   landmark = "h1, form, main button, main",
 ): Promise<void> {
-  await page.goto(path, { waitUntil: "domcontentloaded" });
+  const response = await page.goto(path, { waitUntil: "domcontentloaded" });
+  if (response && response.status() >= 500) {
+    await page.waitForTimeout(1_000);
+    await page.goto(path, { waitUntil: "domcontentloaded" });
+  }
   await page.locator(landmark).first().waitFor({
     state: "visible",
     timeout: 15_000,
