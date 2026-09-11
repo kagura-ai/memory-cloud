@@ -6003,9 +6003,17 @@ async def process_pending_embedding(memory_id: UUID) -> None:
             # embedding_retry_count (#979): the retry budget is per
             # failure-episode, not a lifetime tally — a later, unrelated
             # failure must get the full MAX_EMBEDDING_RETRIES budget again.
-            await db.execute(
+            #
+            # #1525: only while this worker still owns the claim. An embedding
+            # migration's switch re-queues rows to `pending` after flipping
+            # the context's routing; this worker resolved the OLD routing and
+            # wrote to the old collection. Stamping `success` here would hide
+            # that row from the sweep for good. If the claim is gone, leave
+            # the row as the re-queue left it and let the sweep redo it under
+            # the new routing.
+            done = await db.execute(
                 update(Memory)
-                .where(Memory.id == memory_id)
+                .where(Memory.id == memory_id, Memory.embedding_status == "processing")
                 .values(
                     embedding_status="success",
                     embedding_error=None,
@@ -6013,6 +6021,13 @@ async def process_pending_embedding(memory_id: UUID) -> None:
                 )
             )
             await db.commit()
+            if int(getattr(done, "rowcount", 0) or 0) == 0:
+                logger.info(
+                    "embedding_claim_lost",
+                    memory_id=str(memory_id),
+                    collection=collection,
+                )
+                return
 
             logger.info("embedding_completed", memory_id=str(memory_id))
 
@@ -6063,17 +6078,26 @@ async def process_pending_embedding(memory_id: UUID) -> None:
             values = embedding_failure_values(e, utcnow())
 
             final_count: int | None = None
+            claim_lost = False
             try:
+                # #1525: same fence as the success write — a row re-queued
+                # (`pending`) by a migration switch must not be marked failed
+                # by the worker that lost it.
                 result = await db.execute(
                     update(Memory)
-                    .where(Memory.id == memory_id)
+                    .where(Memory.id == memory_id, Memory.embedding_status == "processing")
                     .values(**values)
                     .returning(Memory.embedding_retry_count)
                 )
                 final_count = result.scalar_one_or_none()
+                claim_lost = final_count is None
                 await db.commit()
             except Exception:
                 logger.warning("embedding_status_update_failed", memory_id=str(memory_id))
+
+            if claim_lost:
+                logger.info("embedding_claim_lost", memory_id=str(memory_id), error=str(e))
+                return
 
             # #1496: the transition that matters to an operator is the one into
             # a state nothing will ever retry. Give it its OWN event name so it
