@@ -361,3 +361,57 @@ class TestVocabularyIsScopedToTheCaller:
             tags=["dev-env"],
         )
         assert [h.code for h in hints] == []
+
+
+class TestVocabularyCacheOnTheWritePath:
+    """#1512: lint reads the vocabulary through the per-context TTL cache."""
+
+    @pytest.mark.asyncio
+    async def test_repeated_writes_share_one_aggregate(self):
+        db = _db_with_vocabulary({"auth": 12})
+        for _ in range(3):
+            await lint_write(
+                db,
+                workspace_id=WS,
+                context_id=CTX,
+                user_id=USER,
+                summary=GOOD_SUMMARY,
+                tags=["Auth"],
+            )
+        assert db.execute.await_count == 1
+
+    @pytest.mark.asyncio
+    async def test_untagged_write_reads_no_vocabulary(self):
+        db = _db_with_vocabulary({"auth": 12})
+        await lint_write(
+            db, workspace_id=WS, context_id=CTX, user_id=USER, summary=GOOD_SUMMARY, tags=[]
+        )
+        assert db.execute.await_count == 0
+
+    @pytest.mark.asyncio
+    async def test_logs_cache_state_and_hint_count_once_per_write(self):
+        db = _db_with_vocabulary({"auth": 12})
+        with patch("services.write_lint.logger") as log:
+            hints = await lint_write(
+                db,
+                workspace_id=WS,
+                context_id=CTX,
+                user_id=USER,
+                summary=GOOD_SUMMARY,
+                tags=["Auth", "brand-new"],
+            )
+            await lint_write(
+                db,
+                workspace_id=WS,
+                context_id=CTX,
+                user_id=USER,
+                summary=GOOD_SUMMARY,
+                tags=["Auth"],
+            )
+        assert [h.code for h in hints] == ["tag_near_duplicate"]
+        calls = [c for c in log.info.call_args_list if c.args[0] == "write_lint_vocabulary"]
+        assert len(calls) == 2
+        first, second = (c.kwargs for c in calls)
+        assert first["cache"] == "miss" and first["tag_near_duplicate_hints"] == 1
+        assert first["vocabulary_size"] == 1 and first["context_id"] == str(CTX)
+        assert second["cache"] == "hit" and second["duration_ms"] == 0.0

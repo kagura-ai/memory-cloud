@@ -11,13 +11,17 @@ from unittest.mock import AsyncMock, MagicMock, patch
 from uuid import uuid4
 
 import pytest
+from cachetools import TTLCache
 
+import services.tag_resolution as tag_resolution_module
 from services.tag_resolution import (
     MAX_EXPANSION_PER_TAG,
     MAX_SUGGESTIONS_PER_TAG,
+    VOCABULARY_CACHE_TTL_SECONDS,
     VOCABULARY_LIMIT,
     expand_tag_filter,
     fetch_vocabulary,
+    fetch_vocabulary_cached,
     suggest_tags,
 )
 
@@ -436,3 +440,78 @@ class TestCrossContextRecallSkipsSingleContextHints:
                 "tag expansion must be skipped for a cross-context recall — the "
                 "vocabulary read covers only the primary context"
             )
+
+
+class TestWriteSideVocabularyCache:
+    """#1512: the write-side read is cached per (workspace, context, scope)."""
+
+    @pytest.mark.asyncio
+    async def test_second_read_is_a_hit_and_skips_the_aggregate(self):
+        db = _db_with_vocabulary({"python": 3})
+        first = await fetch_vocabulary_cached(db, workspace_id=WS, context_id=CTX, user_id=USER)
+        second = await fetch_vocabulary_cached(db, workspace_id=WS, context_id=CTX, user_id=USER)
+        assert first.cache == "miss" and first.duration_ms >= 0.0
+        assert second.cache == "hit" and second.duration_ms == 0.0
+        assert second.vocabulary == {"python": 3}
+        assert db.execute.await_count == 1, "a hit must not run the context-wide aggregate"
+
+    @pytest.mark.asyncio
+    async def test_entry_expires_after_the_ttl(self, monkeypatch):
+        clock = [0.0]
+        monkeypatch.setattr(
+            tag_resolution_module,
+            "_vocabulary_cache",
+            TTLCache(maxsize=8, ttl=VOCABULARY_CACHE_TTL_SECONDS, timer=lambda: clock[0]),
+        )
+        db = _db_with_vocabulary({"python": 3})
+        await fetch_vocabulary_cached(db, workspace_id=WS, context_id=CTX, user_id=USER)
+        clock[0] = VOCABULARY_CACHE_TTL_SECONDS - 1
+        assert (
+            await fetch_vocabulary_cached(db, workspace_id=WS, context_id=CTX, user_id=USER)
+        ).cache == "hit"
+        clock[0] = VOCABULARY_CACHE_TTL_SECONDS + 1
+        assert (
+            await fetch_vocabulary_cached(db, workspace_id=WS, context_id=CTX, user_id=USER)
+        ).cache == "miss"
+        assert db.execute.await_count == 2
+
+    @pytest.mark.asyncio
+    async def test_unshared_context_is_keyed_per_user(self):
+        """The #1511 scoping survives caching: one user's vocabulary never serves another."""
+        db = _db_with_vocabulary({"python": 3})
+        await fetch_vocabulary_cached(db, workspace_id=WS, context_id=CTX, user_id="alice")
+        other = await fetch_vocabulary_cached(db, workspace_id=WS, context_id=CTX, user_id="bob")
+        assert other.cache == "miss"
+        assert db.execute.await_count == 2
+        sql = str(db.execute.await_args.args[0].compile(compile_kwargs={"literal_binds": True}))
+        assert "'bob'" in sql
+
+    @pytest.mark.asyncio
+    async def test_shared_context_is_keyed_once_for_every_member(self):
+        db = _db_with_vocabulary({"python": 3})
+        with _shared_context():
+            await fetch_vocabulary_cached(db, workspace_id=WS, context_id=CTX, user_id="alice")
+            other = await fetch_vocabulary_cached(
+                db, workspace_id=WS, context_id=CTX, user_id="bob"
+            )
+        assert other.cache == "hit"
+        assert db.execute.await_count == 1
+
+    @pytest.mark.asyncio
+    async def test_sharing_is_resolved_on_every_call(self):
+        """A context flipped private→shared must not keep serving the per-user entry."""
+        db = _db_with_vocabulary({"python": 3})
+        await fetch_vocabulary_cached(db, workspace_id=WS, context_id=CTX, user_id=USER)
+        with _shared_context():
+            read = await fetch_vocabulary_cached(db, workspace_id=WS, context_id=CTX, user_id=USER)
+        assert read.cache == "miss"
+        assert db.execute.await_count == 2
+
+    @pytest.mark.asyncio
+    async def test_recall_side_read_stays_uncached(self):
+        """expand/suggest are gated already and must see the vocabulary as stored."""
+        db = _db_with_vocabulary({"python": 3})
+        await fetch_vocabulary_cached(db, workspace_id=WS, context_id=CTX, user_id=USER)
+        await fetch_vocabulary(db, workspace_id=WS, context_id=CTX, user_id=USER)
+        await fetch_vocabulary(db, workspace_id=WS, context_id=CTX, user_id=USER)
+        assert db.execute.await_count == 3

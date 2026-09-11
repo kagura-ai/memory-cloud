@@ -211,6 +211,10 @@ class WriteLintHint(BaseModel):
     Advisory only: the memory is already stored, and hints never affect the
     write. They exist because recall quality depends on how the summary and
     tags were written, and nothing else tells the writer at the time.
+
+    ``tag_near_duplicate`` compares against a per-context tag vocabulary that
+    the server caches for up to two minutes (#1512), so a spelling stored a
+    moment ago may not be reflected in the very next write's hints.
     """
 
     code: str = Field(

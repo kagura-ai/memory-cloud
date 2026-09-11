@@ -22,8 +22,12 @@ check of their own and must never be reachable from an unauthorized path.
 
 from __future__ import annotations
 
+from dataclasses import dataclass
+from time import perf_counter
+from typing import Final, Literal
 from uuid import UUID
 
+from cachetools import TTLCache
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -44,6 +48,50 @@ MAX_EXPANSION_PER_TAG = 20
 
 # Bound on suggestions returned per requested tag.
 MAX_SUGGESTIONS_PER_TAG = 5
+
+# #1512: the WRITE-side vocabulary read (``write_lint``'s ``tag_near_duplicate``
+# rule) runs on every tagged ``remember()`` / ``update_memory()`` response path,
+# and the aggregate is O(memories x tags) with no index to serve ``unnest``.
+# Tag vocabularies change slowly, so the write side reads through a
+# process-local TTL cache (same shape as the llm_pricing cache, #713): a stale
+# entry costs at most one missed or spurious ADVISORY hint within the window,
+# which is an acceptable trade for taking the aggregate off most writes. The
+# recall-side callers (``expand_tag_filter`` / ``suggest_tags``) stay uncached —
+# they are already gated to zero-result, tag-filtered recalls and must reflect
+# the vocabulary as stored.
+#
+# The key carries the #1511 scoping dimension: a non-shared context aggregates
+# only the caller's own rows, so its entry is keyed per user; a shared context
+# aggregates every author and is keyed once for all of them. Without that, one
+# user's tag names and counts would be served to another.
+VOCABULARY_CACHE_TTL_SECONDS: Final = 120
+VOCABULARY_CACHE_MAXSIZE: Final = 512
+_SHARED_SCOPE: Final = "*"
+_vocabulary_cache: TTLCache[tuple[UUID, UUID, str], dict[str, int]] = TTLCache[
+    tuple[UUID, UUID, str], dict[str, int]
+](maxsize=VOCABULARY_CACHE_MAXSIZE, ttl=VOCABULARY_CACHE_TTL_SECONDS)
+
+
+def clear_vocabulary_cache() -> None:
+    """Drop every entry from the process-local write-side vocabulary cache.
+
+    Exposed for tests that need a deterministic cache state (the autouse
+    conftest fixture calls it around every test).
+    """
+    _vocabulary_cache.clear()
+
+
+@dataclass(frozen=True)
+class CachedVocabulary:
+    """A write-side vocabulary read plus what it cost, for the caller to log.
+
+    ``vocabulary`` is the cached mapping itself — read-only by contract, never
+    mutate it. ``duration_ms`` is the DB read time on a miss and ``0.0`` on a hit.
+    """
+
+    vocabulary: dict[str, int]
+    cache: Literal["hit", "miss"]
+    duration_ms: float
 
 
 async def fetch_vocabulary(
@@ -74,10 +122,55 @@ async def fetch_vocabulary(
     Returns:
         ``{tag: memory_count}``, capped at ``VOCABULARY_LIMIT`` by descending count.
     """
+    shared = await _is_context_shared(db, context_id)
+    return await _read_vocabulary(
+        db, workspace_id=workspace_id, context_id=context_id, user_id=user_id, shared=shared
+    )
+
+
+async def fetch_vocabulary_cached(
+    db: AsyncSession,
+    *,
+    workspace_id: UUID,
+    context_id: UUID,
+    user_id: str,
+) -> CachedVocabulary:
+    """The write-side read: :func:`fetch_vocabulary` through the TTL cache (#1512).
+
+    Sharing is resolved on every call (one indexed SELECT) because it decides
+    the cache key's scope; only the aggregate is cached. See the cache notes
+    above for the staleness trade-off and why the recall side does not use this.
+    """
+    shared = await _is_context_shared(db, context_id)
+    key = (workspace_id, context_id, _SHARED_SCOPE if shared else user_id)
+    cached = _vocabulary_cache.get(key)
+    if cached is not None:
+        return CachedVocabulary(vocabulary=cached, cache="hit", duration_ms=0.0)
+
+    started = perf_counter()
+    vocabulary = await _read_vocabulary(
+        db, workspace_id=workspace_id, context_id=context_id, user_id=user_id, shared=shared
+    )
+    duration_ms = (perf_counter() - started) * 1000.0
+    _vocabulary_cache[key] = vocabulary
+    return CachedVocabulary(vocabulary=vocabulary, cache="miss", duration_ms=duration_ms)
+
+
+async def _is_context_shared(db: AsyncSession, context_id: UUID) -> bool:
     from services.context_service import ContextService
 
-    shared = await ContextService(db).is_context_shared(context_id)
+    return await ContextService(db).is_context_shared(context_id)
 
+
+async def _read_vocabulary(
+    db: AsyncSession,
+    *,
+    workspace_id: UUID,
+    context_id: UUID,
+    user_id: str,
+    shared: bool,
+) -> dict[str, int]:
+    """The uncached aggregate; ``shared`` decides whether ``user_id`` scopes it."""
     conditions = [
         Memory.workspace_id == workspace_id,
         Memory.context_id == context_id,

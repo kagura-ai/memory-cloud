@@ -54,6 +54,22 @@ def _clear_pricing_cache():
     clear_pricing_cache()
 
 
+@pytest.fixture(autouse=True)
+def _clear_vocabulary_cache():
+    """Reset the process-local write-lint tag vocabulary cache around every test (#1512).
+
+    ``fetch_vocabulary_cached`` keeps a module-global ``TTLCache`` keyed by
+    (workspace, context, scope). Without clearing it, a vocabulary mocked by one
+    test would be served as a cache hit to a later test using the same fixture
+    ids, making lint assertions order-dependent. Cheap (a dict clear).
+    """
+    from services.tag_resolution import clear_vocabulary_cache
+
+    clear_vocabulary_cache()
+    yield
+    clear_vocabulary_cache()
+
+
 def pytest_configure(config: pytest.Config) -> None:
     """Validate asyncio_default_test_loop_scope matches fixture loop scope.
 

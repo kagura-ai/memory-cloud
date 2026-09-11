@@ -177,15 +177,35 @@ async def lint_write(
 
         tag_list = [t for t in (tags or []) if isinstance(t, str) and t]
         vocabulary: dict[str, int] = {}
+        read = None
         if tag_list:
             # Only pay for the vocabulary read when there is something to compare
-            # against it; the no-tags hint needs no vocabulary at all.
-            from services.tag_resolution import fetch_vocabulary
+            # against it; the no-tags hint needs no vocabulary at all. #1512: the
+            # read goes through the per-context TTL cache — see tag_resolution.
+            from services.tag_resolution import fetch_vocabulary_cached
 
-            vocabulary = await fetch_vocabulary(
+            read = await fetch_vocabulary_cached(
                 db, workspace_id=workspace_id, context_id=context_id, user_id=user_id
             )
-        hints.extend(_tag_hints(tag_list, vocabulary))
+            vocabulary = read.vocabulary
+        tag_hints = _tag_hints(tag_list, vocabulary)
+        hints.extend(tag_hints)
+
+        if read is not None:
+            # #1512: one line per write-side vocabulary read, so the cost of the
+            # aggregate (cache miss rate, DB time by context size) and how often
+            # the near-duplicate rule actually fires can be read off the logs
+            # before deciding whether a heavier fix is warranted.
+            logger.info(
+                "write_lint_vocabulary",
+                context_id=str(context_id),
+                cache=read.cache,
+                duration_ms=round(read.duration_ms, 2),
+                vocabulary_size=len(vocabulary),
+                tag_near_duplicate_hints=sum(
+                    1 for h in tag_hints if h.code == "tag_near_duplicate"
+                ),
+            )
 
         return hints[:MAX_HINTS]
     except Exception as e:  # noqa: BLE001 — advisory only; never fail a committed write
