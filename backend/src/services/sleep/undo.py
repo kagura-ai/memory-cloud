@@ -356,7 +356,8 @@ async def undo_merge_action(
         raise UndoMergeError(
             "memory_purged",
             f"Merged memory {loser_id} no longer exists — it was hard-deleted by the "
-            "merge retention policy (sleep_merge_retention_days), which bounds how "
+            "merge retention window (sleep_merge_retention_days) or, when Sleep "
+            "maintenance is disabled, by the 30-day cleanup task; either bounds how "
             "long merges stay reversible.",
         )
     if loser.deleted_at is None:

@@ -386,7 +386,8 @@ async def _undo_merge(db: Any, action: Any, ctx: _RollbackCtx, summary: dict[str
         counter_key="merges_reversed",
         not_restorable=(
             f"merge loser {action.target_id} not restorable — purged by retention "
-            "(sleep_merge_retention_days or the 30-day cleanup task), or no longer "
+            "(sleep_merge_retention_days, or the 30-day cleanup task when Sleep is "
+            "disabled), or no longer "
             "a merge tombstone"
         ),
     )
@@ -463,7 +464,8 @@ async def _undo_archive(db: Any, action: Any, ctx: _RollbackCtx, summary: dict[s
         counter_key="archives_restored",
         not_restorable=(
             f"archived memory {action.memory_id} not restorable — tombstone purged "
-            "(sleep_merge_retention_days or the 30-day cleanup task), or no longer "
+            "(sleep_merge_retention_days, or the 30-day cleanup task when Sleep is "
+            "disabled), or no longer "
             "a sleep tombstone"
         ),
     )

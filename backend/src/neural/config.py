@@ -256,13 +256,18 @@ class NeuralMemoryConfig:
     # #1209: sleep-tombstone retention window in days — merge losers and, since
     # #1520, consolidation archives. 0 = disabled = retain forever (pre-#1209
     # behavior). When > 0 the merge_retention phase hard-deletes tombstones
-    # past the window; undo/rollback only work inside it (and inside the
-    # 30-day cleanup task's global purge, see #1521).
+    # past the window; undo/rollback only work inside it.
+    # #1521: this window is the ONLY purger of sleep tombstones while
+    # SLEEP_ENABLED=true — the daily cleanup task leaves them alone. With
+    # Sleep disabled no retention phase runs, and the cleanup task's fixed
+    # 30-day sweep applies to every tombstone instead.
     sleep_merge_retention_days: int = 0
     # #1336: user-forget tombstone retention window in days. 0 = disabled =
     # retain forever (pre-#1336 behavior). When > 0 the forget_retention
     # phase hard-deletes user-forgotten rows (details incl. coordinates)
     # past the window; merge losers keep their own window above.
+    # #1521: same split as above — sole purger of forget() tombstones in
+    # live contexts while Sleep is on; the 30-day cleanup sweep otherwise.
     sleep_forget_retention_days: int = 0
     # #1355: measurement-series retention window in days. 0 = disabled =
     # retain forever (the #1333 append-only default — series completeness
@@ -492,12 +497,12 @@ class NeuralMemoryConfig:
             )
         if self.sleep_merge_retention_days < 0:
             raise ValueError(
-                f"sleep_merge_retention_days must be >= 0 (0 = retain forever), "
+                f"sleep_merge_retention_days must be >= 0 (0 = retain forever while Sleep is on), "
                 f"got {self.sleep_merge_retention_days}"
             )
         if self.sleep_forget_retention_days < 0:
             raise ValueError(
-                f"sleep_forget_retention_days must be >= 0 (0 = retain forever), "
+                f"sleep_forget_retention_days must be >= 0 (0 = retain forever while Sleep is on), "
                 f"got {self.sleep_forget_retention_days}"
             )
         if self.sleep_measurement_retention_days < 0:
