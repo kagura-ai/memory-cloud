@@ -13,7 +13,6 @@ from urllib.parse import urlparse
 from pydantic import AliasChoices, Field, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
-from config.constants import DEPLOY_COLORS
 from utils.media_types import MEDIA_TYPE_RE, normalize_media_type
 
 # Issue #1470: the total memory quota one inviter's referral chain may mint.
@@ -164,7 +163,7 @@ class Settings(BaseSettings):
     # ``responding_color`` by GET /api/v1/workers/active-color so a caller can
     # tell it reached a color that is no longer live. Empty (local dev, single
     # instance) is reported as null — never guessed.
-    deploy_color: str = Field(
+    deploy_color: Literal["", "blue", "green"] = Field(
         default="",
         description='Color of this API instance in a blue-green deploy ("blue" | "green"); empty = not a colored deploy',
     )
@@ -178,20 +177,18 @@ class Settings(BaseSettings):
 
     @field_validator("deploy_color", mode="before")
     @classmethod
-    def _normalize_deploy_color(cls, v: Any) -> str:
-        """Accept "Blue"/" green " but refuse anything that is not a known color.
+    def _strip_deploy_color(cls, v: Any) -> Any:
+        """Trim whitespace only; the ``Literal`` does the refusing.
 
-        A typo here would make ``responding_color`` lie, and the whole point of
-        that field is to expose a mismatch — so fail at startup instead.
+        The valid values live in ``config.constants.DeployColor`` — the same
+        Literal the marker reader and the response model type against — so a
+        typo (which would make ``responding_color`` lie, the one thing that
+        field exists to expose) fails at startup with pydantic's own error.
+        Case is NOT folded: the marker writer refuses ``Blue`` too.
         """
         if v is None:
             return ""
-        color = str(v).strip().lower()
-        if color and color not in DEPLOY_COLORS:
-            raise ValueError(
-                f"DEPLOY_COLOR must be one of {sorted(DEPLOY_COLORS)} or empty, got {v!r}"
-            )
-        return color
+        return v.strip() if isinstance(v, str) else v
 
     # Issue #954: service-to-service auth for the external billing service
     # pushing entitlement changes to PUT /internal/...

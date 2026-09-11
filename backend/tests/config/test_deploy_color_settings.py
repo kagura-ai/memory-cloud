@@ -1,9 +1,11 @@
 """DEPLOY_COLOR / ACTIVE_COLOR_MARKER_PATH validation (#1482)."""
 
+from typing import get_args
+
 import pytest
 from pydantic import ValidationError
 
-from config.constants import DEPLOY_COLORS
+from config.constants import DEPLOY_COLORS, DeployColor
 from config.settings import Settings
 
 
@@ -15,15 +17,23 @@ def test_defaults_are_uncolored_and_point_at_the_container_mount(monkeypatch):
     assert s.active_color_marker_path == "/run/kagura/active-color"
 
 
-@pytest.mark.parametrize(("raw", "expected"), [("blue", "blue"), (" Green\n", "green")])
-def test_known_colors_are_normalized(monkeypatch, raw, expected):
+@pytest.mark.parametrize(("raw", "expected"), [("blue", "blue"), (" green\n", "green")])
+def test_known_colors_are_accepted_after_trimming(monkeypatch, raw, expected):
     monkeypatch.setenv("DEPLOY_COLOR", raw)
     assert Settings(_env_file=None).deploy_color == expected
     assert expected in DEPLOY_COLORS
 
 
-def test_unknown_color_refuses_to_start(monkeypatch):
-    # responding_color exists to expose a mismatch; a typo here would make it lie.
-    monkeypatch.setenv("DEPLOY_COLOR", "purple")
-    with pytest.raises(ValidationError, match="DEPLOY_COLOR"):
+@pytest.mark.parametrize("raw", ["purple", "Blue", "GREEN"])
+def test_unknown_or_miscased_color_refuses_to_start(monkeypatch, raw):
+    # responding_color exists to expose a mismatch; a typo here would make it
+    # lie. Case is not folded because deploy.sh refuses "Blue" in the marker
+    # too — the two readers must agree on what a color is.
+    monkeypatch.setenv("DEPLOY_COLOR", raw)
+    with pytest.raises(ValidationError, match="deploy_color"):
         Settings(_env_file=None)
+
+
+def test_the_frozenset_is_derived_from_the_literal():
+    # One definition: adding a color to the Literal is the whole change.
+    assert DEPLOY_COLORS == frozenset(get_args(DeployColor))

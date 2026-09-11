@@ -854,13 +854,19 @@ class ErasureAlreadyInProgressError(MemoryCloudException):
 class ActiveColorUnavailableError(MemoryCloudException):
     """The blue-green deploy marker cannot be read (503, #1482).
 
-    ``reason`` is one of ``missing`` / ``unreadable`` / ``invalid``. The
-    endpoint never substitutes a guessed color: a consumer that cannot learn
-    the live color must fall back to its own connect-level retry, not to a
-    value this service made up.
+    ``reason`` is one of ``missing`` / ``unreadable`` / ``invalid``. All three
+    can be TRANSIENT during a color switch (the marker is republished in place
+    with ``cp``, which truncates before it writes), so a consumer should treat
+    every 503 from this endpoint as retryable. The endpoint never substitutes
+    a guessed color: a consumer that cannot learn the live color must fall
+    back to its own connect-level retry, not to a value this service made up.
+
+    ``empty`` (not part of the response) tells the caller the ``invalid`` was
+    a zero-byte read — the shape of that truncate window — so it can re-read
+    once before answering.
     """
 
-    def __init__(self, *, reason: str, path: str) -> None:
+    def __init__(self, *, reason: str, path: str, empty: bool = False) -> None:
         super().__init__(
             f"Active deploy color is unavailable: marker {reason}",
             status_code=503,
@@ -869,3 +875,4 @@ class ActiveColorUnavailableError(MemoryCloudException):
             # The container-side mount path only — it carries no host layout.
             marker_path=path,
         )
+        self.empty = empty
