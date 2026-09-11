@@ -13,9 +13,17 @@ routing — the dual-collection shape::
   (``embedding_status='pending'``) so the regular sweep lands that small delta
   in the new collection. There is no moment at which the context has no
   vectors.
-* Nothing here deletes anything implicitly. The source points stay until the
-  operator calls :func:`purge_source_points` — which is also why a ``switch``
-  back to the source model is a complete rollback.
+* Nothing here deletes source points implicitly. They stay until the operator
+  calls :func:`purge_source_points` — which is why
+  :func:`rollback_context_embedding` (a switch back plus a re-queue of what
+  was written since the switch) is a complete rollback. The *target*
+  collection, on the other hand, is reconciled: ``verify`` and ``switch``
+  drop target points whose memory was forgotten while the migration ran, so
+  a hard-delete request is not undone by the copy.
+* Every step is its own short transaction: ``reembed`` ends the read
+  transaction after each page before it talks to the embedding provider or
+  Qdrant, so a large context never holds one Postgres transaction open for
+  the whole run.
 * ``KAGURA_RECREATE_COLLECTIONS`` is never consulted; the target collection is
   created with ``ensure_kagura_memories_collection`` like any other.
 * Qdrant only: :func:`verify_context_migration` retrieves by id, which the
@@ -37,9 +45,11 @@ from config.embedding_policy import is_embedding_model_allowed
 from db.qdrant import (
     add_memory_to_qdrant,
     delete_context_points,
+    delete_points_from_qdrant,
     ensure_kagura_memories_collection,
     get_collection_name,
     get_qdrant_client,
+    list_context_point_ids,
 )
 from models.auth import Context
 from models.config import ContextSearchConfig
@@ -85,6 +95,8 @@ class VerifyResult:
     expected: int
     present: int
     missing: list[UUID] = field(default_factory=list)
+    stale_removed: int = 0
+    """Target points deleted because their memory is no longer live."""
 
     @property
     def ok(self) -> bool:
@@ -98,6 +110,9 @@ class SwitchResult:
     model: str
     dimensions: int
     requeued: int
+    stale_removed: int = 0
+    """Points dropped from the new collection for memories forgotten since
+    ``requeue_since`` (closes the verify -> switch delete race)."""
 
 
 async def list_migratable_context_ids(
@@ -117,16 +132,27 @@ async def plan_context_migration(
     target_model: str,
     *,
     allowlist_setting: str | None = None,
+    source_model: str | None = None,
 ) -> MigrationPlan:
     """Resolve source and target for one context; refuse what cannot work.
 
+    ``source_model`` overrides the resolved source for the one step that runs
+    after routing has already moved: purging. After A -> B has switched, the
+    context routes to B, so a plan derived from routing alone cannot name A;
+    ``source_model="A"`` with ``target_model`` = the active model rebuilds the
+    A -> B plan :func:`purge_source_points` needs. It is refused when it names
+    the model the context still serves from.
+
     Raises:
         ValidationError: unknown target, target not offered by this deployment,
-            or target equal to the current model.
+            target equal to the current model, or an explicit ``source_model``
+            that is unknown, still active, or paired with a non-active target.
         NotFoundException: no live context with that id.
     """
     if target_model not in EMBEDDING_MODEL_REGISTRY:
         raise ValidationError(f"Unknown embedding model: {target_model!r}")
+    if source_model is not None and source_model not in EMBEDDING_MODEL_REGISTRY:
+        raise ValidationError(f"Unknown embedding model: {source_model!r}")
     if not is_embedding_model_allowed(target_model, allowlist_setting):
         raise ValidationError(
             f"Embedding model {target_model!r} is not offered by this deployment "
@@ -140,9 +166,22 @@ async def plan_context_migration(
     if context is None:
         raise NotFoundException(f"Context not found: {context_id}")
 
-    source_model, source_dimensions = await resolve_context_embedding(db, context_id)
-    if source_model == target_model:
-        raise ValidationError(f"Context {context_id} already uses {target_model!r}")
+    current_model, current_dimensions = await resolve_context_embedding(db, context_id)
+    if source_model is None:
+        source_model, source_dimensions = current_model, current_dimensions
+        if source_model == target_model:
+            raise ValidationError(f"Context {context_id} already uses {target_model!r}")
+    else:
+        if source_model == current_model:
+            raise ValidationError(
+                f"Context {context_id} still routes to {source_model!r}; switch before purging"
+            )
+        if target_model != current_model:
+            raise ValidationError(
+                f"explicit source {source_model!r} must be paired with the active "
+                f"model {current_model!r} as target, not {target_model!r}"
+            )
+        source_dimensions = EMBEDDING_MODEL_REGISTRY[source_model][0]
     target_dimensions = EMBEDDING_MODEL_REGISTRY[target_model][0]
 
     count_result = await db.execute(
@@ -216,6 +255,14 @@ async def reembed_context(
             stmt = stmt.where(Memory.id > last_id)
         stmt = stmt.order_by(Memory.id).limit(batch_size)
         rows = list((await db.execute(stmt)).scalars().all())
+        # Rows are read-only here: drop them from the identity map so a large
+        # context does not accumulate across pages, and end the read
+        # transaction the SELECT opened before any embedding / Qdrant call.
+        # Otherwise one Postgres transaction would stay open for the whole
+        # run (hours on a big context), pinning locks and vacuum. The session
+        # is expire_on_commit=False, so the materialised rows stay usable.
+        db.expunge_all()
+        await db.commit()
         if not rows:
             break
 
@@ -247,9 +294,6 @@ async def reembed_context(
 
         batches += 1
         last_id = rows[-1].id
-        # Rows are read-only here; drop them from the identity map so a large
-        # context does not accumulate in memory across batches.
-        db.expunge_all()
         if progress is not None:
             progress(embedded, plan.memory_count)
 
@@ -270,6 +314,13 @@ async def verify_context_migration(
     """Every live memory of the context must have a point in the target
     collection. Reports the missing ids rather than a bare count, so a caller
     can decide whether to re-run :func:`reembed_context` or investigate.
+
+    Also reconciles the other direction: a memory forgotten *after* the
+    re-embed copied it has a target point with no live row. ``forget`` only
+    deletes from the collection the context routes to, so nothing else would
+    ever remove that point; it is deleted here and counted in
+    ``stale_removed``. Deletes that land after this check are covered by
+    :func:`switch_context_embedding`.
     """
     result = await db.execute(
         select(Memory.id)
@@ -296,7 +347,23 @@ async def verify_context_migration(
             else:
                 missing.append(memory_id)
 
-    return VerifyResult(expected=len(ids), present=present, missing=missing)
+    live = {str(memory_id) for memory_id in ids}
+    stored = await list_context_point_ids(
+        str(plan.workspace_id), str(plan.context_id), plan.target_collection
+    )
+    stale = [point_id for point_id in stored if point_id not in live]
+    if stale:
+        await delete_points_from_qdrant(stale, plan.target_collection)
+        logger.info(
+            "context_embedding_stale_points_removed",
+            context_id=str(plan.context_id),
+            target_collection=plan.target_collection,
+            count=len(stale),
+        )
+
+    return VerifyResult(
+        expected=len(ids), present=present, missing=missing, stale_removed=len(stale)
+    )
 
 
 async def switch_context_embedding(
@@ -311,11 +378,18 @@ async def switch_context_embedding(
     the memories the bulk re-embed could not have seen.
 
     ``requeue_since`` is the :attr:`ReembedResult.started_at` of the run that
-    filled the target collection. Rows created or updated since then — plus
-    any row whose embedding was not ``success`` to begin with — go back to
-    ``pending`` so the regular sweep embeds them under the new routing. With
-    ``None`` this is a pure routing flip (used for rollback when the source
-    collection is still complete).
+    filled the target collection (or, for :func:`rollback_context_embedding`,
+    the moment of the switch being undone). Rows created or updated since
+    then — plus any row whose embedding was not ``success`` to begin with — go
+    back to ``pending`` so the regular sweep embeds them under the new
+    routing. Rows *forgotten* since then are removed from the new collection
+    after the flip, closing the window between the last verify and the
+    routing change. With ``None`` this is a pure routing flip.
+
+    A worker that claimed a row before the flip resolved the old routing;
+    ``process_pending_embedding`` only marks ``success`` while it still owns
+    the ``processing`` claim, so the re-queue here wins and the sweep
+    re-embeds that row under the new routing.
     """
     if model not in EMBEDDING_MODEL_REGISTRY:
         raise ValidationError(f"Unknown embedding model: {model!r}")
@@ -358,6 +432,24 @@ async def switch_context_embedding(
         requeued = int(getattr(requeue, "rowcount", 0) or 0)
 
     await db.commit()
+
+    stale_removed = 0
+    if requeue_since is not None:
+        # Routing now points at ``model``; forgets from here on delete from
+        # its collection themselves. Forgets between the last verify and the
+        # commit above only hit the previous collection — drop those points
+        # from the new one. Hard-deleted rows (no tombstone) cannot be found
+        # this way; only the soft-delete path (``deleted_at``) is covered.
+        forgotten = await db.execute(
+            select(Memory.id).where(
+                Memory.context_id == context_id, Memory.deleted_at >= requeue_since
+            )
+        )
+        forgotten_ids = [str(memory_id) for memory_id in forgotten.scalars().all()]
+        if forgotten_ids:
+            await delete_points_from_qdrant(forgotten_ids, get_collection_name(model, dimensions))
+            stale_removed = len(forgotten_ids)
+
     logger.info(
         "context_embedding_switched",
         context_id=str(context_id),
@@ -365,6 +457,7 @@ async def switch_context_embedding(
         model=model,
         dimensions=dimensions,
         requeued=requeued,
+        stale_removed=stale_removed,
     )
     return SwitchResult(
         previous_model=previous_model,
@@ -372,6 +465,62 @@ async def switch_context_embedding(
         model=model,
         dimensions=dimensions,
         requeued=requeued,
+        stale_removed=stale_removed,
+    )
+
+
+async def rollback_context_embedding(
+    db: AsyncSession,
+    context_id: UUID,
+    model: str,
+    *,
+    requeue_since: datetime | None = None,
+) -> SwitchResult:
+    """Route the context back to ``model`` without losing what was written
+    since it left.
+
+    A bare routing flip is not a rollback: after A -> B, memories created,
+    updated or forgotten on B exist only in B's collection, so flipping to A
+    would make them unsearchable, stale, or resurrect them. This re-queues
+    the delta since the switch — by default the ``updated_at`` of the
+    ``ContextSearchConfig`` row, which the switch stamped — and refuses when
+    ``model``'s collection does not exist (nothing to serve from).
+
+    Raises:
+        ValidationError: unknown model, the model the context already routes
+            to, no collection for it, or no recorded switch time and no
+            explicit ``requeue_since``.
+    """
+    if model not in EMBEDDING_MODEL_REGISTRY:
+        raise ValidationError(f"Unknown embedding model: {model!r}")
+    dimensions = EMBEDDING_MODEL_REGISTRY[model][0]
+
+    current_model, _ = await resolve_context_embedding(db, context_id)
+    if current_model == model:
+        raise ValidationError(f"Context {context_id} already routes to {model!r}")
+
+    if requeue_since is None:
+        result = await db.execute(
+            select(ContextSearchConfig.updated_at).where(
+                ContextSearchConfig.context_id == context_id
+            )
+        )
+        requeue_since = result.scalar_one_or_none()
+        if requeue_since is None:
+            raise ValidationError(
+                f"Context {context_id} has no recorded switch time; pass the time of "
+                "the switch being undone as requeue_since (--requeue-since)"
+            )
+
+    collection = get_collection_name(model, dimensions)
+    if not await get_qdrant_client().collection_exists(collection):
+        raise ValidationError(
+            f"Collection {collection!r} for {model!r} does not exist; "
+            "there is nothing to route back to (was it purged?)"
+        )
+
+    return await switch_context_embedding(
+        db, context_id, model, dimensions, requeue_since=requeue_since
     )
 
 
