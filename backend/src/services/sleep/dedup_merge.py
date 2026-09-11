@@ -39,7 +39,7 @@ from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from db.qdrant import delete_memory_from_qdrant, search_memories_qdrant
-from models.memory import DELIVERY_MODE_ALWAYS, Memory
+from models.memory import DELETED_BY_SLEEP_MERGE, DELIVERY_MODE_ALWAYS, Memory
 from repositories.neural_edge import NeuralEdgeRepository
 from services.embedding_service import EmbeddingService
 from services.llm_service import LLMService
@@ -1366,7 +1366,7 @@ class DedupMergePhase:
             .where(Memory.id == loser.id)
             .values(
                 deleted_at=utcnow(),
-                deleted_by="sleep_maintenance",
+                deleted_by=DELETED_BY_SLEEP_MERGE,
             )
         )
 

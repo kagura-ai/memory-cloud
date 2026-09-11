@@ -786,7 +786,7 @@ class TestRollbackActionDispatch:
         actions = [
             self._action("create_edge", id=1),
             self._action("promote", id=2),
-            self._action("archive", id=3, memory_id=archived.id),
+            self._action("archive", id=3, memory_id=archived.id, details={"mode": "tombstone"}),
             self._action("update_importance", id=4, details={"old_importance": 0.4}),
             # Unknown type mixed in — it must not disturb its neighbours.
             self._action("undo_merge", id=5),
@@ -817,7 +817,7 @@ class TestRollbackActionDispatch:
         anyway. A zero-row restore must be reported, never counted."""
         gone = MagicMock()
         gone.id = uuid4()
-        actions = [self._action("archive", id=1, memory_id=gone.id)]
+        actions = [self._action("archive", id=1, memory_id=gone.id, details={"mode": "tombstone"})]
         cfg = MagicMock()
         cfg.scalar_one_or_none.return_value = None
         prefetch = MagicMock()
@@ -830,6 +830,29 @@ class TestRollbackActionDispatch:
         assert summary["archives_restored"] == 0
         assert len(summary["errors"]) == 1
         assert str(gone.id) in summary["errors"][0]
+        assert "purged" in summary["errors"][0]  # a tombstone that is gone was purged
+
+    @pytest.mark.asyncio
+    async def test_legacy_archive_action_is_reported_as_hard_deleted(self, user_id, workspace_id):
+        """An archive action recorded before tombstone archives carries no ``mode``:
+        the row was hard-deleted, and the message must say so deterministically
+        (no release number, no guess)."""
+        gone = MagicMock()
+        gone.id = uuid4()
+        actions = [self._action("archive", id=1, memory_id=gone.id, details={})]
+        cfg = MagicMock()
+        cfg.scalar_one_or_none.return_value = None
+        prefetch = MagicMock()
+        prefetch.scalars.return_value.all.return_value = []
+        update_result = MagicMock()
+        update_result.rowcount = 0
+        data = await self._run(actions, user_id, workspace_id, extra=[cfg, prefetch, update_result])
+
+        summary = data["rollback_summary"]
+        assert summary["archives_restored"] == 0
+        assert len(summary["errors"]) == 1
+        assert "hard-deleted" in summary["errors"][0]
+        assert "v0." not in summary["errors"][0]
 
     @pytest.mark.asyncio
     async def test_one_failing_action_does_not_abandon_the_rest(self, user_id, workspace_id):

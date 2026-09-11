@@ -58,8 +58,8 @@ class ForgetRetentionPhase:
         No-op (skipped) when the retention window is disabled (<= 0).
         """
         # NULL deleted_by = legacy user-forget rows that predate the column
-        # being written; the sentinel exclusion keeps merge losers on their
-        # own retention window. deleted_by is deliberately NOT pinned to
+        # being written; the sentinel exclusion keeps sleep tombstones (merge
+        # losers + consolidation archives, #1520) on their own retention window. deleted_by is deliberately NOT pinned to
         # this run's user sub: forget() records the ACTOR, so a teammate's
         # forget on this user's memory writes the teammate's sub — pinning
         # would strand those tombstones forever (no sleep run ever matches
@@ -69,7 +69,7 @@ class ForgetRetentionPhase:
         # #1520: derived from SLEEP_TOMBSTONE_DELETED_BY (merge losers AND
         # consolidation archives) so a new sleep tombstone class cannot land
         # in this window by omission.
-        not_merge_loser = user_tombstone_predicate()
+        not_sleep_tombstone = user_tombstone_predicate()
         # Context soft-delete (#84 recovery design) tombstones its memories
         # with deleted_by=<user sub> too — but deliberately KEEPS their
         # Qdrant points for recovery, and they are indistinguishable from
@@ -85,7 +85,7 @@ class ForgetRetentionPhase:
         return await purge_tombstones(
             self.db,
             phase_name="forget_retention",
-            deleted_by_predicate=and_(not_merge_loser, in_live_context),
+            deleted_by_predicate=and_(not_sleep_tombstone, in_live_context),
             retention_days=int(getattr(config, "sleep_forget_retention_days", 0) or 0),
             user_id=user_id,
             workspace_id=workspace_id,

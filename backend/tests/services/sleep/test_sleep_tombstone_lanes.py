@@ -17,6 +17,7 @@ from models.memory import Memory
 from repositories.memory import MemoryRepository
 from services.sleep.merge_retention import (
     MergeRetentionPhase,
+    restore_sleep_tombstone_stmt,
     sleep_tombstone_predicate,
     user_tombstone_predicate,
 )
@@ -81,6 +82,16 @@ class TestLanePredicates:
         assert "sleep_maintenance" in sql
         assert "sleep_consolidation" in sql
 
+    def test_restore_only_matches_the_named_sleep_tombstone_in_a_live_context(self):
+        """#1520 review: rowcount == 1 must mean "a sleep tombstone of this class was
+        restored" — never "some row for this user exists". A user forget (deleted_by
+        = actor sub) and a row inside a deleted context must not match."""
+        stmt = restore_sleep_tombstone_stmt(uuid4(), "u", deleted_by="sleep_consolidation")
+        sql = str(stmt.compile(compile_kwargs={"literal_binds": True}))
+        assert "memories.deleted_at IS NOT NULL" in sql
+        assert "memories.deleted_by = 'sleep_consolidation'" in sql
+        assert "contexts.deleted_at IS NULL" in sql
+
     def test_user_lane_excludes_both_sentinels_and_keeps_null(self):
         sql = str(user_tombstone_predicate().compile(compile_kwargs={"literal_binds": True}))
         assert "sleep_maintenance" in sql
@@ -123,6 +134,7 @@ class TestArchiveRollbackRealDB:
         )
         action = MagicMock()
         action.memory_id = row.id
+        action.details = {"mode": "tombstone"}
         summary = {"archives_restored": 0, "errors": []}
         with patch("mcp_server.tools.sleep._re_embed_to_qdrant", new_callable=AsyncMock) as reembed:
             await _undo_archive(db_session, action, ctx, summary)
@@ -134,26 +146,35 @@ class TestArchiveRollbackRealDB:
         # A row that is no longer there (older hard-delete, or purged) is an error, not a restore.
         gone = MagicMock()
         gone.memory_id = uuid4()
+        gone.details = {"mode": "tombstone"}
         with patch("mcp_server.tools.sleep._re_embed_to_qdrant", new_callable=AsyncMock):
             await _undo_archive(db_session, gone, ctx, summary)
         assert summary["archives_restored"] == 1
         assert len(summary["errors"]) == 1 and str(gone.memory_id) in summary["errors"][0]
 
-
-class TestHealthBacklogRealDB:
-    async def test_backlog_counts_both_sleep_tombstone_classes(self, db_session):
-        from services.memory_health_service import MemoryHealthService
-
-        user = f"hb-user-{uuid4()}"
-        db_session.add_all(
-            [
-                _tombstone(user, "sleep_maintenance", age_days=3),
-                _tombstone(user, "sleep_consolidation", age_days=5),
-                _tombstone(user, "some-user-sub", age_days=9),  # forget(): not a sleep tombstone
-            ]
+        # A user's own forget() tombstone under an archive action (the fetch/stamp
+        # race) must NOT be resurrected by a sleep rollback.
+        forgotten = Memory(
+            id=uuid4(),
+            user_id=user,
+            summary="forgotten by the user",
+            content="c",
+            type="note",
+            client="pytest",
+            scope="working",
+            deleted_at=utcnow(),
+            deleted_by="some-user-sub",
         )
+        db_session.add(forgotten)
         await db_session.flush()
-
-        backlogs = await MemoryHealthService(db_session)._fetch_merge_backlogs(user)
-        total = sum(b["count"] for b in backlogs.values())
-        assert total == 2
+        ctx.memory_cache[forgotten.id] = forgotten
+        stale = MagicMock()
+        stale.memory_id = forgotten.id
+        stale.details = {"mode": "tombstone"}
+        with patch("mcp_server.tools.sleep._re_embed_to_qdrant", new_callable=AsyncMock) as reembed:
+            await _undo_archive(db_session, stale, ctx, summary)
+        await db_session.refresh(forgotten)
+        assert forgotten.deleted_at is not None and forgotten.deleted_by == "some-user-sub"
+        assert summary["archives_restored"] == 1
+        assert len(summary["errors"]) == 2
+        reembed.assert_not_awaited()

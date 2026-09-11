@@ -22,7 +22,7 @@ from sqlalchemy import update as sa_update
 from sqlalchemy.engine import CursorResult
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from models.memory import Memory
+from models.memory import DELETED_BY_SLEEP_MERGE, Memory
 from models.sleep import SleepAction, SleepReport
 from utils.datetime import utcnow
 from utils.logger import get_logger
@@ -363,7 +363,7 @@ async def undo_merge_action(
             "already_restored",
             f"Memory {loser_id} is not deleted — this merge was already undone or rolled back.",
         )
-    if loser.deleted_by != "sleep_maintenance":
+    if loser.deleted_by != DELETED_BY_SLEEP_MERGE:
         raise UndoMergeError(
             "not_merge_deleted",
             f"Memory {loser_id} was deleted by '{loser.deleted_by}', not by sleep "

@@ -247,9 +247,18 @@ class ConsolidationPhase:
                     await delete_memory_from_qdrant(user_id, memory.id, self.collection_name)
                     # #1520: a tombstone, not a row delete — rollback_sleep_run's
                     # _undo_archive can only restore what is still there.
-                    await self.memory_repo.soft_delete(
+                    # #1520: the fetch is not locked — a 0-row stamp means the row was
+                    # forgotten (or archived by an overlapping run) in between. Count and
+                    # record nothing, or rollback would later un-tombstone a deletion this
+                    # run never made.
+                    stamped = await self.memory_repo.soft_delete(
                         memory.id, deleted_by=DELETED_BY_SLEEP_ARCHIVE
                     )
+                    if stamped == 0:
+                        logger.warning(
+                            "consolidation_archive_stamp_missed", memory_id=str(memory.id)
+                        )
+                        continue
                     tally.deleted += 1
                     await self._record_action(
                         reporter,
@@ -261,6 +270,7 @@ class ConsolidationPhase:
                         memory.access_count,
                         age_days,
                         memory.reference_count or 0,
+                        mode="tombstone",
                     )
                 except Exception as e:
                     logger.warning(
@@ -347,9 +357,18 @@ class ConsolidationPhase:
                         neural = await graph_service.get_node_metrics(str(memory_id))
                     if not neural or neural["is_isolated"]:
                         await delete_memory_from_qdrant(user_id, memory_id, self.collection_name)
-                        await self.memory_repo.soft_delete(  # #1520: tombstone
+                        # #1520: the fetch is not locked — a 0-row stamp means the row was
+                        # forgotten (or archived by an overlapping run) in between. Count and
+                        # record nothing, or rollback would later un-tombstone a deletion this
+                        # run never made.
+                        stamped = await self.memory_repo.soft_delete(  # #1520: tombstone
                             memory_id, deleted_by=DELETED_BY_SLEEP_ARCHIVE
                         )
+                        if stamped == 0:
+                            logger.warning(
+                                "consolidation_archive_stamp_missed", memory_id=str(memory_id)
+                            )
+                            continue
                         tally.llm_archived += 1
                         await self._record_action(
                             reporter,
@@ -361,6 +380,7 @@ class ConsolidationPhase:
                             mem.access_count,
                             mem_age_days,
                             mem.reference_count or 0,
+                            mode="tombstone",
                         )
 
     async def execute(
@@ -476,8 +496,12 @@ class ConsolidationPhase:
         access_count: int,
         age_days: int,
         reference_count: int = 0,
+        mode: str | None = None,
     ) -> None:
         """Record a consolidation action if reporter is available.
+
+        #1520: ``mode="tombstone"`` on archive actions lets ``rollback_sleep_run``
+        tell a restorable tombstone from a legacy hard delete (no mode key).
 
         Issue #1049: records ``reference_count`` (the adoption signal the gate now
         keys on) alongside ``access_count`` (surfacing, kept for comparison) so
@@ -495,6 +519,7 @@ class ConsolidationPhase:
                     "access_count": access_count,
                     "reference_count": reference_count,
                     "age_days": age_days,
+                    **({"mode": mode} if mode else {}),
                 },
             )
 

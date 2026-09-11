@@ -20,6 +20,8 @@ from mcp_server.tools._helpers import (
     _resolve_context_id,
     _success_response,
 )
+from models.memory import DELETED_BY_SLEEP_ARCHIVE, DELETED_BY_SLEEP_MERGE
+from services.sleep.merge_retention import restore_sleep_tombstone_stmt
 from utils.logger import get_logger
 
 # #1440: bind through ``utils.logger.get_logger`` (structlog) like the rest of
@@ -335,41 +337,59 @@ async def _undo_shadow_merge(
         )
 
 
+async def _restore_sleep_tombstone(
+    db: Any,
+    memory_id: UUID,
+    ctx: _RollbackCtx,
+    summary: dict[str, Any],
+    *,
+    deleted_by: str,
+    counter_key: str,
+    not_restorable: str,
+) -> None:
+    """Un-tombstone one sleep-maintained row and rebuild its vector (#1209/#1520).
+
+    Shared by the merge and archive undoers so the restore contract lives once:
+    the UPDATE only matches a tombstone of the named class in a live context
+    (``restore_sleep_tombstone_stmt``); a 0-row match — hard-deleted, purged,
+    re-tombstoned by the user, or context deleted — is reported under
+    ``errors`` and never counted. Result[Any] at type level, CursorResult at
+    runtime — .rowcount lives on the latter (#1442).
+    """
+    restore_result = await db.execute(
+        restore_sleep_tombstone_stmt(memory_id, ctx.user_id, deleted_by=deleted_by)
+    )
+    mem = ctx.memory_cache.get(memory_id)
+    restore_rows = cast(CursorResult[Any], restore_result).rowcount
+    if restore_rows == 0 or mem is None:
+        summary["errors"].append(not_restorable)
+        return
+    await _re_embed_to_qdrant(
+        mem, ctx.user_id, ctx.embedding_svc, ctx.ws_id, ctx.ctx_id_str, ctx.collection_name
+    )
+    summary[counter_key] += 1
+
+
 async def _undo_merge(db: Any, action: Any, ctx: _RollbackCtx, summary: dict[str, Any]) -> None:
     """Restore a merge loser (row + vector), or revert a shadow merge's edge."""
-    from sqlalchemy import update as sa_update
-
-    from models.memory import Memory
-
     if not action.target_id:
         return
     if (action.details or {}).get("mode") == "shadow":
         await _undo_shadow_merge(db, action, ctx, summary)
         return
-
-    restore_result = await db.execute(
-        sa_update(Memory)
-        .where(Memory.id == action.target_id, Memory.user_id == ctx.user_id)
-        .values(deleted_at=None, deleted_by=None)
+    await _restore_sleep_tombstone(
+        db,
+        action.target_id,
+        ctx,
+        summary,
+        deleted_by=DELETED_BY_SLEEP_MERGE,
+        counter_key="merges_reversed",
+        not_restorable=(
+            f"merge loser {action.target_id} not restorable — purged by retention "
+            "(sleep_merge_retention_days or the 30-day cleanup task), or no longer "
+            "a merge tombstone"
+        ),
     )
-    loser = ctx.memory_cache.get(action.target_id)
-    # #1209: a loser hard-deleted by the merge retention window matches 0 rows —
-    # record it as an error instead of a phantom "reversed" (the per-merge undo
-    # path returns 409 for the same state; run-level rollback must not report a
-    # restore that never happened). Result[Any] at type level, CursorResult at
-    # runtime — .rowcount lives on the latter (#1442).
-    restore_rows = cast(CursorResult[Any], restore_result).rowcount
-    if restore_rows == 0 or loser is None:
-        summary["errors"].append(
-            f"merge loser {action.target_id} not restorable — purged by the "
-            "retention policy (sleep_merge_retention_days)"
-        )
-        return
-
-    await _re_embed_to_qdrant(
-        loser, ctx.user_id, ctx.embedding_svc, ctx.ws_id, ctx.ctx_id_str, ctx.collection_name
-    )
-    summary["merges_reversed"] += 1
 
 
 async def _undo_update_importance(
@@ -420,35 +440,33 @@ async def _undo_promote(db: Any, action: Any, ctx: _RollbackCtx, summary: dict[s
 
 
 async def _undo_archive(db: Any, action: Any, ctx: _RollbackCtx, summary: dict[str, Any]) -> None:
-    """Un-delete an archived memory and rebuild its vector."""
-    from sqlalchemy import update as sa_update
+    """Un-delete an archived memory and rebuild its vector.
 
-    from models.memory import Memory
-
+    #1520: archives are tombstones (``details.mode == "tombstone"``). An action
+    without that mode was recorded when archive was a hard DELETE — nothing to
+    restore, and the message says so instead of guessing.
+    """
     if not action.memory_id:
         return
-    restore_result = await db.execute(
-        sa_update(Memory)
-        .where(Memory.id == action.memory_id, Memory.user_id == ctx.user_id)
-        .values(deleted_at=None, deleted_by=None)
-    )
-    mem = ctx.memory_cache.get(action.memory_id)
-    # #1520: archives are tombstones since v0.66.0; a zero-row UPDATE means the
-    # row was hard-deleted by an older archive, or purged by the retention
-    # window — report it, never count a restore that did not happen (same
-    # contract as _undo_merge).
-    restore_rows = cast(CursorResult[Any], restore_result).rowcount
-    if restore_rows == 0 or mem is None:
+    if (action.details or {}).get("mode") != "tombstone":
         summary["errors"].append(
-            f"archived memory {action.memory_id} not restorable — hard-deleted "
-            "before the tombstone archive (v0.66.0) or purged by the retention "
-            "policy (sleep_merge_retention_days)"
+            f"archived memory {action.memory_id} not restorable — recorded before "
+            "tombstone archives (hard-deleted at archive time)"
         )
         return
-    await _re_embed_to_qdrant(
-        mem, ctx.user_id, ctx.embedding_svc, ctx.ws_id, ctx.ctx_id_str, ctx.collection_name
+    await _restore_sleep_tombstone(
+        db,
+        action.memory_id,
+        ctx,
+        summary,
+        deleted_by=DELETED_BY_SLEEP_ARCHIVE,
+        counter_key="archives_restored",
+        not_restorable=(
+            f"archived memory {action.memory_id} not restorable — tombstone purged "
+            "(sleep_merge_retention_days or the 30-day cleanup task), or no longer "
+            "a sleep tombstone"
+        ),
     )
-    summary["archives_restored"] += 1
 
 
 # Action type → undoer. An action type absent from this table is skipped

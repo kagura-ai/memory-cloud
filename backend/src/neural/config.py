@@ -253,9 +253,11 @@ class NeuralMemoryConfig:
     sleep_max_llm_calls_per_run: int = 50  # LLM call budget per run
     sleep_dedup_enabled: bool = True  # Phase 2 on/off
     sleep_dedup_similarity_threshold: float = 0.92  # Cosine similarity for dedup
-    # #1209: merge-loser retention window in days. 0 = disabled = retain
-    # forever (pre-#1209 behavior). When > 0 the merge_retention phase
-    # hard-deletes losers past the window; undo/rollback only work inside it.
+    # #1209: sleep-tombstone retention window in days — merge losers and, since
+    # #1520, consolidation archives. 0 = disabled = retain forever (pre-#1209
+    # behavior). When > 0 the merge_retention phase hard-deletes tombstones
+    # past the window; undo/rollback only work inside it (and inside the
+    # 30-day cleanup task's global purge, see #1521).
     sleep_merge_retention_days: int = 0
     # #1336: user-forget tombstone retention window in days. 0 = disabled =
     # retain forever (pre-#1336 behavior). When > 0 the forget_retention
