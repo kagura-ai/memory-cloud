@@ -114,6 +114,9 @@ class EmbeddingService:
             self.provider = settings.embedding_provider
         self.self_hosted_base_url = settings.self_hosted_base_url
         self.self_hosted_api_key = settings.self_hosted_api_key or None
+        # Issue #1525: what to call the model on the wire when the backend
+        # serves it under a different id than the registry name.
+        self.self_hosted_model_aliases = getattr(settings, "self_hosted_model_aliases", "") or ""
         self._self_hosted_verified = False
         # Issue #713: the credential tier the most recent ``_get_client`` OpenAI
         # call resolved (set in ``_get_client``). ``resolve_paid_by`` reads it to
@@ -513,9 +516,21 @@ class EmbeddingService:
         return AsyncOpenAI(api_key=api_key)
 
     def _build_embedding_kwargs(self, input_data: str | list[str]) -> dict:
-        """Build kwargs for OpenAI-compatible embeddings.create() call."""
-        kwargs: dict = {"model": self.model, "input": input_data}
-        # OpenAI supports dimensions param; Ollama infers from model
+        """Build kwargs for OpenAI-compatible embeddings.create() call.
+
+        Issue #1525: for ``self_hosted`` the wire ``model`` goes through
+        ``SELF_HOSTED_MODEL_ALIASES`` — vLLM and hosted OpenAI-compatible
+        endpoints often serve the same weights under a HF path or a vendor
+        prefix. ``self.model`` (the registry name) is untouched so the
+        collection name, the allowlist and the Redis cache key stay canonical.
+        """
+        model = self.model
+        if self.provider == "self_hosted":
+            from config.self_hosted_aliases import resolve_self_hosted_model_id
+
+            model = resolve_self_hosted_model_id(self.model, self.self_hosted_model_aliases)
+        kwargs: dict = {"model": model, "input": input_data}
+        # OpenAI supports dimensions param; self-hosted backends infer from model
         if self.provider == "openai":
             kwargs["dimensions"] = self.dimensions
         return kwargs

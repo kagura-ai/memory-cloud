@@ -1234,6 +1234,73 @@ async def delete_context_points(
         raise QdrantError(f"Failed to delete context points: {e}") from e
 
 
+async def list_context_point_ids(
+    workspace_id: str, context_id: str, collection_name: str, *, page_size: int = 1000
+) -> list[str]:
+    """Every point id stored for a context in ``collection_name`` (#1525).
+
+    Qdrant only — scrolls by the same ``workspace_id`` + ``context_id`` payload
+    filter :func:`delete_context_points` deletes by, without payload or
+    vectors. Used by the embedding migration to find points the target
+    collection holds for memories that are no longer live.
+
+    Raises:
+        QdrantError: If the scroll fails.
+    """
+    client = get_qdrant_client()
+    filter_conditions = Filter(
+        must=[
+            FieldCondition(key="workspace_id", match=MatchValue(value=workspace_id)),
+            FieldCondition(key="context_id", match=MatchValue(value=context_id)),
+        ]
+    )
+    ids: list[str] = []
+    offset = None
+    try:
+        while True:
+            points, offset = await client.scroll(
+                collection_name=collection_name,
+                scroll_filter=filter_conditions,
+                limit=page_size,
+                offset=offset,
+                with_payload=False,
+                with_vectors=False,
+            )
+            ids.extend(str(point.id) for point in points)
+            if offset is None or not points:
+                return ids
+    except Exception as e:
+        raise QdrantError(f"Failed to list context points: {e}") from e
+
+
+async def delete_points_from_qdrant(point_ids: list[str], collection_name: str) -> None:
+    """Delete ``point_ids`` from ``collection_name`` in one request (#1525).
+
+    Ids that do not exist are ignored by Qdrant, so callers may pass a
+    superset. No-op on an empty list.
+
+    Raises:
+        QdrantError: If deletion fails.
+    """
+    if not point_ids:
+        return
+    _store = _active_store()
+    if _store is not None:
+        for point_id in point_ids:
+            await _store.delete_memory("", UUID(point_id), collection_name)
+        return
+
+    client = get_qdrant_client()
+    try:
+        await client.delete(
+            collection_name=collection_name,
+            points_selector=PointIdsList(points=list(point_ids)),
+        )
+        logger.info("points_deleted_from_qdrant", collection=collection_name, count=len(point_ids))
+    except Exception as e:
+        raise QdrantError(f"Failed to delete points: {e}") from e
+
+
 async def delete_user_points(user_id: str) -> dict[str, int]:
     """Delete every point authored by a user across all kagura_memories collections.
 

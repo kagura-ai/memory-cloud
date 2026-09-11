@@ -98,3 +98,128 @@ async def test_claim_returns_early_when_not_claimable():
         await memory_service.process_pending_embedding(uuid4())
 
     db.commit.assert_not_awaited()  # never got past the claim
+
+
+# --------------------------------------------------------------------- #1525
+# An embedding-model migration's switch re-queues rows to `pending` after
+# flipping routing. A worker that claimed a row before the flip embedded it
+# under the OLD routing; its completion write must not overwrite the re-queue.
+
+
+def _worker_db(execute_results):
+    db = MagicMock()
+    db.execute = AsyncMock(side_effect=list(execute_results))
+    db.commit = AsyncMock()
+    db.rollback = AsyncMock()
+    return db
+
+
+def _claimed(memory_id):
+    result = MagicMock()
+    result.scalar_one_or_none = MagicMock(return_value=memory_id)
+    return result
+
+
+def _memory_row(memory_id):
+    memory = MagicMock()
+    memory.id = memory_id
+    memory.user_id = "u1"
+    memory.summary = "s"
+    memory.workspace_id = uuid4()
+    memory.context_id = uuid4()
+    result = MagicMock()
+    result.scalar_one_or_none = MagicMock(return_value=memory)
+    return result
+
+
+def _rowcount(n):
+    result = MagicMock()
+    result.rowcount = n
+    result.scalar_one_or_none = MagicMock(return_value=None if n == 0 else 0)
+    return result
+
+
+@pytest.mark.asyncio
+async def test_success_write_is_fenced_on_still_owning_the_claim():
+    from services import memory_service
+
+    memory_id = uuid4()
+    captured: list = []
+    db = _worker_db([_claimed(memory_id), _memory_row(memory_id), _rowcount(0)])
+    original_execute = db.execute
+
+    async def _execute(stmt, *a, **k):
+        captured.append(stmt)
+        return await original_execute(stmt, *a, **k)
+
+    db.execute = AsyncMock(side_effect=_execute)
+
+    async def _aiter():
+        yield db
+
+    embed_svc = MagicMock()
+    embed_svc.embed = AsyncMock(return_value=[0.1])
+    embed_svc.model = "m"
+
+    with (
+        patch("db.base.get_db", return_value=_aiter()),
+        patch("services.embedding_service.EmbeddingService", MagicMock()),
+        patch(
+            "services.context_routing.resolve_context_routing",
+            AsyncMock(return_value=("kagura_memories", embed_svc)),
+        ),
+        patch.object(memory_service, "add_memory_to_qdrant", AsyncMock()),
+        patch.object(memory_service, "build_memory_point", return_value=({}, [], [])),
+        patch.object(memory_service, "_create_knn_seed_edges", AsyncMock()) as knn,
+        patch.object(memory_service, "_create_tag_cooccurrence_seed_edges", AsyncMock()) as tags,
+    ):
+        await memory_service.process_pending_embedding(memory_id)
+
+    # claim UPDATE, SELECT memory, success UPDATE — and nothing after a lost claim.
+    assert len(captured) == 3
+    sql = str(
+        captured[2].compile(dialect=postgresql.dialect(), compile_kwargs={"literal_binds": True})
+    ).upper()
+    assert "EMBEDDING_STATUS = 'PROCESSING'" in sql.replace("MEMORIES.", "")
+    assert "'SUCCESS'" in sql
+    knn.assert_not_awaited()
+    tags.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_failure_write_is_fenced_on_still_owning_the_claim():
+    from services import memory_service
+
+    memory_id = uuid4()
+    captured: list = []
+    db = _worker_db([_claimed(memory_id), _memory_row(memory_id), _rowcount(0)])
+    original_execute = db.execute
+
+    async def _execute(stmt, *a, **k):
+        captured.append(stmt)
+        return await original_execute(stmt, *a, **k)
+
+    db.execute = AsyncMock(side_effect=_execute)
+
+    async def _aiter():
+        yield db
+
+    embed_svc = MagicMock()
+    embed_svc.embed = AsyncMock(side_effect=RuntimeError("provider down"))
+
+    with (
+        patch("db.base.get_db", return_value=_aiter()),
+        patch("services.embedding_service.EmbeddingService", MagicMock()),
+        patch(
+            "services.context_routing.resolve_context_routing",
+            AsyncMock(return_value=("kagura_memories", embed_svc)),
+        ),
+    ):
+        await memory_service.process_pending_embedding(memory_id)
+
+    assert len(captured) == 3
+    sql = str(
+        captured[2].compile(dialect=postgresql.dialect(), compile_kwargs={"literal_binds": True})
+    ).upper()
+    assert "EMBEDDING_STATUS = 'PROCESSING'" in sql.replace("MEMORIES.", "")
+    assert "'FAILED'" in sql

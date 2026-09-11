@@ -424,6 +424,17 @@ class Settings(BaseSettings):
             "(e.g. vLLM launched with --api-key). Ollama ignores it."
         ),
     )
+    self_hosted_model_aliases: str = Field(
+        default="",
+        description=(
+            "Issue #1525: comma-separated `registry-name=upstream-id` pairs that "
+            "rewrite the wire `model` for self_hosted embedding requests, e.g. "
+            "`qwen3-embedding:4b=Qwen/Qwen3-Embedding-4B`. The registry name "
+            "stays the canonical identity (collection name, allowlist, cache key); "
+            "only the request to the backend changes. Empty = send the registry "
+            "name unchanged."
+        ),
+    )
 
     @field_validator("self_hosted_base_url")
     @classmethod
