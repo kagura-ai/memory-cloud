@@ -408,8 +408,7 @@ jobs:
       E2E_ADMIN_LOGIN_ID: e2e-admin
       E2E_API_URL: http://localhost:8080
       NEXT_PUBLIC_API_URL: http://localhost:8080
-      # #1500: the readiness gate reads the app's boot-phase INFO lines
-      # (application_starting / application_started) from the API log.
+      # #1500: wait-for-api.sh reads the boot-phase INFO lines from the API log.
       LOG_LEVEL: INFO
     services:
       postgres:
@@ -477,27 +476,25 @@ jobs:
         run: cd backend && python -m src.cli.seed_e2e_admin
 
       - name: Start API server
-        # Log to a file so the readiness gate below (and the on-failure dump)
-        # can see the app's own boot phases; the pid crosses steps via a file.
+        # Logged to a file so the readiness gate can read the boot phases.
         run: |
           cd backend
-          nohup python -m uvicorn src.api.main:app --host 0.0.0.0 --port 8080 --log-level warning \
+          python -m uvicorn src.api.main:app --host 0.0.0.0 --port 8080 --log-level warning \
             > "$RUNNER_TEMP/api.log" 2>&1 &
-          echo "$!" > "$RUNNER_TEMP/api.pid"
+          echo "API_PID=$!" >> "$GITHUB_ENV"
 
       - name: Wait for API readiness
-        # #1500: its own step so a slow or crashed boot is reported here as an
-        # environment failure — never as a locator timeout in the test step —
-        # and the message names the phase (import / lifespan / serving) the
-        # API was blocked in, with the log tail. 180s budget replaces the old
-        # fixed 60s.
-        run: .github/scripts/wait-for-api.sh "$(cat "$RUNNER_TEMP/api.pid")" "$RUNNER_TEMP/api.log"
+        # #1500: a slow or crashed boot fails HERE, naming its phase — see
+        # .github/scripts/wait-for-api.sh.
+        id: wait_api
+        run: .github/scripts/wait-for-api.sh "$API_PID" "$RUNNER_TEMP/api.log"
 
       - name: Run authed a11y tests
         run: cd frontend && npm run test:a11y:authed
 
       - name: Show API log
-        if: ${{ failure() }}
+        # The readiness step already dumps the log when it is the one failing.
+        if: ${{ failure() && steps.wait_api.outcome != 'failure' }}
         run: tail -n 100 "$RUNNER_TEMP/api.log" || true
 
       - name: Upload Playwright report
@@ -540,8 +537,7 @@ jobs:
       E2E_ADMIN_LOGIN_ID: e2e-admin
       E2E_API_URL: http://localhost:8080
       NEXT_PUBLIC_API_URL: http://localhost:8080
-      # #1500: the readiness gate reads the app's boot-phase INFO lines
-      # (application_starting / application_started) from the API log.
+      # #1500: wait-for-api.sh reads the boot-phase INFO lines from the API log.
       LOG_LEVEL: INFO
       # OAuth test-IdP harness (#937): redirect the server-side GitHub exchange
       # at the Playwright-managed mock IdP on :9100.
@@ -622,27 +618,25 @@ jobs:
         run: cd backend && python -m src.cli.seed_e2e_admin
 
       - name: Start API server
-        # Log to a file so the readiness gate below (and the on-failure dump)
-        # can see the app's own boot phases; the pid crosses steps via a file.
+        # Logged to a file so the readiness gate can read the boot phases.
         run: |
           cd backend
-          nohup python -m uvicorn src.api.main:app --host 0.0.0.0 --port 8080 --log-level warning \
+          python -m uvicorn src.api.main:app --host 0.0.0.0 --port 8080 --log-level warning \
             > "$RUNNER_TEMP/api.log" 2>&1 &
-          echo "$!" > "$RUNNER_TEMP/api.pid"
+          echo "API_PID=$!" >> "$GITHUB_ENV"
 
       - name: Wait for API readiness
-        # #1500: its own step so a slow or crashed boot is reported here as an
-        # environment failure — never as a locator timeout in the test step —
-        # and the message names the phase (import / lifespan / serving) the
-        # API was blocked in, with the log tail. 180s budget replaces the old
-        # fixed 60s.
-        run: .github/scripts/wait-for-api.sh "$(cat "$RUNNER_TEMP/api.pid")" "$RUNNER_TEMP/api.log"
+        # #1500: a slow or crashed boot fails HERE, naming its phase — see
+        # .github/scripts/wait-for-api.sh.
+        id: wait_api
+        run: .github/scripts/wait-for-api.sh "$API_PID" "$RUNNER_TEMP/api.log"
 
       - name: Run OAuth account-linking E2E
         run: cd frontend && npm run test:e2e:oauth
 
       - name: Show API log
-        if: ${{ failure() }}
+        # The readiness step already dumps the log when it is the one failing.
+        if: ${{ failure() && steps.wait_api.outcome != 'failure' }}
         run: tail -n 100 "$RUNNER_TEMP/api.log" || true
 
       - name: Upload Playwright report

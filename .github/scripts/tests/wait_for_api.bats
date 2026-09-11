@@ -1,20 +1,20 @@
 #!/usr/bin/env bats
-# Pins the three verdicts of .github/scripts/wait-for-api.sh (#1500): ready,
-# process died (phase named), budget exhausted (phase named + log tail).
-# `curl` is shadowed with a stub on PATH so no network is touched.
+# Pins the verdicts of .github/scripts/wait-for-api.sh (#1500): ready, process
+# died (phase named), a phase cap tripped (phase named), budget exhausted (phase
+# named + log tail), and argument validation. The probe is stubbed through the
+# CURL env indirection, the same way deploy.sh's bats suites stub curl.
 
 SCRIPT="$BATS_TEST_DIRNAME/../wait-for-api.sh"
 
+mock_curl() {
+  [ "${FAKE_CURL_OK:-0}" = "1" ] && return 0
+  return 22
+}
+
 setup() {
   TMP="$(mktemp -d)"
-  mkdir -p "$TMP/bin"
-  cat > "$TMP/bin/curl" <<'STUB'
-#!/usr/bin/env bash
-[ "${FAKE_CURL_OK:-0}" = "1" ] && exit 0
-exit 22
-STUB
-  chmod +x "$TMP/bin/curl"
-  export PATH="$TMP/bin:$PATH"
+  export -f mock_curl
+  export CURL=mock_curl
   export WAIT_FOR_API_INTERVAL=1
   LOG="$TMP/api.log"
   : > "$LOG"
@@ -45,17 +45,32 @@ teardown() {
   [[ "$output" == *"application_starting"* ]]
 }
 
-@test "budget exhausted names the phase — import when nothing was logged" {
-  run "$SCRIPT" "$LIVE_PID" "$LOG" http://x/health 2
+@test "import cap trips when application_starting never appears" {
+  WAIT_FOR_API_STARTING_CAP=1 run "$SCRIPT" "$LIVE_PID" "$LOG" http://x/health 30
   [ "$status" -eq 1 ]
-  [[ "$output" == *"not ready after 2s"* ]]
-  [[ "$output" == *"stuck in phase: import"* ]]
+  [[ "$output" == *"still importing after"* ]]
+  [[ "$output" == *"application_starting not logged within 1s"* ]]
   [[ "$output" == *"(no log output)"* ]]
+}
+
+@test "lifespan cap trips when application_started never appears" {
+  echo "application_starting" >> "$LOG"
+  WAIT_FOR_API_STARTED_CAP=1 run "$SCRIPT" "$LIVE_PID" "$LOG" http://x/health 30
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"lifespan not finished after"* ]]
+  [[ "$output" == *"application_started not logged within 1s"* ]]
 }
 
 @test "budget exhausted names serving once lifespan finished" {
   printf 'application_starting\napplication_started\n' >> "$LOG"
   run "$SCRIPT" "$LIVE_PID" "$LOG" http://x/health 2
   [ "$status" -eq 1 ]
+  [[ "$output" == *"not ready after"* ]]
   [[ "$output" == *"stuck in phase: serving"* ]]
+}
+
+@test "a non-integer interval is rejected instead of breaking the loop" {
+  WAIT_FOR_API_INTERVAL=0.5 run "$SCRIPT" "$LIVE_PID" "$LOG" http://x/health 5
+  [ "$status" -eq 2 ]
+  [[ "$output" == *"interval must be a positive integer"* ]]
 }
