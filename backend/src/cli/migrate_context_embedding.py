@@ -10,10 +10,15 @@ Steps (each is a flag; ``--run`` chains the first three):
 
     --plan        resolve source/target, count memories        (default, read-only)
     --reembed     fill the target collection; routing untouched (idempotent, re-runnable)
-    --verify      every live memory has a point in the target  (read-only)
+    --verify      every live memory has a point in the target; drops target points
+                  whose memory was forgotten meanwhile
     --switch      flip routing + re-queue the delta since the re-embed started
-    --purge       delete the source points (only after a switch; irreversible)
-    --rollback-to MODEL   flip routing back (source points are still there)
+    --purge       delete the source points, in the same invocation as --switch
+    --purge-source MODEL  delete MODEL's points for the context in a later run,
+                  after routing has moved on (the plan can no longer name the
+                  old source by itself); refused while MODEL is still active
+    --rollback-to MODEL   route back to MODEL and re-queue everything written
+                  since the switch (its collection must still exist)
 
 Exit codes: 0 ok · 1 error · 2 verification found missing points.
 """
@@ -31,12 +36,14 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 from config.constants import EMBEDDING_MODEL_REGISTRY  # noqa: E402
 from config.settings import get_settings  # noqa: E402
 from db.base import get_db  # noqa: E402
+from services.context_routing import resolve_context_embedding  # noqa: E402
 from services.embedding_migration_service import (  # noqa: E402
     MigrationPlan,
     list_migratable_context_ids,
     plan_context_migration,
     purge_source_points,
     reembed_context,
+    rollback_context_embedding,
     switch_context_embedding,
     verify_context_migration,
 )
@@ -61,15 +68,37 @@ async def _one_context(db, context_id: UUID, args: argparse.Namespace) -> int:
     settings = get_settings()
 
     if args.rollback_to:
-        dims = EMBEDDING_MODEL_REGISTRY[args.rollback_to][0]
         if not _confirm(f"Route {context_id} back to {args.rollback_to}?", args.yes):
             print("  skipped")
             return 0
-        result = await switch_context_embedding(db, context_id, args.rollback_to, dims)
+        result = await rollback_context_embedding(
+            db, context_id, args.rollback_to, requeue_since=args.requeue_since
+        )
         print(
             f"  rolled back {context_id}: {result.previous_model} -> {result.model} "
-            f"(requeued {result.requeued})"
+            f"(requeued {result.requeued} for the sweep, "
+            f"dropped {result.stale_removed} forgotten)"
         )
+        return 0
+
+    if args.purge_source:
+        active_model, _ = await resolve_context_embedding(db, context_id)
+        plan = await plan_context_migration(
+            db,
+            context_id,
+            active_model,
+            allowlist_setting=settings.embedding_model_allowlist,
+            source_model=args.purge_source,
+        )
+        _print_plan(plan)
+        if not _confirm(
+            f"Delete {context_id}'s points from {plan.source_collection}? (irreversible)",
+            args.yes,
+        ):
+            print("  skipped")
+            return 0
+        deleted = await purge_source_points(db, plan)
+        print(f"  purged {deleted} points from {plan.source_collection}")
         return 0
 
     plan = await plan_context_migration(
@@ -91,7 +120,10 @@ async def _one_context(db, context_id: UUID, args: argparse.Namespace) -> int:
 
     if args.verify or args.run:
         verified = await verify_context_migration(db, plan)
-        print(f"  verify: {verified.present}/{verified.expected} present")
+        print(
+            f"  verify: {verified.present}/{verified.expected} present, "
+            f"{verified.stale_removed} stale target point(s) removed"
+        )
         if not verified.ok:
             print(
                 f"  MISSING {len(verified.missing)}: {', '.join(str(m) for m in verified.missing[:20])}"
@@ -118,7 +150,8 @@ async def _one_context(db, context_id: UUID, args: argparse.Namespace) -> int:
         )
         print(
             f"  switched: {switched.previous_model} -> {switched.model} "
-            f"(requeued {switched.requeued} for the sweep)"
+            f"(requeued {switched.requeued} for the sweep, "
+            f"dropped {switched.stale_removed} forgotten)"
         )
 
     if args.purge:
@@ -169,20 +202,45 @@ def _parse(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--switch", action="store_true")
     parser.add_argument("--purge", action="store_true")
     parser.add_argument("--run", action="store_true", help="--reembed + --verify + --switch")
-    parser.add_argument("--rollback-to", metavar="MODEL", help="flip routing back to MODEL")
+    parser.add_argument(
+        "--rollback-to",
+        metavar="MODEL",
+        help="route back to MODEL and re-queue what was written since the switch",
+    )
+    parser.add_argument(
+        "--purge-source",
+        metavar="MODEL",
+        help="delete MODEL's points for the context (a later run, after --switch)",
+    )
     parser.add_argument("--batch-size", type=int, default=64)
     parser.add_argument(
         "--requeue-since",
         type=lambda s: __import__("datetime").datetime.fromisoformat(s),
-        help="ISO timestamp; with a standalone --switch, re-queue memories written since",
+        help=(
+            "ISO timestamp; with a standalone --switch, re-queue memories written since; "
+            "with --rollback-to, overrides the recorded switch time"
+        ),
     )
     parser.add_argument("--yes", action="store_true", help="no confirmation prompts")
     args = parser.parse_args(argv)
-    if args.rollback_to:
-        if args.rollback_to not in EMBEDDING_MODEL_REGISTRY:
-            parser.error(f"unknown model for --rollback-to: {args.rollback_to}")
+    standalone = [
+        name
+        for name, value in (
+            ("--rollback-to", args.rollback_to),
+            ("--purge-source", args.purge_source),
+        )
+        if value
+    ]
+    if len(standalone) > 1:
+        parser.error(f"{' and '.join(standalone)} are separate runs; pass one")
+    if standalone:
+        model = args.rollback_to or args.purge_source
+        if model not in EMBEDDING_MODEL_REGISTRY:
+            parser.error(f"unknown model for {standalone[0]}: {model}")
+        if args.to or args.reembed or args.verify or args.switch or args.purge or args.run:
+            parser.error(f"{standalone[0]} is a standalone run; drop the migration flags")
     elif not args.to:
-        parser.error("--to is required unless --rollback-to is given")
+        parser.error("--to is required unless --rollback-to or --purge-source is given")
     if args.purge and (args.reembed or args.run):
         parser.error("--purge is a separate step; run it after a switch has settled")
     return args
