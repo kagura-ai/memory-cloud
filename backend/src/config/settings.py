@@ -158,6 +158,38 @@ class Settings(BaseSettings):
         default="",
         description="Shared bearer token authenticating the ai-worker to /api/v1/workers/* (RFC 6750)",
     )
+    # #1482: blue-green identity of THIS API instance, set per service by the
+    # compose file (api-blue → "blue", api-green → "green"). Reported as
+    # ``responding_color`` by GET /api/v1/workers/active-color so a caller can
+    # tell it reached a color that is no longer live. Empty (local dev, single
+    # instance) is reported as null — never guessed.
+    deploy_color: Literal["", "blue", "green"] = Field(
+        default="",
+        description='Color of this API instance in a blue-green deploy ("blue" | "green"); empty = not a colored deploy',
+    )
+    # #1482: where the deploy marker (the color serving traffic right now) is
+    # mounted inside the container. Read on EVERY request — the marker is the
+    # single source of truth and must never be cached across a color switch.
+    active_color_marker_path: str = Field(
+        default="/run/kagura/active-color",
+        description="Path of the active-color deploy marker as mounted in the API container (#1482)",
+    )
+
+    @field_validator("deploy_color", mode="before")
+    @classmethod
+    def _strip_deploy_color(cls, v: Any) -> Any:
+        """Trim whitespace only; the ``Literal`` does the refusing.
+
+        The valid values live in ``config.constants.DeployColor`` — the same
+        Literal the marker reader and the response model type against — so a
+        typo (which would make ``responding_color`` lie, the one thing that
+        field exists to expose) fails at startup with pydantic's own error.
+        Case is NOT folded: the marker writer refuses ``Blue`` too.
+        """
+        if v is None:
+            return ""
+        return v.strip() if isinstance(v, str) else v
+
     # Issue #954: service-to-service auth for the external billing service
     # pushing entitlement changes to PUT /internal/...
     # Empty disables the internal billing endpoints (fail-closed, 503). Distinct

@@ -254,7 +254,7 @@ openapi_tags = [
     },
     {
         "name": "workers",
-        "description": "Authenticated connector-worker runtime configuration",
+        "description": "Authenticated connector-worker runtime configuration and deployment discovery",
     },
     {
         "name": "analyses",

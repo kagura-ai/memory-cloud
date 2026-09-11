@@ -4,11 +4,24 @@ Issue #273: Extract magic numbers to centralized configuration for maintainabili
 All constants are grouped by category with clear documentation.
 """
 
+from typing import Literal, get_args
+
 # ============================================================================
 # Application Version (single source of truth for runtime)
 # ============================================================================
 
 APP_VERSION = "0.65.0"
+
+# ============================================================================
+# Blue-green deploy colors (#1482)
+# ============================================================================
+# The only values the active-color marker and DEPLOY_COLOR may take. The
+# Literal is the single definition: the settings field, the marker reader and
+# the response model all type against it, and the frozenset is DERIVED from it
+# (the WORKER_LOCALES pattern) so the runtime check and the OpenAPI contract
+# cannot disagree — a color that is not here is refused, never guessed.
+DeployColor = Literal["blue", "green"]
+DEPLOY_COLORS: frozenset[str] = frozenset(get_args(DeployColor))
 
 # ============================================================================
 # Context Field Limits (#1193)

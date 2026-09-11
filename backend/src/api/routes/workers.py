@@ -23,10 +23,12 @@ from fastapi import APIRouter, Depends, Header, HTTPException, Query, Response, 
 from pydantic import BaseModel, SerializerFunctionWrapHandler, model_serializer
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from config.constants import DeployColor
 from config.settings import get_settings
 from db.base import get_db
 from models.api_base import TZAwareBaseModel
 from models.worker_runtime import WorkerLocale, WorkerRuntimeConfig, normalize_worker_locale
+from services.active_color import read_active_color_settled
 from services.connector_provisioning import ConnectorProvisioningService
 from services.worker_app_identity import (
     WorkerAppIdentityService,
@@ -129,6 +131,13 @@ class WorkerAppBootstrapItem(TZAwareBaseModel):
 class WorkerAppBootstrapResponse(BaseModel):
     revision: str
     apps: list[WorkerAppBootstrapItem]
+
+
+class WorkerActiveColorResponse(BaseModel):
+    """Which blue-green color is live, and which one answered (#1482)."""
+
+    active_color: DeployColor
+    responding_color: DeployColor | None
 
 
 def _etag(revision: str) -> str:
@@ -456,3 +465,63 @@ async def get_worker_config(
         # cannot fetch its token/KMC key either).
         runtime=WorkerRuntimeConfig.from_stored(connector.runtime_config),
     )
+
+
+@router.get(
+    "/active-color",
+    response_model=WorkerActiveColorResponse,
+    summary="Live blue-green deploy color",
+    responses={
+        503: {
+            "description": (
+                "The deploy marker is missing, unreadable or not a known color "
+                "(error code DEPLOY-001, ``details.reason`` = missing | unreadable "
+                "| invalid). No color is guessed. Every reason can be transient "
+                "while the marker is republished during a color switch — treat "
+                "the 503 as retryable."
+            )
+        }
+    },
+)
+async def get_active_color(
+    _: None = Depends(verify_worker_token),
+) -> WorkerActiveColorResponse:
+    """Report the color serving traffic, read from the deploy marker per request.
+
+    A co-resident consumer of this lane used to learn the live color by
+    bind-mounting the marker file itself, which pins the inode at container
+    start and silently goes stale (#1482). Here the process that owns the
+    marker reads it on every call, so the answer is always the marker's
+    current value. ``responding_color`` is the identity of the instance that
+    answered: when it differs from ``active_color`` the caller has reached a
+    color that is no longer live and should re-target.
+    """
+    settings = get_settings()
+    active = await read_active_color_settled(settings.active_color_marker_path)
+    # DEPLOY_COLOR is validated against the same Literal at startup; empty
+    # (an uncolored single instance) is reported as null, never guessed.
+    responding: DeployColor | None = settings.deploy_color or None
+    _note_color_pair(active, responding)
+    return WorkerActiveColorResponse(active_color=active, responding_color=responding)
+
+
+# Last (active, responding) pair this process answered with. A mismatch is
+# logged once per TRANSITION, not per request: the lane has no rate limiter
+# and a poller on a drained color (which stays up until the next deploy after
+# a rollback) would otherwise emit one WARN per poll for the whole window.
+# The response body already carries the signal on every call.
+_last_color_pair: tuple[DeployColor, DeployColor | None] | None = None
+
+
+def _note_color_pair(active: DeployColor, responding: DeployColor | None) -> None:
+    global _last_color_pair
+    pair = (active, responding)
+    if pair == _last_color_pair:
+        return
+    _last_color_pair = pair
+    if responding is not None and responding != active:
+        logger.warning(
+            "active_color_mismatch",
+            active_color=active,
+            responding_color=responding,
+        )
