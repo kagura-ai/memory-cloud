@@ -2775,7 +2775,7 @@
         "sleep_max_llm_calls_per_run": "1 回の sleep 実行での最大 LLM API 呼び出し数",
         "sleep_dedup_enabled": "重複排除/マージフェーズを有効化",
         "sleep_dedup_similarity_threshold": "重複検出のコサイン類似度しきい値",
-        "sleep_merge_retention_days": "Sleep tombstone（マージ敗者・consolidation アーカイブ）のパージ猶予日数（0 = 永久保持）",
+        "sleep_merge_retention_days": "Sleep tombstone（マージ敗者・consolidation アーカイブ）のパージ猶予日数（0 = Sleep による追加パージなし。プラットフォームのクリーンアップ掃引 CLEANUP_DELETED_MEMORIES_RETENTION_DAYS（既定 30 日）は引き続き全 tombstone に適用）",
         "sleep_dedup_supersede_enabled": "dedupシャドウモード：敗者を削除せず supersedes エッジを記録",
         "sleep_edge_discovery_enabled": "エッジ発見フェーズを有効化",
         "sleep_edge_discovery_sample_size": "エッジ発見 1 回あたりのサンプルメモリ数",

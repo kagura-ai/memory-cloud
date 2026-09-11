@@ -18,7 +18,9 @@ can never fall into this window by omission. The sweep mechanics
 (TOCTOU-guarded DELETE, budget exemption, batch audit) are shared with
 merge_retention via ``purge_tombstones`` so the two phases cannot drift.
 
-Default is **0 = disabled = retain forever** (pre-#1336 behavior).
+Default is **0 = disabled = no additional Sleep purge** (pre-#1336 behavior; the
+platform cleanup sweep, ``CLEANUP_DELETED_MEMORIES_RETENTION_DAYS``, still bounds
+every tombstone — #1521).
 """
 
 from __future__ import annotations

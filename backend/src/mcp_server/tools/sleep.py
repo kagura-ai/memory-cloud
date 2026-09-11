@@ -11,6 +11,7 @@ from mcp.types import TextContent
 from sqlalchemy import select
 from sqlalchemy.engine import CursorResult
 
+from config.constants import TOMBSTONE_PURGER_CLAUSE
 from mcp_server.tools._helpers import (
     _check_viewer_permission,
     _ContextNotFoundError,
@@ -385,9 +386,8 @@ async def _undo_merge(db: Any, action: Any, ctx: _RollbackCtx, summary: dict[str
         deleted_by=DELETED_BY_SLEEP_MERGE,
         counter_key="merges_reversed",
         not_restorable=(
-            f"merge loser {action.target_id} not restorable — purged by retention "
-            "(sleep_merge_retention_days or the 30-day cleanup task), or no longer "
-            "a merge tombstone"
+            f"merge loser {action.target_id} not restorable — {TOMBSTONE_PURGER_CLAUSE}, "
+            "or no longer a merge tombstone"
         ),
     )
 
@@ -462,9 +462,8 @@ async def _undo_archive(db: Any, action: Any, ctx: _RollbackCtx, summary: dict[s
         deleted_by=DELETED_BY_SLEEP_ARCHIVE,
         counter_key="archives_restored",
         not_restorable=(
-            f"archived memory {action.memory_id} not restorable — tombstone purged "
-            "(sleep_merge_retention_days or the 30-day cleanup task), or no longer "
-            "a sleep tombstone"
+            f"archived memory {action.memory_id} not restorable — {TOMBSTONE_PURGER_CLAUSE}, "
+            "or no longer a sleep tombstone"
         ),
     )
 

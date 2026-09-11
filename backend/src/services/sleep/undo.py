@@ -22,6 +22,7 @@ from sqlalchemy import update as sa_update
 from sqlalchemy.engine import CursorResult
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from config.constants import TOMBSTONE_PURGER_CLAUSE
 from models.memory import DELETED_BY_SLEEP_MERGE, Memory
 from models.sleep import SleepAction, SleepReport
 from services.sleep.merge_retention import restore_sleep_tombstone_stmt
@@ -355,9 +356,8 @@ async def undo_merge_action(
     if loser is None:
         raise UndoMergeError(
             "memory_purged",
-            f"Merged memory {loser_id} no longer exists — it was hard-deleted by the "
-            "merge retention policy (sleep_merge_retention_days), which bounds how "
-            "long merges stay reversible.",
+            f"Merged memory {loser_id} no longer exists — {TOMBSTONE_PURGER_CLAUSE}; "
+            "whichever window is shorter bounds how long merges stay reversible.",
         )
     if loser.deleted_at is None:
         raise UndoMergeError(

@@ -597,7 +597,7 @@ Common issues:
 • "Not found" → Memory already deleted or wrong ID (verify with recall)
 • "Permission denied" → Trying to delete another user's memory
 
-Note: Soft delete with 30-day retention. Associated graph edges are automatically cleaned up. Supports deletion by specific memory_id or by search query (deletes top-k matches).
+Note: Soft delete; retention is bounded by the deployment's cleanup window (CLEANUP_DELETED_MEMORIES_RETENTION_DAYS, default 30 days). Associated graph edges are automatically cleaned up. Supports deletion by specific memory_id or by search query (deletes top-k matches).
 
 IMPORTANT: Always specify context_id to ensure you're deleting from the intended context. Use list_contexts() to discover available context IDs.
 

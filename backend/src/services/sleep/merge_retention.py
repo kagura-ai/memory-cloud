@@ -12,7 +12,9 @@ are hard-deleted, and the run's audit log records a batch
 summary (one action, not one row per purge — a large backlog must not explode
 ``sleep_actions``).
 
-Default is **0 = disabled = retain forever** (the pre-#1209 behavior). The
+Default is **0 = disabled = no additional Sleep purge** (the pre-#1209 behavior;
+the platform cleanup sweep, ``CLEANUP_DELETED_MEMORIES_RETENTION_DAYS``, still
+bounds every tombstone — #1521). The
 undo path (`services.sleep.undo`) names this setting in its error message
 when a purged merge can no longer be restored — the rollback bound is
 declared, not silent.

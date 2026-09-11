@@ -71,7 +71,7 @@ Detects and merges duplicate memories by clustering high-similarity neighbors.
 
 Hard-deletes merge losers whose soft-deletion is older than the declared retention window — destructive deletion as an explicit, telemetered second step, never a side effect of the merge itself. Consolidation archives (`deleted_by='sleep_consolidation'`, #1520) share this window — both sleep tombstone classes are one set (`SLEEP_TOMBSTONE_DELETED_BY`), and the user-forget window is defined as its complement.
 
-- **Default**: `sleep_merge_retention_days = 0` — **disabled, retain forever**. Merges stay reversible indefinitely unless an operator declares a window. Since #1520 the same window bounds consolidation archives. Until #1521 lands, the platform-wide 30-day cleanup task still hard-deletes tombstones older than 30 days regardless of this setting, so rollback is bounded by whichever is shorter.
+- **Default**: `sleep_merge_retention_days = 0` — **no additional Sleep purge**. This is not "retain forever": the platform-wide cleanup sweep (`CLEANUP_DELETED_MEMORIES_RETENTION_DAYS`, default 30 days, `0` disables it) still hard-deletes every tombstone older than its window, whether or not Sleep runs and regardless of who tombstoned the row (#1521). Since #1520 the same Sleep window bounds consolidation archives. Undo and rollback are possible inside whichever window is shorter.
 - **When enabled**: losers past the window are purged and the run records one batch-summary `purge` action (`purged`, `retention_days`, `cutoff`). Per-merge undo and run rollback are only possible **inside** the window; the undo API returns 410 naming this setting once a loser is purged.
 - **LLM**: no.
 
@@ -85,7 +85,7 @@ Adjusts memory importance using LLM scoring combined with EMA smoothing.
 
 ### Phase 4 — Consolidation
 
-Promotes, keeps, or archives working memories based on fast-path rules plus LLM judgment for borderline cases. **Archive is a soft delete** (#1520): the row is tombstoned with `deleted_by='sleep_consolidation'` and its vector removed, so `rollback_sleep_run` restores it (row + re-embed) for as long as the Phase 2.5 retention window (and, until #1521 lands, the 30-day cleanup task) keeps the tombstone; a rollback that finds no row reports it under `errors` instead of counting a restore. (The legacy `consolidation_task` cron used when `SLEEP_ENABLED` is not `true` still hard-deletes stale working memories with no tombstone or audit row.)
+Promotes, keeps, or archives working memories based on fast-path rules plus LLM judgment for borderline cases. **Archive is a soft delete** (#1520): the row is tombstoned with `deleted_by='sleep_consolidation'` and its vector removed, so `rollback_sleep_run` restores it (row + re-embed) for as long as the tombstone survives — the Phase 2.5 retention window when set, and always the platform cleanup sweep (`CLEANUP_DELETED_MEMORIES_RETENTION_DAYS`, default 30 days), whichever is shorter; a rollback that finds no row reports it under `errors` instead of counting a restore. (The legacy `consolidation_task` cron used when `SLEEP_ENABLED` is not `true` still hard-deletes stale working memories with no tombstone or audit row.)
 
 - **Algorithm**: rule-based fast path for clear-cut `promote` / `archive` decisions (no LLM) → LLM judgment only for borderline cases → bridge-node protection (never delete memories with high graph centrality).
 - **Judge actions** (#1233): the LLM judge decides `promote` vs `keep` only. Archival is exclusively the deterministic rule path's job (`_archival_eligible` + isolation, which runs *before* the judge) — the judge's `archive` option was removed because its picks were always either redundant or guarded out (#1229), wasting prompt tokens and probability mass. The eligibility guard remains in code as a defensive backstop; `llm_archive_guarded` stays in the report vocabulary (expected 0).
@@ -211,7 +211,7 @@ Restored memories are re-embedded back into Qdrant. On full success the report m
 
 ### Per-merge undo (#1209)
 
-`rollback_sleep_run` reverses a whole run; the correction loop for a single bad merge is `POST /admin/sleep/actions/{action_id}/undo-merge` — it restores just that merge's loser (row **and** Qdrant vector) and appends an `undo_merge` action to the same report, so the merge's full history (merge → undo) reads out of one audit log. Self-scoped like the manual trigger. Error contract: `400` the action is not a dedup merge, `404` unknown/unowned action, `409` already restored (or deleted by something other than sleep), `410` the loser was purged by the retention window (`sleep_merge_retention_days`) — reversibility is bounded by the declared window, and the bound is named, never silent.
+`rollback_sleep_run` reverses a whole run; the correction loop for a single bad merge is `POST /admin/sleep/actions/{action_id}/undo-merge` — it restores just that merge's loser (row **and** Qdrant vector) and appends an `undo_merge` action to the same report, so the merge's full history (merge → undo) reads out of one audit log. Self-scoped like the manual trigger. Error contract: `400` the action is not a dedup merge, `404` unknown/unowned action, `409` already restored (or deleted by something other than sleep), `410` the loser was purged by the Sleep retention window (`sleep_merge_retention_days`) or the platform cleanup sweep (`CLEANUP_DELETED_MEMORIES_RETENTION_DAYS`) — reversibility is bounded by whichever window is shorter, and both bounds are named, never silent.
 
 ## Admin UI
 
@@ -229,7 +229,7 @@ All Sleep-specific settings live under the Sleep category of Neural Config (`bac
 | `sleep_max_memories_per_run`  | Upper bound on memories touched per context per run.           |
 | `sleep_max_llm_calls_per_run` | Upper bound on LLM calls per context per run (budget cap).     |
 | `sleep_dedup_enabled`         | Master toggle for Phase 2.                                     |
-| `sleep_merge_retention_days`  | Merge-loser purge window (#1209). `0` = retain forever.        |
+| `sleep_merge_retention_days`  | Sleep-tombstone purge window (#1209, #1520). `0` = no additional Sleep purge; the cleanup sweep still applies (#1521). |
 | `sleep_edge_discovery_enabled`| Master toggle for Phase 1.                                     |
 | `sleep_importance_reeval_enabled` | Master toggle for Phase 3.                                 |
 | `sleep_consolidation_enabled` | Master toggle for Phase 4.                                     |

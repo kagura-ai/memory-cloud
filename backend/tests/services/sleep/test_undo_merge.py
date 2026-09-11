@@ -71,6 +71,10 @@ async def test_purged_loser_names_the_retention_setting() -> None:
         await undo_merge_action(db, 42, acting_user_id="admin-user")
     assert exc.value.code == "memory_purged"
     assert "sleep_merge_retention_days" in exc.value.message
+    # #1521: the platform cleanup sweep purges too, so the message must name
+    # both purgers — an operator reading "0 = no additional Sleep purge" is
+    # otherwise sent to the wrong setting.
+    assert "CLEANUP_DELETED_MEMORIES_RETENTION_DAYS" in exc.value.message
 
 
 @pytest.mark.asyncio

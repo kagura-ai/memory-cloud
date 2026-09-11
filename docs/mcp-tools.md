@@ -13,7 +13,7 @@ See [MCP Client Setup](mcp-clients.md) for connecting a client, and [Core Concep
 | `recall_nearby` | Deterministic WHERE-axis query — memories with `details.location` within `radius_m` of a point, nearest first | Viewer+ |
 | `reference` | Get full 3-layer details of a memory | Viewer+ |
 | `update_memory` | Update an existing memory in-place or upsert by external ID | Member+ |
-| `forget` | Soft-delete a memory (30-day retention) | Member+ |
+| `forget` | Soft-delete a memory (retention bounded by the deployment's cleanup window, default 30 days) | Member+ |
 | `explore` | Discover related memories via Neural Memory graph | Viewer+ |
 
 ## Agent Substrate (7)
