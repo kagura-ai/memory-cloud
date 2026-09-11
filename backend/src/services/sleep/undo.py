@@ -24,6 +24,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from models.memory import DELETED_BY_SLEEP_MERGE, Memory
 from models.sleep import SleepAction, SleepReport
+from services.sleep.merge_retention import restore_sleep_tombstone_stmt
 from utils.datetime import utcnow
 from utils.logger import get_logger
 
@@ -372,9 +373,19 @@ async def undo_merge_action(
 
     embedding_model, collection_name = await _resolve_embedding_info(db, report.context_id)
 
-    await db.execute(
-        sa_update(Memory).where(Memory.id == loser_id).values(deleted_at=None, deleted_by=None)
+    # #1520: the same restore UPDATE as run-level rollback — it matches only a
+    # live-context row still carrying the merge sentinel, so a forget() or a
+    # context soft-delete that landed after the reads above is refused instead
+    # of planting a live row + vector where no retention sweep can reach it.
+    restored = await db.execute(
+        restore_sleep_tombstone_stmt(loser_id, report.user_id, deleted_by=DELETED_BY_SLEEP_MERGE)
     )
+    if cast(CursorResult[Any], restored).rowcount == 0:
+        raise UndoMergeError(
+            "not_restorable",
+            f"Memory {loser_id} could not be restored — it was forgotten, purged, or its "
+            "context was deleted after the merge was checked.",
+        )
 
     # Resolve workspace_id — required by add_memory_to_qdrant. Mirrors the
     # run-level rollback's Context fallback: workspace-less reports exist,

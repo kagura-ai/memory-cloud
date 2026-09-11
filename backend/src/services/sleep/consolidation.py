@@ -244,20 +244,7 @@ class ConsolidationPhase:
                 )
             elif should_delete:
                 try:
-                    await delete_memory_from_qdrant(user_id, memory.id, self.collection_name)
-                    # #1520: a tombstone, not a row delete — rollback_sleep_run's
-                    # _undo_archive can only restore what is still there.
-                    # #1520: the fetch is not locked — a 0-row stamp means the row was
-                    # forgotten (or archived by an overlapping run) in between. Count and
-                    # record nothing, or rollback would later un-tombstone a deletion this
-                    # run never made.
-                    stamped = await self.memory_repo.soft_delete(
-                        memory.id, deleted_by=DELETED_BY_SLEEP_ARCHIVE
-                    )
-                    if stamped == 0:
-                        logger.warning(
-                            "consolidation_archive_stamp_missed", memory_id=str(memory.id)
-                        )
+                    if not await self._archive_tombstone(user_id, memory.id):
                         continue
                     tally.deleted += 1
                     await self._record_action(
@@ -356,18 +343,7 @@ class ConsolidationPhase:
                     if has_graph:
                         neural = await graph_service.get_node_metrics(str(memory_id))
                     if not neural or neural["is_isolated"]:
-                        await delete_memory_from_qdrant(user_id, memory_id, self.collection_name)
-                        # #1520: the fetch is not locked — a 0-row stamp means the row was
-                        # forgotten (or archived by an overlapping run) in between. Count and
-                        # record nothing, or rollback would later un-tombstone a deletion this
-                        # run never made.
-                        stamped = await self.memory_repo.soft_delete(  # #1520: tombstone
-                            memory_id, deleted_by=DELETED_BY_SLEEP_ARCHIVE
-                        )
-                        if stamped == 0:
-                            logger.warning(
-                                "consolidation_archive_stamp_missed", memory_id=str(memory_id)
-                            )
+                        if not await self._archive_tombstone(user_id, memory_id):
                             continue
                         tally.llm_archived += 1
                         await self._record_action(
@@ -484,6 +460,37 @@ class ConsolidationPhase:
         )
 
         return result
+
+    async def _archive_tombstone(self, user_id: str, memory_id: UUID) -> bool:
+        """Tombstone one archive candidate, then drop its vector (#1520).
+
+        Shared by the rule and LLM paths so the archive contract lives once.
+        The row is stamped FIRST: the candidate fetch is not locked, so a 0-row
+        stamp means the row was forgotten, archived by an overlapping run, or
+        its context was soft-deleted in between. Then nothing else is touched —
+        the Qdrant point in particular stays, because a soft-deleted context
+        keeps its points for recovery (#84), and a rollback must never
+        un-tombstone a deletion this run did not make. Returns whether the
+        caller should tally and record the archive.
+
+        If the vector delete fails after the stamp, the tombstone stands and is
+        still recorded: rollback re-embeds (upsert) and the point is filtered
+        at read time by the PG row, so an orphan is a logged degradation, not a
+        lost restore.
+        """
+        stamped = await self.memory_repo.soft_delete(memory_id, deleted_by=DELETED_BY_SLEEP_ARCHIVE)
+        if stamped == 0:
+            logger.warning("consolidation_archive_stamp_missed", memory_id=str(memory_id))
+            return False
+        try:
+            await delete_memory_from_qdrant(user_id, memory_id, self.collection_name)
+        except Exception as e:  # noqa: BLE001 — the tombstone is the truth; log the orphan
+            logger.warning(
+                "consolidation_archive_vector_delete_failed",
+                memory_id=str(memory_id),
+                error=str(e),
+            )
+        return True
 
     @staticmethod
     async def _record_action(

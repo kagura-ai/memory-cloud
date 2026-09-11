@@ -6,8 +6,9 @@ and, since #1520, consolidation soft-deletes its archives
 (``deleted_by='sleep_consolidation'``); both keep the action reversible via
 ``rollback_sleep_run`` — and grow storage forever. This phase
 implements the declared retention window: when
-``sleep_merge_retention_days > 0``, merge losers whose soft-deletion is older
-than the window are hard-deleted, and the run's audit log records a batch
+``sleep_merge_retention_days > 0``, Sleep tombstones (every ``deleted_by`` in
+``SLEEP_TOMBSTONE_DELETED_BY``) whose soft-deletion is older than the window
+are hard-deleted, and the run's audit log records a batch
 summary (one action, not one row per purge — a large backlog must not explode
 ``sleep_actions``).
 

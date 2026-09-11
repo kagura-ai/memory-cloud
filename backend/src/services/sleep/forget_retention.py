@@ -9,9 +9,12 @@ coordinates included, via the WHERE axis) persisted at rest forever. When
 the window are hard-deleted, audited as one batch-summary action.
 
 Selection is the complement of merge_retention's: ``deleted_by`` is the
-forgetting user's sub (or NULL on legacy rows), never the
-``sleep_maintenance`` merge sentinel — merge losers keep their own window
-(``sleep_merge_retention_days``) and undo path. The sweep mechanics
+forgetting user's sub (or NULL on legacy rows), never one of the Sleep
+sentinels in ``SLEEP_TOMBSTONE_DELETED_BY`` (merge losers and, since #1520,
+consolidation archives) — those keep their own window
+(``sleep_merge_retention_days``) and undo path. The complement is derived
+from that set (``user_tombstone_predicate``), so a new Sleep tombstone class
+can never fall into this window by omission. The sweep mechanics
 (TOCTOU-guarded DELETE, budget exemption, batch audit) are shared with
 merge_retention via ``purge_tombstones`` so the two phases cannot drift.
 

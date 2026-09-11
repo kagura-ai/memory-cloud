@@ -71,7 +71,7 @@ Detects and merges duplicate memories by clustering high-similarity neighbors.
 
 Hard-deletes merge losers whose soft-deletion is older than the declared retention window — destructive deletion as an explicit, telemetered second step, never a side effect of the merge itself. Consolidation archives (`deleted_by='sleep_consolidation'`, #1520) share this window — both sleep tombstone classes are one set (`SLEEP_TOMBSTONE_DELETED_BY`), and the user-forget window is defined as its complement.
 
-- **Default**: `sleep_merge_retention_days = 0` — **disabled, retain forever**. Merges stay reversible indefinitely unless an operator declares a window. Since #1520 the same window bounds consolidation archives.
+- **Default**: `sleep_merge_retention_days = 0` — **disabled, retain forever**. Merges stay reversible indefinitely unless an operator declares a window. Since #1520 the same window bounds consolidation archives. Until #1521 lands, the platform-wide 30-day cleanup task still hard-deletes tombstones older than 30 days regardless of this setting, so rollback is bounded by whichever is shorter.
 - **When enabled**: losers past the window are purged and the run records one batch-summary `purge` action (`purged`, `retention_days`, `cutoff`). Per-merge undo and run rollback are only possible **inside** the window; the undo API returns 410 naming this setting once a loser is purged.
 - **LLM**: no.
 
@@ -85,7 +85,7 @@ Adjusts memory importance using LLM scoring combined with EMA smoothing.
 
 ### Phase 4 — Consolidation
 
-Promotes, keeps, or archives working memories based on fast-path rules plus LLM judgment for borderline cases. **Archive is a soft delete** (#1520): the row is tombstoned with `deleted_by='sleep_consolidation'` and its vector removed, so `rollback_sleep_run` restores it (row + re-embed) for as long as the Phase 2.5 retention window keeps the tombstone; a rollback that finds no row reports it under `errors` instead of counting a restore. (The legacy `consolidation_task` cron used when `SLEEP_ENABLED` is not `true` still hard-deletes stale working memories with no tombstone or audit row.)
+Promotes, keeps, or archives working memories based on fast-path rules plus LLM judgment for borderline cases. **Archive is a soft delete** (#1520): the row is tombstoned with `deleted_by='sleep_consolidation'` and its vector removed, so `rollback_sleep_run` restores it (row + re-embed) for as long as the Phase 2.5 retention window (and, until #1521 lands, the 30-day cleanup task) keeps the tombstone; a rollback that finds no row reports it under `errors` instead of counting a restore. (The legacy `consolidation_task` cron used when `SLEEP_ENABLED` is not `true` still hard-deletes stale working memories with no tombstone or audit row.)
 
 - **Algorithm**: rule-based fast path for clear-cut `promote` / `archive` decisions (no LLM) → LLM judgment only for borderline cases → bridge-node protection (never delete memories with high graph centrality).
 - **Judge actions** (#1233): the LLM judge decides `promote` vs `keep` only. Archival is exclusively the deterministic rule path's job (`_archival_eligible` + isolation, which runs *before* the judge) — the judge's `archive` option was removed because its picks were always either redundant or guarded out (#1229), wasting prompt tokens and probability mass. The eligibility guard remains in code as a defensive backstop; `llm_archive_guarded` stays in the report vocabulary (expected 0).

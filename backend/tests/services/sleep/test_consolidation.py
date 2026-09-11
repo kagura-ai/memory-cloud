@@ -80,7 +80,6 @@ async def _run_execute(
     """
     phase._fetch_working_memories = AsyncMock(return_value=memories)
     phase.memory_repo.promote_to_persistent = AsyncMock()
-    phase.memory_repo.delete = AsyncMock()
     phase.memory_repo.soft_delete = AsyncMock(return_value=soft_delete_rows)
     config = _make_config(provider="")  # LLM off → borderline memories stay put
     budget = SleepBudget()
@@ -143,7 +142,7 @@ class TestAdoptionPromotionGate:
         assert result.details["rule_promoted"] == len(mems)
         assert result.details["rule_deleted"] == 0
         assert consolidation_phase.memory_repo.promote_to_persistent.await_count == len(mems)
-        consolidation_phase.memory_repo.delete.assert_not_called()
+        consolidation_phase.memory_repo.soft_delete.assert_not_called()
 
     @pytest.mark.asyncio
     async def test_surfaced_but_ignored_does_not_promote(self, consolidation_phase):
@@ -193,7 +192,7 @@ class TestAdoptionArchivalGrandfather:
         mem = _make_working_memory(reference_count=0, access_count=0, importance=0.1, age_days=60)
         result = await _run_execute(consolidation_phase, [mem], cutoff=None)
         assert result.details["rule_deleted"] == 0
-        consolidation_phase.memory_repo.delete.assert_not_called()
+        consolidation_phase.memory_repo.soft_delete.assert_not_called()
 
     @pytest.mark.asyncio
     async def test_pre_cutoff_memory_grandfathered(self, consolidation_phase):
@@ -206,7 +205,7 @@ class TestAdoptionArchivalGrandfather:
         )
         result = await _run_execute(consolidation_phase, [pre], cutoff=cutoff)
         assert result.details["rule_deleted"] == 0
-        consolidation_phase.memory_repo.delete.assert_not_called()
+        consolidation_phase.memory_repo.soft_delete.assert_not_called()
 
     @pytest.mark.asyncio
     async def test_post_cutoff_unadopted_old_isolated_is_deleted(self, consolidation_phase):
@@ -224,7 +223,6 @@ class TestAdoptionArchivalGrandfather:
         consolidation_phase.memory_repo.soft_delete.assert_awaited_once_with(
             post.id, deleted_by="sleep_consolidation"
         )
-        consolidation_phase.memory_repo.delete.assert_not_called()
 
     @pytest.mark.asyncio
     async def test_archive_action_records_tombstone_mode(self, consolidation_phase):
@@ -440,7 +438,7 @@ class TestNeuralMetricsUnderIsolation:
             result = await phase.execute(_make_config(provider=""), "u", "ws", "ctx", SleepBudget())
 
         _assert_graph_service_isolation(mock_graph_service)
-        phase.memory_repo.delete.assert_not_called()
+        phase.memory_repo.soft_delete.assert_not_called()
         del_qdrant.assert_not_called()
         phase.memory_repo.promote_to_persistent.assert_not_called()
         assert result.details["rule_deleted"] == 0
@@ -523,7 +521,7 @@ class TestLLMArchivalEligibilityGuard:
     async def _run_llm_archive(self, phase, memory, *, cutoff):
         phase._fetch_working_memories = AsyncMock(return_value=[memory])
         phase.memory_repo.promote_to_persistent = AsyncMock()
-        phase.memory_repo.delete = AsyncMock()
+        phase.memory_repo.soft_delete = AsyncMock(return_value=1)
         phase._llm_judge_batch = AsyncMock(return_value={memory.id: "archive"})
         config = _make_config()  # LLM on
         budget = SleepBudget()
@@ -550,7 +548,7 @@ class TestLLMArchivalEligibilityGuard:
 
         result = await self._run_llm_archive(consolidation_phase, mem, cutoff=cutoff)
 
-        consolidation_phase.memory_repo.delete.assert_not_awaited()
+        consolidation_phase.memory_repo.soft_delete.assert_not_awaited()
         assert result.details["llm_archived"] == 0
         assert result.details["llm_archive_guarded"] == 1
 
@@ -562,7 +560,7 @@ class TestLLMArchivalEligibilityGuard:
 
         result = await self._run_llm_archive(consolidation_phase, mem, cutoff=None)
 
-        consolidation_phase.memory_repo.delete.assert_not_awaited()
+        consolidation_phase.memory_repo.soft_delete.assert_not_awaited()
         assert result.details["llm_archived"] == 0
         assert result.details["llm_archive_guarded"] == 1
 
@@ -574,7 +572,7 @@ class TestLLMArchivalEligibilityGuard:
 
         result = await self._run_llm_archive(consolidation_phase, mem, cutoff=cutoff)
 
-        consolidation_phase.memory_repo.delete.assert_not_awaited()
+        consolidation_phase.memory_repo.soft_delete.assert_not_awaited()
         assert result.details["llm_archive_guarded"] == 1
 
     @pytest.mark.asyncio
