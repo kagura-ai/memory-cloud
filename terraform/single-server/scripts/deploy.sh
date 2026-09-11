@@ -244,7 +244,29 @@ get_active_color() {
     if [ "$color" != "blue" ] && [ "$color" != "green" ]; then
         error "Marker file $MARKER_FILE contains invalid value: '$color'. Expected 'blue' or 'green'."
     fi
+    # The API containers read this same file as uid 1000 (#1482), so "readable
+    # by whoever runs deploy.sh" is not enough: a root-owned 0600 marker passes
+    # every check above and then answers 503 DEPLOY-001 unreadable on every
+    # request — with the docs steering the operator at the wrong cause.
+    if ! marker_is_world_readable; then
+        error "Marker file $MARKER_FILE is not world-readable ($(stat -c '%A %U' "$MARKER_FILE" 2>/dev/null)).
+       Both API containers read it as an unprivileged user (GET /api/v1/workers/active-color).
+       Fix in place — do NOT recreate the file, that would change its inode:
+           chmod 0644 $MARKER_FILE"
+    fi
     echo "$color"
+}
+
+# The API containers read the marker as an unprivileged uid; `stat -c %a` is
+# the one portable-enough way to ask "can they" without being that uid.
+marker_is_world_readable() {
+    local mode
+    mode="$(stat -c '%a' "$MARKER_FILE" 2>/dev/null)" || return 1
+    # Last octal digit = "other"; 4 (r) or 6 (rw) or 5/7 carry the read bit.
+    case "${mode: -1}" in
+        4|5|6|7) return 0 ;;
+        *) return 1 ;;
+    esac
 }
 
 # Report a marker that names a color with no running container (#1448).
@@ -351,6 +373,18 @@ write_marker() {
     fi
     rm -f "${MARKER_FILE}.tmp"
 
+    # cp preserves the destination's existing mode, so a marker that was
+    # bootstrapped under a restrictive umask stays unreadable to the API
+    # containers forever. Assert the mode the readers need, still in place
+    # (chmod does not touch the inode). #1482
+    # Only a regular file: a directory at the marker path is caught by the
+    # read-back below, and chmod-ing it would only make it harder to remove.
+    if [ -f "$MARKER_FILE" ] && ! chmod 0644 "$MARKER_FILE"; then
+        error "Could not chmod 0644 $MARKER_FILE — the API containers cannot read it.
+       Fix by hand (in place):
+           sudo chmod 0644 $MARKER_FILE"
+    fi
+
     # Read back before claiming success. `cp file dir` SUCCEEDS by copying into
     # the directory, so a marker path that is somehow a directory would leave
     # the published color unchanged while cp exits 0 — the same "reported the
@@ -367,6 +401,57 @@ write_marker() {
        Traffic may already be switched — write it by hand to match reality:
            echo $color > $MARKER_FILE"
     fi
+}
+
+# Ask the NEW color's own API what it sees (#1482). The marker was just
+# republished in place; both API containers bind-mount it as a single file, so
+# if anything replaced the inode instead (an editor save, `sed -i`, a backup
+# restore, an older `mv`-based script) the container keeps the deleted inode
+# and would report the OLD color to every consumer that trusts this endpoint —
+# the exact failure #1482 retired, now behind an interface. The host-side
+# read-back in write_marker cannot see that, so ask through the container.
+#
+# Called BEFORE Caddy is switched, so a stale view aborts while traffic is
+# still on the old color. The token never leaves the container: the curl runs
+# inside api-${color}, where WORKER_SERVICE_TOKEN is already in the env.
+#
+#   $1 color — the color that must be reported as both active and responding
+verify_active_color_endpoint() {
+    local color="$1" body active responding
+    log "  Asking api-${color} which color it sees (GET /api/v1/workers/active-color)..."
+    # Single quotes on purpose: $WORKER_SERVICE_TOKEN must expand INSIDE the container.
+    # shellcheck disable=SC2016
+    if ! body="$(dc exec -T "api-${color}" sh -c \
+            'curl -sf --max-time 5 -H "Authorization: Bearer $WORKER_SERVICE_TOKEN" \
+             http://localhost:8080/api/v1/workers/active-color' 2>/dev/null)"; then
+        error "api-${color} did not answer GET /api/v1/workers/active-color (see above).
+  A 503 here means the container cannot read its marker mount (missing at first
+  'compose up' -> Docker created a directory; or not world-readable). Caddy has
+  NOT been switched. Fix the marker, then recreate BOTH api containers so the
+  mount is re-resolved:
+      ls -l $MARKER_FILE
+      docker compose -f $COMPOSE_FILE --env-file $ENV_FILE up -d --no-deps --force-recreate api-blue api-green"
+    fi
+    active="$(json_string_field "$body" active_color)"
+    responding="$(json_string_field "$body" responding_color)"
+    if [ "$active" != "$color" ] || [ "$responding" != "$color" ]; then
+        error "api-${color} reports active_color='${active:-?}' responding_color='${responding:-?}', expected '${color}' for both.
+  The marker on disk says '${color}' but the container sees a different file:
+  its single-file bind mount is pinned to an inode that something REPLACED
+  (editor save, 'sed -i', a restore, 'mv'). The marker must only ever be
+  written IN PLACE (cp/tee). Caddy has NOT been switched. Recover:
+      docker compose -f $COMPOSE_FILE --env-file $ENV_FILE up -d --no-deps --force-recreate api-blue api-green
+      $0 --status"
+    fi
+    log "  api-${color} sees active_color=${active} responding_color=${responding} — marker mount is live."
+}
+
+# Extract one string field from a flat JSON object without jq (not installed
+# on the VM). Good enough for the two-field body this script reads; returns
+# empty on a missing field so the caller's comparison fails loudly.
+json_string_field() {
+    local body="$1" key="$2"
+    printf '%s' "$body" | sed -n "s/.*\"${key}\"[[:space:]]*:[[:space:]]*\"\([^\"]*\)\".*/\1/p" | head -n 1
 }
 
 is_container_running() {
@@ -489,8 +574,8 @@ verify_bridge_pin() {
                 log "                 /opt/kagura-bridge/src/deploy/.env"
                 log "             cd /opt/kagura-bridge/src && docker compose -f deploy/compose.yml \\"
                 log "                 --env-file deploy/.env up -d --no-deps --force-recreate worker"
-                log "         Better: blank KMC_INTERNAL_URL so the worker follows the marker,"
-                log "         which this script now writes in place (#1480)."
+                log "         Better: have the worker ask GET /api/v1/workers/active-color (#1482)"
+                log "         instead of pinning a color; the marker-mount template is legacy."
                 return 1
                 ;;
         esac
@@ -660,6 +745,7 @@ cmd_rollback() {
     # bind-mount it as a single file actually see the change (#1480).
     log "Switching Caddy: api-${active} -> api-${inactive}"
     write_marker "$inactive"
+    verify_active_color_endpoint "$inactive"
     DEPLOY_STAGE="rollback: switch Caddy -> api-${inactive} (incl. security gate)"
     generate_caddyfile "api-${inactive}"
     reload_caddy
@@ -726,6 +812,9 @@ cmd_deploy() {
     DEPLOY_STAGE="Step 5/7: update marker -> ${inactive}"
     log "Step 5/7: Updating marker -> ${inactive}"
     write_marker "$inactive"
+    # ...and prove the new color's container sees it through its mount
+    # before any traffic moves (#1482).
+    verify_active_color_endpoint "$inactive"
 
     # Step 6: Switch Caddy upstream
     DEPLOY_STAGE="Step 6/7: switch Caddy upstream -> api-${inactive} (incl. security gate)"

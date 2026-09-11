@@ -225,8 +225,11 @@ Start everything (initial setup starts both API colors; Caddy defaults to
 `api-blue`):
 
 ```bash
+# Seed the marker FIRST (startup.sh already does this on a fresh VM). Both API
+# containers bind-mount it as a single file, and Docker creates a DIRECTORY at
+# a missing bind source — which no later `echo >` can fix without a recreate.
+[ -e /opt/kagura-memory/active-color ] || printf 'blue\n' | install -m 0644 /dev/stdin /opt/kagura-memory/active-color
 docker compose -f docker-compose.prod.yml --env-file .env.prod up -d --build
-echo "blue" > /opt/kagura-memory/active-color
 ```
 
 The first build takes several minutes (backend + frontend images).
@@ -279,18 +282,37 @@ Authorization: Bearer $WORKER_SERVICE_TOKEN
   (`DEPLOY_COLOR`, set per service in the compose file). When the two differ,
   the caller has reached a color that is no longer live and should re-target.
 - A missing, unreadable or unknown marker answers `503` with error code
-  `DEPLOY-001` and a `reason` — never a guessed color.
+  `DEPLOY-001` and `details.reason` = `missing` | `unreadable` | `invalid` —
+  never a guessed color. **All three can be transient**: the marker is
+  republished in place during a switch, so treat any 503 from this route as
+  retryable (the API itself re-reads once when it sees an empty file).
+- The marker is compared **byte for byte** (`blue` or `green`, optional
+  trailing newline), exactly like `deploy.sh`; `Blue` or ` blue` is `invalid`.
 - The route lives under `/api/v1/workers/`, so Caddy keeps 404-ing it at the
   edge (`verify_workers_blocked` is unchanged).
 
 For that read the compose files mount the marker into both API containers as a
 **single read-only file** (`/run/kagura/active-color`), not the deploy
-directory — that directory holds `.env.prod`. The single-file mount stays
-current because `write_marker()` publishes in place. Two consequences:
+directory — that directory holds `.env.prod`. A single-file bind mount resolves
+to an *inode* when the container starts, which is why:
 
+- **The marker must only ever be written in place** — `cp` onto it, `tee`, or
+  `deploy.sh`'s `write_marker()`. Never `mv`/rename over it, never save it from
+  an editor (most write a new file and rename), never restore it from a backup
+  by replacement. Any of those hands the running containers (and every legacy
+  consumer that still mounts the file) a deleted inode: the host file changes,
+  the endpoint keeps answering the old color, and nothing on the host notices.
+  `deploy.sh` guards this on every flip: right after `write_marker()` it asks
+  the new color's container `GET /api/v1/workers/active-color` and aborts
+  *before* switching Caddy if the container does not see the value on disk.
+  Recovery is a recreate, not a restart:
+  `docker compose -f docker-compose.prod.yml --env-file .env.prod up -d --no-deps --force-recreate api-blue api-green`
 - the marker must exist **before** the first `docker compose up`; Docker
   creates a *directory* at a missing bind source, which the endpoint reports as
   `unreadable` and which `deploy.sh` then refuses as an empty marker
+- it must be world-readable (`0644`): the containers read it as an
+  unprivileged user. `write_marker()` enforces the mode, and `deploy.sh`
+  refuses to run from a marker the containers could not read.
 - adding the mount to a running stack needs `docker compose up -d api-blue
   api-green` (recreate); a plain `restart` does not apply a new mount
 
@@ -501,12 +523,14 @@ that color, or `./scripts/deploy.sh --rollback` to switch back.
 > ./scripts/deploy.sh --verify-bridge   # exits non-zero if not on the active color
 > ```
 >
-> **To make it fully automatic**, leave the static internal URL blank in the
-> consumer's env so it follows the marker template. That works because this
-> script now publishes the marker **in place** — see `write_marker()`. A
-> single-file bind mount tracks the *inode*, so the old `mv` published a new
-> inode the running container never saw; `cp` keeps the inode and the change is
-> visible immediately, with no restart at all.
+> **The preferred fix is to stop pinning at all**: have the consumer ask the
+> API which color is live — `GET /api/v1/workers/active-color` on the workers
+> lane (#1482, see above) — and re-target when `responding_color` differs from
+> `active_color`. Leaving the static internal URL blank so the worker follows
+> the marker *template* (a bind mount of the marker file) still works, because
+> this script publishes the marker **in place** — see `write_marker()` — but it
+> is the legacy/transitional path: it depends on the inode never changing,
+> which the endpoint does not.
 
 Tunable environment variables:
 

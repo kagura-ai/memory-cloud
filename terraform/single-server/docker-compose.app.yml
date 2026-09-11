@@ -19,10 +19,11 @@
 # Postgres, Qdrant and Redis reachability before any traffic switch.
 # =============================================================================
 
-# Shared API environment — split out of x-api-common so api-blue / api-green
-# can merge it with their own DEPLOY_COLOR (#1482). A YAML merge key is
-# shallow: an `environment:` on the service would REPLACE this map, not extend
-# it, so the map itself needs an anchor.
+# Shared API environment (#1482). api-blue / api-green each merge this map
+# with their own DEPLOY_COLOR, so it is anchored on its own and NOT attached
+# to x-api-common: a YAML merge key is shallow, so a service-level
+# `environment:` REPLACES whatever the common block carried — an
+# `environment:` under x-api-common would be dead. Add shared API env HERE.
 x-api-env: &api-env
   DATABASE_URL: postgresql+asyncpg://kagura:${DB_PASSWORD}@${POSTGRES_HOST:-postgres}:5432/kagura
   QDRANT_URL: http://${QDRANT_HOST:-qdrant}:6333
@@ -41,7 +42,6 @@ x-api-common: &api-common
   restart: always
   env_file:
     - .env.prod
-  environment: *api-env
   # #1482: the blue-green marker deploy.sh publishes. Mounted as the single
   # file, read-only, so the deploy directory (.env.prod and friends) is not
   # exposed to the container. deploy.sh writes the marker IN PLACE (cp, never

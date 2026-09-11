@@ -88,6 +88,14 @@ groupadd -f docker
 # Kagura working directory
 # -----------------------------------------------------------------------------
 install -d -m 0755 /opt/kagura-memory
+# Seed the blue-green marker BEFORE anything can `compose up` (#1482): both API
+# containers bind-mount it as a single file, and Docker creates a DIRECTORY at
+# a missing bind source, which then answers 503 on /api/v1/workers/active-color
+# and makes deploy.sh refuse the marker. World-readable: the containers read it
+# as an unprivileged uid. Never rewrite it by rename afterwards — in place only.
+if [ ! -e /opt/kagura-memory/active-color ]; then
+    printf 'blue\n' | install -m 0644 /dev/stdin /opt/kagura-memory/active-color
+fi
 install -d -m 0700 /var/lib/kagura
 install -d -m 0700 /var/lib/kagura/origin-ca
 install -d -m 0755 /var/lib/kagura/volumes
