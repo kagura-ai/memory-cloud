@@ -650,6 +650,7 @@ class MemoryService:
                     user_id=user_id,
                     summary=request.summary,
                     tags=request.tags,
+                    memory_id=memory_id,
                 ),
             )
 
@@ -806,6 +807,7 @@ class MemoryService:
                 user_id=user_id,
                 summary=memory.summary,
                 tags=memory.tags,
+                memory_id=memory.id,
             ),
         )
 
@@ -3780,6 +3782,7 @@ class MemoryService:
         user_id: str,
         summary: str | None,
         tags: list[str] | None,
+        memory_id: UUID | None = None,
     ) -> list[WriteLintHint]:
         """#1502: advisory recall-ability hints for a completed write.
 
@@ -3806,6 +3809,7 @@ class MemoryService:
                 user_id=user_id,
                 summary=summary,
                 tags=tags,
+                memory_id=memory_id,
             )
         except Exception as e:  # noqa: BLE001 — advisory; never fail a committed write
             logger.warning("write_lint_unavailable", error=str(e))

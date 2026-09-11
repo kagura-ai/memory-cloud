@@ -155,6 +155,7 @@ async def lint_write(
     user_id: str,
     summary: str,
     tags: list[str] | None,
+    memory_id: UUID | None = None,
 ) -> list[WriteLintHint]:
     """Advisory recall-ability hints for a just-written memory.
 
@@ -166,6 +167,7 @@ async def lint_write(
             never describe memories the caller cannot read.
         summary: The summary as written.
         tags: The tags as written.
+        memory_id: The written row, for the log line only.
 
     Returns:
         Up to ``MAX_HINTS`` hints, or an empty list when the write looks fine —
@@ -177,37 +179,34 @@ async def lint_write(
 
         tag_list = [t for t in (tags or []) if isinstance(t, str) and t]
         vocabulary: dict[str, int] = {}
-        read = None
         if tag_list:
             # Only pay for the vocabulary read when there is something to compare
             # against it; the no-tags hint needs no vocabulary at all. #1512: the
-            # read goes through the per-context TTL cache — see tag_resolution.
-            from services.tag_resolution import fetch_vocabulary_cached
+            # read is the cached snapshot from BEFORE this write (the row is
+            # already committed), so the rule fires the same on a hit and a miss.
+            from services.tag_resolution import vocabulary_before_write
 
-            read = await fetch_vocabulary_cached(
-                db, workspace_id=workspace_id, context_id=context_id, user_id=user_id
+            vocabulary = await vocabulary_before_write(
+                db,
+                workspace_id=workspace_id,
+                context_id=context_id,
+                user_id=user_id,
+                written_tags=tag_list,
             )
-            vocabulary = read.vocabulary
-        tag_hints = _tag_hints(tag_list, vocabulary)
-        hints.extend(tag_hints)
+        hints.extend(_tag_hints(tag_list, vocabulary))
+        hints = hints[:MAX_HINTS]
 
-        if read is not None:
-            # #1512: one line per write-side vocabulary read, so the cost of the
-            # aggregate (cache miss rate, DB time by context size) and how often
-            # the near-duplicate rule actually fires can be read off the logs
-            # before deciding whether a heavier fix is warranted.
+        if hints:
+            # #1512: the counts here are what the caller actually receives, so
+            # the fire rate of each rule can be read off the logs.
             logger.info(
-                "write_lint_vocabulary",
+                "write_lint_hints",
                 context_id=str(context_id),
-                cache=read.cache,
-                duration_ms=round(read.duration_ms, 2),
-                vocabulary_size=len(vocabulary),
-                tag_near_duplicate_hints=sum(
-                    1 for h in tag_hints if h.code == "tag_near_duplicate"
-                ),
+                memory_id=str(memory_id) if memory_id else None,
+                codes=[h.code for h in hints],
+                tag_near_duplicate_hints=sum(1 for h in hints if h.code == "tag_near_duplicate"),
             )
-
-        return hints[:MAX_HINTS]
+        return hints
     except Exception as e:  # noqa: BLE001 — advisory only; never fail a committed write
         logger.warning("write_lint_failed", error=str(e))
         return []

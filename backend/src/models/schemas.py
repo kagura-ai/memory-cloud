@@ -213,8 +213,9 @@ class WriteLintHint(BaseModel):
     tags were written, and nothing else tells the writer at the time.
 
     ``tag_near_duplicate`` compares against a per-context tag vocabulary that
-    the server caches for up to two minutes (#1512), so a spelling stored a
-    moment ago may not be reflected in the very next write's hints.
+    the server caches for up to two minutes (#1512). Tags written through this
+    API are reflected immediately; a tag removed by forget() or an update may
+    still be cited for up to that window.
     """
 
     code: str = Field(

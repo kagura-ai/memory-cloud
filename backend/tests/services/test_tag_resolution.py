@@ -6,6 +6,7 @@ what only hints, and the fail-open behaviour that keeps a recall alive when the
 vocabulary read breaks.
 """
 
+import asyncio
 import contextlib
 from unittest.mock import AsyncMock, MagicMock, patch
 from uuid import uuid4
@@ -23,6 +24,7 @@ from services.tag_resolution import (
     fetch_vocabulary,
     fetch_vocabulary_cached,
     suggest_tags,
+    vocabulary_before_write,
 )
 
 WS = uuid4()
@@ -442,17 +444,15 @@ class TestCrossContextRecallSkipsSingleContextHints:
             )
 
 
-class TestWriteSideVocabularyCache:
-    """#1512: the write-side read is cached per (workspace, context, scope)."""
+class TestVocabularyCache:
+    """#1512: writes and expand_tag_filter read through a per-scope TTL cache."""
 
     @pytest.mark.asyncio
     async def test_second_read_is_a_hit_and_skips_the_aggregate(self):
         db = _db_with_vocabulary({"python": 3})
         first = await fetch_vocabulary_cached(db, workspace_id=WS, context_id=CTX, user_id=USER)
         second = await fetch_vocabulary_cached(db, workspace_id=WS, context_id=CTX, user_id=USER)
-        assert first.cache == "miss" and first.duration_ms >= 0.0
-        assert second.cache == "hit" and second.duration_ms == 0.0
-        assert second.vocabulary == {"python": 3}
+        assert first == second == {"python": 3}
         assert db.execute.await_count == 1, "a hit must not run the context-wide aggregate"
 
     @pytest.mark.asyncio
@@ -466,13 +466,10 @@ class TestWriteSideVocabularyCache:
         db = _db_with_vocabulary({"python": 3})
         await fetch_vocabulary_cached(db, workspace_id=WS, context_id=CTX, user_id=USER)
         clock[0] = VOCABULARY_CACHE_TTL_SECONDS - 1
-        assert (
-            await fetch_vocabulary_cached(db, workspace_id=WS, context_id=CTX, user_id=USER)
-        ).cache == "hit"
+        await fetch_vocabulary_cached(db, workspace_id=WS, context_id=CTX, user_id=USER)
+        assert db.execute.await_count == 1
         clock[0] = VOCABULARY_CACHE_TTL_SECONDS + 1
-        assert (
-            await fetch_vocabulary_cached(db, workspace_id=WS, context_id=CTX, user_id=USER)
-        ).cache == "miss"
+        await fetch_vocabulary_cached(db, workspace_id=WS, context_id=CTX, user_id=USER)
         assert db.execute.await_count == 2
 
     @pytest.mark.asyncio
@@ -480,8 +477,7 @@ class TestWriteSideVocabularyCache:
         """The #1511 scoping survives caching: one user's vocabulary never serves another."""
         db = _db_with_vocabulary({"python": 3})
         await fetch_vocabulary_cached(db, workspace_id=WS, context_id=CTX, user_id="alice")
-        other = await fetch_vocabulary_cached(db, workspace_id=WS, context_id=CTX, user_id="bob")
-        assert other.cache == "miss"
+        await fetch_vocabulary_cached(db, workspace_id=WS, context_id=CTX, user_id="bob")
         assert db.execute.await_count == 2
         sql = str(db.execute.await_args.args[0].compile(compile_kwargs={"literal_binds": True}))
         assert "'bob'" in sql
@@ -491,10 +487,7 @@ class TestWriteSideVocabularyCache:
         db = _db_with_vocabulary({"python": 3})
         with _shared_context():
             await fetch_vocabulary_cached(db, workspace_id=WS, context_id=CTX, user_id="alice")
-            other = await fetch_vocabulary_cached(
-                db, workspace_id=WS, context_id=CTX, user_id="bob"
-            )
-        assert other.cache == "hit"
+            await fetch_vocabulary_cached(db, workspace_id=WS, context_id=CTX, user_id="bob")
         assert db.execute.await_count == 1
 
     @pytest.mark.asyncio
@@ -503,15 +496,137 @@ class TestWriteSideVocabularyCache:
         db = _db_with_vocabulary({"python": 3})
         await fetch_vocabulary_cached(db, workspace_id=WS, context_id=CTX, user_id=USER)
         with _shared_context():
-            read = await fetch_vocabulary_cached(db, workspace_id=WS, context_id=CTX, user_id=USER)
-        assert read.cache == "miss"
+            await fetch_vocabulary_cached(db, workspace_id=WS, context_id=CTX, user_id=USER)
         assert db.execute.await_count == 2
 
     @pytest.mark.asyncio
-    async def test_recall_side_read_stays_uncached(self):
-        """expand/suggest are gated already and must see the vocabulary as stored."""
+    async def test_failed_read_is_negative_cached_for_the_ttl(self):
+        """A context whose aggregate cannot complete must not re-run it on every write."""
+        db = _broken_db()
+        first = await fetch_vocabulary_cached(db, workspace_id=WS, context_id=CTX, user_id=USER)
+        second = await fetch_vocabulary_cached(db, workspace_id=WS, context_id=CTX, user_id=USER)
+        assert first == {} and second == {}
+        assert db.execute.await_count == 1
+
+    @pytest.mark.asyncio
+    async def test_concurrent_misses_share_one_aggregate(self):
+        """Single-flight: N writes landing on a cold key run the aggregate once."""
+        started = asyncio.Event()
+        release = asyncio.Event()
+        result = MagicMock()
+        result.all.return_value = [("python", 3)]
+
+        async def slow_execute(*_args, **_kwargs):
+            started.set()
+            await release.wait()
+            return result
+
+        db = MagicMock()
+        db.execute = AsyncMock(side_effect=slow_execute)
+        leader = asyncio.create_task(
+            fetch_vocabulary_cached(db, workspace_id=WS, context_id=CTX, user_id=USER)
+        )
+        await started.wait()
+        followers = [
+            asyncio.create_task(
+                fetch_vocabulary_cached(db, workspace_id=WS, context_id=CTX, user_id=USER)
+            )
+            for _ in range(4)
+        ]
+        await asyncio.sleep(0)
+        release.set()
+        results = await asyncio.gather(leader, *followers)
+        assert all(r == {"python": 3} for r in results)
+        assert db.execute.await_count == 1
+        assert tag_resolution_module._inflight == {}
+
+    @pytest.mark.asyncio
+    async def test_cancelled_leader_does_not_strand_followers(self):
+        started = asyncio.Event()
+
+        async def hang(*_args, **_kwargs):
+            started.set()
+            await asyncio.Event().wait()
+
+        db = MagicMock()
+        db.execute = AsyncMock(side_effect=hang)
+        leader = asyncio.create_task(
+            fetch_vocabulary_cached(db, workspace_id=WS, context_id=CTX, user_id=USER)
+        )
+        await started.wait()
+        follower = asyncio.create_task(
+            fetch_vocabulary_cached(db, workspace_id=WS, context_id=CTX, user_id=USER)
+        )
+        await asyncio.sleep(0)
+        leader.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await leader
+        with pytest.raises(asyncio.CancelledError):
+            await follower
+        assert tag_resolution_module._inflight == {}
+
+    @pytest.mark.asyncio
+    async def test_expand_tag_filter_reads_through_the_cache(self):
+        """Widening only needs mechanical variants, so it may run on a stale entry."""
+        db = _db_with_vocabulary({"Dev_Environment": 12})
+        await expand_tag_filter(
+            db, workspace_id=WS, context_id=CTX, user_id=USER, tags=["dev-environment"]
+        )
+        expanded, added = await expand_tag_filter(
+            db, workspace_id=WS, context_id=CTX, user_id=USER, tags=["dev-environment"]
+        )
+        assert expanded == ["dev-environment", "Dev_Environment"]
+        assert added == {"dev-environment": ["Dev_Environment"]}
+        assert db.execute.await_count == 1
+
+    @pytest.mark.asyncio
+    async def test_suggest_tags_reads_as_stored(self):
+        """A zero-result recall's hint must cite the vocabulary as it IS, not a snapshot."""
         db = _db_with_vocabulary({"python": 3})
         await fetch_vocabulary_cached(db, workspace_id=WS, context_id=CTX, user_id=USER)
-        await fetch_vocabulary(db, workspace_id=WS, context_id=CTX, user_id=USER)
+        await suggest_tags(db, workspace_id=WS, context_id=CTX, user_id=USER, tags=["pythn"])
         await fetch_vocabulary(db, workspace_id=WS, context_id=CTX, user_id=USER)
         assert db.execute.await_count == 3
+
+
+class TestVocabularyBeforeWrite:
+    """#1512: the lint snapshot never contains the write being linted."""
+
+    @pytest.mark.asyncio
+    async def test_miss_subtracts_the_committed_write(self):
+        # The aggregate ran AFTER the commit, so it already counts this write.
+        db = _db_with_vocabulary({"auth": 12, "brand-new": 1})
+        snapshot = await vocabulary_before_write(
+            db, workspace_id=WS, context_id=CTX, user_id=USER, written_tags=["auth", "brand-new"]
+        )
+        assert snapshot == {"auth": 11}
+        # The cache keeps the aggregate — it already reflects the row.
+        assert await fetch_vocabulary_cached(db, workspace_id=WS, context_id=CTX, user_id=USER) == {
+            "auth": 12,
+            "brand-new": 1,
+        }
+
+    @pytest.mark.asyncio
+    async def test_hit_is_the_snapshot_and_writes_through(self):
+        db = _db_with_vocabulary({"auth": 12})
+        await fetch_vocabulary_cached(db, workspace_id=WS, context_id=CTX, user_id=USER)
+        snapshot = await vocabulary_before_write(
+            db, workspace_id=WS, context_id=CTX, user_id=USER, written_tags=["auth", "Auth"]
+        )
+        assert snapshot == {"auth": 12}, "a hit lints against the pre-write snapshot"
+        assert await fetch_vocabulary_cached(db, workspace_id=WS, context_id=CTX, user_id=USER) == {
+            "auth": 13,
+            "Auth": 1,
+        }
+        assert db.execute.await_count == 1
+
+    @pytest.mark.asyncio
+    async def test_snapshot_is_a_copy(self):
+        db = _db_with_vocabulary({"auth": 12})
+        snapshot = await vocabulary_before_write(
+            db, workspace_id=WS, context_id=CTX, user_id=USER, written_tags=["auth"]
+        )
+        snapshot["mutated"] = 1
+        assert "mutated" not in await fetch_vocabulary_cached(
+            db, workspace_id=WS, context_id=CTX, user_id=USER
+        )

@@ -364,7 +364,7 @@ class TestVocabularyIsScopedToTheCaller:
 
 
 class TestVocabularyCacheOnTheWritePath:
-    """#1512: lint reads the vocabulary through the per-context TTL cache."""
+    """#1512: lint reads a pre-write snapshot through the per-context TTL cache."""
 
     @pytest.mark.asyncio
     async def test_repeated_writes_share_one_aggregate(self):
@@ -389,8 +389,41 @@ class TestVocabularyCacheOnTheWritePath:
         assert db.execute.await_count == 0
 
     @pytest.mark.asyncio
-    async def test_logs_cache_state_and_hint_count_once_per_write(self):
+    async def test_drifted_spelling_fires_on_a_miss_and_on_a_hit(self):
+        """The row is committed before lint, so a raw aggregate would contain the
+        drifted tag and suppress the hint on a miss only — the rule must not depend
+        on cache warmth."""
+        # Miss: the aggregate already counts this write's 'Auth'.
+        db = _db_with_vocabulary({"auth": 12, "Auth": 1})
+        miss = await lint_write(
+            db, workspace_id=WS, context_id=CTX, user_id=USER, summary=GOOD_SUMMARY, tags=["Auth"]
+        )
+        assert [h.code for h in miss] == ["tag_near_duplicate"]
+        # Hit, from a different writer of a genuinely new drift: still fires.
+        hit = await lint_write(
+            db, workspace_id=WS, context_id=CTX, user_id=USER, summary=GOOD_SUMMARY, tags=["AUTH"]
+        )
+        assert [h.code for h in hit] == ["tag_near_duplicate"]
+        assert db.execute.await_count == 1
+
+    @pytest.mark.asyncio
+    async def test_second_identical_write_sees_the_first_as_established(self):
+        """Write-through: once 'Auth' has been written it is a stored spelling,
+        so repeating it within the TTL is not a spurious near-duplicate."""
+        db = _db_with_vocabulary({"auth": 12, "Auth": 1})
+        await lint_write(
+            db, workspace_id=WS, context_id=CTX, user_id=USER, summary=GOOD_SUMMARY, tags=["Auth"]
+        )
+        again = await lint_write(
+            db, workspace_id=WS, context_id=CTX, user_id=USER, summary=GOOD_SUMMARY, tags=["Auth"]
+        )
+        assert again == []
+        assert db.execute.await_count == 1
+
+    @pytest.mark.asyncio
+    async def test_logs_hints_only_when_there_are_any(self):
         db = _db_with_vocabulary({"auth": 12})
+        mid = uuid4()
         with patch("services.write_lint.logger") as log:
             hints = await lint_write(
                 db,
@@ -398,7 +431,8 @@ class TestVocabularyCacheOnTheWritePath:
                 context_id=CTX,
                 user_id=USER,
                 summary=GOOD_SUMMARY,
-                tags=["Auth", "brand-new"],
+                tags=["Auth"],
+                memory_id=mid,
             )
             await lint_write(
                 db,
@@ -406,12 +440,27 @@ class TestVocabularyCacheOnTheWritePath:
                 context_id=CTX,
                 user_id=USER,
                 summary=GOOD_SUMMARY,
-                tags=["Auth"],
+                tags=["auth"],
             )
         assert [h.code for h in hints] == ["tag_near_duplicate"]
-        calls = [c for c in log.info.call_args_list if c.args[0] == "write_lint_vocabulary"]
-        assert len(calls) == 2
-        first, second = (c.kwargs for c in calls)
-        assert first["cache"] == "miss" and first["tag_near_duplicate_hints"] == 1
-        assert first["vocabulary_size"] == 1 and first["context_id"] == str(CTX)
-        assert second["cache"] == "hit" and second["duration_ms"] == 0.0
+        calls = [c for c in log.info.call_args_list if c.args[0] == "write_lint_hints"]
+        assert len(calls) == 1, "a clean write logs nothing"
+        kw = calls[0].kwargs
+        assert kw["memory_id"] == str(mid) and kw["context_id"] == str(CTX)
+        assert kw["codes"] == ["tag_near_duplicate"] and kw["tag_near_duplicate_hints"] == 1
+
+    @pytest.mark.asyncio
+    async def test_hint_count_is_taken_after_truncation(self):
+        """The logged fire count must describe what the caller receives."""
+        db = _db_with_vocabulary({f"tag{i}": 5 for i in range(10)})
+        drifted = [f"Tag{i}" for i in range(10)]
+        with patch("services.write_lint.logger") as log:
+            hints = await lint_write(
+                db, workspace_id=WS, context_id=CTX, user_id=USER, summary="short", tags=drifted
+            )
+        assert len(hints) == MAX_HINTS
+        kw = [c for c in log.info.call_args_list if c.args[0] == "write_lint_hints"][0].kwargs
+        assert kw["tag_near_duplicate_hints"] == sum(
+            1 for h in hints if h.code == "tag_near_duplicate"
+        )
+        assert len(kw["codes"]) == MAX_HINTS
