@@ -70,7 +70,9 @@ export default defineConfig({
   projects: [
     {
       name: "setup",
-      testMatch: /auth\.setup\.ts$/,
+      // auth.setup.ts logs the admin in once; warmup.setup.ts compiles every
+      // authed route once (#1500) before any spec races two cold routes.
+      testMatch: /\.setup\.ts$/,
       // The login POST carries E2E_ADMIN_PASSWORD — never retain it in a trace.
       use: { trace: "off" },
     },
