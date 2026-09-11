@@ -260,6 +260,40 @@ echo blue  > /opt/kagura-memory/active-color
 echo green > /opt/kagura-memory/active-color
 ```
 
+#### Asking the API which color is live (#1482)
+
+Co-resident consumers should **not** bind-mount the marker to follow the
+active color — a single-file mount pins the inode at container start, and a
+marker replaced by `mv` goes stale for the life of that container. Instead the
+API reads the marker itself on every request and serves it on the internal
+workers lane:
+
+```
+GET /api/v1/workers/active-color
+Authorization: Bearer $WORKER_SERVICE_TOKEN
+→ { "active_color": "green", "responding_color": "green" }
+```
+
+- `active_color` is the marker's current value, read per request.
+- `responding_color` is the identity of the instance that answered
+  (`DEPLOY_COLOR`, set per service in the compose file). When the two differ,
+  the caller has reached a color that is no longer live and should re-target.
+- A missing, unreadable or unknown marker answers `503` with error code
+  `DEPLOY-001` and a `reason` — never a guessed color.
+- The route lives under `/api/v1/workers/`, so Caddy keeps 404-ing it at the
+  edge (`verify_workers_blocked` is unchanged).
+
+For that read the compose files mount the marker into both API containers as a
+**single read-only file** (`/run/kagura/active-color`), not the deploy
+directory — that directory holds `.env.prod`. The single-file mount stays
+current because `write_marker()` publishes in place. Two consequences:
+
+- the marker must exist **before** the first `docker compose up`; Docker
+  creates a *directory* at a missing bind source, which the endpoint reports as
+  `unreadable` and which `deploy.sh` then refuses as an empty marker
+- adding the mount to a running stack needs `docker compose up -d api-blue
+  api-green` (recreate); a plain `restart` does not apply a new mount
+
 Once everything is healthy, enable the systemd unit so the stack comes back
 after a reboot:
 

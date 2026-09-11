@@ -11,6 +11,14 @@ All constants are grouped by category with clear documentation.
 APP_VERSION = "0.65.0"
 
 # ============================================================================
+# Blue-green deploy colors (#1482)
+# ============================================================================
+# The only values the active-color marker and DEPLOY_COLOR may take. Lives in
+# constants (not settings) so the marker reader and the settings validator
+# share one definition — a color that is not here is refused, never guessed.
+DEPLOY_COLORS: frozenset[str] = frozenset({"blue", "green"})
+
+# ============================================================================
 # Context Field Limits (#1193)
 # ============================================================================
 # Single source of truth for context metadata length caps — enforced

@@ -23,10 +23,12 @@ from fastapi import APIRouter, Depends, Header, HTTPException, Query, Response, 
 from pydantic import BaseModel, SerializerFunctionWrapHandler, model_serializer
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from config.constants import DEPLOY_COLORS
 from config.settings import get_settings
 from db.base import get_db
 from models.api_base import TZAwareBaseModel
 from models.worker_runtime import WorkerLocale, WorkerRuntimeConfig, normalize_worker_locale
+from services.active_color import read_active_color
 from services.connector_provisioning import ConnectorProvisioningService
 from services.worker_app_identity import (
     WorkerAppIdentityService,
@@ -129,6 +131,13 @@ class WorkerAppBootstrapItem(TZAwareBaseModel):
 class WorkerAppBootstrapResponse(BaseModel):
     revision: str
     apps: list[WorkerAppBootstrapItem]
+
+
+class WorkerActiveColorResponse(BaseModel):
+    """Which blue-green color is live, and which one answered (#1482)."""
+
+    active_color: Literal["blue", "green"]
+    responding_color: Literal["blue", "green"] | None
 
 
 def _etag(revision: str) -> str:
@@ -456,3 +465,45 @@ async def get_worker_config(
         # cannot fetch its token/KMC key either).
         runtime=WorkerRuntimeConfig.from_stored(connector.runtime_config),
     )
+
+
+@router.get(
+    "/active-color",
+    response_model=WorkerActiveColorResponse,
+    summary="Live blue-green deploy color",
+    responses={
+        503: {
+            "description": (
+                "The deploy marker is missing, unreadable or not a known color "
+                "(error code DEPLOY-001, ``details.reason``). No color is guessed."
+            )
+        }
+    },
+)
+async def get_active_color(
+    _: None = Depends(verify_worker_token),
+) -> WorkerActiveColorResponse:
+    """Report the color serving traffic, read from the deploy marker per request.
+
+    A co-resident consumer of this lane used to learn the live color by
+    bind-mounting the marker file itself, which pins the inode at container
+    start and silently goes stale (#1482). Here the process that owns the
+    marker reads it on every call, so the answer is always the marker's
+    current value. ``responding_color`` is the identity of the instance that
+    answered: when it differs from ``active_color`` the caller has reached a
+    color that is no longer live and should re-target.
+    """
+    settings = get_settings()
+    active = read_active_color(settings.active_color_marker_path)
+    responding = settings.deploy_color or None
+    if responding is not None and responding not in DEPLOY_COLORS:
+        # Settings already validate this; the guard keeps the response type
+        # honest if a test stubs settings with an arbitrary string.
+        responding = None
+    if responding is not None and responding != active:
+        logger.warning(
+            "active_color_mismatch",
+            active_color=active,
+            responding_color=responding,
+        )
+    return WorkerActiveColorResponse(active_color=active, responding_color=responding)  # type: ignore[arg-type]
