@@ -13,7 +13,7 @@ the failure the marker exists to prevent.
 
 from __future__ import annotations
 
-from typing import Literal
+from typing import Literal, cast
 
 from config.constants import DEPLOY_COLORS
 from utils.exceptions import ActiveColorUnavailableError
@@ -23,10 +23,11 @@ from utils.exceptions import ActiveColorUnavailableError
 # pulled into memory or echoed back to a caller.
 _MARKER_MAX_BYTES = 64
 
+DeployColor = Literal["blue", "green"]
 MarkerFailure = Literal["missing", "unreadable", "invalid"]
 
 
-def read_active_color(path: str) -> str:
+def read_active_color(path: str) -> DeployColor:
     """Return the color named by the marker at ``path``.
 
     Raises:
@@ -49,4 +50,4 @@ def read_active_color(path: str) -> str:
     color = raw.decode("ascii", errors="replace").strip().lower()
     if color not in DEPLOY_COLORS:
         raise ActiveColorUnavailableError(reason="invalid", path=path)
-    return color
+    return cast(DeployColor, color)

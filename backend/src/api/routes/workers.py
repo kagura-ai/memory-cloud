@@ -16,7 +16,7 @@ from __future__ import annotations
 
 import secrets
 from datetime import datetime
-from typing import Any, Literal
+from typing import Any, Literal, cast
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, Header, HTTPException, Query, Response, status
@@ -28,7 +28,7 @@ from config.settings import get_settings
 from db.base import get_db
 from models.api_base import TZAwareBaseModel
 from models.worker_runtime import WorkerLocale, WorkerRuntimeConfig, normalize_worker_locale
-from services.active_color import read_active_color
+from services.active_color import DeployColor, read_active_color
 from services.connector_provisioning import ConnectorProvisioningService
 from services.worker_app_identity import (
     WorkerAppIdentityService,
@@ -136,8 +136,8 @@ class WorkerAppBootstrapResponse(BaseModel):
 class WorkerActiveColorResponse(BaseModel):
     """Which blue-green color is live, and which one answered (#1482)."""
 
-    active_color: Literal["blue", "green"]
-    responding_color: Literal["blue", "green"] | None
+    active_color: DeployColor
+    responding_color: DeployColor | None
 
 
 def _etag(revision: str) -> str:
@@ -495,15 +495,14 @@ async def get_active_color(
     """
     settings = get_settings()
     active = read_active_color(settings.active_color_marker_path)
-    responding = settings.deploy_color or None
-    if responding is not None and responding not in DEPLOY_COLORS:
-        # Settings already validate this; the guard keeps the response type
-        # honest if a test stubs settings with an arbitrary string.
-        responding = None
+    # Settings validate DEPLOY_COLOR at startup; the membership check only
+    # narrows the type (and keeps the response honest under a stubbed settings).
+    own = str(settings.deploy_color or "")
+    responding: DeployColor | None = cast(DeployColor, own) if own in DEPLOY_COLORS else None
     if responding is not None and responding != active:
         logger.warning(
             "active_color_mismatch",
             active_color=active,
             responding_color=responding,
         )
-    return WorkerActiveColorResponse(active_color=active, responding_color=responding)  # type: ignore[arg-type]
+    return WorkerActiveColorResponse(active_color=active, responding_color=responding)
