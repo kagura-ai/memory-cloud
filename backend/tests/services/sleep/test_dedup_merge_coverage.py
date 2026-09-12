@@ -54,6 +54,10 @@ def dedup_phase(mock_db, mock_llm):
         phase = DedupMergePhase(mock_db, mock_llm)
         phase.edge_repo = AsyncMock()
         phase.embedding_service = AsyncMock()
+    # #1523: the neighbour-widening count is a real SELECT against the run's
+    # scope; mock-db tests pass non-UUID scope strings, so stub it like the
+    # candidate fetch. Real-DB coverage lives in test_count_pinned_*.
+    phase._count_pinned = AsyncMock(return_value=0)
     return phase
 
 
@@ -1257,6 +1261,52 @@ class TestFetchActiveMemoriesRealDB:
 
 class TestSoftDeleteRealDB:
     """#1520: the tombstone write consolidation's archive branch uses."""
+
+    async def test_only_if_refuses_a_row_pinned_since_the_fetch(self, db_session):
+        """#1523: the archive stamp carries not_pinned_predicate() as ``only_if``,
+        so a row pinned between the (unlocked) fetch and the stamp is left alone —
+        0 rows, no tombstone, no vector loss."""
+        from models.memory import not_pinned_predicate
+        from repositories.memory import MemoryRepository
+
+        user = f"sd-user-{uuid4()}"
+        pinned = Memory(
+            id=uuid4(),
+            user_id=user,
+            summary="pinned since fetch",
+            content="c",
+            type="note",
+            client="pytest",
+            scope="working",
+            delivery_mode="always",
+        )
+        plain = Memory(
+            id=uuid4(),
+            user_id=user,
+            summary="plain",
+            content="c",
+            type="note",
+            client="pytest",
+            scope="working",
+        )
+        db_session.add_all([pinned, plain])
+        await db_session.flush()
+
+        repo = MemoryRepository(db_session)
+        assert (
+            await repo.soft_delete(
+                pinned.id, deleted_by="sleep_consolidation", only_if=not_pinned_predicate()
+            )
+            == 0
+        )
+        assert (
+            await repo.soft_delete(
+                plain.id, deleted_by="sleep_consolidation", only_if=not_pinned_predicate()
+            )
+            == 1
+        )
+        await db_session.refresh(pinned)
+        assert pinned.deleted_at is None
 
     async def test_soft_delete_stamps_tombstone_and_reports_rowcount(self, db_session):
         from repositories.memory import MemoryRepository

@@ -1444,7 +1444,7 @@ and stays rollbackable). After rollback, the report is marked
 ⚠️ This is a destructive operation — use with care.
 Requires action recording (reports created before this feature have no actions to rollback).
 
-Returns: {status, report_id, rollback_summary: {edges_deleted, merges_reversed, merges_unreversible, importance_restored, promotions_reversed, archives_restored, errors}}. Re-embedding is best-effort - check rollback_summary.errors.
+Returns: {status, report_id, rollback_summary: {edges_deleted, merges_reversed, merges_unreversible, importance_restored, promotions_reversed, importance_kept, promotions_kept, archives_restored, errors}}. importance_kept / promotions_kept count actions left standing by design (the row was pinned with delivery_mode='always', forgotten, or removed since the run) - not errors. Re-embedding is best-effort - check rollback_summary.errors.
 
 merges_unreversible (#1450) counts shadow merges this run did NOT reverse because a later writer changed or removed the edge — restoring the pre-merge state would have discarded that newer state. Those runs report error='partial_rollback'; a rollback is only complete when this is 0.""",
             "inputSchema": {

@@ -5,7 +5,7 @@ LLM borderline path, bridge node protection.
 """
 
 from datetime import timedelta
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import ANY, AsyncMock, MagicMock, patch
 from uuid import uuid4
 
 import pytest
@@ -221,7 +221,7 @@ class TestAdoptionArchivalGrandfather:
         # #1520: "archive" is a tombstone, not a row delete — rollback_sleep_run
         # can only restore what is still there.
         consolidation_phase.memory_repo.soft_delete.assert_awaited_once_with(
-            post.id, deleted_by="sleep_consolidation"
+            post.id, deleted_by="sleep_consolidation", only_if=ANY
         )
 
     @pytest.mark.asyncio
@@ -589,7 +589,7 @@ class TestLLMArchivalEligibilityGuard:
         result = await self._run_llm_archive(consolidation_phase, mem, cutoff=cutoff)
 
         consolidation_phase.memory_repo.soft_delete.assert_awaited_once_with(
-            mem.id, deleted_by="sleep_consolidation"
+            mem.id, deleted_by="sleep_consolidation", only_if=ANY
         )
         assert result.details["rule_deleted"] == 1
         assert result.details["llm_archive_guarded"] == 0

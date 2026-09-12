@@ -20,7 +20,7 @@ is the ``AsyncMock`` repo from the source's own seam so no network call is made.
 from __future__ import annotations
 
 from datetime import datetime, timedelta
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import ANY, AsyncMock, MagicMock, patch
 from uuid import uuid4
 
 import pytest
@@ -281,7 +281,7 @@ class TestLLMBorderlinePath:
         assert result.details["llm_archive_guarded"] == 0
         assert result.details["llm_archived"] == 1
         phase.memory_repo.soft_delete.assert_awaited_once_with(
-            mem.id, deleted_by="sleep_consolidation"
+            mem.id, deleted_by="sleep_consolidation", only_if=ANY
         )
 
     @pytest.mark.asyncio
@@ -617,7 +617,7 @@ class TestRuleDeleteFailure:
 
         assert result.details["rule_deleted"] == 1
         phase.memory_repo.soft_delete.assert_awaited_once_with(
-            mem.id, deleted_by="sleep_consolidation"
+            mem.id, deleted_by="sleep_consolidation", only_if=ANY
         )
 
     @pytest.mark.asyncio
@@ -655,7 +655,7 @@ class TestRuleDeleteFailure:
 
         assert result.details["rule_deleted"] == 1
         phase.memory_repo.soft_delete.assert_awaited_once_with(
-            mem.id, deleted_by="sleep_consolidation"
+            mem.id, deleted_by="sleep_consolidation", only_if=ANY
         )
         reporter.add_action.assert_awaited_once()
         _, kwargs = reporter.add_action.call_args

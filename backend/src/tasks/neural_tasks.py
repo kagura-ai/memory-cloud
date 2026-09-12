@@ -192,6 +192,13 @@ async def consolidation_task():
                             importance=memory.importance,
                         )
 
+                    # #1523: a pinned row (delivery_mode='always') is never an
+                    # automated-delete candidate — same exemption as the Sleep
+                    # phases, and this branch is a physical delete with no
+                    # tombstone to restore from.
+                    elif memory.is_pinned:
+                        logger.info("legacy_consolidation_skipped_pinned", memory_id=str(memory.id))
+
                     # Deletion criteria
                     elif age_days >= LEGACY_ARCHIVE_MIN_AGE_DAYS and memory.access_count == 0:
                         # ================================================================

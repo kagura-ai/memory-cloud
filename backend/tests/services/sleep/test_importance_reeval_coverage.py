@@ -155,6 +155,43 @@ class TestFetchCandidates:
 
         assert [c.id for c in candidates] == [plain["id"]]
 
+    async def test_row_pinned_since_fetch_is_not_rescored(self, db_session):
+        """#1523: the write carries not_pinned_predicate(), so a row pinned while
+        the LLM batch ran keeps its owner-set importance: no Qdrant patch, no
+        action row, not counted. The race is simulated by handing execute() a
+        candidate that is already pinned in the DB."""
+        user_id = f"u-{uuid4()}"
+        kw = _mem_kwargs(user_id=user_id, importance=0.5)
+        row = Memory(**kw, delivery_mode="always")
+        db_session.add(row)
+        await db_session.flush()
+
+        llm = AsyncMock()
+        llm.complete_json = AsyncMock(
+            return_value=_make_llm_response({"scores": [{"label": "A", "importance": 0.9}]})
+        )
+        qdrant = AsyncMock()
+        reporter = AsyncMock()
+        with patch("services.sleep.importance_reeval.update_memory_payload_in_qdrant", qdrant):
+            phase = ImportanceReevalPhase(db_session, llm)
+            phase._fetch_candidates = AsyncMock(return_value=[row])
+            result = await phase.execute(
+                _make_config(alpha=0.3),
+                user_id,
+                None,
+                None,
+                SleepBudget(),
+                reporter=reporter,
+                report_id=uuid4(),
+            )
+
+        await db_session.refresh(row)
+        assert row.importance == pytest.approx(0.5)
+        assert result.memories_processed == 0
+        assert row.id not in result.changed_memory_ids
+        qdrant.assert_not_awaited()
+        reporter.add_action.assert_not_awaited()
+
     async def test_excludes_fresh_memory(self, db_session):
         """A recently-updated memory is below the staleness cutoff."""
         user_id = f"u-{uuid4()}"

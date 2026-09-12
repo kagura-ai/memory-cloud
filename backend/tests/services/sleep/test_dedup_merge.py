@@ -104,6 +104,10 @@ def dedup_phase(mock_db, mock_llm):
         phase = DedupMergePhase(mock_db, mock_llm)
         phase.edge_repo = AsyncMock()
         phase.embedding_service = AsyncMock()
+    # #1523: the neighbour-widening count is a real SELECT against the run's
+    # scope; mock-db tests pass non-UUID scope strings, so stub it like the
+    # candidate fetch. Real-DB coverage lives in test_count_pinned_*.
+    phase._count_pinned = AsyncMock(return_value=0)
     return phase
 
 

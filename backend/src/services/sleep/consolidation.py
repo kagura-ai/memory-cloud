@@ -478,7 +478,13 @@ class ConsolidationPhase:
         at read time by the PG row, so an orphan is a logged degradation, not a
         lost restore.
         """
-        stamped = await self.memory_repo.soft_delete(memory_id, deleted_by=DELETED_BY_SLEEP_ARCHIVE)
+        # #1523: the fetch excluded pinned rows, but the LLM pass runs between
+        # fetch and stamp — a pin landing in that window must still win, so the
+        # exemption rides on the UPDATE itself (0 rows → skipped, like any
+        # other state change since the fetch).
+        stamped = await self.memory_repo.soft_delete(
+            memory_id, deleted_by=DELETED_BY_SLEEP_ARCHIVE, only_if=not_pinned_predicate()
+        )
         if stamped == 0:
             logger.warning("consolidation_archive_stamp_missed", memory_id=str(memory_id))
             return False

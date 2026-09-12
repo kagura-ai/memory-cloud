@@ -41,7 +41,6 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from db.qdrant import delete_memory_from_qdrant, search_memories_qdrant
 from models.memory import (
     DELETED_BY_SLEEP_MERGE,
-    DELIVERY_MODE_ALWAYS,
     MEMORY_TYPE_TIME,
     Memory,
     not_pinned_predicate,
@@ -562,11 +561,7 @@ class DedupMergePhase:
         # Step 2: Find similar pairs via Qdrant. #1523: pinned rows are not
         # candidates but still answer vector search, so widen the neighbour cap
         # by their count or they can saturate an unpinned memory's slots.
-        try:
-            pinned_in_scope = await self._count_pinned(user_id, workspace_id, context_id)
-        except Exception as e:  # noqa: BLE001 — widening is an optimisation, never a gate
-            logger.warning("dedup_pinned_count_failed", error=str(e))
-            pinned_in_scope = 0
+        pinned_in_scope = await self._count_pinned(user_id, workspace_id, context_id)
         pairs = await self._find_similar_pairs(
             memories,
             user_id,
@@ -1480,7 +1475,9 @@ class DedupMergePhase:
         """
         rows = (
             await self.db.execute(
-                select(Memory.id, Memory.delivery_mode, Memory.deleted_at, Memory.type)
+                select(
+                    Memory.id, pinned_predicate().label("pinned"), Memory.deleted_at, Memory.type
+                )
                 .where(Memory.id.in_([winner.id, loser.id]))
                 .with_for_update()
             )
@@ -1493,7 +1490,7 @@ class DedupMergePhase:
                 reasons.append(f"{label}_missing")
             elif row.deleted_at is not None:
                 reasons.append(f"{label}_deleted")
-            elif row.delivery_mode == DELIVERY_MODE_ALWAYS:
+            elif row.pinned:
                 reasons.append(f"{label}_pinned")
             elif row.type == MEMORY_TYPE_TIME:
                 reasons.append(f"{label}_time")

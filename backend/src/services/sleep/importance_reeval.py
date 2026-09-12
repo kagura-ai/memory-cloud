@@ -18,7 +18,7 @@ from __future__ import annotations
 import random
 import string
 from datetime import timedelta
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any, cast
 from uuid import UUID
 
 if TYPE_CHECKING:
@@ -26,6 +26,7 @@ if TYPE_CHECKING:
     from services.sleep.reporter import SleepReporter
 
 from sqlalchemy import select, update
+from sqlalchemy.engine import CursorResult
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from db.qdrant import update_memory_payload_in_qdrant
@@ -128,12 +129,23 @@ class ImportanceReevalPhase:
                 smoothed = alpha * new_score + (1 - alpha) * old_importance
                 smoothed = max(0.0, min(1.0, smoothed))  # Clamp to [0, 1]
 
-                # Update PostgreSQL
-                await self.db.execute(
+                # Update PostgreSQL. #1523: the candidate fetch excluded pinned
+                # rows, but the LLM batch runs in between — a row pinned since
+                # keeps the importance its owner set (load_pinned() orders by
+                # it), and a forgotten row is left alone. 0 rows → skipped:
+                # no Qdrant patch, no action row, not counted.
+                written = await self.db.execute(
                     update(Memory)
-                    .where(Memory.id == memory_id)
+                    .where(
+                        Memory.id == memory_id,
+                        Memory.deleted_at.is_(None),
+                        not_pinned_predicate(),
+                    )
                     .values(importance=smoothed, updated_at=utcnow())
                 )
+                if cast(CursorResult[Any], written).rowcount == 0:
+                    logger.info("importance_reeval_skipped_since_fetch", memory_id=str(memory_id))
+                    continue
 
                 # Update Qdrant payload
                 try:
