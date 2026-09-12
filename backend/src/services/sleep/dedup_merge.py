@@ -39,7 +39,7 @@ from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from db.qdrant import delete_memory_from_qdrant, search_memories_qdrant
-from models.memory import DELETED_BY_SLEEP_MERGE, DELIVERY_MODE_ALWAYS, Memory
+from models.memory import DELETED_BY_SLEEP_MERGE, DELIVERY_MODE_ALWAYS, MEMORY_TYPE_TIME, Memory
 from repositories.neural_edge import NeuralEdgeRepository
 from services.embedding_service import EmbeddingService
 from services.llm_service import LLMService
@@ -739,7 +739,7 @@ class DedupMergePhase:
         context_id: str | None,
         limit: int = 500,
     ) -> list[Memory]:
-        """Fetch active (non-deleted), unpinned memories, capped by limit.
+        """Fetch active (non-deleted), unpinned, non-time memories, capped by limit.
 
         #1519: ``delivery_mode='always'`` rows are the deterministic
         ``load_pinned()`` lane (#886) and never enter dedup candidacy. A pinned
@@ -748,6 +748,11 @@ class DedupMergePhase:
         fact instead of absorbing it. Excluding them here covers every downstream
         path at once: ``_find_similar_pairs`` restricts vector-search hits to the
         fetched id set, so a pinned neighbour cannot re-enter that way either.
+
+        #1524: ``type='time'`` rows are the other deterministic lane
+        (``recall_upcoming``, keyed on ``details.trigger``). Two occurrences of a
+        recurring window share a summary and embed identically, and merge folds
+        only tags — the loser's trigger window would vanish from that lane.
         """
         stmt = (
             select(Memory)
@@ -755,6 +760,9 @@ class DedupMergePhase:
                 Memory.user_id == user_id,
                 Memory.deleted_at.is_(None),
                 Memory.delivery_mode != DELIVERY_MODE_ALWAYS,
+                # #1524: time memories are served by their trigger window, not
+                # their summary — a same-summary occurrence is not a duplicate.
+                Memory.type != MEMORY_TYPE_TIME,
             )
             .order_by(Memory.updated_at.desc())
             .limit(limit)
@@ -1408,11 +1416,13 @@ class DedupMergePhase:
         side. ``SELECT ... FOR UPDATE`` inside the phase transaction serializes
         against a concurrent ``update_memory``/``forget`` so the state read here
         is the state the merge would act on. Returns True (refuse) when either
-        row is now pinned, soft-deleted, or missing.
+        row is now pinned, soft-deleted, missing, or (#1524) a time memory —
+        ``update_memory`` can flip ``type`` in the same window, and a merge would
+        drop the loser's trigger window from ``recall_upcoming``.
         """
         rows = (
             await self.db.execute(
-                select(Memory.id, Memory.delivery_mode, Memory.deleted_at)
+                select(Memory.id, Memory.delivery_mode, Memory.deleted_at, Memory.type)
                 .where(Memory.id.in_([winner.id, loser.id]))
                 .with_for_update()
             )
@@ -1427,6 +1437,8 @@ class DedupMergePhase:
                 reasons.append(f"{label}_deleted")
             elif row.delivery_mode == DELIVERY_MODE_ALWAYS:
                 reasons.append(f"{label}_pinned")
+            elif row.type == MEMORY_TYPE_TIME:
+                reasons.append(f"{label}_time")
         if not reasons:
             return False
         logger.info(

@@ -19,7 +19,7 @@ from uuid import uuid4
 import pytest
 from sqlalchemy import select, update
 
-from models.memory import DELIVERY_MODE_ALWAYS, Memory
+from models.memory import DELIVERY_MODE_ALWAYS, MEMORY_TYPE_TIME, Memory
 from services.sleep.dedup_merge import (
     AUTO_MERGE_THRESHOLD,
     MAX_CLUSTER_SIZE,
@@ -669,6 +669,46 @@ class TestPinRecheckAtExecution:
         del_qdrant.assert_not_called()
         phase.edge_repo.transfer_edges.assert_not_called()
 
+    async def test_loser_turned_time_memory_after_fetch_is_refused(self, db_session):
+        """#1524: update_memory can flip ``type`` to 'time' between the fetch and
+        the merge; the locked re-check must refuse, or the loser's trigger window
+        would vanish from recall_upcoming."""
+        winner = await _make_db_memory(db_session, summary="standup 09:00", tags=["a"])
+        loser = await _make_db_memory(db_session, summary="standup 09:00", tags=["b"])
+        phase = await self._phase_for_db(db_session)
+        await db_session.execute(
+            update(Memory)
+            .where(Memory.id == loser.id)
+            .values(
+                type=MEMORY_TYPE_TIME,
+                details={
+                    "trigger": {
+                        "year": 2026,
+                        "month": 9,
+                        "day": 9,
+                        "from": "2026-09-09T00:00:00",
+                        "until": "2026-09-09T23:59:59",
+                    }
+                },
+            )
+        )
+
+        with patch(
+            "services.sleep.dedup_merge.delete_memory_from_qdrant", new_callable=AsyncMock
+        ) as del_qdrant:
+            executed = await phase._execute_merge(winner, loser, "dedup-user", None, None)
+
+        assert executed is False
+        loser_row = (
+            await db_session.execute(
+                select(Memory.deleted_at, Memory.type).where(Memory.id == loser.id)
+            )
+        ).one()
+        assert loser_row.deleted_at is None
+        assert loser_row.type == MEMORY_TYPE_TIME
+        del_qdrant.assert_not_called()
+        phase.edge_repo.transfer_edges.assert_not_called()
+
     async def test_shadow_mode_winner_pinned_after_fetch_is_refused(self, db_session):
         winner = await _make_db_memory(db_session, summary="w", tags=["a"])
         loser = await _make_db_memory(db_session, summary="l", tags=["b"])
@@ -1108,6 +1148,49 @@ class TestFetchActiveMemoriesRealDB:
         ids = {m.id for m in rows}
         assert plain.id in ids
         assert pinned.id not in ids  # pinned excluded
+
+    async def test_excludes_time_memories(self, db_session):
+        """#1524: type='time' rows (the recall_upcoming lane) never enter dedup
+        candidacy, even when a same-summary note would."""
+        user = f"fetch-user-{uuid4()}"
+        note = Memory(
+            id=uuid4(),
+            user_id=user,
+            summary="standup 09:00",
+            content="c",
+            type="note",
+            client="pytest",
+            scope="working",
+        )
+        occurrence = Memory(
+            id=uuid4(),
+            user_id=user,
+            summary="standup 09:00",
+            content="c",
+            type=MEMORY_TYPE_TIME,
+            client="pytest",
+            scope="working",
+            # Resolved window bounds: the valid_trigger_window_format CHECK
+            # requires fixed-width ISO from/until on every type='time' row.
+            details={
+                "trigger": {
+                    "year": 2026,
+                    "month": 9,
+                    "day": 9,
+                    "from": "2026-09-09T00:00:00",
+                    "until": "2026-09-09T23:59:59",
+                }
+            },
+        )
+        db_session.add_all([note, occurrence])
+        await db_session.flush()
+
+        phase = await self._phase_for_db(db_session)
+        rows = await phase._fetch_active_memories(user, None, None, limit=500)
+
+        ids = {m.id for m in rows}
+        assert note.id in ids
+        assert occurrence.id not in ids  # time lane excluded
 
 
 class TestSoftDeleteRealDB:

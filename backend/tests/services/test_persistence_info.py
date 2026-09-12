@@ -247,9 +247,9 @@ def test_dedup_merge_still_has_no_age_or_adoption_gate():
     """Pin WHY the age field is named for consolidation only.
 
     ``DedupMergePhase._fetch_active_memories`` selects on identity columns,
-    ``deleted_at`` and the #1519 pinned exemption alone — no age, scope, or
-    reference_count gate — so an unpinned memory written minutes ago can lose a
-    near-duplicate merge the same night. Any global "not removed before N days"
+    ``deleted_at`` and the two lane exemptions (#1519 pinned, #1524 time) alone
+    — no age, scope, or reference_count gate — so an unpinned, non-time memory
+    written minutes ago can lose a near-duplicate merge the same night. Any global "not removed before N days"
     wording would therefore be false.
 
     If a gate is ever added here, this test fails: revisit the response wording,
@@ -281,6 +281,9 @@ def test_dedup_merge_still_has_no_age_or_adoption_gate():
         # working-scope floor wording stays as is; persistence_info(pinned=True)
         # carries the widened promise for pinned writes.
         "delivery_mode",
+        # #1524: time memories (type='time') are the recall_upcoming lane and are
+        # excluded the same way — a lane exemption, still not an age gate.
+        "type",
     }, (
         f"dedup selection columns changed to {sorted(referenced)} — if an age or "
         "adoption gate was added, the persistence wording can be widened"

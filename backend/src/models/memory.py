@@ -52,6 +52,12 @@ DELIVERY_MODE_ALWAYS = "always"
 DELIVERY_MODE_ON_RECALL = "on_recall"
 DELIVERY_MODE_ON_TRIGGER = "on_trigger"
 
+# Time Memory lane (#877): rows ``recall_upcoming`` serves deterministically by
+# ``type`` + ``details.trigger``. Its write path never assigns
+# ``delivery_mode='on_trigger'``, so the lane is keyed on ``type`` alone — every
+# reader and every automated-deleter exemption (#1524) must use this constant.
+MEMORY_TYPE_TIME = "time"
+
 # ``deleted_by`` provenance for rows Sleep maintenance tombstones (#1209/#1520).
 # Merge losers and consolidation archives are both soft deletes that
 # ``rollback_sleep_run`` can restore, and both are hard-purged by the SAME

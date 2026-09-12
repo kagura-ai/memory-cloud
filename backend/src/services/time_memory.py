@@ -59,12 +59,12 @@ async def query_upcoming_time_memories(
     read is not the injection surface bootstrap is.
     """
     from models.auth import CONTEXT_TRUST_TIER_TRUSTED, Context
-    from models.memory import SOURCE_TYPE_CONNECTOR, Memory
+    from models.memory import MEMORY_TYPE_TIME, SOURCE_TYPE_CONNECTOR, Memory
 
     query = (
         select(Memory)
         .where(Memory.deleted_at.is_(None))
-        .where(Memory.type == "time")
+        .where(Memory.type == MEMORY_TYPE_TIME)
         .where(Memory.context_id == context_id)
     )
     if trusted_only:
