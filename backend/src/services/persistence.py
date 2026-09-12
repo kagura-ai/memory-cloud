@@ -35,9 +35,11 @@ DELIBERATELY NOT CLAIMED — this is not a retention SLA:
 * Near-duplicate merge (``services/sleep/dedup_merge.py``) soft-deletes the
   loser of a >= 0.98-cosine pair with **no age, scope, or adoption gate**;
   ``_fetch_active_memories`` selects on user/workspace/context,
-  ``deleted_at IS NULL`` and the pinned exemption only (``delivery_mode=
+  ``deleted_at IS NULL`` and two lane exemptions only (``delivery_mode=
   'always'`` rows never enter candidacy, #1519 — ``pinned=True`` below carries
-  that promise). An unpinned memory written minutes ago can lose a merge the
+  that promise; ``type='time'`` rows never do either, #1524, since the Time
+  Memory lane serves them by trigger window, not summary). An unpinned,
+  non-time memory written minutes ago can lose a merge the
   same night (its tags and edges transfer to the winner, but its id stops
   resolving). Any global "nothing you write today can be removed" wording would
   therefore be false, which is why the age field is named for consolidation and

@@ -19,7 +19,7 @@ from uuid import uuid4
 import pytest
 from sqlalchemy import select, update
 
-from models.memory import DELIVERY_MODE_ALWAYS, Memory
+from models.memory import DELIVERY_MODE_ALWAYS, MEMORY_TYPE_TIME, Memory
 from services.sleep.dedup_merge import (
     AUTO_MERGE_THRESHOLD,
     MAX_CLUSTER_SIZE,
@@ -1108,6 +1108,49 @@ class TestFetchActiveMemoriesRealDB:
         ids = {m.id for m in rows}
         assert plain.id in ids
         assert pinned.id not in ids  # pinned excluded
+
+    async def test_excludes_time_memories(self, db_session):
+        """#1524: type='time' rows (the recall_upcoming lane) never enter dedup
+        candidacy, even when a same-summary note would."""
+        user = f"fetch-user-{uuid4()}"
+        note = Memory(
+            id=uuid4(),
+            user_id=user,
+            summary="standup 09:00",
+            content="c",
+            type="note",
+            client="pytest",
+            scope="working",
+        )
+        occurrence = Memory(
+            id=uuid4(),
+            user_id=user,
+            summary="standup 09:00",
+            content="c",
+            type=MEMORY_TYPE_TIME,
+            client="pytest",
+            scope="working",
+            # Resolved window bounds: the valid_trigger_window_format CHECK
+            # requires fixed-width ISO from/until on every type='time' row.
+            details={
+                "trigger": {
+                    "year": 2026,
+                    "month": 9,
+                    "day": 9,
+                    "from": "2026-09-09T00:00:00",
+                    "until": "2026-09-09T23:59:59",
+                }
+            },
+        )
+        db_session.add_all([note, occurrence])
+        await db_session.flush()
+
+        phase = await self._phase_for_db(db_session)
+        rows = await phase._fetch_active_memories(user, None, None, limit=500)
+
+        ids = {m.id for m in rows}
+        assert note.id in ids
+        assert occurrence.id not in ids  # time lane excluded
 
 
 class TestSoftDeleteRealDB:
