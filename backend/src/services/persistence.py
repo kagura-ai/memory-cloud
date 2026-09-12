@@ -36,10 +36,12 @@ DELIBERATELY NOT CLAIMED — this is not a retention SLA:
   loser of a >= 0.98-cosine pair with **no age, scope, or adoption gate**;
   ``_fetch_active_memories`` selects on user/workspace/context,
   ``deleted_at IS NULL`` and two lane exemptions only (``delivery_mode=
-  'always'`` rows never enter candidacy, #1519 — ``pinned=True`` below carries
-  that promise; ``type='time'`` rows never do either, #1524, since the Time
-  Memory lane serves them by trigger window, not summary). An unpinned,
-  non-time memory written minutes ago can lose a merge the
+  'always'`` rows never enter candidacy, #1519, and since #1523 the same
+  predicate exempts them from consolidation archive and importance
+  re-evaluation too — ``pinned=True`` below carries that promise; ``type='time'``
+  rows never do either, #1524, since the Time Memory lane serves them by
+  trigger window, not summary). An unpinned, non-time memory written minutes
+  ago can lose a merge the
   same night (its tags and edges transfer to the winner, but its id stops
   resolving). Any global "nothing you write today can be removed" wording would
   therefore be false, which is why the age field is named for consolidation and
@@ -154,17 +156,20 @@ def _merge_caveat(pinned: bool, *, floor: bool) -> str:
     """The sentence about maintenance that is NOT consolidation.
 
     ``floor`` selects the working-scope phrasing ("not bound by that floor")
-    over the persistent one ("not scope-gated"). Pinned memories (#1519) are
-    excluded from dedup at the candidate fetch, so for them the merge caveat
-    becomes a promise and only forget() remains.
+    over the persistent one ("not scope-gated"). Pinned memories (#1519, #1523)
+    are excluded from every automated deleter at its candidate fetch (one shared
+    predicate), so for them the merge caveat becomes a promise and only
+    forget() remains.
     """
     if pinned:
         # Hedged on purpose: the exemption holds only while the pin holds (an
         # unpin re-enters candidacy), and forget() is not the only removal path
         # (deleting the context removes it too) — so no "never", no "only".
         return (
-            "While it stays pinned (delivery_mode='always'), near-duplicate "
-            "merge does not select it; an explicit forget() still removes it"
+            "While it stays pinned (delivery_mode='always'), Sleep maintenance "
+            "does not select it — near-duplicate merge, consolidation archive "
+            "and importance re-evaluation all exclude it, and rollback never "
+            "demotes it; an explicit forget() still removes it"
             + (" and is not bound by that floor." if floor else ".")
         )
     if floor:

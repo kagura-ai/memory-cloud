@@ -35,11 +35,18 @@ if TYPE_CHECKING:
     from neural.config import NeuralMemoryConfig
     from services.sleep.reporter import SleepReporter
 
-from sqlalchemy import select, update
+from sqlalchemy import func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from db.qdrant import delete_memory_from_qdrant, search_memories_qdrant
-from models.memory import DELETED_BY_SLEEP_MERGE, DELIVERY_MODE_ALWAYS, MEMORY_TYPE_TIME, Memory
+from models.memory import (
+    DELETED_BY_SLEEP_MERGE,
+    DELIVERY_MODE_ALWAYS,
+    MEMORY_TYPE_TIME,
+    Memory,
+    not_pinned_predicate,
+    pinned_predicate,
+)
 from repositories.neural_edge import NeuralEdgeRepository
 from services.embedding_service import EmbeddingService
 from services.llm_service import LLMService
@@ -58,6 +65,12 @@ from utils.datetime import utcnow
 from utils.logger import get_logger
 
 logger = get_logger(__name__)
+
+# Per-memory Qdrant neighbour cap for candidate discovery (#1231 documents the
+# saturation it can hit). #1523 widens it by the pinned rows in scope, bounded so
+# a context with thousands of pins cannot turn every search into a full scan.
+NEIGHBOR_LIMIT = 10
+MAX_EXTRA_NEIGHBORS = 50
 
 # Maximum cluster size to process in one run.
 # Larger clusters are deferred to the next sleep cycle.
@@ -546,9 +559,21 @@ class DedupMergePhase:
             result.details = {"message": "not_enough_memories", "count": len(memories)}
             return result
 
-        # Step 2: Find similar pairs via Qdrant
+        # Step 2: Find similar pairs via Qdrant. #1523: pinned rows are not
+        # candidates but still answer vector search, so widen the neighbour cap
+        # by their count or they can saturate an unpinned memory's slots.
+        try:
+            pinned_in_scope = await self._count_pinned(user_id, workspace_id, context_id)
+        except Exception as e:  # noqa: BLE001 — widening is an optimisation, never a gate
+            logger.warning("dedup_pinned_count_failed", error=str(e))
+            pinned_in_scope = 0
         pairs = await self._find_similar_pairs(
-            memories, user_id, workspace_id, context_id, threshold
+            memories,
+            user_id,
+            workspace_id,
+            context_id,
+            threshold,
+            extra_neighbors=pinned_in_scope,
         )
         if not pairs:
             result.details = {"message": "no_duplicate_candidates"}
@@ -759,7 +784,8 @@ class DedupMergePhase:
             .where(
                 Memory.user_id == user_id,
                 Memory.deleted_at.is_(None),
-                Memory.delivery_mode != DELIVERY_MODE_ALWAYS,
+                # #1523: the shared exemption every automated deleter uses.
+                not_pinned_predicate(),
                 # #1524: time memories are served by their trigger window, not
                 # their summary — a same-summary occurrence is not a duplicate.
                 Memory.type != MEMORY_TYPE_TIME,
@@ -775,6 +801,29 @@ class DedupMergePhase:
         result = await self.db.execute(stmt)
         return list(result.scalars().all())
 
+    async def _count_pinned(
+        self,
+        user_id: str,
+        workspace_id: str | None,
+        context_id: str | None,
+    ) -> int:
+        """Live pinned rows in the run's scope (#1523).
+
+        Pinned rows are out of the candidate set but still in Qdrant, so they
+        compete for the per-memory neighbour slots in ``_find_similar_pairs``.
+        The count widens that search by exactly the rows that can crowd it.
+        """
+        stmt = select(func.count()).where(
+            Memory.user_id == user_id,
+            Memory.deleted_at.is_(None),
+            pinned_predicate(),
+        )
+        if workspace_id:
+            stmt = stmt.where(Memory.workspace_id == UUID(workspace_id))
+        if context_id:
+            stmt = stmt.where(Memory.context_id == UUID(context_id))
+        return int((await self.db.execute(stmt)).scalar_one() or 0)
+
     async def _find_similar_pairs(
         self,
         memories: list[Memory],
@@ -782,12 +831,21 @@ class DedupMergePhase:
         workspace_id: str | None,
         context_id: str | None,
         threshold: float,
+        *,
+        extra_neighbors: int = 0,
     ) -> list[tuple[UUID, UUID, float]]:
         """Find pairs of memories with cosine similarity >= threshold.
 
         For each memory, embed its summary and search Qdrant for
         high-similarity neighbors. Deduplicates pairs by sorted ID tuple.
+
+        ``extra_neighbors`` (#1523) widens the per-memory neighbour cap by the
+        number of pinned rows in scope (capped at ``MAX_EXTRA_NEIGHBORS``):
+        pinned near-duplicates are filtered out below but still occupy Qdrant
+        hits, and without the widening they could take every slot and hide an
+        unpinned memory's true duplicate (the #1231 saturation shape).
         """
+        neighbor_limit = NEIGHBOR_LIMIT + max(0, min(extra_neighbors, MAX_EXTRA_NEIGHBORS))
         pairs: list[tuple[UUID, UUID, float]] = []
         seen: set[tuple[UUID, UUID]] = set()
         memory_ids = {m.id for m in memories}
@@ -813,7 +871,7 @@ class DedupMergePhase:
                     query_vector=vector,
                     workspace_id=workspace_id or "",
                     context_id=context_id or "",
-                    limit=10,
+                    limit=neighbor_limit,
                     filters={"score_threshold": threshold},
                     collection_name=self.collection_name or "kagura_memories",
                 )

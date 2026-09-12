@@ -855,6 +855,24 @@ class TestRollbackActionDispatch:
         assert "v0." not in summary["errors"][0]
 
     @pytest.mark.asyncio
+    async def test_pinned_promotion_is_refused_not_demoted(self, user_id, workspace_id):
+        """#1523: the demote UPDATE carries the shared not-pinned predicate, so a
+        row pinned after its promotion matches 0 rows — reported, never counted,
+        and never sent back to the scope the archive branch could reach."""
+        pinned = self._action("promote", id=1, memory_id=uuid4())
+        cfg = MagicMock()
+        cfg.scalar_one_or_none.return_value = None
+        demote = MagicMock()
+        demote.rowcount = 0  # WHERE ... AND delivery_mode != 'always' matched nothing
+        data = await self._run([pinned], user_id, workspace_id, extra=[cfg, demote])
+
+        summary = data["rollback_summary"]
+        assert summary["promotions_reversed"] == 0
+        assert len(summary["errors"]) == 1
+        assert "pinned" in summary["errors"][0]
+        assert str(pinned.memory_id) in summary["errors"][0]
+
+    @pytest.mark.asyncio
     async def test_one_failing_action_does_not_abandon_the_rest(self, user_id, workspace_id):
         """Per-action isolation: the loop keeps going and records the failure."""
         boom = self._action("create_edge", id=1)

@@ -423,19 +423,38 @@ async def _undo_update_importance(
 
 
 async def _undo_promote(db: Any, action: Any, ctx: _RollbackCtx, summary: dict[str, Any]) -> None:
-    """Send a promoted memory back to the working scope."""
+    """Send a promoted memory back to the working scope.
+
+    #1523: a row pinned after the promotion is refused. Pin-on-write made it
+    persistent for the deterministic ``load_pinned()`` lane; demoting it would
+    put it back where consolidation's archive branch could later remove it.
+    The refusal is the UPDATE's own predicate (``not_pinned_predicate``), so a
+    pin that lands between read and write still wins; a 0-row match is
+    reported under ``errors`` and never counted.
+    """
     from sqlalchemy import update as sa_update
 
-    from models.memory import Memory
+    from models.memory import Memory, not_pinned_predicate
     from utils.datetime import utcnow
 
     if not action.memory_id:
         return
-    await db.execute(
+    demote_result = await db.execute(
         sa_update(Memory)
-        .where(Memory.id == action.memory_id, Memory.user_id == ctx.user_id)
+        .where(
+            Memory.id == action.memory_id,
+            Memory.user_id == ctx.user_id,
+            not_pinned_predicate(),
+        )
         .values(scope="working", promoted_at=None, updated_at=utcnow())
     )
+    if cast(CursorResult[Any], demote_result).rowcount == 0:
+        summary["errors"].append(
+            f"promotion of {action.memory_id} not reversed — the row is pinned "
+            "(delivery_mode='always') and keeps its persistent scope, or it no "
+            "longer exists"
+        )
+        return
     summary["promotions_reversed"] += 1
 
 

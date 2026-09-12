@@ -276,17 +276,58 @@ def test_dedup_merge_still_has_no_age_or_adoption_gate():
         "updated_at",
         "workspace_id",
         "context_id",
-        # #1519: pinned rows (delivery_mode='always') are excluded from dedup
-        # candidacy. This is an exemption, not an age/adoption gate — the
-        # working-scope floor wording stays as is; persistence_info(pinned=True)
-        # carries the widened promise for pinned writes.
-        "delivery_mode",
         # #1524: time memories (type='time') are the recall_upcoming lane and are
         # excluded the same way — a lane exemption, still not an age gate.
         "type",
     }, (
         f"dedup selection columns changed to {sorted(referenced)} — if an age or "
         "adoption gate was added, the persistence wording can be widened"
+    )
+    # #1519/#1523: the pinned exemption is the shared ``not_pinned_predicate()``
+    # call, not an inline column — an exemption, not an age/adoption gate; the
+    # working-scope floor wording stays as is and persistence_info(pinned=True)
+    # carries the widened promise for pinned writes.
+    assert _calls_not_pinned_predicate(fn)
+
+
+def _calls_not_pinned_predicate(fn: ast.AST) -> bool:
+    return any(
+        isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Name)
+        and node.func.id == "not_pinned_predicate"
+        for node in ast.walk(fn)
+    )
+
+
+def _async_fn(module, name: str) -> ast.AsyncFunctionDef:
+    tree = ast.parse(Path(module.__file__).read_text(encoding="utf-8"))
+    return next(
+        node
+        for node in ast.walk(tree)
+        if isinstance(node, ast.AsyncFunctionDef) and node.name == name
+    )
+
+
+@pytest.mark.parametrize(
+    ("module_name", "fn_name"),
+    [
+        ("services.sleep.dedup_merge", "_fetch_active_memories"),
+        ("services.sleep.consolidation", "_fetch_working_memories"),
+        ("services.sleep.importance_reeval", "_fetch_candidates"),
+    ],
+)
+def test_every_automated_deleter_uses_the_shared_pinned_exemption(module_name, fn_name):
+    """#1523: ``persistence_info(pinned=True)`` promises that Sleep maintenance does
+    not select a pinned row. That promise is only as wide as the set of candidate
+    fetches carrying ``not_pinned_predicate()`` — pin the set here so a new phase
+    (or a hand-copied inline predicate) cannot silently narrow it."""
+    import importlib
+
+    module = importlib.import_module(module_name)
+    assert _calls_not_pinned_predicate(_async_fn(module, fn_name)), (
+        f"{module_name}.{fn_name} no longer calls not_pinned_predicate(); either the "
+        "pinned promise in services/persistence.py is now false, or the exemption was "
+        "re-spelled inline — use the shared predicate"
     )
 
 

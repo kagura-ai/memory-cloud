@@ -1192,6 +1192,68 @@ class TestFetchActiveMemoriesRealDB:
         assert note.id in ids
         assert occurrence.id not in ids  # time lane excluded
 
+    async def test_count_pinned_counts_live_pinned_rows_in_scope(self, db_session):
+        """#1523: the neighbour-widening count uses the shared inclusion predicate
+        on the run's scope — live pinned rows only, this user only."""
+        user = f"fetch-user-{uuid4()}"
+        rows = [
+            Memory(
+                id=uuid4(),
+                user_id=user,
+                summary="p1",
+                content="c",
+                type="note",
+                client="pytest",
+                scope="persistent",
+                delivery_mode="always",
+            ),
+            Memory(
+                id=uuid4(),
+                user_id=user,
+                summary="p2",
+                content="c",
+                type="note",
+                client="pytest",
+                scope="working",
+                delivery_mode="always",
+            ),
+            Memory(
+                id=uuid4(),
+                user_id=user,
+                summary="gone",
+                content="c",
+                type="note",
+                client="pytest",
+                scope="persistent",
+                delivery_mode="always",
+                deleted_at=utcnow(),
+            ),
+            Memory(
+                id=uuid4(),
+                user_id=user,
+                summary="plain",
+                content="c",
+                type="note",
+                client="pytest",
+                scope="working",
+            ),
+            Memory(
+                id=uuid4(),
+                user_id=f"other-{uuid4()}",
+                summary="theirs",
+                content="c",
+                type="note",
+                client="pytest",
+                scope="working",
+                delivery_mode="always",
+            ),
+        ]
+        db_session.add_all(rows)
+        await db_session.flush()
+
+        phase = await self._phase_for_db(db_session)
+        assert await phase._count_pinned(user, None, None) == 2
+
 
 class TestSoftDeleteRealDB:
     """#1520: the tombstone write consolidation's archive branch uses."""

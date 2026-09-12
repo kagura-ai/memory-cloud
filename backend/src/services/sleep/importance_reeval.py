@@ -29,7 +29,7 @@ from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from db.qdrant import update_memory_payload_in_qdrant
-from models.memory import Memory
+from models.memory import Memory, not_pinned_predicate
 from services.llm_service import LLMService
 from services.sleep.prompts import (
     IMPORTANCE_REEVAL_SYSTEM,
@@ -202,6 +202,9 @@ class ImportanceReevalPhase:
             Memory.importance >= IMPORTANCE_MIN,
             Memory.importance <= IMPORTANCE_MAX,
             Memory.updated_at < cutoff,
+            # #1523: pinned rows keep the importance their owner set; the
+            # deterministic load_pinned() lane orders by it.
+            not_pinned_predicate(),
         )
         if workspace_id:
             stmt = stmt.where(Memory.workspace_id == UUID(workspace_id))

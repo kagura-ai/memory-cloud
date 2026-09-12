@@ -713,6 +713,25 @@ class TestFetchWorkingMemories:
         assert all(isinstance(r, Memory) for r in rows)
 
     @pytest.mark.asyncio
+    async def test_excludes_pinned_working_rows(self, db_session):
+        """#1523: a pinned row can be working-scope (a pre-#1523 rollback demoted
+        it, or the pin was set on a working row). It must never reach the archive
+        branch, so the shared exemption applies at the fetch."""
+        user = f"u-{uuid4()}"
+        plain = _persist_memory(user_id=user, scope="working")
+        pinned = _persist_memory(user_id=user, scope="working", delivery_mode="always")
+        db_session.add_all([plain, pinned])
+        await db_session.flush()
+
+        with patch("services.sleep.consolidation.MemoryRepository"):
+            phase = ConsolidationPhase(db_session, AsyncMock())
+        rows = await phase._fetch_working_memories(user, None, None)
+
+        ids = {r.id for r in rows}
+        assert plain.id in ids
+        assert pinned.id not in ids
+
+    @pytest.mark.asyncio
     async def test_workspace_filter_applied(self, db_session):
         # workspace_id has no FK → safe to set directly. Covers the workspace
         # ``stmt.where`` branch.

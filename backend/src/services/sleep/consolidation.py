@@ -30,7 +30,7 @@ if TYPE_CHECKING:
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from db.qdrant import delete_memory_from_qdrant
-from models.memory import DELETED_BY_SLEEP_ARCHIVE, Memory
+from models.memory import DELETED_BY_SLEEP_ARCHIVE, Memory, not_pinned_predicate
 from repositories.memory import MemoryRepository
 from services.graph_service import GraphService
 from services.llm_service import LLMService
@@ -543,6 +543,10 @@ class ConsolidationPhase:
             Memory.user_id == user_id,
             Memory.scope == "working",
             Memory.deleted_at.is_(None),
+            # #1523: a pinned row can be working-scope (a rollback that demoted
+            # it before this rule, or a pin set on a working row). It must never
+            # reach the archive branch — same exemption dedup applies.
+            not_pinned_predicate(),
         )
         if workspace_id:
             stmt = stmt.where(Memory.workspace_id == UUID(workspace_id))

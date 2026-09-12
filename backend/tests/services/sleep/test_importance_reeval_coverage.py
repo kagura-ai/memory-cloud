@@ -140,6 +140,21 @@ class TestFetchCandidates:
 
         assert [c.id for c in candidates] == [kw["id"]]
 
+    async def test_excludes_pinned_memory(self, db_session):
+        """#1523: pinned rows keep the importance their owner set — load_pinned()
+        orders by it — so the shared exemption keeps them out of re-evaluation."""
+        user_id = f"u-{uuid4()}"
+        plain = _mem_kwargs(user_id=user_id, importance=0.5)
+        pinned = _mem_kwargs(user_id=user_id, importance=0.5)
+        db_session.add(Memory(**plain))
+        db_session.add(Memory(**pinned, delivery_mode="always"))
+        await db_session.flush()
+
+        phase = ImportanceReevalPhase(db_session, AsyncMock())
+        candidates = await phase._fetch_candidates(user_id, None, None)
+
+        assert [c.id for c in candidates] == [plain["id"]]
+
     async def test_excludes_fresh_memory(self, db_session):
         """A recently-updated memory is below the staleness cutoff."""
         user_id = f"u-{uuid4()}"

@@ -10,7 +10,7 @@ from sqlalchemy.engine import CursorResult
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from models.auth import CONTEXT_TRUST_TIER_TRUSTED, Context
-from models.memory import DELIVERY_MODE_ALWAYS, SOURCE_TYPE_CONNECTOR, Memory
+from models.memory import SOURCE_TYPE_CONNECTOR, Memory, pinned_predicate
 from repositories.base import BaseRepository
 from utils.datetime import utcnow
 from utils.exceptions import NotFoundException
@@ -387,7 +387,10 @@ class MemoryRepository(BaseRepository[Memory]):
         conditions = [
             Memory.workspace_id == workspace_id,
             Memory.context_id == context_id,
-            Memory.delivery_mode == DELIVERY_MODE_ALWAYS,
+            # #1523: the shared pinned predicate — the same definition every
+            # automated deleter excludes with, so this lane and their candidate
+            # sets can never disagree on what "pinned" means.
+            pinned_predicate(),
             Memory.deleted_at.is_(None),
         ]
         if trusted_only:
