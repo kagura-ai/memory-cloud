@@ -406,11 +406,26 @@ async def _undo_update_importance(
     if not (action.memory_id and old_importance is not None):
         return
 
-    await db.execute(
+    # #1523: a row pinned since the run keeps the importance its owner set
+    # (load_pinned() orders by it); a forgotten row is left alone. The refusal
+    # is the UPDATE's own predicate, and a skip is not an error — the run's
+    # other actions still reverse and the report stays rolled back.
+    from models.memory import not_pinned_predicate
+
+    restored = await db.execute(
         sa_update(Memory)
-        .where(Memory.id == action.memory_id, Memory.user_id == ctx.user_id)
+        .where(
+            Memory.id == action.memory_id,
+            Memory.user_id == ctx.user_id,
+            Memory.deleted_at.is_(None),
+            not_pinned_predicate(),
+        )
         .values(importance=old_importance, updated_at=utcnow())
     )
+    if cast(CursorResult[Any], restored).rowcount == 0:
+        logger.info("importance_rollback_kept", memory_id=str(action.memory_id))
+        summary["importance_kept"] += 1
+        return
     try:
         await update_memory_payload_in_qdrant(
             memory_id=action.memory_id,
@@ -423,19 +438,38 @@ async def _undo_update_importance(
 
 
 async def _undo_promote(db: Any, action: Any, ctx: _RollbackCtx, summary: dict[str, Any]) -> None:
-    """Send a promoted memory back to the working scope."""
+    """Send a promoted memory back to the working scope.
+
+    #1523: a row pinned after the promotion is refused. Pin-on-write made it
+    persistent for the deterministic ``load_pinned()`` lane; demoting it would
+    put it back where consolidation's archive branch could later remove it.
+    The refusal is the UPDATE's own predicate (``not_pinned_predicate``), so a
+    pin that lands between read and write still wins. A 0-row match (pinned,
+    forgotten, or gone) is a by-design skip counted under
+    ``promotions_kept`` — not an ``errors`` entry, which would flip the whole
+    report to ``failed`` and make it unretryable.
+    """
     from sqlalchemy import update as sa_update
 
-    from models.memory import Memory
+    from models.memory import Memory, not_pinned_predicate
     from utils.datetime import utcnow
 
     if not action.memory_id:
         return
-    await db.execute(
+    demote_result = await db.execute(
         sa_update(Memory)
-        .where(Memory.id == action.memory_id, Memory.user_id == ctx.user_id)
+        .where(
+            Memory.id == action.memory_id,
+            Memory.user_id == ctx.user_id,
+            Memory.deleted_at.is_(None),
+            not_pinned_predicate(),
+        )
         .values(scope="working", promoted_at=None, updated_at=utcnow())
     )
+    if cast(CursorResult[Any], demote_result).rowcount == 0:
+        logger.info("promotion_rollback_kept", memory_id=str(action.memory_id))
+        summary["promotions_kept"] += 1
+        return
     summary["promotions_reversed"] += 1
 
 
@@ -616,6 +650,11 @@ async def handle_rollback_sleep_run(
                 "merges_unreversible": 0,
                 "importance_restored": 0,
                 "promotions_reversed": 0,
+                # #1523: by-design skips — the row was pinned, forgotten or gone
+                # since the run, so the recorded change is left standing. Not
+                # errors: the rest of the run still reverses.
+                "importance_kept": 0,
+                "promotions_kept": 0,
                 "archives_restored": 0,
                 "errors": [],
             }

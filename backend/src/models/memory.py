@@ -34,6 +34,7 @@ from sqlalchemy import (
 )
 from sqlalchemy.dialects.postgresql import ARRAY, UUID
 from sqlalchemy.orm import Mapped, mapped_column
+from sqlalchemy.sql.elements import ColumnElement
 
 from db.base import Base
 
@@ -515,8 +516,28 @@ class Memory(Base):
     @property
     def is_pinned(self) -> bool:
         """#1519: the one Python-side definition of "pinned" — the row belongs to the
-        deterministic ``load_pinned()`` lane (``delivery_mode='always'``)."""
+        deterministic ``load_pinned()`` lane (``delivery_mode='always'``). The SQL
+        twin is ``pinned_predicate()`` below; both read ``DELIVERY_MODE_ALWAYS``."""
         return self.delivery_mode == DELIVERY_MODE_ALWAYS
+
+
+def pinned_predicate() -> ColumnElement[bool]:
+    """The one SQL definition of "pinned" (#1523): ``delivery_mode='always'``.
+
+    Inclusion side — ``list_pinned()`` selects with it. Every automated deleter
+    excludes with ``not_pinned_predicate()`` so the invariant "maintenance never
+    removes or demotes a pinned memory" is spelled once, not per phase.
+    """
+    return Memory.delivery_mode == DELIVERY_MODE_ALWAYS
+
+
+def not_pinned_predicate() -> ColumnElement[bool]:
+    """Exclusion side of ``pinned_predicate()`` for candidate queries (#1523).
+
+    ``delivery_mode`` is NOT NULL (server default ``on_recall``), so a plain
+    inequality is the exact complement — no NULL branch to keep.
+    """
+    return Memory.delivery_mode != DELIVERY_MODE_ALWAYS
 
 
 # The ``idx_memories_summary_trgm`` GIN index (#818) uses the ``gin_trgm_ops``

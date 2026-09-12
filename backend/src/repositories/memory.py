@@ -8,9 +8,10 @@ from uuid import UUID
 from sqlalchemy import and_, desc, func, select, update
 from sqlalchemy.engine import CursorResult
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.sql.elements import ColumnElement
 
 from models.auth import CONTEXT_TRUST_TIER_TRUSTED, Context
-from models.memory import DELIVERY_MODE_ALWAYS, SOURCE_TYPE_CONNECTOR, Memory
+from models.memory import SOURCE_TYPE_CONNECTOR, Memory, pinned_predicate
 from repositories.base import BaseRepository
 from utils.datetime import utcnow
 from utils.exceptions import NotFoundException
@@ -176,24 +177,33 @@ class MemoryRepository(BaseRepository[Memory]):
 
         return True
 
-    async def soft_delete(self, memory_id: UUID, *, deleted_by: str) -> int:
+    async def soft_delete(
+        self,
+        memory_id: UUID,
+        *,
+        deleted_by: str,
+        only_if: ColumnElement[bool] | None = None,
+    ) -> int:
         """Tombstone a memory (``deleted_at`` + ``deleted_by``) without deleting the row.
 
         #1520: consolidation's archive branch writes this, so an archive lands
         in the same restorable lane as a merge loser instead of being a hard
         ``DELETE`` that ``rollback_sleep_run`` cannot undo.
 
-        Returns:
-            Rows stamped: 1, or 0 when the row is missing or already
-            tombstoned (idempotent — a second stamp must not move
-            ``deleted_at`` and shorten the retention window).
-        """
+        ``only_if`` (#1523) is an extra WHERE predicate evaluated at stamp time,
+        so a caller whose candidate fetch was not locked can refuse a row whose
+        state changed in between (e.g. ``not_pinned_predicate()``): the refusal
+        is the UPDATE's own predicate, not a read-then-write.
 
-        result = await self.db.execute(
-            update(Memory)
-            .where(Memory.id == memory_id, Memory.deleted_at.is_(None))
-            .values(deleted_at=utcnow(), deleted_by=deleted_by)
-        )
+        Returns:
+            Rows stamped: 1, or 0 when the row is missing, already tombstoned
+            (idempotent — a second stamp must not move ``deleted_at`` and
+            shorten the retention window), or excluded by ``only_if``.
+        """
+        stmt = update(Memory).where(Memory.id == memory_id, Memory.deleted_at.is_(None))
+        if only_if is not None:
+            stmt = stmt.where(only_if)
+        result = await self.db.execute(stmt.values(deleted_at=utcnow(), deleted_by=deleted_by))
         return cast(CursorResult[Any], result).rowcount
 
     async def count(self, filters: dict | None = None) -> int:
@@ -387,7 +397,10 @@ class MemoryRepository(BaseRepository[Memory]):
         conditions = [
             Memory.workspace_id == workspace_id,
             Memory.context_id == context_id,
-            Memory.delivery_mode == DELIVERY_MODE_ALWAYS,
+            # #1523: the shared pinned predicate — the same definition every
+            # automated deleter excludes with, so this lane and their candidate
+            # sets can never disagree on what "pinned" means.
+            pinned_predicate(),
             Memory.deleted_at.is_(None),
         ]
         if trusted_only:

@@ -276,11 +276,6 @@ def test_dedup_merge_still_has_no_age_or_adoption_gate():
         "updated_at",
         "workspace_id",
         "context_id",
-        # #1519: pinned rows (delivery_mode='always') are excluded from dedup
-        # candidacy. This is an exemption, not an age/adoption gate — the
-        # working-scope floor wording stays as is; persistence_info(pinned=True)
-        # carries the widened promise for pinned writes.
-        "delivery_mode",
         # #1524: time memories (type='time') are the recall_upcoming lane and are
         # excluded the same way — a lane exemption, still not an age gate.
         "type",
@@ -288,6 +283,84 @@ def test_dedup_merge_still_has_no_age_or_adoption_gate():
         f"dedup selection columns changed to {sorted(referenced)} — if an age or "
         "adoption gate was added, the persistence wording can be widened"
     )
+    # #1519/#1523: the pinned exemption is the shared ``not_pinned_predicate()``
+    # call, not an inline column — an exemption, not an age/adoption gate; the
+    # working-scope floor wording stays as is and persistence_info(pinned=True)
+    # carries the widened promise for pinned writes.
+    assert _calls_not_pinned_predicate(fn)
+
+
+def _is_not_pinned_call(node: ast.AST) -> bool:
+    return (
+        isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Name)
+        and node.func.id == "not_pinned_predicate"
+    )
+
+
+def _calls_not_pinned_predicate(fn: ast.AST) -> bool:
+    """True when ``not_pinned_predicate()`` is an ARGUMENT of some call in ``fn`` —
+    a ``.where(...)`` clause or an ``only_if=`` keyword — never a stray statement
+    or an unused local, which would leave the query unguarded while the name is
+    still present in the body."""
+    for node in ast.walk(fn):
+        if not isinstance(node, ast.Call):
+            continue
+        if any(_is_not_pinned_call(arg) for arg in node.args):
+            return True
+        if any(_is_not_pinned_call(kw.value) for kw in node.keywords):
+            return True
+    return False
+
+
+def _async_fn(module, name: str) -> ast.AsyncFunctionDef:
+    tree = ast.parse(Path(module.__file__).read_text(encoding="utf-8"))
+    return next(
+        node
+        for node in ast.walk(tree)
+        if isinstance(node, ast.AsyncFunctionDef) and node.name == name
+    )
+
+
+@pytest.mark.parametrize(
+    ("module_name", "fn_name"),
+    [
+        # candidate fetches (read side)
+        ("services.sleep.dedup_merge", "_fetch_active_memories"),
+        ("services.sleep.consolidation", "_fetch_working_memories"),
+        ("services.sleep.importance_reeval", "_fetch_candidates"),
+        # writes that follow an unlocked fetch (a pin can land in between)
+        ("services.sleep.consolidation", "_archive_tombstone"),
+        ("services.sleep.importance_reeval", "execute"),
+        # rollback writes
+        ("mcp_server.tools.sleep", "_undo_promote"),
+        ("mcp_server.tools.sleep", "_undo_update_importance"),
+    ],
+)
+def test_every_automated_deleter_uses_the_shared_pinned_exemption(module_name, fn_name):
+    """#1523: ``persistence_info(pinned=True)`` promises that Sleep maintenance does
+    not select, archive, re-score or demote a pinned row. That promise is only as
+    wide as the set of queries carrying ``not_pinned_predicate()`` as a WHERE /
+    ``only_if`` argument — pin the set here so a new phase (or a hand-copied
+    inline predicate) cannot silently narrow it."""
+    import importlib
+
+    module = importlib.import_module(module_name)
+    assert _calls_not_pinned_predicate(_async_fn(module, fn_name)), (
+        f"{module_name}.{fn_name} no longer passes not_pinned_predicate() into its "
+        "query; either the pinned promise in services/persistence.py is now false, or "
+        "the exemption was re-spelled inline — use the shared predicate"
+    )
+
+
+def test_pinned_working_rows_are_repaired_by_migration():
+    """#1523: the consolidation exemption removes pinned working rows from the
+    promote branch too, so the migration that moves them to persistent must ship
+    with it (pin-on-write is the only remaining producer, and it is persistent)."""
+    src = Path(__file__).resolve().parents[2] / "alembic" / "versions" / "e78_1523_repin_scope.py"
+    text = src.read_text(encoding="utf-8")
+    assert "delivery_mode = 'always'" in text and "scope = 'working'" in text
+    assert "SET scope = 'persistent'" in text
 
 
 @pytest.mark.parametrize("scope", ["working", "persistent"])

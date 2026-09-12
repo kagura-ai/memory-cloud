@@ -46,6 +46,7 @@ def _make_memory(
     mem.access_count = access_count
     mem.importance = importance
     mem.created_at = utcnow() - timedelta(days=age_days)
+    mem.is_pinned = False  # #1523: a bare MagicMock attribute would read as pinned
     return mem
 
 
@@ -261,6 +262,37 @@ class TestConsolidationTask:
 
         mock_qdrant_delete.assert_called_once_with(old_memory.user_id, old_memory.id)
         mock_memory_repo.delete.assert_called_once_with(old_memory.id)
+        mock_memory_repo.promote_to_persistent.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_never_deletes_a_pinned_memory(self):
+        """#1523: the legacy path is a physical delete with no tombstone, so a
+        pinned (delivery_mode='always') working row that otherwise qualifies for
+        deletion is skipped — same exemption as the Sleep phases."""
+        mock_db = MagicMock()
+        mock_db.commit = AsyncMock()
+
+        graph = _make_graph()
+        mock_graph_repo = MagicMock()
+        mock_graph_repo.list = AsyncMock(return_value=[graph])
+
+        pinned = _make_memory(access_count=0, importance=0.0, age_days=45)
+        pinned.is_pinned = True
+        mock_memory_repo = MagicMock()
+        mock_memory_repo.list = AsyncMock(return_value=[pinned])
+        mock_memory_repo.promote_to_persistent = AsyncMock()
+        mock_memory_repo.delete = AsyncMock()
+
+        with (
+            patch("tasks.neural_tasks.get_db", mock_get_db_factory(mock_db)),
+            patch("tasks.neural_tasks.GraphRepository", return_value=mock_graph_repo),
+            patch("tasks.neural_tasks.MemoryRepository", return_value=mock_memory_repo),
+            patch("db.qdrant.delete_memory_from_qdrant", new=AsyncMock()) as mock_qdrant_delete,
+        ):
+            await consolidation_task()
+
+        mock_qdrant_delete.assert_not_called()
+        mock_memory_repo.delete.assert_not_called()
         mock_memory_repo.promote_to_persistent.assert_not_called()
 
     @pytest.mark.asyncio

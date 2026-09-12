@@ -20,7 +20,7 @@ is the ``AsyncMock`` repo from the source's own seam so no network call is made.
 from __future__ import annotations
 
 from datetime import datetime, timedelta
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import ANY, AsyncMock, MagicMock, patch
 from uuid import uuid4
 
 import pytest
@@ -281,7 +281,7 @@ class TestLLMBorderlinePath:
         assert result.details["llm_archive_guarded"] == 0
         assert result.details["llm_archived"] == 1
         phase.memory_repo.soft_delete.assert_awaited_once_with(
-            mem.id, deleted_by="sleep_consolidation"
+            mem.id, deleted_by="sleep_consolidation", only_if=ANY
         )
 
     @pytest.mark.asyncio
@@ -617,7 +617,7 @@ class TestRuleDeleteFailure:
 
         assert result.details["rule_deleted"] == 1
         phase.memory_repo.soft_delete.assert_awaited_once_with(
-            mem.id, deleted_by="sleep_consolidation"
+            mem.id, deleted_by="sleep_consolidation", only_if=ANY
         )
 
     @pytest.mark.asyncio
@@ -655,7 +655,7 @@ class TestRuleDeleteFailure:
 
         assert result.details["rule_deleted"] == 1
         phase.memory_repo.soft_delete.assert_awaited_once_with(
-            mem.id, deleted_by="sleep_consolidation"
+            mem.id, deleted_by="sleep_consolidation", only_if=ANY
         )
         reporter.add_action.assert_awaited_once()
         _, kwargs = reporter.add_action.call_args
@@ -711,6 +711,25 @@ class TestFetchWorkingMemories:
         assert deleted.id not in ids  # soft-deleted
         assert other_user.id not in ids  # wrong user
         assert all(isinstance(r, Memory) for r in rows)
+
+    @pytest.mark.asyncio
+    async def test_excludes_pinned_working_rows(self, db_session):
+        """#1523: a pinned row can be working-scope (a pre-#1523 rollback demoted
+        it, or the pin was set on a working row). It must never reach the archive
+        branch, so the shared exemption applies at the fetch."""
+        user = f"u-{uuid4()}"
+        plain = _persist_memory(user_id=user, scope="working")
+        pinned = _persist_memory(user_id=user, scope="working", delivery_mode="always")
+        db_session.add_all([plain, pinned])
+        await db_session.flush()
+
+        with patch("services.sleep.consolidation.MemoryRepository"):
+            phase = ConsolidationPhase(db_session, AsyncMock())
+        rows = await phase._fetch_working_memories(user, None, None)
+
+        ids = {r.id for r in rows}
+        assert plain.id in ids
+        assert pinned.id not in ids
 
     @pytest.mark.asyncio
     async def test_workspace_filter_applied(self, db_session):

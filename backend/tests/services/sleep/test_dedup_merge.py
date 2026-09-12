@@ -104,6 +104,10 @@ def dedup_phase(mock_db, mock_llm):
         phase = DedupMergePhase(mock_db, mock_llm)
         phase.edge_repo = AsyncMock()
         phase.embedding_service = AsyncMock()
+    # #1523: the neighbour-widening count is a real SELECT against the run's
+    # scope; mock-db tests pass non-UUID scope strings, so stub it like the
+    # candidate fetch. Real-DB coverage lives in test_count_pinned_*.
+    phase._count_pinned = AsyncMock(return_value=0)
     return phase
 
 
@@ -966,3 +970,54 @@ class TestDirectPairSimilarity:
         a, b = uuid4(), uuid4()
         dedup_phase._summary_vectors = {a: [math.inf, 0.0], b: [1.0, 0.0]}
         assert dedup_phase._direct_pair_similarity(a, b) is None
+
+
+class TestPinnedNeighborWidening:
+    """#1523: pinned rows leave the candidate set but still answer Qdrant, so the
+    per-memory neighbour cap is widened by their count (bounded)."""
+
+    @pytest.mark.asyncio
+    async def test_neighbor_limit_grows_by_pinned_count(self, dedup_phase):
+        from services.sleep.dedup_merge import NEIGHBOR_LIMIT
+
+        dedup_phase.embedding_service.embed_with_usage = AsyncMock(return_value=([0.1] * 768, 1))
+        search = AsyncMock(return_value=[])
+        with patch("services.sleep.dedup_merge.search_memories_qdrant", search):
+            await dedup_phase._find_similar_pairs(
+                [_make_memory(summary="a")], "user-1", "ws-1", "ctx-1", 0.9, extra_neighbors=7
+            )
+        assert search.await_args.kwargs["limit"] == NEIGHBOR_LIMIT + 7
+
+    @pytest.mark.asyncio
+    async def test_neighbor_widening_is_capped_and_never_negative(self, dedup_phase):
+        from services.sleep.dedup_merge import MAX_EXTRA_NEIGHBORS, NEIGHBOR_LIMIT
+
+        dedup_phase.embedding_service.embed_with_usage = AsyncMock(return_value=([0.1] * 768, 1))
+        search = AsyncMock(return_value=[])
+        with patch("services.sleep.dedup_merge.search_memories_qdrant", search):
+            await dedup_phase._find_similar_pairs(
+                [_make_memory(summary="a")], "user-1", "ws-1", "ctx-1", 0.9, extra_neighbors=10_000
+            )
+            assert search.await_args.kwargs["limit"] == NEIGHBOR_LIMIT + MAX_EXTRA_NEIGHBORS
+            await dedup_phase._find_similar_pairs(
+                [_make_memory(summary="a")], "user-1", "ws-1", "ctx-1", 0.9, extra_neighbors=-3
+            )
+            assert search.await_args.kwargs["limit"] == NEIGHBOR_LIMIT
+
+    @pytest.mark.asyncio
+    async def test_execute_passes_the_scoped_pinned_count(self, dedup_phase):
+        """The count is taken once per run, on the same scope as the candidate fetch."""
+        memories = [_make_memory(summary="a"), _make_memory(summary="b")]
+        dedup_phase._fetch_active_memories = AsyncMock(return_value=memories)
+        dedup_phase._count_pinned = AsyncMock(return_value=4)
+        dedup_phase._find_similar_pairs = AsyncMock(return_value=[])
+        config = MagicMock()
+        config.sleep_llm_provider = ""
+        config.sleep_dedup_similarity_threshold = 0.98
+        config.sleep_max_memories_per_run = 500
+        config.sleep_dedup_supersede_enabled = False
+
+        await dedup_phase.execute(config, "user-1", "ws-1", "ctx-1", SleepBudget())
+
+        dedup_phase._count_pinned.assert_awaited_once_with("user-1", "ws-1", "ctx-1")
+        assert dedup_phase._find_similar_pairs.await_args.kwargs["extra_neighbors"] == 4

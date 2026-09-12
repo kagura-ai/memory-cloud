@@ -770,6 +770,8 @@ class TestRollbackActionDispatch:
                 "merges_unreversible",
                 "importance_restored",
                 "promotions_reversed",
+                "importance_kept",
+                "promotions_kept",
                 "archives_restored",
             )
         ), summary
@@ -853,6 +855,47 @@ class TestRollbackActionDispatch:
         assert len(summary["errors"]) == 1
         assert "hard-deleted" in summary["errors"][0]
         assert "v0." not in summary["errors"][0]
+
+    @pytest.mark.asyncio
+    async def test_pinned_promotion_is_kept_not_demoted_and_not_an_error(
+        self, user_id, workspace_id
+    ):
+        """#1523: the demote UPDATE carries the shared not-pinned predicate, so a
+        row pinned after its promotion matches 0 rows. That is a by-design skip:
+        counted under ``promotions_kept``, never ``promotions_reversed``, and NOT
+        an ``errors`` entry — an error would flip the report to ``failed`` and
+        make the whole run unretryable for something that is working as intended."""
+        pinned = self._action("promote", id=1, memory_id=uuid4())
+        cfg = MagicMock()
+        cfg.scalar_one_or_none.return_value = None
+        demote = MagicMock()
+        demote.rowcount = 0  # WHERE ... AND delivery_mode != 'always' matched nothing
+        data = await self._run([pinned], user_id, workspace_id, extra=[cfg, demote])
+
+        summary = data["rollback_summary"]
+        assert summary["promotions_reversed"] == 0
+        assert summary["promotions_kept"] == 1
+        assert summary["errors"] == []
+        assert data.get("error") != "partial_rollback", data
+
+    @pytest.mark.asyncio
+    async def test_pinned_importance_is_kept_not_restored(self, user_id, workspace_id):
+        """#1523: same contract for update_importance — a pinned (or forgotten)
+        row keeps the importance its owner set; no Qdrant patch, no counter, no error."""
+        action = self._action("update_importance", id=1, details={"old_importance": 0.4})
+        cfg = MagicMock()
+        cfg.scalar_one_or_none.return_value = None
+        restore = MagicMock()
+        restore.rowcount = 0
+        qdrant = AsyncMock()
+        with patch("db.qdrant.update_memory_payload_in_qdrant", qdrant):
+            data = await self._run([action], user_id, workspace_id, extra=[cfg, restore])
+
+        summary = data["rollback_summary"]
+        assert summary["importance_restored"] == 0
+        assert summary["importance_kept"] == 1
+        assert summary["errors"] == []
+        qdrant.assert_not_awaited()
 
     @pytest.mark.asyncio
     async def test_one_failing_action_does_not_abandon_the_rest(self, user_id, workspace_id):

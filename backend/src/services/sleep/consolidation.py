@@ -30,7 +30,7 @@ if TYPE_CHECKING:
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from db.qdrant import delete_memory_from_qdrant
-from models.memory import DELETED_BY_SLEEP_ARCHIVE, Memory
+from models.memory import DELETED_BY_SLEEP_ARCHIVE, Memory, not_pinned_predicate
 from repositories.memory import MemoryRepository
 from services.graph_service import GraphService
 from services.llm_service import LLMService
@@ -478,7 +478,13 @@ class ConsolidationPhase:
         at read time by the PG row, so an orphan is a logged degradation, not a
         lost restore.
         """
-        stamped = await self.memory_repo.soft_delete(memory_id, deleted_by=DELETED_BY_SLEEP_ARCHIVE)
+        # #1523: the fetch excluded pinned rows, but the LLM pass runs between
+        # fetch and stamp — a pin landing in that window must still win, so the
+        # exemption rides on the UPDATE itself (0 rows → skipped, like any
+        # other state change since the fetch).
+        stamped = await self.memory_repo.soft_delete(
+            memory_id, deleted_by=DELETED_BY_SLEEP_ARCHIVE, only_if=not_pinned_predicate()
+        )
         if stamped == 0:
             logger.warning("consolidation_archive_stamp_missed", memory_id=str(memory_id))
             return False
@@ -543,6 +549,10 @@ class ConsolidationPhase:
             Memory.user_id == user_id,
             Memory.scope == "working",
             Memory.deleted_at.is_(None),
+            # #1523: a pinned row can be working-scope (a rollback that demoted
+            # it before this rule, or a pin set on a working row). It must never
+            # reach the archive branch — same exemption dedup applies.
+            not_pinned_predicate(),
         )
         if workspace_id:
             stmt = stmt.where(Memory.workspace_id == UUID(workspace_id))
