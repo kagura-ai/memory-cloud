@@ -1416,11 +1416,13 @@ class DedupMergePhase:
         side. ``SELECT ... FOR UPDATE`` inside the phase transaction serializes
         against a concurrent ``update_memory``/``forget`` so the state read here
         is the state the merge would act on. Returns True (refuse) when either
-        row is now pinned, soft-deleted, or missing.
+        row is now pinned, soft-deleted, missing, or (#1524) a time memory —
+        ``update_memory`` can flip ``type`` in the same window, and a merge would
+        drop the loser's trigger window from ``recall_upcoming``.
         """
         rows = (
             await self.db.execute(
-                select(Memory.id, Memory.delivery_mode, Memory.deleted_at)
+                select(Memory.id, Memory.delivery_mode, Memory.deleted_at, Memory.type)
                 .where(Memory.id.in_([winner.id, loser.id]))
                 .with_for_update()
             )
@@ -1435,6 +1437,8 @@ class DedupMergePhase:
                 reasons.append(f"{label}_deleted")
             elif row.delivery_mode == DELIVERY_MODE_ALWAYS:
                 reasons.append(f"{label}_pinned")
+            elif row.type == MEMORY_TYPE_TIME:
+                reasons.append(f"{label}_time")
         if not reasons:
             return False
         logger.info(

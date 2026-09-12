@@ -669,6 +669,46 @@ class TestPinRecheckAtExecution:
         del_qdrant.assert_not_called()
         phase.edge_repo.transfer_edges.assert_not_called()
 
+    async def test_loser_turned_time_memory_after_fetch_is_refused(self, db_session):
+        """#1524: update_memory can flip ``type`` to 'time' between the fetch and
+        the merge; the locked re-check must refuse, or the loser's trigger window
+        would vanish from recall_upcoming."""
+        winner = await _make_db_memory(db_session, summary="standup 09:00", tags=["a"])
+        loser = await _make_db_memory(db_session, summary="standup 09:00", tags=["b"])
+        phase = await self._phase_for_db(db_session)
+        await db_session.execute(
+            update(Memory)
+            .where(Memory.id == loser.id)
+            .values(
+                type=MEMORY_TYPE_TIME,
+                details={
+                    "trigger": {
+                        "year": 2026,
+                        "month": 9,
+                        "day": 9,
+                        "from": "2026-09-09T00:00:00",
+                        "until": "2026-09-09T23:59:59",
+                    }
+                },
+            )
+        )
+
+        with patch(
+            "services.sleep.dedup_merge.delete_memory_from_qdrant", new_callable=AsyncMock
+        ) as del_qdrant:
+            executed = await phase._execute_merge(winner, loser, "dedup-user", None, None)
+
+        assert executed is False
+        loser_row = (
+            await db_session.execute(
+                select(Memory.deleted_at, Memory.type).where(Memory.id == loser.id)
+            )
+        ).one()
+        assert loser_row.deleted_at is None
+        assert loser_row.type == MEMORY_TYPE_TIME
+        del_qdrant.assert_not_called()
+        phase.edge_repo.transfer_edges.assert_not_called()
+
     async def test_shadow_mode_winner_pinned_after_fetch_is_refused(self, db_session):
         winner = await _make_db_memory(db_session, summary="w", tags=["a"])
         loser = await _make_db_memory(db_session, summary="l", tags=["b"])

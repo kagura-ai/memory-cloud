@@ -34,6 +34,7 @@ from models.memory import (
     EDGE_ORIGIN_HEBBIAN,
     EDGE_ORIGIN_SEMANTIC,
     EDGE_TYPE_NEURAL_ASSOCIATION,
+    MEMORY_TYPE_TIME,
     SOURCE_TYPE_CONNECTOR,
     SOURCE_TYPE_MANUAL,
     Memory,
@@ -368,7 +369,7 @@ class MemoryService:
             ValueError: if a time memory has no trigger or an invalid one (the
                 established "bad request" signal inside MemoryService).
         """
-        if memory_type != "time":
+        if memory_type != MEMORY_TYPE_TIME:
             return details
 
         from utils.time_trigger import TriggerValidationError, normalize_trigger
@@ -995,7 +996,7 @@ class MemoryService:
         if request.details is not None:
             effective_details = self._apply_location(effective_details)
         self._reject_context_location(request.context)
-        if request.details is not None or effective_type == "time":
+        if request.details is not None or effective_type == MEMORY_TYPE_TIME:
             memory.details = effective_details
         if request.type is not None:
             memory.type = request.type
@@ -1198,7 +1199,7 @@ class MemoryService:
         # No context guard here: PatchMemoryRequest has no context field.
         if "details" in provided_fields:
             effective_details = self._apply_location(effective_details)
-        if "details" in provided_fields or effective_type == "time":
+        if "details" in provided_fields or effective_type == MEMORY_TYPE_TIME:
             # Explicit null clears the column; non-null replaces it. A
             # type="time" patch always (re)writes the normalized details.
             memory.details = effective_details
