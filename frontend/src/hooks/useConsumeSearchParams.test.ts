@@ -162,6 +162,31 @@ describe("useConsumeSearchParams", () => {
     expect(mockReplace).toHaveBeenCalledTimes(2);
   });
 
+  it("forgets a stale remount memory after the TTL, so a late identical arrival is consumed", () => {
+    const now = vi.spyOn(Date, "now");
+    try {
+      now.mockReturnValue(1_000_000);
+      paramsHolder.current = new URLSearchParams("refreshed=1");
+      const consume = vi.fn().mockReturnValue(true);
+
+      // Consume, then leave the page before the strip ever lands.
+      const first = renderHook(() =>
+        useConsumeSearchParams(consume, { cleanUrl: "/profile" }),
+      );
+      expect(consume).toHaveBeenCalledTimes(1);
+      first.unmount();
+
+      // Well past the remount race window, the same params arrive again.
+      now.mockReturnValue(1_000_000 + 11_000);
+      renderHook(() => useConsumeSearchParams(consume, { cleanUrl: "/profile" }));
+
+      expect(consume).toHaveBeenCalledTimes(2);
+      expect(mockReplace).toHaveBeenCalledTimes(2);
+    } finally {
+      now.mockRestore();
+    }
+  });
+
   it("scopes the remount guard per cleanUrl", () => {
     paramsHolder.current = new URLSearchParams("linked=1");
     const consumeA = vi.fn().mockReturnValue(true);
