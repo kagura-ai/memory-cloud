@@ -26,7 +26,11 @@ dependencies = [
     "alembic>=1.13.0",
 
     # Vector Database (Qdrant)
-    "qdrant-client>=1.12.0",
+    # Upper bound tracks the pinned server image (qdrant/qdrant:v1.15.0 in
+    # docker-compose.yml, .github/workflows/eval-nightly.yml and
+    # terraform/single-server/docker-compose.*.yml): the client warns unless
+    # major matches and minor differs by <= 1. Bump them together (#1535).
+    "qdrant-client>=1.12.0,<1.17",
     "mmh3>=4.0.0",             # MurmurHash3 for sparse vector token hashing (Issue #16)
     "numpy>=1.24.0",           # Cosine similarity in neural memory (neural/utils.py)
 
