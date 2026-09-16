@@ -16,6 +16,7 @@ import {
   within,
 } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { resetConsumedSearchParams } from "@/hooks/useConsumeSearchParams";
 
 import ConnectorsPage from "./page";
 
@@ -127,6 +128,9 @@ function setWorkspace(role: string | undefined, overrides = {}) {
 }
 
 beforeEach(() => {
+  // #1532: the hook remembers consumed params across remounts (module-level);
+  // forget them so one case's URL params cannot suppress the next case's toast.
+  resetConsumedSearchParams();
   // clearAllMocks does NOT reset implementations — re-arm defaults here so a
   // per-test mockResolvedValue never leaks into later tests (#1376 review).
   mockUpdateConnectorSettings.mockReset();

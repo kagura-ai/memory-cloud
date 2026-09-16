@@ -14,6 +14,7 @@
 
 import { render, screen, fireEvent, waitFor } from "@testing-library/react";
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
+import { resetConsumedSearchParams } from "@/hooks/useConsumeSearchParams";
 
 import ProfilePage from "./page";
 import {
@@ -102,6 +103,9 @@ vi.mock("next/navigation", () => ({
 }));
 
 beforeEach(() => {
+  // #1532: the hook remembers consumed params across remounts (module-level);
+  // forget them so one case's URL params cannot suppress the next case's toast.
+  resetConsumedSearchParams();
   mockUser = null;
   mockRefetchUser.mockClear();
   mockToast.mockClear();
