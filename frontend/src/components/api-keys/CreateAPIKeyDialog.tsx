@@ -27,6 +27,11 @@ import {
 } from "@/components/ui/select";
 import { AlertCircle, Check, CheckCircle, Copy } from "lucide-react";
 import { createAPIKey } from "@/lib/api/api-keys";
+import {
+  DEFAULT_EXPIRY_SELECTION,
+  NEVER_EXPIRY_SELECTION,
+  expiresDaysFromSelection,
+} from "./expiry";
 import { ApiError } from "@/lib/api/base";
 import type { APIKeyCreateResponse } from "@/lib/types/api-key";
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
@@ -43,7 +48,7 @@ export function CreateAPIKeyDialog({
   onSuccess,
 }: CreateAPIKeyDialogProps) {
   const [name, setName] = useState("");
-  const [expiryDays, setExpiryDays] = useState<string>("null");
+  const [expiryDays, setExpiryDays] = useState<string>(DEFAULT_EXPIRY_SELECTION);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
@@ -71,7 +76,7 @@ export function CreateAPIKeyDialog({
 
       const response = await createAPIKey({
         name: name.trim(),
-        expires_days: expiryDays === "null" ? null : parseInt(expiryDays, 10),
+        expires_days: expiresDaysFromSelection(expiryDays),
       });
 
       // Show one-time display
@@ -108,7 +113,7 @@ export function CreateAPIKeyDialog({
 
   const handleClose = () => {
     setName("");
-    setExpiryDays("null");
+    setExpiryDays(DEFAULT_EXPIRY_SELECTION);
     setError(null);
     setCreatedKey(null);
     setCopied(false);
@@ -278,11 +283,14 @@ export function CreateAPIKeyDialog({
                   <SelectItem value="30">30 days</SelectItem>
                   <SelectItem value="90">90 days</SelectItem>
                   <SelectItem value="365">1 year</SelectItem>
-                  <SelectItem value="null">Never (no expiration)</SelectItem>
+                  <SelectItem value={NEVER_EXPIRY_SELECTION}>
+                    Never (no expiration — not recommended)
+                  </SelectItem>
                 </SelectContent>
               </Select>
               <p className="text-xs text-slate-500">
-                Key will be automatically invalidated after this period
+                Key will be automatically invalidated after this period.
+                Keys expire after 1 year by default.
               </p>
             </div>
           </div>

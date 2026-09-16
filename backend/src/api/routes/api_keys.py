@@ -57,11 +57,16 @@ class APIKeyCreate(BaseModel):
     name: str = Field(
         ..., min_length=1, max_length=100, description="Friendly name for the API key"
     )
+    # Issue #1537: omitted → server default (365 days); 0 → never expires
+    # (explicit opt-in — a key cannot end up without an expiry by accident).
     expires_days: int | None = Field(
         None,
-        ge=1,
+        ge=0,
         le=3650,
-        description="Expiration in days (30, 90, 365, or None for no expiration)",
+        description=(
+            "Expiration in days (1-3650). Omit for the server default (365 days); "
+            "0 opts in to a key that never expires."
+        ),
     )
 
 
@@ -359,7 +364,9 @@ async def regenerate_api_key(
         key_workspace_id = old_key.workspace_id
         key_expires_at = old_key.expires_at
 
-        # Calculate remaining expiration days if applicable
+        # Carry the remaining lifetime forward. A key that had no expiry (or
+        # whose expiry already passed) leaves expires_days=None so the new key
+        # gets the server default instead of inheriting "never" (#1537).
         expires_days = None
         if key_expires_at:
             remaining = key_expires_at - utcnow()

@@ -139,7 +139,11 @@ class APIKeyManager:
         Args:
             name: Friendly name for the key
             user_id: User ID that owns this key
-            expires_days: Optional expiration in days
+            expires_days: Lifetime in days. ``None`` (omitted) resolves to the
+                deployment default — ``api_key_default_expires_days`` (365) or
+                ``api_key_agent_default_expires_days`` (90) when ``agent_id``
+                is set; ``0`` is the explicit opt-in for a key that never
+                expires (Issue #1537).
             workspace_id: Optional workspace ID for workspace-scoped access (Issue #169).
                 Mutually exclusive with ``bound_context_id``.
             bound_context_id: Optional context ID for public-bound attribution
@@ -239,6 +243,17 @@ class APIKeyManager:
         api_key = self._generate_key()
         key_hash = self._hash_key(api_key)
         key_prefix = api_key[:16]
+
+        # Issue #1537: keys expire by default. None = "use the deployment default"
+        # (agent-bound keys get the shorter one); 0 = explicit never-expires
+        # opt-in, which the falsy check below turns into expires_at=None.
+        if expires_days is None:
+            settings = get_settings()
+            expires_days = (
+                settings.api_key_agent_default_expires_days
+                if agent_id is not None
+                else settings.api_key_default_expires_days
+            )
 
         # Calculate expiration
         expires_at = None

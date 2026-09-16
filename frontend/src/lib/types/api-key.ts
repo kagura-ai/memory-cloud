@@ -19,7 +19,9 @@ export interface APIKey {
 
 export interface APIKeyCreateRequest {
   name: string; // Friendly name (required)
-  expires_days: number | null; // 30, 90, 365, or null for no expiration
+  // Days until expiry (1-3650). 0 = never expires (explicit opt-in);
+  // null/omitted = server default (365 days) — see #1537.
+  expires_days: number | null;
 }
 
 export interface APIKeyCreateResponse extends APIKey {

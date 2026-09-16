@@ -365,7 +365,7 @@ Notes:
 ### APIKeyCreate (BaseModel, L54) (request model)
 > Request model for creating an API key.
 - `name: str` — required
-- `expires_days: int | None` — optional
+- `expires_days: int | None` — optional; omitted → server default (365 days, `API_KEY_DEFAULT_EXPIRES_DAYS`), `0` → never expires (explicit opt-in), `1–3650` → that many days (#1537)
 
 ### DailyStats (BaseModel, L68)
 > Daily usage statistics.

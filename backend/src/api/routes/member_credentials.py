@@ -585,9 +585,10 @@ async def create_api_key(
         )
 
     # Issue #1165: expires_days is an owner-provisioned-only field. Session
-    # self-mint keeps its historical "no expiry" behavior and does not plumb
-    # expires_days to APIKeyManager — reject it explicitly rather than silently
-    # ignoring a client-supplied value (Copilot review, PR #1171).
+    # self-mint does not plumb expires_days to APIKeyManager — reject it
+    # explicitly rather than silently ignoring a client-supplied value (Copilot
+    # review, PR #1171). Since #1537 the omitted value resolves to the server
+    # default lifetime (365 days) inside create_key, not to "never".
     if data.expires_days is not None:
         raise BadRequestError(
             message="expires_days is only supported for owner-provisioned keys "
