@@ -384,3 +384,7 @@ STRIPE_PRICE_PRO=price_yyy
 ```
 
 Plan display names in the web UI can be customized via `NEXT_PUBLIC_PLAN_FREE_DISPLAY_NAME` / `BASIC` / `PRO` (see [Frontend Environment Variables](#frontend-environment-variables)).
+
+### Referral budget
+
+Lowering `PLAN_FREE_MEMORY_LIMIT` / `PLAN_BASIC_MEMORY_LIMIT` also shrinks the referral payout budget, which is the effective FREE → BASIC memory gap. When `ENABLE_REFERRALS=true`, the API refuses to start if `REFERRAL_MAX_GRANTS_PER_REFERRER × REFERRAL_REFERRER_REWARD_MEMORIES + REFERRAL_REFEREE_REWARD_MEMORIES` reaches the new gap (a fully-used referral chain would hand out the whole paid tier) — retune the `REFERRAL_*` values first.

@@ -24,6 +24,8 @@ from api.main import app
 from auth.dependencies import require_admin, require_session_auth
 from config.plan_tiers import PLAN_TIERS
 from config.settings import (
+    _DEFAULT_BASIC_MEMORY_LIMIT,
+    _DEFAULT_FREE_MEMORY_LIMIT,
     REFERRAL_TOTAL_PAYOUT_BUDGET_MEMORIES,
     Settings,
     get_settings,
@@ -74,13 +76,50 @@ class TestPayoutBudget:
         """Pin the hardcoded budget to the tier values it was derived from.
 
         ``settings.py`` cannot import ``plan_tiers`` (that module calls
-        ``get_settings()`` at import time), so the constant is hardcoded there
-        and pinned here instead. If someone retunes the FREE or BASIC memory
-        limit, this is what tells them the referral budget moved too.
+        ``get_settings()`` at import time), so the two tier defaults are
+        duplicated there and pinned here instead. If someone retunes the FREE
+        or BASIC memory limit, this is what tells them the referral budget
+        moved too.
         """
+        assert _DEFAULT_FREE_MEMORY_LIMIT == PLAN_TIERS["free"].memory_limit
+        assert _DEFAULT_BASIC_MEMORY_LIMIT == PLAN_TIERS["basic"].memory_limit
         assert REFERRAL_TOTAL_PAYOUT_BUDGET_MEMORIES == (
             PLAN_TIERS["basic"].memory_limit - PLAN_TIERS["free"].memory_limit
         )
+
+    def test_effective_budget_is_the_constant_when_no_tier_is_overridden(self) -> None:
+        settings = Settings(_env_file=None, enable_referrals=False)
+        assert settings.referral_payout_budget_memories == REFERRAL_TOTAL_PAYOUT_BUDGET_MEMORIES
+
+    def test_effective_budget_follows_env_lowered_tiers(self) -> None:
+        """#1552: hosted deployments lower the tiers via ``PLAN_*_MEMORY_LIMIT``.
+
+        The gap — and so the budget — shrinks with them: 3000 - 500 = 2500. The
+        default rewards (3 x 500 + 500 = 2000) still fit, so lowering the tiers
+        alone does not break boot.
+        """
+        settings = Settings(
+            _env_file=None,
+            enable_referrals=True,
+            plan_free_memory_limit=500,
+            plan_basic_memory_limit=3000,
+        )
+        assert settings.referral_payout_budget_memories == 2500
+        assert _worst_case(settings) == 2000
+
+    def test_an_in_budget_default_config_can_blow_a_lowered_gap(self) -> None:
+        """5 x 500 + 500 = 3000 is well under the default 9000 gap but reaches
+        the lowered 2500 one — a fully-used chain would hand out the whole
+        (smaller) BASIC tier. Refused at load, naming the EFFECTIVE gap so the
+        operator retunes against the right number."""
+        with pytest.raises(ValidationError, match="2500"):
+            Settings(
+                _env_file=None,
+                enable_referrals=True,
+                plan_free_memory_limit=500,
+                plan_basic_memory_limit=3000,
+                referral_max_grants_per_referrer=5,
+            )
 
     def test_per_field_ceilings_alone_would_blow_the_budget(self) -> None:
         """Documents WHY the cross-field validator has to exist.

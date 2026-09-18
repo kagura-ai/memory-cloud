@@ -17,16 +17,24 @@ from utils.media_types import MEDIA_TYPE_RE, normalize_media_type
 
 # Issue #1470: the total memory quota one inviter's referral chain may mint.
 #
-# Derived from the FREE -> BASIC memory gap: ``PLAN_BASIC.memory_limit (10000) -
-# PLAN_FREE.memory_limit (1000)``. If a fully-used referral chain could close
-# that gap, the referral program would BE the paid tier, for free.
+# Derived from the FREE -> BASIC memory gap: ``PLAN_BASIC.memory_limit -
+# PLAN_FREE.memory_limit``. If a fully-used referral chain could close that
+# gap, the referral program would BE the paid tier, for free.
 #
-# Hardcoded rather than imported from ``config.plan_tiers`` because that module
-# calls ``get_settings()`` at import time (``_apply_settings_overrides``), so
-# importing it here would be circular. The coupling is instead pinned by
+# The two tier defaults are duplicated here rather than imported from
+# ``config.plan_tiers`` because that module calls ``get_settings()`` at import
+# time (``_apply_settings_overrides``), so importing it here would be circular.
+# The coupling is instead pinned by
 # ``tests/api/test_referrals.py::test_payout_budget_matches_the_free_to_basic_gap``,
-# which fails if the tier values move and this constant does not.
-REFERRAL_TOTAL_PAYOUT_BUDGET_MEMORIES = 9000
+# which fails if the tier values move and these constants do not.
+#
+# Issue #1552: the constant is the DEFAULT-tier budget. Hosted deployments lower
+# the tiers via ``PLAN_FREE_MEMORY_LIMIT`` / ``PLAN_BASIC_MEMORY_LIMIT`` and the
+# gap shrinks with them, so the validator enforces
+# ``Settings.referral_payout_budget_memories`` (the effective gap) instead.
+_DEFAULT_FREE_MEMORY_LIMIT = 1000
+_DEFAULT_BASIC_MEMORY_LIMIT = 10000
+REFERRAL_TOTAL_PAYOUT_BUDGET_MEMORIES = _DEFAULT_BASIC_MEMORY_LIMIT - _DEFAULT_FREE_MEMORY_LIMIT
 
 
 def _validate_handoff_base_url(value: str) -> str:
@@ -1106,6 +1114,29 @@ class Settings(BaseSettings):
                 )
         return self
 
+    @property
+    def referral_payout_budget_memories(self) -> int:
+        """The FREE -> BASIC memory gap under the EFFECTIVE tiers (#1552).
+
+        ``REFERRAL_TOTAL_PAYOUT_BUDGET_MEMORIES`` is the default-tier gap. When
+        an operator lowers either tier via ``PLAN_*_MEMORY_LIMIT`` the gap moves
+        with it, and so must the budget — a chain sized for the default gap
+        would otherwise hand out the whole (smaller) BASIC tier.
+        """
+        if self.plan_free_memory_limit is None and self.plan_basic_memory_limit is None:
+            return REFERRAL_TOTAL_PAYOUT_BUDGET_MEMORIES
+        free = (
+            self.plan_free_memory_limit
+            if self.plan_free_memory_limit is not None
+            else _DEFAULT_FREE_MEMORY_LIMIT
+        )
+        basic = (
+            self.plan_basic_memory_limit
+            if self.plan_basic_memory_limit is not None
+            else _DEFAULT_BASIC_MEMORY_LIMIT
+        )
+        return basic - free
+
     @model_validator(mode="after")
     def _validate_referral_payout_budget(self) -> "Settings":
         """Fail-fast when the referral config could close the FREE -> BASIC gap (#1470).
@@ -1113,9 +1144,11 @@ class Settings(BaseSettings):
         The per-field ``le=`` bounds cannot express this: they bound each knob
         independently, but the thing that matters is the PRODUCT
         ``max_grants x reward``. At the individual ceilings that product reaches
-        10 x 2000 = 20000, more than double the 9000-memory gap — i.e. an
-        operator could hand out the paid tier for free without ever exceeding a
-        single field's bound.
+        10 x 2000 = 20000, more than double the default 9000-memory gap — i.e.
+        an operator could hand out the paid tier for free without ever exceeding
+        a single field's bound. The gap checked is the EFFECTIVE one
+        (``referral_payout_budget_memories``, #1552): env-lowered tiers shrink
+        it, so a config that is fine under the defaults can be over budget.
 
         The formula counts what actually accrues to ONE workspace, which is what
         ``ReferralService._recompute_workspace_bonus`` sums: a user is the
@@ -1137,14 +1170,15 @@ class Settings(BaseSettings):
         # fully-used chain lands exactly ON the BASIC limit — the paid tier,
         # for free. ">=" is what makes "cannot reach BASIC" true rather than
         # "cannot exceed BASIC".
-        if worst_case >= REFERRAL_TOTAL_PAYOUT_BUDGET_MEMORIES:
+        budget = self.referral_payout_budget_memories
+        if worst_case >= budget:
             raise ValueError(
                 "Referral config would mint up to "
                 f"{worst_case} memories per inviter, reaching the "
-                f"{REFERRAL_TOTAL_PAYOUT_BUDGET_MEMORIES}-memory budget "
-                "(the FREE->BASIC gap). Lower REFERRAL_MAX_GRANTS_PER_REFERRER "
-                "or the reward amounts — otherwise a fully-used referral chain "
-                "hands out the paid tier for free."
+                f"{budget}-memory budget (the effective FREE->BASIC gap). "
+                "Lower REFERRAL_MAX_GRANTS_PER_REFERRER or the reward amounts — "
+                "otherwise a fully-used referral chain hands out the paid tier "
+                "for free."
             )
         return self
 
