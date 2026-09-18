@@ -459,6 +459,9 @@ class MemoryService:
             user_id: User ID
             client: Client name
             current_context_id: Current context UUID (Issue #82)
+            current_workspace_id: Caller-selected workspace, kept for call-site
+                compatibility. Quotas are checked against the *context's*
+                workspace (the one the row is written to), not this value.
             _skip_daily_quota: Issue #1549 — do not charge the daily
                 memory-creation quota. Private: only ``_upsert_by_external_id``
                 sets it, when the new row REPLACES an existing external_id
@@ -474,30 +477,17 @@ class MemoryService:
             >>> result.scope
             'working'
         """
-        # Issue #149: Check quota before creating memory
-        # Single Collection Migration: Memory count only (storage size removed)
-        if current_workspace_id:
-            from services.quota_service import QuotaService
-
-            quota_service = QuotaService(self.db)
-
-            # Check memory quota (count-based only)
-            can_create, error = await quota_service.check_memory_quota(
-                current_workspace_id, raise_on_exceeded=True
-            )
-
-            # Issue #1549: reserve one creation against today's daily quota.
-            # This is THE charge point for user-visible memory creation — MCP
-            # remember, REST remember and the create half of the external_id
-            # upsert all arrive here (see check_memories_per_day's docstring).
-            if not _skip_daily_quota:
-                await quota_service.check_memories_per_day(
-                    current_workspace_id, count=1, raise_on_exceeded=True
-                )
-
         # Single Collection Migration: Extract isolation params (optimized).
         # Issue #1275: remember is a WRITE — gate the declared context against
         # the agent binding (no-op for non-agent credentials).
+        #
+        # Resolved BEFORE the quota gates (#1549 review): the row is stamped
+        # into the CONTEXT's workspace below, so that is the workspace whose
+        # quotas must be checked and charged — not the caller-selected
+        # ``current_workspace_id``, which may be unset (a bypass) or, for a
+        # shared context the caller is also a member of, a different workspace
+        # (the wrong counter). A workspace-scoped key or a binding denial is
+        # still refused here, before any counter is touched.
         context, workspace_id_str, context_id_str = await self._get_context_isolation_params(
             user_id,
             current_context_id,
@@ -509,6 +499,28 @@ class MemoryService:
         # Validate required parameters
         if not workspace_id_str or not context_id_str:
             raise ValueError("remember() requires current_context_id")
+
+        # Issue #149: Check quota before creating memory
+        # Single Collection Migration: Memory count only (storage size removed)
+        from services.quota_service import QuotaService
+
+        target_workspace_id = UUID(workspace_id_str)
+        quota_service = QuotaService(self.db)
+
+        # Check memory quota (count-based only) — against the workspace the row
+        # lands in; the resolution above is shared with the daily gate.
+        can_create, error = await quota_service.check_memory_quota(
+            target_workspace_id, raise_on_exceeded=True
+        )
+
+        # Issue #1549: reserve one creation against today's daily quota.
+        # This is THE charge point for user-visible memory creation — MCP
+        # remember, REST remember and the create half of the external_id
+        # upsert all arrive here (see check_memories_per_day's docstring).
+        if not _skip_daily_quota:
+            await quota_service.check_memories_per_day(
+                target_workspace_id, count=1, raise_on_exceeded=True
+            )
 
         # Issue #273: Validate content size to prevent DoS attacks
         # Without storage quota, we enforce per-memory size limit

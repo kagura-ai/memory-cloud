@@ -410,7 +410,9 @@ export interface PlanTierFeature {
   max_contexts: number;
   max_members: number;
   memory_limit: number;
-  memories_per_day: number; // #1549: memories created per UTC day
+  // #1549: memories created per UTC day. Optional: an API predating #1549
+  // omits it (rolling deploy), and the matrix renders it as ✗ / 0.
+  memories_per_day?: number;
   storage_limit_bytes: number;
   mcp_calls_per_day: number;
   rest_calls_per_day: number;

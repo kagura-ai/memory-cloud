@@ -175,6 +175,20 @@ describe("PlanFeatureMatrix (#1138)", () => {
     );
   });
 
+  it("renders ✗ (not a crash) for a tier payload that predates memories_per_day", async () => {
+    // Rolling deploy: the frontend ships before the API; the field is absent.
+    const legacyFree = { ...TIERS[0] } as Partial<(typeof TIERS)[number]>;
+    delete legacyFree.memories_per_day;
+    mockGetMatrix.mockResolvedValue([legacyFree, ...TIERS.slice(1)]);
+    render(<PlanFeatureMatrix currentTier="basic" />);
+    await screen.findByText("planMatrix.row_memoriesPerDay");
+
+    const row = rowOf("planMatrix.row_memoriesPerDay");
+    expect(row.getAllByText("✗").length).toBe(1); // free: field missing
+    expect(row.getByText("300")).toBeInTheDocument(); // the rest still render
+    expect(row.getByText("10,000")).toBeInTheDocument();
+  });
+
   it("renders ✓/✗ for boolean capabilities", async () => {
     render(<PlanFeatureMatrix currentTier="basic" />);
     await screen.findByText("planMatrix.row_reranking");

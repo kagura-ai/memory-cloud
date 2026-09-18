@@ -145,9 +145,7 @@ const PRO = {
   max_members_per_workspace: 10,
   max_resource_tokens: 30,
   memory_limit: 100000,
-  // Real PRO value is 2000, but "2,000" is reserved below as the unique
-  // legacy daily_api_limit sentinel — keep this fixture off that number.
-  memories_per_day: 2500,
+  memories_per_day: 2000,
   mcp_calls_per_day: 50000,
   rest_calls_per_day: 5000,
   public_calls_per_day: 1000,
@@ -261,6 +259,14 @@ const QUOTA_DETAIL_PRO = {
   spend_cap: null,
 };
 
+/** Scope queries to one tiers-table row by its i18n label key. */
+const tierRow = (key: string) =>
+  within(
+    screen
+      .getByText(`admin.plans.tiersTable.${key}`)
+      .closest("tr") as HTMLElement,
+  );
+
 describe("AdminPlansPage — tiers tab", () => {
   it("renders 17 ROW_DEFINITIONS rows once tiers load", async () => {
     render(<AdminPlansPage />);
@@ -342,14 +348,37 @@ describe("AdminPlansPage — tiers tab", () => {
     await screen.findByText("admin.plans.tiersTable.memories");
 
     // Legacy daily_api_limit was 100/2000/10000 (mis-displayed pre-#664).
-    // The new row must show actual mcp_calls_per_day 1000/10000/50000.
-    expect(screen.getAllByText("1,000").length).toBeGreaterThan(0); // FREE
-    expect(screen.getAllByText("10,000").length).toBeGreaterThan(0); // BASIC
-    expect(screen.getAllByText("50,000").length).toBeGreaterThan(0); // PRO
-    // The legacy BASIC daily_api_limit was 2000 — uniquely identifiable
-    // (no other field/tier in our fixtures lands on 2000). If it appears,
-    // the row regressed to legacy ``daily_api_limit`` from the rename.
-    expect(screen.queryByText("2,000")).not.toBeInTheDocument();
+    // The MCP row must show actual mcp_calls_per_day 1000/10000/50000.
+    const mcpRow = tierRow("mcpCallsPerDay");
+    expect(mcpRow.getByText("1,000")).toBeInTheDocument(); // FREE
+    expect(mcpRow.getByText("10,000")).toBeInTheDocument(); // BASIC
+    expect(mcpRow.getByText("50,000")).toBeInTheDocument(); // PRO
+    // The legacy BASIC daily_api_limit was 2000. Scoped to THIS row: the
+    // memories/day row legitimately shows 2,000 for PRO (#1549). If it shows
+    // up here, the row regressed to legacy ``daily_api_limit``.
+    expect(mcpRow.queryByText("2,000")).not.toBeInTheDocument();
+  });
+
+  it("renders the memories/day row (#1549) with the real tier values", async () => {
+    render(<AdminPlansPage />);
+    await screen.findByText("admin.plans.tiersTable.memoriesPerDay");
+
+    const row = tierRow("memoriesPerDay");
+    for (const cell of ["50", "300", "2,000", "10,000"]) {
+      expect(row.getByText(cell)).toBeInTheDocument();
+    }
+  });
+
+  it("renders — for a tier payload that predates memories_per_day (rolling deploy)", async () => {
+    const legacyFree = { ...FREE } as Partial<typeof FREE>;
+    delete legacyFree.memories_per_day;
+    mockGetAdminPlanTiers.mockResolvedValue([legacyFree, BASIC, PRO, PROMAX]);
+    render(<AdminPlansPage />);
+    await screen.findByText("admin.plans.tiersTable.memoriesPerDay");
+
+    const row = tierRow("memoriesPerDay");
+    expect(row.getByText("—")).toBeInTheDocument(); // FREE: field missing
+    expect(row.getByText("300")).toBeInTheDocument(); // the rest still render
   });
 
   it("renders the info-card with addon + zero-floor + env-override copy", async () => {

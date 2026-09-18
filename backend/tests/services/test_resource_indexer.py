@@ -10,10 +10,14 @@ from unittest.mock import AsyncMock, MagicMock, patch
 from uuid import uuid4
 
 import pytest
+from sqlalchemy import select
 
 from db.qdrant import KAGURA_MEMORIES_BM25_VECTOR_NAME, KAGURA_MEMORIES_VECTOR_NAME
+from models.auth import Context, Workspace
+from models.memory import Memory
 from services.context_routing import resolve_context_routing
 from services.resource_indexer import ResourceIndexer
+from utils.datetime import utcnow
 
 
 def _make_event() -> MagicMock:
@@ -116,6 +120,23 @@ class TestResourceIndexerNamedVectorUpsert:
         )
         assert KAGURA_MEMORIES_VECTOR_NAME in point.vector
         assert point.vector[KAGURA_MEMORIES_VECTOR_NAME] == [0.1] * 512
+
+    @pytest.mark.asyncio
+    async def test_apply_upsert_existing_row_lookup_excludes_tombstones(self, indexer, mock_db):
+        """#1549 review: the idempotency lookup must not match a soft-deleted
+        row, or a forgotten doc is patched under its tombstone (invisible, yet
+        charged) instead of being re-created."""
+        await indexer._apply_upsert(
+            _make_event(),
+            _make_schema(),
+            _make_context(),
+            "kagura_memories",
+            indexer.embedding_service,
+        )
+
+        lookup_sql = str(mock_db.execute.call_args_list[0].args[0])
+        assert "resource_doc_id" in lookup_sql
+        assert "deleted_at IS NULL" in lookup_sql
 
     @pytest.mark.asyncio
     async def test_apply_upsert_attaches_bm25_sparse_vector(self, indexer):
@@ -698,3 +719,79 @@ class TestExistingResourceDocIds:
 
         assert await indexer._existing_resource_doc_ids("res_test", _make_context(), set()) == set()
         indexer.db.execute.assert_not_awaited()
+
+
+class TestResyncOfForgottenDoc:
+    """#1549 review, against the real DB: a doc the user ``forget``-ed is
+    re-created on re-sync as a fresh, visible row and charged exactly once —
+    the tombstone neither absorbs the update nor counts as "known"."""
+
+    async def _seed_tombstone(self, db_session):
+        owner = f"owner-{uuid4().hex[:8]}"
+        ws = Workspace(
+            id=uuid4(), name=f"ws-{uuid4().hex[:8]}", plan_name="pro", owner_user_id=owner
+        )
+        db_session.add(ws)
+        await db_session.flush()
+        ctx = Context(
+            id=uuid4(),
+            workspace_id=ws.id,
+            name=f"ctx-{uuid4().hex[:8]}",
+            created_by=owner,
+            is_private=False,
+        )
+        db_session.add(ctx)
+        await db_session.flush()
+        tombstone = Memory(
+            id=uuid4(),
+            user_id=owner,
+            workspace_id=ws.id,
+            context_id=ctx.id,
+            summary="[res_test] doc_1 v1",
+            content="{}",
+            type="resource_data",
+            client="resource_indexer",
+            details={"resource_id": "res_test", "doc_id": "doc_1", "version": 1},
+            deleted_at=utcnow(),
+        )
+        db_session.add(tombstone)
+        await db_session.flush()
+        return ctx, tombstone
+
+    @pytest.mark.asyncio
+    async def test_resync_creates_a_visible_row_and_is_charged_once(self, db_session):
+        ctx, tombstone = await self._seed_tombstone(db_session)
+        with patch("services.resource_indexer.get_qdrant_client", return_value=AsyncMock()):
+            indexer = ResourceIndexer(db_session)
+        indexer.embedding_service = MagicMock()
+        indexer.embedding_service.embed = AsyncMock(return_value=[0.1] * 512)
+        event = _upsert("doc_1", 1)  # same version as the forgotten row
+        event.event_metadata = None  # legacy shape, no worker lineage
+
+        # Charge side: the tombstone is not "known", so the batch pays for doc_1.
+        assert await indexer._existing_resource_doc_ids("res_test", ctx, {"doc_1"}) == set()
+
+        await indexer._apply_upsert(
+            event, _make_schema(), ctx, "kagura_memories", indexer.embedding_service
+        )
+
+        rows = (
+            (
+                await db_session.execute(
+                    select(Memory).where(
+                        Memory.context_id == ctx.id, Memory.resource_doc_id == "doc_1"
+                    )
+                )
+            )
+            .scalars()
+            .all()
+        )
+        live = [m for m in rows if m.deleted_at is None]
+        assert len(live) == 1
+        assert live[0].id != tombstone.id
+        assert live[0].resource_version == 1
+        # The tombstone is left to the #1521 sweep — not restored, not reused.
+        await db_session.refresh(tombstone)
+        assert tombstone.deleted_at is not None
+        # Now the doc is known: a second re-sync would be free.
+        assert await indexer._existing_resource_doc_ids("res_test", ctx, {"doc_1"}) == {"doc_1"}

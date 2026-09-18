@@ -142,7 +142,9 @@ export function PlanFeatureMatrix({
         no
       );
     }
-    const n = value as number;
+    // A field an older API omits (e.g. memories_per_day before #1549) renders
+    // as ✗ rather than crashing on `undefined.toLocaleString`.
+    const n = (value as number | undefined) ?? 0;
     if (n === 0) return no;
     return row.kind === "bytes" ? formatStorage(n) : n.toLocaleString(locale);
   };

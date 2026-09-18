@@ -747,6 +747,11 @@ class ResourceIndexer:
             # Performance: Use generated columns (Migration 061) instead of JSONB search
             # Bugfix: Context uses 'created_by' not 'owner_id'
             # Single Collection Migration: Use workspace_id/context_id instead of collection_name
+            # #1549 review: tombstones are excluded so a doc the user forgot is
+            # RE-CREATED on re-sync (a fresh, visible row — charged once by the
+            # batch gate, which ignores tombstones the same way) instead of
+            # being patched in place under its deleted_at and staying invisible.
+            # Tombstones are terminal: the #1521 sweep hard-deletes them later.
             existing_memory_query = await self.db.execute(
                 select(Memory).where(
                     Memory.user_id == str(context.created_by),
@@ -755,6 +760,7 @@ class ResourceIndexer:
                     Memory.resource_id == event.resource_id,  # Generated column (fast!)
                     Memory.resource_doc_id == event.doc_id,  # Generated column (fast!)
                     Memory.resource_version == event.version,  # Generated column (fast!)
+                    Memory.deleted_at.is_(None),
                 )
             )
             existing_memory = existing_memory_query.scalar_one_or_none()

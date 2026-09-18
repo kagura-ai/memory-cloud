@@ -37,7 +37,24 @@ def service(mock_db):
     svc = MemoryService(mock_db)
     svc.memory_repo = MagicMock()
     svc.memory_repo.create = AsyncMock()
+    svc._create_declared_links = AsyncMock()
     return svc
+
+
+def _resolve_context_in(service, workspace_id) -> MagicMock:
+    """Make the declared context resolve to ``workspace_id`` (the row's home)."""
+    ctx = MagicMock()
+    ctx.id = uuid4()
+    ctx.workspace_id = workspace_id
+    service._get_context_isolation_params = AsyncMock(
+        return_value=(ctx, str(workspace_id), str(ctx.id))
+    )
+    return ctx
+
+
+async def _remember(service, ctx, **kwargs):
+    with patch("services.memory_service.process_pending_embedding", new=AsyncMock()):
+        return await service.remember(_req(), user_id="u", current_context_id=ctx.id, **kwargs)
 
 
 @pytest.fixture
@@ -82,59 +99,94 @@ def _make_memory(**overrides) -> MagicMock:
 
 
 class TestRememberCharges:
-    """``remember`` reserves exactly one unit, after the total-count check."""
+    """``remember`` reserves exactly one unit, after the total-count check,
+    against the workspace the row is written to — the CONTEXT's workspace."""
 
-    async def test_remember_charges_once_after_total_count_check(self, service, quota_service):
-        ws_id = uuid4()
-        # Stop right after the quota gates: no context → the established
-        # ValueError, before any row is written.
-        service._get_context_isolation_params = AsyncMock(return_value=(None, None, None))
+    async def test_charges_the_context_workspace_when_current_workspace_is_unset(
+        self, service, quota_service
+    ):
+        """(a) No caller-selected workspace used to bypass both gates."""
+        ws_b = uuid4()
+        ctx = _resolve_context_in(service, ws_b)
 
-        with pytest.raises(ValueError, match="requires current_context_id"):
-            await service.remember(_req(), user_id="u", current_workspace_id=ws_id)
+        result = await _remember(service, ctx, current_workspace_id=None)
 
-        quota_service.check_memory_quota.assert_awaited_once_with(ws_id, raise_on_exceeded=True)
+        assert result.memory_id is not None
+        quota_service.check_memory_quota.assert_awaited_once_with(ws_b, raise_on_exceeded=True)
         quota_service.check_memories_per_day.assert_awaited_once_with(
-            ws_id, count=1, raise_on_exceeded=True
+            ws_b, count=1, raise_on_exceeded=True
         )
         assert [c[0] for c in quota_service.mock_calls] == [
             "check_memory_quota",
             "check_memories_per_day",
         ]
+        service.memory_repo.create.assert_awaited_once()
+
+    async def test_charges_the_context_workspace_not_the_caller_selected_one(
+        self, service, quota_service
+    ):
+        """(b) current_workspace_id=A but the context lives in B: the row lands
+        in B (existing isolation rule — membership of the OWNING workspace is
+        what authorizes the write), so B's counters are charged, never A's."""
+        ws_a, ws_b = uuid4(), uuid4()
+        ctx = _resolve_context_in(service, ws_b)
+
+        await _remember(service, ctx, current_workspace_id=ws_a)
+
+        quota_service.check_memory_quota.assert_awaited_once_with(ws_b, raise_on_exceeded=True)
+        quota_service.check_memories_per_day.assert_awaited_once_with(
+            ws_b, count=1, raise_on_exceeded=True
+        )
+        assert ws_a not in {c.args[0] for c in quota_service.mock_calls}
+        # The row itself is stamped into B, matching the charge.
+        assert service.memory_repo.create.await_args.args[0].workspace_id == ws_b
+
+    async def test_isolation_denial_precedes_any_charge(self, service, quota_service):
+        """A key-confined or binding-denied context is refused by the resolver
+        (uniform NotFound) before either counter is touched."""
+        from utils.exceptions import NotFoundException
+
+        service._get_context_isolation_params = AsyncMock(
+            side_effect=NotFoundException("Context", "denied")
+        )
+
+        with pytest.raises(NotFoundException):
+            await service.remember(
+                _req(), user_id="u", current_context_id=uuid4(), current_workspace_id=uuid4()
+            )
+
+        quota_service.check_memory_quota.assert_not_awaited()
+        quota_service.check_memories_per_day.assert_not_awaited()
 
     async def test_refusal_propagates_and_nothing_is_written(self, service, quota_service):
         quota_service.check_memories_per_day.side_effect = QuotaExceededError(
             "Daily memory-creation quota exceeded", quota_type="memories_per_day"
         )
-        service._get_context_isolation_params = AsyncMock()
+        ctx = _resolve_context_in(service, uuid4())
 
         with pytest.raises(QuotaExceededError) as excinfo:
-            await service.remember(_req(), user_id="u", current_workspace_id=uuid4())
+            await _remember(service, ctx, current_workspace_id=None)
 
         assert excinfo.value.details["quota_type"] == "memories_per_day"
-        service._get_context_isolation_params.assert_not_awaited()
         service.memory_repo.create.assert_not_awaited()
 
-    async def test_no_workspace_skips_both_quota_gates(self, service, quota_service):
+    async def test_missing_context_fails_before_any_quota_call(self, service, quota_service):
         service._get_context_isolation_params = AsyncMock(return_value=(None, None, None))
 
         with pytest.raises(ValueError, match="requires current_context_id"):
-            await service.remember(_req(), user_id="u", current_workspace_id=None)
+            await service.remember(_req(), user_id="u", current_workspace_id=uuid4())
 
         quota_service.check_memory_quota.assert_not_awaited()
         quota_service.check_memories_per_day.assert_not_awaited()
 
     async def test_skip_flag_keeps_total_count_check_but_not_daily(self, service, quota_service):
         """The private opt-out used by an external_id *replacement*."""
-        ws_id = uuid4()
-        service._get_context_isolation_params = AsyncMock(return_value=(None, None, None))
+        ws_b = uuid4()
+        ctx = _resolve_context_in(service, ws_b)
 
-        with pytest.raises(ValueError, match="requires current_context_id"):
-            await service.remember(
-                _req(), user_id="u", current_workspace_id=ws_id, _skip_daily_quota=True
-            )
+        await _remember(service, ctx, current_workspace_id=None, _skip_daily_quota=True)
 
-        quota_service.check_memory_quota.assert_awaited_once()
+        quota_service.check_memory_quota.assert_awaited_once_with(ws_b, raise_on_exceeded=True)
         quota_service.check_memories_per_day.assert_not_awaited()
 
 
