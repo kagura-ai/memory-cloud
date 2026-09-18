@@ -860,3 +860,45 @@ async def test_unauthenticated_modern_request_gets_the_oauth_challenge(monkeypat
 
     assert send.status == 401
     assert b"www-authenticate" in send.headers
+
+
+# ------------------------------------------------------- PR review follow-ups
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("method_header", [b"tools/list", b"=?base64?!!!not-base64!!!?="])
+async def test_bare_discover_probe_with_a_contradicting_header_is_rejected(method_header):
+    """Absence is tolerated even on the bare probe; contradiction never is."""
+    body = {"jsonrpc": "2.0", "id": 1, "method": "server/discover"}
+    send = await _post(body, {b"mcp-method": method_header})
+
+    assert send.status == 400
+    assert send.body["error"]["code"] == -32020
+
+
+@pytest.mark.asyncio
+async def test_bare_discover_probe_with_a_matching_header_is_answered():
+    body = {"jsonrpc": "2.0", "id": 1, "method": "server/discover"}
+    send = await _post(body, {b"mcp-method": b"server/discover"})
+
+    assert send.status == 200
+    assert MODERN in send.body["result"]["supportedVersions"]
+
+
+@pytest.mark.asyncio
+async def test_explicit_null_arguments_is_treated_as_omitted(monkeypatch):
+    """Matches the reference SDK (``arguments: dict | None = None``): serializers
+    with nullable fields emit ``null`` for a no-argument call."""
+    import mcp_server.tools as tools_mod
+
+    seen: dict = {}
+
+    async def fake_execute(**kwargs):
+        seen.update(kwargs)
+        return []
+
+    monkeypatch.setattr(tools_mod, "execute_tool_call", fake_execute)
+    send = await _post(_request("tools/call", {"name": "list_contexts", "arguments": None}))
+
+    assert send.status == 200
+    assert seen["arguments"] == {}

@@ -114,7 +114,7 @@ The server is dual-era (#1544). The tables above describe the **legacy** half (`
 | HTTP | JSON-RPC code | Trigger |
 |---|---|---|
 | 400 | `-32600` | message without a string `method`, or a request `id` that is not a string / integer |
-| 400 | `-32602` | `_meta.protocolVersion` not a string, `_meta.clientCapabilities` present but not an object; `tools/call` without a string `name` or with non-object `arguments` |
+| 400 | `-32602` | `_meta.protocolVersion` not a string, `_meta.clientCapabilities` present but not an object; `tools/call` without a string `name`, or with `arguments` that is neither an object nor `null` (an explicit `null` is treated as omitted, like the reference SDK) |
 | 400 | `-32020` **HeaderMismatch** | `MCP-Protocol-Version`, `Mcp-Method` or (for `tools/call`) `Mcp-Name` header present but undecodable or different from the body value (`Mcp-Name` is Base64-sentinel-decoded first) |
 | 400 | `-32022` **UnsupportedProtocolVersion** | requested version is not a modern revision this server serves — settled before every other rule; `data` = `{ "supported": [...], "requested": "..." }`. `supported` lists the legacy revisions too — they are reachable through `initialize` |
 | 404 | `-32601` | unknown / unimplemented method (`resources/*`, `prompts/*`, `subscriptions/listen`, …). The legacy path keeps HTTP **200** for the same code |

@@ -150,9 +150,14 @@ def _validate(body: dict, headers: dict[bytes, bytes]) -> tuple[str, dict, list[
     params = body.get("params")
     meta = params.get("_meta") if isinstance(params, dict) else None
     if not isinstance(params, dict) or not isinstance(meta, dict):
-        if is_discover:
-            return method, {}, ["params._meta"]
-        raise _Rejected(400, -32602, "Invalid params: params._meta is required")
+        if not is_discover:
+            raise _Rejected(400, -32602, "Invalid params: params._meta is required")
+        # A bare probe: nothing in the body to validate, but a mirrored header
+        # it does send must still not contradict it — absence is tolerated,
+        # contradiction never is.
+        missing.append("params._meta")
+        _check_mirror(headers, "Mcp-Method", method, missing)
+        return method, {}, missing
 
     requested = meta.get(PROTOCOL_VERSION_META_KEY)
     if requested is None and is_discover:
@@ -190,6 +195,9 @@ def _validate(body: dict, headers: dict[bytes, bytes]) -> tuple[str, dict, list[
         if not isinstance(name, str) or not name:
             raise _Rejected(400, -32602, "Invalid params: 'name' must be a non-empty string")
         _check_mirror(headers, "Mcp-Name", name, missing)
+        # An explicit ``null`` is treated like an omitted field, as the
+        # reference SDK does (``arguments: dict[str, Any] | None = None``):
+        # serializers with nullable fields emit it for a no-argument call.
         arguments = params.get("arguments")
         if arguments is not None and not isinstance(arguments, dict):
             raise _Rejected(400, -32602, "Invalid params: 'arguments' must be an object")
