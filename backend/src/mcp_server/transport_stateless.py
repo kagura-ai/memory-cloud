@@ -16,7 +16,6 @@ multi round-trip input requests, resources and prompts — capabilities stay
 import asyncio
 import base64
 import binascii
-import json
 import logging
 from typing import Any
 from uuid import UUID
@@ -24,20 +23,21 @@ from uuid import UUID
 from starlette.types import Send
 
 from mcp_server.transport import (
-    DISCOVER_TTL_MS,
     MODERN_PROTOCOL_VERSIONS,
     PROTOCOL_VERSION_META_KEY,
     SERVER_INFO,
+    SERVER_INFO_META_KEY,
     SUPPORTED_PROTOCOL_VERSIONS,
+    TOOLS_LIST_TTL_MS,
     _discover_result,
     _send_json_error,
+    _send_jsonrpc_result,
 )
 
 logger = logging.getLogger(__name__)
 
 CLIENT_CAPABILITIES_META_KEY = "io.modelcontextprotocol/clientCapabilities"
 CLIENT_INFO_META_KEY = "io.modelcontextprotocol/clientInfo"
-SERVER_INFO_META_KEY = "io.modelcontextprotocol/serverInfo"
 
 # Protocol-defined error codes (MCP 2026-07-28 reserves -32020..-32099).
 HEADER_MISMATCH = -32020
@@ -93,15 +93,18 @@ def _decode_header_value(raw: bytes | None) -> str | None:
     return value
 
 
-def _require_header(headers: dict[bytes, bytes], name: str, expected: str) -> None:
-    """Reject with ``HeaderMismatch`` unless header ``name`` equals ``expected``.
+def _check_mirror(
+    headers: dict[bytes, bytes], name: str, expected: str, missing: list[str]
+) -> None:
+    """Reject a mirrored header that disagrees with the body; note an absent one.
 
     Header *names* are case-insensitive (ASGI lower-cases them); header *values*
     are compared case-sensitively, as the spec requires.
     """
     raw = headers.get(name.lower().encode("ascii"))
     if raw is None:
-        raise _Rejected(400, HEADER_MISMATCH, f"Header mismatch: required {name} header is missing")
+        missing.append(name)
+        return
     actual = _decode_header_value(raw)
     if actual != expected:
         shown_actual = "<undecodable>" if actual is None else _shown(actual)
@@ -113,39 +116,52 @@ def _require_header(headers: dict[bytes, bytes], name: str, expected: str) -> No
         )
 
 
-def _validate(body: dict, headers: dict[bytes, bytes]) -> tuple[str, dict]:
-    """Validate a modern request envelope; return ``(method, params)``.
+def _validate(body: dict, headers: dict[bytes, bytes]) -> tuple[str, dict, list[str]]:
+    """Validate a modern request envelope.
 
-    Order matters. The protocol version is settled first — a client on another
-    revision must hear ``-32022`` (and the versions to retry with), not be
-    blamed for a header rule that revision may not define. Only then are the
-    2026-07-28 header↔body rules applied.
+    The protocol version is settled first: a client on another revision must
+    hear ``-32022`` (and the versions to retry with), not be blamed for a
+    2026-07-28 rule its revision may not define.
+
+    Mirrored metadata is then checked for *disagreement*, which is always
+    rejected — a header that contradicts the body is the case the spec's
+    validation rule exists for (an intermediary acting on one value while we
+    execute the other). Mere *absence* of a mirrored header, or of
+    ``clientCapabilities``, is tolerated and reported back to the caller for
+    logging. That is a deliberate robustness deviation from two spec MUSTs:
+    nothing here routes on those headers or relies on a client capability, the
+    clients that matter can only be exercised in production, and a rejection
+    would cost them the connection while protecting nothing. Tighten it once
+    real clients are observed to send them.
+
+    ``server/discover`` is the pre-negotiation probe, so it is answerable even
+    with no ``_meta`` at all.
+
+    Returns:
+        ``(method, params, missing)`` — ``missing`` names the tolerated gaps.
 
     Raises:
         _Rejected: with the HTTP status and JSON-RPC error to send.
     """
     method = body["method"]
+    is_discover = method == "server/discover"
+    missing: list[str] = []
 
     params = body.get("params")
     meta = params.get("_meta") if isinstance(params, dict) else None
     if not isinstance(params, dict) or not isinstance(meta, dict):
+        if is_discover:
+            return method, {}, ["params._meta"]
         raise _Rejected(400, -32602, "Invalid params: params._meta is required")
 
     requested = meta.get(PROTOCOL_VERSION_META_KEY)
-    if not isinstance(requested, str) or not requested:
+    if requested is None and is_discover:
+        missing.append(PROTOCOL_VERSION_META_KEY)
+    elif not isinstance(requested, str) or not requested:
         raise _Rejected(
-            400, -32602, f"Invalid params: _meta['{PROTOCOL_VERSION_META_KEY}'] is required"
+            400, -32602, f"Invalid params: _meta['{PROTOCOL_VERSION_META_KEY}'] must be a string"
         )
-    if not isinstance(meta.get(CLIENT_CAPABILITIES_META_KEY), dict):
-        raise _Rejected(
-            400, -32602, f"Invalid params: _meta['{CLIENT_CAPABILITIES_META_KEY}'] is required"
-        )
-
-    # The header mirrors the body so intermediaries can route without parsing
-    # it; a disagreement means two components would act on different versions.
-    _require_header(headers, "MCP-Protocol-Version", requested)
-
-    if requested not in MODERN_PROTOCOL_VERSIONS:
+    elif requested not in MODERN_PROTOCOL_VERSIONS:
         # Legacy revisions are listed too (they ARE supported, through
         # ``initialize``), which is what lets a dual-era client fall back.
         raise _Rejected(
@@ -154,19 +170,31 @@ def _validate(body: dict, headers: dict[bytes, bytes]) -> tuple[str, dict]:
             "Unsupported protocol version",
             {"supported": list(SUPPORTED_PROTOCOL_VERSIONS), "requested": _shown(requested)},
         )
+    else:
+        _check_mirror(headers, "MCP-Protocol-Version", requested, missing)
 
-    _require_header(headers, "Mcp-Method", method)
+    capabilities = meta.get(CLIENT_CAPABILITIES_META_KEY)
+    if capabilities is None:
+        missing.append(CLIENT_CAPABILITIES_META_KEY)
+    elif not isinstance(capabilities, dict):
+        raise _Rejected(
+            400,
+            -32602,
+            f"Invalid params: _meta['{CLIENT_CAPABILITIES_META_KEY}'] must be an object",
+        )
+
+    _check_mirror(headers, "Mcp-Method", method, missing)
 
     if method in _NAMED_METHODS:
         name = params.get("name")
         if not isinstance(name, str) or not name:
             raise _Rejected(400, -32602, "Invalid params: 'name' must be a non-empty string")
-        _require_header(headers, "Mcp-Name", name)
+        _check_mirror(headers, "Mcp-Name", name, missing)
         arguments = params.get("arguments")
         if arguments is not None and not isinstance(arguments, dict):
             raise _Rejected(400, -32602, "Invalid params: 'arguments' must be an object")
 
-    return method, params
+    return method, params, missing
 
 
 def _complete(result: dict) -> dict:
@@ -180,15 +208,7 @@ def _complete(result: dict) -> dict:
 
 async def _send_result(send: Send, request_id: Any, result: dict) -> None:
     """Send a JSON-RPC result. No ``Mcp-Session-Id``: this revision has none."""
-    await send(
-        {
-            "type": "http.response.start",
-            "status": 200,
-            "headers": [[b"content-type", b"application/json"]],
-        }
-    )
-    body = {"jsonrpc": "2.0", "id": request_id, "result": result}
-    await send({"type": "http.response.body", "body": json.dumps(body).encode()})
+    await _send_jsonrpc_result(send, None, request_id, result)
 
 
 async def _send_error(
@@ -270,9 +290,14 @@ async def handle_stateless_post(
     request_id = body.get("id")
     method = body.get("method")
 
+    # Unlike base JSON-RPC, an MCP request id MUST be a string or an integer
+    # (bool is an int subclass in Python, hence the explicit exclusion).
+    valid_id = isinstance(request_id, (str, int)) and not isinstance(request_id, bool)
+
     if not isinstance(method, str) or not method:
-        echo_id = request_id if isinstance(request_id, (str, int)) else None
-        await _send_error(send, 400, echo_id, -32600, "Invalid Request: missing method")
+        await _send_error(
+            send, 400, request_id if valid_id else None, -32600, "Invalid Request: missing method"
+        )
         return
 
     # This revision defines no client-to-server notification over HTTP, but
@@ -283,16 +308,14 @@ async def handle_stateless_post(
         await send({"type": "http.response.body", "body": b""})
         return
 
-    # Unlike base JSON-RPC, an MCP request id MUST be a string or an integer
-    # (bool is an int subclass in Python, hence the explicit exclusion).
-    if isinstance(request_id, bool) or not isinstance(request_id, (str, int)):
+    if not valid_id:
         await _send_error(
             send, 400, None, -32600, "Invalid Request: id must be a string or an integer"
         )
         return
 
     try:
-        method, params = _validate(body, headers)
+        method, params, missing = _validate(body, headers)
     except _Rejected as rejected:
         # ChatGPT-class clients can only be exercised in production, so the
         # reason — and which mirrored headers the client did send (names
@@ -310,12 +333,20 @@ async def handle_stateless_post(
         )
         return
 
-    client_info = params["_meta"].get(CLIENT_INFO_META_KEY)
+    meta = params.get("_meta") or {}
+    client_info = meta.get(CLIENT_INFO_META_KEY)
     client_name = client_info.get("name") if isinstance(client_info, dict) else None
     logger.info(
-        f"MCP {_shown(method)!r} (stateless, {params['_meta'][PROTOCOL_VERSION_META_KEY]}): "
+        f"MCP {_shown(method)!r} (stateless, {_shown(meta.get(PROTOCOL_VERSION_META_KEY))}): "
         f"client={_shown(client_name)!r}, user={user_id}"
     )
+    if missing:
+        # Tolerated, not rejected (see ``_validate``) — but worth knowing
+        # before the leniency is ever tightened.
+        logger.warning(
+            f"MCP stateless request served without required metadata: "
+            f"method={_shown(method)!r}, missing={missing}, client={_shown(client_name)!r}"
+        )
 
     if method == "server/discover":
         await _send_result(send, request_id, _discover_result())
@@ -335,7 +366,7 @@ async def handle_stateless_post(
             _complete(
                 {
                     "tools": get_tool_definitions(),
-                    "ttlMs": DISCOVER_TTL_MS,
+                    "ttlMs": TOOLS_LIST_TTL_MS,
                     "cacheScope": "public",
                 }
             ),

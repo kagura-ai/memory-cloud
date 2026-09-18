@@ -338,15 +338,21 @@ async def test_unsupported_version_is_400_with_the_supported_list(requested):
 
 
 @pytest.mark.asyncio
-async def test_unsupported_version_wins_over_later_header_rules():
-    """The Mcp-Method / Mcp-Name rules belong to the revision we implement;
-    a client on another revision must be told about the version, not blamed for
-    a header that revision may not even define."""
-    body = _request("tools/list", version="2027-01-01")
-    send = await _post(body, {b"mcp-protocol-version": b"2027-01-01"})
+async def test_unsupported_version_is_settled_before_every_other_rule():
+    """The header / ``clientCapabilities`` rules belong to the revision we
+    implement; a client on another revision must be told about the version (and
+    what to retry with), not blamed for a rule its revision may not define."""
+    body = {
+        "jsonrpc": "2.0",
+        "id": 1,
+        "method": "tools/list",
+        "params": {"_meta": {PV_KEY: "2027-01-01"}},  # no clientCapabilities
+    }
+    send = await _post(body, {})  # and no mirrored headers at all
 
     assert send.status == 400
     assert send.body["error"]["code"] == -32022
+    assert MODERN in send.body["error"]["data"]["supported"]
 
 
 # --------------------------------------------------------------- HeaderMismatch
@@ -356,14 +362,15 @@ async def test_unsupported_version_wins_over_later_header_rules():
 @pytest.mark.parametrize(
     "overrides",
     [
-        {"mcp-protocol-version": None},  # required header missing
         {"mcp-protocol-version": "2025-03-26"},  # header != body _meta
-        {"mcp-method": None},
+        {"mcp-protocol-version": "2027-01-01"},
         {"mcp-method": "tools/call"},  # header != body method
         {"mcp-method": "Tools/List"},  # header *values* are case-sensitive
     ],
 )
 async def test_header_body_disagreement_is_a_400_header_mismatch(overrides):
+    """A header that contradicts the body is what the validation rule is for:
+    an intermediary would act on one value while we execute the other."""
     body = _request("tools/list", request_id=8)
     send = await _post(body, _headers(body, **overrides))
 
@@ -374,7 +381,7 @@ async def test_header_body_disagreement_is_a_400_header_mismatch(overrides):
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("name_header", [None, "remember", "=?base64?!!!not-base64!!!?="])
+@pytest.mark.parametrize("name_header", ["remember", "=?base64?!!!not-base64!!!?=", "Recall"])
 async def test_tools_call_name_header_must_match_the_body(monkeypatch, name_header):
     import mcp_server.tools as tools_mod
 
@@ -404,29 +411,103 @@ async def test_base64_sentinel_name_header_is_decoded_before_comparison(monkeypa
     assert send.status == 200
 
 
+# ---------------------------------------- tolerated gaps (deliberate leniency)
+# The spec makes the mirrored headers and ``clientCapabilities`` MUSTs. Nothing
+# here routes on the headers or relies on a client capability, and the clients
+# that matter can only be exercised in production — so their *absence* is
+# served (and logged), while any *disagreement* above is still rejected.
+
+
 @pytest.mark.asyncio
-async def test_name_header_is_not_required_for_methods_without_a_name():
-    body = _request("tools/list")
-    headers = _headers(body)
-    assert b"mcp-name" not in headers
-    send = await _post(body, headers)
+@pytest.mark.parametrize(
+    "present",
+    [
+        [],
+        ["mcp-protocol-version"],
+        ["mcp-method"],
+    ],
+)
+async def test_absent_mirrored_headers_are_tolerated_and_logged(monkeypatch, caplog, present):
+    import mcp_server.tools as tools_mod
+
+    async def fake_execute(**_kwargs):
+        return []
+
+    monkeypatch.setattr(tools_mod, "execute_tool_call", fake_execute)
+    body = _request("tools/call", {"name": "recall"})
+    headers = {k: v for k, v in _headers(body).items() if k.decode() in present}
+
+    with caplog.at_level("WARNING", logger="mcp_server.transport_stateless"):
+        send = await _post(body, headers)
+
     assert send.status == 200
+    assert "Mcp-Name" in caplog.text  # never sent in any of the cases above
 
 
-# ------------------------------------------------------- required _meta fields
+@pytest.mark.asyncio
+async def test_absent_client_capabilities_is_tolerated_and_logged(caplog):
+    body = _request("ping")
+    del body["params"]["_meta"][CAPS_KEY]
+
+    with caplog.at_level("WARNING", logger="mcp_server.transport_stateless"):
+        send = await _post(body)
+
+    assert send.status == 200
+    assert CAPS_KEY in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_fully_conforming_request_logs_no_metadata_warning(caplog):
+    with caplog.at_level("WARNING", logger="mcp_server.transport_stateless"):
+        send = await _post(_request("ping"))
+
+    assert send.status == 200
+    assert caplog.text == ""
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "body",
+    [
+        {"jsonrpc": "2.0", "id": 1, "method": "server/discover"},
+        {"jsonrpc": "2.0", "id": 1, "method": "server/discover", "params": {}},
+        {"jsonrpc": "2.0", "id": 1, "method": "server/discover", "params": {"_meta": {}}},
+        {"jsonrpc": "2.0", "id": 1, "method": "server/discover", "params": [1]},
+    ],
+)
+async def test_bare_discover_probe_is_always_answered(body):
+    """``server/discover`` is the pre-negotiation probe: a client that cannot
+    read ``supportedVersions`` has nothing to correct its request with."""
+    send = await _post(body, {})
+
+    assert send.status == 200
+    _assert_stateless(send)
+    assert MODERN in send.body["result"]["supportedVersions"]
+
+
+@pytest.mark.asyncio
+async def test_discover_for_an_unsupported_version_still_names_the_supported_ones():
+    send = await _post(_request("server/discover", version="2027-01-01"), {})
+
+    assert send.status == 400
+    assert send.body["error"]["code"] == -32022
+    assert MODERN in send.body["error"]["data"]["supported"]
+
+
+# ------------------------------------------------------------ malformed _meta
 
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
     "meta",
     [
-        {CAPS_KEY: {}},  # protocolVersion missing (era chosen by the header)
-        {PV_KEY: MODERN},  # clientCapabilities missing
+        {CAPS_KEY: {}},  # protocolVersion missing on a non-discover method
         {PV_KEY: 20260728, CAPS_KEY: {}},  # wrong types
+        {PV_KEY: "", CAPS_KEY: {}},
         {PV_KEY: MODERN, CAPS_KEY: []},
     ],
 )
-async def test_missing_required_meta_is_400_invalid_params(meta):
+async def test_malformed_meta_is_400_invalid_params(meta):
     body = {"jsonrpc": "2.0", "id": 2, "method": "tools/list", "params": {"_meta": meta}}
     send = await _post(
         body, {b"mcp-protocol-version": MODERN.encode(), b"mcp-method": b"tools/list"}
@@ -461,6 +542,17 @@ async def test_request_without_a_string_method_is_an_invalid_request(method):
 
 
 @pytest.mark.asyncio
+async def test_invalid_id_is_never_echoed_even_without_a_method():
+    body = _request("ping", request_id=True)
+    del body["method"]
+    send = await _post(body, {})
+
+    assert send.status == 400
+    assert send.body["error"]["code"] == -32600
+    assert send.body["id"] is None
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("request_id", [None, True, 1.5, [1], {"a": 1}])
 async def test_request_id_must_be_a_string_or_integer(request_id):
     """Unlike base JSON-RPC, an MCP request id MUST NOT be null."""
@@ -484,35 +576,23 @@ async def test_notification_is_accepted_with_202_and_no_body():
 # ------------------------------------------------------------------ era detection
 
 
+_BARE_LIST = {"jsonrpc": "2.0", "id": 1, "method": "tools/list"}
+
+
 @pytest.mark.parametrize(
-    ("body", "headers", "modern"),
+    ("body", "modern"),
     [
         # Per-request _meta is the modern signal.
-        (_request("tools/list"), {}, True),
-        (_request("server/discover"), {}, True),
+        (_request("tools/list"), True),
+        (_request("server/discover"), True),
         # ... even for a version we do not support: it must reach the stateless
         # path to be told -32022 rather than being served under legacy semantics.
-        (_request("tools/list", version="2027-01-01"), {}, True),
-        # A modern MCP-Protocol-Version header alone is enough (the body is then
-        # rejected for its missing _meta instead of minting a session).
-        (
-            {"jsonrpc": "2.0", "id": 1, "method": "tools/list"},
-            {b"mcp-protocol-version": b"2026-07-28"},
-            True,
-        ),
+        (_request("tools/list", version="2027-01-01"), True),
+        # server/discover exists only in the modern protocol — a bare probe must
+        # not be answered from the session path (orphan Mcp-Session-Id).
+        ({"jsonrpc": "2.0", "id": 1, "method": "server/discover"}, True),
         # initialize ALWAYS selects legacy semantics.
-        (_request("initialize"), {b"mcp-protocol-version": b"2026-07-28"}, False),
-        # Legacy clients (2025-06-18+) send the header too — with a legacy value.
-        (
-            {"jsonrpc": "2.0", "id": 1, "method": "tools/list"},
-            {b"mcp-protocol-version": b"2025-06-18"},
-            False,
-        ),
-        (
-            {"jsonrpc": "2.0", "id": 1, "method": "tools/list"},
-            {b"mcp-protocol-version": b"2025-03-26"},
-            False,
-        ),
+        (_request("initialize"), False),
         # A legacy request may carry _meta (progressToken) without the version key.
         (
             {
@@ -521,19 +601,18 @@ async def test_notification_is_accepted_with_202_and_no_body():
                 "method": "tools/call",
                 "params": {"name": "x", "_meta": {"progressToken": 1}},
             },
-            {},
             False,
         ),
-        ({"jsonrpc": "2.0", "id": 1, "method": "tools/list"}, {}, False),
+        (_BARE_LIST, False),
         # Unparseable / non-object bodies stay on the legacy path, which already
         # answers them with -32700 / -32600.
-        (None, {}, False),
-        ([_request("tools/list")], {}, False),
-        ({"jsonrpc": "2.0", "id": 1, "method": "tools/list", "params": [1]}, {}, False),
+        (None, False),
+        ([_request("tools/list")], False),
+        ({"jsonrpc": "2.0", "id": 1, "method": "tools/list", "params": [1]}, False),
     ],
 )
-def test_is_modern_request(body, headers, modern):
-    assert _is_modern_request(body, headers) is modern
+def test_is_modern_request(body, modern):
+    assert _is_modern_request(body) is modern
 
 
 # --------------------------------------------------- era split in mcp_asgi_app
@@ -672,3 +751,42 @@ async def test_legacy_request_without_modern_metadata_keeps_the_legacy_contract(
     assert send.status == 200
     assert send.body["error"]["code"] == -32601
     assert send.headers[b"mcp-session-id"] == b"sess-1"
+
+
+@pytest.mark.asyncio
+async def test_modern_version_header_alone_does_not_pull_a_request_off_its_session(asgi):
+    """The header is not an era signal: a proxy or SDK stamping its newest known
+    version on every request must not turn a working session call into a
+    stateless rejection."""
+    body = {"jsonrpc": "2.0", "id": 3, "method": "ping"}
+    send = await asgi.call(body, {b"mcp-protocol-version": MODERN.encode()})
+
+    assert send.status == 200
+    assert send.body == {"jsonrpc": "2.0", "id": 3, "result": {}}
+    assert send.headers[b"mcp-session-id"] == b"sess-1"
+
+
+@pytest.mark.asyncio
+async def test_bare_discover_probe_mints_no_session(asgi):
+    """A DiscoverResult advertising a session-less revision next to a fresh
+    ``Mcp-Session-Id`` is self-contradictory — and every probe used to leave an
+    orphan session behind until the idle timeout."""
+    send = await asgi.call({"jsonrpc": "2.0", "id": 1, "method": "server/discover"}, {})
+
+    assert send.status == 200
+    _assert_stateless(send)
+    assert MODERN in send.body["result"]["supportedVersions"]
+    assert asgi.sessions.calls == []
+
+
+@pytest.mark.asyncio
+async def test_invalid_utf8_body_is_a_parse_error_not_a_500(asgi):
+    async def receive():
+        return {"type": "http.request", "body": b'{"method": "\xff"}', "more_body": False}
+
+    send = _Recorder()
+    scope = {"type": "http", "method": "POST", "path": "/mcp/", "query_string": b"", "headers": []}
+    await mcp_asgi_app(scope, receive, send)
+
+    assert send.status == 400
+    assert send.body["error"]["code"] == -32700
