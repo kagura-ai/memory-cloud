@@ -911,15 +911,16 @@ async def handle_setup_resource(
             await db.refresh(context)
 
             # 8. Create search config
+            from config.settings import get_settings
             from models.config import ContextSearchConfig
+            from repositories.config_repository import search_config_defaults
 
             search_config = ContextSearchConfig(
                 context_id=context.id,
                 semantic_weight=0.6,
                 fetch_factor=3,
-                use_rerank=False,
-                reranker_provider="voyage",
-                reranker_model="rerank-2-lite",
+                # #1572: same deployment default as ContextService.create_context.
+                **search_config_defaults(get_settings()),
                 embedding_model=actual_embedding_model,
                 embedding_dimensions=actual_dimensions,
             )

@@ -6,12 +6,14 @@ Issue #1220: Per-context router calibration store (stage 4)
 """
 
 from datetime import datetime  # noqa: TC003 - runtime annotation in upsert()
+from typing import Any
 from uuid import UUID
 
 from sqlalchemy import select, text
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from config.settings import Settings, get_settings
 from models.config import (
     ROUTER_CALIBRATION_SOURCE_FROZEN,
     ContextSearchConfig,
@@ -21,6 +23,39 @@ from models.schemas import ContextSearchConfigUpdate
 from utils.logger import get_logger
 
 logger = get_logger(__name__)
+
+
+def search_config_defaults(settings: Settings) -> dict[str, Any]:
+    """Reranker values for a new (or reset) context search config (#1572).
+
+    The one place the deployment default (``DEFAULT_USE_RERANK`` /
+    ``DEFAULT_RERANKER_PROVIDER`` / ``DEFAULT_RERANKER_MODEL``) becomes row
+    values. Shared by ``ContextService.create_context``, ``setup_resource``,
+    :meth:`ContextSearchConfigRepository.create_or_get`,
+    :meth:`ContextSearchConfigRepository.reset_to_default`, the MCP
+    ``update_search_config`` fallbacks and ``/system/info``. The ORM column
+    defaults stay as the static safety net for raw inserts; existing rows are
+    never rewritten here (see ``cli/apply_rerank_defaults.py``).
+
+    Args:
+        settings: Application settings — passed in so callers and tests decide
+            which instance is read.
+
+    Returns:
+        ``{"use_rerank", "reranker_provider", "reranker_model"}`` ready to
+        splat into ``ContextSearchConfig(...)`` or ``ContextSearchConfigUpdate(...)``.
+        With the DEFAULT_* env unset this is ``False / "voyage" / "rerank-2"``.
+    """
+    # Lazy: reranker_service imports this module at import time.
+    from services.reranker_service import default_reranker_model_for
+
+    provider = settings.default_reranker_provider
+    return {
+        "use_rerank": settings.default_use_rerank,
+        "reranker_provider": provider,
+        "reranker_model": settings.default_reranker_model
+        or default_reranker_model_for(provider, settings),
+    }
 
 
 class ContextSearchConfigRepository:
@@ -79,9 +114,13 @@ class ContextSearchConfigRepository:
         if config:
             return config
 
-        # Create default config
+        # Create default config. The reranker fields are passed explicitly so
+        # the lazily materialized row (a recall on a row-less legacy context)
+        # gets the same deployment default as create_context (#1572).
         logger.info("config_creating_default", context_id=str(context_id))
-        config = ContextSearchConfig(context_id=context_id)
+        config = ContextSearchConfig(
+            context_id=context_id, **search_config_defaults(get_settings())
+        )
         self.db.add(config)
         await self.db.commit()
         await self.db.refresh(config)
@@ -157,9 +196,9 @@ class ContextSearchConfigRepository:
             semantic_weight=0.6,
             bm25_weight=0.4,
             fetch_factor=3,
-            use_rerank=False,
-            reranker_provider="voyage",
-            reranker_model="rerank-2",
+            # #1572: "reset" means the DEPLOYMENT default — the same reranker
+            # values create_context writes — not the code default.
+            **search_config_defaults(get_settings()),
             # #1207: reset converges reinforce to the documented defaults too.
             # These must be passed explicitly — update() applies
             # exclude_unset, so omitting them would leave stored values
