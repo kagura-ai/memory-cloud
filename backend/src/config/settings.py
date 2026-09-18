@@ -1008,6 +1008,30 @@ class Settings(BaseSettings):
         default=None, description="Display name for PROMAX tier (default: XL)"
     )
 
+    # Issue #1559: replace a tier's ``features`` set wholesale (comma-separated,
+    # whitespace-tolerant). Validated against ``config.plan_tiers.KNOWN_FEATURES``
+    # when that module loads — an unknown name refuses to boot. ``None`` or
+    # blank = the dataclass default. Lets a self-host re-enable the XL-only
+    # ``resources`` / ``connectors`` / ``public_contexts`` (#1551) on a lower
+    # tier. Every set must keep ``secret_store``; ``resources`` requires
+    # ``public_contexts``.
+    plan_free_features: str | None = Field(
+        default=None,
+        description="Override FREE plan feature set, comma-separated (Issue #1559)",
+    )
+    plan_basic_features: str | None = Field(
+        default=None,
+        description="Override BASIC plan feature set, comma-separated (Issue #1559)",
+    )
+    plan_pro_features: str | None = Field(
+        default=None,
+        description="Override PRO plan feature set, comma-separated (Issue #1559)",
+    )
+    plan_promax_features: str | None = Field(
+        default=None,
+        description="Override PROMAX plan feature set, comma-separated (Issue #1559)",
+    )
+
     # Usage warning thresholds (Issue #48)
     usage_warning_threshold: float = Field(
         default=0.80, description="Usage warning threshold (0.0-1.0)"
