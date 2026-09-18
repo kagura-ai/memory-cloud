@@ -790,3 +790,73 @@ async def test_invalid_utf8_body_is_a_parse_error_not_a_500(asgi):
 
     assert send.status == 400
     assert send.body["error"]["code"] == -32700
+
+
+@pytest.mark.asyncio
+async def test_modern_request_inherits_the_workspace_url_check(monkeypatch):
+    """The era split sits AFTER authentication and the workspace checks: a
+    stateless request must not be a way around the key↔URL workspace match."""
+    from uuid import uuid4
+
+    key_workspace = uuid4()
+
+    async def fake_auth(**_kwargs):
+        return "user-1", None, key_workspace
+
+    async def must_not_run(*_args, **_kwargs):  # pragma: no cover - the assertion
+        raise AssertionError("a workspace-mismatched request reached the stateless handler")
+
+    import mcp_server.transport_stateless as stateless
+
+    monkeypatch.setattr(transport, "authenticate_mcp_request", fake_auth)
+    monkeypatch.setattr(stateless, "handle_stateless_post", must_not_run)
+
+    body = _request("tools/list")
+    raw = json.dumps(body).encode()
+
+    async def receive():
+        return {"type": "http.request", "body": raw, "more_body": False}
+
+    send = _Recorder()
+    scope = {
+        "type": "http",
+        "method": "POST",
+        "path": "/mcp/",
+        "query_string": b"",
+        "headers": list(_headers(body).items()),
+        "workspace_id_from_url": str(uuid4()),
+    }
+    await mcp_asgi_app(scope, receive, send)
+
+    assert send.status == 403
+    assert send.body["error"] == "workspace_mismatch"
+
+
+@pytest.mark.asyncio
+async def test_unauthenticated_modern_request_gets_the_oauth_challenge(monkeypatch):
+    """ChatGPT's first POST is an unauthenticated probe: it must still get the
+    401 + WWW-Authenticate that starts the OAuth flow, whatever its era."""
+
+    async def failing_auth(**_kwargs):
+        raise Exception("Missing Authorization header")
+
+    monkeypatch.setattr(transport, "authenticate_mcp_request", failing_auth)
+
+    body = _request("server/discover")
+    raw = json.dumps(body).encode()
+
+    async def receive():  # pragma: no cover - auth fails before the body is read
+        return {"type": "http.request", "body": raw, "more_body": False}
+
+    send = _Recorder()
+    scope = {
+        "type": "http",
+        "method": "POST",
+        "path": "/mcp/",
+        "query_string": b"",
+        "headers": list(_headers(body).items()),
+    }
+    await mcp_asgi_app(scope, receive, send)
+
+    assert send.status == 401
+    assert b"www-authenticate" in send.headers
