@@ -110,7 +110,7 @@ _RATE_LIMIT_EXEMPT_TOOLS = frozenset(
         # Issue #1128: secret-store tools carry NO embedding/LLM cost (the memory
         # quota's cost driver) and must stay callable on EVERY plan — an agent has
         # to be able to fetch its deploy key even after heavy recall use. Available
-        # on all plans (free/basic/pro); workspace-role gating + the append-only
+        # on every plan tier; workspace-role gating + the append-only
         # audit log bound abuse, not the memory rate limit.
         "secret_register_pubkey",
         "secret_put",

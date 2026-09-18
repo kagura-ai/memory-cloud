@@ -38,7 +38,7 @@ class PlanLimits(BaseModel):
     sums.
     """
 
-    plan_name: str = Field(..., description="Plan name (free/pro/enterprise)")
+    plan_name: str = Field(..., description="Plan tier key: free | basic | pro | promax")
     memory_limit: int = Field(..., description="Maximum memories allowed")
     daily_total_limit: int = Field(
         ...,
