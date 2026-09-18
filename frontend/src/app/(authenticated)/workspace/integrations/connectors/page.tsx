@@ -392,6 +392,17 @@ export default function ConnectorsPage() {
   useEffect(() => {
     if (!installHandle) return;
     if (!allowed) return;
+    // #1551: below XL the create form must never open — a stale or crafted
+    // callback would otherwise show an enabled form that only fails at the
+    // backend 403. Surface the upsell and strip the one-time handle instead.
+    if (!canCreate) {
+      toast({
+        title: t("planGate.title", { plan: xlLabel }),
+        description: t("planGate.description", { plan: xlLabel }),
+      });
+      router.replace("/workspace/integrations/connectors");
+      return;
+    }
     let cancelled = false;
     (async () => {
       try {
@@ -448,7 +459,7 @@ export default function ConnectorsPage() {
     // of re-fetching + resetting the form (mode, name, PII) on every unrelated
     // re-render — which would clobber the operator's write-target choice (#1409).
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [installHandle, allowed]);
+  }, [installHandle, allowed, canCreate]);
 
   // #1375/#1381: a cancelled/failed/expired Slack OAuth consent redirects
   // back with ?slack_error=cancelled|failed|expired (allowlisted by the
@@ -688,6 +699,9 @@ export default function ConnectorsPage() {
 
   const handleCreate = useCallback(async () => {
     if (!installHandle || !pending) return;
+    // #1551: defense in depth with the callback effect and the submit button —
+    // never POST a create from a tier without the connectors feature.
+    if (!canCreate) return;
     setSubmitting(true);
     setCreateError(null);
     try {
@@ -730,6 +744,7 @@ export default function ConnectorsPage() {
   }, [
     installHandle,
     pending,
+    canCreate,
     displayName,
     contextName,
     contextMode,
@@ -1861,6 +1876,7 @@ export default function ConnectorsPage() {
               onClick={() => void handleCreate()}
               disabled={
                 submitting ||
+                !canCreate ||
                 !createBindingReady ||
                 (piiEnabled && piiDetectors.length === 0)
               }

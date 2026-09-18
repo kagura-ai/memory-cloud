@@ -233,6 +233,46 @@ describe("ConnectorsPage XL-only create gate (#1551)", () => {
     ).toBeInTheDocument();
   });
 
+  it("basic + ?slack_install callback: dialog stays closed, upsell shown, no POST, handle stripped", async () => {
+    setWorkspace("admin", {}, "basic");
+    mockSearchParamsGet.mockImplementation((key: string) =>
+      key === "slack_install" ? "handle-stale" : null,
+    );
+
+    render(<ConnectorsPage />);
+
+    expect(await screen.findByText("planGate.title")).toBeInTheDocument();
+    // The callback never reaches the pending-install lookup or the dialog.
+    await waitFor(() =>
+      expect(mockRouterReplace).toHaveBeenCalledWith(
+        "/workspace/integrations/connectors",
+      ),
+    );
+    expect(mockGetSlackPendingInstall).not.toHaveBeenCalled();
+    expect(
+      screen.queryByRole("button", { name: "createConnector" }),
+    ).not.toBeInTheDocument();
+    expect(mockCreateConnector).not.toHaveBeenCalled();
+    // Upsell is surfaced as a toast too (the callback landed on this page).
+    expect(mockToast).toHaveBeenCalledWith(
+      expect.objectContaining({ title: "planGate.title" }),
+    );
+  });
+
+  it("promax + ?slack_install callback: create dialog opens as before", async () => {
+    setWorkspace("admin");
+    mockSearchParamsGet.mockImplementation((key: string) =>
+      key === "slack_install" ? "handle-1" : null,
+    );
+
+    render(<ConnectorsPage />);
+
+    expect(
+      await screen.findByRole("button", { name: "createConnector" }),
+    ).toBeEnabled();
+    expect(mockGetSlackPendingInstall).toHaveBeenCalledWith("handle-1");
+  });
+
   it("promax: no upsell, provider CTA enabled", async () => {
     setWorkspace("admin");
 

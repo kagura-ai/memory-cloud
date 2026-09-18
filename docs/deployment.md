@@ -386,10 +386,13 @@ contexts or bound public keys keeps them working end to end: the numeric caps
 those objects serve against (`max_resource_tokens` 3 / 30, `max_connectors`
 3 / 10, `public_calls_per_day` 1000 and `bound_public_calls_per_minute` 100
 on L) are unchanged; only provisioning a *new* one is refused with a
-`FEAT-001` / `plan_required` error naming the XL tier. Because those M / L
-caps stay above zero, an `extra_connectors` (or other resource) add-on on
-M / L still stacks mechanically, but it cannot unlock creation — such an
-add-on only matters on XL.
+`FEAT-001` / `plan_required` error naming the XL tier. Rotating
+(regenerating) an existing bound public key is allowed on any tier: it revokes
+the old key and mints its replacement against the same, still-public context,
+so the number of bound keys does not grow. Because those M / L caps stay above
+zero, an `extra_connectors` (or other resource) add-on on M / L still stacks
+mechanically, but it cannot unlock creation — such an add-on only matters on
+XL.
 
 Override via environment variables (`PLAN_<KEY>_<FIELD>`, key upper-cased):
 

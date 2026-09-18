@@ -315,6 +315,42 @@ class TestBoundPublicKeyCreate:
         assert r.status_code == 201, r.text
         assert mgr.create_key.await_args.kwargs["bound_context_id"] == self._ctx.id
 
+    @pytest.mark.asyncio
+    async def test_member_regenerate_cannot_mint_a_bound_key(self) -> None:
+        """#1551 grandfathering check for the OTHER rotation route: the
+        member-credentials regenerate selects ``workspace_id == <ws>`` keys only
+        (bound keys have ``workspace_id IS NULL``) and never passes
+        ``bound_context_id`` — so it can neither rotate nor create a bound key,
+        and needs no create gate."""
+        import inspect
+
+        from api.routes import member_credentials as mc
+
+        old_key = SimpleNamespace(id=7, name="ws-key", revoked_at=None)
+        new_key = SimpleNamespace(id=8, key_prefix="kagura_new")
+        db = MagicMock()
+        db.execute = AsyncMock(return_value=_result(one=old_key))
+        db.commit = AsyncMock()
+        mgr = MagicMock()
+        mgr.create_key = AsyncMock(return_value=("kagura_PLAIN", new_key))
+
+        with (
+            patch("api.routes.member_credentials.check_permission", new=AsyncMock()),
+            patch("api.routes.member_credentials.MemberCredentialsService"),
+            patch("api.routes.member_credentials.APIKeyManager", return_value=mgr),
+        ):
+            r = await mc.regenerate_api_key(
+                _WS, "member-1", {"user_id": "member-1", "sub": "m"}, db
+            )
+
+        assert r.key == "kagura_PLAIN"
+        kwargs = mgr.create_key.await_args.kwargs
+        assert kwargs["workspace_id"] == _WS
+        assert "bound_context_id" not in kwargs
+        assert old_key.revoked_at is not None
+        # The lookup itself excludes bound keys (workspace_id IS NULL rows).
+        assert "APIKey.workspace_id == workspace_id" in inspect.getsource(mc.regenerate_api_key)
+
 
 # ---------------------------------------------------------------------------
 # Hardcoded-name clean-ups taken along
