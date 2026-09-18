@@ -16,6 +16,7 @@ import uuid
 
 import fakeredis.aioredis as fakeaioredis
 import pytest
+import redis.exceptions
 
 import db.redis as redis_mod
 from db.redis import (
@@ -91,6 +92,14 @@ def _k(name: str) -> str:
     return f"test:{name}:{uuid.uuid4().hex}"
 
 
+class _PoolSettings:
+    """Settings stub carrying only the two pool knobs ``get_redis_client`` reads."""
+
+    def __init__(self, max_connections: int = 50, timeout: float = 2.0):
+        self.redis_max_connections = max_connections
+        self.redis_pool_timeout_seconds = timeout
+
+
 class TestGetRedisClient:
     """get_redis_client singleton factory + error wrapping."""
 
@@ -99,35 +108,79 @@ class TestGetRedisClient:
         assert get_redis_client() is fake_redis
 
     def test_builds_client_when_none(self, monkeypatch):
-        """First call with no singleton calls from_url and caches the result."""
+        """First call builds a BlockingConnectionPool from settings and caches it.
+
+        #1556: the pool must be the blocking variant so callers queue for a
+        connection (up to ``redis_pool_timeout_seconds``) instead of getting
+        ``Too many connections`` — which every quota check treats as "Redis
+        down" and fails open.
+        """
         monkeypatch.setattr(redis_mod, "_redis_client", None)
-        sentinel = object()
-        calls = {}
+        monkeypatch.setattr(redis_mod, "get_settings", lambda: _PoolSettings(7, 0.5))
+        pool_sentinel = object()
+        client_sentinel = object()
+        calls: dict = {}
 
         def fake_from_url(url, **kwargs):
             calls["url"] = url
             calls["kwargs"] = kwargs
-            return sentinel
+            return pool_sentinel
 
-        monkeypatch.setattr(redis_mod.aioredis, "from_url", fake_from_url)
+        def fake_from_pool(pool):
+            calls["pool"] = pool
+            return client_sentinel
+
+        monkeypatch.setattr(redis_mod.aioredis.BlockingConnectionPool, "from_url", fake_from_url)
+        monkeypatch.setattr(redis_mod.aioredis.Redis, "from_pool", fake_from_pool)
         try:
             client = get_redis_client()
-            assert client is sentinel
+            assert client is client_sentinel
             # cached: a second call does not rebuild
-            assert get_redis_client() is sentinel
+            assert get_redis_client() is client_sentinel
+            assert calls["pool"] is pool_sentinel
+            assert calls["url"] == redis_mod.REDIS_URL
             assert calls["kwargs"]["decode_responses"] is True
-            assert calls["kwargs"]["max_connections"] == 10
+            assert calls["kwargs"]["encoding"] == "utf-8"
+            assert calls["kwargs"]["max_connections"] == 7
+            assert calls["kwargs"]["timeout"] == 0.5
         finally:
             monkeypatch.setattr(redis_mod, "_redis_client", None)
 
-    def test_wraps_connect_failure_in_redis_error(self, monkeypatch):
-        """from_url raising is re-raised as RedisError with chained cause."""
+    async def test_real_pool_is_blocking_with_settings_values(self, monkeypatch):
+        """Unpatched redis-py: the built client owns a BlockingConnectionPool.
+
+        No network I/O — redis-py connects lazily on the first command.
+        """
         monkeypatch.setattr(redis_mod, "_redis_client", None)
+        monkeypatch.setattr(redis_mod, "get_settings", lambda: _PoolSettings(13, 1.5))
+        try:
+            client = get_redis_client()
+            pool = client.connection_pool
+            assert isinstance(pool, redis_mod.aioredis.BlockingConnectionPool)
+            assert pool.max_connections == 13
+            assert pool.timeout == 1.5
+            assert pool.connection_kwargs["decode_responses"] is True
+            assert pool.connection_kwargs["encoding"] == "utf-8"
+            await client.aclose()
+        finally:
+            monkeypatch.setattr(redis_mod, "_redis_client", None)
+
+    def test_settings_defaults(self):
+        """Pool knobs default to 50 connections / 2.0s wait (Issue #1556)."""
+        from config.settings import Settings
+
+        assert Settings.model_fields["redis_max_connections"].default == 50
+        assert Settings.model_fields["redis_pool_timeout_seconds"].default == 2.0
+
+    def test_wraps_connect_failure_in_redis_error(self, monkeypatch):
+        """Pool construction raising is re-raised as RedisError with chained cause."""
+        monkeypatch.setattr(redis_mod, "_redis_client", None)
+        monkeypatch.setattr(redis_mod, "get_settings", lambda: _PoolSettings())
 
         def boom_from_url(url, **kwargs):
             raise ConnectionError("no redis")
 
-        monkeypatch.setattr(redis_mod.aioredis, "from_url", boom_from_url)
+        monkeypatch.setattr(redis_mod.aioredis.BlockingConnectionPool, "from_url", boom_from_url)
         try:
             with pytest.raises(RedisError, match="Failed to connect to Redis"):
                 get_redis_client()
@@ -249,6 +302,25 @@ class TestIncrementCounter:
         with pytest.raises(RedisError, match="Failed to increment counter"):
             await increment_counter("k", ttl=60)
 
+    async def test_pool_timeout_surfaces_as_redis_error(self, monkeypatch):
+        """BlockingConnectionPool timeout → redis ConnectionError → our RedisError.
+
+        #1556: the pool raises ``ConnectionError("No connection available.")``
+        (a ``redis.exceptions.RedisError`` subclass) when the wait times out.
+        The wrapper must chain it as ``utils.exceptions.RedisError`` so the
+        middleware's fail-open branch catches it like any other outage.
+        """
+        original = redis_mod._redis_client
+        timeout_exc = redis.exceptions.ConnectionError("No connection available.")
+        monkeypatch.setattr(redis_mod, "_redis_client", _BoomRedis(timeout_exc))
+        try:
+            with pytest.raises(RedisError, match="No connection available") as info:
+                await increment_counter("k", ttl=60)
+            assert info.value.__cause__ is timeout_exc
+            assert isinstance(info.value.__cause__, redis.exceptions.RedisError)
+        finally:
+            monkeypatch.setattr(redis_mod, "_redis_client", original)
+
 
 class TestIncrbyCounter:
     """incrby_counter incrby + TTL-only-if-absent behavior."""
@@ -283,6 +355,18 @@ class TestIncrbyCounter:
     async def test_incrby_error_raises(self, boom_redis):
         with pytest.raises(RedisError, match="Failed to increment counter"):
             await incrby_counter("k", 1, ttl=10)
+
+    async def test_pool_timeout_surfaces_as_redis_error(self, monkeypatch):
+        """Same chaining guarantee as increment_counter for the incrby path (#1556)."""
+        original = redis_mod._redis_client
+        timeout_exc = redis.exceptions.ConnectionError("No connection available.")
+        monkeypatch.setattr(redis_mod, "_redis_client", _BoomRedis(timeout_exc))
+        try:
+            with pytest.raises(RedisError, match="No connection available") as info:
+                await incrby_counter("k", 1, ttl=10)
+            assert info.value.__cause__ is timeout_exc
+        finally:
+            monkeypatch.setattr(redis_mod, "_redis_client", original)
 
 
 class TestCoActivation:

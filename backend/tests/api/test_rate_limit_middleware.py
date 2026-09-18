@@ -6,12 +6,25 @@ Issue #251: Rate limiting for REST API endpoints.
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
+import redis.exceptions
 from fastapi import Request, Response
 from fastapi.responses import JSONResponse
 
 from api.middleware.rate_limit import RateLimitMiddleware
 from config.plan_tiers import PlanName
-from utils.exceptions import QuotaExceededError
+from utils.exceptions import QuotaExceededError, RedisError
+
+
+def _pool_timeout_error() -> RedisError:
+    """RedisError as ``db.redis.increment_counter`` raises it on pool timeout.
+
+    The wrapper chains the redis-py ``ConnectionError("No connection
+    available.")`` that ``BlockingConnectionPool`` raises when the wait for a
+    free connection exceeds ``redis_pool_timeout_seconds`` (#1556).
+    """
+    exc = RedisError("Failed to increment counter: No connection available.")
+    exc.__cause__ = redis.exceptions.ConnectionError("No connection available.")
+    return exc
 
 
 class TestRateLimitMiddleware:
@@ -186,8 +199,6 @@ class TestRateLimitMiddleware:
         mock_call_next,
     ):
         """Test that Redis failures don't block requests (fail-open)."""
-        from utils.exceptions import RedisError
-
         mock_get_plan.return_value = ("free", None)
         mock_increment.side_effect = RedisError("Redis connection failed")
 
@@ -197,6 +208,91 @@ class TestRateLimitMiddleware:
         assert response is not None
         # Headers should not be added (Redis failure)
         assert "X-RateLimit-Limit" not in response.headers
+
+    @pytest.mark.asyncio
+    @patch("api.middleware.rate_limit.logger")
+    @patch("api.middleware.rate_limit.increment_counter")
+    @patch.object(RateLimitMiddleware, "_get_user_plan")
+    async def test_per_minute_fail_open_emits_one_warning(
+        self,
+        mock_get_plan,
+        mock_increment,
+        mock_logger,
+        middleware,
+        mock_request,
+        mock_call_next,
+    ):
+        """Pool timeout on the per-minute counter → allowed + ONE stable warning (#1556)."""
+        mock_get_plan.return_value = ("free", None)
+        mock_increment.side_effect = _pool_timeout_error()
+
+        response = await middleware.dispatch(mock_request, mock_call_next)
+
+        assert response.status_code == 200
+        assert mock_logger.warning.call_count == 1
+        event, kwargs = mock_logger.warning.call_args[0][0], mock_logger.warning.call_args[1]
+        assert event == "quota_check_failed_open"
+        assert kwargs["quota"] == "per_minute"
+        assert kwargs["key_prefix"] == "rate_limit:user:test_user_123:minute"
+        assert kwargs["error_class"] == "ConnectionError"
+        assert kwargs["user_id"] == "test_user_123"
+        # The old per-request error line is gone — one event, not two.
+        mock_logger.error.assert_not_called()
+
+    @pytest.mark.asyncio
+    @patch("api.middleware.rate_limit.logger")
+    @patch("api.middleware.rate_limit.increment_counter")
+    @patch("api.middleware.rate_limit.get_plan_tier")
+    async def test_daily_quota_fail_open_emits_one_warning(
+        self,
+        mock_get_tier,
+        mock_increment,
+        mock_logger,
+    ):
+        """Pool timeout on the daily counter → no raise + ONE stable warning (#1556)."""
+        from config.plan_tiers import PLAN_FREE
+
+        middleware = RateLimitMiddleware(MagicMock())
+        mock_get_tier.return_value = PLAN_FREE
+        mock_increment.side_effect = _pool_timeout_error()
+
+        # Fail-open: must not raise QuotaExceededError or propagate RedisError.
+        await middleware._check_daily_quota(
+            "user123", "/api/v1/memory/remember", PlanName.FREE, "ws-1"
+        )
+
+        assert mock_logger.warning.call_count == 1
+        event, kwargs = mock_logger.warning.call_args[0][0], mock_logger.warning.call_args[1]
+        assert event == "quota_check_failed_open"
+        assert kwargs["quota"] == "daily_mcp"
+        assert kwargs["key_prefix"] == "quota:ws:ws-1:mcp"
+        assert kwargs["error_class"] == "ConnectionError"
+        assert kwargs["user_id"] == "user123"
+        mock_logger.error.assert_not_called()
+
+    @pytest.mark.asyncio
+    @patch("api.middleware.rate_limit.logger")
+    @patch("api.middleware.rate_limit.increment_counter")
+    @patch("api.middleware.rate_limit.get_plan_tier")
+    async def test_daily_quota_fail_open_unchained_error_class(
+        self,
+        mock_get_tier,
+        mock_increment,
+        mock_logger,
+    ):
+        """Without a chained cause the wrapper's own class is reported."""
+        from config.plan_tiers import PLAN_BASIC
+
+        middleware = RateLimitMiddleware(MagicMock())
+        mock_get_tier.return_value = PLAN_BASIC
+        mock_increment.side_effect = RedisError("Redis connection failed")
+
+        await middleware._check_daily_quota("user123", "/api/v1/users/me", PlanName.BASIC, None)
+
+        kwargs = mock_logger.warning.call_args[1]
+        assert kwargs["quota"] == "daily_rest"
+        assert kwargs["key_prefix"] == "quota:user:user123:rest"
+        assert kwargs["error_class"] == "RedisError"
 
     @pytest.mark.asyncio
     async def test_get_user_plan_with_workspace(self):
