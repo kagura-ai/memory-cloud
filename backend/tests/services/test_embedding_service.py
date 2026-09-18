@@ -451,14 +451,89 @@ class TestPlatformPaidCapGate:
         inst.load_workspace.assert_not_called()
         inst.check_cap_or_raise.assert_not_called()
 
+    @staticmethod
+    def _patch_price(priced: bool):
+        return patch(
+            "services.llm_pricing_service.LLMPricingService.has_positive_price",
+            new_callable=AsyncMock,
+            return_value=priced,
+        )
+
     @pytest.mark.asyncio
-    async def test_self_hosted_provider_skips_before_byok_probe(self, service):
-        """provider='self_hosted' → skip immediately (no provider cost), before the BYOK probe."""
+    async def test_unpriced_self_hosted_skips_before_byok_probe(self, service):
+        """#1570: self_hosted with no price (> 0) → skip, before the BYOK probe.
+
+        Pre-#1570 behaviour for a local Ollama / vLLM: uncapped, no counters.
+        """
         service.provider = "self_hosted"
+        service.model = "qwen3-embedding:4b"
         service.has_byok_key = AsyncMock(return_value=True)
-        result = await service._prepare_spend_cap_gate("00000000-0000-0000-0000-000000000001")
+        ws = self._cap_ws("pro")
+        patcher, inst = self._patch_cap_service(ws)
+        try:
+            with self._patch_price(False) as price:
+                result = await service._prepare_spend_cap_gate(
+                    "00000000-0000-0000-0000-000000000001"
+                )
+        finally:
+            patcher.stop()
         assert result == (None, None)
+        price.assert_awaited_once()
+        assert price.await_args.kwargs["provider"] == "self_hosted"
+        assert price.await_args.kwargs["model"] == "qwen3-embedding:4b"
+        assert price.await_args.kwargs["unit_type"] == "embedding_tokens"
         service.has_byok_key.assert_not_called()
+        inst.load_workspace.assert_not_called()
+        inst.check_cap_or_raise.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_priced_self_hosted_is_capped_regardless_of_byok_or_plan(self, service):
+        """#1570: self_hosted with a price > 0 → capped, skipping the BYOK / plan checks.
+
+        A free-tier workspace with no BYOK would be UNCAPPED on the OpenAI
+        path (#708 carve-out); a paid self-hosted endpoint is the operator's
+        money, so the cap fires anyway and the gate is returned so the
+        post-call ``record_spend_from_tokens`` advances the counters.
+        """
+        service.provider = "self_hosted"
+        service.model = "qwen3-embedding:4b"
+        service.has_byok_key = AsyncMock(return_value=False)
+        ws = self._cap_ws("free")
+        patcher, inst = self._patch_cap_service(ws)
+        try:
+            with self._patch_price(True):
+                cap_svc, cap_ws = await service._prepare_spend_cap_gate(
+                    "00000000-0000-0000-0000-000000000001"
+                )
+        finally:
+            patcher.stop()
+        assert cap_svc is inst and cap_ws is ws
+        inst.check_cap_or_raise.assert_awaited_once_with(ws)
+        service.has_byok_key.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_priced_self_hosted_missing_workspace_row_skips(self, service):
+        """#1570: priced self_hosted but the workspace row is gone → skip (no 500)."""
+        service.provider = "self_hosted"
+        patcher, inst = self._patch_cap_service(None)
+        try:
+            with self._patch_price(True):
+                result = await service._prepare_spend_cap_gate(
+                    "00000000-0000-0000-0000-000000000001"
+                )
+        finally:
+            patcher.stop()
+        assert result == (None, None)
+        inst.check_cap_or_raise.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_self_hosted_missing_workspace_id_skips_without_price_lookup(self, service):
+        """No workspace_id → skip before even asking for a price."""
+        service.provider = "self_hosted"
+        with self._patch_price(True) as price:
+            result = await service._prepare_spend_cap_gate(None)
+        assert result == (None, None)
+        price.assert_not_called()
 
     @pytest.mark.asyncio
     async def test_missing_workspace_id_skips(self, service):

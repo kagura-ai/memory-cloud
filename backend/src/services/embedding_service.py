@@ -25,6 +25,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from config.plan_tiers import has_feature
 from db.redis import get_cache, set_cache
 from models.auth import ExternalAPIKey, Workspace
+from utils.datetime import utcnow
 from utils.encryption import get_encryptor
 from utils.exceptions import (
     ConfigurationError,
@@ -274,7 +275,15 @@ class EmbeddingService:
         Returns ``(cap_svc, cap_workspace)`` when the call should be capped, or
         ``(None, None)`` to skip. Skip cases:
 
-        - **Ollama** — no real provider cost; cap is irrelevant.
+        - **Unpriced ``self_hosted``** — no ``llm_pricing`` row with a price
+          above zero for ``(self_hosted, model, embedding_tokens)``: a local
+          Ollama / vLLM with nothing to bill. Issue #1570: self_hosted is
+          capped iff the effective price is > 0 — an operator paying a
+          third-party OpenAI-compatible endpoint prices the model via
+          ``LLM_PRICING_OVERRIDES`` and the cap then applies like any
+          platform-paid embed (the BYOK / ``managed_embeddings`` branches
+          below are skipped; they are about the platform OpenAI key).
+          Counters only advance when the endpoint reports ``usage`` tokens.
         - **Missing ``workspace_id``** — no caller scope to resolve a cap against.
         - **Workspace row missing** — disappeared between request entry and embed.
         - **No BYOK on a plan without ``managed_embeddings`` (Free / S)** — a
@@ -317,9 +326,34 @@ class EmbeddingService:
         select a BYOK row for THIS context — not for a key scoped to some OTHER
         context in the same workspace.
         """
-        if not workspace_id or self.provider == "self_hosted":
+        if not workspace_id:
             return None, None
         from services.embedding_spend_cap_service import EmbeddingSpendCapService
+
+        if self.provider == "self_hosted":
+            # Issue #1570: self_hosted is capped iff the effective price is > 0.
+            # Unpriced (no row, or an explicit $0 for a truly free local model)
+            # → uncapped and no counters, exactly as before. Priced (a paid
+            # OpenAI-compatible endpoint the operator pays for, via
+            # LLM_PRICING_OVERRIDES) → the BYOK / managed_embeddings checks
+            # below do not apply — they govern platform OpenAI key use — so
+            # go straight to the cap.
+            from services.llm_pricing_service import LLMPricingService
+
+            priced = await LLMPricingService(self.db).has_positive_price(
+                provider=self.provider,
+                model=self.model,
+                unit_type="embedding_tokens",
+                started_at=utcnow(),
+            )
+            if not priced:
+                return None, None
+            cap_svc = EmbeddingSpendCapService(self.db)
+            cap_workspace = await cap_svc.load_workspace(workspace_id)
+            if cap_workspace is None:
+                return None, None
+            await cap_svc.check_cap_or_raise(cap_workspace)
+            return cap_svc, cap_workspace
 
         has_byok = await self.has_byok_key(workspace_id, context_id=context_id)
         # No BYOK + env fallback forbidden → the call errors in ``_get_client``
