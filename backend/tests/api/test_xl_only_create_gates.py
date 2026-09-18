@@ -157,6 +157,71 @@ class TestResourceTokenQuotaUpdateKeepsServing:
 
 
 # ---------------------------------------------------------------------------
+# POST /contexts — is_private=False ("shared", stays on L)
+# ---------------------------------------------------------------------------
+
+
+class TestContextCreateShared:
+    """#1561: the REST shared gate is ``has_feature(plan, "shared_contexts")``
+    and refuses with ``FeatureNotAvailableError.for_feature`` — FEAT-001 (403),
+    tier name from the registry — instead of the old fixed "Pro plan" text."""
+
+    async def _post(self, plan_name: str | None):
+        from api.routes.contexts import ContextCreate, create_context
+
+        created = SimpleNamespace(
+            id=uuid.uuid4(),
+            name="ctx",
+            display_name=None,
+            description=None,
+            summary=None,
+            usage_guide=None,
+            is_default=False,
+            is_private=False,
+            sleep_mode="skip",
+            created_by="owner-1",
+            created_at=datetime(2026, 1, 1, tzinfo=UTC),
+            updated_at=datetime(2026, 1, 1, tzinfo=UTC),
+        )
+        service = MagicMock()
+        service.create_context = AsyncMock(return_value=created)
+        # 1) workspace (plan) lookup, 2) search-config lookup for the response
+        service.db.execute = AsyncMock(
+            side_effect=[_result(one=SimpleNamespace(plan_name=plan_name)), _result(one=None)]
+        )
+
+        with patch(
+            "services.quota_service.QuotaService.check_context_creation_allowed",
+            new=AsyncMock(return_value=(True, None)),
+        ):
+            response = await create_context(
+                ContextCreate(name="ctx", is_private=False),
+                {"user_id": "owner-1", "sub": "owner-1", "current_workspace_id": _WS},
+                service,
+            )
+        return response, service
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("plan_name", ["free", "basic"])
+    async def test_refused_below_l(self, plan_name: str) -> None:
+        from config.plan_tiers import get_plan_tier
+
+        with pytest.raises(FeatureNotAvailableError) as exc_info:
+            await self._post(plan_name)
+
+        assert exc_info.value.status_code == 403
+        assert exc_info.value.details["feature"] == "shared_contexts"
+        assert f"Upgrade to {get_plan_tier('pro').display_name} plan" in exc_info.value.message
+        assert "Pro plan" not in exc_info.value.message
+
+    @pytest.mark.asyncio
+    async def test_allowed_on_l(self) -> None:
+        response, service = await self._post("pro")
+        assert response.is_private is False
+        assert service.create_context.await_args.kwargs["is_private"] is False
+
+
+# ---------------------------------------------------------------------------
 # PUT /contexts/{id} — is_public=True ("set_public")
 # ---------------------------------------------------------------------------
 
@@ -237,6 +302,22 @@ class TestContextSetPublic:
         still satisfied by L — the public re-map does not drag it along."""
         service, _ = await self._put("pro", self._existing(is_public=False), is_private=False)
         service.update_context.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("plan_name", ["free", "basic"])
+    async def test_shared_refused_below_l(self, plan_name: str) -> None:
+        """#1561: the update gate now answers FEAT-001 (403) with the registry
+        tier name — it used to be a 400 (route-translated ``ValidationError``)
+        with fixed "Pro plan" text."""
+        from config.plan_tiers import get_plan_tier
+
+        with pytest.raises(FeatureNotAvailableError) as exc_info:
+            await self._put(plan_name, self._existing(is_public=False), is_private=False)
+
+        assert exc_info.value.status_code == 403
+        assert exc_info.value.details["feature"] == "shared_contexts"
+        assert f"Upgrade to {get_plan_tier('pro').display_name} plan" in exc_info.value.message
+        assert "Pro plan" not in exc_info.value.message
 
 
 # ---------------------------------------------------------------------------

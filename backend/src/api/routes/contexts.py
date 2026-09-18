@@ -946,7 +946,8 @@ async def update_context(
             # SECURITY: Check plan allows shared contexts
             # Issue #271 Code Review H-1: Use plan_tiers instead of hardcoded plan names
             # #1561: same feature gate + FEAT-001 refusal as the create path
-            # (was a 422 ValidationError with fixed "Pro plan" text).
+            # (was a 400 — route-translated ValidationError — with fixed
+            # "Pro plan" text).
             if not request.is_private and existing_context:
                 from config.plan_tiers import has_feature
                 from models.auth import Workspace
