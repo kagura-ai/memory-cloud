@@ -167,7 +167,8 @@ def sync_products():
 
 - Each token has a `quota_events_per_hour` limit
 - **Creating** a resource token (or a resource via `setup_resource`) requires a plan with the `resources` feature — XL (`promax`) by default (#1551). Lower plans cannot mint new tokens.
-- The per-plan active-token caps are **serve-only** limits for tokens a workspace already holds — existing tokens stay valid, listed and editable after a downgrade; nothing is revoked: Free 0, Basic 3, Pro 30, XL 150. For plans with the feature the cap is the second gate at creation time.
+- The per-plan active-token caps are **serve-only** limits for tokens a workspace already holds — existing tokens stay valid, listed and editable (description, active flag) after a downgrade; nothing is revoked: Free 0, Basic 3, Pro 30, XL 150. For plans with the feature the cap is the second gate at creation time.
+- A `quota_events_per_hour` change is checked against the **current** tier's aggregate ceiling (cap × 10,000 events/hour across the workspace's active tokens), so on Free (cap 0) any positive quota edit is refused (400) and on Basic the sum must fit 30,000 — the token itself keeps serving at its stored quota.
 
 ## Resource Tokens vs API Keys
 

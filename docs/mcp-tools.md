@@ -111,7 +111,7 @@ Analysis runs are capped by `ANALYSIS_MAX_MEMORY_COUNT` (default 10,000; preview
 | `get_resource_impact` | Resource stats (tokens, memories, schema version) | Viewer+ |
 | `get_resource_schema` | Field definitions for a resource | Viewer+ |
 
-The `resources` / `connectors` feature gates (#1551) apply to **new creation only**: resources, resource tokens and connectors that already exist on a lower plan keep working — they stay listed, served, editable and ingestible. The per-plan token / connector caps bound only what a lower plan already holds; for plans with the feature they are the second gate at creation time.
+The `resources` / `connectors` feature gates (#1551) apply to **new creation only**: resources, resource tokens and connectors that already exist on a lower plan keep working — they stay listed, served, editable and ingestible (a resource token's `quota_events_per_hour` change is still bounded by the current tier's aggregate ceiling — see the resource-tokens guide). The per-plan token / connector caps bound only what a lower plan already holds; for plans with the feature they are the second gate at creation time.
 
 ## Secrets (5)
 
