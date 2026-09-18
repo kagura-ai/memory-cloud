@@ -128,28 +128,7 @@ const TIERS = [
     connectors: true,
     public_contexts: true,
   },
-  {
-    // #1548: XL — every pro capability, higher limits. Values mirror the
-    // backend PLAN_PROMAX registry (config/plan_tiers.py).
-    name: "promax",
-    display_name: "XL",
-    max_contexts: 1000,
-    max_members: 50,
-    memory_limit: 100000,
-    storage_limit_bytes: 50 * 1024 ** 3,
-    mcp_calls_per_day: 250000,
-    rest_calls_per_day: 25000,
-    public_calls_per_day: 5000,
-    max_resource_tokens: 150,
-    max_connectors: 50,
-    analysis_runs_per_day: 15,
-    sleep_enabled_contexts_limit: 15,
-    reranking: true,
-    managed_embeddings: true,
-    secret_store: true,
-    shared_contexts: true,
-    team_invitations: true,
-  },
+
 ];
 
 beforeEach(() => {
