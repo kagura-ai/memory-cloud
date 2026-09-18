@@ -42,6 +42,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from config.constants import EMBEDDING_MODEL_REGISTRY
 from config.embedding_policy import is_embedding_model_allowed
+from config.settings import get_settings
 from db.qdrant import (
     add_memory_to_qdrant,
     delete_context_points,
@@ -54,6 +55,7 @@ from db.qdrant import (
 from models.auth import Context
 from models.config import ContextSearchConfig
 from models.memory import Memory
+from repositories.config_repository import search_config_defaults
 from services.context_routing import resolve_context_embedding
 from services.embedding_service import EmbeddingService
 from services.memory_service import build_memory_point
@@ -406,8 +408,14 @@ async def switch_context_embedding(
     if config is None:
         # Legacy context that never materialised a config row: creating it
         # here is what moves it off the hardcoded fallback in context_routing.
+        # The reranker columns take the #1572 deployment default, exactly as
+        # the lazy create_or_get() on the recall path would — the row must not
+        # depend on which path happened to materialise it first.
         config = ContextSearchConfig(
-            context_id=context_id, embedding_model=model, embedding_dimensions=dimensions
+            context_id=context_id,
+            embedding_model=model,
+            embedding_dimensions=dimensions,
+            **search_config_defaults(get_settings()),
         )
         db.add(config)
     else:

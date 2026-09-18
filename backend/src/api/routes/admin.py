@@ -1723,6 +1723,8 @@ async def recover_context(
             # recovery pins the non-ranking-modifying value rather than the
             # new-context default (recall ordering must not change as a side
             # effect of disaster recovery). Re-enable via update_search_config.
+            # The reranker columns follow the same rule: ORM defaults (off),
+            # deliberately not the #1572 deployment default.
             reinforce_enabled=False,
         )
         db.add(new_config)

@@ -50,9 +50,11 @@ describe("useSystemFeatures (#1145)", () => {
     const Harness = await setup(getSystemInfo);
 
     render(<Harness />);
-    // Error → {} so every gated feature reads as disabled.
-    await waitFor(() =>
-      expect(screen.getByTestId("out").textContent).toBe("loaded:{}"),
+    // Error → {} so every gated feature reads as disabled. The hook retries
+    // twice (500 ms + 1000 ms) before failing closed, so wait past that.
+    await waitFor(
+      () => expect(screen.getByTestId("out").textContent).toBe("loaded:{}"),
+      { timeout: 3000 },
     );
   });
 });

@@ -2868,7 +2868,14 @@ class MemoryService:
                 "ranking_policy": {
                     "name": "production_hybrid_recall_v1",
                     "search_mode": request.search_mode,
-                    "use_rerank": request.use_rerank,
+                    # #1572: an omitted use_rerank (None) follows the context
+                    # config, as SearchService.hybrid_search resolves it — the
+                    # evidence records the applied policy, never "unspecified".
+                    "use_rerank": (
+                        request.use_rerank
+                        if request.use_rerank is not None
+                        else bool(getattr(effective_search_config, "use_rerank", False))
+                    ),
                     "reinforce_enabled": bool(
                         getattr(effective_search_config, "reinforce_enabled", False)
                     ),

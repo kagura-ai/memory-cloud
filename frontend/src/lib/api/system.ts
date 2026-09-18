@@ -105,13 +105,26 @@ export async function getHealth(): Promise<HealthResponse> {
   return await apiClient.get<HealthResponse>("/health");
 }
 
+/**
+ * #1572: the reranker values new contexts are created with (the deployment
+ * default — `DEFAULT_USE_RERANK` / `DEFAULT_RERANKER_PROVIDER` /
+ * `DEFAULT_RERANKER_MODEL`). Names only; never URLs or keys.
+ */
+export interface SearchDefaults {
+  use_rerank: boolean;
+  reranker_provider: string;
+  reranker_model: string;
+}
+
 export interface SystemInfo {
   name: string;
   version: string;
   description: string;
   environment: string;
-  /** Backend feature flags (e.g. `plan_page`, `neural_memory`). */
+  /** Backend feature flags (e.g. `plan_page`, `neural_memory`, `reranking`). */
   features: Record<string, boolean>;
+  /** Absent on backends older than #1572. */
+  search_defaults?: SearchDefaults;
 }
 
 /**

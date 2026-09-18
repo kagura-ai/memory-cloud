@@ -168,9 +168,9 @@ async def reset_context_search_config(
     - semantic_weight: 0.6
     - bm25_weight: 0.4
     - fetch_factor: 3
-    - use_rerank: false
-    - reranker_provider: 'voyage'
-    - reranker_model: 'rerank-2'
+    - use_rerank / reranker_provider / reranker_model: the deployment default
+      (DEFAULT_USE_RERANK / DEFAULT_RERANKER_PROVIDER / DEFAULT_RERANKER_MODEL,
+      #1572; unset: false / 'voyage' / 'rerank-2')
 
     Args:
         context_id: Context UUID

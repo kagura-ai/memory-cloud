@@ -7,9 +7,38 @@ exposed and defaults OFF (OSS / self-hosted posture).
 
 from __future__ import annotations
 
+import pytest
 from fastapi.testclient import TestClient
 
 from api.main import app
+from config.settings import Settings
+
+_RERANK_ENV = [
+    "ENABLE_RERANKING",
+    "RERANK_BASE_URL",
+    "RERANK_MODEL",
+    "SELF_HOSTED_BASE_URL",
+    "DEFAULT_RERANKER_PROVIDER",
+    "DEFAULT_USE_RERANK",
+    "DEFAULT_RERANKER_MODEL",
+]
+
+
+@pytest.fixture
+def info_with(monkeypatch):
+    """GET /system/info under a fresh Settings built from ``overrides`` only
+    (env keys that would leak into the fields are removed first)."""
+    for key in _RERANK_ENV:
+        monkeypatch.delenv(key, raising=False)
+
+    def _get(**overrides):
+        settings = Settings(_env_file=None, **overrides)
+        monkeypatch.setattr("config.settings.get_settings", lambda: settings)
+        resp = TestClient(app).get("/api/v1/system/info")
+        assert resp.status_code == 200
+        return resp
+
+    return _get
 
 
 def test_system_info_exposes_plan_page_flag_default_off() -> None:
@@ -34,3 +63,52 @@ def test_system_info_exposes_managed_connectors_flag_default_off() -> None:
         "managed_connectors flag must be exposed for the web UI"
     )
     assert features["managed_connectors"] is False, "ENABLE_MANAGED_CONNECTORS must default OFF"
+
+
+# ---------------------------------------------------------------------------
+# #1572: features.reranking + search_defaults
+# ---------------------------------------------------------------------------
+
+
+def test_system_info_reranking_on_and_todays_defaults_when_unset(info_with) -> None:
+    """ENABLE_RERANKING defaults ON and the voyage default may have a BYOK key
+    per workspace, so the feature reads available; search_defaults is the
+    deployment default new contexts get (today's values when unset)."""
+    body = info_with().json()
+    assert body["features"]["reranking"] is True
+    assert body["search_defaults"] == {
+        "use_rerank": False,
+        "reranker_provider": "voyage",
+        "reranker_model": "rerank-2",
+    }
+
+
+def test_system_info_reranking_false_when_disabled_by_deployment(info_with) -> None:
+    body = info_with(enable_reranking=False).json()
+    assert body["features"]["reranking"] is False
+
+
+def test_system_info_self_hosted_default_without_endpoint_is_not_available(info_with) -> None:
+    """A self_hosted default that is OFF boots fine but has nowhere to rerank —
+    the web UI must not present reranking as available."""
+    body = info_with(default_reranker_provider="self_hosted").json()
+    assert body["features"]["reranking"] is False
+    assert body["search_defaults"]["reranker_provider"] == "self_hosted"
+
+
+def test_system_info_self_hosted_default_with_endpoint_exposes_model_not_url(info_with) -> None:
+    resp = info_with(
+        rerank_base_url="http://gpu-rig.internal:8002",
+        rerank_model="qwen3-reranker-4b",
+        default_reranker_provider="self_hosted",
+        default_use_rerank=True,
+    )
+    body = resp.json()
+    assert body["features"]["reranking"] is True
+    assert body["search_defaults"] == {
+        "use_rerank": True,
+        "reranker_provider": "self_hosted",
+        "reranker_model": "qwen3-reranker-4b",
+    }
+    # Public endpoint: provider/model names only, never the internal URL.
+    assert "gpu-rig.internal" not in resp.text

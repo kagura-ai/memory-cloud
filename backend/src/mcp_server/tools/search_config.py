@@ -35,9 +35,14 @@ async def handle_update_search_config(
         try:
             from uuid import UUID as _UUID
 
+            from config.settings import get_settings
             from models.schemas import ContextSearchConfigUpdate
-            from repositories.config_repository import ContextSearchConfigRepository
+            from repositories.config_repository import (
+                ContextSearchConfigRepository,
+                search_config_defaults,
+            )
             from services.permission_service import PermissionService
+            from services.reranker_service import default_reranker_model_for
 
             # Parse context_id
             try:
@@ -64,16 +69,24 @@ async def handle_update_search_config(
                     f"No search config for context {args['context_id']}",
                 )
 
-            # Build update with current values as defaults
+            # Build update with current values as defaults. A row with a NULL
+            # provider/model falls back to the deployment default (#1572), the
+            # model derived for whichever provider is in effect.
+            settings = get_settings()
+            defaults = search_config_defaults(settings)
+            provider = args.get(
+                "reranker_provider", config.reranker_provider or defaults["reranker_provider"]
+            )
             update_fields = {
                 "semantic_weight": args.get("semantic_weight", float(config.semantic_weight)),
                 "bm25_weight": args.get("bm25_weight", float(config.bm25_weight)),
                 "fetch_factor": args.get("fetch_factor", config.fetch_factor),
                 "use_rerank": args.get("use_rerank", config.use_rerank),
-                "reranker_provider": args.get(
-                    "reranker_provider", config.reranker_provider or "voyage"
+                "reranker_provider": provider,
+                "reranker_model": args.get(
+                    "reranker_model",
+                    config.reranker_model or default_reranker_model_for(provider, settings),
                 ),
-                "reranker_model": args.get("reranker_model", config.reranker_model or "rerank-2"),
                 # Issue #1048: reinforce re-rank knobs (round-trip current values).
                 "reinforce_enabled": args.get("reinforce_enabled", config.reinforce_enabled),
                 "reinforce_max_boost": args.get(

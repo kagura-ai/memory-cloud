@@ -114,14 +114,27 @@ async def system_info():
         }
     """
     from config.settings import get_settings
+    from repositories.config_repository import search_config_defaults
 
     settings = get_settings()
+
+    # #1572: reranking is available when the deployment toggle is on AND the
+    # default provider can run at all — voyage/cohere may have a BYOK key per
+    # workspace (unknowable here), self_hosted needs an endpoint. Same
+    # model_fields_set idiom as the telemetry probe below.
+    rerank_configured = settings.default_reranker_provider != "self_hosted" or (
+        bool(settings.rerank_base_url) or "self_hosted_base_url" in settings.model_fields_set
+    )
 
     return {
         "name": "Kagura Memory Cloud",
         "version": APP_VERSION,
         "description": "Remote MCP Server + Web Management",
         "environment": settings.environment,
+        # #1572: the reranker values new contexts are created with, so the web
+        # UI renders the real deployment default instead of baked copy.
+        # Provider/model names only — never URLs or keys (public endpoint).
+        "search_defaults": search_config_defaults(settings),
         "features": {
             "neural_memory": settings.enable_neural_memory,
             "research_tools": settings.enable_research_tools,
@@ -140,6 +153,9 @@ async def system_info():
             # availability is exposed here — never the reward amounts, which
             # would tell a farmer exactly what a fresh account is worth.
             "referrals": settings.enable_referrals,
+            # Issue #1572: false when ENABLE_RERANKING is off or the self_hosted
+            # default has no endpoint; the web UI then disables the reranker card.
+            "reranking": settings.enable_reranking and rerank_configured,
         },
     }
 
