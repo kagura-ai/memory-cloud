@@ -10,7 +10,9 @@
  * ``analyses.modal.tags*`` i18n keys reserved for that UI.
  * Runs ``previewAnalysis`` whenever the form changes (debounced) so the
  * preflight strip shows live ``estimated_cost_cents`` and
- * ``memory_count``.
+ * ``memory_count``. The estimate cell exists only when ``showCost``
+ * (Issue #1571: the parent passes ``features.cost_display``; the backend
+ * nulls the estimate on such a deployment anyway).
  *
  * Submit posts ``startAnalysis`` and on 202 calls ``onStarted(run_id)``
  * so the parent can pivot into "watching the active run" mode.
@@ -60,6 +62,8 @@ interface NewAnalysisModalProps {
   contextName: string;
   onClose: () => void;
   onStarted: (runId: string) => void;
+  // Issue #1571: render the estimated-cost cell only when the deployment shows money.
+  showCost: boolean;
 }
 
 const DEFAULT_TYPES = [
@@ -91,6 +95,7 @@ export function NewAnalysisModal({
   contextName,
   onClose,
   onStarted,
+  showCost,
 }: NewAnalysisModalProps) {
   const t = useTranslations("analyses.modal");
   // ``actions.cancel`` lives one namespace up; a separate hook reaches it
@@ -285,7 +290,9 @@ export function NewAnalysisModal({
 
         <div className="rounded-md border border-gray-200 bg-gray-50 px-4 py-3 text-sm dark:border-gray-700 dark:bg-gray-800/50">
           <div className="flex items-center justify-between gap-4">
-            <div>
+            {/* The memories cell takes the freed width when the cost cell is
+                hidden (#1571) so the strip is not lopsided. */}
+            <div className={showCost ? undefined : "flex-1"}>
               <div className="text-xs text-gray-500 dark:text-gray-400">
                 {t("preflight.memoriesCount")}
               </div>
@@ -295,16 +302,18 @@ export function NewAnalysisModal({
                   : previewMemoryCount.toLocaleString()}
               </div>
             </div>
-            <div>
-              <div className="text-xs text-gray-500 dark:text-gray-400">
-                {t("preflight.estimatedCost")}
+            {showCost && (
+              <div>
+                <div className="text-xs text-gray-500 dark:text-gray-400">
+                  {t("preflight.estimatedCost")}
+                </div>
+                <div className="font-semibold text-emerald-700 dark:text-emerald-400">
+                  {previewLoading
+                    ? t("preflight.loading")
+                    : formatCostCents(previewCostCents)}
+                </div>
               </div>
-              <div className="font-semibold text-emerald-700 dark:text-emerald-400">
-                {previewLoading
-                  ? t("preflight.loading")
-                  : formatCostCents(previewCostCents)}
-              </div>
-            </div>
+            )}
             <CheckCircle2 className="h-5 w-5 shrink-0 text-emerald-600 dark:text-emerald-400" />
           </div>
           {previewError && (

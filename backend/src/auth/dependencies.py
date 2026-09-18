@@ -634,6 +634,28 @@ async def require_byok_enabled() -> None:
 
 
 # ============================================================================
+# Cost display feature gate (Issue #1571)
+# ============================================================================
+
+
+async def require_cost_display_enabled() -> None:
+    """Reject with 404 when the deployment hides money from workspace users (#1571).
+
+    Mirrors :func:`require_byok_enabled` — parameterless, listed before the
+    auth/role dependencies, uniform 404 for every caller. Only the workspace
+    cost dashboard route carries it; ``/admin/cost-aggregation`` stays
+    reachable for system admins regardless of the flag.
+
+    Raises:
+        HTTPException: 404 when ``ENABLE_COST_DISPLAY`` is false.
+    """
+    from config.settings import get_settings
+
+    if not get_settings().enable_cost_display:
+        raise HTTPException(status_code=404, detail="Not Found")
+
+
+# ============================================================================
 # Workspace Owner (API Key + Session)
 # ============================================================================
 

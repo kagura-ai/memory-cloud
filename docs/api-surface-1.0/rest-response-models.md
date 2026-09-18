@@ -297,7 +297,7 @@ Notes:
 > Cost-estimate output (Stage [A] from preview.py).
 - `memory_count: int` — required
 - `cluster_count_estimate: int` — required
-- `estimated_cost_cents: int | None` — required (#1570: `null` when no price is configured for the model — estimate unavailable, not zero)
+- `estimated_cost_cents: int | None` — required (#1570: `null` when no price is configured for the model — estimate unavailable, not zero; #1571: also `null` when the deployment disables cost display, `ENABLE_COST_DISPLAY=false`)
 - `model_id: str` — required
 - `breakdown: dict[str, int]` — required
 
@@ -317,8 +317,8 @@ Notes:
 - `started_at: datetime` — required
 - `finished_at: datetime | None` — required
 - `input_count: int` — required
-- `cost_estimated_cents: int | None` — required
-- `cost_actual_cents: int | None` — required
+- `cost_estimated_cents: int | None` — required (`null` when the run is unpriced or the deployment disables cost display — #1571 `ENABLE_COST_DISPLAY=false`; the key is always present)
+- `cost_actual_cents: int | None` — required (same `null` conditions as `cost_estimated_cents`)
 - `error: str | None` — required
 - `cancellation_reason: str | None` — required
 

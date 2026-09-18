@@ -94,6 +94,33 @@ NEXT_PUBLIC_APP_URL=https://your-domain.com
 # NEXT_PUBLIC_PLAN_PROMAX_DISPLAY_NAME=Premium Max
 ```
 
+## Hosted-mode UI gates (Issue #1571)
+
+The web UI reads `GET /api/v1/system/info` → `features.*` at runtime, so a
+deployment hides a surface with a backend env var, not a frontend rebuild.
+The three toggles that shape a hosted deployment:
+
+| Variable | Default | When `false` |
+|----------|---------|--------------|
+| `ENABLE_COST_DISPLAY` | `true` | Hides money from workspace users. The workspace cost dashboard disappears (`/workspace/cost` nav entry hidden, the page shows a "not enabled" notice, `GET /workspaces/{id}/cost-aggregation` answers 404). The Memory Analysis "Run cost" KPI, history "Cost" column and pre-flight "Estimated cost" are not rendered, and the analysis payloads carry no cost: REST `cost_estimated_cents` / `cost_actual_cents` / `estimated_cost_cents` are `null` (shape kept), the MCP `get_analysis` / `list_analyses` / `get_active_analysis` / `analyze_context` dry-run dicts omit the keys. `GET /admin/cost-aggregation` and the `/admin/cost` page are **unaffected** — operators still see what the platform spends. |
+| `ENABLE_BYOK` (#1167) | `true` | Closes the external-keys console and the key-status probe; also hides the workspace cost dashboard. Both `ENABLE_BYOK` and `ENABLE_COST_DISPLAY` must be `true` for that dashboard to show. |
+| `ENABLE_PLAN_PAGE` (#1145) | `false` | Keeps the owner Plan page + nav entry hidden (no billing to hand off to on a self-hosted deployment). |
+
+A flat-price hosted deployment typically runs `ENABLE_COST_DISPLAY=false`
+(the platform-billed USD is the operator's own cost) with `ENABLE_PLAN_PAGE=true`.
+OSS / self-hosted keeps the defaults and sees today's UI.
+
+**Resources / Connectors navigation** needs no env var. Since #1551 creating
+them is XL-only (`resources` / `connectors` in the plan-tier matrix, see
+[Plan Tiers](#plan-tiers)); the sidebar shows an entry when the plan includes
+the feature **or** the workspace already owns at least one such object
+(objects created before a downgrade keep working). For a plan without the
+feature the sidebar asks the list endpoint once per session (owner for
+resources, admin+ for connectors — the roles the entries already require);
+the entry stays hidden while either answer is pending, so a lower tier never
+sees a flash-then-hide. The pages themselves stay reachable by URL and carry
+the upsell state for new objects.
+
 ## Tag Co-Occurrence Cold-Start Seeding (Issue #223)
 
 Migration `b05_223_tag_cooccurrence` adds the schema; seeding fires

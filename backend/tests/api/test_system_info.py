@@ -65,6 +65,14 @@ def test_system_info_exposes_managed_connectors_flag_default_off() -> None:
     assert features["managed_connectors"] is False, "ENABLE_MANAGED_CONNECTORS must default OFF"
 
 
+def test_system_info_exposes_cost_display_flag_default_on() -> None:
+    """#1571: the web UI renders money (cost page + nav, analysis KPI / column /
+    estimate) only when features.cost_display is true. Default ON (OSS)."""
+    features = TestClient(app).get("/api/v1/system/info").json()["features"]
+    assert "cost_display" in features, "cost_display flag must be exposed for the web UI"
+    assert features["cost_display"] is True, "ENABLE_COST_DISPLAY must default ON"
+
+
 # ---------------------------------------------------------------------------
 # #1572: features.reranking + search_defaults
 # ---------------------------------------------------------------------------

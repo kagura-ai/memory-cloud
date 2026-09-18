@@ -1917,7 +1917,7 @@ merges_unreversible (#1450) counts shadow merges this run did NOT reverse becaus
                 "Example:\n"
                 '  analyze_context(context_id="...", dry_run=True)  # cost preview\n'
                 '  analyze_context(context_id="...")                # 202 + run_id'
-                "\n\nReturns (dry_run preview): {status, dry_run, memory_count, cluster_count_estimate, estimated_cost_cents, model_id, breakdown: {input_tokens, output_tokens, calls}}. estimated_cost_cents is null when no price is configured for the model (estimate unavailable, not zero). dry_run=true is preview-only; call with dry_run=false to start the run, then poll get_analysis(run_id) until finished_at is set."
+                "\n\nReturns (dry_run preview): {status, dry_run, memory_count, cluster_count_estimate, estimated_cost_cents, model_id, breakdown: {input_tokens, output_tokens, calls}}. estimated_cost_cents is null when no price is configured for the model (estimate unavailable, not zero) and absent when the deployment disables cost display. dry_run=true is preview-only; call with dry_run=false to start the run, then poll get_analysis(run_id) until finished_at is set."
             ),
             "inputSchema": {
                 "type": "object",
@@ -1978,7 +1978,7 @@ merges_unreversible (#1450) counts shadow merges this run did NOT reverse becaus
                 '  get_analysis(run_id="...")\n'
                 "  → {run_id, status, started_at, finished_at, "
                 "cost_estimated_cents, cost_actual_cents, ...}"
-                "\n\nReturns: {status, run_id, workspace_id, context_id, triggered_by, started_at, finished_at, input_count, cost_estimated_cents, cost_actual_cents, error, cancellation_reason}. Poll with run_id until finished_at is set."
+                "\n\nReturns: {status, run_id, workspace_id, context_id, triggered_by, started_at, finished_at, input_count, cost_estimated_cents, cost_actual_cents, error, cancellation_reason}. The cost_* keys are absent when the deployment disables cost display. Poll with run_id until finished_at is set."
             ),
             "inputSchema": {
                 "type": "object",
@@ -2003,7 +2003,7 @@ merges_unreversible (#1450) counts shadow merges this run did NOT reverse becaus
                 "Example:\n"
                 '  list_analyses(context_id="...", limit=20)\n'
                 '  → {items: [...], next_cursor: "2026-04-30T12:34:56"}'
-                "\n\nReturns: {status, items: [{run_id, workspace_id, context_id, status, triggered_by, started_at, finished_at, input_count, cost_estimated_cents, cost_actual_cents, error, cancellation_reason}], next_cursor}. Paginate by passing next_cursor as cursor until it is null."
+                "\n\nReturns: {status, items: [{run_id, workspace_id, context_id, status, triggered_by, started_at, finished_at, input_count, cost_estimated_cents, cost_actual_cents, error, cancellation_reason}], next_cursor}. The cost_* keys are absent when the deployment disables cost display. Paginate by passing next_cursor as cursor until it is null."
             ),
             "inputSchema": {
                 "type": "object",
@@ -2035,7 +2035,7 @@ merges_unreversible (#1450) counts shadow merges this run did NOT reverse becaus
                 "Example:\n"
                 '  get_active_analysis(context_id="...")\n'
                 '  → {run_id, status: "succeeded", finished_at, ...}'
-                "\n\nReturns: {status, run_id, workspace_id, context_id, triggered_by, started_at, finished_at, input_count, cost_estimated_cents, cost_actual_cents, error, cancellation_reason}. Returns the most recent succeeded run for the context."
+                "\n\nReturns: {status, run_id, workspace_id, context_id, triggered_by, started_at, finished_at, input_count, cost_estimated_cents, cost_actual_cents, error, cancellation_reason}. The cost_* keys are absent when the deployment disables cost display. Returns the most recent succeeded run for the context."
             ),
             "inputSchema": {
                 "type": "object",

@@ -1,4 +1,4 @@
-import { render, screen, within, act } from "@testing-library/react";
+import { render, screen, within, act, waitFor } from "@testing-library/react";
 import { describe, it, expect, vi, beforeEach } from "vitest";
 
 // Hoisted so the vi.mock factory below can reference it (vi.mock is hoisted).
@@ -41,7 +41,7 @@ const mockUser = {
   name: "Test User",
   email: "test@example.com",
   picture: "",
-  role: "user" as const,
+  role: "user" as "user" | "admin",
 };
 
 vi.mock("@/contexts/AuthContext", () => ({
@@ -52,16 +52,41 @@ vi.mock("@/contexts/AuthContext", () => ({
   }),
 }));
 
+// #1571: the existing-objects probe is module-cached per workspace id, so the
+// plan-gate tests below give each case its own id instead of sharing "w1".
+let mockWorkspaceId = "w1";
 vi.mock("@/contexts/WorkspaceContext", () => ({
   useWorkspace: () => ({
     currentWorkspace: {
-      id: "w1",
+      id: mockWorkspaceId,
       name: "Test WS",
       current_user_role: "owner",
       member_count: 1,
     },
-    currentWorkspaceId: "w1",
+    currentWorkspaceId: mockWorkspaceId,
   }),
+}));
+
+// #1571: resources / connectors are plan-gated with an existing-objects
+// fallback probed through the list APIs. Default: every plan feature included
+// (today's UI for an XL workspace); flip per test.
+let mockPlanFeatures: Record<string, boolean> | null = {
+  resources: true,
+  connectors: true,
+  public_contexts: true,
+};
+vi.mock("@/hooks/usePlanFeatures", () => ({
+  usePlanFeatures: () => mockPlanFeatures,
+}));
+const mockListResources = vi.hoisted(() =>
+  vi.fn().mockResolvedValue({ resources: [], total: 0 }),
+);
+const mockListConnectors = vi.hoisted(() => vi.fn().mockResolvedValue([]));
+vi.mock("@/lib/api/resources", () => ({
+  listResources: (...args: unknown[]) => mockListResources(...args),
+}));
+vi.mock("@/lib/api/workspace-connectors", () => ({
+  listConnectors: (...args: unknown[]) => mockListConnectors(...args),
 }));
 
 vi.mock("@/lib/api/contexts", () => ({
@@ -93,9 +118,11 @@ vi.mock("@/components/icons/KaguraLogo", () => ({
 // #1145: feature flags gate certain nav items (e.g. Plan). Mock the hook so the
 // suite doesn't hit the network; default to plan_page enabled, flip per-test.
 // #1167: byok gates the externalKeys + workspace cost entries; default on.
+// #1571: cost_display gates the workspace cost entry too; default on.
 let mockFeatures: Record<string, boolean> | null = {
   plan_page: true,
   byok: true,
+  cost_display: true,
 };
 vi.mock("@/hooks/useSystemFeatures", () => ({
   useSystemFeatures: () => mockFeatures,
@@ -107,7 +134,14 @@ import { Sidebar } from "./Sidebar";
 describe("Sidebar", () => {
   beforeEach(() => {
     vi.clearAllMocks();
-    mockFeatures = { plan_page: true, byok: true };
+    mockFeatures = { plan_page: true, byok: true, cost_display: true };
+    mockPlanFeatures = {
+      resources: true,
+      connectors: true,
+      public_contexts: true,
+    };
+    mockWorkspaceId = "w1";
+    mockUser.role = "user";
   });
 
   it("renders the Kagura logo at the top, linked to dashboard", () => {
@@ -166,6 +200,28 @@ describe("Sidebar", () => {
     render(<Sidebar />);
     expect(screen.queryByRole("link", { name: "externalKeys" })).toBeNull();
     expect(screen.queryByRole("link", { name: "cost" })).toBeNull();
+  });
+
+  it("hides the workspace cost link when cost_display is off; externalKeys stays (#1571)", () => {
+    mockFeatures = { plan_page: true, byok: true, cost_display: false };
+    render(<Sidebar />);
+    expect(screen.queryByRole("link", { name: "cost" })).toBeNull();
+    expect(screen.getByRole("link", { name: "externalKeys" })).toHaveAttribute(
+      "href",
+      "/workspace/integrations/external-keys",
+    );
+  });
+
+  it("keeps the admin /admin/cost link for a system admin when cost_display is off (#1571)", () => {
+    // Operators still need to see what the platform spends; only the
+    // workspace-facing entry is money the deployment hides.
+    mockUser.role = "admin";
+    mockFeatures = { plan_page: true, byok: true, cost_display: false };
+    render(<Sidebar />);
+    const costLinks = screen.getAllByRole("link", { name: "cost" });
+    expect(costLinks.map((a) => a.getAttribute("href"))).toEqual([
+      "/admin/cost",
+    ]);
   });
 
   it("skips the owner external-keys warning fetch when byok is off (#1167)", () => {
@@ -230,6 +286,79 @@ describe("Sidebar", () => {
   });
 });
 
+describe("plan-gated Resources / Connectors nav (#1571)", () => {
+  /**
+   * Rule (Sidebar nav filter): show the entry when the plan includes the
+   * feature OR the workspace already owns such objects; hide while either
+   * answer is pending. The existing-objects probe fires only when the plan
+   * says no — an included plan never pays the list request.
+   */
+  const noPlanFeatures = {
+    resources: false,
+    connectors: false,
+    public_contexts: false,
+  };
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    mockFeatures = { plan_page: true, byok: true, cost_display: true };
+    mockUser.role = "user";
+  });
+
+  it("hides both for a plan without them and no existing objects", async () => {
+    mockWorkspaceId = "w-starter-empty";
+    mockPlanFeatures = noPlanFeatures;
+    render(<Sidebar />);
+    await waitFor(() => {
+      expect(mockListResources).toHaveBeenCalledTimes(1);
+      expect(mockListConnectors).toHaveBeenCalledTimes(1);
+    });
+    expect(screen.queryByRole("link", { name: "resources" })).toBeNull();
+    expect(screen.queryByRole("link", { name: "connectors" })).toBeNull();
+  });
+
+  it("keeps the connectors entry when the workspace already has a connector", async () => {
+    mockWorkspaceId = "w-starter-with-connector";
+    mockPlanFeatures = noPlanFeatures;
+    mockListConnectors.mockResolvedValueOnce([{ id: "conn-1" }]);
+    render(<Sidebar />);
+    expect(
+      await screen.findByRole("link", { name: "connectors" }),
+    ).toHaveAttribute("href", "/workspace/integrations/connectors");
+    expect(screen.queryByRole("link", { name: "resources" })).toBeNull();
+  });
+
+  it("shows both without probing when the plan includes them", () => {
+    mockWorkspaceId = "w-xl";
+    mockPlanFeatures = {
+      resources: true,
+      connectors: true,
+      public_contexts: true,
+    };
+    render(<Sidebar />);
+    expect(screen.getByRole("link", { name: "resources" })).toHaveAttribute(
+      "href",
+      "/workspace/resources",
+    );
+    expect(screen.getByRole("link", { name: "connectors" })).toHaveAttribute(
+      "href",
+      "/workspace/integrations/connectors",
+    );
+    expect(mockListResources).not.toHaveBeenCalled();
+    expect(mockListConnectors).not.toHaveBeenCalled();
+  });
+
+  it("hides both and does not probe while the plan is still resolving", () => {
+    mockWorkspaceId = "w-pending";
+    mockPlanFeatures = null;
+    render(<Sidebar />);
+    expect(screen.queryByRole("link", { name: "resources" })).toBeNull();
+    expect(screen.queryByRole("link", { name: "connectors" })).toBeNull();
+    expect(mockListResources).not.toHaveBeenCalled();
+    expect(mockListConnectors).not.toHaveBeenCalled();
+  });
+});
+
 describe("the sidebar subtree survives a state change (#1488 Phase 4)", () => {
   /**
    * Regression guard for a defect that made the Phase 3 account switcher
@@ -268,5 +397,4 @@ describe("the sidebar subtree survives a state change (#1488 Phase 4)", () => {
     expect(after).toBe(before);
     expect(after.closest("aside")).toBe(navBefore);
   });
-
 });
