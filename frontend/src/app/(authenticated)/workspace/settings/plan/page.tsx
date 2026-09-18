@@ -211,8 +211,16 @@ export default function WorkspacePlanPage() {
         </div>
       </Section>
 
+      {/* #1560: this block is the workspace's EFFECTIVE entitlements (what it
+          runs under today), while the matrix below is the CREATE view (#1551).
+          A non-zero public-calls figure here next to a ✗ row below is not a
+          contradiction — public contexts made on an earlier plan keep serving
+          — so each section says which view it is. */}
       {plan && (
-        <Section title={t("planPage.usageTitle")}>
+        <Section
+          title={t("planPage.usageTitle")}
+          description={t("planPage.usageDescription")}
+        >
           <dl className="grid grid-cols-1 gap-x-6 gap-y-2 text-sm sm:grid-cols-2">
             <div className="flex justify-between border-b border-gray-100 pb-1 dark:border-gray-800">
               <dt className="text-gray-500 dark:text-gray-400">

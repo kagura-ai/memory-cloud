@@ -34,60 +34,50 @@ import {
   type ResourceTokenCreateResponse,
 } from "@/lib/api/resource-tokens";
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
-import { useWorkspace } from "@/contexts/WorkspaceContext";
 import { getContexts, type Context } from "@/lib/api/contexts";
-import { isPlanTier, type PlanTier } from "@/lib/utils/planLabel";
 
-import {
-  MAX_QUOTA_PER_TOKEN,
-  getMaxTokens,
-  getMaxQuotaCapacity,
-} from "@/config/resource-tokens";
+import { MAX_QUOTA_PER_TOKEN } from "@/config/resource-tokens";
 
 interface CreateResourceTokenDialogProps {
   isOpen: boolean;
   onClose: () => void;
   onSuccess: () => void;
   currentTokens: ResourceToken[];
+  /**
+   * #1560: the plan's total quota capacity (events/hour across all active
+   * tokens) from `GET /workspaces/{id}/plan` → `quotas.max_quota_capacity`,
+   * supplied by the owning panel. `null` = unknown (still loading or the
+   * fetch failed): only the per-token ceiling binds client-side and the
+   * backend enforces the plan total.
+   */
+  maxQuotaCapacity: number | null;
   /** Issue #47: Pre-select this resource_id when opened via deep-link. */
   initialResourceId?: string;
 }
-
-// Plan-based quota defaults and limits
-const QUOTA_CONFIG: Record<
-  PlanTier,
-  { default: number; min: number; max: number }
-> = {
-  free: { default: 0, min: 0, max: 0 },
-  basic: { default: 500, min: 1, max: 1000 },
-  pro: { default: 1000, min: 1, max: 10000 },
-  promax: { default: 1000, min: 1, max: 10000 },
-};
 
 export function CreateResourceTokenDialog({
   isOpen,
   onClose,
   onSuccess,
   currentTokens,
+  maxQuotaCapacity,
   initialResourceId,
 }: CreateResourceTokenDialogProps) {
   const t = useTranslations("resourceTokens");
   const tCommon = useTranslations("common");
-  const { currentWorkspace } = useWorkspace();
-  const rawPlan = currentWorkspace?.plan_name;
-  const planName: PlanTier = isPlanTier(rawPlan) ? rawPlan : "free";
-  const quotaConfig = QUOTA_CONFIG[planName] || QUOTA_CONFIG.basic;
 
-  // Calculate remaining quota (use centralized constants)
+  // Calculate remaining quota (per-token ceiling is the one tier-independent
+  // constant left in config/resource-tokens; the plan total comes via props).
   const maxPerToken = MAX_QUOTA_PER_TOKEN;
-  const maxTokens = getMaxTokens(planName);
-  const maxTotalQuota = getMaxQuotaCapacity(planName);
   const usedQuota = currentTokens
     .filter((t) => t.status === "active")
     .reduce((sum, t) => sum + t.quota_events_per_hour, 0);
-  const remainingQuota = Math.max(0, maxTotalQuota - usedQuota);
-  const quotaMax = Math.min(remainingQuota, maxPerToken); // Max for this token: min(remaining, 10000)
-  const quotaDefault = Math.min(remainingQuota, maxPerToken); // Default: same as max
+  const remainingQuota =
+    maxQuotaCapacity === null
+      ? null
+      : Math.max(0, maxQuotaCapacity - usedQuota);
+  const quotaMax = Math.min(remainingQuota ?? maxPerToken, maxPerToken); // Max for this token: min(remaining, 10000)
+  const quotaDefault = quotaMax; // Default: same as max
 
   const [resourceId, setResourceId] = useState(initialResourceId ?? "");
   const [description, setDescription] = useState("");
@@ -146,7 +136,9 @@ export function CreateResourceTokenDialog({
     const quotaNum = parseInt(quotaInput, 10);
     if (isNaN(quotaNum) || quotaNum < 1 || quotaNum > quotaMax) {
       setError(
-        `Quota must be between 1 and ${quotaMax.toLocaleString()} (${remainingQuota.toLocaleString()} remaining)`,
+        remainingQuota === null
+          ? `Quota must be between 1 and ${quotaMax.toLocaleString()}`
+          : `Quota must be between 1 and ${quotaMax.toLocaleString()} (${remainingQuota.toLocaleString()} remaining)`,
       );
       return;
     }
@@ -434,7 +426,12 @@ export function CreateResourceTokenDialog({
                 required
               />
               <p className="text-xs text-slate-500">
-                {remainingQuota > 0 ? (
+                {remainingQuota === null ? (
+                  t("createDialog.quotaCapUnknown", {
+                    maxPerToken: maxPerToken.toLocaleString(),
+                    unit: t("eventsPerHour"),
+                  })
+                ) : remainingQuota > 0 ? (
                   t("createDialog.quotaRemaining", {
                     remaining: remainingQuota.toLocaleString(),
                     unit: t("eventsPerHour"),

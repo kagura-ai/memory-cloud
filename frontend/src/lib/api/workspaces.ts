@@ -366,6 +366,13 @@ export interface WorkspacePlanInfo {
     mcp_calls_per_week: number;
     rest_calls_per_day: number;
     public_calls_per_day: number;
+    // #242 / #1560: SERVE caps for resource tokens on this tier — the source
+    // for the token screens' "used / max" and quota-capacity displays. Stay
+    // positive on M/L for tokens that already exist there even though
+    // creating a new one is XL-only (#1551); the create gate is the tier
+    // matrix boolean (`usePlanFeatures`), not these numbers.
+    max_resource_tokens: number;
+    max_quota_capacity: number;
   };
   can_upgrade: boolean;
   can_downgrade: boolean;

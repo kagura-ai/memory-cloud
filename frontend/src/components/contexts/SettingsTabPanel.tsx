@@ -59,7 +59,8 @@ import type { Context } from "@/lib/types/context";
 import { useAuth } from "@/contexts/AuthContext";
 import { useWorkspace } from "@/contexts/WorkspaceContext";
 import { CONTEXT_TEMPLATES, getTemplate } from "@/lib/templates/usage-guide";
-import { planAtLeast, planLabelFromEnv } from "@/lib/utils/planLabel";
+import { planLabelFromEnv } from "@/lib/utils/planLabel";
+import { usePlanFeature } from "@/hooks/usePlanFeatures";
 
 interface SettingsTabPanelProps {
   contextId: string;
@@ -81,7 +82,9 @@ export function SettingsTabPanel({
   // #1551: making a context public is XL-only. A context that is already
   // public keeps serving (and can still be unpublished) on any tier — only
   // the transition INTO public is gated here.
-  const canMakePublic = planAtLeast(currentWorkspace?.plan_name, "promax");
+  // #1560: gate = tier matrix `public_contexts` boolean; `null` while it
+  // resolves (the Make Public control is withheld, no upsell yet).
+  const canMakePublic = usePlanFeature("public_contexts");
 
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -625,7 +628,7 @@ export function SettingsTabPanel({
                     </Alert>
                   )}
                 </div>
-              ) : !canMakePublic ? (
+              ) : canMakePublic === null ? null : canMakePublic === false ? (
                 <Alert>
                   <AlertCircle className="h-4 w-4" />
                   <AlertDescription>

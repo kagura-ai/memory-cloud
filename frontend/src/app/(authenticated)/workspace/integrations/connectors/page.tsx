@@ -72,10 +72,11 @@ import { useToast } from "@/hooks/use-toast";
 import { useCopyFeedback } from "@/hooks/useCopyFeedback";
 import { useConsumeSearchParams } from "@/hooks/useConsumeSearchParams";
 import { useSystemFeatures } from "@/hooks/useSystemFeatures";
+import { usePlanFeature } from "@/hooks/usePlanFeatures";
 import { ChannelPicker, parseChannelIds } from "./ChannelPicker";
 import { useWorkspace } from "@/contexts/WorkspaceContext";
 import { hasWorkspaceRole, WorkspaceRole } from "@/lib/auth/rbac";
-import { planAtLeast, planLabelFromEnv } from "@/lib/utils/planLabel";
+import { planLabelFromEnv } from "@/lib/utils/planLabel";
 import { API_BASE_URL } from "@/lib/api/base";
 import { getContexts, type Context } from "@/lib/api/contexts";
 import {
@@ -209,7 +210,10 @@ export default function ConnectorsPage() {
   // #1551: connectors are XL-only to CREATE. Connectors that already exist
   // keep being listed, configured and dispatched on any tier — only the
   // create controls (provider CTA, manual bind, empty-state action) gate.
-  const canCreate = planAtLeast(currentWorkspace?.plan_name, "promax");
+  // #1560: the gate is the tier matrix's `connectors` boolean, not a tier
+  // name. Tri-state — `null` while resolving: controls stay disabled and the
+  // upsell is only rendered on an explicit `false`.
+  const canCreate = usePlanFeature("connectors");
   const xlLabel = planLabelFromEnv("promax", locale);
 
   // #1426: managed (hosted SaaS) mode. When true the shared worker/bridge
@@ -392,6 +396,9 @@ export default function ConnectorsPage() {
   useEffect(() => {
     if (!installHandle) return;
     if (!allowed) return;
+    // #1560: hold the handle while the plan gate is still resolving — neither
+    // open the form nor strip the one-time handle on a pending answer.
+    if (canCreate === null) return;
     // #1551: below XL the create form must never open — a stale or crafted
     // callback would otherwise show an enabled form that only fails at the
     // backend 403. Surface the upsell and strip the one-time handle instead.
@@ -1012,7 +1019,7 @@ export default function ConnectorsPage() {
     <PageContainer>
       <PageHeader title={t("title")} description={t("description")} />
 
-      {!canCreate && (
+      {canCreate === false && (
         <Alert className="mb-4">
           <AlertDescription className="flex flex-wrap items-center justify-between gap-2">
             <span>
@@ -1156,9 +1163,9 @@ export default function ConnectorsPage() {
           icon={Plug}
           title={t("emptyTitle")}
           description={
-            canCreate
-              ? t("emptyDesc")
-              : t("planGate.description", { plan: xlLabel })
+            canCreate === false
+              ? t("planGate.description", { plan: xlLabel })
+              : t("emptyDesc")
           }
           actionLabel={
             canCreate ? t("connectProvider", { name: "Slack" }) : undefined
