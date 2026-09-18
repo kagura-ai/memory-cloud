@@ -93,6 +93,14 @@ vi.mock("@/hooks/useSystemFeatures", () => ({
   useSystemFeatures: () => mockUseSystemFeatures(),
 }));
 
+// #1560: the create gate is the tier matrix's `connectors` boolean, read via
+// usePlanFeature — tri-state (`null` = still resolving). The hook is mocked
+// so the page is exercised against the API answer, not a tier name.
+let mockPlanFeature: boolean | null = true;
+vi.mock("@/hooks/usePlanFeatures", () => ({
+  usePlanFeature: () => mockPlanFeature,
+}));
+
 // #1399: the fold/label tests differ only by llm_config_present, so build the
 // stored-connector row from one factory instead of re-inlining every field.
 function makeConnector(overrides: Record<string, unknown> = {}) {
@@ -143,6 +151,7 @@ beforeEach(() => {
   // per-test mockResolvedValue never leaks into later tests (#1376 review).
   mockUpdateConnectorSettings.mockReset();
   mockUseSystemFeatures.mockReturnValue({}); // #1426: non-managed by default
+  mockPlanFeature = true; // #1560: connectors included unless a test says otherwise
   // #1391: default the channel list to unavailable so the picker falls back to
   // the manual-ID lane (the shape existing channel tests exercise). The
   // select-mode test overrides with a resolved page.
@@ -190,6 +199,7 @@ describe("ConnectorsPage XL-only create gate (#1551)", () => {
     "%s: lists the existing connector (may serve) but gates every create control",
     async (plan) => {
       setWorkspace("admin", {}, plan);
+      mockPlanFeature = false; // #1560: the matrix says connectors=false here
       mockListConnectors.mockResolvedValue([
         makeConnector({ display_name: "Sales Slack / T0123ABC" }),
       ]);
@@ -219,6 +229,7 @@ describe("ConnectorsPage XL-only create gate (#1551)", () => {
 
   it("basic with no connectors: empty state offers no Slack install, banner carries the upgrade CTA", async () => {
     setWorkspace("admin", {}, "basic");
+    mockPlanFeature = false;
 
     render(<ConnectorsPage />);
 
@@ -235,6 +246,7 @@ describe("ConnectorsPage XL-only create gate (#1551)", () => {
 
   it("basic + ?slack_install callback: dialog stays closed, upsell shown, no POST, handle stripped", async () => {
     setWorkspace("admin", {}, "basic");
+    mockPlanFeature = false;
     mockSearchParamsGet.mockImplementation((key: string) =>
       key === "slack_install" ? "handle-stale" : null,
     );
@@ -286,6 +298,48 @@ describe("ConnectorsPage XL-only create gate (#1551)", () => {
     })) {
       expect(cta).toBeEnabled();
     }
+  });
+
+  // #1560: the gate follows the API boolean, not the tier's name/rank.
+  it("pro with connectors=true from the matrix: no upsell, CTA enabled (#1560)", async () => {
+    setWorkspace("admin", {}, "pro");
+    mockPlanFeature = true;
+
+    render(<ConnectorsPage />);
+
+    expect(await screen.findByText("connectProvider")).toBeInTheDocument();
+    expect(screen.queryByText("planGate.title")).not.toBeInTheDocument();
+    for (const cta of screen.getAllByRole("button", {
+      name: /connectProvider/,
+    })) {
+      expect(cta).toBeEnabled();
+    }
+  });
+
+  it("pending gate + ?slack_install: no upsell flash, CTA disabled, handle held (#1560)", async () => {
+    setWorkspace("admin");
+    mockPlanFeature = null;
+    mockSearchParamsGet.mockImplementation((key: string) =>
+      key === "slack_install" ? "handle-1" : null,
+    );
+
+    render(<ConnectorsPage />);
+
+    expect(await screen.findByText("emptyTitle")).toBeInTheDocument();
+    // Neither the upsell banner nor the upsell toast may appear while the
+    // matrix is unresolved, and the empty state keeps its neutral copy.
+    expect(screen.queryByText("planGate.title")).not.toBeInTheDocument();
+    expect(screen.getByText("emptyDesc")).toBeInTheDocument();
+    expect(mockToast).not.toHaveBeenCalled();
+    // Create controls stay withheld until the answer is known.
+    for (const cta of screen.getAllByRole("button", {
+      name: /connectProvider/,
+    })) {
+      expect(cta).toBeDisabled();
+    }
+    // The one-time install handle is neither consumed nor stripped.
+    expect(mockGetSlackPendingInstall).not.toHaveBeenCalled();
+    expect(mockRouterReplace).not.toHaveBeenCalled();
   });
 });
 

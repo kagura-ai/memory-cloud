@@ -45,6 +45,29 @@ router = APIRouter(tags=["workspace-plan"])
 # ============================================================================
 
 
+class WorkspacePlanQuotas(BaseModel):
+    """Effective quotas of one workspace, as ``GET /workspaces/{id}/plan`` returns them.
+
+    Typed rather than a bare ``dict`` because the frontend reads named keys off
+    this payload: the token screens take "used / max" and the quota-capacity
+    line from ``max_resource_tokens`` / ``max_quota_capacity`` (#1560). A rename
+    here must fail pyright at the construction site, not silently degrade the UI
+    to its "cap unknown" fallback.
+    """
+
+    memory_limit: int
+    max_contexts: int
+    # Issue #242: SERVE caps for resource tokens. They stay positive on M/L for
+    # tokens that already exist there even though creating a new one is XL-only
+    # (#1551) — the create gate is the tier matrix's ``resources`` boolean.
+    max_resource_tokens: int
+    max_quota_capacity: int  # events/hour across all active tokens
+    mcp_calls_per_day: int
+    mcp_calls_per_week: int
+    rest_calls_per_day: int
+    public_calls_per_day: int
+
+
 class WorkspacePlanInfo(BaseModel):
     """Workspace plan information with usage stats."""
 
@@ -54,7 +77,7 @@ class WorkspacePlanInfo(BaseModel):
     plan_display_name: str
     price_monthly: int
     usage: dict  # Current usage (memories, storage, contexts)
-    quotas: dict  # Plan quotas
+    quotas: WorkspacePlanQuotas
     can_upgrade: bool
     can_downgrade: bool
 
@@ -189,16 +212,16 @@ async def get_workspace_plan(
             "memories": memory_count,
             "contexts": context_count,
         },
-        quotas={
-            "memory_limit": workspace.effective_memory_limit,
-            "max_contexts": workspace.effective_max_contexts,
-            "max_resource_tokens": plan_tier.max_resource_tokens,  # Issue #242
-            "max_quota_capacity": plan_tier.max_resource_tokens * 10000,  # Issue #242: events/hour
-            "mcp_calls_per_day": workspace.effective_mcp_calls_per_day,
-            "mcp_calls_per_week": workspace.effective_mcp_calls_per_week,
-            "rest_calls_per_day": workspace.effective_rest_calls_per_day,
-            "public_calls_per_day": workspace.effective_public_calls_per_day,
-        },
+        quotas=WorkspacePlanQuotas(
+            memory_limit=workspace.effective_memory_limit,
+            max_contexts=workspace.effective_max_contexts,
+            max_resource_tokens=plan_tier.max_resource_tokens,  # Issue #242
+            max_quota_capacity=plan_tier.max_resource_tokens * 10000,  # Issue #242: events/hour
+            mcp_calls_per_day=workspace.effective_mcp_calls_per_day,
+            mcp_calls_per_week=workspace.effective_mcp_calls_per_week,
+            rest_calls_per_day=workspace.effective_rest_calls_per_day,
+            public_calls_per_day=workspace.effective_public_calls_per_day,
+        ),
         can_upgrade=current_index < len(PLAN_ORDER) - 1,
         can_downgrade=current_index > 0,
     )

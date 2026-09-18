@@ -61,6 +61,13 @@ vi.mock("@/contexts/WorkspaceContext", () => ({
   useWorkspace: () => ({ currentWorkspace: mockCurrentWorkspace }),
 }));
 
+// #1560: the create gate is the tier matrix's `resources` boolean via
+// usePlanFeature (tri-state; `null` = resolving), not a tier-name rank.
+let mockPlanFeature: boolean | null = true;
+vi.mock("@/hooks/usePlanFeatures", () => ({
+  usePlanFeature: () => mockPlanFeature,
+}));
+
 vi.mock("@/contexts/AuthContext", () => ({
   useAuth: () => ({ user: { timezone: "UTC" } }),
 }));
@@ -89,6 +96,7 @@ beforeEach(() => {
   mockPush.mockReset();
   // #1551: resources are XL-only to create — promax is the "no upsell" tier.
   mockCurrentWorkspace = { plan_name: "promax", current_user_role: "owner" };
+  mockPlanFeature = true; // #1560: resources included unless a test says otherwise
 });
 
 afterEach(() => {
@@ -138,6 +146,7 @@ describe("ResourcesListPage", () => {
     "%s: renders existing resources (may serve) and the XL upsell banner (#1551)",
     async (plan) => {
       mockCurrentWorkspace = { plan_name: plan, current_user_role: "owner" };
+      mockPlanFeature = false; // #1560: the matrix says resources=false here
       mockListResources.mockResolvedValue({ resources: [item()], total: 1 });
 
       render(<ResourcesListPage />);
@@ -150,6 +159,33 @@ describe("ResourcesListPage", () => {
       expect(screen.getByText("planGate.title")).toBeInTheDocument();
     },
   );
+
+  // #1560: the banner follows the API boolean, not the tier's name/rank.
+  it("pro with resources=true from the matrix: list served, no upsell (#1560)", async () => {
+    mockCurrentWorkspace = { plan_name: "pro", current_user_role: "owner" };
+    mockPlanFeature = true;
+    mockListResources.mockResolvedValue({ resources: [item()], total: 1 });
+
+    render(<ResourcesListPage />);
+
+    await waitFor(() => {
+      expect(screen.getByText("ec_products")).toBeInTheDocument();
+    });
+    expect(screen.queryByText("planGate.title")).toBeNull();
+  });
+
+  it("pending gate: list served, no upsell flash while the matrix resolves (#1560)", async () => {
+    mockCurrentWorkspace = { plan_name: "basic", current_user_role: "owner" };
+    mockPlanFeature = null;
+    mockListResources.mockResolvedValue({ resources: [item()], total: 1 });
+
+    render(<ResourcesListPage />);
+
+    await waitFor(() => {
+      expect(screen.getByText("ec_products")).toBeInTheDocument();
+    });
+    expect(screen.queryByText("planGate.title")).toBeNull();
+  });
 
   it("promax is not plan-gated: fetches and renders, no upgrade CTA (#1548)", async () => {
     mockCurrentWorkspace = { plan_name: "promax", current_user_role: "owner" };
@@ -179,6 +215,7 @@ describe("ResourcesListPage", () => {
 
   it("upgrade CTA button navigates to the plan page", async () => {
     mockCurrentWorkspace = { plan_name: "free", current_user_role: "owner" };
+    mockPlanFeature = false;
     mockListResources.mockResolvedValue({ resources: [], total: 0 });
 
     render(<ResourcesListPage />);

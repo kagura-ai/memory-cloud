@@ -33,18 +33,11 @@ import {
   type ResourceToken,
 } from "@/lib/api/resource-tokens";
 import { getContexts } from "@/lib/api/contexts";
+import { getWorkspacePlan, type WorkspacePlanInfo } from "@/lib/api/workspaces";
 import { ApiError } from "@/lib/api/base";
-import {
-  isPlanTier,
-  planAtLeast,
-  planLabelFromEnv,
-  type PlanTier,
-} from "@/lib/utils/planLabel";
-import {
-  MAX_QUOTA_PER_TOKEN,
-  getMaxQuotaCapacity,
-  getMaxTokens,
-} from "@/config/resource-tokens";
+import { planLabelFromEnv } from "@/lib/utils/planLabel";
+import { usePlanFeature } from "@/hooks/usePlanFeatures";
+import { MAX_QUOTA_PER_TOKEN } from "@/config/resource-tokens";
 import { Plus, AlertTriangle, ChevronDown } from "lucide-react";
 import { useToast } from "@/hooks/use-toast";
 import { Label } from "@/components/ui/label";
@@ -82,13 +75,23 @@ export function ResourceTokensTabPanel({
   const { currentWorkspaceId, currentWorkspace } = useWorkspace();
   const { toast } = useToast();
   const locale = useLocale();
-  // Plan limits come from config/resource-tokens (single source, #1548).
-  const rawPlan = currentWorkspace?.plan_name;
-  const planName: PlanTier = isPlanTier(rawPlan) ? rawPlan : "free";
   // #1551: new tokens are XL-only ("may create"); tokens that already exist
   // on M/L stay listed, editable and revocable against the tier's own cap.
-  const canCreateTokens = planAtLeast(planName, "promax");
+  // #1560: the gate is the tier matrix's `resources` boolean (tri-state —
+  // `null` while resolving keeps Create disabled without an upsell).
+  const canCreateTokens = usePlanFeature("resources");
   const xlLabel = planLabelFromEnv("promax", locale);
+
+  // #1560: the SERVE caps ("used / max", quota capacity) come from
+  // `GET /workspaces/{id}/plan` instead of a hand-mirrored table. That
+  // endpoint is owner-only (#246) and so is every cap display below, so
+  // non-owners simply never fetch. `null` = unknown (loading, or the fetch
+  // failed): the "/ max" suffix and capacity line are withheld and the quota
+  // inputs fall back to the per-token ceiling — the backend enforces the
+  // plan total either way.
+  const [planQuotas, setPlanQuotas] = useState<
+    WorkspacePlanInfo["quotas"] | null
+  >(null);
 
   const [tokens, setTokens] = useState<ResourceToken[]>([]);
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -119,6 +122,32 @@ export function ResourceTokensTabPanel({
 
   // Check if user is owner
   const isOwner = currentWorkspace?.current_user_role === "owner";
+
+  useEffect(() => {
+    // Clear BEFORE the owner check: a switch to a workspace the viewer does
+    // not own never fetches, and must not leave the previous workspace's
+    // owner-only caps rendered in the (un-guarded) summary below.
+    setPlanQuotas(null);
+    if (!currentWorkspaceId || !isOwner) return;
+    let alive = true;
+    getWorkspacePlan(currentWorkspaceId)
+      .then((plan) => {
+        if (alive) setPlanQuotas(plan.quotas);
+      })
+      .catch((err: unknown) => {
+        // Caps are a display aid, not a gate — degrade to "unknown" silently
+        // (the token list has its own ErrorBanner for load failures).
+        if (process.env.NODE_ENV === "development") {
+          console.error("Failed to load workspace plan quotas:", err);
+        }
+      });
+    return () => {
+      alive = false;
+    };
+  }, [currentWorkspaceId, isOwner]);
+
+  const maxTokens = planQuotas?.max_resource_tokens ?? null;
+  const maxTotalQuota = planQuotas?.max_quota_capacity ?? null;
 
   // Issue #47: Deep-link support — `?resource_id=<id>` pre-filters the token list.
   // Passed through to the backend list endpoint; also gates the create dialog's
@@ -334,7 +363,7 @@ export function ResourceTokensTabPanel({
 
         {/* Prerequisites Warning — plan gate (#1551) first, then resource-id.
             Existing tokens stay listed below either way (block-new-only). */}
-        {isOwner && !canCreateTokens && (
+        {isOwner && canCreateTokens === false && (
           <div className="rounded-lg border-2 border-purple-200 bg-purple-50 p-4 mb-6">
             <div className="flex items-start gap-3">
               <AlertTriangle className="h-5 w-5 text-purple-600 flex-shrink-0 mt-0.5" />
@@ -576,10 +605,12 @@ export function ResourceTokensTabPanel({
                   </p>
                   <p className="text-3xl font-bold text-slate-900 dark:text-white mt-1">
                     {tokens.filter((tk) => tk.status === "active").length}
-                    <span className="text-lg text-slate-400">
-                      {" "}
-                      / {getMaxTokens(planName)}
-                    </span>
+                    {maxTokens !== null && (
+                      <span className="text-lg text-slate-400">
+                        {" "}
+                        / {maxTokens}
+                      </span>
+                    )}
                   </p>
                 </div>
                 {tokens.filter((tk) => tk.status === "revoked").length > 0 && (
@@ -608,22 +639,23 @@ export function ResourceTokensTabPanel({
                   {t("eventsPerHour")}
                 </span>
               </p>
-              <p className="text-xs text-slate-500 mt-1">
-                {(() => {
-                  const maxQuota = getMaxQuotaCapacity(planName);
-                  const currentQuota = tokens
-                    .filter((tk) => tk.status === "active")
-                    .reduce((sum, tk) => sum + tk.quota_events_per_hour, 0);
-                  const percentage =
-                    maxQuota > 0
-                      ? ((currentQuota / maxQuota) * 100).toFixed(1)
-                      : 0;
-                  return t("maxCapacity", {
-                    percentage,
-                    max: maxQuota.toLocaleString(),
-                  });
-                })()}
-              </p>
+              {maxTotalQuota !== null && (
+                <p className="text-xs text-slate-500 mt-1">
+                  {(() => {
+                    const currentQuota = tokens
+                      .filter((tk) => tk.status === "active")
+                      .reduce((sum, tk) => sum + tk.quota_events_per_hour, 0);
+                    const percentage =
+                      maxTotalQuota > 0
+                        ? ((currentQuota / maxTotalQuota) * 100).toFixed(1)
+                        : 0;
+                    return t("maxCapacity", {
+                      percentage,
+                      max: maxTotalQuota.toLocaleString(),
+                    });
+                  })()}
+                </p>
+              )}
             </div>
           </div>
 
@@ -717,6 +749,7 @@ export function ResourceTokensTabPanel({
             onClose={() => setShowCreateDialog(false)}
             onSuccess={handleCreateSuccess}
             currentTokens={tokens}
+            maxQuotaCapacity={maxTotalQuota}
             initialResourceId={resourceIdFilter}
           />
         )}
@@ -750,7 +783,8 @@ export function ResourceTokensTabPanel({
                     min="1"
                     max={(() => {
                       const maxPerToken = MAX_QUOTA_PER_TOKEN;
-                      const maxTotalQuota = getMaxQuotaCapacity(planName);
+                      // Plan total unknown → only the per-token ceiling binds.
+                      if (maxTotalQuota === null) return maxPerToken;
                       const usedByOthers = tokens
                         .filter(
                           (tk) =>
@@ -765,22 +799,27 @@ export function ResourceTokensTabPanel({
                     value={editQuotaInput}
                     onChange={(e) => setEditQuotaInput(e.target.value)}
                   />
-                  <p className="text-xs text-slate-500">
-                    {(() => {
-                      const maxTotalQuota = getMaxQuotaCapacity(planName);
-                      const usedByOthers = tokens
-                        .filter(
-                          (tk) =>
-                            tk.status === "active" && tk.id !== tokenToEdit.id,
-                        )
-                        .reduce((sum, tk) => sum + tk.quota_events_per_hour, 0);
-                      const available = maxTotalQuota - usedByOthers;
-                      return t("editDialog.availableQuota", {
-                        available: available.toLocaleString(),
-                        unit: t("eventsPerHour"),
-                      });
-                    })()}
-                  </p>
+                  {maxTotalQuota !== null && (
+                    <p className="text-xs text-slate-500">
+                      {(() => {
+                        const usedByOthers = tokens
+                          .filter(
+                            (tk) =>
+                              tk.status === "active" &&
+                              tk.id !== tokenToEdit.id,
+                          )
+                          .reduce(
+                            (sum, tk) => sum + tk.quota_events_per_hour,
+                            0,
+                          );
+                        const available = maxTotalQuota - usedByOthers;
+                        return t("editDialog.availableQuota", {
+                          available: available.toLocaleString(),
+                          unit: t("eventsPerHour"),
+                        });
+                      })()}
+                    </p>
+                  )}
                 </div>
               </div>
               <AlertDialogFooter>

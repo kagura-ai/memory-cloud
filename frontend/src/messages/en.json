@@ -1175,6 +1175,7 @@
       "featureDisabled": "The Plan page is not enabled on this deployment.",
       "upgradeError": "Could not start the billing session. Please try again.",
       "usageTitle": "Usage & limits",
+      "usageDescription": "Your current entitlements — the limits this workspace runs under today. Resources, connectors and public contexts that already exist keep serving on any plan, so these can exceed the create matrix below.",
       "memories": "Memories",
       "contexts": "Contexts",
       "mcpPerDay": "MCP calls / day",
@@ -1183,7 +1184,7 @@
     },
     "planMatrix": {
       "title": "Compare plans",
-      "description": "What each tier includes. Pricing is shown in the billing portal.",
+      "description": "What each plan can create. Pricing is shown in the billing portal.",
       "beta": "Beta",
       "featureColumn": "Feature",
       "current": "current",
@@ -3183,6 +3184,8 @@
       "quota": "Quota (events per hour)",
       "quotaHelp": "Maximum number of events this token can ingest per hour (1-10,000)",
       "quotaError": "Quota must be between 1 and 10,000 events per hour",
+      "quotaRangeError": "Quota must be between 1 and {max}",
+      "quotaRangeErrorRemaining": "Quota must be between 1 and {max} ({remaining} remaining)",
       "resourceIdRequired": "Please select a resource ID",
       "cancel": "Cancel",
       "create": "Create Token",
@@ -3194,6 +3197,7 @@
       "quotaHelpFree": "Public contexts are not available on Free plan",
       "quotaHelpBasic": "BASIC plan: {min}-{max} events/hour (Default: {default})",
       "quotaHelpPro": "PRO plan: {min}-{max} events/hour (Default: {default})",
+      "quotaCapUnknown": "Max per token: {maxPerToken} {unit}. The plan's total capacity could not be loaded — the server enforces it.",
       "quotaRemaining": "Remaining: {remaining} {unit} (Max per token: {maxPerToken})",
       "quotaLimitReached": "Quota limit reached. Revoke unused tokens to create new ones."
     },

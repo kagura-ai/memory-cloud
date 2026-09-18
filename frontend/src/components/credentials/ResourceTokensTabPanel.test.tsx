@@ -34,6 +34,20 @@ vi.mock("@/contexts/WorkspaceContext", () => ({
   }),
 }));
 
+// #1560: the create gate is the tier matrix's `resources` boolean via
+// usePlanFeature (tri-state; `null` = resolving), not a tier-name rank.
+let mockPlanFeature: boolean | null = true;
+vi.mock("@/hooks/usePlanFeatures", () => ({
+  usePlanFeature: () => mockPlanFeature,
+}));
+
+// #1560: the SERVE caps ("used / max", capacity) come from the owner-only
+// GET /workspaces/{id}/plan, not a hand-mirrored per-tier table.
+const mockGetWorkspacePlan = vi.fn();
+vi.mock("@/lib/api/workspaces", () => ({
+  getWorkspacePlan: (...args: unknown[]) => mockGetWorkspacePlan(...args),
+}));
+
 vi.mock("next-intl", () => ({
   useTranslations: () => (key: string) => key,
   useLocale: () => "en",
@@ -81,7 +95,12 @@ const resourceContext = {
 beforeEach(() => {
   mockListResourceTokens.mockReset();
   mockGetContexts.mockReset();
+  mockGetWorkspacePlan.mockReset();
+  mockGetWorkspacePlan.mockResolvedValue({
+    quotas: { max_resource_tokens: 30, max_quota_capacity: 300000 },
+  });
   mockCurrentWorkspace = { plan_name: "promax", current_user_role: "owner" };
+  mockPlanFeature = true; // #1560: resources included unless a test says otherwise
 });
 
 const createButton = () => screen.getByRole("button", { name: /createToken/ });
@@ -91,6 +110,7 @@ describe("ResourceTokensTabPanel — XL-only create gate (#1551)", () => {
     "%s: existing tokens stay listed, Create is disabled behind the XL upsell",
     async (plan) => {
       mockCurrentWorkspace = { plan_name: plan, current_user_role: "owner" };
+      mockPlanFeature = false; // #1560: the matrix says resources=false here
       mockListResourceTokens.mockResolvedValue({
         tokens: [token(1), token(2)],
         total: 2,
@@ -131,5 +151,95 @@ describe("ResourceTokensTabPanel — XL-only create gate (#1551)", () => {
     expect(await screen.findByText("noResourceIdWarning")).toBeInTheDocument();
     expect(createButton()).toBeDisabled();
     expect(screen.queryByText("planGateTitle")).toBeNull();
+  });
+
+  // #1560: the gate follows the API boolean, not the tier's name/rank.
+  it("pro with resources=true from the matrix: Create enabled, no upsell (#1560)", async () => {
+    mockCurrentWorkspace = { plan_name: "pro", current_user_role: "owner" };
+    mockPlanFeature = true;
+    mockListResourceTokens.mockResolvedValue({ tokens: [token(1)], total: 1 });
+    mockGetContexts.mockResolvedValue({ contexts: [resourceContext] });
+
+    render(<ResourceTokensTabPanel />);
+
+    expect(await screen.findByText("token#1")).toBeInTheDocument();
+    await waitFor(() => expect(createButton()).toBeEnabled());
+    expect(screen.queryByText("planGateTitle")).toBeNull();
+  });
+
+  it("pending gate: Create disabled with no upsell while the matrix resolves (#1560)", async () => {
+    mockPlanFeature = null;
+    mockListResourceTokens.mockResolvedValue({ tokens: [token(1)], total: 1 });
+    mockGetContexts.mockResolvedValue({ contexts: [resourceContext] });
+
+    render(<ResourceTokensTabPanel />);
+
+    expect(await screen.findByText("token#1")).toBeInTheDocument();
+    expect(createButton()).toBeDisabled();
+    expect(screen.queryByText("planGateTitle")).toBeNull();
+    expect(screen.queryByText("noResourceIdWarning")).toBeNull();
+  });
+});
+
+describe("ResourceTokensTabPanel — serve caps from /workspaces/{id}/plan (#1560)", () => {
+  it("owner: renders used / max and the capacity line from the plan quotas", async () => {
+    mockListResourceTokens.mockResolvedValue({
+      tokens: [token(1), token(2)],
+      total: 2,
+    });
+    mockGetContexts.mockResolvedValue({ contexts: [resourceContext] });
+
+    render(<ResourceTokensTabPanel />);
+
+    expect(await screen.findByText("token#1")).toBeInTheDocument();
+    expect(mockGetWorkspacePlan).toHaveBeenCalledWith("ws-1");
+    // "2 / 30" — the 30 is the API's max_resource_tokens, not a local table.
+    expect(await screen.findByText(/\/ 30/)).toBeInTheDocument();
+    expect(screen.getByText("maxCapacity")).toBeInTheDocument();
+  });
+
+  it("owner: withholds the caps (no stale table) when the plan fetch fails", async () => {
+    mockGetWorkspacePlan.mockRejectedValue(new Error("boom"));
+    mockListResourceTokens.mockResolvedValue({ tokens: [token(1)], total: 1 });
+    mockGetContexts.mockResolvedValue({ contexts: [resourceContext] });
+
+    render(<ResourceTokensTabPanel />);
+
+    expect(await screen.findByText("token#1")).toBeInTheDocument();
+    await waitFor(() => expect(mockGetWorkspacePlan).toHaveBeenCalled());
+    expect(screen.queryByText(/\/ \d+/)).toBeNull();
+    expect(screen.queryByText("maxCapacity")).toBeNull();
+  });
+
+  it("owner → non-owner switch: the previous workspace's caps are cleared", async () => {
+    mockListResourceTokens.mockResolvedValue({ tokens: [token(1)], total: 1 });
+    mockGetContexts.mockResolvedValue({ contexts: [resourceContext] });
+
+    const { rerender } = render(<ResourceTokensTabPanel />);
+    expect(await screen.findByText(/\/ 30/)).toBeInTheDocument();
+    expect(screen.getByText("maxCapacity")).toBeInTheDocument();
+
+    // Same panel instance, viewer no longer owns the workspace. Non-owners
+    // never fetch the plan, so the effect must drop the stale figures rather
+    // than leave the previous workspace's owner-only caps on screen.
+    mockCurrentWorkspace = { plan_name: "promax", current_user_role: "admin" };
+    rerender(<ResourceTokensTabPanel />);
+
+    await waitFor(() => expect(screen.queryByText(/\/ 30/)).toBeNull());
+    expect(screen.queryByText("maxCapacity")).toBeNull();
+    expect(mockGetWorkspacePlan).toHaveBeenCalledTimes(1);
+  });
+
+  it("non-owner: never calls the owner-only plan endpoint", async () => {
+    mockCurrentWorkspace = { plan_name: "promax", current_user_role: "admin" };
+
+    render(<ResourceTokensTabPanel />);
+
+    // Non-owners skip both owner-only loads (tokens and plan); flush effects
+    // and confirm neither fired and no cap figure is on screen.
+    await Promise.resolve();
+    expect(mockListResourceTokens).not.toHaveBeenCalled();
+    expect(mockGetWorkspacePlan).not.toHaveBeenCalled();
+    expect(screen.queryByText("maxCapacity")).toBeNull();
   });
 });
