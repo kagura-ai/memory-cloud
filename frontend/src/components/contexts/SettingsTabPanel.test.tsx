@@ -67,6 +67,13 @@ vi.mock("@/contexts/WorkspaceContext", () => ({
   useWorkspace: () => mockUseWorkspace(),
 }));
 
+// #1560: the Make Public gate is the tier matrix's `public_contexts` boolean
+// via usePlanFeature (tri-state; `null` = resolving), not a tier-name rank.
+let mockPlanFeature: boolean | null = true;
+vi.mock("@/hooks/usePlanFeatures", () => ({
+  usePlanFeature: () => mockPlanFeature,
+}));
+
 vi.mock("@/contexts/AuthContext", () => ({
   useAuth: () => ({ user: { id: "user-1" } }),
 }));
@@ -162,6 +169,7 @@ beforeEach(() => {
   // Default: owner with no quota constraint. Tests override as needed.
   setRole("owner");
   setQuotaResponse(0, 10);
+  mockPlanFeature = true; // #1560: public_contexts included unless a test says otherwise
 });
 
 // ---------- Public toggle is XL-only (#1551) ---------------------------------
@@ -169,6 +177,7 @@ beforeEach(() => {
 describe("SettingsTabPanel — public toggle is XL-only (#1551)", () => {
   it("pro: replaces the Make Public control with an XL upsell", () => {
     setRole("owner", "pro");
+    mockPlanFeature = false; // #1560: the matrix says public_contexts=false here
     render(
       <SettingsTabPanel
         contextId={CTX_ID}
@@ -183,6 +192,7 @@ describe("SettingsTabPanel — public toggle is XL-only (#1551)", () => {
 
   it("pro: an already-public context keeps its Unpublish control (may serve)", () => {
     setRole("owner", "pro");
+    mockPlanFeature = false;
     render(
       <SettingsTabPanel
         contextId={CTX_ID}
@@ -214,6 +224,39 @@ describe("SettingsTabPanel — public toggle is XL-only (#1551)", () => {
     expect(
       screen.getByRole("button", { name: /makePublic/ }),
     ).toBeInTheDocument();
+    expect(screen.queryByText("publicRequiresPlan")).toBeNull();
+  });
+
+  // #1560: the gate follows the API boolean, not the tier's name/rank.
+  it("pro with public_contexts=true from the matrix: shows the Make Public control (#1560)", () => {
+    setRole("owner", "pro");
+    mockPlanFeature = true;
+    render(
+      <SettingsTabPanel
+        contextId={CTX_ID}
+        context={makeContext({ is_private: false, is_public: false })}
+        onContextUpdated={noop}
+      />,
+    );
+
+    expect(
+      screen.getByRole("button", { name: /makePublic/ }),
+    ).toBeInTheDocument();
+    expect(screen.queryByText("publicRequiresPlan")).toBeNull();
+  });
+
+  it("pending gate: neither the control nor the upsell while the matrix resolves (#1560)", () => {
+    setRole("owner", "pro");
+    mockPlanFeature = null;
+    render(
+      <SettingsTabPanel
+        contextId={CTX_ID}
+        context={makeContext({ is_private: false, is_public: false })}
+        onContextUpdated={noop}
+      />,
+    );
+
+    expect(screen.queryByRole("button", { name: /makePublic/ })).toBeNull();
     expect(screen.queryByText("publicRequiresPlan")).toBeNull();
   });
 });

@@ -31,9 +31,10 @@ import {
   TableRow,
 } from "@/components/ui/table";
 import { formatRelativeTime } from "@/lib/utils/datetime";
-import { planAtLeast, planLabelFromEnv } from "@/lib/utils/planLabel";
+import { planLabelFromEnv } from "@/lib/utils/planLabel";
 import { listResources, type ResourceListItem } from "@/lib/api/resources";
 import { useWorkspace } from "@/contexts/WorkspaceContext";
+import { usePlanFeature } from "@/hooks/usePlanFeatures";
 
 export default function ResourcesListPage() {
   const router = useRouter();
@@ -56,7 +57,9 @@ export default function ResourcesListPage() {
   // #1551: resources are XL-only to CREATE. Resources that already exist on
   // a lower tier keep serving, so the list always loads; the plan only
   // decides whether the "new resources need XL" banner is shown.
-  const canCreate = planAtLeast(planName, "promax");
+  // #1560: read from the tier matrix's `resources` boolean; `null` while it
+  // resolves, and the banner renders only on an explicit `false`.
+  const canCreate = usePlanFeature("resources");
   const xlLabel = planLabelFromEnv("promax", locale);
 
   const fetchResources = useCallback(async () => {
@@ -99,7 +102,7 @@ export default function ResourcesListPage() {
     <PageContainer>
       <PageHeader title={t("list.title")} description={t("list.description")} />
 
-      {workspaceReady && !canCreate && (
+      {workspaceReady && canCreate === false && (
         <Alert className="mb-4">
           <AlertTitle>{t("planGate.title", { plan: xlLabel })}</AlertTitle>
           <AlertDescription className="flex flex-wrap items-center justify-between gap-2">

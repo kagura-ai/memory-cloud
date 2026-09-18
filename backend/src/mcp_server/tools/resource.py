@@ -716,8 +716,8 @@ async def _setup_resource_preflight(
     from config.plan_tiers import (
         feature_denied_message,
         get_plan_tier,
-        get_required_plan_for_feature,
         has_feature,
+        required_plan_name,
     )
     from config.settings import get_settings
     from models.auth import Context, Workspace
@@ -779,13 +779,14 @@ async def _setup_resource_preflight(
     # token), so it is gated on the ``resources`` feature (XL-only) rather than
     # on ``allows_shared_contexts`` / ``max_resource_tokens == 0`` — M/L keep
     # positive caps so their existing tokens stay served. The token-count
-    # check further down remains the second gate.
+    # check further down remains the second gate. ``required_plan`` is ``None``
+    # when an env override (#1559) dropped the feature from every tier.
     if not has_feature(plan_name, "resources"):
         return (
             _error_response(
                 "plan_required",
                 feature_denied_message(plan_name, "resources"),
-                required_plan=get_required_plan_for_feature("resources"),
+                required_plan=required_plan_name("resources"),
             ),
             None,
         )
@@ -1192,12 +1193,15 @@ async def handle_setup_connector(
             # (code + ``required_plan``), so MCP clients see one vocabulary for
             # "upgrade to create this".
             if isinstance(exc, FeatureNotAvailableError):
-                from config.plan_tiers import get_required_plan_for_feature
+                # Non-raising: a raise inside this handler would escape the
+                # tool entirely when an env override (#1559) dropped the
+                # feature from every tier.
+                from config.plan_tiers import required_plan_name
 
                 return _error_response(
                     "plan_required",
                     exc.message,
-                    required_plan=get_required_plan_for_feature("connectors"),
+                    required_plan=required_plan_name("connectors"),
                     **exc.details,
                 )
             return _error_response(

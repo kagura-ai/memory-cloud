@@ -89,6 +89,8 @@ const planInfo = (overrides: Record<string, unknown> = {}) => ({
     mcp_calls_per_week: 1,
     rest_calls_per_day: 1,
     public_calls_per_day: 1,
+    max_resource_tokens: 3,
+    max_quota_capacity: 30000,
   },
   can_upgrade: false,
   can_downgrade: false,
@@ -195,6 +197,19 @@ describe("WorkspacePlanPage (#1141)", () => {
     await waitFor(() => expect(button).not.toBeDisabled());
     expect(button).toHaveAttribute("aria-busy", "false");
     expect(liveRegion).toHaveTextContent("");
+  });
+
+  it("labels the usage block as current entitlements next to the create matrix (#1560)", async () => {
+    mockWorkspace = { current_user_role: "owner", plan_name: "basic" };
+    render(<WorkspacePlanPage />);
+    // Effective view (may serve on this tier) vs the matrix's create view —
+    // both sections say which one they are so a non-zero effective
+    // public-calls figure beside a ✗ matrix row does not read as a conflict.
+    expect(
+      await screen.findByText("planPage.usageDescription"),
+    ).toBeInTheDocument();
+    expect(screen.getByText("planPage.publicPerDay")).toBeInTheDocument();
+    expect(screen.getByText("planMatrix.description")).toBeInTheDocument();
   });
 
   it("non-owner sees the owner-only note and no billing button", async () => {

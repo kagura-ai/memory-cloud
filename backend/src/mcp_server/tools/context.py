@@ -412,8 +412,8 @@ async def _apply_public_flag(db: Any, context: Any, is_public: Any) -> list[Text
         # public context on L is never re-gated here (block-new-only).
         from config.plan_tiers import (
             feature_denied_message,
-            get_required_plan_for_feature,
             has_feature,
+            required_plan_name,
         )
         from models.auth import Workspace
 
@@ -421,10 +421,12 @@ async def _apply_public_flag(db: Any, context: Any, is_public: Any) -> list[Text
         # Fail closed: no workspace row → no plan → no feature.
         plan_name = ws.plan_name if ws else None
         if not has_feature(plan_name or "", "public_contexts"):
+            # ``None`` when an env override (#1559) dropped the feature from
+            # every tier — the refusal must not raise into the catch-all.
             return _error_response(
                 "plan_required",
                 feature_denied_message(plan_name, "public_contexts"),
-                required_plan=get_required_plan_for_feature("public_contexts"),
+                required_plan=required_plan_name("public_contexts"),
             )
     if not is_public and context.is_public and context.resource_id:
         return _error_response(
