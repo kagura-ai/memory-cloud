@@ -396,8 +396,10 @@ export default function ConnectorsPage() {
   useEffect(() => {
     if (!installHandle) return;
     if (!allowed) return;
-    // #1560: hold the handle while the plan gate is still resolving — neither
-    // open the form nor strip the one-time handle on a pending answer.
+    // #1560: hold the handle while the plan gate is still resolving (or the
+    // tier matrix is unavailable — the hook stays `null` on a persistent
+    // fetch failure) — neither open the form nor strip the one-time handle
+    // until the answer is actually known.
     if (canCreate === null) return;
     // #1551: below XL the create form must never open — a stale or crafted
     // callback would otherwise show an enabled form that only fails at the

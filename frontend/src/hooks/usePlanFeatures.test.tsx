@@ -161,20 +161,30 @@ describe("usePlanFeatures (#1560)", () => {
     expect(out()).toBe("pending");
   });
 
-  it("fails closed (every gate false) when the fetch keeps failing", async () => {
+  it("stays pending (never `false`) when the fetch keeps failing, and a later mount retries", async () => {
     vi.useFakeTimers();
     try {
       const getPlanTierMatrix = vi.fn().mockRejectedValue(new Error("down"));
       const Harness = await setup(getPlanTierMatrix, { plan_name: "pro" });
 
-      render(<Harness />);
+      const { unmount } = render(<Harness />);
       // Three attempts with 500ms / 1000ms back-off before giving up.
       await vi.advanceTimersByTimeAsync(2000);
       expect(getPlanTierMatrix).toHaveBeenCalledTimes(3);
       await vi.advanceTimersByTimeAsync(0);
-      expect(out()).toBe(
-        'loaded:{"resources":false,"connectors":false,"public_contexts":false}',
-      );
+      // "Matrix unavailable" is not "not included": resolving to `false`
+      // here would upsell an entitled tenant and let the connectors page
+      // strip its one-time Slack install handle. Consumers stay pending.
+      expect(out()).toBe("pending");
+
+      // The failure is not cached — the next mount starts a fresh fetch and
+      // answers normally once the API is back.
+      unmount();
+      vi.useRealTimers();
+      getPlanTierMatrix.mockResolvedValue(MATRIX);
+      render(<Harness />);
+      expect(getPlanTierMatrix).toHaveBeenCalledTimes(4);
+      await waitFor(() => expect(out()).toContain('"connectors":true'));
     } finally {
       vi.useRealTimers();
     }

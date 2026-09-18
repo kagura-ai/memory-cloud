@@ -3184,6 +3184,8 @@
       "quota": "Quota (events per hour)",
       "quotaHelp": "Maximum number of events this token can ingest per hour (1-10,000)",
       "quotaError": "Quota must be between 1 and 10,000 events per hour",
+      "quotaRangeError": "Quota must be between 1 and {max}",
+      "quotaRangeErrorRemaining": "Quota must be between 1 and {max} ({remaining} remaining)",
       "resourceIdRequired": "Please select a resource ID",
       "cancel": "Cancel",
       "create": "Create Token",

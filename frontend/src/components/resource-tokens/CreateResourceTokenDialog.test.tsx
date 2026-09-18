@@ -7,7 +7,7 @@
  * binds client-side and the hint says so.
  */
 
-import { render, screen } from "@testing-library/react";
+import { fireEvent, render, screen } from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 import { CreateResourceTokenDialog } from "./CreateResourceTokenDialog";
@@ -41,23 +41,35 @@ const activeToken = (id: number, quota: number) => ({
 
 const noop = () => {};
 
+function dialogProps(
+  maxQuotaCapacity: number | null,
+  currentTokens: ReturnType<typeof activeToken>[] = [],
+) {
+  return {
+    isOpen: true,
+    onClose: noop,
+    onSuccess: noop,
+    currentTokens,
+    maxQuotaCapacity,
+  };
+}
+
 function renderDialog(
   maxQuotaCapacity: number | null,
   currentTokens: ReturnType<typeof activeToken>[] = [],
 ) {
   return render(
     <CreateResourceTokenDialog
-      isOpen
-      onClose={noop}
-      onSuccess={noop}
-      currentTokens={currentTokens}
-      maxQuotaCapacity={maxQuotaCapacity}
+      {...dialogProps(maxQuotaCapacity, currentTokens)}
     />,
   );
 }
 
 const quotaInput = () =>
   screen.getByLabelText("createDialog.quota") as HTMLInputElement;
+
+const submitForm = () =>
+  fireEvent.submit(quotaInput().closest("form") as HTMLFormElement);
 
 beforeEach(() => {
   mockGetContexts.mockReset();
@@ -95,5 +107,69 @@ describe("CreateResourceTokenDialog — quota bounds from the plan API (#1560)",
       screen.getByText("createDialog.quotaCapUnknown"),
     ).toBeInTheDocument();
     expect(screen.queryByText("createDialog.quotaRemaining")).toBeNull();
+  });
+
+  // The owning panel's /plan fetch is async, so the dialog can mount on
+  // `null` (per-token ceiling) and learn a smaller remaining capacity a
+  // moment later. The seeded default must follow the bound, or submit would
+  // reject the very value the dialog pre-filled.
+  it("re-seeds the default when the plan bound arrives after mount", () => {
+    const tokens = [activeToken(1, 299000)];
+    const { rerender } = renderDialog(null, tokens);
+    expect(quotaInput().value).toBe(String(MAX_QUOTA_PER_TOKEN));
+
+    rerender(<CreateResourceTokenDialog {...dialogProps(300000, tokens)} />);
+
+    expect(quotaInput()).toHaveAttribute("max", "1000");
+    expect(quotaInput().value).toBe("1000");
+  });
+
+  it("keeps a value the user already typed when the bound moves", () => {
+    const tokens = [activeToken(1, 299000)];
+    const { rerender } = renderDialog(null, tokens);
+    fireEvent.change(quotaInput(), { target: { value: "500" } });
+
+    rerender(<CreateResourceTokenDialog {...dialogProps(300000, tokens)} />);
+
+    expect(quotaInput()).toHaveAttribute("max", "1000");
+    expect(quotaInput().value).toBe("500");
+  });
+
+  // Validation copy goes through next-intl like every other string in the
+  // dialog (the mock renders the key), with the remaining figure only when
+  // the plan total is known.
+  it("reports an out-of-range quota via i18n, naming the remaining capacity when known", () => {
+    render(
+      <CreateResourceTokenDialog
+        {...dialogProps(300000, [activeToken(1, 299000)])}
+        initialResourceId="products"
+      />,
+    );
+    fireEvent.change(quotaInput(), { target: { value: "5000" } });
+    submitForm();
+
+    expect(
+      screen.getByText("createDialog.quotaRangeErrorRemaining"),
+    ).toBeInTheDocument();
+  });
+
+  it("reports an out-of-range quota via i18n without a remaining figure when the plan total is unknown", () => {
+    render(
+      <CreateResourceTokenDialog
+        {...dialogProps(null)}
+        initialResourceId="products"
+      />,
+    );
+    fireEvent.change(quotaInput(), {
+      target: { value: String(MAX_QUOTA_PER_TOKEN + 1) },
+    });
+    submitForm();
+
+    expect(
+      screen.getByText("createDialog.quotaRangeError"),
+    ).toBeInTheDocument();
+    expect(
+      screen.queryByText("createDialog.quotaRangeErrorRemaining"),
+    ).toBeNull();
   });
 });

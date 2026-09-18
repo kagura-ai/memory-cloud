@@ -16,9 +16,14 @@
  * Callers must NOT flash an upsell in that window — keep the create control
  * pending (hidden / disabled / skeleton) until the answer is known.
  *
- * Fail-closed: a plan name missing from the matrix, a boolean an older API
- * omits, or a persistent fetch failure all read as "not included", mirroring
- * the backend's free-tier fallback for unrecognised plan names.
+ * Fail-closed on DATA: a plan name missing from the matrix or a boolean an
+ * older API omits reads as "not included", mirroring the backend's free-tier
+ * fallback for unrecognised plan names. Fail-PENDING on TRANSPORT: when the
+ * fetch keeps failing the hook stays `null` instead of resolving to `false`,
+ * because "matrix unavailable" must never upsell an entitled tenant or fire a
+ * consumer's not-included branch (the connectors page strips its one-time
+ * Slack install handle on `false`). The failure is not cached, so the next
+ * mount retries.
  */
 
 import { useEffect, useMemo, useState } from "react";
@@ -55,14 +60,15 @@ export function planFeaturesFor(
   };
 }
 
-// Same retry-then-fail-closed shape as useSystemFeatures: a transient blip
-// keeps the hook in the `null` (pending) state instead of resolving to a
-// terminal "not included" that would show an upsell to an entitled tenant.
+// Same retry shape as useSystemFeatures, but unlike that hook a persistent
+// failure does NOT fail closed: the hook stays `null` (pending) rather than
+// resolving to a terminal "not included" that would show an upsell to an
+// entitled tenant — see the docblock.
 const MAX_ATTEMPTS = 3;
 const RETRY_BASE_MS = 500;
 
 let cache: PlanTierFeature[] | null = null;
-let inflight: Promise<PlanTierFeature[]> | null = null;
+let inflight: Promise<PlanTierFeature[] | null> | null = null;
 
 async function fetchMatrixWithRetry(): Promise<PlanTierFeature[]> {
   let lastError: unknown;
@@ -83,8 +89,8 @@ async function fetchMatrixWithRetry(): Promise<PlanTierFeature[]> {
 
 /**
  * The cached tier matrix, `null` until the first fetch resolves. A persistent
- * failure yields `[]` (every plan unknown → every gate false) and is not
- * cached, so a later mount retries.
+ * failure also leaves it `null` (consumers stay pending, never upsell) and is
+ * not cached, so a later mount retries.
  */
 export function usePlanTierMatrix(): PlanTierFeature[] | null {
   const [tiers, setTiers] = useState<PlanTierFeature[] | null>(cache);
@@ -106,7 +112,7 @@ export function usePlanTierMatrix(): PlanTierFeature[] | null {
             console.error("usePlanTierMatrix: /plans/tiers fetch failed", e);
           }
           inflight = null;
-          return [] as PlanTierFeature[];
+          return null;
         });
     }
     let alive = true;

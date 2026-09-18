@@ -5,7 +5,7 @@
  * Shows plaintext token ONLY once (one-time display)
  */
 
-import { useState, useEffect } from "react";
+import { useState, useEffect, useRef } from "react";
 import { useTranslations } from "next-intl";
 import { Button } from "@/components/ui/button";
 import { copyText } from "@/lib/utils/clipboard";
@@ -81,7 +81,15 @@ export function CreateResourceTokenDialog({
 
   const [resourceId, setResourceId] = useState(initialResourceId ?? "");
   const [description, setDescription] = useState("");
-  const [quotaInput, setQuotaInput] = useState(quotaDefault.toString()); // Fixed: use quotaMax, not remainingQuota
+  const [quotaInput, setQuotaInput] = useState(quotaDefault.toString());
+  // The bound usually lands AFTER the dialog mounts (the owning panel's /plan
+  // fetch is async), so the seeded default follows it — unless the user has
+  // already typed a value, which validation then judges against the new max.
+  const quotaEdited = useRef(false);
+  useEffect(() => {
+    if (quotaEdited.current) return;
+    setQuotaInput(quotaDefault.toString());
+  }, [quotaDefault]);
   const [loading, setLoading] = useState(false);
   const [loadingContexts, setLoadingContexts] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -137,8 +145,13 @@ export function CreateResourceTokenDialog({
     if (isNaN(quotaNum) || quotaNum < 1 || quotaNum > quotaMax) {
       setError(
         remainingQuota === null
-          ? `Quota must be between 1 and ${quotaMax.toLocaleString()}`
-          : `Quota must be between 1 and ${quotaMax.toLocaleString()} (${remainingQuota.toLocaleString()} remaining)`,
+          ? t("createDialog.quotaRangeError", {
+              max: quotaMax.toLocaleString(),
+            })
+          : t("createDialog.quotaRangeErrorRemaining", {
+              max: quotaMax.toLocaleString(),
+              remaining: remainingQuota.toLocaleString(),
+            }),
       );
       return;
     }
@@ -187,6 +200,7 @@ export function CreateResourceTokenDialog({
   const handleClose = () => {
     setResourceId("");
     setDescription("");
+    quotaEdited.current = false;
     setQuotaInput(quotaDefault.toString()); // Reset to default (not remainingQuota)
     setError(null);
     setCreatedToken(null);
@@ -421,7 +435,10 @@ export function CreateResourceTokenDialog({
                 min={1}
                 max={quotaMax}
                 value={quotaInput}
-                onChange={(e) => setQuotaInput(e.target.value)}
+                onChange={(e) => {
+                  quotaEdited.current = true;
+                  setQuotaInput(e.target.value);
+                }}
                 disabled={loading}
                 required
               />

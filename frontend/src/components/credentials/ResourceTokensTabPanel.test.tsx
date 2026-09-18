@@ -211,6 +211,25 @@ describe("ResourceTokensTabPanel — serve caps from /workspaces/{id}/plan (#156
     expect(screen.queryByText("maxCapacity")).toBeNull();
   });
 
+  it("owner → non-owner switch: the previous workspace's caps are cleared", async () => {
+    mockListResourceTokens.mockResolvedValue({ tokens: [token(1)], total: 1 });
+    mockGetContexts.mockResolvedValue({ contexts: [resourceContext] });
+
+    const { rerender } = render(<ResourceTokensTabPanel />);
+    expect(await screen.findByText(/\/ 30/)).toBeInTheDocument();
+    expect(screen.getByText("maxCapacity")).toBeInTheDocument();
+
+    // Same panel instance, viewer no longer owns the workspace. Non-owners
+    // never fetch the plan, so the effect must drop the stale figures rather
+    // than leave the previous workspace's owner-only caps on screen.
+    mockCurrentWorkspace = { plan_name: "promax", current_user_role: "admin" };
+    rerender(<ResourceTokensTabPanel />);
+
+    await waitFor(() => expect(screen.queryByText(/\/ 30/)).toBeNull());
+    expect(screen.queryByText("maxCapacity")).toBeNull();
+    expect(mockGetWorkspacePlan).toHaveBeenCalledTimes(1);
+  });
+
   it("non-owner: never calls the owner-only plan endpoint", async () => {
     mockCurrentWorkspace = { plan_name: "promax", current_user_role: "admin" };
 

@@ -124,9 +124,12 @@ export function ResourceTokensTabPanel({
   const isOwner = currentWorkspace?.current_user_role === "owner";
 
   useEffect(() => {
+    // Clear BEFORE the owner check: a switch to a workspace the viewer does
+    // not own never fetches, and must not leave the previous workspace's
+    // owner-only caps rendered in the (un-guarded) summary below.
+    setPlanQuotas(null);
     if (!currentWorkspaceId || !isOwner) return;
     let alive = true;
-    setPlanQuotas(null);
     getWorkspacePlan(currentWorkspaceId)
       .then((plan) => {
         if (alive) setPlanQuotas(plan.quotas);

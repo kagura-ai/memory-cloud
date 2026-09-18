@@ -3184,6 +3184,8 @@
       "quota": "クォータ（イベント数/時）",
       "quotaHelp": "このトークンが1時間あたりに取り込めるイベント数の上限（1-10,000）",
       "quotaError": "クォータは1〜10,000イベント/時の範囲で設定してください",
+      "quotaRangeError": "クォータは1〜{max}の範囲で設定してください",
+      "quotaRangeErrorRemaining": "クォータは1〜{max}の範囲で設定してください（残り {remaining}）",
       "resourceIdRequired": "リソースIDを入力してください",
       "cancel": "キャンセル",
       "create": "トークンを作成",
