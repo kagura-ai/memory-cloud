@@ -34,3 +34,18 @@ def test_system_info_exposes_managed_connectors_flag_default_off() -> None:
         "managed_connectors flag must be exposed for the web UI"
     )
     assert features["managed_connectors"] is False, "ENABLE_MANAGED_CONNECTORS must default OFF"
+
+
+def test_system_info_exposes_managed_llm_flag_default_off(monkeypatch) -> None:
+    """#1569: the analyses UI reads features.managed_llm to stop demanding a
+    workspace OpenAI key. Default OFF (no MANAGED_LLM_PROVIDER); ON when set."""
+    client = TestClient(app)
+    features = client.get("/api/v1/system/info").json()["features"]
+    assert features["managed_llm"] is False, "unset MANAGED_LLM_PROVIDER must read OFF"
+
+    monkeypatch.setenv("MANAGED_LLM_PROVIDER", "openai")
+    monkeypatch.setenv("MANAGED_LLM_MODEL", "gpt-5-nano")
+    monkeypatch.setenv("OPENAI_API_KEY", "sk-platform")
+    monkeypatch.setattr("config.settings._settings", None)
+    features = client.get("/api/v1/system/info").json()["features"]
+    assert features["managed_llm"] is True

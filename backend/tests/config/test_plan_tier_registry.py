@@ -150,9 +150,12 @@ def test_pro_no_longer_carries_public_contexts() -> None:
     assert "public_contexts" in get_plan_tier("promax").features
 
 
-@pytest.mark.parametrize("feature", ["shared_contexts", "team_invitations", "memory_analysis"])
+@pytest.mark.parametrize(
+    "feature", ["shared_contexts", "team_invitations", "memory_analysis", "managed_llm"]
+)
 def test_team_features_stay_on_pro(feature: str) -> None:
-    """Shared / team / analysis are NOT part of the XL re-map."""
+    """Shared / team / analysis (and its #1569 managed-LLM lane) are NOT part of
+    the XL re-map."""
     assert get_required_plan_for_feature(feature) == PlanName.PRO
     assert has_feature("pro", feature) and has_feature("promax", feature)
 
