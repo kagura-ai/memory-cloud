@@ -378,7 +378,15 @@ class TestSwitch:
             ]
         )
 
-        with patch.object(svc, "delete_points_from_qdrant", AsyncMock()) as delete:
+        deployment = MagicMock(
+            default_reranker_provider="self_hosted",
+            default_use_rerank=True,
+            default_reranker_model="qwen3-reranker-0.6b",
+        )
+        with (
+            patch.object(svc, "delete_points_from_qdrant", AsyncMock()) as delete,
+            patch.object(svc, "get_settings", return_value=deployment),
+        ):
             result = await svc.switch_context_embedding(
                 db, context_id, QWEN, 2560, requeue_since=since
             )
@@ -386,6 +394,13 @@ class TestSwitch:
         added = db.add.call_args.args[0]
         assert added.context_id == context_id
         assert (added.embedding_model, added.embedding_dimensions) == (QWEN, 2560)
+        # #1572: the materialised row carries the deployment default, exactly
+        # like the lazy create_or_get() on the recall path would.
+        assert (added.use_rerank, added.reranker_provider, added.reranker_model) == (
+            True,
+            "self_hosted",
+            "qwen3-reranker-0.6b",
+        )
         assert (result.previous_model, result.previous_dimensions) == (SMALL, 512)
         assert result.requeued == 4
         assert result.stale_removed == 0

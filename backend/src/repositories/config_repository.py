@@ -33,9 +33,12 @@ def search_config_defaults(settings: Settings) -> dict[str, Any]:
     values. Shared by ``ContextService.create_context``, ``setup_resource``,
     :meth:`ContextSearchConfigRepository.create_or_get`,
     :meth:`ContextSearchConfigRepository.reset_to_default`, the MCP
-    ``update_search_config`` fallbacks and ``/system/info``. The ORM column
-    defaults stay as the static safety net for raw inserts; existing rows are
-    never rewritten here (see ``cli/apply_rerank_defaults.py``).
+    ``update_search_config`` fallbacks, ``/system/info`` and the legacy-row
+    materialisation in ``embedding_migration_service.switch_context_embedding``.
+    Admin context recovery (``api/routes/admin.py``) deliberately does not use
+    it: a recovered row pins the non-ranking-modifying values (#1207). The ORM
+    column defaults stay as the static safety net for raw inserts; existing
+    rows are never rewritten here (see ``cli/apply_rerank_defaults.py``).
 
     Args:
         settings: Application settings — passed in so callers and tests decide
