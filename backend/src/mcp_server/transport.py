@@ -263,22 +263,15 @@ async def handle_streamable_http_post(
         )
         return
 
-    # Check if this is a notification (no "id" field)
-    is_notification = "id" not in body
-
-    if is_notification:
-        # Notifications don't expect a response - return 202 Accepted
-        logger.info(f"MCP notification: method={body.get('method')}, session={session.session_id}")
-        await send({"type": "http.response.start", "status": 202, "headers": []})
-        await send({"type": "http.response.body", "body": b""})
-        return
-
-    # Check request method
     method = body.get("method")
-    request_id = body.get("id")
+    request_id = body.get("id")  # None for a notification
 
-    # A request must name its method; without one, -32601 "Method not found:
-    # None" would blame a method the client never sent (#1541 review).
+    # Every JSON-RPC message from the client — request or notification — must
+    # name its method. This runs BEFORE the notification short-circuit: checked
+    # after it, a malformed envelope with no ``id`` (``{}``, ``{"method": 5}``)
+    # was silently 202'd as a "notification" and never reached the guard
+    # (#1541 review). Without it, -32601 "Method not found: None" would also
+    # blame a method the client never sent.
     if not isinstance(method, str) or not method:
         await _send_json_error(
             send,
@@ -289,6 +282,14 @@ async def handle_streamable_http_post(
                 "id": request_id,
             },
         )
+        return
+
+    # A valid notification (string method, no "id") expects no response.
+    if "id" not in body:
+        shown = method[:100]
+        logger.info(f"MCP notification: method={shown!r}, session={session.session_id}")
+        await send({"type": "http.response.start", "status": 202, "headers": []})
+        await send({"type": "http.response.body", "body": b""})
         return
 
     # Handle initialize request

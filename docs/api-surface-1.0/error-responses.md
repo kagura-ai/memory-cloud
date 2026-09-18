@@ -105,7 +105,7 @@ Requests whose `method` the transport does not implement (anything other than `i
 | JSON-RPC code | Trigger | Site |
 |---|---|---|
 | `-32601` | unknown / unimplemented request method (standard) | `handle_streamable_http_post` — terminal branch |
-| `-32600` | body is not a single JSON-RPC object (scalar / batch array), or a request without a string `method` — HTTP **400** (standard) | `handle_streamable_http_post` — envelope guards |
+| `-32600` | body is not a single JSON-RPC object (scalar / batch array), or a message without a string `method` — with or without an `id`, so a malformed id-less envelope is not mistaken for a notification — HTTP **400** (standard) | `handle_streamable_http_post` — envelope guards |
 
 ⚠ The application `error_code` does **not** pass through this path — `MemoryCloudException` falls into the `-32603` bucket with only `exception_type` in `data`. (In practice most tool handlers catch it first, path 4 above.)
 
@@ -200,7 +200,7 @@ Emitted in the MCP tool envelope (`{"status":"error","error":...}`); the logged 
 | `-32602` | transport.py:252 | Invalid params (standard). |
 | `-32603` | transport.py:255 | Internal error (standard; catch-all — application `error_code` is NOT propagated here ⚠). |
 | `-32601` | transport.py `handle_streamable_http_post` (terminal branch) | Method not found (standard) — any request method the transport does not implement (#1541). |
-| `-32600` | transport.py `handle_streamable_http_post` (envelope guards) | Invalid Request (standard) — non-object / batch body, or missing `method`; HTTP 400 (#1541). |
+| `-32600` | transport.py `handle_streamable_http_post` (envelope guards) | Invalid Request (standard) — non-object / batch body, or missing `method` (checked before the notification 202, so it applies to id-less envelopes too); HTTP 400 (#1541). |
 
 ### E. RFC 6750 challenge codes — `backend/src/mcp_server/transport.py`
 

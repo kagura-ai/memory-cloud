@@ -364,3 +364,35 @@ async def test_tools_call_failure_maps_to_a_jsonrpc_error(monkeypatch, exc, code
     assert send.body["id"] == 6
     assert send.body["error"]["code"] == code
     assert send.body["error"]["data"]["exception_type"] == type(exc).__name__
+
+
+# ------------------------------- id-less malformed envelopes (Copilot review)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "payload",
+    [
+        {},
+        {"jsonrpc": "2.0"},
+        {"jsonrpc": "2.0", "method": 5},
+        {"jsonrpc": "2.0", "method": ""},
+        {"jsonrpc": "2.0", "method": None},
+    ],
+)
+async def test_idless_envelope_without_a_string_method_is_not_a_notification(payload):
+    """The 202 notification short-circuit ran before method validation, so a
+    malformed envelope with no ``id`` was silently accepted. Only a *valid*
+    notification (string method, no id) earns the 202."""
+    send = await _post(payload)
+    assert send.status == 400
+    assert send.body["error"]["code"] == -32600
+    assert send.body["id"] is None
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("method", ["notifications/initialized", "notifications/cancelled", "x"])
+async def test_valid_notification_still_gets_202_with_no_body(method):
+    send = await _post({"jsonrpc": "2.0", "method": method})
+    assert send.status == 202
+    assert send.messages[1]["body"] == b""
