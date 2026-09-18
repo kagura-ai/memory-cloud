@@ -262,3 +262,12 @@ async def test_evaluate_unknown_plan_fails_closed_to_no_targets():
     svc.current_usage = AsyncMock()
     assert await svc.evaluate(_ws(plan_name="enterprise")) == []
     svc.current_usage.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_evaluate_promax_targets_every_lower_tier_in_order():
+    """#1548: the XL tier sits above pro, so pro becomes a downgrade target."""
+    svc = _svc()
+    svc.current_usage = AsyncMock(return_value=_usage())
+    targets = await svc.evaluate(_ws(plan_name="promax"))
+    assert [t.target_plan for t in targets] == ["free", "basic", "pro"]

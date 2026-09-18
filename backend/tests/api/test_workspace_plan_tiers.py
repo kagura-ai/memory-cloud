@@ -42,16 +42,16 @@ def client():
     app.dependency_overrides.clear()
 
 
-def test_returns_three_tiers_in_upgrade_order(client: TestClient) -> None:
+def test_returns_four_tiers_in_upgrade_order(client: TestClient) -> None:
     resp = client.get(ENDPOINT)
     assert resp.status_code == 200
     data = resp.json()
     assert isinstance(data, list)
-    assert [t["name"] for t in data] == ["free", "basic", "pro"]
+    assert [t["name"] for t in data] == ["free", "basic", "pro", "promax"]
 
 
 def test_curated_numeric_limits_match_plan_tiers(client: TestClient) -> None:
-    free, basic, pro = client.get(ENDPOINT).json()
+    free, basic, pro, _promax = client.get(ENDPOINT).json()
 
     # The three rows the user called out (connectors / analysis / sleep).
     assert (free["max_connectors"], basic["max_connectors"], pro["max_connectors"]) == (0, 3, 10)
@@ -92,7 +92,7 @@ def test_curated_numeric_limits_match_plan_tiers(client: TestClient) -> None:
 
 
 def test_boolean_capabilities(client: TestClient) -> None:
-    free, basic, pro = client.get(ENDPOINT).json()
+    free, basic, pro, _promax = client.get(ENDPOINT).json()
     assert (free["reranking"], basic["reranking"], pro["reranking"]) == (False, True, True)
     assert (
         free["managed_embeddings"],
@@ -120,6 +120,22 @@ def test_boolean_capabilities(client: TestClient) -> None:
 def test_price_is_omitted(client: TestClient) -> None:
     """#1138 / #1141: the OSS Plan page must not surface a price — pricing lives
     on the payment side. The matrix payload carries no price field."""
-    free, _basic, _pro = client.get(ENDPOINT).json()
+    free, _basic, _pro, _promax = client.get(ENDPOINT).json()
     assert "price_monthly" not in free
     assert "price" not in free
+
+
+def test_promax_row_is_pro_or_better(client: TestClient) -> None:
+    """#1548: the XL tier is served last and never below pro on any row."""
+    _free, _basic, pro, promax = client.get(ENDPOINT).json()
+    assert promax["name"] == "promax"
+    assert (promax["max_contexts"], promax["memory_limit"], promax["max_members"]) == (
+        1000,
+        100000,
+        50,
+    )
+    for key, value in pro.items():
+        if isinstance(value, bool):
+            assert promax[key] or not value, key
+        elif isinstance(value, int):
+            assert promax[key] >= value, key

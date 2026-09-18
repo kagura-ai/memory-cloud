@@ -1524,7 +1524,7 @@ class Workspace(Base):
         name: Workspace display name
         description: Optional description
         owner_user_id: Owner user ID (creator)
-        plan_name: Billing plan (free/basic/pro)
+        plan_name: Billing plan (free/basic/pro/promax)
         daily_api_limit: Daily API call limit
         weekly_api_limit: Weekly API call limit
         created_at: Creation timestamp
@@ -1536,7 +1536,7 @@ class Workspace(Base):
         contexts: Contexts owned by this workspace (one-to-many)
 
     Constraints:
-        - plan_name must be in: free, basic, pro
+        - plan_name must be in: free, basic, pro, promax
     """
 
     __tablename__ = "workspaces"
@@ -1862,7 +1862,7 @@ class Workspace(Base):
 
     # Constraints
     __table_args__ = (
-        CheckConstraint("plan_name IN ('free', 'basic', 'pro')", name="valid_plan_name"),
+        CheckConstraint("plan_name IN ('free', 'basic', 'pro', 'promax')", name="valid_plan_name"),
         # #1095: CHECK derived from ``ENTITLEMENT_SOURCES`` (single quotes),
         # byte-identical to the alembic migration literal.
         CheckConstraint(

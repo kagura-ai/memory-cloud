@@ -23,6 +23,7 @@ import { ErrorBanner } from "@/components/common/ErrorBanner";
 import { EmptyState } from "@/components/ui/empty-state";
 import { useWorkspace } from "@/contexts/WorkspaceContext";
 import { hasWorkspaceRole, WorkspaceRole } from "@/lib/auth/rbac";
+import { planAtLeast } from "@/lib/utils/planLabel";
 import { fetchWorkspaceSleepReports } from "@/lib/api";
 
 export default function WorkspaceSleepReportsPage() {
@@ -30,11 +31,12 @@ export default function WorkspaceSleepReportsPage() {
   const router = useRouter();
   const { currentWorkspace, currentWorkspaceId, loading } = useWorkspace();
 
-  // Sleep Maintenance is Pro-only (sleep_enabled_contexts_limit = 0 on
+  // Sleep Maintenance is Pro-or-better (sleep_enabled_contexts_limit = 0 on
   // free/basic). Mirror the resources page: keep the sidebar entry, gate the
   // page with an upgrade CTA that routes to the Plan page (#1137).
   const planName = currentWorkspace?.plan_name;
-  const isProGated = !loading && planName !== undefined && planName !== "pro";
+  const isProGated =
+    !loading && planName !== undefined && !planAtLeast(planName, "pro");
 
   const allowed = hasWorkspaceRole(
     currentWorkspace?.current_user_role,

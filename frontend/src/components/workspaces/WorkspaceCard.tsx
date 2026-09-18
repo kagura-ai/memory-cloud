@@ -8,6 +8,7 @@
  */
 
 import { PlanBadge } from '@/components/common/PlanBadge';
+import type { PlanTier } from '@/lib/utils/planLabel';
 import { useTranslations } from 'next-intl';
 import { Brain, Users } from 'lucide-react';
 
@@ -60,7 +61,7 @@ export function WorkspaceCard({
         <div className="min-w-0 flex-1">
           <div className="flex items-center gap-2">
             <div className="font-medium truncate">{workspace.name}</div>
-            <PlanBadge planName={workspace.plan_name as 'free' | 'basic' | 'pro'} size="sm" />
+            <PlanBadge planName={workspace.plan_name as PlanTier} size="sm" />
             {workspace.current_user_role === 'owner' && (
               <span className="text-xs text-amber-500" title="Owner">👤</span>
             )}
@@ -114,7 +115,7 @@ export function WorkspaceCard({
               <h3 className="font-semibold text-slate-900 dark:text-white truncate">
                 {workspace.name}
               </h3>
-              <PlanBadge planName={workspace.plan_name as 'free' | 'basic' | 'pro'} size="sm" />
+              <PlanBadge planName={workspace.plan_name as PlanTier} size="sm" />
               {workspace.current_user_role === 'owner' && (
                 <span className="text-xs text-amber-500" title="Owner">👤</span>
               )}

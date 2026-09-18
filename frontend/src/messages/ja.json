@@ -2391,6 +2391,7 @@
         "free": "S",
         "basic": "M",
         "pro": "L",
+        "promax": "XL",
         "loadError": "プランティア情報の取得に失敗しました",
         "emptyTitle": "プランティアが設定されていません",
         "emptyDescription": "バックエンドからティアが返されませんでした。デプロイの PLAN_* 設定を確認してください。",
@@ -2634,7 +2635,8 @@
           "planOptions": {
             "free": "Free",
             "basic": "Basic",
-            "pro": "Pro"
+            "pro": "Pro",
+            "promax": "Pro Max"
           },
           "warningText": "⚠️ プラン変更は即時反映され、クォータ上限が更新されます。",
           "confirm": "プラン変更"

@@ -1303,7 +1303,7 @@ class OwnedWorkspaceInfo(BaseModel):
 
     id: str
     name: str
-    plan_name: str  # Workspace's current plan tier (free/basic/pro)
+    plan_name: str  # Workspace's current plan tier (free/basic/pro/promax)
 
 
 class WorkspaceSummary(BaseModel):

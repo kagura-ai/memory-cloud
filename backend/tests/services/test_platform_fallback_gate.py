@@ -61,7 +61,7 @@ class TestTheRule:
         restriction(True)
         assert platform_fallback_allowed("free") is False
 
-    @pytest.mark.parametrize("plan", ["free", "basic", "pro"])
+    @pytest.mark.parametrize("plan", ["free", "basic", "pro", "promax"])
     def test_with_the_restriction_off_every_tier_may(self, plan, restriction):
         """The default, and it must stay the default.
 

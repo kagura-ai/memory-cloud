@@ -19,6 +19,7 @@ import { useMemoryContext } from "@/contexts/MemoryContextContext";
 import { SleepModeBadge } from "@/components/contexts/SleepModeBadge";
 import { CurrentContextBadge } from "@/components/contexts/CurrentContextBadge";
 import { formatDateTime, formatRelativeTime } from "@/lib/utils/datetime";
+import { planAtLeast } from "@/lib/utils/planLabel";
 import {
   Plus,
   FolderOpen,
@@ -865,8 +866,8 @@ export default function ContextsPage() {
                     value="shared"
                     checked={!isPrivate}
                     onChange={() => {
-                      // Issue #270: Only Pro plan can create shared contexts
-                      if (currentWorkspace?.plan_name === "pro") {
+                      // Issue #270: Only Pro plan (or better) can create shared contexts
+                      if (planAtLeast(currentWorkspace?.plan_name, "pro")) {
                         setIsPrivate(false);
                       }
                     }}
@@ -890,7 +891,7 @@ export default function ContextsPage() {
                       )}
                     </div>
                     <div className="text-xs text-gray-600 dark:text-gray-400 mt-1">
-                      {currentWorkspace?.plan_name === "pro"
+                      {planAtLeast(currentWorkspace?.plan_name, "pro")
                         ? t("teamMembersAccess")
                         : t("upgradeToPro")}
                     </div>
@@ -1376,8 +1377,8 @@ export default function ContextsPage() {
                     value="shared"
                     checked={!isPrivate}
                     onChange={() => {
-                      // Issue #270: Only Pro plan can create shared contexts
-                      if (currentWorkspace?.plan_name === "pro") {
+                      // Issue #270: Only Pro plan (or better) can create shared contexts
+                      if (planAtLeast(currentWorkspace?.plan_name, "pro")) {
                         setIsPrivate(false);
                       }
                     }}
@@ -1401,7 +1402,7 @@ export default function ContextsPage() {
                       )}
                     </div>
                     <div className="text-xs text-gray-600 dark:text-gray-400 mt-1">
-                      {currentWorkspace?.plan_name === "pro"
+                      {planAtLeast(currentWorkspace?.plan_name, "pro")
                         ? t("teamMembersCanAccessShort")
                         : t("requiresProPlan")}
                     </div>

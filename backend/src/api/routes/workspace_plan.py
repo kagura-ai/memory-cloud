@@ -23,7 +23,7 @@ from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from auth.dependencies import SessionUser
-from config.plan_tiers import PLAN_TIERS, PlanTier, get_plan_tier
+from config.plan_tiers import PLAN_ORDER, PLAN_TIERS, PlanTier, get_plan_tier, plan_rank
 from db.base import get_db
 from models.auth import (
     Context,
@@ -167,10 +167,7 @@ async def get_workspace_plan(
     )
 
     # Determine upgrade/downgrade options
-    plan_order = ["free", "basic", "pro"]
-    current_index = (
-        plan_order.index(workspace.plan_name) if workspace.plan_name in plan_order else 0
-    )
+    current_index = plan_rank(workspace.plan_name)
 
     return WorkspacePlanInfo(
         workspace_id=str(workspace.id),
@@ -192,7 +189,7 @@ async def get_workspace_plan(
             "rest_calls_per_day": workspace.effective_rest_calls_per_day,
             "public_calls_per_day": workspace.effective_public_calls_per_day,
         },
-        can_upgrade=current_index < len(plan_order) - 1,
+        can_upgrade=current_index < len(PLAN_ORDER) - 1,
         can_downgrade=current_index > 0,
     )
 

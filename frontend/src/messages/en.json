@@ -2391,6 +2391,7 @@
         "free": "S",
         "basic": "M",
         "pro": "L",
+        "promax": "XL",
         "loadError": "Failed to load plan tier data",
         "emptyTitle": "No plan tiers configured",
         "emptyDescription": "The backend returned no tiers — check the deployment's PLAN_* configuration.",
@@ -2634,7 +2635,8 @@
           "planOptions": {
             "free": "Free",
             "basic": "Basic",
-            "pro": "Pro"
+            "pro": "Pro",
+            "promax": "Pro Max"
           },
           "warningText": "⚠️ Plan changes take effect immediately and will update quota limits.",
           "confirm": "Change Plan"

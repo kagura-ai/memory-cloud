@@ -9,22 +9,60 @@
  *
  * Resolution order (first hit wins):
  *   1. Locale-aware JSON map  — NEXT_PUBLIC_PLAN_DISPLAY_NAMES
- *      e.g. {"en":{"free":"Trial","basic":"Starter","pro":"Pro"},
- *            "ja":{"free":"お試し","basic":"スターター","pro":"プロ"}}
+ *      e.g. {"en":{"free":"Trial","basic":"Starter","pro":"Pro","promax":"Pro Max"},
+ *            "ja":{"free":"お試し","basic":"スターター","pro":"プロ","promax":"プロマックス"}}
  *      (exact locale, then its base language: "ja-JP" → "ja")
  *   2. Single-string env (locale-blind, back-compat with #350)
- *      — NEXT_PUBLIC_PLAN_{FREE,BASIC,PRO}_DISPLAY_NAME
- *   3. OSS default — S / M / L
+ *      — NEXT_PUBLIC_PLAN_{FREE,BASIC,PRO,PROMAX}_DISPLAY_NAME
+ *   3. OSS default — S / M / L / XL
  */
 
-export type PlanTier = "free" | "basic" | "pro";
+export type PlanTier = "free" | "basic" | "pro" | "promax";
+
+/**
+ * Tiers lowest → highest. Mirrors backend `PLAN_ORDER` (#1548) — the single
+ * source for "is plan X at least Y" gates and for enumerating tiers in UI.
+ */
+export const PLAN_TIER_ORDER = [
+  "free",
+  "basic",
+  "pro",
+  "promax",
+] as const satisfies readonly PlanTier[];
 
 /** OSS default labels — intentionally neutral. Do not localize these. */
 export const DEFAULT_PLAN_LABELS: Record<PlanTier, string> = {
   free: "S",
   basic: "M",
   pro: "L",
+  promax: "XL",
 };
+
+export function isPlanTier(v: unknown): v is PlanTier {
+  return (
+    typeof v === "string" && (PLAN_TIER_ORDER as readonly string[]).includes(v)
+  );
+}
+
+/**
+ * Index in PLAN_TIER_ORDER. Unknown / null / undefined → 0 (free): the same
+ * fail-closed fallback the backend applies to unrecognised plan names.
+ */
+export function planRank(plan: string | null | undefined): number {
+  return isPlanTier(plan) ? PLAN_TIER_ORDER.indexOf(plan) : 0;
+}
+
+/** "pro or better" style gate — true for `minimum` and every higher tier. */
+export function planAtLeast(
+  plan: string | null | undefined,
+  minimum: PlanTier,
+): boolean {
+  return planRank(plan) >= planRank(minimum);
+}
+
+export function isPaidTier(plan: string | null | undefined): boolean {
+  return planRank(plan) > 0;
+}
 
 export type LocalePlanLabelMap = Record<
   string,
@@ -107,5 +145,6 @@ export function planLabelFromEnv(
     free: process.env.NEXT_PUBLIC_PLAN_FREE_DISPLAY_NAME,
     basic: process.env.NEXT_PUBLIC_PLAN_BASIC_DISPLAY_NAME,
     pro: process.env.NEXT_PUBLIC_PLAN_PRO_DISPLAY_NAME,
+    promax: process.env.NEXT_PUBLIC_PLAN_PROMAX_DISPLAY_NAME,
   });
 }

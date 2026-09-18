@@ -32,7 +32,11 @@ import { getWorkspacePlan, type WorkspacePlanInfo } from "@/lib/api/workspaces";
 import { mintBillingHandoff } from "@/lib/api/billing";
 import { ApiError } from "@/lib/api/base";
 import { useLocale } from "@/i18n";
-import { planLabelFromEnv, type PlanTier } from "@/lib/utils/planLabel";
+import {
+  isPaidTier,
+  isPlanTier,
+  planLabelFromEnv,
+} from "@/lib/utils/planLabel";
 import { PlanFeatureMatrix } from "@/components/plan/PlanFeatureMatrix";
 import { useSystemFeatures } from "@/hooks/useSystemFeatures";
 import { Alert, AlertDescription } from "@/components/ui/alert";
@@ -142,19 +146,16 @@ export default function WorkspacePlanPage() {
   // Label precedence: localized tier label (OSS default S/M/L, per-locale
   // override via env) → backend display_name → raw plan_name → em dash.
   const canonicalTier = currentWorkspace?.plan_name;
-  const planName =
-    canonicalTier === "free" ||
-    canonicalTier === "basic" ||
-    canonicalTier === "pro"
-      ? planLabelFromEnv(canonicalTier as PlanTier, locale)
-      : (plan?.plan_display_name ?? canonicalTier ?? "—");
+  const planName = isPlanTier(canonicalTier)
+    ? planLabelFromEnv(canonicalTier, locale)
+    : (plan?.plan_display_name ?? canonicalTier ?? "—");
 
   // "Subscribed" = on a paid tier. memory-cloud is price/currency-agnostic
   // (#1096 — payment is the billing SoT; entitlement push carries plan_name +
   // addons only, no price/currency), so the actual billed amount/currency is
   // confirmed in the billing portal, never hardcoded here (#1141).
   const subscribedTier = canonicalTier ?? plan?.current_plan;
-  const isSubscribed = subscribedTier === "basic" || subscribedTier === "pro";
+  const isSubscribed = isPaidTier(subscribedTier);
 
   return (
     <PageContainer>

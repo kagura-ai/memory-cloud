@@ -61,6 +61,11 @@ import {
   type WorkspaceSummary,
 } from "@/lib/api/admin";
 import { formatRelativeTime } from "@/lib/utils/datetime";
+import {
+  PLAN_TIER_ORDER,
+  isPlanTier,
+  planAtLeast,
+} from "@/lib/utils/planLabel";
 import { useToast } from "@/hooks/use-toast";
 import { USER_DETAIL_TEST_IDS } from "./testids";
 
@@ -110,8 +115,6 @@ const KNOWN_ROLE_VALUES = [
   "editor",
 ] as const;
 
-const KNOWN_PLAN_VALUES = ["free", "basic", "pro"] as const;
-
 export default function UserDetailPage() {
   const params = useParams();
   const router = useRouter();
@@ -159,11 +162,7 @@ export default function UserDetailPage() {
   };
 
   const getLocalizedPlan = (plan: string) => {
-    return KNOWN_PLAN_VALUES.includes(
-      plan as (typeof KNOWN_PLAN_VALUES)[number],
-    )
-      ? t(`changePlanDialog.planOptions.${plan as "free" | "basic" | "pro"}`)
-      : plan;
+    return isPlanTier(plan) ? t(`changePlanDialog.planOptions.${plan}`) : plan;
   };
 
   useEffect(() => {
@@ -543,7 +542,7 @@ export default function UserDetailPage() {
                     <TableCell>
                       <Badge
                         variant={
-                          workspace.plan_name === "pro"
+                          planAtLeast(workspace.plan_name, "pro")
                             ? "destructive"
                             : workspace.plan_name === "basic"
                               ? "default"
@@ -695,7 +694,7 @@ export default function UserDetailPage() {
                             <span className="font-medium">{ws.name}</span>
                             <Badge
                               variant={
-                                ws.plan_name === "pro"
+                                planAtLeast(ws.plan_name, "pro")
                                   ? "destructive"
                                   : ws.plan_name === "basic"
                                     ? "default"
@@ -838,7 +837,9 @@ export default function UserDetailPage() {
               <div className="mt-2">
                 <Badge
                   variant={
-                    planDialog.currentPlan === "pro" ? "destructive" : "default"
+                    planAtLeast(planDialog.currentPlan, "pro")
+                      ? "destructive"
+                      : "default"
                   }
                 >
                   {planDialog.currentPlan
@@ -857,15 +858,11 @@ export default function UserDetailPage() {
                   <SelectValue />
                 </SelectTrigger>
                 <SelectContent>
-                  <SelectItem value="free">
-                    {t("changePlanDialog.planOptions.free")}
-                  </SelectItem>
-                  <SelectItem value="basic">
-                    {t("changePlanDialog.planOptions.basic")}
-                  </SelectItem>
-                  <SelectItem value="pro">
-                    {t("changePlanDialog.planOptions.pro")}
-                  </SelectItem>
+                  {PLAN_TIER_ORDER.map((plan) => (
+                    <SelectItem key={plan} value={plan}>
+                      {t(`changePlanDialog.planOptions.${plan}`)}
+                    </SelectItem>
+                  ))}
                 </SelectContent>
               </Select>
             </div>

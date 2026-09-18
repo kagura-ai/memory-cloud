@@ -6,6 +6,7 @@
 
 import { apiClient } from "./base";
 import { ContextRole, WorkspaceRole } from "@/lib/auth/rbac";
+import type { PlanTier } from "@/lib/utils/planLabel";
 
 export interface WorkspacePlanInfo {
   id: string;
@@ -37,7 +38,7 @@ export interface PlanChangeAuditEntry {
 }
 
 export interface UpdatePlanRequest {
-  plan_name: "free" | "basic" | "pro";
+  plan_name: PlanTier;
   reason?: string;
 }
 
@@ -77,7 +78,7 @@ export async function getAdminPlanAudit(
 // ============================================================================
 
 export interface PlanTierInfo {
-  name: "free" | "basic" | "pro";
+  name: PlanTier;
   display_name: string;
   price_monthly: number;
   max_contexts_per_workspace: number;

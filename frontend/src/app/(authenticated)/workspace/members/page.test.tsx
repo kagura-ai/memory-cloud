@@ -8,7 +8,13 @@
  */
 
 import { describe, it, expect, beforeEach, vi, afterEach } from "vitest";
-import { render, screen, waitFor, cleanup } from "@testing-library/react";
+import {
+  render,
+  screen,
+  waitFor,
+  cleanup,
+  fireEvent,
+} from "@testing-library/react";
 
 import WorkspaceMembersPage from "./page";
 
@@ -64,13 +70,13 @@ type Role = "owner" | "admin" | "member" | "viewer";
 
 const WORKSPACE_ID = "ws-1";
 
-function setupWithRole(role: Role) {
+function setupWithRole(role: Role, plan: string = "pro") {
   mockUseAuth.mockReturnValue({ user: { id: "user-1" } });
   mockUseWorkspace.mockReturnValue({
     currentWorkspaceId: WORKSPACE_ID,
     currentWorkspace: {
       id: WORKSPACE_ID,
-      plan_name: "pro",
+      plan_name: plan,
       current_user_role: role,
     },
     loading: false,
@@ -78,7 +84,7 @@ function setupWithRole(role: Role) {
   mockListMembers.mockResolvedValue([]);
   mockListInvitations.mockResolvedValue([]);
   mockGetMemberQuota.mockResolvedValue({
-    plan_name: "pro",
+    plan_name: plan,
     members_used: 0,
     members_limit: 100,
     upgrade_required: false,
@@ -156,4 +162,36 @@ describe("WorkspaceMembersPage redirect guard (#398)", () => {
     });
     expect(mockPush).not.toHaveBeenCalled();
   });
+});
+
+// Team invitations are Pro-or-better (#1548): promax must get the same
+// treatment as pro, and free/basic still route to the plan page.
+describe("WorkspaceMembersPage invite gate", () => {
+  it.each(["pro", "promax"] as const)(
+    "%s: invite is enabled and does not redirect to the plan page",
+    async (plan) => {
+      setupWithRole("owner", plan);
+      render(<WorkspaceMembersPage />);
+      const invite = await screen.findByRole("button", {
+        name: /inviteMember/,
+      });
+      expect(invite).not.toBeDisabled();
+      expect(invite).not.toHaveTextContent("proPlanRequired");
+      fireEvent.click(invite);
+      expect(mockPush).not.toHaveBeenCalledWith("/workspace/settings/plan");
+    },
+  );
+
+  it.each(["free", "basic"] as const)(
+    "%s: invite is disabled with the pro-required hint",
+    async (plan) => {
+      setupWithRole("owner", plan);
+      render(<WorkspaceMembersPage />);
+      const invite = await screen.findByRole("button", {
+        name: /inviteMember/,
+      });
+      expect(invite).toBeDisabled();
+      expect(invite).toHaveTextContent("proPlanRequired");
+    },
+  );
 });

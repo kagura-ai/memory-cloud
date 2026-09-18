@@ -306,7 +306,7 @@ async def list_users(
         search: Search by email or name (partial match)
         workspace_id: Filter by workspace ID
         role: Filter by system role (admin/user)
-        plan: Filter by plan tier (free/basic/pro)
+        plan: Filter by plan tier (free/basic/pro/promax)
         sort: Sort field (created_at, last_login, memory_count)
 
     Returns:
