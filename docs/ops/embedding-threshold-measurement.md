@@ -254,10 +254,12 @@ unreliable.
 
 **`UserWarning: Qdrant client version X.X.X is incompatible with server
 version Y.Y.Y`** (raised by `qdrant_client/async_qdrant_remote.py`):
-informational — production tolerates the current minor-version skew.
-Set `check_compatibility=False` on the client constructor only if it
-adds noise to copy-pasted output; the measurement itself is not
-affected.
+the client and server have drifted more than one minor version apart.
+`backend/pyproject.toml` caps `qdrant-client` to the window the pinned
+server image accepts (#1535), so this means either the install bypassed
+that pin or the server image moved without the cap being bumped. Fix the
+pin rather than passing `check_compatibility=False` — that flag also
+hides a real incompatibility. The measurement itself is not affected.
 
 **`UserWarning: Api key is used with an insecure connection`** (raised
 by `src/db/qdrant.py`): informational — production Qdrant runs over
