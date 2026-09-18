@@ -8,7 +8,38 @@ Tests the validation rules:
 - Memory addon: soft limit (always allow reduction)
 """
 
+import pytest
+
+from api.routes.admin_plans import UpdateAddonRequest, _addon_feature_warnings
 from config.plan_tiers import get_plan_tier
+
+
+class TestAddonFeatureWarnings:
+    """#1561: grants whose addon needs a feature the tier lacks warn, never block.
+
+    ``extra_connectors`` seats on a tier without the ``connectors`` feature are
+    stored but inert (provisioning still refuses with FEAT-001), so the handler
+    returns a structured warning for the admin UI instead of rejecting.
+    """
+
+    @pytest.mark.parametrize("plan_name", ["free", "basic", "pro"])
+    def test_connector_grant_warns_when_tier_lacks_connectors(self, plan_name: str):
+        request = UpdateAddonRequest(addon_connector_bonus=2)
+        assert _addon_feature_warnings(plan_name, request) == ["connectors_feature_missing"]
+
+    def test_connector_grant_silent_on_tier_with_connectors(self):
+        request = UpdateAddonRequest(addon_connector_bonus=2)
+        assert _addon_feature_warnings("promax", request) == []
+
+    def test_zeroing_or_omitting_connector_grant_never_warns(self):
+        # Zeroing an inert grant is the expected cleanup; an untouched field
+        # (None) must not be read as a grant either.
+        assert _addon_feature_warnings("pro", UpdateAddonRequest(addon_connector_bonus=0)) == []
+        assert _addon_feature_warnings("pro", UpdateAddonRequest(addon_memory_bonus=10_000)) == []
+
+    def test_unknown_tier_fails_closed_to_a_warning(self):
+        request = UpdateAddonRequest(addon_connector_bonus=1)
+        assert _addon_feature_warnings("enterprise", request) == ["connectors_feature_missing"]
 
 
 class TestAddonReductionValidation:

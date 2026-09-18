@@ -2491,6 +2491,11 @@
           "title": "Some addon values can't be saved",
           "body": "The value for {keys} is not a valid multiple of its unit (or is negative) and would be rejected on save. Saving is disabled until you enter a valid amount."
         },
+        "featureWarning": {
+          "title": "Saved, but this addon has no effect on the current plan",
+          "connectorsFeatureMissing": "Extra connector seats were granted, but this workspace's plan lacks the connectors feature, so creating new connectors is still refused. The seats take effect once the workspace is upgraded to a plan that includes connectors.",
+          "generic": "Addon granted with a warning: {code}"
+        },
         "connector": "Connectors"
       },
       "spendCapDialog": {

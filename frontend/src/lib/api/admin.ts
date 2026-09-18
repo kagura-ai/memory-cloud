@@ -246,13 +246,27 @@ export async function getWorkspaceQuotas(
 }
 
 /**
+ * Response of the addon PUT (Issue #1561).
+ *
+ * `warnings` carries structured codes for grants that were stored but are
+ * inert on the workspace's current tier — e.g. `connectors_feature_missing`
+ * when `extra_connectors` seats are granted below a plan with the
+ * `connectors` feature. The backend never rejects such a grant (admins may
+ * pre-grant ahead of an upgrade); the UI surfaces the code in the dialog.
+ */
+export interface UpdateAddonResponse {
+  message: string;
+  warnings?: string[];
+}
+
+/**
  * Update workspace addon bonuses (Admin only)
  */
 export async function updateWorkspaceAddons(
   workspaceId: string,
   request: UpdateAddonRequest,
-): Promise<{ message: string }> {
-  return apiClient.put<{ message: string }>(
+): Promise<UpdateAddonResponse> {
+  return apiClient.put<UpdateAddonResponse>(
     `/api/v1/admin/plans/workspaces/${workspaceId}/quotas`,
     request,
   );

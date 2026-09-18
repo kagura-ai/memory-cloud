@@ -259,6 +259,10 @@ export default function AdminPlansPage() {
   );
   const [quotaLoading, setQuotaLoading] = useState(false);
   const [addonDialogOpen, setAddonDialogOpen] = useState(false);
+  // Issue #1561: structured warning codes returned by the addon PUT (e.g.
+  // `connectors_feature_missing`). Non-empty keeps the dialog open after a
+  // successful save so the admin reads why the grant is inert on this tier.
+  const [addonWarnings, setAddonWarnings] = useState<string[]>([]);
   const [spendCapDialogOpen, setSpendCapDialogOpen] = useState(false);
   // Issue #663: 9 addon dimensions consolidated into a single record so
   // ``ADDON_TYPES`` can drive both the dialog inputs and the PUT body
@@ -377,13 +381,14 @@ export default function AdminPlansPage() {
   const openAddonDialog = () => {
     if (!quotaDetail) return;
     setAddonValues(snapshotAddonValues(quotaDetail));
+    setAddonWarnings([]);
     setAddonDialogOpen(true);
   };
 
   const handleUpdateAddons = async () => {
     if (!quotaDetail) return;
     try {
-      await updateWorkspaceAddons(
+      const result = await updateWorkspaceAddons(
         quotaDetail.workspace_id,
         buildUpdateAddonRequest(addonValues),
       );
@@ -391,7 +396,14 @@ export default function AdminPlansPage() {
         title: tCommon("success"),
         description: t("messages.addonUpdateSuccess"),
       });
-      setAddonDialogOpen(false);
+      // Issue #1561: the save succeeded either way; a non-empty `warnings`
+      // means a grant is inert on this tier, so keep the dialog open and
+      // show it instead of closing silently.
+      const warnings = result?.warnings ?? [];
+      setAddonWarnings(warnings);
+      if (warnings.length === 0) {
+        setAddonDialogOpen(false);
+      }
       // Refresh detail
       const detail = await getWorkspaceQuotas(quotaDetail.workspace_id);
       setQuotaDetail(detail);
@@ -958,6 +970,29 @@ export default function AdminPlansPage() {
           </DialogHeader>
 
           <div className="space-y-4 py-4">
+            {/* Issue #1561: warnings returned by the addon PUT — the grant was
+                stored but is inert on this tier (e.g. extra connector seats
+                below a plan with the `connectors` feature). Informational,
+                not an error (frontend.md) → Alert, not destructive. Unknown
+                codes fall back to a generic line so a new backend code is
+                never swallowed. */}
+            {addonWarnings.length > 0 && (
+              <Alert>
+                <AlertTitle>{t("addonDialog.featureWarning.title")}</AlertTitle>
+                <AlertDescription className="space-y-1">
+                  {addonWarnings.map((code) => (
+                    <p key={code}>
+                      {code === "connectors_feature_missing"
+                        ? t(
+                            "addonDialog.featureWarning.connectorsFeatureMissing",
+                          )
+                        : t("addonDialog.featureWarning.generic", { code })}
+                    </p>
+                  ))}
+                </AlertDescription>
+              </Alert>
+            )}
+
             {/* Issue #800: a legacy / broken cache can hold a value that is
                 not a multiple of perUnit (e.g. pre-#665 memory_bonus 9000),
                 which the backend rejects with HTTP 400 on save. Rather than

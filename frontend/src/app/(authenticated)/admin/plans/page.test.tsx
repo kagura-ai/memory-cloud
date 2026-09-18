@@ -10,7 +10,13 @@
  * Skips the `useTabParam` URL plumbing by pinning the active tab via stub.
  */
 
-import { render, screen, fireEvent, within } from "@testing-library/react";
+import {
+  render,
+  screen,
+  fireEvent,
+  waitFor,
+  within,
+} from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { PLAN_TIER_ORDER } from "@/lib/utils/planLabel";
 
@@ -708,6 +714,49 @@ describe("AdminPlansPage — workspaces tab addon dialog (Issue #663)", () => {
       .getByText("admin.plans.addonDialog.save")
       .closest("button");
     expect(saveButton).not.toBeDisabled();
+  });
+
+  it("shows the backend feature warning in the dialog and keeps it open (#1561)", async () => {
+    // A PRO workspace granted extra connector seats: the backend stores the
+    // grant but reports it inert because PRO lacks the `connectors` feature.
+    mockUpdateWorkspaceAddons.mockResolvedValue({
+      message: "ok",
+      warnings: ["connectors_feature_missing"],
+    });
+    await openAddonDialog();
+
+    fireEvent.click(screen.getByText("admin.plans.addonDialog.save"));
+
+    await screen.findByText(
+      "admin.plans.addonDialog.featureWarning.connectorsFeatureMissing",
+    );
+    expect(
+      screen.getByText("admin.plans.addonDialog.featureWarning.title"),
+    ).toBeInTheDocument();
+    // Saved-with-warning keeps the dialog open so the admin reads the note
+    // (a toast alone would vanish); closing is left to the admin.
+    expect(
+      screen.getByText("admin.plans.addonDialog.title"),
+    ).toBeInTheDocument();
+  });
+
+  it("closes the dialog and shows no warning when the backend returns none (#1561)", async () => {
+    mockUpdateWorkspaceAddons.mockResolvedValue({
+      message: "ok",
+      warnings: [],
+    });
+    await openAddonDialog();
+
+    fireEvent.click(screen.getByText("admin.plans.addonDialog.save"));
+
+    await waitFor(() =>
+      expect(
+        screen.queryByText("admin.plans.addonDialog.title"),
+      ).not.toBeInTheDocument(),
+    );
+    expect(
+      screen.queryByText("admin.plans.addonDialog.featureWarning.title"),
+    ).not.toBeInTheDocument();
   });
 
   it("renders the max_resource_tokens read-only row in the expanded panel", async () => {
