@@ -220,9 +220,12 @@ class TestSleepMaintenanceConfig:
             NeuralMemoryConfig(sleep_cron_minute=60)
 
     def test_sleep_llm_provider_validation(self):
-        """Test LLM provider must be openai or self_hosted."""
+        """#1569: every LLMService chat provider is a valid judge (anthropic /
+        gemini used to be refused); an unknown name still raises."""
+        for provider in ("openai", "anthropic", "gemini", "self_hosted", ""):
+            assert NeuralMemoryConfig(sleep_llm_provider=provider).sleep_llm_provider == provider
         with pytest.raises(ValueError, match="sleep_llm_provider"):
-            NeuralMemoryConfig(sleep_llm_provider="anthropic")
+            NeuralMemoryConfig(sleep_llm_provider="ollama_cloud")
 
     def test_sleep_max_memories_validation(self):
         """Test max memories must be positive."""
@@ -269,6 +272,96 @@ class TestSleepMaintenanceConfig:
         assert config.sleep_llm_model == "llama3:8b"
         assert config.sleep_max_memories_per_run == 1000
         assert config.sleep_dedup_similarity_threshold == 0.95
+
+
+class TestSleepLlmManagedLanePrecedence:
+    """#1569: explicit SLEEP_LLM_* > MANAGED_LLM_* > code default; DB row wins over all."""
+
+    @pytest.fixture(autouse=True)
+    def _managed_lane(self, monkeypatch):
+        for key in ("SLEEP_LLM_PROVIDER", "SLEEP_LLM_MODEL", "SLEEP_LLM_FORCE_ENV"):
+            monkeypatch.delenv(key, raising=False)
+        monkeypatch.setenv("MANAGED_LLM_PROVIDER", "self_hosted")
+        monkeypatch.setenv("MANAGED_LLM_MODEL", "qwen3:8b")
+        monkeypatch.setenv("SELF_HOSTED_BASE_URL", "http://vllm:8000")
+        monkeypatch.setattr("config.settings._settings", None)
+        monkeypatch.setattr("neural.config._managed_lane_logged", False)
+        NeuralMemoryConfig.invalidate_cache()
+        yield
+        NeuralMemoryConfig.invalidate_cache()
+
+    def test_managed_lane_used_when_sleep_env_unset(self, monkeypatch):
+        import neural.config as neural_config_mod
+
+        spy = MagicMock()
+        monkeypatch.setattr(neural_config_mod, "logger", spy)
+
+        config = NeuralMemoryConfig.from_env()
+        NeuralMemoryConfig.from_env()  # second load: no second notice
+
+        assert (config.sleep_llm_provider, config.sleep_llm_model) == ("self_hosted", "qwen3:8b")
+        assert config.sleep_llm_from_managed_lane is True
+        notices = [c for c in spy.info.call_args_list if c.args[0] == "sleep_llm_from_managed_lane"]
+        assert len(notices) == 1
+        assert notices[0].kwargs["provider"] == "self_hosted"
+
+    def test_explicit_sleep_env_wins_over_managed_lane(self, monkeypatch):
+        monkeypatch.setenv("SLEEP_LLM_PROVIDER", "openai")
+        monkeypatch.setenv("SLEEP_LLM_MODEL", "gpt-5.5")
+        config = NeuralMemoryConfig.from_env()
+        assert (config.sleep_llm_provider, config.sleep_llm_model) == ("openai", "gpt-5.5")
+        assert config.sleep_llm_from_managed_lane is False
+
+    def test_partial_sleep_env_makes_the_pair_explicit(self, monkeypatch):
+        """Only SLEEP_LLM_MODEL set: the provider falls to its code default, not
+        to the managed provider — mixing the two lanes is never implied."""
+        monkeypatch.setenv("SLEEP_LLM_MODEL", "gpt-5.5")
+        config = NeuralMemoryConfig.from_env()
+        assert (config.sleep_llm_provider, config.sleep_llm_model) == ("openai", "gpt-5.5")
+        assert config.sleep_llm_from_managed_lane is False
+
+    def test_no_managed_lane_keeps_code_defaults(self, monkeypatch):
+        monkeypatch.delenv("MANAGED_LLM_PROVIDER")
+        monkeypatch.delenv("MANAGED_LLM_MODEL")
+        monkeypatch.setattr("config.settings._settings", None)
+        config = NeuralMemoryConfig.from_env()
+        assert (config.sleep_llm_provider, config.sleep_llm_model) == ("openai", "gpt-5-nano")
+        assert config.sleep_llm_from_managed_lane is False
+
+    @pytest.mark.asyncio
+    async def test_neural_config_row_takes_the_judge_off_the_managed_lane(self):
+        class _Row:
+            def __init__(self, key, value):
+                self.key = key
+                self._value = value
+
+            def get_typed_value(self):
+                return self._value
+
+        result = MagicMock()
+        result.scalars.return_value.all.return_value = [
+            _Row("sleep_llm_provider", "openai"),
+            _Row("sleep_llm_model", "gpt-5-nano"),
+        ]
+        db = MagicMock()
+        db.execute = AsyncMock(return_value=result)
+
+        config = await NeuralMemoryConfig.from_db(db)
+
+        assert (config.sleep_llm_provider, config.sleep_llm_model) == ("openai", "gpt-5-nano")
+        assert config.sleep_llm_from_managed_lane is False
+
+    @pytest.mark.asyncio
+    async def test_from_db_without_a_row_keeps_the_managed_lane(self):
+        result = MagicMock()
+        result.scalars.return_value.all.return_value = []
+        db = MagicMock()
+        db.execute = AsyncMock(return_value=result)
+
+        config = await NeuralMemoryConfig.from_db(db)
+
+        assert (config.sleep_llm_provider, config.sleep_llm_model) == ("self_hosted", "qwen3:8b")
+        assert config.sleep_llm_from_managed_lane is True
 
 
 class TestTagCooccurrenceConfig:
