@@ -106,6 +106,14 @@ async def test_unknown_method_with_string_id_echoes_the_id():
     assert send.body["error"]["code"] == -32601
 
 
+@pytest.mark.asyncio
+async def test_unknown_method_echo_is_length_capped():
+    """The method name is client-supplied and unbounded — cap what we echo/log."""
+    send = await _post({"jsonrpc": "2.0", "id": 1, "method": "x" * 5000})
+    assert send.body["error"]["code"] == -32601
+    assert len(send.body["error"]["message"]) < 200
+
+
 # ------------------------------------------------------------------------ ping
 
 
@@ -271,3 +279,88 @@ async def test_request_without_a_string_method_is_an_invalid_request(method):
     assert send.status == 400
     assert send.body["id"] == 9
     assert send.body["error"]["code"] == -32600
+
+
+# ------------------------------------- tools/list & tools/call (gate2 qa-lead)
+# Both success paths were moved onto ``_send_jsonrpc_result``; their only other
+# coverage is DB-backed integration tests that the unit job does not run.
+
+
+@pytest.mark.asyncio
+async def test_tools_list_returns_the_tool_definitions(monkeypatch):
+    import mcp_server.tools as tools_mod
+
+    monkeypatch.setattr(
+        tools_mod, "get_tool_definitions", lambda: [{"name": "recall", "inputSchema": {}}]
+    )
+    send = await _post({"jsonrpc": "2.0", "id": 4, "method": "tools/list"})
+
+    assert send.status == 200
+    assert send.headers[b"content-type"] == b"application/json"
+    assert send.headers[b"mcp-session-id"] == b"sess-1"
+    assert send.body == {
+        "jsonrpc": "2.0",
+        "id": 4,
+        "result": {"tools": [{"name": "recall", "inputSchema": {}}]},
+    }
+
+
+@pytest.mark.asyncio
+async def test_tools_call_formats_the_tool_result_and_passes_session_identity(monkeypatch):
+    import mcp_server.tools as tools_mod
+
+    seen: dict = {}
+
+    async def fake_execute(**kwargs):
+        seen.update(kwargs)
+        return [SimpleNamespace(type="text", text='{"status":"success"}')]
+
+    monkeypatch.setattr(tools_mod, "execute_tool_call", fake_execute)
+    send = await _post(
+        {
+            "jsonrpc": "2.0",
+            "id": 5,
+            "method": "tools/call",
+            "params": {"name": "recall", "arguments": {"query": "x"}},
+        }
+    )
+
+    assert send.status == 200
+    assert send.headers[b"mcp-session-id"] == b"sess-1"
+    assert send.body == {
+        "jsonrpc": "2.0",
+        "id": 5,
+        "result": {"content": [{"type": "text", "text": '{"status":"success"}'}]},
+    }
+    assert seen == {
+        "tool_name": "recall",
+        "arguments": {"query": "x"},
+        "user_id": "user-1",
+        "workspace_id": None,
+    }
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("exc", "code"),
+    [
+        (ValueError("bad arg"), -32602),
+        (PermissionError("nope"), -32002),
+        (RuntimeError("x"), -32603),
+    ],
+)
+async def test_tools_call_failure_maps_to_a_jsonrpc_error(monkeypatch, exc, code):
+    import mcp_server.tools as tools_mod
+
+    async def boom(**_kwargs):
+        raise exc
+
+    monkeypatch.setattr(tools_mod, "execute_tool_call", boom)
+    send = await _post(
+        {"jsonrpc": "2.0", "id": 6, "method": "tools/call", "params": {"name": "recall"}}
+    )
+
+    assert send.status == 200
+    assert send.body["id"] == 6
+    assert send.body["error"]["code"] == code
+    assert send.body["error"]["data"]["exception_type"] == type(exc).__name__

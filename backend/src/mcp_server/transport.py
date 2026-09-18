@@ -430,8 +430,12 @@ async def handle_streamable_http_post(
     # 404 + -32601 shape is the *modern* (2026-07-28) contract — a dual-era
     # client would read that as "modern server" and never fall back to
     # ``initialize``.
+    # ``method`` is client-supplied and unbounded: repr() + a length cap keep a
+    # crafted value from forging log lines or bloating the echoed message.
+    shown_method = method[:100]
     logger.info(
-        f"MCP unknown method (Streamable HTTP): method={method}, session={session.session_id}"
+        f"MCP unknown method (Streamable HTTP): method={shown_method!r}, "
+        f"session={session.session_id}"
     )
     await _send_json_error(
         send,
@@ -439,7 +443,7 @@ async def handle_streamable_http_post(
         {
             "jsonrpc": "2.0",
             "id": request_id,
-            "error": {"code": -32601, "message": f"Method not found: {method}"},
+            "error": {"code": -32601, "message": f"Method not found: {shown_method}"},
         },
         [[b"mcp-session-id", session.session_id.encode()]],
     )
