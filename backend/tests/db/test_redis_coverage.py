@@ -175,7 +175,7 @@ class TestGetRedisClient:
     def test_wraps_connect_failure_in_redis_error(self, monkeypatch):
         """Pool construction raising is re-raised as RedisError with chained cause."""
         monkeypatch.setattr(redis_mod, "_redis_client", None)
-        monkeypatch.setattr(redis_mod, "get_settings", lambda: _PoolSettings())
+        monkeypatch.setattr(redis_mod, "get_settings", _PoolSettings)
 
         def boom_from_url(url, **kwargs):
             raise ConnectionError("no redis")

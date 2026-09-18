@@ -44,7 +44,7 @@ async def test_sixty_concurrent_incrby_all_counted(monkeypatch):
     """60 parallel increments through a 5-connection blocking pool all land."""
     original = redis_mod._redis_client
     monkeypatch.setattr(redis_mod, "_redis_client", None)
-    monkeypatch.setattr(redis_mod, "get_settings", lambda: _PoolSettings())
+    monkeypatch.setattr(redis_mod, "get_settings", _PoolSettings)
     key = f"test:pool_smoke:{uuid.uuid4().hex}"
     client = get_redis_client()
     try:
