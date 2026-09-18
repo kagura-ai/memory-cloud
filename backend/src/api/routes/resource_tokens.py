@@ -286,7 +286,7 @@ async def create_resource_token(
         # Check plan limits and active token count
         from sqlalchemy import func, select
 
-        from config.plan_tiers import feature_denied_message, get_plan_tier, has_feature
+        from config.plan_tiers import get_plan_tier, has_feature
         from models.auth import Context, Workspace
 
         # SECURITY: Verify resource_id belongs to current workspace
@@ -321,9 +321,7 @@ async def create_resource_token(
         # tokens they already hold stay editable and served. The count
         # check below remains the second gate for tiers with the feature.
         if not has_feature(plan_name or "", "resources"):
-            raise FeatureNotAvailableError(
-                feature_denied_message(plan_name, "resources"), feature="resources"
-            )
+            raise FeatureNotAvailableError.for_feature(plan_name, "resources")
         plan = get_plan_tier(plan_name)
 
         # Check active token count limit

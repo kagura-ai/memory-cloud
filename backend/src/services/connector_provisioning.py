@@ -20,7 +20,7 @@ from sqlalchemy.exc import DBAPIError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from auth.resource_tokens import ResourceTokenManager
-from config.plan_tiers import feature_denied_message, has_feature
+from config.plan_tiers import has_feature
 from models.auth import Workspace
 from models.resource import Resource, ResourceSchema, ResourceToken, WorkspaceConnector
 from services.resource_lookup import resolve_resource_pk, upsert_resource
@@ -570,10 +570,7 @@ class ConnectorProvisioningService:
         re-configured, dispatched and ingested; none of those paths call this.
         """
         if not has_feature(workspace.plan_name, "connectors"):
-            raise FeatureNotAvailableError(
-                feature_denied_message(workspace.plan_name, "connectors"),
-                feature="connectors",
-            )
+            raise FeatureNotAvailableError.for_feature(workspace.plan_name, "connectors")
 
     @staticmethod
     def _raise_seat_cap(max_connectors: int, active_connectors: int) -> None:

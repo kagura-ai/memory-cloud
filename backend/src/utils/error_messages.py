@@ -34,10 +34,9 @@ class ErrorMessages:
     RESOURCE_NOT_IN_ORG = "Resource ID not found in your workspace or you don't have access to it."
     TOKEN_DIFFERENT_ORG = "This resource token belongs to a different workspace."
 
-    # Plan/Quota
-    SHARED_CONTEXTS_REQUIRE_PRO = (
-        "Shared contexts require Pro plan. Upgrade your plan to share contexts with your team."
-    )
+    # Plan/Quota — feature refusals are built by
+    # ``FeatureNotAvailableError.for_feature`` from the tier registry (#1561);
+    # never pin a tier name here.
     FEATURE_REQUIRES_PLAN = "This feature requires {plan} plan. Please upgrade."
 
     # Permissions

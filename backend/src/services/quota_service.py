@@ -353,7 +353,7 @@ class QuotaService:
             )
 
             if raise_on_denied:
-                raise FeatureNotAvailableError(error)
+                raise FeatureNotAvailableError.for_feature(workspace.plan_name, feature)
             return False, error
 
         return True, None
