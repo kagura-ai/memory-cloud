@@ -210,6 +210,7 @@ class TestAnalysisRestPayloadsWhenDisabled:
         db_mock.execute.side_effect = [
             _scalar_one(_CONTEXT_ID),  # boundary
             _scalar_one(100),  # count_context_memories
+            _scalar_one(1),  # #1569 lane: an enabled OpenAI key exists → BYOK
             _scalars_all(_PRICED_ROWS),  # a priced model — would quote >= 1
         ]
         response = client.post(f"/api/v1/contexts/{_CONTEXT_ID}/analyses/preview", json={})
@@ -230,6 +231,7 @@ class TestAnalysisRestPayloadsWhenEnabled:
         db_mock.execute.side_effect = [
             _scalar_one(_CONTEXT_ID),
             _scalar_one(100),
+            _scalar_one(1),  # #1569 lane: BYOK key exists
             _scalars_all(_PRICED_ROWS),
         ]
         response = client.post(f"/api/v1/contexts/{_CONTEXT_ID}/analyses/preview", json={})
