@@ -209,6 +209,34 @@ describe("SearchSettingsSection deployment default (#1572)", () => {
     expect(screen.queryByText("noRerankerKeys")).not.toBeInTheDocument();
   });
 
+  it("really disables the provider/model selects (not just pointer-events) when features.reranking is false", async () => {
+    mockFeatures = { byok: true, reranking: false };
+    mockInfo = {
+      features: { byok: true, reranking: false },
+      search_defaults: VOYAGE_DEFAULTS,
+    };
+    // A context that enabled reranking before the deployment turned it off:
+    // the provider/model selects render, and must be unreachable by keyboard too.
+    mockGetConfig.mockResolvedValue({
+      context_id: "ctx-1",
+      semantic_weight: 0.6,
+      bm25_weight: 0.4,
+      fetch_factor: 3,
+      use_rerank: true,
+      reranker_provider: "voyage",
+      reranker_model: "rerank-2",
+      created_at: "2026-01-01T00:00:00Z",
+      updated_at: "2026-01-01T00:00:00Z",
+    });
+    render(<SearchSettingsSection contextId="ctx-1" />);
+    expect(
+      await screen.findByText("rerankingDisabledByDeployment"),
+    ).toBeInTheDocument();
+    const selects = screen.getAllByRole("combobox");
+    expect(selects).toHaveLength(2);
+    for (const select of selects) expect(select).toBeDisabled();
+  });
+
   it("hides the configure-keys CTA when the deployment default is keyless self_hosted and reachable", async () => {
     mockInfo = {
       features: { byok: true },

@@ -610,6 +610,9 @@ export function SearchSettingsSection({
                           value as "voyage" | "cohere" | "self_hosted",
                         )
                       }
+                      // pointer-events-none above only stops the mouse; the
+                      // Radix trigger stays keyboard-reachable unless disabled.
+                      disabled={controlsDisabled}
                     >
                       <SelectTrigger id="reranker_provider">
                         <SelectValue />
@@ -693,6 +696,7 @@ export function SearchSettingsSection({
                           reranker_model: value,
                         })
                       }
+                      disabled={controlsDisabled}
                     >
                       <SelectTrigger id="reranker_model">
                         <SelectValue />
