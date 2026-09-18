@@ -269,6 +269,58 @@ async def test_calls_pass_strict_byok_flag() -> None:
 
 
 @pytest.mark.asyncio
+async def test_managed_lane_passes_provider_chain_and_platform_only() -> None:
+    """#1569: the managed lane runs its single model on the given provider
+    with ``platform_only=True`` (and therefore NOT strict BYOK); exhausting
+    the chain still 502s and names the attempted model."""
+    llm_service = AsyncMock()
+    ok = LLMResponse(
+        parsed={"label": "ok"},
+        total_tokens=1,
+        input_tokens=1,
+        output_tokens=0,
+        cached_input_tokens=0,
+        provider="self_hosted",
+        model="qwen3:8b",
+    )
+    llm_service.complete_json = AsyncMock(return_value=ok)
+
+    result = await call_with_fallback(
+        llm_service,
+        user_id="u1",
+        workspace_id="w1",
+        context_id=None,
+        system_prompt="sys",
+        prompt="p",
+        fallback_chain=("qwen3:8b",),
+        provider="self_hosted",
+        platform_only=True,
+    )
+    assert result.response.provider == "self_hosted"
+    kwargs = llm_service.complete_json.call_args.kwargs
+    assert kwargs["provider"] == "self_hosted"
+    assert kwargs["model"] == "qwen3:8b"
+    assert kwargs["platform_only"] is True
+    assert kwargs["disallow_env_fallback"] is False
+
+    llm_service.complete_json = AsyncMock(side_effect=LLMServiceError("down"))
+    with pytest.raises(AnalysisLLMUpstreamError) as excinfo:
+        await call_with_fallback(
+            llm_service,
+            user_id="u1",
+            workspace_id="w1",
+            context_id=None,
+            system_prompt="sys",
+            prompt="p",
+            fallback_chain=("qwen3:8b",),
+            provider="self_hosted",
+            platform_only=True,
+        )
+    assert excinfo.value.details.get("attempted_models") == ["qwen3:8b"]
+    assert llm_service.complete_json.call_count == 1  # no cross-provider fallback
+
+
+@pytest.mark.asyncio
 async def test_configuration_error_propagates_without_fallback() -> None:
     """#1242: ConfigurationError (BYOK row gone mid-run) is NOT an
     upstream provider failure — it must escape immediately and fail the

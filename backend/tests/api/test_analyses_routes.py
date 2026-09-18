@@ -118,6 +118,7 @@ class TestPreview:
         db_mock.execute.side_effect = [
             _scalar_one(_TEST_CONTEXT_ID),  # Context boundary
             _scalar_one(100),  # _count_filtered_memories
+            _scalar_one(1),  # #1569 lane: an enabled OpenAI key exists → BYOK
             # #1570: the default model's pricing rows → priced estimate.
             _scalars_all(
                 [_pricing_row("input_tokens", "0.2"), _pricing_row("output_tokens", "1.25")]
@@ -141,6 +142,7 @@ class TestPreview:
         db_mock.execute.side_effect = [
             _scalar_one(_TEST_CONTEXT_ID),  # Context boundary
             _scalar_one(100),  # count_context_memories
+            _scalar_one(1),  # #1569 lane: BYOK key exists
             _scalars_all([]),  # no llm_pricing rows for openai/gpt-5-nano
         ]
         response = client.post(
@@ -166,6 +168,7 @@ class TestPreview:
         db_mock.execute.side_effect = [
             _scalar_one(_TEST_CONTEXT_ID),  # Context boundary
             _scalar_one(100),  # count_context_memories
+            _scalar_one(1),  # #1569 lane: BYOK key exists
             _scalar_one(pinned),  # LLMPricing.id == 42
             _scalars_all([pinned, sibling]),  # its effective_from siblings
         ]
@@ -186,6 +189,7 @@ class TestPreview:
         db_mock.execute.side_effect = [
             _scalar_one(_TEST_CONTEXT_ID),  # Context boundary
             _scalar_one(100),  # count_context_memories
+            _scalar_one(1),  # #1569 lane: BYOK key exists
             _scalar_one(None),  # no LLMPricing.id == 999
         ]
         response = client.post(

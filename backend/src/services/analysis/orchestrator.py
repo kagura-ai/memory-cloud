@@ -22,7 +22,11 @@ Phase 4 architecture decisions (Pragmatic):
 - **BYOK key**: the orchestrator does not load or hold the key.
   ``LLMService.complete_json`` resolves it inside its own coroutine
   frame on each call. The pre-flight ``assert_openai_byok_key_available``
-  ensures the workspace has an enabled key before compute starts.
+  resolves the run's *lane* (#1569: strict BYOK when the workspace has
+  an enabled key, else the platform-managed LLM when the plan carries
+  ``managed_llm``) before compute starts, and ``start()`` records it on
+  the row (``paid_by`` / ``llm_provider`` / ``llm_model``) so ``run()``
+  — on a fresh session — labels on the same lane.
 
 Idempotency surface: the API layer (#496) catches ``ConflictError``
 and returns 409 with the existing ``run_id`` so the client can poll
@@ -50,16 +54,13 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from db.constraint_names import integrity_error_constraint_name
-from models.analysis import (
-    MEMORY_ANALYSIS_PAID_BY_VALUES,
-    MEMORY_ANALYSIS_STATUSES,
-    MemoryAnalysis,
-)
+from models.analysis import MEMORY_ANALYSIS_STATUSES, MemoryAnalysis
 from models.auth import User
 from models.llm_pricing import LLMPricing
 from services.analysis import labeler as analysis_labeler
 from services.analysis.byok_resolver import assert_openai_byok_key_available
 from services.analysis.clusterer import cluster_high_dim
+from services.analysis.llm_lane import AnalysisLane, lane_for_run
 from services.analysis.preview import DEFAULT_MODEL_ID, DEFAULT_PROVIDER, estimate_cost
 from services.analysis.projector import project_to_2d
 from services.analysis.reporter import (
@@ -116,18 +117,14 @@ class AnalysisParams:
 
 # Status / dimension constants. Use explicit string literals (NOT
 # tuple indices) so a future tuple reordering does not silently flip
-# the values. The asserts pin the contract that these literals must
-# remain members of the canonical tuples — if someone removes
+# the values. The assert pins the contract that the literal must
+# remain a member of the canonical tuple — if someone removes
 # "running" from MEMORY_ANALYSIS_STATUSES the import-time assertion
-# fires loud at startup rather than at the first INSERT.
+# fires loud at startup rather than at the first INSERT. ``paid_by``
+# comes from the lane since #1569 (``services/analysis/llm_lane.py``).
 _STATUS_RUNNING = "running"
-_PAID_BY_BYOK = "byok"
 assert _STATUS_RUNNING in MEMORY_ANALYSIS_STATUSES, (
     f"_STATUS_RUNNING out of sync with MEMORY_ANALYSIS_STATUSES: {MEMORY_ANALYSIS_STATUSES}"
-)
-assert _PAID_BY_BYOK in MEMORY_ANALYSIS_PAID_BY_VALUES, (
-    f"_PAID_BY_BYOK out of sync with MEMORY_ANALYSIS_PAID_BY_VALUES: "
-    f"{MEMORY_ANALYSIS_PAID_BY_VALUES}"
 )
 
 
@@ -191,7 +188,13 @@ def _validate_date_params(params: AnalysisParams) -> None:
             ) from e
 
 
-async def _resolve_pricing_row(db: AsyncSession, model_id: int | None) -> tuple[LLMPricing, dict]:
+async def _resolve_pricing_row(
+    db: AsyncSession,
+    model_id: int | None,
+    *,
+    provider: str = DEFAULT_PROVIDER,
+    model: str = DEFAULT_MODEL_ID,
+) -> tuple[LLMPricing, dict]:
     """Resolve the ``llm_pricing`` row + frozen snapshot for the run.
 
     Single SELECT pulls every (provider, model, effective_from) sibling
@@ -200,6 +203,9 @@ async def _resolve_pricing_row(db: AsyncSession, model_id: int | None) -> tuple[
     ``effective_from`` (or the row matching ``model_id`` when given);
     sibling rows for that same effective_from contribute the rate
     map ('input_tokens', 'output_tokens', 'cache_read_tokens', ...).
+
+    ``provider`` / ``model`` name the default-path lookup target: the
+    BYOK lane's OpenAI default, or the managed lane's model (#1569).
     """
     if model_id is not None:
         # When the caller pins a specific row, look up its (provider,
@@ -223,19 +229,19 @@ async def _resolve_pricing_row(db: AsyncSession, model_id: int | None) -> tuple[
         all_rows = list((await db.execute(rate_stmt)).scalars().all())
         primary = target
     else:
-        # Default path: pull every row for (provider=openai, model=gpt-5-nano)
-        # ordered by effective_from desc with a stable tie-breaker on
-        # ``unit_type`` then ``id``. Without the tie-breaker the
-        # ``primary`` row chosen for ``MemoryAnalysis.model_id`` (the
-        # FK we persist) varies between equally-recent rows
-        # (input_tokens / output_tokens / cache_read_tokens all share
-        # the same ``effective_from``). The deterministic order pins
-        # the FK to one specific row across DBs / re-runs.
+        # Default path: pull every row for (provider, model) ordered by
+        # effective_from desc with a stable tie-breaker on ``unit_type``
+        # then ``id``. Without the tie-breaker the ``primary`` row chosen
+        # for ``MemoryAnalysis.model_id`` (the FK we persist) varies
+        # between equally-recent rows (input_tokens / output_tokens /
+        # cache_read_tokens all share the same ``effective_from``). The
+        # deterministic order pins the FK to one specific row across
+        # DBs / re-runs.
         stmt = (
             select(LLMPricing)
             .where(
-                LLMPricing.provider == DEFAULT_PROVIDER,
-                LLMPricing.model == DEFAULT_MODEL_ID,
+                LLMPricing.provider == provider,
+                LLMPricing.model == model,
             )
             .order_by(
                 LLMPricing.effective_from.desc(),
@@ -246,11 +252,13 @@ async def _resolve_pricing_row(db: AsyncSession, model_id: int | None) -> tuple[
         all_rows = list((await db.execute(stmt)).scalars().all())
         if not all_rows:
             # Default-model fallback path: missing rows mean the seed
-            # migration didn't run or was rolled back → server-side
+            # migration didn't run or was rolled back (or, on the managed
+            # lane, no LLM_PRICING_OVERRIDES entry) → server-side
             # configuration error (500), NOT a 409 conflict.
             raise ConfigurationError(
-                f"Default LLM pricing row not seeded for {DEFAULT_PROVIDER}/"
-                f"{DEFAULT_MODEL_ID}. Run alembic migrations to seed `llm_pricing`."
+                f"LLM pricing row not found for {provider}/{model}. Run alembic "
+                "migrations to seed `llm_pricing`, or price the model with "
+                "LLM_PRICING_OVERRIDES."
             )
         primary = all_rows[0]
 
@@ -275,22 +283,68 @@ async def _resolve_pricing_row(db: AsyncSession, model_id: int | None) -> tuple[
 
 
 async def try_resolve_pricing_row(
-    db: AsyncSession, model_id: int | None
+    db: AsyncSession,
+    model_id: int | None,
+    *,
+    provider: str = DEFAULT_PROVIDER,
+    model: str = DEFAULT_MODEL_ID,
 ) -> tuple[LLMPricing, dict] | None:
-    """``_resolve_pricing_row`` for the preview path (#1570).
+    """``_resolve_pricing_row`` for the preview + managed-lane paths (#1570).
 
     Returns ``None`` instead of raising ``ConfigurationError`` when the
-    default model has no ``llm_pricing`` rows, so a deployment that has not
+    model has no ``llm_pricing`` rows, so a deployment that has not
     seeded / priced its analysis model gets ``estimated_cost_cents=null``
     from ``/preview`` rather than a 500. A caller-pinned ``model_id`` that
     does not exist still raises ``ValidationError`` (client input error).
-    The run path (``start()``) keeps ``_resolve_pricing_row`` — the
-    ``memory_analyses.model_id`` FK needs a row there (#1569).
+    The BYOK run path keeps ``_resolve_pricing_row``; the managed lane
+    (#1569) uses this and runs with ``model_id=NULL`` when unpriced.
     """
     try:
-        return await _resolve_pricing_row(db, model_id)
+        return await _resolve_pricing_row(db, model_id, provider=provider, model=model)
     except ConfigurationError:
         return None
+
+
+def _unpriced_snapshot(lane: AnalysisLane) -> dict:
+    """Snapshot for a managed-lane model with no ``llm_pricing`` row (#1569).
+
+    Same shape as ``_resolve_pricing_row``'s but with an empty rate map, so
+    ``estimate_cost`` and ``reporter._compute_actual_cost_cents`` both yield
+    ``None`` ("cost unknown", #1570) instead of guessing.
+    """
+    return {
+        "provider": lane.provider,
+        "model": lane.primary_model,
+        "effective_from": None,
+        "rates": {},
+    }
+
+
+async def resolve_lane_pricing(
+    db: AsyncSession, lane: AnalysisLane, model_id: int | None
+) -> tuple[LLMPricing | None, dict]:
+    """Pricing row + snapshot for the lane a run will label on (#1569).
+
+    The BYOK lane keeps the strict pre-#1569 contract (its OpenAI default
+    is seeded by Alembic, so a missing row is a deployment fault → 500).
+    The managed lane must run even when the operator has not priced its
+    model: ``None`` row, empty-rate snapshot, ``cost_*_cents`` stay NULL.
+    A caller-pinned ``model_id`` is honoured on both lanes.
+    """
+    if lane.kind == "byok":
+        return await _resolve_pricing_row(db, model_id)
+    resolved = await try_resolve_pricing_row(
+        db, model_id, provider=lane.provider, model=lane.primary_model
+    )
+    if resolved is not None:
+        return resolved
+    logger.info(
+        "analysis_managed_model_unpriced",
+        provider=lane.provider,
+        model=lane.primary_model,
+        hint="cost recorded as unknown; set LLM_PRICING_OVERRIDES to track it",
+    )
+    return None, _unpriced_snapshot(lane)
 
 
 class AnalysisOrchestrator:
@@ -323,13 +377,17 @@ class AnalysisOrchestrator:
     ) -> MemoryAnalysis:
         """Phase 1 (synchronous).
 
-        - Asserts BYOK key exists (raises ConfigurationError → 422
-          at API layer).
+        - Resolves the run's lane (#1569): strict BYOK when the workspace
+          has an enabled OpenAI key, else the platform-managed LLM when
+          the plan carries ``managed_llm`` (raises ValidationError → 422
+          at API layer when neither applies).
         - Idempotency check: a prior run at status='running' for the
           same (workspace, context) raises ConflictError (409). The
           API layer surfaces this with the prior run's ``run_id``.
         - Pre-flight cost estimate.
-        - Resolves the pricing row + builds the model_snapshot.
+        - Resolves the pricing row + builds the model_snapshot for the
+          lane's model (NULL row / empty rates when a managed model is
+          unpriced — the run still proceeds, cost unknown).
         - Creates the ``memory_analyses`` row at status='running'
           and flushes — caller commits.
 
@@ -339,7 +397,7 @@ class AnalysisOrchestrator:
         """
         _validate_date_params(params)
 
-        await assert_openai_byok_key_available(
+        lane = await assert_openai_byok_key_available(
             self.db,
             workspace_id=workspace_id,
             context_id=context_id,
@@ -364,7 +422,7 @@ class AnalysisOrchestrator:
                 run_id=str(prior.id),
             )
 
-        pricing, snapshot = await _resolve_pricing_row(self.db, params.model_id)
+        pricing, snapshot = await resolve_lane_pricing(self.db, lane, params.model_id)
 
         # ``cost_estimated_cents`` is left NULL at start time — the
         # filter count is not known until ``vector_pull`` runs in
@@ -376,13 +434,16 @@ class AnalysisOrchestrator:
             workspace_id=workspace_id,
             context_id=context_id,
             triggered_by=user_id,
-            model_id=pricing.id,
+            model_id=pricing.id if pricing is not None else None,
             model_snapshot=snapshot,
+            # #1569: the lane record ``run()`` rebuilds the lane from.
+            llm_provider=lane.provider,
+            llm_model=lane.primary_model,
             embedding_model="(pending)",
             params=params.to_jsonb(),
             input_count=0,  # filled in by run() once vector_pull resolves
             cost_estimated_cents=None,
-            paid_by=_PAID_BY_BYOK,
+            paid_by=lane.paid_by,
             status=_STATUS_RUNNING,
         )
         self.db.add(analysis)
@@ -427,7 +488,11 @@ class AnalysisOrchestrator:
             workspace_id=str(workspace_id),
             context_id=str(context_id),
             user_id=user_id,
-            model=pricing.model,
+            model=snapshot["model"],
+            provider=lane.provider,
+            lane=lane.kind,
+            paid_by=lane.paid_by,
+            priced=pricing is not None,
         )
         return analysis
 
@@ -528,6 +593,13 @@ class AnalysisOrchestrator:
             # cluster task opens its own ``AsyncSession`` to avoid the
             # SQLAlchemy concurrent-ops violation on the orchestrator's
             # shared session. See labeler.py for the per-task pattern.
+            # The lane comes from the row ``start()`` wrote (#1569), so a
+            # managed-lane run never drifts back onto the workspace key.
+            lane = lane_for_run(
+                paid_by=analysis.paid_by,
+                provider=analysis.llm_provider,
+                model=analysis.llm_model,
+            )
             cluster_label_results = await analysis_labeler.label_clusters(
                 cluster_labels=cluster_result.labels,
                 centroids=cluster_result.centroids,
@@ -537,6 +609,7 @@ class AnalysisOrchestrator:
                 workspace_id=str(analysis.workspace_id),
                 context_id=str(analysis.context_id),
                 locale=label_locale,
+                lane=lane,
             )
 
             # Stage [J] — atomic persist. The transaction here wraps

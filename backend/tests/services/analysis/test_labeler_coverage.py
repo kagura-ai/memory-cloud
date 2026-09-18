@@ -37,6 +37,7 @@ from services.analysis.labeler import (
     label_clusters,
 )
 from services.analysis.llm_caller import (
+    OPENAI_FALLBACK_CHAIN,
     AnalysisLLMUpstreamError,
     CallResult,
 )
@@ -88,14 +89,27 @@ def _patch_caller(monkeypatch, *, parsed: dict, captured: dict | None = None) ->
     """Patch labeler.call_with_fallback to return a canned CallResult."""
 
     async def _fake_call_with_fallback(
-        *, llm_service, user_id, workspace_id, context_id, system_prompt, prompt, fallback_chain
-    ):  # noqa: ANN001, E501
+        *,
+        llm_service,
+        user_id,
+        workspace_id,
+        context_id,
+        system_prompt,
+        prompt,
+        fallback_chain,
+        provider,
+        platform_only,
+    ):  # noqa: ANN001
         if captured is not None:
             captured["system_prompt"] = system_prompt
             captured["prompt"] = prompt
             captured["user_id"] = user_id
             captured["workspace_id"] = workspace_id
             captured["context_id"] = context_id
+            # #1569 lane threading
+            captured["fallback_chain"] = fallback_chain
+            captured["provider"] = provider
+            captured["platform_only"] = platform_only
         resp = _llm_response(parsed=parsed)
         return CallResult(parsed=resp.parsed, response=resp)
 
@@ -804,6 +818,37 @@ class TestLabelClusters:
         )
 
         assert seen["system_prompt"] == CLUSTER_LABEL_SYSTEM_JA
+
+    async def test_lane_threads_provider_chain_and_platform_only(self, monkeypatch) -> None:
+        """#1569: the lane recorded on the run decides what every labeling
+        call asks LLMService for; no lane = the strict BYOK OpenAI chain."""
+        from services.analysis.llm_lane import managed_lane
+
+        memories = [_mem(summary="m0")]
+        cluster_labels = np.array([0], dtype=np.int64)
+        centroids = np.array([[1.0, 0.0]], dtype=np.float32)
+        embeddings = np.array([[1.0, 0.0]], dtype=np.float32)
+        captured: dict = {}
+        _patch_caller(monkeypatch, parsed={"label": "L"}, captured=captured)
+        common = {
+            "cluster_labels": cluster_labels,
+            "centroids": centroids,
+            "embeddings": embeddings,
+            "memories": memories,
+            "user_id": "u",
+            "workspace_id": "w",
+            "context_id": None,
+        }
+
+        await label_clusters(**common, lane=managed_lane("self_hosted", "qwen3:8b"))
+        assert captured["provider"] == "self_hosted"
+        assert captured["fallback_chain"] == ("qwen3:8b",)
+        assert captured["platform_only"] is True
+
+        await label_clusters(**common)
+        assert captured["provider"] == "openai"
+        assert captured["fallback_chain"] == OPENAI_FALLBACK_CHAIN
+        assert captured["platform_only"] is False
 
     async def test_all_clusters_empty_when_no_memories(self, monkeypatch) -> None:
         """Centroids present but zero memories => every cluster is a sentinel."""

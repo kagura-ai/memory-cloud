@@ -44,13 +44,13 @@ from db.base import get_db
 from models.analysis import MEMORY_ANALYSIS_CANCELLATION_REASONS, MEMORY_ANALYSIS_STATUSES
 from models.api_base import TZAwareBaseModel
 from services.analysis import query_service
+from services.analysis.llm_lane import preview_pricing_target
 from services.analysis.orchestrator import (
     AnalysisOrchestrator,
     AnalysisParams,
     try_resolve_pricing_row,
 )
 from services.analysis.preview import (
-    DEFAULT_MODEL_ID,
     assert_run_size_within_cap,
     estimate_cost,
 )
@@ -420,14 +420,18 @@ async def preview_analysis(
         )
     # #1570: price from the same ``llm_pricing`` snapshot the run will
     # freeze — the caller-pinned ``body.model_id`` when given (an unknown id
-    # is the same 422 ``start`` raises), else the default model. No row →
+    # is the same 422 ``start`` raises), else the lane's model (#1569: the
+    # managed model when the workspace would run on it). No row →
     # ``estimated_cost_cents=null`` rather than a 500. The label is the
     # snapshot's model so preview and run name the same rate card.
-    pricing = await try_resolve_pricing_row(db, body.model_id)
+    provider, model = await preview_pricing_target(
+        db, workspace_id=workspace_id, context_id=context_id
+    )
+    pricing = await try_resolve_pricing_row(db, body.model_id, provider=provider, model=model)
     estimate = estimate_cost(
         memory_count,
         rates=None if pricing is None else pricing[1]["rates"],
-        model_id=DEFAULT_MODEL_ID if pricing is None else pricing[1]["model"],
+        model_id=model if pricing is None else pricing[1]["model"],
     )
     return AnalysisPreviewResponse(
         memory_count=estimate.memory_count,

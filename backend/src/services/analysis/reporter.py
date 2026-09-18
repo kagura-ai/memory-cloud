@@ -45,7 +45,7 @@ from models.analysis import (
     MemoryAnalysisAssignment,
     MemoryAnalysisCluster,
 )
-from models.sleep import SLEEP_REPORT_PAID_BY_VALUES, SLEEP_REPORT_SOURCES
+from models.sleep import SLEEP_REPORT_SOURCES
 from services.analysis.labeler import (
     MAX_CLUSTER_FAILURE_RATIO,
     ClusterLabel,
@@ -78,12 +78,10 @@ _STATUS_SUCCEEDED = "succeeded"
 _STATUS_FAILED = "failed"
 _STATUS_CANCELLED = "cancelled"
 _SOURCE_ANALYSIS = "analysis"
-_SLEEP_PAID_BY_BYOK = "byok"
 assert _STATUS_SUCCEEDED in MEMORY_ANALYSIS_STATUSES
 assert _STATUS_FAILED in MEMORY_ANALYSIS_STATUSES
 assert _STATUS_CANCELLED in MEMORY_ANALYSIS_STATUSES
 assert _SOURCE_ANALYSIS in SLEEP_REPORT_SOURCES
-assert _SLEEP_PAID_BY_BYOK in SLEEP_REPORT_PAID_BY_VALUES
 
 # sleep_report_llm_usage.phase value for analysis runs. The DB CHECK
 # constraint added by the d07_495 migration must list this exact
@@ -428,13 +426,15 @@ async def persist_results(
     #    immediately complete it with the labeler's PhaseResult so
     #    the per-(provider, model) breakdown lands in
     #    sleep_report_llm_usage with phase='cluster_labeling'.
+    #    ``paid_by`` mirrors the run row: 'byok' on the BYOK lane, 'platform'
+    #    on the managed lane (#1569) — ``create_report`` validates the value.
     sleep_reporter = SleepReporter(db)
     sleep_report = await sleep_reporter.create_report(
         user_id=user_id,
         workspace_id=workspace_id,
         context_id=context_id,
         source=_SOURCE_ANALYSIS,
-        paid_by=_SLEEP_PAID_BY_BYOK,
+        paid_by=analysis.paid_by,
     )
 
     phase_result = PhaseResult(
