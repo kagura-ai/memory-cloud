@@ -894,6 +894,10 @@ class _AddonFieldSpec:
     addon_type: str  # the ``WorkspaceAddon.addon_type`` enum value
     unit_value: int  # from ``ADDON_UNIT_VALUES`` — bonus = quantity * unit_value
     guard_kind: str | None  # 'member' / 'context' / 'memory' / 'sleep_contexts' / None
+    # #1561: registry feature the addon is inert without (e.g. ``connectors``
+    # for ``extra_connectors``). A grant on a tier lacking it is stored but
+    # warned about — never rejected — see ``_addon_feature_warnings``.
+    required_feature: str | None = None
 
 
 _ADDON_FIELD_SPECS: tuple[_AddonFieldSpec, ...] = (
@@ -956,8 +960,36 @@ _ADDON_FIELD_SPECS: tuple[_AddonFieldSpec, ...] = (
         "extra_connectors",
         ADDON_UNIT_VALUES["extra_connectors"],
         None,  # Spec 2026-06-02: no usage-clamp guard (cap enforced at create time)
+        required_feature="connectors",  # #1551: seats are inert below XL
     ),
 )
+
+
+def _addon_feature_warnings(plan_name: str, request: UpdateAddonRequest) -> list[str]:
+    """Warnings for grants whose addon needs a feature ``plan_name`` lacks (#1561).
+
+    ``extra_connectors`` seats on a tier without the ``connectors`` feature
+    are stored but inert: ``setup_connector`` keeps refusing with FEAT-001
+    until the workspace is upgraded. Admins may legitimately pre-grant ahead
+    of an upgrade, so this is surfaced to the caller as a structured warning
+    (``"<feature>_feature_missing"``), never a rejection. Only positive grants
+    warn — zeroing an inert grant is the expected cleanup — and an unknown
+    tier fails closed to a warning, mirroring ``has_feature``.
+
+    Args:
+        plan_name: The workspace's current plan.
+        request: The PUT body; ``None`` fields are no-touch and never warn.
+
+    Returns:
+        Warning codes in ``_ADDON_FIELD_SPECS`` order; empty when none apply.
+    """
+    return [
+        f"{spec.required_feature}_feature_missing"
+        for spec in _ADDON_FIELD_SPECS
+        if spec.required_feature is not None
+        and (getattr(request, spec.field_name) or 0) > 0
+        and not has_feature(plan_name, spec.required_feature)
+    ]
 
 
 @dataclasses.dataclass(frozen=True)
@@ -1094,6 +1126,14 @@ async def update_workspace_quotas(
     BASIC), so an admin grant on those tiers is harmless to user-facing
     behavior; the admin UI (#663) should display "no effect on this tier"
     rather than rejecting the request from this handler.
+
+    Per #1561: likewise, an ``extra_connectors`` grant on a tier without the
+    ``connectors`` feature (M/L since #1551) is NOT rejected — admins may
+    pre-grant ahead of an upgrade. The grant is stored as usual and the
+    response carries ``warnings: ["connectors_feature_missing"]`` (plus a
+    structured log) so the admin UI can flag that the seats are inert until
+    the workspace is upgraded. ``warnings`` is always present (``[]`` when
+    none apply).
     """
     ws_uuid = UUID(workspace_id)
     now = utcnow()
@@ -1285,7 +1325,22 @@ async def update_workspace_quotas(
         changes=audit_changes,
     )
 
-    return {"message": f"Quota addons updated for workspace {workspace.name}"}
+    # 5. Feature warnings (#1561) — computed after the writes so a rejected
+    #    or failed grant never logs as an inert one.
+    warnings = _addon_feature_warnings(workspace.plan_name, request)
+    if warnings:
+        logger.warning(
+            "workspace_addon_feature_missing",
+            workspace_id=workspace_id,
+            plan=workspace.plan_name,
+            warnings=warnings,
+            admin_user=admin_user["user_id"],
+        )
+
+    return {
+        "message": f"Quota addons updated for workspace {workspace.name}",
+        "warnings": warnings,
+    }
 
 
 def _reject_above_tier(

@@ -2,6 +2,7 @@
 
 import pytest
 
+from config.plan_tiers import feature_denied_message
 from utils.exceptions import (
     AdminProtectionError,
     APIKeyError,
@@ -217,6 +218,22 @@ class TestRateLimitErrors:
         exc = FeatureNotAvailableError(feature="reranking")
         assert exc.status_code == 403
         assert exc.details["feature"] == "reranking"
+
+    def test_feature_not_available_for_feature(self):
+        """#1561: one constructor builds every registry-derived feature refusal."""
+        exc = FeatureNotAvailableError.for_feature("pro", "connectors")
+        assert isinstance(exc, FeatureNotAvailableError)
+        assert exc.status_code == 403
+        assert exc.error_code == "FEAT-001"
+        assert exc.details["feature"] == "connectors"
+        assert exc.message == feature_denied_message("pro", "connectors")
+        assert "Pro plan" not in exc.message
+
+    def test_feature_not_available_for_feature_none_plan_reads_as_free(self):
+        exc = FeatureNotAvailableError.for_feature(None, "resources")
+        assert exc.message == feature_denied_message(None, "resources")
+        assert "on free plan" in exc.message
+        assert exc.details["feature"] == "resources"
 
 
 class TestDatabaseErrors:

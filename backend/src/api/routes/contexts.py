@@ -512,8 +512,10 @@ async def create_context(
 
         # SECURITY: Check plan allows shared contexts
         # Issue #271 Code Review H-1: Use plan_tiers instead of hardcoded plan names
+        # #1561: feature-gated + registry-derived refusal (FEAT-001), the same
+        # text as the service-layer gate — no fixed "Pro plan" wording.
         if not request.is_private:
-            from config.plan_tiers import feature_denied_message, get_plan_tier
+            from config.plan_tiers import has_feature
             from models.auth import Workspace
 
             workspace_result = await service.db.execute(
@@ -521,15 +523,8 @@ async def create_context(
             )
             workspace = workspace_result.scalar_one_or_none()
 
-            if workspace:
-                plan = get_plan_tier(workspace.plan_name)
-                if not plan.allows_shared_contexts:
-                    # Registry-derived tier name (#1559): the minimum moves with
-                    # a PLAN_<KEY>_FEATURES override, so never a hard-coded "Pro".
-                    raise HTTPException(
-                        status_code=status.HTTP_403_FORBIDDEN,
-                        detail=feature_denied_message(workspace.plan_name, "shared_contexts"),
-                    )
+            if workspace and not has_feature(workspace.plan_name, "shared_contexts"):
+                raise FeatureNotAvailableError.for_feature(workspace.plan_name, "shared_contexts")
 
         # Validate embedding model if provided.
         # #1517: check against what this deployment OFFERS, not the whole
@@ -950,25 +945,25 @@ async def update_context(
 
             # SECURITY: Check plan allows shared contexts
             # Issue #271 Code Review H-1: Use plan_tiers instead of hardcoded plan names
+            # #1561: same feature gate + FEAT-001 refusal as the create path
+            # (was a 400 — route-translated ValidationError — with fixed
+            # "Pro plan" text).
             if not request.is_private and existing_context:
-                from config.plan_tiers import feature_denied_message, get_plan_tier
+                from config.plan_tiers import has_feature
                 from models.auth import Workspace
 
                 workspace = await db.get(Workspace, existing_context.workspace_id)
 
-                if workspace:
-                    plan = get_plan_tier(workspace.plan_name)
-                    if not plan.allows_shared_contexts:
-                        # Registry-derived tier name (#1559), see create_context.
-                        raise ValidationError(
-                            feature_denied_message(workspace.plan_name, "shared_contexts")
-                        )
+                if workspace and not has_feature(workspace.plan_name, "shared_contexts"):
+                    raise FeatureNotAvailableError.for_feature(
+                        workspace.plan_name, "shared_contexts"
+                    )
 
         # Issue #1551: "public" is its own gate, independent of "shared" (which
         # stays on L). Only the transition INTO public is gated — a context that
         # is already public keeps serving on its current tier (block-new-only).
         if request.is_public and existing_context and not existing_context.is_public:
-            from config.plan_tiers import feature_denied_message, has_feature
+            from config.plan_tiers import has_feature
             from models.auth import Workspace
 
             workspace = await db.get(Workspace, existing_context.workspace_id)
@@ -976,10 +971,7 @@ async def update_context(
             # hence no feature (same posture as setup_resource's preflight).
             plan_name = workspace.plan_name if workspace else None
             if not has_feature(plan_name or "", "public_contexts"):
-                raise FeatureNotAvailableError(
-                    feature_denied_message(plan_name, "public_contexts"),
-                    feature="public_contexts",
-                )
+                raise FeatureNotAvailableError.for_feature(plan_name, "public_contexts")
 
         # SECURITY: Validate resource_id uniqueness within workspace
         # Issue #271 Code Review H-2: Rely on DB constraint instead of application-level check

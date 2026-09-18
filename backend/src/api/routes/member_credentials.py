@@ -675,7 +675,7 @@ async def create_api_key(
         # after distributing a dead key.
         from sqlalchemy import select as _select_ws
 
-        from config.plan_tiers import feature_denied_message, get_plan_tier, has_feature
+        from config.plan_tiers import get_plan_tier, has_feature
         from models.auth import Workspace
 
         ws_row = await db.execute(_select_ws(Workspace).where(Workspace.id == workspace_id))
@@ -687,10 +687,7 @@ async def create_api_key(
         if not has_feature(plan_name, "public_contexts"):
             # FEAT-001 with the registry-derived tier (not the uniform AUTH-101
             # text) so the client can show the upgrade path.
-            raise FeatureNotAvailableError(
-                feature_denied_message(plan_name, "public_contexts"),
-                feature="public_contexts",
-            )
+            raise FeatureNotAvailableError.for_feature(plan_name, "public_contexts")
         if get_plan_tier(plan_name).bound_public_calls_per_minute <= 0:
             raise AuthorizationError(
                 message=(

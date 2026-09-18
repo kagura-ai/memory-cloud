@@ -133,8 +133,12 @@ worker (connector token)
   by `resource_id` (the resource slug) + `workspace_id`
   (`resource_quota_service._build_key`, #328/#332) and charges `len(events)` per
   call, so batching does **not** bypass the ceiling. A connector minting a token
-  bypasses the `max_resource_tokens` gate but is bounded by the `max_connectors`
-  seat cap (#850/#851), not the Pro+ resource-token gate.
+  bypasses the `max_resource_tokens` cap but is bounded by the `max_connectors`
+  seat cap (#850/#851), not the resource-token cap. Creating a connector at all
+  requires a plan with the `connectors` feature — XL by default (#1551); the seat
+  cap is the second gate. This gates **new creation only**: connectors that
+  already exist on a lower plan keep ingesting, and `max_connectors` on those
+  plans bounds only what they already hold.
 - **`delete` must carry `payload: null`.** An `upsert` payload on a `delete` op is
   rejected by request validation.
 - **Slug, not UUID.** Address the resource by its slug in the URL; the server

@@ -607,6 +607,29 @@ class FeatureNotAvailableError(MemoryCloudException):
     ) -> None:
         super().__init__(message, status_code=403, error_code="FEAT-001", feature=feature)
 
+    @classmethod
+    def for_feature(cls, plan_name: str | None, feature: str) -> "FeatureNotAvailableError":
+        """Build the refusal for a plan that lacks ``feature`` (#1561).
+
+        Single source for the wire text: the message comes from
+        ``config.plan_tiers.feature_denied_message`` (tier name derived from
+        the registry, never a hardcoded "Pro") and ``details.feature`` is
+        always set, so every gate reads the same to clients.
+
+        Args:
+            plan_name: The workspace's plan; ``None`` reads as free.
+            feature: Registry feature key, e.g. ``"connectors"``.
+
+        Returns:
+            The exception, ready to ``raise``.
+        """
+        # Local import: ``config.plan_tiers`` applies settings overrides at
+        # import time and this module is imported everywhere, so keep it off
+        # the module import path.
+        from config.plan_tiers import feature_denied_message
+
+        return cls(feature_denied_message(plan_name, feature), feature=feature)
+
 
 # Database Errors (5xx)
 

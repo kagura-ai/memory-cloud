@@ -104,12 +104,14 @@ Analysis runs are capped by `ANALYSIS_MAX_MEMORY_COUNT` (default 10,000; preview
 
 | Tool | Description | Required Role |
 |------|------------|---------------|
-| `setup_resource` | Create public context + issue resource token | Owner/Admin + Pro plan |
-| `setup_connector` | Provision an ai-worker chat connector (resource + connector row + token) | Owner/Admin + connector seats |
+| `setup_resource` | Create public context + issue resource token | Owner/Admin + plan with the `resources` feature (XL) |
+| `setup_connector` | Provision an ai-worker chat connector (resource + connector row + token) | Owner/Admin + plan with the `connectors` feature (XL); connector seat cap applies second |
 | `list_resource_tokens` | List active resource tokens for your workspace | Owner/Admin |
 | `ingest_events` | Batch upsert/delete events into a resource (max 100 events; session-auth MCP variant) | Member+ |
 | `get_resource_impact` | Resource stats (tokens, memories, schema version) | Viewer+ |
 | `get_resource_schema` | Field definitions for a resource | Viewer+ |
+
+The `resources` / `connectors` feature gates (#1551) apply to **new creation only**: resources, resource tokens and connectors that already exist on a lower plan keep working — they stay listed, served, editable and ingestible (a resource token's `quota_events_per_hour` change is still bounded by the current tier's aggregate ceiling — see the resource-tokens guide). The per-plan token / connector caps bound only what a lower plan already holds; for plans with the feature they are the second gate at creation time.
 
 ## Secrets (5)
 

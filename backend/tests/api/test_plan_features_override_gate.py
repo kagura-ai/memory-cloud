@@ -294,22 +294,25 @@ async def _post_shared(plan_name: str) -> None:
 @pytest.mark.asyncio
 async def test_shared_refusals_name_the_registry_tier_by_default() -> None:
     """Without an override both REST gates name L from the registry — the
-    hard-coded "Pro plan" text (a tier name that no longer exists) is gone."""
-    from fastapi import HTTPException
+    hard-coded "Pro plan" text (a tier name that no longer exists) is gone.
+    Since #1561 both gates raise the canonical FEAT-001 (403) error."""
+    from utils.exceptions import FeatureNotAvailableError
 
     upgrade_to_l = f"Upgrade to {plan_tiers.get_plan_tier('pro').display_name} plan"
 
-    with pytest.raises(HTTPException) as post_exc:
+    with pytest.raises(FeatureNotAvailableError) as post_exc:
         await _post_shared("free")
     assert post_exc.value.status_code == 403
-    assert upgrade_to_l in post_exc.value.detail
-    assert "Pro plan" not in post_exc.value.detail
+    assert post_exc.value.details["feature"] == "shared_contexts"
+    assert upgrade_to_l in post_exc.value.message
+    assert "Pro plan" not in post_exc.value.message
 
-    with pytest.raises(HTTPException) as put_exc:
+    with pytest.raises(FeatureNotAvailableError) as put_exc:
         await _put_shared("free")
-    assert put_exc.value.status_code == 400
-    assert upgrade_to_l in put_exc.value.detail
-    assert "Pro plan" not in put_exc.value.detail
+    assert put_exc.value.status_code == 403  # was a route-translated 400 before #1561
+    assert put_exc.value.details["feature"] == "shared_contexts"
+    assert upgrade_to_l in put_exc.value.message
+    assert "Pro plan" not in put_exc.value.message
 
 
 @pytest.mark.asyncio
@@ -318,13 +321,13 @@ async def test_shared_refusal_follows_the_override_and_basic_passes(
 ) -> None:
     """With ``shared_contexts`` on M, Free is told to upgrade to M (not L) and
     M itself passes — ``allows_shared_contexts`` moved with the feature."""
-    from fastapi import HTTPException
+    from utils.exceptions import FeatureNotAvailableError
 
     upgrade_to_m = f"Upgrade to {plan_tiers.get_plan_tier('basic').display_name} plan"
 
-    with pytest.raises(HTTPException) as exc_info:
+    with pytest.raises(FeatureNotAvailableError) as exc_info:
         await _put_shared("free")
-    assert upgrade_to_m in exc_info.value.detail
+    assert upgrade_to_m in exc_info.value.message
 
     service = await _put_shared("basic")
     service.update_context.assert_awaited_once()
