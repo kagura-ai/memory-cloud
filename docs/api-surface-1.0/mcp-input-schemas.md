@@ -297,7 +297,7 @@ Reverse all recorded actions of a completed Sleep Maintenance run (destructive; 
 
 ### setup_resource
 
-Atomically create a public context + resource token for an ingestion pipeline (Pro plan; owner/admin).
+Atomically create a public context + resource token for an ingestion pipeline (owner/admin; requires a plan with the `resources` feature — XL by default, #1551. Creation-only gate: existing resources and tokens on lower plans keep working).
 
 - **Required**:
   - `name` — string (lowercase alphanumeric/hyphen/underscore, max 100 chars — prose-only)
@@ -309,7 +309,7 @@ Atomically create a public context + resource token for an ingestion pipeline (P
 
 ### setup_connector
 
-Create an ai-worker chat-ingest connector (resource row + connector row + scoped token) in one operation.
+Create an ai-worker chat-ingest connector (resource row + connector row + scoped token) in one operation (owner/admin; requires a plan with the `connectors` feature — XL by default, #1551 — then the `max_connectors` seat cap applies second. Creation-only gate: existing connectors on lower plans keep working).
 
 - **Required**:
   - `connector_type` — string, enum [`slack`, `discord`, `teams`] ⚠ highest enum lock-in risk on the surface: a hard-frozen list of third-party chat vendors is guaranteed to grow (LINE, Mattermost, email…); every addition is a surface change — consider free string + server-side registry before freeze

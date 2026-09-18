@@ -166,9 +166,8 @@ def sync_products():
 ## Quotas
 
 - Each token has a `quota_events_per_hour` limit
-- Free plan: No resource tokens (higher tier plan required)
-- Basic plan: Up to 3 active tokens
-- Pro plan: Up to 30 active tokens
+- **Creating** a resource token (or a resource via `setup_resource`) requires a plan with the `resources` feature — XL (`promax`) by default (#1551). Lower plans cannot mint new tokens.
+- The per-plan active-token caps are **serve-only** limits for tokens a workspace already holds — existing tokens stay valid, listed and editable after a downgrade; nothing is revoked: Free 0, Basic 3, Pro 30, XL 150. For plans with the feature the cap is the second gate at creation time.
 
 ## Resource Tokens vs API Keys
 
