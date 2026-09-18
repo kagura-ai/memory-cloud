@@ -24,6 +24,8 @@ import { useAuth } from "@/contexts/AuthContext";
 import { useWorkspace } from "@/contexts/WorkspaceContext";
 import { checkOpenAIKeyStatus } from "@/lib/api/workspaces";
 import { useSystemFeatures } from "@/hooks/useSystemFeatures";
+import { usePlanFeatures, type PlanFeature } from "@/hooks/usePlanFeatures";
+import { useWorkspaceObjectPresence } from "@/hooks/useWorkspaceObjectPresence";
 import {
   hasRole,
   hasWorkspaceRole,
@@ -86,7 +88,8 @@ interface NavItem {
   icon: React.ElementType;
   requiredRole?: Role; // System admin role
   requiredWorkspaceRole?: Exclude<WorkspaceRole, WorkspaceRole.Viewer>; // Workspace role (minimum required)
-  requiredFeature?: string; // Issue #1145: gate on a GET /system/info features flag
+  requiredFeature?: string | string[]; // Issue #1145: gate on GET /system/info features flag(s); every listed flag must be true (#1571)
+  requiredPlanFeature?: PlanFeature; // Issue #1571: gate on the plan's create gate, with an existing-objects fallback
   disabled?: boolean; // Issue #115: Support for "Coming Soon" items
   showMemberCount?: boolean; // Issue #223: Show dynamic member count
   showContextCount?: boolean; // Show dynamic context count
@@ -124,6 +127,9 @@ const navigationGroups: NavGroup[] = [
         href: "/workspace/resources",
         icon: Database,
         requiredWorkspaceRole: WorkspaceRole.Owner, // Issue #389: Owner-only (resource tokens + schema decisions)
+        // Issue #1571: XL-only since #1551 — hidden for a plan without it
+        // unless the workspace already owns a resource (see the nav filter).
+        requiredPlanFeature: "resources",
       },
       {
         // Issue #955: workspace-scoped file objects (R2 storage). Backend
@@ -167,13 +173,15 @@ const navigationGroups: NavGroup[] = [
         // mirror that here so member/viewer don't see a nav entry that
         // would 403 on click.
         // Issue #1167: part of the BYOK surface — hidden when ENABLE_BYOK
-        // is off (the backing API 404s). Reporting entries stay last in
-        // the group: sleepReports, then cost.
+        // is off (the backing API 404s). Issue #1571: also hidden when the
+        // deployment hides money (ENABLE_COST_DISPLAY=false) — both flags
+        // must be on. Reporting entries stay last in the group:
+        // sleepReports, then cost.
         nameKey: "cost",
         href: "/workspace/cost",
         icon: DollarSign,
         requiredWorkspaceRole: WorkspaceRole.Admin,
-        requiredFeature: "byok",
+        requiredFeature: ["byok", "cost_display"],
       },
     ],
   },
@@ -196,6 +204,9 @@ const navigationGroups: NavGroup[] = [
         href: "/workspace/integrations/connectors",
         icon: Plug,
         requiredWorkspaceRole: WorkspaceRole.Admin,
+        // Issue #1571: XL-only since #1551 — hidden for a plan without it
+        // unless the workspace already owns a connector (see the nav filter).
+        requiredPlanFeature: "connectors",
       },
     ],
   },
@@ -302,6 +313,9 @@ export function Sidebar() {
   // Issue #1145: backend feature flags (e.g. plan_page). null while loading →
   // feature-gated items stay hidden (default-off).
   const systemFeatures = useSystemFeatures();
+  // Issue #1571: the plan's create gates for the resources / connectors
+  // entries. null while resolving → those entries stay hidden.
+  const planFeatures = usePlanFeatures();
   const [isOpen, setIsOpen] = useState(false);
   const [contextCount, setContextCount] = useState<number | null>(null);
   // #1495: whether embeddings WORK, not whether this workspace owns a key.
@@ -416,6 +430,28 @@ export function Sidebar() {
       cancelled = true;
     };
   }, [currentWorkspaceId, currentWorkspaceRole, byokEnabled]);
+
+  // Issue #1571: when the plan refuses NEW resources / connectors, the entry
+  // still has to stay for a workspace that already owns some (#1551 keeps
+  // them working). Probe the list APIs only in that case, and only for a
+  // role that may list them (resources: owner, connectors: admin+ — the same
+  // roles the entries require, so a member never triggers a 403).
+  const hasResources = useWorkspaceObjectPresence(
+    "resources",
+    currentWorkspaceId,
+    planFeatures?.resources === false &&
+      hasWorkspaceRole(currentWorkspaceRole, WorkspaceRole.Owner),
+  );
+  const hasConnectors = useWorkspaceObjectPresence(
+    "connectors",
+    currentWorkspaceId,
+    planFeatures?.connectors === false &&
+      hasWorkspaceRole(currentWorkspaceRole, WorkspaceRole.Admin),
+  );
+  const existingObjects: Partial<Record<PlanFeature, boolean | null>> = {
+    resources: hasResources,
+    connectors: hasConnectors,
+  };
 
   // Sync collapse state across browser tabs
   useEffect(() => {
@@ -568,11 +604,27 @@ export function Sidebar() {
         {navigationGroups.map((group) => {
           // Filter items based on user role
           const visibleItems = group.items.filter((item) => {
-            // Issue #1145: gate behind a backend feature flag. Default-off:
-            // hidden while features load (null) and unless the flag is true.
+            // Issue #1145: gate behind backend feature flag(s). Default-off:
+            // hidden while features load (null) and unless EVERY listed flag
+            // is true (#1571: the workspace cost entry needs byok AND
+            // cost_display).
+            const requiredFeatures =
+              typeof item.requiredFeature === "string"
+                ? [item.requiredFeature]
+                : (item.requiredFeature ?? []);
+            if (requiredFeatures.some((flag) => !systemFeatures?.[flag])) {
+              return false;
+            }
+            // Issue #1571: plan-gated entries (resources / connectors). Shown
+            // when the plan includes the feature OR the workspace already owns
+            // such objects (they keep working after a downgrade, #1551; the
+            // page carries the upsell for new ones, #1560). Hidden while
+            // either answer is pending — a low tier never sees a
+            // flash-then-hide, and an entitled tier never flashes an upsell.
             if (
-              item.requiredFeature &&
-              !systemFeatures?.[item.requiredFeature]
+              item.requiredPlanFeature &&
+              planFeatures?.[item.requiredPlanFeature] !== true &&
+              existingObjects[item.requiredPlanFeature] !== true
             ) {
               return false;
             }
