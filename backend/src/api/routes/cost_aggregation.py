@@ -31,7 +31,12 @@ from uuid import UUID
 from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from auth.dependencies import AdminUser, get_current_user, require_byok_enabled
+from auth.dependencies import (
+    AdminUser,
+    get_current_user,
+    require_byok_enabled,
+    require_cost_display_enabled,
+)
 from db.base import get_db
 from models.api_base import TZAwareBaseModel
 from models.sleep import SLEEP_REPORT_PAID_BY_VALUES, SLEEP_REPORT_SOURCES
@@ -296,9 +301,11 @@ async def admin_cost_aggregation(
     # Issue #1167: the workspace cost dashboard is part of the BYOK surface —
     # 404 when ENABLE_BYOK=false. Listed as a route dependency so it runs
     # before the auth/permission dependencies (uniform 404 for every caller).
+    # Issue #1571: also 404 when ENABLE_COST_DISPLAY=false (both must hold —
+    # a hosted deployment may keep BYOK and still hide money from customers).
     # /admin/cost-aggregation stays ungated: platform env-key usage still
     # accrues cost the system admin may need to see.
-    dependencies=[Depends(require_byok_enabled)],
+    dependencies=[Depends(require_byok_enabled), Depends(require_cost_display_enabled)],
 )
 async def workspace_cost_aggregation(
     workspace_id: UUID,

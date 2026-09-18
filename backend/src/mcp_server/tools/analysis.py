@@ -212,11 +212,14 @@ def _serialize_run_row(row: Any) -> dict[str, Any]:
     Mirrors ``AnalysisRow`` in ``routes/analyses.py`` so REST and MCP
     consumers see the same fields. Datetimes are emitted with explicit
     UTC ``Z`` suffix via ``to_utc_iso`` (#489 wire-format guarantee).
+    When the deployment disables cost display (#1571) the ``cost_*`` keys
+    are absent — REST nulls them instead to keep its schema shape.
     """
     from services.agent_binding_service import (
         REDACTED_RUN_AGGREGATE_FIELDS,
         agent_scope_is_enforce,
     )
+    from services.cost_visibility import strip_cost_fields
     from utils.datetime import to_utc_iso
 
     out = {
@@ -250,7 +253,9 @@ def _serialize_run_row(row: Any) -> dict[str, Any]:
     if agent_scope_is_enforce():
         for field in REDACTED_RUN_AGGREGATE_FIELDS:
             out[field] = None
-    return out
+    # #1571: last, so the enforce redaction above cannot leave ``null``
+    # money keys behind when the deployment hides cost entirely.
+    return strip_cost_fields(out, omit=True)
 
 
 # ============================================================================
@@ -350,13 +355,22 @@ async def handle_analyze_context(
                     context_id=context_id,
                     workspace_id=workspace_id,
                 )
+                # #1571: the key is OMITTED when the deployment hides cost
+                # (REST /preview nulls it — a dict has no schema to keep).
+                from services.cost_visibility import strip_cost_fields
+
                 return _success_response(
-                    dry_run=True,
-                    memory_count=estimate.memory_count,
-                    cluster_count_estimate=estimate.cluster_count_estimate,
-                    estimated_cost_cents=estimate.estimated_cost_cents,
-                    model_id=estimate.model_id,
-                    breakdown=estimate.breakdown,
+                    **strip_cost_fields(
+                        {
+                            "dry_run": True,
+                            "memory_count": estimate.memory_count,
+                            "cluster_count_estimate": estimate.cluster_count_estimate,
+                            "estimated_cost_cents": estimate.estimated_cost_cents,
+                            "model_id": estimate.model_id,
+                            "breakdown": estimate.breakdown,
+                        },
+                        omit=True,
+                    )
                 )
 
             # Real run — orchestrator.start() + commit + create_task.
