@@ -37,7 +37,12 @@ from models.schemas import (
 )
 from services.member_credentials_service import MemberCredentialsService
 from utils.datetime import to_utc_iso, utcnow
-from utils.exceptions import AuthorizationError, BadRequestError, NotFoundException
+from utils.exceptions import (
+    AuthorizationError,
+    BadRequestError,
+    FeatureNotAvailableError,
+    NotFoundException,
+)
 from utils.logger import get_logger
 
 logger = get_logger(__name__)
@@ -661,14 +666,16 @@ async def create_api_key(
 
         # Tier gate: workspace plan must include the ``public_contexts`` feature
         # AND have a non-zero per-key minute quota. The two checks defend in
-        # depth: the feature-flag check is the primary intent (PRO+), but a
-        # custom plan / env override that left ``bound_public_calls_per_minute``
-        # at 0 would otherwise mint a key that 429s on every public-endpoint
-        # call. Refuse creation up-front so the operator sees the
-        # misconfiguration immediately, not after distributing a dead key.
+        # depth: the feature-flag check is the primary intent (XL / ``promax``
+        # since #1551 — minting a NEW bound key is "may create"; keys that
+        # already exist keep serving), but a custom plan / env override that
+        # left ``bound_public_calls_per_minute`` at 0 would otherwise mint a
+        # key that 429s on every public-endpoint call. Refuse creation
+        # up-front so the operator sees the misconfiguration immediately, not
+        # after distributing a dead key.
         from sqlalchemy import select as _select_ws
 
-        from config.plan_tiers import get_plan_tier, has_feature
+        from config.plan_tiers import feature_denied_message, get_plan_tier, has_feature
         from models.auth import Workspace
 
         ws_row = await db.execute(_select_ws(Workspace).where(Workspace.id == workspace_id))
@@ -678,8 +685,11 @@ async def create_api_key(
         # ``has_feature`` / ``get_plan_tier`` don't see ``None`` and 500.
         plan_name = (ws.plan_name if ws is not None else None) or "free"
         if not has_feature(plan_name, "public_contexts"):
-            raise AuthorizationError(
-                message="Workspace plan does not include the public_contexts feature"
+            # FEAT-001 with the registry-derived tier (not the uniform AUTH-101
+            # text) so the client can show the upgrade path.
+            raise FeatureNotAvailableError(
+                feature_denied_message(plan_name, "public_contexts"),
+                feature="public_contexts",
             )
         if get_plan_tier(plan_name).bound_public_calls_per_minute <= 0:
             raise AuthorizationError(

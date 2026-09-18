@@ -401,7 +401,7 @@ PLAN_PRO_MAX_CONTEXTS=50
 PLAN_PROMAX_MAX_CONTEXTS=2000
 ```
 
-For self-hosted single-user setups, assign the L (Pro) plan to your workspace. Plan changes are **admin-only** by default. For SaaS deployments with self-service billing, enable Stripe:
+For self-hosted single-user setups, assign the XL (`promax`) plan to your workspace — since #1551 it is the only tier that may create resources, connectors and public contexts. Numeric limits are env-overridable as above, but a tier's `features` set is not (a `PLAN_<KEY>_FEATURES` override is a planned follow-up). Plan changes are **admin-only** by default. For SaaS deployments with self-service billing, enable Stripe:
 
 ```bash
 BILLING_ENABLED=true

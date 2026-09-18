@@ -100,6 +100,13 @@ class TestResourceTokenCreate:
         # The tier's numeric cap stays the second gate: the count query ran.
         assert db.execute.await_count == 3
 
+    @pytest.mark.asyncio
+    async def test_missing_plan_row_fails_closed(self) -> None:
+        """No plan row → no feature. The old ``if plan_name:`` nesting skipped
+        the gate entirely and minted the token."""
+        with pytest.raises(FeatureNotAvailableError):
+            await self._create(None)  # type: ignore[arg-type]
+
 
 class TestResourceTokenQuotaUpdateKeepsServing:
     """PATCH /resource-tokens/{id}: the ``max_resource_tokens * 10000`` ceiling
@@ -175,11 +182,12 @@ class TestContextSetPublic:
             workspace_id=_WS,
         )
 
-    async def _put(self, plan_name: str, existing: SimpleNamespace, **fields):
+    async def _put(self, plan_name: str | None, existing: SimpleNamespace, **fields):
         from api.routes.contexts import ContextUpdate, update_context
 
         db = MagicMock()
-        db.get = AsyncMock(return_value=SimpleNamespace(plan_name=plan_name))
+        # ``plan_name=None`` models a context whose workspace row is missing.
+        db.get = AsyncMock(return_value=SimpleNamespace(plan_name=plan_name) if plan_name else None)
         perm = MagicMock()
         perm.check_context_owner = AsyncMock(return_value=existing)
         service = MagicMock()
@@ -208,6 +216,11 @@ class TestContextSetPublic:
     async def test_allowed_on_xl(self) -> None:
         service, _ = await self._put("promax", self._existing(is_public=False), is_public=True)
         assert service.update_context.await_args.kwargs["is_public"] is True
+
+    @pytest.mark.asyncio
+    async def test_missing_workspace_row_fails_closed(self) -> None:
+        with pytest.raises(FeatureNotAvailableError):
+            await self._put(None, self._existing(is_public=False), is_public=True)
 
     @pytest.mark.asyncio
     async def test_already_public_pro_context_keeps_serving(self) -> None:
@@ -285,9 +298,15 @@ class TestBoundPublicKeyCreate:
 
     @pytest.mark.parametrize("plan_name", _NON_XL)
     def test_refused_below_xl(self, client, monkeypatch, plan_name: str) -> None:
+        """FEAT-001 with the registry-derived tier — not the uniform AUTH-101
+        "Insufficient permissions" text, which would hide the upgrade path."""
         mgr = self._arrange(monkeypatch, plan_name)
         r = self._mint(client)
         assert r.status_code == 403
+        body = r.json()
+        assert body["error"] == "FEAT-001"
+        assert "public_contexts" in body["message"] and "XL" in body["message"]
+        assert "Insufficient permissions" not in r.text
         mgr.create_key.assert_not_awaited()
 
     def test_allowed_on_xl(self, client, monkeypatch) -> None:

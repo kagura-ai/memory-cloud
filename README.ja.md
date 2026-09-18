@@ -256,7 +256,7 @@ MCP ツールに加えてフル REST API を提供:
 
 ## プランティア カスタマイズ
 
-プランは workspace ごとのリソース上限(contexts / memories / MCP 呼出/日)を制御します。既定では S (`free`)・M (`basic`)・L (`pro`)・XL (`promax`) の 4 tier があります。セルフホストの単独利用では自分の workspace に L (Pro) プランを割り当ててください。既定値・環境変数での上書き・Stripe 課金の有効化: **[Deployment → Plan Tiers](docs/deployment.md#plan-tiers)**(英語)
+プランは workspace ごとのリソース上限(contexts / memories / MCP 呼出/日)を制御します。既定では S (`free`)・M (`basic`)・L (`pro`)・XL (`promax`) の 4 tier があります。セルフホストの単独利用では自分の workspace に XL (`promax`) プランを割り当ててください — リソース・コネクタ・公開コンテキストを新規作成できる唯一の tier です（数値上限は環境変数で上書きできますが、tier の機能セットは上書きできません）。既定値・環境変数での上書き・Stripe 課金の有効化: **[Deployment → Plan Tiers](docs/deployment.md#plan-tiers)**(英語)
 
 ## Claude Code プラグイン
 

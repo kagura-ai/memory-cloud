@@ -332,34 +332,55 @@ export function ResourceTokensTabPanel({
           </div>
         )}
 
-        {/* Prerequisites Warning (Unified) */}
-        {isOwner &&
-          (!canCreateTokens || !contexts.some((c) => c.resource_id)) && (
-            <div className="rounded-lg border-2 border-purple-200 bg-purple-50 p-4 mb-6">
-              <div className="flex items-start gap-3">
-                <AlertTriangle className="h-5 w-5 text-purple-600 flex-shrink-0 mt-0.5" />
-                <div className="flex-1">
-                  <p className="text-sm font-medium text-purple-900">
-                    {t("noResourceIdWarning", { plan: xlLabel })}
-                  </p>
-                  <p className="text-xs text-purple-700 mt-1 mb-3">
-                    {t("noResourceIdWarningDesc", { plan: xlLabel })}
-                  </p>
-                  <div className="space-y-2">
-                    <div className="flex items-center gap-2 text-xs">
-                      <span className="text-purple-900">1.</span>
-                      <a
-                        href="/workspace/contexts"
-                        className="text-purple-600 hover:text-purple-700 underline font-medium"
-                      >
-                        {t("goToContexts")}
-                      </a>
-                    </div>
+        {/* Prerequisites Warning — plan gate (#1551) first, then resource-id.
+            Existing tokens stay listed below either way (block-new-only). */}
+        {isOwner && !canCreateTokens && (
+          <div className="rounded-lg border-2 border-purple-200 bg-purple-50 p-4 mb-6">
+            <div className="flex items-start gap-3">
+              <AlertTriangle className="h-5 w-5 text-purple-600 flex-shrink-0 mt-0.5" />
+              <div className="flex-1">
+                <p className="text-sm font-medium text-purple-900">
+                  {t("planGateTitle", { plan: xlLabel })}
+                </p>
+                <p className="text-xs text-purple-700 mt-1 mb-3">
+                  {t("planGateDesc", { plan: xlLabel })}
+                </p>
+                <a
+                  href="/workspace/settings/plan"
+                  className="text-xs text-purple-600 hover:text-purple-700 underline font-medium"
+                >
+                  {t("upgradePlan")}
+                </a>
+              </div>
+            </div>
+          </div>
+        )}
+        {isOwner && canCreateTokens && !contexts.some((c) => c.resource_id) && (
+          <div className="rounded-lg border-2 border-purple-200 bg-purple-50 p-4 mb-6">
+            <div className="flex items-start gap-3">
+              <AlertTriangle className="h-5 w-5 text-purple-600 flex-shrink-0 mt-0.5" />
+              <div className="flex-1">
+                <p className="text-sm font-medium text-purple-900">
+                  {t("noResourceIdWarning")}
+                </p>
+                <p className="text-xs text-purple-700 mt-1 mb-3">
+                  {t("noResourceIdWarningDesc")}
+                </p>
+                <div className="space-y-2">
+                  <div className="flex items-center gap-2 text-xs">
+                    <span className="text-purple-900">1.</span>
+                    <a
+                      href="/workspace/contexts"
+                      className="text-purple-600 hover:text-purple-700 underline font-medium"
+                    >
+                      {t("goToContexts")}
+                    </a>
                   </div>
                 </div>
               </div>
             </div>
-          )}
+          </div>
+        )}
 
         {/* Usage Guide */}
         {tokens.length > 0 && (

@@ -1705,15 +1705,16 @@ class Workspace(Base):
     def effective_public_calls_per_day(self) -> int:
         """Public REST API calls/day: plan tier base + addon (Issue #238).
 
-        FREE and BASIC have ``public_calls_per_day == 0``. There is **no other
-        runtime tier gate** on the public REST routes — ``api/routes/public_search.py``
-        rejects non-public contexts via ``context.is_public``, but does not check
-        the owner's plan tier. The ``public_contexts`` entry in
-        ``plan_tiers.py:FEATURE_MIN_PLANS`` is declared but never consumed at
-        runtime (``check_feature_access`` is only called for ``memory_analysis``
-        and ``reranking`` today), so the zero-base guard here is the **primary**
-        protection against a stray ``WorkspaceAddon`` row granting public-API
-        access to a tier that excludes it (#569).
+        FREE and BASIC have ``public_calls_per_day == 0``. There is **no
+        runtime tier gate** on the public REST *serve* routes —
+        ``api/routes/public_search.py`` rejects non-public contexts via
+        ``context.is_public`` but does not check the owner's plan tier — so the
+        zero-base guard here is the **primary** protection against a stray
+        ``WorkspaceAddon`` row granting public-API access to a tier that
+        excludes it (#569). The ``public_contexts`` feature flag gates only
+        *making* a context public (#1551, XL-only): PRO keeps
+        ``public_calls_per_day == 1000`` as a serve-only cap so contexts that
+        are already public keep answering.
         """
         return _zero_floor(self._plan_tier.public_calls_per_day, self.addon_public_quota_bonus)
 
@@ -1777,12 +1778,14 @@ class Workspace(Base):
     def effective_max_connectors(self) -> int:
         """Max ai-worker connectors: plan tier base + ``extra_connectors`` addon.
 
-        Tier bases are FREE=0 / BASIC=3 / PRO=10 (Spec 2026-06-02). Admins can
-        grant extra seats per workspace via the ``extra_connectors`` addon, which
-        ``AddonCalculatorService`` accumulates into ``addon_connector_bonus``
-        (mirrors ``effective_max_members`` / sleep contexts). It governs
-        ai-worker chat-ingest connector creation independently of
-        ``max_resource_tokens``.
+        Tier bases are FREE=0 / BASIC=3 / PRO=10 / PROMAX=50 (Spec 2026-06-02,
+        #1551). Admins can grant extra seats per workspace via the
+        ``extra_connectors`` addon, which ``AddonCalculatorService`` accumulates
+        into ``addon_connector_bonus`` (mirrors ``effective_max_members`` /
+        sleep contexts). It is the *second* gate on connector creation, after
+        the ``connectors`` feature flag (XL-only, #1551): on BASIC / PRO the
+        positive base is serve-only — it keeps connectors that already exist
+        listed and dispatched, and an addon there cannot unlock creation.
         """
         return _zero_floor(self._plan_tier.max_connectors, self.addon_connector_bonus)
 

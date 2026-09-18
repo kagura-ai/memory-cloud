@@ -418,10 +418,12 @@ async def _apply_public_flag(db: Any, context: Any, is_public: Any) -> list[Text
         from models.auth import Workspace
 
         ws = await db.get(Workspace, context.workspace_id)
-        if ws and not has_feature(ws.plan_name, "public_contexts"):
+        # Fail closed: no workspace row → no plan → no feature.
+        plan_name = ws.plan_name if ws else None
+        if not has_feature(plan_name or "", "public_contexts"):
             return _error_response(
                 "plan_required",
-                feature_denied_message(ws.plan_name, "public_contexts"),
+                feature_denied_message(plan_name, "public_contexts"),
                 required_plan=get_required_plan_for_feature("public_contexts"),
             )
     if not is_public and context.is_public and context.resource_id:

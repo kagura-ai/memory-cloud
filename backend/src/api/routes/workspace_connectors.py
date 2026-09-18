@@ -308,8 +308,9 @@ async def create_workspace_connector(
 ) -> WorkspaceConnectorCreateResponse:
     """Provision a connector using the Resource Foundation.
 
-    Unlike ``setup_resource``, this endpoint is gated by ``max_connectors`` and
-    not by the public-context/resource-token plan gate.
+    Requires a plan with the ``connectors`` feature (XL, #1551); existing
+    connectors on lower plans keep working. The ``max_connectors`` seat cap
+    applies second, inside ``ConnectorProvisioningService``.
     """
     user_id = admin["user_id"]
     workspace_id = admin.get("current_workspace_id")

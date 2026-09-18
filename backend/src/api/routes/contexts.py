@@ -969,9 +969,12 @@ async def update_context(
             from models.auth import Workspace
 
             workspace = await db.get(Workspace, existing_context.workspace_id)
-            if workspace and not has_feature(workspace.plan_name, "public_contexts"):
+            # Fail closed: a context whose workspace row is missing has no plan,
+            # hence no feature (same posture as setup_resource's preflight).
+            plan_name = workspace.plan_name if workspace else None
+            if not has_feature(plan_name or "", "public_contexts"):
                 raise FeatureNotAvailableError(
-                    feature_denied_message(workspace.plan_name, "public_contexts"),
+                    feature_denied_message(plan_name, "public_contexts"),
                     feature="public_contexts",
                 )
 

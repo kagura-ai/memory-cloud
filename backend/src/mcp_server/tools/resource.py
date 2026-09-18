@@ -32,7 +32,7 @@ from services.resource_quota_service import (
     check_event_quota,
     resolve_workspace_event_quota_per_hour,
 )
-from utils.exceptions import RateLimitError
+from utils.exceptions import FeatureNotAvailableError, MemoryCloudException, RateLimitError
 
 logger = logging.getLogger(__name__)
 
@@ -1125,7 +1125,6 @@ async def handle_setup_connector(
                     return _error_response("validation_error", str(ve))
 
             from services.connector_provisioning import ConnectorProvisioningService
-            from utils.exceptions import FeatureNotAvailableError, MemoryCloudException
 
             result = await ConnectorProvisioningService(db).provision_connector(
                 workspace_id=workspace_id,
@@ -1189,13 +1188,20 @@ async def handle_setup_connector(
                 workspace_id=workspace_id,
             )
             # Issue #1551: the connectors feature gate surfaces under the same
-            # ``plan_required`` code setup_resource / update_context use, so
-            # MCP clients see one vocabulary for "upgrade to create this".
-            error_code = (
-                "plan_required" if isinstance(exc, FeatureNotAvailableError) else exc.error_code
-            )
+            # ``plan_required`` envelope setup_resource / update_context use
+            # (code + ``required_plan``), so MCP clients see one vocabulary for
+            # "upgrade to create this".
+            if isinstance(exc, FeatureNotAvailableError):
+                from config.plan_tiers import get_required_plan_for_feature
+
+                return _error_response(
+                    "plan_required",
+                    exc.message,
+                    required_plan=get_required_plan_for_feature("connectors"),
+                    **exc.details,
+                )
             return _error_response(
-                error_code,
+                exc.error_code,
                 exc.message,
                 **exc.details,
             )

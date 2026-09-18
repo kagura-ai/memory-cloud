@@ -308,59 +308,59 @@ async def create_resource_token(
                 detail=f"Resource ID '{data.resource_id}' not found in your workspace or you don't have access to it.",
             )
 
-        if workspace_id:
-            workspace_result = await db.execute(
-                select(Workspace.plan_name).where(Workspace.id == workspace_id)
+        # ``WorkspaceOwner`` guarantees a workspace id; a missing plan row is a
+        # data gap that must fail CLOSED (no plan → no feature), not skip the
+        # gate the way the old ``if workspace_id: … if plan_name:`` nesting did.
+        workspace_result = await db.execute(
+            select(Workspace.plan_name).where(Workspace.id == workspace_id)
+        )
+        plan_name = workspace_result.scalar_one_or_none()
+
+        # Issue #1551: "may create" is the feature flag (XL-only), NOT
+        # ``max_resource_tokens == 0`` — M/L keep a positive cap so the
+        # tokens they already hold stay editable and served. The count
+        # check below remains the second gate for tiers with the feature.
+        if not has_feature(plan_name or "", "resources"):
+            raise FeatureNotAvailableError(
+                feature_denied_message(plan_name, "resources"), feature="resources"
             )
-            plan_name = workspace_result.scalar_one_or_none()
+        plan = get_plan_tier(plan_name)
 
-            if plan_name:
-                plan = get_plan_tier(plan_name)
-
-                # Issue #1551: "may create" is the feature flag (XL-only), NOT
-                # ``max_resource_tokens == 0`` — M/L keep a positive cap so the
-                # tokens they already hold stay editable and served. The count
-                # check below remains the second gate for tiers with the feature.
-                if not has_feature(plan_name, "resources"):
-                    raise FeatureNotAvailableError(
-                        feature_denied_message(plan_name, "resources"), feature="resources"
-                    )
-
-                # Check active token count limit
-                # Note: Race condition possible but low impact (concurrent creation rare)
-                # Alternative: Use database constraint on token count (future improvement)
-                #
-                # Issue #858: exclude connector-owned tokens from this count.
-                # The connector setup flow mints a resource token that bypasses
-                # the max_resource_tokens gate on purpose (connectors are gated
-                # by max_connectors seats instead). Counting it here would let it
-                # eat a regular slot post-mint — an asymmetry that can prematurely
-                # 403 a legitimate regular-token creation. The anti-join against
-                # workspace_connectors (UNIQUE resource_pk, so no count inflation)
-                # drops exactly the connector-owned tokens. A regular token with a
-                # NULL resource_pk never matches the join condition, so it is
-                # correctly still counted.
-                active_count_result = await db.execute(
-                    select(func.count(ResourceToken.id))
-                    .outerjoin(
-                        WorkspaceConnector,
-                        WorkspaceConnector.resource_pk == ResourceToken.resource_pk,
-                    )
-                    .where(
-                        and_(
-                            ResourceToken.created_by == user_id,
-                            ResourceToken.is_active == True,  # noqa: E712
-                            WorkspaceConnector.id.is_(None),
-                        )
-                    )
+        # Check active token count limit
+        # Note: Race condition possible but low impact (concurrent creation rare)
+        # Alternative: Use database constraint on token count (future improvement)
+        #
+        # Issue #858: exclude connector-owned tokens from this count.
+        # The connector setup flow mints a resource token that bypasses
+        # the max_resource_tokens gate on purpose (connectors are gated
+        # by max_connectors seats instead). Counting it here would let it
+        # eat a regular slot post-mint — an asymmetry that can prematurely
+        # 403 a legitimate regular-token creation. The anti-join against
+        # workspace_connectors (UNIQUE resource_pk, so no count inflation)
+        # drops exactly the connector-owned tokens. A regular token with a
+        # NULL resource_pk never matches the join condition, so it is
+        # correctly still counted.
+        active_count_result = await db.execute(
+            select(func.count(ResourceToken.id))
+            .outerjoin(
+                WorkspaceConnector,
+                WorkspaceConnector.resource_pk == ResourceToken.resource_pk,
+            )
+            .where(
+                and_(
+                    ResourceToken.created_by == user_id,
+                    ResourceToken.is_active == True,  # noqa: E712
+                    WorkspaceConnector.id.is_(None),
                 )
-                active_count = active_count_result.scalar() or 0
+            )
+        )
+        active_count = active_count_result.scalar() or 0
 
-                if active_count >= plan.max_resource_tokens:
-                    raise HTTPException(
-                        status_code=status.HTTP_403_FORBIDDEN,
-                        detail=f"Token limit reached. Your {plan_name.upper()} plan allows {plan.max_resource_tokens} active tokens. Please revoke unused tokens or upgrade your plan.",
-                    )
+        if active_count >= plan.max_resource_tokens:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail=f"Token limit reached. Your {plan_name.upper()} plan allows {plan.max_resource_tokens} active tokens. Please revoke unused tokens or upgrade your plan.",
+            )
 
         # Issue #390 Phase 2: resolve authoritative ``resource_pk`` + pass
         # ``workspace_id`` so the ResourceToken insert satisfies the

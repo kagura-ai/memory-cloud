@@ -39,6 +39,20 @@ async def test_making_public_is_refused_below_xl(plan_name: str) -> None:
 
 
 @pytest.mark.asyncio
+async def test_missing_workspace_row_fails_closed() -> None:
+    """No workspace row → no plan → refused, never silently allowed."""
+    db = MagicMock()
+    db.get = AsyncMock(return_value=None)
+    ctx = _context(is_public=False)
+
+    error = await _apply_public_flag(db, ctx, True)
+
+    assert error is not None
+    assert __import__("json").loads(error[0].text)["error"] == "plan_required"
+    assert ctx.is_public is False
+
+
+@pytest.mark.asyncio
 async def test_making_public_is_allowed_on_xl() -> None:
     ctx = _context(is_public=False)
     assert await _apply_public_flag(_db_for("promax"), ctx, True) is None

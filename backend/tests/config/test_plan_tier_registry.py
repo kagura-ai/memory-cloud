@@ -145,6 +145,14 @@ def test_every_tier_has_secret_store(plan: str) -> None:
     assert has_feature(plan, "secret_store")
 
 
+@pytest.mark.parametrize("plan", PLAN_ORDER)
+def test_resources_implies_public_contexts(plan: str) -> None:
+    """``setup_resource`` inserts a *public* context, so any tier that may
+    create resources must also be allowed to make contexts public."""
+    if has_feature(plan, "resources"):
+        assert has_feature(plan, "public_contexts"), plan
+
+
 def test_serve_caps_for_existing_objects_are_unchanged() -> None:
     """Block-new-only: the numeric caps existing M/L objects rely on do not
     move to 0 — only the feature flag gates creation."""
