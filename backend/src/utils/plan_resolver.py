@@ -31,10 +31,10 @@ Soft-delete:
     nothing, matching the runtime predicate the migration uses.
 
 Missing user (defensive):
-    If the User row is not found, returns ``(0, BASE_CAP)``. The
-    caller has already passed authentication, so this branch is
-    theoretically unreachable; treating it as "no usage, base cap"
-    fails safely rather than crashing.
+    If the User row is not found, returns a summary with ``owned_count=0``
+    and ``cap=BASE_CAP`` (lowest tier, no bonus). The caller has already
+    passed authentication, so this branch is theoretically unreachable;
+    treating it as "no usage, base cap" fails safely rather than crashing.
 """
 
 from collections.abc import Iterable
@@ -87,6 +87,16 @@ def tier_owned_workspace_cap(tier: PlanTier) -> int:
     return BASE_CAP + tier.owned_workspace_grant
 
 
+def cap_on_tier(summary: WorkspaceCapSummary, tier_name: str) -> int:
+    """The cap ``summary``'s user would have if their highest owned tier were ``tier_name``.
+
+    Same formula as ``resolve_workspace_cap`` with the grant swapped — used
+    for the "upgrade to X to own up to N" upsell so the gate never assembles
+    ``base + bonus + grant`` itself.
+    """
+    return summary.base + summary.slot_bonus + get_plan_tier(tier_name).owned_workspace_grant
+
+
 def next_tier_with_more_workspaces(tier_name: str) -> str | None:
     """Lowest tier above ``tier_name`` whose owned-workspace grant is larger.
 
@@ -136,7 +146,8 @@ async def get_user_workspace_cap_summary(db: AsyncSession, user_id: str) -> Work
 
     Returns:
         ``WorkspaceCapSummary`` (owned non-deleted count, effective cap and
-        its parts). ``(0, BASE_CAP)`` if the user row does not exist.
+        its parts). ``owned_count=0, cap=BASE_CAP`` if the user row does
+        not exist.
     """
     # LEFT OUTER JOIN so a user with zero owned workspaces still produces
     # a row (with count = 0); INNER JOIN would silently drop them.

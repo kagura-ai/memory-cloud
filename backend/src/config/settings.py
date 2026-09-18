@@ -917,18 +917,22 @@ class Settings(BaseSettings):
     # dataclass default (free 0 / basic 0 / pro 2 / promax 19 → caps 1/1/3/20).
     plan_free_owned_workspace_grant: int | None = Field(
         default=None,
+        ge=0,
         description="Override FREE plan owned-workspace slot grant (Issue #1550; default 0)",
     )
     plan_basic_owned_workspace_grant: int | None = Field(
         default=None,
+        ge=0,
         description="Override BASIC plan owned-workspace slot grant (Issue #1550; default 0)",
     )
     plan_pro_owned_workspace_grant: int | None = Field(
         default=None,
+        ge=0,
         description="Override PRO plan owned-workspace slot grant (Issue #1550; default 2)",
     )
     plan_promax_owned_workspace_grant: int | None = Field(
         default=None,
+        ge=0,
         description="Override PROMAX plan owned-workspace slot grant (Issue #1550; default 19)",
     )
     enforce_workspace_cap: bool = Field(

@@ -245,9 +245,9 @@ class QuotaService:
         """
         from config.settings import get_settings
         from utils.plan_resolver import (
+            cap_on_tier,
             get_user_workspace_cap_summary,
             next_tier_with_more_workspaces,
-            tier_owned_workspace_cap,
         )
 
         settings = get_settings()
@@ -306,9 +306,9 @@ class QuotaService:
             next_tier = next_tier_with_more_workspaces(summary.tier)
             upsell = ""
             if next_tier is not None:
-                next_plan = get_plan_tier(next_tier)
-                next_cap = tier_owned_workspace_cap(next_plan) + summary.slot_bonus
-                upsell = f"Upgrade to {next_plan.display_name} to own up to {next_cap}. "
+                next_display = get_plan_tier(next_tier).display_name
+                next_cap = cap_on_tier(summary, next_tier)
+                upsell = f"Upgrade to {next_display} to own up to {next_cap}. "
             error = (
                 f"Workspace limit reached. "
                 f"You currently own {workspace_count} workspace(s) "

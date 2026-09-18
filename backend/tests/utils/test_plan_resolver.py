@@ -29,6 +29,7 @@ import pytest
 from utils.plan_resolver import (
     BASE_CAP,
     WorkspaceCapSummary,
+    cap_on_tier,
     get_user_workspace_cap_summary,
     next_tier_with_more_workspaces,
     resolve_workspace_cap,
@@ -132,6 +133,15 @@ def test_tier_owned_workspace_cap_is_the_matrix_row() -> None:
     from config.plan_tiers import PLAN_ORDER, get_plan_tier
 
     assert [tier_owned_workspace_cap(get_plan_tier(p)) for p in PLAN_ORDER] == [1, 1, 3, 20]
+
+
+def test_cap_on_tier_swaps_only_the_grant() -> None:
+    """Upsell math: same base + bonus, the target tier's grant (#1550)."""
+    summary = resolve_workspace_cap(owned_count=3, slot_bonus=1, owned_plan_names=["free", "pro"])
+    assert summary.cap == 4
+    assert cap_on_tier(summary, "pro") == summary.cap  # own tier → unchanged
+    assert cap_on_tier(summary, "promax") == 1 + 1 + 19
+    assert cap_on_tier(summary, "free") == 2  # downgrade preview: base + bonus
 
 
 @pytest.mark.parametrize(
@@ -253,20 +263,26 @@ def test_resolver_call_sites_match_allow_list() -> None:
     assert _src_files_calling_resolver() == RESOLVER_CALL_SITE_ALLOW_LIST
 
 
-def _functions_calling(module: Path, callee: str) -> set[str]:
-    """Names of the top-level functions in ``module`` whose body calls ``callee``."""
+def _callers_of(module: Path, callee: str) -> set[str]:
+    """Qualified names (``fn`` / ``Class.method``) of every function in
+    ``module`` whose body calls ``callee`` — as a bare name or an attribute."""
     tree = ast.parse(module.read_text(encoding="utf-8"))
     callers: set[str] = set()
-    for node in tree.body:
-        if not isinstance(node, ast.AsyncFunctionDef | ast.FunctionDef):
-            continue
-        for sub in ast.walk(node):
-            if (
-                isinstance(sub, ast.Call)
-                and isinstance(sub.func, ast.Attribute)
-                and sub.func.attr == callee
-            ):
-                callers.add(node.name)
+
+    def visit(nodes: list[ast.stmt], prefix: str) -> None:
+        for node in nodes:
+            if isinstance(node, ast.ClassDef):
+                visit(node.body, f"{prefix}{node.name}.")
+            elif isinstance(node, ast.AsyncFunctionDef | ast.FunctionDef):
+                for sub in ast.walk(node):
+                    if not isinstance(sub, ast.Call):
+                        continue
+                    fn = sub.func
+                    name = fn.attr if isinstance(fn, ast.Attribute) else getattr(fn, "id", None)
+                    if name == callee:
+                        callers.add(f"{prefix}{node.name}")
+
+    visit(tree.body, "")
     return callers
 
 
@@ -275,25 +291,15 @@ def test_workspace_routes_gate_only_create() -> None:
     (``update_workspace``), ``delete_workspace``, ``list_workspaces`` and the
     rest never do — an over-cap user keeps and manages every workspace."""
     routes = SRC / "api" / "routes" / "workspaces.py"
-    assert _functions_calling(routes, "check_workspace_creation_allowed") == {"create_workspace"}
+    assert _callers_of(routes, "check_workspace_creation_allowed") == {"create_workspace"}
     assert "plan_resolver" not in routes.read_text(encoding="utf-8")
 
 
 def test_create_gate_is_the_only_consumer_in_quota_service() -> None:
     quota = SRC / "services" / "quota_service.py"
-    assert _functions_calling(quota, "get_user_workspace_cap_summary") == set()  # method, not fn
-    tree = ast.parse(quota.read_text(encoding="utf-8"))
-    methods = {
-        fn.name
-        for cls in tree.body
-        if isinstance(cls, ast.ClassDef)
-        for fn in cls.body
-        if isinstance(fn, ast.AsyncFunctionDef | ast.FunctionDef)
-        and any(
-            isinstance(sub, ast.Call)
-            and isinstance(sub.func, ast.Name)
-            and sub.func.id == "get_user_workspace_cap_summary"
-            for sub in ast.walk(fn)
-        )
+    assert _callers_of(quota, "get_user_workspace_cap_summary") == {
+        "QuotaService.check_workspace_creation_allowed"
     }
-    assert methods == {"check_workspace_creation_allowed"}
+    # The upsell math goes through the resolver's helper, never inline.
+    assert _callers_of(quota, "cap_on_tier") == {"QuotaService.check_workspace_creation_allowed"}
+    assert "tier_owned_workspace_cap" not in quota.read_text(encoding="utf-8")
