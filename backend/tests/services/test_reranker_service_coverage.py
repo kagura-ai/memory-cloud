@@ -478,6 +478,19 @@ class TestRerankerServiceProviderSelection:
         )
         assert provider is None
 
+    async def test_stored_keys_disabled_ignores_present_key(self, service, mock_db, monkeypatch):
+        """#1569: RESOLVE_STORED_BYOK_KEYS=false — a stored voyage key is not
+        even looked up; the API-key rerankers have no platform fallback."""
+        monkeypatch.setattr("services.byok_resolution.stored_byok_keys_disabled", lambda: True)
+        mock_db.execute.return_value = _result_scalar_one_or_none(
+            _make_api_key_row("voyage", "enc")
+        )
+        provider = await service.get_active_provider(
+            "user-1", context_id=None, workspace_id=str(uuid4())
+        )
+        assert provider is None
+        mock_db.execute.assert_not_called()
+
     async def test_voyage_key_returns_voyage_provider(self, service, mock_db, monkeypatch):
         """An enabled voyage key is decrypted and a VoyageReranker is returned."""
         from services import reranker_service as rs

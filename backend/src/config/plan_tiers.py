@@ -237,6 +237,7 @@ PLAN_PRO = PlanTier(
             "shared_contexts",  # Issue #165: Shared contexts with role-based access
             "memory_analysis",  # Issue #496: Memory Analysis
             "managed_embeddings",  # Issue #1030: platform-managed embeddings (M/L)
+            "managed_llm",  # Issue #1569: Analysis on the platform-managed LLM lane (no BYOK)
             "secret_store",  # Issue #1128: zero-knowledge secret store (all tiers)
         }
     ),
@@ -322,6 +323,7 @@ FEATURE_MIN_PLANS: dict[str, str] = {
     "public_contexts": "promax",  # Issue #1551: making a context public is XL-only
     "memory_analysis": "pro",  # Issue #496: Memory Analysis (Pro only; FREE/BASIC=0)
     "managed_embeddings": "basic",  # Issue #1030: platform-managed embeddings (M/L; FREE=BYOK/self-hosted)
+    "managed_llm": "pro",  # Issue #1569: Memory Analysis on the platform-managed LLM lane (L/XL)
     "resources": "promax",  # Issue #1551: setup_resource / new resource tokens are XL-only
     "connectors": "promax",  # Issue #1551: setup_connector is XL-only
 }

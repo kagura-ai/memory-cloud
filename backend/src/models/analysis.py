@@ -73,14 +73,18 @@ class MemoryAnalysis(Base):
         finished_at: Run completion time (NULL while running)
         status: running / succeeded / failed / cancelled
         triggered_by: User id that triggered the run
-        model_id: FK to ``llm_pricing`` (BIGINT) — RESTRICT on delete
+        model_id: FK to ``llm_pricing`` (BIGINT) — RESTRICT on delete.
+            NULL (#1569) when the managed-lane model has no pricing row:
+            the run proceeds with cost unknown.
+        llm_provider: Provider the run labelled on (#1569 lane record)
+        llm_model: Primary model of the run's chain (#1569 lane record)
         model_snapshot: Pricing row frozen at run start (JSONB)
         embedding_model: Single embedding model used for this run
         params: Run parameters (filters, query, etc., JSONB)
         input_count: Number of memories included
         cost_estimated_cents: Pre-flight cost estimate
         cost_actual_cents: Actual measured cost
-        paid_by: byok / platform (v1 = byok-only)
+        paid_by: byok (workspace key) / platform (managed LLM lane, #1569)
         quality: Cluster-quality metrics (silhouette, label_confidence...)
         overview: LLM-generated narrative
         error: Failure detail when status='failed'
@@ -119,11 +123,17 @@ class MemoryAnalysis(Base):
     )
     triggered_by: Mapped[str] = mapped_column(String(255), nullable=False)
 
-    model_id: Mapped[int] = mapped_column(
+    # Nullable since e81 (#1569): a managed-lane model without an
+    # ``llm_pricing`` row still runs (cost unknown, #1570 semantics).
+    model_id: Mapped[int | None] = mapped_column(
         BigInteger,
         ForeignKey("llm_pricing.id", ondelete="RESTRICT"),
-        nullable=False,
+        nullable=True,
     )
+    # #1569: what actually ran, independent of pricing. NULL on rows written
+    # before e81 (all of them BYOK on the OpenAI chain).
+    llm_provider: Mapped[str | None] = mapped_column(String(50), nullable=True)
+    llm_model: Mapped[str | None] = mapped_column(String(100), nullable=True)
     model_snapshot: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False)
     embedding_model: Mapped[str] = mapped_column(String(100), nullable=False)
     params: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False)
@@ -132,7 +142,7 @@ class MemoryAnalysis(Base):
     cost_estimated_cents: Mapped[int | None] = mapped_column(Integer, nullable=True)
     cost_actual_cents: Mapped[int | None] = mapped_column(Integer, nullable=True)
 
-    # ``platform`` reserved for v2 platform-paid mode; all v1 runs are BYOK.
+    # 'byok' = the workspace's key; 'platform' = the managed LLM lane (#1569).
     paid_by: Mapped[str] = mapped_column(
         String(20),
         nullable=False,

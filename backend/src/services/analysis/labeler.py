@@ -70,11 +70,11 @@ import numpy as np
 
 from db.base import _get_session_factory
 from services.analysis.llm_caller import (
-    OPENAI_FALLBACK_CHAIN,
     AnalysisLLMUpstreamError,
     call_with_fallback,
     filter_hallucinated_ids,
 )
+from services.analysis.llm_lane import AnalysisLane, byok_lane
 from services.analysis.prompts import (
     CLUSTER_LABEL_SYSTEM,
     CLUSTER_LABEL_SYSTEM_JA,
@@ -214,6 +214,7 @@ async def _label_one_cluster(
     context_id: str | None,
     sem: asyncio.Semaphore,
     locale: str = "en",
+    lane: AnalysisLane | None = None,
 ) -> ClusterLabel:
     """Single-cluster labeling with semaphore + frozenset guard.
 
@@ -235,6 +236,10 @@ async def _label_one_cluster(
     """
     rep_block = _format_representatives(reps)
     rep_ids = [str(r.id) for r in reps]
+    # #1569: the lane ``orchestrator.start()`` recorded on the run row decides
+    # provider, chain and credential source; BYOK (the pre-#1569 default)
+    # when the caller does not thread one.
+    lane = lane or byok_lane()
 
     # Locale-aware prompt selection (Issue #542)
     # Mapping table so new languages only need a prompts.py entry.
@@ -268,7 +273,9 @@ async def _label_one_cluster(
                     context_id=context_id,
                     system_prompt=system_prompt,
                     prompt=prompt,
-                    fallback_chain=OPENAI_FALLBACK_CHAIN,
+                    fallback_chain=lane.models,
+                    provider=lane.provider,
+                    platform_only=lane.platform_only,
                 )
             except AnalysisLLMUpstreamError as e:
                 logger.warning(
@@ -347,6 +354,7 @@ async def label_clusters(
     context_id: str | None,
     concurrency: int = _LLM_CONCURRENCY,
     locale: str = "en",
+    lane: AnalysisLane | None = None,
 ) -> list[ClusterLabel]:
     """Label every cluster in parallel (semaphore-bounded).
 
@@ -362,6 +370,8 @@ async def label_clusters(
         memories: Per-row memory metadata (len n).
         user_id, workspace_id, context_id: Auth/scoping for BYOK.
         concurrency: Max in-flight LLM calls.
+        lane: #1569 provider / chain / credential route of the run
+            (``AnalysisLane``); ``None`` = the strict BYOK lane.
 
     Returns:
         ``list[ClusterLabel]`` ordered by ``cluster_index``.
@@ -395,6 +405,7 @@ async def label_clusters(
                     context_id=context_id,
                     sem=sem,
                     locale=locale,
+                    lane=lane,
                 )
             )
         )

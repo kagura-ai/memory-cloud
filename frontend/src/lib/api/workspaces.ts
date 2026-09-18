@@ -431,6 +431,9 @@ export interface PlanTierFeature {
   sleep_enabled_contexts_limit: number;
   reranking: boolean;
   managed_embeddings: boolean;
+  // #1569: Memory Analysis may run on the deployment's managed LLM lane
+  // (no workspace OpenAI key). Optional: an API predating #1569 omits it.
+  managed_llm?: boolean;
   secret_store: boolean;
   shared_contexts: boolean;
   team_invitations: boolean;

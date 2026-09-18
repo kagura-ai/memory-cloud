@@ -39,6 +39,7 @@ from models.memory import EDGE_ORIGIN_SEMANTIC, Memory, NeuralMemoryEdge
 from repositories.neural_edge import NeuralEdgeRepository
 from services.embedding_service import EmbeddingService
 from services.llm_service import LLMService
+from services.sleep.judge_lane import judge_platform_only
 from services.sleep.prompts import (
     EDGE_DISCOVERY_PROMPT_REVISION,
     EDGE_DISCOVERY_SYSTEM,
@@ -885,6 +886,7 @@ class EdgeDiscoveryPhase:
                 workspace_id=workspace_id,
                 model=config.sleep_llm_model,
                 provider=config.sleep_llm_provider,
+                platform_only=judge_platform_only(config),  # #1569
             )
             response = llm_resp.parsed
             self._tokens_used += llm_resp.total_tokens

@@ -144,8 +144,9 @@ Mode resolution happens in `SleepOrchestrator._get_sleep_mode()`. Unknown or mis
 
 Phases 1–4 call the LLM through `LLMService`, which supports:
 
-- **Providers**: OpenAI (default) and `self_hosted` (any OpenAI-compatible backend, e.g. Ollama, vLLM). Self-hosted connectivity is health-checked at startup against `self_hosted_base_url`. Configured via `SLEEP_LLM_PROVIDER` and `SLEEP_LLM_MODEL` environment variables (or the corresponding fields in Neural Config).
-- **API key priority** (most specific wins): context-scoped key → workspace-scoped key → user-scoped key → `OPENAI_API_KEY` env var fallback.
+- **Providers**: `openai` (default), `anthropic`, `gemini` and `self_hosted` (any OpenAI-compatible backend, e.g. Ollama, vLLM — `SELF_HOSTED_MODEL_ALIASES` rewrites the wire model id, a backend that rejects `response_format` gets one retry without it, request timeout `SELF_HOSTED_LLM_TIMEOUT_SECONDS`). Self-hosted connectivity is health-checked once per service instance against `self_hosted_base_url`.
+- **Provider / model precedence** (#1569): a `neural_config` row (`sleep_llm_provider` / `sleep_llm_model`) > explicit `SLEEP_LLM_PROVIDER` / `SLEEP_LLM_MODEL` env > the deployment's `MANAGED_LLM_PROVIDER` / `MANAGED_LLM_MODEL` (logged once as `sleep_llm_from_managed_lane`) > the code default `openai` / `gpt-5-nano`. `SLEEP_LLM_FORCE_ENV=1` pins env over the DB row.
+- **API key priority** (most specific wins): context-scoped key → workspace-scoped key → the provider's platform env var (`OPENAI_API_KEY`, `ANTHROPIC_API_KEY`, `GOOGLE_API_KEY`; `SELF_HOSTED_BASE_URL` for `self_hosted`). With `RESOLVE_STORED_BYOK_KEYS=false` the two stored-key tiers are skipped, and a judge on the managed lane resolves the platform credential only (`platform_only`). See "LLM Credentials" in [deployment.md](deployment.md).
 - **Interface**: `complete_json()` returns `(parsed_json, tokens_used)`; each phase aggregates tokens into its `PhaseResult`, and the reporter rolls them up into the `SleepReport`.
 - **Budget enforcement**: every phase checks `SleepBudget.can_afford()` before issuing an LLM batch. When the budget is exhausted, later phases are skipped with `skip_reason="budget_exhausted"`. Defaults: `max_llm_calls=50`, `max_memories=200` per run (override via Neural Config).
 
@@ -225,7 +226,7 @@ All Sleep-specific settings live under the Sleep category of Neural Config (`bac
 
 | Field                         | Purpose                                                        |
 |-------------------------------|----------------------------------------------------------------|
-| `sleep_llm_provider`          | `openai` or `self_hosted`.                                     |
+| `sleep_llm_provider`          | `openai`, `anthropic`, `gemini` or `self_hosted`.               |
 | `sleep_llm_model`             | Model identifier passed to the provider.                       |
 | `sleep_max_memories_per_run`  | Upper bound on memories touched per context per run.           |
 | `sleep_max_llm_calls_per_run` | Upper bound on LLM calls per context per run (budget cap).     |

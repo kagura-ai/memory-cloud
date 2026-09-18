@@ -34,6 +34,7 @@ from models.memory import DELETED_BY_SLEEP_ARCHIVE, Memory, not_pinned_predicate
 from repositories.memory import MemoryRepository
 from services.graph_service import GraphService
 from services.llm_service import LLMService
+from services.sleep.judge_lane import judge_platform_only
 from services.sleep.prompts import (
     CONSOLIDATION_JUDGE_SYSTEM,
     CONSOLIDATION_JUDGE_USER,
@@ -604,6 +605,7 @@ class ConsolidationPhase:
                 workspace_id=workspace_id,
                 model=config.sleep_llm_model,
                 provider=config.sleep_llm_provider,
+                platform_only=judge_platform_only(config),  # #1569
             )
             budget.consume(llm_calls=1)
             self._tokens_used += llm_resp.total_tokens

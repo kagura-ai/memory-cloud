@@ -19,6 +19,7 @@ from sqlalchemy.exc import IntegrityError
 from models.analysis import MemoryAnalysis
 from models.auth import Context, Workspace
 from models.llm_pricing import LLMPricing
+from services.analysis.llm_lane import byok_lane, managed_lane
 from services.analysis.orchestrator import (
     AnalysisOrchestrator,
     AnalysisParams,
@@ -27,6 +28,11 @@ from services.analysis.orchestrator import (
     try_resolve_pricing_row,
 )
 from utils.exceptions import ConfigurationError, ConflictError, ValidationError
+
+# #1569: the pre-flight returns the run's lane; these tests pin the BYOK lane
+# (the pre-#1569 behaviour) unless they say otherwise.
+_BYOK_LANE = byok_lane()
+_LANE_PATCH = "services.analysis.orchestrator.assert_openai_byok_key_available"
 
 
 @pytest_asyncio.fixture(autouse=True)
@@ -165,7 +171,8 @@ class TestResolvePricingRow:
 
     @pytest.mark.asyncio
     async def test_default_path_empty_raises(self, db_session) -> None:
-        with pytest.raises(ConfigurationError, match="Default LLM pricing row not seeded"):
+        # #1569: the message names the (provider, model) it looked for.
+        with pytest.raises(ConfigurationError, match="pricing row not found for openai/gpt-5-nano"):
             await _resolve_pricing_row(db_session, model_id=None)
 
     @pytest.mark.asyncio
@@ -296,7 +303,7 @@ class TestAnalysisOrchestratorStart:
 
         with patch(
             "services.analysis.orchestrator.assert_openai_byok_key_available",
-            return_value=None,
+            return_value=_BYOK_LANE,
         ):
             with pytest.raises(ConflictError, match="already in progress"):
                 await service.start(
@@ -326,7 +333,7 @@ class TestAnalysisOrchestratorStart:
 
         with patch(
             "services.analysis.orchestrator.assert_openai_byok_key_available",
-            return_value=None,
+            return_value=_BYOK_LANE,
         ):
             analysis = await service.start(
                 workspace_id=ws_id,
@@ -338,6 +345,169 @@ class TestAnalysisOrchestratorStart:
         assert analysis.status == "running"
         assert analysis.paid_by == "byok"
         assert analysis.workspace_id == ws_id
+        # #1569: the BYOK lane is recorded on the row too.
+        assert (analysis.llm_provider, analysis.llm_model) == ("openai", "gpt-5-nano")
+
+
+class TestAnalysisOrchestratorStartManagedLane:
+    """#1569: a run on the platform-managed LLM lane.
+
+    The pre-flight resolved the managed lane (no BYOK key, plan carries
+    ``managed_llm``); ``start()`` must record ``paid_by='platform'`` and the
+    lane's provider/model, and must NOT need an ``llm_pricing`` row.
+    """
+
+    _LANE = managed_lane("self_hosted", "qwen3:8b")
+
+    @pytest.mark.asyncio
+    async def test_unpriced_managed_model_starts_with_null_model_id(self, db_session) -> None:
+        service = AnalysisOrchestrator(db_session)
+        ws_id, ctx_id = uuid4(), uuid4()
+        await _seed_workspace_context(db_session, ws_id, ctx_id)
+        # No llm_pricing row at all for self_hosted/qwen3:8b.
+
+        with patch(_LANE_PATCH, return_value=self._LANE):
+            analysis = await service.start(
+                workspace_id=ws_id, context_id=ctx_id, user_id="u1", params=AnalysisParams()
+            )
+
+        assert analysis.status == "running"
+        assert analysis.paid_by == "platform"
+        assert analysis.model_id is None
+        assert (analysis.llm_provider, analysis.llm_model) == ("self_hosted", "qwen3:8b")
+        assert analysis.model_snapshot["provider"] == "self_hosted"
+        assert analysis.model_snapshot["model"] == "qwen3:8b"
+        assert analysis.model_snapshot["rates"] == {}
+        assert analysis.cost_estimated_cents is None
+
+    @pytest.mark.asyncio
+    async def test_priced_managed_model_records_its_pricing_row(self, db_session) -> None:
+        service = AnalysisOrchestrator(db_session)
+        ws_id, ctx_id = uuid4(), uuid4()
+        await _seed_workspace_context(db_session, ws_id, ctx_id)
+        row = LLMPricing(
+            provider="self_hosted",
+            model="qwen3:8b",
+            unit_type="input_tokens",
+            price_per_unit="0.05",
+            currency="USD",
+            effective_from=datetime(2026, 1, 1),
+        )
+        db_session.add(row)
+        await db_session.flush()
+
+        with patch(_LANE_PATCH, return_value=self._LANE):
+            analysis = await service.start(
+                workspace_id=ws_id, context_id=ctx_id, user_id="u1", params=AnalysisParams()
+            )
+
+        assert analysis.model_id == row.id
+        assert analysis.paid_by == "platform"
+        assert analysis.model_snapshot["rates"] == {"input_tokens": 0.05}
+
+    @pytest.mark.asyncio
+    async def test_pinned_model_id_is_refused_on_managed_lane(self, db_session) -> None:
+        """A caller-pinned ``llm_pricing`` row would freeze a snapshot (and
+        bill) for a model the managed lane never calls → VAL-001, no row."""
+        service = AnalysisOrchestrator(db_session)
+        ws_id, ctx_id = uuid4(), uuid4()
+        await _seed_workspace_context(db_session, ws_id, ctx_id)
+        other = LLMPricing(
+            provider="openai",
+            model="gpt-5-nano",
+            unit_type="input_tokens",
+            price_per_unit="0.2",
+            currency="USD",
+            effective_from=datetime(2026, 1, 1),
+        )
+        db_session.add(other)
+        await db_session.flush()
+
+        with patch(_LANE_PATCH, return_value=self._LANE):
+            with pytest.raises(ValidationError, match="model_id"):
+                await service.start(
+                    workspace_id=ws_id,
+                    context_id=ctx_id,
+                    user_id="u1",
+                    params=AnalysisParams(model_id=other.id),
+                )
+
+        count = await db_session.scalar(
+            select(func.count())
+            .select_from(MemoryAnalysis)
+            .where(MemoryAnalysis.context_id == ctx_id)
+        )
+        assert count == 0
+
+    @pytest.mark.asyncio
+    async def test_byok_lane_still_requires_seeded_default_row(self, db_session) -> None:
+        """The strict pre-#1569 contract is unchanged on the BYOK lane."""
+        service = AnalysisOrchestrator(db_session)
+        ws_id, ctx_id = uuid4(), uuid4()
+        await _seed_workspace_context(db_session, ws_id, ctx_id)
+        with patch(_LANE_PATCH, return_value=_BYOK_LANE):
+            with pytest.raises(ConfigurationError, match="pricing row"):
+                await service.start(
+                    workspace_id=ws_id, context_id=ctx_id, user_id="u1", params=AnalysisParams()
+                )
+
+    @pytest.mark.asyncio
+    async def test_run_threads_recorded_lane_to_labeler(self, db_session) -> None:
+        """``run()`` rebuilds the lane from the row, not from settings/keys."""
+        service = AnalysisOrchestrator(db_session)
+        ws_id, ctx_id = uuid4(), uuid4()
+        await _seed_workspace_context(db_session, ws_id, ctx_id)
+        analysis = MemoryAnalysis(
+            workspace_id=ws_id,
+            context_id=ctx_id,
+            triggered_by="u1",
+            model_id=None,
+            llm_provider="self_hosted",
+            llm_model="qwen3:8b",
+            model_snapshot={"provider": "self_hosted", "model": "qwen3:8b", "rates": {}},
+            embedding_model="em",
+            params={},
+            input_count=0,
+            status="running",
+            paid_by="platform",
+        )
+        db_session.add(analysis)
+        await db_session.flush()
+
+        fake_pull = MagicMock()
+        fake_pull.memories = [MagicMock(), MagicMock()]
+        fake_pull.embeddings = [[0.1]]
+        fake_pull.embedding_model = "test-model"
+        with (
+            patch(
+                "services.analysis.orchestrator.pull_memories_with_vectors",
+                new=AsyncMock(return_value=fake_pull),
+            ),
+            patch(
+                "services.analysis.orchestrator.cluster_high_dim",
+                return_value=MagicMock(
+                    labels=[],
+                    centroids=[],
+                    n_clusters=0,
+                    silhouette=0.0,
+                    size_variance=0.0,
+                    outlier_ratio=0.0,
+                ),
+            ),
+            patch("services.analysis.orchestrator.project_to_2d", return_value=[]),
+            patch(
+                "services.analysis.orchestrator.analysis_labeler.label_clusters",
+                new=AsyncMock(return_value=[]),
+            ) as mock_label_clusters,
+            patch("services.analysis.orchestrator.persist_results", new=AsyncMock()),
+        ):
+            await service.run(analysis_id=analysis.id)
+
+        lane = mock_label_clusters.call_args.kwargs["lane"]
+        assert (lane.kind, lane.provider, lane.models) == ("managed", "self_hosted", ("qwen3:8b",))
+        assert lane.platform_only is True
+        # Unpriced snapshot → the real estimate_cost yields "unknown", not 0.
+        assert analysis.cost_estimated_cents is None
 
 
 # ---------------------------------------------------------------------------
@@ -631,7 +801,7 @@ class TestStartValidatesDateParams:
 
         with patch(
             "services.analysis.orchestrator.assert_openai_byok_key_available",
-            return_value=None,
+            return_value=_BYOK_LANE,
         ):
             with pytest.raises(ValidationError, match="ISO-8601"):
                 await service.start(
@@ -652,7 +822,7 @@ class TestStartValidatesDateParams:
 
         with patch(
             "services.analysis.orchestrator.assert_openai_byok_key_available",
-            return_value=None,
+            return_value=_BYOK_LANE,
         ):
             with pytest.raises(ValidationError, match="ISO-8601"):
                 await service.start(
@@ -683,7 +853,7 @@ class TestStartValidatesDateParams:
 
         with patch(
             "services.analysis.orchestrator.assert_openai_byok_key_available",
-            return_value=None,
+            return_value=_BYOK_LANE,
         ):
             analysis = await service.start(
                 workspace_id=ws_id,
@@ -785,7 +955,7 @@ class TestOneRunningPartialUniqueIndex:
         monkeypatch.setattr(db_session, "flush", racing_flush)
         with patch(
             "services.analysis.orchestrator.assert_openai_byok_key_available",
-            return_value=None,
+            return_value=_BYOK_LANE,
         ):
             with pytest.raises(ConflictError, match="already in progress"):
                 await service.start(
@@ -834,7 +1004,7 @@ class TestStartIntegrityErrorScoping:
         monkeypatch.setattr(db_session, "flush", fk_violating_flush)
         with patch(
             "services.analysis.orchestrator.assert_openai_byok_key_available",
-            return_value=None,
+            return_value=_BYOK_LANE,
         ):
             with pytest.raises(IntegrityError):
                 await service.start(
@@ -878,7 +1048,7 @@ class TestStartIntegrityErrorStructuredDiagnostics:
         monkeypatch.setattr(db_session, "flush", racing_flush)
         with patch(
             "services.analysis.orchestrator.assert_openai_byok_key_available",
-            return_value=None,
+            return_value=_BYOK_LANE,
         ):
             with pytest.raises(ConflictError, match="already in progress"):
                 await service.start(

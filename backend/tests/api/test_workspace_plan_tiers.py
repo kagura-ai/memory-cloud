@@ -148,6 +148,12 @@ def test_boolean_capabilities(client: TestClient) -> None:
         basic["managed_embeddings"],
         pro["managed_embeddings"],
     ) == (False, True, True)
+    # #1569: Analysis on the platform-managed LLM lane rides with memory_analysis (L+).
+    assert (free["managed_llm"], basic["managed_llm"], pro["managed_llm"]) == (
+        False,
+        False,
+        True,
+    )
     assert (
         free["shared_contexts"],
         basic["shared_contexts"],

@@ -3,11 +3,11 @@
 Wraps ``LLMService.complete_json`` with three analysis-specific concerns:
 
 1. **Within-provider fallback**: ``gpt-5-nano`` → ``gpt-5.5``
-   (next-cheapest OpenAI). Cross-provider fallback is FORBIDDEN —
-   the BYOK key is provider-scoped, and a "smart cost-saving"
-   fallback to a different provider would break the BYOK contract.
-   The fallback chain is a tuple constant; future v1.5 work that
-   adds Gemini will swap this for a provider-keyed mapping.
+   (next-cheapest OpenAI) on the BYOK lane. Cross-provider fallback is
+   FORBIDDEN — the BYOK key is provider-scoped, and a "smart
+   cost-saving" fallback to a different provider would break the BYOK
+   contract. The managed lane (#1569) passes its own single-model
+   chain + provider and never falls back across providers either.
 
 2. **502 wrapping**: ``LLMServiceError`` (which is a plain
    ``Exception`` and does not auto-map to an HTTP status) is
@@ -76,9 +76,9 @@ class AnalysisLLMUpstreamError(ExternalServiceError):
     direct OpenAI errors that did not exhaust a fallback chain.
     """
 
-    def __init__(self, message: str, attempted_models: list[str]) -> None:
+    def __init__(self, message: str, attempted_models: list[str], provider: str = "openai") -> None:
         super().__init__(
-            "OpenAI",
+            provider,
             message,
             error_code="EXT-ANA-001",
             upstream_provider_error=True,
@@ -136,10 +136,12 @@ async def call_with_fallback(
     system_prompt: str,
     prompt: str,
     fallback_chain: tuple[str, ...] = OPENAI_FALLBACK_CHAIN,
+    provider: str = "openai",
+    platform_only: bool = False,
     temperature: float = 0.1,
     max_tokens: int = 1024,
 ) -> CallResult:
-    """Call ``LLMService.complete_json`` with within-OpenAI fallback.
+    """Call ``LLMService.complete_json`` with within-provider fallback.
 
     Tries each model in ``fallback_chain`` in order. On
     ``LLMServiceError`` (upstream provider failure or post-retry
@@ -155,9 +157,15 @@ async def call_with_fallback(
         context_id: Optional context UUID (string form).
         system_prompt: System message.
         prompt: User message.
-        fallback_chain: Ordered tuple of OpenAI models to try. MUST
-            be same-provider; cross-provider fallback is forbidden.
-            Default ``OPENAI_FALLBACK_CHAIN``.
+        fallback_chain: Ordered tuple of models to try. MUST be
+            same-provider; cross-provider fallback is forbidden.
+            Default ``OPENAI_FALLBACK_CHAIN`` (the BYOK lane).
+        provider: ``LLMService`` provider key every model in the chain
+            belongs to. Default ``"openai"`` (the BYOK lane).
+        platform_only: #1569 managed lane. False (default) keeps the
+            strict BYOK contract (``disallow_env_fallback=True``); True
+            resolves the platform credential only and never the
+            workspace's stored keys.
         temperature: Sampling temperature.
         max_tokens: Output cap.
 
@@ -184,15 +192,17 @@ async def call_with_fallback(
                 workspace_id=workspace_id,
                 context_id=context_id,
                 model=model,
-                provider="openai",
+                provider=provider,
                 temperature=temperature,
                 max_tokens=max_tokens,
                 # #1242 strict BYOK: analysis is a paid feature — a BYOK
                 # key deleted mid-run must fail the run (ConfigurationError
                 # is not an LLMServiceError, so it escapes the fallback
                 # loop below immediately), never resolve the platform
-                # OPENAI_API_KEY env credential.
-                disallow_env_fallback=True,
+                # OPENAI_API_KEY env credential. The managed lane (#1569)
+                # is the mirror image: platform credential only.
+                disallow_env_fallback=not platform_only,
+                platform_only=platform_only,
             )
             return CallResult(
                 parsed=response.parsed,
@@ -219,6 +229,7 @@ async def call_with_fallback(
             f"All fallback models exhausted: {list(fallback_chain)}. Last error: {last_error}"
         ),
         attempted_models=list(fallback_chain),
+        provider=provider,
     )
 
 

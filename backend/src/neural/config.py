@@ -16,6 +16,24 @@ if TYPE_CHECKING:
 
 logger = get_logger(__name__)
 
+# #1569: ``from_env()`` runs on every ``from_db()`` (5-minute cache), so the
+# "judge runs on the managed lane" notice is emitted once per process.
+_managed_lane_logged = False
+
+
+def _log_sleep_llm_from_managed_lane_once(provider: str, model: str) -> None:
+    global _managed_lane_logged
+    if _managed_lane_logged:
+        return
+    _managed_lane_logged = True
+    logger.info(
+        "sleep_llm_from_managed_lane",
+        provider=provider,
+        model=model,
+        hint="no SLEEP_LLM_PROVIDER / SLEEP_LLM_MODEL set; the judge uses MANAGED_LLM_*",
+    )
+
+
 # Cache TTL in seconds (5 minutes)
 _CONFIG_CACHE_TTL = 300
 
@@ -90,8 +108,10 @@ class NeuralMemoryConfig:
         sleep_enabled: Master switch for Sleep Maintenance (env-only)
         sleep_cron_hour: UTC hour for scheduled sleep run (env-only)
         sleep_cron_minute: UTC minute for scheduled sleep run (env-only)
-        sleep_llm_provider: LLM provider (openai / self_hosted)
+        sleep_llm_provider: LLM provider (openai / anthropic / gemini / self_hosted)
         sleep_llm_model: LLM model name for sleep judgments
+        sleep_llm_from_managed_lane: True when the pair above came from
+            MANAGED_LLM_PROVIDER / MANAGED_LLM_MODEL (#1569; env-derived)
         sleep_max_memories_per_run: Max memories processed per run
         sleep_max_llm_calls_per_run: LLM call budget per run
         sleep_dedup_enabled: Enable dedup/merge phase
@@ -247,8 +267,12 @@ class NeuralMemoryConfig:
     sleep_enabled: bool = False  # Feature flag (env-only)
     sleep_cron_hour: int = 2  # UTC hour for cron schedule (env-only)
     sleep_cron_minute: int = 0  # UTC minute for cron schedule (env-only)
-    sleep_llm_provider: str = "openai"  # LLM provider: openai / self_hosted
+    sleep_llm_provider: str = "openai"  # LLM provider: openai / anthropic / gemini / self_hosted
     sleep_llm_model: str = "gpt-5-nano"  # LLM model name
+    # #1569: the pair above was taken from MANAGED_LLM_PROVIDER / MANAGED_LLM_MODEL
+    # (no explicit SLEEP_LLM_* env, no neural_config row). Derived, never
+    # persisted; ``services/sleep/judge_lane.py`` reads it.
+    sleep_llm_from_managed_lane: bool = False
     sleep_max_memories_per_run: int = 200  # Batch size cap per run
     sleep_max_llm_calls_per_run: int = 50  # LLM call budget per run
     sleep_dedup_enabled: bool = True  # Phase 2 on/off
@@ -473,10 +497,12 @@ class NeuralMemoryConfig:
             raise ValueError(f"sleep_cron_hour must be in [0, 23], got {self.sleep_cron_hour}")
         if not (0 <= self.sleep_cron_minute <= 59):
             raise ValueError(f"sleep_cron_minute must be in [0, 59], got {self.sleep_cron_minute}")
-        if self.sleep_llm_provider not in ("openai", "self_hosted", ""):
+        # Every chat provider ``LLMService`` supports (#1569 widened from
+        # openai / self_hosted; ``ollama_cloud`` stays opt-in, #1040).
+        if self.sleep_llm_provider not in ("openai", "anthropic", "gemini", "self_hosted", ""):
             raise ValueError(
-                "sleep_llm_provider must be 'openai', 'self_hosted', or '', "
-                f"got '{self.sleep_llm_provider}'"
+                "sleep_llm_provider must be 'openai', 'anthropic', 'gemini', 'self_hosted', "
+                f"or '', got '{self.sleep_llm_provider}'"
             )
         if not self.sleep_max_memories_per_run > 0:
             raise ValueError(
@@ -567,6 +593,8 @@ class NeuralMemoryConfig:
         def get_bool(key: str, default: bool) -> bool:
             return os.getenv(key, str(default)).lower() == "true"
 
+        sleep_llm_provider, sleep_llm_model, sleep_llm_from_managed_lane = cls._sleep_llm_from_env()
+
         return cls(
             # Hebbian Learning
             learning_rate=get_float("LEARNING_RATE", 0.05),
@@ -637,8 +665,9 @@ class NeuralMemoryConfig:
             sleep_enabled=get_bool("SLEEP_ENABLED", False),
             sleep_cron_hour=get_int("SLEEP_CRON_HOUR", 2),
             sleep_cron_minute=get_int("SLEEP_CRON_MINUTE", 0),
-            sleep_llm_provider=os.getenv("SLEEP_LLM_PROVIDER", "openai"),
-            sleep_llm_model=os.getenv("SLEEP_LLM_MODEL", "gpt-5-nano"),
+            sleep_llm_provider=sleep_llm_provider,
+            sleep_llm_model=sleep_llm_model,
+            sleep_llm_from_managed_lane=sleep_llm_from_managed_lane,
             sleep_max_memories_per_run=get_int("SLEEP_MAX_MEMORIES_PER_RUN", 200),
             sleep_max_llm_calls_per_run=get_int("SLEEP_MAX_LLM_CALLS_PER_RUN", 50),
             sleep_dedup_enabled=get_bool("SLEEP_DEDUP_ENABLED", True),
@@ -651,6 +680,34 @@ class NeuralMemoryConfig:
             sleep_edge_discovery_sample_size=get_int("SLEEP_EDGE_DISCOVERY_SAMPLE_SIZE", 30),
             sleep_importance_reeval_enabled=get_bool("SLEEP_IMPORTANCE_REEVAL_ENABLED", True),
         )
+
+    @staticmethod
+    def _sleep_llm_from_env() -> tuple[str, str, bool]:
+        """Resolve the judge pair from env, else the managed lane, else defaults (#1569).
+
+        Precedence: an explicit ``SLEEP_LLM_PROVIDER`` / ``SLEEP_LLM_MODEL``
+        (either one set makes the pair explicit; the other falls to its code
+        default) > ``MANAGED_LLM_PROVIDER`` / ``MANAGED_LLM_MODEL`` > the code
+        default (``openai`` / ``gpt-5-nano``). A ``neural_config`` row is
+        applied on top by ``_resolve_sleep_llm``, so DB still wins over both.
+
+        Returns:
+            ``(provider, model, from_managed_lane)``.
+        """
+        import os
+
+        env_provider = os.getenv("SLEEP_LLM_PROVIDER")
+        env_model = os.getenv("SLEEP_LLM_MODEL")
+        if env_provider is None and env_model is None:
+            from config.settings import get_settings
+
+            settings = get_settings()
+            if settings.managed_llm_provider:
+                _log_sleep_llm_from_managed_lane_once(
+                    settings.managed_llm_provider, settings.managed_llm_model
+                )
+                return settings.managed_llm_provider, settings.managed_llm_model, True
+        return env_provider or "openai", env_model or "gpt-5-nano", False
 
     @classmethod
     def _resolve_sleep_llm(cls, configs: dict, base_config: "NeuralMemoryConfig") -> dict[str, str]:
@@ -872,6 +929,13 @@ class NeuralMemoryConfig:
             sleep_cron_minute=base_config.sleep_cron_minute,  # Schedule (env-only)
             sleep_llm_provider=sleep_llm["sleep_llm_provider"],
             sleep_llm_model=sleep_llm["sleep_llm_model"],
+            # #1569: a neural_config row for either key takes the judge off the
+            # managed lane (DB wins over env, and the managed pair is env-derived).
+            sleep_llm_from_managed_lane=(
+                base_config.sleep_llm_from_managed_lane
+                and configs.get("sleep_llm_provider") is None
+                and configs.get("sleep_llm_model") is None
+            ),
             sleep_max_memories_per_run=configs.get(
                 "sleep_max_memories_per_run", base_config.sleep_max_memories_per_run
             ),

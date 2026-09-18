@@ -32,6 +32,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from db.qdrant import update_memory_payload_in_qdrant
 from models.memory import Memory, not_pinned_predicate
 from services.llm_service import LLMService
+from services.sleep.judge_lane import judge_platform_only
 from services.sleep.prompts import (
     IMPORTANCE_REEVAL_SYSTEM,
     IMPORTANCE_REEVAL_USER,
@@ -264,6 +265,7 @@ class ImportanceReevalPhase:
                 workspace_id=workspace_id,
                 model=config.sleep_llm_model,
                 provider=config.sleep_llm_provider,
+                platform_only=judge_platform_only(config),  # #1569
             )
             budget.consume(llm_calls=1)
             self._tokens_used += llm_resp.total_tokens

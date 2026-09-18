@@ -40,6 +40,15 @@ _DEFAULT_FREE_MEMORY_LIMIT = 1000
 _DEFAULT_BASIC_MEMORY_LIMIT = 10000
 REFERRAL_TOTAL_PAYOUT_BUDGET_MEMORIES = _DEFAULT_BASIC_MEMORY_LIMIT - _DEFAULT_FREE_MEMORY_LIMIT
 
+# Issue #1569: the platform credential each API-key provider of the managed
+# LLM lane bills. Mirrors the env map ``LLMService._get_user_api_key`` reads
+# from, so the boot check and the runtime resolution look at the same variable.
+MANAGED_LLM_PLATFORM_KEY_ENV: dict[str, str] = {
+    "openai": "OPENAI_API_KEY",
+    "anthropic": "ANTHROPIC_API_KEY",
+    "gemini": "GOOGLE_API_KEY",
+}
+
 
 def _validate_handoff_base_url(value: str) -> str:
     """Validate/normalize the optional billing handoff base URL (#1118).
@@ -742,6 +751,101 @@ class Settings(BaseSettings):
             "it). Surfaced via GET /api/v1/system/info features.cost_display."
         ),
     )
+    # Issue #1569: stop RESOLVING stored BYOK keys, not just provisioning
+    # them. Default True keeps #1167's deliberate posture (keys stored before
+    # ENABLE_BYOK=false are still used). False makes LLMService,
+    # EmbeddingService and RerankerService skip the external_api_keys lookup
+    # and resolve the platform env/settings credential only; it requires
+    # ENABLE_BYOK=false (see ``_validate_resolve_stored_byok_keys``).
+    resolve_stored_byok_keys: bool = Field(
+        default=True,
+        description=(
+            "Issue #1569: when false, the LLM / embedding / reranker services "
+            "ignore external_api_keys rows and use the platform credential only. "
+            "Requires ENABLE_BYOK=false. Default true = #1167 behaviour."
+        ),
+    )
+    # Issue #1569: the platform-managed LLM lane. When set, Memory Analysis
+    # runs on this provider/model for a workspace whose plan carries the
+    # ``managed_llm`` feature and that has no BYOK key (``paid_by='platform'``),
+    # and Sleep's judge defaults to it unless SLEEP_LLM_* is set explicitly.
+    # Empty (the default) = no managed lane: Analysis stays strict-BYOK and
+    # Sleep keeps its code default — today's behaviour.
+    managed_llm_provider: Literal["", "openai", "anthropic", "gemini", "self_hosted"] = Field(
+        default="",
+        description=(
+            "Issue #1569: provider of the platform-managed LLM used by paid "
+            "features without a BYOK key (openai / anthropic / gemini / "
+            "self_hosted). Empty = no managed lane."
+        ),
+    )
+    managed_llm_model: str = Field(
+        default="",
+        description=(
+            "Issue #1569: model id sent to MANAGED_LLM_PROVIDER (for self_hosted "
+            "the registry name; SELF_HOSTED_MODEL_ALIASES applies). Required when "
+            "the provider is set."
+        ),
+    )
+    self_hosted_llm_timeout_seconds: float = Field(
+        default=60.0,
+        gt=0,
+        description=(
+            "Issue #1569: per-request timeout for self_hosted chat completions "
+            "(SelfHostedProvider). A slow local model may need more than the 60 s "
+            "default; the embedding path has its own timeout."
+        ),
+    )
+
+    @model_validator(mode="after")
+    def _validate_managed_llm_lane(self) -> "Settings":
+        """Refuse a half-configured managed LLM lane at boot (#1569).
+
+        The lane is what makes Memory Analysis / Sleep work with no BYOK key,
+        so a missing model or platform credential would only surface at the
+        first paid run. The platform key is checked where ``LLMService``
+        reads it (``os.getenv`` — a value that only lives in the .env file
+        would not reach ``_get_user_api_key`` either). ``self_hosted`` needs
+        ``SELF_HOSTED_BASE_URL`` set explicitly (``model_fields_set``, same
+        idiom as the telemetry probe): the localhost default is not a
+        deliberate lane target.
+        """
+        provider = self.managed_llm_provider
+        if not provider:
+            return self
+        if not self.managed_llm_model.strip():
+            raise ValueError(
+                f"MANAGED_LLM_PROVIDER={provider} requires MANAGED_LLM_MODEL to name the model."
+            )
+        if provider == "self_hosted":
+            if "self_hosted_base_url" not in self.model_fields_set:
+                raise ValueError(
+                    "MANAGED_LLM_PROVIDER=self_hosted requires SELF_HOSTED_BASE_URL to be set "
+                    "explicitly (the localhost default is not a managed lane target)."
+                )
+            return self
+        env_var = MANAGED_LLM_PLATFORM_KEY_ENV[provider]
+        if not os.getenv(env_var):
+            raise ValueError(
+                f"MANAGED_LLM_PROVIDER={provider} requires the platform credential "
+                f"{env_var} in the environment (the managed lane bills the platform key)."
+            )
+        return self
+
+    @model_validator(mode="after")
+    def _validate_resolve_stored_byok_keys(self) -> "Settings":
+        """``RESOLVE_STORED_BYOK_KEYS=false`` only makes sense with BYOK off (#1569).
+
+        Letting users store keys the services then ignore would be a silent
+        no-op for every key they add; refuse the combination.
+        """
+        if not self.resolve_stored_byok_keys and self.enable_byok:
+            raise ValueError(
+                "RESOLVE_STORED_BYOK_KEYS=false requires ENABLE_BYOK=false — stored keys "
+                "cannot be provisioned and ignored at the same time."
+            )
+        return self
+
     enable_referrals: bool = Field(
         default=False,
         description=(

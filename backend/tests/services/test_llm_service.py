@@ -405,3 +405,131 @@ class TestStrictByokKeyResolution:
         # Default mode still resolves the env key end-to-end.
         provider = await llm_service._get_provider("u1", "openai")
         assert provider is not None
+
+
+def _db_returning_row(mock_db, row):
+    """Make every ``await db.execute(...)`` yield ``row`` from scalar_one_or_none."""
+    from unittest.mock import MagicMock
+
+    result = MagicMock()
+    result.scalar_one_or_none = MagicMock(return_value=row)
+    mock_db.execute = AsyncMock(return_value=result)
+    return result
+
+
+class TestPlatformOnlyKeyResolution:
+    """#1569 managed lane: ``platform_only`` never touches ``external_api_keys``.
+
+    The deployment pays for the managed lane, so a workspace's stored key
+    must not be billed even when one exists; the platform env credential is
+    the only source.
+    """
+
+    @pytest.mark.asyncio
+    async def test_platform_only_skips_stored_key_and_uses_env(
+        self, llm_service, mock_db, monkeypatch
+    ):
+        from uuid import uuid4
+
+        monkeypatch.setenv("OPENAI_API_KEY", "sk-platform-1569")
+        _db_returning_row(mock_db, object())  # a stored key IS present
+        key = await llm_service._get_user_api_key(
+            "u1", "openai", workspace_id=str(uuid4()), platform_only=True
+        )
+        assert key == "sk-platform-1569"
+        mock_db.execute.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_platform_only_without_env_raises(self, llm_service, mock_db, monkeypatch):
+        from uuid import uuid4
+
+        monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+        _db_returning_row(mock_db, object())
+        with pytest.raises(ConfigurationError):
+            await llm_service._get_user_api_key(
+                "u1", "openai", workspace_id=str(uuid4()), platform_only=True
+            )
+        mock_db.execute.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_flags_are_mutually_exclusive(self, llm_service):
+        with pytest.raises(ValueError, match="mutually exclusive"):
+            await llm_service._get_user_api_key(
+                "u1", "openai", disallow_env_fallback=True, platform_only=True
+            )
+        with pytest.raises(ValueError, match="mutually exclusive"):
+            await llm_service._get_provider(
+                "u1", "openai", disallow_env_fallback=True, platform_only=True
+            )
+
+    @pytest.mark.asyncio
+    async def test_complete_json_threads_platform_only(self, llm_service):
+        provider = AsyncMock()
+        provider.complete_json = AsyncMock(return_value=_make_provider_response('{"ok": true}'))
+        llm_service._get_provider = AsyncMock(return_value=provider)
+
+        await llm_service.complete_json("u1", "prompt", workspace_id="ws", platform_only=True)
+        kwargs = llm_service._get_provider.call_args.kwargs
+        assert kwargs.get("platform_only") is True
+        assert kwargs.get("disallow_env_fallback") is False
+
+    @pytest.mark.asyncio
+    async def test_platform_only_self_hosted_uses_settings_not_stored_row(
+        self, llm_service, mock_db
+    ):
+        """self_hosted: the base URL comes from settings, the workspace's
+        ``ExternalAPIKey`` row (which may point elsewhere) is never read."""
+        from uuid import uuid4
+
+        _db_returning_row(mock_db, object())
+        with patch("config.settings.get_settings") as mock_settings:
+            mock_settings.return_value.self_hosted_base_url = "http://platform-vllm:8000"
+            mock_settings.return_value.self_hosted_api_key = ""
+            provider = await llm_service._get_provider(
+                "u1", "self_hosted", workspace_id=str(uuid4()), platform_only=True
+            )
+        from services.llm_providers import SelfHostedProvider
+
+        assert isinstance(provider, SelfHostedProvider)
+        assert llm_service._last_self_hosted_base_url == "http://platform-vllm:8000"
+        mock_db.execute.assert_not_called()
+
+
+class TestResolveStoredByokKeysDisabled:
+    """#1569 D6: ``RESOLVE_STORED_BYOK_KEYS=false`` ignores stored keys."""
+
+    @pytest.fixture
+    def stored_keys_disabled(self, monkeypatch):
+        monkeypatch.setenv("RESOLVE_STORED_BYOK_KEYS", "false")
+        monkeypatch.setenv("ENABLE_BYOK", "false")
+        monkeypatch.setattr("config.settings._settings", None)
+        monkeypatch.setattr("services.byok_resolution._disabled_logged", False)
+
+    @pytest.mark.asyncio
+    async def test_stored_key_ignored_env_used_logged_once(
+        self, llm_service, mock_db, monkeypatch, stored_keys_disabled
+    ):
+        from uuid import uuid4
+
+        from structlog.testing import capture_logs
+
+        monkeypatch.setenv("OPENAI_API_KEY", "sk-platform-only")
+        _db_returning_row(mock_db, object())  # stored key present but must be ignored
+        with capture_logs() as logs:
+            first = await llm_service._get_user_api_key("u1", "openai", workspace_id=str(uuid4()))
+            second = await llm_service._get_user_api_key("u1", "openai", workspace_id=str(uuid4()))
+        assert (first, second) == ("sk-platform-only", "sk-platform-only")
+        mock_db.execute.assert_not_called()
+        events = [e["event"] for e in logs if e["event"] == "byok_key_resolution_disabled"]
+        assert events == ["byok_key_resolution_disabled"], "logged once per process"
+
+    @pytest.mark.asyncio
+    async def test_self_hosted_base_url_from_settings_only(
+        self, llm_service, mock_db, stored_keys_disabled
+    ):
+        from uuid import uuid4
+
+        _db_returning_row(mock_db, object())
+        provider = await llm_service._get_provider("u1", "self_hosted", workspace_id=str(uuid4()))
+        assert provider is not None
+        mock_db.execute.assert_not_called()

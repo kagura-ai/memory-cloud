@@ -175,8 +175,12 @@ class EmbeddingService:
 
         from sqlalchemy import or_
 
+        from services.byok_resolution import stored_byok_keys_disabled
+
         api_key_entry = None
-        if workspace_id:
+        # #1569: RESOLVE_STORED_BYOK_KEYS=false skips steps 1-2 — the platform
+        # env credential is the only source on such a deployment.
+        if workspace_id and not stored_byok_keys_disabled():
             workspace_uuid = UUID(workspace_id) if isinstance(workspace_id, str) else workspace_id
             conditions = [
                 ExternalAPIKey.workspace_id == workspace_uuid,
@@ -466,12 +470,22 @@ class EmbeddingService:
         This is a cheap existence probe (single indexed SELECT, no decrypt)
         and lives alongside ``_get_user_api_key`` to avoid duplicating its
         priority rules in callers.
+
+        #1569: mirrors ``_get_user_api_key``'s ``RESOLVE_STORED_BYOK_KEYS``
+        gate — a stored key the resolver ignores must not read as present
+        here either, or the spend-cap plan gate, ``resolve_paid_by`` and the
+        shared-context preflight would decide on a credential the call
+        never uses.
         """
         from uuid import UUID
 
         from sqlalchemy import or_
 
+        from services.byok_resolution import stored_byok_keys_disabled
+
         if not workspace_id or self.provider == "self_hosted":
+            return False
+        if stored_byok_keys_disabled():
             return False
         ws_uuid = UUID(workspace_id) if isinstance(workspace_id, str) else workspace_id
         conditions = [

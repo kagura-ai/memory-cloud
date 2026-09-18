@@ -77,6 +77,8 @@ const ROWS: MatrixRow[] = [
   },
   { key: "reranking", field: "reranking", kind: "bool" },
   { key: "managedEmbeddings", field: "managed_embeddings", kind: "bool" },
+  // #1569: Memory Analysis on the deployment's managed LLM (no workspace key).
+  { key: "managedLlm", field: "managed_llm", kind: "bool", beta: true },
   { key: "secretStore", field: "secret_store", kind: "bool", beta: true },
   { key: "sharedContexts", field: "shared_contexts", kind: "bool" },
   { key: "teamInvitations", field: "team_invitations", kind: "bool" },

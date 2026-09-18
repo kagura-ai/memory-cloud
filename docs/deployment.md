@@ -511,6 +511,7 @@ Feature availability (the `features` set on each tier):
 |---------|---|---|---|----|
 | Secret store (`secret_store`) | ✓ | ✓ | ✓ | ✓ |
 | Shared contexts / team invitations / memory analysis | – | – | ✓ | ✓ |
+| Memory analysis on the platform-managed LLM, no workspace key (`managed_llm`) | – | – | ✓ | ✓ |
 | Resources — `setup_resource`, new resource tokens (`resources`) | – | – | – | ✓ |
 | Connectors — `setup_connector` (`connectors`) | – | – | – | ✓ |
 | Public — `set_public`, bound public API keys (`public_contexts`) | – | – | – | ✓ |
@@ -560,9 +561,9 @@ Rules the API enforces when it loads the registry (a violation refuses to
 start, naming the variable):
 
 - Every name must be one of the known features (`api_keys`, `oauth`,
-  `secret_store`, `reranking`, `managed_embeddings`, `team_invitations`,
-  `shared_contexts`, `memory_analysis`, `resources`, `connectors`,
-  `public_contexts`).
+  `secret_store`, `reranking`, `managed_embeddings`, `managed_llm`,
+  `team_invitations`, `shared_contexts`, `memory_analysis`, `resources`,
+  `connectors`, `public_contexts`).
 - **Invariants.** Every tier must keep `secret_store` (the zero-knowledge secret
   store is on every tier), and `resources` requires `public_contexts` —
   `setup_resource` creates a *public* context, so a tier that may create
@@ -685,6 +686,104 @@ at exactly `0` (an explicit "this local model is free") stays uncapped. Spend
 counters only advance when the backend reports `usage` tokens: vLLM and
 OpenAI-compatible servers do, a bare Ollama does not — a capped Ollama would
 count nothing.
+
+## LLM Credentials (BYOK vs platform-managed)
+
+Two paid features call an LLM on the workspace's behalf: **Memory Analysis**
+(cluster labelling) and **Sleep Maintenance** (the judge behind edge
+discovery, dedup, importance re-evaluation and consolidation). Where the
+credential comes from is decided per feature:
+
+- **`ENABLE_BYOK`** (default `true`) controls key *provisioning* only: with
+  `false`, the External Keys console's create/update paths, the workspace cost
+  dashboard and the OpenAI key-status probe return 404 and the web UI hides
+  them. It does **not** stop the LLM / embedding / reranker services from
+  *resolving* keys that were stored before the flip — the owner deletes those
+  through the still-open management paths, or the operator sets
+  `RESOLVE_STORED_BYOK_KEYS=false` (below).
+- **Memory Analysis** was strict-BYOK: an enabled workspace OpenAI key had to
+  exist, and the labelling calls refused the platform credential. Since
+  #1569 the run resolves a *lane* instead (table below).
+- **Sleep** resolves its judge key BYOK-then-env: a workspace key when one
+  exists, else the platform credential for the configured provider.
+
+### The platform-managed LLM lane (`MANAGED_LLM_*`)
+
+```bash
+MANAGED_LLM_PROVIDER=openai            # openai | anthropic | gemini | self_hosted
+MANAGED_LLM_MODEL=gpt-5-nano            # the model id sent to that provider
+# The matching platform credential must be present at boot:
+#   openai → OPENAI_API_KEY, anthropic → ANTHROPIC_API_KEY, gemini → GOOGLE_API_KEY,
+#   self_hosted → SELF_HOSTED_BASE_URL (+ SELF_HOSTED_API_KEY if the server needs one)
+```
+
+When set, a workspace whose plan carries the **`managed_llm`** feature (L / XL
+by default; grant it to any tier with `PLAN_<KEY>_FEATURES`) can run Memory
+Analysis with **zero** external keys. The run records `paid_by='platform'`,
+the labelling calls use the platform credential only (a workspace's stored
+key is never billed by accident), and the chain is the single managed model —
+no cross-provider fallback. Sleep's judge also defaults to this pair when no
+explicit `SLEEP_LLM_PROVIDER` / `SLEEP_LLM_MODEL` is set (a `neural_config`
+row still wins). A half-configured lane (provider without model, missing
+platform credential, `self_hosted` without an explicit `SELF_HOSTED_BASE_URL`)
+refuses to boot, naming the variable. `GET /api/v1/system/info` exposes
+`features.managed_llm` so the web UI knows a workspace key is not required.
+
+**Lane resolution for a Memory Analysis run** (`services/analysis/llm_lane.py`):
+
+| BYOK provisioning | Enabled workspace OpenAI key | `MANAGED_LLM_*` set | Plan has `managed_llm` | Lane |
+|---|---|---|---|---|
+| on | yes | any | any | **BYOK** — strict, OpenAI chain, `paid_by='byok'` (unchanged) |
+| any | no (or BYOK off) | yes | yes | **managed** — platform credential only, `paid_by='platform'` |
+| any | no (or BYOK off) | yes | no | refused (`VAL-001`), message names the plan feature |
+| any | no (or BYOK off) | no | – | refused (`VAL-001`), message names both routes |
+
+**Cost of the managed model.** Analysis needs no `llm_pricing` row for it —
+an unpriced model runs with `memory_analyses.model_id = NULL` and
+`cost_estimated_cents` / `cost_actual_cents` = `NULL` ("cost unknown", the
+same posture #1570 gave unpriced embeddings). To track spend, price it with
+`LLM_PRICING_OVERRIDES` (previous section); `/preview` and the run then quote
+the same rate card. The REST `model_id` (an `llm_pricing` row to pin) is
+honoured on the BYOK lane only — on the managed lane both `/preview` and
+`start` refuse it with `VAL-001`, since the snapshot and cost attribution
+must name the model the lane actually runs.
+
+### Recipe: hosted deployment with no BYOK at all
+
+```bash
+ENABLE_BYOK=false                        # no key console, no cost dashboard
+RESOLVE_STORED_BYOK_KEYS=false           # optional hardening, see below
+MANAGED_LLM_PROVIDER=self_hosted         # or openai / anthropic / gemini + its key
+MANAGED_LLM_MODEL=qwen3:8b
+SELF_HOSTED_BASE_URL=http://vllm:8000    # explicit, even if it equals the default
+SELF_HOSTED_API_KEY=                     # if the server was started with --api-key
+SELF_HOSTED_MODEL_ALIASES=qwen3:8b=Qwen/Qwen3-8B-Instruct   # wire id, if different
+SELF_HOSTED_LLM_TIMEOUT_SECONDS=120      # a local model may need more than 60 s
+LLM_PRICING_OVERRIDES='[{"provider":"self_hosted","model":"qwen3:8b","unit_type":"input_tokens","price_per_unit":0.05},{"provider":"self_hosted","model":"qwen3:8b","unit_type":"output_tokens","price_per_unit":0.20}]'
+# PLAN_FREE_FEATURES=api_keys,oauth,secret_store,managed_llm   # to open it to every tier
+```
+
+Notes for `self_hosted` as the managed LLM: the `SELF_HOSTED_MODEL_ALIASES`
+mapping applies to chat completions as well as embeddings (#1569); a backend
+that rejects OpenAI's `response_format` (HTTP 400) gets one retry without it
+and the JSON contract then rests on the prompt plus `LLMService`'s parse
+retry; judge failures still count toward a Sleep report's `degraded` grade.
+
+### Stop resolving stored keys (`RESOLVE_STORED_BYOK_KEYS=false`)
+
+Opt-in hardening for a deployment that turned BYOK off and wants "off" to
+mean off: `LLMService`, `EmbeddingService` and `RerankerService` skip their
+`external_api_keys` lookups and use the platform env / settings credential
+only (for `self_hosted`, `SELF_HOSTED_BASE_URL` — never a workspace's stored
+URL). `EmbeddingService`'s BYOK existence probe (the spend-cap plan gate,
+`paid_by` attribution and the shared-context read preflight) treats stored
+keys as absent too, so a Free workspace is refused the platform fallback
+rather than slipping through on an ignored key. Logged once per process as
+`byok_key_resolution_disabled`. Requires
+`ENABLE_BYOK=false` (refused at boot otherwise: users must not be able to
+store keys the services ignore). Default `true` keeps the #1167 behaviour.
+With it set, Sleep's judge calls on the managed lane also pass
+`platform_only`; without it Sleep keeps BYOK-then-env.
 
 ## Redis Connection Pool (rate limits and daily quotas) — Issue #1556
 

@@ -17,6 +17,7 @@ from sqlalchemy import and_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from models.auth import ExternalAPIKey
+from services.byok_resolution import stored_byok_keys_disabled
 from services.llm_providers import (
     AnthropicProvider,
     GeminiProvider,
@@ -94,6 +95,21 @@ def _api_key_fingerprint(key: str) -> str:
     return hashlib.sha256(key.encode()).hexdigest()[:16]
 
 
+def _check_key_resolution_flags(*, disallow_env_fallback: bool, platform_only: bool) -> None:
+    """Refuse the contradictory flag pair (#1569).
+
+    ``disallow_env_fallback`` (#1242) means "a BYOK row or nothing";
+    ``platform_only`` means "the platform env/settings credential or nothing".
+    Both at once would leave no resolvable source, so it is a calling-code
+    bug — raise ``ValueError`` rather than a misleading ``ConfigurationError``.
+    """
+    if disallow_env_fallback and platform_only:
+        raise ValueError(
+            "platform_only and disallow_env_fallback are mutually exclusive: the first "
+            "resolves the platform credential only, the second a BYOK row only."
+        )
+
+
 class LLMService:
     """Multi-provider async LLM client for Sleep Maintenance."""
 
@@ -122,6 +138,7 @@ class LLMService:
         temperature: float = 0.1,
         max_tokens: int = 1024,
         disallow_env_fallback: bool = False,
+        platform_only: bool = False,
     ) -> LLMResponse:
         """Call LLM with JSON mode and return cost-grade response.
 
@@ -143,6 +160,12 @@ class LLMService:
                 labeling) set this so a mid-run BYOK key removal fails
                 the run instead of silently billing the platform key.
                 Mirrors ``EmbeddingService``'s flag (#708/#1030).
+            platform_only: #1569 managed lane. When True, the context /
+                workspace ``external_api_keys`` lookups are skipped entirely
+                and the key (or, for ``self_hosted``, the base URL) comes
+                from the platform env / settings — the deployment pays, so
+                a workspace's stored key must never be billed by accident.
+                Mutually exclusive with ``disallow_env_fallback``.
 
         Returns:
             LLMResponse — parsed JSON + per-class token counts +
@@ -151,6 +174,7 @@ class LLMService:
         Raises:
             LLMServiceError: On API error or JSON parse failure after retry
             ConfigurationError: No resolvable API key for the provider.
+            ValueError: ``platform_only`` and ``disallow_env_fallback`` both set.
         """
         resolved_model = model or os.getenv("SLEEP_LLM_MODEL", "gpt-5-nano")
         resolved_provider = provider or os.getenv("SLEEP_LLM_PROVIDER", "openai")
@@ -161,6 +185,7 @@ class LLMService:
             context_id,
             workspace_id,
             disallow_env_fallback=disallow_env_fallback,
+            platform_only=platform_only,
         )
 
         # First attempt
@@ -369,14 +394,20 @@ class LLMService:
         workspace_id: str | None = None,
         *,
         disallow_env_fallback: bool = False,
+        platform_only: bool = False,
     ) -> LLMProvider:
         """Instantiate the correct LLM provider with resolved API key.
 
         ``disallow_env_fallback`` (#1242) applies to API-key providers
         only — the ``self_hosted`` branch resolves a base URL, not
         billable key material, so its env/settings fallback is
-        deliberately exempt.
+        deliberately exempt. ``platform_only`` (#1569) applies to both:
+        the ``self_hosted`` branch then takes the base URL from settings
+        and never reads the workspace's ``ExternalAPIKey`` row.
         """
+        _check_key_resolution_flags(
+            disallow_env_fallback=disallow_env_fallback, platform_only=platform_only
+        )
         provider_cls = _PROVIDERS.get(provider_name)
         if provider_cls is None:
             raise ConfigurationError(
@@ -385,21 +416,24 @@ class LLMService:
 
         if provider_name == "self_hosted":
             # The self-hosted provider uses a base URL rather than an API key.
-            # Resolve from ExternalAPIKey first, then env var, then settings.
+            # Resolve from ExternalAPIKey first, then env var, then settings —
+            # unless the platform lane (#1569) or RESOLVE_STORED_BYOK_KEYS=false
+            # rules the stored row out, in which case settings alone decide.
             base_url: str | None = None
-            try:
-                # The self-hosted base URL is stored under provider="self_hosted"
-                # in ExternalAPIKey so the UI can treat it like any other
-                # external key, even though it is a URL rather than a secret.
-                base_url = await self._get_user_api_key(
-                    user_id, "self_hosted", context_id, workspace_id
-                )
-            except ConfigurationError:
-                # No DB key for the self-hosted backend — fall through to
-                # env / settings below.
-                logger.debug("self_hosted_base_url_not_in_db", provider=provider_name)
-            if not base_url:
-                base_url = os.getenv("SELF_HOSTED_BASE_URL") or None
+            if not platform_only and not stored_byok_keys_disabled():
+                try:
+                    # The self-hosted base URL is stored under provider="self_hosted"
+                    # in ExternalAPIKey so the UI can treat it like any other
+                    # external key, even though it is a URL rather than a secret.
+                    base_url = await self._get_user_api_key(
+                        user_id, "self_hosted", context_id, workspace_id
+                    )
+                except ConfigurationError:
+                    # No DB key for the self-hosted backend — fall through to
+                    # env / settings below.
+                    logger.debug("self_hosted_base_url_not_in_db", provider=provider_name)
+                if not base_url:
+                    base_url = os.getenv("SELF_HOSTED_BASE_URL") or None
             if not base_url:
                 from config.settings import get_settings
 
@@ -418,6 +452,7 @@ class LLMService:
             context_id,
             workspace_id,
             disallow_env_fallback=disallow_env_fallback,
+            platform_only=platform_only,
         )
         return provider_cls(api_key)
 
@@ -429,6 +464,7 @@ class LLMService:
         workspace_id: str | None = None,
         *,
         disallow_env_fallback: bool = False,
+        platform_only: bool = False,
     ) -> str:
         """Resolve the API key for the calling user's workspace context.
 
@@ -445,12 +481,17 @@ class LLMService:
            env var is the platform's own credential, and a paid BYOK
            feature must never bill it.
 
+        Steps 1-2 are skipped when ``platform_only`` is True (#1569 managed
+        lane: the deployment pays, so only its own credential may be used)
+        or when the deployment runs with ``RESOLVE_STORED_BYOK_KEYS=false``.
+
         Args:
             user_id: Caller's user ID — logged for audit, NOT used as a filter.
             provider: Provider name (e.g. ``"openai"``, ``"anthropic"``).
             context_id: Optional context UUID.
             workspace_id: Workspace UUID; when omitted the DB lookup is skipped.
             disallow_env_fallback: Require a DB (BYOK) key; see above.
+            platform_only: Resolve the platform env credential only; see above.
 
         Returns:
             Decrypted API key.
@@ -458,13 +499,26 @@ class LLMService:
         Raises:
             ConfigurationError: If neither a DB key nor an env var is
                 available — or, in strict mode, no DB key exists.
+            ValueError: ``platform_only`` and ``disallow_env_fallback`` both set.
         """
         from uuid import UUID
 
         from sqlalchemy import or_
 
+        _check_key_resolution_flags(
+            disallow_env_fallback=disallow_env_fallback, platform_only=platform_only
+        )
+
         api_key_entry = None
-        if workspace_id:
+        if platform_only:
+            logger.debug(
+                "llm_api_key_platform_only",
+                provider=provider,
+                user_id=user_id,
+                workspace_id=workspace_id,
+                context_id=context_id,
+            )
+        elif workspace_id and not stored_byok_keys_disabled():
             workspace_uuid = UUID(workspace_id) if isinstance(workspace_id, str) else workspace_id
             conditions = [
                 ExternalAPIKey.workspace_id == workspace_uuid,
