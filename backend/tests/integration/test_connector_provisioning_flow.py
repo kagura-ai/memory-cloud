@@ -245,12 +245,14 @@ async def test_registration_path_creates_context_and_mints_kmc_key(
     # KMC write key minted, surfaced once, stored encrypted (retrievable).
     assert result.plaintext_kmc_api_key
     assert result.connector.get_kmc_api_key() == result.plaintext_kmc_api_key
-    key_count = (
-        await db_session.execute(
-            select(func.count(APIKey.id)).where(APIKey.workspace_id == workspace.id)
-        )
+    kmc_key = (
+        await db_session.execute(select(APIKey).where(APIKey.workspace_id == workspace.id))
     ).scalar_one()
-    assert key_count == 1
+    # #1537: the key expires by default, and the worker config endpoint's
+    # expiry warning reads only the connector column — it must mirror the
+    # row exactly (as rotate_kmc_key already does), not stay NULL.
+    assert kmc_key.expires_at is not None
+    assert result.connector.kmc_api_key_expires_at == kmc_key.expires_at
 
 
 @pytest.mark.asyncio
