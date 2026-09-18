@@ -82,6 +82,8 @@ class TestEffectiveQuotaService:
         )
         # Issue #663: tier-fixed, no addon. Mirrors the model property.
         ws.effective_max_resource_tokens = tier.max_resource_tokens
+        # Issue #1549: tier-fixed (no addon column yet). Mirrors the model property.
+        ws.effective_memories_per_day = tier.memories_per_day
         return ws
 
     @pytest.mark.asyncio
@@ -160,6 +162,7 @@ class TestEffectiveQuotaService:
             "storage_bytes_limit",
             "sleep_enabled_contexts_limit",
             "max_resource_tokens",
+            "memories_per_day",  # Issue #1549
         }
         assert set(quotas.keys()) == expected_keys
         for key, value in quotas.items():

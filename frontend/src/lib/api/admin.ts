@@ -98,6 +98,9 @@ export interface PlanTierInfo {
   analysis_runs_per_day: number;
   storage_limit_bytes: number;
   sleep_enabled_contexts_limit: number;
+  // Issue #1549. Optional: an API predating #1549 omits it (rolling deploy);
+  // the tiers table renders the gap as "—".
+  memories_per_day?: number;
   embedding_daily_cap_usd: number | null; // Issue #709
   embedding_monthly_cap_usd: number | null; // Issue #709
   allows_shared_contexts: boolean;

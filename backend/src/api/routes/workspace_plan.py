@@ -88,6 +88,7 @@ class PlanTierFeature(BaseModel):
     # this tier gets with zero slot bonus (1 base + owned_workspace_grant).
     owned_workspaces: int
     memory_limit: int
+    memories_per_day: int  # Issue #1549: memories created per UTC day
     storage_limit_bytes: int
     mcp_calls_per_day: int
     rest_calls_per_day: int
@@ -257,6 +258,7 @@ def _plan_tier_feature(tier: PlanTier) -> PlanTierFeature:
         max_members=tier.max_members_per_workspace,
         owned_workspaces=tier_owned_workspace_cap(tier),
         memory_limit=tier.memory_limit,
+        memories_per_day=tier.memories_per_day,
         storage_limit_bytes=tier.storage_limit_bytes,
         mcp_calls_per_day=tier.mcp_calls_per_day,
         rest_calls_per_day=tier.rest_calls_per_day,

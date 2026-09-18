@@ -428,7 +428,15 @@ async def _remember(service, **kwargs):
     )
     with (
         patch("services.memory_service.process_pending_embedding", new=AsyncMock()),
-        patch("services.quota_service.QuotaService"),
+        # #1549: the quota gates run against the context's workspace even with
+        # current_workspace_id=None, so the stub must be awaitable and permissive.
+        patch(
+            "services.quota_service.QuotaService",
+            **{
+                "return_value.check_memory_quota": AsyncMock(return_value=(True, None)),
+                "return_value.check_memories_per_day": AsyncMock(return_value=(True, None)),
+            },
+        ),
     ):
         return await service.remember(
             request,

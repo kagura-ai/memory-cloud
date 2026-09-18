@@ -483,6 +483,33 @@ class TestWorkspaceUsageCurrent:
         assert response.plan.plan_name == "pro"
 
     @pytest.mark.asyncio
+    async def test_memories_today_surfaces_additively(self, mock_db, mock_user, mock_workspace):
+        """#1549: the daily memory-creation quota rides the existing payload as
+        new defaulted fields (plan limit, today's count, a UsageStatus block).
+        The count is a Redis read, so the DB query count is unchanged."""
+        mock_db.execute.side_effect = self._build_execute_side_effects(mock_workspace)
+
+        with (
+            patch("services.effective_quota_service.EffectiveQuotaService") as mock_quota,
+            patch(
+                "services.quota_service.QuotaService.count_memories_created_today",
+                new=AsyncMock(return_value=40),
+            ),
+        ):
+            mock_quota.return_value.get_effective_quotas = AsyncMock(
+                return_value=self._make_effective_quotas()
+            )
+            response = await get_workspace_usage_current(user=mock_user, db=mock_db)
+
+        assert response.plan.memories_per_day == 50
+        assert response.usage.memories_created_today == 40
+        assert response.memories_today_usage is not None
+        assert response.memories_today_usage.current == 40
+        assert response.memories_today_usage.limit == 50
+        assert response.memories_today_usage.percentage == 80.0
+        assert response.memories_today_usage.is_warning is True
+
+    @pytest.mark.asyncio
     async def test_no_member_ids_query(self, mock_db, mock_user, mock_workspace):
         """Issue #65: Verify member_ids query is no longer executed (redundant IN-list removed)."""
         call_count = 0
@@ -531,6 +558,7 @@ class TestWorkspaceUsageCurrent:
             "analysis_runs_per_day": 3,
             "storage_bytes_limit": 10 * 1024 * 1024 * 1024,
             "sleep_enabled_contexts_limit": 3,  # Issue #560
+            "memories_per_day": 50,  # Issue #1549
         }
 
     @staticmethod

@@ -1193,6 +1193,7 @@
       "row_members": "Members",
       "row_ownedWorkspaces": "Owned workspaces",
       "row_memories": "Memories",
+      "row_memoriesPerDay": "Memories created / day",
       "row_storage": "Storage",
       "row_mcpPerDay": "MCP calls / day",
       "row_restPerDay": "REST calls / day",
@@ -2051,7 +2052,8 @@
     "sleepContextsWithAddon": "Includes +{addon} from extra_sleep_contexts addon",
     "sleepContextsTier": "Plan-tier limit (PRO required to enable Sleep Maintenance)",
     "ownedWorkspaces": "Owned Workspaces",
-    "ownedWorkspacesTier": "Owned workspace cap (joined workspaces are uncapped)"
+    "ownedWorkspacesTier": "Owned workspace cap (joined workspaces are uncapped)",
+    "memoriesCreatedToday": "Created today: {count} / {limit} (resets at midnight UTC)"
   },
   "memoryOverview": {
     "failedToLoad": "Failed to load memory overview",
@@ -2409,6 +2411,8 @@
         "contextsPerWorkspaceDescription": "Maximum simultaneous memory contexts within a single workspace.",
         "memories": "Memories",
         "memoriesDescription": "Maximum stored memory rows per workspace (durable count, soft-deleted excluded).",
+        "memoriesPerDay": "Memories Created (Daily)",
+        "memoriesPerDayDescription": "Memories that may be created per workspace per UTC day (remember, REST create, connector ingest). Updates, Sleep and context merges are not counted. 0 means the tier cannot create memories.",
         "mcpCallsPerDay": "MCP Calls (Daily)",
         "mcpCallsPerDayDescription": "Maximum MCP API tool calls (recall / remember / etc.) per workspace per calendar day.",
         "analysisRuns": "Memory Analyses (Daily)",

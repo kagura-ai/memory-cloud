@@ -938,6 +938,25 @@ class Settings(BaseSettings):
             "Override PROMAX plan monthly embedding spend cap in USD (Issue #709; default 1500.0)"
         ),
     )
+    # Issue #1549: memories created per workspace per UTC day. ``None`` = the
+    # dataclass default in ``plan_tiers.py``; ``0`` = the tier cannot create
+    # memories (zero-floor, #569), NOT unlimited — set a huge value for no cap.
+    plan_free_memories_per_day: int | None = Field(
+        default=None,
+        description="Override FREE plan memories created/day (Issue #1549; default 50)",
+    )
+    plan_basic_memories_per_day: int | None = Field(
+        default=None,
+        description="Override BASIC plan memories created/day (Issue #1549; default 300)",
+    )
+    plan_pro_memories_per_day: int | None = Field(
+        default=None,
+        description="Override PRO plan memories created/day (Issue #1549; default 2000)",
+    )
+    plan_promax_memories_per_day: int | None = Field(
+        default=None,
+        description="Override PROMAX plan memories created/day (Issue #1549; default 10000)",
+    )
     # Issue #661's ``plan_*_max_owned_workspaces`` env overrides were removed
     # in #675 — the cap is per-user (``users.workspace_slot_bonus``). #1550
     # lets the tier GRANT extra slots instead (``PLAN_<KEY>_OWNED_WORKSPACE_GRANT``);

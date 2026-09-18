@@ -141,6 +141,99 @@ class TestUpdateMemoryNotFoundEnvelope:
         assert "help" in payload
 
 
+class TestRememberQuotaExceededEnvelope:
+    """#1549 gate2: a ``QuotaExceededError`` out of ``MemoryService.remember``
+    (total ``memory_limit`` or the daily ``memories_per_day`` reservation) is a
+    429, not a crash. ``handle_remember`` must return the ``quota_exceeded``
+    envelope that analysis / files already use — structured details forwarded
+    — and log the call as 429 instead of falling into the generic 500 arm.
+    """
+
+    async def _remember_raising(self, exc):
+        from mcp_server.tools.memory import handle_remember
+
+        mock_db = MagicMock()
+        mock_db.rollback = AsyncMock()
+
+        async def mock_get_db():
+            yield mock_db
+
+        mock_service = MagicMock()
+        mock_service.remember = AsyncMock(side_effect=exc)
+        mock_ctx = MagicMock()
+        mock_ctx.id = uuid4()
+        log_usage = AsyncMock()
+
+        with (
+            patch("db.base.get_db", new=mock_get_db),
+            patch(
+                "mcp_server.tools.memory._check_viewer_permission",
+                new=AsyncMock(return_value=None),
+            ),
+            patch(
+                "mcp_server.tools.memory._resolve_context",
+                new=AsyncMock(return_value=mock_ctx),
+            ),
+            patch("mcp_server.tools.memory._log_tool_usage", new=log_usage),
+            patch(
+                "services.memory_service.MemoryService",
+                new=MagicMock(return_value=mock_service),
+            ),
+        ):
+            result = await handle_remember(
+                {
+                    "context_id": str(uuid4()),
+                    "summary": "a summary long enough",
+                    "content": "c",
+                    "type": "note",
+                },
+                "test_user",
+                uuid4(),
+            )
+        return json.loads(result[0].text), mock_db, log_usage
+
+    @pytest.mark.asyncio
+    async def test_daily_quota_refusal_carries_structured_details_and_logs_429(self):
+        from utils.exceptions import QuotaExceededError
+
+        exc = QuotaExceededError(
+            "Daily memory-creation quota exceeded. Limit: 50/day (free plan), "
+            "created today: 50, requested: 1. Resets at 2026-09-19T00:00:00Z.",
+            quota_type="memories_per_day",
+            limit=50,
+            used_today=50,
+            requested=1,
+            resets_at="2026-09-19T00:00:00Z",
+        )
+
+        payload, mock_db, log_usage = await self._remember_raising(exc)
+
+        assert payload["status"] == "error"
+        assert payload["error"] == "quota_exceeded"
+        assert payload["quota_type"] == "memories_per_day"
+        assert payload["resets_at"] == "2026-09-19T00:00:00Z"
+        assert (payload["limit"], payload["used_today"], payload["requested"]) == (50, 50, 1)
+        assert payload["message"].startswith("Daily memory-creation quota exceeded")
+        mock_db.rollback.assert_awaited_once()
+        # (db, user_id, tool, start_time, status_code, ...)
+        assert log_usage.await_args.args[4] == 429
+
+    @pytest.mark.asyncio
+    async def test_total_count_refusal_uses_the_same_envelope_without_null_keys(self):
+        """``check_memory_quota`` raises with no details — same envelope, and
+        ``quota_type: null`` must not leak into the payload."""
+        from utils.exceptions import QuotaExceededError
+
+        payload, _db, log_usage = await self._remember_raising(
+            QuotaExceededError("Memory quota exceeded. Current: 1000, Limit: 1000")
+        )
+
+        assert payload["error"] == "quota_exceeded"
+        assert "quota_type" not in payload
+        assert payload["message"].startswith("Memory quota exceeded")
+        assert log_usage.await_args.args[4] == 429
+
+
 class TestDispatchResponseModelErrorsStayLoud:
     @pytest.mark.asyncio
     async def test_response_model_validation_error_is_not_invalid_argument(self):

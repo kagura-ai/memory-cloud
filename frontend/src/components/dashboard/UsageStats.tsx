@@ -61,6 +61,7 @@ interface CurrentUsage {
   rest_calls_this_week: number; // Issue #238
   public_calls_today: number; // Issue #238
   public_calls_this_week: number; // Issue #238
+  memories_created_today?: number; // Issue #1549 — optional (additive field)
   sleep_contexts: SleepContextsUsage | null; // Issue #560
   workspaces: WorkspacesUsage; // Issue #661 — always populated
 }
@@ -236,6 +237,15 @@ export const UsageStats = forwardRef<UsageStatsRef, UsageStatsProps>(
       );
     }
 
+    // Issue #1549: "created today" rides the Memories card. Both fields are
+    // additive on the backend, so render only when the payload carries the
+    // count and the tier actually allows creation (0 = zero-floor, not
+    // unlimited — showing "n / 0" would read as a bug).
+    const memoriesCreatedToday = currentUsage.usage.memories_created_today;
+    const memoriesPerDay = currentUsage.plan.memories_per_day ?? 0;
+    const showMemoriesToday =
+      typeof memoriesCreatedToday === "number" && memoriesPerDay > 0;
+
     return (
       <div className="space-y-6">
         {/* Quota Warnings - Issue #149 */}
@@ -276,6 +286,14 @@ export const UsageStats = forwardRef<UsageStatsRef, UsageStatsProps>(
                     percent: currentUsage.memory_usage.percentage.toFixed(1),
                   })}
                 </p>
+                {showMemoriesToday && (
+                  <p className="text-xs text-muted-foreground mt-1">
+                    {t("memoriesCreatedToday", {
+                      count: memoriesCreatedToday,
+                      limit: memoriesPerDay,
+                    })}
+                  </p>
+                )}
               </CardContent>
             </Card>
 

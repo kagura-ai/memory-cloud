@@ -154,6 +154,12 @@ const TIER_ROW_DEFINITIONS = [
     render: (t: PlanTierInfo) => formatNumber(t.memory_limit),
   },
   {
+    // Issue #1549: memories created per UTC day. An older API omits the
+    // field (rolling deploy) → "—" like a zero quota, not a crash.
+    key: "memoriesPerDay",
+    render: (t: PlanTierInfo) => formatNumber(t.memories_per_day ?? 0),
+  },
+  {
     key: "mcpCallsPerDay",
     render: (t: PlanTierInfo) => formatNumber(t.mcp_calls_per_day),
   },

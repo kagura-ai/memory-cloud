@@ -81,6 +81,15 @@ def test_promax_tier_values() -> None:
     assert xl.price_monthly == 0
 
 
+def test_memories_per_day_values_are_monotonic() -> None:
+    """#1549: daily memory-creation quota S 50 · M 300 · L 2,000 · XL 10,000."""
+    values = [get_plan_tier(name).memories_per_day for name in PLAN_ORDER]
+    assert values == [50, 300, 2_000, 10_000]
+    assert values == sorted(values), "memories/day must not shrink on upgrade"
+    # Zero-floor (#569): 0 would mean "cannot create memories", so no tier ships 0.
+    assert all(v > 0 for v in values)
+
+
 def test_promax_is_never_below_pro() -> None:
     pro = get_plan_tier("pro")
     xl = get_plan_tier("promax")

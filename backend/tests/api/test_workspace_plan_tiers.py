@@ -133,6 +133,13 @@ def test_xl_only_feature_booleans(client: TestClient) -> None:
         assert (free[key], basic[key], pro[key], promax[key]) == (False, False, False, True), key
 
 
+def test_memories_per_day_row(client: TestClient) -> None:
+    """#1549: the daily memory-creation quota is a matrix row (S 50 · M 300 ·
+    L 2,000 · XL 10,000)."""
+    tiers = client.get(ENDPOINT).json()
+    assert [t["memories_per_day"] for t in tiers] == [50, 300, 2000, 10000]
+
+
 def test_boolean_capabilities(client: TestClient) -> None:
     free, basic, pro, _promax = client.get(ENDPOINT).json()
     assert (free["reranking"], basic["reranking"], pro["reranking"]) == (False, True, True)

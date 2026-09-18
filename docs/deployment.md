@@ -359,16 +359,30 @@ and `KAGURA_LANCE_DB_PATH`. Implementation: `backend/src/db/lance_store.py`.
 
 Plans control resource limits per workspace. Defaults:
 
-| Plan | Contexts | Memories | MCP calls/day | Owned workspaces |
-|------|----------|----------|---------------|------------------|
-| S (Free) | 1 | 1,000 | 1,000 | 1 |
-| M (Basic) | 3 | 10,000 | 10,000 | 1 |
-| L (Pro) | 20 | 100,000 | 50,000 | 3 |
-| XL (Pro Max, key `promax`) | 1,000 | 100,000 | 250,000 | 20 |
+| Plan | Contexts | Memories | Memories/day | MCP calls/day | Owned workspaces |
+|------|----------|----------|--------------|---------------|------------------|
+| S (Free) | 1 | 1,000 | 50 | 1,000 | 1 |
+| M (Basic) | 3 | 10,000 | 300 | 10,000 | 1 |
+| L (Pro) | 20 | 100,000 | 2,000 | 50,000 | 3 |
+| XL (Pro Max, key `promax`) | 1,000 | 100,000 | 10,000 | 250,000 | 20 |
 
 The plan *key* (`free` / `basic` / `pro` / `promax`) is what the admin API,
 the billing entitlement push and the `workspaces.plan_name` column use; the
 size code is only its default display name.
+
+**Memories/day** is a per-workspace quota on memory *creation* per UTC day
+(counter in Redis, reset at 00:00Z; `resets_at` is returned with the 429).
+It charges every path that creates a user-visible memory: MCP `remember`,
+REST memory create, a brand-new `update_memory(external_id=...)`, and
+connector / resource ingest (charged once per indexer batch, up front, for the
+doc_ids not indexed yet — a re-sync of known docs is free, and a batch that
+does not fit is left untouched and re-queued for the next UTC midnight). It
+does **not** charge in-place updates (`update_memory` by id, `PATCH`), an
+`external_id` replace, context merges, admin context recovery, or Sleep /
+consolidation. If Redis is
+down the check fails open. `0` follows the zero-floor rule used by every quota
+field: the tier cannot create memories at all — it never means "unlimited".
+Self-hosters who want no cap set a very large value.
 
 "Owned workspaces" is a *per-user* cap, not a per-workspace one:
 `cap = 1 + users.workspace_slot_bonus + owned_workspace_grant`, where the
@@ -407,6 +421,7 @@ Override via environment variables (`PLAN_<KEY>_<FIELD>`, key upper-cased):
 ```bash
 PLAN_FREE_MAX_CONTEXTS=5
 PLAN_FREE_MEMORY_LIMIT=5000
+PLAN_FREE_MEMORIES_PER_DAY=1000000   # effectively no daily cap (0 = none)
 PLAN_BASIC_MAX_CONTEXTS=10
 PLAN_PRO_MAX_CONTEXTS=50
 PLAN_PROMAX_MAX_CONTEXTS=2000

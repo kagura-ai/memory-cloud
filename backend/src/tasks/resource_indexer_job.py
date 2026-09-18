@@ -6,6 +6,7 @@ Runs every 5 minutes to process queued indexer jobs.
 """
 
 import time
+from datetime import datetime, timedelta
 from uuid import UUID
 
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
@@ -24,6 +25,12 @@ logger = get_logger(__name__)
 # Constraints (Issue #238)
 MAX_RUNS_PER_HOUR = 6
 MIN_INTERVAL_SECONDS = 600  # 10 minutes
+
+
+def _next_utc_midnight() -> datetime:
+    """When the #1549 daily memory-creation counter resets (naive UTC, like
+    ``IndexerState.next_run_at``)."""
+    return datetime.combine(utcnow().date() + timedelta(days=1), datetime.min.time())
 
 
 async def can_run_indexer(resource_id: str, context_id: UUID) -> tuple[bool, str]:
@@ -152,8 +159,15 @@ async def run_queued_indexers() -> None:
                         batch_size=100,
                     )
 
-                    # Update state
-                    state.job_status = "idle"
+                    # Update state. Only an ingest event re-queues an idle row,
+                    # so a batch the #1549 daily memory quota refused (nothing
+                    # applied, offset unchanged) is re-queued here for the UTC
+                    # reset instead of parking until the next event arrives.
+                    if metrics.reason == "memories_per_day_exceeded":
+                        state.job_status = "queued"
+                        state.next_run_at = _next_utc_midnight()
+                    else:
+                        state.job_status = "idle"
                     state.metrics = metrics.to_dict()
                     await db.commit()
 

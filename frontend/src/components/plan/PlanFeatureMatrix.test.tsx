@@ -37,6 +37,7 @@ const TIERS = [
     max_members: 1,
     owned_workspaces: 1,
     memory_limit: 1000,
+    memories_per_day: 50,
     storage_limit_bytes: 100 * 1024 * 1024,
     mcp_calls_per_day: 1000,
     rest_calls_per_day: 0,
@@ -64,6 +65,7 @@ const TIERS = [
     max_members: 1,
     owned_workspaces: 1,
     memory_limit: 10000,
+    memories_per_day: 300,
     storage_limit_bytes: 1024 ** 3,
     mcp_calls_per_day: 10000,
     rest_calls_per_day: 1000,
@@ -88,6 +90,7 @@ const TIERS = [
     max_members: 10,
     owned_workspaces: 3,
     memory_limit: 100000,
+    memories_per_day: 2000,
     storage_limit_bytes: 10 * 1024 ** 3,
     mcp_calls_per_day: 50000,
     rest_calls_per_day: 5000,
@@ -115,6 +118,7 @@ const TIERS = [
     max_members: 50,
     owned_workspaces: 20,
     memory_limit: 100000,
+    memories_per_day: 10000,
     storage_limit_bytes: 50 * 1024 ** 3,
     mcp_calls_per_day: 250000,
     rest_calls_per_day: 25000,
@@ -170,6 +174,42 @@ describe("PlanFeatureMatrix (#1138)", () => {
     expect(
       rowOf("planMatrix.row_storage").getByText("50 GiB"),
     ).toBeInTheDocument();
+  });
+
+  it("renders the memories-per-day row (#1549) as a stable numeric row", async () => {
+    render(<PlanFeatureMatrix currentTier="basic" />);
+    await screen.findByText("planMatrix.row_memoriesPerDay");
+
+    // S 50 · M 300 · L 2,000 · XL 10,000 — locale-grouped like the other
+    // numeric rows, no Beta badge, and sits right under the memory cap.
+    const row = rowOf("planMatrix.row_memoriesPerDay");
+    expect(row.getByText("50")).toBeInTheDocument();
+    expect(row.getByText("300")).toBeInTheDocument();
+    expect(row.getByText("2,000")).toBeInTheDocument();
+    expect(row.getByText("10,000")).toBeInTheDocument();
+    expect(row.queryByText("✗")).toBeNull();
+    expect(row.queryByText("planMatrix.beta")).toBeNull();
+
+    const labels = screen
+      .getAllByRole("row")
+      .map((tr) => tr.querySelector("td")?.textContent ?? "");
+    expect(labels.indexOf("planMatrix.row_memoriesPerDay")).toBe(
+      labels.indexOf("planMatrix.row_memories") + 1,
+    );
+  });
+
+  it("renders ✗ (not a crash) for a tier payload that predates memories_per_day", async () => {
+    // Rolling deploy: the frontend ships before the API; the field is absent.
+    const legacyFree = { ...TIERS[0] } as Partial<(typeof TIERS)[number]>;
+    delete legacyFree.memories_per_day;
+    mockGetMatrix.mockResolvedValue([legacyFree, ...TIERS.slice(1)]);
+    render(<PlanFeatureMatrix currentTier="basic" />);
+    await screen.findByText("planMatrix.row_memoriesPerDay");
+
+    const row = rowOf("planMatrix.row_memoriesPerDay");
+    expect(row.getAllByText("✗").length).toBe(1); // free: field missing
+    expect(row.getByText("300")).toBeInTheDocument(); // the rest still render
+    expect(row.getByText("10,000")).toBeInTheDocument();
   });
 
   it("renders the owned-workspaces row (1 / 1 / 3 / 20) next to members (#1550)", async () => {

@@ -41,6 +41,7 @@ IndexerSkippedReason = Literal[
     "context_not_found",
     "empty_valid_points",
     "resource_entity_missing",
+    "memories_per_day_exceeded",  # #1549: batch deferred to the UTC reset
 ]
 """Reasons the indexer may record under ``metrics.reason`` when a run was
 skipped. Enum is derived from in-tree uses in ``services.resource_indexer``;

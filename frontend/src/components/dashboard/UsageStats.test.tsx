@@ -48,12 +48,14 @@ vi.mock("@/lib/api/workspaces", () => ({
     mockGetWorkspaceUsageBreakdown(...a),
 }));
 
-// Translator returns the key plus any `addon` var that this test file
-// asserts on. Other interpolations fall through to the bare key — the
-// tests query by stable key text rather than rendered numbers, so
-// `count`/`percent` branches would never be exercised.
+// Translator returns the key plus the `addon` var and the `count`/`limit`
+// pair that this test file asserts on. Other interpolations fall through
+// to the bare key — the tests query by stable key text rather than
+// rendered numbers, so the `percent` branch is never exercised.
 const stableT = (key: string, vars?: Record<string, unknown>) => {
   if (vars && "addon" in vars) return `${key}:+${vars.addon}`;
+  if (vars && "count" in vars && "limit" in vars)
+    return `${key}:${vars.count}/${vars.limit}`;
   return key;
 };
 vi.mock("next-intl", () => ({
@@ -112,6 +114,7 @@ function makePlan(overrides: Partial<PlanLimits> = {}): PlanLimits {
     rest_calls_per_week: 200,
     public_calls_per_day: 10,
     public_calls_per_week: 50,
+    memories_per_day: 50, // Issue #1549
     ...overrides,
   };
 }
@@ -119,6 +122,7 @@ function makePlan(overrides: Partial<PlanLimits> = {}): PlanLimits {
 function makeUsage(overrides: Partial<CurrentUsage> = {}): CurrentUsage {
   return {
     memory_count: 42,
+    memories_created_today: 12, // Issue #1549
     api_calls_today: 17,
     api_calls_this_week: 89,
     mcp_calls_today: 7,
@@ -162,6 +166,14 @@ function makeCurrentResponse(
       current: 89,
       limit: 500,
       percentage: 17.8,
+      is_warning: false,
+      is_critical: false,
+      is_exceeded: false,
+    },
+    memories_today_usage: {
+      current: 12,
+      limit: 50,
+      percentage: 24,
       is_warning: false,
       is_critical: false,
       is_exceeded: false,
@@ -333,6 +345,44 @@ describe("UsageStats — primary usage cards", () => {
     expect(
       screen.getByText((_c, node) => node?.textContent === "89 / 500"),
     ).toBeInTheDocument();
+  });
+});
+
+// ---------- Memories created today (#1549) -----------------------------------
+
+describe("UsageStats — memories created today line", () => {
+  it("renders 'created today' under the Memories card when the payload carries it", async () => {
+    mockGetWorkspaceUsageCurrent.mockResolvedValue(makeCurrentResponse());
+    render(<UsageStats />);
+
+    await screen.findByText("memories");
+    // stableT echoes count/limit so the numbers are asserted, not just the key.
+    expect(screen.getByText("memoriesCreatedToday:12/50")).toBeInTheDocument();
+  });
+
+  it("does NOT render the line when the backend predates the field", async () => {
+    // Rolling deploy: an older API omits both fields entirely.
+    const plan = makePlan();
+    delete (plan as Partial<PlanLimits>).memories_per_day;
+    const usage = makeUsage();
+    delete (usage as Partial<CurrentUsage>).memories_created_today;
+    mockGetWorkspaceUsageCurrent.mockResolvedValue(
+      makeCurrentResponse({ plan, usage, memories_today_usage: undefined }),
+    );
+    render(<UsageStats />);
+
+    await screen.findByText("memories");
+    expect(screen.queryByText(/memoriesCreatedToday/)).not.toBeInTheDocument();
+  });
+
+  it("does NOT render the line when the daily limit is 0 (zero-floor tier)", async () => {
+    mockGetWorkspaceUsageCurrent.mockResolvedValue(
+      makeCurrentResponse({ plan: makePlan({ memories_per_day: 0 }) }),
+    );
+    render(<UsageStats />);
+
+    await screen.findByText("memories");
+    expect(screen.queryByText(/memoriesCreatedToday/)).not.toBeInTheDocument();
   });
 });
 

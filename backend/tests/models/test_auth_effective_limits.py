@@ -138,6 +138,29 @@ class TestZeroBaseBypassClosed:
         assert getattr(Workspace, prop_name).fget(ws) == 100
 
 
+class TestEffectiveMemoriesPerDay:
+    """#1549: daily memory-creation quota is plan-tier base only (no addon
+    column yet) and follows the zero-floor rule like every other quota."""
+
+    @pytest.mark.parametrize(
+        ("plan_name", "expected"),
+        [("free", 50), ("basic", 300), ("pro", 2_000), ("promax", 10_000)],
+    )
+    def test_tier_base(self, plan_name, expected):
+        from config.plan_tiers import get_plan_tier
+
+        ws = MagicMock()
+        ws._plan_tier = get_plan_tier(plan_name)
+        assert Workspace.effective_memories_per_day.fget(ws) == expected
+
+    def test_zero_base_is_zero(self):
+        tier = MagicMock()
+        tier.memories_per_day = 0
+        ws = MagicMock()
+        ws._plan_tier = tier
+        assert Workspace.effective_memories_per_day.fget(ws) == 0
+
+
 class TestEffectiveMaxConnectors:
     """Spec 2026-06-02: the ai-worker connector seat cap is plan tier base +
     the ``extra_connectors`` addon (mirrors ``effective_max_members``).

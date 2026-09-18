@@ -411,6 +411,9 @@ export interface PlanTierFeature {
   max_members: number;
   owned_workspaces: number; // #1550: per-user owned cap on this tier (1 + grant)
   memory_limit: number;
+  // #1549: memories created per UTC day. Optional: an API predating #1549
+  // omits it (rolling deploy), and the matrix renders it as ✗ / 0.
+  memories_per_day?: number;
   storage_limit_bytes: number;
   mcp_calls_per_day: number;
   rest_calls_per_day: number;
