@@ -406,6 +406,40 @@ class TestAnalysisOrchestratorStartManagedLane:
         assert analysis.model_snapshot["rates"] == {"input_tokens": 0.05}
 
     @pytest.mark.asyncio
+    async def test_pinned_model_id_is_refused_on_managed_lane(self, db_session) -> None:
+        """A caller-pinned ``llm_pricing`` row would freeze a snapshot (and
+        bill) for a model the managed lane never calls → VAL-001, no row."""
+        service = AnalysisOrchestrator(db_session)
+        ws_id, ctx_id = uuid4(), uuid4()
+        await _seed_workspace_context(db_session, ws_id, ctx_id)
+        other = LLMPricing(
+            provider="openai",
+            model="gpt-5-nano",
+            unit_type="input_tokens",
+            price_per_unit="0.2",
+            currency="USD",
+            effective_from=datetime(2026, 1, 1),
+        )
+        db_session.add(other)
+        await db_session.flush()
+
+        with patch(_LANE_PATCH, return_value=self._LANE):
+            with pytest.raises(ValidationError, match="model_id"):
+                await service.start(
+                    workspace_id=ws_id,
+                    context_id=ctx_id,
+                    user_id="u1",
+                    params=AnalysisParams(model_id=other.id),
+                )
+
+        count = await db_session.scalar(
+            select(func.count())
+            .select_from(MemoryAnalysis)
+            .where(MemoryAnalysis.context_id == ctx_id)
+        )
+        assert count == 0
+
+    @pytest.mark.asyncio
     async def test_byok_lane_still_requires_seeded_default_row(self, db_session) -> None:
         """The strict pre-#1569 contract is unchanged on the BYOK lane."""
         service = AnalysisOrchestrator(db_session)

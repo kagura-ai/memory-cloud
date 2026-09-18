@@ -419,13 +419,13 @@ async def preview_analysis(
             db, workspace_id=workspace_id, context_id=context_id
         )
     # #1570: price from the same ``llm_pricing`` snapshot the run will
-    # freeze — the caller-pinned ``body.model_id`` when given (an unknown id
-    # is the same 422 ``start`` raises), else the lane's model (#1569: the
-    # managed model when the workspace would run on it). No row →
-    # ``estimated_cost_cents=null`` rather than a 500. The label is the
-    # snapshot's model so preview and run name the same rate card.
+    # freeze — the caller-pinned ``body.model_id`` when given (an unknown id,
+    # or any id on the managed lane, is the same 422 ``start`` raises), else
+    # the lane's model (#1569: the managed model when the workspace would run
+    # on it). No row → ``estimated_cost_cents=null`` rather than a 500. The
+    # label is the snapshot's model so preview and run name the same rate card.
     provider, model = await preview_pricing_target(
-        db, workspace_id=workspace_id, context_id=context_id
+        db, workspace_id=workspace_id, context_id=context_id, model_id=body.model_id
     )
     pricing = await try_resolve_pricing_row(db, body.model_id, provider=provider, model=model)
     estimate = estimate_cost(

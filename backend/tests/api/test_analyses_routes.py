@@ -183,6 +183,28 @@ class TestPreview:
         # the default card (0.2 / 1.25) would have said 1 cent.
         assert body["estimated_cost_cents"] == 96
 
+    def test_preview_refuses_pinned_model_on_managed_lane(self, client, db_mock):
+        """#1569: on the managed lane a pinned ``model_id`` is the same 422
+        ``start`` raises — the preview must not quote a rate card for a model
+        the deployment's fixed lane will never call."""
+        from services.analysis.llm_lane import managed_lane
+
+        db_mock.execute.side_effect = [
+            _scalar_one(_TEST_CONTEXT_ID),  # Context boundary
+            _scalar_one(100),  # count_context_memories
+        ]
+        with patch(
+            "services.analysis.llm_lane.try_resolve_analysis_lane",
+            new=AsyncMock(return_value=managed_lane("self_hosted", "qwen3:8b")),
+        ):
+            response = client.post(
+                f"/api/v1/contexts/{_TEST_CONTEXT_ID}/analyses/preview",
+                json={"model_id": 42},
+            )
+        assert response.status_code == 422, response.text
+        assert "model_id" in response.text
+        assert "self_hosted/qwen3:8b" in response.text
+
     def test_preview_unknown_pinned_model_is_422(self, client, db_mock):
         """A ``model_id`` with no ``llm_pricing`` row is the client error
         ``start`` returns, not a silent fall-back to the default model."""

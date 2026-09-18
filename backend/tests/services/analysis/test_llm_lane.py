@@ -20,6 +20,7 @@ from services.analysis.llm_lane import (
     byok_lane,
     lane_for_run,
     managed_lane,
+    pinned_pricing_id,
     preview_pricing_target,
     resolve_analysis_lane,
     try_resolve_analysis_lane,
@@ -160,6 +161,36 @@ class TestHelpers:
         )
         assert await preview_pricing_target(
             _db("basic"), workspace_id=uuid4(), context_id=None
+        ) == ("openai", "gpt-5-nano")
+
+    def test_pinned_pricing_id_passes_through_except_on_managed_lane(self) -> None:
+        """A pinned ``llm_pricing`` row is honoured on BYOK and on the
+        preview's no-lane default; the managed lane refuses it (the snapshot
+        must name the model that actually runs)."""
+        assert pinned_pricing_id(byok_lane(), 42) == 42
+        assert pinned_pricing_id(None, 42) == 42
+        assert pinned_pricing_id(managed_lane("self_hosted", "qwen3:8b"), None) is None
+        with pytest.raises(ValidationError) as exc_info:
+            pinned_pricing_id(managed_lane("self_hosted", "qwen3:8b"), 42)
+        assert exc_info.value.details["field"] == "model_id"
+        assert "self_hosted/qwen3:8b" in str(exc_info.value)
+
+    @pytest.mark.asyncio
+    async def test_preview_pricing_target_refuses_pinned_id_on_managed_lane(
+        self, monkeypatch
+    ) -> None:
+        """``/preview`` applies the same rule as ``start()``: a pinned row on
+        the managed lane is a 422, while the no-lane default still takes it."""
+        monkeypatch.setattr(
+            "services.analysis.llm_lane.get_settings",
+            lambda: _settings(monkeypatch, enable_byok=False, **_MANAGED),
+        )
+        with pytest.raises(ValidationError):
+            await preview_pricing_target(
+                _db("pro"), workspace_id=uuid4(), context_id=None, model_id=42
+            )
+        assert await preview_pricing_target(
+            _db("basic"), workspace_id=uuid4(), context_id=None, model_id=42
         ) == ("openai", "gpt-5-nano")
 
     def test_lane_for_run_rebuilds_from_row(self) -> None:

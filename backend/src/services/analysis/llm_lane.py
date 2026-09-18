@@ -115,6 +115,30 @@ def lane_for_run(*, paid_by: str, provider: str | None, model: str | None) -> An
     return byok_lane()
 
 
+def pinned_pricing_id(lane: AnalysisLane | None, model_id: int | None) -> int | None:
+    """The caller-pinned ``llm_pricing`` row a lane can honour (#1569).
+
+    ``model_id`` picks the rate card on the BYOK lane (and on the preview's
+    no-lane default) exactly as before. The managed lane labels on the
+    deployment's fixed model, so a pinned row would freeze a ``model_snapshot``
+    — and the run's cost attribution — for a model the provider never saw;
+    refuse it with the VAL-001 the unknown-id case already returns.
+
+    Raises:
+        ValidationError: ``model_id`` given on the managed lane (422,
+            ``field="model_id"``).
+    """
+    if model_id is None or lane is None or lane.kind != "managed":
+        return model_id
+    raise ValidationError(
+        f"model_id={model_id} cannot be pinned on the managed LLM lane: the run "
+        f"labels on the deployment's {lane.provider}/{lane.primary_model}. "
+        "Omit model_id.",
+        field="model_id",
+        model_id=model_id,
+    )
+
+
 def _as_uuid(value: UUID | str) -> UUID:
     return value if isinstance(value, UUID) else UUID(str(value))
 
@@ -267,15 +291,25 @@ async def try_resolve_analysis_lane(
 
 
 async def preview_pricing_target(
-    db: AsyncSession, *, workspace_id: UUID | str, context_id: UUID | str | None
+    db: AsyncSession,
+    *,
+    workspace_id: UUID | str,
+    context_id: UUID | str | None,
+    model_id: int | None = None,
 ) -> tuple[str, str]:
     """``(provider, model)`` the preview should price (#1569).
 
     The lane the run would take, or the BYOK default when no lane applies —
     so a workspace that will be refused at ``start()`` still sees the same
-    rate card it always did.
+    rate card it always did. ``model_id`` is the caller-pinned row, checked
+    against the lane the same way ``start()`` does (``pinned_pricing_id``) so
+    preview and run refuse identically.
+
+    Raises:
+        ValidationError: ``model_id`` pinned on the managed lane.
     """
     lane = await try_resolve_analysis_lane(db, workspace_id=workspace_id, context_id=context_id)
+    pinned_pricing_id(lane, model_id)
     if lane is None:
         return DEFAULT_PROVIDER, DEFAULT_MODEL_ID
     return lane.provider, lane.primary_model

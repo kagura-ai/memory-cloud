@@ -60,7 +60,7 @@ from models.llm_pricing import LLMPricing
 from services.analysis import labeler as analysis_labeler
 from services.analysis.byok_resolver import assert_openai_byok_key_available
 from services.analysis.clusterer import cluster_high_dim
-from services.analysis.llm_lane import AnalysisLane, lane_for_run
+from services.analysis.llm_lane import AnalysisLane, lane_for_run, pinned_pricing_id
 from services.analysis.preview import DEFAULT_MODEL_ID, DEFAULT_PROVIDER, estimate_cost
 from services.analysis.projector import project_to_2d
 from services.analysis.reporter import (
@@ -329,8 +329,11 @@ async def resolve_lane_pricing(
     is seeded by Alembic, so a missing row is a deployment fault → 500).
     The managed lane must run even when the operator has not priced its
     model: ``None`` row, empty-rate snapshot, ``cost_*_cents`` stay NULL.
-    A caller-pinned ``model_id`` is honoured on both lanes.
+    A caller-pinned ``model_id`` is honoured on the BYOK lane only; the
+    managed lane refuses it (``pinned_pricing_id``) so the snapshot always
+    names the model that actually runs.
     """
+    model_id = pinned_pricing_id(lane, model_id)
     if lane.kind == "byok":
         return await _resolve_pricing_row(db, model_id)
     resolved = await try_resolve_pricing_row(

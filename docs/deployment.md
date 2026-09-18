@@ -630,7 +630,10 @@ an unpriced model runs with `memory_analyses.model_id = NULL` and
 `cost_estimated_cents` / `cost_actual_cents` = `NULL` ("cost unknown", the
 same posture #1570 gave unpriced embeddings). To track spend, price it with
 `LLM_PRICING_OVERRIDES` (previous section); `/preview` and the run then quote
-the same rate card.
+the same rate card. The REST `model_id` (an `llm_pricing` row to pin) is
+honoured on the BYOK lane only — on the managed lane both `/preview` and
+`start` refuse it with `VAL-001`, since the snapshot and cost attribution
+must name the model the lane actually runs.
 
 ### Recipe: hosted deployment with no BYOK at all
 
