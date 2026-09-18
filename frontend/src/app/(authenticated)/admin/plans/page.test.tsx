@@ -165,19 +165,22 @@ const PRO = {
 // #1548: XL — every PRO feature, higher limits.
 const PROMAX = {
   ...PRO,
+  // Mirrors backend PLAN_PROMAX (config/plan_tiers.py) so the tiers table
+  // test exercises values production can actually return.
   name: "promax",
   display_name: "XL",
-  price_monthly: 300,
+  price_monthly: 0, // legacy field, placeholder — no pricing in this repo (#1096)
   max_contexts_per_workspace: 1000,
   max_members_per_workspace: 50,
   max_resource_tokens: 150,
-  mcp_calls_per_day: 100000,
-  rest_calls_per_day: 10000,
+  max_connectors: 50,
+  mcp_calls_per_day: 250000,
+  rest_calls_per_day: 25000,
   public_calls_per_day: 5000,
-  bound_public_calls_per_minute: 300,
-  analysis_runs_per_day: 10,
-  storage_limit_bytes: 100 * 1024 * 1024 * 1024,
-  sleep_enabled_contexts_limit: 10,
+  bound_public_calls_per_minute: 500,
+  analysis_runs_per_day: 15,
+  storage_limit_bytes: 50 * 1024 * 1024 * 1024,
+  sleep_enabled_contexts_limit: 15,
 };
 
 beforeEach(() => {
