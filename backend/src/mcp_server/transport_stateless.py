@@ -295,10 +295,15 @@ async def handle_stateless_post(
         method, params = _validate(body, headers)
     except _Rejected as rejected:
         # ChatGPT-class clients can only be exercised in production, so the
-        # reason has to be readable from the log alone.
+        # reason — and which mirrored headers the client did send (names
+        # only) — has to be readable from the log alone.
+        mcp_headers = sorted(
+            name.decode("latin-1")[:_SHOWN_CHARS] for name in headers if name.startswith(b"mcp-")
+        )
         logger.warning(
             f"MCP stateless request rejected: method={_shown(method)!r}, "
-            f"code={rejected.code}, reason={rejected.message!r}, user={user_id}"
+            f"code={rejected.code}, reason={rejected.message!r}, "
+            f"mcp_headers={mcp_headers}, user={user_id}"
         )
         await _send_error(
             send, rejected.status, request_id, rejected.code, rejected.message, rejected.data
