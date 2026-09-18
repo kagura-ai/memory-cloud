@@ -359,10 +359,16 @@ async def regenerate_api_key(
                 detail="Cannot regenerate a revoked key",
             )
 
-        # Store old key info
+        # Store old key info. agent_id / bound_context_id are immutable
+        # bindings — the replacement must keep them, otherwise regenerating an
+        # agent-bound key silently drops its agent containment (and picks up
+        # the longer workspace default instead of the agent one — #1537), and
+        # a public-bound key turns into an unbound one.
         key_name = old_key.name
         key_workspace_id = old_key.workspace_id
         key_expires_at = old_key.expires_at
+        key_agent_id = old_key.agent_id
+        key_bound_context_id = old_key.bound_context_id
 
         # Carry the remaining lifetime forward. A key that had no expiry (or
         # whose expiry already passed) leaves expires_days=None so the new key
@@ -383,6 +389,8 @@ async def regenerate_api_key(
             user_id=user_id,
             expires_days=expires_days,
             workspace_id=key_workspace_id,
+            bound_context_id=key_bound_context_id,
+            agent_id=key_agent_id,
         )
 
         await db.commit()
@@ -392,6 +400,11 @@ async def regenerate_api_key(
         response_data = _format_key_response(new_key)
         return APIKeyCreateResponse(**response_data.model_dump(), api_key=new_api_key)
 
+    except ValueError as e:
+        # create_key re-validates the carried bindings (agent must still be
+        # active, bound context still public) — surface that as a client
+        # error like the create route does, not a 500.
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e)) from e
     except HTTPException:
         raise
     except Exception as e:
