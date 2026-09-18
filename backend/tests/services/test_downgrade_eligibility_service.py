@@ -257,6 +257,25 @@ async def test_evaluate_pro_targets_free_then_basic_in_order():
 
 
 @pytest.mark.asyncio
+async def test_evaluate_never_evaluates_the_current_tier_even_when_over_its_limits():
+    """#1552: an env-lowered PRO limit cannot make an unchanged PRO workspace
+    "ineligible for its own tier" — only strictly-lower tiers are ever
+    evaluated, so a workspace that wakes up over its limit still just sees
+    (blocked) downgrade targets, not a verdict on the tier it is already on."""
+    svc = _svc()
+    svc.current_usage = AsyncMock(
+        return_value=_usage(
+            memories=PRO.memory_limit + 1, contexts=PRO.max_contexts_per_workspace + 1
+        )
+    )
+    targets = await svc.evaluate(_ws(plan_name="pro"))
+    assert [t.target_plan for t in targets] == ["free", "basic"]
+    # The usage really was over — both lower tiers are blocked — yet "pro"
+    # itself never appears in the result.
+    assert all(not t.eligible for t in targets)
+
+
+@pytest.mark.asyncio
 async def test_evaluate_unknown_plan_fails_closed_to_no_targets():
     svc = _svc()
     svc.current_usage = AsyncMock()
