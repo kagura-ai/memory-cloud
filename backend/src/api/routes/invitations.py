@@ -21,6 +21,7 @@ from auth.programmatic_workspace_auth import (
     authorize_workspace_management,
 )
 from auth.workspace_roles import WorkspaceRole
+from config.plan_tiers import has_feature
 from db.base import get_db
 from models.auth import Workspace, WorkspaceInvitation, WorkspaceMember
 from models.schemas import (
@@ -96,7 +97,8 @@ async def create_invitation(
         result = await db.execute(stmt)
         workspace = result.scalar_one()
 
-        if workspace.plan_name in ["free", "basic"]:
+        # Feature-based (#1548): the tier registry decides; unknown tiers fail closed.
+        if not has_feature(workspace.plan_name, "team_invitations"):
             raise HTTPException(
                 status_code=403,
                 detail="Team invitations require Pro plan. Upgrade your plan to invite team members.",

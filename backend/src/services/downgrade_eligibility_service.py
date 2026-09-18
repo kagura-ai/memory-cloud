@@ -29,15 +29,14 @@ from pydantic import BaseModel
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from config.plan_tiers import PLAN_TIERS, PlanTier
+from config.plan_tiers import PLAN_ORDER, PLAN_TIERS, PlanTier, plan_rank
 from models.auth import Context, Workspace, WorkspaceMember, _zero_floor
 from models.file_objects import FileObject
 from models.memory import Memory
 from models.resource import ResourceToken, WorkspaceConnector
 
-# Lowest → highest tier. A downgrade target is any tier strictly left of the
-# workspace's current tier; mirrors ``plan_order`` in workspace_plan.py.
-_PLAN_ORDER: list[str] = ["free", "basic", "pro"]
+# A downgrade target is any tier strictly below the workspace's current tier in
+# ``PLAN_ORDER`` (lowest → highest, derived from the registry — #1548).
 
 
 class DowngradeDimension(StrEnum):
@@ -115,16 +114,14 @@ class DowngradeEligibilityService:
         Returns an empty list when the workspace is already on the lowest tier
         (or on an unknown tier — fail-closed to "no downgrade targets").
         """
-        current_index = (
-            _PLAN_ORDER.index(workspace.plan_name) if workspace.plan_name in _PLAN_ORDER else 0
-        )
+        current_index = plan_rank(workspace.plan_name)
         if current_index == 0:
             return []
 
         usage = await self.current_usage(workspace.id)
         return [
             self._evaluate_tier(workspace, usage, PLAN_TIERS[target])
-            for target in _PLAN_ORDER[:current_index]
+            for target in PLAN_ORDER[:current_index]
         ]
 
     async def current_usage(self, workspace_id: UUID) -> WorkspaceUsage:

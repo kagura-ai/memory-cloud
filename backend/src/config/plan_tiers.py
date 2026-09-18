@@ -22,6 +22,12 @@ class PlanName(StrEnum):
     FREE = "free"
     BASIC = "basic"
     PRO = "pro"
+    # Issue #1548: XL ("Pro Max"). The key is the contract with the billing
+    # service and is immutable once shipped. Spelled without an underscore so
+    # the env override prefix stays unambiguous: ``PLAN_PRO_MAX_CONTEXTS``
+    # already means "pro tier, max_contexts" (a ``pro_max`` key would yield
+    # ``PLAN_PRO_MAX_MAX_CONTEXTS`` next to it).
+    PROMAX = "promax"
 
 
 @dataclass(frozen=True)
@@ -193,12 +199,70 @@ PLAN_PRO = PlanTier(
     ),
 )
 
-# Plan tier registry
+PLAN_PROMAX = PlanTier(
+    name="promax",
+    display_name="XL",
+    # Legacy USD field served by the plan endpoints. Pricing does not live in
+    # this repo (#1096 / #1141) — the plan key is the whole contract with the
+    # billing service — so XL carries a placeholder, not a price.
+    price_monthly=0,
+    max_contexts_per_workspace=1000,  # Issue #1547 matrix
+    max_members_per_workspace=50,  # Issue #1547 matrix
+    # Provisional 5x PRO so XL is never below PRO; #1551 (gate re-map) sets
+    # the final resource-token / connector seat counts.
+    max_resource_tokens=150,
+    max_connectors=50,
+    allows_shared_contexts=True,
+    memory_limit=100000,  # Issue #1547 matrix
+    daily_api_limit=50000,  # Legacy (backward compatibility)
+    weekly_api_limit=250000,  # Legacy (backward compatibility)
+    mcp_calls_per_day=250000,
+    mcp_calls_per_week=1250000,
+    rest_calls_per_day=25000,
+    rest_calls_per_week=125000,
+    public_calls_per_day=5000,
+    public_calls_per_week=25000,
+    bound_public_calls_per_minute=500,
+    analysis_runs_per_day=15,
+    storage_limit_bytes=50 * 1024 * 1024 * 1024,  # 50 GiB
+    sleep_enabled_contexts_limit=15,
+    embedding_daily_cap_usd=50.0,
+    embedding_monthly_cap_usd=1500.0,
+    # Same capability set as PRO; XL-only capabilities arrive with #1551.
+    features=PLAN_PRO.features,
+)
+
+# Plan tier registry. Insertion order IS the upgrade order (free → ... → promax):
+# the plan endpoints, downgrade targets and ``plan_rank`` all rely on it.
 PLAN_TIERS: dict[str, PlanTier] = {
     PlanName.FREE: PLAN_FREE,
     PlanName.BASIC: PLAN_BASIC,
     PlanName.PRO: PLAN_PRO,
+    PlanName.PROMAX: PLAN_PROMAX,
 }
+
+# Lowest → highest tier, derived from the registry so a new tier is added in
+# exactly one place (#1548). Prefer ``plan_rank`` / ``plan_at_least`` over
+# hardcoded name lists or ``== "pro"`` checks that mean "pro or better".
+PLAN_ORDER: tuple[str, ...] = tuple(PLAN_TIERS)
+
+
+def plan_rank(plan_name: str | None) -> int:
+    """Position of ``plan_name`` in the upgrade order (0 = lowest tier).
+
+    Unknown or missing names rank as the lowest tier — the fail-closed
+    fallback every existing ``... if name in order else 0`` site used.
+    """
+    try:
+        return PLAN_ORDER.index(plan_name)  # type: ignore[arg-type]
+    except ValueError:
+        return 0
+
+
+def plan_at_least(plan_name: str | None, minimum: str) -> bool:
+    """True when ``plan_name`` is ``minimum`` or a higher tier."""
+    return plan_rank(plan_name) >= plan_rank(minimum)
+
 
 # Feature to minimum plan mapping
 FEATURE_MIN_PLANS: dict[str, str] = {
@@ -256,6 +320,16 @@ def _apply_settings_overrides() -> None:
             "embedding_daily_cap_usd": settings.plan_pro_embedding_daily_cap_usd,
             "embedding_monthly_cap_usd": settings.plan_pro_embedding_monthly_cap_usd,
             "display_name": settings.plan_pro_display_name,
+        },
+        PlanName.PROMAX: {
+            "max_contexts_per_workspace": settings.plan_promax_max_contexts,
+            "memory_limit": settings.plan_promax_memory_limit,
+            "mcp_calls_per_day": settings.plan_promax_mcp_calls_per_day,
+            "storage_limit_bytes": settings.plan_promax_storage_limit_bytes,
+            "sleep_enabled_contexts_limit": settings.plan_promax_sleep_enabled_contexts_limit,
+            "embedding_daily_cap_usd": settings.plan_promax_embedding_daily_cap_usd,
+            "embedding_monthly_cap_usd": settings.plan_promax_embedding_monthly_cap_usd,
+            "display_name": settings.plan_promax_display_name,
         },
     }
 

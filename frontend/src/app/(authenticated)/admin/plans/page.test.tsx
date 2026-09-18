@@ -10,8 +10,9 @@
  * Skips the `useTabParam` URL plumbing by pinning the active tab via stub.
  */
 
-import { render, screen, fireEvent } from "@testing-library/react";
+import { render, screen, fireEvent, within } from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
+import { PLAN_TIER_ORDER } from "@/lib/utils/planLabel";
 
 const mockGetAdminWorkspaces = vi.fn();
 const mockGetAdminPlanAudit = vi.fn();
@@ -59,6 +60,40 @@ vi.mock("@/components/common/PageContainer", () => ({
 }));
 vi.mock("@/components/common/PageHeader", () => ({
   PageHeader: ({ title }: { title: string }) => <h1>{title}</h1>,
+}));
+
+// Radix Select needs pointer APIs jsdom lacks; render the change-plan select
+// as a native <select> so the option list is inspectable (same idiom as the
+// signup-gate page test).
+type SelectChildren = { children: React.ReactNode };
+vi.mock("@/components/ui/select", () => ({
+  Select: ({
+    value,
+    onValueChange,
+    children,
+  }: {
+    value: string;
+    onValueChange?: (v: string) => void;
+    children: React.ReactNode;
+  }) => (
+    <select
+      data-testid="select-mock"
+      value={value}
+      onChange={(e) => onValueChange?.(e.target.value)}
+    >
+      {children}
+    </select>
+  ),
+  SelectTrigger: ({ children }: SelectChildren) => <>{children}</>,
+  SelectValue: () => null,
+  SelectContent: ({ children }: SelectChildren) => <>{children}</>,
+  SelectItem: ({
+    value,
+    children,
+  }: {
+    value: string;
+    children: React.ReactNode;
+  }) => <option value={value}>{children}</option>,
 }));
 
 import AdminPlansPage from "./page";
@@ -127,11 +162,32 @@ const PRO = {
   ],
 };
 
+// #1548: XL — every PRO feature, higher limits.
+const PROMAX = {
+  ...PRO,
+  // Mirrors backend PLAN_PROMAX (config/plan_tiers.py) so the tiers table
+  // test exercises values production can actually return.
+  name: "promax",
+  display_name: "XL",
+  price_monthly: 0, // legacy field, placeholder — no pricing in this repo (#1096)
+  max_contexts_per_workspace: 1000,
+  max_members_per_workspace: 50,
+  max_resource_tokens: 150,
+  max_connectors: 50,
+  mcp_calls_per_day: 250000,
+  rest_calls_per_day: 25000,
+  public_calls_per_day: 5000,
+  bound_public_calls_per_minute: 500,
+  analysis_runs_per_day: 15,
+  storage_limit_bytes: 50 * 1024 * 1024 * 1024,
+  sleep_enabled_contexts_limit: 15,
+};
+
 beforeEach(() => {
   currentTab = "tiers";
   mockGetAdminWorkspaces.mockResolvedValue([]);
   mockGetAdminPlanAudit.mockResolvedValue([]);
-  mockGetAdminPlanTiers.mockResolvedValue([FREE, BASIC, PRO]);
+  mockGetAdminPlanTiers.mockResolvedValue([FREE, BASIC, PRO, PROMAX]);
   mockGetWorkspaceQuotas.mockReset();
   mockUpdateWorkspaceAddons.mockReset();
 });
@@ -246,6 +302,9 @@ describe("AdminPlansPage — tiers tab", () => {
     expect(screen.getByRole("columnheader", { name: "S" })).toBeInTheDocument();
     expect(screen.getByRole("columnheader", { name: "M" })).toBeInTheDocument();
     expect(screen.getByRole("columnheader", { name: "L" })).toBeInTheDocument();
+    expect(
+      screen.getByRole("columnheader", { name: "XL" }),
+    ).toBeInTheDocument();
   });
 
   it("renders zero-quota cells as em-dash, non-zero with locale grouping", async () => {
@@ -384,6 +443,31 @@ describe("AdminPlansPage audit tab — actor link", () => {
 
     expect(await screen.findByText("erased-pseudonym")).toBeInTheDocument();
     expect(screen.queryByRole("link", { name: "erased-pseudonym" })).toBeNull();
+  });
+});
+
+describe("AdminPlansPage — workspaces tab change-plan dialog (#1548)", () => {
+  beforeEach(() => {
+    currentTab = "workspaces";
+    mockGetAdminWorkspaces.mockResolvedValue([WORKSPACE_PRO_SUMMARY]);
+  });
+
+  it("offers one option per PLAN_TIER_ORDER entry, promax included", async () => {
+    render(<AdminPlansPage />);
+    fireEvent.click(
+      await screen.findByText("admin.plans.workspacesTable.changePlan"),
+    );
+    await screen.findByText("admin.plans.changePlanDialog.title");
+
+    const options = within(screen.getByTestId("select-mock")).getAllByRole(
+      "option",
+    ) as HTMLOptionElement[];
+    expect(options).toHaveLength(4);
+    expect(options.map((o) => o.value)).toEqual([...PLAN_TIER_ORDER]);
+    // Labels come from the tiersTable codes (S/M/L/XL), not a second list.
+    expect(options.map((o) => o.textContent)).toEqual(
+      PLAN_TIER_ORDER.map((p) => `admin.plans.tiersTable.${p}`),
+    );
   });
 });
 

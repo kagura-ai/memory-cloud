@@ -215,7 +215,7 @@ docker compose up -d
 - **Frontend env vars**: Copy `frontend/.env.example` to `frontend/.env.local` and set:
   - `NEXT_PUBLIC_API_URL` — backend URL (default: `http://localhost:8080`)
   - `NEXT_PUBLIC_APP_URL` — frontend URL for metadata
-  - `NEXT_PUBLIC_PLAN_FREE_DISPLAY_NAME` / `BASIC` / `PRO` — plan display name customization (default: S/M/L)
+  - `NEXT_PUBLIC_PLAN_FREE_DISPLAY_NAME` / `BASIC` / `PRO` / `PROMAX` — plan display name customization (default: S/M/L/XL)
 
 </details>
 
@@ -280,7 +280,7 @@ Users with the same email address across providers share a single account. Passw
 
 ## Plan Tier Customization
 
-Plans control per-workspace resource limits (contexts / memories / MCP calls per day). For self-hosted single-user setups, assign the L (Pro) plan to your workspace. Defaults, environment-variable overrides, and optional Stripe self-service billing: **[Deployment → Plan Tiers](docs/deployment.md#plan-tiers)**
+Plans control per-workspace resource limits (contexts / memories / MCP calls per day). Four tiers ship by default: S (`free`), M (`basic`), L (`pro`) and XL (`promax`). For self-hosted single-user setups, assign the L (Pro) plan to your workspace. Defaults, environment-variable overrides, and optional Stripe self-service billing: **[Deployment → Plan Tiers](docs/deployment.md#plan-tiers)**
 
 ## Development with Claude Code
 

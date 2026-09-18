@@ -105,6 +105,7 @@ import {
   type AddonValuesByKey,
 } from "./_addon-types";
 import { SpendCapEditDialog } from "./SpendCapEditDialog";
+import { PLAN_TIER_ORDER, type PlanTier } from "@/lib/utils/planLabel";
 
 const PLAN_TABS = ["workspaces", "tiers", "audit"] as const;
 
@@ -304,7 +305,7 @@ export default function AdminPlansPage() {
 
     try {
       await updateWorkspacePlan(selectedWorkspace.id, {
-        plan_name: newPlan as "free" | "basic" | "pro",
+        plan_name: newPlan as PlanTier,
       });
 
       toast({
@@ -481,10 +482,7 @@ export default function AdminPlansPage() {
                             </TableCell>
                             <TableCell>
                               <PlanBadge
-                                planName={
-                                  workspace.plan_name as
-                                    "free" | "basic" | "pro"
-                                }
+                                planName={workspace.plan_name as PlanTier}
                               />
                             </TableCell>
                             <TableCell className="text-right">
@@ -808,18 +806,14 @@ export default function AdminPlansPage() {
                           {entry.old_plan && (
                             <>
                               <PlanBadge
-                                planName={
-                                  entry.old_plan as "free" | "basic" | "pro"
-                                }
+                                planName={entry.old_plan as PlanTier}
                                 size="sm"
                               />
                               <span className="mx-2">→</span>
                             </>
                           )}
                           <PlanBadge
-                            planName={
-                              entry.new_plan as "free" | "basic" | "pro"
-                            }
+                            planName={entry.new_plan as PlanTier}
                             size="sm"
                           />
                         </TableCell>
@@ -877,9 +871,7 @@ export default function AdminPlansPage() {
               <div className="mt-2">
                 {selectedWorkspace && (
                   <PlanBadge
-                    planName={
-                      selectedWorkspace.plan_name as "free" | "basic" | "pro"
-                    }
+                    planName={selectedWorkspace.plan_name as PlanTier}
                   />
                 )}
               </div>
@@ -894,9 +886,11 @@ export default function AdminPlansPage() {
                   <SelectValue />
                 </SelectTrigger>
                 <SelectContent>
-                  <SelectItem value="free">{t("tiersTable.free")}</SelectItem>
-                  <SelectItem value="basic">{t("tiersTable.basic")}</SelectItem>
-                  <SelectItem value="pro">{t("tiersTable.pro")}</SelectItem>
+                  {PLAN_TIER_ORDER.map((plan) => (
+                    <SelectItem key={plan} value={plan}>
+                      {t(`tiersTable.${plan}`)}
+                    </SelectItem>
+                  ))}
                 </SelectContent>
               </Select>
             </div>

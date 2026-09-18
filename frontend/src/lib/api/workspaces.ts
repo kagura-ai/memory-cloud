@@ -425,7 +425,7 @@ export interface PlanTierFeature {
   team_invitations: boolean;
 }
 
-/** Curated per-tier feature matrix (free → basic → pro) for the Plan page (#1138). */
+/** Curated per-tier feature matrix (upgrade order, free → promax) for the Plan page (#1138). */
 export async function getPlanTierMatrix(): Promise<PlanTierFeature[]> {
   return apiClient.get<PlanTierFeature[]>("/api/v1/workspaces/plans/tiers");
 }

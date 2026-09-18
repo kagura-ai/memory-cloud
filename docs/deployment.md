@@ -87,10 +87,11 @@ NEXT_PUBLIC_API_URL=https://api.your-domain.com
 # Required: Frontend URL (for OpenGraph metadata)
 NEXT_PUBLIC_APP_URL=https://your-domain.com
 
-# Optional: Custom plan display names (default: S/M/L)
+# Optional: Custom plan display names (default: S/M/L/XL)
 # NEXT_PUBLIC_PLAN_FREE_DISPLAY_NAME=Free
 # NEXT_PUBLIC_PLAN_BASIC_DISPLAY_NAME=Standard
 # NEXT_PUBLIC_PLAN_PRO_DISPLAY_NAME=Premium
+# NEXT_PUBLIC_PLAN_PROMAX_DISPLAY_NAME=Premium Max
 ```
 
 ## Tag Co-Occurrence Cold-Start Seeding (Issue #223)
@@ -363,14 +364,20 @@ Plans control resource limits per workspace. Defaults:
 | S (Free) | 1 | 1,000 | 1,000 |
 | M (Basic) | 3 | 10,000 | 10,000 |
 | L (Pro) | 20 | 100,000 | 50,000 |
+| XL (Pro Max, key `promax`) | 1,000 | 100,000 | 250,000 |
 
-Override via environment variables:
+The plan *key* (`free` / `basic` / `pro` / `promax`) is what the admin API,
+the billing entitlement push and the `workspaces.plan_name` column use; the
+size code is only its default display name.
+
+Override via environment variables (`PLAN_<KEY>_<FIELD>`, key upper-cased):
 
 ```bash
 PLAN_FREE_MAX_CONTEXTS=5
 PLAN_FREE_MEMORY_LIMIT=5000
 PLAN_BASIC_MAX_CONTEXTS=10
 PLAN_PRO_MAX_CONTEXTS=50
+PLAN_PROMAX_MAX_CONTEXTS=2000
 ```
 
 For self-hosted single-user setups, assign the L (Pro) plan to your workspace. Plan changes are **admin-only** by default. For SaaS deployments with self-service billing, enable Stripe:
@@ -383,7 +390,7 @@ STRIPE_PRICE_BASIC=price_xxx
 STRIPE_PRICE_PRO=price_yyy
 ```
 
-Plan display names in the web UI can be customized via `NEXT_PUBLIC_PLAN_FREE_DISPLAY_NAME` / `BASIC` / `PRO` (see [Frontend Environment Variables](#frontend-environment-variables)).
+Plan display names in the web UI can be customized via `NEXT_PUBLIC_PLAN_FREE_DISPLAY_NAME` / `BASIC` / `PRO` / `PROMAX` (see [Frontend Environment Variables](#frontend-environment-variables)).
 
 ### Referral budget
 

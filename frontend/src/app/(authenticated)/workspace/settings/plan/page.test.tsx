@@ -54,7 +54,12 @@ vi.mock("@/lib/api/base", () => ({
     status = 0;
   },
 }));
-vi.mock("@/lib/utils/planLabel", () => ({
+// Keep the real tier predicates (isPlanTier / isPaidTier); echo the tier as
+// its label so assertions don't depend on S/M/L/XL vs env overrides.
+vi.mock("@/lib/utils/planLabel", async () => ({
+  ...(await vi.importActual<typeof import("@/lib/utils/planLabel")>(
+    "@/lib/utils/planLabel",
+  )),
   planLabelFromEnv: (tier: string) => tier,
 }));
 // The comparison matrix self-fetches and is covered by its own test; stub it
@@ -128,6 +133,20 @@ describe("WorkspacePlanPage (#1141)", () => {
     ).toBeInTheDocument();
     expect(screen.getByText("planPage.billingAmountHint")).toBeInTheDocument();
     expect(screen.queryByText("planPage.manageBilling")).toBeNull();
+  });
+
+  it("promax (paid) owner is subscribed: review-or-change button + billing hint (#1548)", async () => {
+    mockWorkspace = { current_user_role: "owner", plan_name: "promax" };
+    render(<WorkspacePlanPage />);
+    expect(
+      await screen.findByText("planPage.reviewOrChangePlan"),
+    ).toBeInTheDocument();
+    expect(screen.getByText("planPage.billingAmountHint")).toBeInTheDocument();
+    expect(screen.queryByText("planPage.manageBilling")).toBeNull();
+    // promax is a known tier → label resolves via planLabelFromEnv (echo),
+    // not the backend display_name.
+    expect(screen.getByText("promax")).toBeInTheDocument();
+    expect(screen.queryByText("Starter")).toBeNull();
   });
 
   it("free (unsubscribed) owner keeps the change-plan wording and shows no hint", async () => {

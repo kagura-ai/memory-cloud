@@ -151,6 +151,19 @@ def test_workspace_not_found_returns_404(billing):
     assert resp.status_code == 404
 
 
+@pytest.mark.parametrize("plan_name", ["free", "basic", "pro", "promax"])
+def test_accepts_every_registered_tier(billing, plan_name):
+    """#1548: the entitlement push is how XL reaches production — every key in
+    the registry must round-trip, not just the ones that existed at #954."""
+    ws = _make_ws()
+    resp = billing.client(ws).put(
+        _PATH, json={"plan_name": plan_name}, headers={"Authorization": "Bearer secret"}
+    )
+    assert resp.status_code == 200
+    assert resp.json()["plan_name"] == plan_name
+    assert ws.plan_name == plan_name
+
+
 def test_sets_plan_and_addons(billing):
     ws = _make_ws()
     resp = billing.client(ws).put(

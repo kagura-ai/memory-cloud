@@ -30,6 +30,7 @@ import { ContextBreakdownTable } from "@/components/dashboard/ContextBreakdownTa
 import { MemoryTimelineChart } from "@/components/dashboard/MemoryTimelineChart";
 import { AdminSections } from "@/components/dashboard/AdminSections";
 import { PlanBadge } from "@/components/common/PlanBadge";
+import type { PlanTier } from "@/lib/utils/planLabel";
 import { OnboardingCard } from "@/components/onboarding/OnboardingCard";
 import { useWorkspace } from "@/contexts/WorkspaceContext";
 import {
@@ -173,7 +174,7 @@ export default function WorkspaceStatsPage() {
             <h1 className="text-3xl font-bold">{t("overview")}</h1>
             {stats && (
               <PlanBadge
-                planName={stats.plan_name as "free" | "basic" | "pro"}
+                planName={stats.plan_name as PlanTier}
                 size="sm"
                 className="translate-y-0.5"
               />

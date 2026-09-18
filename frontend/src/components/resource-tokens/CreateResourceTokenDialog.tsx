@@ -36,6 +36,7 @@ import {
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import { useWorkspace } from "@/contexts/WorkspaceContext";
 import { getContexts, type Context } from "@/lib/api/contexts";
+import { isPlanTier, type PlanTier } from "@/lib/utils/planLabel";
 
 import {
   MAX_QUOTA_PER_TOKEN,
@@ -53,10 +54,14 @@ interface CreateResourceTokenDialogProps {
 }
 
 // Plan-based quota defaults and limits
-const QUOTA_CONFIG = {
+const QUOTA_CONFIG: Record<
+  PlanTier,
+  { default: number; min: number; max: number }
+> = {
   free: { default: 0, min: 0, max: 0 },
   basic: { default: 500, min: 1, max: 1000 },
   pro: { default: 1000, min: 1, max: 10000 },
+  promax: { default: 1000, min: 1, max: 10000 },
 };
 
 export function CreateResourceTokenDialog({
@@ -69,8 +74,8 @@ export function CreateResourceTokenDialog({
   const t = useTranslations("resourceTokens");
   const tCommon = useTranslations("common");
   const { currentWorkspace } = useWorkspace();
-  const planName = (currentWorkspace?.plan_name ||
-    "free") as keyof typeof QUOTA_CONFIG;
+  const rawPlan = currentWorkspace?.plan_name;
+  const planName: PlanTier = isPlanTier(rawPlan) ? rawPlan : "free";
   const quotaConfig = QUOTA_CONFIG[planName] || QUOTA_CONFIG.basic;
 
   // Calculate remaining quota (use centralized constants)

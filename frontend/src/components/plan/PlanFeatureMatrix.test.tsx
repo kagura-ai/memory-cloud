@@ -16,7 +16,11 @@ vi.mock("next-intl", () => ({
   useTranslations: (_ns: string) => stableTranslator,
 }));
 vi.mock("@/i18n", () => ({ useLocale: () => ({ locale: "en" }) }));
-vi.mock("@/lib/utils/planLabel", () => ({
+// Keep the real PLAN_TIER_ORDER (drives TIER_KEYS); echo the tier as its label.
+vi.mock("@/lib/utils/planLabel", async () => ({
+  ...(await vi.importActual<typeof import("@/lib/utils/planLabel")>(
+    "@/lib/utils/planLabel",
+  )),
   planLabelFromEnv: (tier: string) => tier,
 }));
 
@@ -86,6 +90,28 @@ const TIERS = [
     shared_contexts: true,
     team_invitations: true,
   },
+  {
+    // #1548: XL — every pro capability, higher limits. Values mirror the
+    // backend PLAN_PROMAX registry (config/plan_tiers.py).
+    name: "promax",
+    display_name: "XL",
+    max_contexts: 1000,
+    max_members: 50,
+    memory_limit: 100000,
+    storage_limit_bytes: 50 * 1024 ** 3,
+    mcp_calls_per_day: 250000,
+    rest_calls_per_day: 25000,
+    public_calls_per_day: 5000,
+    max_resource_tokens: 150,
+    max_connectors: 50,
+    analysis_runs_per_day: 15,
+    sleep_enabled_contexts_limit: 15,
+    reranking: true,
+    managed_embeddings: true,
+    secret_store: true,
+    shared_contexts: true,
+    team_invitations: true,
+  },
 ];
 
 beforeEach(() => {
@@ -104,17 +130,22 @@ describe("PlanFeatureMatrix (#1138)", () => {
     const connectors = rowOf("planMatrix.row_connectors");
     expect(connectors.getByText("3")).toBeInTheDocument(); // basic
     expect(connectors.getByText("10")).toBeInTheDocument(); // pro
+    expect(connectors.getByText("50")).toBeInTheDocument(); // promax
     expect(connectors.getAllByText("✗").length).toBe(1); // free = 0
 
-    // Locale-grouped number + GiB storage.
+    // Locale-grouped number + GiB storage. pro and promax share the memory
+    // limit (promax is a superset on features, not every quota).
     expect(
-      rowOf("planMatrix.row_memories").getByText("100,000"),
-    ).toBeInTheDocument();
+      rowOf("planMatrix.row_memories").getAllByText("100,000").length,
+    ).toBe(2);
     expect(
       rowOf("planMatrix.row_storage").getByText("100 MiB"),
     ).toBeInTheDocument();
     expect(
       rowOf("planMatrix.row_storage").getByText("10 GiB"),
+    ).toBeInTheDocument();
+    expect(
+      rowOf("planMatrix.row_storage").getByText("50 GiB"),
     ).toBeInTheDocument();
   });
 
@@ -123,18 +154,38 @@ describe("PlanFeatureMatrix (#1138)", () => {
     await screen.findByText("planMatrix.row_reranking");
 
     const reranking = rowOf("planMatrix.row_reranking");
-    expect(reranking.getAllByText("✓").length).toBe(2); // basic + pro
+    expect(reranking.getAllByText("✓").length).toBe(3); // basic + pro + promax
     expect(reranking.getAllByText("✗").length).toBe(1); // free
 
-    // team_invitations is Pro-only.
+    // team_invitations is Pro-or-better.
     const team = rowOf("planMatrix.row_teamInvitations");
-    expect(team.getAllByText("✓").length).toBe(1);
+    expect(team.getAllByText("✓").length).toBe(2);
     expect(team.getAllByText("✗").length).toBe(2);
 
     // secret_store (Volt) is included on every tier.
     const secrets = rowOf("planMatrix.row_secretStore");
-    expect(secrets.getAllByText("✓").length).toBe(3);
+    expect(secrets.getAllByText("✓").length).toBe(4);
     expect(secrets.queryByText("✗")).toBeNull();
+  });
+
+  it("labels every PLAN_TIER_ORDER tier via planLabelFromEnv, unknown tiers via display_name (#1548)", async () => {
+    mockGetMatrix.mockResolvedValue([
+      ...TIERS,
+      { ...TIERS[3], name: "enterprise", display_name: "Enterprise" },
+    ]);
+    render(<PlanFeatureMatrix />);
+    await screen.findByText("planMatrix.row_connectors");
+
+    // promax is a known key → env-resolvable label (mock echoes the tier),
+    // NOT the backend display_name.
+    expect(
+      screen.getByRole("columnheader", { name: "promax" }),
+    ).toBeInTheDocument();
+    expect(screen.queryByText("XL")).toBeNull();
+    // A tier the frontend doesn't know falls back to display_name.
+    expect(
+      screen.getByRole("columnheader", { name: "Enterprise" }),
+    ).toBeInTheDocument();
   });
 
   it("highlights the current tier and never renders a price", async () => {

@@ -29,6 +29,7 @@ TIER_RATE_LIMITS = {
     PlanName.FREE: RateLimitConfig(requests_per_minute=100),
     PlanName.BASIC: RateLimitConfig(requests_per_minute=300),
     PlanName.PRO: RateLimitConfig(requests_per_minute=1000),
+    PlanName.PROMAX: RateLimitConfig(requests_per_minute=5000),  # Issue #1548
 }
 
 

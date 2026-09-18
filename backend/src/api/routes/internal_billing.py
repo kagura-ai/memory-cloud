@@ -118,7 +118,10 @@ async def verify_billing_service_token(authorization: str | None = Header(None))
 class BillingPlanPush(BaseModel):
     """Entitlement push from the billing service (#954 boundary contract)."""
 
-    plan_name: str = Field(..., description="Entitlement tier: free | basic | pro")
+    plan_name: str = Field(
+        ...,
+        description="Entitlement tier: one of the registered plan keys (free | basic | pro | promax)",
+    )
     status: str | None = Field(
         default=None,
         max_length=50,

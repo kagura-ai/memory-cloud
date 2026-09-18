@@ -41,12 +41,12 @@ def client():
     app.dependency_overrides.clear()
 
 
-def test_list_plan_tiers_returns_three_tiers_in_canonical_order(client: TestClient) -> None:
+def test_list_plan_tiers_returns_four_tiers_in_canonical_order(client: TestClient) -> None:
     resp = client.get("/api/v1/admin/plans/tiers")
     assert resp.status_code == 200
     data = resp.json()
     assert isinstance(data, list)
-    assert [t["name"] for t in data] == ["free", "basic", "pro"]
+    assert [t["name"] for t in data] == ["free", "basic", "pro", "promax"]
 
 
 def test_list_plan_tiers_exposes_pivot_corrected_mcp_quota(client: TestClient) -> None:
@@ -56,7 +56,7 @@ def test_list_plan_tiers_exposes_pivot_corrected_mcp_quota(client: TestClient) -
     """
     resp = client.get("/api/v1/admin/plans/tiers")
     assert resp.status_code == 200
-    free, basic, pro = resp.json()
+    free, basic, pro, _promax = resp.json()
 
     assert free["mcp_calls_per_day"] == 1000
     assert basic["mcp_calls_per_day"] == 10000
@@ -71,7 +71,7 @@ def test_list_plan_tiers_exposes_pivot_corrected_mcp_quota(client: TestClient) -
 
 def test_list_plan_tiers_serializes_pro_only_features(client: TestClient) -> None:
     resp = client.get("/api/v1/admin/plans/tiers")
-    free, basic, pro = resp.json()
+    free, basic, pro, _promax = resp.json()
 
     # Features arrive sorted for deterministic output.
     assert pro["features"] == sorted(pro["features"])
@@ -95,7 +95,7 @@ def test_list_plan_tiers_exposes_new_quota_fields(client: TestClient) -> None:
     """Cover the 10 new rows added by #664 (data side — values come from
     the dataclass, which already had these fields)."""
     resp = client.get("/api/v1/admin/plans/tiers")
-    free, basic, pro = resp.json()
+    free, basic, pro, _promax = resp.json()
 
     # storage_limit_bytes
     assert free["storage_limit_bytes"] == 100 * 1024 * 1024
@@ -148,3 +148,15 @@ def test_list_plan_tiers_reflects_runtime_override(client: TestClient, monkeypat
 # through SessionMiddleware → Redis, leaking the test out of the api-tier
 # unit boundary (and failing in local environments without a running
 # Redis container).
+
+
+def test_list_plan_tiers_serves_promax_last_with_pro_features(client: TestClient) -> None:
+    """#1548: XL (``promax``) is the fourth row, carries every PRO feature and a
+    placeholder price — pricing does not live in this repo (#1096)."""
+    resp = client.get("/api/v1/admin/plans/tiers")
+    _free, _basic, pro, promax = resp.json()
+    assert promax["name"] == "promax"
+    assert set(promax["features"]) >= set(pro["features"])
+    assert promax["price_monthly"] == 0
+    assert promax["max_contexts_per_workspace"] == 1000
+    assert promax["max_members_per_workspace"] == 50

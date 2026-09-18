@@ -13,6 +13,7 @@ import { useRouter } from "next/navigation";
 import { useTranslations } from "next-intl";
 import { hasWorkspaceRole, WorkspaceRole } from "@/lib/auth/rbac";
 import { copyText } from "@/lib/utils/clipboard";
+import { planAtLeast } from "@/lib/utils/planLabel";
 import { PageHeader } from "@/components/common/PageHeader";
 import { PageContainer } from "@/components/common/PageContainer";
 import { Section } from "@/components/common/Section";
@@ -146,8 +147,8 @@ export default function WorkspaceMembersPage() {
   // Role permissions section toggle
   const [showRolePermissions, setShowRolePermissions] = useState(false);
 
-  // Check if Pro plan
-  const isProPlan = currentWorkspace?.plan_name === "pro";
+  // Check if Pro plan or better (team invitations)
+  const isProPlan = planAtLeast(currentWorkspace?.plan_name, "pro");
 
   useEffect(() => {
     // Issue #398: skip the four protected fetches for member/viewer — the

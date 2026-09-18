@@ -15,14 +15,14 @@ from decimal import Decimal
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 from sqlalchemy import delete as sql_delete
 from sqlalchemy import func, select
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from auth.dependencies import require_admin as auth_require_admin
-from config.plan_tiers import PLAN_TIERS, PlanName, get_plan_tier
+from config.plan_tiers import PLAN_ORDER, PLAN_TIERS, get_plan_tier
 from db.base import get_db
 from models.auth import (
     ENTITLEMENT_SOURCE_ADMIN_GRANT,
@@ -72,8 +72,17 @@ class AdminWorkspacePlanInfo(BaseModel):
 class AdminUpdatePlanRequest(BaseModel):
     """Request to update workspace plan tier."""
 
-    plan_name: str = Field(..., pattern=r"^(free|basic|pro)$")
+    plan_name: str = Field(..., description="Target tier; one of the registered plan keys")
     reason: str | None = None
+
+    @field_validator("plan_name")
+    @classmethod
+    def _known_plan(cls, value: str) -> str:
+        # Derived from the registry (#1548) instead of a literal alternation so
+        # a new tier is added in exactly one place.
+        if value not in PLAN_TIERS:
+            raise ValueError(f"plan_name must be one of: {', '.join(PLAN_ORDER)}")
+        return value
 
 
 class QuotaBreakdown(BaseModel):
@@ -391,14 +400,13 @@ async def list_plan_tiers(
     process-global registry populated at import time.
 
     Returns:
-        List of plan tier info in canonical FREE → BASIC → PRO order.
+        List of plan tier info in canonical upgrade order (``PLAN_ORDER``).
     """
     # Pydantic v2 BaseModel defaults to ``extra='ignore'``, so legacy
     # ``daily_api_limit`` / ``weekly_api_limit`` on the dataclass are
     # silently dropped — they intentionally do not surface on the admin
     # tiers tab (#664). ``features`` is overridden with a sorted list
     # because ``asdict`` materializes the frozenset in arbitrary order.
-    ordered = (PlanName.FREE, PlanName.BASIC, PlanName.PRO)
     tiers = [
         PlanTierInfo(
             **{
@@ -406,7 +414,7 @@ async def list_plan_tiers(
                 "features": sorted(PLAN_TIERS[plan].features),
             }
         )
-        for plan in ordered
+        for plan in PLAN_ORDER
     ]
 
     logger.info("admin_listed_plan_tiers", admin_user=admin_user["user_id"])
@@ -490,7 +498,7 @@ async def update_workspace_plan(
         db.add(audit_entry)
 
         # Issue #149: If downgrading to Free, disable reranking on all contexts
-        if request.plan_name == "free" and old_plan in ("basic", "pro"):
+        if request.plan_name == "free" and old_plan != "free":
             from models.auth import Context
             from models.config import ContextSearchConfig
 

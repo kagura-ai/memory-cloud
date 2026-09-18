@@ -3,7 +3,8 @@
 /**
  * PlanFeatureMatrix (#1138)
  *
- * Per-tier capability comparison (free / basic / pro) for the owner Plan page.
+ * Per-tier capability comparison (free / basic / pro / promax) for the owner
+ * Plan page.
  * Source of truth = backend `GET /api/v1/workspaces/plan-tiers` (curated from
  * `config/plan_tiers.py`, env-overridable). **No price column** — pricing lives
  * on the payment side (#1141 / #1096); this surface is feature limits only.
@@ -25,7 +26,11 @@ import {
 import { ErrorBanner } from "@/components/common/ErrorBanner";
 import { TableLoadingState } from "@/components/common/LoadingState";
 import { useLocale } from "@/i18n";
-import { planLabelFromEnv, type PlanTier } from "@/lib/utils/planLabel";
+import {
+  PLAN_TIER_ORDER,
+  planLabelFromEnv,
+  type PlanTier,
+} from "@/lib/utils/planLabel";
 import { getPlanTierMatrix, type PlanTierFeature } from "@/lib/api/workspaces";
 
 type RowKind = "number" | "bytes" | "bool";
@@ -66,7 +71,7 @@ const ROWS: MatrixRow[] = [
   { key: "teamInvitations", field: "team_invitations", kind: "bool" },
 ];
 
-const TIER_KEYS = new Set(["free", "basic", "pro"]);
+const TIER_KEYS = new Set<string>(PLAN_TIER_ORDER);
 
 // GiB/MiB storage, matching the admin plan-tiers convention. The shared
 // `formatBytes` util renders MB/GB, which diverges from the GiB convention

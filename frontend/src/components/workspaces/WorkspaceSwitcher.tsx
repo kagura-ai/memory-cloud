@@ -15,6 +15,7 @@ import { useTranslations } from 'next-intl';
 import { Plus } from 'lucide-react';
 import { useWorkspace } from '@/contexts/WorkspaceContext';
 import { PlanBadge } from '@/components/common/PlanBadge';
+import type { PlanTier } from '@/lib/utils/planLabel';
 import { useToast } from '@/hooks/use-toast';
 import { WorkspaceCard } from './WorkspaceCard';
 
@@ -76,7 +77,7 @@ export function WorkspaceSwitcher() {
             {currentWorkspace?.name.charAt(0).toUpperCase()}
           </div>
           <span className="font-medium truncate">{currentWorkspace?.name}</span>
-          {currentWorkspace && <PlanBadge planName={currentWorkspace.plan_name as 'free' | 'basic' | 'pro'} size="sm" />}
+          {currentWorkspace && <PlanBadge planName={currentWorkspace.plan_name as PlanTier} size="sm" />}
         </div>
         <svg
           className={`w-4 h-4 transition-transform ${isOpen ? 'rotate-180' : ''}`}

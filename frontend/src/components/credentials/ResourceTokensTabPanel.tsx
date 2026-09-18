@@ -34,7 +34,12 @@ import {
 } from "@/lib/api/resource-tokens";
 import { getContexts } from "@/lib/api/contexts";
 import { ApiError } from "@/lib/api/base";
-import { getMaxQuotaCapacity } from "@/config/resource-tokens";
+import { isPlanTier, type PlanTier } from "@/lib/utils/planLabel";
+import {
+  MAX_QUOTA_PER_TOKEN,
+  getMaxQuotaCapacity,
+  getMaxTokens,
+} from "@/config/resource-tokens";
 import { Plus, AlertTriangle, ChevronDown } from "lucide-react";
 import { useToast } from "@/hooks/use-toast";
 import { Label } from "@/components/ui/label";
@@ -71,6 +76,9 @@ export function ResourceTokensTabPanel({
   const tCommon = useTranslations("common");
   const { currentWorkspaceId, currentWorkspace } = useWorkspace();
   const { toast } = useToast();
+  // Plan limits come from config/resource-tokens (single source, #1548).
+  const rawPlan = currentWorkspace?.plan_name;
+  const planName: PlanTier = isPlanTier(rawPlan) ? rawPlan : "free";
 
   const [tokens, setTokens] = useState<ResourceToken[]>([]);
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -540,12 +548,7 @@ export function ResourceTokensTabPanel({
                     {tokens.filter((tk) => tk.status === "active").length}
                     <span className="text-lg text-slate-400">
                       {" "}
-                      /{" "}
-                      {currentWorkspace?.plan_name === "pro"
-                        ? 30
-                        : currentWorkspace?.plan_name === "basic"
-                          ? 3
-                          : 0}
+                      / {getMaxTokens(planName)}
                     </span>
                   </p>
                 </div>
@@ -577,10 +580,6 @@ export function ResourceTokensTabPanel({
               </p>
               <p className="text-xs text-slate-500 mt-1">
                 {(() => {
-                  const planName = (currentWorkspace?.plan_name || "free") as
-                    | "free"
-                    | "basic"
-                    | "pro";
                   const maxQuota = getMaxQuotaCapacity(planName);
                   const currentQuota = tokens
                     .filter((tk) => tk.status === "active")
@@ -721,14 +720,8 @@ export function ResourceTokensTabPanel({
                     type="number"
                     min="1"
                     max={(() => {
-                      const maxPerToken = 10000;
-                      const maxTokens =
-                        currentWorkspace?.plan_name === "pro"
-                          ? 30
-                          : currentWorkspace?.plan_name === "basic"
-                            ? 3
-                            : 0;
-                      const maxTotalQuota = maxTokens * maxPerToken;
+                      const maxPerToken = MAX_QUOTA_PER_TOKEN;
+                      const maxTotalQuota = getMaxQuotaCapacity(planName);
                       const usedByOthers = tokens
                         .filter(
                           (tk) =>
@@ -745,8 +738,6 @@ export function ResourceTokensTabPanel({
                   />
                   <p className="text-xs text-slate-500">
                     {(() => {
-                      const planName = (currentWorkspace?.plan_name ||
-                        "free") as "free" | "basic" | "pro";
                       const maxTotalQuota = getMaxQuotaCapacity(planName);
                       const usedByOthers = tokens
                         .filter(

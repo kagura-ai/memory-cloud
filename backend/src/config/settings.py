@@ -891,6 +891,34 @@ class Settings(BaseSettings):
         default=None,
         description="Override PRO plan monthly embedding spend cap in USD (Issue #709; default 300.0)",
     )
+    # Issue #1548: XL ("Pro Max", key ``promax``) overrides — same knobs as the
+    # other tiers, under the ``PLAN_PROMAX_*`` prefix.
+    plan_promax_max_contexts: int | None = Field(
+        default=None, description="Override PROMAX plan max contexts per workspace"
+    )
+    plan_promax_memory_limit: int | None = Field(
+        default=None, description="Override PROMAX plan memory limit"
+    )
+    plan_promax_mcp_calls_per_day: int | None = Field(
+        default=None, description="Override PROMAX plan MCP calls/day"
+    )
+    plan_promax_storage_limit_bytes: int | None = Field(
+        default=None, description="Override PROMAX plan file-storage hard cap (bytes, Issue #485)"
+    )
+    plan_promax_sleep_enabled_contexts_limit: int | None = Field(
+        default=None,
+        description="Override PROMAX plan sleep-enabled contexts cap (Issue #560; default 15)",
+    )
+    plan_promax_embedding_daily_cap_usd: float | None = Field(
+        default=None,
+        description="Override PROMAX plan daily embedding spend cap in USD (Issue #709; default 50.0)",
+    )
+    plan_promax_embedding_monthly_cap_usd: float | None = Field(
+        default=None,
+        description=(
+            "Override PROMAX plan monthly embedding spend cap in USD (Issue #709; default 1500.0)"
+        ),
+    )
     # Issue #661's ``plan_*_max_owned_workspaces`` env overrides were removed
     # in #675 — the cap is now per-user (``users.workspace_slot_bonus``) and
     # no longer depends on the plan tier.
@@ -914,6 +942,9 @@ class Settings(BaseSettings):
     )
     plan_pro_display_name: str | None = Field(
         default=None, description="Display name for PRO tier (default: L)"
+    )
+    plan_promax_display_name: str | None = Field(
+        default=None, description="Display name for PROMAX tier (default: XL)"
     )
 
     # Usage warning thresholds (Issue #48)
