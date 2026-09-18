@@ -35,6 +35,7 @@ const TIERS = [
     display_name: "S",
     max_contexts: 1,
     max_members: 1,
+    owned_workspaces: 1,
     memory_limit: 1000,
     memories_per_day: 50,
     storage_limit_bytes: 100 * 1024 * 1024,
@@ -56,6 +57,7 @@ const TIERS = [
     display_name: "M",
     max_contexts: 3,
     max_members: 1,
+    owned_workspaces: 1,
     memory_limit: 10000,
     memories_per_day: 300,
     storage_limit_bytes: 1024 ** 3,
@@ -77,6 +79,7 @@ const TIERS = [
     display_name: "L",
     max_contexts: 20,
     max_members: 10,
+    owned_workspaces: 3,
     memory_limit: 100000,
     memories_per_day: 2000,
     storage_limit_bytes: 10 * 1024 ** 3,
@@ -100,6 +103,7 @@ const TIERS = [
     display_name: "XL",
     max_contexts: 1000,
     max_members: 50,
+    owned_workspaces: 20,
     memory_limit: 100000,
     memories_per_day: 10000,
     storage_limit_bytes: 50 * 1024 ** 3,
@@ -187,6 +191,29 @@ describe("PlanFeatureMatrix (#1138)", () => {
     expect(row.getAllByText("✗").length).toBe(1); // free: field missing
     expect(row.getByText("300")).toBeInTheDocument(); // the rest still render
     expect(row.getByText("10,000")).toBeInTheDocument();
+  });
+
+  it("renders the owned-workspaces row (1 / 1 / 3 / 20) next to members (#1550)", async () => {
+    render(<PlanFeatureMatrix currentTier="basic" />);
+    await screen.findByText("planMatrix.row_ownedWorkspaces");
+
+    const owned = rowOf("planMatrix.row_ownedWorkspaces");
+    const cells = owned.getAllByRole("cell").map((c) => c.textContent);
+    expect(cells).toEqual([
+      "planMatrix.row_ownedWorkspaces",
+      "1",
+      "1",
+      "3",
+      "20",
+    ]);
+    expect(owned.queryByText("✗")).toBeNull(); // every tier owns at least one
+
+    // Sits directly under the members row.
+    const rows = screen.getAllByRole("row").map((r) => r.textContent ?? "");
+    const membersIdx = rows.findIndex((r) =>
+      r.startsWith("planMatrix.row_members"),
+    );
+    expect(rows[membersIdx + 1]).toMatch(/^planMatrix\.row_ownedWorkspaces/);
   });
 
   it("renders ✓/✗ for boolean capabilities", async () => {

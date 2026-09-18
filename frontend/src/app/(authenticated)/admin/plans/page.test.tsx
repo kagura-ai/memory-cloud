@@ -104,6 +104,8 @@ const FREE = {
   price_monthly: 0,
   max_contexts_per_workspace: 1,
   max_members_per_workspace: 1,
+  owned_workspace_grant: 0,
+  owned_workspaces: 1,
   max_resource_tokens: 0,
   memory_limit: 1000,
   memories_per_day: 50, // Issue #1549
@@ -143,6 +145,8 @@ const PRO = {
   price_monthly: 100,
   max_contexts_per_workspace: 20,
   max_members_per_workspace: 10,
+  owned_workspace_grant: 2,
+  owned_workspaces: 3,
   max_resource_tokens: 30,
   memory_limit: 100000,
   memories_per_day: 2000,
@@ -175,6 +179,8 @@ const PROMAX = {
   price_monthly: 0, // legacy field, placeholder — no pricing in this repo (#1096)
   max_contexts_per_workspace: 1000,
   max_members_per_workspace: 50,
+  owned_workspace_grant: 19,
+  owned_workspaces: 20,
   max_resource_tokens: 150,
   memories_per_day: 10000,
   max_connectors: 50,
@@ -286,6 +292,7 @@ describe("AdminPlansPage — tiers tab", () => {
       "mcpAppCredentials",
       "storage",
       "maxMembers",
+      "ownedWorkspaces",
       "maxResourceTokens",
       "restCallsPerDay",
       "publicCallsPerDay",
@@ -305,6 +312,16 @@ describe("AdminPlansPage — tiers tab", () => {
     expect(
       screen.queryByText("admin.plans.tiersTable.memoryAgent"),
     ).not.toBeInTheDocument();
+
+    // #1550: owned-workspace cap per tier (1 + grant) renders 1 / 1 / 3 / 20.
+    const ownedRow = screen
+      .getByText("admin.plans.tiersTable.ownedWorkspaces")
+      .closest("tr") as HTMLElement;
+    const ownedCells = within(ownedRow)
+      .getAllByRole("cell")
+      .slice(1)
+      .map((c) => c.textContent);
+    expect(ownedCells).toEqual(["1", "1", "3", "20"]);
   });
 
   it("uses tier display_name from API as column headers", async () => {

@@ -185,6 +185,11 @@ const TIER_ROW_DEFINITIONS = [
     render: (t: PlanTierInfo) => formatNumber(t.max_members_per_workspace),
   },
   {
+    // #1550: per-user owned-workspace cap on this tier (1 base + grant).
+    key: "ownedWorkspaces",
+    render: (t: PlanTierInfo) => formatNumber(t.owned_workspaces),
+  },
+  {
     key: "maxResourceTokens",
     render: (t: PlanTierInfo) => formatNumber(t.max_resource_tokens),
   },

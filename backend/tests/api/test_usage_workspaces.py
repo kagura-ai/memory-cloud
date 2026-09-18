@@ -4,11 +4,12 @@ This helper feeds the workspace-scoped ``/workspace/usage/current`` endpoint
 (``workspace.py``). It originally also fed the user-scoped ``/usage/current``,
 removed in #810; the helper and these unit tests are unchanged by that removal.
 
-Issue #675 (epic #674 sub-A): cap is now ``1 + users.workspace_slot_bonus``.
-The helper ``_build_workspaces_usage`` issues a single SELECT via
-``get_user_workspace_cap_summary`` which returns ``(owned_count, slot_bonus)``.
-Tests mock exactly one ``execute()`` call returning a Row with those
-two attribute fields.
+Issue #675 (epic #674 sub-A): cap is now ``1 + users.workspace_slot_bonus``;
+#1550 adds the owned-workspace grant of the highest owned tier. The helper
+``_build_workspaces_usage`` issues a single SELECT via
+``get_user_workspace_cap_summary`` which reads ``(owned_count, slot_bonus,
+owned_plan_names)``. Tests mock exactly one ``execute()`` call returning a
+Row with those three attribute fields.
 """
 
 from unittest.mock import AsyncMock, MagicMock
@@ -18,13 +19,17 @@ import pytest
 from api.routes.usage import _build_workspaces_usage
 
 
-def _mock_db(owned_count: int, slot_bonus: int):
-    """Mock AsyncSession whose execute() returns a Row(owned_count, slot_bonus)."""
+def _mock_db(owned_count: int, slot_bonus: int, owned_plan_names: list[str] | None = None):
+    """Mock AsyncSession whose execute() returns a Row(owned_count, slot_bonus, plan_names).
+
+    Defaults to ``owned_count`` free workspaces so the tier grant is 0.
+    """
     db = MagicMock()
     db.execute = AsyncMock()
     row = MagicMock()
     row.owned_count = owned_count
     row.workspace_slot_bonus = slot_bonus
+    row.owned_plan_names = ["free"] * owned_count if owned_plan_names is None else owned_plan_names
     result = MagicMock()
     result.one_or_none = MagicMock(return_value=row)
     db.execute.return_value = result
@@ -79,6 +84,16 @@ async def test_admin_granted_bonus_no_workspaces():
     assert result.used == 0
     assert result.limit == 10
     assert result.remaining == 10
+
+
+@pytest.mark.asyncio
+async def test_pro_owner_tier_grant_raises_limit():
+    """#1550: owns a pro workspace, 0 bonus → limit = 1 + 2 = 3, remaining 2."""
+    db = _mock_db(owned_count=1, slot_bonus=0, owned_plan_names=["pro"])
+    result = await _build_workspaces_usage(db, "user-1")
+    assert result.used == 1
+    assert result.limit == 3
+    assert result.remaining == 2
 
 
 @pytest.mark.asyncio

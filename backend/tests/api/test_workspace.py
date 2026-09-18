@@ -604,11 +604,14 @@ class TestWorkspaceUsageCurrent:
         count_result = MagicMock(scalar_one=MagicMock(return_value=0))
 
         # Query 6: User+Workspace JOIN for owned_count + workspace_slot_bonus
-        # (#675 — plan_resolver.get_user_workspace_cap_summary). Returning
-        # (owned_count=1, slot_bonus=9) yields cap 10, remaining 9.
+        # + owned plan names (#675 / #1550 —
+        # plan_resolver.get_user_workspace_cap_summary). Returning
+        # (owned_count=1, slot_bonus=9, one free workspace) yields cap 10,
+        # remaining 9.
         plan_row = MagicMock()
         plan_row.owned_count = 1
         plan_row.workspace_slot_bonus = 9
+        plan_row.owned_plan_names = ["free"]
         plan_resolver_result = MagicMock(one_or_none=MagicMock(return_value=plan_row))
 
         return [

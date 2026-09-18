@@ -34,11 +34,13 @@ class PlanName(StrEnum):
 class PlanTier:
     """Plan tier configuration.
 
-    Issue #276 (updated by Issue #661 / #675): user-owned workspace count
-    is no longer driven by this dataclass — the cap is per-user via
-    ``users.workspace_slot_bonus`` (``cap = 1 + bonus``). The plan tier
-    controls per-workspace features (memory_limit, api_quota, etc.) only.
-    Joined workspaces (via invite) are uncapped.
+    Issue #276 (updated by Issue #661 / #675 / #1550): the user-owned
+    workspace cap is per-user — ``cap = 1 + users.workspace_slot_bonus +
+    owned_workspace_grant`` — where the grant is taken from the HIGHEST tier
+    among the workspaces the user owns (``utils.plan_resolver``). The tier
+    therefore grants slots but never caps a user on its own; every other
+    field here controls per-workspace features (memory_limit, api_quota,
+    etc.). Joined workspaces (via invite) are uncapped.
 
     Attributes:
         name: Plan tier name ('free', 'basic', 'pro')
@@ -46,6 +48,9 @@ class PlanTier:
         price_monthly: Monthly price in USD
         max_contexts_per_workspace: Maximum contexts per workspace
         max_members_per_workspace: Maximum members per workspace (Issue #229)
+        owned_workspace_grant: Extra owned-workspace slots this tier grants
+            its owner on top of the per-user base (1) and slot bonus
+            (Issue #1550: free 0 / basic 0 / pro 2 / promax 19 → 1/1/3/20).
         max_resource_tokens: Maximum active resource tokens (Issue #242)
         max_connectors: Maximum ai-worker chat-ingest connectors per
             workspace (Issue #850, F6-a of #755). A SEPARATE seat cap from
@@ -107,9 +112,11 @@ class PlanTier:
     # over these tier defaults; see ``Workspace.effective_embedding_*_cap_usd``.
     embedding_daily_cap_usd: float | None = None
     embedding_monthly_cap_usd: float | None = None
-    # Issue #661's ``max_owned_workspaces`` field was removed in #675 — the
-    # user-level workspace cap is now derived from ``users.workspace_slot_bonus``
-    # (``cap = 1 + bonus``), independent of the workspace's plan tier.
+    # Issue #661's ``max_owned_workspaces`` field was removed in #675 (the cap
+    # became per-user: ``1 + users.workspace_slot_bonus``). #1550 re-links the
+    # tier as a slot GRANT, not a cap: the highest owned tier adds this many
+    # slots. A user above the cap keeps every workspace — only create is gated.
+    owned_workspace_grant: int = 0
     allows_shared_contexts: bool = False  # Issue #271: Shared context feature (Pro only)
     features: frozenset[str] = field(default_factory=frozenset)
 
@@ -121,6 +128,7 @@ PLAN_FREE = PlanTier(
     price_monthly=0,
     max_contexts_per_workspace=1,
     max_members_per_workspace=1,  # Issue #229: Owner only
+    owned_workspace_grant=0,  # Issue #1550: base slot only → owns 1
     max_resource_tokens=0,  # Issue #242: No resource tokens (PRO only)
     max_connectors=0,  # Issue #850: no ai-worker connectors on Free
     memory_limit=1000,
@@ -149,6 +157,7 @@ PLAN_BASIC = PlanTier(
     price_monthly=10,
     max_contexts_per_workspace=3,  # Limited to 3 contexts
     max_members_per_workspace=1,  # Issue #229: Owner only
+    owned_workspace_grant=0,  # Issue #1550: same as Free → owns 1
     max_resource_tokens=3,  # Issue #242: Max 3 active tokens
     max_connectors=3,  # Issue #850 → Spec(2026-06-02): Basic 1→3
     allows_shared_contexts=False,  # Issue #271: Private contexts only (like Free)
@@ -177,6 +186,7 @@ PLAN_PRO = PlanTier(
     price_monthly=100,
     max_contexts_per_workspace=20,  # Issue #164: Set reasonable limit
     max_members_per_workspace=10,  # Issue #229: 10 members max for Pro plan
+    owned_workspace_grant=2,  # Issue #1550: 1 base + 2 → owns 3
     max_resource_tokens=30,  # Issue #242: Max 30 active tokens
     max_connectors=10,  # Issue #850 → Spec(2026-06-02): Pro 5→10
     allows_shared_contexts=True,  # Issue #271: Shared contexts enabled
@@ -221,6 +231,7 @@ PLAN_PROMAX = PlanTier(
     price_monthly=0,
     max_contexts_per_workspace=1000,  # Issue #1547 matrix
     max_members_per_workspace=50,  # Issue #1547 matrix
+    owned_workspace_grant=19,  # Issue #1550: 1 base + 19 → owns 20
     # Provisional 5x PRO so XL is never below PRO; #1551 (gate re-map) sets
     # the final resource-token / connector seat counts.
     max_resource_tokens=150,
@@ -314,6 +325,7 @@ def _apply_settings_overrides() -> None:
             "memories_per_day": settings.plan_free_memories_per_day,
             "embedding_daily_cap_usd": settings.plan_free_embedding_daily_cap_usd,
             "embedding_monthly_cap_usd": settings.plan_free_embedding_monthly_cap_usd,
+            "owned_workspace_grant": settings.plan_free_owned_workspace_grant,
             "display_name": settings.plan_free_display_name,
         },
         PlanName.BASIC: {
@@ -325,6 +337,7 @@ def _apply_settings_overrides() -> None:
             "memories_per_day": settings.plan_basic_memories_per_day,
             "embedding_daily_cap_usd": settings.plan_basic_embedding_daily_cap_usd,
             "embedding_monthly_cap_usd": settings.plan_basic_embedding_monthly_cap_usd,
+            "owned_workspace_grant": settings.plan_basic_owned_workspace_grant,
             "display_name": settings.plan_basic_display_name,
         },
         PlanName.PRO: {
@@ -336,6 +349,7 @@ def _apply_settings_overrides() -> None:
             "memories_per_day": settings.plan_pro_memories_per_day,
             "embedding_daily_cap_usd": settings.plan_pro_embedding_daily_cap_usd,
             "embedding_monthly_cap_usd": settings.plan_pro_embedding_monthly_cap_usd,
+            "owned_workspace_grant": settings.plan_pro_owned_workspace_grant,
             "display_name": settings.plan_pro_display_name,
         },
         PlanName.PROMAX: {
@@ -347,6 +361,7 @@ def _apply_settings_overrides() -> None:
             "memories_per_day": settings.plan_promax_memories_per_day,
             "embedding_daily_cap_usd": settings.plan_promax_embedding_daily_cap_usd,
             "embedding_monthly_cap_usd": settings.plan_promax_embedding_monthly_cap_usd,
+            "owned_workspace_grant": settings.plan_promax_owned_workspace_grant,
             "display_name": settings.plan_promax_display_name,
         },
     }

@@ -1311,14 +1311,18 @@ class WorkspaceSummary(BaseModel):
 
     Mirrors the fields surfaced in the "Workspace Capacity" admin UI section:
     base_cap (always 1 today, sourced from ``plan_resolver.BASE_CAP`` so the
-    frontend does not hardcode), the configurable bonus, the effective cap,
-    and the list of currently-owned workspaces. ``is_at_cap`` is precomputed
-    so the badge variant in the UI does not have to recompute the comparison.
+    frontend does not hardcode), the configurable bonus, the tier grant of
+    the highest owned tier (#1550: ``cap = base_cap + workspace_slot_bonus +
+    tier_grant``), the effective cap, and the list of currently-owned
+    workspaces. ``is_at_cap`` is precomputed so the badge variant in the UI
+    does not have to recompute the comparison.
     """
 
     owned_count: int
     workspace_slot_bonus: int
     base_cap: int
+    tier_grant: int  # Issue #1550
+    tier: str  # Issue #1550: plan key the grant comes from (free/basic/pro/promax)
     cap: int
     is_at_cap: bool
     owned_workspaces: list[OwnedWorkspaceInfo]

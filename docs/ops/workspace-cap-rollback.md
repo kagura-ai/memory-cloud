@@ -8,7 +8,7 @@
 
 ## 1. このフラグは何か / なぜ rollback が必要か
 
-`backend/src/services/quota_service.py` の `check_workspace_creation_allowed` は **`cap = 1 + users.workspace_slot_bonus`** を gate する。フラグは:
+`backend/src/services/quota_service.py` の `check_workspace_creation_allowed` は **`cap = 1 + users.workspace_slot_bonus + owned_workspace_grant`**（#1550: 所有 workspace の最上位 tier が付与する slot、FREE 0 / BASIC 0 / PRO 2 / PROMAX 19）を gate する。フラグは:
 
 - **目的**: TOCTOU race を `pg_advisory_xact_lock` で塞いだ上で（#677）、cap 超過を実際に deny する切替（#674 sub-C の最終段）。
 - **動作**: `False` のとき warn log のみで通す、`True` のとき deny + 5xx ではなく `QuotaExceededError` で 4xx 応答。

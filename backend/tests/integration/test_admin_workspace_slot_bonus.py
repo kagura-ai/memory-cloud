@@ -42,7 +42,8 @@ async def user_with_bonus(db_session: AsyncSession) -> dict:
     db_session.add(user)
     await db_session.flush()
 
-    ws = make_workspace(owner_user_id=user.user_id)
+    # free: keep this fixture bonus-only (#1550 — a pro workspace would add +2).
+    ws = make_workspace(owner_user_id=user.user_id, plan_name="free")
     db_session.add(ws)
     await db_session.flush()
     db_session.add(
@@ -86,7 +87,8 @@ async def user_destructive(db_session: AsyncSession) -> dict:
     db_session.add(user)
     await db_session.flush()
 
-    workspaces = [make_workspace(owner_user_id=user.user_id) for _ in range(4)]
+    # free: bonus-only cap (#1550 — pro would grant +2 and defuse the gate).
+    workspaces = [make_workspace(owner_user_id=user.user_id, plan_name="free") for _ in range(4)]
     db_session.add_all(workspaces)
     await db_session.flush()
     db_session.add_all(
@@ -98,6 +100,50 @@ async def user_destructive(db_session: AsyncSession) -> dict:
     await db_session.commit()
 
     return {"user_id": user.user_id, "email": user.email}
+
+
+async def _pro_owner(db_session: AsyncSession, *, bonus: int, owned: int) -> dict:
+    """User owning ``owned`` workspaces of which ONE is pro (#1550 grant +2).
+
+    cap = 1 + bonus + 2. Shared by the two tier-grant fixtures below.
+    """
+    user = make_user(workspace_slot_bonus=bonus, name="Pro Owner Test User")
+    db_session.add(user)
+    await db_session.flush()
+
+    workspaces = [make_workspace(owner_user_id=user.user_id, plan_name="pro")] + [
+        make_workspace(owner_user_id=user.user_id, plan_name="free") for _ in range(owned - 1)
+    ]
+    db_session.add_all(workspaces)
+    await db_session.flush()
+    db_session.add_all(
+        [
+            WorkspaceMember(workspace_id=w.id, user_id=user.user_id, role=WorkspaceRole.OWNER)
+            for w in workspaces
+        ]
+    )
+    await db_session.commit()
+    return {"user_id": user.user_id, "email": user.email}
+
+
+@pytest_asyncio.fixture
+async def pro_owner_below_cap(db_session: AsyncSession) -> dict:
+    """bonus=1, owns 3 (1 pro + 2 free) → cap = 1 + 1 + 2 = 4, not at cap.
+
+    Decrementing to bonus 0 lands exactly at cap (3 ≥ owned 3): NOT
+    destructive *only because* the grant is included — the pre-#1550
+    formula (1 + 0 = 1 < 3) would have demanded a reason.
+    """
+    return await _pro_owner(db_session, bonus=1, owned=3)
+
+
+@pytest_asyncio.fixture
+async def pro_owner_at_cap(db_session: AsyncSession) -> dict:
+    """bonus=1, owns 4 (1 pro + 3 free) → cap = 4, at cap.
+
+    Decrementing to bonus 0 → cap 3 < owned 4 → destructive (BONUS-001).
+    """
+    return await _pro_owner(db_session, bonus=1, owned=4)
 
 
 @pytest_asyncio.fixture
@@ -254,6 +300,54 @@ class TestUpdateWorkspaceSlotBonus:
                 db=db_session,
             )
 
+    # ------------------------------------------------------------------
+    # #1550: the tier grant is part of the cap the destructive check uses
+    # ------------------------------------------------------------------
+
+    @pytest.mark.asyncio
+    async def test_decrement_to_grant_only_cap_is_not_destructive(
+        self, db_session: AsyncSession, pro_owner_below_cap: dict
+    ) -> None:
+        """pro owner: bonus 1→0 with 3 owned → cap 3 (1 + 0 + 2) ≥ 3, no reason needed."""
+        response = await update_workspace_slot_bonus(
+            user_id=pro_owner_below_cap["user_id"],
+            request=UpdateWorkspaceSlotBonusRequest(delta=-1, reason=None),
+            admin=mock_admin(),
+            db=db_session,
+        )
+        assert response.before_value == 1
+        assert response.after_value == 0
+        assert response.base_cap == 1
+        assert response.cap == 3  # grant carried into the post-UPDATE cap
+        assert response.owned_count == 3
+        assert response.is_at_cap is True
+
+    @pytest.mark.asyncio
+    async def test_decrement_on_pro_owner_at_cap_is_destructive_with_grant(
+        self, db_session: AsyncSession, pro_owner_at_cap: dict
+    ) -> None:
+        """pro owner at 4/4: -1 → cap 3 < owned 4 → BONUS-001; with a reason
+        the response cap is 3 = 1 base + 0 bonus + 2 grant."""
+        with pytest.raises(InsufficientReasonError) as exc:
+            await update_workspace_slot_bonus(
+                user_id=pro_owner_at_cap["user_id"],
+                request=UpdateWorkspaceSlotBonusRequest(delta=-1, reason=None),
+                admin=mock_admin(),
+                db=db_session,
+            )
+        assert exc.value.error_code == "BONUS-001"
+
+        response = await update_workspace_slot_bonus(
+            user_id=pro_owner_at_cap["user_id"],
+            request=UpdateWorkspaceSlotBonusRequest(delta=-1, reason="#1550 grant check"),
+            admin=mock_admin(),
+            db=db_session,
+        )
+        assert response.after_value == 0
+        assert response.cap == 3
+        assert response.owned_count == 4
+        assert response.is_at_cap is True
+
     @pytest.mark.asyncio
     async def test_unknown_user_returns_404(self, db_session: AsyncSession) -> None:
         with pytest.raises(HTTPException) as exc:
@@ -286,6 +380,29 @@ class TestGetUserDetailWorkspaceSummary:
         assert detail.workspace_summary.is_at_cap is False
         owned_ids = {ws.id for ws in detail.workspace_summary.owned_workspaces}
         assert user_with_bonus["workspace_id"] in owned_ids
+        # #1550: free-only owner → no tier grant.
+        assert detail.workspace_summary.tier == "free"
+        assert detail.workspace_summary.tier_grant == 0
+
+    @pytest.mark.asyncio
+    async def test_workspace_summary_carries_tier_grant(
+        self, db_session: AsyncSession, pro_owner_below_cap: dict
+    ) -> None:
+        """#1550: 1 pro + 2 free, bonus 1 → tier pro, grant 2, cap 4 = 1 + 1 + 2."""
+        detail = await get_user_detail(
+            user_id=pro_owner_below_cap["user_id"],
+            admin=mock_admin(),
+            db=db_session,
+        )
+        summary = detail.workspace_summary
+        assert summary is not None
+        assert summary.tier == "pro"
+        assert summary.tier_grant == 2
+        assert summary.workspace_slot_bonus == 1
+        assert summary.cap == summary.base_cap + summary.workspace_slot_bonus + summary.tier_grant
+        assert summary.cap == 4
+        assert summary.owned_count == 3
+        assert summary.is_at_cap is False
 
     @pytest.mark.asyncio
     async def test_workspace_summary_excludes_soft_deleted(

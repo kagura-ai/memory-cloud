@@ -359,12 +359,12 @@ and `KAGURA_LANCE_DB_PATH`. Implementation: `backend/src/db/lance_store.py`.
 
 Plans control resource limits per workspace. Defaults:
 
-| Plan | Contexts | Memories | Memories/day | MCP calls/day |
-|------|----------|----------|--------------|---------------|
-| S (Free) | 1 | 1,000 | 50 | 1,000 |
-| M (Basic) | 3 | 10,000 | 300 | 10,000 |
-| L (Pro) | 20 | 100,000 | 2,000 | 50,000 |
-| XL (Pro Max, key `promax`) | 1,000 | 100,000 | 10,000 | 250,000 |
+| Plan | Contexts | Memories | Memories/day | MCP calls/day | Owned workspaces |
+|------|----------|----------|--------------|---------------|------------------|
+| S (Free) | 1 | 1,000 | 50 | 1,000 | 1 |
+| M (Basic) | 3 | 10,000 | 300 | 10,000 | 1 |
+| L (Pro) | 20 | 100,000 | 2,000 | 50,000 | 3 |
+| XL (Pro Max, key `promax`) | 1,000 | 100,000 | 10,000 | 250,000 | 20 |
 
 The plan *key* (`free` / `basic` / `pro` / `promax`) is what the admin API,
 the billing entitlement push and the `workspaces.plan_name` column use; the
@@ -384,6 +384,14 @@ down the check fails open. `0` follows the zero-floor rule used by every quota
 field: the tier cannot create memories at all — it never means "unlimited".
 Self-hosters who want no cap set a very large value.
 
+"Owned workspaces" is a *per-user* cap, not a per-workspace one:
+`cap = 1 + users.workspace_slot_bonus + owned_workspace_grant`, where the
+grant (0 / 0 / 2 / 19) comes from the highest tier among the workspaces the
+user owns. Admin/referral slot bonuses stack on top. Only creating another
+workspace is gated — a user above the cap (e.g. after a downgrade) keeps
+every workspace. Enforcement is behind `ENFORCE_WORKSPACE_CAP` (default
+`false` = log-only); see `docs/ops/workspace-cap-rollback.md`.
+
 Override via environment variables (`PLAN_<KEY>_<FIELD>`, key upper-cased):
 
 ```bash
@@ -393,6 +401,8 @@ PLAN_FREE_MEMORIES_PER_DAY=1000000   # effectively no daily cap (0 = none)
 PLAN_BASIC_MAX_CONTEXTS=10
 PLAN_PRO_MAX_CONTEXTS=50
 PLAN_PROMAX_MAX_CONTEXTS=2000
+PLAN_PRO_OWNED_WORKSPACE_GRANT=4      # L owners may own 1 + 4 = 5 workspaces
+PLAN_PROMAX_OWNED_WORKSPACE_GRANT=49  # XL owners may own 50
 ```
 
 For self-hosted single-user setups, assign the L (Pro) plan to your workspace. Plan changes are **admin-only** by default. For SaaS deployments with self-service billing, enable Stripe:
