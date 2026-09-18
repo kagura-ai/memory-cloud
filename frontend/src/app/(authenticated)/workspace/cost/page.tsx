@@ -76,6 +76,16 @@ export default function WorkspaceCostPage() {
       />
     );
   }
+  // Issue #1571: a flat-price hosted deployment hides money from workspace
+  // users (ENABLE_COST_DISPLAY=false — the API 404s, the nav entry is hidden).
+  if (!systemFeatures.cost_display) {
+    return (
+      <FeatureDisabledNotice
+        title={t("title")}
+        message={t("costDisplayDisabled")}
+      />
+    );
+  }
 
   // Distinguish "no workspace exists / selected" from "wrong role".
   // Without this branch a brand-new account with zero workspaces would

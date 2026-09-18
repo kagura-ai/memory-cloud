@@ -737,6 +737,20 @@ class Settings(BaseSettings):
             "paths. Surfaced to the frontend via GET /api/v1/system/info features.byok."
         ),
     )
+    enable_cost_display: bool = Field(
+        default=True,
+        description=(
+            "Show money to workspace users (#1571). ON by default so OSS / "
+            "self-hosted keeps the cost surfaces. A flat-price hosted deployment "
+            "sets this false: the platform-billed USD is the operator's own cost, "
+            "not something to show a customer. When false the workspace cost "
+            "dashboard route (GET /workspaces/{id}/cost-aggregation) answers 404, "
+            "analysis cost fields are null (REST) / omitted (MCP), and the web UI "
+            "hides the cost page, nav entry and the analysis KPI / column / "
+            "estimate. GET /admin/cost-aggregation is unaffected (operators need "
+            "it). Surfaced via GET /api/v1/system/info features.cost_display."
+        ),
+    )
     # Issue #1569: stop RESOLVING stored BYOK keys, not just provisioning
     # them. Default True keeps #1167's deliberate posture (keys stored before
     # ENABLE_BYOK=false are still used). False makes LLMService,

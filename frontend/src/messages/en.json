@@ -2817,6 +2817,7 @@
       "description": "LLM and embedding cost ($) breakdown across all workspaces",
       "descriptionWorkspace": "LLM and embedding cost ($) breakdown for this workspace",
       "featureDisabled": "The workspace cost dashboard is not enabled on this deployment.",
+      "costDisplayDisabled": "Cost display is not enabled on this deployment.",
       "actions": {
         "refresh": "Refresh"
       },

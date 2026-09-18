@@ -159,7 +159,8 @@ class AnalysisPreviewResponse(BaseModel):
     """Cost-estimate output (Stage [A] from preview.py).
 
     ``estimated_cost_cents`` is ``null`` when no price is configured for the
-    model (#1570) — the estimate is unavailable, not zero.
+    model (#1570) — the estimate is unavailable, not zero — or when the
+    deployment disables cost display (``ENABLE_COST_DISPLAY=false``, #1571).
     """
 
     memory_count: int
@@ -215,12 +216,23 @@ class AnalysisRow(TZAwareBaseModel):
     # scales with total volume) act as an existence oracle and are
     # withheld. Non-agent callers always receive an int.
     input_count: int | None
+    # ``null`` when the run is unpriced (#1570) or the deployment disables
+    # cost display (#1571, ``ENABLE_COST_DISPLAY=false``) — the keys stay so
+    # the response shape is stable.
     cost_estimated_cents: int | None
     cost_actual_cents: int | None
     error: str | None
     cancellation_reason: str | None
 
     model_config = {"populate_by_name": True, "from_attributes": True}
+
+    def for_caller(self) -> AnalysisRow:
+        """Apply every response-time redaction: agent scope, then cost display.
+
+        The one call every handler makes on a validated row, so a new
+        redaction lane cannot be forgotten on one of the three GET routes.
+        """
+        return self.redacted_for_agent_scope().with_cost_visibility()
 
     def redacted_for_agent_scope(self) -> AnalysisRow:
         """Withhold aggregate fields for enforce-mode agents (#1366).
@@ -237,6 +249,24 @@ class AnalysisRow(TZAwareBaseModel):
         if not agent_scope_is_enforce():
             return self
         return self.model_copy(update=dict.fromkeys(REDACTED_RUN_AGGREGATE_FIELDS))
+
+    def with_cost_visibility(self) -> AnalysisRow:
+        """Null the cost columns when the deployment hides money (#1571).
+
+        Same ``strip_cost_fields`` helper as the MCP lane (which omits the
+        keys instead — a dict has no schema to keep stable). No-op (returns
+        self) when ``ENABLE_COST_DISPLAY`` is true.
+        """
+        from services.cost_visibility import (
+            ANALYSIS_COST_FIELDS,
+            cost_display_enabled,
+            strip_cost_fields,
+        )
+
+        if cost_display_enabled():
+            return self
+        costs = self.model_dump(include=set(ANALYSIS_COST_FIELDS))
+        return self.model_copy(update=strip_cost_fields(costs, omit=False))
 
 
 class AnalysisListResponse(BaseModel):
@@ -433,12 +463,21 @@ async def preview_analysis(
         rates=None if pricing is None else pricing[1]["rates"],
         model_id=model if pricing is None else pricing[1]["model"],
     )
+    # #1571: ``estimated_cost_cents`` is nulled (key kept) when the
+    # deployment hides money; the MCP dry-run omits it instead.
+    from services.cost_visibility import strip_cost_fields
+
     return AnalysisPreviewResponse(
-        memory_count=estimate.memory_count,
-        cluster_count_estimate=estimate.cluster_count_estimate,
-        estimated_cost_cents=estimate.estimated_cost_cents,
-        model_id=estimate.model_id,
-        breakdown=estimate.breakdown,
+        **strip_cost_fields(
+            {
+                "memory_count": estimate.memory_count,
+                "cluster_count_estimate": estimate.cluster_count_estimate,
+                "estimated_cost_cents": estimate.estimated_cost_cents,
+                "model_id": estimate.model_id,
+                "breakdown": estimate.breakdown,
+            },
+            omit=False,
+        )
     )
 
 
@@ -560,7 +599,7 @@ async def list_runs(
         cursor=cursor,
     )
     return AnalysisListResponse(
-        items=[AnalysisRow.model_validate(row).redacted_for_agent_scope() for row in rows],
+        items=[AnalysisRow.model_validate(row).for_caller() for row in rows],
         next_cursor=next_cursor,
     )
 
@@ -594,7 +633,7 @@ async def get_active(
             status_code=404,
             detail=f"No succeeded analysis run found for context {context_id}",
         )
-    return AnalysisRow.model_validate(row).redacted_for_agent_scope()
+    return AnalysisRow.model_validate(row).for_caller()
 
 
 # ============================================================================
@@ -622,7 +661,7 @@ async def get_run(
     # context's runs even if the workspace gate passed.
     if row is None or row.context_id != context_id:
         raise HTTPException(status_code=404, detail=f"Analysis run {run_id} not found")
-    return AnalysisRow.model_validate(row).redacted_for_agent_scope()
+    return AnalysisRow.model_validate(row).for_caller()
 
 
 # ============================================================================

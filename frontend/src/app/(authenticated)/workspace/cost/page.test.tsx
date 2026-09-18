@@ -18,7 +18,11 @@ vi.mock("@/contexts/WorkspaceContext", () => ({
   useWorkspace: () => mockUseWorkspace(),
 }));
 
-let mockFeatures: Record<string, boolean> | null = { byok: true };
+// #1571: cost_display gates the page too (fail-closed like byok); default on.
+let mockFeatures: Record<string, boolean> | null = {
+  byok: true,
+  cost_display: true,
+};
 vi.mock("@/hooks/useSystemFeatures", () => ({
   useSystemFeatures: () => mockFeatures,
 }));
@@ -44,7 +48,7 @@ function setWorkspace(role: string = "admin") {
 
 beforeEach(() => {
   vi.clearAllMocks();
-  mockFeatures = { byok: true };
+  mockFeatures = { byok: true, cost_display: true };
   setWorkspace("admin");
 });
 
@@ -57,10 +61,18 @@ describe("WorkspaceCostPage BYOK gate (#1167)", () => {
   });
 
   it("renders the not-available notice when byok is off", () => {
-    mockFeatures = { byok: false };
+    mockFeatures = { byok: false, cost_display: true };
     render(<WorkspaceCostPage />);
     expect(screen.getByText("featureDisabled")).toBeInTheDocument();
     expect(screen.queryByTestId("cost-dashboard")).toBeNull();
+  });
+
+  it("renders the cost-display notice (not the dashboard) when cost_display is off (#1571)", () => {
+    mockFeatures = { byok: true, cost_display: false };
+    render(<WorkspaceCostPage />);
+    expect(screen.getByText("costDisplayDisabled")).toBeInTheDocument();
+    expect(screen.queryByTestId("cost-dashboard")).toBeNull();
+    expect(mockFetchCost).not.toHaveBeenCalled();
   });
 
   it("renders a loader (not the dashboard) while feature flags load", () => {

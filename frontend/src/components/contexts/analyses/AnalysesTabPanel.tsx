@@ -35,6 +35,7 @@ import {
   type ScatterPosition,
 } from "@/lib/api/analyses";
 import { ErrorBanner } from "@/components/common/ErrorBanner";
+import { useSystemFeatures } from "@/hooks/useSystemFeatures";
 import {
   CardLoadingState,
   InlineSpinner,
@@ -97,6 +98,11 @@ export function AnalysesTabPanel({
   const router = useRouter();
   const pathname = usePathname();
   const searchParams = useSearchParams();
+  // Issue #1571: money (the "Run cost" KPI, the history cost column, the
+  // pre-flight estimate) renders only when the deployment says so —
+  // fail-closed while /system/info loads, like the sidebar's gates.
+  const systemFeatures = useSystemFeatures();
+  const showCost = systemFeatures?.cost_display === true;
 
   const [state, setState] = useState<BootstrapState>(EMPTY_BOOTSTRAP);
   const [activeRunId, setActiveRunId] = useState<string | null>(null);
@@ -526,8 +532,10 @@ export function AnalysesTabPanel({
       )}
       {selectedError && <ErrorBanner error={selectedError} />}
 
-      {/* KPI strip */}
-      <div className="grid grid-cols-2 gap-3 sm:grid-cols-4">
+      {/* KPI strip — three cards when the deployment hides cost (#1571) */}
+      <div
+        className={`grid grid-cols-2 gap-3 ${showCost ? "sm:grid-cols-4" : "sm:grid-cols-3"}`}
+      >
         <KpiCard
           icon={Clock}
           label={t("kpi.lastRun")}
@@ -543,18 +551,20 @@ export function AnalysesTabPanel({
           label={t("kpi.memoriesSurveyed")}
           value={displayRun ? displayRun.input_count : "—"}
         />
-        <KpiCard
-          icon={DollarSign}
-          label={t("kpi.runCost")}
-          value={
-            displayRun
-              ? formatCostCents(
-                  displayRun.cost_actual_cents ??
-                    displayRun.cost_estimated_cents,
-                )
-              : "—"
-          }
-        />
+        {showCost && (
+          <KpiCard
+            icon={DollarSign}
+            label={t("kpi.runCost")}
+            value={
+              displayRun
+                ? formatCostCents(
+                    displayRun.cost_actual_cents ??
+                      displayRun.cost_estimated_cents,
+                  )
+                : "—"
+            }
+          />
+        )}
         <KpiCard
           icon={Award}
           label={t("kpi.quality")}
@@ -631,6 +641,7 @@ export function AnalysesTabPanel({
               activeRunId={state.activeRun?.run_id ?? null}
               selectedRunId={selectedView?.run.run_id ?? null}
               onSelectRun={setSelectedRunId}
+              showCost={showCost}
             />
             <PropertyStats
               clusters={displayClusters}
@@ -646,6 +657,7 @@ export function AnalysesTabPanel({
         contextName={contextName}
         onClose={() => setShowModal(false)}
         onStarted={handleRunStarted}
+        showCost={showCost}
       />
     </div>
   );
