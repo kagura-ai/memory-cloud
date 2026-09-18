@@ -1,18 +1,20 @@
 "use client";
 
 /**
- * useSystemFeatures (#1145)
+ * useSystemFeatures (#1145) / useSystemInfo (#1572)
  *
- * Reads the backend feature flags from `GET /api/v1/system/info` and exposes
- * them to UI surfaces that gate on a deployment toggle (e.g. the Plan page).
+ * Reads `GET /api/v1/system/info` and exposes it to UI surfaces that gate on a
+ * deployment toggle (e.g. the Plan page) or render a deployment default (the
+ * reranker card).
  *
- * Module-cached so multiple consumers (sidebar + plan page) share a single
- * fetch per session. Returns `null` while the first fetch is in flight; callers
- * should treat a missing flag as **disabled** (default-off semantics).
+ * Module-cached so multiple consumers (sidebar + plan page + settings) share a
+ * single fetch per session. Both hooks return `null` while the first fetch is
+ * in flight; callers should treat a missing flag as **disabled** (default-off
+ * semantics) and a missing `search_defaults` as unknown.
  */
 
 import { useEffect, useState } from "react";
-import { getSystemInfo } from "@/lib/api/system";
+import { getSystemInfo, type SystemInfo } from "@/lib/api/system";
 
 type Features = Record<string, boolean>;
 
@@ -26,15 +28,24 @@ type Features = Record<string, boolean>;
 const MAX_ATTEMPTS = 3;
 const RETRY_BASE_MS = 500;
 
-let cache: Features | null = null;
-let inflight: Promise<Features> | null = null;
+// Persistent failure → fail closed: every gated feature reads as disabled and
+// no deployment default is known.
+const FAILED_INFO: SystemInfo = {
+  name: "",
+  version: "",
+  description: "",
+  environment: "",
+  features: {},
+};
 
-async function fetchFeaturesWithRetry(): Promise<Features> {
+let cache: SystemInfo | null = null;
+let inflight: Promise<SystemInfo> | null = null;
+
+async function fetchInfoWithRetry(): Promise<SystemInfo> {
   let lastError: unknown;
   for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
     try {
-      const info = await getSystemInfo();
-      return info.features ?? {};
+      return await getSystemInfo();
     } catch (e) {
       lastError = e;
       if (attempt < MAX_ATTEMPTS) {
@@ -47,22 +58,21 @@ async function fetchFeaturesWithRetry(): Promise<Features> {
   throw lastError;
 }
 
-export function useSystemFeatures(): Features | null {
-  const [features, setFeatures] = useState<Features | null>(cache);
+function useCachedSystemInfo(): SystemInfo | null {
+  const [info, setInfo] = useState<SystemInfo | null>(cache);
 
   useEffect(() => {
     if (cache) {
-      setFeatures(cache);
+      setInfo(cache);
       return;
     }
     if (!inflight) {
-      inflight = fetchFeaturesWithRetry()
-        .then((f) => {
-          cache = f;
+      inflight = fetchInfoWithRetry()
+        .then((i) => {
+          cache = i;
           return cache;
         })
         .catch((e) => {
-          // Persistent failure after retries → fail closed (default-off).
           // Surface it in dev so a real /system/info outage isn't silently
           // invisible. Don't cache, so a later component mount retries.
           if (process.env.NODE_ENV === "development") {
@@ -70,17 +80,30 @@ export function useSystemFeatures(): Features | null {
             console.error("useSystemFeatures: /system/info fetch failed", e);
           }
           inflight = null;
-          return {} as Features;
+          return FAILED_INFO;
         });
     }
     let alive = true;
-    inflight.then((f) => {
-      if (alive) setFeatures(f);
+    inflight.then((i) => {
+      if (alive) setInfo(i);
     });
     return () => {
       alive = false;
     };
   }, []);
 
-  return features;
+  return info;
+}
+
+export function useSystemFeatures(): Features | null {
+  const info = useCachedSystemInfo();
+  return info ? (info.features ?? {}) : null;
+}
+
+/**
+ * The whole `/system/info` payload (features + `search_defaults`), from the
+ * same cache and retry as `useSystemFeatures` (#1572).
+ */
+export function useSystemInfo(): SystemInfo | null {
+  return useCachedSystemInfo();
 }

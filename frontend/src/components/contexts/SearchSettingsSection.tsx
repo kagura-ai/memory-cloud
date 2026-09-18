@@ -54,7 +54,7 @@ import {
 import { apiClient } from "@/lib/api/base";
 import { useToast } from "@/hooks/use-toast";
 import { useWorkspace } from "@/contexts/WorkspaceContext";
-import { useSystemFeatures } from "@/hooks/useSystemFeatures";
+import { useSystemFeatures, useSystemInfo } from "@/hooks/useSystemFeatures";
 import { cn } from "@/styles/design-tokens";
 
 interface TelemetryServiceStatus {
@@ -124,9 +124,23 @@ export function SearchSettingsSection({
   // "configure reranker keys" CTA would point at a disabled page — gate both.
   const systemFeatures = useSystemFeatures();
   const byokEnabled = systemFeatures?.byok === true;
+  // #1572: the deployment default new contexts get, and whether the deployment
+  // reranks at all. Both `null`/undefined while /system/info is in flight (and
+  // `search_defaults` is absent on older backends) — render the plain copy then.
+  const systemInfo = useSystemInfo();
+  const searchDefaults = systemInfo?.search_defaults ?? null;
+  // Only an explicit false disables: loading and older backends keep the card usable.
+  const rerankingDisabledByDeployment = systemFeatures?.reranking === false;
 
   const isFree = currentWorkspace?.plan_name === "free";
   const isDirty = Object.keys(editedConfig).length > 0;
+
+  const providerLabel = (provider: string) =>
+    provider === "voyage"
+      ? "Voyage AI"
+      : provider === "cohere"
+        ? "Cohere"
+        : t("selfHostedLocal");
 
   const loadExternalKeys = useCallback(async () => {
     try {
@@ -246,7 +260,13 @@ export function SearchSettingsSection({
     setEditedConfig({
       ...editedConfig,
       reranker_provider: provider,
-      reranker_model: DEFAULT_RERANKER_MODELS[provider],
+      // #1572: picking the deployment's default provider preselects the model
+      // the deployment actually serves (e.g. a vLLM served-model-name the
+      // static list below cannot know).
+      reranker_model:
+        searchDefaults && provider === searchDefaults.reranker_provider
+          ? searchDefaults.reranker_model
+          : DEFAULT_RERANKER_MODELS[provider],
     });
   };
 
@@ -293,14 +313,29 @@ export function SearchSettingsSection({
   const externalKeysKnown = externalKeysLoaded;
   const hasAnyRerankerAvailable =
     !externalKeysKnown || hasVoyageKey || hasCohereKey || selfHostedAvailable;
+  // #1572: no "configure keys" CTA when BYOK is off (#1167) OR the deployment
+  // default is the keyless self_hosted reranker and it is reachable — there is
+  // nothing to configure in either case.
+  const keylessDefault =
+    searchDefaults?.reranker_provider === "self_hosted" && selfHostedAvailable;
+  const showConfigureKeysCta = byokEnabled && !keylessDefault;
+  const controlsDisabled =
+    isFree || !hasAnyRerankerAvailable || rerankingDisabledByDeployment;
 
   const currentProvider = getCurrentValue("reranker_provider");
-  const availableModels =
-    currentProvider === "voyage"
+  const currentModel = getCurrentValue("reranker_model");
+  const availableModels = [
+    ...(currentProvider === "voyage"
       ? VOYAGE_MODELS
       : currentProvider === "self_hosted"
         ? SELF_HOSTED_MODELS
-        : COHERE_MODELS;
+        : COHERE_MODELS),
+  ];
+  if (currentModel && !availableModels.some((m) => m.value === currentModel)) {
+    // A deployment-default (or hand-set) model the static list doesn't know —
+    // keep it selectable instead of rendering an empty select (#1572).
+    availableModels.push({ value: currentModel, label: currentModel });
+  }
 
   const selectedProviderUnavailable =
     (externalKeysKnown && currentProvider === "voyage" && !hasVoyageKey) ||
@@ -463,9 +498,25 @@ export function SearchSettingsSection({
               <Sparkles className="h-5 w-5" />
               {t("rerankerConfig")}
             </CardTitle>
-            <CardDescription>{t("rerankerConfigDesc")}</CardDescription>
+            <CardDescription>
+              {searchDefaults
+                ? t("rerankerConfigDesc", {
+                    provider: providerLabel(searchDefaults.reranker_provider),
+                    model: searchDefaults.reranker_model,
+                  })
+                : t("rerankerConfigDescPlain")}
+            </CardDescription>
           </CardHeader>
           <CardContent className="space-y-6">
+            {rerankingDisabledByDeployment && (
+              <Alert>
+                <Info className="h-4 w-4" />
+                <AlertDescription>
+                  {t("rerankingDisabledByDeployment")}
+                </AlertDescription>
+              </Alert>
+            )}
+
             {isFree && (
               <Alert>
                 <Lock className="h-4 w-4" />
@@ -490,36 +541,37 @@ export function SearchSettingsSection({
             {/* #1167: only offer the configure-keys CTA when BYOK is on —
                 with BYOK off the external-keys page is disabled, so show the
                 headline without a dangling link. */}
-            {!isFree && !hasAnyRerankerAvailable && (
-              <Alert>
-                <AlertCircle className="h-4 w-4" />
-                <AlertDescription>
-                  <p className="font-medium mb-2">{t("noRerankerKeys")}</p>
-                  {byokEnabled && (
-                    <p className="text-sm">
-                      {/* t.rich with a <link> tag in the message — splitting
+            {!isFree &&
+              !rerankingDisabledByDeployment &&
+              !hasAnyRerankerAvailable && (
+                <Alert>
+                  <AlertCircle className="h-4 w-4" />
+                  <AlertDescription>
+                    <p className="font-medium mb-2">{t("noRerankerKeys")}</p>
+                    {showConfigureKeysCta && (
+                      <p className="text-sm">
+                        {/* t.rich with a <link> tag in the message — splitting
                           on an English substring broke non-English locales. */}
-                      {t.rich("configureRerankerKeys", {
-                        link: (chunks) => (
-                          <Link
-                            href="/workspace/integrations/external-keys"
-                            className="underline font-medium"
-                          >
-                            {chunks}
-                          </Link>
-                        ),
-                      })}
-                    </p>
-                  )}
-                </AlertDescription>
-              </Alert>
-            )}
+                        {t.rich("configureRerankerKeys", {
+                          link: (chunks) => (
+                            <Link
+                              href="/workspace/integrations/external-keys"
+                              className="underline font-medium"
+                            >
+                              {chunks}
+                            </Link>
+                          ),
+                        })}
+                      </p>
+                    )}
+                  </AlertDescription>
+                </Alert>
+              )}
 
             <div
               className={cn(
                 "space-y-6",
-                (isFree || !hasAnyRerankerAvailable) &&
-                  "opacity-50 pointer-events-none",
+                controlsDisabled && "opacity-50 pointer-events-none",
               )}
             >
               <div className="flex items-center justify-between">
@@ -528,7 +580,13 @@ export function SearchSettingsSection({
                     {t("enableReranking")}
                   </Label>
                   <p className="text-sm text-muted-foreground">
-                    {t("enableRerankingDesc")}
+                    {searchDefaults
+                      ? t("enableRerankingDesc", {
+                          state: searchDefaults.use_rerank
+                            ? t("deploymentDefaultOn")
+                            : t("deploymentDefaultOff"),
+                        })
+                      : t("enableRerankingDescPlain")}
                   </p>
                 </div>
                 <Switch
@@ -537,7 +595,7 @@ export function SearchSettingsSection({
                   onCheckedChange={(checked) =>
                     setEditedConfig({ ...editedConfig, use_rerank: checked })
                   }
-                  disabled={isFree || !hasAnyRerankerAvailable}
+                  disabled={controlsDisabled}
                 />
               </div>
 
@@ -601,7 +659,7 @@ export function SearchSettingsSection({
                             <p className="text-sm">
                               {t("selfHostedUnavailableDetail")}
                             </p>
-                          ) : byokEnabled ? (
+                          ) : showConfigureKeysCta ? (
                             <p className="text-sm">
                               {t.rich("configureRerankerKeys", {
                                 link: (chunks) => (
@@ -616,7 +674,8 @@ export function SearchSettingsSection({
                             </p>
                           ) : (
                             // #1167: BYOK off — key setup is not available in
-                            // this deployment, so no configure link.
+                            // this deployment, so no configure link. #1572:
+                            // same when the keyless self_hosted default is up.
                             <p className="text-sm">{t("noRerankerKeys")}</p>
                           )}
                         </AlertDescription>
