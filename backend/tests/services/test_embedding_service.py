@@ -957,3 +957,21 @@ class TestDisallowEnvFallback:
 
         assert (result, source) == ("sk-platform-only", "env")
         service.db.execute.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_stored_keys_disabled_has_byok_key_is_false(self, service, monkeypatch):
+        """#1569: the BYOK existence probe mirrors the resolver's gate — a
+        stored key row is not looked up, so the spend-cap plan gate,
+        ``resolve_paid_by`` and the shared-context preflight see no BYOK."""
+        monkeypatch.setattr("services.byok_resolution.stored_byok_keys_disabled", lambda: True)
+        execute_result = MagicMock()
+        execute_result.scalar_one_or_none.return_value = uuid4()
+        service.db.execute = AsyncMock(return_value=execute_result)
+
+        has_key = await service.has_byok_key(
+            "00000000-0000-0000-0000-000000000001",
+            context_id="00000000-0000-0000-0000-000000000002",
+        )
+
+        assert has_key is False
+        service.db.execute.assert_not_called()

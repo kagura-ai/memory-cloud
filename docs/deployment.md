@@ -659,7 +659,11 @@ Opt-in hardening for a deployment that turned BYOK off and wants "off" to
 mean off: `LLMService`, `EmbeddingService` and `RerankerService` skip their
 `external_api_keys` lookups and use the platform env / settings credential
 only (for `self_hosted`, `SELF_HOSTED_BASE_URL` — never a workspace's stored
-URL). Logged once per process as `byok_key_resolution_disabled`. Requires
+URL). `EmbeddingService`'s BYOK existence probe (the spend-cap plan gate,
+`paid_by` attribution and the shared-context read preflight) treats stored
+keys as absent too, so a Free workspace is refused the platform fallback
+rather than slipping through on an ignored key. Logged once per process as
+`byok_key_resolution_disabled`. Requires
 `ENABLE_BYOK=false` (refused at boot otherwise: users must not be able to
 store keys the services ignore). Default `true` keeps the #1167 behaviour.
 With it set, Sleep's judge calls on the managed lane also pass
