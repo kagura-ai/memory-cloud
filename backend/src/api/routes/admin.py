@@ -49,7 +49,11 @@ from utils.exceptions import (
     ValidationError,
 )
 from utils.logger import get_logger
-from utils.plan_resolver import BASE_CAP, get_user_workspace_cap_summary
+from utils.plan_resolver import (
+    BASE_CAP,
+    get_user_workspace_cap_summary,
+    resolve_workspace_cap,
+)
 
 logger = get_logger(__name__)
 
@@ -93,8 +97,9 @@ class UserInfo(TZAwareBaseModel):
     # closely-related admin endpoints). Always populated for active users so
     # the list UI can render `owned_count / cap` and an at-cap flag.
     # ``cap`` defaults to ``BASE_CAP`` (not a literal ``1``) so the schema
-    # stays in sync if ``BASE_CAP`` ever changes — recomputed per-user in
-    # the handler from ``BASE_CAP + workspace_slot_bonus``.
+    # stays in sync if ``BASE_CAP`` ever changes — resolved per-user in the
+    # handler via ``plan_resolver.resolve_workspace_cap`` (#1550: base +
+    # slot bonus + highest owned tier's grant).
     owned_count: int = 0
     workspace_slot_bonus: int = 0
     base_cap: int = BASE_CAP
@@ -204,14 +209,16 @@ async def _fetch_memory_counts(db: AsyncSession, user_ids: list[str]) -> dict[st
 
 
 async def _fetch_workspace_caps(db: AsyncSession, user_ids: list[str]) -> dict[str, dict[str, int]]:
-    """Owned-workspace count + slot bonus per user, in ONE query (#695).
+    """Owned-workspace count + slot bonus + cap per user, in ONE query (#695).
 
-    Mirrors ``plan_resolver.get_user_workspace_cap_summary`` but joined for
-    every listed user — calling the per-user helper in the render loop would
-    re-introduce the N+1 pattern fixed for memory counts. LEFT OUTER JOIN so
-    users with zero owned workspaces still surface (count = 0), and the join
-    predicate excludes soft-deleted workspaces (#681: cap math counts only live
-    workspaces).
+    Mirrors the SELECT in ``plan_resolver.get_user_workspace_cap_summary`` but
+    joined for every listed user — calling the per-user helper in the render
+    loop would re-introduce the N+1 pattern fixed for memory counts. The cap
+    itself still comes from ``plan_resolver.resolve_workspace_cap`` (#1550:
+    the owned plan names ride the same JOIN) so the list and the detail view
+    never drift. LEFT OUTER JOIN so users with zero owned workspaces still
+    surface (count = 0), and the join predicate excludes soft-deleted
+    workspaces (#681: cap math counts only live workspaces).
     """
     if not user_ids:
         return {}
@@ -220,6 +227,7 @@ async def _fetch_workspace_caps(db: AsyncSession, user_ids: list[str]) -> dict[s
             User.user_id,
             User.workspace_slot_bonus,
             func.count(Workspace.id).label("owned_count"),
+            func.array_agg(Workspace.plan_name).label("owned_plan_names"),
         )
         .outerjoin(
             Workspace,
@@ -233,12 +241,16 @@ async def _fetch_workspace_caps(db: AsyncSession, user_ids: list[str]) -> dict[s
     )
     caps: dict[str, dict[str, int]] = {}
     for row in result.all():
-        bonus = int(row.workspace_slot_bonus or 0)
+        summary = resolve_workspace_cap(
+            int(row.owned_count or 0),
+            int(row.workspace_slot_bonus or 0),
+            row.owned_plan_names or (),
+        )
         caps[row.user_id] = {
-            "owned_count": int(row.owned_count or 0),
-            "workspace_slot_bonus": bonus,
-            "base_cap": BASE_CAP,
-            "cap": BASE_CAP + bonus,
+            "owned_count": summary.owned_count,
+            "workspace_slot_bonus": summary.slot_bonus,
+            "base_cap": summary.base,
+            "cap": summary.cap,
         }
     return caps
 
@@ -352,19 +364,18 @@ async def list_users(
         user_infos = []
         for u in users_list:
             stats = memory_stats_dict.get(u.user_id, {"memory_count": 0})
-            # Issue #695: cap_stats falls back to (0, 0, BASE_CAP) for users
+            # Issue #695: cap_stats falls back to "0 owned, no tier" for users
             # that returned no row (extremely unlikely — only if the user was
             # deleted between the listing query and the cap query). Same
             # shape as the User column default so the UI always has values.
-            cap = cap_stats_dict.get(
-                u.user_id,
-                {
-                    "owned_count": 0,
-                    "workspace_slot_bonus": int(u.workspace_slot_bonus or 0),
-                    "base_cap": BASE_CAP,
-                    "cap": BASE_CAP + int(u.workspace_slot_bonus or 0),
-                },
-            )
+            if (cap := cap_stats_dict.get(u.user_id)) is None:
+                fallback = resolve_workspace_cap(0, int(u.workspace_slot_bonus or 0), ())
+                cap = {
+                    "owned_count": fallback.owned_count,
+                    "workspace_slot_bonus": fallback.slot_bonus,
+                    "base_cap": fallback.base,
+                    "cap": fallback.cap,
+                }
             # Issue #246: current_context_id removed
             # context_info = context_map.get(u.user_id, {})
 
@@ -663,7 +674,8 @@ async def get_user_detail(
             WorkspaceSummary,
         )
 
-        owned_count, cap = await get_user_workspace_cap_summary(db, user_id)
+        cap_summary = await get_user_workspace_cap_summary(db, user_id)
+        owned_count, cap = cap_summary.owned_count, cap_summary.cap
         owned_ws_result = await db.execute(
             select(Workspace.id, Workspace.name, Workspace.plan_name)
             .where(
@@ -679,7 +691,9 @@ async def get_user_detail(
         workspace_summary = WorkspaceSummary(
             owned_count=owned_count,
             workspace_slot_bonus=target_user.workspace_slot_bonus,
-            base_cap=BASE_CAP,
+            base_cap=cap_summary.base,
+            tier_grant=cap_summary.tier_grant,  # #1550
+            tier=cap_summary.tier,  # #1550
             cap=cap,
             is_at_cap=(owned_count >= cap),
             owned_workspaces=owned_ws_list,
@@ -850,10 +864,13 @@ async def update_workspace_slot_bonus(
         raise BonusBelowZeroError(current=current_bonus, delta=request.delta)
 
     # owned_count is read before the mutation; the cap below is the
-    # *new* cap (BASE_CAP + projected_after). Computing it locally avoids a
-    # second query and keeps the destructive-op decision deterministic.
-    owned_count, _current_cap = await get_user_workspace_cap_summary(db, user_id)
-    projected_cap = BASE_CAP + projected_after
+    # *new* cap — the resolved cap moves 1:1 with the bonus, so shifting it
+    # by ``delta`` avoids a second query without restating the formula
+    # (#1550: the tier grant is already inside ``cap_summary.cap``) and
+    # keeps the destructive-op decision deterministic.
+    cap_summary = await get_user_workspace_cap_summary(db, user_id)
+    owned_count = cap_summary.owned_count
+    projected_cap = cap_summary.cap + request.delta
 
     reason_clean = (request.reason or "").strip() or None
     is_destructive = request.delta < 0 and projected_cap < owned_count
@@ -901,7 +918,9 @@ async def update_workspace_slot_bonus(
     # under concurrent +1 collisions the audit trail records the actual
     # pre-state of THIS update, not a stale SELECT snapshot.
     before_value = after_value - request.delta
-    final_cap = BASE_CAP + after_value
+    # Re-base the resolved cap on the authoritative post-UPDATE bonus (the
+    # snapshot bonus may be stale under a concurrent admin edit).
+    final_cap = cap_summary.cap - cap_summary.slot_bonus + after_value
 
     # Race-guard the destructive-op check post-UPDATE. The pre-UPDATE
     # validation used ``current_bonus`` from a snapshot, so two admins
@@ -957,7 +976,7 @@ async def update_workspace_slot_bonus(
         before_value=before_value,
         after_value=after_value,
         owned_count=owned_count,
-        base_cap=BASE_CAP,
+        base_cap=cap_summary.base,
         cap=final_cap,
         is_at_cap=(owned_count >= final_cap),
         reason=reason_clean,

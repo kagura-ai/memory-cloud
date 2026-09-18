@@ -205,11 +205,15 @@ class QuotaService:
     ) -> tuple[bool, str | None]:
         """Check if user can create another workspace.
 
-        Issue #276 (updated by Issue #661, refined by #674/#675): the
-        owned-workspace cap is ``1 (base) + users.workspace_slot_bonus``.
-        Joined workspaces (via invite) do not count toward this limit —
-        they consume the inviting workspace's seat quota, which the
-        inviter pays for.
+        Issue #276 (updated by Issue #661, refined by #674/#675, #1550):
+        the owned-workspace cap is ``1 (base) + users.workspace_slot_bonus
+        + owned_workspace_grant`` of the highest tier the user owns
+        (free 0 / basic 0 / pro 2 / promax 19). Block-new-only: a user
+        above the cap (e.g. after downgrading that workspace) keeps every
+        workspace — only creating another is refused here. Joined
+        workspaces (via invite) do not count toward this limit — they
+        consume the inviting workspace's seat quota, which the inviter
+        pays for.
 
         Issue #677 (sub-C): a per-user ``pg_advisory_xact_lock`` is
         acquired before the count/cap read to close the TOCTOU race
@@ -240,7 +244,11 @@ class QuotaService:
                 reached, AND ``settings.enforce_workspace_cap`` is True.
         """
         from config.settings import get_settings
-        from utils.plan_resolver import get_user_workspace_cap_summary
+        from utils.plan_resolver import (
+            get_user_workspace_cap_summary,
+            next_tier_with_more_workspaces,
+            tier_owned_workspace_cap,
+        )
 
         settings = get_settings()
 
@@ -283,24 +291,37 @@ class QuotaService:
             # denials on infrastructure errors — allow the create.
             return True, None
 
-        # Issue #675 (epic #674 sub-A): cap = 1 (base) + users.workspace_slot_bonus.
-        # The plan_resolver helper returns both numbers in a single SELECT
-        # (JOIN of users + workspaces) so the gate and the dashboard read
-        # consistent state.
-        workspace_count, cap = await get_user_workspace_cap_summary(self.db, user_id)
+        # Issue #675 (epic #674 sub-A) / #1550: cap = 1 (base) +
+        # users.workspace_slot_bonus + owned_workspace_grant of the highest
+        # tier the user owns. The plan_resolver helper resolves everything
+        # in a single SELECT (JOIN of users + workspaces) so the gate and
+        # the dashboard read consistent state.
+        summary = await get_user_workspace_cap_summary(self.db, user_id)
+        workspace_count, cap = summary.owned_count, summary.cap
 
         if workspace_count >= cap:
+            # #1550 upsell-ready refusal: name the tier the cap derives from
+            # and the next tier that grants more slots (None on the top tier,
+            # in which case the upgrade sentence is dropped).
+            next_tier = next_tier_with_more_workspaces(summary.tier)
+            upsell = ""
+            if next_tier is not None:
+                next_plan = get_plan_tier(next_tier)
+                next_cap = tier_owned_workspace_cap(next_plan) + summary.slot_bonus
+                upsell = f"Upgrade to {next_plan.display_name} to own up to {next_cap}. "
             error = (
                 f"Workspace limit reached. "
                 f"You currently own {workspace_count} workspace(s) "
-                f"(cap: {cap}). You can still join other workspaces "
-                f"as a member via invite."
+                f"(cap: {cap} on the {get_plan_tier(summary.tier).display_name} plan). "
+                f"{upsell}You can still join other workspaces as a member via invite."
             )
             logger.warning(
                 "workspace_creation_denied",
                 user_id=user_id,
                 current_owned_workspaces=workspace_count,
                 max_owned_workspaces=cap,
+                tier=summary.tier,
+                tier_grant=summary.tier_grant,
                 enforced=settings.enforce_workspace_cap,
                 lock_wait_ms=lock_wait_ms,
                 reason="over_cap",
@@ -317,11 +338,15 @@ class QuotaService:
                 # discriminator the frontend keys off (``error`` stays the shared
                 # ``QUOTA-001``); ``owned_count`` / ``cap`` feed the i18n
                 # placeholders. Future quota types follow the same convention.
+                # #1550: ``tier`` / ``next_tier`` are plan KEYS (not display
+                # names) so the client can localize the upsell itself.
                 raise QuotaExceededError(
                     error,
                     quota_type="workspace_limit_reached",
                     owned_count=workspace_count,
                     cap=cap,
+                    tier=summary.tier,
+                    next_tier=next_tier,
                 )
             return False, error
 
@@ -334,6 +359,8 @@ class QuotaService:
             user_id=user_id,
             current_owned_workspaces=workspace_count,
             max_owned_workspaces=cap,
+            tier=summary.tier,
+            tier_grant=summary.tier_grant,
             lock_wait_ms=lock_wait_ms,
             enforced=settings.enforce_workspace_cap,
         )

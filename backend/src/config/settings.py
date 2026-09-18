@@ -911,15 +911,34 @@ class Settings(BaseSettings):
         ),
     )
     # Issue #661's ``plan_*_max_owned_workspaces`` env overrides were removed
-    # in #675 — the cap is now per-user (``users.workspace_slot_bonus``) and
-    # no longer depends on the plan tier.
+    # in #675 — the cap is per-user (``users.workspace_slot_bonus``). #1550
+    # lets the tier GRANT extra slots instead (``PLAN_<KEY>_OWNED_WORKSPACE_GRANT``);
+    # the highest tier among the user's owned workspaces applies. ``None`` =
+    # dataclass default (free 0 / basic 0 / pro 2 / promax 19 → caps 1/1/3/20).
+    plan_free_owned_workspace_grant: int | None = Field(
+        default=None,
+        description="Override FREE plan owned-workspace slot grant (Issue #1550; default 0)",
+    )
+    plan_basic_owned_workspace_grant: int | None = Field(
+        default=None,
+        description="Override BASIC plan owned-workspace slot grant (Issue #1550; default 0)",
+    )
+    plan_pro_owned_workspace_grant: int | None = Field(
+        default=None,
+        description="Override PRO plan owned-workspace slot grant (Issue #1550; default 2)",
+    )
+    plan_promax_owned_workspace_grant: int | None = Field(
+        default=None,
+        description="Override PROMAX plan owned-workspace slot grant (Issue #1550; default 19)",
+    )
     enforce_workspace_cap: bool = Field(
         default=False,
         description=(
             "Issue #661 / #675 rollout gate. When False (default), workspace "
             "creation is allowed unconditionally but a structured warn log "
             "is emitted whenever a user is over their effective cap "
-            "(1 + workspace_slot_bonus). Flip to True once the cleanup "
+            "(1 + workspace_slot_bonus + highest owned tier's "
+            "owned_workspace_grant, #1550). Flip to True once the cleanup "
             "window closes — tracked in #677 (sub-C: TOCTOU + enforce flip)."
         ),
     )
