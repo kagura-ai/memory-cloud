@@ -1,6 +1,8 @@
 """Data retention policies for Kagura Memory Cloud.
 
-Defines retention periods for Working and Persistent memory.
+Defines the Working memory retention period and the Working → Persistent
+promotion rule. Persistent memory is retained indefinitely; there is no
+per-plan retention here (plan tiers live in ``config.plan_tiers``).
 
 Issue #2 - Phase 1: データ保持期間要件定義
 """
@@ -17,21 +19,6 @@ WORKING_MEMORY_RETENTION = timedelta(days=WORKING_MEMORY_RETENTION_DAYS)
 
 # 自動クリーンアップスケジュール
 CLEANUP_SCHEDULE = "daily"  # daily, hourly, weekly
-
-
-# ============================================================================
-# Persistent Memory Retention
-# ============================================================================
-
-# Persistent memory保持期間: 無期限（プラン別に将来変更可能）
-PERSISTENT_MEMORY_RETENTION_DAYS = None  # None = 無期限
-
-# プラン別保持期間（将来用）
-RETENTION_BY_PLAN = {
-    "free": timedelta(days=90),  # Free: 90日
-    "pro": None,  # Pro: 無期限
-    "enterprise": None,  # Enterprise: 無期限
-}
 
 
 # ============================================================================

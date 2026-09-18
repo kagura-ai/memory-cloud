@@ -37,6 +37,35 @@ from utils.logger import get_logger
 logger = get_logger(__name__)
 
 
+def _log_quota_fail_open(*, quota: str, key: str, exc: RedisError, user_id: str, path: str) -> None:
+    """Emit the single warning for a quota check that lost Redis and failed open.
+
+    ``quota_check_failed_open`` is the stable event operators alert on (Issue
+    #1556): exactly one line per failed check, whether Redis is down or the
+    connection pool wait timed out — ``db.redis`` wraps both as ``RedisError``.
+    ``key_prefix`` drops the trailing time bucket (minute / date) so the field
+    stays low-cardinality; ``error_class`` is the chained root cause when the
+    wrapper has one (e.g. redis-py ``ConnectionError``), else the wrapper.
+
+    Args:
+        quota: Which check failed — ``per_minute`` or ``daily_{mcp,public,rest}``.
+        key: The Redis counter key that could not be incremented.
+        exc: The ``RedisError`` raised by the counter helper.
+        user_id: Requesting user (for correlation with the request log).
+        path: Request path.
+    """
+    cause = exc.__cause__ or exc
+    logger.warning(
+        "quota_check_failed_open",
+        quota=quota,
+        key_prefix=key.rsplit(":", 1)[0],
+        error_class=type(cause).__name__,
+        error=str(exc),
+        user_id=user_id,
+        path=path,
+    )
+
+
 class RateLimitMiddleware(BaseHTTPMiddleware):
     """Enforce rate limits based on user plan tier.
 
@@ -100,8 +129,11 @@ class RateLimitMiddleware(BaseHTTPMiddleware):
             try:
                 minute_count = await increment_counter(minute_key, ttl=60)
             except RedisError as e:
-                logger.error("rate_limit_redis_failed", error=str(e), user_id=user_id)
-                # Fail-open: Allow request if Redis is down
+                # Fail-open: Allow request if Redis is down (or the pool wait
+                # timed out, #1556) — one stable warning so it stays visible.
+                _log_quota_fail_open(
+                    quota="per_minute", key=minute_key, exc=e, user_id=user_id, path=path
+                )
                 return await call_next(request)
 
             remaining = max(0, per_minute_limit - minute_count)
@@ -248,12 +280,12 @@ class RateLimitMiddleware(BaseHTTPMiddleware):
         is_public = path.startswith("/api/v1/public/") or path.startswith("/api/v1/resources/")
 
         if is_mcp:
-            daily_key = f"quota:{scope_key}:mcp:{today}"
+            mode = "mcp"
             daily_limit = plan_tier.mcp_calls_per_day
             quota_type = "MCP"
 
         elif is_public:
-            daily_key = f"quota:{scope_key}:public:{today}"
+            mode = "public"
             daily_limit = plan_tier.public_calls_per_day
             quota_type = "Public API"
 
@@ -263,7 +295,7 @@ class RateLimitMiddleware(BaseHTTPMiddleware):
                 )
 
         else:
-            daily_key = f"quota:{scope_key}:rest:{today}"
+            mode = "rest"
             daily_limit = plan_tier.rest_calls_per_day
             quota_type = "REST"
 
@@ -272,11 +304,16 @@ class RateLimitMiddleware(BaseHTTPMiddleware):
                     "REST API is not available on Free plan. Please upgrade to Basic or Pro plan."
                 )
 
+        daily_key = f"quota:{scope_key}:{mode}:{today}"
+
         try:
             daily_count = await increment_counter(daily_key, ttl=86400)
         except RedisError as e:
-            logger.error("daily_quota_redis_failed", error=str(e), user_id=user_id)
-            # Fail-open: Allow request if Redis is down
+            # Fail-open: Allow request if Redis is down (or the pool wait timed
+            # out, #1556) — one stable warning so it stays visible.
+            _log_quota_fail_open(
+                quota=f"daily_{mode}", key=daily_key, exc=e, user_id=user_id, path=path
+            )
             return
 
         if daily_count > daily_limit:
