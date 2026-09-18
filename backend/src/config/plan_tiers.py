@@ -381,7 +381,8 @@ def _derive_feature_min_plans(tiers: dict[str, PlanTier]) -> dict[str, str]:
     """Lowest tier in ``PLAN_ORDER`` that carries each feature of ``tiers``.
 
     A feature on no tier gets no entry, so ``get_required_plan_for_feature``
-    raises for it and the refusal text falls back to "higher".
+    raises for it, ``required_plan_name`` returns ``None`` and the refusal
+    text falls back to "higher".
     """
     min_plans: dict[str, str] = {}
     for plan_name in PLAN_ORDER:
@@ -547,6 +548,23 @@ def get_required_plan_for_feature(feature: str) -> str:
     if feature not in FEATURE_MIN_PLANS:
         raise ValueError(f"Unknown feature: {feature}")
     return FEATURE_MIN_PLANS[feature]
+
+
+def required_plan_name(feature: str) -> str | None:
+    """Minimum plan tier name for ``feature``, or ``None`` when no tier has it.
+
+    Non-raising twin of ``get_required_plan_for_feature`` for the gates that
+    put the tier name in an error envelope (#1559): a ``PLAN_<KEY>_FEATURES``
+    override that drops a feature from every tier leaves it without a
+    ``FEATURE_MIN_PLANS`` row, and a refusal must never turn into a 500.
+
+    Args:
+        feature: Feature name
+
+    Returns:
+        Minimum plan tier name, or ``None`` if no tier carries the feature.
+    """
+    return FEATURE_MIN_PLANS.get(feature)
 
 
 def has_feature(plan_name: str, feature: str) -> bool:

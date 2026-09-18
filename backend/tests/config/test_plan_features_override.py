@@ -25,6 +25,7 @@ from config.plan_tiers import (
     get_required_plan_for_feature,
     has_feature,
     required_plan_display_name,
+    required_plan_name,
 )
 from config.settings import Settings
 
@@ -181,6 +182,8 @@ def test_a_feature_on_no_tier_drops_out_of_the_matrix(registry: MagicMock) -> No
     assert "managed_embeddings" not in plan_tiers.FEATURE_MIN_PLANS
     with pytest.raises(ValueError, match="Unknown feature"):
         get_required_plan_for_feature("managed_embeddings")
+    # The envelope-building gates use the non-raising twin.
+    assert required_plan_name("managed_embeddings") is None
     assert required_plan_display_name("managed_embeddings") == "higher"
     assert not any(has_feature(p, "managed_embeddings") for p in PLAN_ORDER)
 

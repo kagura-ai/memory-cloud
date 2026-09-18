@@ -465,9 +465,18 @@ currently unlock by tier rank (XL); the REST API and MCP tools honour the
 override.
 
 The override changes *which* tiers may create; the numeric caps stay the
-second gate. The Free tier's `max_resource_tokens` is 0 and has no env
-override, so grant `resources` to M or above — on Free the token-count check
-would still refuse.
+second gate, and several of them are 0 on the lower tiers with no env override
+of their own:
+
+- `max_resource_tokens` and `max_connectors` are 0 on Free — granting
+  `resources` / `connectors` to Free still refuses at the count check, so grant
+  them to M or above.
+- `public_calls_per_day` and `bound_public_calls_per_minute` are 0 on Free
+  **and M** — with the example above an M workspace can *create* a public
+  context, but every public-API request against it is refused by the daily
+  public quota, and no public-bound API key can be minted. To actually serve
+  public traffic from the override, grant `public_contexts` (and `resources`)
+  to L (`PLAN_PRO_FEATURES`) or above, whose public caps are non-zero.
 
 Alternatively, for self-hosted single-user setups, simply assign the XL
 (`promax`) plan to your workspace. Plan changes are **admin-only** by default. For SaaS deployments with self-service billing, enable Stripe:
