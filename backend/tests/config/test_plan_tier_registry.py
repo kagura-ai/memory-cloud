@@ -108,6 +108,14 @@ def test_plan_rank_and_at_least() -> None:
     assert not plan_at_least(None, "basic")
 
 
+def test_owned_workspace_grants_are_0_0_2_19_and_monotonic() -> None:
+    """#1550: the tier GRANTS owned-workspace slots on top of the per-user base
+    (1) and slot bonus — totals 1 / 1 / 3 / 20 with bonus 0."""
+    grants = [get_plan_tier(p).owned_workspace_grant for p in PLAN_ORDER]
+    assert grants == [0, 0, 2, 19]
+    assert grants == sorted(grants), "a higher tier never grants fewer workspaces"
+
+
 def test_admin_plan_change_accepts_every_registered_tier() -> None:
     from api.routes.admin_plans import AdminUpdatePlanRequest
 

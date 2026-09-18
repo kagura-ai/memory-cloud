@@ -409,6 +409,7 @@ export interface PlanTierFeature {
   display_name: string;
   max_contexts: number;
   max_members: number;
+  owned_workspaces: number; // #1550: per-user owned cap on this tier (1 + grant)
   memory_limit: number;
   storage_limit_bytes: number;
   mcp_calls_per_day: number;

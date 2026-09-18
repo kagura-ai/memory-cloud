@@ -83,6 +83,8 @@ export interface PlanTierInfo {
   price_monthly: number;
   max_contexts_per_workspace: number;
   max_members_per_workspace: number;
+  owned_workspace_grant: number; // #1550: slots the tier grants its owner
+  owned_workspaces: number; // #1550: 1 base + grant (what the table shows)
   max_resource_tokens: number;
   max_connectors: number; // #1551: serve-only cap on M/L, creation cap on XL
   memory_limit: number;
@@ -318,13 +320,17 @@ export interface OwnedWorkspaceInfo {
  * Per-user workspace capacity summary for the admin slot bonus UI (#676).
  * base_cap is surfaced explicitly so the frontend does not hardcode the
  * formula — if BASE_CAP ever changes in plan_resolver.py, this just flows
- * through. is_at_cap is precomputed on the backend so the badge variant
- * does not have to recompute it.
+ * through. #1550 adds tier_grant / tier (slots granted by the highest owned
+ * tier: cap = base_cap + workspace_slot_bonus + tier_grant); optional during
+ * the mixed-version rollout window. is_at_cap is precomputed on the backend
+ * so the badge variant does not have to recompute it.
  */
 export interface WorkspaceSummary {
   owned_count: number;
   workspace_slot_bonus: number;
   base_cap: number;
+  tier_grant?: number;
+  tier?: string;
   cap: number;
   is_at_cap: boolean;
   owned_workspaces: OwnedWorkspaceInfo[];

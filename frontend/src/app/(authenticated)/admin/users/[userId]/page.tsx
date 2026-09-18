@@ -258,7 +258,11 @@ export default function UserDetailPage() {
     // [-]/[+] feels responsive. Reconciled with the authoritative value
     // returned by the PATCH below.
     const projectedBonus = summarySnapshot.workspace_slot_bonus + delta;
-    const projectedCap = summarySnapshot.base_cap + projectedBonus;
+    // #1550: the tier grant is part of the cap; the bonus moves it 1:1.
+    const projectedCap =
+      summarySnapshot.base_cap +
+      (summarySnapshot.tier_grant ?? 0) +
+      projectedBonus;
     setUserDetail((prev) =>
       prev && prev.workspace_summary
         ? {
@@ -334,7 +338,8 @@ export default function UserDetailPage() {
     if (!userDetail?.workspace_summary || bonusPending !== null) return;
     const summary = userDetail.workspace_summary;
     const projectedBonus = summary.workspace_slot_bonus + delta;
-    const projectedCap = summary.base_cap + projectedBonus;
+    const projectedCap =
+      summary.base_cap + (summary.tier_grant ?? 0) + projectedBonus;
 
     if (projectedBonus < 0) {
       toast({
@@ -617,6 +622,7 @@ export default function UserDetailPage() {
                         {t("workspaceCapacity.formula", {
                           base: summary.base_cap,
                           bonus: summary.workspace_slot_bonus,
+                          grant: summary.tier_grant ?? 0,
                         })}
                       </span>
                     </p>

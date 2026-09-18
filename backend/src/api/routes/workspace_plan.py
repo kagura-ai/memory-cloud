@@ -33,6 +33,7 @@ from models.auth import (
 from models.memory import Memory
 from services.permission_service import PermissionService
 from utils.logger import get_logger
+from utils.plan_resolver import tier_owned_workspace_cap
 
 logger = get_logger(__name__)
 
@@ -83,6 +84,9 @@ class PlanTierFeature(BaseModel):
     # Numeric limits (0 == not available on this tier)
     max_contexts: int
     max_members: int
+    # #1550: owned-workspace cap a user whose highest-tier workspace is on
+    # this tier gets with zero slot bonus (1 base + owned_workspace_grant).
+    owned_workspaces: int
     memory_limit: int
     storage_limit_bytes: int
     mcp_calls_per_day: int
@@ -251,6 +255,7 @@ def _plan_tier_feature(tier: PlanTier) -> PlanTierFeature:
         display_name=tier.display_name,
         max_contexts=tier.max_contexts_per_workspace,
         max_members=tier.max_members_per_workspace,
+        owned_workspaces=tier_owned_workspace_cap(tier),
         memory_limit=tier.memory_limit,
         storage_limit_bytes=tier.storage_limit_bytes,
         mcp_calls_per_day=tier.mcp_calls_per_day,

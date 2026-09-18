@@ -207,13 +207,15 @@ class TestQuotaServiceMemberQuota:
 
 
 class TestQuotaServiceWorkspaceCreationCap:
-    """Test QuotaService.check_workspace_creation_allowed() — #674 sub-A, #675.
+    """Test QuotaService.check_workspace_creation_allowed() — #674 sub-A, #675, #1550.
 
     Post-#675 slot-pivot semantics: the cap is ``1 + workspace_slot_bonus``
-    instead of the prior plan-tier-derived cap. The helper
-    ``get_user_workspace_cap_summary`` returns ``(owned_count, slot_bonus)``
-    via a single JOIN; the mock arms one ``execute()`` call returning a
-    Row with attribute access for those two values.
+    instead of the prior plan-tier-derived cap; #1550 adds the tier GRANT
+    of the highest owned workspace (free 0 / basic 0 / pro 2 / promax 19).
+    The helper ``get_user_workspace_cap_summary`` reads owned_count,
+    slot_bonus and the owned plan names via a single JOIN; the mock arms
+    one ``execute()`` call returning a Row with attribute access for
+    those three values.
 
     Settings are patched at ``config.settings.get_settings`` (the
     method's lazy-import lookup target).
@@ -242,16 +244,28 @@ class TestQuotaServiceWorkspaceCreationCap:
         mock_settings.enforce_workspace_cap = enforce
         return patch("config.settings.get_settings", return_value=mock_settings)
 
-    def _arm_db(self, mock_db, owned_count: int, slot_bonus: int):
+    def _arm_db(
+        self,
+        mock_db,
+        owned_count: int,
+        slot_bonus: int,
+        owned_plan_names: list[str | None] | None = None,
+    ):
         """Configure mock_db.execute for the single SELECT inside
         ``get_user_workspace_cap_summary``.
 
         The helper calls ``result.one_or_none()`` and reads
-        ``row.owned_count`` and ``row.workspace_slot_bonus``.
+        ``row.owned_count``, ``row.workspace_slot_bonus`` and
+        ``row.owned_plan_names`` (#1550). The default is ``owned_count``
+        free workspaces (or PostgreSQL's ``[NULL]`` array_agg shape when
+        nothing is owned) so the tier grant stays 0 unless a test says so.
         """
         row = MagicMock()
         row.owned_count = owned_count
         row.workspace_slot_bonus = slot_bonus
+        if owned_plan_names is None:
+            owned_plan_names = ["free"] * owned_count or [None]
+        row.owned_plan_names = owned_plan_names
         result = MagicMock()
         result.one_or_none = MagicMock(return_value=row)
         mock_db.execute.return_value = result
@@ -279,10 +293,11 @@ class TestQuotaServiceWorkspaceCreationCap:
         assert error is not None
         assert "Workspace limit reached" in error
         assert "1 workspace" in error  # owned_count + cap surfaced
-        # Error message is tier-neutral — must not reference plan names.
-        assert "FREE" not in error
-        assert "BASIC" not in error
-        assert "PRO" not in error
+        # #1550 (supersedes #675's tier-neutral wording): the refusal names
+        # the tier the cap comes from and the tier that grants more.
+        assert "cap: 1 on the S plan" in error
+        assert "Upgrade to L to own up to 3" in error
+        assert "join other workspaces as a member" in error
 
     @pytest.mark.asyncio
     async def test_denied_raises_with_structured_details(self, service, mock_db):
@@ -298,6 +313,10 @@ class TestQuotaServiceWorkspaceCreationCap:
         assert exc.details["quota_type"] == "workspace_limit_reached"
         assert exc.details["owned_count"] == 3
         assert exc.details["cap"] == 3
+        # #1550 upsell fields: the tier the cap derives from + the next
+        # tier that grants more slots (keys, so the client can localize).
+        assert exc.details["tier"] == "free"
+        assert exc.details["next_tier"] == "pro"
         assert exc.error_code == "QUOTA-001"
         assert exc.status_code == 429
 
@@ -333,6 +352,89 @@ class TestQuotaServiceWorkspaceCreationCap:
         assert error is not None
         assert "3 workspace" in error  # owned_count
         assert "cap: 3" in error  # cap = 1 + bonus
+
+    # ------------------------------------------------------------------
+    # Tier grant (#1550): highest owned tier adds 0 / 0 / 2 / 19 slots
+    # ------------------------------------------------------------------
+
+    @pytest.mark.asyncio
+    async def test_pro_owner_two_of_three_can_create(self, service, mock_db):
+        """pro owner: 2 owned, 0 bonus → cap = 1 + 2 = 3, 2 < 3 → allowed."""
+        self._arm_db(mock_db, owned_count=2, slot_bonus=0, owned_plan_names=["pro", "free"])
+        with self._patch_settings(enforce=True):
+            can_create, error = await service.check_workspace_creation_allowed("user-1")
+        assert can_create is True
+        assert error is None
+
+    @pytest.mark.asyncio
+    async def test_pro_owner_at_cap_refused_with_upsell(self, service, mock_db):
+        """pro owner at 3/3 → refused; message names the tier, the cap and the
+        next tier that grants more (XL → 20)."""
+        self._arm_db(mock_db, owned_count=3, slot_bonus=0, owned_plan_names=["pro", "free", "free"])
+        with self._patch_settings(enforce=True):
+            with pytest.raises(QuotaExceededError) as exc_info:
+                await service.check_workspace_creation_allowed("user-1", raise_on_denied=True)
+        exc = exc_info.value
+        assert "3 workspace(s) (cap: 3 on the L plan)" in str(exc)
+        assert "Upgrade to XL to own up to 20" in str(exc)
+        assert exc.details["cap"] == 3
+        assert exc.details["tier"] == "pro"
+        assert exc.details["next_tier"] == "promax"
+
+    @pytest.mark.asyncio
+    async def test_promax_owner_at_cap_has_no_upsell(self, service, mock_db):
+        """Top tier at 20/20 → refused, no higher tier to point at."""
+        self._arm_db(mock_db, owned_count=20, slot_bonus=0, owned_plan_names=["promax"] * 20)
+        with self._patch_settings(enforce=True):
+            with pytest.raises(QuotaExceededError) as exc_info:
+                await service.check_workspace_creation_allowed("user-1", raise_on_denied=True)
+        exc = exc_info.value
+        assert "cap: 20 on the XL plan" in str(exc)
+        assert "Upgrade to" not in str(exc)
+        assert exc.details["tier"] == "promax"
+        assert exc.details["next_tier"] is None
+
+    @pytest.mark.asyncio
+    async def test_downgraded_owner_is_over_cap_and_only_create_is_refused(self, service, mock_db):
+        """Block-new-only: the pro workspace was downgraded to basic → cap 1 while
+        3 are still owned. The gate refuses the 4th; nothing else happens
+        (no delete, no extra query — one SELECT after the lock)."""
+        self._arm_db(
+            mock_db, owned_count=3, slot_bonus=0, owned_plan_names=["basic", "free", "free"]
+        )
+        with self._patch_settings(enforce=True):
+            can_create, error = await service.check_workspace_creation_allowed("user-1")
+        assert can_create is False
+        assert error is not None
+        assert "own 3 workspace(s) (cap: 1 on the M plan)" in error
+
+    @pytest.mark.asyncio
+    async def test_over_cap_with_enforcement_off_allows_and_warns(
+        self, service, mock_db, monkeypatch
+    ):
+        """Kill switch off (the default): over-cap create is allowed but the
+        structured ``workspace_creation_denied`` warn log carries the tier."""
+        from services import quota_service as qs
+
+        warning_mock = MagicMock()
+        monkeypatch.setattr(qs.logger, "warning", warning_mock)
+        self._arm_db(mock_db, owned_count=3, slot_bonus=0, owned_plan_names=["pro", "free", "free"])
+        with self._patch_settings(enforce=False):
+            can_create, error = await service.check_workspace_creation_allowed(
+                "user-1", raise_on_denied=True
+            )
+        assert can_create is True
+        assert error is None
+        event_calls = [
+            c
+            for c in warning_mock.call_args_list
+            if c.args and c.args[0] == "workspace_creation_denied"
+        ]
+        assert len(event_calls) == 1
+        assert event_calls[0].kwargs.get("reason") == "over_cap"
+        assert event_calls[0].kwargs.get("enforced") is False
+        assert event_calls[0].kwargs.get("max_owned_workspaces") == 3
+        assert event_calls[0].kwargs.get("tier") == "pro"
 
     # ------------------------------------------------------------------
     # Grandfather case (large existing ownership)

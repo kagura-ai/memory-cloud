@@ -40,6 +40,7 @@ from services.effective_quota_service import EffectiveQuotaService
 from utils import db_transaction
 from utils.datetime import to_utc_iso, utcnow
 from utils.logger import get_logger
+from utils.plan_resolver import tier_owned_workspace_cap
 
 logger = get_logger(__name__)
 
@@ -275,6 +276,10 @@ class PlanTierInfo(BaseModel):
     price_monthly: int
     max_contexts_per_workspace: int
     max_members_per_workspace: int
+    # #1550: raw tier grant + the resulting per-user cap with zero slot
+    # bonus (``1 + grant``) — the latter is what the tiers table shows.
+    owned_workspace_grant: int
+    owned_workspaces: int
     max_resource_tokens: int
     max_connectors: int  # Issue #1551: serve-only cap on M/L, creation cap on XL
     memory_limit: int
@@ -412,7 +417,8 @@ async def list_plan_tiers(
     # ``daily_api_limit`` / ``weekly_api_limit`` on the dataclass are
     # silently dropped — they intentionally do not surface on the admin
     # tiers tab (#664). ``features`` is overridden with a sorted list
-    # because ``asdict`` materializes the frozenset in arbitrary order.
+    # because ``asdict`` materializes the frozenset in arbitrary order;
+    # ``owned_workspaces`` (#1550) is derived, not a dataclass field.
     tiers = [
         PlanTierInfo(
             **{
@@ -421,6 +427,7 @@ async def list_plan_tiers(
                 "resources": "resources" in PLAN_TIERS[plan].features,
                 "connectors": "connectors" in PLAN_TIERS[plan].features,
                 "public_contexts": "public_contexts" in PLAN_TIERS[plan].features,
+                "owned_workspaces": tier_owned_workspace_cap(PLAN_TIERS[plan]),
             }
         )
         for plan in PLAN_ORDER

@@ -71,6 +71,13 @@ def test_curated_numeric_limits_match_plan_tiers(client: TestClient) -> None:
     # Headline quotas.
     assert (free["max_contexts"], basic["max_contexts"], pro["max_contexts"]) == (1, 3, 20)
     assert (free["max_members"], basic["max_members"], pro["max_members"]) == (1, 1, 10)
+    # #1550: owned-workspace cap a user on this tier gets (1 base + tier grant).
+    assert (
+        free["owned_workspaces"],
+        basic["owned_workspaces"],
+        pro["owned_workspaces"],
+        _promax["owned_workspaces"],
+    ) == (1, 1, 3, 20)
     assert (free["memory_limit"], basic["memory_limit"], pro["memory_limit"]) == (
         1000,
         10000,

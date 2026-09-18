@@ -328,23 +328,24 @@ async def _build_sleep_contexts_usage(
 async def _build_workspaces_usage(db: AsyncSession, user_id: str) -> "WorkspacesUsage":
     """Build the ``workspaces`` field of /usage/current (#674 sub-A, #675).
 
-    User-level cap: ``get_user_workspace_cap_summary`` returns the
-    owned count and the user's ``workspace_slot_bonus`` in a single
-    SELECT (JOIN of users + workspaces). The same helper is used by
-    ``QuotaService.check_workspace_creation_allowed`` so the gate and
-    the dashboard read consistent state.
+    User-level cap: ``get_user_workspace_cap_summary`` resolves the owned
+    count and the cap in a single SELECT (JOIN of users + workspaces:
+    count, ``workspace_slot_bonus``, owned plan names). The same helper is
+    used by ``QuotaService.check_workspace_creation_allowed`` so the gate
+    and the dashboard read consistent state.
 
-    Effective cap = ``1 (base) + workspace_slot_bonus``.
+    Effective cap = ``1 (base) + workspace_slot_bonus + owned_workspace_grant``
+    of the highest tier the user owns (#1550).
 
     Always returns a populated ``WorkspacesUsage`` — the cap is
     user-scoped so there is no "no current workspace" null case here.
     """
     from utils.plan_resolver import get_user_workspace_cap_summary
 
-    owned_count, cap = await get_user_workspace_cap_summary(db, user_id)
+    summary = await get_user_workspace_cap_summary(db, user_id)
 
     return WorkspacesUsage(
-        used=owned_count,
-        limit=cap,
-        remaining=max(0, cap - owned_count),
+        used=summary.owned_count,
+        limit=summary.cap,
+        remaining=max(0, summary.cap - summary.owned_count),
     )
