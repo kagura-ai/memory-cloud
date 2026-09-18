@@ -938,3 +938,22 @@ class TestDisallowEnvFallback:
             )
 
         assert captured_kwargs.get("disallow_env_fallback") is True
+
+    @pytest.mark.asyncio
+    async def test_stored_keys_disabled_ignores_present_db_key(self, service, monkeypatch):
+        """#1569: RESOLVE_STORED_BYOK_KEYS=false — the workspace's stored key is
+        not even looked up; the platform env credential resolves as ``env``."""
+        monkeypatch.setenv("OPENAI_API_KEY", "sk-platform-only")
+        monkeypatch.setattr("services.byok_resolution.stored_byok_keys_disabled", lambda: True)
+        api_key_entry = MagicMock(encrypted_value="enc", context_id=None)
+        execute_result = MagicMock()
+        execute_result.scalar_one_or_none.return_value = api_key_entry
+        service.db.execute = AsyncMock(return_value=execute_result)
+
+        result, source = await service._get_user_api_key(
+            user_id="caller",
+            workspace_id="00000000-0000-0000-0000-000000000001",
+        )
+
+        assert (result, source) == ("sk-platform-only", "env")
+        service.db.execute.assert_not_called()

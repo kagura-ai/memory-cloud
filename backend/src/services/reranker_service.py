@@ -679,6 +679,16 @@ class RerankerService:
             logger.debug("no_reranker_configured", user_id=user_id, reason="no_workspace_context")
             return None
 
+        # #1569: RESOLVE_STORED_BYOK_KEYS=false — the API-key rerankers exist
+        # only as external_api_keys rows, so there is nothing left to resolve.
+        from services.byok_resolution import stored_byok_keys_disabled
+
+        if stored_byok_keys_disabled():
+            logger.debug(
+                "no_reranker_configured", user_id=user_id, reason="stored_byok_keys_disabled"
+            )
+            return None
+
         workspace_uuid = UUID(workspace_id) if isinstance(workspace_id, str) else workspace_id
         conditions = [
             ExternalAPIKey.workspace_id == workspace_uuid,

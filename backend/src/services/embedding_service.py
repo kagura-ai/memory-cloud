@@ -175,8 +175,12 @@ class EmbeddingService:
 
         from sqlalchemy import or_
 
+        from services.byok_resolution import stored_byok_keys_disabled
+
         api_key_entry = None
-        if workspace_id:
+        # #1569: RESOLVE_STORED_BYOK_KEYS=false skips steps 1-2 — the platform
+        # env credential is the only source on such a deployment.
+        if workspace_id and not stored_byok_keys_disabled():
             workspace_uuid = UUID(workspace_id) if isinstance(workspace_id, str) else workspace_id
             conditions = [
                 ExternalAPIKey.workspace_id == workspace_uuid,

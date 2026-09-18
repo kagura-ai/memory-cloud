@@ -358,6 +358,106 @@ class TestSelfHostedProvider:
         assert models == [{"id": "llama3.1", "name": "llama3.1"}]
 
 
+def _self_hosted_settings(**overrides):
+    """A settings stand-in for ``SelfHostedProvider.__init__`` (#1569 knobs)."""
+    settings = MagicMock()
+    settings.self_hosted_base_url = "http://localhost:11434"
+    settings.self_hosted_api_key = ""
+    settings.self_hosted_model_aliases = ""
+    settings.self_hosted_llm_timeout_seconds = 60.0
+    for key, value in overrides.items():
+        setattr(settings, key, value)
+    return settings
+
+
+def _chat_response(content: str = '{"ok": true}') -> MagicMock:
+    response = MagicMock()
+    response.choices = [MagicMock(message=MagicMock(content=content))]
+    response.usage = MagicMock(prompt_tokens=1, completion_tokens=1, total_tokens=2)
+    return response
+
+
+def _bad_request(message: str):
+    import httpx
+    from openai import BadRequestError
+
+    return BadRequestError(
+        message,
+        response=httpx.Response(400, request=httpx.Request("POST", "http://x/v1/chat")),
+        body={"error": {"message": message}},
+    )
+
+
+class TestSelfHostedProviderManagedLane:
+    """#1569: the knobs that make ``self_hosted`` a first-class chat provider."""
+
+    def test_timeout_read_from_settings(self):
+        with patch(
+            "services.llm_providers.self_hosted_provider.get_settings",
+            return_value=_self_hosted_settings(self_hosted_llm_timeout_seconds=123.0),
+        ):
+            provider = SelfHostedProvider(base_url="http://localhost:11434")
+        assert provider._client.timeout == 123.0
+
+    @pytest.mark.asyncio
+    async def test_model_alias_applied_on_the_wire(self):
+        with patch(
+            "services.llm_providers.self_hosted_provider.get_settings",
+            return_value=_self_hosted_settings(
+                self_hosted_model_aliases="qwen3:8b=Qwen/Qwen3-8B-Instruct"
+            ),
+        ):
+            provider = SelfHostedProvider(base_url="http://localhost:11434")
+        provider._verified = True
+        create = AsyncMock(return_value=_chat_response())
+        with patch.object(provider._client.chat.completions, "create", create):
+            await provider.complete_json("hello", model="qwen3:8b")
+        assert create.call_args.kwargs["model"] == "Qwen/Qwen3-8B-Instruct"
+        assert create.call_args.kwargs["response_format"] == {"type": "json_object"}
+
+    @pytest.mark.asyncio
+    async def test_response_format_rejected_retries_without_it(self):
+        with patch(
+            "services.llm_providers.self_hosted_provider.get_settings",
+            return_value=_self_hosted_settings(),
+        ):
+            provider = SelfHostedProvider(base_url="http://localhost:11434")
+        provider._verified = True
+        create = AsyncMock(
+            side_effect=[
+                _bad_request("response_format is not supported by this model"),
+                _chat_response('{"retried": true}'),
+                _chat_response('{"second": true}'),
+            ]
+        )
+        with patch.object(provider._client.chat.completions, "create", create):
+            result = await provider.complete_json("hello", model="llama3.1")
+            # Remembered per instance: no wasted 400 on the next call.
+            await provider.complete_json("again", model="llama3.1")
+
+        assert result.content == '{"retried": true}'
+        assert create.call_count == 3
+        assert "response_format" in create.call_args_list[0].kwargs
+        assert "response_format" not in create.call_args_list[1].kwargs
+        assert "response_format" not in create.call_args_list[2].kwargs
+
+    @pytest.mark.asyncio
+    async def test_unrelated_400_propagates_without_retry(self):
+        from openai import BadRequestError
+
+        with patch(
+            "services.llm_providers.self_hosted_provider.get_settings",
+            return_value=_self_hosted_settings(),
+        ):
+            provider = SelfHostedProvider(base_url="http://localhost:11434")
+        provider._verified = True
+        create = AsyncMock(side_effect=_bad_request("model 'nope' not found"))
+        with patch.object(provider._client.chat.completions, "create", create):
+            with pytest.raises(BadRequestError):
+                await provider.complete_json("hello", model="nope")
+        assert create.call_count == 1
+
+
 # ============================================================================
 # OllamaCloudProvider
 # ============================================================================

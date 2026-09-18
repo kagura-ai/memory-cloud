@@ -9,17 +9,18 @@ without an engine subfield.
 
 from __future__ import annotations
 
-from openai import AsyncOpenAI
+from openai import AsyncOpenAI, BadRequestError
 
+from config.self_hosted_aliases import resolve_self_hosted_model_id
 from config.settings import get_settings
 from services.llm_providers.base import LLMProvider, ProviderResponse, Usage
 from utils.exceptions import ConfigurationError
 from utils.logger import get_logger
 
-# Bound LLM request duration so a hung / unreachable provider cannot
-# stall the analysis pipeline indefinitely (Issue #533 silent-hang
-# mitigation; matches OpenAI SDK's `timeout=` kwarg semantics).
-_LLM_REQUEST_TIMEOUT_S = 60.0
+# The request timeout (Issue #533 silent-hang mitigation; matches the OpenAI
+# SDK's `timeout=` kwarg semantics) comes from
+# ``settings.self_hosted_llm_timeout_seconds`` (#1569): a local model can
+# legitimately need more than the 60 s the API-key providers hardcode.
 
 # Placeholder sent to keyless backends (Ollama ignores it). A real key is
 # used when SELF_HOSTED_API_KEY is configured (e.g. vLLM launched with
@@ -102,12 +103,20 @@ class SelfHostedProvider(LLMProvider):
             api_key = settings.self_hosted_api_key or ""
         self._base_url = base_url.rstrip("/")
         self._api_key = api_key or ""
+        # #1569: the same registry-name → upstream-id aliasing the embedding
+        # path applies (#1525), so a chat model served under a HF path or a
+        # vendor prefix can still be named by its registry id in config.
+        self._model_aliases = settings.self_hosted_model_aliases
         self._client = AsyncOpenAI(
             base_url=f"{self._base_url}/v1",
             api_key=self._api_key or _PLACEHOLDER_API_KEY,
-            timeout=_LLM_REQUEST_TIMEOUT_S,
+            timeout=settings.self_hosted_llm_timeout_seconds,
         )
         self._verified = False
+        # #1569: some OpenAI-compatible servers reject ``response_format``
+        # (HTTP 400). Once seen, later calls skip it and rely on the prompt +
+        # LLMService's JSON-parse retry instead of paying a 400 per call.
+        self._response_format_supported = True
 
     def _auth_headers(self) -> dict[str, str]:
         """Bearer header for backends started with an API key; empty for keyless."""
@@ -136,7 +145,13 @@ class SelfHostedProvider(LLMProvider):
         max_tokens: int = 1024,
         **kwargs,
     ) -> ProviderResponse:
-        """Call the backend with JSON mode via the OpenAI-compatible endpoint."""
+        """Call the backend with JSON mode via the OpenAI-compatible endpoint.
+
+        ``model`` is the registry name; ``SELF_HOSTED_MODEL_ALIASES`` rewrites
+        it on the wire. A backend that rejects ``response_format`` with HTTP
+        400 gets one retry without it (#1569) — the JSON contract then rests
+        on the prompt and on ``LLMService.complete_json``'s parse retry.
+        """
         await self._verify()
 
         messages = []
@@ -144,19 +159,37 @@ class SelfHostedProvider(LLMProvider):
             messages.append({"role": "system", "content": system_prompt})
         messages.append({"role": "user", "content": prompt})
 
-        response = await self._client.chat.completions.create(
-            model=model,
-            messages=messages,
-            temperature=temperature,
-            max_completion_tokens=max_tokens,
-            response_format={"type": "json_object"},
-        )
+        wire_model = resolve_self_hosted_model_id(model, self._model_aliases)
+        create_kwargs: dict = {
+            "model": wire_model,
+            "messages": messages,
+            "temperature": temperature,
+            "max_completion_tokens": max_tokens,
+        }
+        if self._response_format_supported:
+            try:
+                response = await self._client.chat.completions.create(
+                    **create_kwargs, response_format={"type": "json_object"}
+                )
+            except BadRequestError as err:
+                if "response_format" not in str(err):
+                    raise
+                logger.info(
+                    "self_hosted_response_format_unsupported",
+                    model=wire_model,
+                    hint="retrying without response_format; JSON relies on the prompt",
+                )
+                self._response_format_supported = False
+                response = await self._client.chat.completions.create(**create_kwargs)
+        else:
+            response = await self._client.chat.completions.create(**create_kwargs)
         content = response.choices[0].message.content or "{}"
         usage = self.extract_usage(response)
 
         logger.debug(
             "self_hosted_complete_json",
             model=model,
+            wire_model=wire_model,
             tokens=usage.total,
             input=usage.input,
             output=usage.output,
