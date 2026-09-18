@@ -175,3 +175,55 @@ async def test_zero_units_short_circuits_before_lookup():
 
     assert result == 0.0
     service.lookup.assert_not_awaited()
+
+
+# ---------------------------------------------------------------------------
+# has_positive_price (#1570)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("row", "expected"),
+    [
+        (None, False),  # lookup miss → unpriced
+        ("0", False),  # explicit $0 → unpriced (nothing to cap)
+        ("0.02", True),
+    ],
+)
+async def test_has_positive_price(row, expected):
+    service = _service()
+    service.lookup = AsyncMock(return_value=None if row is None else _pricing_row(row, 1_000_000))
+
+    priced = await service.has_positive_price(
+        provider="self_hosted",
+        model="qwen3-embedding:4b",
+        unit_type="embedding_tokens",
+        started_at=_STARTED_AT,
+    )
+
+    assert priced is expected
+
+
+@pytest.mark.asyncio
+async def test_has_positive_price_shares_the_cache_with_compute_cost_usd():
+    """Gate (``has_positive_price``) + post-call (``compute_cost_usd``) → one ``lookup``."""
+    service = _service()
+    service.lookup = AsyncMock(return_value=_pricing_row("0.02", 1_000_000))
+
+    assert await service.has_positive_price(
+        provider="self_hosted",
+        model="qwen3-embedding:4b",
+        unit_type="embedding_tokens",
+        started_at=_STARTED_AT,
+    )
+    cost = await service.compute_cost_usd(
+        provider="self_hosted",
+        model="qwen3-embedding:4b",
+        unit_type="embedding_tokens",
+        started_at=_STARTED_AT,
+        units=1_000_000,
+    )
+
+    assert cost == pytest.approx(0.02)
+    assert service.lookup.await_count == 1

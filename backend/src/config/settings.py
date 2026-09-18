@@ -7,13 +7,16 @@ Database URLs are managed directly via os.getenv() in config/database.py.
 
 import os
 from datetime import datetime
-from typing import Any, Literal
+from typing import TYPE_CHECKING, Any, Literal
 from urllib.parse import urlparse
 
 from pydantic import AliasChoices, Field, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 from utils.media_types import MEDIA_TYPE_RE, normalize_media_type
+
+if TYPE_CHECKING:
+    from config.llm_pricing_overrides import PricingOverride
 
 # Issue #1470: the total memory quota one inviter's referral chain may mint.
 #
@@ -524,6 +527,44 @@ class Settings(BaseSettings):
         SelfHostedProvider/Reranker) gets a clean base.
         """
         return v.rstrip("/") if v else v
+
+    # Issue #1570: operator-set prices for models Alembic does not seed (a paid
+    # OpenAI-compatible endpoint behind ``self_hosted``, above all). JSON array;
+    # see ``config/llm_pricing_overrides.py`` for the entry shape. Validated at
+    # boot (a bad value refuses to start, like ``PLAN_<KEY>_FEATURES``) and
+    # materialized into ``llm_pricing`` by the API lifespan / the
+    # ``sync_llm_pricing`` CLI. USD only.
+    llm_pricing_overrides: str = Field(
+        default="",
+        description=(
+            "Issue #1570: JSON array of {provider, model, unit_type, price_per_unit"
+            "[, unit_denominator][, context_min_tokens]} appended to `llm_pricing` "
+            "at startup when the effective price differs. Prices are USD per "
+            "`unit_denominator` units (default 1,000,000). Empty = no overrides."
+        ),
+    )
+
+    @field_validator("llm_pricing_overrides")
+    @classmethod
+    def _validate_llm_pricing_overrides(cls, v: str) -> str:
+        """Refuse to boot on a malformed ``LLM_PRICING_OVERRIDES`` (#1570).
+
+        A silently dropped entry would leave a paid endpoint unpriced and
+        therefore uncapped — the very bug the override exists to fix — so the
+        parser is strict and its ``ValueError`` (naming the variable and the
+        entry index) surfaces here as a settings validation error.
+        """
+        from config.llm_pricing_overrides import parse_llm_pricing_overrides
+
+        parse_llm_pricing_overrides(v)
+        return v
+
+    @property
+    def parsed_llm_pricing_overrides(self) -> tuple["PricingOverride", ...]:
+        """``LLM_PRICING_OVERRIDES`` as validated entries (empty tuple when unset)."""
+        from config.llm_pricing_overrides import parse_llm_pricing_overrides
+
+        return parse_llm_pricing_overrides(self.llm_pricing_overrides)
 
     # Local reranker serving override
     rerank_base_url: str = Field(
