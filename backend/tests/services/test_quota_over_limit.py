@@ -225,7 +225,11 @@ class TestQuotaStatusOverLimit:
         """The dashboard must be able to say "750 / 500 (150 %)", so the status
         carries the raw numbers and a >100 percentage — nothing clamped, nothing
         negative (there is no "remaining" key to go below zero)."""
-        ws = _make_workspace(workspace_id, effective_memory_limit=LIMIT)
+        # #1549 added the daily block to the status payload; give the mock a
+        # daily limit too so the raw-number assertions cover it.
+        ws = _make_workspace(
+            workspace_id, effective_memory_limit=LIMIT, effective_memories_per_day=50
+        )
         members_result = MagicMock()
         members_result.all = MagicMock(return_value=[("user-1",)])
         # Call order: select(Workspace) → select(member user_ids) → count(Memory).
