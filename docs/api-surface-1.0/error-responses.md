@@ -100,6 +100,12 @@ Unhandled exceptions in `tools/call` map to a JSON-RPC error object (`backend/sr
 | `-32602` | `ValueError` — invalid params (standard) | `transport.py:252` |
 | `-32603` | anything else — internal error (standard) | `transport.py:255` |
 
+Requests whose `method` the transport does not implement (anything other than `initialize` / `tools/list` / `tools/call` / `ping` / `server/discover`, e.g. `resources/list`) get a standard `-32601` **Method not found**, also HTTP 200 (`transport.py:434`, #1541). Before #1541 this path dereferenced a `session.transport` attribute that no longer existed and was an unconditional HTTP 500.
+
+| JSON-RPC code | Trigger | Site |
+|---|---|---|
+| `-32601` | unknown / unimplemented request method (standard) | `transport.py:434` |
+
 ⚠ The application `error_code` does **not** pass through this path — `MemoryCloudException` falls into the `-32603` bucket with only `exception_type` in `data`. (In practice most tool handlers catch it first, path 4 above.)
 
 ### 6. MCP transport — OAuth 401 challenge (RFC 6750)
@@ -115,7 +121,7 @@ Auth failure before dispatch (`transport.py:531-580`): HTTP 401, body `{"error":
 
 ## Error code catalogue
 
-**Total: 55 distinct error code values** (54 distinct values matched by the `error_code` grep + `RES-004`, which is emitted inline as an `"error"` literal with no exception class — reserved per the comment at `exceptions.py:177-181`). **55 of 55 enumerated** below. JSON-RPC numeric codes are counted (4 values); `invalid_token` is one value with three emitting classes plus the RFC 6750 path.
+**Total: 56 distinct error code values** (54 distinct values matched by the `error_code` grep + `RES-004`, which is emitted inline as an `"error"` literal with no exception class — reserved per the comment at `exceptions.py:177-181` + `-32601`, emitted inline in the transport dispatch, #1541). **56 of 56 enumerated** below. JSON-RPC numeric codes are counted (5 values); `invalid_token` is one value with three emitting classes plus the RFC 6750 path.
 
 ### A. `MemoryCloudException` hierarchy (REST canonical shape) — `backend/src/utils/exceptions.py`
 
@@ -192,6 +198,7 @@ Emitted in the MCP tool envelope (`{"status":"error","error":...}`); the logged 
 | `-32002` | transport.py:249 | Permission denied (custom). |
 | `-32602` | transport.py:252 | Invalid params (standard). |
 | `-32603` | transport.py:255 | Internal error (standard; catch-all — application `error_code` is NOT propagated here ⚠). |
+| `-32601` | transport.py:434 | Method not found (standard) — any request method the transport does not implement (#1541). |
 
 ### E. RFC 6750 challenge codes — `backend/src/mcp_server/transport.py`
 
