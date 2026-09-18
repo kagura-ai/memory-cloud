@@ -495,6 +495,82 @@ Plan display names in the web UI can be customized via `NEXT_PUBLIC_PLAN_FREE_DI
 
 The referral payout budget is the effective FREE → BASIC memory gap (`PLAN_BASIC_MEMORY_LIMIT − PLAN_FREE_MEMORY_LIMIT`), so lowering `PLAN_BASIC_MEMORY_LIMIT` — or otherwise narrowing the gap — shrinks it. When `ENABLE_REFERRALS=true`, the API refuses to start if `REFERRAL_MAX_GRANTS_PER_REFERRER × REFERRAL_REFERRER_REWARD_MEMORIES + REFERRAL_REFEREE_REWARD_MEMORIES` reaches the new gap (a fully-used referral chain would hand out the whole paid tier) — retune the `REFERRAL_*` values first.
 
+## LLM & Embedding Pricing (cost tracking and spend caps)
+
+Every token count the platform records — recall / remember embeddings, Sleep
+and Memory Analysis LLM calls, reranking — is turned into USD by the
+`llm_pricing` table: one append-only row per `(provider, model, unit_type)`
+with a `price_per_unit`, a `unit_denominator` (1,000,000 = "per million
+tokens") and an `effective_from`. The newest row whose `effective_from` is
+before the call wins, so a price change never rewrites history. Alembic seeds
+the OpenAI / Anthropic / Voyage / Cohere rate cards; the admin cost dashboard,
+the per-workspace cost API and the embedding spend cap all read this table.
+
+A model with **no** row is *unknown*, not free: its cost renders as `—`, the
+call log marks `pricing_miss`, and the embedding spend cap does not apply.
+This is deliberately the case for `self_hosted` models — a local Ollama is
+free, but the same provider key also fronts paid OpenAI-compatible endpoints
+(`SELF_HOSTED_BASE_URL` + `SELF_HOSTED_API_KEY`), and the platform cannot know
+which one you run. (Earlier releases seeded those models at `$0`; that seed is
+removed on upgrade so a paid endpoint no longer shows `$0.00`.)
+
+### Setting prices (`LLM_PRICING_OVERRIDES`)
+
+Price a model — self-hosted or any other — with a JSON array:
+
+```bash
+LLM_PRICING_OVERRIDES='[
+  {"provider": "self_hosted", "model": "qwen3-embedding:4b",
+   "unit_type": "embedding_tokens", "price_per_unit": 0.02},
+  {"provider": "self_hosted", "model": "my-llm",
+   "unit_type": "input_tokens", "price_per_unit": 0.5},
+  {"provider": "self_hosted", "model": "my-llm",
+   "unit_type": "output_tokens", "price_per_unit": 1.5}
+]'
+```
+
+- `provider` / `model`: the names usage rows record. For embeddings `model`
+  is the **registry** name (`qwen3-embedding:4b`), not the upstream id an
+  alias in `SELF_HOSTED_MODEL_ALIASES` maps it to.
+- `unit_type`: one of `input_tokens`, `output_tokens`, `cache_read_tokens`,
+  `cache_write_tokens`, `embedding_tokens`, `rerank_tokens`,
+  `rerank_search_units`. An LLM needs at least `input_tokens` and
+  `output_tokens` for its cost to be known.
+- `price_per_unit`: USD per `unit_denominator` units (default `1000000`, i.e.
+  per million tokens; a vendor quoting per 1k tokens can pass
+  `"unit_denominator": 1000`). Optional `context_min_tokens` for tiered rate
+  cards.
+- **USD only.** Every figure in the platform is USD; a vendor billing in
+  another currency is entered at the converted USD price (and re-entered when
+  the exchange rate moves enough to matter).
+
+The value is validated when the API starts — a malformed entry refuses to
+boot, naming `LLM_PRICING_OVERRIDES` and the entry index. Valid entries are
+then written into `llm_pricing`: when the currently effective row for that
+key already has the same price, nothing happens; otherwise a new row with
+`effective_from = now` is appended (the old row stays for history). To apply
+a change without restarting, run the same sync from the API environment:
+
+```bash
+python -m src.cli.sync_llm_pricing            # print what would be inserted
+python -m src.cli.sync_llm_pricing --apply    # append it
+```
+
+Other API workers see the new price within the 60-minute price cache, or
+immediately after a restart.
+
+### Spend caps on self-hosted embeddings
+
+`self_hosted` embeddings are capped **iff their effective price is above
+zero**. With a price set, `PLAN_<KEY>_EMBEDDING_DAILY_CAP_USD` /
+`_MONTHLY_CAP_USD` (and the per-workspace override, the 80% / 100% owner mails
+and the `QUOTA-002` 429) apply exactly as they do to platform-paid OpenAI
+embeddings, on every tier and regardless of BYOK. Unpriced (no row) or priced
+at exactly `0` (an explicit "this local model is free") stays uncapped. Spend
+counters only advance when the backend reports `usage` tokens: vLLM and
+OpenAI-compatible servers do, a bare Ollama does not — a capped Ollama would
+count nothing.
+
 ## Redis Connection Pool (rate limits and daily quotas) — Issue #1556
 
 Per-minute rate limits and the daily MCP / REST / Public API quotas above are counters in Redis, incremented by `RateLimitMiddleware` on every authenticated request. The singleton client (`backend/src/db/redis.py`) uses a `BlockingConnectionPool`: when all pooled connections are checked out, a request waits up to `REDIS_POOL_TIMEOUT_SECONDS` (default `2.0`) for one to free up instead of failing immediately. Size the pool with `REDIS_MAX_CONNECTIONS` (default `50`, per API worker process). Quota checks are **fail-open** by design — if Redis is down, or the pool wait times out, the request is allowed and the counter update is lost (or, if Redis fails between the `INCR` and the `EXPIRE` that follows it, only partially applied). Each such miss logs exactly one `quota_check_failed_open` warning with `quota` (`per_minute`, `daily_mcp`, `daily_public`, `daily_rest`), `key_prefix` and `error_class` fields. Alert on that event: a sustained stream of it means quotas are not being enforced and either Redis or the pool size needs attention.
