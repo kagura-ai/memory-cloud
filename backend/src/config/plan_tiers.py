@@ -7,6 +7,14 @@ Defines quota limits and feature access for each plan tier.
 
 from dataclasses import dataclass, field
 from enum import StrEnum
+from typing import TYPE_CHECKING
+
+from utils.logger import get_logger
+
+if TYPE_CHECKING:
+    from config.settings import Settings
+
+logger = get_logger(__name__)
 
 # Constants
 UNLIMITED_CONTEXTS = 999999  # Effectively unlimited
@@ -81,8 +89,13 @@ class PlanTier:
             shared 50/min/context bucket; bound keys get their own per-key
             bucket sized by this field. 0 disables bound-key creation for
             the plan.
-        allows_shared_contexts: Whether plan allows shared (non-private) contexts (Issue #271)
-        features: Set of enabled features
+        allows_shared_contexts: Whether plan allows shared (non-private) contexts
+            (Issue #271). Mirrors ``"shared_contexts" in features`` — the
+            shared-context gates read this boolean, so a ``features`` override
+            (#1559) re-derives it.
+        features: Set of enabled features. Replaceable per tier via
+            ``PLAN_<KEY>_FEATURES`` (comma-separated, #1559); names must be in
+            ``KNOWN_FEATURES``.
     """
 
     name: str
@@ -313,19 +326,94 @@ FEATURE_MIN_PLANS: dict[str, str] = {
     "connectors": "promax",  # Issue #1551: setup_connector is XL-only
 }
 
+# Every feature name the registry knows (#1559): the code-default tiers'
+# ``features`` plus the matrix keys — ``secret_store`` is on every tier and so
+# has no matrix row. Computed BEFORE the env overrides run, so it is the
+# vocabulary a ``PLAN_<KEY>_FEATURES`` value is validated against.
+KNOWN_FEATURES: frozenset[str] = frozenset(FEATURE_MIN_PLANS).union(
+    *(tier.features for tier in PLAN_TIERS.values())
+)
 
-def _apply_settings_overrides() -> None:
+
+def _parse_features_override(plan_name: str, raw: str) -> frozenset[str]:
+    """Parse and validate one ``PLAN_<KEY>_FEATURES`` value (#1559).
+
+    Comma-separated and whitespace-tolerant; the result REPLACES the tier's
+    ``features``. Refused at import (``ValueError``) when a name is not in
+    ``KNOWN_FEATURES`` or the set breaks a registry invariant: every tier
+    carries ``secret_store`` (#1128), and ``resources`` implies
+    ``public_contexts`` because ``setup_resource`` inserts a *public* context.
+
+    Args:
+        plan_name: Tier key (``free`` / ``basic`` / ``pro`` / ``promax``).
+        raw: The env value as read by Settings.
+
+    Returns:
+        The validated feature set.
+
+    Raises:
+        ValueError: Unknown feature name(s) or a violated invariant, naming
+            the env var so the operator can find the line to fix.
+    """
+    env_name = f"PLAN_{plan_name.upper()}_FEATURES"
+    features = frozenset(name.strip() for name in raw.split(",") if name.strip())
+    unknown = sorted(features - KNOWN_FEATURES)
+    if unknown:
+        raise ValueError(
+            f"{env_name}: unknown feature(s) {', '.join(unknown)}. "
+            f"Known features: {', '.join(sorted(KNOWN_FEATURES))}"
+        )
+    if "secret_store" not in features:
+        raise ValueError(
+            f"{env_name} must include 'secret_store' — the zero-knowledge secret "
+            "store is available on every tier (#1128)."
+        )
+    if "resources" in features and "public_contexts" not in features:
+        raise ValueError(
+            f"{env_name}: 'resources' requires 'public_contexts' — setup_resource "
+            "creates a public context, so a tier that may create resources must "
+            "also be allowed to make contexts public."
+        )
+    return features
+
+
+def _derive_feature_min_plans(tiers: dict[str, PlanTier]) -> dict[str, str]:
+    """Lowest tier in ``PLAN_ORDER`` that carries each feature of ``tiers``.
+
+    A feature on no tier gets no entry, so ``get_required_plan_for_feature``
+    raises for it and the refusal text falls back to "higher".
+    """
+    min_plans: dict[str, str] = {}
+    for plan_name in PLAN_ORDER:
+        for feature in sorted(tiers[plan_name].features):
+            min_plans.setdefault(feature, plan_name)
+    return min_plans
+
+
+def _apply_settings_overrides(settings: "Settings | None" = None) -> None:
     """Apply environment variable overrides to plan tiers.
 
     Reads override values from Settings and creates new PlanTier instances
     with overridden values where configured. Called once at module load time.
 
     This enables OSS deployments to customize plan limits via environment
-    variables without modifying source code.
-    """
-    from config.settings import get_settings
+    variables without modifying source code. ``PLAN_<KEY>_FEATURES`` (#1559)
+    replaces a tier's feature set; when any tier's features are overridden,
+    ``FEATURE_MIN_PLANS`` is re-derived from the EFFECTIVE tiers so the
+    refusal text names the right minimum tier.
 
-    settings = get_settings()
+    Args:
+        settings: Settings to read from. ``None`` (the import-time call) uses
+            the process-global instance; tests pass one built in-process.
+
+    Raises:
+        ValueError: A ``PLAN_<KEY>_FEATURES`` value names an unknown feature
+            or violates a registry invariant (see ``_parse_features_override``).
+    """
+    if settings is None:
+        from config.settings import get_settings
+
+        settings = get_settings()
 
     override_map: dict[str, dict[str, int | float | str | None]] = {
         PlanName.FREE: {
@@ -339,6 +427,7 @@ def _apply_settings_overrides() -> None:
             "embedding_monthly_cap_usd": settings.plan_free_embedding_monthly_cap_usd,
             "owned_workspace_grant": settings.plan_free_owned_workspace_grant,
             "display_name": settings.plan_free_display_name,
+            "features": settings.plan_free_features,
         },
         PlanName.BASIC: {
             "max_contexts_per_workspace": settings.plan_basic_max_contexts,
@@ -351,6 +440,7 @@ def _apply_settings_overrides() -> None:
             "embedding_monthly_cap_usd": settings.plan_basic_embedding_monthly_cap_usd,
             "owned_workspace_grant": settings.plan_basic_owned_workspace_grant,
             "display_name": settings.plan_basic_display_name,
+            "features": settings.plan_basic_features,
         },
         PlanName.PRO: {
             "max_contexts_per_workspace": settings.plan_pro_max_contexts,
@@ -363,6 +453,7 @@ def _apply_settings_overrides() -> None:
             "embedding_monthly_cap_usd": settings.plan_pro_embedding_monthly_cap_usd,
             "owned_workspace_grant": settings.plan_pro_owned_workspace_grant,
             "display_name": settings.plan_pro_display_name,
+            "features": settings.plan_pro_features,
         },
         PlanName.PROMAX: {
             "max_contexts_per_workspace": settings.plan_promax_max_contexts,
@@ -375,11 +466,27 @@ def _apply_settings_overrides() -> None:
             "embedding_monthly_cap_usd": settings.plan_promax_embedding_monthly_cap_usd,
             "owned_workspace_grant": settings.plan_promax_owned_workspace_grant,
             "display_name": settings.plan_promax_display_name,
+            "features": settings.plan_promax_features,
         },
     }
 
+    # Validate every tier's features BEFORE mutating the registry, so a
+    # rejected override leaves the process with the untouched code defaults
+    # (the ValueError aborts the import either way).
+    features_by_plan: dict[str, frozenset[str]] = {}
     for plan_name, overrides in override_map.items():
-        active_overrides = {k: v for k, v in overrides.items() if v is not None}
+        raw_features = overrides.pop("features")
+        if isinstance(raw_features, str) and raw_features.strip():
+            features_by_plan[plan_name] = _parse_features_override(plan_name, raw_features)
+
+    for plan_name, overrides in override_map.items():
+        active_overrides: dict[str, object] = {k: v for k, v in overrides.items() if v is not None}
+        if plan_name in features_by_plan:
+            features = features_by_plan[plan_name]
+            active_overrides["features"] = features
+            # The shared-context gates read this boolean, not the feature set —
+            # keep the two in lock-step.
+            active_overrides["allows_shared_contexts"] = "shared_contexts" in features
         if active_overrides:
             from dataclasses import asdict
 
@@ -388,6 +495,18 @@ def _apply_settings_overrides() -> None:
             original_dict.update(active_overrides)
             # Reconstruct frozen dataclass with overrides
             PLAN_TIERS[plan_name] = PlanTier(**original_dict)
+
+    if features_by_plan:
+        # In place: ``feature_denied_message`` / ``get_required_plan_for_feature``
+        # read the module global, and the matrix must follow the EFFECTIVE tiers.
+        FEATURE_MIN_PLANS.clear()
+        FEATURE_MIN_PLANS.update(_derive_feature_min_plans(PLAN_TIERS))
+
+    logger.info(
+        "plan_tier_features_effective",
+        overridden=sorted(features_by_plan, key=plan_rank),
+        **{plan_name: sorted(PLAN_TIERS[plan_name].features) for plan_name in PLAN_ORDER},
+    )
 
 
 # Apply overrides from environment variables at import time
