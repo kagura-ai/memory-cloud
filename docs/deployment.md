@@ -392,6 +392,30 @@ workspace is gated — a user above the cap (e.g. after a downgrade) keeps
 every workspace. Enforcement is behind `ENFORCE_WORKSPACE_CAP` (default
 `false` = log-only); see `docs/ops/workspace-cap-rollback.md`.
 
+Feature availability (the `features` set on each tier):
+
+| Feature | S | M | L | XL |
+|---------|---|---|---|----|
+| Secret store (`secret_store`) | ✓ | ✓ | ✓ | ✓ |
+| Shared contexts / team invitations / memory analysis | – | – | ✓ | ✓ |
+| Resources — `setup_resource`, new resource tokens (`resources`) | – | – | – | ✓ |
+| Connectors — `setup_connector` (`connectors`) | – | – | – | ✓ |
+| Public — `set_public`, bound public API keys (`public_contexts`) | – | – | – | ✓ |
+
+**Block-new-only rule.** The three XL-only rows gate *creation* only. A
+workspace on M / L that already has resource tokens, connectors, public
+contexts or bound public keys keeps them working end to end: the numeric caps
+those objects serve against (`max_resource_tokens` 3 / 30, `max_connectors`
+3 / 10, `public_calls_per_day` 1000 and `bound_public_calls_per_minute` 100
+on L) are unchanged; only provisioning a *new* one is refused with a
+`FEAT-001` / `plan_required` error naming the XL tier. Rotating
+(regenerating) an existing bound public key is allowed on any tier: it revokes
+the old key and mints its replacement against the same, still-public context,
+so the number of bound keys does not grow. Because those M / L caps stay above
+zero, an `extra_connectors` (or other resource) add-on on M / L still stacks
+mechanically, but it cannot unlock creation — such an add-on only matters on
+XL.
+
 Override via environment variables (`PLAN_<KEY>_<FIELD>`, key upper-cased):
 
 ```bash
@@ -405,7 +429,7 @@ PLAN_PRO_OWNED_WORKSPACE_GRANT=4      # L owners may own 1 + 4 = 5 workspaces
 PLAN_PROMAX_OWNED_WORKSPACE_GRANT=49  # XL owners may own 50
 ```
 
-For self-hosted single-user setups, assign the L (Pro) plan to your workspace. Plan changes are **admin-only** by default. For SaaS deployments with self-service billing, enable Stripe:
+For self-hosted single-user setups, assign the XL (`promax`) plan to your workspace — since #1551 it is the only tier that may create resources, connectors and public contexts. Numeric limits are env-overridable as above, but a tier's `features` set is not (a `PLAN_<KEY>_FEATURES` override is a planned follow-up). Plan changes are **admin-only** by default. For SaaS deployments with self-service billing, enable Stripe:
 
 ```bash
 BILLING_ENABLED=true

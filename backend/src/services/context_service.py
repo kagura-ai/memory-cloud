@@ -18,7 +18,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm.exc import ObjectDeletedError
 
 from auth.workspace_roles import WorkspaceRole
-from config.plan_tiers import has_feature
+from config.plan_tiers import has_feature, required_plan_display_name
 from config.settings import get_settings
 from models.auth import Context, ContextMember, User, Workspace, WorkspaceMember
 from models.sleep import SleepMode
@@ -174,7 +174,9 @@ class ContextService:
             # is never silently excluded and an unknown tier fails closed.
             if not has_feature(workspace.plan_name, "shared_contexts"):
                 raise ValidationError(
-                    "Shared contexts require Pro plan. Upgrade to share contexts with team members."
+                    f"Shared contexts require the "
+                    f"{required_plan_display_name('shared_contexts')} plan. "
+                    "Upgrade to share contexts with team members."
                 )
 
         # Determine embedding model: parameter > global setting

@@ -103,6 +103,11 @@ class PlanTierFeature(BaseModel):
     secret_store: bool
     shared_contexts: bool
     team_invitations: bool
+    # Issue #1551: XL-only "may create" gates. When false, the matching
+    # numeric rows above read 0 in this (creation) view.
+    resources: bool
+    connectors: bool
+    public_contexts: bool
 
 
 # ============================================================================
@@ -236,7 +241,16 @@ async def get_available_plans(
 
 
 def _plan_tier_feature(tier: PlanTier) -> PlanTierFeature:
-    """Project a ``PlanTier`` onto the curated comparison-matrix shape (#1138)."""
+    """Project a ``PlanTier`` onto the curated comparison-matrix shape (#1138).
+
+    Issue #1551: the matrix is the *creation* view. Resource tokens, connectors
+    and public calls are XL-only to create, so on tiers without the feature
+    those numeric rows read 0 (✗) here — WITHOUT touching the tier dataclass,
+    whose positive M/L caps still serve objects that already exist.
+    """
+    has_resources = "resources" in tier.features
+    has_connectors = "connectors" in tier.features
+    has_public = "public_contexts" in tier.features
     return PlanTierFeature(
         name=tier.name,
         display_name=tier.display_name,
@@ -248,9 +262,9 @@ def _plan_tier_feature(tier: PlanTier) -> PlanTierFeature:
         storage_limit_bytes=tier.storage_limit_bytes,
         mcp_calls_per_day=tier.mcp_calls_per_day,
         rest_calls_per_day=tier.rest_calls_per_day,
-        public_calls_per_day=tier.public_calls_per_day,
-        max_resource_tokens=tier.max_resource_tokens,
-        max_connectors=tier.max_connectors,
+        public_calls_per_day=tier.public_calls_per_day if has_public else 0,
+        max_resource_tokens=tier.max_resource_tokens if has_resources else 0,
+        max_connectors=tier.max_connectors if has_connectors else 0,
         analysis_runs_per_day=tier.analysis_runs_per_day,
         sleep_enabled_contexts_limit=tier.sleep_enabled_contexts_limit,
         reranking="reranking" in tier.features,
@@ -258,6 +272,9 @@ def _plan_tier_feature(tier: PlanTier) -> PlanTierFeature:
         secret_store="secret_store" in tier.features,
         shared_contexts=tier.allows_shared_contexts,
         team_invitations="team_invitations" in tier.features,
+        resources=has_resources,
+        connectors=has_connectors,
+        public_contexts=has_public,
     )
 
 

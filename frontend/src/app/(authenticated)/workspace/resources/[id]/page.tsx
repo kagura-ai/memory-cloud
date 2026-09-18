@@ -60,13 +60,11 @@ export default function ResourceDetailPage() {
   const t = useTranslations("resources");
   const { currentWorkspace } = useWorkspace();
 
-  // Match the list page's plan-gate posture — a deep-link direct to this URL
-  // on a Free/Basic workspace must see the upgrade CTA, not a generic
-  // not-found/error after a wasted API round-trip.
-  const planName = currentWorkspace?.plan_name;
-  const workspaceReady = currentWorkspace !== null && planName !== undefined;
-  const isPlanGated =
-    workspaceReady && (planName === "free" || planName === "basic");
+  // #1551: no plan gate here — an existing resource keeps serving on every
+  // tier (block-new-only); the "new resources need XL" upsell lives on the
+  // list page. Only hold the fetch until WorkspaceContext has hydrated.
+  const workspaceReady =
+    currentWorkspace !== null && currentWorkspace?.plan_name !== undefined;
 
   const [tab, setTab] = useTabParam("overview", "tab", RESOURCE_TABS);
 
@@ -136,18 +134,14 @@ export default function ResourceDetailPage() {
   }, [resourceId, t]);
 
   useEffect(() => {
-    // Hold the fetch until WorkspaceContext hydrates, then skip entirely for
-    // plan-gated workspaces — same rule as the list page so a direct deep-link
-    // on Free/Basic never fires an API call.
+    // Hold the fetch until WorkspaceContext hydrates — same rule as the list
+    // page so a direct deep-link never fires an API call before the role is
+    // known.
     if (!workspaceReady) return;
     // Issue #389: Owner-only access. Mirrors the gate on the list page so a
     // direct deep-link to /workspace/resources/[id] behaves identically.
     if (currentWorkspace && currentWorkspace.current_user_role !== "owner") {
       router.push("/workspace/dashboard");
-      return;
-    }
-    if (isPlanGated) {
-      setLoading(false);
       return;
     }
     fetchResource();
@@ -156,12 +150,7 @@ export default function ResourceDetailPage() {
     // as a scalar avoids re-running on every object-ref churn from
     // WorkspaceContext's selector.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [
-    fetchResource,
-    isPlanGated,
-    workspaceReady,
-    currentWorkspace?.current_user_role,
-  ]);
+  }, [fetchResource, workspaceReady, currentWorkspace?.current_user_role]);
 
   const fetchIndexerStatus = useCallback(async () => {
     try {
@@ -192,21 +181,6 @@ export default function ResourceDetailPage() {
       : t("detail.title");
     document.title = `${title} - Kagura Memory Cloud`;
   }, [resource, t]);
-
-  if (isPlanGated) {
-    return (
-      <PageContainer>
-        <PageHeader title={t("list.title")} />
-        <EmptyState
-          icon={Database}
-          title={t("planGate.title")}
-          description={t("planGate.description")}
-          actionLabel={t("planGate.action")}
-          onAction={() => router.push("/workspace/settings/plan")}
-        />
-      </PageContainer>
-    );
-  }
 
   if (loading) {
     return (

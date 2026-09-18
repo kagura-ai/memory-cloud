@@ -21,7 +21,7 @@ from auth.programmatic_workspace_auth import (
     authorize_workspace_management,
 )
 from auth.workspace_roles import WorkspaceRole
-from config.plan_tiers import has_feature
+from config.plan_tiers import has_feature, required_plan_display_name
 from db.base import get_db
 from models.auth import Workspace, WorkspaceInvitation, WorkspaceMember
 from models.schemas import (
@@ -101,7 +101,11 @@ async def create_invitation(
         if not has_feature(workspace.plan_name, "team_invitations"):
             raise HTTPException(
                 status_code=403,
-                detail="Team invitations require Pro plan. Upgrade your plan to invite team members.",
+                detail=(
+                    f"Team invitations require the "
+                    f"{required_plan_display_name('team_invitations')} plan. "
+                    "Upgrade your plan to invite team members."
+                ),
             )
 
         # Check member quota (Issue #229)

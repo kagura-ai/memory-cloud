@@ -8,7 +8,7 @@ lane (`delivery_mode` pinning + `load_pinned`, the agent session-state lane, ret
 and the `trust_tier` recall filter), and owner-scoped binding introspection.
 When the caller is a workspace owner/admin, it also exercises the v0.49 Agent Control Plane
 (registry, context bindings, and bootstrap composition).
-Optionally exercises PRO-only resource rows (setup_resource, ingest_events, get_resource_impact, get_resource_schema, list_resource_tokens, plus delete_context cleanup) if the workspace has a PRO plan.
+Optionally exercises the XL-only resource rows (setup_resource, ingest_events, get_resource_impact, get_resource_schema, list_resource_tokens, plus delete_context cleanup) if the workspace plan has the `resources` feature (XL / `promax`; since #1551 lower tiers may only keep serving resources that already exist).
 
 The canonical definitions are `backend/src/mcp_server/tools/_definitions.py` (**60 tools**). The
 **Coverage cross-check** section near the end mirrors that registry so the "all MCP tools" claim
@@ -335,9 +335,9 @@ rollback_sleep_run(report_id="this-is-not-a-uuid")
 -> Verify: returns `invalid_report_id` error (invalid UUID format)
 ```
 
-### 7.8. Resource tools (PRO plan only)
+### 7.8. Resource tools (XL plan only)
 
-**Pre-check:** Call `get_usage()` and check the plan. If the plan is `free` or `basic`, skip this section entirely and note "Resource tools skipped — PRO plan required" in the report.
+**Pre-check:** Call `get_usage()` and check the plan. If the plan lacks the `resources` feature (anything below XL: `free`, `basic` or `pro`), skip this section entirely and note "Resource tools skipped — XL (`promax`) plan required to create resources" in the report. (`setup_resource` returns `plan_required` with `required_plan: "promax"` on those tiers.)
 
 ```
 setup_resource(name="smoke-test-resource-{unix_timestamp}", resource_id="smoke_test_{unix_timestamp}")
@@ -481,7 +481,7 @@ rollback_sleep_run, delete_context.
 get_agent, update_agent, delete_agent, bind_agent_context, list_agent_bindings,
 update_agent_binding, unbind_agent_context, get_agent_bootstrap.
 
-**Exercised only on PRO plan, else SKIP (5 tools):** setup_resource, ingest_events,
+**Exercised only on a plan with the `resources` feature (XL), else SKIP (5 tools):** setup_resource, ingest_events,
 get_resource_impact, get_resource_schema, list_resource_tokens.
 
 **Documented exclusions / gated-skip (12 tools) — with reasons:**
@@ -502,7 +502,7 @@ get_resource_impact, get_resource_schema, list_resource_tokens.
 | `secret_revoke_grant` | Operates on an existing grant produced by `secret_put`. |
 
 33 + 10 + 5 + 12 = **60** — the full registry. The conditional rows are the 10 owner/admin Agent
-Control Plane tools and 5 PRO-gated resource tools; the remaining 12 are documented exclusions.
+Control Plane tools and 5 XL-gated resource tools; the remaining 12 are documented exclusions.
 
 ### 9. Report
 
@@ -570,12 +570,12 @@ Print a summary table (numbers are illustrative; the executed order follows the 
 | A8 | update_agent | Update agent version (owner/admin only) | PASS/FAIL/SKIP |
 | A9 | unbind_agent_context | Remove temporary binding (owner/admin only) | PASS/FAIL/SKIP |
 | A10 | delete_agent | Delete temporary agent (owner/admin only) | PASS/FAIL/SKIP |
-| P1 | setup_resource | Create resource context + token (PRO only) | PASS/FAIL/SKIP |
-| P2 | ingest_events | Batch ingest 2 test events (PRO only) | PASS/FAIL/SKIP |
-| P3 | get_resource_impact | Get resource stats (PRO only) | PASS/FAIL/SKIP |
-| P4 | get_resource_schema | Get schema (expect not_found) (PRO only) | PASS/FAIL/SKIP |
-| P5 | list_resource_tokens | List tokens for resource (PRO only) | PASS/FAIL/SKIP |
-| P6 | delete_context | Delete resource context (PRO only) | PASS/FAIL/SKIP |
+| P1 | setup_resource | Create resource context + token (XL only) | PASS/FAIL/SKIP |
+| P2 | ingest_events | Batch ingest 2 test events (XL only) | PASS/FAIL/SKIP |
+| P3 | get_resource_impact | Get resource stats (XL only) | PASS/FAIL/SKIP |
+| P4 | get_resource_schema | Get schema (expect not_found) (XL only) | PASS/FAIL/SKIP |
+| P5 | list_resource_tokens | List tokens for resource (XL only) | PASS/FAIL/SKIP |
+| P6 | delete_context | Delete resource context (XL only) | PASS/FAIL/SKIP |
 
 **Result: N/47 core rows passed** (+ N/10 Agent Control Plane rows and N/6 PRO resource rows
 passed, or SKIP when the corresponding gate is unavailable)

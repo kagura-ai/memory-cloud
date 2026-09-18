@@ -32,7 +32,7 @@ from models.schemas import ContextExportResponse, RelatedTagItem
 from models.sleep import SleepMode
 from services.context_service import ContextService, TagSortMode
 from utils.datetime import to_utc_iso
-from utils.exceptions import NotFoundException, ValidationError
+from utils.exceptions import FeatureNotAvailableError, NotFoundException, ValidationError
 from utils.logger import get_logger
 
 logger = get_logger(__name__)
@@ -960,6 +960,23 @@ async def update_context(
                         raise ValidationError(
                             "Shared contexts require Pro plan. Upgrade your plan to share contexts with your team."
                         )
+
+        # Issue #1551: "public" is its own gate, independent of "shared" (which
+        # stays on L). Only the transition INTO public is gated — a context that
+        # is already public keeps serving on its current tier (block-new-only).
+        if request.is_public and existing_context and not existing_context.is_public:
+            from config.plan_tiers import feature_denied_message, has_feature
+            from models.auth import Workspace
+
+            workspace = await db.get(Workspace, existing_context.workspace_id)
+            # Fail closed: a context whose workspace row is missing has no plan,
+            # hence no feature (same posture as setup_resource's preflight).
+            plan_name = workspace.plan_name if workspace else None
+            if not has_feature(plan_name or "", "public_contexts"):
+                raise FeatureNotAvailableError(
+                    feature_denied_message(plan_name, "public_contexts"),
+                    feature="public_contexts",
+                )
 
         # SECURITY: Validate resource_id uniqueness within workspace
         # Issue #271 Code Review H-2: Rely on DB constraint instead of application-level check

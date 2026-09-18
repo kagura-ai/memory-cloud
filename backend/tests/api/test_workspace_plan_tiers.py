@@ -53,8 +53,10 @@ def test_returns_four_tiers_in_upgrade_order(client: TestClient) -> None:
 def test_curated_numeric_limits_match_plan_tiers(client: TestClient) -> None:
     free, basic, pro, _promax = client.get(ENDPOINT).json()
 
-    # The three rows the user called out (connectors / analysis / sleep).
-    assert (free["max_connectors"], basic["max_connectors"], pro["max_connectors"]) == (0, 3, 10)
+    # #1551: connectors are XL-only to CREATE. The matrix is the creation
+    # view, so non-XL rows read 0 (✗) even though the tier dataclass keeps
+    # basic=3 / pro=10 as serve-only caps for existing connectors.
+    assert (free["max_connectors"], basic["max_connectors"], pro["max_connectors"]) == (0, 0, 0)
     assert (
         free["analysis_runs_per_day"],
         basic["analysis_runs_per_day"],
@@ -86,16 +88,49 @@ def test_curated_numeric_limits_match_plan_tiers(client: TestClient) -> None:
         basic["rest_calls_per_day"],
         pro["rest_calls_per_day"],
     ) == (0, 1000, 5000)
+    # #1551: same creation-view rule for public calls and resource tokens.
     assert (
         free["public_calls_per_day"],
         basic["public_calls_per_day"],
         pro["public_calls_per_day"],
-    ) == (0, 0, 1000)
+    ) == (0, 0, 0)
     assert (
         free["max_resource_tokens"],
         basic["max_resource_tokens"],
         pro["max_resource_tokens"],
-    ) == (0, 3, 30)
+    ) == (0, 0, 0)
+
+
+def test_matrix_zeroes_xl_only_rows_without_touching_the_tier_numbers(
+    client: TestClient,
+) -> None:
+    """The "—" for M/L comes from the matrix builder, NOT from the dataclass:
+    existing M/L tokens / connectors / public contexts still serve against
+    the unchanged tier caps (block-new-only, #1551)."""
+    from config.plan_tiers import get_plan_tier
+
+    _free, basic, pro, promax = client.get(ENDPOINT).json()
+    assert (basic["max_resource_tokens"], pro["max_resource_tokens"]) == (0, 0)
+    assert (
+        get_plan_tier("basic").max_resource_tokens,
+        get_plan_tier("pro").max_resource_tokens,
+    ) == (
+        3,
+        30,
+    )
+    assert get_plan_tier("pro").public_calls_per_day == 1000
+    # XL carries the real creation numbers.
+    assert (
+        promax["max_resource_tokens"],
+        promax["max_connectors"],
+        promax["public_calls_per_day"],
+    ) == (150, 50, 5000)
+
+
+def test_xl_only_feature_booleans(client: TestClient) -> None:
+    free, basic, pro, promax = client.get(ENDPOINT).json()
+    for key in ("resources", "connectors", "public_contexts"):
+        assert (free[key], basic[key], pro[key], promax[key]) == (False, False, False, True), key
 
 
 def test_memories_per_day_row(client: TestClient) -> None:

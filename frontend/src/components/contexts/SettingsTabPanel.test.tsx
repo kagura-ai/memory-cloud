@@ -59,6 +59,7 @@ const stableT = (key: string, vars?: Record<string, unknown>) => {
 };
 vi.mock("next-intl", () => ({
   useTranslations: (_ns: string) => stableT,
+  useLocale: () => "en",
 }));
 
 const mockUseWorkspace = vi.fn();
@@ -104,9 +105,14 @@ function makeContext(overrides: Partial<Context> = {}): Context {
   };
 }
 
-function setRole(role: "owner" | "admin" | "member" | "viewer") {
+// #1551: making a context public is XL-only, so the default workspace is on
+// promax; the public-gate tests below pass a lower plan explicitly.
+function setRole(
+  role: "owner" | "admin" | "member" | "viewer",
+  plan_name = "promax",
+) {
   mockUseWorkspace.mockReturnValue({
-    currentWorkspace: { id: "ws-1", current_user_role: role },
+    currentWorkspace: { id: "ws-1", current_user_role: role, plan_name },
     currentWorkspaceId: "ws-1",
   });
 }
@@ -156,6 +162,60 @@ beforeEach(() => {
   // Default: owner with no quota constraint. Tests override as needed.
   setRole("owner");
   setQuotaResponse(0, 10);
+});
+
+// ---------- Public toggle is XL-only (#1551) ---------------------------------
+
+describe("SettingsTabPanel — public toggle is XL-only (#1551)", () => {
+  it("pro: replaces the Make Public control with an XL upsell", () => {
+    setRole("owner", "pro");
+    render(
+      <SettingsTabPanel
+        contextId={CTX_ID}
+        context={makeContext({ is_private: false, is_public: false })}
+        onContextUpdated={noop}
+      />,
+    );
+
+    expect(screen.getByText("publicRequiresPlan")).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /makePublic/ })).toBeNull();
+  });
+
+  it("pro: an already-public context keeps its Unpublish control (may serve)", () => {
+    setRole("owner", "pro");
+    render(
+      <SettingsTabPanel
+        contextId={CTX_ID}
+        context={makeContext({
+          is_private: false,
+          is_public: true,
+          resource_id: "products",
+        })}
+        onContextUpdated={noop}
+      />,
+    );
+
+    expect(
+      screen.getByRole("button", { name: "unpublish" }),
+    ).toBeInTheDocument();
+    expect(screen.queryByText("publicRequiresPlan")).toBeNull();
+  });
+
+  it("promax: shows the Make Public control", () => {
+    setRole("owner");
+    render(
+      <SettingsTabPanel
+        contextId={CTX_ID}
+        context={makeContext({ is_private: false, is_public: false })}
+        onContextUpdated={noop}
+      />,
+    );
+
+    expect(
+      screen.getByRole("button", { name: /makePublic/ }),
+    ).toBeInTheDocument();
+    expect(screen.queryByText("publicRequiresPlan")).toBeNull();
+  });
 });
 
 // ---------- Sleep mode section visibility -----------------------------------

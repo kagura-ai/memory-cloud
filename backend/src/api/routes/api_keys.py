@@ -383,7 +383,16 @@ async def regenerate_api_key(
         old_key.revoked_at = utcnow()
         await db.flush()
 
-        # Create new key with same name
+        # Create new key with same name.
+        #
+        # #1551 (block-new-only): the ``public_contexts`` create gate is
+        # intentionally NOT applied here. Rotation replaces an existing bound
+        # key — the old row is revoked above, ``bound_context_id`` is copied
+        # from it (there is no request body that could bind an unbound key or
+        # re-point it at another context), and ``create_key`` re-verifies the
+        # context is still public — so the number of bound keys never grows.
+        # That is the "may serve" side of the rule: a workspace that left XL
+        # keeps rotating the keys it already has.
         new_api_key, new_key = await manager.create_key(
             name=key_name,
             user_id=user_id,

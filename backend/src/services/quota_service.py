@@ -18,7 +18,7 @@ from sqlalchemy import func, or_, select, text
 from sqlalchemy.exc import DBAPIError
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from config.plan_tiers import PLAN_TIERS, get_plan_tier, has_feature
+from config.plan_tiers import feature_denied_message, get_plan_tier, has_feature
 from db.redis import get_cache, incrby_counter
 from models.auth import (
     Context,
@@ -338,15 +338,12 @@ class QuotaService:
 
             try:
                 required_plan = get_required_plan_for_feature(feature)
-                plan_display = PLAN_TIERS[required_plan].display_name
-            except (ValueError, KeyError):
+            except ValueError:
                 required_plan = "unknown"
-                plan_display = "higher"
 
-            error = (
-                f"Feature '{feature}' not available on {workspace.plan_name} plan. "
-                f"Upgrade to {plan_display} plan to access this feature."
-            )
+            # Shared with the create gates that already hold the workspace
+            # row (#1551) so every refusal derives the tier the same way.
+            error = feature_denied_message(workspace.plan_name, feature)
             logger.info(
                 "feature_access_denied",
                 workspace_id=str(workspace_id),

@@ -51,8 +51,14 @@ const TIERS = [
     secret_store: true,
     shared_contexts: false,
     team_invitations: false,
+    resources: false,
+    connectors: false,
+    public_contexts: false,
   },
   {
+    // #1551: the matrix is the CREATION view — the API zeroes the
+    // resource-token / connector / public rows below XL even though the tier
+    // keeps serve-only caps for objects that already exist.
     name: "basic",
     display_name: "M",
     max_contexts: 3,
@@ -64,8 +70,8 @@ const TIERS = [
     mcp_calls_per_day: 10000,
     rest_calls_per_day: 1000,
     public_calls_per_day: 0,
-    max_resource_tokens: 3,
-    max_connectors: 3,
+    max_resource_tokens: 0,
+    max_connectors: 0,
     analysis_runs_per_day: 0,
     sleep_enabled_contexts_limit: 0,
     reranking: true,
@@ -73,6 +79,9 @@ const TIERS = [
     secret_store: true,
     shared_contexts: false,
     team_invitations: false,
+    resources: false,
+    connectors: false,
+    public_contexts: false,
   },
   {
     name: "pro",
@@ -85,9 +94,9 @@ const TIERS = [
     storage_limit_bytes: 10 * 1024 ** 3,
     mcp_calls_per_day: 50000,
     rest_calls_per_day: 5000,
-    public_calls_per_day: 1000,
-    max_resource_tokens: 30,
-    max_connectors: 10,
+    public_calls_per_day: 0,
+    max_resource_tokens: 0,
+    max_connectors: 0,
     analysis_runs_per_day: 3,
     sleep_enabled_contexts_limit: 3,
     reranking: true,
@@ -95,10 +104,14 @@ const TIERS = [
     secret_store: true,
     shared_contexts: true,
     team_invitations: true,
+    resources: false,
+    connectors: false,
+    public_contexts: false,
   },
   {
     // #1548: XL — every pro capability, higher limits. Values mirror the
-    // backend PLAN_PROMAX registry (config/plan_tiers.py).
+    // backend PLAN_PROMAX registry (config/plan_tiers.py); #1551: the only
+    // tier that may create resources / connectors / public contexts.
     name: "promax",
     display_name: "XL",
     max_contexts: 1000,
@@ -119,7 +132,11 @@ const TIERS = [
     secret_store: true,
     shared_contexts: true,
     team_invitations: true,
+    resources: true,
+    connectors: true,
+    public_contexts: true,
   },
+
 ];
 
 beforeEach(() => {
@@ -135,11 +152,13 @@ describe("PlanFeatureMatrix (#1138)", () => {
     render(<PlanFeatureMatrix currentTier="basic" />);
     await screen.findByText("planMatrix.row_connectors");
 
-    const connectors = rowOf("planMatrix.row_connectors");
-    expect(connectors.getByText("3")).toBeInTheDocument(); // basic
-    expect(connectors.getByText("10")).toBeInTheDocument(); // pro
-    expect(connectors.getByText("50")).toBeInTheDocument(); // promax
-    expect(connectors.getAllByText("✗").length).toBe(1); // free = 0
+    // #1551: connector seats are a creation cap — ✗ everywhere below XL.
+    const seats = rowOf("planMatrix.row_connectorSeats");
+    expect(seats.getByText("50")).toBeInTheDocument(); // promax
+    expect(seats.getAllByText("✗").length).toBe(3); // free / basic / pro
+    const tokens = rowOf("planMatrix.row_resourceTokens");
+    expect(tokens.getByText("150")).toBeInTheDocument(); // promax
+    expect(tokens.getAllByText("✗").length).toBe(3);
 
     // Locale-grouped number + GiB storage. pro and promax share the memory
     // limit (promax is a superset on features, not every quota).
@@ -235,6 +254,25 @@ describe("PlanFeatureMatrix (#1138)", () => {
     expect(secrets.queryByText("✗")).toBeNull();
   });
 
+  it("marks resources / connectors / public features as XL-only (#1551)", async () => {
+    render(<PlanFeatureMatrix currentTier="pro" />);
+    await screen.findByText("planMatrix.row_resources");
+
+    for (const key of [
+      "planMatrix.row_resources",
+      "planMatrix.row_connectors",
+      "planMatrix.row_publicFeatures",
+    ]) {
+      const row = rowOf(key);
+      expect(row.getAllByText("✓").length).toBe(1); // promax only
+      expect(row.getAllByText("✗").length).toBe(3); // free / basic / pro
+    }
+    // Shared contexts stay on L — the public re-map does not drag them along.
+    expect(
+      rowOf("planMatrix.row_sharedContexts").getAllByText("✓").length,
+    ).toBe(2);
+  });
+
   it("labels every PLAN_TIER_ORDER tier via planLabelFromEnv, unknown tiers via display_name (#1548)", async () => {
     mockGetMatrix.mockResolvedValue([
       ...TIERS,
@@ -270,6 +308,7 @@ describe("PlanFeatureMatrix (#1138)", () => {
 
     for (const key of [
       "planMatrix.row_connectors",
+      "planMatrix.row_connectorSeats",
       "planMatrix.row_analysisPerDay",
       "planMatrix.row_sleepContexts",
       "planMatrix.row_secretStore",

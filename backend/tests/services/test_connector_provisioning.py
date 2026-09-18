@@ -12,7 +12,12 @@ from services.connector_provisioning import (
     ConnectorProvisioningService,
     validate_connector_idempotency_key,
 )
-from utils.exceptions import ConflictError, MemoryCloudException, ValidationError
+from utils.exceptions import (
+    ConflictError,
+    FeatureNotAvailableError,
+    MemoryCloudException,
+    ValidationError,
+)
 
 
 def _result(*, one=None, scalar=None):
@@ -57,12 +62,14 @@ class TestConnectorProvisioningService:
             yield
 
     @pytest.mark.asyncio
-    async def test_free_plan_zero_connector_cap_blocks_before_writes(self, mock_db):
+    async def test_zero_connector_cap_blocks_before_writes(self, mock_db):
         workspace_id = uuid4()
         # #857/PR #860: a zero-cap plan short-circuits to 403 BEFORE the advisory
         # lock and count — so only the workspace lookup runs (no lock results).
+        # #1551: the tier has the feature (XL) but an env override left the
+        # seat cap at 0 — the numeric cap is the second gate.
         mock_db.execute.side_effect = [
-            _result(one=SimpleNamespace(effective_max_connectors=0)),
+            _result(one=SimpleNamespace(plan_name="promax", effective_max_connectors=0)),
         ]
 
         with patch("services.connector_provisioning.upsert_resource", new=AsyncMock()) as upsert:
@@ -83,11 +90,42 @@ class TestConnectorProvisioningService:
         assert mock_db.execute.call_count == 1
 
     @pytest.mark.asyncio
+    @pytest.mark.parametrize("plan_name", ["free", "basic", "pro"])
+    async def test_non_xl_plan_is_refused_by_the_feature_gate(self, mock_db, plan_name):
+        """#1551: connectors are XL-only to CREATE. Refused before the seat
+        cap, the advisory lock and any write — with the registry-derived tier
+        in the message, not a hardcoded "Pro"."""
+        workspace_id = uuid4()
+        mock_db.execute.side_effect = [
+            # M/L keep their seat caps (3 / 10) for existing connectors; the
+            # feature gate refuses regardless of headroom.
+            _result(one=SimpleNamespace(plan_name=plan_name, effective_max_connectors=10)),
+        ]
+
+        with patch("services.connector_provisioning.upsert_resource", new=AsyncMock()) as upsert:
+            with pytest.raises(FeatureNotAvailableError) as exc_info:
+                await ConnectorProvisioningService(mock_db).provision_connector(
+                    workspace_id=workspace_id,
+                    user_id="user-1",
+                    connector_type="slack",
+                    resource_id="slack_general",
+                )
+
+        assert exc_info.value.status_code == 403
+        assert exc_info.value.error_code == "FEAT-001"
+        assert exc_info.value.details["feature"] == "connectors"
+        assert "XL" in exc_info.value.message
+        assert "Pro plan" not in exc_info.value.message
+        upsert.assert_not_awaited()
+        mock_db.add.assert_not_called()
+        assert mock_db.execute.call_count == 1
+
+    @pytest.mark.asyncio
     async def test_basic_plan_at_cap_blocks_paid_boundary(self, mock_db):
         """AC2: cap=1 and active=1 must reject; >= cannot regress to >."""
         workspace_id = uuid4()
         mock_db.execute.side_effect = [
-            _result(one=SimpleNamespace(effective_max_connectors=1)),
+            _result(one=SimpleNamespace(plan_name="promax", effective_max_connectors=1)),
             *_lock_results(),
             _result(scalar=1),
         ]
@@ -113,7 +151,7 @@ class TestConnectorProvisioningService:
         resource_pk = uuid4()
         token = SimpleNamespace(id=123, quota_events_per_hour=1000)
         mock_db.execute.side_effect = [
-            _result(one=SimpleNamespace(effective_max_connectors=1)),
+            _result(one=SimpleNamespace(plan_name="promax", effective_max_connectors=1)),
             *_lock_results(),
             _result(scalar=0),
             _result(one=None),
@@ -153,7 +191,9 @@ class TestConnectorProvisioningService:
         token = SimpleNamespace(id=123, quota_events_per_hour=1000)
         mock_db.execute.side_effect = [
             _result(
-                one=SimpleNamespace(effective_max_connectors=1, effective_max_resource_tokens=0)
+                one=SimpleNamespace(
+                    plan_name="promax", effective_max_connectors=1, effective_max_resource_tokens=0
+                )
             ),
             *_lock_results(),
             _result(scalar=0),
@@ -198,7 +238,7 @@ class TestConnectorProvisioningService:
 
         lock_timeout = DBAPIError("SELECT pg_advisory_xact_lock(...)", {}, _Orig())
         mock_db.execute.side_effect = [
-            _result(one=SimpleNamespace(effective_max_connectors=1)),
+            _result(one=SimpleNamespace(plan_name="promax", effective_max_connectors=1)),
             _result(),  # SET LOCAL lock_timeout = '5s'
             lock_timeout,  # pg_advisory_xact_lock raises
         ]
@@ -224,7 +264,7 @@ class TestConnectorProvisioningService:
         resource_pk = uuid4()
         connector_id = uuid4()
         mock_db.execute.side_effect = [
-            _result(one=SimpleNamespace(effective_max_connectors=5)),
+            _result(one=SimpleNamespace(plan_name="promax", effective_max_connectors=5)),
             *_lock_results(),
             _result(scalar=0),
             _result(one=SimpleNamespace(id=connector_id)),
@@ -259,7 +299,7 @@ class TestConnectorProvisioningService:
         workspace_id = uuid4()
         resource_pk = uuid4()
         mock_db.execute.side_effect = [
-            _result(one=SimpleNamespace(effective_max_connectors=5)),
+            _result(one=SimpleNamespace(plan_name="promax", effective_max_connectors=5)),
             *_lock_results(),
             _result(scalar=0),
             _result(one=None),
@@ -310,6 +350,59 @@ class TestConnectorIdempotencyKey:
                 connector_id=connector_id,
                 idempotency_key=f"{uuid4()}:summary-123",
             )
+
+
+@pytest.fixture
+def create_gate_must_not_run():
+    """#1551: the ``connectors`` feature gate is CREATE-only. Existing
+    connectors on M/L are listed, re-configured and dispatched without it —
+    so any call into the flag from these paths is a regression."""
+    with patch(
+        "services.connector_provisioning.has_feature",
+        side_effect=AssertionError("serve path consulted the create-only feature gate"),
+    ):
+        yield
+
+
+@pytest.mark.asyncio
+async def test_existing_connector_paths_bypass_the_create_gate(create_gate_must_not_run):
+    """A basic-tier workspace's existing connector: list → runtime update →
+    worker dispatch lookup all succeed with the feature flag unreachable."""
+    ws_id = uuid4()
+    connector = SimpleNamespace(
+        id=uuid4(),
+        workspace_id=ws_id,
+        context_id=uuid4(),
+        runtime_config=None,
+        config_version=1,
+    )
+
+    list_db = MagicMock()
+    list_result = MagicMock()
+    list_result.all.return_value = [(connector, "slack-sales", "Sales", "sales")]
+    activity_result = MagicMock()
+    activity_result.all.return_value = []
+    list_db.execute = AsyncMock(side_effect=[list_result, activity_result])
+    listed = await ConnectorProvisioningService(list_db).list_connectors(ws_id)
+    assert [item.connector for item in listed] == [connector]
+
+    runtime_db = MagicMock()
+    runtime_db.execute = AsyncMock(return_value=_result(one=connector))
+    runtime_db.flush = AsyncMock()
+    updated = await ConnectorProvisioningService(runtime_db).update_runtime_config(
+        workspace_id=ws_id,
+        connector_id=connector.id,
+        runtime_config={"vision_enabled": False},
+        user_id="admin-1",
+    )
+    assert updated.config_version == 2
+
+    dispatch_db = MagicMock()
+    dispatch_db.execute = AsyncMock(return_value=_result(one=connector))
+    resolved = await ConnectorProvisioningService(dispatch_db).get_connector_for_dispatch(
+        connector_type="slack", external_team_id="T01"
+    )
+    assert resolved is connector
 
 
 @pytest.mark.asyncio

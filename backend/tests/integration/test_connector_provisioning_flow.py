@@ -37,7 +37,10 @@ def _mock_qdrant_collection():
 async def _seed_workspace(
     db: AsyncSession,
     *,
-    plan_name: str = "basic",
+    # #1551: provisioning a connector is XL-only ("may create"); these flows
+    # all CREATE, so they run on promax. Serve-path coverage for existing M/L
+    # connectors lives in tests/services/test_connector_provisioning.py.
+    plan_name: str = "promax",
 ) -> tuple[str, Workspace]:
     user_id = f"user-{uuid4().hex}"
     workspace = Workspace(
@@ -212,7 +215,7 @@ async def test_registration_path_creates_context_and_mints_kmc_key(
     """
     from models.auth import APIKey, Context
 
-    user_id, workspace = await _seed_workspace(db_session, plan_name="basic")
+    user_id, workspace = await _seed_workspace(db_session, plan_name="promax")
     resource_id = f"slack_{uuid4().hex[:8]}"
     ctx_name = f"slack-{uuid4().hex[:8]}"
 
@@ -266,7 +269,7 @@ async def test_provision_seeds_canonical_chat_resource_schema(db_session: AsyncS
     """
     from models.resource import ResourceSchema
 
-    user_id, workspace = await _seed_workspace(db_session, plan_name="basic")
+    user_id, workspace = await _seed_workspace(db_session, plan_name="promax")
     resource_id = f"slack_{uuid4().hex[:8]}"
 
     result = await ConnectorProvisioningService(db_session).provision_connector(
@@ -298,7 +301,7 @@ async def test_ensure_chat_schema_is_idempotent(db_session: AsyncSession):
 
     from models.resource import Resource, ResourceSchema
 
-    user_id, workspace = await _seed_workspace(db_session, plan_name="basic")
+    user_id, workspace = await _seed_workspace(db_session, plan_name="promax")
     # Create a bare resource to attach a schema to.
     res = Resource(workspace_id=workspace.id, resource_id="slack_idem", created_by=user_id)
     db_session.add(res)
@@ -328,7 +331,7 @@ async def test_delete_connector_revokes_kmc_key_and_removes_connector(
     """
     from models.auth import APIKey, Context
 
-    user_id, workspace = await _seed_workspace(db_session, plan_name="basic")
+    user_id, workspace = await _seed_workspace(db_session, plan_name="promax")
     result = await ConnectorProvisioningService(db_session).provision_connector(
         workspace_id=workspace.id,
         user_id=user_id,
@@ -382,7 +385,7 @@ async def test_admin_non_owner_can_auto_create_context(db_session: AsyncSession)
     """
     from models.auth import Context
 
-    owner_id, workspace = await _seed_workspace(db_session, plan_name="pro")
+    owner_id, workspace = await _seed_workspace(db_session, plan_name="promax")
     admin_id = f"admin-{uuid4().hex}"
     db_session.add(
         WorkspaceMember(
@@ -426,7 +429,7 @@ async def test_duplicate_team_id_is_rejected(db_session: AsyncSession):
     """
     from utils.exceptions import ConflictError
 
-    user_id, workspace = await _seed_workspace(db_session, plan_name="pro")
+    user_id, workspace = await _seed_workspace(db_session, plan_name="promax")
     svc = ConnectorProvisioningService(db_session)
     await svc.provision_connector(
         workspace_id=workspace.id,
@@ -454,7 +457,7 @@ async def test_same_team_id_is_allowed_under_two_app_identities(db_session: Asyn
     """The dispatch uniqueness boundary is (platform, app_key, team_id)."""
     from models.worker_app import WorkerAppIdentity
 
-    user_id, workspace = await _seed_workspace(db_session, plan_name="pro")
+    user_id, workspace = await _seed_workspace(db_session, plan_name="promax")
     custom_app = WorkerAppIdentity(
         platform="slack",
         app_key="sales",
@@ -504,7 +507,7 @@ async def test_provision_rejects_explicitly_disabled_default_identity(db_session
     from services.worker_app_identity import WorkerAppIdentityService
     from utils.exceptions import ValidationError
 
-    user_id, workspace = await _seed_workspace(db_session, plan_name="pro")
+    user_id, workspace = await _seed_workspace(db_session, plan_name="promax")
     # e68_1315 seeds slack/default, so disable the existing row rather than
     # inserting a duplicate; the session rollback restores it afterwards.
     seeded = await WorkerAppIdentityService(db_session).get_identity("slack", "default")
@@ -544,7 +547,7 @@ async def test_orphan_context_cleaned_up_on_post_context_failure(db_session: Asy
     """
     from models.auth import Context
 
-    user_id, workspace = await _seed_workspace(db_session, plan_name="pro")
+    user_id, workspace = await _seed_workspace(db_session, plan_name="promax")
     ctx_name = f"slack-{uuid4().hex[:8]}"
 
     with patch(

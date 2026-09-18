@@ -12,7 +12,14 @@ import type { PlanTier } from "@/lib/utils/planLabel";
 export const MAX_QUOTA_PER_TOKEN = 10000;
 
 /**
- * Plan-based token limits (mirrors backend `max_resource_tokens`)
+ * Plan-based token limits (mirrors backend `max_resource_tokens`).
+ *
+ * Kept in sync by hand with `backend/src/config/plan_tiers.py` — the token
+ * screens do not fetch `/workspaces/{id}/plan`, so this table is the source
+ * for the "used / max" and quota-capacity displays. #1551: the basic / pro
+ * values are SERVE-ONLY caps for tokens that already exist on those tiers;
+ * creating a new token is gated on `planAtLeast(plan, "promax")`, not on
+ * these numbers.
  */
 export const PLAN_TOKEN_LIMITS = {
   free: {

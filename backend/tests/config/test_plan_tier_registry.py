@@ -18,12 +18,19 @@ from config.plan_tiers import (
     PLAN_ORDER,
     PLAN_TIERS,
     PlanName,
+    feature_denied_message,
     get_plan_tier,
+    get_required_plan_for_feature,
     has_feature,
     plan_at_least,
     plan_rank,
+    required_plan_display_name,
 )
 from config.rate_limits import TIER_RATE_LIMITS
+
+# #1551: creation of these is XL-only. Their numeric caps on M/L stay > 0 so
+# objects that already exist keep serving (block-new-only).
+XL_ONLY_FEATURES = ("resources", "connectors", "public_contexts")
 
 
 def test_promax_is_a_plan_name() -> None:
@@ -125,3 +132,65 @@ def test_admin_plan_change_accepts_every_registered_tier() -> None:
         assert AdminUpdatePlanRequest(plan_name=name).plan_name == name
     with pytest.raises(ValidationError):
         AdminUpdatePlanRequest(plan_name="enterprise")
+
+
+# ---------------------------------------------------------------------------
+# #1551 — resources / connectors / public are XL-only ("may create" gate)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("feature", XL_ONLY_FEATURES)
+def test_xl_only_features_are_promax_exclusive(feature: str) -> None:
+    assert [has_feature(p, feature) for p in PLAN_ORDER] == [False, False, False, True]
+    assert get_required_plan_for_feature(feature) == PlanName.PROMAX
+
+
+def test_pro_no_longer_carries_public_contexts() -> None:
+    assert "public_contexts" not in get_plan_tier("pro").features
+    assert "public_contexts" in get_plan_tier("promax").features
+
+
+@pytest.mark.parametrize("feature", ["shared_contexts", "team_invitations", "memory_analysis"])
+def test_team_features_stay_on_pro(feature: str) -> None:
+    """Shared / team / analysis are NOT part of the XL re-map."""
+    assert get_required_plan_for_feature(feature) == PlanName.PRO
+    assert has_feature("pro", feature) and has_feature("promax", feature)
+
+
+@pytest.mark.parametrize("plan", PLAN_ORDER)
+def test_every_tier_has_secret_store(plan: str) -> None:
+    assert has_feature(plan, "secret_store")
+
+
+@pytest.mark.parametrize("plan", PLAN_ORDER)
+def test_resources_implies_public_contexts(plan: str) -> None:
+    """``setup_resource`` inserts a *public* context, so any tier that may
+    create resources must also be allowed to make contexts public."""
+    if has_feature(plan, "resources"):
+        assert has_feature(plan, "public_contexts"), plan
+
+
+def test_serve_caps_for_existing_objects_are_unchanged() -> None:
+    """Block-new-only: the numeric caps existing M/L objects rely on do not
+    move to 0 — only the feature flag gates creation."""
+    basic, pro, xl = get_plan_tier("basic"), get_plan_tier("pro"), get_plan_tier("promax")
+    assert (basic.max_resource_tokens, basic.max_connectors) == (3, 3)
+    assert (pro.max_resource_tokens, pro.max_connectors) == (30, 10)
+    assert (pro.public_calls_per_day, pro.bound_public_calls_per_minute) == (1000, 100)
+    # Final XL seat counts (#1548 shipped these as provisional).
+    assert (xl.max_resource_tokens, xl.max_connectors) == (150, 50)
+
+
+def test_feature_denied_message_names_the_registry_tier() -> None:
+    """Refusal text derives the tier from the registry — never a hardcoded
+    "Pro" — so a display-name override or a new tier flows through."""
+    xl_display = get_plan_tier("promax").display_name
+    msg = feature_denied_message("pro", "resources")
+    assert "resources" in msg and "pro plan" in msg and xl_display in msg
+    assert "Pro plan" not in msg
+    # Legacy rows with plan_name NULL are read as free (member_credentials.py).
+    assert "free plan" in feature_denied_message(None, "connectors")
+    assert required_plan_display_name("public_contexts") == xl_display
+    assert required_plan_display_name("shared_contexts") == get_plan_tier("pro").display_name
+    # Unknown feature: fall back rather than 500 on a typo.
+    assert required_plan_display_name("not-a-feature") == "higher"

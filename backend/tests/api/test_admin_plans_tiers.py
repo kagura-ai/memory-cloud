@@ -83,11 +83,12 @@ def test_list_plan_tiers_serializes_pro_only_features(client: TestClient) -> Non
     # Features arrive sorted for deterministic output.
     assert pro["features"] == sorted(pro["features"])
 
-    # PRO-exclusive features
-    for pro_only in ("memory_analysis", "public_contexts", "shared_contexts"):
+    # PRO+ features (public_contexts moved to XL in #1551)
+    for pro_only in ("memory_analysis", "shared_contexts"):
         assert pro_only in pro["features"]
         assert pro_only not in free["features"]
         assert pro_only not in basic["features"]
+    assert "public_contexts" not in pro["features"]
 
     # Reranking: BASIC+ only
     assert "reranking" in basic["features"]
@@ -177,3 +178,15 @@ def test_list_plan_tiers_serves_promax_last_with_pro_features(client: TestClient
     assert promax["price_monthly"] == 0
     assert promax["max_contexts_per_workspace"] == 1000
     assert promax["max_members_per_workspace"] == 50
+
+
+def test_list_plan_tiers_exposes_xl_only_feature_booleans(client: TestClient) -> None:
+    """#1551: the admin table reads the three create-gates as booleans; the
+    numeric caps on M/L are served unchanged (serve-only for existing objects)."""
+    free, basic, pro, promax = client.get("/api/v1/admin/plans/tiers").json()
+    for key in ("resources", "connectors", "public_contexts"):
+        assert (free[key], basic[key], pro[key], promax[key]) == (False, False, False, True), key
+    assert (basic["max_resource_tokens"], pro["max_resource_tokens"]) == (3, 30)
+    assert (basic["max_connectors"], pro["max_connectors"]) == (3, 10)
+    assert pro["public_calls_per_day"] == 1000
+    assert (promax["max_resource_tokens"], promax["max_connectors"]) == (150, 50)

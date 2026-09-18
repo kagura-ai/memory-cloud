@@ -168,15 +168,19 @@ class TestListResourceTokensRoleGating:
 
 class TestSetupResourcePlanGating:
     @pytest.mark.asyncio
-    async def test_non_pro_plan_denied(self):
-        """Basic/Free plan should not be able to run setup_resource."""
+    @pytest.mark.parametrize("plan_name", ["free", "basic", "pro"])
+    async def test_non_xl_plan_denied(self, plan_name):
+        """#1551: setup_resource creates a NEW resource, so it is XL-only —
+        refused on free / basic / pro (pro keeps its 30-token serve cap for
+        tokens that already exist) with a ``plan_required`` error that names
+        the XL tier from the registry."""
         workspace_id = uuid4()
         mock_db = AsyncMock()
 
         # db.execute order:
         # 1) role check → owner
         # 2) resource_id duplicate check → none
-        # 3) workspace plan_name lookup → "basic"
+        # 3) workspace plan_name lookup → plan_name
         # (context name duplicate check is patched below, so it does not touch db.execute)
         role_result = MagicMock()
         owner = MagicMock()
@@ -187,7 +191,7 @@ class TestSetupResourcePlanGating:
         resource_dup_result.scalar_one_or_none.return_value = None
 
         plan_result = MagicMock()
-        plan_result.scalar_one_or_none.return_value = "basic"
+        plan_result.scalar_one_or_none.return_value = plan_name
 
         mock_db.execute.side_effect = [role_result, resource_dup_result, plan_result]
 
@@ -212,6 +216,12 @@ class TestSetupResourcePlanGating:
 
         data = _json_of(result)
         assert data["error"] == "plan_required"
+        assert data["required_plan"] == "promax"
+        assert "XL" in data["message"]
+        assert "PRO plan" not in data["message"]
+        # Refused at the gate: nothing was staged or committed.
+        mock_db.add.assert_not_called()
+        mock_db.commit.assert_not_awaited()
 
     @pytest.mark.asyncio
     async def test_non_owner_denied(self):
@@ -774,7 +784,7 @@ class TestSetupResourceHappyPath:
         # db.execute sequence:
         # 1) role check → owner
         # 2) resource_id duplicate check → none
-        # 3) workspace plan_name lookup → "pro"
+        # 3) workspace plan_name lookup → "promax" (#1551: resources are XL-only)
         # 4) upsert_resource: resolve_resource_pk → existing uuid (Issue #390 Phase 2)
         # 5) active token count → 0
         role_result = MagicMock()
@@ -786,7 +796,7 @@ class TestSetupResourceHappyPath:
         resource_dup_result.scalar_one_or_none.return_value = None
 
         plan_result = MagicMock()
-        plan_result.scalar_one_or_none.return_value = "pro"
+        plan_result.scalar_one_or_none.return_value = "promax"
 
         resource_pk_result = MagicMock()
         resource_pk_result.scalar_one_or_none.return_value = uuid4()

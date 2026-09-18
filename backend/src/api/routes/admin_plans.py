@@ -22,7 +22,7 @@ from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from auth.dependencies import require_admin as auth_require_admin
-from config.plan_tiers import PLAN_ORDER, PLAN_TIERS, get_plan_tier
+from config.plan_tiers import PLAN_ORDER, PLAN_TIERS, get_plan_tier, has_feature
 from db.base import get_db
 from models.auth import (
     ENTITLEMENT_SOURCE_ADMIN_GRANT,
@@ -281,6 +281,7 @@ class PlanTierInfo(BaseModel):
     owned_workspace_grant: int
     owned_workspaces: int
     max_resource_tokens: int
+    max_connectors: int  # Issue #1551: serve-only cap on M/L, creation cap on XL
     memory_limit: int
     mcp_calls_per_day: int
     mcp_calls_per_week: int
@@ -296,6 +297,11 @@ class PlanTierInfo(BaseModel):
     embedding_daily_cap_usd: float | None = None  # Issue #709
     embedding_monthly_cap_usd: float | None = None  # Issue #709
     allows_shared_contexts: bool
+    # Issue #1551: XL-only "may create" gates as booleans. The numeric caps
+    # above stay the tier's real (serve-only on M/L) values.
+    resources: bool
+    connectors: bool
+    public_contexts: bool
     features: list[str]
 
 
@@ -419,6 +425,9 @@ async def list_plan_tiers(
             **{
                 **dataclasses.asdict(PLAN_TIERS[plan]),
                 "features": sorted(PLAN_TIERS[plan].features),
+                "resources": "resources" in PLAN_TIERS[plan].features,
+                "connectors": "connectors" in PLAN_TIERS[plan].features,
+                "public_contexts": "public_contexts" in PLAN_TIERS[plan].features,
                 "owned_workspaces": tier_owned_workspace_cap(PLAN_TIERS[plan]),
             }
         )
@@ -427,6 +436,15 @@ async def list_plan_tiers(
 
     logger.info("admin_listed_plan_tiers", admin_user=admin_user["user_id"])
     return tiers
+
+
+def _loses_feature(old_plan: str, new_plan: str, feature: str) -> bool:
+    """True when a plan change drops ``feature`` the old tier had.
+
+    Registry-driven (#1551) so "downgrade" means "the new tier lacks it", not
+    ``== "free"`` — a future tier without reranking is handled automatically.
+    """
+    return has_feature(old_plan, feature) and not has_feature(new_plan, feature)
 
 
 @router.put("/workspaces/{workspace_id}/plan")
@@ -505,8 +523,8 @@ async def update_workspace_plan(
         )
         db.add(audit_entry)
 
-        # Issue #149: If downgrading to Free, disable reranking on all contexts
-        if request.plan_name == "free" and old_plan != "free":
+        # Issue #149: if the new tier lacks reranking, disable it on all contexts
+        if _loses_feature(old_plan, request.plan_name, "reranking"):
             from models.auth import Context
             from models.config import ContextSearchConfig
 
@@ -535,13 +553,13 @@ async def update_workspace_plan(
                     disabled_count += 1
                     logger.info(
                         f"Disabled reranking for context {context.id} "
-                        f"due to workspace downgrade to Free plan"
+                        f"due to workspace plan change to {request.plan_name}"
                     )
 
             if disabled_count > 0:
                 logger.info(
                     f"Disabled reranking on {disabled_count} context(s) "
-                    f"for workspace {workspace_id} (downgrade to Free)"
+                    f"for workspace {workspace_id} (plan change to {request.plan_name})"
                 )
 
         await db.commit()

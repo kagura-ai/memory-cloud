@@ -460,16 +460,23 @@ describe("ResourceDetailPage", () => {
     });
   });
 
-  it("renders upgrade CTA and skips fetch on basic plan", async () => {
+  it("basic: renders the existing resource — may serve, not plan-gated (#1551)", async () => {
     mockCurrentWorkspace = { plan_name: "basic", current_user_role: "owner" };
+    mockListResources.mockResolvedValue({
+      resources: [makeResource()],
+      total: 1,
+    });
+    mockGetSchema.mockResolvedValue(makeSchema());
 
     render(<ResourceDetailPage />);
 
     await waitFor(() => {
-      expect(screen.getByText("resources.planGate.title")).toBeInTheDocument();
+      expect(screen.getByText("EC Products")).toBeInTheDocument();
     });
-    expect(mockListResources).not.toHaveBeenCalled();
-    expect(mockGetSchema).not.toHaveBeenCalled();
+    expect(mockListResources).toHaveBeenCalledTimes(1);
+    expect(
+      screen.queryByText("resources.planGate.title"),
+    ).not.toBeInTheDocument();
   });
 
   it("holds the fetch until WorkspaceContext hydrates", async () => {

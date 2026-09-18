@@ -86,6 +86,7 @@ export interface PlanTierInfo {
   owned_workspace_grant: number; // #1550: slots the tier grants its owner
   owned_workspaces: number; // #1550: 1 base + grant (what the table shows)
   max_resource_tokens: number;
+  max_connectors: number; // #1551: serve-only cap on M/L, creation cap on XL
   memory_limit: number;
   mcp_calls_per_day: number;
   mcp_calls_per_week: number;
@@ -103,6 +104,10 @@ export interface PlanTierInfo {
   embedding_daily_cap_usd: number | null; // Issue #709
   embedding_monthly_cap_usd: number | null; // Issue #709
   allows_shared_contexts: boolean;
+  // #1551: XL-only "may create" gates as booleans.
+  resources: boolean;
+  connectors: boolean;
+  public_contexts: boolean;
   features: string[];
 }
 

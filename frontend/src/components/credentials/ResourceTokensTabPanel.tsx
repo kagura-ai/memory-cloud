@@ -11,7 +11,7 @@
 import { useEffect, useRef, useState } from "react";
 import Link from "next/link";
 import { useSearchParams } from "next/navigation";
-import { useTranslations } from "next-intl";
+import { useLocale, useTranslations } from "next-intl";
 import { Section } from "@/components/common/Section";
 import {
   InlineSpinner,
@@ -34,7 +34,12 @@ import {
 } from "@/lib/api/resource-tokens";
 import { getContexts } from "@/lib/api/contexts";
 import { ApiError } from "@/lib/api/base";
-import { isPlanTier, type PlanTier } from "@/lib/utils/planLabel";
+import {
+  isPlanTier,
+  planAtLeast,
+  planLabelFromEnv,
+  type PlanTier,
+} from "@/lib/utils/planLabel";
 import {
   MAX_QUOTA_PER_TOKEN,
   getMaxQuotaCapacity,
@@ -76,9 +81,14 @@ export function ResourceTokensTabPanel({
   const tCommon = useTranslations("common");
   const { currentWorkspaceId, currentWorkspace } = useWorkspace();
   const { toast } = useToast();
+  const locale = useLocale();
   // Plan limits come from config/resource-tokens (single source, #1548).
   const rawPlan = currentWorkspace?.plan_name;
   const planName: PlanTier = isPlanTier(rawPlan) ? rawPlan : "free";
+  // #1551: new tokens are XL-only ("may create"); tokens that already exist
+  // on M/L stay listed, editable and revocable against the tier's own cap.
+  const canCreateTokens = planAtLeast(planName, "promax");
+  const xlLabel = planLabelFromEnv("promax", locale);
 
   const [tokens, setTokens] = useState<ResourceToken[]>([]);
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -322,35 +332,55 @@ export function ResourceTokensTabPanel({
           </div>
         )}
 
-        {/* Prerequisites Warning (Unified) */}
-        {isOwner &&
-          (currentWorkspace?.plan_name === "free" ||
-            !contexts.some((c) => c.resource_id)) && (
-            <div className="rounded-lg border-2 border-purple-200 bg-purple-50 p-4 mb-6">
-              <div className="flex items-start gap-3">
-                <AlertTriangle className="h-5 w-5 text-purple-600 flex-shrink-0 mt-0.5" />
-                <div className="flex-1">
-                  <p className="text-sm font-medium text-purple-900">
-                    {t("noResourceIdWarning")}
-                  </p>
-                  <p className="text-xs text-purple-700 mt-1 mb-3">
-                    {t("noResourceIdWarningDesc")}
-                  </p>
-                  <div className="space-y-2">
-                    <div className="flex items-center gap-2 text-xs">
-                      <span className="text-purple-900">1.</span>
-                      <a
-                        href="/workspace/contexts"
-                        className="text-purple-600 hover:text-purple-700 underline font-medium"
-                      >
-                        {t("goToContexts")}
-                      </a>
-                    </div>
+        {/* Prerequisites Warning — plan gate (#1551) first, then resource-id.
+            Existing tokens stay listed below either way (block-new-only). */}
+        {isOwner && !canCreateTokens && (
+          <div className="rounded-lg border-2 border-purple-200 bg-purple-50 p-4 mb-6">
+            <div className="flex items-start gap-3">
+              <AlertTriangle className="h-5 w-5 text-purple-600 flex-shrink-0 mt-0.5" />
+              <div className="flex-1">
+                <p className="text-sm font-medium text-purple-900">
+                  {t("planGateTitle", { plan: xlLabel })}
+                </p>
+                <p className="text-xs text-purple-700 mt-1 mb-3">
+                  {t("planGateDesc", { plan: xlLabel })}
+                </p>
+                <a
+                  href="/workspace/settings/plan"
+                  className="text-xs text-purple-600 hover:text-purple-700 underline font-medium"
+                >
+                  {t("upgradePlan")}
+                </a>
+              </div>
+            </div>
+          </div>
+        )}
+        {isOwner && canCreateTokens && !contexts.some((c) => c.resource_id) && (
+          <div className="rounded-lg border-2 border-purple-200 bg-purple-50 p-4 mb-6">
+            <div className="flex items-start gap-3">
+              <AlertTriangle className="h-5 w-5 text-purple-600 flex-shrink-0 mt-0.5" />
+              <div className="flex-1">
+                <p className="text-sm font-medium text-purple-900">
+                  {t("noResourceIdWarning")}
+                </p>
+                <p className="text-xs text-purple-700 mt-1 mb-3">
+                  {t("noResourceIdWarningDesc")}
+                </p>
+                <div className="space-y-2">
+                  <div className="flex items-center gap-2 text-xs">
+                    <span className="text-purple-900">1.</span>
+                    <a
+                      href="/workspace/contexts"
+                      className="text-purple-600 hover:text-purple-700 underline font-medium"
+                    >
+                      {t("goToContexts")}
+                    </a>
                   </div>
                 </div>
               </div>
             </div>
-          )}
+          </div>
+        )}
 
         {/* Usage Guide */}
         {tokens.length > 0 && (
@@ -619,8 +649,7 @@ export function ResourceTokensTabPanel({
                 size="sm"
                 className={colors.button.primary}
                 disabled={
-                  !contexts.some((c) => c.resource_id) ||
-                  currentWorkspace?.plan_name === "free"
+                  !contexts.some((c) => c.resource_id) || !canCreateTokens
                 }
               >
                 <Plus className="h-4 w-4 mr-2" />

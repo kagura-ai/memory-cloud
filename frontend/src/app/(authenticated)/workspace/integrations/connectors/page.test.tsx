@@ -118,9 +118,17 @@ function makeConnector(overrides: Record<string, unknown> = {}) {
   };
 }
 
-function setWorkspace(role: string | undefined, overrides = {}) {
+// #1551: connectors are XL-only to CREATE, so the default workspace is on
+// promax; the create-gate tests below pass a lower plan explicitly.
+function setWorkspace(
+  role: string | undefined,
+  overrides = {},
+  plan_name = "promax",
+) {
   mockUseWorkspace.mockReturnValue({
-    currentWorkspace: role ? { id: "ws-1", current_user_role: role } : null,
+    currentWorkspace: role
+      ? { id: "ws-1", current_user_role: role, plan_name }
+      : null,
     currentWorkspaceId: "ws-1",
     loading: false,
     ...overrides,
@@ -175,6 +183,110 @@ beforeEach(() => {
 afterEach(() => {
   cleanup();
   vi.clearAllMocks();
+});
+
+describe("ConnectorsPage XL-only create gate (#1551)", () => {
+  it.each(["basic", "pro"])(
+    "%s: lists the existing connector (may serve) but gates every create control",
+    async (plan) => {
+      setWorkspace("admin", {}, plan);
+      mockListConnectors.mockResolvedValue([
+        makeConnector({ display_name: "Sales Slack / T0123ABC" }),
+      ]);
+      mockListAvailableWorkerApps.mockResolvedValue([
+        {
+          platform: "slack",
+          app_key: "sales",
+          display_name: "Sales Slack App",
+        },
+      ]);
+
+      render(<ConnectorsPage />);
+
+      // Existing connector still rendered and manageable.
+      expect(
+        await screen.findByText("Sales Slack / T0123ABC"),
+      ).toBeInTheDocument();
+      // Upsell names the XL tier (i18n mock drops params → key text).
+      expect(screen.getByText("planGate.title")).toBeInTheDocument();
+      // Create controls: provider CTA disabled, manual-bind form hidden.
+      expect(
+        screen.getByRole("button", { name: /connectProvider/ }),
+      ).toBeDisabled();
+      expect(screen.queryByText("manualBindTitle")).not.toBeInTheDocument();
+    },
+  );
+
+  it("basic with no connectors: empty state offers no Slack install, banner carries the upgrade CTA", async () => {
+    setWorkspace("admin", {}, "basic");
+
+    render(<ConnectorsPage />);
+
+    expect(await screen.findByText("emptyTitle")).toBeInTheDocument();
+    // Only the (disabled) provider-picker CTA remains — the empty state must
+    // not add a second Slack install action that would 403 on this tier.
+    const ctas = screen.getAllByRole("button", { name: /connectProvider/ });
+    expect(ctas).toHaveLength(1);
+    expect(ctas[0]).toBeDisabled();
+    expect(
+      screen.getByRole("button", { name: "planGate.action" }),
+    ).toBeInTheDocument();
+  });
+
+  it("basic + ?slack_install callback: dialog stays closed, upsell shown, no POST, handle stripped", async () => {
+    setWorkspace("admin", {}, "basic");
+    mockSearchParamsGet.mockImplementation((key: string) =>
+      key === "slack_install" ? "handle-stale" : null,
+    );
+
+    render(<ConnectorsPage />);
+
+    expect(await screen.findByText("planGate.title")).toBeInTheDocument();
+    // The callback never reaches the pending-install lookup or the dialog.
+    await waitFor(() =>
+      expect(mockRouterReplace).toHaveBeenCalledWith(
+        "/workspace/integrations/connectors",
+      ),
+    );
+    expect(mockGetSlackPendingInstall).not.toHaveBeenCalled();
+    expect(
+      screen.queryByRole("button", { name: "createConnector" }),
+    ).not.toBeInTheDocument();
+    expect(mockCreateConnector).not.toHaveBeenCalled();
+    // Upsell is surfaced as a toast too (the callback landed on this page).
+    expect(mockToast).toHaveBeenCalledWith(
+      expect.objectContaining({ title: "planGate.title" }),
+    );
+  });
+
+  it("promax + ?slack_install callback: create dialog opens as before", async () => {
+    setWorkspace("admin");
+    mockSearchParamsGet.mockImplementation((key: string) =>
+      key === "slack_install" ? "handle-1" : null,
+    );
+
+    render(<ConnectorsPage />);
+
+    expect(
+      await screen.findByRole("button", { name: "createConnector" }),
+    ).toBeEnabled();
+    expect(mockGetSlackPendingInstall).toHaveBeenCalledWith("handle-1");
+  });
+
+  it("promax: no upsell, provider CTA enabled", async () => {
+    setWorkspace("admin");
+
+    render(<ConnectorsPage />);
+
+    expect(await screen.findByText("connectProvider")).toBeInTheDocument();
+    expect(screen.queryByText("planGate.title")).not.toBeInTheDocument();
+    // Picker CTA and the empty-state action are both live on XL.
+    for (const cta of screen.getAllByRole("button", {
+      name: /connectProvider/,
+    })) {
+      expect(cta).toBeEnabled();
+    }
+  });
 });
 
 describe("ConnectorsPage RBAC gate", () => {
@@ -1420,7 +1532,9 @@ describe("ConnectorsPage RBAC gate", () => {
       await screen.findByRole("button", { name: "editSettings" }),
     );
     fireEvent.change(await screen.findByLabelText("memoryLinkTemplateLabel"), {
-      target: { value: "https://m.example/c/{context_id}?memoryId={memory_id}" },
+      target: {
+        value: "https://m.example/c/{context_id}?memoryId={memory_id}",
+      },
     });
     fireEvent.click(screen.getByRole("button", { name: "settingsSave" }));
 
@@ -1447,7 +1561,10 @@ describe("ConnectorsPage RBAC gate", () => {
     // response returned.
     setWorkspace("admin");
     mockListConnectors.mockResolvedValue([
-      connectorWithRuntime({ vision_enabled: true, memory_link_template: null }),
+      connectorWithRuntime({
+        vision_enabled: true,
+        memory_link_template: null,
+      }),
     ]);
     mockUpdateConnectorSettings.mockResolvedValue({
       connector_id: "connector-1",
@@ -1543,7 +1660,9 @@ describe("ConnectorsPage RBAC gate", () => {
     fireEvent.click(
       await screen.findByRole("button", { name: "editSettings" }),
     );
-    fireEvent.click(await screen.findByRole("button", { name: "settingsSave" }));
+    fireEvent.click(
+      await screen.findByRole("button", { name: "settingsSave" }),
+    );
 
     expect(await screen.findByText("noChanges")).toBeInTheDocument();
     expect(mockUpdateConnectorRuntime).not.toHaveBeenCalled();
