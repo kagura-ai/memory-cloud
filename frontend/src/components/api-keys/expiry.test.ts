@@ -1,22 +1,28 @@
 /**
  * Expiry selection → request value (#1537).
  *
- * The server now treats an omitted/null `expires_days` as "use the deployment
- * default", so the dialog must send an explicit `0` for "Never" — sending
- * null there would silently produce a 365-day key.
+ * The server treats an omitted/null `expires_days` as "use the deployment
+ * default", so the dialog's default selection must send `null` (not a
+ * literal 365, which would bypass a tightened `API_KEY_DEFAULT_EXPIRES_DAYS`)
+ * and "Never" must send an explicit `0`.
  */
 
 import { describe, it, expect } from "vitest";
 import {
   DEFAULT_EXPIRY_SELECTION,
   NEVER_EXPIRY_SELECTION,
+  SERVER_DEFAULT_EXPIRY_SELECTION,
   expiresDaysFromSelection,
 } from "./expiry";
 
 describe("expiresDaysFromSelection", () => {
-  it("defaults the dialog to the server default (365 days)", () => {
-    expect(DEFAULT_EXPIRY_SELECTION).toBe("365");
-    expect(expiresDaysFromSelection(DEFAULT_EXPIRY_SELECTION)).toBe(365);
+  it("defaults the dialog to the server default, sent as null", () => {
+    expect(DEFAULT_EXPIRY_SELECTION).toBe(SERVER_DEFAULT_EXPIRY_SELECTION);
+    expect(expiresDaysFromSelection(DEFAULT_EXPIRY_SELECTION)).toBeNull();
+  });
+
+  it("keeps 1 year available as an explicit choice distinct from the default", () => {
+    expect(expiresDaysFromSelection("365")).toBe(365);
   });
 
   it("sends an explicit 0 for Never — null would mean 'server default'", () => {

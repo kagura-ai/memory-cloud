@@ -30,6 +30,7 @@ import { createAPIKey } from "@/lib/api/api-keys";
 import {
   DEFAULT_EXPIRY_SELECTION,
   NEVER_EXPIRY_SELECTION,
+  SERVER_DEFAULT_EXPIRY_SELECTION,
   expiresDaysFromSelection,
 } from "./expiry";
 import { ApiError } from "@/lib/api/base";
@@ -280,6 +281,9 @@ export function CreateAPIKeyDialog({
                   <SelectValue placeholder="Select expiration" />
                 </SelectTrigger>
                 <SelectContent>
+                  <SelectItem value={SERVER_DEFAULT_EXPIRY_SELECTION}>
+                    Server default (1 year unless configured otherwise)
+                  </SelectItem>
                   <SelectItem value="30">30 days</SelectItem>
                   <SelectItem value="90">90 days</SelectItem>
                   <SelectItem value="365">1 year</SelectItem>
@@ -289,8 +293,9 @@ export function CreateAPIKeyDialog({
                 </SelectContent>
               </Select>
               <p className="text-xs text-slate-500">
-                Key will be automatically invalidated after this period.
-                Keys expire after 1 year by default.
+                Key will be automatically invalidated after this period. The
+                server default is 1 year unless your deployment sets
+                API_KEY_DEFAULT_EXPIRES_DAYS.
               </p>
             </div>
           </div>
