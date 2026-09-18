@@ -22,15 +22,19 @@ out of scope here — connector provisioning does not log a per-acquire wait):
    the test setup is genuinely racy when the safeguard is removed, so the
    positive test above cannot pass by lucky scheduling.
 
-The ``pro`` plan grants ``max_connectors = 10`` (cap = 10). The fixture
-pre-creates ``_PARALLEL_ATTEMPTS`` resource rows (the 1:1 FK target each
-connector needs) so every attempt can stage an insert against a distinct
-``resource_pk`` and the only thing bounding inserts is the seat cap.
+The workspace is on ``promax`` — since #1551 the only tier that may CREATE
+connectors — with the XL seat cap pinned to ``_CAP`` for the test (the
+fixture patches ``PLAN_TIERS`` before any ``Workspace`` instance is loaded,
+so every worker's cached ``_plan_tier`` sees the pinned cap). The fixture
+pre-creates ``_PARALLEL_ATTEMPTS`` resource rows (the 1:1
+FK target each connector needs) so every attempt can stage an insert against
+a distinct ``resource_pk`` and the only thing bounding inserts is the seat cap.
 """
 
 from __future__ import annotations
 
 import asyncio
+import dataclasses
 from collections.abc import AsyncIterator
 from uuid import uuid4
 
@@ -39,12 +43,13 @@ import pytest_asyncio
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
+import config.plan_tiers as plan_tiers_module
 from models.auth import User, Workspace
 from models.resource import Resource, WorkspaceConnector
 from services.connector_provisioning import ConnectorProvisioningService
 from utils.exceptions import MemoryCloudException
 
-_CAP = 10  # pro plan max_connectors (Spec 2026-06-02)
+_CAP = 10  # seat cap pinned on the promax fixture tier (was pro's cap, Spec 2026-06-02)
 _PARALLEL_ATTEMPTS = 20
 
 
@@ -60,12 +65,23 @@ async def _count_connectors(session: AsyncSession, workspace_id) -> int:
 @pytest_asyncio.fixture(loop_scope="session")
 async def pro_workspace_with_resources(
     db_session: AsyncSession,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> AsyncIterator[tuple[object, list[object]]]:
-    """A ``pro`` workspace (cap=10) plus N spare resources for connector inserts.
+    """A ``promax`` workspace with the seat cap pinned to ``_CAP`` plus N spare
+    resources for connector inserts.
 
     Cleans up connectors → resources → workspace → user after the test so
     repeated suite runs do not accumulate rows that skew later fixtures.
     """
+    # #1551: creation is XL-only, and XL's real cap (50) exceeds
+    # _PARALLEL_ATTEMPTS — pin it to the historical cap so the race stays
+    # meaningful. Patched before any Workspace row is loaded, so the
+    # per-instance ``_plan_tier`` cache of every worker sees the pinned cap.
+    monkeypatch.setitem(
+        plan_tiers_module.PLAN_TIERS,
+        "promax",
+        dataclasses.replace(plan_tiers_module.PLAN_TIERS["promax"], max_connectors=_CAP),
+    )
     user_id = f"u_{uuid4().hex[:8]}"
     workspace_id = uuid4()
     db_session.add(
@@ -83,7 +99,7 @@ async def pro_workspace_with_resources(
         Workspace(
             id=workspace_id,
             name=f"conn-toctou-{uuid4().hex[:8]}",
-            plan_name="pro",
+            plan_name="promax",
             owner_user_id=user_id,
             daily_api_limit=500,
             weekly_api_limit=2500,

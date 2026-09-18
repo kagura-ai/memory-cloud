@@ -370,6 +370,27 @@ The plan *key* (`free` / `basic` / `pro` / `promax`) is what the admin API,
 the billing entitlement push and the `workspaces.plan_name` column use; the
 size code is only its default display name.
 
+Feature availability (the `features` set on each tier):
+
+| Feature | S | M | L | XL |
+|---------|---|---|---|----|
+| Secret store (`secret_store`) | ✓ | ✓ | ✓ | ✓ |
+| Shared contexts / team invitations / memory analysis | – | – | ✓ | ✓ |
+| Resources — `setup_resource`, new resource tokens (`resources`) | – | – | – | ✓ |
+| Connectors — `setup_connector` (`connectors`) | – | – | – | ✓ |
+| Public — `set_public`, bound public API keys (`public_contexts`) | – | – | – | ✓ |
+
+**Block-new-only rule.** The three XL-only rows gate *creation* only. A
+workspace on M / L that already has resource tokens, connectors, public
+contexts or bound public keys keeps them working end to end: the numeric caps
+those objects serve against (`max_resource_tokens` 3 / 30, `max_connectors`
+3 / 10, `public_calls_per_day` 1000 and `bound_public_calls_per_minute` 100
+on L) are unchanged; only provisioning a *new* one is refused with a
+`FEAT-001` / `plan_required` error naming the XL tier. Because those M / L
+caps stay above zero, an `extra_connectors` (or other resource) add-on on
+M / L still stacks mechanically, but it cannot unlock creation — such an
+add-on only matters on XL.
+
 Override via environment variables (`PLAN_<KEY>_<FIELD>`, key upper-cased):
 
 ```bash

@@ -4,8 +4,9 @@
  * Verifies:
  * - table rows render from listResources() response
  * - empty-state renders when the response is empty
- * - plan-gated workspaces see the upgrade CTA and never fire the fetch
- * - the fetch is held until WorkspaceContext hydrates (no flash for free/basic)
+ * - below XL the list still renders (existing resources keep serving, #1551)
+ *   with an upsell banner naming the XL tier; XL shows no banner
+ * - the fetch is held until WorkspaceContext hydrates
  * - errors render via ErrorBanner, not toast
  * - row click navigates to detail page
  */
@@ -86,7 +87,8 @@ const item = (overrides: Partial<ResourceListItem> = {}): ResourceListItem => ({
 beforeEach(() => {
   mockListResources.mockReset();
   mockPush.mockReset();
-  mockCurrentWorkspace = { plan_name: "pro", current_user_role: "owner" };
+  // #1551: resources are XL-only to create — promax is the "no upsell" tier.
+  mockCurrentWorkspace = { plan_name: "promax", current_user_role: "owner" };
 });
 
 afterEach(() => {
@@ -132,16 +134,22 @@ describe("ResourcesListPage", () => {
     expect(screen.queryByRole("link", { name: /setupGuide/i })).toBeNull();
   });
 
-  it("renders upgrade CTA and skips fetch on basic plan", async () => {
-    mockCurrentWorkspace = { plan_name: "basic", current_user_role: "owner" };
+  it.each([["basic"], ["pro"]])(
+    "%s: renders existing resources (may serve) and the XL upsell banner (#1551)",
+    async (plan) => {
+      mockCurrentWorkspace = { plan_name: plan, current_user_role: "owner" };
+      mockListResources.mockResolvedValue({ resources: [item()], total: 1 });
 
-    render(<ResourcesListPage />);
+      render(<ResourcesListPage />);
 
-    await waitFor(() => {
+      await waitFor(() => {
+        expect(screen.getByText("ec_products")).toBeInTheDocument();
+      });
+      expect(mockListResources).toHaveBeenCalledTimes(1);
+      // Block-new-only: the list is served, creation is what the banner gates.
       expect(screen.getByText("planGate.title")).toBeInTheDocument();
-    });
-    expect(mockListResources).not.toHaveBeenCalled();
-  });
+    },
+  );
 
   it("promax is not plan-gated: fetches and renders, no upgrade CTA (#1548)", async () => {
     mockCurrentWorkspace = { plan_name: "promax", current_user_role: "owner" };
@@ -158,6 +166,7 @@ describe("ResourcesListPage", () => {
 
   it("upgrade CTA button navigates to the plan page", async () => {
     mockCurrentWorkspace = { plan_name: "free", current_user_role: "owner" };
+    mockListResources.mockResolvedValue({ resources: [], total: 0 });
 
     render(<ResourcesListPage />);
 

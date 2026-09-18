@@ -407,18 +407,23 @@ async def _apply_public_flag(db: Any, context: Any, is_public: Any) -> list[Text
         An error response to send instead of continuing, or ``None`` on success.
     """
     if is_public and not context.is_public:
-        # Making public: check the plan allows it.
-        from config.plan_tiers import get_plan_tier
+        # Making public: check the plan allows it. Issue #1551: "public" is
+        # its own feature (XL-only), separate from "shared" (L) — an already
+        # public context on L is never re-gated here (block-new-only).
+        from config.plan_tiers import (
+            feature_denied_message,
+            get_required_plan_for_feature,
+            has_feature,
+        )
         from models.auth import Workspace
 
         ws = await db.get(Workspace, context.workspace_id)
-        if ws:
-            plan = get_plan_tier(ws.plan_name)
-            if not plan.allows_shared_contexts:
-                return _error_response(
-                    "plan_required",
-                    "Public contexts require a higher tier plan.",
-                )
+        if ws and not has_feature(ws.plan_name, "public_contexts"):
+            return _error_response(
+                "plan_required",
+                feature_denied_message(ws.plan_name, "public_contexts"),
+                required_plan=get_required_plan_for_feature("public_contexts"),
+            )
     if not is_public and context.is_public and context.resource_id:
         return _error_response(
             "cannot_make_private",

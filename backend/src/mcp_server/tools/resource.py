@@ -713,7 +713,12 @@ async def _setup_resource_preflight(
     from sqlalchemy import select
 
     from config.constants import EMBEDDING_MODEL_REGISTRY
-    from config.plan_tiers import get_plan_tier
+    from config.plan_tiers import (
+        feature_denied_message,
+        get_plan_tier,
+        get_required_plan_for_feature,
+        has_feature,
+    )
     from config.settings import get_settings
     from models.auth import Context, Workspace
     from services.context_service import ContextService
@@ -770,13 +775,17 @@ async def _setup_resource_preflight(
         return _error_response("workspace_not_found", "Workspace not found."), None
 
     plan = get_plan_tier(plan_name)
-    # setup_resource creates a shared + public context; both require Pro. Basic
-    # has max_resource_tokens>0 but does NOT allow shared/public contexts.
-    if not plan.allows_shared_contexts or plan.max_resource_tokens == 0:
+    # Issue #1551: setup_resource creates a NEW resource (public context +
+    # token), so it is gated on the ``resources`` feature (XL-only) rather than
+    # on ``allows_shared_contexts`` / ``max_resource_tokens == 0`` — M/L keep
+    # positive caps so their existing tokens stay served. The token-count
+    # check further down remains the second gate.
+    if not has_feature(plan_name, "resources"):
         return (
             _error_response(
                 "plan_required",
-                "setup_resource requires PRO plan (public/shared contexts + resource tokens).",
+                feature_denied_message(plan_name, "resources"),
+                required_plan=get_required_plan_for_feature("resources"),
             ),
             None,
         )
@@ -1116,7 +1125,7 @@ async def handle_setup_connector(
                     return _error_response("validation_error", str(ve))
 
             from services.connector_provisioning import ConnectorProvisioningService
-            from utils.exceptions import MemoryCloudException
+            from utils.exceptions import FeatureNotAvailableError, MemoryCloudException
 
             result = await ConnectorProvisioningService(db).provision_connector(
                 workspace_id=workspace_id,
@@ -1179,8 +1188,14 @@ async def handle_setup_connector(
                 exc.status_code,
                 workspace_id=workspace_id,
             )
+            # Issue #1551: the connectors feature gate surfaces under the same
+            # ``plan_required`` code setup_resource / update_context use, so
+            # MCP clients see one vocabulary for "upgrade to create this".
+            error_code = (
+                "plan_required" if isinstance(exc, FeatureNotAvailableError) else exc.error_code
+            )
             return _error_response(
-                exc.error_code,
+                error_code,
                 exc.message,
                 **exc.details,
             )

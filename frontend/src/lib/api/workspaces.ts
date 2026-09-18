@@ -423,6 +423,11 @@ export interface PlanTierFeature {
   secret_store: boolean;
   shared_contexts: boolean;
   team_invitations: boolean;
+  // #1551: XL-only "may create" gates. When false the matching numeric rows
+  // above (tokens / connectors / public calls) are served as 0.
+  resources: boolean;
+  connectors: boolean;
+  public_contexts: boolean;
 }
 
 /** Curated per-tier feature matrix (upgrade order, free → promax) for the Plan page (#1138). */

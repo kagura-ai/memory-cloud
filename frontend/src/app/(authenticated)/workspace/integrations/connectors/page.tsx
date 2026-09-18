@@ -75,6 +75,7 @@ import { useSystemFeatures } from "@/hooks/useSystemFeatures";
 import { ChannelPicker, parseChannelIds } from "./ChannelPicker";
 import { useWorkspace } from "@/contexts/WorkspaceContext";
 import { hasWorkspaceRole, WorkspaceRole } from "@/lib/auth/rbac";
+import { planAtLeast, planLabelFromEnv } from "@/lib/utils/planLabel";
 import { API_BASE_URL } from "@/lib/api/base";
 import { getContexts, type Context } from "@/lib/api/contexts";
 import {
@@ -204,6 +205,12 @@ export default function ConnectorsPage() {
     currentWorkspace?.current_user_role,
     WorkspaceRole.Admin,
   );
+
+  // #1551: connectors are XL-only to CREATE. Connectors that already exist
+  // keep being listed, configured and dispatched on any tier — only the
+  // create controls (provider CTA, manual bind, empty-state action) gate.
+  const canCreate = planAtLeast(currentWorkspace?.plan_name, "promax");
+  const xlLabel = planLabelFromEnv("promax", locale);
 
   // #1426: managed (hosted SaaS) mode. When true the shared worker/bridge
   // provides the pre-compile LLM and only OAuth is offered, so hide the BYO
@@ -990,6 +997,26 @@ export default function ConnectorsPage() {
     <PageContainer>
       <PageHeader title={t("title")} description={t("description")} />
 
+      {!canCreate && (
+        <Alert className="mb-4">
+          <AlertDescription className="flex flex-wrap items-center justify-between gap-2">
+            <span>
+              <span className="font-medium">
+                {t("planGate.title", { plan: xlLabel })}
+              </span>{" "}
+              {t("planGate.description", { plan: xlLabel })}
+            </span>
+            <Button
+              size="sm"
+              variant="outline"
+              onClick={() => router.push("/workspace/settings/plan")}
+            >
+              {t("planGate.action", { plan: xlLabel })}
+            </Button>
+          </AlertDescription>
+        </Alert>
+      )}
+
       {/* #1389: provider picker rendered from the CONNECTOR_PROVIDERS
           descriptor — Slack live, Discord/Teams disabled coming-soon — so
           Slack-hardcoded JSX stops multiplying (#1390). */}
@@ -998,9 +1025,9 @@ export default function ConnectorsPage() {
           <Button
             key={provider.key}
             variant={provider.enabled ? "default" : "outline"}
-            disabled={!provider.enabled}
+            disabled={!provider.enabled || !canCreate}
             onClick={
-              provider.enabled
+              provider.enabled && canCreate
                 ? () => {
                     // Routing lives in the descriptor: a provider enabled
                     // without its own flow yields a no-op, never another
@@ -1025,92 +1052,107 @@ export default function ConnectorsPage() {
           by default so first-run users see explanation + one primary CTA.
           #1426: on managed (hosted SaaS) it is hidden entirely — BYO apps are a
           self-host affordance; SaaS tenants use OAuth only. */}
-      {!managedConnectors && availableApps && availableApps.length > 0 && (
-        <details className="mb-6 rounded-md border">
-          <summary className="cursor-pointer p-4 font-medium">
-            {t("manualBindTitle")}
-          </summary>
-          <form
-            onSubmit={handleManualCreate}
-            className="grid gap-3 p-4 pt-0 md:grid-cols-4"
-          >
-            <div className="md:col-span-4">
-              <p className="text-sm text-muted-foreground">
-                {t("manualBindIntro")}
-              </p>
-              <p className="mt-1 text-sm text-muted-foreground">
-                {t("manualBindDescription")}
-              </p>
-            </div>
-            {manualError && (
-              <Alert variant="destructive" className="md:col-span-4">
-                <AlertDescription>{manualError}</AlertDescription>
-              </Alert>
-            )}
-            <Select value={manualAppKey} onValueChange={setManualAppKey}>
-              <SelectTrigger aria-label={t("manualAppIdentity")}>
-                <SelectValue placeholder={t("manualAppIdentity")} />
-              </SelectTrigger>
-              <SelectContent>
-                {availableApps.map((app) => (
-                  <SelectItem key={app.app_key} value={app.app_key}>
-                    {app.display_name} ({app.app_key})
-                  </SelectItem>
-                ))}
-              </SelectContent>
-            </Select>
-            <div>
-              <Input
-                aria-label={t("manualTeamId")}
-                placeholder={t("manualTeamId")}
-                value={manualTeamId}
-                onChange={(event) => setManualTeamId(event.target.value)}
-                required
-              />
-              <p className="mt-1 text-xs text-muted-foreground">
-                {t("manualTeamIdHelp")}
-              </p>
-            </div>
-            <div>
-              <Input
-                aria-label={t("manualBotToken")}
-                placeholder={t("manualBotToken")}
-                type="password"
-                autoComplete="new-password"
-                value={manualBotToken}
-                onChange={(event) => setManualBotToken(event.target.value)}
-                required
-              />
-              <p className="mt-1 text-xs text-muted-foreground">
-                {t("manualBotTokenHelp")}
-              </p>
-            </div>
-            <Button
-              type="submit"
-              disabled={
-                manualSubmitting ||
-                !manualAppKey ||
-                !manualTeamId ||
-                !manualBotToken
-              }
+      {canCreate &&
+        !managedConnectors &&
+        availableApps &&
+        availableApps.length > 0 && (
+          <details className="mb-6 rounded-md border">
+            <summary className="cursor-pointer p-4 font-medium">
+              {t("manualBindTitle")}
+            </summary>
+            <form
+              onSubmit={handleManualCreate}
+              className="grid gap-3 p-4 pt-0 md:grid-cols-4"
             >
-              {t("manualBind")}
-            </Button>
-          </form>
-        </details>
-      )}
+              <div className="md:col-span-4">
+                <p className="text-sm text-muted-foreground">
+                  {t("manualBindIntro")}
+                </p>
+                <p className="mt-1 text-sm text-muted-foreground">
+                  {t("manualBindDescription")}
+                </p>
+              </div>
+              {manualError && (
+                <Alert variant="destructive" className="md:col-span-4">
+                  <AlertDescription>{manualError}</AlertDescription>
+                </Alert>
+              )}
+              <Select value={manualAppKey} onValueChange={setManualAppKey}>
+                <SelectTrigger aria-label={t("manualAppIdentity")}>
+                  <SelectValue placeholder={t("manualAppIdentity")} />
+                </SelectTrigger>
+                <SelectContent>
+                  {availableApps.map((app) => (
+                    <SelectItem key={app.app_key} value={app.app_key}>
+                      {app.display_name} ({app.app_key})
+                    </SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+              <div>
+                <Input
+                  aria-label={t("manualTeamId")}
+                  placeholder={t("manualTeamId")}
+                  value={manualTeamId}
+                  onChange={(event) => setManualTeamId(event.target.value)}
+                  required
+                />
+                <p className="mt-1 text-xs text-muted-foreground">
+                  {t("manualTeamIdHelp")}
+                </p>
+              </div>
+              <div>
+                <Input
+                  aria-label={t("manualBotToken")}
+                  placeholder={t("manualBotToken")}
+                  type="password"
+                  autoComplete="new-password"
+                  value={manualBotToken}
+                  onChange={(event) => setManualBotToken(event.target.value)}
+                  required
+                />
+                <p className="mt-1 text-xs text-muted-foreground">
+                  {t("manualBotTokenHelp")}
+                </p>
+              </div>
+              <Button
+                type="submit"
+                disabled={
+                  manualSubmitting ||
+                  !manualAppKey ||
+                  !manualTeamId ||
+                  !manualBotToken
+                }
+              >
+                {t("manualBind")}
+              </Button>
+            </form>
+          </details>
+        )}
 
       {loadError ? (
         <ErrorBanner error={loadError} />
       ) : connectors === null ? (
         <TableLoadingState rows={3} />
       ) : connectors.length === 0 ? (
+        // #1551: below XL the banner above already carries the upgrade CTA —
+        // the empty state must not offer a Slack install that would 403.
         <EmptyState
           icon={Plug}
           title={t("emptyTitle")}
-          description={t("emptyDesc")}
-          actionLabel={t("connectProvider", { name: "Slack" })}
-          onAction={() => (window.location.href = slackInstallUrl())}
+          description={
+            canCreate
+              ? t("emptyDesc")
+              : t("planGate.description", { plan: xlLabel })
+          }
+          actionLabel={
+            canCreate ? t("connectProvider", { name: "Slack" }) : undefined
+          }
+          onAction={
+            canCreate
+              ? () => (window.location.href = slackInstallUrl())
+              : undefined
+          }
         />
       ) : (
         // One provider for the whole list so Radix's shared skip-delay

@@ -20,11 +20,18 @@ from sqlalchemy.exc import DBAPIError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from auth.resource_tokens import ResourceTokenManager
+from config.plan_tiers import feature_denied_message, has_feature
 from models.auth import Workspace
 from models.resource import Resource, ResourceSchema, ResourceToken, WorkspaceConnector
 from services.resource_lookup import resolve_resource_pk, upsert_resource
 from utils.datetime import utcnow
-from utils.exceptions import ConflictError, MemoryCloudException, NotFoundException, ValidationError
+from utils.exceptions import (
+    ConflictError,
+    FeatureNotAvailableError,
+    MemoryCloudException,
+    NotFoundException,
+    ValidationError,
+)
 from utils.logger import get_logger
 
 logger = get_logger(__name__)
@@ -225,6 +232,7 @@ class ConnectorProvisioningService:
             ).model_dump(mode="json")
 
         workspace = await self._get_workspace(workspace_id)
+        self._enforce_connector_feature(workspace)
 
         # Non-default identities must already be active. ``default`` stays
         # compatible during the migration window while its signing secret is
@@ -551,6 +559,21 @@ class ConnectorProvisioningService:
         if workspace is None:
             raise NotFoundException("Workspace", str(workspace_id))
         return workspace
+
+    @staticmethod
+    def _enforce_connector_feature(workspace: Workspace) -> None:
+        """CREATE-only "may create" gate (#1551): connectors are an XL feature.
+
+        Runs before the seat cap, the advisory lock and any write. The seat
+        cap stays as the second gate for tiers that have the feature — M/L
+        keep positive caps so connectors they already own are still listed,
+        re-configured, dispatched and ingested; none of those paths call this.
+        """
+        if not has_feature(workspace.plan_name, "connectors"):
+            raise FeatureNotAvailableError(
+                feature_denied_message(workspace.plan_name, "connectors"),
+                feature="connectors",
+            )
 
     @staticmethod
     def _raise_seat_cap(max_connectors: int, active_connectors: int) -> None:

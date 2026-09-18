@@ -1203,7 +1203,10 @@
       "row_managedEmbeddings": "マネージド埋め込み",
       "row_secretStore": "シークレット",
       "row_sharedContexts": "共有・公開コンテキスト",
-      "row_teamInvitations": "チーム招待"
+      "row_teamInvitations": "チーム招待",
+      "row_connectorSeats": "コネクタ枚数",
+      "row_resources": "リソース（セットアップ + トークン）",
+      "row_publicFeatures": "公開機能"
     },
     "secretStore": {
       "title": "シークレット",
@@ -2430,9 +2433,15 @@
         "sharedContexts": "共有コンテキスト",
         "sharedContextsDescription": "ワークスペースメンバーが読み取り可能な非プライベートコンテキストを許可。",
         "publicContexts": "Public コンテキスト",
-        "publicContextsDescription": "コンテキストを read-only 公開エンドポイントとして配信可能。",
+        "publicContextsDescription": "コンテキストを read-only 公開エンドポイントとして配信可能（新規公開は XL 限定。既存の公開コンテキストは引き続き配信）。",
         "memoryAnalysis": "メモリー分析（クラスター）",
-        "memoryAnalysisDescription": "保存メモリーに対するクラスター分析（PRO 限定）。"
+        "memoryAnalysisDescription": "保存メモリーに対するクラスター分析（PRO 限定）。",
+        "maxConnectors": "コネクタ枚数",
+        "maxConnectorsDescription": "ワークスペースあたりの ai-worker コネクタ上限。M / L では既存コネクタの配信専用 — 新規作成には Connectors 機能（XL）が必要。",
+        "resources": "リソース",
+        "resourcesDescription": "新規リソースのセットアップと新規リソーストークンの発行（XL 限定）。既存のリソースとトークンは全ティアで引き続き動作。",
+        "connectors": "コネクタ",
+        "connectorsDescription": "新規チャットプラットフォームコネクタの接続（XL 限定）。既存コネクタは全ティアで引き続き取り込み。"
       },
       "quota": {
         "memory": "メモリー",
@@ -3256,8 +3265,8 @@
     },
     "quotaUsage": "クォータ使用状況",
     "maxCapacity": "{percentage}% / 最大容量 {max}",
-    "noResourceIdWarning": "Resource IDの設定が必要です（上位プラン）",
-    "noResourceIdWarningDesc": "Resource Tokenを作成するには、上位プランと、Resource IDが設定されたContextが必要です。",
+    "noResourceIdWarning": "Resource ID の設定と {plan} プランが必要です",
+    "noResourceIdWarningDesc": "Resource Token を作成するには、{plan} プランと、Resource ID が設定された Context が必要です。既存のトークンは引き続き利用できます。",
     "goToContexts": "Contextページへ →",
     "stepFlow": {
       "step1": "Resource IDを設定",
@@ -3571,6 +3580,7 @@
     "manageResourceTokens": "リソーストークン管理 →",
     "pythonSdk": "Python SDK →",
     "makePublic": "パブリックにする",
+    "publicRequiresPlan": "コンテキストの新規公開には {plan} プランが必要です。すでに公開中のコンテキストは引き続き配信されます。",
     "protectionTitle": "保護と危険ゾーン",
     "contextLocked": "コンテキストがロック済み",
     "contextUnlocked": "コンテキストがロック解除済み",
@@ -3755,9 +3765,9 @@
       }
     },
     "planGate": {
-      "title": "リソース機能は Pro プラン必須",
-      "description": "リソースのセットアップと ingest は Pro 以上のプランで利用可能です。アップグレードして Web UI 可視化、MCP リソースツール、ingest クォータを解放しましょう。",
-      "action": "Pro にアップグレード"
+      "title": "新規リソースには {plan} プランが必要です",
+      "description": "既存のリソースとトークンは引き続き動作します。新規リソースのセットアップ（setup_resource、新規リソーストークン）は {plan} プランで利用できます。",
+      "action": "{plan} にアップグレード"
     }
   },
   "signupBlocked": {
@@ -3979,6 +3989,11 @@
     "description": "外部チャットプラットフォームを接続すると、会話が自動でメモリコンテキストに取り込まれます。",
     "emptyTitle": "コネクタがありません",
     "emptyDesc": "Slack を接続して会話のメモリ取り込みを開始します。",
+    "planGate": {
+      "title": "新規コネクタには {plan} プランが必要です。",
+      "description": "既存のコネクタは引き続き取り込みを行います。新しいチャットプラットフォームの接続は {plan} プランで利用できます。",
+      "action": "{plan} にアップグレード"
+    },
     "contextBound": "コンテキスト {id} に書き込み",
     "contextNotReady": "セットアップ未完了 — 書き込み先コンテキストなし",
     "appIdentity": "アプリ ID: {appKey}",

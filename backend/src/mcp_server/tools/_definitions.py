@@ -1469,7 +1469,8 @@ merges_unreversible (#1450) counts shadow merges this run did NOT reverse becaus
                 "atomic operation. Use this to set up a resource ingestion pipeline.\n\n"
                 "Returns context_id, resource_id, and a plaintext token. "
                 "Save the token immediately — it is shown only once.\n\n"
-                "Requires owner or admin role. Requires PRO plan.\n\n"
+                "Requires owner or admin role. Requires a plan with the `resources` "
+                "feature (XL). Existing resources on lower plans keep working.\n\n"
                 "Example:\n"
                 '  setup_resource(name="ec-products", resource_id="ec_products")\n'
                 "  → context created, token issued, ready for ingest_events()"

@@ -120,7 +120,6 @@ const PLAN_TABS = ["workspaces", "tiers", "audit"] as const;
 const TIER_FEATURES = {
   RERANKING: "reranking",
   OAUTH: "oauth",
-  PUBLIC_CONTEXTS: "public_contexts",
   MEMORY_ANALYSIS: "memory_analysis",
 } as const;
 
@@ -183,6 +182,12 @@ const TIER_ROW_DEFINITIONS = [
     render: (t: PlanTierInfo) => formatNumber(t.max_resource_tokens),
   },
   {
+    // #1551: the tier's real cap — serve-only on M/L (existing connectors),
+    // the creation cap on XL. The boolean rows below say who may create.
+    key: "maxConnectors",
+    render: (t: PlanTierInfo) => formatNumber(t.max_connectors),
+  },
+  {
     key: "restCallsPerDay",
     render: (t: PlanTierInfo) => formatNumber(t.rest_calls_per_day),
   },
@@ -204,7 +209,15 @@ const TIER_ROW_DEFINITIONS = [
   },
   {
     key: "publicContexts",
-    render: (t: PlanTierInfo) => hasFeature(t, TIER_FEATURES.PUBLIC_CONTEXTS),
+    render: (t: PlanTierInfo) => formatBool(t.public_contexts),
+  },
+  {
+    key: "resources",
+    render: (t: PlanTierInfo) => formatBool(t.resources),
+  },
+  {
+    key: "connectors",
+    render: (t: PlanTierInfo) => formatBool(t.connectors),
   },
   {
     key: "memoryAnalysis",

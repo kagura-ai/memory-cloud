@@ -84,6 +84,7 @@ export interface PlanTierInfo {
   max_contexts_per_workspace: number;
   max_members_per_workspace: number;
   max_resource_tokens: number;
+  max_connectors: number; // #1551: serve-only cap on M/L, creation cap on XL
   memory_limit: number;
   mcp_calls_per_day: number;
   mcp_calls_per_week: number;
@@ -98,6 +99,10 @@ export interface PlanTierInfo {
   embedding_daily_cap_usd: number | null; // Issue #709
   embedding_monthly_cap_usd: number | null; // Issue #709
   allows_shared_contexts: boolean;
+  // #1551: XL-only "may create" gates as booleans.
+  resources: boolean;
+  connectors: boolean;
+  public_contexts: boolean;
   features: string[];
 }
 

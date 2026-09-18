@@ -9,7 +9,7 @@
 "use client";
 
 import { useEffect, useState, useCallback } from "react";
-import { useTranslations } from "next-intl";
+import { useLocale, useTranslations } from "next-intl";
 import { Button } from "@/components/ui/button";
 import { copyText } from "@/lib/utils/clipboard";
 import { Input } from "@/components/ui/input";
@@ -59,6 +59,7 @@ import type { Context } from "@/lib/types/context";
 import { useAuth } from "@/contexts/AuthContext";
 import { useWorkspace } from "@/contexts/WorkspaceContext";
 import { CONTEXT_TEMPLATES, getTemplate } from "@/lib/templates/usage-guide";
+import { planAtLeast, planLabelFromEnv } from "@/lib/utils/planLabel";
 
 interface SettingsTabPanelProps {
   contextId: string;
@@ -76,6 +77,11 @@ export function SettingsTabPanel({
   const { toast } = useToast();
   const t = useTranslations("contextSettings");
   const tCommon = useTranslations("common");
+  const locale = useLocale();
+  // #1551: making a context public is XL-only. A context that is already
+  // public keeps serving (and can still be unpublished) on any tier — only
+  // the transition INTO public is gated here.
+  const canMakePublic = planAtLeast(currentWorkspace?.plan_name, "promax");
 
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -619,6 +625,15 @@ export function SettingsTabPanel({
                     </Alert>
                   )}
                 </div>
+              ) : !canMakePublic ? (
+                <Alert>
+                  <AlertCircle className="h-4 w-4" />
+                  <AlertDescription>
+                    {t("publicRequiresPlan", {
+                      plan: planLabelFromEnv("promax", locale),
+                    })}
+                  </AlertDescription>
+                </Alert>
               ) : (
                 <div className="space-y-3">
                   <div className="space-y-2">

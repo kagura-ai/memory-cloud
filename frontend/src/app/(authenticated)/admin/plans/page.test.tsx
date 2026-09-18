@@ -117,6 +117,11 @@ const FREE = {
   storage_limit_bytes: 100 * 1024 * 1024,
   sleep_enabled_contexts_limit: 0,
   allows_shared_contexts: false,
+  // #1551: XL-only create gates as booleans (numeric caps stay serve-only).
+  max_connectors: 0,
+  resources: false,
+  connectors: false,
+  public_contexts: false,
   features: ["api_keys", "oauth"],
 };
 
@@ -127,6 +132,7 @@ const BASIC = {
   price_monthly: 10,
   max_contexts_per_workspace: 3,
   max_resource_tokens: 3,
+  max_connectors: 3,
   memory_limit: 10000,
   mcp_calls_per_day: 10000,
   rest_calls_per_day: 1000,
@@ -142,6 +148,7 @@ const PRO = {
   max_contexts_per_workspace: 20,
   max_members_per_workspace: 10,
   max_resource_tokens: 30,
+  max_connectors: 10,
   memory_limit: 100000,
   mcp_calls_per_day: 50000,
   rest_calls_per_day: 5000,
@@ -155,14 +162,14 @@ const PRO = {
     "api_keys",
     "memory_analysis",
     "oauth",
-    "public_contexts",
     "reranking",
     "shared_contexts",
     "team_invitations",
   ],
 };
 
-// #1548: XL — every PRO feature, higher limits.
+// #1548: XL — every PRO feature, higher limits; #1551: the only tier that
+// may create resources / connectors / public contexts.
 const PROMAX = {
   ...PRO,
   // Mirrors backend PLAN_PROMAX (config/plan_tiers.py) so the tiers table
@@ -174,6 +181,10 @@ const PROMAX = {
   max_members_per_workspace: 50,
   max_resource_tokens: 150,
   max_connectors: 50,
+  resources: true,
+  connectors: true,
+  public_contexts: true,
+  features: [...PRO.features, "connectors", "public_contexts", "resources"],
   mcp_calls_per_day: 250000,
   rest_calls_per_day: 25000,
   public_calls_per_day: 5000,
@@ -256,7 +267,7 @@ const QUOTA_DETAIL_PRO = {
 };
 
 describe("AdminPlansPage — tiers tab", () => {
-  it("renders 16 ROW_DEFINITIONS rows once tiers load", async () => {
+  it("renders 19 ROW_DEFINITIONS rows once tiers load", async () => {
     render(<AdminPlansPage />);
 
     // Wait for one of the well-known row labels to appear (i18n stub
@@ -274,12 +285,15 @@ describe("AdminPlansPage — tiers tab", () => {
       "storage",
       "maxMembers",
       "maxResourceTokens",
+      "maxConnectors",
       "restCallsPerDay",
       "publicCallsPerDay",
       "boundPublicPerMinute",
       "sleepContextsLimit",
       "sharedContexts",
       "publicContexts",
+      "resources",
+      "connectors",
       "memoryAnalysis",
     ];
     for (const key of expectedRowKeys) {

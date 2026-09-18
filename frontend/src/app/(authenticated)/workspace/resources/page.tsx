@@ -19,7 +19,9 @@ import { PageHeader } from "@/components/common/PageHeader";
 import { TableLoadingState } from "@/components/common/LoadingState";
 import { ErrorBanner } from "@/components/common/ErrorBanner";
 import { EmptyState } from "@/components/ui/empty-state";
+import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import { Badge } from "@/components/ui/badge";
+import { Button } from "@/components/ui/button";
 import {
   Table,
   TableBody,
@@ -29,6 +31,7 @@ import {
   TableRow,
 } from "@/components/ui/table";
 import { formatRelativeTime } from "@/lib/utils/datetime";
+import { planAtLeast, planLabelFromEnv } from "@/lib/utils/planLabel";
 import { listResources, type ResourceListItem } from "@/lib/api/resources";
 import { useWorkspace } from "@/contexts/WorkspaceContext";
 
@@ -47,12 +50,14 @@ export default function ResourcesListPage() {
   const [error, setError] = useState<string | null>(null);
 
   const planName = currentWorkspace?.plan_name;
-  // Wait for currentWorkspace to resolve before deciding on plan gating —
-  // otherwise we flash the loading skeleton and fire a spurious API call on
-  // the first render (before WorkspaceContext hydrates).
+  // Wait for currentWorkspace to resolve before fetching — otherwise we fire
+  // a spurious API call on the first render (before WorkspaceContext hydrates).
   const workspaceReady = currentWorkspace !== null && planName !== undefined;
-  const isPlanGated =
-    workspaceReady && (planName === "free" || planName === "basic");
+  // #1551: resources are XL-only to CREATE. Resources that already exist on
+  // a lower tier keep serving, so the list always loads; the plan only
+  // decides whether the "new resources need XL" banner is shown.
+  const canCreate = planAtLeast(planName, "promax");
+  const xlLabel = planLabelFromEnv("promax", locale);
 
   const fetchResources = useCallback(async () => {
     try {
@@ -68,8 +73,8 @@ export default function ResourcesListPage() {
   }, [t]);
 
   useEffect(() => {
-    // Hold until the workspace context has hydrated; avoids a free/basic user
-    // issuing an authenticated round-trip before the CTA renders.
+    // Hold until the workspace context has hydrated; avoids issuing an
+    // authenticated round-trip before the workspace (and role) is known.
     if (!workspaceReady) return;
     // Issue #389: Owner-only access. Non-owner roles (admin / member /
     // viewer) never hit the API call below — silent redirect matches the
@@ -78,48 +83,37 @@ export default function ResourcesListPage() {
       router.push("/workspace/dashboard");
       return;
     }
-    if (isPlanGated) {
-      setLoading(false);
-      return;
-    }
     fetchResources();
     // router from next/navigation is stable and is intentionally excluded
     // from the dependency array; watching currentWorkspace?.current_user_role
     // as a scalar avoids re-running on every object-ref churn from
     // WorkspaceContext's selector.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [
-    fetchResources,
-    isPlanGated,
-    workspaceReady,
-    currentWorkspace?.current_user_role,
-  ]);
+  }, [fetchResources, workspaceReady, currentWorkspace?.current_user_role]);
 
   useEffect(() => {
     document.title = `${t("list.title")} - Kagura Memory Cloud`;
   }, [t]);
 
-  if (isPlanGated) {
-    return (
-      <PageContainer>
-        <PageHeader
-          title={t("list.title")}
-          description={t("list.description")}
-        />
-        <EmptyState
-          icon={Database}
-          title={t("planGate.title")}
-          description={t("planGate.description")}
-          actionLabel={t("planGate.action")}
-          onAction={() => router.push("/workspace/settings/plan")}
-        />
-      </PageContainer>
-    );
-  }
-
   return (
     <PageContainer>
       <PageHeader title={t("list.title")} description={t("list.description")} />
+
+      {workspaceReady && !canCreate && (
+        <Alert className="mb-4">
+          <AlertTitle>{t("planGate.title", { plan: xlLabel })}</AlertTitle>
+          <AlertDescription className="flex flex-wrap items-center justify-between gap-2">
+            <span>{t("planGate.description", { plan: xlLabel })}</span>
+            <Button
+              size="sm"
+              variant="outline"
+              onClick={() => router.push("/workspace/settings/plan")}
+            >
+              {t("planGate.action", { plan: xlLabel })}
+            </Button>
+          </AlertDescription>
+        </Alert>
+      )}
 
       {error && <ErrorBanner error={error} />}
 

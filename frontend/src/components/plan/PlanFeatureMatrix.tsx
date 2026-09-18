@@ -51,7 +51,14 @@ const ROWS: MatrixRow[] = [
   { key: "restPerDay", field: "rest_calls_per_day", kind: "number" },
   { key: "publicPerDay", field: "public_calls_per_day", kind: "number" },
   { key: "resourceTokens", field: "max_resource_tokens", kind: "number" },
-  { key: "connectors", field: "max_connectors", kind: "number", beta: true },
+  // #1551: the API serves these three numeric rows as 0 below XL (creation
+  // view); the boolean rows further down name the capability itself.
+  {
+    key: "connectorSeats",
+    field: "max_connectors",
+    kind: "number",
+    beta: true,
+  },
   {
     key: "analysisPerDay",
     field: "analysis_runs_per_day",
@@ -69,6 +76,10 @@ const ROWS: MatrixRow[] = [
   { key: "secretStore", field: "secret_store", kind: "bool", beta: true },
   { key: "sharedContexts", field: "shared_contexts", kind: "bool" },
   { key: "teamInvitations", field: "team_invitations", kind: "bool" },
+  // #1551: XL-only to CREATE — existing objects on lower tiers keep serving.
+  { key: "resources", field: "resources", kind: "bool" },
+  { key: "connectors", field: "connectors", kind: "bool", beta: true },
+  { key: "publicFeatures", field: "public_contexts", kind: "bool" },
 ];
 
 const TIER_KEYS = new Set<string>(PLAN_TIER_ORDER);

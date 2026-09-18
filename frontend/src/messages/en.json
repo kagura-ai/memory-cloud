@@ -1204,7 +1204,10 @@
       "row_managedEmbeddings": "Managed embeddings",
       "row_secretStore": "Secrets",
       "row_sharedContexts": "Shared / public contexts",
-      "row_teamInvitations": "Team invitations"
+      "row_teamInvitations": "Team invitations",
+      "row_connectorSeats": "Connector seats",
+      "row_resources": "Resources (setup + tokens)",
+      "row_publicFeatures": "Public features"
     },
     "secretStore": {
       "title": "Secrets",
@@ -2430,9 +2433,15 @@
         "sharedContexts": "Shared Contexts",
         "sharedContextsDescription": "Allows non-private contexts readable by workspace members.",
         "publicContexts": "Public Contexts",
-        "publicContextsDescription": "Allows publishing contexts as read-only public endpoints.",
+        "publicContextsDescription": "Allows publishing contexts as read-only public endpoints (XL only to create; existing public contexts keep serving).",
         "memoryAnalysis": "Memory Analysis",
-        "memoryAnalysisDescription": "Cluster-based analysis across stored memories (PRO only)."
+        "memoryAnalysisDescription": "Cluster-based analysis across stored memories (PRO only).",
+        "maxConnectors": "Connector Seats",
+        "maxConnectorsDescription": "Maximum ai-worker connectors per workspace. On M / L this only serves connectors that already exist — creating one requires the Connectors feature (XL).",
+        "resources": "Resources",
+        "resourcesDescription": "May set up new resources and mint new resource tokens (XL only). Existing resources and tokens keep working on every tier.",
+        "connectors": "Connectors",
+        "connectorsDescription": "May connect new chat-platform connectors (XL only). Existing connectors keep ingesting on every tier."
       },
       "quota": {
         "memory": "Memories",
@@ -3256,8 +3265,8 @@
     },
     "quotaUsage": "Quota Usage",
     "maxCapacity": "{percentage}% of {max} max capacity",
-    "noResourceIdWarning": "Resource ID Required (Higher Tier Plan)",
-    "noResourceIdWarningDesc": "To create Resource Tokens, you need a higher tier plan and a Context with a Resource ID configured.",
+    "noResourceIdWarning": "Resource ID and {plan} plan required",
+    "noResourceIdWarningDesc": "To create Resource Tokens, you need the {plan} plan and a Context with a Resource ID configured. Tokens you already have keep working.",
     "goToContexts": "Go to Contexts →",
     "stepFlow": {
       "step1": "Set Resource ID",
@@ -3571,6 +3580,7 @@
     "manageResourceTokens": "Manage Resource Tokens →",
     "pythonSdk": "Python SDK →",
     "makePublic": "Make Public",
+    "publicRequiresPlan": "Making a context public requires the {plan} plan. Contexts that are already public keep serving.",
     "protectionTitle": "Protection & Danger Zone",
     "contextLocked": "Context Locked",
     "contextUnlocked": "Context Unlocked",
@@ -3755,9 +3765,9 @@
       }
     },
     "planGate": {
-      "title": "Resources require Pro plan",
-      "description": "Resource setup and ingestion are available on Pro and higher plans. Upgrade to unlock Web UI visibility, MCP resource tools, and ingestion quotas.",
-      "action": "Upgrade to Pro"
+      "title": "New resources require the {plan} plan",
+      "description": "Existing resources and their tokens keep working. Setting up a new resource (setup_resource, new resource tokens) is available on the {plan} plan.",
+      "action": "Upgrade to {plan}"
     }
   },
   "signupBlocked": {
@@ -3979,6 +3989,11 @@
     "description": "Connect external chat platforms so conversations are automatically ingested into a memory context.",
     "emptyTitle": "No connectors yet",
     "emptyDesc": "Connect Slack to start ingesting conversations into a memory context.",
+    "planGate": {
+      "title": "New connectors require the {plan} plan.",
+      "description": "Existing connectors keep ingesting. Connecting a new chat platform is available on the {plan} plan.",
+      "action": "Upgrade to {plan}"
+    },
     "contextBound": "Writes to context {id}",
     "contextNotReady": "Setup incomplete — no write-target context",
     "appIdentity": "App identity: {appKey}",

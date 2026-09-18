@@ -138,7 +138,9 @@ PLAN_BASIC = PlanTier(
     price_monthly=10,
     max_contexts_per_workspace=3,  # Limited to 3 contexts
     max_members_per_workspace=1,  # Issue #229: Owner only
+    # serve-only: existing objects; creation is feature-gated (#1551)
     max_resource_tokens=3,  # Issue #242: Max 3 active tokens
+    # serve-only: existing objects; creation is feature-gated (#1551)
     max_connectors=3,  # Issue #850 → Spec(2026-06-02): Basic 1→3
     allows_shared_contexts=False,  # Issue #271: Private contexts only (like Free)
     memory_limit=10000,
@@ -165,7 +167,9 @@ PLAN_PRO = PlanTier(
     price_monthly=100,
     max_contexts_per_workspace=20,  # Issue #164: Set reasonable limit
     max_members_per_workspace=10,  # Issue #229: 10 members max for Pro plan
+    # serve-only: existing objects; creation is feature-gated (#1551)
     max_resource_tokens=30,  # Issue #242: Max 30 active tokens
+    # serve-only: existing objects; creation is feature-gated (#1551)
     max_connectors=10,  # Issue #850 → Spec(2026-06-02): Pro 5→10
     allows_shared_contexts=True,  # Issue #271: Shared contexts enabled
     memory_limit=100000,
@@ -176,14 +180,18 @@ PLAN_PRO = PlanTier(
     mcp_calls_per_week=250000,
     rest_calls_per_day=5000,
     rest_calls_per_week=25000,
+    # serve-only: existing objects; creation is feature-gated (#1551)
     public_calls_per_day=1000,
     public_calls_per_week=5000,
-    bound_public_calls_per_minute=100,  # Issue #626: per-key bucket (PRO only)
+    # serve-only: existing objects; creation is feature-gated (#1551)
+    bound_public_calls_per_minute=100,  # Issue #626: per-key bucket
     analysis_runs_per_day=3,  # Issue #494: Memory Analysis (Pro only; FREE/BASIC=0)
     storage_limit_bytes=10 * 1024 * 1024 * 1024,  # Issue #485: 10 GiB
     sleep_enabled_contexts_limit=3,  # Issue #560: Sleep mode (Pro only; FREE/BASIC=0)
     embedding_daily_cap_usd=10.0,  # Issue #709: PRO ceiling, conservative
     embedding_monthly_cap_usd=300.0,  # Issue #709
+    # Issue #1551: ``public_contexts`` moved to XL. Existing L public contexts
+    # keep serving on the caps above; only *making* a context public is gated.
     features=frozenset(
         {
             "api_keys",
@@ -191,7 +199,6 @@ PLAN_PRO = PlanTier(
             "oauth",
             "team_invitations",  # Issue #165: Team collaboration
             "shared_contexts",  # Issue #165: Shared contexts with role-based access
-            "public_contexts",  # Issue #238: Public contexts
             "memory_analysis",  # Issue #496: Memory Analysis
             "managed_embeddings",  # Issue #1030: platform-managed embeddings (M/L)
             "secret_store",  # Issue #1128: zero-knowledge secret store (all tiers)
@@ -208,8 +215,8 @@ PLAN_PROMAX = PlanTier(
     price_monthly=0,
     max_contexts_per_workspace=1000,  # Issue #1547 matrix
     max_members_per_workspace=50,  # Issue #1547 matrix
-    # Provisional 5x PRO so XL is never below PRO; #1551 (gate re-map) sets
-    # the final resource-token / connector seat counts.
+    # Issue #1551: final XL seat counts — the only tier that may *create*
+    # resource tokens / connectors, so these are the real creation caps.
     max_resource_tokens=150,
     max_connectors=50,
     allows_shared_contexts=True,
@@ -228,8 +235,11 @@ PLAN_PROMAX = PlanTier(
     sleep_enabled_contexts_limit=15,
     embedding_daily_cap_usd=50.0,
     embedding_monthly_cap_usd=1500.0,
-    # Same capability set as PRO; XL-only capabilities arrive with #1551.
-    features=PLAN_PRO.features,
+    # Issue #1551: XL-only "may create" features. ``resources`` gates
+    # setup_resource / resource-token creation, ``connectors`` gates
+    # setup_connector, ``public_contexts`` gates set_public and bound public
+    # keys. Lower tiers keep serving what they already have.
+    features=PLAN_PRO.features | {"resources", "connectors", "public_contexts"},
 )
 
 # Plan tier registry. Insertion order IS the upgrade order (free → ... → promax):
@@ -271,9 +281,11 @@ FEATURE_MIN_PLANS: dict[str, str] = {
     "oauth": "free",  # Free plan includes OAuth (updated from basic)
     "team_invitations": "pro",  # Issue #165: Team collaboration requires Pro
     "shared_contexts": "pro",  # Issue #165: Shared contexts require Pro
-    "public_contexts": "pro",  # Issue #242: Public contexts require PRO only
+    "public_contexts": "promax",  # Issue #1551: making a context public is XL-only
     "memory_analysis": "pro",  # Issue #496: Memory Analysis (Pro only; FREE/BASIC=0)
     "managed_embeddings": "basic",  # Issue #1030: platform-managed embeddings (M/L; FREE=BYOK/self-hosted)
+    "resources": "promax",  # Issue #1551: setup_resource / new resource tokens are XL-only
+    "connectors": "promax",  # Issue #1551: setup_connector is XL-only
 }
 
 
@@ -400,3 +412,29 @@ def has_feature(plan_name: str, feature: str) -> bool:
         return feature in plan.features
     except ValueError:
         return False
+
+
+def required_plan_display_name(feature: str) -> str:
+    """Display name of the lowest tier that includes ``feature``.
+
+    Falls back to ``"higher"`` for an unknown feature so refusal text never
+    500s on a typo — the fallback ``QuotaService.check_feature_access`` has
+    always used.
+    """
+    try:
+        return PLAN_TIERS[get_required_plan_for_feature(feature)].display_name
+    except (ValueError, KeyError):
+        return "higher"
+
+
+def feature_denied_message(plan_name: str | None, feature: str) -> str:
+    """Refusal text for a plan that lacks ``feature`` (#1551).
+
+    Names the minimum tier from the registry — never a hardcoded "Pro" — so a
+    display-name override or a re-mapped feature flows through every gate.
+    ``None`` reads as free: legacy rows pre-dating the ``plan_name`` backfill.
+    """
+    return (
+        f"Feature '{feature}' not available on {plan_name or PlanName.FREE} plan. "
+        f"Upgrade to {required_plan_display_name(feature)} plan to access this feature."
+    )
