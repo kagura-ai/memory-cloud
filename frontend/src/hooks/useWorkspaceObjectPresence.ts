@@ -39,32 +39,36 @@ export function useWorkspaceObjectPresence(
   enabled: boolean,
 ): boolean | null {
   const key = workspaceId ? `${workspaceId}:${kind}` : null;
-  const [present, setPresent] = useState<boolean | null>(() =>
-    key !== null ? (cache.get(key) ?? null) : null,
-  );
+  // The resolved answer is stored WITH the key it belongs to. The sidebar's
+  // nav filter runs during render, so an effect-time reset (the contextCount
+  // pattern) is one commit too late: the render that switches `key` would
+  // still read the previous workspace's `true` and flash its entry for a
+  // frame. Keyed state makes a key change read `null` — or that workspace's
+  // cached answer — in the very same render.
+  const [resolved, setResolved] = useState<{
+    key: string;
+    has: boolean;
+  } | null>(null);
 
   useEffect(() => {
-    // Reset on workspace switch so a stale answer never leaks across
-    // workspaces while the new probe is in flight (Sidebar's contextCount
-    // pattern).
-    const cached = key !== null ? cache.get(key) : undefined;
-    setPresent(cached ?? null);
-    if (!enabled || key === null || cached !== undefined) return;
+    if (!enabled || key === null || cache.has(key)) return;
 
     let cancelled = false;
     PROBES[kind]()
       .then((has) => {
         cache.set(key, has);
-        if (!cancelled) setPresent(has);
+        if (!cancelled) setResolved({ key, has });
       })
       .catch(() => {
-        // Unknown, not cached — the next mount retries.
-        if (!cancelled) setPresent(null);
+        // Unknown, not cached — the return below keeps reading `null` for
+        // this key and the next mount retries.
       });
     return () => {
       cancelled = true;
     };
   }, [enabled, key, kind]);
 
-  return enabled ? present : null;
+  if (!enabled || key === null) return null;
+  if (resolved?.key === key) return resolved.has;
+  return cache.get(key) ?? null;
 }
