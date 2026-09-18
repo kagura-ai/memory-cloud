@@ -429,7 +429,48 @@ PLAN_PRO_OWNED_WORKSPACE_GRANT=4      # L owners may own 1 + 4 = 5 workspaces
 PLAN_PROMAX_OWNED_WORKSPACE_GRANT=49  # XL owners may own 50
 ```
 
-For self-hosted single-user setups, assign the XL (`promax`) plan to your workspace — since #1551 it is the only tier that may create resources, connectors and public contexts. Numeric limits are env-overridable as above, but a tier's `features` set is not (a `PLAN_<KEY>_FEATURES` override is a planned follow-up). Plan changes are **admin-only** by default. For SaaS deployments with self-service billing, enable Stripe:
+### Feature set override (`PLAN_<KEY>_FEATURES`)
+
+A tier's `features` set is env-overridable too. `PLAN_<KEY>_FEATURES` is a
+comma-separated list (whitespace around names is ignored) that **replaces**
+the tier's whole set — list every feature the tier should have, not just the
+additions. Since #1551 only XL may *create* resources, connectors and public
+contexts; a self-host that wants them on a lower tier re-enables them like so:
+
+```bash
+# M keeps its defaults (api_keys, oauth, reranking, managed_embeddings,
+# secret_store) and may now also create resources / connectors / public contexts.
+PLAN_BASIC_FEATURES=api_keys,oauth,reranking,managed_embeddings,secret_store,resources,connectors,public_contexts
+```
+
+Rules the API enforces when it loads the registry (a violation refuses to
+start, naming the variable):
+
+- Every name must be one of the known features (`api_keys`, `oauth`,
+  `secret_store`, `reranking`, `managed_embeddings`, `team_invitations`,
+  `shared_contexts`, `memory_analysis`, `resources`, `connectors`,
+  `public_contexts`).
+- **Invariants.** Every tier must keep `secret_store` (the zero-knowledge secret
+  store is on every tier), and `resources` requires `public_contexts` —
+  `setup_resource` creates a *public* context, so a tier that may create
+  resources must also be allowed to make contexts public.
+
+The "minimum tier" for each feature — what the `FEAT-001` refusal text and the
+plan-comparison matrix name — is recomputed from the *effective* tiers (the
+lowest tier that has the feature), so with the example above a free workspace
+is told to upgrade to M, not XL. `allows_shared_contexts` follows
+`shared_contexts` automatically. The effective set per tier is logged once at
+startup (`plan_tier_features_effective`). Note that the web UI's create buttons
+currently unlock by tier rank (XL); the REST API and MCP tools honour the
+override.
+
+The override changes *which* tiers may create; the numeric caps stay the
+second gate. The Free tier's `max_resource_tokens` is 0 and has no env
+override, so grant `resources` to M or above — on Free the token-count check
+would still refuse.
+
+Alternatively, for self-hosted single-user setups, simply assign the XL
+(`promax`) plan to your workspace. Plan changes are **admin-only** by default. For SaaS deployments with self-service billing, enable Stripe:
 
 ```bash
 BILLING_ENABLED=true
