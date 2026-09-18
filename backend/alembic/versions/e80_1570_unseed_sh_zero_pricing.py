@@ -14,8 +14,10 @@ cap inert — the pre-#1570 behaviour), and ``llm_call_log`` marks
 one who wants an explicit ``$0.00`` for a truly free local model sets an
 override at price 0.
 
-Only the exact seed rows are removed (``effective_from = 2026-04-28``, price
-0). A row still referenced by an FK (``memory_analyses.model_id`` RESTRICT,
+Only the exact seed rows are removed (the five ``_SEED_MODELS`` names,
+``effective_from = 2026-04-28``, price 0) — an operator-added ``self_hosted``
+row that happens to share the timestamp and price is left alone. A row still
+referenced by an FK (``memory_analyses.model_id`` RESTRICT,
 ``workspaces.analysis_default_model_id`` / ``analysis_quality_model_id`` SET
 NULL) is kept and logged rather than deleted, so no analysis history loses its
 snapshot row and no workspace default is silently nulled.
@@ -68,14 +70,18 @@ _REFERENCED = (
     "              OR w.analysis_quality_model_id = p.id)"
 )
 
-# The seed rows: bound ``:effective_from`` is the only runtime value; every
-# other fragment is a constant string assembled at import time.
+# The seed rows: bound ``:effective_from`` and the ``:model_N`` names are the
+# only runtime values; every other fragment is a constant string assembled at
+# import time.
+_SEED_MODEL_PARAMS = {f"model_{i}": model for i, model in enumerate(_SEED_MODELS)}
 _SEED_ROWS_WHERE = (
     "p.provider = 'self_hosted'"
     " AND p.unit_type = 'embedding_tokens'"
     " AND p.price_per_unit = 0"
     " AND p.effective_from = :effective_from"
+    " AND p.model IN (" + ", ".join(f":{name}" for name in _SEED_MODEL_PARAMS) + ")"
 )
+_SEED_ROWS_PARAMS = {"effective_from": _SEED_EFFECTIVE_FROM, **_SEED_MODEL_PARAMS}
 
 _SELECT_REFERENCED_SQL = (
     "SELECT p.id, p.model FROM llm_pricing p WHERE "
@@ -92,10 +98,7 @@ _DELETE_UNREFERENCED_SQL = (
 def upgrade() -> None:
     """Delete the unreferenced $0 self_hosted embedding seed rows."""
     bind = op.get_bind()
-    referenced = bind.execute(
-        text(_SELECT_REFERENCED_SQL),
-        {"effective_from": _SEED_EFFECTIVE_FROM},
-    ).fetchall()
+    referenced = bind.execute(text(_SELECT_REFERENCED_SQL), _SEED_ROWS_PARAMS).fetchall()
     for row in referenced:
         logger.warning(
             "e80_1570: keeping $0 self_hosted pricing row id=%s model=%s — still referenced "
@@ -103,10 +106,7 @@ def upgrade() -> None:
             row.id,
             row.model,
         )
-    deleted = bind.execute(
-        text(_DELETE_UNREFERENCED_SQL),
-        {"effective_from": _SEED_EFFECTIVE_FROM},
-    ).rowcount
+    deleted = bind.execute(text(_DELETE_UNREFERENCED_SQL), _SEED_ROWS_PARAMS).rowcount
     logger.info(
         "e80_1570: removed %s seeded $0 self_hosted embedding pricing row(s); kept %s referenced",
         deleted,

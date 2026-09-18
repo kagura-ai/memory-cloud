@@ -418,15 +418,16 @@ async def preview_analysis(
         memory_count = await query_service.count_context_memories_binding_visible(
             db, workspace_id=workspace_id, context_id=context_id
         )
-    # v1 only supports the default model in the cost estimator;
-    # body.model_id is forward-compat scaffolding (preview.py:73-77).
     # #1570: price from the same ``llm_pricing`` snapshot the run will
-    # freeze; no row → ``estimated_cost_cents=null`` rather than a 500.
-    pricing = await try_resolve_pricing_row(db, None)
+    # freeze — the caller-pinned ``body.model_id`` when given (an unknown id
+    # is the same 422 ``start`` raises), else the default model. No row →
+    # ``estimated_cost_cents=null`` rather than a 500. The label is the
+    # snapshot's model so preview and run name the same rate card.
+    pricing = await try_resolve_pricing_row(db, body.model_id)
     estimate = estimate_cost(
         memory_count,
         rates=None if pricing is None else pricing[1]["rates"],
-        model_id=DEFAULT_MODEL_ID,
+        model_id=DEFAULT_MODEL_ID if pricing is None else pricing[1]["model"],
     )
     return AnalysisPreviewResponse(
         memory_count=estimate.memory_count,

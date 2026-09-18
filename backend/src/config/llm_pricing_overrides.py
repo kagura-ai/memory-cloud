@@ -12,8 +12,9 @@ unknown and the embedding spend cap never fired.
 
 Keys: ``provider`` and ``model`` (the REGISTRY model name — what usage rows
 record, not the aliased wire id), ``unit_type`` (one of
-``LLM_PRICING_UNIT_TYPES``), ``price_per_unit`` (USD, ``>= 0``, at most
-``MAX_PRICE_DECIMALS`` decimal places — the column's scale), optional
+``LLM_PRICING_UNIT_TYPES``), ``price_per_unit`` (USD, ``0 <= price <
+MAX_PRICE_EXCLUSIVE`` with at most ``MAX_PRICE_DECIMALS`` decimal places —
+what the ``Numeric(14, 10)`` column stores as written), optional
 ``unit_denominator`` (``> 0``, default 1,000,000 — i.e. price per million) and
 optional ``context_min_tokens`` (``>= 0``, default 0). Currency is always USD;
 convert a vendor's non-USD price before setting it.
@@ -35,11 +36,15 @@ from typing import Any
 
 ENV_NAME = "LLM_PRICING_OVERRIDES"
 DEFAULT_UNIT_DENOMINATOR = 1_000_000
-# ``llm_pricing.price_per_unit`` is ``Numeric(14, 10)``. Postgres would round an
-# 11th decimal HALF_UP on INSERT, so the stored price would no longer equal the
-# configured one and ``sync_llm_pricing_overrides`` would see a "different" row
-# and append another on every boot. Refuse it instead of rounding silently.
+# ``llm_pricing.price_per_unit`` is ``Numeric(14, 10)``: ten decimal places and
+# four integer digits. Postgres would round an 11th decimal HALF_UP on INSERT
+# (the stored price no longer equals the configured one, so
+# ``sync_llm_pricing_overrides`` sees a "different" row and appends another on
+# every boot) and rejects ``>= 10000`` outright (``numeric field overflow`` —
+# which the startup sync catches and logs, leaving a *paid* model unpriced and
+# uncapped). Refuse both here, so "valid" means "stored as written".
 MAX_PRICE_DECIMALS = 10
+MAX_PRICE_EXCLUSIVE = Decimal(10_000)
 
 _REQUIRED_KEYS = frozenset({"provider", "model", "unit_type", "price_per_unit"})
 _OPTIONAL_KEYS = frozenset({"unit_denominator", "context_min_tokens"})
@@ -93,6 +98,10 @@ def _price(entry: dict[str, Any], index: int) -> Decimal:
         raise _error(index, "has an invalid 'price_per_unit' (number >= 0 required)") from None
     if not price.is_finite() or price < 0:
         raise _error(index, "has an invalid 'price_per_unit' (number >= 0 required)")
+    if price >= MAX_PRICE_EXCLUSIVE:
+        raise _error(
+            index, f"has an invalid 'price_per_unit' (number below {MAX_PRICE_EXCLUSIVE} required)"
+        )
     # ``normalize()`` first so ``"0.0200000000000"`` (trailing zeros) still passes;
     # the exponent of a finite Decimal is ``-<decimal places>`` (the ``isinstance``
     # only narrows the NaN/Infinity literals ``is_finite()`` already excluded).
@@ -151,8 +160,9 @@ def parse_llm_pricing_overrides(raw: str | None) -> tuple[PricingOverride, ...]:
 
     Raises:
         ValueError: Malformed JSON, a non-array top level, or an entry with a
-            missing / unknown key, bad ``unit_type``, negative or over-precise
-            price, bad denominator, or a duplicate ``(provider, model, unit_type,
+            missing / unknown key, bad ``unit_type``, a price that is negative,
+            ``>= 10000`` or finer than 10 decimals, bad denominator, or a
+            duplicate ``(provider, model, unit_type,
             context_min_tokens)``. The message names ``LLM_PRICING_OVERRIDES``
             and the zero-based entry index.
     """

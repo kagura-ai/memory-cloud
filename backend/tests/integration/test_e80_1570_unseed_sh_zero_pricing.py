@@ -2,6 +2,7 @@
 
 - upgrade removes the five c03 seed rows (renamed by e53) …
 - … except one still referenced by ``memory_analyses.model_id`` (RESTRICT FK);
+- an operator-added ``self_hosted`` $0 row sharing the seed timestamp is kept;
 - downgrade re-inserts the five rows at price 0 without duplicating the kept one.
 """
 
@@ -30,6 +31,10 @@ _SEED_MODELS = {
     "qwen3-embedding:4b",
     "qwen3-embedding:8b",
 }
+
+# Not in the seed list, but otherwise indistinguishable from a seed row
+# (same provider / unit_type / price / effective_from): must survive upgrade.
+_CUSTOM_MODEL = "operator-custom-embed"
 
 _SEED_ROWS_SQL = text(
     "SELECT model, price_per_unit FROM llm_pricing"
@@ -88,6 +93,18 @@ def _seed_analysis_referencing(conn: Connection, model: str) -> int:
     return pricing_id
 
 
+def _insert_custom_zero_row(conn: Connection) -> None:
+    conn.execute(
+        text(
+            "INSERT INTO llm_pricing (provider, model, unit_type, effective_from,"
+            " context_min_tokens, pricing_model, price_per_unit, currency, unit_denominator)"
+            " VALUES ('self_hosted', :model, 'embedding_tokens', :effective_from,"
+            " 0, 'per_token', 0, 'USD', 1000000)"
+        ),
+        {"model": _CUSTOM_MODEL, "effective_from": _SEED_EFFECTIVE_FROM},
+    )
+
+
 def _leave_db_at_head() -> None:
     with _alembic_at_test_db():
         command.upgrade(_get_alembic_config(), "head")
@@ -106,18 +123,24 @@ class TestE80UnseedSelfHostedZeroPricing:
                 assert set(before) == _SEED_MODELS, before
                 assert set(before.values()) == {0.0}
                 kept_id = _seed_analysis_referencing(conn, "qwen3-embedding:4b")
+                _insert_custom_zero_row(conn)
 
             with _alembic_at_test_db():
                 command.upgrade(_get_alembic_config(), E80_REV)
 
             with engine.begin() as conn:
                 after = _seed_rows(conn)
-                # The referenced row survives (RESTRICT FK); the other four are gone.
-                assert after == {"qwen3-embedding:4b": 0.0}, after
+                # The referenced row survives (RESTRICT FK); the other four are
+                # gone; the operator's non-seed row is not touched.
+                assert after == {"qwen3-embedding:4b": 0.0, _CUSTOM_MODEL: 0.0}, after
                 still_there = conn.execute(
                     text("SELECT id FROM llm_pricing WHERE id = :id"), {"id": kept_id}
                 ).scalar_one_or_none()
                 assert still_there == kept_id
+                # Out of the way so the downgrade assertions below see seed rows only.
+                conn.execute(
+                    text("DELETE FROM llm_pricing WHERE model = :model"), {"model": _CUSTOM_MODEL}
+                )
 
             with _alembic_at_test_db():
                 command.downgrade(_get_alembic_config(), PRE_E80_REV)

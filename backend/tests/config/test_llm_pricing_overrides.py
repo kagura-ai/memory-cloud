@@ -69,12 +69,22 @@ class TestParse:
             ("0.0000000001", Decimal("0.0000000001")),
             (1e-10, Decimal("0.0000000001")),
             ("0.0200000000000", Decimal("0.02")),  # trailing zeros are not precision
+            ("9999.9999999999", Decimal("9999.9999999999")),  # the column's maximum
         ],
     )
-    def test_price_within_column_scale_is_accepted(self, value, expected):
-        # 10 decimals is the column's scale (Numeric(14, 10)).
+    def test_price_within_column_range_is_accepted(self, value, expected):
+        # Numeric(14, 10): 4 integer digits, 10 decimals.
         (override,) = parse_llm_pricing_overrides(json.dumps([{**_ENTRY, "price_per_unit": value}]))
         assert override.price_per_unit == expected
+
+    @pytest.mark.parametrize("value", [10_000, "10000", 1e4, "1e5"])
+    def test_price_at_or_above_column_range_is_rejected(self, value):
+        # Postgres raises ``numeric field overflow`` for >= 10^4; at startup
+        # that is caught and logged, and the paid model would stay unpriced
+        # and uncapped — refuse it where the operator sees the error.
+        raw = json.dumps([{**_ENTRY, "price_per_unit": value}])
+        with pytest.raises(ValueError, match="LLM_PRICING_OVERRIDES.*entry 0.*below 10000"):
+            parse_llm_pricing_overrides(raw)
 
     @pytest.mark.parametrize("value", ["0.00000000005", 5e-11, "0.12345678901"])
     def test_price_beyond_column_scale_is_rejected(self, value):
