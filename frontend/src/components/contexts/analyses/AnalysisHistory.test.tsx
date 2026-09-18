@@ -40,6 +40,7 @@ describe("AnalysisHistory — clickable rows (#732)", () => {
         total={2}
         activeRunId={null}
         onSelectRun={onSelectRun}
+        showCost
       />,
     );
     const rows = screen.getAllByRole("button");
@@ -56,6 +57,7 @@ describe("AnalysisHistory — clickable rows (#732)", () => {
         total={1}
         activeRunId={null}
         onSelectRun={onSelectRun}
+        showCost
       />,
     );
     fireEvent.keyDown(screen.getByRole("button"), { key: "Enter" });
@@ -70,6 +72,7 @@ describe("AnalysisHistory — clickable rows (#732)", () => {
         activeRunId={null}
         selectedRunId="run-b"
         onSelectRun={vi.fn()}
+        showCost
       />,
     );
     const current = screen
@@ -79,7 +82,45 @@ describe("AnalysisHistory — clickable rows (#732)", () => {
   });
 
   it("renders non-interactive rows when onSelectRun is omitted", () => {
-    render(<AnalysisHistory runs={[makeRun()]} total={1} activeRunId={null} />);
+    render(
+      <AnalysisHistory
+        runs={[makeRun()]}
+        total={1}
+        activeRunId={null}
+        showCost
+      />,
+    );
     expect(screen.queryAllByRole("button")).toHaveLength(0);
+  });
+});
+
+describe("AnalysisHistory — cost column gate (#1571)", () => {
+  it("renders the cost header and a formatted amount when showCost is true", () => {
+    render(
+      <AnalysisHistory
+        runs={[makeRun({ cost_actual_cents: 123 })]}
+        total={1}
+        activeRunId={null}
+        showCost
+      />,
+    );
+    expect(screen.getByText("headerCost")).toBeInTheDocument();
+    expect(screen.getByText("$1.230")).toBeInTheDocument();
+  });
+
+  it("renders no cost header and no money when showCost is false", () => {
+    render(
+      <AnalysisHistory
+        runs={[makeRun({ cost_actual_cents: 123 })]}
+        total={1}
+        activeRunId={null}
+        showCost={false}
+      />,
+    );
+    expect(screen.queryByText("headerCost")).toBeNull();
+    expect(screen.queryByText(/\$/)).toBeNull();
+    // The other three columns are still there.
+    expect(screen.getByText("headerMemories")).toBeInTheDocument();
+    expect(screen.getByText("10")).toBeInTheDocument();
   });
 });

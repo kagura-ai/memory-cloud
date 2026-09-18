@@ -2816,6 +2816,7 @@
       "description": "全 workspace の LLM・embedding コスト ($) ブレイクダウン",
       "descriptionWorkspace": "この workspace の LLM・embedding コスト ($) ブレイクダウン",
       "featureDisabled": "この環境ではワークスペースのコストダッシュボードが有効化されていません。",
+      "costDisplayDisabled": "この環境ではコスト表示が有効化されていません。",
       "actions": {
         "refresh": "更新"
       },

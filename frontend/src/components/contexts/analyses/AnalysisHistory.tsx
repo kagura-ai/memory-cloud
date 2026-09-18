@@ -5,7 +5,10 @@
  *
  * Renders the paginated ``listAnalysisRuns`` payload as a small read-
  * only table. Sticky-NULL on cost columns: an unpriced run shows "—"
- * via ``formatCostCents`` rather than a misleading $0.000.
+ * via ``formatCostCents`` rather than a misleading $0.000. The cost
+ * column exists only when ``showCost`` (Issue #1571: the parent passes
+ * ``features.cost_display``; a deployment that hides money gets a
+ * three-column table, not a column of dashes).
  */
 
 import { useTranslations } from "next-intl";
@@ -31,6 +34,8 @@ interface AnalysisHistoryProps {
   // that run's results; ``selectedRunId`` marks the row currently being viewed.
   selectedRunId?: string | null;
   onSelectRun?: (runId: string) => void;
+  // Issue #1571: render the cost column only when the deployment shows money.
+  showCost: boolean;
 }
 
 // Translatable status labels — keyed by the canonical
@@ -45,6 +50,7 @@ export function AnalysisHistory({
   activeRunId,
   selectedRunId = null,
   onSelectRun,
+  showCost,
 }: AnalysisHistoryProps) {
   const t = useTranslations("analyses.history");
 
@@ -77,7 +83,9 @@ export function AnalysisHistory({
             <TableHead>{t("headerDate")}</TableHead>
             <TableHead>{t("headerStatus")}</TableHead>
             <TableHead className="text-right">{t("headerMemories")}</TableHead>
-            <TableHead className="text-right">{t("headerCost")}</TableHead>
+            {showCost && (
+              <TableHead className="text-right">{t("headerCost")}</TableHead>
+            )}
           </TableRow>
         </TableHeader>
         <TableBody>
@@ -143,11 +151,13 @@ export function AnalysisHistory({
                 <TableCell className="text-right font-medium">
                   {run.input_count.toLocaleString()}
                 </TableCell>
-                <TableCell className="text-right">
-                  {formatCostCents(
-                    run.cost_actual_cents ?? run.cost_estimated_cents,
-                  )}
-                </TableCell>
+                {showCost && (
+                  <TableCell className="text-right">
+                    {formatCostCents(
+                      run.cost_actual_cents ?? run.cost_estimated_cents,
+                    )}
+                  </TableCell>
+                )}
               </TableRow>
             );
           })}
