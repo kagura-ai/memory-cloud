@@ -249,14 +249,16 @@ class ContextService:
 
         # Create context search config with embedding settings (Issue #146)
         from models.config import ContextSearchConfig
+        from repositories.config_repository import search_config_defaults
 
         search_config = ContextSearchConfig(
             context_id=context.id,
             semantic_weight=0.6,  # Default
             fetch_factor=3,  # Default
-            use_rerank=False,  # Default: OFF (Issue #146)
-            reranker_provider="voyage",  # Default
-            reranker_model="rerank-2-lite",  # Default
+            # #1572: reranker fields follow the deployment default (DEFAULT_USE_RERANK /
+            # DEFAULT_RERANKER_PROVIDER / DEFAULT_RERANKER_MODEL); unset they are
+            # today's values (off / voyage / rerank-2).
+            **search_config_defaults(settings),
             embedding_model=actual_embedding_model,
             embedding_dimensions=actual_dimensions,
         )

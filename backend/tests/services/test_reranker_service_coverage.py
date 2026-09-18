@@ -373,33 +373,61 @@ class TestSelfHostedReranker:
         assert scores[0] == pytest.approx(0.8)
         assert scores[1] == 0.0
 
-    async def test_timeout_falls_back_to_zero(self, monkeypatch):
-        """A timeout exception during post yields 0.0 for that doc (no raise)."""
+    async def test_timeout_on_one_doc_falls_back_to_zero(self, monkeypatch):
+        """A timeout on one doc yields 0.0 for that doc; the others keep their
+        score (no raise). #1572 narrowed the old single-doc variant: a lone
+        document that times out is now "every doc failed" and raises instead."""
 
         def handler(url, json):
-            raise httpx.TimeoutException("slow")
+            if "slow" in json["prompt"]:
+                raise httpx.TimeoutException("slow")
+            return _FakeHttpResponse(json_data={"choices": [{"text": "0.7"}]})
 
         _patch_ollama_post(monkeypatch, handler)
 
-        out = await SelfHostedReranker("http://x").rerank("q", ["only"], 1)
-        assert out == [{"index": 0, "relevance_score": 0.0}]
+        out = await SelfHostedReranker("http://x").rerank("q", ["fast", "slow"], 2)
+        scores = {d["index"]: d["relevance_score"] for d in out}
+        assert scores[0] == pytest.approx(0.7)
+        assert scores[1] == 0.0
 
     async def test_malformed_completion_body_scores_zero(self, monkeypatch):
-        """A malformed /v1/completions body (no 'choices') scores 0.0.
+        """A malformed /v1/completions body (no 'choices') scores 0.0 for that doc.
 
         The reranker reads ``resp.json()["choices"][0]["text"]``; an empty
         ``{}`` raises KeyError, which the per-doc ``except`` swallows to 0.0.
         This exercises that fallback path (also hit by ``{"choices": []}`` /
-        ``{"choices": [{}]}`` from a real backend).
+        ``{"choices": [{}]}`` from a real backend). Paired with a healthy doc
+        because an all-malformed batch now raises (#1572).
         """
 
         def handler(url, json):
-            return _FakeHttpResponse(json_data={})
+            if "bad" in json["prompt"]:
+                return _FakeHttpResponse(json_data={})
+            return _FakeHttpResponse(json_data={"choices": [{"text": "0.6"}]})
 
         _patch_ollama_post(monkeypatch, handler)
 
-        out = await SelfHostedReranker("http://x").rerank("q", ["doc"], 1)
-        assert out[0]["relevance_score"] == 0.0
+        out = await SelfHostedReranker("http://x").rerank("q", ["good", "bad"], 2)
+        scores = {d["index"]: d["relevance_score"] for d in out}
+        assert scores[0] == pytest.approx(0.6)
+        assert scores[1] == 0.0
+
+    async def test_every_doc_failing_raises_instead_of_arbitrary_order(self, monkeypatch):
+        """#1572: when EVERY scoring fails (backend down, model 404) the reranker
+        raises rather than returning an all-zero list in arbitrary order as if it
+        were a ranking. SearchService catches it, logs ``rerank_failed_open`` and
+        returns the un-reranked hybrid results. A single-document request follows
+        the same rule (1 of 1 failed = all failed)."""
+
+        def handler(url, json):
+            raise httpx.ConnectError("down")
+
+        _patch_ollama_post(monkeypatch, handler)
+
+        with pytest.raises(RuntimeError, match="self_hosted rerank backend unavailable"):
+            await SelfHostedReranker("http://x").rerank("q", ["a", "b", "c"], 2)
+        with pytest.raises(RuntimeError, match="all 1 document"):
+            await SelfHostedReranker("http://x").rerank("q", ["only"], 1)
 
 
 # ---------------------------------------------------------------------------

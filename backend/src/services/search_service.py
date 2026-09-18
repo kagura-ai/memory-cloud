@@ -13,6 +13,7 @@ from uuid import UUID
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from config.settings import get_settings
 from db.qdrant import search_memories_fulltext, search_memories_qdrant
 from models.llm_call_log import (
     LLM_CALL_LOG_CALL_TYPES,
@@ -63,7 +64,7 @@ class SearchService:
         workspace_id: str,
         context_id: str | list[str],
         k: int = 10,
-        use_rerank: bool = False,
+        use_rerank: bool | None = None,
         filters: dict[str, Any] | None = None,
         search_mode: SearchMode = "hybrid",
         include_vectors: bool = False,
@@ -86,7 +87,9 @@ class SearchService:
             workspace_id: Workspace ID (required)
             context_id: Context ID or list of context IDs (Issue #81)
             k: Number of results
-            use_rerank: Use reranking if available
+            use_rerank: None (omitted) follows the context's search config;
+                False forces reranking off; True still requires the context
+                to allow it (#1572). ``ENABLE_RERANKING=false`` wins over all.
             filters: Optional filters
             search_mode: Search strategy (hybrid/semantic/keyword)
             include_vectors: Return document embeddings from Qdrant (increases payload size)
@@ -118,10 +121,20 @@ class SearchService:
 
         # Load context search configuration (Issue #130)
         config = await self._get_search_config(primary_context_id)
+        # #1572: an omitted use_rerank (None) follows the context config; an
+        # explicit bool still ANDs with it (#130). ENABLE_RERANKING=false is the
+        # deployment kill switch and wins over both.
+        if use_rerank is None:
+            effective_use_rerank = bool(config.use_rerank)
+        else:
+            effective_use_rerank = bool(use_rerank and config.use_rerank)
+        if effective_use_rerank and not get_settings().enable_reranking:
+            logger.debug("reranking_disabled_by_deployment", context_id=primary_context_id)
+            effective_use_rerank = False
         fetch_factor = config.fetch_factor
         # Issue #67: Double fetch size when reranker is active to compensate for
         # content-based BM25 length bias (reranker will re-score and trim)
-        if use_rerank and getattr(config, "use_rerank", False):
+        if effective_use_rerank:
             fetch_factor = fetch_factor * 2
         fetch_size = min(k * fetch_factor, 200)  # Cap to prevent excessive Qdrant/reranker load
 
@@ -350,10 +363,13 @@ class SearchService:
             )
 
         # 4. Reranking (optional) - Issue #105: Multi-provider support (Voyage AI, Cohere)
-        # Issue #130: Check both use_rerank parameter and config setting
+        # Issue #130 / #1572: effective flag resolved above (caller vs context
+        # config vs ENABLE_RERANKING).
         # Issue #149: Check plan tier feature access
-        if use_rerank and config.use_rerank:
-            # Check if workspace's plan tier allows reranking
+        if effective_use_rerank:
+            # Check if workspace's plan tier allows reranking. No workspace_id
+            # (dev mode?) → allow.
+            plan_allows = True
             if workspace_id:
                 from services.quota_service import QuotaService
 
@@ -363,43 +379,38 @@ class SearchService:
                 )
 
                 if not can_rerank:
+                    plan_allows = False
                     logger.info(
                         "reranking_disabled_by_plan_tier",
                         workspace_id=str(workspace_id),
                         reason=error,
                     )
                     # Graceful degradation: Continue without reranking
-                else:
-                    # Plan tier allows reranking, proceed
-                    try:
-                        merged_results = await self.reranker_service.rerank(
-                            query=query,
-                            candidates=merged_results[
-                                :fetch_size
-                            ],  # Dynamic fetch size (Issue #130)
-                            user_id=user_id,
-                            k=k,
-                            context_id=primary_context_id,
-                            workspace_id=workspace_id,  # NEW: Issue #146
-                        )
-                        logger.debug("reranking_completed", results=len(merged_results))
-                    except Exception as e:
-                        logger.warning("reranking_failed", error=str(e))
-                        # Continue without reranking
-            else:
-                # No workspace_id (dev mode?), allow reranking
+
+            if plan_allows:
                 try:
                     merged_results = await self.reranker_service.rerank(
                         query=query,
-                        candidates=merged_results[:fetch_size],
+                        candidates=merged_results[:fetch_size],  # Dynamic fetch size (Issue #130)
                         user_id=user_id,
                         k=k,
                         context_id=primary_context_id,
-                        workspace_id=workspace_id,
+                        workspace_id=workspace_id,  # NEW: Issue #146
                     )
                     logger.debug("reranking_completed", results=len(merged_results))
                 except Exception as e:
-                    logger.warning("reranking_failed", error=str(e))
+                    # Fail open to the un-reranked hybrid results — never fail
+                    # the recall. ``rerank_failed_open`` is the stable event
+                    # operators alert on (#1572; same shape as
+                    # ``quota_check_failed_open`` in api/middleware/rate_limit.py).
+                    logger.warning(
+                        "rerank_failed_open",
+                        provider=getattr(config, "reranker_provider", None),
+                        error_class=type(e).__name__,
+                        error=str(e),
+                        context_id=primary_context_id,
+                        workspace_id=str(workspace_id) if workspace_id else None,
+                    )
         elif not config.use_rerank:
             logger.debug("reranking_disabled_by_config", context_id=primary_context_id)
 

@@ -638,8 +638,73 @@ class Settings(BaseSettings):
     # Search Configuration (Issue #105)
     enable_reranking: bool = Field(
         default=True,
-        description="Enable reranking globally. Future: toggle external vs local reranker.",
+        description=(
+            "Enable reranking globally. When false SearchService never calls a "
+            "reranker, whatever the per-context config says (#1572)."
+        ),
     )
+
+    # Deployment defaults stamped on new context search configs (#1572). They
+    # apply to contexts created from now on; existing rows are never rewritten
+    # by a migration (#1207 decision) — use `python -m src.cli.apply_rerank_defaults`
+    # to convert default-valued rows. Unset = today's values (off / voyage / rerank-2).
+    default_reranker_provider: Literal["voyage", "cohere", "self_hosted"] = Field(
+        default="voyage",
+        description=(
+            "Reranker provider written to new context search configs. "
+            "'self_hosted' is keyless (RERANK_BASE_URL or SELF_HOSTED_BASE_URL); "
+            "voyage/cohere still need a BYOK key per workspace at recall time."
+        ),
+    )
+    default_use_rerank: bool = Field(
+        default=False,
+        description=(
+            "use_rerank written to new context search configs. True makes a "
+            "recall that omits use_rerank rerank on plans with the 'reranking' feature."
+        ),
+    )
+    default_reranker_model: str = Field(
+        default="",
+        description=(
+            "reranker_model written to new context search configs. Empty = the "
+            "provider's default (voyage rerank-2, cohere rerank-multilingual-v3.0, "
+            "self_hosted RERANK_MODEL when RERANK_BASE_URL is set else "
+            "SELF_HOSTED_RERANK_MODEL)."
+        ),
+    )
+
+    @field_validator("default_reranker_model", mode="before")
+    @classmethod
+    def _strip_default_reranker_model(cls, v: object) -> object:
+        # Same contract as the RERANK_* fields: a whitespace-only value must
+        # collapse to "" so the per-provider default applies instead of a
+        # blank model name being written to every new context.
+        return v.strip() if isinstance(v, str) else v
+
+    @model_validator(mode="after")
+    def _validate_rerank_defaults(self) -> "Settings":
+        """A keyless self_hosted default needs a backend to talk to (#1572).
+
+        ``DEFAULT_USE_RERANK=true`` with ``DEFAULT_RERANKER_PROVIDER=self_hosted``
+        would otherwise stamp every new context with a reranker that has no
+        endpoint and fail open on every recall. ``self_hosted_base_url`` is
+        checked via ``model_fields_set`` (same idiom as the telemetry probe in
+        ``api/routes/system.py``): an operator who sets it *to* the default is
+        still configured. Voyage/Cohere defaults are allowed without a key —
+        BYOK per workspace decides at runtime.
+        """
+        if (
+            self.default_use_rerank
+            and self.default_reranker_provider == "self_hosted"
+            and not self.rerank_base_url
+            and "self_hosted_base_url" not in self.model_fields_set
+        ):
+            raise ValueError(
+                "DEFAULT_USE_RERANK=true with DEFAULT_RERANKER_PROVIDER=self_hosted "
+                "requires a reranker backend: set RERANK_BASE_URL (batched /v1/rerank) "
+                "or SELF_HOSTED_BASE_URL (prompt scoring)."
+            )
+        return self
 
     # Feature Flags
     enable_neural_memory: bool = Field(default=False, description="Enable Neural Memory (Phase 3)")

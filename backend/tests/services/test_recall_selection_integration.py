@@ -113,6 +113,7 @@ async def test_selection_evidence_uses_post_trust_pool_and_never_serializes_cont
     service._maybe_graph_boost = AsyncMock()
 
     search_config = SimpleNamespace(
+        use_rerank=False,
         reinforce_enabled=False,
         reinforce_require_host_arbitration=False,
     )
@@ -167,6 +168,38 @@ async def test_selection_evidence_uses_post_trust_pool_and_never_serializes_cont
     dumped = response.model_dump(mode="json")
     assert "selection_evidence" not in dumped
     assert "secret-content" not in repr(response.selection_evidence)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("requested", "context_use_rerank", "expected"),
+    [
+        (None, True, True),  # omitted → follows the context config (#1572)
+        (None, False, False),
+        (False, True, False),  # explicit False forces off
+        (True, True, True),
+    ],
+)
+async def test_ranking_policy_use_rerank_is_the_applied_value_not_the_request_default(
+    requested: bool | None, context_use_rerank: bool, expected: bool
+) -> None:
+    # RecallRequest.use_rerank defaults to None since #1572 (None == omitted);
+    # the stamped policy must never carry that "unspecified" into the evidence.
+    service = MemoryService(MagicMock())
+
+    _plan, evidence = await service._build_selection_evidence(
+        RecallSelectionConfig(seed=188, exploration_floor=0.1, candidate_pool_k=100),
+        eligible_ids=(str(uuid4()), str(uuid4())),
+        request=RecallRequest(query="q", k=2, search_mode="hybrid", use_rerank=requested),
+        search_config=SimpleNamespace(
+            use_rerank=context_use_rerank,
+            reinforce_enabled=False,
+            reinforce_require_host_arbitration=False,
+        ),
+        context_id=uuid4(),
+    )
+
+    assert evidence["selection_policy"]["ranking_policy"]["use_rerank"] is expected
 
 
 @pytest.mark.asyncio

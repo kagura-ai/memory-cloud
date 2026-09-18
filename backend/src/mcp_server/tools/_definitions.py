@@ -385,7 +385,7 @@ Returns: {status, degraded, degraded_reason, results: [{memory_id, summary, cont
                     },
                     "use_rerank": {
                         "type": "boolean",
-                        "description": "Enable reranking for higher quality results (default: false). Uses Voyage AI or Cohere based on your configured provider. Set to true if you have API keys configured.",
+                        "description": "Cross-encoder reranking for higher quality results. Omit to follow the context's search config (its use_rerank); set false to force off; true still requires the context to allow it and a usable provider (BYOK Voyage/Cohere key, or the deployment's self_hosted reranker). Plan-gated (reranking feature).",
                     },
                     "filters": {
                         "type": "object",
@@ -1281,9 +1281,9 @@ Examples:
 - Increase keyword matching: semantic_weight=0.5, bm25_weight=0.5
 - Semantic-heavy: semantic_weight=0.7, bm25_weight=0.3
 - Enable reranking: use_rerank=true, reranker_provider="voyage"
-- Local reranking (free): use_rerank=true, reranker_provider="self_hosted", reranker_model="dengcao/Qwen3-Reranker-8B:Q5_K_M"
+- Local reranking (keyless): use_rerank=true, reranker_provider="self_hosted" (reranker_model may be omitted — the deployment's local reranker model is used)
 
-Weights must sum to 1.0.
+Weights must sum to 1.0. A recall that omits use_rerank follows this context's use_rerank.
 
 Returns: {status, message, context_id, config: {semantic_weight, bm25_weight, fetch_factor, use_rerank, reranker_provider, reranker_model, reinforce_enabled, reinforce_max_boost, reinforce_require_host_arbitration, routing_mode}}. semantic_weight + bm25_weight must sum to 1.0.""",
             "inputSchema": {
@@ -1309,7 +1309,7 @@ Returns: {status, message, context_id, config: {semantic_weight, bm25_weight, fe
                     },
                     "use_rerank": {
                         "type": "boolean",
-                        "description": "Enable/disable reranking. Requires API key for Voyage/Cohere, or use 'self_hosted' for free local reranking (Ollama, vLLM).",
+                        "description": "Enable/disable reranking for this context; recalls that omit use_rerank follow this value. Requires API key for Voyage/Cohere, or use 'self_hosted' for keyless local reranking (Ollama, vLLM).",
                     },
                     "reranker_provider": {
                         "type": "string",

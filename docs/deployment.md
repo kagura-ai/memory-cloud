@@ -355,6 +355,92 @@ pre-tokenized FTS text. Semantic + BM25 hybrid fusion is unchanged.
 Configuration: `KAGURA_VECTOR_BACKEND` (`qdrant` | `lance`, default `qdrant`)
 and `KAGURA_LANCE_DB_PATH`. Implementation: `backend/src/db/lance_store.py`.
 
+## Reranking — Issue #1572
+
+Recall is hybrid (semantic + BM25); a **cross-encoder reranker** can re-score
+the candidate window before the top *k* is returned. Reranking is resolved per
+context from its search config (`use_rerank`, `reranker_provider`,
+`reranker_model` — the context Settings tab, `PUT /contexts/{id}/search-config`,
+or the `update_search_config` MCP tool) and gated three ways at recall time:
+
+1. **Plan** — the `reranking` feature: Basic (M) and up by default; Free (S)
+   never reranks. Override per tier with `PLAN_<KEY>_FEATURES` (see Plan Tiers).
+2. **Deployment** — `ENABLE_RERANKING=false` is the kill switch: no context
+   reranks, whatever its config says.
+3. **Caller** — `recall(use_rerank=...)`: **omit it to follow the context's
+   config**; `false` forces reranking off; `true` still requires the context to
+   allow it.
+
+Providers: `voyage` and `cohere` are **BYOK** (a workspace-scoped external API
+key resolved at recall time — there is no platform-key tier); `self_hosted` is
+**keyless** and talks to an endpoint you run.
+
+### Environment variables
+
+| Variable | Default | Notes |
+| --- | --- | --- |
+| `ENABLE_RERANKING` | `true` | Deployment kill switch. `false` ⇒ no context reranks; `/system/info` reports `features.reranking=false` and the web UI disables the reranker card. |
+| `DEFAULT_RERANKER_PROVIDER` | `voyage` | `voyage` \| `cohere` \| `self_hosted`. Written to **new** context search configs. |
+| `DEFAULT_USE_RERANK` | `false` | `use_rerank` written to new context search configs. `true` with `self_hosted` requires `RERANK_BASE_URL` or `SELF_HOSTED_BASE_URL`, else the API refuses to start. |
+| `DEFAULT_RERANKER_MODEL` | — | Model written to new configs. Empty ⇒ the provider's default (`rerank-2`, `rerank-multilingual-v3.0`, or for `self_hosted` `RERANK_MODEL` when `RERANK_BASE_URL` is set, else `SELF_HOSTED_RERANK_MODEL`). For voyage/cohere it must be a model the UI offers. |
+| `RERANK_BASE_URL` | — | OpenAI/Jina-style `/v1/rerank` endpoint (vLLM `--runner pooling`, TEI, Infinity). When set, `self_hosted` makes **one batched** `POST {RERANK_BASE_URL}/v1/rerank` per recall. |
+| `RERANK_MODEL` | `qwen3-reranker-0.6b` | Served model name on that endpoint (vLLM `--served-model-name`). |
+| `RERANK_API_KEY` | — | Bearer token when the `/v1/rerank` endpoint is behind auth. |
+| `SELF_HOSTED_RERANK_MODEL` | `dengcao/Qwen3-Reranker-8B:Q5_K_M` | Prompt-scoring fallback on `SELF_HOSTED_BASE_URL` (`/v1/completions`, one call per document), used only when `RERANK_BASE_URL` is unset. The default is an Ollama-registry id — a pure-vLLM stack must set a model it actually serves. |
+
+The `DEFAULT_*` values apply to contexts created from now on; **existing rows
+are never rewritten by a migration** (#1207 decision) — see the recipe below.
+Unset, they reproduce the previous behaviour (`false` / `voyage` / `rerank-2`).
+
+`GET /api/v1/system/info` (public) exposes `features.reranking`
+(`ENABLE_RERANKING` and, for a `self_hosted` default, an endpoint is configured)
+and `search_defaults: {use_rerank, reranker_provider, reranker_model}` — names
+only, never URLs or keys.
+
+### Self-hosted recipe (keyless reranking as standard equipment)
+
+Serve a reranker behind `/v1/rerank` and make it the default for new contexts:
+
+```bash
+# e.g. vLLM: vllm serve Qwen/Qwen3-Reranker-0.6B --runner pooling \
+#            --served-model-name qwen3-reranker-0.6b --port 8002
+RERANK_BASE_URL=http://reranker:8002
+RERANK_MODEL=qwen3-reranker-0.6b
+DEFAULT_RERANKER_PROVIDER=self_hosted
+DEFAULT_USE_RERANK=true
+```
+
+A freshly created context on a plan with `reranking` now reranks with no user
+action and no external key; a Free workspace does not
+(`reranking_disabled_by_plan_tier` in the log). Then convert the contexts that
+already exist (one-shot, idempotent):
+
+```bash
+# inside the API container / venv, from backend/
+python -m src.cli.apply_rerank_defaults --all                # plan: convert/skip per context, writes nothing
+python -m src.cli.apply_rerank_defaults --all --apply --yes  # write; --workspace <uuid> narrows the scope
+```
+
+Only rows still carrying the **code default** (`use_rerank=false`,
+`reranker_provider=voyage`, `reranker_model` `rerank-2` or `rerank-2-lite`) are
+converted; any other value is treated as an explicit choice and left alone. An
+owner who explicitly picked the old default is indistinguishable and is
+converted too. Re-running after `--apply` changes 0 rows.
+
+### Fail-open behaviour
+
+A reranker outage never fails a recall. When the provider raises (endpoint
+unreachable, HTTP error, every document scoring failed), the un-reranked hybrid
+results are returned and exactly one warning is logged:
+
+```
+rerank_failed_open provider=self_hosted error_class=ConnectError context_id=... workspace_id=...
+```
+
+Alert on `rerank_failed_open` (a structured log event — the backend has no
+metrics counters). `reranking_disabled_by_deployment` (debug) and
+`reranking_disabled_by_plan_tier` (info) mark the two deliberate skips.
+
 ## Plan Tiers
 
 Plans control resource limits per workspace. Defaults:

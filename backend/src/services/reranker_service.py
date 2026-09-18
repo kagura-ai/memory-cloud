@@ -23,7 +23,7 @@ from __future__ import annotations
 import asyncio
 import re
 from abc import ABC, abstractmethod
-from typing import Any
+from typing import TYPE_CHECKING, Any
 from uuid import UUID
 
 import httpx
@@ -35,6 +35,9 @@ from repositories.config_repository import ContextSearchConfigRepository
 from utils.encryption import get_encryptor
 from utils.exceptions import CohereError, VoyageError
 from utils.logger import get_logger
+
+if TYPE_CHECKING:
+    from config.settings import Settings
 
 logger = get_logger(__name__)
 
@@ -70,6 +73,45 @@ REMOTE_RERANKER_DEFAULT_MODELS = frozenset(
         "rerank-english-v3.0",
     }
 )
+
+# The model each REMOTE provider gets when a context leaves reranker_model
+# empty. Keep the voyage entry equal to the ORM column default
+# (models/config.py) — it is also what `search_config_defaults` writes when the
+# deployment sets no DEFAULT_RERANKER_MODEL.
+_REMOTE_PROVIDER_DEFAULT_MODELS = {
+    "voyage": "rerank-2",
+    "cohere": "rerank-multilingual-v3.0",
+}
+
+
+def default_reranker_model_for(provider: str, settings: Settings | None = None) -> str:
+    """Default model for ``provider`` when no explicit reranker_model is set (#1572).
+
+    Single source for every default-writing site (context creation,
+    ``create_or_get``, ``reset_to_default``, the MCP ``update_search_config``
+    fallbacks, ``/system/info``) and for ``_get_reranker_model``'s runtime
+    fallback, so the provider/model pairing cannot drift between them.
+
+    Args:
+        provider: ``voyage`` | ``cohere`` | ``self_hosted``.
+        settings: Settings to read the self-hosted model from. Loaded lazily
+            when omitted so remote-provider lookups never touch settings.
+
+    Returns:
+        The model name to send to that provider. For ``self_hosted`` it is
+        ``RERANK_MODEL`` when ``RERANK_BASE_URL`` is set (batched /v1/rerank),
+        else ``SELF_HOSTED_RERANK_MODEL`` (prompt scoring); the built-in
+        constants are the floor when either is explicitly blanked.
+    """
+    if provider == "self_hosted":
+        if settings is None:
+            from config.settings import get_settings
+
+            settings = get_settings()
+        if settings.rerank_base_url:
+            return settings.rerank_model or DEFAULT_VLLM_RERANK_MODEL
+        return settings.self_hosted_rerank_model or DEFAULT_SELF_HOSTED_RERANK_MODEL
+    return _REMOTE_PROVIDER_DEFAULT_MODELS.get(provider, "rerank-2")
 
 
 def _bearer_headers(api_key: str | None) -> dict[str, str] | None:
@@ -321,6 +363,7 @@ class SelfHostedReranker(RerankerProvider):
             raise ValueError("top_n must be positive")
 
         scored: list[dict[str, Any]] = []
+        failed: set[int] = set()
 
         headers = _bearer_headers(self.api_key)
 
@@ -359,12 +402,24 @@ class SelfHostedReranker(RerankerProvider):
                             index=idx,
                             error=str(e),
                         )
+                        failed.add(idx)
                         score = 0.0
 
                     return {"index": idx, "relevance_score": score}
 
             tasks = [score_doc(i, doc) for i, doc in enumerate(documents)]
             scored = await asyncio.gather(*tasks)
+
+        # A partial failure keeps the per-doc zero above. When EVERY scoring
+        # failed the backend is down (or 404s the model) and an all-zero list
+        # would be returned in arbitrary order as if it were a ranking — raise
+        # instead so SearchService fails open to the un-reranked hybrid results
+        # and emits rerank_failed_open (#1572).
+        if len(failed) == len(documents):
+            raise RuntimeError(
+                f"self_hosted rerank backend unavailable: all {len(documents)} "
+                f"document scorings failed (model={self.model})"
+            )
 
         # Sort by score descending and take top_n
         scored.sort(key=lambda x: x["relevance_score"], reverse=True)
@@ -809,15 +864,8 @@ class RerankerService:
         Returns:
             Model name string (provider-specific)
         """
-        # Default models per provider
-        default_models = {
-            "voyage": "rerank-2",
-            "cohere": "rerank-multilingual-v3.0",
-            "self_hosted": DEFAULT_SELF_HOSTED_RERANK_MODEL,
-        }
-
         if not context_id:
-            model = default_models.get(provider_name, "rerank-2")
+            model = default_reranker_model_for(provider_name)
             logger.debug(
                 "reranker_model_default",
                 provider=provider_name,
@@ -841,7 +889,7 @@ class RerankerService:
                     fallback="using_config_model_anyway",
                 )
 
-            model = config.reranker_model or default_models.get(provider_name, "rerank-2")
+            model = config.reranker_model or default_reranker_model_for(provider_name)
             logger.debug(
                 "reranker_model_loaded",
                 context_id=context_id,
@@ -851,7 +899,7 @@ class RerankerService:
             return model
 
         except Exception as e:
-            model = default_models.get(provider_name, "rerank-2")
+            model = default_reranker_model_for(provider_name)
             logger.warning(
                 "reranker_model_load_failed",
                 context_id=context_id,
