@@ -36,6 +36,7 @@ const TIERS = [
     max_contexts: 1,
     max_members: 1,
     memory_limit: 1000,
+    memories_per_day: 50,
     storage_limit_bytes: 100 * 1024 * 1024,
     mcp_calls_per_day: 1000,
     rest_calls_per_day: 0,
@@ -56,6 +57,7 @@ const TIERS = [
     max_contexts: 3,
     max_members: 1,
     memory_limit: 10000,
+    memories_per_day: 300,
     storage_limit_bytes: 1024 ** 3,
     mcp_calls_per_day: 10000,
     rest_calls_per_day: 1000,
@@ -76,6 +78,7 @@ const TIERS = [
     max_contexts: 20,
     max_members: 10,
     memory_limit: 100000,
+    memories_per_day: 2000,
     storage_limit_bytes: 10 * 1024 ** 3,
     mcp_calls_per_day: 50000,
     rest_calls_per_day: 5000,
@@ -97,6 +100,7 @@ const TIERS = [
     max_contexts: 1000,
     max_members: 50,
     memory_limit: 100000,
+    memories_per_day: 10000,
     storage_limit_bytes: 100 * 1024 ** 3,
     mcp_calls_per_day: 100000,
     rest_calls_per_day: 10000,
@@ -146,6 +150,28 @@ describe("PlanFeatureMatrix (#1138)", () => {
     expect(
       rowOf("planMatrix.row_storage").getByText("100 GiB"),
     ).toBeInTheDocument();
+  });
+
+  it("renders the memories-per-day row (#1549) as a stable numeric row", async () => {
+    render(<PlanFeatureMatrix currentTier="basic" />);
+    await screen.findByText("planMatrix.row_memoriesPerDay");
+
+    // S 50 · M 300 · L 2,000 · XL 10,000 — locale-grouped like the other
+    // numeric rows, no Beta badge, and sits right under the memory cap.
+    const row = rowOf("planMatrix.row_memoriesPerDay");
+    expect(row.getByText("50")).toBeInTheDocument();
+    expect(row.getByText("300")).toBeInTheDocument();
+    expect(row.getByText("2,000")).toBeInTheDocument();
+    expect(row.getByText("10,000")).toBeInTheDocument();
+    expect(row.queryByText("✗")).toBeNull();
+    expect(row.queryByText("planMatrix.beta")).toBeNull();
+
+    const labels = screen
+      .getAllByRole("row")
+      .map((tr) => tr.querySelector("td")?.textContent ?? "");
+    expect(labels.indexOf("planMatrix.row_memoriesPerDay")).toBe(
+      labels.indexOf("planMatrix.row_memories") + 1,
+    );
   });
 
   it("renders ✓/✗ for boolean capabilities", async () => {

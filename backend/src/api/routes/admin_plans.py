@@ -287,6 +287,7 @@ class PlanTierInfo(BaseModel):
     analysis_runs_per_day: int
     storage_limit_bytes: int
     sleep_enabled_contexts_limit: int
+    memories_per_day: int  # Issue #1549
     embedding_daily_cap_usd: float | None = None  # Issue #709
     embedding_monthly_cap_usd: float | None = None  # Issue #709
     allows_shared_contexts: bool

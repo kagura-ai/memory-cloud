@@ -441,6 +441,7 @@ class MemoryService:
         current_context_id: UUID | None = None,
         current_workspace_id: UUID | None = None,  # NEW: Workspace ID (Issue #146)
         key_workspace_id: UUID | None = None,  # Issue #963/#1281: pure key scope
+        _skip_daily_quota: bool = False,  # Issue #1549: internal, see _upsert_by_external_id
     ) -> RememberResponse:
         """Store new memory.
 
@@ -458,6 +459,10 @@ class MemoryService:
             user_id: User ID
             client: Client name
             current_context_id: Current context UUID (Issue #82)
+            _skip_daily_quota: Issue #1549 — do not charge the daily
+                memory-creation quota. Private: only ``_upsert_by_external_id``
+                sets it, when the new row REPLACES an existing external_id
+                (an update from the caller's point of view, not a creation).
 
         Returns:
             RememberResponse with memory_id and scope
@@ -480,6 +485,15 @@ class MemoryService:
             can_create, error = await quota_service.check_memory_quota(
                 current_workspace_id, raise_on_exceeded=True
             )
+
+            # Issue #1549: reserve one creation against today's daily quota.
+            # This is THE charge point for user-visible memory creation — MCP
+            # remember, REST remember and the create half of the external_id
+            # upsert all arrive here (see check_memories_per_day's docstring).
+            if not _skip_daily_quota:
+                await quota_service.check_memories_per_day(
+                    current_workspace_id, count=1, raise_on_exceeded=True
+                )
 
         # Single Collection Migration: Extract isolation params (optimized).
         # Issue #1275: remember is a WRITE — gate the declared context against
@@ -1547,12 +1561,17 @@ class MemoryService:
         # operation="update" event — the inner remember()/forget() calls each
         # emit their own row, which describes exactly what happened
         # physically (a new row created, the old row soft-deleted).
+        #
+        # #1549: a REPLACEMENT is an update to the caller (the memory count
+        # does not grow), so only a brand-new external_id is charged against
+        # the daily memory-creation quota.
         result = await self.remember(
             remember_request,
             user_id=user_id,
             client=client,
             current_context_id=current_context_id,
             current_workspace_id=current_workspace_id,
+            _skip_daily_quota=existing is not None,
         )
 
         # Only forget old memory after new one is successfully created.

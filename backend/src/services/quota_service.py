@@ -10,6 +10,7 @@ Responsibilities:
 """
 
 import time
+from datetime import UTC, date, datetime, timedelta
 from typing import Any
 from uuid import UUID
 
@@ -18,6 +19,7 @@ from sqlalchemy.exc import DBAPIError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from config.plan_tiers import PLAN_TIERS, get_plan_tier, has_feature
+from db.redis import get_cache, incrby_counter
 from models.auth import (
     Context,
     UsageStats,
@@ -27,11 +29,24 @@ from models.auth import (
 )
 from models.memory import Memory
 from services.effective_quota_service import EffectiveQuotaService
-from utils.datetime import utcnow
-from utils.exceptions import FeatureNotAvailableError, QuotaExceededError
+from utils.datetime import to_utc_iso, utcnow
+from utils.exceptions import FeatureNotAvailableError, QuotaExceededError, RedisError
 from utils.logger import get_logger
 
 logger = get_logger(__name__)
+
+# Issue #1549: the day counter is keyed by UTC date, so a key outlives its day
+# by at most this TTL (the date in the key keeps stale counters inert).
+_MEMORIES_PER_DAY_TTL = 86400
+
+
+def _memories_per_day_key(workspace_id: UUID, today: date) -> str:
+    return f"quota:workspace:{workspace_id}:memories:{today.isoformat()}"
+
+
+def _next_utc_midnight_iso(today: date) -> str:
+    """``resets_at`` for the daily memory quota: tomorrow 00:00Z as ISO-8601."""
+    return to_utc_iso(datetime.combine(today + timedelta(days=1), datetime.min.time(), UTC)) or ""
 
 
 class QuotaService:
@@ -128,6 +143,150 @@ class QuotaService:
             return False, error
 
         return True, None
+
+    async def check_memories_per_day(
+        self,
+        workspace_id: UUID,
+        count: int = 1,
+        *,
+        raise_on_exceeded: bool = False,
+    ) -> tuple[bool, str | None]:
+        """Reserve ``count`` memory creations against today's daily quota (#1549).
+
+        Redis counter ``quota:workspace:{workspace_id}:memories:{YYYY-MM-DD}``
+        (UTC day, 24h TTL). Read-then-reserve is racy, so this RESERVES first:
+        INCRBY ``count``; if the new total exceeds
+        ``Workspace.effective_memories_per_day`` the same amount is decremented
+        back and the request is refused. Concurrent overshoot is therefore
+        bounded to one batch, and a refused batch is never partially charged.
+
+        Which writes are charged (every path that creates a user-visible
+        memory row):
+
+        - ``MemoryService.remember`` (count=1) — MCP ``remember``, REST
+          ``POST /memory/remember`` and the *create* half of
+          ``update_memory(external_id=...)`` all funnel through it.
+        - ``ResourceIndexer.process_incremental`` — connector / ``ingest_events``
+          / resource ingest; charged once per batch, up front, with
+          ``count = number of upsert events``; the whole batch is deferred to
+          the next run when it does not fit.
+
+        Not charged (they mutate or copy rows the workspace already created):
+        ``MemoryService._update_in_place`` / ``patch_memory`` /
+        ``_upsert_by_external_id`` when it replaces an existing external_id,
+        ``ContextService.merge_contexts`` (copies rows into the target
+        context), ``api.routes.admin`` context recovery (restores rows from
+        Qdrant), Sleep / consolidation / promotion (``services.sleep``,
+        ``neural`` — they only re-scope, merge or soft-delete existing rows)
+        and agent bootstrap (read-only).
+
+        A reservation is not refunded if the write fails later (validation,
+        DB error): a failed attempt costs one unit, like an MCP call does.
+        Redis unavailable → fail-open with a warning log, exactly like
+        ``RateLimitMiddleware._check_daily_quota`` (``RedisError`` caught).
+
+        Args:
+            workspace_id: Workspace ID
+            count: Memories about to be created (a batch reserves all at once)
+            raise_on_exceeded: If True, raise QuotaExceededError instead of
+                returning False
+
+        Returns:
+            Tuple of (can_create, error_message)
+
+        Raises:
+            QuotaExceededError: If raise_on_exceeded=True and the reservation
+                does not fit. ``details`` carries ``quota_type="memories_per_day"``,
+                ``limit``, ``used_today``, ``requested`` and ``resets_at``.
+        """
+        workspace_result = await self.db.execute(
+            select(Workspace).where(Workspace.id == workspace_id)
+        )
+        workspace = workspace_result.scalar_one_or_none()
+
+        if not workspace:
+            error = f"Workspace {workspace_id} not found"
+            if raise_on_exceeded:
+                raise QuotaExceededError(error)
+            return False, error
+
+        if count <= 0:
+            return True, None
+
+        limit = workspace.effective_memories_per_day
+        today = utcnow().date()
+        resets_at = _next_utc_midnight_iso(today)
+
+        def _refuse(used_today: int) -> tuple[bool, str | None]:
+            error = (
+                f"Daily memory-creation quota exceeded. "
+                f"Limit: {limit}/day ({workspace.plan_name} plan), "
+                f"created today: {used_today}, requested: {count}. "
+                f"Resets at {resets_at}."
+            )
+            logger.warning(
+                "memories_per_day_exceeded",
+                workspace_id=str(workspace_id),
+                used_today=used_today,
+                requested=count,
+                limit=limit,
+                plan=workspace.plan_name,
+            )
+            if raise_on_exceeded:
+                raise QuotaExceededError(
+                    error,
+                    quota_type="memories_per_day",
+                    limit=limit,
+                    used_today=used_today,
+                    requested=count,
+                    resets_at=resets_at,
+                )
+            return False, error
+
+        # Zero-floor (#569): 0 means the tier cannot create memories at all.
+        # Nothing to reserve, so Redis is not touched.
+        if limit == 0:
+            return _refuse(0)
+
+        key = _memories_per_day_key(workspace_id, today)
+        try:
+            new_total = await incrby_counter(key, count, ttl=_MEMORIES_PER_DAY_TTL)
+        except RedisError as e:
+            # Fail-open: never block a write because the counter is down.
+            logger.warning(
+                "memories_per_day_redis_failed",
+                workspace_id=str(workspace_id),
+                error=str(e),
+            )
+            return True, None
+
+        if new_total > limit:
+            # Release the reservation so the refused attempt does not consume
+            # budget. Best-effort: if this fails the phantom reservation
+            # expires with the day key.
+            try:
+                await incrby_counter(key, -count)
+            except RedisError as e:
+                logger.warning(
+                    "memories_per_day_release_failed",
+                    workspace_id=str(workspace_id),
+                    count=count,
+                    error=str(e),
+                )
+            return _refuse(new_total - count)
+
+        return True, None
+
+    async def count_memories_created_today(self, workspace_id: UUID) -> int:
+        """Memories created in this workspace today (UTC), per the #1549 counter.
+
+        Read-only GET on the day key; 0 when missing or Redis is unavailable.
+        """
+        cached = await get_cache(_memories_per_day_key(workspace_id, utcnow().date()))
+        try:
+            return int(cached) if cached else 0
+        except ValueError:
+            return 0
 
     # ========================================================================
     # Feature Access Checks
@@ -677,6 +836,8 @@ class QuotaService:
         Returns:
             Dict with quota status:
                 - memory: {current, limit, percentage, warning, exceeded}
+                - memories_today: {current, limit, percentage, warning, exceeded,
+                  resets_at} (#1549 daily memory-creation quota)
                 - features: {reranking, oauth} (bool)
         """
         # Get workspace
@@ -717,6 +878,11 @@ class QuotaService:
         effective_limit = workspace.effective_memory_limit
         memory_percentage = (memory_count / effective_limit * 100) if effective_limit > 0 else 0
 
+        # Issue #1549: today's memory creations vs the daily quota (Redis read).
+        created_today = await self.count_memories_created_today(workspace_id)
+        daily_limit = workspace.effective_memories_per_day
+        daily_percentage = (created_today / daily_limit * 100) if daily_limit > 0 else 0
+
         return {
             "memory": {
                 "current": memory_count,
@@ -724,6 +890,14 @@ class QuotaService:
                 "percentage": round(memory_percentage, 2),
                 "warning": memory_percentage >= 80,
                 "exceeded": memory_percentage >= 100,
+            },
+            "memories_today": {
+                "current": created_today,
+                "limit": daily_limit,
+                "percentage": round(daily_percentage, 2),
+                "warning": daily_percentage >= 80,
+                "exceeded": daily_percentage >= 100,
+                "resets_at": _next_utc_midnight_iso(utcnow().date()),
             },
             "features": {
                 "reranking": "reranking" in plan.features,

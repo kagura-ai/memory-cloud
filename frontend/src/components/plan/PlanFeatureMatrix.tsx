@@ -46,6 +46,7 @@ const ROWS: MatrixRow[] = [
   { key: "contexts", field: "max_contexts", kind: "number" },
   { key: "members", field: "max_members", kind: "number" },
   { key: "memories", field: "memory_limit", kind: "number" },
+  { key: "memoriesPerDay", field: "memories_per_day", kind: "number" }, // #1549
   { key: "storage", field: "storage_limit_bytes", kind: "bytes" },
   { key: "mcpPerDay", field: "mcp_calls_per_day", kind: "number" },
   { key: "restPerDay", field: "rest_calls_per_day", kind: "number" },

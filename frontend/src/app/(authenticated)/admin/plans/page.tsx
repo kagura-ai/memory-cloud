@@ -155,6 +155,11 @@ const TIER_ROW_DEFINITIONS = [
     render: (t: PlanTierInfo) => formatNumber(t.memory_limit),
   },
   {
+    // Issue #1549: memories created per UTC day.
+    key: "memoriesPerDay",
+    render: (t: PlanTierInfo) => formatNumber(t.memories_per_day),
+  },
+  {
     key: "mcpCallsPerDay",
     render: (t: PlanTierInfo) => formatNumber(t.mcp_calls_per_day),
   },

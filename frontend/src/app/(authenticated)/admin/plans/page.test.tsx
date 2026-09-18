@@ -3,7 +3,7 @@
  *
  * Scope is the tiers tab only — workspaces / audit tabs are not exercised
  * here (covered by their own integration paths). We assert: the tab renders
- * 16 rows from ROW_DEFINITIONS, header columns reflect `display_name` from
+ * 17 rows from ROW_DEFINITIONS, header columns reflect `display_name` from
  * the API (env-overridable), the info-card appears, ErrorBanner shows when
  * `getAdminPlanTiers` rejects, and a zero quota renders as "—" not "0".
  *
@@ -106,6 +106,7 @@ const FREE = {
   max_members_per_workspace: 1,
   max_resource_tokens: 0,
   memory_limit: 1000,
+  memories_per_day: 50, // Issue #1549
   mcp_calls_per_day: 1000,
   mcp_calls_per_week: 5000,
   rest_calls_per_day: 0,
@@ -128,6 +129,7 @@ const BASIC = {
   max_contexts_per_workspace: 3,
   max_resource_tokens: 3,
   memory_limit: 10000,
+  memories_per_day: 300,
   mcp_calls_per_day: 10000,
   rest_calls_per_day: 1000,
   storage_limit_bytes: 1024 * 1024 * 1024,
@@ -143,6 +145,9 @@ const PRO = {
   max_members_per_workspace: 10,
   max_resource_tokens: 30,
   memory_limit: 100000,
+  // Real PRO value is 2000, but "2,000" is reserved below as the unique
+  // legacy daily_api_limit sentinel — keep this fixture off that number.
+  memories_per_day: 2500,
   mcp_calls_per_day: 50000,
   rest_calls_per_day: 5000,
   public_calls_per_day: 1000,
@@ -171,6 +176,7 @@ const PROMAX = {
   max_contexts_per_workspace: 1000,
   max_members_per_workspace: 50,
   max_resource_tokens: 150,
+  memories_per_day: 10000,
   mcp_calls_per_day: 100000,
   rest_calls_per_day: 10000,
   public_calls_per_day: 5000,
@@ -253,7 +259,7 @@ const QUOTA_DETAIL_PRO = {
 };
 
 describe("AdminPlansPage — tiers tab", () => {
-  it("renders 16 ROW_DEFINITIONS rows once tiers load", async () => {
+  it("renders 17 ROW_DEFINITIONS rows once tiers load", async () => {
     render(<AdminPlansPage />);
 
     // Wait for one of the well-known row labels to appear (i18n stub
@@ -264,6 +270,7 @@ describe("AdminPlansPage — tiers tab", () => {
     const expectedRowKeys = [
       "contextsPerWorkspace",
       "memories",
+      "memoriesPerDay", // Issue #1549
       "mcpCallsPerDay",
       "analysisRuns",
       "reranking",

@@ -510,7 +510,11 @@ class TestProcessIncrementalResolvesRoutingOncePerBatch:
         indexer._apply_delete = AsyncMock()
         indexer.db.commit = AsyncMock()
 
-        with patch("services.resource_indexer.resolve_context_routing", mock_resolve):
+        with (
+            patch("services.resource_indexer.resolve_context_routing", mock_resolve),
+            patch("services.resource_indexer.QuotaService") as quota_cls,
+        ):
+            quota_cls.return_value.check_memories_per_day = AsyncMock(return_value=(True, None))
             await indexer.process_incremental("res_test", uuid4())
 
         assert mock_resolve.await_count == 1, (
@@ -522,3 +526,89 @@ class TestProcessIncrementalResolvesRoutingOncePerBatch:
             # (event, schema, context, collection_name, embedding_service)
             assert call.args[3] == "kagura_memories"
             assert call.args[4] is stub_embedding_service
+
+
+class TestProcessIncrementalMemoriesPerDay:
+    """#1549: connector/resource ingest is charged against the daily
+    memory-creation quota ONCE per batch, up front, for the whole batch.
+
+    All-or-nothing: when the batch does not fit, nothing is applied and the
+    offset does not move, so the same events are retried on the next run
+    (after the UTC reset) instead of being lost.
+    """
+
+    def _indexer(self, events):
+        with patch("services.resource_indexer.get_qdrant_client", return_value=AsyncMock()):
+            indexer = ResourceIndexer(AsyncMock())
+        self.state = MagicMock(last_offset=0, last_run_at=None, metrics=None)
+        self.context = _make_context()
+        indexer._get_or_create_state = AsyncMock(return_value=self.state)
+        indexer._fetch_events = AsyncMock(return_value=events)
+        indexer._get_latest_schema = AsyncMock(return_value=_make_schema())
+        indexer._get_context = AsyncMock(return_value=self.context)
+        indexer._apply_upsert = AsyncMock()
+        indexer._apply_delete = AsyncMock()
+        indexer.db.commit = AsyncMock()
+        return indexer
+
+    def _run(self, indexer, allowed: bool):
+        quota = AsyncMock(return_value=(allowed, None if allowed else "over quota"))
+        routing = AsyncMock(return_value=("kagura_memories", MagicMock()))
+        return quota, routing
+
+    @pytest.mark.asyncio
+    async def test_batch_charged_once_with_upsert_count(self):
+        delete = _make_event()
+        delete.op = "delete"
+        indexer = self._indexer([_make_event(), _make_event(), delete])
+        quota, routing = self._run(indexer, allowed=True)
+
+        with (
+            patch("services.resource_indexer.resolve_context_routing", routing),
+            patch("services.resource_indexer.QuotaService") as quota_cls,
+        ):
+            quota_cls.return_value.check_memories_per_day = quota
+            metrics = await indexer.process_incremental("res_test", uuid4())
+
+        # Deletes create nothing — only the two upserts are reserved, in one call.
+        quota.assert_awaited_once_with(self.context.workspace_id, count=2)
+        assert indexer._apply_upsert.await_count == 2
+        assert indexer._apply_delete.await_count == 1
+        assert metrics.skipped is False
+
+    @pytest.mark.asyncio
+    async def test_refused_batch_applies_nothing_and_keeps_offset(self):
+        indexer = self._indexer([_make_event(), _make_event()])
+        quota, routing = self._run(indexer, allowed=False)
+
+        with (
+            patch("services.resource_indexer.resolve_context_routing", routing),
+            patch("services.resource_indexer.QuotaService") as quota_cls,
+        ):
+            quota_cls.return_value.check_memories_per_day = quota
+            metrics = await indexer.process_incremental("res_test", uuid4())
+
+        indexer._apply_upsert.assert_not_awaited()
+        indexer._apply_delete.assert_not_awaited()
+        assert self.state.last_offset == 0
+        indexer.db.commit.assert_not_awaited()
+        assert metrics.skipped is True
+        assert metrics.reason == "memories_per_day_exceeded"
+        assert metrics.errors == 0
+
+    @pytest.mark.asyncio
+    async def test_delete_only_batch_is_not_charged(self):
+        delete = _make_event()
+        delete.op = "delete"
+        indexer = self._indexer([delete])
+        quota, routing = self._run(indexer, allowed=True)
+
+        with (
+            patch("services.resource_indexer.resolve_context_routing", routing),
+            patch("services.resource_indexer.QuotaService") as quota_cls,
+        ):
+            quota_cls.return_value.check_memories_per_day = quota
+            await indexer.process_incremental("res_test", uuid4())
+
+        quota.assert_not_awaited()
+        assert indexer._apply_delete.await_count == 1

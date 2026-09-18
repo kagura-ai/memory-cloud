@@ -38,6 +38,7 @@ from models.memory import (  # Issue #262: Memory model for resource data storag
 from models.resource import IndexerState, Resource, ResourceEvent, ResourceSchema
 from services.context_routing import resolve_context_routing
 from services.embedding_service import EmbeddingService
+from services.quota_service import QuotaService
 from utils.datetime import to_utc_iso, utcnow
 from utils.exceptions import QdrantError
 from utils.logger import get_logger
@@ -371,6 +372,34 @@ class ResourceIndexer:
             collection_name, embedding_service = await resolve_context_routing(
                 self.db, context_id, default_service=self.embedding_service
             )
+
+            # Issue #1549: charge the daily memory-creation quota ONCE for the
+            # whole batch, up front. Every upsert is counted as a creation —
+            # a re-index of an existing doc version (the update branch of
+            # _apply_upsert) is over-charged rather than pre-queried; the
+            # bound is conservative. All-or-nothing: a batch that does not fit
+            # is deferred untouched (offset unchanged) and retried on the next
+            # run, after the UTC reset. Deletes create nothing. A batch larger
+            # than the whole daily limit never fits, so an operator lowering
+            # ``PLAN_*_MEMORIES_PER_DAY`` below ``batch_size`` must lower the
+            # batch size too.
+            upsert_count = sum(1 for event in events if event.op == "upsert")
+            if upsert_count:
+                allowed, quota_error = await QuotaService(self.db).check_memories_per_day(
+                    context.workspace_id, count=upsert_count
+                )
+                if not allowed:
+                    metrics.skipped = True
+                    metrics.reason = "memories_per_day_exceeded"
+                    logger.warning(
+                        "indexer_memories_per_day_exceeded",
+                        resource_id=resource_id,
+                        context_id=context_id,
+                        workspace_id=str(context.workspace_id),
+                        upserts=upsert_count,
+                        error=quota_error,
+                    )
+                    return metrics
 
             # 5. Process each event
             for event in events:

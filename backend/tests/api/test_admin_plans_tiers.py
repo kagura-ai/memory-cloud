@@ -49,6 +49,13 @@ def test_list_plan_tiers_returns_four_tiers_in_canonical_order(client: TestClien
     assert [t["name"] for t in data] == ["free", "basic", "pro", "promax"]
 
 
+def test_list_plan_tiers_exposes_memories_per_day(client: TestClient) -> None:
+    """#1549: the admin tiers table gets the daily memory-creation quota."""
+    resp = client.get("/api/v1/admin/plans/tiers")
+    assert resp.status_code == 200
+    assert [t["memories_per_day"] for t in resp.json()] == [50, 300, 2000, 10000]
+
+
 def test_list_plan_tiers_exposes_pivot_corrected_mcp_quota(client: TestClient) -> None:
     """The renamed ``apiCalls`` row must show actual ``mcp_calls_per_day``
     (not the legacy ``daily_api_limit``), since the frontend now binds to

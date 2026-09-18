@@ -84,6 +84,7 @@ class PlanTierFeature(BaseModel):
     max_contexts: int
     max_members: int
     memory_limit: int
+    memories_per_day: int  # Issue #1549: memories created per UTC day
     storage_limit_bytes: int
     mcp_calls_per_day: int
     rest_calls_per_day: int
@@ -238,6 +239,7 @@ def _plan_tier_feature(tier: PlanTier) -> PlanTierFeature:
         max_contexts=tier.max_contexts_per_workspace,
         max_members=tier.max_members_per_workspace,
         memory_limit=tier.memory_limit,
+        memories_per_day=tier.memories_per_day,
         storage_limit_bytes=tier.storage_limit_bytes,
         mcp_calls_per_day=tier.mcp_calls_per_day,
         rest_calls_per_day=tier.rest_calls_per_day,
