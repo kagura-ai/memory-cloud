@@ -84,10 +84,10 @@ async def _post(payload: dict) -> _Recorder:
 async def test_unknown_request_method_is_a_jsonrpc_method_not_found(method):
     send = await _post({"jsonrpc": "2.0", "id": 7, "method": method, "params": {}})
 
-    # HTTP 200 + JSON-RPC error, like the tools/call error path: this server
-    # speaks the legacy (initialize-handshake) protocol, and a 404 + -32601 is
-    # the *modern* contract that a dual-era client would read as "modern
-    # server, do not fall back to initialize".
+    # HTTP 200 + JSON-RPC error, like the tools/call error path: this handler
+    # is the legacy (initialize-handshake) half of the dual-era server. The
+    # 404 + -32601 shape is the *modern* contract and is only produced for
+    # requests carrying modern ``_meta`` (``test_transport_stateless``).
     assert send.status == 200
     assert send.headers[b"content-type"] == b"application/json"
     body = send.body
@@ -157,11 +157,12 @@ async def test_server_discover_returns_a_complete_cacheable_discover_result():
     assert isinstance(result["ttlMs"], int) and result["ttlMs"] >= 0
     assert result["cacheScope"] in ("public", "private")
 
-    # Only the legacy (initialize-handshake) versions this server actually
-    # speaks — never 2026-07-28, which would commit us to per-request _meta
-    # / stateless semantics we do not implement.
+    # Dual-era (#1544): the modern revision served statelessly by
+    # ``transport_stateless`` plus the legacy ones ``initialize`` negotiates.
+    # Legacy-only was the bug — a DiscoverResult is itself a modern signal, so
+    # it stopped dual-era fallback and left modern-only clients no version.
     versions = result["supportedVersions"]
-    assert versions and all(v < "2026-07-28" for v in versions)
+    assert "2026-07-28" in versions
     assert "2024-11-05" in versions  # what initialize negotiates today
 
     assert result["capabilities"] == {"tools": {}}
@@ -212,13 +213,14 @@ async def test_initialize_still_negotiates_the_legacy_protocol():
         ("2025-03-26", "2025-03-26"),  # advertised by discover → must be echoed
         ("2024-11-05", "2024-11-05"),
         ("2025-06-18", "2024-11-05"),  # not advertised → fall back to the default
-        ("2026-07-28", "2024-11-05"),
+        ("2026-07-28", "2024-11-05"),  # advertised, but modern: no handshake form
         (None, "2024-11-05"),
     ],
 )
 async def test_initialize_echoes_every_version_discover_advertises(requested, negotiated):
     """``server/discover`` and ``initialize`` must not contradict each other: a
-    client that picks a version out of ``supportedVersions`` gets it echoed back
+    client that picks a *legacy* version out of ``supportedVersions`` gets it
+    echoed back
     (spec: a server that supports the requested version MUST answer with it)."""
     params = {} if requested is None else {"protocolVersion": requested}
     send = await _post({"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": params})
@@ -226,9 +228,17 @@ async def test_initialize_echoes_every_version_discover_advertises(requested, ne
 
 
 @pytest.mark.asyncio
-async def test_every_advertised_version_is_negotiable():
+async def test_every_advertised_legacy_version_is_negotiable():
+    """Modern revisions are excluded: they have no handshake to negotiate in —
+    a client selects one per request (``test_transport_stateless``)."""
+    from mcp_server.transport import MODERN_PROTOCOL_VERSIONS
+
     disc = await _post({"jsonrpc": "2.0", "id": 1, "method": "server/discover"})
-    for version in disc.body["result"]["supportedVersions"]:
+    legacy = [
+        v for v in disc.body["result"]["supportedVersions"] if v not in MODERN_PROTOCOL_VERSIONS
+    ]
+    assert legacy
+    for version in legacy:
         init = await _post(
             {
                 "jsonrpc": "2.0",

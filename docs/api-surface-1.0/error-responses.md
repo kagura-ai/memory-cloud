@@ -107,6 +107,22 @@ Requests whose `method` the transport does not implement (anything other than `i
 | `-32601` | unknown / unimplemented request method (standard) | `handle_streamable_http_post` — terminal branch |
 | `-32600` | body is not a single JSON-RPC object (scalar / batch array), or a message without a string `method` — with or without an `id`, so a malformed id-less envelope is not mistaken for a notification — HTTP **400** (standard) | `handle_streamable_http_post` — envelope guards |
 
+#### Modern (MCP 2026-07-28) requests — stateless path
+
+The server is dual-era (#1544). The tables above describe the **legacy** half (`initialize` handshake, `Mcp-Session-Id`). A request that carries per-request `params._meta["io.modelcontextprotocol/protocolVersion"]` (or a modern `MCP-Protocol-Version` header) is served statelessly by `handle_stateless_post` (`backend/src/mcp_server/transport_stateless.py`) — no session is minted, required, or echoed — and follows the 2026-07-28 error contract instead:
+
+| HTTP | JSON-RPC code | Trigger |
+|---|---|---|
+| 400 | `-32600` | message without a string `method`, or a request `id` that is not a string / integer |
+| 400 | `-32602` | required `_meta` field missing or mistyped (`protocolVersion`, `clientCapabilities`); `tools/call` without a string `name` or with non-object `arguments` |
+| 400 | `-32020` **HeaderMismatch** | `MCP-Protocol-Version`, `Mcp-Method` or (for `tools/call`) `Mcp-Name` header missing, undecodable, or different from the body value (`Mcp-Name` is Base64-sentinel-decoded first) |
+| 400 | `-32022` **UnsupportedProtocolVersion** | requested version is not a modern revision this server serves; `data` = `{ "supported": [...], "requested": "..." }`. `supported` lists the legacy revisions too — they are reachable through `initialize` |
+| 404 | `-32601` | unknown / unimplemented method (`resources/*`, `prompts/*`, `subscriptions/listen`, …). The legacy path keeps HTTP **200** for the same code |
+| 200 | `-32602` | `ValueError` raised by the tool |
+| 200 | `-32603` | any other tool exception. `PermissionError` keeps its message; timeouts report `Tool execution timeout`; everything else is a bare `Internal error` — the exception text is logged, not returned. The legacy-range `-32001` / `-32002` are **not** used on this path |
+
+Successful results carry `resultType: "complete"` and `_meta["io.modelcontextprotocol/serverInfo"]`; `server/discover` and `tools/list` additionally carry the `ttlMs` / `cacheScope` caching hints.
+
 ⚠ The application `error_code` does **not** pass through this path — `MemoryCloudException` falls into the `-32603` bucket with only `exception_type` in `data`. (In practice most tool handlers catch it first, path 4 above.)
 
 ### 6. MCP transport — OAuth 401 challenge (RFC 6750)

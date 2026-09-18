@@ -2,6 +2,8 @@
 
 Implements MCP Streamable HTTP transport (spec 2025-03-26) for remote client connections.
 Issue #248: SSE transport removed (deprecated in MCP spec 2025-03-26).
+Issue #1544: dual-era — requests carrying MCP 2026-07-28 per-request ``_meta``
+are handed to ``mcp_server.transport_stateless`` before any session handling.
 """
 
 import asyncio
@@ -137,17 +139,35 @@ async def _get_user_workspace_id(user_id: str) -> "UUID | None":
         return None
 
 
-# Protocol revisions this transport actually speaks. Both are legacy
-# (initialize-handshake) revisions: 2024-11-05 is what ``initialize`` negotiates,
-# 2025-03-26 is the Streamable HTTP revision this module implements. Never list
-# 2026-07-28 here — that would commit us to the modern per-request ``_meta`` /
-# stateless / ``-32022`` contract, which this server does not implement (#1541).
-SUPPORTED_PROTOCOL_VERSIONS: tuple[str, ...] = ("2025-03-26", "2024-11-05")
+# This is a dual-era server (#1544). MCP 2026-07-28 splits revisions in two:
+#
+# - *legacy* — an ``initialize`` handshake opens a session (``Mcp-Session-Id``).
+#   2024-11-05 is what ``initialize`` negotiates by default, 2025-03-26 is the
+#   Streamable HTTP revision ``handle_streamable_http_post`` implements.
+# - *modern* — no handshake and no session: every request carries its protocol
+#   version in ``params._meta`` and is served statelessly by
+#   ``mcp_server.transport_stateless``.
+#
+# The two sets stay separate because they are reachable through different
+# doors: ``initialize`` must never echo a modern revision (there is no
+# session-scoped 2026-07-28), and per-request ``_meta`` must never select a
+# legacy one. Only ``server/discover`` and the ``-32022`` error list both.
+#
+# Listing legacy revisions alone was the #1544 bug: a ``DiscoverResult`` is
+# itself a modern signal, so a dual-era client stopped falling back to
+# ``initialize`` and a modern-only client (ChatGPT) found no version to speak.
+MODERN_PROTOCOL_VERSIONS: tuple[str, ...] = ("2026-07-28",)
+LEGACY_PROTOCOL_VERSIONS: tuple[str, ...] = ("2025-03-26", "2024-11-05")
+SUPPORTED_PROTOCOL_VERSIONS: tuple[str, ...] = MODERN_PROTOCOL_VERSIONS + LEGACY_PROTOCOL_VERSIONS
 
 # What ``initialize`` answers when the client asks for a revision we do not
 # list (or for none): the spec lets the server reply with another version it
 # supports, and this is what every existing client has been negotiating.
 DEFAULT_PROTOCOL_VERSION = "2024-11-05"
+
+# ``params._meta`` key that carries the per-request protocol version. Its
+# presence is what marks a request as modern (see ``_is_modern_request``).
+PROTOCOL_VERSION_META_KEY = "io.modelcontextprotocol/protocolVersion"
 
 # ``server/discover`` caching hint (MCP 2026-07-28 caching utility): the result
 # is static per deployment, identical for every user → public, one hour.
@@ -168,6 +188,10 @@ def _discover_result() -> dict:
     Issue #1541: ChatGPT sends this before anything else. The result carries the
     same identity and capabilities as ``initialize`` plus the versions we
     support and the MUST caching hints (``ttlMs`` >= 0, ``cacheScope``).
+
+    Issue #1544: ``supportedVersions`` lists both eras — the modern revision a
+    per-request client continues with, and the legacy ones an ``initialize``
+    client negotiates.
     """
     return {
         "resultType": "complete",
@@ -178,6 +202,72 @@ def _discover_result() -> dict:
         "ttlMs": DISCOVER_TTL_MS,
         "cacheScope": "public",
     }
+
+
+def _is_modern_request(body: Any, headers: dict[bytes, bytes]) -> bool:
+    """Decide which era serves a ``POST /mcp`` body (#1544).
+
+    Per MCP 2026-07-28 a dual-era server "selects its behavior from how the
+    client opens": per-request ``_meta`` → stateless, ``initialize`` → legacy.
+
+    The ``MCP-Protocol-Version`` header alone counts only when it names a
+    *modern* revision. Legacy clients (2025-06-18 and later) send that header
+    too, with their negotiated legacy value, and must keep their session. A
+    body that did not parse to a JSON object stays legacy as well: that path
+    already answers it with ``-32700`` / ``-32600``.
+
+    Args:
+        body: The decoded JSON body, or ``None`` when it did not parse.
+        headers: Request headers (lower-cased byte names, as ASGI delivers).
+
+    Returns:
+        True when the stateless 2026-07-28 handler must serve the request —
+        including a request for a modern-looking version we do not support,
+        which has to reach that handler to be answered with ``-32022``.
+    """
+    if not isinstance(body, dict) or body.get("method") == "initialize":
+        return False
+
+    params = body.get("params")
+    meta = params.get("_meta") if isinstance(params, dict) else None
+    if isinstance(meta, dict) and PROTOCOL_VERSION_META_KEY in meta:
+        return True
+
+    header = headers.get(b"mcp-protocol-version")
+    return header is not None and header.decode("latin-1").strip() in MODERN_PROTOCOL_VERSIONS
+
+
+async def _read_body(receive: Receive) -> bytes:
+    """Drain the ASGI request body."""
+    body_bytes = b""
+    while True:
+        message = await receive()
+        if message["type"] == "http.request":
+            body_bytes += message.get("body", b"")
+            if not message.get("more_body", False):
+                break
+        elif message["type"] == "http.disconnect":
+            break
+    return body_bytes
+
+
+def _replay_receive(body_bytes: bytes) -> Receive:
+    """Build a ``receive`` that replays an already-drained body (#1544).
+
+    ``mcp_asgi_app`` has to read the body to pick the era before it decides
+    whether a session is involved at all; the legacy handler still expects to
+    read it from ``receive``.
+    """
+    delivered = False
+
+    async def receive() -> dict[str, Any]:
+        nonlocal delivered
+        if not delivered:
+            delivered = True
+            return {"type": "http.request", "body": body_bytes, "more_body": False}
+        return {"type": "http.disconnect"}
+
+    return receive
 
 
 async def _send_jsonrpc_result(
@@ -216,18 +306,11 @@ async def handle_streamable_http_post(
         session: MCP session
         headers: Request headers dict
     """
-    # Read request body
-    body_bytes = b""
-    while True:
-        message = await receive()
-        if message["type"] == "http.request":
-            body_bytes += message.get("body", b"")
-            if not message.get("more_body", False):
-                break
+    body_bytes = await _read_body(receive)
 
     try:
         body = json.loads(body_bytes.decode("utf-8"))
-    except json.JSONDecodeError as e:
+    except (json.JSONDecodeError, UnicodeDecodeError) as e:
         logger.error(f"MCP POST invalid JSON: {e}")
         await _send_json_error(
             send,
@@ -296,13 +379,16 @@ async def handle_streamable_http_post(
     if method == "initialize":
         logger.info(f"MCP initialize (Streamable HTTP): session={session.session_id}")
 
-        # Echo the requested revision when it is one we advertise through
-        # server/discover, so the two surfaces cannot contradict each other;
-        # anything else negotiates down to the default, as before (#1541).
+        # Echo the requested revision when it is a legacy one we advertise
+        # through server/discover, so the two surfaces cannot contradict each
+        # other; anything else negotiates down to the default, as before
+        # (#1541). A modern revision is never echoed: 2026-07-28 has no
+        # handshake, so there is no session-scoped form of it to agree on
+        # (#1544).
         params = body.get("params")
         requested = params.get("protocolVersion") if isinstance(params, dict) else None
         protocol_version = (
-            requested if requested in SUPPORTED_PROTOCOL_VERSIONS else DEFAULT_PROTOCOL_VERSION
+            requested if requested in LEGACY_PROTOCOL_VERSIONS else DEFAULT_PROTOCOL_VERSION
         )
 
         # Session ID is returned in the mcp-session-id header
@@ -419,7 +505,9 @@ async def handle_streamable_http_post(
         await _send_jsonrpc_result(send, session, request_id, {})
         return
 
-    # Handle server/discover request (MCP 2026-07-28 discovery)
+    # Handle server/discover request (MCP 2026-07-28 discovery). A conforming
+    # client sends it with per-request ``_meta`` and is served by the stateless
+    # handler; only a bare probe without that metadata lands here (#1544).
     elif method == "server/discover":
         logger.info(f"MCP server/discover (Streamable HTTP): session={session.session_id}")
         await _send_jsonrpc_result(send, session, request_id, _discover_result())
@@ -427,10 +515,9 @@ async def handle_streamable_http_post(
 
     # Unknown / unimplemented request method → -32601 Method not found.
     # HTTP 200 + JSON-RPC error, like the tools/call error path above: this
-    # server speaks the legacy (initialize-handshake) protocol, and the
-    # 404 + -32601 shape is the *modern* (2026-07-28) contract — a dual-era
-    # client would read that as "modern server" and never fall back to
-    # ``initialize``.
+    # handler is the legacy (initialize-handshake) half of the server, and the
+    # 404 + -32601 shape belongs to the *modern* (2026-07-28) contract, which
+    # ``transport_stateless`` answers for requests carrying modern ``_meta``.
     # ``method`` is client-supplied and unbounded: repr() + a length cap keep a
     # crafted value from forging log lines or bloating the echoed message.
     shown_method = method[:100]
@@ -724,6 +811,33 @@ async def mcp_asgi_app(scope: Scope, receive: Receive, send: Send) -> None:
         )
         await send({"type": "http.response.body", "body": error_response})
         return
+
+    # Era split (#1544). Runs after authentication and the workspace checks
+    # above, so both eras inherit them, and BEFORE any session handling: a
+    # modern (MCP 2026-07-28) request is stateless — it neither needs nor mints
+    # an ``Mcp-Session-Id``, and a stale one on it is ignored rather than 404'd.
+    # ``/mcp/`` is what the FastAPI routes normalize to; ``/mcp`` is the raw
+    # ASGI mount.
+    if method == "POST" and path in ("/mcp", "/mcp/"):
+        body_bytes = await _read_body(receive)
+        try:
+            parsed_body = json.loads(body_bytes.decode("utf-8"))
+        except (json.JSONDecodeError, UnicodeDecodeError):
+            parsed_body = None  # the legacy handler owns the -32700 answer
+
+        if _is_modern_request(parsed_body, headers):
+            from mcp_server.transport_stateless import handle_stateless_post
+
+            try:
+                await handle_stateless_post(
+                    send, parsed_body, headers, user_id=user_id, workspace_id=workspace_id
+                )
+            except Exception as e:
+                logger.error(f"MCP stateless handler exception: {e}", exc_info=True)
+                raise
+            return
+
+        receive = _replay_receive(body_bytes)
 
     # Get or create session. Priority: URL path, header, query parameter.
     session_id = _extract_session_id(method, path, headers, scope.get("query_string", b""))
