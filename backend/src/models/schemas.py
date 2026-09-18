@@ -266,7 +266,16 @@ class RecallRequest(BaseModel):
     # ample room for HyDE-style hypothetical-answer queries.
     query: str = Field(..., min_length=1, max_length=8000, description="検索クエリ")
     k: int = Field(default=5, ge=1, le=100, description="返却結果数")
-    use_rerank: bool = Field(default=False, description="Reranking (Voyage/Cohere)を使用")
+    # #1572: None means "caller did not specify" — SearchService then follows the
+    # context's search config (use_rerank). An explicit False forces off; an
+    # explicit True still requires the context to allow it (#130 AND gate).
+    use_rerank: bool | None = Field(
+        default=None,
+        description=(
+            "Reranking (Voyage/Cohere BYOK, or self_hosted). Omit to follow the "
+            "context's search config; set false to force off."
+        ),
+    )
     filters: dict | None = Field(default=None, description="オプショナルフィルタ")
     # #1212: None means "caller did not specify". MemoryService.recall resolves
     # it to "hybrid" — or, when the context opts into routing_mode='active', to

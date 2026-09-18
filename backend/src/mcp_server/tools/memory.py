@@ -570,7 +570,8 @@ async def handle_recall(
     request = RecallRequest(
         query=args["query"],
         k=args.get("k", 5),
-        use_rerank=args.get("use_rerank", False),
+        # #1572: None when omitted → SearchService follows the context's config.
+        use_rerank=args.get("use_rerank"),
         filters=args.get("filters"),
         # #1212: pass None through when the caller omitted search_mode so the
         # query router can act on contexts with routing_mode='active';

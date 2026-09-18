@@ -585,8 +585,11 @@ def get_config_schema() -> dict[str, ConfigKeySchema]:
             key="ENABLE_RERANKING",
             type="boolean",
             category="search",
-            description="Enable AI reranking for search results (Cohere or Voyage provider)",
-            default_value=False,
+            description=(
+                "Enable AI reranking for search results (BYOK Voyage/Cohere, or the "
+                "self_hosted reranker). When false no context reranks (#1572)."
+            ),
+            default_value=True,
             requires_restart=False,
             impact="Improves search accuracy with AI reranking. Adds latency and cost per query.",
             examples=["true", "false"],
