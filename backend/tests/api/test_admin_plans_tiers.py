@@ -106,6 +106,16 @@ def test_list_plan_tiers_exposes_new_quota_fields(client: TestClient) -> None:
     assert free["max_members_per_workspace"] == 1
     assert pro["max_members_per_workspace"] == 10
 
+    # #1550: owned-workspace grant (raw tier field) + the resulting per-user
+    # cap with zero slot bonus (1 + grant) as its own row.
+    assert (free["owned_workspace_grant"], pro["owned_workspace_grant"]) == (0, 2)
+    assert (
+        free["owned_workspaces"],
+        basic["owned_workspaces"],
+        pro["owned_workspaces"],
+        _promax["owned_workspaces"],
+    ) == (1, 1, 3, 20)
+
     # max_resource_tokens (zero-floored on FREE)
     assert free["max_resource_tokens"] == 0
     assert pro["max_resource_tokens"] == 30

@@ -26,19 +26,24 @@ async def users_with_varied_cap(db_session: AsyncSession) -> dict:
     - baseline:     bonus=0, owns 1 live workspace            → 1 / 1 (at cap)
     - bonus_grant:  bonus=2, owns 1 live + 1 soft-deleted    → 1 / 3 (not at cap)
     - zero_owned:   bonus=0, owns 0                          → 0 / 1
+    - pro_owner:    bonus=0, owns 1 live PRO workspace       → 1 / 3 (#1550 grant +2)
     """
     baseline = make_user(workspace_slot_bonus=0, name="Baseline User")
     bonus_grant = make_user(workspace_slot_bonus=2, name="Bonus User")
     zero_owned = make_user(workspace_slot_bonus=0, name="Zero Owned User")
-    db_session.add_all([baseline, bonus_grant, zero_owned])
+    pro_owner = make_user(workspace_slot_bonus=0, name="Pro Owner User")
+    db_session.add_all([baseline, bonus_grant, zero_owned, pro_owner])
     await db_session.flush()
 
+    # free workspaces: these three pin the bonus-only shapes (#1550 — a pro
+    # workspace would add +2 via the tier grant; see ``pro_owner`` below).
     db_session.add_all(
         [
-            make_workspace(owner_user_id=baseline.user_id, soft_deleted=False),
-            make_workspace(owner_user_id=bonus_grant.user_id, soft_deleted=False),
-            make_workspace(owner_user_id=bonus_grant.user_id, soft_deleted=True),
+            make_workspace(owner_user_id=baseline.user_id, soft_deleted=False, plan_name="free"),
+            make_workspace(owner_user_id=bonus_grant.user_id, soft_deleted=False, plan_name="free"),
+            make_workspace(owner_user_id=bonus_grant.user_id, soft_deleted=True, plan_name="free"),
             # zero_owned: intentionally no workspaces
+            make_workspace(owner_user_id=pro_owner.user_id, soft_deleted=False, plan_name="pro"),
         ]
     )
     await db_session.commit()
@@ -47,6 +52,7 @@ async def users_with_varied_cap(db_session: AsyncSession) -> dict:
         "baseline": baseline.user_id,
         "bonus_grant": bonus_grant.user_id,
         "zero_owned": zero_owned.user_id,
+        "pro_owner": pro_owner.user_id,
     }
 
 
@@ -114,6 +120,25 @@ class TestListUsersCapColumn:
         assert target.owned_count == 0
         assert target.workspace_slot_bonus == 0
         assert target.cap == 1
+
+    @pytest.mark.asyncio
+    async def test_pro_owner_gets_tier_grant_in_bulk_query(
+        self,
+        db_session: AsyncSession,
+        users_with_varied_cap: dict,
+    ) -> None:
+        """#1550: the bulk cap query must include the highest owned tier's
+        grant — 1 pro workspace, bonus 0 → cap 3 (1 base + 2), not 1."""
+        response = await list_users(user=mock_admin(), db=db_session, **_LIST_DEFAULTS)
+        target = next(
+            (u for u in response.users if u.id == users_with_varied_cap["pro_owner"]),
+            None,
+        )
+        assert target is not None
+        assert target.owned_count == 1
+        assert target.workspace_slot_bonus == 0
+        assert target.base_cap == 1
+        assert target.cap == 3
 
     @pytest.mark.asyncio
     async def test_pagination_total_unchanged_by_cap_join(

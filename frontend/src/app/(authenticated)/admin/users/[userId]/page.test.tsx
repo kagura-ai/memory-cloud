@@ -248,6 +248,55 @@ describe("Workspace Capacity section (#676)", () => {
     ).not.toBeInTheDocument();
   });
 
+  it("includes tier_grant in the -1 projection: at-cap-after-decrement is not destructive (#1550)", async () => {
+    // pro owner: 3 owned, bonus 1, grant 2 → cap 4. Decrementing lands on
+    // cap 3 = base 1 + grant 2 + bonus 0 ≥ owned 3, so no reason modal.
+    // Without the grant in the projection (1 + 0 = 1 < 3) the modal would open.
+    mockGet.mockResolvedValueOnce(
+      detailWith({
+        owned_count: 3,
+        workspace_slot_bonus: 1,
+        base_cap: 1,
+        tier_grant: 2,
+        tier: "pro",
+        cap: 4,
+        is_at_cap: false,
+        owned_workspaces: [],
+      }),
+    );
+    mockUpdateBonus.mockResolvedValueOnce({
+      before_value: 1,
+      after_value: 0,
+      owned_count: 3,
+      base_cap: 1,
+      cap: 3,
+      is_at_cap: true,
+      reason: null,
+    });
+    render(<UserDetailPage />);
+    await screen.findByTestId(USER_DETAIL_TEST_IDS.workspaceCapacitySection);
+
+    // The formula line surfaces the grant term.
+    expect(
+      screen.getByTestId(USER_DETAIL_TEST_IDS.workspaceCapacityCapDisplay)
+        .textContent,
+    ).toMatch(/grant=2/);
+
+    fireEvent.click(
+      screen.getByTestId(USER_DETAIL_TEST_IDS.workspaceCapacityDecrement),
+    );
+
+    await waitFor(() => {
+      expect(mockUpdateBonus).toHaveBeenCalledWith("u_test_123", {
+        delta: -1,
+        reason: null,
+      });
+    });
+    expect(
+      screen.queryByTestId(USER_DETAIL_TEST_IDS.reasonModal),
+    ).not.toBeInTheDocument();
+  });
+
   it("opens reason modal for destructive -1 and submits with reason", async () => {
     mockGet.mockResolvedValueOnce(
       detailWith({

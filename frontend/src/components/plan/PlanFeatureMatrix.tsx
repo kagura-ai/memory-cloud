@@ -45,6 +45,9 @@ interface MatrixRow {
 const ROWS: MatrixRow[] = [
   { key: "contexts", field: "max_contexts", kind: "number" },
   { key: "members", field: "max_members", kind: "number" },
+  // #1550: owned-workspace cap for a user whose top workspace is on this
+  // tier (1 base + tier grant; per-user slot bonuses stack on top).
+  { key: "ownedWorkspaces", field: "owned_workspaces", kind: "number" },
   { key: "memories", field: "memory_limit", kind: "number" },
   { key: "storage", field: "storage_limit_bytes", kind: "bytes" },
   { key: "mcpPerDay", field: "mcp_calls_per_day", kind: "number" },
