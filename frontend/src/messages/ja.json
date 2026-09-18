@@ -1204,6 +1204,7 @@
       "row_sleepContexts": "Sleep対応コンテキスト",
       "row_reranking": "リランキング",
       "row_managedEmbeddings": "マネージド埋め込み",
+      "row_managedLlm": "マネージドLLMでの分析",
       "row_secretStore": "シークレット",
       "row_sharedContexts": "共有コンテキスト",
       "row_teamInvitations": "チーム招待",

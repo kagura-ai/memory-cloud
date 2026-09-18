@@ -1205,6 +1205,7 @@
       "row_sleepContexts": "Sleep-enabled contexts",
       "row_reranking": "Reranking",
       "row_managedEmbeddings": "Managed embeddings",
+      "row_managedLlm": "Analysis on the managed LLM",
       "row_secretStore": "Secrets",
       "row_sharedContexts": "Shared contexts",
       "row_teamInvitations": "Team invitations",

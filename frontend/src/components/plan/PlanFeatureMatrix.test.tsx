@@ -48,6 +48,7 @@ const TIERS = [
     sleep_enabled_contexts_limit: 0,
     reranking: false,
     managed_embeddings: false,
+    managed_llm: false,
     secret_store: true,
     shared_contexts: false,
     team_invitations: false,
@@ -76,6 +77,7 @@ const TIERS = [
     sleep_enabled_contexts_limit: 0,
     reranking: true,
     managed_embeddings: true,
+    managed_llm: false,
     secret_store: true,
     shared_contexts: false,
     team_invitations: false,
@@ -101,6 +103,7 @@ const TIERS = [
     sleep_enabled_contexts_limit: 3,
     reranking: true,
     managed_embeddings: true,
+    managed_llm: true,
     secret_store: true,
     shared_contexts: true,
     team_invitations: true,
@@ -129,6 +132,7 @@ const TIERS = [
     sleep_enabled_contexts_limit: 15,
     reranking: true,
     managed_embeddings: true,
+    managed_llm: true,
     secret_store: true,
     shared_contexts: true,
     team_invitations: true,
@@ -136,7 +140,6 @@ const TIERS = [
     connectors: true,
     public_contexts: true,
   },
-
 ];
 
 beforeEach(() => {
@@ -247,6 +250,11 @@ describe("PlanFeatureMatrix (#1138)", () => {
     const team = rowOf("planMatrix.row_teamInvitations");
     expect(team.getAllByText("✓").length).toBe(2);
     expect(team.getAllByText("✗").length).toBe(2);
+
+    // #1569: managed_llm rides with memory_analysis (Pro-or-better).
+    const managedLlm = rowOf("planMatrix.row_managedLlm");
+    expect(managedLlm.getAllByText("✓").length).toBe(2);
+    expect(managedLlm.getAllByText("✗").length).toBe(2);
 
     // secret_store (Volt) is included on every tier.
     const secrets = rowOf("planMatrix.row_secretStore");
