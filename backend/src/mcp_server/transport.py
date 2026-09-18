@@ -7,7 +7,7 @@ Issue #248: SSE transport removed (deprecated in MCP spec 2025-03-26).
 import asyncio
 import json
 import logging
-from typing import TYPE_CHECKING, Any, cast
+from typing import TYPE_CHECKING, Any
 from uuid import UUID
 
 from starlette.responses import Response
@@ -137,6 +137,67 @@ async def _get_user_workspace_id(user_id: str) -> "UUID | None":
         return None
 
 
+# Protocol revisions this transport actually speaks. Both are legacy
+# (initialize-handshake) revisions: 2024-11-05 is what ``initialize`` negotiates,
+# 2025-03-26 is the Streamable HTTP revision this module implements. Never list
+# 2026-07-28 here — that would commit us to the modern per-request ``_meta`` /
+# stateless / ``-32022`` contract, which this server does not implement (#1541).
+SUPPORTED_PROTOCOL_VERSIONS: tuple[str, ...] = ("2025-03-26", "2024-11-05")
+
+# What ``initialize`` answers when the client asks for a revision we do not
+# list (or for none): the spec lets the server reply with another version it
+# supports, and this is what every existing client has been negotiating.
+DEFAULT_PROTOCOL_VERSION = "2024-11-05"
+
+# ``server/discover`` caching hint (MCP 2026-07-28 caching utility): the result
+# is static per deployment, identical for every user → public, one hour.
+DISCOVER_TTL_MS = 60 * 60 * 1000
+
+SERVER_INFO = {"name": "kagura-memory-cloud", "version": APP_VERSION}
+SERVER_CAPABILITIES: dict[str, dict] = {"tools": {}}
+SERVER_INSTRUCTIONS = (
+    "Kagura Memory Cloud: persistent memory for AI agents. Call list_contexts "
+    "first to discover context IDs, then remember / recall / explore within a "
+    "context. All tools take context_id explicitly."
+)
+
+
+def _discover_result() -> dict:
+    """Build the ``server/discover`` result (MCP 2026-07-28 DiscoverResult).
+
+    Issue #1541: ChatGPT sends this before anything else. The result carries the
+    same identity and capabilities as ``initialize`` plus the versions we
+    support and the MUST caching hints (``ttlMs`` >= 0, ``cacheScope``).
+    """
+    return {
+        "resultType": "complete",
+        "supportedVersions": list(SUPPORTED_PROTOCOL_VERSIONS),
+        "capabilities": SERVER_CAPABILITIES,
+        "_meta": {"io.modelcontextprotocol/serverInfo": SERVER_INFO},
+        "instructions": SERVER_INSTRUCTIONS,
+        "ttlMs": DISCOVER_TTL_MS,
+        "cacheScope": "public",
+    }
+
+
+async def _send_jsonrpc_result(
+    send: Send, session: "MCPSession", request_id: Any, result: dict
+) -> None:
+    """Send a JSON-RPC success response for the Streamable HTTP session."""
+    response = {"jsonrpc": "2.0", "id": request_id, "result": result}
+    await send(
+        {
+            "type": "http.response.start",
+            "status": 200,
+            "headers": [
+                [b"content-type", b"application/json"],
+                [b"mcp-session-id", session.session_id.encode()],
+            ],
+        }
+    )
+    await send({"type": "http.response.body", "body": json.dumps(response).encode()})
+
+
 async def handle_streamable_http_post(
     scope: Scope,
     receive: Receive,
@@ -179,51 +240,82 @@ async def handle_streamable_http_post(
         )
         return
 
-    # Check if this is a notification (no "id" field)
-    is_notification = "id" not in body
+    # A JSON-RPC message is a single object. A scalar body used to raise
+    # TypeError on the membership test below (HTTP 500), and a batch array
+    # passed it by list membership and was 202'd as a "notification", leaving
+    # the client waiting for a response that never came (#1541 review).
+    # Batching is not supported by this transport.
+    if not isinstance(body, dict):
+        await _send_json_error(
+            send,
+            400,
+            {
+                "jsonrpc": "2.0",
+                "error": {
+                    "code": -32600,
+                    "message": (
+                        "Invalid Request: expected a single JSON-RPC object "
+                        "(batch arrays are not supported)"
+                    ),
+                },
+                "id": None,
+            },
+        )
+        return
 
-    if is_notification:
-        # Notifications don't expect a response - return 202 Accepted
-        logger.info(f"MCP notification: method={body.get('method')}, session={session.session_id}")
+    method = body.get("method")
+    request_id = body.get("id")  # None for a notification
+
+    # Every JSON-RPC message from the client — request or notification — must
+    # name its method. This runs BEFORE the notification short-circuit: checked
+    # after it, a malformed envelope with no ``id`` (``{}``, ``{"method": 5}``)
+    # was silently 202'd as a "notification" and never reached the guard
+    # (#1541 review). Without it, -32601 "Method not found: None" would also
+    # blame a method the client never sent.
+    if not isinstance(method, str) or not method:
+        await _send_json_error(
+            send,
+            400,
+            {
+                "jsonrpc": "2.0",
+                "error": {"code": -32600, "message": "Invalid Request: missing method"},
+                "id": request_id,
+            },
+        )
+        return
+
+    # A valid notification (string method, no "id") expects no response.
+    if "id" not in body:
+        shown = method[:100]
+        logger.info(f"MCP notification: method={shown!r}, session={session.session_id}")
         await send({"type": "http.response.start", "status": 202, "headers": []})
         await send({"type": "http.response.body", "body": b""})
         return
-
-    # Check request method
-    method = body.get("method")
-    request_id = body.get("id")
 
     # Handle initialize request
     if method == "initialize":
         logger.info(f"MCP initialize (Streamable HTTP): session={session.session_id}")
 
-        response = {
-            "jsonrpc": "2.0",
-            "id": request_id,
-            "result": {
-                "protocolVersion": "2024-11-05",
-                "capabilities": {"tools": {}},
-                "serverInfo": {
-                    "name": "kagura-memory-cloud",
-                    "version": APP_VERSION,
-                },
-            },
-        }
-
-        response_body = json.dumps(response).encode()
-
-        # Return session ID in header
-        await send(
-            {
-                "type": "http.response.start",
-                "status": 200,
-                "headers": [
-                    [b"content-type", b"application/json"],
-                    [b"mcp-session-id", session.session_id.encode()],
-                ],
-            }
+        # Echo the requested revision when it is one we advertise through
+        # server/discover, so the two surfaces cannot contradict each other;
+        # anything else negotiates down to the default, as before (#1541).
+        params = body.get("params")
+        requested = params.get("protocolVersion") if isinstance(params, dict) else None
+        protocol_version = (
+            requested if requested in SUPPORTED_PROTOCOL_VERSIONS else DEFAULT_PROTOCOL_VERSION
         )
-        await send({"type": "http.response.body", "body": response_body})
+
+        # Session ID is returned in the mcp-session-id header
+        await _send_jsonrpc_result(
+            send,
+            session,
+            request_id,
+            {
+                "protocolVersion": protocol_version,
+                "capabilities": SERVER_CAPABILITIES,
+                "serverInfo": SERVER_INFO,
+            },
+        )
         return
 
     # Handle tools/list request
@@ -233,25 +325,7 @@ async def handle_streamable_http_post(
         from mcp_server.tools import get_tool_definitions
 
         tools = get_tool_definitions()
-        response = {
-            "jsonrpc": "2.0",
-            "id": request_id,
-            "result": {"tools": tools},
-        }
-
-        response_body = json.dumps(response).encode()
-
-        await send(
-            {
-                "type": "http.response.start",
-                "status": 200,
-                "headers": [
-                    [b"content-type", b"application/json"],
-                    [b"mcp-session-id", session.session_id.encode()],
-                ],
-            }
-        )
-        await send({"type": "http.response.body", "body": response_body})
+        await _send_jsonrpc_result(send, session, request_id, {"tools": tools})
         return
 
     # Handle tools/call request
@@ -277,26 +351,12 @@ async def handle_streamable_http_post(
                 workspace_id=session.workspace_id,  # Issue #204: Pass workspace_id for workspace info
             )
 
-            # Format response
-            response = {
-                "jsonrpc": "2.0",
-                "id": request_id,
-                "result": {"content": [{"type": item.type, "text": item.text} for item in result]},
-            }
-
-            response_body = json.dumps(response).encode()
-
-            await send(
-                {
-                    "type": "http.response.start",
-                    "status": 200,
-                    "headers": [
-                        [b"content-type", b"application/json"],
-                        [b"mcp-session-id", session.session_id.encode()],
-                    ],
-                }
+            await _send_jsonrpc_result(
+                send,
+                session,
+                request_id,
+                {"content": [{"type": item.type, "text": item.text} for item in result]},
             )
-            await send({"type": "http.response.body", "body": response_body})
             return
 
         except Exception as e:
@@ -344,35 +404,50 @@ async def handle_streamable_http_post(
             await send({"type": "http.response.body", "body": error_body})
             return
 
-    # For other requests, use existing transport mechanism
-    # Reuse the legacy POST message handler
-    logger.info(f"MCP request (Streamable HTTP): method={method}, session={session.session_id}")
+    # Issue #1541: everything below used to fall through to a "legacy
+    # transport" path that dereferenced ``session.transport`` — an attribute
+    # MCPSession has not had since #248 (SSE removal) — so ANY other
+    # id-bearing request was a guaranteed AttributeError → HTTP 500. ChatGPT
+    # opens every session with ``server/discover`` (MCP 2026-07-28) and hit
+    # it on each connector registration. Notifications never reach here (202
+    # above); requests are answered explicitly, and the unknown case is a
+    # JSON-RPC ``-32601`` instead of a crash.
 
-    # Create modified scope for legacy handler
-    modified_scope = dict(scope)
-    modified_scope["path"] = f"/messages/{session.session_id}/"
-    modified_scope["raw_path"] = f"/messages/{session.session_id}/".encode()
+    # Handle ping request (spec utility; MUST answer with an empty result)
+    elif method == "ping":
+        logger.info(f"MCP ping (Streamable HTTP): session={session.session_id}")
+        await _send_jsonrpc_result(send, session, request_id, {})
+        return
 
-    # Create a new receive callable that replays the body
-    body_sent = False
+    # Handle server/discover request (MCP 2026-07-28 discovery)
+    elif method == "server/discover":
+        logger.info(f"MCP server/discover (Streamable HTTP): session={session.session_id}")
+        await _send_jsonrpc_result(send, session, request_id, _discover_result())
+        return
 
-    async def replay_receive():
-        nonlocal body_sent
-        if not body_sent:
-            body_sent = True
-            return {
-                "type": "http.request",
-                "body": body_bytes,
-                "more_body": False,
-            }
-        # After body is sent, wait for disconnect
-        return await receive()
-
-    # Use existing transport handler with replayed body.
-    # MCPSession (post Issue #248 SSE removal) does not formally declare a
-    # `transport` attribute on its dataclass — the fallthrough path in
-    # Streamable HTTP relies on a runtime attribute attached elsewhere.
-    await cast(Any, session).transport.handle_post_message(modified_scope, replay_receive, send)
+    # Unknown / unimplemented request method → -32601 Method not found.
+    # HTTP 200 + JSON-RPC error, like the tools/call error path above: this
+    # server speaks the legacy (initialize-handshake) protocol, and the
+    # 404 + -32601 shape is the *modern* (2026-07-28) contract — a dual-era
+    # client would read that as "modern server" and never fall back to
+    # ``initialize``.
+    # ``method`` is client-supplied and unbounded: repr() + a length cap keep a
+    # crafted value from forging log lines or bloating the echoed message.
+    shown_method = method[:100]
+    logger.info(
+        f"MCP unknown method (Streamable HTTP): method={shown_method!r}, "
+        f"session={session.session_id}"
+    )
+    await _send_json_error(
+        send,
+        200,
+        {
+            "jsonrpc": "2.0",
+            "id": request_id,
+            "error": {"code": -32601, "message": f"Method not found: {shown_method}"},
+        },
+        [[b"mcp-session-id", session.session_id.encode()]],
+    )
 
 
 async def handle_streamable_http_get(
