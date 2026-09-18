@@ -63,6 +63,28 @@ class TestParse:
         (override,) = parse_llm_pricing_overrides(json.dumps([{**_ENTRY, "price_per_unit": 0}]))
         assert override.price_per_unit == Decimal("0")
 
+    @pytest.mark.parametrize(
+        ("value", "expected"),
+        [
+            ("0.0000000001", Decimal("0.0000000001")),
+            (1e-10, Decimal("0.0000000001")),
+            ("0.0200000000000", Decimal("0.02")),  # trailing zeros are not precision
+        ],
+    )
+    def test_price_within_column_scale_is_accepted(self, value, expected):
+        # 10 decimals is the column's scale (Numeric(14, 10)).
+        (override,) = parse_llm_pricing_overrides(json.dumps([{**_ENTRY, "price_per_unit": value}]))
+        assert override.price_per_unit == expected
+
+    @pytest.mark.parametrize("value", ["0.00000000005", 5e-11, "0.12345678901"])
+    def test_price_beyond_column_scale_is_rejected(self, value):
+        # Postgres would round the 11th decimal HALF_UP on INSERT and the
+        # stored row would never compare equal to the configured price —
+        # the sync would append a row on every boot. Refuse, don't round.
+        raw = json.dumps([{**_ENTRY, "price_per_unit": value}])
+        with pytest.raises(ValueError, match="LLM_PRICING_OVERRIDES.*entry 0.*decimal places"):
+            parse_llm_pricing_overrides(raw)
+
     def test_whitespace_around_names_is_stripped(self):
         (override,) = parse_llm_pricing_overrides(
             json.dumps([{**_ENTRY, "provider": " self_hosted ", "model": " m "}])

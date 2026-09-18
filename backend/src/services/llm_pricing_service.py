@@ -35,7 +35,7 @@ from __future__ import annotations
 from collections.abc import Iterable
 from dataclasses import dataclass, field
 from datetime import date, datetime
-from decimal import Decimal
+from decimal import ROUND_HALF_UP, Decimal
 from typing import TYPE_CHECKING, Final
 
 from cachetools import TTLCache
@@ -335,8 +335,11 @@ class LLMPricingService:
 # ---------------------------------------------------------------------------
 
 # ``llm_pricing.price_per_unit`` is ``Numeric(14, 10)``; compare at the column's
-# scale so an override with more decimals than the column keeps does not read
-# back as "different" and re-insert on every boot.
+# scale. The parser already refuses more decimals than the column keeps
+# (``config.llm_pricing_overrides.MAX_PRICE_DECIMALS``), so for parsed entries
+# this only normalizes the exponent; an override built elsewhere is rounded the
+# way Postgres rounds on INSERT (HALF_UP, not Decimal's default HALF_EVEN) so
+# it does not read back as "different" and re-insert on every boot.
 _PRICE_SCALE: Final = Decimal("1e-10")
 
 
@@ -415,7 +418,7 @@ async def sync_llm_pricing_overrides(
     result = SyncResult()
     for override in overrides:
         current = await _effective_row(db, override, now=now)
-        wanted_price = override.price_per_unit.quantize(_PRICE_SCALE)
+        wanted_price = override.price_per_unit.quantize(_PRICE_SCALE, rounding=ROUND_HALF_UP)
         if (
             current is not None
             and Decimal(current.price_per_unit) == wanted_price

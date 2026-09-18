@@ -538,8 +538,9 @@ LLM_PRICING_OVERRIDES='[
   `output_tokens` for its cost to be known.
 - `price_per_unit`: USD per `unit_denominator` units (default `1000000`, i.e.
   per million tokens; a vendor quoting per 1k tokens can pass
-  `"unit_denominator": 1000`). Optional `context_min_tokens` for tiered rate
-  cards.
+  `"unit_denominator": 1000`). At most 10 decimal places (the column's
+  scale) — a finer figure is refused rather than rounded. Optional
+  `context_min_tokens` for tiered rate cards.
 - **USD only.** Every figure in the platform is USD; a vendor billing in
   another currency is entered at the converted USD price (and re-entered when
   the exchange rate moves enough to matter).
