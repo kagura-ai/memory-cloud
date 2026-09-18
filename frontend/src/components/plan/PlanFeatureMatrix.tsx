@@ -49,6 +49,7 @@ const ROWS: MatrixRow[] = [
   // tier (1 base + tier grant; per-user slot bonuses stack on top).
   { key: "ownedWorkspaces", field: "owned_workspaces", kind: "number" },
   { key: "memories", field: "memory_limit", kind: "number" },
+  { key: "memoriesPerDay", field: "memories_per_day", kind: "number" }, // #1549
   { key: "storage", field: "storage_limit_bytes", kind: "bytes" },
   { key: "mcpPerDay", field: "mcp_calls_per_day", kind: "number" },
   { key: "restPerDay", field: "rest_calls_per_day", kind: "number" },
@@ -144,7 +145,9 @@ export function PlanFeatureMatrix({
         no
       );
     }
-    const n = value as number;
+    // A field an older API omits (e.g. memories_per_day before #1549) renders
+    // as ✗ rather than crashing on `undefined.toLocaleString`.
+    const n = (value as number | undefined) ?? 0;
     if (n === 0) return no;
     return row.kind === "bytes" ? formatStorage(n) : n.toLocaleString(locale);
   };

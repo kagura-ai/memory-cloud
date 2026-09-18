@@ -38,6 +38,7 @@ from models.memory import (  # Issue #262: Memory model for resource data storag
 from models.resource import IndexerState, Resource, ResourceEvent, ResourceSchema
 from services.context_routing import resolve_context_routing
 from services.embedding_service import EmbeddingService
+from services.quota_service import QuotaService
 from utils.datetime import to_utc_iso, utcnow
 from utils.exceptions import QdrantError
 from utils.logger import get_logger
@@ -88,6 +89,7 @@ _KNOWN_SKIPPED_REASONS: frozenset[str] = frozenset(
         "context_not_found",
         "empty_valid_points",
         "resource_entity_missing",
+        "memories_per_day_exceeded",  # #1549: batch deferred to the UTC reset
     }
 )
 
@@ -371,6 +373,43 @@ class ResourceIndexer:
             collection_name, embedding_service = await resolve_context_routing(
                 self.db, context_id, default_service=self.embedding_service
             )
+
+            # Issue #1549: charge the daily memory-creation quota ONCE for the
+            # whole batch, up front, for the doc_ids that do not exist yet. A
+            # re-index of a known doc (the update branch of _apply_upsert, or a
+            # new version that replaces the old row) creates no net row and
+            # must not burn the workspace's shared daily budget — one SELECT
+            # splits the batch into new vs known. All-or-nothing: a batch that
+            # does not fit is left untouched (offset unchanged) and the job
+            # re-queues the row for the next UTC midnight, when the counter
+            # resets (tasks/resource_indexer_job.py). Deletes create nothing.
+            # A batch larger than the whole daily limit never fits, so an
+            # operator lowering ``PLAN_*_MEMORIES_PER_DAY`` below ``batch_size``
+            # must lower the batch size too.
+            upsert_doc_ids = {event.doc_id for event in events if event.op == "upsert"}
+            if upsert_doc_ids:
+                known_doc_ids = await self._existing_resource_doc_ids(
+                    resource_id, context, upsert_doc_ids
+                )
+                new_count = len(upsert_doc_ids - known_doc_ids)
+            else:
+                new_count = 0
+            if new_count:
+                allowed, quota_error = await QuotaService(self.db).check_memories_per_day(
+                    context.workspace_id, count=new_count
+                )
+                if not allowed:
+                    metrics.skipped = True
+                    metrics.reason = "memories_per_day_exceeded"
+                    logger.warning(
+                        "indexer_memories_per_day_exceeded",
+                        resource_id=resource_id,
+                        context_id=context_id,
+                        workspace_id=str(context.workspace_id),
+                        new_docs=new_count,
+                        error=quota_error,
+                    )
+                    return metrics
 
             # 5. Process each event
             for event in events:
@@ -708,6 +747,11 @@ class ResourceIndexer:
             # Performance: Use generated columns (Migration 061) instead of JSONB search
             # Bugfix: Context uses 'created_by' not 'owner_id'
             # Single Collection Migration: Use workspace_id/context_id instead of collection_name
+            # #1549 review: tombstones are excluded so a doc the user forgot is
+            # RE-CREATED on re-sync (a fresh, visible row — charged once by the
+            # batch gate, which ignores tombstones the same way) instead of
+            # being patched in place under its deleted_at and staying invisible.
+            # Tombstones are terminal: the #1521 sweep hard-deletes them later.
             existing_memory_query = await self.db.execute(
                 select(Memory).where(
                     Memory.user_id == str(context.created_by),
@@ -716,6 +760,7 @@ class ResourceIndexer:
                     Memory.resource_id == event.resource_id,  # Generated column (fast!)
                     Memory.resource_doc_id == event.doc_id,  # Generated column (fast!)
                     Memory.resource_version == event.version,  # Generated column (fast!)
+                    Memory.deleted_at.is_(None),
                 )
             )
             existing_memory = existing_memory_query.scalar_one_or_none()
@@ -1025,6 +1070,36 @@ class ResourceIndexer:
     # ========================================================================
     # Helper Methods
     # ========================================================================
+
+    async def _existing_resource_doc_ids(
+        self,
+        resource_id: str,
+        context: Context,
+        doc_ids: set[str],
+    ) -> set[str]:
+        """Which of ``doc_ids`` already have a live memory in this context (#1549).
+
+        One SELECT on the generated ``resource_doc_id`` column, scoped exactly
+        like ``_apply_upsert``'s existing-memory lookup minus the version, so
+        the daily quota charges only doc_ids the batch will actually create.
+        Soft-deleted rows do not count: a doc the user forgot is a creation
+        again when the connector re-syncs it.
+        """
+        if not doc_ids:
+            return set()
+        result = await self.db.execute(
+            select(Memory.resource_doc_id)
+            .where(
+                Memory.user_id == str(context.created_by),
+                Memory.workspace_id == context.workspace_id,
+                Memory.context_id == context.id,
+                Memory.resource_id == resource_id,
+                Memory.resource_doc_id.in_(doc_ids),
+                Memory.deleted_at.is_(None),
+            )
+            .distinct()
+        )
+        return {doc_id for doc_id in result.scalars().all() if doc_id is not None}
 
     async def _get_or_create_state(
         self,

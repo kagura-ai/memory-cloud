@@ -17,6 +17,9 @@ export interface PlanLimits {
   rest_calls_per_week: number;
   public_calls_per_day: number;
   public_calls_per_week: number;
+  // Issue #1549: memories that may be created per UTC day. Optional so a
+  // frontend deployed ahead of the backend still parses the payload.
+  memories_per_day?: number;
 }
 
 /**
@@ -62,6 +65,7 @@ export interface CurrentUsage {
   rest_calls_this_week: number;
   public_calls_today: number; // Issue #238: Public quota separation
   public_calls_this_week: number;
+  memories_created_today?: number; // Issue #1549 (optional: additive field)
   sleep_contexts: SleepContextsUsage | null; // Issue #560
   // Issue #661 — always populated (user-level cap), unlike sleep_contexts
   // which is workspace-scoped. See backend WorkspacesUsage docstring.
@@ -83,6 +87,7 @@ export interface UsageCurrentResponse {
   memory_usage: UsageStatus;
   daily_api_usage: UsageStatus;
   weekly_api_usage: UsageStatus;
+  memories_today_usage?: UsageStatus | null; // Issue #1549 (optional: additive field)
 }
 
 export interface DailyUsage {

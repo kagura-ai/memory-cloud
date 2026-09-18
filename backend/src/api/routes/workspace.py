@@ -351,9 +351,11 @@ async def get_workspace_usage_current(
                 "rest_calls_per_week": workspace.effective_rest_calls_per_week,
                 "public_calls_per_day": workspace.effective_public_calls_per_day,
                 "public_calls_per_week": workspace.effective_public_calls_per_week,
+                "memories_per_day": workspace.effective_memories_per_day,
             }
 
         effective_memory_limit = effective_quotas["memory_limit"]
+        effective_memories_per_day = effective_quotas["memories_per_day"]
         effective_mcp_daily = effective_quotas["mcp_calls_per_day"]
         effective_mcp_weekly = effective_quotas["mcp_calls_per_week"]
         effective_rest_daily = effective_quotas["rest_calls_per_day"]
@@ -378,6 +380,12 @@ async def get_workspace_usage_current(
             )
         )
         memory_count = memory_count_result.scalar() or 0
+
+        # Issue #1549: today's memory creations come from the Redis day counter
+        # (no DB query — the Issue #65 query-count invariant is unchanged).
+        from services.quota_service import QuotaService
+
+        memories_created_today = await QuotaService(db).count_memories_created_today(workspace.id)
 
         # Issue #65: Single conditional aggregation query replaces 8 sequential COUNTs
         today = utcnow().date()
@@ -431,9 +439,11 @@ async def get_workspace_usage_current(
                 rest_calls_per_week=effective_rest_weekly,
                 public_calls_per_day=effective_public_daily,
                 public_calls_per_week=effective_public_weekly,
+                memories_per_day=effective_memories_per_day,
             ),
             usage=CurrentUsage(
                 memory_count=memory_count,
+                memories_created_today=memories_created_today,
                 api_calls_today=api_calls_today,
                 api_calls_this_week=api_calls_week,
                 mcp_calls_today=mcp_calls_today,
@@ -453,6 +463,9 @@ async def get_workspace_usage_current(
             memory_usage=calculate_usage_status(memory_count, effective_memory_limit),
             daily_api_usage=calculate_usage_status(api_calls_today, effective_daily_api_limit),
             weekly_api_usage=calculate_usage_status(api_calls_week, effective_weekly_api_limit),
+            memories_today_usage=calculate_usage_status(
+                memories_created_today, effective_memories_per_day
+            ),
         )
 
 

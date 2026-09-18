@@ -1192,6 +1192,7 @@
       "row_members": "メンバー",
       "row_ownedWorkspaces": "所有ワークスペース",
       "row_memories": "メモリ",
+      "row_memoriesPerDay": "メモリ作成 / 日",
       "row_storage": "ストレージ",
       "row_mcpPerDay": "MCP呼び出し / 日",
       "row_restPerDay": "REST呼び出し / 日",
@@ -2048,7 +2049,8 @@
     "sleepContextsWithAddon": "extra_sleep_contexts アドオンによる +{addon} を含む",
     "sleepContextsTier": "プラン基本上限 (Sleep メンテナンスは PRO 専用機能)",
     "ownedWorkspaces": "所有 Workspace",
-    "ownedWorkspacesTier": "所有ワークスペース上限（招待 join は無制限）"
+    "ownedWorkspacesTier": "所有ワークスペース上限（招待 join は無制限）",
+    "memoriesCreatedToday": "本日の作成: {count} / {limit}（UTC 0時にリセット）"
   },
   "memoryOverview": {
     "failedToLoad": "メモリー概要の読み込みに失敗しました",
@@ -2406,6 +2408,8 @@
         "contextsPerWorkspaceDescription": "1 ワークスペース内で同時に保持できるメモリーコンテキストの最大数。",
         "memories": "メモリー",
         "memoriesDescription": "ワークスペースあたりの永続メモリー行数（ソフト削除済みは含まず）。",
+        "memoriesPerDay": "メモリー作成（日次）",
+        "memoriesPerDayDescription": "ワークスペースあたり 1 日（UTC）に作成できるメモリー数（remember / REST 作成 / コネクタ取り込み）。更新・Sleep・コンテキスト統合は含まず。0 はこのティアではメモリー作成不可。",
         "mcpCallsPerDay": "MCP 呼び出し（日次）",
         "mcpCallsPerDayDescription": "ワークスペースあたりの 1 日の MCP ツール呼び出し (recall / remember 等) の上限。",
         "analysisRuns": "メモリー分析（日次）",

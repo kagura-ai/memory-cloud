@@ -10,10 +10,14 @@ from unittest.mock import AsyncMock, MagicMock, patch
 from uuid import uuid4
 
 import pytest
+from sqlalchemy import select
 
 from db.qdrant import KAGURA_MEMORIES_BM25_VECTOR_NAME, KAGURA_MEMORIES_VECTOR_NAME
+from models.auth import Context, Workspace
+from models.memory import Memory
 from services.context_routing import resolve_context_routing
 from services.resource_indexer import ResourceIndexer
+from utils.datetime import utcnow
 
 
 def _make_event() -> MagicMock:
@@ -116,6 +120,23 @@ class TestResourceIndexerNamedVectorUpsert:
         )
         assert KAGURA_MEMORIES_VECTOR_NAME in point.vector
         assert point.vector[KAGURA_MEMORIES_VECTOR_NAME] == [0.1] * 512
+
+    @pytest.mark.asyncio
+    async def test_apply_upsert_existing_row_lookup_excludes_tombstones(self, indexer, mock_db):
+        """#1549 review: the idempotency lookup must not match a soft-deleted
+        row, or a forgotten doc is patched under its tombstone (invisible, yet
+        charged) instead of being re-created."""
+        await indexer._apply_upsert(
+            _make_event(),
+            _make_schema(),
+            _make_context(),
+            "kagura_memories",
+            indexer.embedding_service,
+        )
+
+        lookup_sql = str(mock_db.execute.call_args_list[0].args[0])
+        assert "resource_doc_id" in lookup_sql
+        assert "deleted_at IS NULL" in lookup_sql
 
     @pytest.mark.asyncio
     async def test_apply_upsert_attaches_bm25_sparse_vector(self, indexer):
@@ -508,9 +529,14 @@ class TestProcessIncrementalResolvesRoutingOncePerBatch:
         mock_resolve = AsyncMock(return_value=("kagura_memories", stub_embedding_service))
         indexer._apply_upsert = AsyncMock()
         indexer._apply_delete = AsyncMock()
+        indexer._existing_resource_doc_ids = AsyncMock(return_value=set())
         indexer.db.commit = AsyncMock()
 
-        with patch("services.resource_indexer.resolve_context_routing", mock_resolve):
+        with (
+            patch("services.resource_indexer.resolve_context_routing", mock_resolve),
+            patch("services.resource_indexer.QuotaService") as quota_cls,
+        ):
+            quota_cls.return_value.check_memories_per_day = AsyncMock(return_value=(True, None))
             await indexer.process_incremental("res_test", uuid4())
 
         assert mock_resolve.await_count == 1, (
@@ -522,3 +548,250 @@ class TestProcessIncrementalResolvesRoutingOncePerBatch:
             # (event, schema, context, collection_name, embedding_service)
             assert call.args[3] == "kagura_memories"
             assert call.args[4] is stub_embedding_service
+
+
+def _upsert(doc_id: str, version: int = 1) -> MagicMock:
+    event = _make_event()
+    event.doc_id = doc_id
+    event.version = version
+    return event
+
+
+class TestProcessIncrementalMemoriesPerDay:
+    """#1549: connector/resource ingest is charged against the daily
+    memory-creation quota ONCE per batch, up front, for the doc_ids that do
+    not exist yet (a re-index of a known doc creates no row and must not burn
+    the workspace's shared daily budget).
+
+    All-or-nothing: when the batch does not fit, nothing is applied and the
+    offset does not move; the job re-queues the row for the UTC reset.
+    """
+
+    def _indexer(self, events, existing: set[str] | None = None):
+        with patch("services.resource_indexer.get_qdrant_client", return_value=AsyncMock()):
+            indexer = ResourceIndexer(AsyncMock())
+        self.state = MagicMock(last_offset=0, last_run_at=None, metrics=None)
+        self.context = _make_context()
+        indexer._get_or_create_state = AsyncMock(return_value=self.state)
+        indexer._fetch_events = AsyncMock(return_value=events)
+        indexer._get_latest_schema = AsyncMock(return_value=_make_schema())
+        indexer._get_context = AsyncMock(return_value=self.context)
+        indexer._existing_resource_doc_ids = AsyncMock(return_value=existing or set())
+        indexer._apply_upsert = AsyncMock()
+        indexer._apply_delete = AsyncMock()
+        indexer.db.commit = AsyncMock()
+        return indexer
+
+    def _run(self, indexer, allowed: bool):
+        quota = AsyncMock(return_value=(allowed, None if allowed else "over quota"))
+        routing = AsyncMock(return_value=("kagura_memories", MagicMock()))
+        return quota, routing
+
+    @pytest.mark.asyncio
+    async def test_batch_charged_once_with_new_doc_count(self):
+        delete = _make_event()
+        delete.op = "delete"
+        indexer = self._indexer([_upsert("doc_1"), _upsert("doc_2"), delete])
+        quota, routing = self._run(indexer, allowed=True)
+
+        with (
+            patch("services.resource_indexer.resolve_context_routing", routing),
+            patch("services.resource_indexer.QuotaService") as quota_cls,
+        ):
+            quota_cls.return_value.check_memories_per_day = quota
+            metrics = await indexer.process_incremental("res_test", uuid4())
+
+        # Deletes create nothing — only the two new upserts are reserved, in one call.
+        quota.assert_awaited_once_with(self.context.workspace_id, count=2)
+        indexer._existing_resource_doc_ids.assert_awaited_once_with(
+            "res_test", self.context, {"doc_1", "doc_2"}
+        )
+        assert indexer._apply_upsert.await_count == 2
+        assert indexer._apply_delete.await_count == 1
+        assert metrics.skipped is False
+
+    @pytest.mark.asyncio
+    async def test_all_existing_batch_charges_nothing(self):
+        """A connector re-sync of N known docs is N updates, not N creations."""
+        indexer = self._indexer(
+            [_upsert("doc_1", 2), _upsert("doc_2", 2)], existing={"doc_1", "doc_2"}
+        )
+        quota, routing = self._run(indexer, allowed=False)  # would refuse if ever asked
+
+        with (
+            patch("services.resource_indexer.resolve_context_routing", routing),
+            patch("services.resource_indexer.QuotaService") as quota_cls,
+        ):
+            quota_cls.return_value.check_memories_per_day = quota
+            metrics = await indexer.process_incremental("res_test", uuid4())
+
+        quota.assert_not_awaited()
+        assert indexer._apply_upsert.await_count == 2
+        assert metrics.skipped is False
+
+    @pytest.mark.asyncio
+    async def test_mixed_batch_charges_only_new_distinct_doc_ids(self):
+        """doc_1 exists; doc_3 arrives twice (v1, v2) in the same batch — the
+        second is an update of the row the first creates → charge 2, not 4."""
+        indexer = self._indexer(
+            [_upsert("doc_1", 2), _upsert("doc_2"), _upsert("doc_3", 1), _upsert("doc_3", 2)],
+            existing={"doc_1"},
+        )
+        quota, routing = self._run(indexer, allowed=True)
+
+        with (
+            patch("services.resource_indexer.resolve_context_routing", routing),
+            patch("services.resource_indexer.QuotaService") as quota_cls,
+        ):
+            quota_cls.return_value.check_memories_per_day = quota
+            await indexer.process_incremental("res_test", uuid4())
+
+        quota.assert_awaited_once_with(self.context.workspace_id, count=2)
+        assert indexer._apply_upsert.await_count == 4
+
+    @pytest.mark.asyncio
+    async def test_refused_batch_applies_nothing_and_keeps_offset(self):
+        indexer = self._indexer([_upsert("doc_1"), _upsert("doc_2")])
+        quota, routing = self._run(indexer, allowed=False)
+
+        with (
+            patch("services.resource_indexer.resolve_context_routing", routing),
+            patch("services.resource_indexer.QuotaService") as quota_cls,
+        ):
+            quota_cls.return_value.check_memories_per_day = quota
+            metrics = await indexer.process_incremental("res_test", uuid4())
+
+        indexer._apply_upsert.assert_not_awaited()
+        indexer._apply_delete.assert_not_awaited()
+        assert self.state.last_offset == 0
+        indexer.db.commit.assert_not_awaited()
+        assert metrics.skipped is True
+        assert metrics.reason == "memories_per_day_exceeded"
+        assert metrics.errors == 0
+
+    @pytest.mark.asyncio
+    async def test_delete_only_batch_is_not_charged(self):
+        delete = _make_event()
+        delete.op = "delete"
+        indexer = self._indexer([delete])
+        quota, routing = self._run(indexer, allowed=True)
+
+        with (
+            patch("services.resource_indexer.resolve_context_routing", routing),
+            patch("services.resource_indexer.QuotaService") as quota_cls,
+        ):
+            quota_cls.return_value.check_memories_per_day = quota
+            await indexer.process_incremental("res_test", uuid4())
+
+        quota.assert_not_awaited()
+        indexer._existing_resource_doc_ids.assert_not_awaited()
+        assert indexer._apply_delete.await_count == 1
+
+
+class TestExistingResourceDocIds:
+    """The ONE SELECT behind the #1549 new-vs-known split."""
+
+    def _indexer(self, rows):
+        with patch("services.resource_indexer.get_qdrant_client", return_value=AsyncMock()):
+            indexer = ResourceIndexer(AsyncMock())
+        result = MagicMock()
+        result.scalars.return_value.all.return_value = rows
+        indexer.db.execute = AsyncMock(return_value=result)
+        return indexer
+
+    @pytest.mark.asyncio
+    async def test_returns_known_doc_ids_from_a_single_select(self):
+        indexer = self._indexer(["doc_1", "doc_3"])
+
+        known = await indexer._existing_resource_doc_ids(
+            "res_test", _make_context(), {"doc_1", "doc_2", "doc_3"}
+        )
+
+        assert known == {"doc_1", "doc_3"}
+        indexer.db.execute.assert_awaited_once()
+        sql = str(indexer.db.execute.await_args.args[0])
+        assert "resource_doc_id IN" in sql
+        assert "deleted_at IS NULL" in sql
+
+    @pytest.mark.asyncio
+    async def test_empty_input_skips_the_select(self):
+        indexer = self._indexer([])
+
+        assert await indexer._existing_resource_doc_ids("res_test", _make_context(), set()) == set()
+        indexer.db.execute.assert_not_awaited()
+
+
+class TestResyncOfForgottenDoc:
+    """#1549 review, against the real DB: a doc the user ``forget``-ed is
+    re-created on re-sync as a fresh, visible row and charged exactly once —
+    the tombstone neither absorbs the update nor counts as "known"."""
+
+    async def _seed_tombstone(self, db_session):
+        owner = f"owner-{uuid4().hex[:8]}"
+        ws = Workspace(
+            id=uuid4(), name=f"ws-{uuid4().hex[:8]}", plan_name="pro", owner_user_id=owner
+        )
+        db_session.add(ws)
+        await db_session.flush()
+        ctx = Context(
+            id=uuid4(),
+            workspace_id=ws.id,
+            name=f"ctx-{uuid4().hex[:8]}",
+            created_by=owner,
+            is_private=False,
+        )
+        db_session.add(ctx)
+        await db_session.flush()
+        tombstone = Memory(
+            id=uuid4(),
+            user_id=owner,
+            workspace_id=ws.id,
+            context_id=ctx.id,
+            summary="[res_test] doc_1 v1",
+            content="{}",
+            type="resource_data",
+            client="resource_indexer",
+            details={"resource_id": "res_test", "doc_id": "doc_1", "version": 1},
+            deleted_at=utcnow(),
+        )
+        db_session.add(tombstone)
+        await db_session.flush()
+        return ctx, tombstone
+
+    @pytest.mark.asyncio
+    async def test_resync_creates_a_visible_row_and_is_charged_once(self, db_session):
+        ctx, tombstone = await self._seed_tombstone(db_session)
+        with patch("services.resource_indexer.get_qdrant_client", return_value=AsyncMock()):
+            indexer = ResourceIndexer(db_session)
+        indexer.embedding_service = MagicMock()
+        indexer.embedding_service.embed = AsyncMock(return_value=[0.1] * 512)
+        event = _upsert("doc_1", 1)  # same version as the forgotten row
+        event.event_metadata = None  # legacy shape, no worker lineage
+
+        # Charge side: the tombstone is not "known", so the batch pays for doc_1.
+        assert await indexer._existing_resource_doc_ids("res_test", ctx, {"doc_1"}) == set()
+
+        await indexer._apply_upsert(
+            event, _make_schema(), ctx, "kagura_memories", indexer.embedding_service
+        )
+
+        rows = (
+            (
+                await db_session.execute(
+                    select(Memory).where(
+                        Memory.context_id == ctx.id, Memory.resource_doc_id == "doc_1"
+                    )
+                )
+            )
+            .scalars()
+            .all()
+        )
+        live = [m for m in rows if m.deleted_at is None]
+        assert len(live) == 1
+        assert live[0].id != tombstone.id
+        assert live[0].resource_version == 1
+        # The tombstone is left to the #1521 sweep — not restored, not reused.
+        await db_session.refresh(tombstone)
+        assert tombstone.deleted_at is not None
+        # Now the doc is known: a second re-sync would be free.
+        assert await indexer._existing_resource_doc_ids("res_test", ctx, {"doc_1"}) == {"doc_1"}

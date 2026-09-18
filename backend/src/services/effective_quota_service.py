@@ -59,7 +59,8 @@ class EffectiveQuotaService:
                 "analysis_runs_per_day": int,  # Issue #494
                 "storage_bytes_limit": int,  # Issue #485
                 "sleep_enabled_contexts_limit": int,  # Issue #560
-                "max_resource_tokens": int  # Issue #663 (tier-fixed, no addon)
+                "max_resource_tokens": int,  # Issue #663 (tier-fixed, no addon)
+                "memories_per_day": int  # Issue #1549 (tier-fixed, no addon yet)
             }
 
         Raises:
@@ -94,6 +95,7 @@ class EffectiveQuotaService:
             "storage_bytes_limit": workspace.effective_storage_limit_bytes,
             "sleep_enabled_contexts_limit": workspace.effective_sleep_enabled_contexts_limit,
             "max_resource_tokens": workspace.effective_max_resource_tokens,
+            "memories_per_day": workspace.effective_memories_per_day,
         }
 
         logger.debug(

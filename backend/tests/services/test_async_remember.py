@@ -51,7 +51,15 @@ class TestAsyncRemember:
                 "services.memory_service.process_pending_embedding",
                 new=AsyncMock(),
             ),
-            patch("services.quota_service.QuotaService"),
+            # #1549: the quota gates run against the context's workspace even
+            # with current_workspace_id=None → the stub must be awaitable.
+            patch(
+                "services.quota_service.QuotaService",
+                return_value=MagicMock(
+                    check_memory_quota=AsyncMock(return_value=(True, None)),
+                    check_memories_per_day=AsyncMock(return_value=(True, None)),
+                ),
+            ),
         ):
             result = await service.remember(
                 request,
@@ -86,7 +94,19 @@ class TestAsyncRemember:
         service.memory_repo = MagicMock()
         service.memory_repo.create = AsyncMock(side_effect=Exception("DB error"))
 
-        with pytest.raises(Exception, match="DB error"):
+        # #1549: the quota gates run against the context's workspace even with
+        # current_workspace_id=None, so they need an awaitable, permissive stub
+        # for the DB failure under test to be the one that surfaces.
+        with (
+            patch(
+                "services.quota_service.QuotaService",
+                return_value=MagicMock(
+                    check_memory_quota=AsyncMock(return_value=(True, None)),
+                    check_memories_per_day=AsyncMock(return_value=(True, None)),
+                ),
+            ),
+            pytest.raises(Exception, match="DB error"),
+        ):
             await service.remember(
                 request,
                 user_id="test_user",
@@ -124,7 +144,15 @@ class TestAsyncRemember:
                 "services.memory_service.process_pending_embedding",
                 new=AsyncMock(),
             ),
-            patch("services.quota_service.QuotaService"),
+            # #1549: the quota gates run against the context's workspace even
+            # with current_workspace_id=None → the stub must be awaitable.
+            patch(
+                "services.quota_service.QuotaService",
+                return_value=MagicMock(
+                    check_memory_quota=AsyncMock(return_value=(True, None)),
+                    check_memories_per_day=AsyncMock(return_value=(True, None)),
+                ),
+            ),
         ):
             await service.remember(
                 request,

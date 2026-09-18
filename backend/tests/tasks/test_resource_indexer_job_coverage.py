@@ -22,7 +22,7 @@ mock every external boundary: Redis (``get_redis_client`` /
 from __future__ import annotations
 
 import uuid
-from datetime import timedelta
+from datetime import datetime, timedelta
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import numpy  # noqa: F401  isort: skip  # load-bearing: pre-load numpy's C ext before --cov instrumentation (else "cannot load module more than once")
@@ -266,6 +266,38 @@ class TestRunQueuedIndexers:
         assert seeded_state.job_status == "idle"
         assert seeded_state.metrics == {"applied_upserts": 3, "skipped": False}
         assert seeded_state.last_run_at is not None
+
+    async def test_memories_per_day_refusal_requeues_for_utc_reset(self, db_session, seeded_state):
+        """#1549: a batch refused for the daily memory-creation quota applied
+        nothing, so the row must not park ``idle`` until the next ingest event —
+        it is re-queued for the next UTC midnight, when the counter resets."""
+        client = _fake_redis()
+        client.get = AsyncMock(return_value=None)  # allowed
+
+        metrics = MagicMock()
+        metrics.skipped = True
+        metrics.reason = "memories_per_day_exceeded"
+        metrics.to_dict.return_value = {"skipped": True, "reason": "memories_per_day_exceeded"}
+        indexer_instance = MagicMock()
+        indexer_instance.process_incremental = AsyncMock(return_value=metrics)
+        indexer_ctor = MagicMock(return_value=indexer_instance)
+        record = AsyncMock()
+
+        with (
+            patch("tasks.resource_indexer_job.get_db", _mock_get_db(db_session)),
+            patch("tasks.resource_indexer_job.get_redis_client", return_value=client),
+            patch("tasks.resource_indexer_job.ResourceIndexer", indexer_ctor),
+            patch("tasks.resource_indexer_job.record_indexer_run", record),
+        ):
+            await run_queued_indexers()
+
+        await db_session.refresh(seeded_state)
+        assert seeded_state.job_status == "queued"
+        expected = datetime.combine(utcnow().date() + timedelta(days=1), datetime.min.time())
+        assert seeded_state.next_run_at == expected
+        assert seeded_state.metrics == {"skipped": True, "reason": "memories_per_day_exceeded"}
+        # The attempt still counts toward the hourly token bucket.
+        record.assert_awaited_once()
 
     async def test_rate_limited_job_is_skipped_and_stays_queued(self, db_session, seeded_state):
         """can_run_indexer → False: the indexer is never built and state stays queued."""

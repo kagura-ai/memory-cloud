@@ -38,7 +38,7 @@ class PlanLimits(BaseModel):
     sums.
     """
 
-    plan_name: str = Field(..., description="Plan tier name: free | basic | pro")
+    plan_name: str = Field(..., description="Plan tier key: free | basic | pro | promax")
     memory_limit: int = Field(..., description="Maximum memories allowed")
     daily_total_limit: int = Field(
         ...,
@@ -54,6 +54,9 @@ class PlanLimits(BaseModel):
     rest_calls_per_week: int = Field(default=0, description="REST API weekly limit")
     public_calls_per_day: int = Field(default=0, description="Public REST API daily limit")
     public_calls_per_week: int = Field(default=0, description="Public REST API weekly limit")
+    memories_per_day: int = Field(
+        default=0, description="Memories that may be created per UTC day (Issue #1549)"
+    )
 
 
 class AnalysisUsage(BaseModel):
@@ -137,6 +140,9 @@ class CurrentUsage(BaseModel):
     )
     public_calls_today: int = Field(default=0, description="Public REST API calls today")
     public_calls_this_week: int = Field(default=0, description="Public REST API calls this week")
+    memories_created_today: int = Field(
+        default=0, description="Memories created today, UTC (Issue #1549 daily quota counter)"
+    )
     analysis: AnalysisUsage | None = Field(
         default=None,
         description=(
@@ -179,6 +185,10 @@ class UsageCurrentResponse(BaseModel):
     memory_usage: UsageStatus
     daily_api_usage: UsageStatus
     weekly_api_usage: UsageStatus
+    # Issue #1549: additive — defaulted so older clients / payloads still parse.
+    memories_today_usage: UsageStatus | None = Field(
+        default=None, description="Memories created today vs the daily quota (Issue #1549)"
+    )
 
 
 class DailyUsage(BaseModel):
