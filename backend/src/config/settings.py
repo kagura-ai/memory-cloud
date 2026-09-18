@@ -120,6 +120,22 @@ class Settings(BaseSettings):
         default=60,
         description="Min seconds between api_keys.last_used_at writes per key (Issue #947)",
     )
+    # Issue #1537: keys expire by default. An omitted expires_days on any mint
+    # path resolves to these; 0 is the explicit "never expires" opt-in at the
+    # request layer. Operators may tighten (min 1 day) but a never-expiring
+    # DEFAULT is not configurable — that was the posture this issue removed.
+    api_key_default_expires_days: int = Field(
+        default=365,
+        ge=1,
+        le=3650,
+        description="Default lifetime in days for API keys minted without expires_days (Issue #1537)",
+    )
+    api_key_agent_default_expires_days: int = Field(
+        default=90,
+        ge=1,
+        le=3650,
+        description="Default lifetime in days for agent-bound API keys minted without expires_days (Issue #1537)",
+    )
     # Issue #1257: same pattern for contexts.last_used_at — memory operations
     # (remember/recall/reference) mark the context as used so the list_contexts
     # recency sort means something, but a context row is hotter than an API key

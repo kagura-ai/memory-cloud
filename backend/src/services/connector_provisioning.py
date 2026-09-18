@@ -378,12 +378,17 @@ class ConnectorProvisioningService:
             if resolved_context_id is not None:
                 from auth.api_keys import APIKeyManager
 
-                plaintext_kmc_api_key, _ = await APIKeyManager(self.db).create_key(
+                plaintext_kmc_api_key, kmc_key_row = await APIKeyManager(self.db).create_key(
                     name=f"connector:{connector.id}",
                     user_id=user_id,
                     workspace_id=workspace_id,
                 )
                 connector.set_kmc_api_key(plaintext_kmc_api_key)
+                # #1537: the key now expires by default, and the worker config
+                # endpoint's expiry warning reads only this connector column —
+                # mirror the row's expires_at exactly as rotate_kmc_key does so
+                # the two never drift.
+                connector.kmc_api_key_expires_at = kmc_key_row.expires_at
                 await self.db.flush()
 
             plaintext_token, token_record = await ResourceTokenManager(self.db).create_token(

@@ -375,9 +375,11 @@ A permanently-off deployment gives up:
   grants owners/admins no `create` on others, and `get_or_create_credentials` performs no
   lazy initialization), so the *first* key for a service member can only be minted by that
   identity logging in and self-minting — an owner cannot provision it.
-- **Mandatory expiry.** Session self-mint rejects `expires_days` with 400, so any
-  session-minted workload key never expires; the section 5 expiry policy is unachievable
-  via a web-UI-only lifecycle.
+- **Chosen expiry.** Session self-mint rejects `expires_days` with 400, so a
+  session-minted workload key always gets the deployment default lifetime
+  (`API_KEY_DEFAULT_EXPIRES_DAYS`, 365 days — #1537) rather than the shorter,
+  per-key expiry the section 5 policy calls for; the policy is only fully achievable
+  via the owner-provisioned path.
 - **Force-hidden one-time display.** Session-minted keys use the timed visibility window
   (cleared later by the auto-hide sweeper, section 8) instead of being force-hidden at
   mint.
