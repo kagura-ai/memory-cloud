@@ -207,3 +207,124 @@ async def test_setup_connector_gate_refuses_a_feature_on_no_tier_without_raising
     assert "higher plan" in payload["message"]
     db.add.assert_not_called()
     db.commit.assert_not_awaited()
+
+
+# ---------------------------------------------------------------------------
+# REST shared-context gates name the EFFECTIVE minimum tier
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture
+def basic_may_share(monkeypatch: pytest.MonkeyPatch) -> None:
+    """``PLAN_BASIC_FEATURES`` adds ``shared_contexts`` to M."""
+    monkeypatch.setattr(plan_tiers, "PLAN_TIERS", dict(plan_tiers.PLAN_TIERS))
+    monkeypatch.setattr(plan_tiers, "FEATURE_MIN_PLANS", dict(plan_tiers.FEATURE_MIN_PLANS))
+    monkeypatch.setattr(plan_tiers, "logger", MagicMock())
+    plan_tiers._apply_settings_overrides(
+        Settings(
+            _env_file=None,
+            plan_basic_features=(
+                "api_keys,oauth,reranking,managed_embeddings,secret_store,shared_contexts"
+            ),
+        )
+    )
+
+
+def _existing_context() -> SimpleNamespace:
+    return SimpleNamespace(
+        id=uuid.uuid4(),
+        name="ctx",
+        display_name=None,
+        description=None,
+        summary=None,
+        usage_guide=None,
+        is_default=False,
+        is_locked=False,
+        sleep_mode="skip",
+        is_private=True,
+        is_public=False,
+        resource_id=None,
+        created_by="owner-1",
+        created_at=datetime(2026, 1, 1, tzinfo=UTC),
+        updated_at=datetime(2026, 1, 1, tzinfo=UTC),
+        workspace_id=_WS,
+    )
+
+
+async def _put_shared(plan_name: str) -> MagicMock:
+    """``PUT /contexts/{id}`` with ``is_private=False`` — the SHARED gate."""
+    from api.routes.contexts import ContextUpdate, update_context
+
+    existing = _existing_context()
+    db = MagicMock()
+    db.get = AsyncMock(return_value=SimpleNamespace(plan_name=plan_name))
+    perm = MagicMock()
+    perm.check_context_owner = AsyncMock(return_value=existing)
+    service = MagicMock()
+    service.update_context = AsyncMock(return_value=existing)
+
+    with patch("services.permission_service.PermissionService", return_value=perm):
+        await update_context(
+            existing.id,
+            ContextUpdate(is_private=False),
+            {"user_id": "owner-1", "sub": "owner-1"},
+            service,
+            db,
+        )
+    return service
+
+
+async def _post_shared(plan_name: str) -> None:
+    """``POST /contexts`` with ``is_private=False`` — the SHARED gate."""
+    from api.routes.contexts import ContextCreate, create_context
+
+    service = MagicMock()
+    service.db.execute = AsyncMock(return_value=_result(one=SimpleNamespace(plan_name=plan_name)))
+    with patch(
+        "services.quota_service.QuotaService.check_context_creation_allowed",
+        new=AsyncMock(return_value=(True, None)),
+    ):
+        await create_context(
+            ContextCreate(name="ctx", is_private=False),
+            {"user_id": "owner-1", "sub": "owner-1", "current_workspace_id": _WS},
+            service,
+        )
+
+
+@pytest.mark.asyncio
+async def test_shared_refusals_name_the_registry_tier_by_default() -> None:
+    """Without an override both REST gates name L from the registry — the
+    hard-coded "Pro plan" text (a tier name that no longer exists) is gone."""
+    from fastapi import HTTPException
+
+    upgrade_to_l = f"Upgrade to {plan_tiers.get_plan_tier('pro').display_name} plan"
+
+    with pytest.raises(HTTPException) as post_exc:
+        await _post_shared("free")
+    assert post_exc.value.status_code == 403
+    assert upgrade_to_l in post_exc.value.detail
+    assert "Pro plan" not in post_exc.value.detail
+
+    with pytest.raises(HTTPException) as put_exc:
+        await _put_shared("free")
+    assert put_exc.value.status_code == 400
+    assert upgrade_to_l in put_exc.value.detail
+    assert "Pro plan" not in put_exc.value.detail
+
+
+@pytest.mark.asyncio
+async def test_shared_refusal_follows_the_override_and_basic_passes(
+    basic_may_share: None,
+) -> None:
+    """With ``shared_contexts`` on M, Free is told to upgrade to M (not L) and
+    M itself passes — ``allows_shared_contexts`` moved with the feature."""
+    from fastapi import HTTPException
+
+    upgrade_to_m = f"Upgrade to {plan_tiers.get_plan_tier('basic').display_name} plan"
+
+    with pytest.raises(HTTPException) as exc_info:
+        await _put_shared("free")
+    assert upgrade_to_m in exc_info.value.detail
+
+    service = await _put_shared("basic")
+    service.update_context.assert_awaited_once()

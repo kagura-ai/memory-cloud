@@ -513,7 +513,7 @@ async def create_context(
         # SECURITY: Check plan allows shared contexts
         # Issue #271 Code Review H-1: Use plan_tiers instead of hardcoded plan names
         if not request.is_private:
-            from config.plan_tiers import get_plan_tier
+            from config.plan_tiers import feature_denied_message, get_plan_tier
             from models.auth import Workspace
 
             workspace_result = await service.db.execute(
@@ -524,9 +524,11 @@ async def create_context(
             if workspace:
                 plan = get_plan_tier(workspace.plan_name)
                 if not plan.allows_shared_contexts:
+                    # Registry-derived tier name (#1559): the minimum moves with
+                    # a PLAN_<KEY>_FEATURES override, so never a hard-coded "Pro".
                     raise HTTPException(
                         status_code=status.HTTP_403_FORBIDDEN,
-                        detail="Shared contexts require Pro plan. Upgrade your plan to share contexts with your team.",
+                        detail=feature_denied_message(workspace.plan_name, "shared_contexts"),
                     )
 
         # Validate embedding model if provided.
@@ -949,7 +951,7 @@ async def update_context(
             # SECURITY: Check plan allows shared contexts
             # Issue #271 Code Review H-1: Use plan_tiers instead of hardcoded plan names
             if not request.is_private and existing_context:
-                from config.plan_tiers import get_plan_tier
+                from config.plan_tiers import feature_denied_message, get_plan_tier
                 from models.auth import Workspace
 
                 workspace = await db.get(Workspace, existing_context.workspace_id)
@@ -957,8 +959,9 @@ async def update_context(
                 if workspace:
                     plan = get_plan_tier(workspace.plan_name)
                     if not plan.allows_shared_contexts:
+                        # Registry-derived tier name (#1559), see create_context.
                         raise ValidationError(
-                            "Shared contexts require Pro plan. Upgrade your plan to share contexts with your team."
+                            feature_denied_message(workspace.plan_name, "shared_contexts")
                         )
 
         # Issue #1551: "public" is its own gate, independent of "shared" (which
