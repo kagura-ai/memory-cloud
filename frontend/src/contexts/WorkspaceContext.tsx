@@ -93,9 +93,15 @@ export function WorkspaceProvider({ children }: { children: ReactNode }) {
     }
   };
 
+  // Reload only when the values loadWorkspaces actually reads change. Depending
+  // on the `user` object itself re-fires on every refetchUser() — it always
+  // hands back a fresh object — which flips `loading` and makes WorkspaceGuard
+  // unmount the whole authenticated subtree (#1532).
+  const userId = user?.id;
+  const userWorkspaceId = user?.current_workspace_id;
   useEffect(() => {
     loadWorkspaces();
-  }, [user, authLoading]);
+  }, [userId, userWorkspaceId, authLoading]);
 
   const value: WorkspaceContextType = {
     currentWorkspace,
