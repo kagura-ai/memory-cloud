@@ -192,3 +192,82 @@ async def test_initialize_still_negotiates_the_legacy_protocol():
     assert send.status == 200
     assert send.headers[b"mcp-session-id"] == b"sess-1"
     assert send.body["result"]["protocolVersion"] == "2024-11-05"
+
+
+# ------------------------------------------------ version negotiation (review)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("requested", "negotiated"),
+    [
+        ("2025-03-26", "2025-03-26"),  # advertised by discover → must be echoed
+        ("2024-11-05", "2024-11-05"),
+        ("2025-06-18", "2024-11-05"),  # not advertised → fall back to the default
+        ("2026-07-28", "2024-11-05"),
+        (None, "2024-11-05"),
+    ],
+)
+async def test_initialize_echoes_every_version_discover_advertises(requested, negotiated):
+    """``server/discover`` and ``initialize`` must not contradict each other: a
+    client that picks a version out of ``supportedVersions`` gets it echoed back
+    (spec: a server that supports the requested version MUST answer with it)."""
+    params = {} if requested is None else {"protocolVersion": requested}
+    send = await _post({"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": params})
+    assert send.body["result"]["protocolVersion"] == negotiated
+
+
+@pytest.mark.asyncio
+async def test_every_advertised_version_is_negotiable():
+    disc = await _post({"jsonrpc": "2.0", "id": 1, "method": "server/discover"})
+    for version in disc.body["result"]["supportedVersions"]:
+        init = await _post(
+            {
+                "jsonrpc": "2.0",
+                "id": 2,
+                "method": "initialize",
+                "params": {"protocolVersion": version},
+            }
+        )
+        assert init.body["result"]["protocolVersion"] == version
+
+
+@pytest.mark.asyncio
+async def test_initialize_tolerates_non_object_params():
+    send = await _post({"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": [1]})
+    assert send.status == 200
+    assert send.body["result"]["protocolVersion"] == "2024-11-05"
+
+
+# --------------------------------------------------- invalid requests (review)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("payload", [None, 42, True, "initialize"])
+async def test_scalar_json_body_is_an_invalid_request_not_a_500(payload):
+    send = await _post(payload)
+    assert send.status == 400
+    assert send.body["error"]["code"] == -32600
+    assert send.body["id"] is None
+
+
+@pytest.mark.asyncio
+async def test_batch_array_is_rejected_instead_of_silently_accepted():
+    """A batch used to satisfy ``"id" not in body`` (list membership) and was
+    202'd as a notification, leaving the client waiting forever."""
+    send = await _post([{"jsonrpc": "2.0", "id": 1, "method": "initialize"}])
+    assert send.status == 400
+    assert send.body["error"]["code"] == -32600
+    assert "batch" in send.body["error"]["message"].lower()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("method", [None, 5, "", ["tools/list"]])
+async def test_request_without_a_string_method_is_an_invalid_request(method):
+    payload: dict = {"jsonrpc": "2.0", "id": 9}
+    if method is not None:
+        payload["method"] = method
+    send = await _post(payload)
+    assert send.status == 400
+    assert send.body["id"] == 9
+    assert send.body["error"]["code"] == -32600

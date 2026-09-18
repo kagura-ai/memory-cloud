@@ -144,6 +144,11 @@ async def _get_user_workspace_id(user_id: str) -> "UUID | None":
 # stateless / ``-32022`` contract, which this server does not implement (#1541).
 SUPPORTED_PROTOCOL_VERSIONS: tuple[str, ...] = ("2025-03-26", "2024-11-05")
 
+# What ``initialize`` answers when the client asks for a revision we do not
+# list (or for none): the spec lets the server reply with another version it
+# supports, and this is what every existing client has been negotiating.
+DEFAULT_PROTOCOL_VERSION = "2024-11-05"
+
 # ``server/discover`` caching hint (MCP 2026-07-28 caching utility): the result
 # is static per deployment, identical for every user → public, one hour.
 DISCOVER_TTL_MS = 60 * 60 * 1000
@@ -235,6 +240,29 @@ async def handle_streamable_http_post(
         )
         return
 
+    # A JSON-RPC message is a single object. A scalar body used to raise
+    # TypeError on the membership test below (HTTP 500), and a batch array
+    # passed it by list membership and was 202'd as a "notification", leaving
+    # the client waiting for a response that never came (#1541 review).
+    # Batching is not supported by this transport.
+    if not isinstance(body, dict):
+        await _send_json_error(
+            send,
+            400,
+            {
+                "jsonrpc": "2.0",
+                "error": {
+                    "code": -32600,
+                    "message": (
+                        "Invalid Request: expected a single JSON-RPC object "
+                        "(batch arrays are not supported)"
+                    ),
+                },
+                "id": None,
+            },
+        )
+        return
+
     # Check if this is a notification (no "id" field)
     is_notification = "id" not in body
 
@@ -249,34 +277,44 @@ async def handle_streamable_http_post(
     method = body.get("method")
     request_id = body.get("id")
 
+    # A request must name its method; without one, -32601 "Method not found:
+    # None" would blame a method the client never sent (#1541 review).
+    if not isinstance(method, str) or not method:
+        await _send_json_error(
+            send,
+            400,
+            {
+                "jsonrpc": "2.0",
+                "error": {"code": -32600, "message": "Invalid Request: missing method"},
+                "id": request_id,
+            },
+        )
+        return
+
     # Handle initialize request
     if method == "initialize":
         logger.info(f"MCP initialize (Streamable HTTP): session={session.session_id}")
 
-        response = {
-            "jsonrpc": "2.0",
-            "id": request_id,
-            "result": {
-                "protocolVersion": "2024-11-05",
+        # Echo the requested revision when it is one we advertise through
+        # server/discover, so the two surfaces cannot contradict each other;
+        # anything else negotiates down to the default, as before (#1541).
+        params = body.get("params")
+        requested = params.get("protocolVersion") if isinstance(params, dict) else None
+        protocol_version = (
+            requested if requested in SUPPORTED_PROTOCOL_VERSIONS else DEFAULT_PROTOCOL_VERSION
+        )
+
+        # Session ID is returned in the mcp-session-id header
+        await _send_jsonrpc_result(
+            send,
+            session,
+            request_id,
+            {
+                "protocolVersion": protocol_version,
                 "capabilities": SERVER_CAPABILITIES,
                 "serverInfo": SERVER_INFO,
             },
-        }
-
-        response_body = json.dumps(response).encode()
-
-        # Return session ID in header
-        await send(
-            {
-                "type": "http.response.start",
-                "status": 200,
-                "headers": [
-                    [b"content-type", b"application/json"],
-                    [b"mcp-session-id", session.session_id.encode()],
-                ],
-            }
         )
-        await send({"type": "http.response.body", "body": response_body})
         return
 
     # Handle tools/list request
@@ -286,25 +324,7 @@ async def handle_streamable_http_post(
         from mcp_server.tools import get_tool_definitions
 
         tools = get_tool_definitions()
-        response = {
-            "jsonrpc": "2.0",
-            "id": request_id,
-            "result": {"tools": tools},
-        }
-
-        response_body = json.dumps(response).encode()
-
-        await send(
-            {
-                "type": "http.response.start",
-                "status": 200,
-                "headers": [
-                    [b"content-type", b"application/json"],
-                    [b"mcp-session-id", session.session_id.encode()],
-                ],
-            }
-        )
-        await send({"type": "http.response.body", "body": response_body})
+        await _send_jsonrpc_result(send, session, request_id, {"tools": tools})
         return
 
     # Handle tools/call request
@@ -330,26 +350,12 @@ async def handle_streamable_http_post(
                 workspace_id=session.workspace_id,  # Issue #204: Pass workspace_id for workspace info
             )
 
-            # Format response
-            response = {
-                "jsonrpc": "2.0",
-                "id": request_id,
-                "result": {"content": [{"type": item.type, "text": item.text} for item in result]},
-            }
-
-            response_body = json.dumps(response).encode()
-
-            await send(
-                {
-                    "type": "http.response.start",
-                    "status": 200,
-                    "headers": [
-                        [b"content-type", b"application/json"],
-                        [b"mcp-session-id", session.session_id.encode()],
-                    ],
-                }
+            await _send_jsonrpc_result(
+                send,
+                session,
+                request_id,
+                {"content": [{"type": item.type, "text": item.text} for item in result]},
             )
-            await send({"type": "http.response.body", "body": response_body})
             return
 
         except Exception as e:
@@ -427,25 +433,16 @@ async def handle_streamable_http_post(
     logger.info(
         f"MCP unknown method (Streamable HTTP): method={method}, session={session.session_id}"
     )
-    error_response = {
-        "jsonrpc": "2.0",
-        "id": request_id,
-        "error": {
-            "code": -32601,
-            "message": f"Method not found: {method}",
-        },
-    }
-    await send(
+    await _send_json_error(
+        send,
+        200,
         {
-            "type": "http.response.start",
-            "status": 200,
-            "headers": [
-                [b"content-type", b"application/json"],
-                [b"mcp-session-id", session.session_id.encode()],
-            ],
-        }
+            "jsonrpc": "2.0",
+            "id": request_id,
+            "error": {"code": -32601, "message": f"Method not found: {method}"},
+        },
+        [[b"mcp-session-id", session.session_id.encode()]],
     )
-    await send({"type": "http.response.body", "body": json.dumps(error_response).encode()})
 
 
 async def handle_streamable_http_get(
