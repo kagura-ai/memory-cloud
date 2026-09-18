@@ -215,7 +215,7 @@ docker compose up -d
 - **Frontend env vars**: Copy `frontend/.env.example` to `frontend/.env.local` and set:
   - `NEXT_PUBLIC_API_URL` — backend URL (default: `http://localhost:8080`)
   - `NEXT_PUBLIC_APP_URL` — frontend URL for metadata
-  - `NEXT_PUBLIC_PLAN_FREE_DISPLAY_NAME` / `BASIC` / `PRO` — plan display name customization (default: S/M/L)
+  - `NEXT_PUBLIC_PLAN_FREE_DISPLAY_NAME` / `BASIC` / `PRO` / `PROMAX` — plan display name customization (default: S/M/L/XL)
 
 </details>
 

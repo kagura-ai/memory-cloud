@@ -143,7 +143,7 @@ export default function WorkspacePlanPage() {
     );
   }
 
-  // Label precedence: localized tier label (OSS default S/M/L, per-locale
+  // Label precedence: localized tier label (OSS default S/M/L/XL, per-locale
   // override via env) → backend display_name → raw plan_name → em dash.
   const canonicalTier = currentWorkspace?.plan_name;
   const planName = isPlanTier(canonicalTier)

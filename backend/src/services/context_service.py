@@ -18,6 +18,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm.exc import ObjectDeletedError
 
 from auth.workspace_roles import WorkspaceRole
+from config.plan_tiers import has_feature
 from config.settings import get_settings
 from models.auth import Context, ContextMember, User, Workspace, WorkspaceMember
 from models.sleep import SleepMode
@@ -169,7 +170,9 @@ class ContextService:
 
         # Plan tier validation for shared contexts (Issue #165)
         if not is_private:
-            if workspace.plan_name in ["free", "basic"]:
+            # Feature-based (#1548): the tier registry decides, so a new tier
+            # is never silently excluded and an unknown tier fails closed.
+            if not has_feature(workspace.plan_name, "shared_contexts"):
                 raise ValidationError(
                     "Shared contexts require Pro plan. Upgrade to share contexts with team members."
                 )

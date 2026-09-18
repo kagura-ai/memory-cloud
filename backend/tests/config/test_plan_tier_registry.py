@@ -39,6 +39,24 @@ def test_registry_lists_every_plan_name_in_upgrade_order() -> None:
     assert PLAN_ORDER[-1] == PlanName.PROMAX
 
 
+def test_db_check_constraint_lists_every_plan_name() -> None:
+    """The ``valid_plan_name`` CHECK on ``workspaces.plan_name`` is the fourth
+    registry. ``test_schema_drift`` pins ORM ↔ migration; this pins ORM ↔ code,
+    so adding a tier to ``PlanName`` without the model + migration fails here."""
+    from sqlalchemy import CheckConstraint
+
+    from models.auth import Workspace
+
+    checks = [
+        c
+        for c in Workspace.__table__.constraints
+        if isinstance(c, CheckConstraint) and c.name == "valid_plan_name"
+    ]
+    assert len(checks) == 1
+    expected = "plan_name IN (" + ", ".join(f"'{name}'" for name in PLAN_ORDER) + ")"
+    assert str(checks[0].sqltext) == expected
+
+
 def test_every_plan_name_has_a_rate_limit() -> None:
     assert set(TIER_RATE_LIMITS) == set(PlanName)
     rpm = [TIER_RATE_LIMITS[PlanName(name)].requests_per_minute for name in PLAN_ORDER]

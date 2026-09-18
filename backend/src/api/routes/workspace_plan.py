@@ -270,6 +270,6 @@ async def get_plan_tier_matrix(
     ``/workspaces/plan-tiers`` would be shadowed by the earlier-registered
     ``GET /workspaces/{workspace_id}`` route and 422 on the UUID parse.
     """
-    # Iterate PLAN_TIERS directly (insertion order = free → basic → pro) so a
+    # Iterate PLAN_TIERS directly (insertion order = PLAN_ORDER, lowest first) so a
     # custom/added tier is never silently dropped — mirrors get_available_plans.
     return [_plan_tier_feature(tier) for tier in PLAN_TIERS.values()]
