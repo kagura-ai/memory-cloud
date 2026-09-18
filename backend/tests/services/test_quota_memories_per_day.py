@@ -47,8 +47,8 @@ def incrby():
 
 @pytest.fixture(autouse=True)
 def frozen_clock():
-    with patch("services.quota_service.utcnow", return_value=NOW):
-        yield
+    with patch("services.quota_service.utcnow", return_value=NOW) as clock:
+        yield clock
 
 
 def _key(workspace_id) -> str:
@@ -219,7 +219,7 @@ class TestCountMemoriesCreatedToday:
 
 
 class TestQuotaStatusMemoriesToday:
-    async def test_status_block_shape(self):
+    async def test_status_block_shape(self, frozen_clock):
         ws = _workspace(limit=50, plan_name="free")
         ws.effective_memory_limit = 1000
         workspace_result = MagicMock()
@@ -243,3 +243,6 @@ class TestQuotaStatusMemoriesToday:
         }
         # The pre-existing block is untouched.
         assert status["memory"]["current"] == 0
+        # One clock read for both the counter key and resets_at, so a midnight
+        # crossing cannot pair yesterday's count with tomorrow's reset.
+        assert frozen_clock.call_count == 1

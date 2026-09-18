@@ -29,7 +29,7 @@ from mcp_server.tools._helpers import (
     execute_with_timeout,
 )
 from utils.datetime import to_utc_iso
-from utils.exceptions import NotFoundException
+from utils.exceptions import NotFoundException, QuotaExceededError
 
 logger = logging.getLogger(__name__)
 
@@ -126,6 +126,21 @@ async def handle_remember(
         except _ContextNotFoundError as e:
             await db.rollback()
             return e.to_response()
+        except QuotaExceededError as e:
+            # The quota family (total memory_limit, #1549 daily memories_per_day)
+            # is a 429, not a crash: same ``quota_exceeded`` envelope as
+            # analysis / files, with the structured details (quota_type, limit,
+            # used_today, requested, resets_at) forwarded so clients can show
+            # the reset time instead of parsing the message.
+            await db.rollback()
+            await _log_tool_usage(
+                db, user_id, "remember", start_time, 429, args.get("context_id"), workspace_id
+            )
+            return _error_response(
+                "quota_exceeded",
+                e.message,
+                **{k: v for k, v in e.details.items() if v is not None},
+            )
         except ValueError as e:
             # MemoryService raises ValueError as its "bad request" signal (e.g.
             # an invalid type="time" details.trigger). Return a structured

@@ -508,6 +508,7 @@ class TestProcessIncrementalResolvesRoutingOncePerBatch:
         mock_resolve = AsyncMock(return_value=("kagura_memories", stub_embedding_service))
         indexer._apply_upsert = AsyncMock()
         indexer._apply_delete = AsyncMock()
+        indexer._existing_resource_doc_ids = AsyncMock(return_value=set())
         indexer.db.commit = AsyncMock()
 
         with (
@@ -528,16 +529,24 @@ class TestProcessIncrementalResolvesRoutingOncePerBatch:
             assert call.args[4] is stub_embedding_service
 
 
+def _upsert(doc_id: str, version: int = 1) -> MagicMock:
+    event = _make_event()
+    event.doc_id = doc_id
+    event.version = version
+    return event
+
+
 class TestProcessIncrementalMemoriesPerDay:
     """#1549: connector/resource ingest is charged against the daily
-    memory-creation quota ONCE per batch, up front, for the whole batch.
+    memory-creation quota ONCE per batch, up front, for the doc_ids that do
+    not exist yet (a re-index of a known doc creates no row and must not burn
+    the workspace's shared daily budget).
 
     All-or-nothing: when the batch does not fit, nothing is applied and the
-    offset does not move, so the same events are retried on the next run
-    (after the UTC reset) instead of being lost.
+    offset does not move; the job re-queues the row for the UTC reset.
     """
 
-    def _indexer(self, events):
+    def _indexer(self, events, existing: set[str] | None = None):
         with patch("services.resource_indexer.get_qdrant_client", return_value=AsyncMock()):
             indexer = ResourceIndexer(AsyncMock())
         self.state = MagicMock(last_offset=0, last_run_at=None, metrics=None)
@@ -546,6 +555,7 @@ class TestProcessIncrementalMemoriesPerDay:
         indexer._fetch_events = AsyncMock(return_value=events)
         indexer._get_latest_schema = AsyncMock(return_value=_make_schema())
         indexer._get_context = AsyncMock(return_value=self.context)
+        indexer._existing_resource_doc_ids = AsyncMock(return_value=existing or set())
         indexer._apply_upsert = AsyncMock()
         indexer._apply_delete = AsyncMock()
         indexer.db.commit = AsyncMock()
@@ -557,10 +567,10 @@ class TestProcessIncrementalMemoriesPerDay:
         return quota, routing
 
     @pytest.mark.asyncio
-    async def test_batch_charged_once_with_upsert_count(self):
+    async def test_batch_charged_once_with_new_doc_count(self):
         delete = _make_event()
         delete.op = "delete"
-        indexer = self._indexer([_make_event(), _make_event(), delete])
+        indexer = self._indexer([_upsert("doc_1"), _upsert("doc_2"), delete])
         quota, routing = self._run(indexer, allowed=True)
 
         with (
@@ -570,15 +580,57 @@ class TestProcessIncrementalMemoriesPerDay:
             quota_cls.return_value.check_memories_per_day = quota
             metrics = await indexer.process_incremental("res_test", uuid4())
 
-        # Deletes create nothing — only the two upserts are reserved, in one call.
+        # Deletes create nothing — only the two new upserts are reserved, in one call.
         quota.assert_awaited_once_with(self.context.workspace_id, count=2)
+        indexer._existing_resource_doc_ids.assert_awaited_once_with(
+            "res_test", self.context, {"doc_1", "doc_2"}
+        )
         assert indexer._apply_upsert.await_count == 2
         assert indexer._apply_delete.await_count == 1
         assert metrics.skipped is False
 
     @pytest.mark.asyncio
+    async def test_all_existing_batch_charges_nothing(self):
+        """A connector re-sync of N known docs is N updates, not N creations."""
+        indexer = self._indexer(
+            [_upsert("doc_1", 2), _upsert("doc_2", 2)], existing={"doc_1", "doc_2"}
+        )
+        quota, routing = self._run(indexer, allowed=False)  # would refuse if ever asked
+
+        with (
+            patch("services.resource_indexer.resolve_context_routing", routing),
+            patch("services.resource_indexer.QuotaService") as quota_cls,
+        ):
+            quota_cls.return_value.check_memories_per_day = quota
+            metrics = await indexer.process_incremental("res_test", uuid4())
+
+        quota.assert_not_awaited()
+        assert indexer._apply_upsert.await_count == 2
+        assert metrics.skipped is False
+
+    @pytest.mark.asyncio
+    async def test_mixed_batch_charges_only_new_distinct_doc_ids(self):
+        """doc_1 exists; doc_3 arrives twice (v1, v2) in the same batch — the
+        second is an update of the row the first creates → charge 2, not 4."""
+        indexer = self._indexer(
+            [_upsert("doc_1", 2), _upsert("doc_2"), _upsert("doc_3", 1), _upsert("doc_3", 2)],
+            existing={"doc_1"},
+        )
+        quota, routing = self._run(indexer, allowed=True)
+
+        with (
+            patch("services.resource_indexer.resolve_context_routing", routing),
+            patch("services.resource_indexer.QuotaService") as quota_cls,
+        ):
+            quota_cls.return_value.check_memories_per_day = quota
+            await indexer.process_incremental("res_test", uuid4())
+
+        quota.assert_awaited_once_with(self.context.workspace_id, count=2)
+        assert indexer._apply_upsert.await_count == 4
+
+    @pytest.mark.asyncio
     async def test_refused_batch_applies_nothing_and_keeps_offset(self):
-        indexer = self._indexer([_make_event(), _make_event()])
+        indexer = self._indexer([_upsert("doc_1"), _upsert("doc_2")])
         quota, routing = self._run(indexer, allowed=False)
 
         with (
@@ -611,4 +663,38 @@ class TestProcessIncrementalMemoriesPerDay:
             await indexer.process_incremental("res_test", uuid4())
 
         quota.assert_not_awaited()
+        indexer._existing_resource_doc_ids.assert_not_awaited()
         assert indexer._apply_delete.await_count == 1
+
+
+class TestExistingResourceDocIds:
+    """The ONE SELECT behind the #1549 new-vs-known split."""
+
+    def _indexer(self, rows):
+        with patch("services.resource_indexer.get_qdrant_client", return_value=AsyncMock()):
+            indexer = ResourceIndexer(AsyncMock())
+        result = MagicMock()
+        result.scalars.return_value.all.return_value = rows
+        indexer.db.execute = AsyncMock(return_value=result)
+        return indexer
+
+    @pytest.mark.asyncio
+    async def test_returns_known_doc_ids_from_a_single_select(self):
+        indexer = self._indexer(["doc_1", "doc_3"])
+
+        known = await indexer._existing_resource_doc_ids(
+            "res_test", _make_context(), {"doc_1", "doc_2", "doc_3"}
+        )
+
+        assert known == {"doc_1", "doc_3"}
+        indexer.db.execute.assert_awaited_once()
+        sql = str(indexer.db.execute.await_args.args[0])
+        assert "resource_doc_id IN" in sql
+        assert "deleted_at IS NULL" in sql
+
+    @pytest.mark.asyncio
+    async def test_empty_input_skips_the_select(self):
+        indexer = self._indexer([])
+
+        assert await indexer._existing_resource_doc_ids("res_test", _make_context(), set()) == set()
+        indexer.db.execute.assert_not_awaited()

@@ -168,8 +168,9 @@ class QuotaService:
           ``update_memory(external_id=...)`` all funnel through it.
         - ``ResourceIndexer.process_incremental`` — connector / ``ingest_events``
           / resource ingest; charged once per batch, up front, with
-          ``count = number of upsert events``; the whole batch is deferred to
-          the next run when it does not fit.
+          ``count = number of upsert doc_ids not yet indexed`` (a re-sync of
+          known docs is free); a batch that does not fit is left untouched and
+          the indexer job re-queues it for the next UTC midnight.
 
         Not charged (they mutate or copy rows the workspace already created):
         ``MemoryService._update_in_place`` / ``patch_memory`` /
@@ -277,12 +278,19 @@ class QuotaService:
 
         return True, None
 
-    async def count_memories_created_today(self, workspace_id: UUID) -> int:
+    async def count_memories_created_today(
+        self, workspace_id: UUID, *, today: date | None = None
+    ) -> int:
         """Memories created in this workspace today (UTC), per the #1549 counter.
 
         Read-only GET on the day key; 0 when missing or Redis is unavailable.
+        ``today`` lets a caller that also derives ``resets_at`` read the clock
+        once, so a midnight crossing cannot pair one day's count with the
+        next day's reset.
         """
-        cached = await get_cache(_memories_per_day_key(workspace_id, utcnow().date()))
+        if today is None:
+            today = utcnow().date()
+        cached = await get_cache(_memories_per_day_key(workspace_id, today))
         try:
             return int(cached) if cached else 0
         except ValueError:
@@ -879,7 +887,9 @@ class QuotaService:
         memory_percentage = (memory_count / effective_limit * 100) if effective_limit > 0 else 0
 
         # Issue #1549: today's memory creations vs the daily quota (Redis read).
-        created_today = await self.count_memories_created_today(workspace_id)
+        # One clock read for both the counter key and resets_at.
+        today = utcnow().date()
+        created_today = await self.count_memories_created_today(workspace_id, today=today)
         daily_limit = workspace.effective_memories_per_day
         daily_percentage = (created_today / daily_limit * 100) if daily_limit > 0 else 0
 
@@ -897,7 +907,7 @@ class QuotaService:
                 "percentage": round(daily_percentage, 2),
                 "warning": daily_percentage >= 80,
                 "exceeded": daily_percentage >= 100,
-                "resets_at": _next_utc_midnight_iso(utcnow().date()),
+                "resets_at": _next_utc_midnight_iso(today),
             },
             "features": {
                 "reranking": "reranking" in plan.features,

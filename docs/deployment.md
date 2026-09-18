@@ -374,10 +374,12 @@ size code is only its default display name.
 (counter in Redis, reset at 00:00Z; `resets_at` is returned with the 429).
 It charges every path that creates a user-visible memory: MCP `remember`,
 REST memory create, a brand-new `update_memory(external_id=...)`, and
-connector / resource ingest (charged once per indexer batch, up front — a
-batch that does not fit is deferred to the next run). It does **not** charge
-in-place updates (`update_memory` by id, `PATCH`), an `external_id` replace,
-context merges, admin context recovery, or Sleep / consolidation. If Redis is
+connector / resource ingest (charged once per indexer batch, up front, for the
+doc_ids not indexed yet — a re-sync of known docs is free, and a batch that
+does not fit is left untouched and re-queued for the next UTC midnight). It
+does **not** charge in-place updates (`update_memory` by id, `PATCH`), an
+`external_id` replace, context merges, admin context recovery, or Sleep /
+consolidation. If Redis is
 down the check fails open. `0` follows the zero-floor rule used by every quota
 field: the tier cannot create memories at all — it never means "unlimited".
 Self-hosters who want no cap set a very large value.
