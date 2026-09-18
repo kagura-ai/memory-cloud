@@ -44,7 +44,11 @@ from db.base import get_db
 from models.analysis import MEMORY_ANALYSIS_CANCELLATION_REASONS, MEMORY_ANALYSIS_STATUSES
 from models.api_base import TZAwareBaseModel
 from services.analysis import query_service
-from services.analysis.orchestrator import AnalysisOrchestrator, AnalysisParams
+from services.analysis.orchestrator import (
+    AnalysisOrchestrator,
+    AnalysisParams,
+    try_resolve_pricing_row,
+)
 from services.analysis.preview import (
     DEFAULT_MODEL_ID,
     assert_run_size_within_cap,
@@ -152,11 +156,15 @@ class AnalysisPreviewRequest(BaseModel):
 
 
 class AnalysisPreviewResponse(BaseModel):
-    """Cost-estimate output (Stage [A] from preview.py)."""
+    """Cost-estimate output (Stage [A] from preview.py).
+
+    ``estimated_cost_cents`` is ``null`` when no price is configured for the
+    model (#1570) — the estimate is unavailable, not zero.
+    """
 
     memory_count: int
     cluster_count_estimate: int
-    estimated_cost_cents: int
+    estimated_cost_cents: int | None
     model_id: str
     breakdown: dict[str, int]
 
@@ -410,9 +418,17 @@ async def preview_analysis(
         memory_count = await query_service.count_context_memories_binding_visible(
             db, workspace_id=workspace_id, context_id=context_id
         )
-    # v1 only supports the default model in the cost estimator;
-    # body.model_id is forward-compat scaffolding (preview.py:73-77).
-    estimate = estimate_cost(memory_count, model_id=DEFAULT_MODEL_ID)
+    # #1570: price from the same ``llm_pricing`` snapshot the run will
+    # freeze — the caller-pinned ``body.model_id`` when given (an unknown id
+    # is the same 422 ``start`` raises), else the default model. No row →
+    # ``estimated_cost_cents=null`` rather than a 500. The label is the
+    # snapshot's model so preview and run name the same rate card.
+    pricing = await try_resolve_pricing_row(db, body.model_id)
+    estimate = estimate_cost(
+        memory_count,
+        rates=None if pricing is None else pricing[1]["rates"],
+        model_id=DEFAULT_MODEL_ID if pricing is None else pricing[1]["model"],
+    )
     return AnalysisPreviewResponse(
         memory_count=estimate.memory_count,
         cluster_count_estimate=estimate.cluster_count_estimate,

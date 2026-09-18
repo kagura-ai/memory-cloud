@@ -306,6 +306,7 @@ async def handle_analyze_context(
                 # (delegates to ``query_service.count_context_memories``).
                 from services.agent_binding_service import agent_scope_is_enforce
                 from services.analysis import query_service
+                from services.analysis.orchestrator import try_resolve_pricing_row
                 from services.analysis.preview import (
                     DEFAULT_MODEL_ID,
                     assert_run_size_within_cap,
@@ -332,7 +333,14 @@ async def handle_analyze_context(
                     memory_count = await query_service.count_context_memories_binding_visible(
                         db, workspace_id=workspace_id, context_id=context_id
                     )
-                estimate = estimate_cost(memory_count, model_id=DEFAULT_MODEL_ID)
+                # #1570: same pricing snapshot as the run; no row →
+                # ``estimated_cost_cents=null`` (estimate unavailable).
+                pricing = await try_resolve_pricing_row(db, None)
+                estimate = estimate_cost(
+                    memory_count,
+                    rates=None if pricing is None else pricing[1]["rates"],
+                    model_id=DEFAULT_MODEL_ID,
+                )
                 await _log_tool_usage(
                     db,
                     user_id,

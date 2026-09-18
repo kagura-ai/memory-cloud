@@ -337,3 +337,55 @@ class TestCounterKeyFormat:
 class TestTTL:
     def test_daily_ttl_covers_clock_skew_past_midnight(self):
         assert _DAILY_TTL_SECONDS == 25 * 3600
+
+
+class TestPricedSelfHostedIsCapped:
+    """#1570 acceptance: a priced ``self_hosted`` embed advances the counters and
+    trips QUOTA-002 at the cap, exactly like a platform-paid OpenAI embed."""
+
+    @staticmethod
+    def _patch_lookup(price: str):
+        row = MagicMock()
+        row.price_per_unit = Decimal(price)
+        row.unit_denominator = 1_000_000
+        return patch(
+            "services.llm_pricing_service.LLMPricingService.lookup",
+            new_callable=AsyncMock,
+            return_value=row,
+        )
+
+    @pytest.mark.asyncio
+    async def test_priced_self_hosted_tokens_advance_both_counters(self, service, redis_mocks):
+        ws = _make_workspace(tier_daily=10.0)
+        _, mock_incr, _ = redis_mocks
+        mock_incr.return_value = 20_000  # far below cap → no alert
+        with self._patch_lookup("0.02"):
+            await service.record_spend_from_tokens(
+                ws, provider="self_hosted", model="qwen3-embedding:4b", tokens=1_000_000
+            )
+        # 1M tokens × $0.02/1M = $0.02 = 20,000 micro-USD, on daily + monthly.
+        assert mock_incr.call_count == 2
+        assert {c.args[1] for c in mock_incr.call_args_list} == {20_000}
+        keys = {c.args[0] for c in mock_incr.call_args_list}
+        assert all(k.startswith(f"embed_spend:{ws.id}:") for k in keys)
+
+    @pytest.mark.asyncio
+    async def test_zero_priced_self_hosted_records_nothing(self, service, redis_mocks):
+        """An explicit $0 override (a truly free local model) stays uncapped."""
+        ws = _make_workspace(tier_daily=10.0)
+        _, mock_incr, _ = redis_mocks
+        with self._patch_lookup("0"):
+            await service.record_spend_from_tokens(
+                ws, provider="self_hosted", model="qwen3-embedding:4b", tokens=1_000_000
+            )
+        mock_incr.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_cap_reached_raises_quota_002(self, service, redis_mocks):
+        ws = _make_workspace(tier_daily=0.05)
+        mock_get, _, _ = redis_mocks
+        mock_get.return_value = str(int(Decimal("0.05") * _MICRO_USD))  # at the cap
+        with pytest.raises(EmbeddingSpendCapExceeded) as exc_info:
+            await service.check_cap_or_raise(ws)
+        assert exc_info.value.error_code == "QUOTA-002"
+        assert exc_info.value.status_code == 429

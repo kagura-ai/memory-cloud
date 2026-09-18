@@ -161,20 +161,28 @@ def _aggregate_breakdown_totals(
 def _compute_actual_cost_cents(
     totals: _CostTotals,
     model_snapshot: dict[str, Any],
-) -> int:
+) -> int | None:
     """Compute the run's actual cost from pre-aggregated totals.
 
     The snapshot must contain unit-price rows for input/output
     tokens (and optionally cache_read). We prefer rates from the
     snapshot — even if pricing changed after the run started, the
     historical cost stays stable. Returns rounded-up integer cents.
+
+    Issue #1570: a snapshot without an ``input_tokens`` or ``output_tokens``
+    rate means the model's price is unknown → ``None`` (cost unknown,
+    persisted as ``cost_actual_cents = NULL``), never a silent ``0``. The
+    same per-million rates feed the pre-flight ``preview.estimate_cost``,
+    so estimate and actual agree on what a token costs. Only the
+    ``cache_read_tokens`` rate may be absent: cached input then falls back
+    to 10% of the input rate (the Anthropic / OpenAI discount range;
+    gpt-5-nano's seeded rate confirms 10%).
     """
     rates = model_snapshot.get("rates", {})
-    input_per_m = float(rates.get("input_tokens", 0.0))
-    output_per_m = float(rates.get("output_tokens", 0.0))
-    # If cache_read isn't priced in the snapshot, treat cached input
-    # as 10% of standard input (matches the Anthropic / OpenAI
-    # discount range; gpt-5-nano's seeded rate confirms 10% is right).
+    if rates.get("input_tokens") is None or rates.get("output_tokens") is None:
+        return None
+    input_per_m = float(rates["input_tokens"])
+    output_per_m = float(rates["output_tokens"])
     cached_per_m = float(rates.get("cache_read_tokens", input_per_m / 10.0))
 
     cost_usd = (

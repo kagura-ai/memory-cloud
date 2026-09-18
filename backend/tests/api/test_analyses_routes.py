@@ -14,6 +14,7 @@ The full 4-stage gate behavior is covered by
 from __future__ import annotations
 
 from datetime import datetime
+from decimal import Decimal
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
 from uuid import UUID, uuid4
@@ -99,12 +100,28 @@ def _scalars_all(values: list) -> MagicMock:
 # ============================================================================
 
 
+def _pricing_row(unit_type: str, price: str) -> MagicMock:
+    """A gpt-5-nano ``LLMPricing`` row as ``try_resolve_pricing_row`` reads it."""
+    row = MagicMock()
+    row.provider = "openai"
+    row.model = "gpt-5-nano"
+    row.unit_type = unit_type
+    row.price_per_unit = Decimal(price)
+    row.unit_denominator = 1_000_000
+    row.effective_from = datetime(2026, 4, 28)
+    return row
+
+
 class TestPreview:
     def test_returns_cost_estimate_shape(self, client, db_mock):
         # Boundary check passes (Context exists in workspace) → memory count = 100.
         db_mock.execute.side_effect = [
             _scalar_one(_TEST_CONTEXT_ID),  # Context boundary
             _scalar_one(100),  # _count_filtered_memories
+            # #1570: the default model's pricing rows → priced estimate.
+            _scalars_all(
+                [_pricing_row("input_tokens", "0.2"), _pricing_row("output_tokens", "1.25")]
+            ),
         ]
         response = client.post(
             f"/api/v1/contexts/{_TEST_CONTEXT_ID}/analyses/preview",
@@ -117,6 +134,66 @@ class TestPreview:
         assert body["cluster_count_estimate"] >= 1
         assert body["estimated_cost_cents"] >= 1
         assert "input_tokens" in body["breakdown"]
+
+    def test_preview_without_pricing_rows_returns_null_estimate(self, client, db_mock):
+        """#1570: an unpriced default model → 200 with ``estimated_cost_cents: null``,
+        not the 500 the run path raises for the missing FK row."""
+        db_mock.execute.side_effect = [
+            _scalar_one(_TEST_CONTEXT_ID),  # Context boundary
+            _scalar_one(100),  # count_context_memories
+            _scalars_all([]),  # no llm_pricing rows for openai/gpt-5-nano
+        ]
+        response = client.post(
+            f"/api/v1/contexts/{_TEST_CONTEXT_ID}/analyses/preview",
+            json={},
+        )
+        assert response.status_code == 200, response.text
+        body = response.json()
+        assert body["estimated_cost_cents"] is None
+        assert body["memory_count"] == 100
+        assert body["cluster_count_estimate"] == 10
+
+    def test_preview_prices_the_pinned_model(self, client, db_mock):
+        """#1570: ``body.model_id`` picks the rate card exactly as ``start``
+        does (``_resolve_pricing_row``), and the response names that model —
+        a preview pinned to a custom model must not quote the default's price."""
+        pinned = _pricing_row("input_tokens", "50")
+        sibling = _pricing_row("output_tokens", "150")
+        for row in (pinned, sibling):
+            row.provider = "self_hosted"
+            row.model = "my-llm"
+        pinned.id = 42
+        db_mock.execute.side_effect = [
+            _scalar_one(_TEST_CONTEXT_ID),  # Context boundary
+            _scalar_one(100),  # count_context_memories
+            _scalar_one(pinned),  # LLMPricing.id == 42
+            _scalars_all([pinned, sibling]),  # its effective_from siblings
+        ]
+        response = client.post(
+            f"/api/v1/contexts/{_TEST_CONTEXT_ID}/analyses/preview",
+            json={"model_id": 42},
+        )
+        assert response.status_code == 200, response.text
+        body = response.json()
+        assert body["model_id"] == "my-llm"
+        # 11 calls * (1500 in @ $50/M + 80 out @ $150/M) = $0.957 → 96 cents;
+        # the default card (0.2 / 1.25) would have said 1 cent.
+        assert body["estimated_cost_cents"] == 96
+
+    def test_preview_unknown_pinned_model_is_422(self, client, db_mock):
+        """A ``model_id`` with no ``llm_pricing`` row is the client error
+        ``start`` returns, not a silent fall-back to the default model."""
+        db_mock.execute.side_effect = [
+            _scalar_one(_TEST_CONTEXT_ID),  # Context boundary
+            _scalar_one(100),  # count_context_memories
+            _scalar_one(None),  # no LLMPricing.id == 999
+        ]
+        response = client.post(
+            f"/api/v1/contexts/{_TEST_CONTEXT_ID}/analyses/preview",
+            json={"model_id": 999},
+        )
+        assert response.status_code == 422, response.text
+        assert "model_id" in response.text
 
     def test_preview_rejects_over_cap_context(self, client, db_mock, monkeypatch):
         """#1244: preview 422s (naming the limit) instead of quoting a

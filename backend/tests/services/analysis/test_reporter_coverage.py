@@ -199,12 +199,20 @@ class TestComputeActualCostCents:
         snapshot = {"rates": {"input_tokens": 1.0, "output_tokens": 2.0}}
         assert _compute_actual_cost_cents(totals, snapshot) == 0
 
-    def test_missing_rates_key_treats_prices_as_zero(self):
-        """A snapshot with no ``rates`` prices everything at 0 → 0 cents."""
+    def test_missing_rates_key_means_cost_unknown(self):
+        """#1570: a snapshot with no ``rates`` → ``None`` (unknown), not a silent $0."""
         totals = _CostTotals(
             input_tokens=1_000_000, output_tokens=1_000_000, cached_input_tokens=0, calls=1
         )
-        assert _compute_actual_cost_cents(totals, {}) == 0
+        assert _compute_actual_cost_cents(totals, {}) is None
+
+    @pytest.mark.parametrize("present", ["input_tokens", "output_tokens"])
+    def test_missing_either_token_rate_means_cost_unknown(self, present):
+        """#1570: only ``cache_read_tokens`` may be absent; input/output are required."""
+        totals = _CostTotals(
+            input_tokens=1_000_000, output_tokens=1_000_000, cached_input_tokens=0, calls=1
+        )
+        assert _compute_actual_cost_cents(totals, {"rates": {present: 1.0}}) is None
 
     def test_rounds_up_to_at_least_one_cent(self):
         """A tiny positive cost rounds up to the 1-cent floor via ceil/max."""
@@ -851,8 +859,9 @@ class TestPersistResults:
         assert analysis.quality["labeling_failures"] == 1
         # Only the non-failed cluster's 0.8 counts.
         assert analysis.quality["label_confidence"] == pytest.approx(0.8)
-        # No breakdowns → zero cost.
-        assert analysis.cost_actual_cents == 0
+        # #1570: a snapshot without rates → cost unknown, persisted as NULL
+        # (was a silent 0 before).
+        assert analysis.cost_actual_cents is None
 
     async def test_memory_with_unknown_cluster_index_is_unassigned(
         self, db_session, fixture_workspace_id, fixture_context_id, fixture_pricing
