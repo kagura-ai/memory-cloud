@@ -69,7 +69,7 @@ class WorkspaceService:
             owner_user_id: User ID of the owner
             openai_api_key: OpenAI API key (optional, workspace-scoped)
             description: Optional description
-            plan_name: Billing plan (free/pro/enterprise)
+            plan_name: Billing plan tier (a ``config.plan_tiers.PlanName`` value)
             create_default_context: Whether to create default context (default: True)
             default_context_name: Optional name for default context (defaults to "default")
             default_context_summary: Optional summary for default context

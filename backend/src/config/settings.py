@@ -342,6 +342,25 @@ class Settings(BaseSettings):
         default=7 * 24 * 60 * 60, description="Session TTL (default: 7 days)"
     )
 
+    # Redis connection pool (Issue #1556). The singleton ``db.redis`` client uses
+    # a BlockingConnectionPool: when every connection is checked out a caller
+    # waits up to ``redis_pool_timeout_seconds`` instead of getting "Too many
+    # connections" at once. Every quota / rate-limit path treats a RedisError
+    # as "Redis down" and fails open, so with the old non-blocking pool a burst
+    # of >max_connections concurrent requests silently skipped the counters.
+    # The timeout is deliberately short: the request is holding an event-loop
+    # slot while it waits, and the fail-open branch is the backstop past it.
+    redis_max_connections: int = Field(
+        default=50,
+        ge=1,
+        description="Max pooled connections for the singleton Redis client, per worker (Issue #1556)",
+    )
+    redis_pool_timeout_seconds: float = Field(
+        default=2.0,
+        gt=0,
+        description="Seconds a caller waits for a free pooled Redis connection (Issue #1556)",
+    )
+
     # API Settings
     api_host: str = Field(default="0.0.0.0", description="API host")
     api_port: int = Field(default=8080, description="API port")

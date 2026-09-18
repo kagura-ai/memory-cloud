@@ -8,6 +8,7 @@ from typing import cast
 import redis.asyncio as aioredis
 
 from config.database import REDIS_URL
+from config.settings import get_settings
 from utils.exceptions import RedisError
 from utils.logger import get_logger
 from utils.url_redact import redact_generic_url
@@ -30,14 +31,31 @@ def get_redis_client() -> aioredis.Redis:
     global _redis_client
 
     if _redis_client is None:
+        settings = get_settings()
         try:
-            _redis_client = aioredis.from_url(
+            # #1556: BlockingConnectionPool queues callers for up to ``timeout``
+            # seconds when every connection is checked out. The default
+            # ConnectionPool raised ``Too many connections`` immediately, which
+            # the quota / rate-limit paths treat as "Redis down" and fail open —
+            # so a burst of >max_connections concurrent requests skipped the
+            # daily counters. A timed-out wait still surfaces as a
+            # ``redis.exceptions.ConnectionError`` (wrapped as RedisError by the
+            # helpers below), so the fail-open branches keep working as the
+            # backstop. from_url keeps the URL-driven options (rediss:// → TLS).
+            pool = aioredis.BlockingConnectionPool.from_url(
                 REDIS_URL,
+                max_connections=settings.redis_max_connections,
+                timeout=settings.redis_pool_timeout_seconds,
                 encoding="utf-8",
                 decode_responses=True,
-                max_connections=10,
             )
-            logger.info("redis_client_initialized", url=redact_generic_url(REDIS_URL))
+            _redis_client = aioredis.Redis.from_pool(pool)
+            logger.info(
+                "redis_client_initialized",
+                url=redact_generic_url(REDIS_URL),
+                max_connections=settings.redis_max_connections,
+                pool_timeout_seconds=settings.redis_pool_timeout_seconds,
+            )
         except Exception as e:
             raise RedisError(f"Failed to connect to Redis: {e}") from e
 
