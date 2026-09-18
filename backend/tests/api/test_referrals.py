@@ -121,6 +121,17 @@ class TestPayoutBudget:
                 referral_max_grants_per_referrer=5,
             )
 
+    def test_an_inverted_ladder_is_named_as_the_cause(self) -> None:
+        """BASIC <= FREE leaves no gap to protect. Refuse with the ladder named,
+        not a nonsensical negative budget that points at REFERRAL_*."""
+        with pytest.raises(ValidationError, match="PLAN_BASIC_MEMORY_LIMIT must exceed"):
+            Settings(
+                _env_file=None,
+                enable_referrals=True,
+                plan_free_memory_limit=3000,
+                plan_basic_memory_limit=3000,
+            )
+
     def test_per_field_ceilings_alone_would_blow_the_budget(self) -> None:
         """Documents WHY the cross-field validator has to exist.
 

@@ -28,10 +28,11 @@ from utils.media_types import MEDIA_TYPE_RE, normalize_media_type
 # ``tests/api/test_referrals.py::test_payout_budget_matches_the_free_to_basic_gap``,
 # which fails if the tier values move and these constants do not.
 #
-# Issue #1552: the constant is the DEFAULT-tier budget. Hosted deployments lower
-# the tiers via ``PLAN_FREE_MEMORY_LIMIT`` / ``PLAN_BASIC_MEMORY_LIMIT`` and the
-# gap shrinks with them, so the validator enforces
-# ``Settings.referral_payout_budget_memories`` (the effective gap) instead.
+# Issue #1552: the constant is the DEFAULT-tier budget. Hosted deployments
+# retune the tiers via ``PLAN_FREE_MEMORY_LIMIT`` / ``PLAN_BASIC_MEMORY_LIMIT``
+# and the gap moves with them (narrower when BASIC comes down further than
+# FREE), so the validator enforces ``Settings.referral_payout_budget_memories``
+# (the effective gap) instead.
 _DEFAULT_FREE_MEMORY_LIMIT = 1000
 _DEFAULT_BASIC_MEMORY_LIMIT = 10000
 REFERRAL_TOTAL_PAYOUT_BUDGET_MEMORIES = _DEFAULT_BASIC_MEMORY_LIMIT - _DEFAULT_FREE_MEMORY_LIMIT
@@ -1171,6 +1172,15 @@ class Settings(BaseSettings):
         # for free. ">=" is what makes "cannot reach BASIC" true rather than
         # "cannot exceed BASIC".
         budget = self.referral_payout_budget_memories
+        if budget <= 0:
+            # An inverted or flat ladder (BASIC <= FREE) has no gap to protect;
+            # name the real cause instead of blaming REFERRAL_* for a
+            # nonsensical "-2500-memory budget".
+            raise ValueError(
+                "PLAN_BASIC_MEMORY_LIMIT must exceed PLAN_FREE_MEMORY_LIMIT while "
+                f"ENABLE_REFERRALS is on (effective FREE->BASIC gap is {budget}); "
+                "the referral payout budget is that gap."
+            )
         if worst_case >= budget:
             raise ValueError(
                 "Referral config would mint up to "

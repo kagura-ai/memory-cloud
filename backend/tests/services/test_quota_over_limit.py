@@ -223,8 +223,8 @@ class TestQuotaStatusOverLimit:
         self, service, mock_db, workspace_id
     ):
         """The dashboard must be able to say "750 / 500 (150 %)", so the status
-        carries the raw numbers and a >100 percentage — never a clamped bar
-        value or a negative "remaining"."""
+        carries the raw numbers and a >100 percentage — nothing clamped, nothing
+        negative (there is no "remaining" key to go below zero)."""
         ws = _make_workspace(workspace_id, effective_memory_limit=LIMIT)
         members_result = MagicMock()
         members_result.all = MagicMock(return_value=[("user-1",)])
