@@ -164,6 +164,19 @@ describe("ResourcesListPage", () => {
     expect(screen.queryByText("planGate.title")).toBeNull();
   });
 
+  it("promax is not plan-gated: fetches and renders, no upgrade CTA (#1548)", async () => {
+    mockCurrentWorkspace = { plan_name: "promax", current_user_role: "owner" };
+    mockListResources.mockResolvedValue({ resources: [item()], total: 1 });
+
+    render(<ResourcesListPage />);
+
+    await waitFor(() => {
+      expect(screen.getByText("ec_products")).toBeInTheDocument();
+    });
+    expect(mockListResources).toHaveBeenCalledTimes(1);
+    expect(screen.queryByText("planGate.title")).toBeNull();
+  });
+
   it("upgrade CTA button navigates to the plan page", async () => {
     mockCurrentWorkspace = { plan_name: "free", current_user_role: "owner" };
     mockListResources.mockResolvedValue({ resources: [], total: 0 });
