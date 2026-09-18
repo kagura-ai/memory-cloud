@@ -32,8 +32,11 @@ Design rationale:
 
 from __future__ import annotations
 
+from collections.abc import Iterable
+from dataclasses import dataclass, field
 from datetime import date, datetime
-from typing import Final
+from decimal import ROUND_HALF_UP, Decimal
+from typing import TYPE_CHECKING, Final
 
 from cachetools import TTLCache
 from sqlalchemy import and_, or_, select
@@ -41,6 +44,9 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from models.llm_pricing import LLM_PRICING_UNIT_TYPES, LLMPricing
 from utils.logger import get_logger
+
+if TYPE_CHECKING:
+    from config.llm_pricing_overrides import PricingOverride
 
 logger = get_logger(__name__)
 
@@ -229,6 +235,31 @@ class LLMPricingService:
         price_per_unit, unit_denominator = components
         return float(units) * price_per_unit / unit_denominator
 
+    async def has_positive_price(
+        self,
+        *,
+        provider: str,
+        model: str,
+        unit_type: str,
+        started_at: datetime,
+        context_tokens: int = 0,
+    ) -> bool:
+        """Is there an effective price row with ``price_per_unit > 0``? (#1570)
+
+        ``False`` both for a lookup miss and for an explicit ``$0`` row — the
+        two are indistinguishable for the callers that ask (a ``$0`` model has
+        nothing to cap either). Goes through the process-local cache, so the
+        recall hot path pays at most one SELECT per hour per model.
+        """
+        components = await self._cached_price_components(
+            provider=provider,
+            model=model,
+            unit_type=unit_type,
+            started_at=started_at,
+            context_tokens=context_tokens,
+        )
+        return components is not None and components[0] > 0
+
     async def _cached_price_components(
         self,
         *,
@@ -297,3 +328,137 @@ class LLMPricingService:
         )
         _pricing_cache[cache_key] = components
         return components
+
+
+# ---------------------------------------------------------------------------
+# Operator overrides → table (#1570)
+# ---------------------------------------------------------------------------
+
+# ``llm_pricing.price_per_unit`` is ``Numeric(14, 10)``; compare at the column's
+# scale. The parser already refuses more decimals than the column keeps
+# (``config.llm_pricing_overrides.MAX_PRICE_DECIMALS``), so for parsed entries
+# this only normalizes the exponent; an override built elsewhere is rounded the
+# way Postgres rounds on INSERT (HALF_UP, not Decimal's default HALF_EVEN) so
+# it does not read back as "different" and re-insert on every boot.
+_PRICE_SCALE: Final = Decimal("1e-10")
+
+
+@dataclass
+class SyncResult:
+    """Outcome of one ``sync_llm_pricing_overrides`` pass."""
+
+    inserted: list[PricingOverride] = field(default_factory=list)
+    unchanged: list[PricingOverride] = field(default_factory=list)
+
+
+async def _effective_row(
+    db: AsyncSession, override: PricingOverride, *, now: datetime
+) -> LLMPricing | None:
+    """The row ``lookup()`` would pick for this override's exact tier at ``now``."""
+    stmt = (
+        select(LLMPricing)
+        .where(
+            and_(
+                LLMPricing.provider == override.provider,
+                LLMPricing.model == override.model,
+                LLMPricing.unit_type == override.unit_type,
+                LLMPricing.context_min_tokens == override.context_min_tokens,
+                LLMPricing.effective_from <= now,
+            )
+        )
+        .order_by(LLMPricing.effective_from.desc())
+        .limit(1)
+    )
+    return (await db.execute(stmt)).scalar_one_or_none()
+
+
+async def sync_llm_pricing_overrides(
+    db: AsyncSession,
+    overrides: Iterable[PricingOverride],
+    *,
+    now: datetime,
+    dry_run: bool = False,
+) -> SyncResult:
+    """Materialize ``LLM_PRICING_OVERRIDES`` into ``llm_pricing`` (#1570).
+
+    For each override, find the row currently effective for the same
+    ``(provider, model, unit_type, context_min_tokens)``. When there is none,
+    or its ``(price_per_unit, unit_denominator)`` differ, INSERT a new row
+    with ``effective_from=now`` (``pricing_model='per_token'``, USD); otherwise
+    do nothing. Existing rows are never updated or deleted — the table is an
+    append-only snapshot history and ``lookup()`` picks the newest row whose
+    ``effective_from <= started_at``, so the new price takes over from ``now``
+    while historical reports keep the rate that applied at the time.
+
+    The table is the single source of truth for ``LLMPricingService``, the SQL
+    LATERAL joins in ``cost_aggregation_service`` and the
+    ``memory_analyses.model_id`` FK — an in-memory override layer would miss
+    the SQL aggregation, which is why the env value is written down here.
+
+    Flushes but does not commit; the caller owns the transaction. Clears the
+    process-local price cache after any insert so the new price is visible
+    without waiting out the TTL. Multiple replicas syncing at the same moment
+    may each insert an identical-price row with a slightly different
+    ``effective_from`` — harmless (newest wins, same price); two inserts in the
+    very same microsecond hit the unique constraint and the caller's error
+    path.
+
+    Args:
+        db: Async session; the caller commits.
+        overrides: Parsed ``LLM_PRICING_OVERRIDES`` entries.
+        now: Naive UTC timestamp used as ``effective_from`` for inserts (and
+            as the "currently effective" cut-off).
+        dry_run: Compute the diff but write nothing (the CLI's ``--plan``).
+            ``inserted`` then lists what a real run would append.
+
+    Returns:
+        ``SyncResult`` listing the overrides that were inserted and those
+        that already matched the effective row.
+    """
+    result = SyncResult()
+    for override in overrides:
+        current = await _effective_row(db, override, now=now)
+        wanted_price = override.price_per_unit.quantize(_PRICE_SCALE, rounding=ROUND_HALF_UP)
+        if (
+            current is not None
+            and Decimal(current.price_per_unit) == wanted_price
+            and int(current.unit_denominator) == override.unit_denominator
+        ):
+            result.unchanged.append(override)
+            continue
+        result.inserted.append(override)
+        if dry_run:
+            continue
+        db.add(
+            LLMPricing(
+                provider=override.provider,
+                model=override.model,
+                unit_type=override.unit_type,
+                effective_from=now,
+                context_min_tokens=override.context_min_tokens,
+                pricing_model="per_token",
+                price_per_unit=override.price_per_unit,
+                currency="USD",
+                unit_denominator=override.unit_denominator,
+            )
+        )
+        logger.info(
+            "llm_pricing_override_applied",
+            provider=override.provider,
+            model=override.model,
+            unit_type=override.unit_type,
+            price_per_unit=str(override.price_per_unit),
+            unit_denominator=override.unit_denominator,
+            context_min_tokens=override.context_min_tokens,
+            previous_price=None if current is None else str(current.price_per_unit),
+        )
+    if result.inserted and not dry_run:
+        await db.flush()
+        clear_pricing_cache()
+    logger.info(
+        "llm_pricing_overrides_synced",
+        inserted=len(result.inserted),
+        unchanged=len(result.unchanged),
+        dry_run=dry_run,
+    )
+    return result

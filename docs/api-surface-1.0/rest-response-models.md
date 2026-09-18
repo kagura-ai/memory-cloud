@@ -297,7 +297,7 @@ Notes:
 > Cost-estimate output (Stage [A] from preview.py).
 - `memory_count: int` — required
 - `cluster_count_estimate: int` — required
-- `estimated_cost_cents: int` — required
+- `estimated_cost_cents: int | None` — required (#1570: `null` when no price is configured for the model — estimate unavailable, not zero)
 - `model_id: str` — required
 - `breakdown: dict[str, int]` — required
 

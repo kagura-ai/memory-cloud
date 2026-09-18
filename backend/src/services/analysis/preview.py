@@ -32,11 +32,20 @@ call's input is closer to 1500 tokens, not 380. Updated:
 - For n=8000: 91 * $0.0004 = ~$0.0364 USD = ~4 cents.
 
 This matches the Phase 3 cost target ($0.033 / 8000 memory).
+
+Issue #1570: the rates above are illustrative only. ``estimate_cost`` takes
+the per-million rates of the model that will actually run — the
+``snapshot["rates"]`` that ``orchestrator._resolve_pricing_row`` builds from
+``llm_pricing`` — so the pre-flight estimate and the post-run
+``cost_actual_cents`` (``reporter._compute_actual_cost_cents``) read the same
+numbers. No price for the model → ``estimated_cost_cents=None``
+("estimate unavailable"), not a guess and not a 500.
 """
 
 from __future__ import annotations
 
 import math
+from collections.abc import Mapping
 from dataclasses import dataclass
 
 # Default analysis provider + model (issue #496/B3 - shared by REST
@@ -54,10 +63,6 @@ DEFAULT_MODEL_ID = "gpt-5-nano"
 _INPUT_TOKENS_PER_CALL = 1500
 _OUTPUT_TOKENS_PER_CALL = 80
 
-# gpt-5-nano pricing per ``c03_471_seed_pricing`` (USD per million).
-_GPT5_NANO_INPUT_PER_M = 0.20
-_GPT5_NANO_OUTPUT_PER_M = 1.25
-
 
 @dataclass(frozen=True)
 class CostEstimate:
@@ -66,7 +71,9 @@ class CostEstimate:
     Attributes:
         memory_count: Number of memories the analysis would cluster.
         cluster_count_estimate: ``ceil(sqrt(memory_count))``.
-        estimated_cost_cents: Conservative upper-bound, integer cents.
+        estimated_cost_cents: Conservative upper-bound, integer cents;
+            ``None`` when the model has no ``input_tokens`` /
+            ``output_tokens`` price (estimate unavailable, #1570).
         model_id: Pricing snapshot model the estimate is based on.
         breakdown: Itemized prompt/output token totals so the modal
             can show a "what counts as a token" tooltip if needed.
@@ -74,7 +81,7 @@ class CostEstimate:
 
     memory_count: int
     cluster_count_estimate: int
-    estimated_cost_cents: int
+    estimated_cost_cents: int | None
     model_id: str
     breakdown: dict[str, int]
 
@@ -138,12 +145,23 @@ def assert_run_size_within_cap(memory_count: int, *, redact_count: bool = False)
         )
 
 
-def estimate_cost(memory_count: int, *, model_id: str = DEFAULT_MODEL_ID) -> CostEstimate:
+def estimate_cost(
+    memory_count: int,
+    *,
+    rates: Mapping[str, float] | None,
+    model_id: str = DEFAULT_MODEL_ID,
+) -> CostEstimate:
     """Compute the pre-flight estimate for a memory_count-sized run.
 
-    The model_id parameter is forward-compatibility scaffolding;
-    today only gpt-5-nano is supported. v1.5 will branch on
-    ``model_id`` to pull the actual ``llm_pricing`` row.
+    Args:
+        memory_count: Memories the run would cluster.
+        rates: Per-million USD rates keyed by unit type
+            (``{"input_tokens": 0.2, "output_tokens": 1.25, ...}``) — the
+            ``snapshot["rates"]`` of the pricing row the run will use
+            (``orchestrator._resolve_pricing_row`` /
+            ``try_resolve_pricing_row``). ``None`` or a map missing either
+            token rate yields ``estimated_cost_cents=None``.
+        model_id: Label for the model the rates belong to.
     """
     if memory_count < 2:
         # Pipeline cannot cluster a single memory. The API layer
@@ -163,10 +181,17 @@ def estimate_cost(memory_count: int, *, model_id: str = DEFAULT_MODEL_ID) -> Cos
     input_tokens = n_calls * _INPUT_TOKENS_PER_CALL
     output_tokens = n_calls * _OUTPUT_TOKENS_PER_CALL
 
-    cost_usd = (
-        input_tokens * _GPT5_NANO_INPUT_PER_M + output_tokens * _GPT5_NANO_OUTPUT_PER_M
-    ) / 1_000_000.0
-    cost_cents = max(1, math.ceil(cost_usd * 100))
+    input_per_m = None if rates is None else rates.get("input_tokens")
+    output_per_m = None if rates is None else rates.get("output_tokens")
+    if input_per_m is None or output_per_m is None:
+        # No price for the model that will run → "estimate unavailable"
+        # rather than a number from some other model's rate card.
+        cost_cents = None
+    else:
+        cost_usd = (
+            input_tokens * float(input_per_m) + output_tokens * float(output_per_m)
+        ) / 1_000_000.0
+        cost_cents = max(1, math.ceil(cost_usd * 100))
 
     return CostEstimate(
         memory_count=memory_count,

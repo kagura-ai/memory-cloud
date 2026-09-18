@@ -67,7 +67,8 @@ export interface AnalysisCancelResponse {
 export interface AnalysisPreviewResponse {
   memory_count: number;
   cluster_count_estimate: number;
-  estimated_cost_cents: number;
+  /** null when no price is configured for the model (estimate unavailable). */
+  estimated_cost_cents: number | null;
   model_id: string;
   breakdown: Record<string, number>;
 }

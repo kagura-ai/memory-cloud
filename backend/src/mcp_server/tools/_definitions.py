@@ -1917,7 +1917,7 @@ merges_unreversible (#1450) counts shadow merges this run did NOT reverse becaus
                 "Example:\n"
                 '  analyze_context(context_id="...", dry_run=True)  # cost preview\n'
                 '  analyze_context(context_id="...")                # 202 + run_id'
-                "\n\nReturns (dry_run preview): {status, dry_run, memory_count, cluster_count_estimate, estimated_cost_cents, model_id, breakdown: {input_tokens, output_tokens, calls}}. dry_run=true is preview-only; call with dry_run=false to start the run, then poll get_analysis(run_id) until finished_at is set."
+                "\n\nReturns (dry_run preview): {status, dry_run, memory_count, cluster_count_estimate, estimated_cost_cents, model_id, breakdown: {input_tokens, output_tokens, calls}}. estimated_cost_cents is null when no price is configured for the model (estimate unavailable, not zero). dry_run=true is preview-only; call with dry_run=false to start the run, then poll get_analysis(run_id) until finished_at is set."
             ),
             "inputSchema": {
                 "type": "object",

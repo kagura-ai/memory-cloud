@@ -74,6 +74,23 @@ async def lifespan(app: FastAPI):
     else:
         logger.info("auth_routes_initialized (password only, google oauth disabled)")
 
+    # Issue #1570: write LLM_PRICING_OVERRIDES into ``llm_pricing`` so the price
+    # service, the SQL cost aggregation and the analysis pricing FK all see the
+    # operator's prices. Append-only, no-op when nothing changed, and never a
+    # reason not to boot — a transient DB error is logged and the previous
+    # rows keep serving (``python -m src.cli.sync_llm_pricing --apply`` re-syncs).
+    pricing_overrides = get_settings().parsed_llm_pricing_overrides
+    if pricing_overrides:
+        from db.base import get_db
+        from services.llm_pricing_service import sync_llm_pricing_overrides
+        from utils.datetime import utcnow
+
+        try:
+            async for db in get_db():
+                await sync_llm_pricing_overrides(db, pricing_overrides, now=utcnow())
+        except Exception as e:  # noqa: BLE001 — startup must not die on a pricing sync
+            logger.error("llm_pricing_overrides_sync_failed", error=str(e))
+
     # Start background task scheduler
     from tasks import (
         get_scheduler,

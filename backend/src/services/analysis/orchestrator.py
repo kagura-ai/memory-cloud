@@ -261,9 +261,36 @@ async def _resolve_pricing_row(db: AsyncSession, model_id: int | None) -> tuple[
         "provider": primary.provider,
         "model": primary.model,
         "effective_from": (primary.effective_from.isoformat() if primary.effective_from else None),
-        "rates": {r.unit_type: float(r.price_per_unit) for r in rate_rows},
+        # Rates are USD per MILLION units, whatever the row's
+        # ``unit_denominator`` (#1570: operator overrides may use another
+        # denominator; the seed rows are all per-1M so this is a no-op for
+        # them). ``preview.estimate_cost`` and
+        # ``reporter._compute_actual_cost_cents`` both divide by 1e6.
+        "rates": {
+            r.unit_type: float(r.price_per_unit) * 1_000_000 / float(r.unit_denominator)
+            for r in rate_rows
+        },
     }
     return primary, snapshot
+
+
+async def try_resolve_pricing_row(
+    db: AsyncSession, model_id: int | None
+) -> tuple[LLMPricing, dict] | None:
+    """``_resolve_pricing_row`` for the preview path (#1570).
+
+    Returns ``None`` instead of raising ``ConfigurationError`` when the
+    default model has no ``llm_pricing`` rows, so a deployment that has not
+    seeded / priced its analysis model gets ``estimated_cost_cents=null``
+    from ``/preview`` rather than a 500. A caller-pinned ``model_id`` that
+    does not exist still raises ``ValidationError`` (client input error).
+    The run path (``start()``) keeps ``_resolve_pricing_row`` — the
+    ``memory_analyses.model_id`` FK needs a row there (#1569).
+    """
+    try:
+        return await _resolve_pricing_row(db, model_id)
+    except ConfigurationError:
+        return None
 
 
 class AnalysisOrchestrator:
@@ -463,6 +490,7 @@ class AnalysisOrchestrator:
             snapshot_dict = dict(analysis.model_snapshot or {})
             estimate = estimate_cost(
                 memory_count=len(pull.memories),
+                rates=snapshot_dict.get("rates"),
                 model_id=str(snapshot_dict.get("model", DEFAULT_MODEL_ID)),
             )
             analysis.cost_estimated_cents = estimate.estimated_cost_cents
