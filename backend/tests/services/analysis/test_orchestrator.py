@@ -24,6 +24,7 @@ from services.analysis.orchestrator import (
     AnalysisParams,
     _params_iso_to_naive_utc,
     _resolve_pricing_row,
+    try_resolve_pricing_row,
 )
 from utils.exceptions import ConfigurationError, ConflictError, ValidationError
 
@@ -198,6 +199,55 @@ class TestResolvePricingRow:
         assert snapshot["rates"]["input_tokens"] == 0.001
         assert snapshot["rates"]["output_tokens"] == 0.002
         assert "cache_read_tokens" not in snapshot["rates"]
+
+    @pytest.mark.asyncio
+    async def test_rates_are_normalized_to_per_million(self, db_session) -> None:
+        """#1570: an operator override priced per 1k units lands in the snapshot per 1M."""
+        row = LLMPricing(
+            provider="self_hosted",
+            model="my-llm",
+            unit_type="input_tokens",
+            price_per_unit="0.001",
+            unit_denominator=1_000,
+            currency="USD",
+            effective_from=datetime(2024, 1, 1),
+        )
+        db_session.add(row)
+        await db_session.flush()
+
+        _primary, snapshot = await _resolve_pricing_row(db_session, model_id=row.id)
+        assert snapshot["rates"]["input_tokens"] == pytest.approx(1.0)
+
+
+class TestTryResolvePricingRow:
+    """#1570: the preview path must not 500 on an unpriced default model."""
+
+    @pytest.mark.asyncio
+    async def test_default_path_empty_returns_none(self, db_session) -> None:
+        assert await try_resolve_pricing_row(db_session, model_id=None) is None
+
+    @pytest.mark.asyncio
+    async def test_default_path_seeded_returns_snapshot(self, db_session) -> None:
+        db_session.add(
+            LLMPricing(
+                provider="openai",
+                model="gpt-5-nano",
+                unit_type="input_tokens",
+                price_per_unit="0.2",
+                currency="USD",
+                effective_from=datetime(2024, 1, 1),
+            )
+        )
+        await db_session.flush()
+        resolved = await try_resolve_pricing_row(db_session, model_id=None)
+        assert resolved is not None
+        _primary, snapshot = resolved
+        assert snapshot["rates"] == {"input_tokens": pytest.approx(0.2)}
+
+    @pytest.mark.asyncio
+    async def test_pinned_missing_model_id_still_raises(self, db_session) -> None:
+        with pytest.raises(ValidationError, match="No LLM pricing row"):
+            await try_resolve_pricing_row(db_session, model_id=99999)
 
 
 # ---------------------------------------------------------------------------

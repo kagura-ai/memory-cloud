@@ -10,6 +10,7 @@ quotes prices for (or starts) runs that REST would refuse.
 from __future__ import annotations
 
 import json
+from contextlib import ExitStack
 from unittest.mock import AsyncMock, MagicMock, patch
 from uuid import uuid4
 
@@ -128,6 +129,12 @@ class TestAnalyzeContextRunSizeCap:
                 "mcp_server.tools.analysis._log_tool_usage",
                 AsyncMock(),
             ),
+            # #1570: the estimate now reads the pricing row from the DB;
+            # unpriced here (None) — the pricing surface has its own tests below.
+            patch(
+                "services.analysis.orchestrator.try_resolve_pricing_row",
+                AsyncMock(return_value=None),
+            ),
         ):
             result = await handle_analyze_context(
                 {"context_id": str(uuid4()), "dry_run": True},
@@ -137,3 +144,50 @@ class TestAnalyzeContextRunSizeCap:
         body = _envelope(result)
         assert body.get("dry_run") is True, body
         assert body.get("memory_count") == 49
+
+
+class TestDryRunEstimatePricing:
+    """#1570: the dry_run estimate reads the run's pricing row; unpriced → null."""
+
+    @staticmethod
+    async def _run(db_mock, pricing):
+        """dry_run analyze_context with the gates stubbed and ``pricing`` resolved."""
+        with ExitStack() as stack:
+            for patcher in (
+                patch("db.base.get_db", _fake_get_db(db_mock)),
+                patch(
+                    "mcp_server.tools.analysis._verify_context_in_workspace_mcp",
+                    AsyncMock(return_value=None),
+                ),
+                patch(
+                    "auth.analysis_gates.check_memory_analysis_access_mcp",
+                    AsyncMock(return_value="UTC"),
+                ),
+                patch(
+                    "services.analysis.query_service.count_context_memories",
+                    AsyncMock(return_value=100),
+                ),
+                patch("mcp_server.tools.analysis._log_tool_usage", AsyncMock()),
+                patch(
+                    "services.analysis.orchestrator.try_resolve_pricing_row",
+                    AsyncMock(return_value=pricing),
+                ),
+            ):
+                stack.enter_context(patcher)
+            return await handle_analyze_context(
+                {"context_id": str(uuid4()), "dry_run": True}, "u1", uuid4()
+            )
+
+    @pytest.mark.asyncio
+    async def test_unpriced_model_surfaces_null_estimate(self, db_mock):
+        body = _envelope(await self._run(db_mock, pricing=None))
+        assert body.get("dry_run") is True, body
+        assert "estimated_cost_cents" in body
+        assert body["estimated_cost_cents"] is None
+        assert body["memory_count"] == 100
+
+    @pytest.mark.asyncio
+    async def test_priced_model_surfaces_a_positive_estimate(self, db_mock):
+        snapshot = {"rates": {"input_tokens": 0.2, "output_tokens": 1.25}}
+        body = _envelope(await self._run(db_mock, pricing=(MagicMock(), snapshot)))
+        assert body["estimated_cost_cents"] >= 1
