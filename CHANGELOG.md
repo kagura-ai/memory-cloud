@@ -4,25 +4,28 @@ Release notes are published on [GitHub Releases](https://github.com/kagura-ai/me
 which is the canonical source for the complete release history. This file highlights the current
 release train and preserves selected historical development notes.
 
-## [Unreleased]
+## [v0.68.0](https://github.com/kagura-ai/memory-cloud/releases/tag/v0.68.0) — 2026-09-19
 
-Release train: **v0.68.0** — the four-tier plan matrix ([#1547](https://github.com/kagura-ai/memory-cloud/issues/1547)).
+The four-tier plan matrix ([#1547](https://github.com/kagura-ai/memory-cloud/issues/1547)).
 
 ### Added
 - **XL (`promax`) tier** ([#1547](https://github.com/kagura-ai/memory-cloud/issues/1547), [#1551](https://github.com/kagura-ai/memory-cloud/issues/1551)): a fourth plan above L (`pro`). Tiers are S / M / L / XL (`free` / `basic` / `pro` / `promax`); display names remain env-overridable.
 - **Owned-workspace cap by plan** ([#1550](https://github.com/kagura-ai/memory-cloud/issues/1550)): a user may own **1 / 1 / 3 / 20** workspaces on S / M / L / XL (`owned_workspace_grant`). Existing workspaces above the cap are kept — only creation is gated.
 - **Daily memory-creation quota `memories_per_day`** ([#1549](https://github.com/kagura-ai/memory-cloud/issues/1549)): memories created per workspace per UTC day — **50 / 300 / 2,000 / 10,000** by default (`0` means none, not unlimited). The Redis counter fails open and is observable via structured logs ([#1556](https://github.com/kagura-ai/memory-cloud/issues/1556)).
+- **`PLAN_<KEY>_FEATURES` env override** ([#1559](https://github.com/kagura-ai/memory-cloud/issues/1559)): a self-hosted deployment can re-enable `resources` / `connectors` / `public_contexts` (or any feature) on a lower tier; unknown names and invariant violations (`resources` ⊆ `public_contexts`, `secret_store` everywhere) are rejected at startup and `FEATURE_MIN_PLANS` follows the effective tiers.
+- **Blocking Redis pool** ([#1556](https://github.com/kagura-ai/memory-cloud/issues/1556)): `REDIS_MAX_CONNECTIONS` (50) / `REDIS_POOL_TIMEOUT_SECONDS` (2.0); pool exhaustion no longer turns the daily quotas fail-open silently — every fail-open emits `quota_check_failed_open`.
 - **Admin add-on warning** ([#1561](https://github.com/kagura-ai/memory-cloud/issues/1561)): `PUT /api/v1/admin/plans/workspaces/{id}/quotas` now returns `warnings` (e.g. `["connectors_feature_missing"]`) when `extra_connectors` seats are granted to a tier without the `connectors` feature. The grant is stored — admins may pre-grant ahead of an upgrade — but stays inert until the workspace is upgraded; the admin UI shows the warning in the add-on dialog.
 
 ### Changed
 - **L (`pro`) can no longer create public contexts, resources or connectors** ([#1551](https://github.com/kagura-ai/memory-cloud/issues/1551)): `setup_resource`, new resource tokens, `setup_connector` and the private→public context transition require the `resources` / `connectors` / `public_contexts` feature, which only XL carries by default. **This blocks new creation only — existing public contexts, resource tokens and connectors on L keep working** (listed, served, editable, ingesting). The M/L token and connector caps now bound only what those plans already hold.
 - **Unified feature-refusal text** ([#1561](https://github.com/kagura-ai/memory-cloud/issues/1561)): the plan-feature gates for `connectors`, `resources`, `public_contexts`, `QuotaService.check_feature_access` and the REST shared-context routes now build their FEAT-001 refusal via `FeatureNotAvailableError.for_feature`, which derives the tier name from the plan registry and always sets `details.feature`. The REST shared-context gates (create and update) answer FEAT-001 (403) with that text instead of fixed "Pro plan" wording; the update path previously answered 400. The analysis and sleep gates keep their own wording.
+- **Frontend create gates and token caps come from the plan API** ([#1560](https://github.com/kagura-ai/memory-cloud/issues/1560)): `usePlanFeatures` reads the tier booleans and `GET /workspaces/{id}/plan` quotas instead of hard-coded tier names; the plan page separates "what each plan can create" from the workspace's current entitlements.
 - **Legacy tier enums removed** ([#1553](https://github.com/kagura-ai/memory-cloud/issues/1553)): `UserPlan` / `RETENTION_BY_PLAN`.
 - Docs swept for stale "Pro plan" creation claims — `mcp-tools`, `resource-tokens-guide`, `api-surface-1.0/mcp-input-schemas`, `connector-ingest-contract` ([#1561](https://github.com/kagura-ai/memory-cloud/issues/1561)).
 
 ### Notes
 - **Billing:** the billing side must map a `promax` SKU before XL can be sold self-serve; until then XL is admin-assigned. Existing L subscriptions are not migrated automatically.
-- **New env knobs:** `PLAN_PROMAX_*` (numeric limits and display name for the new tier), `PLAN_<KEY>_MEMORIES_PER_DAY` and `PLAN_<KEY>_OWNED_WORKSPACE_GRANT` for every tier key. A tier's `features` set is not env-overridable yet (`PLAN_<KEY>_FEATURES` is tracked in [#1559](https://github.com/kagura-ai/memory-cloud/issues/1559)). See [Deployment → Plan Tiers](docs/deployment.md#plan-tiers).
+- **New env knobs:** `PLAN_PROMAX_*` (numeric limits and display name for the new tier), `PLAN_<KEY>_MEMORIES_PER_DAY` and `PLAN_<KEY>_OWNED_WORKSPACE_GRANT` for every tier key. `PLAN_<KEY>_FEATURES` overrides a tier's feature set ([#1559](https://github.com/kagura-ai/memory-cloud/issues/1559)); `REDIS_MAX_CONNECTIONS` / `REDIS_POOL_TIMEOUT_SECONDS` size the Redis pool ([#1556](https://github.com/kagura-ai/memory-cloud/issues/1556)). See [Deployment → Plan Tiers](docs/deployment.md#plan-tiers).
 
 ## [v0.50.0](https://github.com/kagura-ai/memory-cloud/releases/tag/v0.50.0) — 2026-07-15
 
