@@ -20,6 +20,8 @@ import type { BetaInviteSummary } from "@/lib/api/beta-invites";
 import { Button } from "@/components/ui/button";
 import { cn, colors, transitions, typography } from "@/styles/design-tokens";
 
+// Per-user, but a bare key: also listed in `lib/auth/clearClientState.ts` so a
+// sign-out or an account switch does not carry A's dismissal over to B.
 export const BETA_INVITE_CARD_DISMISS_KEY = "kagura:beta-invite-card-dismissed";
 
 interface InviteFriendCardProps {

@@ -8,6 +8,7 @@
  */
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 
+import { BETA_INVITE_CARD_DISMISS_KEY } from "@/components/beta-invites/InviteFriendCard";
 import { clearIdentityScopedClientState } from "./clearClientState";
 
 beforeEach(() => {
@@ -32,6 +33,14 @@ describe("clearIdentityScopedClientState", () => {
     localStorage.setItem("onboarding:dismissed", "true");
     clearIdentityScopedClientState();
     expect(localStorage.getItem("onboarding:dismissed")).toBeNull();
+  });
+
+  it("drops the dismissed invite-a-friend card (#1582)", () => {
+    // A pressed × on the card; B has its own invites to give. Set through the
+    // card's own constant so a renamed key cannot drift away from the list.
+    localStorage.setItem(BETA_INVITE_CARD_DISMISS_KEY, "true");
+    clearIdentityScopedClientState();
+    expect(localStorage.getItem(BETA_INVITE_CARD_DISMISS_KEY)).toBeNull();
   });
 
   it("drops EVERY feature-guide key, not every other one", () => {
