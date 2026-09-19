@@ -94,6 +94,51 @@ NEXT_PUBLIC_APP_URL=https://your-domain.com
 # NEXT_PUBLIC_PLAN_PROMAX_DISPLAY_NAME=Premium Max
 ```
 
+## Closed-beta invite links (Issue #1581)
+
+For a deployment that runs with the **signup gate closed** (Admin → Signup
+gate: enabled, mode `manual`), invite links let existing users bring people in
+without an admin adding each identity by hand. A signed-in user mints a
+one-time URL (`{FRONTEND_URL}/join/{token}`); whoever opens it and signs in
+with Google or GitHub within 7 days passes the gate once, and is recorded on
+the signup allowlist at that moment (source `beta_invite`, added by = the
+inviter) where admins can see and prune it as usual.
+
+| Variable | Default | Effect |
+|----------|---------|--------|
+| `ENABLE_BETA_INVITES` | `false` | Master switch **and kill switch**. When `false` every `/api/v1/beta-invites*` route answers 404, `features.beta_invites` is `false` (the web UI shows no entry points), an `invite=` parameter on OAuth login is ignored, and **redemption at the OAuth callback is disabled too** — links already handed out stop working. Allowlist rows written by earlier redemptions are not touched; remove them on the admin signup-gate page. |
+| `BETA_INVITE_QUOTA_PER_USER` | `4` | Links a non-admin user may hold at once. Active (unused, unexpired) and redeemed links count; expired and revoked ones free their slot. System admins (`role=admin`) are uncapped. `0` lets only system admins mint. |
+
+The 7-day lifetime is fixed in code. Notes for operators:
+
+- A link is a credential. Only its SHA-256 hash is stored (database and the
+  short-lived OAuth-state key in Redis); the URL is shown once, at creation. A
+  lost link cannot be recovered — revoke it and mint another.
+- The token travels in URLs (`/join/{token}`, `/api/v1/beta-invites/{token}/preview`,
+  and `…/login?invite={token}`). The API scrubs it from its own output — structured
+  logs, the uvicorn access log and the `usage_stats` table all record the literal
+  `{token}` instead. **A reverse proxy in front of the API or the frontend is
+  outside that reach:** if yours writes access logs — the single-server Terraform
+  template's `Caddyfile.tpl` does (`log { output stdout, format json }`, which
+  records the full request URI **and the request headers**) — those lines contain
+  live invite URLs until the link is used or expires. The token shows up in two
+  fields: the request URI, and — when the frontend and the API share an origin —
+  the `Referer` header the browser sends from the `/join/{token}` page (on the
+  preview call, the `/auth/{provider}/login` navigation and every asset the page
+  loads). Filtering only the URI leaves the second copy in place. Before enabling
+  the feature, restrict who can read those logs, or scrub both fields for
+  `/join/`, `/beta-invites/` and `invite=` (Caddy: a `filter` log encoder on
+  `request>uri` and `request>headers>Referer`, or drop that header from the log).
+- The invite is only consumed when the gate would otherwise have blocked the
+  sign-in. Existing users, the first user, identities already on the allowlist,
+  and any deployment with the gate disabled (where `ALLOW_REGISTRATION` decides)
+  never use one up.
+- Invitees are ordinary users and get their own quota, so invitations chain.
+  `ENABLE_BETA_INVITES=false` stops the chain immediately.
+- Minting, redemption and revocation are written to the audit log as
+  `beta_invite.created` / `beta_invite.redeemed` / `beta_invite.revoked`, naming
+  the invite by id only.
+
 ## Hosted-mode UI gates (Issue #1571)
 
 The web UI reads `GET /api/v1/system/info` → `features.*` at runtime, so a

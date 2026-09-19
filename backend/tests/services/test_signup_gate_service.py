@@ -822,8 +822,14 @@ class TestIsAllowlistedSourceFiltering:
         allowed = await svc._is_allowlisted("github", "1234", mode)
         assert allowed is False  # no matching row → not allowlisted
 
-        # SQL contains "source = " clause iff mode != 'both'
-        has_source_filter = "signup_allowlist.source =" in captured["sql"]
+        # SQL contains a source clause iff mode != 'both'. #1581: mode='manual'
+        # filters with ``source IN ('manual', 'beta_invite')`` (a redeemed
+        # closed-beta invite is honoured like a manual grant — pinned by value
+        # in test_signup_gate_service_beta_invite.py); sponsors stays ``=``.
+        has_source_filter = (
+            "signup_allowlist.source =" in captured["sql"]
+            or "signup_allowlist.source IN" in captured["sql"]
+        )
         if mode == "both":
             assert not has_source_filter, f"mode=both must not filter by source: {captured['sql']}"
         else:

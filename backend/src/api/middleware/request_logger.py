@@ -12,6 +12,7 @@ from starlette.middleware.base import BaseHTTPMiddleware
 
 from db.base import get_db
 from utils.logger import get_logger
+from utils.url_redact import redact_invite_tokens
 from utils.usage_logger import log_usage
 
 logger = get_logger(__name__)
@@ -64,7 +65,14 @@ class RequestLoggingMiddleware(BaseHTTPMiddleware):
                     await log_usage(
                         db=db,
                         user_id=user_id,
-                        endpoint=request.url.path,
+                        # #1581: this PERSISTS the path. The public invite
+                        # preview carries its plaintext token in the path, and
+                        # a signed-in caller opening a /join link reaches it
+                        # with a session — without this a live, account-granting
+                        # token would rest in usage_stats. Only that shape is
+                        # rewritten; every other path is stored verbatim (the
+                        # usage readers LIKE-match concrete paths).
+                        endpoint=redact_invite_tokens(request.url.path),
                         method=request.method,
                         status_code=response.status_code,
                         response_time_ms=response_time_ms,

@@ -290,6 +290,15 @@ openapi_tags = [
             "surface 404s unless the deployment sets ENABLE_REFERRALS."
         ),
     },
+    {
+        "name": "beta-invites",
+        "description": (
+            "Closed-beta invite links (Issue #1581): a signed-in user mints a "
+            "one-time link that lets one new person through the signup gate. "
+            "Session auth only except the public preview, and the whole surface "
+            "404s unless the deployment sets ENABLE_BETA_INVITES."
+        ),
+    },
     # Public API
     {"name": "public-search", "description": "Public REST API for search"},
     {"name": "mcp-api", "description": "MCP server tools listing and status"},
@@ -619,6 +628,7 @@ from api.routes import (  # noqa: E402
     api_keys,
     attachments,  # Issue #330 → deprecated by #555 (returns HTTP 410 Gone)
     auth,
+    beta_invites,  # Issue #1581: closed-beta invite links
     billing_handoff,  # Issue #1093: owner-only billing handoff token (/api/v1/billing/handoff)
     bm25_drift,  # Issue #343: BM25 IDF drift admin (preview, cron disabled by default)
     config,
@@ -740,6 +750,11 @@ app.include_router(admin_neural.router, prefix="/api/v1")
 
 # Admin signup gate (Issue #358: admin-configurable signup gate)
 app.include_router(admin_signup_gate.router, prefix="/api/v1")
+
+# Closed-beta invite links (Issue #1581). Every route 404s unless
+# settings.enable_beta_invites; redeemed invitees show up on the admin signup
+# gate above as source='beta_invite' allowlist rows.
+app.include_router(beta_invites.router, prefix="/api/v1")
 
 # Referral program (Issue #1470). The user-facing routes 404 unless
 # settings.enable_referrals; the admin ledger/revoke stays reachable regardless
