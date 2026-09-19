@@ -194,7 +194,7 @@ class ConfigReadOnlyError(MemoryCloudException):
     Issue #1580: every key served by ``GET /config`` is env-backed and nothing
     reads ``config_overrides`` at runtime, so ``PUT /config/{key}`` and
     ``POST /config/batch`` refuse instead of storing a value that changes no
-    behaviour. ``config_read_only`` is the stable code clients route on;
+    behaviour. ``CFG-002`` is the stable code clients route on;
     ``details.keys`` lists the refused keys.
     """
 
@@ -203,7 +203,7 @@ class ConfigReadOnlyError(MemoryCloudException):
             "Configuration is read-only: values are set via environment "
             "variables and applied on restart/redeploy.",
             status_code=409,
-            error_code="config_read_only",
+            error_code="CFG-002",
             keys=keys,
         )
 

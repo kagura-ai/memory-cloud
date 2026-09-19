@@ -212,7 +212,7 @@ class TestWritesAreRefused:
 
         assert resp.status_code == 409
         body = resp.json()
-        assert body["error"] == "config_read_only"
+        assert body["error"] == "CFG-002"
         assert "environment" in body["message"]
         assert "restart" in body["message"]
         assert body["details"] == {"keys": ["ENABLE_RERANKING"]}
@@ -227,7 +227,7 @@ class TestWritesAreRefused:
 
         assert resp.status_code == 409
         body = resp.json()
-        assert body["error"] == "config_read_only"
+        assert body["error"] == "CFG-002"
         assert body["details"] == {"keys": ["ENABLE_RERANKING", "LOG_LEVEL"]}
         db.add.assert_not_called()
         db.commit.assert_not_called()

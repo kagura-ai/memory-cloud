@@ -937,8 +937,8 @@ async def get_categories(
 _READ_ONLY_RESPONSE: dict[int | str, dict[str, Any]] = {
     409: {
         "description": (
-            "Always: configuration is read-only (`config_read_only`). Values are set "
-            "via environment variables and applied on restart/redeploy."
+            "Always: configuration is read-only (`CFG-002`). Values are set via "
+            "environment variables and applied on restart/redeploy."
         )
     }
 }
@@ -962,7 +962,7 @@ async def update_config(
         admin: Authenticated admin user
 
     Raises:
-        ConfigReadOnlyError: Always (409 ``config_read_only``)
+        ConfigReadOnlyError: Always (409 ``CFG-002``)
     """
     logger.info("config_write_refused", keys=[key], admin_user_id=admin.get("user_id"))
     raise ConfigReadOnlyError(keys=[key])
@@ -983,7 +983,7 @@ async def batch_update_config(
         admin: Authenticated admin user
 
     Raises:
-        ConfigReadOnlyError: Always (409 ``config_read_only``)
+        ConfigReadOnlyError: Always (409 ``CFG-002``)
     """
     keys = sorted(request.updates)
     logger.info("config_write_refused", keys=keys, admin_user_id=admin.get("user_id"))

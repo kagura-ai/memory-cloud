@@ -490,7 +490,7 @@ Notes:
 - `category: str` — required (#1580: adds `hosted`, returned to system admins only)
 - `description: str | None` — optional
 - `is_sensitive: bool` — optional (default `False`)
-- `read_only: bool` — optional (default `True`) (#1580, additive: every key is env-backed; `PUT /config/{key}` and `POST /config/batch` answer 409 `config_read_only`)
+- `read_only: bool` — optional (default `True`) (#1580, additive: every key is env-backed; `PUT /config/{key}` and `POST /config/batch` answer 409 `CFG-002`)
 
 ### ConfigListResponse (BaseModel, L41)
 > Configuration list response.
