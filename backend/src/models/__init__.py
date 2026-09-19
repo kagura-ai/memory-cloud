@@ -11,6 +11,7 @@
 import models.agent  # noqa: F401  # Issue #1274: Agent Registry (RFC-0002 P0-1)
 import models.agent_state  # noqa: F401  # Issue #889: agent session-state lane
 import models.analysis  # noqa: F401
+import models.beta_invite  # noqa: F401  # Issue #1581: closed-beta invite links
 import models.file_objects  # noqa: F401  # Issue #485: file storage
 import models.llm_call_log  # noqa: F401  # Issue #474: comprehensive call ledger
 import models.llm_pricing  # noqa: F401

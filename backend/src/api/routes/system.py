@@ -161,6 +161,12 @@ async def system_info():
             # availability is exposed here — never the reward amounts, which
             # would tell a farmer exactly what a fresh account is worth.
             "referrals": settings.enable_referrals,
+            # Issue #1581: default-off. When false every /beta-invites route
+            # 404s, an ``invite=`` on OAuth login is inert, and the web UI hides
+            # the invite card, menu entry and /join landing. Availability only —
+            # never the per-user quota (the inviter reads that from
+            # /beta-invites/me once signed in).
+            "beta_invites": settings.enable_beta_invites,
             # Issue #1572: false when ENABLE_RERANKING is off or the self_hosted
             # default has no endpoint; the web UI then disables the reranker card.
             "reranking": settings.enable_reranking and rerank_configured,

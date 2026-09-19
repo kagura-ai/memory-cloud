@@ -11,12 +11,60 @@ had the same class of bug for the Redis URL.
 
 from __future__ import annotations
 
+import re
 from urllib.parse import urlparse, urlunparse
 
 from sqlalchemy.engine import make_url
 from sqlalchemy.exc import ArgumentError
 
 _REDACTED = "<redacted-url>"
+
+# #1581: closed-beta invite tokens travel in URLs by API contract — the public
+# preview's PATH, the OAuth login's QUERY, and the frontend landing URL itself.
+# Each (pattern, replacement) keeps the route shape and drops only the token.
+_INVITE_TOKEN_PLACEHOLDER = "{token}"
+_INVITE_TOKEN_PATTERNS: tuple[tuple[re.Pattern[str], str], ...] = (
+    # GET /api/v1/beta-invites/<token>/preview — any segment in that slot.
+    (re.compile(r"(/beta-invites/)[^/?#\s\"']+(?=/preview)"), r"\1" + _INVITE_TOKEN_PLACEHOLDER),
+    # GET /api/v1/auth/<provider>/login?...&invite=<token>
+    (re.compile(r"([?&]invite=)[^&#\s\"']+"), r"\1" + _INVITE_TOKEN_PLACEHOLDER),
+    # {FRONTEND_URL}/join/<token> — token-shaped segments only, so an unrelated
+    # ".../join/<short-slug>" path is left alone.
+    (
+        re.compile(r"(/join/)[A-Za-z0-9_-]{20,128}(?![A-Za-z0-9_-])"),
+        r"\1" + _INVITE_TOKEN_PLACEHOLDER,
+    ),
+)
+# Cheap substring gate so the hot logging path pays for a regex only when one
+# of these shapes can actually be present.
+_INVITE_TOKEN_MARKERS = ("/beta-invites/", "invite=", "/join/")
+
+
+def redact_invite_tokens(text: str) -> str:
+    """Replace closed-beta invite tokens in a path / URL / log line with ``{token}``.
+
+    The invite URL is a credential that grants account creation (#1581) and only
+    its hash may be stored. But the API contract carries the plaintext in URLs,
+    and URLs are what request logging records — so every sink that can see one
+    (the structlog pipeline, the stdlib/uvicorn formatters, the ``usage_stats``
+    writer) runs its text through here. Everything that is not one of the three
+    invite URL shapes is returned unchanged.
+
+    Args:
+        text: A request path, a full URL, or an already-rendered log line.
+
+    Returns:
+        ``text`` with any invite token replaced by the literal ``{token}``.
+
+    Example:
+        >>> redact_invite_tokens("/api/v1/beta-invites/AbC...xyz/preview")
+        '/api/v1/beta-invites/{token}/preview'
+    """
+    if not any(marker in text for marker in _INVITE_TOKEN_MARKERS):
+        return text
+    for pattern, replacement in _INVITE_TOKEN_PATTERNS:
+        text = pattern.sub(replacement, text)
+    return text
 
 
 def redact_db_url(url: str) -> str:

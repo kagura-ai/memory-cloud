@@ -11,6 +11,8 @@ import sys
 
 import structlog
 
+from utils.url_redact import redact_invite_tokens
+
 # #1359: asyncpg composes CHECK/constraint-violation messages with a
 # server-side ``DETAIL:  Failing row contains (...)`` payload — the FULL
 # row, including memory content and details.location coordinates.
@@ -23,6 +25,20 @@ _PG_DETAIL_RE = re.compile(r"DETAIL:.*", re.DOTALL)
 _REDACTED = "DETAIL: [redacted]"
 
 
+def _scrub_text(text: str) -> str:
+    """Scrub one rendered string: postgres DETAIL (#1359) + invite tokens (#1581).
+
+    #1581: closed-beta invite tokens ride in URLs by API contract (the preview
+    PATH, the login ``?invite=`` QUERY), and URLs are what request logging
+    records — ``path=request.url.path`` in the global exception handlers fires
+    on every 404/410/429, so a rate-limited preview of a VALID link would log a
+    live, account-granting token. Same chokepoint, same reasoning as DETAIL.
+    """
+    if "DETAIL:" in text:
+        text = _PG_DETAIL_RE.sub(_REDACTED, text)
+    return redact_invite_tokens(text)
+
+
 def _scrub_detail(value):  # noqa: ANN001, ANN202
     """Recursively scrub DETAIL payloads from strings and containers.
 
@@ -32,9 +48,7 @@ def _scrub_detail(value):  # noqa: ANN001, ANN202
     stringifies the structure AFTER the processors have run.
     """
     if isinstance(value, str):
-        if "DETAIL:" in value:
-            return _PG_DETAIL_RE.sub(_REDACTED, value)
-        return value
+        return _scrub_text(value)
     if isinstance(value, dict):
         return {key: _scrub_detail(item) for key, item in value.items()}
     if isinstance(value, list | tuple):
@@ -51,6 +65,10 @@ def redact_pg_detail(logger, method_name, event_dict):  # noqa: ANN001, ANN201
     chokepoint. The constraint name before DETAIL survives for
     diagnosability; the failing-row payload never reaches log
     aggregation.
+
+    #1581: the same pass also replaces closed-beta invite tokens in any
+    string field (``path=``, f-string events, nested values) — see
+    ``_scrub_text``. The name is kept for its existing call sites.
     """
     for key, value in event_dict.items():
         event_dict[key] = _scrub_detail(value)
@@ -80,10 +98,7 @@ class _RedactingStdlibFormatter(logging.Formatter):
         self._inner = inner if inner is not None else logging.Formatter("%(message)s")
 
     def format(self, record: logging.LogRecord) -> str:  # noqa: A003
-        rendered = self._inner.format(record)
-        if "DETAIL:" in rendered:
-            return _PG_DETAIL_RE.sub(_REDACTED, rendered)
-        return rendered
+        return _scrub_text(self._inner.format(record))
 
 
 def _redacting_console_traceback(sio, exc_info) -> None:
@@ -129,6 +144,16 @@ def setup_logger(log_level: str = "INFO", enable_colors: bool = True) -> None:
         stdlib_handler = logging.StreamHandler(sys.stdout)
         stdlib_handler.setFormatter(_RedactingStdlibFormatter(logging.Formatter("%(message)s")))
         root_logger.addHandler(stdlib_handler)
+
+    # #1581: uvicorn's own loggers carry their own handlers and do NOT propagate
+    # to root, so the wrap above never sees them — and ``uvicorn.access`` prints
+    # the whole request line (path + query), i.e. exactly where a closed-beta
+    # invite token travels. Wrap them the same way: destination and format
+    # untouched, only the rendered text scrubbed. No-op outside uvicorn.
+    for uvicorn_logger_name in ("uvicorn", "uvicorn.access"):
+        for handler in logging.getLogger(uvicorn_logger_name).handlers:
+            if not isinstance(handler.formatter, _RedactingStdlibFormatter):
+                handler.setFormatter(_RedactingStdlibFormatter(handler.formatter))
 
     # Determine if colors should be enabled
     use_colors = enable_colors and (os.getenv("LOG_COLORIZE", "true").lower() == "true")

@@ -88,6 +88,14 @@ def test_system_info_exposes_cost_display_flag_default_on() -> None:
     assert features["cost_display"] is True, "ENABLE_COST_DISPLAY must default ON"
 
 
+def test_system_info_exposes_beta_invites_flag_default_off(info_with) -> None:
+    """#1581: the web UI shows the invite card / menu entry / /join page only when
+    features.beta_invites is true. Default OFF — the feature grants account
+    creation, so it is an explicit opt-in."""
+    assert info_with().json()["features"]["beta_invites"] is False
+    assert info_with(enable_beta_invites=True).json()["features"]["beta_invites"] is True
+
+
 # ---------------------------------------------------------------------------
 # #1572: features.reranking + search_defaults
 # ---------------------------------------------------------------------------

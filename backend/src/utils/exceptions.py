@@ -540,6 +540,54 @@ class ReferralCapReachedError(ReferralError):
         )
 
 
+# Closed-beta invite links (#1581)
+#
+# ``error`` follows the REST-wide ``NAMESPACE-NNN`` convention (``BETA-INVITE-``,
+# multi-word like ``WORKER-APP-``). The snake_case names the #1581 issue uses for
+# the two 409s (``quota_exceeded`` / ``already_redeemed``) stay on the wire as
+# ``details.reason`` — a stable discriminator that does not depend on the number.
+
+
+class BetaInviteQuotaExceededError(MemoryCloudException):
+    """The user already holds as many invite links as the deployment allows (409)."""
+
+    def __init__(self, *, quota: int) -> None:
+        super().__init__(
+            "You have used all of your invites.",
+            status_code=409,
+            error_code="BETA-INVITE-001",
+            reason="quota_exceeded",
+            quota=quota,
+        )
+
+
+class BetaInviteAlreadyRedeemedError(MemoryCloudException):
+    """A redeemed invite link cannot be revoked (409)."""
+
+    def __init__(self) -> None:
+        super().__init__(
+            "This invite has already been used and cannot be revoked.",
+            status_code=409,
+            error_code="BETA-INVITE-002",
+            reason="already_redeemed",
+        )
+
+
+class BetaInviteGoneError(MemoryCloudException):
+    """The invite link existed but can no longer be used — expired or redeemed (410).
+
+    One message for both reasons: the preview endpoint is public, and whether a
+    link was used is the inviter's business, not the holder's.
+    """
+
+    def __init__(self) -> None:
+        super().__init__(
+            "This invite link is no longer valid.",
+            status_code=410,
+            error_code="RES-003",
+        )
+
+
 # Rate Limiting & Quota Errors (429)
 
 

@@ -20,7 +20,7 @@ import hashlib
 import os
 from typing import Literal, cast
 from urllib.parse import urlencode
-from uuid import UUID
+from uuid import UUID, uuid4
 
 from fastapi.responses import RedirectResponse
 from sqlalchemy import func, or_, select
@@ -32,6 +32,8 @@ from config.settings import get_settings
 from db.base import get_db
 from models.auth import AuditLog, User
 from models.signup_gate import SignupAllowlistEntry, SignupGateConfig
+from services.beta_invite_service import BetaInviteService
+from utils.datetime import utcnow
 from utils.github_user import resolve_github_user_id
 from utils.hashing import hmac_sha256_hex
 from utils.logger import get_logger
@@ -87,6 +89,7 @@ async def check_signup_access(
     username: str | None = None,
     ip_address: str | None = None,
     user_agent: str | None = None,
+    beta_invite_token_hash: str | None = None,
 ) -> RedirectResponse | None:
     """Run the signup gate for an OAuth callback.
 
@@ -109,6 +112,9 @@ async def check_signup_access(
             events (#655). Optional — None when called from a non-HTTP
             context.
         user_agent: Caller User-Agent header, same role as ``ip_address``.
+        beta_invite_token_hash: ``sha256_hex`` of a closed-beta invite token
+            carried through the OAuth round trip (#1581), or None. Only ever
+            the hash — the callback never sees the plaintext.
 
     Returns:
         None when signup is allowed, a RedirectResponse when blocked.
@@ -122,6 +128,7 @@ async def check_signup_access(
             username=username,
             ip_address=ip_address,
             user_agent=user_agent,
+            beta_invite_token_hash=beta_invite_token_hash,
         )
     return None
 
@@ -145,6 +152,7 @@ class SignupGateService:
         username: str | None,
         ip_address: str | None = None,
         user_agent: str | None = None,
+        beta_invite_token_hash: str | None = None,
     ) -> RedirectResponse | None:
         """Return None when signup is allowed, RedirectResponse when blocked.
 
@@ -154,7 +162,9 @@ class SignupGateService:
            (login not signup; user_id match handles email-change-at-IdP case).
         3. First user (users table empty) → allowed (initial admin bootstrap).
         4. ``mode == "manual"`` → allowed iff ``(provider, subject_id=oauth_sub)``
-           is on the allowlist with ``state='active'``.
+           is on the allowlist with ``state='active'`` (``source`` ``manual`` or
+           ``beta_invite``), or — last, only when everything above said no — a
+           valid closed-beta invite is redeemed for this identity (#1581).
         5. ``mode in ("github_sponsors", "both")`` → NotImplementedError when
            provider is ``"github"`` (Phase 2 work). When provider is
            ``"google"`` these modes fall back to manual semantics (sponsorship
@@ -232,6 +242,22 @@ class SignupGateService:
             # add-time, so the pending state only exists for Google.
             if provider == "google" and await self._promote_pending_google_entry(
                 email=email, oauth_sub=oauth_sub
+            ):
+                return None
+            # #1581: closed-beta invite link — the LAST thing tried, only where
+            # the gate would otherwise block. Placement is the contract: every
+            # path above returned already, so an existing user, the first user,
+            # an allowlisted identity or a promoted pending row never burns a
+            # token, and the disabled gate (legacy / open registration) never
+            # reaches here at all.
+            if await self._redeem_beta_invite(
+                token_hash=beta_invite_token_hash,
+                provider=provider,
+                oauth_sub=oauth_sub,
+                email=email,
+                username=username,
+                ip_address=ip_address,
+                user_agent=user_agent,
             ):
                 return None
             await self._record_blocked_signup(
@@ -615,7 +641,14 @@ class SignupGateService:
             SignupAllowlistEntry.state == "active",
         ]
         if mode == "manual":
-            filters.append(SignupAllowlistEntry.source == "manual")
+            # #1581: a redeemed closed-beta invite writes a ``beta_invite`` row.
+            # It is the same kind of grant as a manual one — an explicit "allow
+            # this identity", attributed to a user instead of an admin — so it
+            # is honoured wherever manual rows are (incl. the #1031 gate-off
+            # path, which calls this with mode="manual"). Without it an invitee
+            # whose user creation failed AFTER redemption (e.g. email_in_use)
+            # would be locked out with their invite already spent.
+            filters.append(SignupAllowlistEntry.source.in_(("manual", "beta_invite")))
         elif mode == "github_sponsors":
             filters.append(SignupAllowlistEntry.source == "github_sponsors")
         # mode == "both" → no source filter
@@ -626,6 +659,149 @@ class SignupGateService:
         # active row hits first.
         result = await self.db.execute(select(SignupAllowlistEntry.id).where(*filters).limit(1))
         return result.first() is not None
+
+    async def _redeem_beta_invite(
+        self,
+        *,
+        token_hash: str | None,
+        provider: SignupGateProvider,
+        oauth_sub: str,
+        email: str,
+        username: str | None,
+        ip_address: str | None,
+        user_agent: str | None,
+    ) -> bool:
+        """Spend a closed-beta invite on this identity (#1581). True = admitted.
+
+        One transaction, three writes: the ``signup_allowlist`` row (keyed on the
+        immutable IdP identity — the e-mail is the label only, #655), the
+        single-use claim on ``beta_invites``, and the audit row. They commit
+        together or not at all, so a consumed invite always has its allowlist
+        row and an allowlist row never exists for an invite someone else won.
+
+        The claim is ``BetaInviteService.mark_redeemed`` — a guarded ``UPDATE``
+        that must hit exactly one row. Two people racing one link both get this
+        far; the row lock serializes them and the loser's ``UPDATE`` matches
+        nothing, so its allowlist INSERT is rolled back and it is blocked.
+
+        Session invariant (see :meth:`_record_blocked_signup`): the gate runs
+        before any other DB mutation in the callback, so the ``commit()`` /
+        ``rollback()`` here can only touch the rows this method added.
+
+        ``ENABLE_BETA_INVITES=false`` is the kill switch for redemption too, not
+        only for minting: the invite table is not even read.
+
+        Args:
+            token_hash: ``sha256_hex`` of the presented token, or None.
+            provider: OAuth provider of the signing-up identity.
+            oauth_sub: Immutable IdP identity — becomes ``subject_id``.
+            email: Invitee e-mail — ``subject_label`` and the audit HMAC input.
+            username: GitHub login (legacy ``github_username`` column); unused
+                for google.
+            ip_address: Caller IP for the audit row.
+            user_agent: Caller User-Agent for the audit row.
+
+        Returns:
+            True when the invite was redeemed (or this identity already holds
+            the winning row from a parallel tab); False to fall through to block.
+        """
+        if not token_hash or not get_settings().enable_beta_invites:
+            return False
+
+        invites = BetaInviteService(self.db)
+        now = utcnow()
+        invite = await invites.find_redeemable(token_hash, now)
+        if invite is None:
+            # Unknown / expired / revoked / already used — deliberately one
+            # undifferentiated outcome. The blocked-signup audit row follows.
+            logger.info("beta_invite_redeem_rejected", provider=provider, subject_id=oauth_sub)
+            return False
+
+        # Snapshot before any commit/rollback: both expire ORM instances, and
+        # touching ``invite.id`` afterwards would lazy-load in async context
+        # (MissingGreenlet) — same trap as ``_promote_pending_google_entry``.
+        invite_id = invite.id
+        inviter_user_id = invite.inviter_user_id
+
+        # Deprecated NOT-NULL legacy columns (#655): filled exactly the way the
+        # admin route fills them — numeric ID + login for github, the
+        # ``<provider>:<sub>`` sentinel + label for everything else.
+        if provider == "github":
+            legacy_user_id = oauth_sub
+            legacy_username = username or email
+        else:
+            legacy_user_id = _legacy_user_id_for_non_github(provider, oauth_sub)
+            legacy_username = email
+
+        # Client-side id: the claim UPDATE needs it as the FK value.
+        entry_id = uuid4()
+        try:
+            self.db.add(
+                SignupAllowlistEntry(
+                    id=entry_id,
+                    provider=provider,
+                    subject_id=oauth_sub,
+                    subject_label=email,
+                    github_user_id=legacy_user_id,
+                    github_username=legacy_username,
+                    source="beta_invite",
+                    state="active",
+                    added_by_user_id=inviter_user_id,
+                )
+            )
+            await self.db.flush()
+        except IntegrityError:
+            # (provider, subject_id, 'beta_invite') already exists: this same
+            # identity is redeeming in two tabs and the other one got there
+            # first, or an inactive row for it lingers. Discard our insert and
+            # answer from the allowlist — a winning active row IS the grant; an
+            # inactive one is not, and the token stays unspent.
+            await self.db.rollback()
+            return await self._is_allowlisted(provider, oauth_sub, "manual")
+
+        claimed = await invites.mark_redeemed(
+            token_hash=token_hash, allowlist_entry_id=entry_id, now=now
+        )
+        if not claimed:
+            # Lost the single-use race (or the invite died since the pre-check).
+            # The rollback takes our allowlist row with it.
+            await self.db.rollback()
+            logger.info(
+                "beta_invite_redeem_lost_race",
+                invite_id=str(invite_id),
+                provider=provider,
+                subject_id=oauth_sub,
+            )
+            return False
+
+        self.db.add(
+            AuditLog(
+                user_email=_OAUTH_CALLBACK_ACTOR,
+                user_id=oauth_sub,
+                action="beta_invite.redeemed",
+                resource=f"beta_invite:{invite_id}",
+                # E-mail HMAC'd, never plaintext — same as _record_blocked_signup.
+                new_value_hash=hmac_sha256_hex(email, get_settings().audit_hmac_key),
+                # Invite id only: never the token, its hash, or the URL.
+                user_metadata={
+                    "provider": provider,
+                    "inviter_user_id": inviter_user_id,
+                    "allowlist_entry_id": str(entry_id),
+                },
+                ip_address=ip_address,
+                user_agent=user_agent,
+            )
+        )
+        await self.db.commit()
+
+        logger.info(
+            "beta_invite_redeemed",
+            invite_id=str(invite_id),
+            provider=provider,
+            subject_id=oauth_sub,
+            inviter_user_id=inviter_user_id,
+        )
+        return True
 
     async def _legacy_check(self, email: str, user_id: str) -> RedirectResponse | None:
         """Delegate to the pre-existing env-based gate.
