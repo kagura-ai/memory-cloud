@@ -1377,7 +1377,7 @@ Returns a summary of each run including status, timing, and counters
 Use this to check what Sleep Maintenance has been doing and when it last ran.
 Combine with get_sleep_report(report_id) for action-level detail.
 
-Returns: {status, reports: [{report_id, context_id, status, started_at, completed_at, memories_processed, edges_created, memories_merged, memories_promoted, llm_calls_made, llm_tokens_used}], count}. Pass a report_id to get_sleep_report for action-level detail.""",
+Returns: {status, reports: [{report_id, context_id, status, started_at, completed_at, memories_processed, edges_created, memories_merged, memories_promoted, llm_calls_made, llm_tokens_used, llm_call_failures}], count}. llm_call_failures is the magnitude behind a 'degraded'/'failed' run status. Pass a report_id to get_sleep_report for action-level detail.""",
             "inputSchema": {
                 "type": "object",
                 "required": ["context_id"],
@@ -2333,7 +2333,8 @@ Reads from the agent session-state lane (see set_state). Supply ``key`` to read
 one value, or omit it to list all live keys for the context. Expired entries are
 never returned. This lane is excluded from recall() by design.
 
-Returns: {status, key, value, found}. found is false (value null) when the key is absent or expired - that is not an error.""",
+Returns (with key): {status, key, value, found}. found is false (value null) when the key is absent or expired - that is not an error.
+Returns (without key): {status, states: {key: value, ...}, count} - every live entry for the context keyed by state key; an empty states object with count 0 is a normal success.""",
             "inputSchema": {
                 "type": "object",
                 "properties": {
