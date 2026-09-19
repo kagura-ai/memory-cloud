@@ -522,9 +522,10 @@ class ReferralCapReachedError(ReferralError):
 
 # Closed-beta invite links (#1581)
 #
-# The two 409s carry the snake_case codes the #1581/#1582 API contract names
-# (``quota_exceeded`` / ``already_redeemed``) instead of a ``NAMESPACE-NNN``
-# one: the web UI routes on ``error`` and the contract fixed these literals.
+# ``error`` follows the REST-wide ``NAMESPACE-NNN`` convention (``BETA-INVITE-``,
+# multi-word like ``WORKER-APP-``). The snake_case names the #1581 issue uses for
+# the two 409s (``quota_exceeded`` / ``already_redeemed``) stay on the wire as
+# ``details.reason`` — a stable discriminator that does not depend on the number.
 
 
 class BetaInviteQuotaExceededError(MemoryCloudException):
@@ -534,7 +535,8 @@ class BetaInviteQuotaExceededError(MemoryCloudException):
         super().__init__(
             "You have used all of your invites.",
             status_code=409,
-            error_code="quota_exceeded",
+            error_code="BETA-INVITE-001",
+            reason="quota_exceeded",
             quota=quota,
         )
 
@@ -546,7 +548,8 @@ class BetaInviteAlreadyRedeemedError(MemoryCloudException):
         super().__init__(
             "This invite has already been used and cannot be revoked.",
             status_code=409,
-            error_code="already_redeemed",
+            error_code="BETA-INVITE-002",
+            reason="already_redeemed",
         )
 
 

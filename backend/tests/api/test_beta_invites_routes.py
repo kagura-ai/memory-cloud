@@ -212,8 +212,8 @@ class TestCreate:
         response = client.post("/api/v1/beta-invites")
 
         assert response.status_code == 409
-        assert response.json()["error"] == "quota_exceeded"
-        assert response.json()["details"] == {"quota": 4}
+        assert response.json()["error"] == "BETA-INVITE-001"
+        assert response.json()["details"] == {"reason": "quota_exceeded", "quota": 4}
 
 
 class TestRevoke:
@@ -244,7 +244,8 @@ class TestRevoke:
         response = client.delete(f"/api/v1/beta-invites/{INVITE_ID}")
 
         assert response.status_code == 409
-        assert response.json()["error"] == "already_redeemed"
+        assert response.json()["error"] == "BETA-INVITE-002"
+        assert response.json()["details"] == {"reason": "already_redeemed"}
 
     def test_non_uuid_id_is_rejected_before_the_service(self, client, enabled, monkeypatch) -> None:
         revoke = AsyncMock()

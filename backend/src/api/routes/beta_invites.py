@@ -182,7 +182,7 @@ async def create_beta_invite(
         The invite id, its plaintext URL, and its expiry.
 
     Raises:
-        BetaInviteQuotaExceededError: 409 ``quota_exceeded`` at the cap.
+        BetaInviteQuotaExceededError: 409 ``BETA-INVITE-001`` at the cap.
     """
     minted = await BetaInviteService(db).create(
         user_id=user["user_id"],
@@ -217,7 +217,7 @@ async def revoke_beta_invite(
 
     Raises:
         NotFoundException: 404 — unknown id, or someone else's invite.
-        BetaInviteAlreadyRedeemedError: 409 ``already_redeemed``.
+        BetaInviteAlreadyRedeemedError: 409 ``BETA-INVITE-002``.
     """
     await BetaInviteService(db).revoke(
         user_id=user["user_id"],

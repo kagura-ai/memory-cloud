@@ -140,7 +140,8 @@ class TestMint:
             await svc.create(user_id="inviter-1", user_email="i@example.test")
 
         assert excinfo.value.status_code == 409
-        assert excinfo.value.error_code == "quota_exceeded"
+        assert excinfo.value.error_code == "BETA-INVITE-001"
+        assert excinfo.value.details == {"reason": "quota_exceeded", "quota": 4}
         db.add.assert_not_called()
 
     @pytest.mark.asyncio

@@ -1026,8 +1026,8 @@ The link is valid for 7 days and works once. Only a hash of the token is stored,
 |---|---|---|
 | `404` | `HTTP-404` | Feature disabled (every route) |
 | `404` | `RES-001` | Preview: unknown, revoked or malformed token · Revoke: unknown id or someone else's invite |
-| `409` | `quota_exceeded` | Mint: the caller already holds `quota` invites (`details.quota`) |
-| `409` | `already_redeemed` | Revoke: the invite was already used |
+| `409` | `BETA-INVITE-001` | Mint: the caller already holds `quota` invites (`details.reason` = `"quota_exceeded"`, `details.quota`) |
+| `409` | `BETA-INVITE-002` | Revoke: the invite was already used (`details.reason` = `"already_redeemed"`) |
 | `410` | `RES-003` | Preview: expired or already redeemed |
 | `429` | `RATE-001` | Preview: per-IP limit exceeded |
 
