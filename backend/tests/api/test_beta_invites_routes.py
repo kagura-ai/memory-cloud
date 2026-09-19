@@ -232,7 +232,10 @@ class TestRevoke:
         monkeypatch.setattr(
             f"{SERVICE}.revoke", AsyncMock(side_effect=NotFoundException("Beta invite"))
         )
-        assert client.delete(f"/api/v1/beta-invites/{INVITE_ID}").status_code == 404
+
+        response = client.delete(f"/api/v1/beta-invites/{INVITE_ID}")
+
+        assert response.status_code == 404
 
     def test_already_redeemed_is_a_409_with_the_contract_code(
         self, client, enabled, monkeypatch
@@ -251,7 +254,9 @@ class TestRevoke:
         revoke = AsyncMock()
         monkeypatch.setattr(f"{SERVICE}.revoke", revoke)
 
-        assert client.delete("/api/v1/beta-invites/not-a-uuid").status_code == 422
+        response = client.delete("/api/v1/beta-invites/not-a-uuid")
+
+        assert response.status_code == 422
         revoke.assert_not_awaited()
 
 
