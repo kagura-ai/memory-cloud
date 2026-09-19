@@ -18,6 +18,23 @@ const nextConfig: NextConfig = {
     ? { allowedDevOrigins: process.env.NEXT_DEV_ALLOWED_ORIGINS.split(",") }
     : {}),
   reactStrictMode: true,
+  // #1588: /join/{token} carries a one-time beta invite token in its path
+  // (#1581). `no-referrer` keeps that URL out of the Referer header on every
+  // request the page makes (preview fetch, OAuth navigation, its own assets),
+  // so the token cannot reach a proxy access log through a second field; the
+  // invite URL must never be indexed either. app/join/layout.tsx repeats both
+  // as <meta> for deployments whose proxy overwrites response headers.
+  async headers() {
+    return [
+      {
+        source: "/join/:path*",
+        headers: [
+          { key: "Referrer-Policy", value: "no-referrer" },
+          { key: "X-Robots-Tag", value: "noindex, nofollow" },
+        ],
+      },
+    ];
+  },
 };
 
 export default nextConfig;
