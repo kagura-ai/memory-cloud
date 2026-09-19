@@ -224,7 +224,8 @@ recall_series(context_id=..., metric="smoke_test_metric", period="month", agg="s
    — either way the bucket values sum to 40.0 and the bucket counts to 2
 -> Note: measurements never surface in recall() — a recall(query="smoke_test_metric") returns only
    memories, so there is nothing to assert in the recall lane. The series is scoped to the
-   temporary context and goes away with it in Cleanup
+   temporary context and becomes unreachable with it in Cleanup (delete_context is a soft delete,
+   so the rows themselves stay until a hard delete cascades — see Cleanup)
 ```
 
 ### 5. Memory update tools
@@ -274,9 +275,9 @@ create_edge(context_id=..., source_id=<memory_id>, target_id=<memory_id_2>, edge
 -> Verify: returns edge with edge_type="related_to", weight=1.0 (the schema default — not 0.5),
    confidence=1.0 and origin="declared"
 -> Verify: operation is "created", OR "updated" together with a `previous` pre-image
-   ({edge_type, weight, confidence, origin}) when a hebbian auto-edge already existed for this pair —
-   #1321 promotes it to origin="declared" instead of failing. Both outcomes PASS; only "unchanged" or
-   an `edge_exists` error would mean a stale declared edge from an earlier run
+   ({edge_type, weight, confidence, origin}) when an automatic (hebbian or semantic) edge already
+   existed for this pair — #1321 promotes it to origin="declared" instead of failing. Both outcomes
+   PASS; only "unchanged" or an `edge_exists` error would mean a stale declared edge from an earlier run
 
 list_edges(context_id=..., memory_id=<memory_id>)
 -> Verify: returns edges array with count >= 1, including the related_to edge to <memory_id_2>;
@@ -395,7 +396,7 @@ rollback_sleep_run(report_id="this-is-not-a-uuid")
 
 ### 7.8. Resource tools (`resources` plan feature only)
 
-**Pre-check:** Call `get_usage()` and check the plan. Since #1551 resource *creation* is gated on the `resources` plan feature, which only XL (`promax`) carries by default; operators can move it between tiers with `PLAN_<KEY>_FEATURES`, so the plan name is a hint, not the gate itself. If the plan lacks the feature, skip this section entirely and note "Resource tools skipped — plan lacks the `resources` feature (XL / `promax` by default)" in the report. If `setup_resource` is attempted and refuses with the plan gate — `plan_required`, with `required_plan` naming the lowest tier that carries the feature (or `null` when an override removed it from every tier); the REST equivalent is `FEAT-001` — record P1–P6 as SKIP, not FAIL. Lower tiers keep serving resources that already exist; only creating new ones is gated.
+**Pre-check:** `get_usage()` reports the plan *name* only, not the effective feature set, so treat it as a hint and let `setup_resource` be the probe. Since #1551 resource *creation* is gated on the `resources` plan feature, which only XL (`promax`) carries by default; operators can move it between tiers with `PLAN_<KEY>_FEATURES`, so the plan name alone cannot tell you whether the gate is open — do not skip this section on the name. Attempt `setup_resource` (P1); if it refuses with the plan gate — `plan_required`, with `required_plan` naming the lowest tier that carries the feature (or `null` when an override removed it from every tier); the REST equivalent is `FEAT-001` — record P1–P6 as SKIP, not FAIL, and note "Resource tools skipped — plan lacks the `resources` feature (XL / `promax` by default)" in the report. Lower tiers keep serving resources that already exist; only creating new ones is gated.
 
 ```
 setup_resource(name="smoke-test-resource-{unix_timestamp}", resource_id="smoke_test_{unix_timestamp}")
@@ -486,9 +487,11 @@ setup_connector — SKIP (documented)
 
 Remove any remaining Agent Control Plane artifacts, then unpin and delete the pinned memory (so
 delivery_mode="always" state does not survive the run) and tear down the remaining artifacts. The
-agent-state entry (set_state) needs no explicit delete — it is removed with its context below and
-also expires via its TTL; the measurement series (record_measurement) is likewise scoped to the
-context and has no delete tool of its own.
+agent-state entry (set_state) needs no explicit delete — it becomes unreachable with its
+soft-deleted context below and also expires via its TTL; the measurement series (record_measurement)
+is likewise scoped to the context and has no delete tool of its own. Note that delete_context is a
+soft delete (it sets deleted_at on the context and its memories and hard-deletes only the neural
+edges), so the agent_states and measurements rows stay in their tables until a hard delete cascades.
 
 ```
 unbind_agent_context(agent_id=<agent_id>, binding_id=<agent_binding_id>)
@@ -510,8 +513,9 @@ forget(memory_id=<memory_id_2>, context_id=...)
 -> Verify: success response (memory 2 deleted from source)
 
 delete_context(context_id=...)
--> Verify: success response (source context deleted — also removes its agent-state entries and
-   the smoke_test_metric series)
+-> Verify: success response (source context soft-deleted, along with its memories — the agent-state
+   entries and the smoke_test_metric series are not deleted, they go unreachable behind the
+   soft-deleted context: get_state / recall_series on it now return `context_not_found`)
 ```
 
 ### 8. Coverage cross-check (anti-drift)
@@ -627,7 +631,7 @@ Print a summary table (numbers are illustrative; the executed order follows the 
 | 50 | forget | Delete pinned memory | PASS/FAIL |
 | 51 | delete_context | Soft-delete merge target and its memories | PASS/FAIL |
 | 52 | forget | Delete memory 2 | PASS/FAIL |
-| 53 | delete_context | Delete source context (+ its agent-state and measurement series) | PASS/FAIL |
+| 53 | delete_context | Soft-delete source context (agent-state + measurement series go unreachable) | PASS/FAIL |
 | A1 | register_agent | Register temporary agent (owner/admin only) | PASS/FAIL/SKIP |
 | A2 | list_agents | List registry and find temporary agent (owner/admin only) | PASS/FAIL/SKIP |
 | A3 | get_agent | Get temporary agent (owner/admin only) | PASS/FAIL/SKIP |
