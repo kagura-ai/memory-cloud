@@ -124,6 +124,44 @@ describe("buildOAuthRedirect — both providers", () => {
   });
 });
 
+describe("buildOAuthRedirect — optional invite token (#1582)", () => {
+  it("appends &invite=<token> after return_to", () => {
+    vi.stubEnv("NEXT_PUBLIC_API_URL", "https://api.example.com");
+    const url = buildOAuthRedirect("google", "/", { invite: "tok_abc123" });
+    expect(url).toBe(
+      `https://api.example.com/api/v1/auth/google/login?return_to=${encodeURIComponent(`${FRONTEND_ORIGIN}/`)}&invite=tok_abc123`,
+    );
+  });
+
+  it("URL-encodes the invite token", () => {
+    vi.stubEnv("NEXT_PUBLIC_API_URL", "https://api.example.com");
+    const url = buildOAuthRedirect("github", "/", { invite: "a b&c=d/e" });
+    expect(url.endsWith("&invite=a%20b%26c%3Dd%2Fe")).toBe(true);
+    expect(new URL(url).searchParams.get("invite")).toBe("a b&c=d/e");
+  });
+
+  it.each([
+    ["no options", undefined],
+    ["empty options", {}],
+    ["undefined invite", { invite: undefined }],
+    ["empty invite", { invite: "" }],
+  ])("is byte-identical to the two-argument form with %s", (_label, options) => {
+    vi.stubEnv("NEXT_PUBLIC_API_URL", "https://api.example.com");
+    expect(buildOAuthRedirect("google", "/x?a=1", options)).toBe(
+      buildOAuthRedirect("google", "/x?a=1"),
+    );
+    expect(buildOAuthRedirect("google", "/x?a=1", options)).not.toContain(
+      "invite",
+    );
+  });
+
+  it("still validates returnTo when an invite is supplied", () => {
+    expect(() =>
+      buildOAuthRedirect("google", "https://evil.com/x", { invite: "tok" }),
+    ).toThrow(TypeError);
+  });
+});
+
 describe("buildOAuthRedirect — returnTo validation (CWE-601 defense)", () => {
   it("throws TypeError on a cross-origin http URL", () => {
     expect(() => buildOAuthRedirect("google", "https://evil.com/x")).toThrow(
