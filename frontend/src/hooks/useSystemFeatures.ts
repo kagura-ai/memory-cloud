@@ -14,9 +14,13 @@
  */
 
 import { useEffect, useState } from "react";
-import { getSystemInfo, type SystemInfo } from "@/lib/api/system";
+import {
+  getSystemInfo,
+  type SystemFeatures,
+  type SystemInfo,
+} from "@/lib/api/system";
 
-type Features = Record<string, boolean>;
+type Features = SystemFeatures;
 
 // Retry a transient /system/info blip before falling back. A single failed
 // fetch used to resolve to {} (everything default-OFF), which is wrong for
