@@ -125,7 +125,11 @@ The 7-day lifetime is fixed in code. Notes for operators:
   fields: the request URI, and — when the frontend and the API share an origin —
   the `Referer` header the browser sends from the `/join/{token}` page (on the
   preview call, the `/auth/{provider}/login` navigation and every asset the page
-  loads). Filtering only the URI leaves the second copy in place. Before enabling
+  loads). Filtering only the URI leaves the second copy in place. The frontend
+  serves `/join/*` with `Referrer-Policy: no-referrer` (response header plus a
+  `<meta name="referrer">` backstop, #1588), so current browsers send no
+  `Referer` from that page; keep the proxy-side `Referer` filter anyway if your
+  proxy overwrites response headers or you cannot vouch for the clients. Before enabling
   the feature, restrict who can read those logs, or scrub both fields for
   `/join/`, `/beta-invites/` and `invite=` (Caddy: a `filter` log encoder on
   `request>uri` and `request>headers>Referer`, or drop that header from the log).
