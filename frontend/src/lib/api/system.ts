@@ -116,13 +116,21 @@ export interface SearchDefaults {
   reranker_model: string;
 }
 
+/**
+ * Backend feature flags (e.g. `plan_page`, `neural_memory`, `reranking`). A
+ * flag a backend does not send reads as off.
+ */
+export type SystemFeatures = Record<string, boolean> & {
+  /** #1582: beta invite links. Absent on backends older than #1581 ⇒ off. */
+  beta_invites?: boolean;
+};
+
 export interface SystemInfo {
   name: string;
   version: string;
   description: string;
   environment: string;
-  /** Backend feature flags (e.g. `plan_page`, `neural_memory`, `reranking`). */
-  features: Record<string, boolean>;
+  features: SystemFeatures;
   /** Absent on backends older than #1572. */
   search_defaults?: SearchDefaults;
 }
