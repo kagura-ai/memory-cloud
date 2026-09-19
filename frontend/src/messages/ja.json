@@ -2178,7 +2178,6 @@
     "rerankerConfig": "リランカー設定",
     "rerankerConfigDesc": "検索品質向上のためのリランキングモデルを設定（デプロイメントのデフォルト: {provider} / {model}）",
     "rerankerConfigDescPlain": "検索品質向上のためのリランキングモデルを設定",
-    "rerankingDisabledByDeployment": "このデプロイメントではリランキングは無効になっています。",
     "rerankerNotAvailableFree": "無料プランではリランキングは利用できません",
     "upgradeToBasic": "Basicプランにアップグレードして、AI搭載リランキングで検索品質を向上させましょう。",
     "noRerankerKeys": "リランカーAPIキーが設定されていません",
@@ -2231,7 +2230,8 @@
     "fetchFactorDesc": "候補取得の倍率。高いほど品質向上、コスト増。（デフォルト: 3）",
     "fetchFactorExample": "例: トップ10件の結果に対して、{count}件の候補を取得。",
     "impactOnQuality": "検索品質への影響",
-    "impactOnQualityDesc": "セマンティック重みが高いほど意味ベースの検索に有利（概念的なクエリに最適）。BM25重みが高いほど完全一致のキーワード検索に有利（技術用語に最適）。取得係数はリランキング前の候補の多様性を制御します。"
+    "impactOnQualityDesc": "セマンティック重みが高いほど意味ベースの検索に有利（概念的なクエリに最適）。BM25重みが高いほど完全一致のキーワード検索に有利（技術用語に最適）。取得係数はリランキング前の候補の多様性を制御します。",
+    "impactOnQualityDescNoRerank": "セマンティック重みが高いほど意味ベースの検索に有利（概念的なクエリに最適）。BM25重みが高いほど完全一致のキーワード検索に有利（技術用語に最適）。"
   },
   "externalKeys": {
     "title": "外部APIキー",

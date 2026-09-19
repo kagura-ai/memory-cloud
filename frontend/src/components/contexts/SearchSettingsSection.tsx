@@ -129,7 +129,9 @@ export function SearchSettingsSection({
   // `search_defaults` is absent on older backends) — render the plain copy then.
   const systemInfo = useSystemInfo();
   const searchDefaults = systemInfo?.search_defaults ?? null;
-  // Only an explicit false disables: loading and older backends keep the card usable.
+  // #1580: only an explicit false hides the reranker card — loading and older
+  // backends (no flag) keep it. Hidden, not greyed out: a deployment that does
+  // not offer reranking has nothing for a workspace owner to configure.
   const rerankingDisabledByDeployment = systemFeatures?.reranking === false;
 
   const isFree = currentWorkspace?.plan_name === "free";
@@ -205,10 +207,11 @@ export function SearchSettingsSection({
 
   // Issue #1167: probe external keys only once the byok flag resolves enabled
   // (kept out of the effect above so a late flag resolution doesn't re-fire
-  // the config/telemetry loads).
+  // the config/telemetry loads). #1580: the keys only feed the reranker card,
+  // so skip the probe when the deployment does not rerank.
   useEffect(() => {
-    if (byokEnabled) loadExternalKeys();
-  }, [byokEnabled, loadExternalKeys]);
+    if (byokEnabled && !rerankingDisabledByDeployment) loadExternalKeys();
+  }, [byokEnabled, rerankingDisabledByDeployment, loadExternalKeys]);
 
   const handleSave = useCallback(async () => {
     if (!contextId || Object.keys(editedConfig).length === 0) return;
@@ -319,8 +322,7 @@ export function SearchSettingsSection({
   const keylessDefault =
     searchDefaults?.reranker_provider === "self_hosted" && selfHostedAvailable;
   const showConfigureKeysCta = byokEnabled && !keylessDefault;
-  const controlsDisabled =
-    isFree || !hasAnyRerankerAvailable || rerankingDisabledByDeployment;
+  const controlsDisabled = isFree || !hasAnyRerankerAvailable;
 
   const currentProvider = getCurrentValue("reranker_provider");
   const currentModel = getCurrentValue("reranker_model");
@@ -343,7 +345,13 @@ export function SearchSettingsSection({
     (currentProvider === "self_hosted" && !selfHostedAvailable);
 
   const useRerank = getCurrentValue("use_rerank");
-  const cannotSave = isDirty && useRerank && selectedProviderUnavailable;
+  // #1580: with the card hidden the provider can be neither seen nor fixed,
+  // and the deployment never calls it — don't block saving the other settings.
+  const cannotSave =
+    !rerankingDisabledByDeployment &&
+    isDirty &&
+    useRerank &&
+    selectedProviderUnavailable;
 
   const getProviderDescription = () => {
     if (selfHostedAvailable && hasVoyageKey && hasCohereKey)
@@ -483,7 +491,9 @@ export function SearchSettingsSection({
                     {t("impactOnQuality")}
                   </p>
                   <p className="text-xs text-blue-700 dark:text-blue-300">
-                    {t("impactOnQualityDesc")}
+                    {rerankingDisabledByDeployment
+                      ? t("impactOnQualityDescNoRerank")
+                      : t("impactOnQualityDesc")}
                   </p>
                 </div>
               </div>
@@ -491,59 +501,50 @@ export function SearchSettingsSection({
           </CardContent>
         </Card>
 
-        {/* Reranker Configuration */}
-        <Card>
-          <CardHeader>
-            <CardTitle className="flex items-center gap-2">
-              <Sparkles className="h-5 w-5" />
-              {t("rerankerConfig")}
-            </CardTitle>
-            <CardDescription>
-              {searchDefaults
-                ? t("rerankerConfigDesc", {
-                    provider: providerLabel(searchDefaults.reranker_provider),
-                    model: searchDefaults.reranker_model,
-                  })
-                : t("rerankerConfigDescPlain")}
-            </CardDescription>
-          </CardHeader>
-          <CardContent className="space-y-6">
-            {rerankingDisabledByDeployment && (
-              <Alert>
-                <Info className="h-4 w-4" />
-                <AlertDescription>
-                  {t("rerankingDisabledByDeployment")}
-                </AlertDescription>
-              </Alert>
-            )}
+        {/* Reranker Configuration — not rendered when the deployment does
+            not rerank (#1580) */}
+        {!rerankingDisabledByDeployment && (
+          <Card>
+            <CardHeader>
+              <CardTitle className="flex items-center gap-2">
+                <Sparkles className="h-5 w-5" />
+                {t("rerankerConfig")}
+              </CardTitle>
+              <CardDescription>
+                {searchDefaults
+                  ? t("rerankerConfigDesc", {
+                      provider: providerLabel(searchDefaults.reranker_provider),
+                      model: searchDefaults.reranker_model,
+                    })
+                  : t("rerankerConfigDescPlain")}
+              </CardDescription>
+            </CardHeader>
+            <CardContent className="space-y-6">
+              {isFree && (
+                <Alert>
+                  <Lock className="h-4 w-4" />
+                  <AlertDescription>
+                    <p className="font-medium mb-1">
+                      {t("rerankerNotAvailableFree")}
+                    </p>
+                    <p className="text-sm">
+                      {t("upgradeToBasic").split("Basic plan")[0]}
+                      <Link
+                        href="/workspace/settings/plan"
+                        className="underline font-medium"
+                      >
+                        Basic plan
+                      </Link>
+                      {t("upgradeToBasic").split("Basic plan")[1]}
+                    </p>
+                  </AlertDescription>
+                </Alert>
+              )}
 
-            {isFree && (
-              <Alert>
-                <Lock className="h-4 w-4" />
-                <AlertDescription>
-                  <p className="font-medium mb-1">
-                    {t("rerankerNotAvailableFree")}
-                  </p>
-                  <p className="text-sm">
-                    {t("upgradeToBasic").split("Basic plan")[0]}
-                    <Link
-                      href="/workspace/settings/plan"
-                      className="underline font-medium"
-                    >
-                      Basic plan
-                    </Link>
-                    {t("upgradeToBasic").split("Basic plan")[1]}
-                  </p>
-                </AlertDescription>
-              </Alert>
-            )}
-
-            {/* #1167: only offer the configure-keys CTA when BYOK is on —
-                with BYOK off the external-keys page is disabled, so show the
-                headline without a dangling link. */}
-            {!isFree &&
-              !rerankingDisabledByDeployment &&
-              !hasAnyRerankerAvailable && (
+              {/* #1167: only offer the configure-keys CTA when BYOK is on —
+                  with BYOK off the external-keys page is disabled, so show the
+                  headline without a dangling link. */}
+              {!isFree && !hasAnyRerankerAvailable && (
                 <Alert>
                   <AlertCircle className="h-4 w-4" />
                   <AlertDescription>
@@ -551,7 +552,7 @@ export function SearchSettingsSection({
                     {showConfigureKeysCta && (
                       <p className="text-sm">
                         {/* t.rich with a <link> tag in the message — splitting
-                          on an English substring broke non-English locales. */}
+                            on an English substring broke non-English locales. */}
                         {t.rich("configureRerankerKeys", {
                           link: (chunks) => (
                             <Link
@@ -568,160 +569,161 @@ export function SearchSettingsSection({
                 </Alert>
               )}
 
-            <div
-              className={cn(
-                "space-y-6",
-                controlsDisabled && "opacity-50 pointer-events-none",
-              )}
-            >
-              <div className="flex items-center justify-between">
-                <div className="space-y-0.5">
-                  <Label htmlFor="use_rerank" className="text-base">
-                    {t("enableReranking")}
-                  </Label>
-                  <p className="text-sm text-muted-foreground">
-                    {searchDefaults
-                      ? t("enableRerankingDesc", {
-                          state: searchDefaults.use_rerank
-                            ? t("deploymentDefaultOn")
-                            : t("deploymentDefaultOff"),
-                        })
-                      : t("enableRerankingDescPlain")}
-                  </p>
+              <div
+                className={cn(
+                  "space-y-6",
+                  controlsDisabled && "opacity-50 pointer-events-none",
+                )}
+              >
+                <div className="flex items-center justify-between">
+                  <div className="space-y-0.5">
+                    <Label htmlFor="use_rerank" className="text-base">
+                      {t("enableReranking")}
+                    </Label>
+                    <p className="text-sm text-muted-foreground">
+                      {searchDefaults
+                        ? t("enableRerankingDesc", {
+                            state: searchDefaults.use_rerank
+                              ? t("deploymentDefaultOn")
+                              : t("deploymentDefaultOff"),
+                          })
+                        : t("enableRerankingDescPlain")}
+                    </p>
+                  </div>
+                  <Switch
+                    id="use_rerank"
+                    checked={getCurrentValue("use_rerank")}
+                    onCheckedChange={(checked) =>
+                      setEditedConfig({ ...editedConfig, use_rerank: checked })
+                    }
+                    disabled={controlsDisabled}
+                  />
                 </div>
-                <Switch
-                  id="use_rerank"
-                  checked={getCurrentValue("use_rerank")}
-                  onCheckedChange={(checked) =>
-                    setEditedConfig({ ...editedConfig, use_rerank: checked })
-                  }
-                  disabled={controlsDisabled}
-                />
-              </div>
 
-              {getCurrentValue("use_rerank") && (
-                <>
-                  <div className="space-y-3">
-                    <Label htmlFor="reranker_provider">{t("provider")}</Label>
-                    <Select
-                      value={getCurrentValue("reranker_provider")}
-                      onValueChange={(value) =>
-                        handleProviderChange(
-                          value as "voyage" | "cohere" | "self_hosted",
-                        )
-                      }
-                      // pointer-events-none above only stops the mouse; the
-                      // Radix trigger stays keyboard-reachable unless disabled.
-                      disabled={controlsDisabled}
-                    >
-                      <SelectTrigger id="reranker_provider">
-                        <SelectValue />
-                      </SelectTrigger>
-                      <SelectContent>
-                        <SelectItem
-                          value="self_hosted"
-                          disabled={!selfHostedAvailable}
-                        >
-                          <span className="flex items-center gap-2">
-                            {t("selfHostedLocal")}
-                            <Badge
-                              variant="outline"
-                              className={cn(
-                                "ml-1 text-xs",
-                                selfHostedAvailable
-                                  ? "border-green-500 text-green-700 dark:text-green-400"
-                                  : "text-muted-foreground",
-                              )}
-                            >
-                              {selfHostedAvailable
-                                ? t("selfHostedAvailable")
-                                : t("selfHostedUnavailable")}
-                            </Badge>
-                          </span>
-                        </SelectItem>
-                        {renderApiProviderItem(
-                          "voyage",
-                          "Voyage AI",
-                          hasVoyageKey,
-                        )}
-                        {renderApiProviderItem(
-                          "cohere",
-                          "Cohere",
-                          hasCohereKey,
-                        )}
-                      </SelectContent>
-                    </Select>
-                    <p className="text-sm text-muted-foreground">
-                      {getProviderDescription()}
-                    </p>
-                    {selectedProviderUnavailable && (
-                      <Alert>
-                        <AlertCircle className="h-4 w-4" />
-                        <AlertDescription>
-                          {currentProvider === "self_hosted" ? (
-                            <p className="text-sm">
-                              {t("selfHostedUnavailableDetail")}
-                            </p>
-                          ) : showConfigureKeysCta ? (
-                            <p className="text-sm">
-                              {t.rich("configureRerankerKeys", {
-                                link: (chunks) => (
-                                  <Link
-                                    href="/workspace/integrations/external-keys"
-                                    className="underline font-medium"
-                                  >
-                                    {chunks}
-                                  </Link>
-                                ),
-                              })}
-                            </p>
-                          ) : (
-                            // #1167: BYOK off — key setup is not available in
-                            // this deployment, so no configure link. #1572:
-                            // same when the keyless self_hosted default is up.
-                            <p className="text-sm">{t("noRerankerKeys")}</p>
-                          )}
-                        </AlertDescription>
-                      </Alert>
-                    )}
-                  </div>
-
-                  <div className="space-y-3">
-                    <Label htmlFor="reranker_model">{t("model")}</Label>
-                    <Select
-                      value={getCurrentValue("reranker_model")}
-                      onValueChange={(value) =>
-                        setEditedConfig({
-                          ...editedConfig,
-                          reranker_model: value,
-                        })
-                      }
-                      disabled={controlsDisabled}
-                    >
-                      <SelectTrigger id="reranker_model">
-                        <SelectValue />
-                      </SelectTrigger>
-                      <SelectContent>
-                        {availableModels.map((model) => (
-                          <SelectItem key={model.value} value={model.value}>
-                            {model.label}
+                {getCurrentValue("use_rerank") && (
+                  <>
+                    <div className="space-y-3">
+                      <Label htmlFor="reranker_provider">{t("provider")}</Label>
+                      <Select
+                        value={getCurrentValue("reranker_provider")}
+                        onValueChange={(value) =>
+                          handleProviderChange(
+                            value as "voyage" | "cohere" | "self_hosted",
+                          )
+                        }
+                        // pointer-events-none above only stops the mouse; the
+                        // Radix trigger stays keyboard-reachable unless disabled.
+                        disabled={controlsDisabled}
+                      >
+                        <SelectTrigger id="reranker_provider">
+                          <SelectValue />
+                        </SelectTrigger>
+                        <SelectContent>
+                          <SelectItem
+                            value="self_hosted"
+                            disabled={!selfHostedAvailable}
+                          >
+                            <span className="flex items-center gap-2">
+                              {t("selfHostedLocal")}
+                              <Badge
+                                variant="outline"
+                                className={cn(
+                                  "ml-1 text-xs",
+                                  selfHostedAvailable
+                                    ? "border-green-500 text-green-700 dark:text-green-400"
+                                    : "text-muted-foreground",
+                                )}
+                              >
+                                {selfHostedAvailable
+                                  ? t("selfHostedAvailable")
+                                  : t("selfHostedUnavailable")}
+                              </Badge>
+                            </span>
                           </SelectItem>
-                        ))}
-                      </SelectContent>
-                    </Select>
-                    <p className="text-sm text-muted-foreground">
-                      {currentProvider === "voyage"
-                        ? t("voyageBestQuality")
-                        : currentProvider === "self_hosted"
-                          ? t("qwen3BestQuality")
-                          : t("cohereMultilingual")}
-                    </p>
-                  </div>
-                </>
-              )}
-            </div>
-          </CardContent>
-        </Card>
+                          {renderApiProviderItem(
+                            "voyage",
+                            "Voyage AI",
+                            hasVoyageKey,
+                          )}
+                          {renderApiProviderItem(
+                            "cohere",
+                            "Cohere",
+                            hasCohereKey,
+                          )}
+                        </SelectContent>
+                      </Select>
+                      <p className="text-sm text-muted-foreground">
+                        {getProviderDescription()}
+                      </p>
+                      {selectedProviderUnavailable && (
+                        <Alert>
+                          <AlertCircle className="h-4 w-4" />
+                          <AlertDescription>
+                            {currentProvider === "self_hosted" ? (
+                              <p className="text-sm">
+                                {t("selfHostedUnavailableDetail")}
+                              </p>
+                            ) : showConfigureKeysCta ? (
+                              <p className="text-sm">
+                                {t.rich("configureRerankerKeys", {
+                                  link: (chunks) => (
+                                    <Link
+                                      href="/workspace/integrations/external-keys"
+                                      className="underline font-medium"
+                                    >
+                                      {chunks}
+                                    </Link>
+                                  ),
+                                })}
+                              </p>
+                            ) : (
+                              // #1167: BYOK off — key setup is not available in
+                              // this deployment, so no configure link. #1572:
+                              // same when the keyless self_hosted default is up.
+                              <p className="text-sm">{t("noRerankerKeys")}</p>
+                            )}
+                          </AlertDescription>
+                        </Alert>
+                      )}
+                    </div>
+
+                    <div className="space-y-3">
+                      <Label htmlFor="reranker_model">{t("model")}</Label>
+                      <Select
+                        value={getCurrentValue("reranker_model")}
+                        onValueChange={(value) =>
+                          setEditedConfig({
+                            ...editedConfig,
+                            reranker_model: value,
+                          })
+                        }
+                        disabled={controlsDisabled}
+                      >
+                        <SelectTrigger id="reranker_model">
+                          <SelectValue />
+                        </SelectTrigger>
+                        <SelectContent>
+                          {availableModels.map((model) => (
+                            <SelectItem key={model.value} value={model.value}>
+                              {model.label}
+                            </SelectItem>
+                          ))}
+                        </SelectContent>
+                      </Select>
+                      <p className="text-sm text-muted-foreground">
+                        {currentProvider === "voyage"
+                          ? t("voyageBestQuality")
+                          : currentProvider === "self_hosted"
+                            ? t("qwen3BestQuality")
+                            : t("cohereMultilingual")}
+                      </p>
+                    </div>
+                  </>
+                )}
+              </div>
+            </CardContent>
+          </Card>
+        )}
 
         {/* Embedding Configuration (Read-only) */}
         <Card>

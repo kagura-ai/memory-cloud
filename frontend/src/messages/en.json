@@ -2178,7 +2178,6 @@
     "rerankerConfig": "Reranker Configuration",
     "rerankerConfigDesc": "Configure reranking model for improved search quality (deployment default: {provider} / {model})",
     "rerankerConfigDescPlain": "Configure reranking model for improved search quality",
-    "rerankingDisabledByDeployment": "Reranking is disabled on this deployment.",
     "rerankerNotAvailableFree": "Reranking not available on Free plan",
     "upgradeToBasic": "Upgrade to Basic plan to enable AI-powered reranking for improved search quality.",
     "noRerankerKeys": "No reranker API keys configured",
@@ -2231,7 +2230,8 @@
     "fetchFactorDesc": "Multiplier for candidate retrieval. Higher = better quality, higher cost. (default: 3)",
     "fetchFactorExample": "Example: For top 10 results, retrieve {count} candidates.",
     "impactOnQuality": "Impact on Search Quality",
-    "impactOnQualityDesc": "Higher semantic weight favors meaning-based search (better for conceptual queries). Higher BM25 weight favors exact keyword matching (better for technical terms). Fetch factor controls the diversity of candidates before reranking."
+    "impactOnQualityDesc": "Higher semantic weight favors meaning-based search (better for conceptual queries). Higher BM25 weight favors exact keyword matching (better for technical terms). Fetch factor controls the diversity of candidates before reranking.",
+    "impactOnQualityDescNoRerank": "Higher semantic weight favors meaning-based search (better for conceptual queries). Higher BM25 weight favors exact keyword matching (better for technical terms)."
   },
   "externalKeys": {
     "title": "External API Keys",
