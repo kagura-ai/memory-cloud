@@ -2,7 +2,7 @@
 
 import pytest
 
-from config.plan_tiers import feature_denied_message
+from config.plan_tiers import feature_denied_message, get_plan_tier
 from utils.exceptions import (
     AdminProtectionError,
     APIKeyError,
@@ -232,7 +232,8 @@ class TestRateLimitErrors:
     def test_feature_not_available_for_feature_none_plan_reads_as_free(self):
         exc = FeatureNotAvailableError.for_feature(None, "resources")
         assert exc.message == feature_denied_message(None, "resources")
-        assert "on free plan" in exc.message
+        # #1583: the current plan reads as its display name, like the required one.
+        assert f"on {get_plan_tier('free').display_name} plan" in exc.message
         assert exc.details["feature"] == "resources"
 
 

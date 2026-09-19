@@ -599,14 +599,26 @@ def required_plan_display_name(feature: str) -> str:
         return "higher"
 
 
+def plan_display_name(plan_name: str | None) -> str:
+    """Display name of ``plan_name`` — the label the UI shows for that tier.
+
+    ``None`` / empty reads as free: legacy rows pre-dating the ``plan_name``
+    backfill. A key the registry does not know is returned unchanged rather
+    than relabelled as a tier the workspace is not on.
+    """
+    tier = PLAN_TIERS.get(plan_name or PlanName.FREE)
+    return tier.display_name if tier else str(plan_name)
+
+
 def feature_denied_message(plan_name: str | None, feature: str) -> str:
     """Refusal text for a plan that lacks ``feature`` (#1551).
 
     Names the minimum tier from the registry — never a hardcoded "Pro" — so a
     display-name override or a re-mapped feature flows through every gate.
-    ``None`` reads as free: legacy rows pre-dating the ``plan_name`` backfill.
+    Both tiers read as display names (#1583): "basic plan … L plan" mixed the
+    raw key with the label the UI shows.
     """
     return (
-        f"Feature '{feature}' not available on {plan_name or PlanName.FREE} plan. "
+        f"Feature '{feature}' not available on {plan_display_name(plan_name)} plan. "
         f"Upgrade to {required_plan_display_name(feature)} plan to access this feature."
     )
