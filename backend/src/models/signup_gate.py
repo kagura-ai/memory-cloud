@@ -149,8 +149,11 @@ class SignupAllowlistEntry(Base):
             "provider IN ('github', 'google')",
             name="valid_signup_allowlist_provider",
         ),
+        # #1581: 'beta_invite' rows are written by the gate itself when a
+        # closed-beta invite link is redeemed (``added_by_user_id`` = inviter).
+        # Kept byte-identical to alembic e82_1581 (tests/test_schema_drift.py).
         CheckConstraint(
-            "source IN ('manual', 'github_sponsors')",
+            "source IN ('manual', 'github_sponsors', 'beta_invite')",
             name="valid_signup_allowlist_source",
         ),
         CheckConstraint(
