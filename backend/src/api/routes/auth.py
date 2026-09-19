@@ -19,6 +19,7 @@ Security features:
 """
 
 import os
+import re
 import secrets
 from typing import Any, Literal
 
@@ -47,11 +48,13 @@ from auth.totp import verify_totp
 from db.base import get_db
 from models.auth import User
 from services.account_linking_service import AccountLinkingService
+from services.beta_invite_service import BETA_INVITE_TOKEN_PATTERN
 from services.signup_gate_service import check_signup_access
 from services.workspace_service import WorkspaceService
 from utils.datetime import utcnow
 from utils.encryption import get_encryptor
 from utils.exceptions import AuthenticationError, ConflictError, InvalidCredentialsError
+from utils.hashing import SHA256_HEX_PATTERN, sha256_hex
 from utils.logger import get_logger
 
 # auth.py historically bound logger via stdlib ``logging.getLogger``
@@ -498,6 +501,7 @@ async def google_login(
     redirect_uri: str | None = None,
     return_to: str | None = None,
     add_account: bool = False,
+    invite: str | None = None,
 ):
     """Initiate Google OAuth2 login flow.
 
@@ -506,6 +510,8 @@ async def google_login(
     Args:
         redirect_uri: Optional custom redirect URI (defaults to configured URI)
         return_to: If provided, auto-redirects browser to Google (for iOS/browser users)
+        invite: Optional closed-beta invite token (#1581). Its hash is bound to
+            this flow's state for the signup gate; malformed values are ignored.
 
     Returns:
         If return_to: RedirectResponse to Google OAuth (browser user)
@@ -545,6 +551,9 @@ async def google_login(
             current_session = request.cookies.get("kagura_session")
             if current_session:
                 _remember_add_account_intent(state, current_session)
+
+        # #1581: closed-beta invite — only its hash, bound to this state.
+        _remember_beta_invite(state, invite)
 
     # Get authorization URL
     redirect = redirect_uri or os.getenv("GOOGLE_REDIRECT_URI")
@@ -724,6 +733,11 @@ async def google_callback(
     # Delete state (one-time use)
     _session_manager._redis.delete(f"oauth2_state:{state}")
 
+    # #1581: closed-beta invite hash bound to this state, if any. Taken here —
+    # after the CSRF check, consumed on every path — so a failed exchange below
+    # cannot leave it behind for a replay of the same state.
+    beta_invite_token_hash = _take_beta_invite_hash(state)
+
     try:
         # 2. Exchange code for token
         redirect_uri = os.getenv("GOOGLE_REDIRECT_URI")
@@ -769,6 +783,8 @@ async def google_callback(
             username=user_info["email"],
             ip_address=request.client.host if request.client else None,
             user_agent=request.headers.get("user-agent"),
+            # #1581: tried last, only if the gate would otherwise block.
+            beta_invite_token_hash=beta_invite_token_hash,
         )
         if blocked:
             return blocked
@@ -1132,6 +1148,65 @@ def _take_add_account_intent(state: str, request: Request) -> tuple[str, str | N
     return ("add", cookie_session)
 
 
+# --- carrying a closed-beta invite across the OAuth round trip (#1581) -------
+#
+# ``GET /auth/{provider}/login?invite=<token>`` travels the same way `return_to`
+# does — a short-lived Redis key beside the CSRF state — so no new cookie is
+# needed and multi-origin deployments (API and frontend on different hosts) work
+# unchanged. Only ``sha256_hex(token)`` is stored: the plaintext never rests in
+# Redis, and the callback (and everything downstream of it) only ever sees the
+# hash. Both providers go through these two helpers so they cannot diverge.
+_BETA_INVITE_KEY = "oauth2_beta_invite:{state}"
+_BETA_INVITE_TTL = 300  # same lifetime as oauth2_state:{state}
+_BETA_INVITE_TOKEN_RE = re.compile(BETA_INVITE_TOKEN_PATTERN)
+_SHA256_HEX_RE = re.compile(SHA256_HEX_PATTERN)
+
+
+def _remember_beta_invite(state: str, invite: str | None) -> None:
+    """Bind the hash of an ``invite=`` token to this OAuth flow's ``state``.
+
+    A malformed or over-long value is ignored, not an error: the login proceeds
+    and the signup gate decides. With ``ENABLE_BETA_INVITES=false`` the
+    parameter is inert — nothing is hashed, nothing is stored.
+
+    Never logs ``invite``: it is a credential.
+    """
+    from config.settings import get_settings
+
+    if not invite or not _session_manager:
+        return
+    if not get_settings().enable_beta_invites:
+        return
+    if not _BETA_INVITE_TOKEN_RE.fullmatch(invite):
+        return
+    _session_manager._redis.setex(
+        _BETA_INVITE_KEY.format(state=state), _BETA_INVITE_TTL, sha256_hex(invite)
+    )
+
+
+def _take_beta_invite_hash(state: str) -> str | None:
+    """Read-and-delete the invite hash bound to ``state`` (single-use, like it).
+
+    Call only AFTER the CSRF state check has passed. Consumes the key on every
+    path; returns the hash only when the feature is still on and the stored
+    value really is a sha256 hex digest, so nothing else can reach the gate.
+    """
+    from config.settings import get_settings
+
+    if not _session_manager:
+        return None
+    key = _BETA_INVITE_KEY.format(state=state)
+    token_hash = _session_manager._redis.get(key)
+    if not token_hash:
+        return None
+    _session_manager._redis.delete(key)
+    if not get_settings().enable_beta_invites:
+        return None
+    if not isinstance(token_hash, str) or not _SHA256_HEX_RE.fullmatch(token_hash):
+        return None
+    return token_hash
+
+
 @router.get("/accounts")
 async def list_signed_in_accounts(request: Request, user: SessionUser):
     """List the accounts signed in on THIS browser session (#1488 Phase 2).
@@ -1315,8 +1390,13 @@ async def github_login(
     request: Request,
     return_to: str | None = None,
     add_account: bool = False,
+    invite: str | None = None,
 ):
-    """Initiate GitHub OAuth2 login flow."""
+    """Initiate GitHub OAuth2 login flow.
+
+    ``invite`` is an optional closed-beta invite token (#1581) — see
+    ``google_login``; both providers share ``_remember_beta_invite``.
+    """
     if not _session_manager:
         raise HTTPException(status_code=500, detail="Auth managers not initialized")
 
@@ -1336,6 +1416,9 @@ async def github_login(
         current_session = request.cookies.get("kagura_session")
         if current_session:
             _remember_add_account_intent(state, current_session)
+
+    # #1581: closed-beta invite — only its hash, bound to this state.
+    _remember_beta_invite(state, invite)
 
     redirect_uri = os.getenv(
         "GITHUB_REDIRECT_URI",
@@ -1473,6 +1556,9 @@ async def github_callback(
         return _oauth_error_redirect("github", "oauth_expired")
     _session_manager._redis.delete(f"oauth2_state:{state}")
 
+    # #1581: closed-beta invite hash bound to this state — see google_callback.
+    beta_invite_token_hash = _take_beta_invite_hash(state)
+
     try:
         # 2. Exchange code for token
         access_token = await _github_exchange_code(code)
@@ -1506,6 +1592,8 @@ async def github_callback(
             username=user_info.get("login"),
             ip_address=request.client.host if request.client else None,
             user_agent=request.headers.get("user-agent"),
+            # #1581: tried last, only if the gate would otherwise block.
+            beta_invite_token_hash=beta_invite_token_hash,
         )
         if blocked:
             return blocked
