@@ -156,6 +156,7 @@ Auth failure before dispatch (`transport.py:531-580`): HTTP 401, body `{"error":
 | `ADMIN-001` | `AdminProtectionError` — exceptions.py:117 | 403 | System-admin invariant blocks operation (initial/last admin); `details` always stripped. |
 | `RES-001` | `NotFoundException` — exceptions.py:159 | 404 | Resource not found. |
 | `RES-002` | `ConflictError` — exceptions.py:188 | 409 | Resource conflict. |
+| `config_read_only` | `ConfigReadOnlyError` — exceptions.py | 409 | #1580: `PUT /config/{key}` / `POST /config/batch` always refuse — every key is env-backed (set via environment, applied on restart/redeploy) and nothing reads a stored override. `details.keys` lists the refused keys; a batch is refused as a whole. ⚠ snake_case, outside the `NAMESPACE-NNN` convention. |
 | `RES-003` | `MemoryGoneError` — exceptions.py:174 | 410 | Resource soft-deleted (distinct from 404 so clients stop retrying). |
 | `RES-004` | *(no class — inline `JSONResponse`)* — api/routes/attachments.py:30 | 410 | Deprecated `/api/v1/attachments/*` retired; carries Sunset/Deprecation/Link headers. |
 | `VAL-001` | `ValidationError` — exceptions.py:195 | 422 | Service-layer validation error (shape/format). ⚠ Coexists with the non-conforming FastAPI 422. |

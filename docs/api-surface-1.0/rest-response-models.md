@@ -483,33 +483,34 @@ Notes:
 
 ## config.py
 
-### ConfigValue (BaseModel, L28)
+### ConfigValue (BaseModel, L29)
 > Single configuration value.
 - `key: str` — required
-- `value: Any` — required
-- `category: str` — required
+- `value: Any` — required (#1580: always the **effective** value — `get_settings()` / the neural layer's env defaults — never a `config_overrides` row; credentials embedded in a URL value are masked)
+- `category: str` — required (#1580: adds `hosted`, returned to system admins only)
 - `description: str | None` — optional
 - `is_sensitive: bool` — optional (default `False`)
+- `read_only: bool` — optional (default `True`) (#1580, additive: every key is env-backed; `PUT /config/{key}` and `POST /config/batch` answer 409 `config_read_only`)
 
-### ConfigListResponse (BaseModel, L38)
+### ConfigListResponse (BaseModel, L41)
 > Configuration list response.
 - `configs: list[ConfigValue]` — required
 - `total: int` — required
 
-### ConfigUpdateRequest (BaseModel, L45) (request model)
+### ConfigUpdateRequest (BaseModel, L48) (request model)
 > Update configuration value.
 - `value: Any` — required
 
-### ConfigBatchRequest (BaseModel, L51) (request model)
+### ConfigBatchRequest (BaseModel, L54) (request model)
 > Batch update configuration.
 - `updates: dict[str, Any]` — required
 
-### ConfigValidateRequest (BaseModel, L57) (request model)
+### ConfigValidateRequest (BaseModel, L60) (request model)
 > Validate configuration.
 - `key: str` — required
 - `value: Any` — required
 
-### ConfigKeySchema (BaseModel, L64)
+### ConfigKeySchema (BaseModel, L67)
 > Configuration key metadata schema.
 - `key: str` — required
 - `type: str` — required

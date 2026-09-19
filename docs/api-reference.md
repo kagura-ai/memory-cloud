@@ -1033,6 +1033,18 @@ See [Sleep Maintenance](sleep-maintenance.md) for the full Sleep cycle design, `
 
 See [Memory Health Report](ops/memory-health-report.md) for every metric and threshold.
 
+### Environment Console
+
+Read-only view of the deployment's environment-backed settings, behind the admin UI's Environment page. Every key is set via environment variables and applied on restart/redeploy — there is no runtime override.
+
+| Endpoint                          | Purpose                                                       |
+|-----------------------------------|---------------------------------------------------------------|
+| `GET /api/v1/config`              | The **effective** value of each key (what the running process uses), as `{key, value, category, description, is_sensitive, read_only}`. `read_only` is `true` for every key. Any authenticated caller; the `hosted` category (BYOK / cost-display / plan-page flags, managed LLM lane, reranker defaults and endpoint) is returned to system admins only. Credentials embedded in a URL value are always masked (`https://***@host`). |
+| `GET /api/v1/config/schema`       | Display metadata per key (type, description, `requires_restart`, impact, examples). |
+| `PUT /api/v1/config/{key}`, `POST /api/v1/config/batch` | Always refused with `409` `config_read_only` (`details.keys` lists the refused keys); a batch is refused as a whole. Change the environment and restart/redeploy instead. |
+
+Rows written to the `config_overrides` table by earlier versions were never read by any runtime consumer; they are ignored.
+
 ### Neural Config
 
 Sleep and Neural Memory tuning knobs (LLM provider, budgets, per-phase toggles, reranker weights) are persisted in `neural_config` and exposed under `/api/v1/admin/neural-config`. The fields are editable from the admin UI's Neural Config page.
