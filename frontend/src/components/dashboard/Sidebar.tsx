@@ -26,6 +26,7 @@ import { checkOpenAIKeyStatus } from "@/lib/api/workspaces";
 import { useSystemFeatures } from "@/hooks/useSystemFeatures";
 import { usePlanFeatures, type PlanFeature } from "@/hooks/usePlanFeatures";
 import { useWorkspaceObjectPresence } from "@/hooks/useWorkspaceObjectPresence";
+import { useBetaInvites } from "@/hooks/useBetaInvites";
 import {
   hasRole,
   hasWorkspaceRole,
@@ -76,11 +77,14 @@ import {
   Plug,
   HardDrive,
   UserPlus,
+  MailPlus,
   Check,
 } from "lucide-react";
 import { apiClient } from "@/lib/api/base";
 // Issue #246: ContextSelector removed - use /contexts link instead
 import { WorkspaceSwitcher } from "@/components/workspaces/WorkspaceSwitcher";
+import { InviteFriendCard } from "@/components/beta-invites/InviteFriendCard";
+import { BetaInviteDialog } from "@/components/beta-invites/BetaInviteDialog";
 
 interface NavItem {
   nameKey: string; // Translation key
@@ -324,6 +328,7 @@ export function Sidebar() {
   const [canEmbed, setCanEmbed] = useState<boolean | null>(null);
   const t = useTranslations("sidebar");
   const tNav = useTranslations("navigation");
+  const tInvite = useTranslations("betaInvites");
 
   const [collapsedSections, setCollapsedSections] = useState<
     Record<string, boolean>
@@ -451,6 +456,18 @@ export function Sidebar() {
   const existingObjects: Partial<Record<PlanFeature, boolean | null>> = {
     resources: hasResources,
     connectors: hasConnectors,
+  };
+
+  // Issue #1582: beta invites. Off (or an older backend without the flag) →
+  // no card, no menu entry, no dialog, and the hook makes no request. The one
+  // hook instance feeds the card, the menu counter and the dialog alike.
+  const betaInvitesEnabled = systemFeatures?.beta_invites === true;
+  const betaInvites = useBetaInvites();
+  const [inviteDialogOpen, setInviteDialogOpen] = useState(false);
+  const openInviteDialog = () => {
+    setInviteDialogOpen(true);
+    // The mobile drawer (z-[70]) would sit on top of the dialog (z-50).
+    setIsOpen(false);
   };
 
   // Sync collapse state across browser tabs
@@ -916,6 +933,14 @@ export function Sidebar() {
         })}
       </nav>
 
+      {/* Invite a friend (#1582) — renders nothing until the summary is known */}
+      {betaInvitesEnabled && (
+        <InviteFriendCard
+          summary={betaInvites.summary}
+          onOpen={openInviteDialog}
+        />
+      )}
+
       {/* User Menu at Bottom */}
       <div className={cn("px-4 py-3", "border-t", colors.border.default)}>
         {user && (
@@ -1069,6 +1094,24 @@ export function Sidebar() {
                 <span>{t("profileSettings")}</span>
               </DropdownMenuItem>
 
+              {/* Invite a friend (#1582) — permanent, so the dialog stays
+                  reachable at the cap and after the card was dismissed. No
+                  counter while the summary loads, no denominator for an
+                  admin (quota null = unlimited). */}
+              {betaInvitesEnabled && (
+                <DropdownMenuItem onClick={openInviteDialog}>
+                  <MailPlus className="mr-2 h-4 w-4" />
+                  <span>
+                    {betaInvites.summary && betaInvites.summary.quota !== null
+                      ? tInvite("menuEntryWithCount", {
+                          used: betaInvites.summary.used,
+                          quota: betaInvites.summary.quota,
+                        })
+                      : tInvite("menuEntry")}
+                  </span>
+                </DropdownMenuItem>
+              )}
+
               <DropdownMenuSeparator />
 
               {/* View Details submenu */}
@@ -1217,6 +1260,17 @@ export function Sidebar() {
       >
         {sidebarContent}
       </aside>
+
+      {betaInvitesEnabled && (
+        <BetaInviteDialog
+          open={inviteDialogOpen}
+          onOpenChange={setInviteDialogOpen}
+          summary={betaInvites.summary}
+          error={betaInvites.error}
+          create={betaInvites.create}
+          revoke={betaInvites.revoke}
+        />
+      )}
     </>
   );
 }
