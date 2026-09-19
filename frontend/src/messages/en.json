@@ -3800,7 +3800,89 @@
     "description": "This instance restricts new signups.",
     "message": "Your account is not on the allowlist. Contact the administrator to request access.",
     "contact": "If you believe you should have access, please reach out to the administrator.",
-    "backToLogin": "Back to Login"
+    "backToLogin": "Back to Login",
+    "haveInvite": "Have an invite link? Open it from the message you received."
+  },
+  "betaInvites": {
+    "menuEntry": "Invite a friend",
+    "menuEntryWithCount": "Invite a friend ({used}/{quota})",
+    "card": {
+      "title": "Invite a friend",
+      "body": "Share a one-time link to the closed beta.",
+      "remaining": "{remaining, plural, one {# invite left} other {# invites left}}",
+      "dismiss": "Dismiss the invite card"
+    },
+    "dialog": {
+      "title": "Invite a friend",
+      "description": "Create a one-time link that lets one new person sign up for the closed beta.",
+      "usage": "Used {used} / {quota}",
+      "usageUnlimited": "Used {used} · no limit",
+      "create": "Create invite link",
+      "capReached": "You have used all {quota} of your invites. Revoke an unused link to free a slot.",
+      "quotaExceeded": "You have reached your invite limit.",
+      "createFailed": "Couldn't create the invite link. Please try again.",
+      "loadFailed": "Couldn't load your invites. Please try again.",
+      "created": {
+        "onceNote": "This link is shown only once. Copy it now and send it to your friend.",
+        "urlLabel": "Invite link",
+        "copy": "Copy",
+        "copied": "Copied",
+        "copyFailed": "Couldn't copy automatically. The link stays visible above — select it and copy it manually.",
+        "done": "Done"
+      },
+      "list": {
+        "heading": "Your invites",
+        "empty": "No invites yet",
+        "emptyHint": "Create a link above to invite someone.",
+        "expiresAt": "Expires {date}",
+        "expiredAt": "Expired {date}",
+        "redeemedAt": "Used {date}",
+        "revokedAt": "Revoked {date}",
+        "revoke": "Revoke"
+      },
+      "status": {
+        "active": "Active",
+        "redeemed": "Used",
+        "expired": "Expired",
+        "revoked": "Revoked"
+      },
+      "revoke": {
+        "title": "Revoke this invite link?",
+        "description": "The link stops working immediately and the slot becomes available again.",
+        "confirm": "Revoke",
+        "alreadyRedeemed": "This invite has already been used, so it can't be revoked.",
+        "failed": "Couldn't revoke the invite. Please try again."
+      }
+    },
+    "join": {
+      "loading": "Checking your invite...",
+      "backToLogin": "Back to Login",
+      "valid": {
+        "title": "You've been invited to the Kagura Memory Cloud closed beta",
+        "message": "Sign up with one of the options below to accept the invite.",
+        "expires": "This invite expires on {date}.",
+        "continueWithGoogle": "Continue with Google",
+        "continueWithGitHub": "Continue with GitHub",
+        "noProviders": "No sign-up method is configured on this deployment. Contact the administrator."
+      },
+      "invalid": {
+        "title": "This invite link isn't valid",
+        "message": "The link may be mistyped or may have been revoked. Ask the person who invited you for a new one."
+      },
+      "expired": {
+        "title": "This invite link can no longer be used",
+        "message": "It has expired or has already been used. Ask the person who invited you for a new one."
+      },
+      "alreadySignedIn": {
+        "title": "You're already signed in",
+        "message": "Invite links are for new accounts. This link has not been used, so it still works for someone else.",
+        "goToDashboard": "Go to the dashboard"
+      },
+      "disabled": {
+        "title": "Invites aren't available",
+        "message": "This deployment doesn't accept invite links."
+      }
+    }
   },
   "analyses": {
     "tabLabel": "Analyses",
