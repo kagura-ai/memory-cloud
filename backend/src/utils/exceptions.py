@@ -188,6 +188,26 @@ class ConflictError(MemoryCloudException):
         super().__init__(message, status_code=409, error_code="RES-002", **details)
 
 
+class ConfigReadOnlyError(MemoryCloudException):
+    """A write to the environment console was refused (409).
+
+    Issue #1580: every key served by ``GET /config`` is env-backed and nothing
+    reads ``config_overrides`` at runtime, so ``PUT /config/{key}`` and
+    ``POST /config/batch`` refuse instead of storing a value that changes no
+    behaviour. ``config_read_only`` is the stable code clients route on;
+    ``details.keys`` lists the refused keys.
+    """
+
+    def __init__(self, keys: list[str]) -> None:
+        super().__init__(
+            "Configuration is read-only: values are set via environment "
+            "variables and applied on restart/redeploy.",
+            status_code=409,
+            error_code="config_read_only",
+            keys=keys,
+        )
+
+
 class ConnectorScopeError(MemoryCloudException):
     """The connector's Slack bot token lacks a scope required for this call (409).
 
