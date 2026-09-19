@@ -42,6 +42,8 @@ export default function SignupBlockedPage() {
           </Alert>
 
           <p className="text-sm text-muted-foreground">{t("contact")}</p>
+          {/* #1582: a beta invite link is the other way through the gate. */}
+          <p className="text-sm text-muted-foreground">{t("haveInvite")}</p>
 
           <div className="pt-2">
             <Button asChild variant="outline" className="w-full">

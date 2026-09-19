@@ -3795,7 +3795,94 @@
     "description": "このインスタンスは新規サインアップを制限しています。",
     "message": "このアカウントは許可リストに登録されていません。アクセスをご希望の場合は管理者にお問い合わせください。",
     "contact": "アクセス権限が必要な場合は、管理者までご連絡ください。",
-    "backToLogin": "ログインに戻る"
+    "backToLogin": "ログインに戻る",
+    "haveInvite": "招待リンクをお持ちですか？受け取ったメッセージからリンクを開いてください。"
+  },
+  "betaInvites": {
+    "menuEntry": "友達を招待",
+    "menuEntryWithCount": "友達を招待 ({used}/{quota})",
+    "card": {
+      "title": "友達を招待",
+      "body": "クローズドベータに参加できる一度限りのリンクを共有できます。",
+      "remaining": "残り {remaining} 件",
+      "dismiss": "招待カードを閉じる"
+    },
+    "dialog": {
+      "title": "友達を招待",
+      "description": "新しい 1 人がクローズドベータにサインアップできる、一度限りのリンクを作成します。",
+      "usage": "使用済み {used} / {quota}",
+      "usageUnlimited": "使用済み {used} · 上限なし",
+      "create": "招待リンクを作成",
+      "capReached": "招待枠 {quota} 件をすべて使用しました。未使用のリンクを取り消すと枠が空きます。",
+      "quotaExceeded": "招待の上限に達しました。",
+      "createFailed": "招待リンクを作成できませんでした。もう一度お試しください。",
+      "loadFailed": "招待を読み込めませんでした。もう一度お試しください。",
+      "created": {
+        "onceNote": "このリンクは一度しか表示されません。今すぐコピーして友達に送ってください。",
+        "urlLabel": "招待リンク",
+        "copy": "コピー",
+        "copied": "コピーしました",
+        "copyFailed": "自動でコピーできませんでした。リンクは上に表示されたままです。選択して手動でコピーしてください。",
+        "done": "完了"
+      },
+      "list": {
+        "heading": "あなたの招待",
+        "empty": "招待はまだありません",
+        "emptyHint": "上のボタンからリンクを作成して招待しましょう。",
+        "expiresAt": "有効期限 {date}",
+        "expiredAt": "期限切れ {date}",
+        "redeemedAt": "使用日時 {date}",
+        "revokedAt": "取り消し日時 {date}",
+        "revoke": "取り消す"
+      },
+      "status": {
+        "active": "有効",
+        "redeemed": "使用済み",
+        "expired": "期限切れ",
+        "revoked": "取り消し済み"
+      },
+      "revoke": {
+        "title": "この招待リンクを取り消しますか？",
+        "description": "リンクはすぐに使えなくなり、招待枠が 1 つ空きます。",
+        "confirm": "取り消す",
+        "alreadyRedeemed": "この招待はすでに使用されているため、取り消せません。",
+        "failed": "招待を取り消せませんでした。もう一度お試しください。"
+      }
+    },
+    "join": {
+      "loading": "招待を確認しています...",
+      "backToLogin": "ログインに戻る",
+      "valid": {
+        "title": "Kagura Memory Cloud クローズドベータに招待されました",
+        "message": "以下のいずれかの方法でサインアップすると、招待を受けられます。",
+        "expires": "この招待の有効期限は {date} です。",
+        "continueWithGoogle": "Google で続ける",
+        "continueWithGitHub": "GitHub で続ける",
+        "noProviders": "この環境にはサインアップ方法が設定されていません。管理者にお問い合わせください。"
+      },
+      "invalid": {
+        "title": "この招待リンクは無効です",
+        "message": "リンクが間違っているか、取り消された可能性があります。招待してくれた方に新しいリンクを依頼してください。"
+      },
+      "expired": {
+        "title": "この招待リンクはもう使用できません",
+        "message": "期限切れ、またはすでに使用済みです。招待してくれた方に新しいリンクを依頼してください。"
+      },
+      "alreadySignedIn": {
+        "title": "すでにサインイン済みです",
+        "message": "招待リンクは新規アカウント用です。このリンクは未使用のままなので、ほかの方が使えます。",
+        "goToDashboard": "ダッシュボードへ"
+      },
+      "disabled": {
+        "title": "招待は利用できません",
+        "message": "この環境では招待リンクを受け付けていません。"
+      },
+      "error": {
+        "title": "招待を確認できませんでした",
+        "message": "サーバーまたはネットワークで問題が発生しました。招待リンクはまだ有効な可能性があります。しばらくしてからもう一度お試しください。",
+        "retry": "再試行"
+      }
+    }
   },
   "analyses": {
     "tabLabel": "分析",
