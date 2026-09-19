@@ -227,7 +227,7 @@ class TestContextCreateShared:
 
 
 class TestContextSetPublic:
-    def _existing(self, *, is_public: bool) -> SimpleNamespace:
+    def _existing(self, *, is_public: bool, is_private: bool = False) -> SimpleNamespace:
         return SimpleNamespace(
             id=uuid.uuid4(),
             name="ctx",
@@ -238,7 +238,7 @@ class TestContextSetPublic:
             is_default=False,
             is_locked=False,
             sleep_mode="skip",
-            is_private=False,
+            is_private=is_private,
             is_public=is_public,
             resource_id="products" if is_public else None,
             created_by="owner-1",
@@ -300,7 +300,9 @@ class TestContextSetPublic:
     async def test_shared_stays_on_pro(self) -> None:
         """``is_private=False`` is the SHARED gate (``allows_shared_contexts``),
         still satisfied by L — the public re-map does not drag it along."""
-        service, _ = await self._put("pro", self._existing(is_public=False), is_private=False)
+        service, _ = await self._put(
+            "pro", self._existing(is_public=False, is_private=True), is_private=False
+        )
         service.update_context.assert_awaited_once()
 
     @pytest.mark.asyncio
@@ -308,16 +310,86 @@ class TestContextSetPublic:
     async def test_shared_refused_below_l(self, plan_name: str) -> None:
         """#1561: the update gate now answers FEAT-001 (403) with the registry
         tier name — it used to be a 400 (route-translated ``ValidationError``)
-        with fixed "Pro plan" text."""
+        with fixed "Pro plan" text. #1583: it is the private → shared
+        TRANSITION that is refused, and both tiers read as display names."""
         from config.plan_tiers import get_plan_tier
 
         with pytest.raises(FeatureNotAvailableError) as exc_info:
-            await self._put(plan_name, self._existing(is_public=False), is_private=False)
+            await self._put(
+                plan_name, self._existing(is_public=False, is_private=True), is_private=False
+            )
 
         assert exc_info.value.status_code == 403
+        assert exc_info.value.error_code == "FEAT-001"
         assert exc_info.value.details["feature"] == "shared_contexts"
+        assert f"on {get_plan_tier(plan_name).display_name} plan" in exc_info.value.message
         assert f"Upgrade to {get_plan_tier('pro').display_name} plan" in exc_info.value.message
         assert "Pro plan" not in exc_info.value.message
+
+
+# ---------------------------------------------------------------------------
+# PUT /contexts/{id} — the shared gate fires on the transition only (#1583)
+# ---------------------------------------------------------------------------
+
+
+class TestContextSharedGateIsTransitionOnly:
+    """Block-new-only, same as ``is_public``: a legacy shared context on a plan
+    that no longer includes ``shared_contexts`` stays editable, and a request
+    that re-submits the stored ``is_private`` is a no-op, never a refusal."""
+
+    # Same PUT harness as the public-gate class (not inherited: that would
+    # collect its tests twice).
+    _existing = TestContextSetPublic._existing
+    _put = TestContextSetPublic._put
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("plan_name", ["free", "basic"])
+    async def test_already_shared_context_accepts_a_no_op_is_private_false(
+        self, plan_name: str
+    ) -> None:
+        service, db = await self._put(
+            plan_name, self._existing(is_public=False), is_private=False, summary="new"
+        )
+        kwargs = service.update_context.await_args.kwargs
+        assert (kwargs["is_private"], kwargs["summary"]) == (False, "new")
+        # The plan is not consulted for a context that is already shared.
+        db.get.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("stored_private", [True, False])
+    async def test_sleep_mode_only_payload_is_never_gated(self, stored_private: bool) -> None:
+        service, db = await self._put(
+            "basic",
+            self._existing(is_public=False, is_private=stored_private),
+            sleep_mode="full",
+        )
+        kwargs = service.update_context.await_args.kwargs
+        assert (kwargs["sleep_mode"], kwargs["is_private"]) == ("full", None)
+        db.get.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_shared_to_private_is_open_on_every_plan(self) -> None:
+        service, db = await self._put("free", self._existing(is_public=False), is_private=True)
+        assert service.update_context.await_args.kwargs["is_private"] is True
+        db.get.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_resource_id_lock_ignores_a_no_op_is_private_true(self) -> None:
+        """#242's "Cannot change to private" is about the shared → private
+        move; re-submitting ``is_private=True`` on a private context that
+        carries a ``resource_id`` must not block an unrelated edit."""
+        existing = self._existing(is_public=False, is_private=True)
+        existing.resource_id = "products"
+        service, _ = await self._put("basic", existing, is_private=True, summary="new")
+        service.update_context.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_resource_id_lock_still_refuses_shared_to_private(self) -> None:
+        existing = self._existing(is_public=True)  # shared, resource_id="products"
+        with pytest.raises(HTTPException) as exc_info:
+            await self._put("pro", existing, is_private=True)
+        assert exc_info.value.status_code == 400
+        assert "Cannot change to private" in str(exc_info.value.detail)
 
 
 # ---------------------------------------------------------------------------
