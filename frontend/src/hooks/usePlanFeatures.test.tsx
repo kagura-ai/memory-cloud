@@ -20,7 +20,10 @@ beforeEach(() => {
 function tier(
   name: string,
   gates: Partial<
-    Pick<PlanTierFeature, "resources" | "connectors" | "public_contexts">
+    Pick<
+      PlanTierFeature,
+      "resources" | "connectors" | "public_contexts" | "shared_contexts"
+    >
   >,
 ): PlanTierFeature {
   return {
@@ -54,7 +57,7 @@ function tier(
 // a hook that still ranked tier NAMES would get both of these wrong.
 const MATRIX = [
   tier("free", {}),
-  tier("pro", { connectors: true, resources: true }),
+  tier("pro", { connectors: true, resources: true, shared_contexts: true }),
   tier("promax", {}),
 ];
 
@@ -87,11 +90,13 @@ describe("planFeaturesFor (#1560)", () => {
       resources: true,
       connectors: true,
       public_contexts: false,
+      shared_contexts: true, // #1583
     });
     expect(planFeaturesFor(MATRIX, "promax")).toEqual({
       resources: false,
       connectors: false,
       public_contexts: false,
+      shared_contexts: false,
     });
   });
 
@@ -101,6 +106,7 @@ describe("planFeaturesFor (#1560)", () => {
       resources: false,
       connectors: false,
       public_contexts: false,
+      shared_contexts: false,
     };
     expect(planFeaturesFor(MATRIX, "enterprise")).toEqual(closed);
     expect(planFeaturesFor(MATRIX, undefined)).toEqual(closed);

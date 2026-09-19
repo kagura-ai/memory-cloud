@@ -935,9 +935,16 @@ async def update_context(
         # Save workspace_id for later use (before potential rollback)
         existing_workspace_id = existing_context.workspace_id if existing_context else None
 
-        # Prevent Public→Private change if has resource_id (Issue #242)
-        if request.is_private is not None:
-            if existing_context and existing_context.resource_id and request.is_private:
+        # #1583: the privacy rules fire on a real transition only. A request
+        # that re-submits the stored value changes nothing, so it must not
+        # refuse an unrelated edit (sleep_mode, summary, ...) riding with it.
+        if (
+            request.is_private is not None
+            and existing_context
+            and request.is_private != existing_context.is_private
+        ):
+            # Prevent Public→Private change if has resource_id (Issue #242)
+            if existing_context.resource_id and request.is_private:
                 raise ValidationError(
                     "Cannot change to private: This context has a resource_id and is used by Resource Tokens. "
                     "Please revoke all tokens first or remove resource_id."
@@ -947,8 +954,10 @@ async def update_context(
             # Issue #271 Code Review H-1: Use plan_tiers instead of hardcoded plan names
             # #1561: same feature gate + FEAT-001 refusal as the create path
             # (was a 400 — route-translated ValidationError — with fixed
-            # "Pro plan" text).
-            if not request.is_private and existing_context:
+            # "Pro plan" text). Private → shared only: a context that is
+            # already shared stays editable on its current tier
+            # (block-new-only, like ``is_public`` below).
+            if not request.is_private:
                 from config.plan_tiers import has_feature
                 from models.auth import Workspace
 

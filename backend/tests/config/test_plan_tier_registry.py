@@ -23,6 +23,7 @@ from config.plan_tiers import (
     get_required_plan_for_feature,
     has_feature,
     plan_at_least,
+    plan_display_name,
     plan_rank,
     required_plan_display_name,
 )
@@ -189,11 +190,35 @@ def test_feature_denied_message_names_the_registry_tier() -> None:
     "Pro" — so a display-name override or a new tier flows through."""
     xl_display = get_plan_tier("promax").display_name
     msg = feature_denied_message("pro", "resources")
-    assert "resources" in msg and "pro plan" in msg and xl_display in msg
+    assert "resources" in msg and xl_display in msg
     assert "Pro plan" not in msg
-    # Legacy rows with plan_name NULL are read as free (member_credentials.py).
-    assert "free plan" in feature_denied_message(None, "connectors")
     assert required_plan_display_name("public_contexts") == xl_display
     assert required_plan_display_name("shared_contexts") == get_plan_tier("pro").display_name
     # Unknown feature: fall back rather than 500 on a typo.
     assert required_plan_display_name("not-a-feature") == "higher"
+
+
+def test_feature_denied_message_uses_display_names_on_both_sides() -> None:
+    """#1583: the current plan is named by its display name too — "basic plan
+    … L plan" mixed the raw key with the label the UI shows."""
+    m_display, l_display = (get_plan_tier(p).display_name for p in ("basic", "pro"))
+    msg = feature_denied_message("basic", "shared_contexts")
+    assert msg == (
+        f"Feature 'shared_contexts' not available on {m_display} plan. "
+        f"Upgrade to {l_display} plan to access this feature."
+    )
+    assert "basic plan" not in msg
+    # Legacy rows with plan_name NULL are read as free (member_credentials.py).
+    free_display = get_plan_tier("free").display_name
+    assert f"on {free_display} plan" in feature_denied_message(None, "connectors")
+    assert "free plan" not in feature_denied_message(None, "connectors")
+
+
+def test_plan_display_name_falls_back_like_the_old_text() -> None:
+    """``None`` / empty reads as free; a key the registry does not know is
+    printed as is — never relabelled as some other tier."""
+    for plan in PLAN_ORDER:
+        assert plan_display_name(plan) == get_plan_tier(plan).display_name
+    assert plan_display_name(None) == get_plan_tier("free").display_name
+    assert plan_display_name("") == get_plan_tier("free").display_name
+    assert plan_display_name("enterprise") == "enterprise"
