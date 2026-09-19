@@ -13,7 +13,7 @@
  * and the account-menu counter.
  */
 
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { useLocale, useTranslations } from "next-intl";
 import { AlertCircle, Check, Copy, Link2, MailPlus } from "lucide-react";
 
@@ -96,8 +96,11 @@ export function BetaInviteDialog({
   const [revokeTarget, setRevokeTarget] = useState<BetaInvite | null>(null);
   const [revoking, setRevoking] = useState(false);
   const [revokeError, setRevokeError] = useState<string | null>(null);
+  // What `open` is right now, for a create that resolves after a close.
+  const openRef = useRef(open);
 
   useEffect(() => {
+    openRef.current = open;
     if (open) return;
     setCreated(null);
     setCopied(false);
@@ -117,7 +120,11 @@ export function BetaInviteDialog({
     setCreating(true);
     setCreateError(null);
     try {
-      setCreated(await create());
+      const next = await create();
+      // Closed meanwhile (the owner can drop `open` whatever the guard on the
+      // Dialog below says): the clear-on-close effect has already run, so a
+      // URL stored now would survive into the next open. Drop it instead.
+      if (openRef.current) setCreated(next);
     } catch (err) {
       // 409 quota_exceeded: the hook has already re-read the summary, so the
       // counter and the disabled button now agree with this message.
@@ -190,7 +197,16 @@ export function BetaInviteDialog({
 
   return (
     <>
-      <Dialog open={open} onOpenChange={onOpenChange}>
+      <Dialog
+        open={open}
+        onOpenChange={(next) => {
+          // Block close while a create is in flight: the URL is shown once,
+          // and a response landing in a closed dialog would be lost to the
+          // user (the invite is minted and counted either way).
+          if (!next && creating) return;
+          onOpenChange(next);
+        }}
+      >
         <DialogContent className="sm:max-w-[560px]">
           <DialogHeader>
             <DialogTitle>{t("dialog.title")}</DialogTitle>

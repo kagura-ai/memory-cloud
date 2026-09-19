@@ -2,7 +2,13 @@
  * BetaInviteDialog (#1582): the invite URL is a credential shown exactly once,
  * the create button explains itself at the cap, and revoke is confirmed.
  */
-import { fireEvent, render, screen, waitFor } from "@testing-library/react";
+import {
+  act,
+  fireEvent,
+  render,
+  screen,
+  waitFor,
+} from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 const mockCopyText = vi.hoisted(() => vi.fn());
@@ -24,10 +30,20 @@ vi.mock("@/contexts/AuthContext", () => ({
 }));
 
 import { ApiError } from "@/lib/api/base";
-import type { BetaInvite, BetaInviteSummary } from "@/lib/api/beta-invites";
+import type {
+  BetaInvite,
+  BetaInviteCreated,
+  BetaInviteSummary,
+} from "@/lib/api/beta-invites";
 import { BetaInviteDialog } from "./BetaInviteDialog";
 
 const INVITE_URL = "https://app.example.com/join/tok_SECRET_once";
+
+const CREATED: BetaInviteCreated = {
+  id: "inv-2",
+  url: INVITE_URL,
+  expires_at: "2030-01-09T00:00:00Z",
+};
 
 const invite = (over: Partial<BetaInvite> = {}): BetaInvite => ({
   id: "inv-1",
@@ -73,11 +89,7 @@ beforeEach(() => {
   vi.clearAllMocks();
   window.localStorage.clear();
   window.sessionStorage.clear();
-  mockCreate.mockResolvedValue({
-    id: "inv-2",
-    url: INVITE_URL,
-    expires_at: "2030-01-09T00:00:00Z",
-  });
+  mockCreate.mockResolvedValue(CREATED);
   mockRevoke.mockResolvedValue(undefined);
   mockCopyText.mockResolvedValue(undefined);
 });
@@ -151,6 +163,55 @@ describe("BetaInviteDialog create — one-time URL", () => {
     expect(screen.getByRole("button", { name: "dialog.create" })).toBeVisible();
   });
 
+  it("stays open while a create is in flight, so the URL cannot land in a closed dialog", async () => {
+    let resolveCreate!: (value: BetaInviteCreated) => void;
+    mockCreate.mockReturnValueOnce(
+      new Promise<BetaInviteCreated>((resolve) => {
+        resolveCreate = resolve;
+      }),
+    );
+    const view = renderDialog();
+    fireEvent.click(screen.getByRole("button", { name: "dialog.create" }));
+
+    // Esc and × both ask to close; neither reaches the owner mid-request.
+    fireEvent.keyDown(screen.getByRole("dialog"), { key: "Escape" });
+    fireEvent.click(screen.getByRole("button", { name: "Close" }));
+    expect(view.props.onOpenChange).not.toHaveBeenCalled();
+
+    await act(async () => {
+      resolveCreate(CREATED);
+    });
+    expect(screen.getByLabelText("dialog.created.urlLabel")).toHaveValue(
+      INVITE_URL,
+    );
+
+    // Settled: closing works again.
+    fireEvent.click(screen.getByRole("button", { name: "Close" }));
+    expect(view.props.onOpenChange).toHaveBeenCalledWith(false);
+  });
+
+  it("drops a URL that arrives after the owner closed the dialog", async () => {
+    let resolveCreate!: (value: BetaInviteCreated) => void;
+    mockCreate.mockReturnValueOnce(
+      new Promise<BetaInviteCreated>((resolve) => {
+        resolveCreate = resolve;
+      }),
+    );
+    const view = renderDialog();
+    fireEvent.click(screen.getByRole("button", { name: "dialog.create" }));
+
+    // The owner controls `open` and can drop it regardless of the guard above.
+    view.rerender(<BetaInviteDialog {...view.props} open={false} />);
+    await act(async () => {
+      resolveCreate(CREATED);
+    });
+
+    view.rerender(<BetaInviteDialog {...view.props} open />);
+    expect(screen.queryByLabelText("dialog.created.urlLabel")).toBeNull();
+    expect(screen.queryByDisplayValue(INVITE_URL)).toBeNull();
+    expect(screen.getByRole("button", { name: "dialog.create" })).toBeEnabled();
+  });
+
   it("keeps the URL selectable and says so when the clipboard is denied", async () => {
     mockCopyText.mockRejectedValueOnce(new Error("denied"));
     renderDialog();
@@ -160,9 +221,7 @@ describe("BetaInviteDialog create — one-time URL", () => {
     fireEvent.click(
       screen.getByRole("button", { name: "dialog.created.copy" }),
     );
-    expect(
-      await screen.findByText("dialog.created.copyFailed"),
-    ).toBeVisible();
+    expect(await screen.findByText("dialog.created.copyFailed")).toBeVisible();
     expect(screen.getByLabelText("dialog.created.urlLabel")).toHaveValue(
       INVITE_URL,
     );
