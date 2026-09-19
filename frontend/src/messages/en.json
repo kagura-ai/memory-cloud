@@ -3881,6 +3881,11 @@
       "disabled": {
         "title": "Invites aren't available",
         "message": "This deployment doesn't accept invite links."
+      },
+      "error": {
+        "title": "We couldn't check this invite",
+        "message": "Something went wrong on the server or the network. Your invite link may still be valid — try again in a moment.",
+        "retry": "Try again"
       }
     }
   },

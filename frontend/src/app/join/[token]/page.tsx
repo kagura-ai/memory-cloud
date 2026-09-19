@@ -10,11 +10,13 @@
  * Flow (structure mirrors `app/invite/[token]/page.tsx`):
  * 1. Existing session → `already_signed_in`. Invites are for new accounts, so
  *    the token is not even previewed — it stays usable for someone else.
- * 2. Public preview → `valid` / `expired` (410) / not found (404, and any
- *    other failure).
+ * 2. Public preview → `valid` / `expired` (410) / not found (404).
  * 3. Not found is `disabled` when `features.beta_invites` is not on (every
  *    route 404s then, and an older backend has no such route), else `invalid`.
  *    It stays `loading` until the flags are known so it never flips.
+ * 4. Anything else (429: the preview is rate-limited per IP; 5xx; a network
+ *    failure) says nothing about the link → `error`, with a Retry. Calling a
+ *    live link dead sends the invitee back for a new one and burns a slot.
  *
  * The token is a credential: never log it, never persist it.
  *
@@ -53,7 +55,8 @@ type PageState =
   | "invalid"
   | "expired"
   | "already_signed_in"
-  | "disabled";
+  | "disabled"
+  | "error";
 
 // What the two probes found; `not_found` still needs the feature flag to
 // become `invalid` or `disabled`.
@@ -62,7 +65,8 @@ type Probe =
   | { kind: "signed_in" }
   | { kind: "valid"; expiresAt: string; providers: OAuthProvider[] }
   | { kind: "expired" }
-  | { kind: "not_found" };
+  | { kind: "not_found" }
+  | { kind: "error" };
 
 type Tone = "brand" | "warning" | "danger" | "success";
 
@@ -134,6 +138,8 @@ export default function JoinPage({
   const locale = useLocale();
   const features = useSystemFeatures();
   const [probe, setProbe] = useState<Probe>({ kind: "pending" });
+  // Bumped by Retry to run the probes again.
+  const [attempt, setAttempt] = useState(0);
 
   useEffect(() => {
     let alive = true;
@@ -158,9 +164,10 @@ export default function JoinPage({
         return { kind: "valid", expiresAt: preview.expires_at, providers };
       } catch (err) {
         // Deliberately not logged: the request URL carries the token.
-        return err instanceof ApiError && err.status === 410
-          ? { kind: "expired" }
-          : { kind: "not_found" };
+        const status = err instanceof ApiError ? err.status : null;
+        if (status === 410) return { kind: "expired" };
+        if (status === 404) return { kind: "not_found" };
+        return { kind: "error" };
       }
     })().then((next) => {
       if (alive) setProbe(next);
@@ -169,7 +176,7 @@ export default function JoinPage({
     return () => {
       alive = false;
     };
-  }, [token]);
+  }, [token, attempt]);
 
   const state: PageState =
     probe.kind === "pending"
@@ -280,6 +287,29 @@ export default function JoinPage({
           <p className="text-center text-gray-600 dark:text-gray-400 mb-6">
             {t("join.expired.message")}
           </p>
+          {backToLogin}
+        </JoinCard>
+      </JoinShell>
+    );
+  }
+
+  if (state === "error") {
+    return (
+      <JoinShell>
+        <JoinCard
+          icon={AlertCircle}
+          tone="warning"
+          title={t("join.error.title")}
+        >
+          <p className="text-center text-gray-600 dark:text-gray-400 mb-6">
+            {t("join.error.message")}
+          </p>
+          <Button
+            onClick={() => setAttempt((n) => n + 1)}
+            className="w-full mb-3"
+          >
+            {t("join.error.retry")}
+          </Button>
           {backToLogin}
         </JoinCard>
       </JoinShell>

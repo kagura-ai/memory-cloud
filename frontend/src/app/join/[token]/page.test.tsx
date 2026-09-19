@@ -1,7 +1,7 @@
 /**
  * /join/[token] — the beta invite landing page (#1582).
  *
- * Five outcomes from two probes (session, preview) plus the feature flag, and
+ * Six outcomes from two probes (session, preview) plus the feature flag, and
  * the one thing the page exists for: carrying the token into the OAuth login.
  * The token is a credential — nothing here may log or persist it.
  */
@@ -248,15 +248,56 @@ describe("/join/[token] — not usable", () => {
       await screen.findByRole("heading", { name: "join.expired.title" }),
     ).toBeVisible();
   });
+});
 
-  it("a network failure with the feature on → invalid, not a blank page", async () => {
+describe("/join/[token] — could not check", () => {
+  // None of these says anything about the link: 429 is the preview's own
+  // per-IP rate limit, and telling the invitee a live link is dead sends them
+  // back to the inviter for a new one.
+  it.each([
+    ["a network failure", 0],
+    ["429 rate limited", 429],
+    ["a 5xx", 503],
+    ["an unexpected 401", 401],
+  ])("%s → retryable error, never invalid", async (_label, status) => {
+    mockPreview.mockRejectedValue(new ApiError({ message: "nope", status }));
+    renderPage();
+    expect(
+      await screen.findByRole("heading", { name: "join.error.title" }),
+    ).toBeVisible();
+    expect(
+      screen.queryByRole("heading", { name: "join.invalid.title" }),
+    ).toBeNull();
+    expect(
+      screen.getByRole("link", { name: "join.backToLogin" }),
+    ).toHaveAttribute("href", "/login");
+  });
+
+  it("does not wait for the feature flags, and ignores them", async () => {
+    mockFeatures = null;
     mockPreview.mockRejectedValue(
       new ApiError({ message: "Network error", status: 0 }),
     );
     renderPage();
     expect(
-      await screen.findByRole("heading", { name: "join.invalid.title" }),
+      await screen.findByRole("heading", { name: "join.error.title" }),
     ).toBeVisible();
+  });
+
+  it("Retry runs the probe again and can land on the invitation", async () => {
+    mockPreview.mockRejectedValueOnce(
+      new ApiError({ message: "Too Many Requests", status: 429 }),
+    );
+    renderPage();
+    fireEvent.click(
+      await screen.findByRole("button", { name: "join.error.retry" }),
+    );
+
+    expect(
+      await screen.findByRole("heading", { name: "join.valid.title" }),
+    ).toBeVisible();
+    expect(mockPreview).toHaveBeenCalledTimes(2);
+    expect(mockPreview).toHaveBeenLastCalledWith(TOKEN);
   });
 });
 
