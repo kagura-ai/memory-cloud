@@ -253,8 +253,8 @@ class TestSchema:
         exposed = [k for keys in get_config_categories().values() for k in keys]
 
         for key in exposed:
-            if key in schema:
-                assert schema[key].requires_restart is True, key
+            assert key in schema, key
+            assert schema[key].requires_restart is True, key
 
     def test_hosted_mode_keys_have_schema_metadata(self):
         schema = get_config_schema()

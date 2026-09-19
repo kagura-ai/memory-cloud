@@ -283,6 +283,17 @@ def get_config_schema() -> dict[str, ConfigKeySchema]:
             examples=["development", "production"],
             recommended="Match your deployment environment",
         ),
+        "CORS_ORIGINS": ConfigKeySchema(
+            key="CORS_ORIGINS",
+            type="string",
+            category="system",
+            description="CORS allowed origins (comma-separated)",
+            default_value="http://localhost:3000,http://localhost:8080",
+            requires_restart=True,
+            impact="Browsers on origins outside this list cannot call the API",
+            examples=["https://app.example.com"],
+            recommended="Only the origins that serve your web UI",
+        ),
         # Feature Flags
         "ENABLE_NEURAL_MEMORY": ConfigKeySchema(
             key="ENABLE_NEURAL_MEMORY",
