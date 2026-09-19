@@ -23,6 +23,13 @@ from sqlalchemy import CHAR, DateTime, ForeignKey, String, UniqueConstraint, fun
 from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.orm import Mapped, mapped_column
 
+# FK target of ``beta_invites.redeemed_allowlist_entry_id``. ``models/__init__``
+# registers this module in every process, so the table it points at has to come
+# along with it — otherwise ``Base.metadata`` is unresolvable
+# (``NoReferencedTableError``) wherever nothing else imports the signup gate:
+# alembic autogenerate, and the ``create_all`` in ``tests/conftest.py``, which
+# turns the error into a silent skip of every DB-backed test.
+import models.signup_gate  # noqa: F401
 from db.base import Base
 from utils.datetime import utcnow
 
