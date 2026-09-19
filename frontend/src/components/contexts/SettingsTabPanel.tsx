@@ -59,8 +59,21 @@ import type { Context } from "@/lib/types/context";
 import { useAuth } from "@/contexts/AuthContext";
 import { useWorkspace } from "@/contexts/WorkspaceContext";
 import { CONTEXT_TEMPLATES, getTemplate } from "@/lib/templates/usage-guide";
-import { planLabelFromEnv } from "@/lib/utils/planLabel";
+import { planLabelFromEnv, type PlanTier } from "@/lib/utils/planLabel";
 import { usePlanFeature } from "@/hooks/usePlanFeatures";
+
+// #1583: plan features this form can refuse on, with the notice that names the
+// control and the tier it asks for — shown on the card and, when a save comes
+// back FEAT-001, in the toast instead of the raw feature key.
+const FEATURE_NOTICES: Record<
+  string,
+  { key: "sharedRequiresPlan" | "publicRequiresPlan"; plan: PlanTier }
+> = {
+  shared_contexts: { key: "sharedRequiresPlan", plan: "pro" },
+  public_contexts: { key: "publicRequiresPlan", plan: "promax" },
+};
+
+const SHARING_NOTICE_ID = "context-sharing-upgrade-notice";
 
 interface SettingsTabPanelProps {
   contextId: string;
@@ -85,6 +98,18 @@ export function SettingsTabPanel({
   // #1560: gate = tier matrix `public_contexts` boolean; `null` while it
   // resolves (the Make Public control is withheld, no upsell yet).
   const canMakePublic = usePlanFeature("public_contexts");
+  // #1583: same tri-state for private → shared. A context that is already
+  // shared stays editable (and can be made private) on any tier.
+  const canShare = usePlanFeature("shared_contexts");
+
+  // #1583: the stored privacy flags, normalised the way the form state is
+  // seeded — an older response omits them, and diffing the raw `undefined`
+  // against the seeded default made an untouched control look changed.
+  const storedIsPrivate = context.is_private ?? true;
+  const storedIsPublic = context.is_public ?? false;
+  // Only the transition is gated: going back to a stored "shared" is free.
+  const sharingLocked = storedIsPrivate && canShare !== true;
+  const sharingNeedsUpgrade = storedIsPrivate && canShare === false;
 
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -189,10 +214,10 @@ export function SettingsTabPanel({
       if (usageGuide.trim() !== (context.usage_guide ?? "")) {
         payload.usage_guide = usageGuide.trim();
       }
-      if (isPrivate !== context.is_private) {
+      if (isPrivate !== storedIsPrivate) {
         payload.is_private = isPrivate;
       }
-      if (isPublic !== context.is_public) {
+      if (isPublic !== storedIsPublic) {
         payload.is_public = isPublic;
       }
       if (resource_id !== undefined) {
@@ -227,6 +252,17 @@ export function SettingsTabPanel({
       let description =
         err instanceof Error ? err.message : t("saveFailedDesc");
       if (err instanceof ApiError) {
+        // #1583: a FEAT-001 refusal names the control ("Sharing requires
+        // the L plan"), not the feature key; unknown features keep the
+        // server text.
+        const feature = err.details?.feature;
+        const notice =
+          typeof feature === "string" ? FEATURE_NOTICES[feature] : undefined;
+        if (notice) {
+          description = t(notice.key, {
+            plan: planLabelFromEnv(notice.plan, locale),
+          });
+        }
         // 422s carry {loc,msg,type}[] here (aliased from details.errors at
         // the transport layer); the declared string type covers legacy shapes.
         const fieldErrors = err.details?.detail as unknown;
@@ -252,7 +288,7 @@ export function SettingsTabPanel({
   };
 
   const handlePrivacyToggle = (newIsPrivate: boolean) => {
-    if (!context?.is_private && newIsPrivate) {
+    if (!storedIsPrivate && newIsPrivate) {
       setPendingPrivacyChange(newIsPrivate);
       setPrivacyDialogOpen(true);
     } else {
@@ -542,18 +578,43 @@ export function SettingsTabPanel({
               <Button
                 variant={isPrivate ? "outline" : "default"}
                 size="sm"
+                // #1583: without `shared_contexts` a private context cannot
+                // leave private, so the form can never bundle an edit with a
+                // change the server is known to refuse. Pending (`null`)
+                // waits too, without the upsell.
+                disabled={sharingLocked}
+                aria-describedby={
+                  sharingNeedsUpgrade ? SHARING_NOTICE_ID : undefined
+                }
                 onClick={() => handlePrivacyToggle(!isPrivate)}
               >
                 {isPrivate ? t("makeShared") : t("makePrivate")}
               </Button>
             </div>
 
+            {sharingNeedsUpgrade && (
+              <Alert id={SHARING_NOTICE_ID}>
+                <AlertCircle className="h-4 w-4" />
+                <AlertDescription>
+                  {t("sharedRequiresPlan", {
+                    plan: planLabelFromEnv(
+                      FEATURE_NOTICES.shared_contexts.plan,
+                      locale,
+                    ),
+                  })}
+                </AlertDescription>
+              </Alert>
+            )}
+
             {isOwner &&
               (isPrivate ? (
-                <Alert>
-                  <AlertCircle className="h-4 w-4" />
-                  <AlertDescription>{t("makeSharedFirst")}</AlertDescription>
-                </Alert>
+                // "Make it Shared first" would point at a disabled button.
+                sharingNeedsUpgrade ? null : (
+                  <Alert>
+                    <AlertCircle className="h-4 w-4" />
+                    <AlertDescription>{t("makeSharedFirst")}</AlertDescription>
+                  </Alert>
+                )
               ) : isPublic || context.is_public ? (
                 <div className="space-y-3">
                   <div className="flex items-center justify-between p-4 border rounded-lg">

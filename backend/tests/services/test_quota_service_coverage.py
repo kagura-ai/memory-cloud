@@ -250,17 +250,19 @@ class TestCheckFeatureAccess:
 
     async def test_feature_denied_surfaces_required_plan(self, db_session):
         """'team_invitations' requires Pro; free workspace is denied and the
-        message names the Pro display name from the registry."""
+        message names both tiers by their registry display names (#1583: the
+        current plan used to read as the raw key, "free")."""
         ws = await _make_workspace(db_session, "free")
         service = QuotaService(db_session)
+        free_display = get_plan_tier("free").display_name
         pro_display = get_plan_tier("pro").display_name
 
         has_access, error = await service.check_feature_access(ws.id, "team_invitations")
 
         assert has_access is False
         assert "team_invitations" in error
-        assert "free" in error
-        assert pro_display in error
+        assert f"on {free_display} plan" in error
+        assert f"Upgrade to {pro_display} plan" in error
 
     async def test_unknown_feature_falls_back_to_higher(self, db_session):
         """An unknown feature is not in any plan → denied; the required-plan

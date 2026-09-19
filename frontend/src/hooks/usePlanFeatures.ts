@@ -30,8 +30,12 @@ import { useEffect, useMemo, useState } from "react";
 import { useWorkspace } from "@/contexts/WorkspaceContext";
 import { getPlanTierMatrix, type PlanTierFeature } from "@/lib/api/workspaces";
 
-/** The #1551 "may create" gates exposed as booleans on each tier. */
-export type PlanFeature = "resources" | "connectors" | "public_contexts";
+/**
+ * The #1551 "may create" gates exposed as booleans on each tier, plus
+ * `shared_contexts` (#1583: "may make a context shared").
+ */
+export type PlanFeature =
+  "resources" | "connectors" | "public_contexts" | "shared_contexts";
 
 export type PlanFeatures = Readonly<Record<PlanFeature, boolean>>;
 
@@ -39,6 +43,7 @@ const NO_FEATURES: PlanFeatures = {
   resources: false,
   connectors: false,
   public_contexts: false,
+  shared_contexts: false,
 };
 
 /**
@@ -57,6 +62,7 @@ export function planFeaturesFor(
     resources: tier.resources === true,
     connectors: tier.connectors === true,
     public_contexts: tier.public_contexts === true,
+    shared_contexts: tier.shared_contexts === true,
   };
 }
 
