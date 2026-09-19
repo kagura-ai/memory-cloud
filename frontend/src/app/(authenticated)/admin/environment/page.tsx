@@ -3,8 +3,9 @@
 /**
  * Environment Configuration Page
  *
- * Display and manage .env configuration values.
- * Admin-only page with inline editing capability.
+ * Display the effective environment configuration values.
+ * Admin-only, read-only page: every key is set via environment variables and
+ * applied on restart/redeploy, so there is nothing to edit or save (#1580).
  * Issue #46: Environment page implementation
  */
 
@@ -24,13 +25,9 @@ import {
   CardTitle,
 } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
-import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
-import { Switch } from "@/components/ui/switch";
 import { Alert, AlertDescription } from "@/components/ui/alert";
 import {
-  Settings,
-  Save,
   RefreshCw,
   AlertCircle,
   Eye,
@@ -42,12 +39,14 @@ import {
 } from "lucide-react";
 import { Badge } from "@/components/ui/badge";
 import { apiClient } from "@/lib/api";
-import { useToast } from "@/hooks/use-toast";
 
 interface ConfigValue {
   value: string | number | boolean;
   type: "string" | "number" | "boolean" | "enum";
   sensitive: boolean;
+  // #1580: env-backed keys cannot be changed here. Absent on older backends,
+  // which this page treats the same way — it has no write path.
+  readOnly: boolean;
   category: string;
   description?: string;
 
@@ -72,9 +71,7 @@ export default function EnvironmentPage() {
 
   const [config, setConfig] = useState<ConfigData>({});
   const [loading, setLoading] = useState(true);
-  const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const [editedValues, setEditedValues] = useState<Record<string, any>>({});
   const [showSensitive, setShowSensitive] = useState<Record<string, boolean>>(
     {},
   );
@@ -87,7 +84,6 @@ export default function EnvironmentPage() {
       available: boolean;
     }>
   >([]);
-  const { toast } = useToast();
 
   useEffect(() => {
     loadConfig();
@@ -111,6 +107,7 @@ export default function EnvironmentPage() {
             category: string;
             description: string | null;
             is_sensitive: boolean;
+            read_only?: boolean;
           }>;
           total: number;
         }>("/api/v1/config?mask_sensitive=true"),
@@ -151,6 +148,7 @@ export default function EnvironmentPage() {
                 ? "number"
                 : "string"),
           sensitive: item.is_sensitive,
+          readOnly: item.read_only ?? true,
           category: item.category,
           description: schema?.description || item.description || undefined,
 
@@ -177,48 +175,6 @@ export default function EnvironmentPage() {
     }
   };
 
-  const handleValueChange = (key: string, value: any) => {
-    setEditedValues({ ...editedValues, [key]: value });
-  };
-
-  const handleSave = async () => {
-    if (Object.keys(editedValues).length === 0) {
-      toast({
-        title: t("messages.noChanges"),
-        description: t("messages.noChangesDesc"),
-      });
-      return;
-    }
-
-    try {
-      setSaving(true);
-
-      // Batch update
-      await apiClient.post("/api/v1/config/batch", { updates: editedValues });
-
-      toast({
-        title: t("messages.saveSuccess"),
-        description: t("messages.saveSuccessDesc", {
-          count: Object.keys(editedValues).length,
-        }),
-      });
-
-      // Reload config
-      await loadConfig();
-      setEditedValues({});
-    } catch (err) {
-      console.error("Failed to save config:", err);
-      toast({
-        title: t("messages.saveError"),
-        description:
-          err instanceof Error ? err.message : t("messages.saveErrorDesc"),
-        variant: "destructive",
-      });
-    } finally {
-      setSaving(false);
-    }
-  };
-
   const toggleSensitive = (key: string) => {
     setShowSensitive({ ...showSensitive, [key]: !showSensitive[key] });
   };
@@ -237,32 +193,24 @@ export default function EnvironmentPage() {
     return grouped;
   };
 
+  // Static display only (#1580): no Switch/Input, the values are not editable.
   const renderConfigValue = (key: string, configValue: ConfigValue) => {
-    const currentValue =
-      editedValues[key] !== undefined ? editedValues[key] : configValue.value;
+    const currentValue = configValue.value;
     const isSensitive = configValue.sensitive;
     const isHidden = isSensitive && !showSensitive[key];
 
     if (configValue.type === "boolean") {
-      const isRestartRequired = configValue.requires_restart === true;
+      const isEnabled = currentValue === true;
       return (
         <div className="flex items-center gap-2">
-          <Switch
-            checked={currentValue as boolean}
-            onCheckedChange={(checked) => {
-              if (!isRestartRequired) handleValueChange(key, checked);
-            }}
-            disabled={isRestartRequired}
-            className={isRestartRequired ? "cursor-not-allowed opacity-60" : ""}
-          />
-          <span className="text-sm">
-            {currentValue ? t("messages.enabled") : t("messages.disabled")}
-          </span>
-          {isRestartRequired && (
-            <span className="text-xs text-amber-600 dark:text-amber-400">
-              ({t("actions.requiresRestart")})
-            </span>
+          {isEnabled ? (
+            <CheckCircle className="h-4 w-4 text-green-500" />
+          ) : (
+            <XCircle className="h-4 w-4 text-gray-400" />
           )}
+          <span className="text-sm">
+            {isEnabled ? t("messages.enabled") : t("messages.disabled")}
+          </span>
         </div>
       );
     }
@@ -270,13 +218,9 @@ export default function EnvironmentPage() {
     if (isSensitive) {
       return (
         <div className="flex items-center gap-2">
-          <Input
-            type={isHidden ? "password" : "text"}
-            value={isHidden ? "••••••••" : currentValue}
-            onChange={(e) => handleValueChange(key, e.target.value)}
-            className="flex-1 font-mono text-sm"
-            readOnly={isHidden}
-          />
+          <span className="flex-1 p-2 bg-gray-50 dark:bg-gray-800 rounded border dark:border-gray-700 font-mono text-sm">
+            {isHidden ? "••••••••" : currentValue}
+          </span>
           <Button
             variant="ghost"
             size="sm"
@@ -319,37 +263,36 @@ export default function EnvironmentPage() {
       );
     }
 
+    const staticValue = (
+      <div className="p-2 bg-gray-50 dark:bg-gray-800 rounded border dark:border-gray-700">
+        {currentValue === "" ? (
+          <span className="text-sm text-gray-400">{t("messages.notSet")}</span>
+        ) : (
+          <span className="font-mono text-sm font-medium break-all">
+            {currentValue}
+          </span>
+        )}
+      </div>
+    );
+
     if (configValue.type === "number") {
       return (
         <div className="space-y-1">
-          <Input
-            type="number"
-            step={currentValue.toString().includes(".") ? "0.01" : "1"}
-            value={currentValue}
-            onChange={(e) => handleValueChange(key, parseFloat(e.target.value))}
-            className="font-mono text-sm"
-            readOnly
-          />
+          {staticValue}
           {(configValue.min_value !== undefined ||
             configValue.max_value !== undefined) && (
             <p className="text-xs text-gray-500">
-              Range: {configValue.min_value ?? "−∞"} to{" "}
-              {configValue.max_value ?? "+∞"}
+              {t("messages.rangeValid", {
+                min: configValue.min_value ?? "−∞",
+                max: configValue.max_value ?? "+∞",
+              })}
             </p>
           )}
         </div>
       );
     }
 
-    return (
-      <Input
-        type="text"
-        value={currentValue}
-        onChange={(e) => handleValueChange(key, e.target.value)}
-        className="font-mono text-sm"
-        readOnly
-      />
-    );
+    return staticValue;
   };
 
   const getCategoryIcon = (category: string) => {
@@ -359,6 +302,7 @@ export default function EnvironmentPage() {
       search: "🔍",
       memory: "💾",
       system: "⚙️",
+      hosted: "☁️",
     };
     return icons[category] || "📁";
   };
@@ -370,6 +314,7 @@ export default function EnvironmentPage() {
       search: t("sections.search"),
       memory: t("sections.memory"),
       system: t("sections.system"),
+      hosted: t("sections.hosted"),
     };
     return titles[category] || category;
   };
@@ -396,7 +341,6 @@ export default function EnvironmentPage() {
   }
 
   const groupedConfig = groupByCategory();
-  const hasChanges = Object.keys(editedValues).length > 0;
 
   return (
     <PageContainer>
@@ -412,27 +356,13 @@ export default function EnvironmentPage() {
             )}
             {t("actions.refresh")}
           </Button>
-          {hasChanges && (
-            <Button onClick={handleSave} disabled={saving}>
-              <Save className="h-4 w-4 mr-2" />
-              {t("actions.saveChanges", {
-                count: Object.keys(editedValues).length,
-              })}
-            </Button>
-          )}
         </div>
       </div>
 
-      {hasChanges && (
-        <Alert className="mb-6">
-          <Settings className="h-4 w-4" />
-          <AlertDescription>
-            {t("messages.unsavedChanges", {
-              count: Object.keys(editedValues).length,
-            })}
-          </AlertDescription>
-        </Alert>
-      )}
+      <Alert className="mb-6">
+        <Info className="h-4 w-4" />
+        <AlertDescription>{t("readOnlyNotice")}</AlertDescription>
+      </Alert>
 
       <div className="space-y-6">
         {/* System Status — Embedding & Services */}
@@ -614,6 +544,7 @@ export default function EnvironmentPage() {
                 {items.map(([key, configValue]) => (
                   <div
                     key={key}
+                    data-config-key={key}
                     className="space-y-3 p-4 border dark:border-gray-700 rounded-lg bg-white dark:bg-gray-900"
                   >
                     {/* Header with key name and badges */}
@@ -635,6 +566,11 @@ export default function EnvironmentPage() {
                             {t("messages.typeEnum")}
                           </Badge>
                         )}
+                        {configValue.readOnly && (
+                          <Badge variant="outline" className="text-xs">
+                            {t("actions.readOnly")}
+                          </Badge>
+                        )}
                       </div>
                     </div>
 
@@ -645,7 +581,7 @@ export default function EnvironmentPage() {
                       </p>
                     )}
 
-                    {/* Value input */}
+                    {/* Value (static) */}
                     <div>{renderConfigValue(key, configValue)}</div>
 
                     {/* Extended metadata panel */}
@@ -702,32 +638,6 @@ export default function EnvironmentPage() {
           </Card>
         ))}
       </div>
-
-      {/* Floating save bar — visible when scrolled and changes exist */}
-      {hasChanges && (
-        <div className="fixed bottom-0 left-0 right-0 z-50 border-t bg-background/95 backdrop-blur supports-[backdrop-filter]:bg-background/60 px-6 py-3">
-          <div className="container mx-auto flex items-center justify-between">
-            <span className="text-sm text-muted-foreground">
-              {t("actions.saveChanges", {
-                count: Object.keys(editedValues).length,
-              })}
-            </span>
-            <div className="flex gap-2">
-              <Button
-                variant="outline"
-                size="sm"
-                onClick={() => setEditedValues({})}
-              >
-                {t("actions.discard")}
-              </Button>
-              <Button size="sm" onClick={handleSave} disabled={saving}>
-                <Save className="h-4 w-4 mr-1" />
-                {t("actions.save")}
-              </Button>
-            </div>
-          </div>
-        </div>
-      )}
     </PageContainer>
   );
 }
