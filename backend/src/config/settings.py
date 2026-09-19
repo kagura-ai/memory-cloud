@@ -948,6 +948,31 @@ class Settings(BaseSettings):
         "When False, only invited users and the first admin can register.",
     )
 
+    # Closed-beta invite links (Issue #1581)
+    enable_beta_invites: bool = Field(
+        default=False,
+        description=(
+            "Enable closed-beta invite links (#1581) — a signed-in user mints a "
+            "one-time /join/{token} URL that lets one new person through the "
+            "admin-configured signup gate. OFF by default: it grants account "
+            "creation, so it must be an explicit opt-in. This is also the KILL "
+            "SWITCH: flipping it false 404s every /beta-invites route AND stops "
+            "redemption at the OAuth callback (signup_allowlist rows already "
+            "written are unaffected — prune them on /admin/signup-gate). Surfaced "
+            "to the frontend via GET /api/v1/system/info features.beta_invites."
+        ),
+    )
+    beta_invite_quota_per_user: int = Field(
+        default=4,
+        ge=0,
+        description=(
+            "How many invite links a non-admin user may hold at once (#1581). "
+            "Counts active (unused, unexpired) + redeemed links; expired and "
+            "revoked ones free their slot. System admins are uncapped. 0 means "
+            "only system admins can mint."
+        ),
+    )
+
     # Workspace Governance (Issue #1113)
     require_dual_control_force_transfer: bool = Field(
         default=False,
