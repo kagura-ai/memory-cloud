@@ -69,6 +69,8 @@ vi.mock("@/contexts/WorkspaceContext", () => ({
 
 // #1560: the Make Public gate is the tier matrix's `public_contexts` boolean
 // via usePlanFeature (tri-state; `null` = resolving), not a tier-name rank.
+// One answer for every feature: the `shared_contexts` gate (#1583) has its
+// own per-feature mock in SettingsTabPanel.sharingGate.test.tsx.
 let mockPlanFeature: boolean | null = true;
 vi.mock("@/hooks/usePlanFeatures", () => ({
   usePlanFeature: () => mockPlanFeature,

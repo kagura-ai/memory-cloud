@@ -3593,6 +3593,7 @@
     "makeShared": "Make Shared",
     "makePrivate": "Make Private",
     "makeSharedFirst": "Make this context Shared first to enable Public access.",
+    "sharedRequiresPlan": "Sharing a context requires the {plan} plan. Contexts that are already shared keep working.",
     "publicContext": "Public Context",
     "publicContextDesc": "External systems can search via Public REST API",
     "unpublish": "Unpublish",

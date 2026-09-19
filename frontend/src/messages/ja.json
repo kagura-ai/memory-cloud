@@ -3593,6 +3593,7 @@
     "makeShared": "共有にする",
     "makePrivate": "プライベートにする",
     "makeSharedFirst": "パブリックアクセスを有効にするには、まずこのコンテキストを共有にしてください。",
+    "sharedRequiresPlan": "コンテキストの共有には {plan} プランが必要です。すでに共有中のコンテキストは引き続き利用できます。",
     "publicContext": "パブリックコンテキスト",
     "publicContextDesc": "外部システムがPublic REST APIで検索可能",
     "unpublish": "非公開にする",
