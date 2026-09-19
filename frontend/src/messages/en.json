@@ -2178,7 +2178,6 @@
     "rerankerConfig": "Reranker Configuration",
     "rerankerConfigDesc": "Configure reranking model for improved search quality (deployment default: {provider} / {model})",
     "rerankerConfigDescPlain": "Configure reranking model for improved search quality",
-    "rerankingDisabledByDeployment": "Reranking is disabled on this deployment.",
     "rerankerNotAvailableFree": "Reranking not available on Free plan",
     "upgradeToBasic": "Upgrade to Basic plan to enable AI-powered reranking for improved search quality.",
     "noRerankerKeys": "No reranker API keys configured",
@@ -2231,7 +2230,8 @@
     "fetchFactorDesc": "Multiplier for candidate retrieval. Higher = better quality, higher cost. (default: 3)",
     "fetchFactorExample": "Example: For top 10 results, retrieve {count} candidates.",
     "impactOnQuality": "Impact on Search Quality",
-    "impactOnQualityDesc": "Higher semantic weight favors meaning-based search (better for conceptual queries). Higher BM25 weight favors exact keyword matching (better for technical terms). Fetch factor controls the diversity of candidates before reranking."
+    "impactOnQualityDesc": "Higher semantic weight favors meaning-based search (better for conceptual queries). Higher BM25 weight favors exact keyword matching (better for technical terms). Fetch factor controls the diversity of candidates before reranking.",
+    "impactOnQualityDescNoRerank": "Higher semantic weight favors meaning-based search (better for conceptual queries). Higher BM25 weight favors exact keyword matching (better for technical terms)."
   },
   "externalKeys": {
     "title": "External API Keys",
@@ -3032,19 +3032,19 @@
       "description": "View system configuration and service status",
       "loadingDesc": "Loading configuration...",
       "configManagement": "Configuration management",
+      "readOnlyNotice": "These values are set via environment variables and applied on restart/redeploy. This page shows the effective values and cannot change them.",
       "actions": {
         "refresh": "Refresh",
-        "saveChanges": "Save Changes ({count})",
         "requiresRestart": "Requires Restart",
-        "discard": "Discard",
-        "save": "Save"
+        "readOnly": "Read-only"
       },
       "sections": {
         "neuralMemory": "Neural Memory Configuration",
         "embedding": "Embedding Configuration",
         "search": "Search Configuration",
         "memory": "Memory Configuration",
-        "system": "System Configuration"
+        "system": "System Configuration",
+        "hosted": "Hosted-mode Configuration"
       },
       "systemStatus": {
         "title": "System Status",
@@ -3071,13 +3071,7 @@
       "messages": {
         "loading": "Loading configuration...",
         "loadError": "Failed to load configuration",
-        "unsavedChanges": "You have {count} unsaved change(s). Click Save Changes to apply.",
-        "noChanges": "No Changes",
-        "noChangesDesc": "No configuration values were modified",
-        "saveSuccess": "Configuration Updated",
-        "saveSuccessDesc": "{count} values saved successfully",
-        "saveError": "Save Failed",
-        "saveErrorDesc": "Failed to save configuration",
+        "notSet": "(not set)",
         "configParams": "{count} configuration parameter{s}",
         "enumValid": "Valid values:",
         "rangeValid": "Range: {min} to {max}",

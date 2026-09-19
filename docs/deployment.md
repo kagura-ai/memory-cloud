@@ -451,7 +451,7 @@ key resolved at recall time — there is no platform-key tier); `self_hosted` is
 
 | Variable | Default | Notes |
 | --- | --- | --- |
-| `ENABLE_RERANKING` | `true` | Deployment kill switch. `false` ⇒ no context reranks; `/system/info` reports `features.reranking=false` and the web UI disables the reranker card. |
+| `ENABLE_RERANKING` | `true` | Deployment kill switch. `false` ⇒ no context reranks; `/system/info` reports `features.reranking=false` and the web UI hides the reranker card from the context search settings. |
 | `DEFAULT_RERANKER_PROVIDER` | `voyage` | `voyage` \| `cohere` \| `self_hosted`. Written to **new** context search configs. |
 | `DEFAULT_USE_RERANK` | `false` | `use_rerank` written to new context search configs. `true` with `self_hosted` requires `RERANK_BASE_URL` or `SELF_HOSTED_BASE_URL`, else the API refuses to start. |
 | `DEFAULT_RERANKER_MODEL` | — | Model written to new configs. Empty ⇒ the provider's default (`rerank-2`, `rerank-multilingual-v3.0`, or for `self_hosted` `RERANK_MODEL` when `RERANK_BASE_URL` is set, else `SELF_HOSTED_RERANK_MODEL`). For voyage/cohere it must be a model the UI offers. |

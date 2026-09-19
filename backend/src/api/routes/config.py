@@ -1,18 +1,19 @@
 """Configuration Management Routes.
 
-Manage application configuration values.
+Read-only view of the application configuration values.
 Issue #45: Web UI Endpoint Implementation
+Issue #1580: every key is env-backed — the console renders the effective value
+and the write routes refuse (nothing at runtime reads ``config_overrides``).
 """
 
 from typing import Any
 
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, HTTPException, status
 from pydantic import BaseModel
-from sqlalchemy.ext.asyncio import AsyncSession
 
 from auth.dependencies import AdminUser, APIKeyOrSessionUser
-from config.settings import get_settings
-from db.base import get_db
+from config.settings import Settings, get_settings
+from utils.exceptions import ConfigReadOnlyError
 from utils.logger import get_logger
 
 logger = get_logger(__name__)
@@ -33,6 +34,8 @@ class ConfigValue(BaseModel):
     category: str
     description: str | None = None
     is_sensitive: bool = False
+    # Issue #1580: the value is the effective one and cannot be changed here.
+    read_only: bool = True
 
 
 class ConfigListResponse(BaseModel):
@@ -119,9 +122,50 @@ def get_config_categories() -> dict[str, list[str]]:
             # This architectural decision ensures GDPR compliance.
             "ENABLE_TRUST_MODULATION",
         ],
+        # Hosted-mode settings (Issue #1580): the deployment posture an operator
+        # needs to inspect. Served to admins only — see get_admin_only_categories().
+        "hosted": [
+            "ENABLE_BYOK",
+            "RESOLVE_STORED_BYOK_KEYS",
+            "ENABLE_COST_DISPLAY",
+            "ENABLE_PLAN_PAGE",
+            "MANAGED_LLM_PROVIDER",
+            "MANAGED_LLM_MODEL",
+            "DEFAULT_USE_RERANK",
+            "DEFAULT_RERANKER_PROVIDER",
+            "DEFAULT_RERANKER_MODEL",
+            "RERANK_BASE_URL",
+            "RERANK_MODEL",
+        ],
         # Note: All tunable Neural Memory parameters (learning_rate, top_m_edges,
         # scoring weights, gradient_clipping, etc.) are managed via /admin/neural-config (Issue #107)
     }
+
+
+def get_admin_only_categories() -> set[str]:
+    """Get the categories GET /config serves to admins only.
+
+    GET /config is open to any authenticated caller. The hosted-mode category
+    names the managed LLM and an internal reranker URL, which are the
+    operator's business (same posture as the #991 ``ollama_base_url`` drop).
+    """
+    return {"hosted"}
+
+
+def get_visible_categories(user: dict) -> dict[str, list[str]]:
+    """Get the configuration categories ``user`` may see.
+
+    Args:
+        user: Authenticated user
+
+    Returns:
+        All categories for an admin; without the admin-only ones otherwise
+    """
+    categories = get_config_categories()
+    if user.get("role") != "admin":
+        for category in get_admin_only_categories():
+            categories.pop(category, None)
+    return categories
 
 
 def get_sensitive_keys() -> set[str]:
@@ -144,6 +188,51 @@ def mask_sensitive_value(key: str, value: Any) -> Any:
     return value
 
 
+def get_url_keys() -> set[str]:
+    """Get list of URL-valued keys that may embed credentials."""
+    return {"RERANK_BASE_URL"}
+
+
+def mask_url_credentials(value: Any) -> Any:
+    """Mask the userinfo part of a URL (``https://user:pw@host`` → ``https://***@host``).
+
+    Fails closed: everything between the scheme and the LAST ``@`` is masked,
+    so a malformed URL cannot leak a password through a parsing quirk.
+    """
+    if not isinstance(value, str) or "@" not in value:
+        return value
+    scheme, sep, rest = value.partition("://")
+    if not sep:
+        scheme, rest = "", value
+    return f"{scheme}{sep}***@{rest.rpartition('@')[2]}"
+
+
+def get_effective_value(key: str, settings: Settings) -> Any:
+    """Resolve the value the running process actually uses for ``key``.
+
+    Args:
+        key: Configuration key (env var name)
+        settings: Application settings
+
+    Returns:
+        The effective value, with URL credentials masked
+    """
+    attr = key.lower()
+    if attr in Settings.model_fields:
+        value = getattr(settings, attr)
+    else:
+        # TRACK_CO_ACTIVATION / ENABLE_DECAY / ENABLE_TRUST_MODULATION are not
+        # Settings fields: the neural layer reads them from env with its own
+        # defaults, so ask it rather than echoing a possibly-unset env var.
+        from neural.config import NeuralMemoryConfig
+
+        value = getattr(NeuralMemoryConfig.from_env(), attr)
+
+    if key in get_url_keys():
+        value = mask_url_credentials(value)
+    return value
+
+
 # ============================================================================
 # Configuration Schema (Issue #53)
 # ============================================================================
@@ -153,7 +242,8 @@ def get_config_schema() -> dict[str, ConfigKeySchema]:
     """Get configuration schema with metadata for all settings.
 
     Returns metadata for frontend display improvements (Issue #54).
-    NOTE: This is read-only metadata - actual config updates not implemented.
+    NOTE: This is read-only metadata. Every key served by GET /config is
+    env-backed, so it truthfully carries ``requires_restart=True`` (Issue #1580).
     """
     return {
         # System Settings
@@ -193,13 +283,24 @@ def get_config_schema() -> dict[str, ConfigKeySchema]:
             examples=["development", "production"],
             recommended="Match your deployment environment",
         ),
+        "CORS_ORIGINS": ConfigKeySchema(
+            key="CORS_ORIGINS",
+            type="string",
+            category="system",
+            description="CORS allowed origins (comma-separated)",
+            default_value="http://localhost:3000,http://localhost:8080",
+            requires_restart=True,
+            impact="Browsers on origins outside this list cannot call the API",
+            examples=["https://app.example.com"],
+            recommended="Only the origins that serve your web UI",
+        ),
         # Feature Flags
         "ENABLE_NEURAL_MEMORY": ConfigKeySchema(
             key="ENABLE_NEURAL_MEMORY",
             type="boolean",
             category="system",
             description="Enable Neural Memory system (Hebbian Learning + Activation Spreading)",
-            default_value=True,
+            default_value=False,
             requires_restart=True,
             impact="Enables automatic memory association learning and graph-based recall enhancement",
             examples=["true", "false"],
@@ -436,7 +537,7 @@ def get_config_schema() -> dict[str, ConfigKeySchema]:
             category="system",
             description="Enable co-activation tracking",
             default_value=True,
-            requires_restart=False,
+            requires_restart=True,
             impact="Learns which memories are accessed together. Enables context-aware recall.",
             examples=["true", "false"],
             recommended="true (enables association learning)",
@@ -476,7 +577,7 @@ def get_config_schema() -> dict[str, ConfigKeySchema]:
             category="system",
             description="Enable automatic edge weight decay",
             default_value=True,
-            requires_restart=False,
+            requires_restart=True,
             impact="Gradually weakens unused connections (forgetting). Prevents stale associations.",
             examples=["true", "false"],
             recommended="true (enables forgetting)",
@@ -572,7 +673,7 @@ def get_config_schema() -> dict[str, ConfigKeySchema]:
             category="system",
             description="Modulate learning by confidence",
             default_value=True,
-            requires_restart=False,
+            requires_restart=True,
             impact="Adjusts learning rate based on confidence. Low confidence = slower learning.",
             examples=["true", "false"],
             recommended="true (stable learning)",
@@ -590,7 +691,7 @@ def get_config_schema() -> dict[str, ConfigKeySchema]:
                 "self_hosted reranker). When false no context reranks (#1572)."
             ),
             default_value=True,
-            requires_restart=False,
+            requires_restart=True,
             impact="Improves search accuracy with AI reranking. Adds latency and cost per query.",
             examples=["true", "false"],
             recommended="true (if reranker API key is configured)",
@@ -638,6 +739,134 @@ def get_config_schema() -> dict[str, ConfigKeySchema]:
             examples=["512", "1536"],
             recommended="512 (balanced)",
         ),
+        # Hosted-mode settings (Issue #1580)
+        "ENABLE_BYOK": ConfigKeySchema(
+            key="ENABLE_BYOK",
+            type="boolean",
+            category="hosted",
+            description="Enable BYOK (bring-your-own-key) provisioning (#1167)",
+            default_value=True,
+            requires_restart=True,
+            impact=(
+                "When false the external-keys write paths, the workspace cost dashboard and "
+                "the OpenAI key-status probe return 404 and the web UI hides their nav entries."
+            ),
+            examples=["true", "false"],
+        ),
+        "RESOLVE_STORED_BYOK_KEYS": ConfigKeySchema(
+            key="RESOLVE_STORED_BYOK_KEYS",
+            type="boolean",
+            category="hosted",
+            description="Resolve stored BYOK keys in the LLM / embedding / reranker services (#1569)",
+            default_value=True,
+            requires_restart=True,
+            impact=(
+                "When false the services ignore stored external API keys and use the platform "
+                "credential only. Requires ENABLE_BYOK=false."
+            ),
+            examples=["true", "false"],
+        ),
+        "ENABLE_COST_DISPLAY": ConfigKeySchema(
+            key="ENABLE_COST_DISPLAY",
+            type="boolean",
+            category="hosted",
+            description="Show money to workspace users (#1571)",
+            default_value=True,
+            requires_restart=True,
+            impact=(
+                "When false the workspace cost dashboard answers 404, analysis cost fields are "
+                "null and the web UI hides the cost surfaces. The admin cost view is unaffected."
+            ),
+            examples=["true", "false"],
+        ),
+        "ENABLE_PLAN_PAGE": ConfigKeySchema(
+            key="ENABLE_PLAN_PAGE",
+            type="boolean",
+            category="hosted",
+            description="Enable the workspace Plan page and its sidebar entry (#1145)",
+            default_value=False,
+            requires_restart=True,
+            impact="Only makes sense where billing is wired up.",
+            examples=["true", "false"],
+        ),
+        "MANAGED_LLM_PROVIDER": ConfigKeySchema(
+            key="MANAGED_LLM_PROVIDER",
+            type="string",
+            category="hosted",
+            description="Provider of the platform-managed LLM lane (#1569)",
+            default_value="",
+            requires_restart=True,
+            impact=(
+                "Memory Analysis runs on this provider for plans with the managed_llm feature "
+                "and no BYOK key; Sleep's judge defaults to it unless SLEEP_LLM_* is set. "
+                "Empty = no managed lane."
+            ),
+            examples=["openai", "anthropic", "gemini", "self_hosted"],
+        ),
+        "MANAGED_LLM_MODEL": ConfigKeySchema(
+            key="MANAGED_LLM_MODEL",
+            type="string",
+            category="hosted",
+            description="Model id sent to MANAGED_LLM_PROVIDER (#1569)",
+            default_value="",
+            requires_restart=True,
+            impact="Required when MANAGED_LLM_PROVIDER is set.",
+        ),
+        "DEFAULT_USE_RERANK": ConfigKeySchema(
+            key="DEFAULT_USE_RERANK",
+            type="boolean",
+            category="hosted",
+            description="use_rerank written to new context search configs (#1572)",
+            default_value=False,
+            requires_restart=True,
+            impact="Applies to contexts created from now on; existing contexts are never rewritten.",
+            examples=["true", "false"],
+        ),
+        "DEFAULT_RERANKER_PROVIDER": ConfigKeySchema(
+            key="DEFAULT_RERANKER_PROVIDER",
+            type="enum",
+            category="hosted",
+            description="Reranker provider written to new context search configs (#1572)",
+            default_value="voyage",
+            enum_values=["voyage", "cohere", "self_hosted"],
+            enum_descriptions={
+                "voyage": "Voyage AI (needs a BYOK key per workspace)",
+                "cohere": "Cohere (needs a BYOK key per workspace)",
+                "self_hosted": "Keyless (RERANK_BASE_URL or SELF_HOSTED_BASE_URL)",
+            },
+            requires_restart=True,
+            impact="Applies to contexts created from now on; existing contexts are never rewritten.",
+        ),
+        "DEFAULT_RERANKER_MODEL": ConfigKeySchema(
+            key="DEFAULT_RERANKER_MODEL",
+            type="string",
+            category="hosted",
+            description="reranker_model written to new context search configs (#1572)",
+            default_value="",
+            requires_restart=True,
+            impact="Empty = the provider's default model.",
+        ),
+        "RERANK_BASE_URL": ConfigKeySchema(
+            key="RERANK_BASE_URL",
+            type="string",
+            category="hosted",
+            description="OpenAI/Jina-style /v1/rerank endpoint for the self_hosted reranker",
+            default_value="",
+            requires_restart=True,
+            impact=(
+                "When set the self_hosted reranker posts one batched /v1/rerank request here. "
+                "Empty = prompt scoring on SELF_HOSTED_BASE_URL. Embedded credentials are masked."
+            ),
+        ),
+        "RERANK_MODEL": ConfigKeySchema(
+            key="RERANK_MODEL",
+            type="string",
+            category="hosted",
+            description="Served model name for the /v1/rerank endpoint (RERANK_BASE_URL)",
+            default_value="qwen3-reranker-0.6b",
+            requires_restart=True,
+            impact="Only consulted when RERANK_BASE_URL is set.",
+        ),
     }
 
 
@@ -649,42 +878,32 @@ def get_config_schema() -> dict[str, ConfigKeySchema]:
 @router.get("", response_model=ConfigListResponse)
 async def get_all_config(
     user: APIKeyOrSessionUser,
-    db: AsyncSession = Depends(get_db),
     mask_sensitive: bool = True,
 ):
     """Get all configuration values.
 
+    Every value is the EFFECTIVE one the running process uses (Issue #1580);
+    ``config_overrides`` rows are never consulted — nothing reads them at
+    runtime, so showing one would display a value that is not in effect.
+    Admin-only categories are omitted for non-admin callers.
+
     Args:
         user: Authenticated user
-        db: Database session
-        mask_sensitive: Whether to mask sensitive values
+        mask_sensitive: Whether to mask sensitive values (URL credentials are
+            masked regardless)
 
     Returns:
         List of configuration values
     """
     try:
-        import os
-
-        from sqlalchemy import select
-
-        from models.config import ConfigOverride
-
         settings = get_settings()
-        categories = get_config_categories()
-
-        # Load DB overrides
-        overrides_result = await db.execute(select(ConfigOverride))
-        db_overrides = {o.key: o.value for o in overrides_result.scalars().all()}
+        categories = get_visible_categories(user)
 
         configs = []
 
         for category, keys in categories.items():
             for key in keys:
-                # DB override takes priority over env var
-                if key in db_overrides:
-                    value = db_overrides[key]
-                else:
-                    value = getattr(settings, key.lower(), os.getenv(key))
+                value = get_effective_value(key, settings)
 
                 # Mask sensitive values
                 if mask_sensitive:
@@ -699,7 +918,7 @@ async def get_all_config(
                     )
                 )
 
-        logger.info(f"config_list_retrieved: user={user['user_id']}, count={len(configs)}")
+        logger.info("config_list_retrieved", user_id=user["user_id"], count=len(configs))
 
         return ConfigListResponse(configs=configs, total=len(configs))
 
@@ -723,125 +942,63 @@ async def get_categories(
     Returns:
         Configuration categories
     """
-    return {"categories": get_config_categories()}
+    return {"categories": get_visible_categories(user)}
 
 
-@router.put("/{key}")
+_READ_ONLY_RESPONSE: dict[int | str, dict[str, Any]] = {
+    409: {
+        "description": (
+            "Always: configuration is read-only (`CFG-002`). Values are set via "
+            "environment variables and applied on restart/redeploy."
+        )
+    }
+}
+
+
+@router.put("/{key}", responses=_READ_ONLY_RESPONSE)
 async def update_config(
     key: str,
     request: ConfigUpdateRequest,
     admin: AdminUser,
-    db: AsyncSession = Depends(get_db),
 ):
-    """Update a single configuration value.
+    """Refuse to update a configuration value (Issue #1580).
 
-    Admin-only endpoint. Updates are stored in database (for runtime config)
-    or require .env.cloud file modification (for env vars).
+    Admin-only endpoint, kept so existing clients get a clear answer. Every key
+    is env-backed: it is set via environment variables and applied on
+    restart/redeploy, and no runtime consumer reads a stored override.
 
     Args:
-        key: Configuration key to update
-        request: New value
+        key: Configuration key the caller tried to update
+        request: Rejected value
         admin: Authenticated admin user
-        db: Database session
 
-    Returns:
-        Success message with updated value
+    Raises:
+        ConfigReadOnlyError: Always (409 ``CFG-002``)
     """
-    try:
-        from sqlalchemy import select
-
-        from models.config import ConfigOverride
-
-        # Upsert: update if exists, create if not
-        result = await db.execute(select(ConfigOverride).where(ConfigOverride.key == key))
-        override = result.scalar_one_or_none()
-
-        value_str = str(request.value) if request.value is not None else ""
-
-        if override:
-            override.value = value_str
-            override.updated_by = admin.get("email", "unknown")
-        else:
-            override = ConfigOverride(
-                key=key, value=value_str, updated_by=admin.get("email", "unknown")
-            )
-            db.add(override)
-
-        await db.commit()
-
-        logger.info(f"config_updated: key={key}, admin={admin.get('email', 'unknown')}")
-
-        return {
-            "message": f"Configuration '{key}' updated successfully",
-            "key": key,
-            "value": mask_sensitive_value(key, request.value),
-        }
-
-    except Exception as e:
-        await db.rollback()
-        logger.error(f"update_config_failed: {e}", exc_info=True)
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail="Failed to update configuration",
-        ) from e
+    logger.info("config_write_refused", keys=[key], admin_user_id=admin.get("user_id"))
+    raise ConfigReadOnlyError(keys=[key])
 
 
-@router.post("/batch")
+@router.post("/batch", responses=_READ_ONLY_RESPONSE)
 async def batch_update_config(
     request: ConfigBatchRequest,
     admin: AdminUser,
-    db: AsyncSession = Depends(get_db),
 ):
-    """Batch update multiple configuration values.
+    """Refuse to batch update configuration values (Issue #1580).
 
-    Admin-only endpoint.
+    Admin-only endpoint. The whole request is refused — there are no partial
+    writes. See ``update_config``.
 
     Args:
-        request: Dictionary of key-value pairs to update
+        request: Rejected key-value pairs
         admin: Authenticated admin user
-        db: Database session
 
-    Returns:
-        Success message with update count
+    Raises:
+        ConfigReadOnlyError: Always (409 ``CFG-002``)
     """
-    try:
-        from sqlalchemy import select
-
-        from models.config import ConfigOverride
-
-        for key, value in request.updates.items():
-            result = await db.execute(select(ConfigOverride).where(ConfigOverride.key == key))
-            override = result.scalar_one_or_none()
-            value_str = str(value) if value is not None else ""
-
-            if override:
-                override.value = value_str
-                override.updated_by = admin.get("email", "unknown")
-            else:
-                db.add(
-                    ConfigOverride(
-                        key=key, value=value_str, updated_by=admin.get("email", "unknown")
-                    )
-                )
-
-        await db.commit()
-
-        logger.info(
-            f"config_batch_updated: count={len(request.updates)}, admin={admin.get('email', 'unknown')}"
-        )
-
-        return {
-            "message": f"{len(request.updates)} configuration values updated",
-            "updated_keys": list(request.updates.keys()),
-        }
-
-    except Exception as e:
-        await db.rollback()
-        logger.error(f"batch_update_config_failed: {e}", exc_info=True)
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail="Failed to batch update configuration",
-        ) from e
+    keys = sorted(request.updates)
+    logger.info("config_write_refused", keys=keys, admin_user_id=admin.get("user_id"))
+    raise ConfigReadOnlyError(keys=keys)
 
 
 @router.post("/validate")

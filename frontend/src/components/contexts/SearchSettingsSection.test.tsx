@@ -7,13 +7,22 @@
  * Both must be suppressed when features.byok is off.
  *
  * #1572: the card renders the deployment default from /system/info
- * (`search_defaults`), is disabled with a note when `features.reranking` is
- * false, and hides the configure-keys CTA when the default is the keyless
- * self_hosted reranker and it is reachable.
+ * (`search_defaults`) and hides the configure-keys CTA when the default is the
+ * keyless self_hosted reranker and it is reachable.
+ *
+ * #1580: when `features.reranking` is false the reranker card is not rendered
+ * at all (hidden, not greyed out) and the external-keys probe is skipped;
+ * `true` and unknown (still loading / older backend) keep the card.
  */
 
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
-import { render, screen, waitFor, cleanup } from "@testing-library/react";
+import {
+  render,
+  screen,
+  waitFor,
+  cleanup,
+  fireEvent,
+} from "@testing-library/react";
 
 vi.mock("next-intl", () => ({
   // Identity translator that appends interpolation values as
@@ -188,55 +197,7 @@ describe("SearchSettingsSection deployment default (#1572)", () => {
       await screen.findByText("rerankerConfigDescPlain"),
     ).toBeInTheDocument();
     expect(screen.getByText("enableRerankingDescPlain")).toBeInTheDocument();
-    // Not disabled by deployment while unknown.
-    expect(
-      screen.queryByText("rerankingDisabledByDeployment"),
-    ).not.toBeInTheDocument();
   });
-
-  it("disables the card and shows the note when features.reranking is false", async () => {
-    mockFeatures = { byok: true, reranking: false };
-    mockInfo = {
-      features: { byok: true, reranking: false },
-      search_defaults: VOYAGE_DEFAULTS,
-    };
-    render(<SearchSettingsSection contextId="ctx-1" />);
-    expect(
-      await screen.findByText("rerankingDisabledByDeployment"),
-    ).toBeInTheDocument();
-    expect(screen.getByRole("switch")).toBeDisabled();
-    // The "no keys" prompt is noise when the deployment never reranks.
-    expect(screen.queryByText("noRerankerKeys")).not.toBeInTheDocument();
-  });
-
-  it("really disables the provider/model selects (not just pointer-events) when features.reranking is false", async () => {
-    mockFeatures = { byok: true, reranking: false };
-    mockInfo = {
-      features: { byok: true, reranking: false },
-      search_defaults: VOYAGE_DEFAULTS,
-    };
-    // A context that enabled reranking before the deployment turned it off:
-    // the provider/model selects render, and must be unreachable by keyboard too.
-    mockGetConfig.mockResolvedValue({
-      context_id: "ctx-1",
-      semantic_weight: 0.6,
-      bm25_weight: 0.4,
-      fetch_factor: 3,
-      use_rerank: true,
-      reranker_provider: "voyage",
-      reranker_model: "rerank-2",
-      created_at: "2026-01-01T00:00:00Z",
-      updated_at: "2026-01-01T00:00:00Z",
-    });
-    render(<SearchSettingsSection contextId="ctx-1" />);
-    expect(
-      await screen.findByText("rerankingDisabledByDeployment"),
-    ).toBeInTheDocument();
-    const selects = screen.getAllByRole("combobox");
-    expect(selects).toHaveLength(2);
-    for (const select of selects) expect(select).toBeDisabled();
-  });
-
   it("hides the configure-keys CTA when the deployment default is keyless self_hosted and reachable", async () => {
     mockInfo = {
       features: { byok: true },
@@ -267,5 +228,104 @@ describe("SearchSettingsSection deployment default (#1572)", () => {
         'a[href="/workspace/integrations/external-keys"]',
       ),
     ).toBeNull();
+  });
+});
+
+describe("SearchSettingsSection reranking off on this deployment (#1580)", () => {
+  const RERANKING_CONTEXT = {
+    context_id: "ctx-1",
+    semantic_weight: 0.6,
+    bm25_weight: 0.4,
+    fetch_factor: 3,
+    use_rerank: true,
+    reranker_provider: "self_hosted",
+    reranker_model: "bge-reranker-v2-m3",
+    created_at: "2026-01-01T00:00:00Z",
+    updated_at: "2026-01-01T00:00:00Z",
+  };
+
+  const setReranking = (reranking: boolean) => {
+    mockFeatures = { byok: true, reranking };
+    mockInfo = {
+      features: { byok: true, reranking },
+      search_defaults: VOYAGE_DEFAULTS,
+    };
+  };
+
+  it("does not render the reranker card when features.reranking is false", async () => {
+    setReranking(false);
+    // A context that enabled reranking before the deployment turned it off
+    // must not bring the provider/model controls back either.
+    mockGetConfig.mockResolvedValue(RERANKING_CONTEXT);
+    render(<SearchSettingsSection contextId="ctx-1" />);
+
+    // The rest of the section is still there.
+    expect(await screen.findByText("hybridSearchWeights")).toBeInTheDocument();
+    expect(screen.getByText("embeddingConfig")).toBeInTheDocument();
+
+    expect(screen.queryByText("rerankerConfig")).not.toBeInTheDocument();
+    expect(screen.queryByText("enableReranking")).not.toBeInTheDocument();
+    expect(screen.queryByText("noRerankerKeys")).not.toBeInTheDocument();
+    expect(screen.queryByRole("switch")).not.toBeInTheDocument();
+    expect(screen.queryAllByRole("combobox")).toHaveLength(0);
+  });
+
+  it("makes no external-keys request when features.reranking is false", async () => {
+    setReranking(false);
+    render(<SearchSettingsSection contextId="ctx-1" />);
+    expect(await screen.findByText("hybridSearchWeights")).toBeInTheDocument();
+    // The telemetry probe still runs; give a stray keys probe the same chance.
+    await waitFor(() => expect(mockApiGet).toHaveBeenCalled());
+    expect(mockListKeys).not.toHaveBeenCalled();
+  });
+
+  it("renders the card and probes keys when features.reranking is true", async () => {
+    setReranking(true);
+    render(<SearchSettingsSection contextId="ctx-1" />);
+    expect(await screen.findByText("rerankerConfig")).toBeInTheDocument();
+    expect(screen.getByRole("switch")).toBeInTheDocument();
+    await waitFor(() => expect(mockListKeys).toHaveBeenCalled());
+  });
+
+  it("renders the card while the flag is unknown (older backend without it)", async () => {
+    // beforeEach: features = { byok: true } — no `reranking` key at all.
+    render(<SearchSettingsSection contextId="ctx-1" />);
+    expect(await screen.findByText("rerankerConfig")).toBeInTheDocument();
+    expect(screen.getByRole("switch")).toBeInTheDocument();
+  });
+
+  it("drops the reranking sentence from the impact box only when reranking is off", async () => {
+    setReranking(false);
+    const { unmount } = render(<SearchSettingsSection contextId="ctx-1" />);
+    expect(
+      await screen.findByText("impactOnQualityDescNoRerank"),
+    ).toBeInTheDocument();
+    expect(screen.queryByText("impactOnQualityDesc")).not.toBeInTheDocument();
+    unmount();
+
+    setReranking(true);
+    render(<SearchSettingsSection contextId="ctx-1" />);
+    expect(await screen.findByText("impactOnQualityDesc")).toBeInTheDocument();
+    expect(
+      screen.queryByText("impactOnQualityDescNoRerank"),
+    ).not.toBeInTheDocument();
+  });
+
+  it("does not block Save on a hidden reranker provider", async () => {
+    setReranking(false);
+    // self_hosted is unreachable (telemetry mock) — with the card visible this
+    // blocks Save; hidden, the user could neither see nor fix the cause.
+    mockGetConfig.mockResolvedValue(RERANKING_CONTEXT);
+    render(<SearchSettingsSection contextId="ctx-1" />);
+
+    fireEvent.change(await screen.findByLabelText("fetchFactorLabel"), {
+      target: { value: "5" },
+    });
+
+    expect(await screen.findByText("unsavedChangesBar")).toBeInTheDocument();
+    expect(
+      screen.queryByText("providerUnavailableCannotSave"),
+    ).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "saveChanges" })).toBeEnabled();
   });
 });

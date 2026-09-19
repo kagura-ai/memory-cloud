@@ -178,6 +178,7 @@ Auth failure before dispatch (`transport.py:531-580`): HTTP 401, body `{"error":
 | `EXT-205` | `EmailDispatchError` — exceptions.py:511 (status overridden to 503 at :515) | 503 | Email-provider dispatch failed; retriable. |
 | `invalid_token` | `TokenRevokedError` — exceptions.py:526; `InvalidTokenError` — exceptions.py:535; RFC 6750 challenge — mcp_server/transport.py:547 | 401 | OAuth2 token revoked/invalid. ⚠ RFC 6750-mandated lowercase vocabulary, intentionally outside the `NAMESPACE-NNN` convention; on the REST path it surfaces in the canonical body as `"error": "invalid_token"`. |
 | `CFG-001` | `ConfigurationError` — exceptions.py:546 | 500 | Server configuration error. |
+| `CFG-002` | `ConfigReadOnlyError` — exceptions.py:206 | 409 | #1580: `PUT /config/{key}` / `POST /config/batch` always refuse — every key is env-backed (set via environment, applied on restart/redeploy) and nothing reads a stored override. `details.keys` lists the refused keys; a batch is refused as a whole. |
 | `INT-001` | `InternalError` — exceptions.py:553 | 500 | Internal server error (structured). |
 | `ERASURE-001` | `ErasureRequestNotFoundError` — exceptions.py:564 | 404 | No erasure request found. |
 | `ERASURE-002` | `ErasureTokenInvalidError` — exceptions.py:571 | 400 | Erasure confirmation token missing/expired/mismatched. |
