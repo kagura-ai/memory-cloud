@@ -120,9 +120,15 @@ The 7-day lifetime is fixed in code. Notes for operators:
   `{token}` instead. **A reverse proxy in front of the API or the frontend is
   outside that reach:** if yours writes access logs — the single-server Terraform
   template's `Caddyfile.tpl` does (`log { output stdout, format json }`, which
-  records the full request URI) — those lines contain live invite URLs until the
-  link is used or expires. Restrict who can read them, or filter the `uri` field
-  for these paths (Caddy: a `filter` log encoder) before enabling the feature.
+  records the full request URI **and the request headers**) — those lines contain
+  live invite URLs until the link is used or expires. The token shows up in two
+  fields: the request URI, and — when the frontend and the API share an origin —
+  the `Referer` header the browser sends from the `/join/{token}` page (on the
+  preview call, the `/auth/{provider}/login` navigation and every asset the page
+  loads). Filtering only the URI leaves the second copy in place. Before enabling
+  the feature, restrict who can read those logs, or scrub both fields for
+  `/join/`, `/beta-invites/` and `invite=` (Caddy: a `filter` log encoder on
+  `request>uri` and `request>headers>Referer`, or drop that header from the log).
 - The invite is only consumed when the gate would otherwise have blocked the
   sign-in. Existing users, the first user, identities already on the allowlist,
   and any deployment with the gate disabled (where `ALLOW_REGISTRATION` decides)
