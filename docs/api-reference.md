@@ -973,6 +973,68 @@ Revoke an API key (soft delete, preserves audit trail).
 
 ---
 
+## Beta Invite APIs
+
+Closed-beta invite links (Issue #1581): a signed-in user mints a one-time link that lets one new person through the admin-configured signup gate. Off by default — every route below answers a plain `404` (before authentication) unless the deployment sets `ENABLE_BETA_INVITES=true`; `GET /api/v1/system/info` → `features.beta_invites` reports availability. Inviter routes accept a session cookie only (no API keys). See [Closed-beta invite links](deployment.md#closed-beta-invite-links-issue-1581) for the operator view.
+
+| Endpoint | Auth | Purpose |
+|---|---|---|
+| `GET /api/v1/beta-invites/me` | session | The caller's quota standing and their invites, newest first |
+| `POST /api/v1/beta-invites` | session | Mint a link (`201`) — the only response that carries the URL |
+| `DELETE /api/v1/beta-invites/{id}` | session | Revoke an own, unused invite (`204`; idempotent) |
+| `GET /api/v1/beta-invites/{token}/preview` | none | Landing-page check: is this link still usable? Read-only, per-IP rate-limited (30/min) |
+
+`GET /api/v1/beta-invites/me`:
+
+```json
+{
+  "quota": 4,
+  "used": 2,
+  "remaining": 2,
+  "invites": [
+    {
+      "id": "0b9f6c1e-5d0a-4a3e-9d57-2f4f3f6f8a11",
+      "status": "active",
+      "created_at": "2026-09-01T12:00:00Z",
+      "expires_at": "2026-09-08T12:00:00Z",
+      "redeemed_at": null,
+      "revoked_at": null
+    }
+  ]
+}
+```
+
+- `status` is derived: `revoked` > `redeemed` > `expired` > `active`. The inviter never learns who redeemed a link.
+- `used` counts active + redeemed invites; expired and revoked ones free their slot.
+- `quota` and `remaining` are `null` for a system admin (unlimited).
+
+`POST /api/v1/beta-invites` → `201`:
+
+```json
+{
+  "id": "0b9f6c1e-5d0a-4a3e-9d57-2f4f3f6f8a11",
+  "url": "https://your-domain.com/join/<token>",
+  "expires_at": "2026-09-08T12:00:00Z"
+}
+```
+
+The link is valid for 7 days and works once. Only a hash of the token is stored, so the URL cannot be shown again — revoke and mint a new one if it is lost.
+
+`GET /api/v1/beta-invites/{token}/preview` → `200 {"valid": true, "expires_at": "…"}`.
+
+| Status | `error` | When |
+|---|---|---|
+| `404` | `HTTP-404` | Feature disabled (every route) |
+| `404` | `RES-001` | Preview: unknown, revoked or malformed token · Revoke: unknown id or someone else's invite |
+| `409` | `quota_exceeded` | Mint: the caller already holds `quota` invites (`details.quota`) |
+| `409` | `already_redeemed` | Revoke: the invite was already used |
+| `410` | `RES-003` | Preview: expired or already redeemed |
+| `429` | `RATE-001` | Preview: per-IP limit exceeded |
+
+**Redeeming a link** is not an API call of its own: the landing page sends the invitee to `GET /api/v1/auth/{google|github}/login?return_to=…&invite=<token>`. The token's hash rides along with the OAuth state, and the signup gate spends the invite at the callback **only if it would otherwise have blocked the sign-in**. A malformed `invite` value is ignored rather than rejected.
+
+---
+
 ## System APIs
 
 ### GET /health
