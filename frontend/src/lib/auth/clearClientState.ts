@@ -28,6 +28,10 @@ const IDENTITY_SCOPED_KEYS = [
   "kagura_last_workspace_id",
   // Per-user onboarding progress.
   "onboarding:dismissed",
+  // Per-user nudge progress (#1582): B has its own invite quota, so A's × must
+  // not hide the card for B. Mirrors BETA_INVITE_CARD_DISMISS_KEY in
+  // components/beta-invites/InviteFriendCard.tsx (the test pins the two).
+  "kagura:beta-invite-card-dismissed",
 ];
 
 /** Prefixes whose every key is per-user progress. */

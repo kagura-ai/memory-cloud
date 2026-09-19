@@ -30,12 +30,23 @@
  * same shape as safeReturnTo (#772) but inlined so the helper is safe by
  * default — callers can pass either a relative same-origin path
  * (`/invite/abc?x=1`) or an already-validated absolute URL.
+ *
+ * `options.invite` (#1582) carries a beta invite token into the OAuth login
+ * (`&invite=<encoded>`), where the backend binds it to the OAuth state. It is
+ * appended only for a non-empty string, so the two-argument form is
+ * byte-identical to before. The token is a credential — never log the result.
  */
 export type OAuthProvider = "google" | "github";
+
+export interface BuildOAuthRedirectOptions {
+  /** Beta invite token from `/join/{token}` (#1582). */
+  invite?: string;
+}
 
 export function buildOAuthRedirect(
   provider: OAuthProvider,
   returnTo: string,
+  options?: BuildOAuthRedirectOptions,
 ): string {
   const absoluteReturnTo = new URL(returnTo, window.location.origin);
   if (
@@ -52,5 +63,9 @@ export function buildOAuthRedirect(
   )
     .replace(/\/api\/v1\/*$/, "")
     .replace(/\/+$/, "");
-  return `${apiBaseUrl}/api/v1/auth/${provider}/login?return_to=${encodeURIComponent(absoluteReturnTo.toString())}`;
+  const inviteParam =
+    typeof options?.invite === "string" && options.invite !== ""
+      ? `&invite=${encodeURIComponent(options.invite)}`
+      : "";
+  return `${apiBaseUrl}/api/v1/auth/${provider}/login?return_to=${encodeURIComponent(absoluteReturnTo.toString())}${inviteParam}`;
 }

@@ -91,3 +91,28 @@ async def test_unpublish_lock_is_unchanged() -> None:
     assert error is not None
     assert __import__("json").loads(error[0].text)["error"] == "cannot_make_private"
     assert ctx.is_public is True
+
+
+@pytest.mark.asyncio
+async def test_update_context_has_no_sharing_surface_to_gate() -> None:
+    """#1583: the REST shared gate is transition-only. MCP ``update_context``
+    cannot set ``is_private`` (or ``sleep_mode``) at all, so there is no gate
+    to align: an edit of a legacy shared context on M never meets a plan check,
+    and a stray ``is_private`` argument is ignored rather than applied."""
+    from mcp_server.tools._definitions import get_tool_definitions
+    from mcp_server.tools.context import _UPDATABLE_CONTEXT_FIELDS, _apply_context_updates
+
+    tool = next(t for t in get_tool_definitions() if t["name"] == "update_context")
+    for field in ("is_private", "sleep_mode"):
+        assert field not in tool["inputSchema"]["properties"]
+        assert field not in _UPDATABLE_CONTEXT_FIELDS
+
+    db = _db_for("basic")
+    ctx = SimpleNamespace(
+        workspace_id="ws-1", is_private=False, is_public=False, resource_id=None, summary=None
+    )
+    args = {"is_private": True, "summary": "new"}
+
+    assert await _apply_context_updates(db, ctx, args, "owner-1") is None
+    assert (ctx.summary, ctx.is_private) == ("new", False)
+    db.get.assert_not_awaited()
