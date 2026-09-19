@@ -9,6 +9,8 @@ exist inside real transactions:
 - **atomic single-use redemption** — N identities racing ONE link through the
   real ``SignupGateService.check_access``: exactly one is admitted, exactly one
   ``signup_allowlist`` row exists, every loser is blocked with nothing written;
+- **the two other races** — one identity finishing the sign-in in two tabs (both
+  admitted, one row, one spend) and a revoke racing a redeem (never both stamps);
 - **hash-only storage** — no column of the persisted row contains the token;
 - the gate's no-consume paths, on real rows.
 """
@@ -42,6 +44,9 @@ from utils.exceptions import (
 from utils.hashing import sha256_hex
 
 _PARALLEL = 12
+# A worker that raises before it reaches a sync point would otherwise leave the
+# rest waiting until the CI job times out. Every wait carries this timeout.
+_SYNC_TIMEOUT = 10.0
 
 
 def _new_user(role: str = "user") -> User:
@@ -139,6 +144,26 @@ async def _gate(session: AsyncSession, *, sub: str, token: str | None, provider:
         user_agent="pytest",
         beta_invite_token_hash=sha256_hex(token) if token else None,
     )
+
+
+async def _until_a_backend_waits_on_a_lock(
+    session_maker: async_sessionmaker[AsyncSession],
+) -> None:
+    """Return once some backend of this database is blocked on a lock.
+
+    ``pg_stat_activity`` is snapshotted per transaction, hence the rollback
+    between polls.
+    """
+    async with session_maker() as probe:
+        async with asyncio.timeout(_SYNC_TIMEOUT):
+            while not await probe.scalar(
+                text(
+                    "SELECT count(*) FROM pg_stat_activity "
+                    "WHERE datname = current_database() AND wait_event_type = 'Lock'"
+                )
+            ):
+                await probe.rollback()
+                await asyncio.sleep(0.02)
 
 
 class TestQuota:
@@ -365,8 +390,9 @@ class TestGateRedemption:
         assert await _gate(db_session, sub=sub, token=None, provider=provider) is None
 
     @pytest.mark.asyncio(loop_scope="session")
+    @pytest.mark.parametrize("provider", ["google", "github"])
     async def test_dead_tokens_do_not_pass_and_write_nothing(
-        self, db_session: AsyncSession, people: dict[str, str], closed_gate: None
+        self, db_session: AsyncSession, people: dict[str, str], closed_gate: None, provider: str
     ) -> None:
         svc = BetaInviteService(db_session)
         inviter = people["inviter"]
@@ -382,7 +408,9 @@ class TestGateRedemption:
 
         for token in (revoked, expired, "unknown-token-" + "z" * 30):
             sub = f"sub-{uuid4().hex[:12]}"
-            assert isinstance(await _gate(db_session, sub=sub, token=token), RedirectResponse)
+            assert isinstance(
+                await _gate(db_session, sub=sub, token=token, provider=provider), RedirectResponse
+            )
             rows = await db_session.scalar(
                 select(func.count(SignupAllowlistEntry.id)).where(
                     SignupAllowlistEntry.subject_id == sub
@@ -391,32 +419,37 @@ class TestGateRedemption:
             assert rows == 0
 
     @pytest.mark.asyncio(loop_scope="session")
+    @pytest.mark.parametrize("provider", ["google", "github"])
     async def test_existing_user_and_open_gate_leave_the_token_unused(
-        self, db_session: AsyncSession, people: dict[str, str], closed_gate: None
+        self, db_session: AsyncSession, people: dict[str, str], closed_gate: None, provider: str
     ) -> None:
         invite_id, token = await _mint(db_session, people["inviter"])
 
         # An existing user logging in with ?invite= is a login, not a redemption.
-        assert await _gate(db_session, sub=people["other"], token=token) is None
+        assert await _gate(db_session, sub=people["other"], token=token, provider=provider) is None
         assert await _status(db_session, invite_id) == "active"
 
         # Gate disabled -> the legacy env gate decides; never the invite path.
         await SignupGateService(db_session).update_config(enabled=False, mode="manual")
-        await _gate(db_session, sub=f"sub-{uuid4().hex[:12]}", token=token)
+        await _gate(db_session, sub=f"sub-{uuid4().hex[:12]}", token=token, provider=provider)
         assert await _status(db_session, invite_id) == "active"
 
     @pytest.mark.asyncio(loop_scope="session")
+    @pytest.mark.parametrize("provider", ["google", "github"])
     async def test_kill_switch_stops_redemption(
         self,
         db_session: AsyncSession,
         people: dict[str, str],
         closed_gate: None,
         monkeypatch: pytest.MonkeyPatch,
+        provider: str,
     ) -> None:
         invite_id, token = await _mint(db_session, people["inviter"])
         monkeypatch.setattr(get_settings(), "enable_beta_invites", False)
 
-        result = await _gate(db_session, sub=f"sub-{uuid4().hex[:12]}", token=token)
+        result = await _gate(
+            db_session, sub=f"sub-{uuid4().hex[:12]}", token=token, provider=provider
+        )
 
         assert isinstance(result, RedirectResponse)
         assert await _status(db_session, invite_id) == "active"
@@ -436,7 +469,7 @@ class TestGateRedemption:
 
         async def find_then_wait(self_, token_hash, now):
             invite = await real_find(self_, token_hash, now)
-            await barrier.wait()
+            await asyncio.wait_for(barrier.wait(), _SYNC_TIMEOUT)
             return invite
 
         monkeypatch.setattr(BetaInviteService, "find_redeemable", find_then_wait)
@@ -505,3 +538,112 @@ class TestGateRedemption:
         invite = await db_session.get(BetaInvite, invite_id)
         assert invite is not None
         assert invite.redeemed_allowlist_entry_id == winning_entry_id
+
+    @pytest.mark.asyncio(loop_scope="session")
+    async def test_same_identity_in_two_tabs_is_admitted_twice_and_written_once(
+        self,
+        async_engine,
+        db_session: AsyncSession,
+        people: dict[str, str],
+        closed_gate: None,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """One person opens the link in two tabs and finishes both sign-ins.
+
+        Both tabs pass the pre-check and INSERT the same ``(provider, subject_id,
+        source)`` allowlist row. The unique constraint serializes them: the second
+        gets ``IntegrityError``, rolls back and is answered from the winner's row.
+        Neither tab is bounced and the link is spent exactly once.
+        """
+        invite_id, token = await _mint(db_session, people["inviter"])
+        sub = f"sub-{uuid4().hex[:12]}"
+
+        results = await self._race(async_engine, monkeypatch, token, [sub, sub])
+
+        assert results == [True, True]
+        rows = await db_session.scalar(
+            select(func.count(SignupAllowlistEntry.id)).where(
+                SignupAllowlistEntry.subject_id == sub
+            )
+        )
+        assert rows == 1
+        assert await _status(db_session, invite_id) == "redeemed"
+
+    @pytest.mark.asyncio(loop_scope="session")
+    @pytest.mark.parametrize("first", ["redeem", "revoke"])
+    async def test_revoke_racing_a_redeem_never_leaves_both_stamps(
+        self,
+        async_engine,
+        db_session: AsyncSession,
+        people: dict[str, str],
+        closed_gate: None,
+        first: str,
+    ) -> None:
+        """The inviter revokes while the invitee is mid-callback.
+
+        Revoke (``redeemed_at IS NULL``) and the claim (``revoked_at IS NULL``)
+        are mirrored guarded UPDATEs on one row: whichever commits first wins and
+        the other matches nothing.
+
+        Both orders, made deterministic: the ``first`` side runs up to its COMMIT
+        and stops there holding the row lock; only then does the other side issue
+        its own UPDATE, which blocks on that lock; and only when Postgres reports
+        a backend waiting on a lock does the first side commit. The blocked
+        UPDATE then re-checks its WHERE against the committed row — the step the
+        whole design rests on — and must match nothing.
+        """
+        session_maker = async_sessionmaker(async_engine, expire_on_commit=False)
+        inviter = people["inviter"]
+        invite_id, token = await _mint(db_session, inviter)
+        sub = f"sub-{uuid4().hex[:12]}"
+        holding = asyncio.Event()
+
+        def hold_commit_until_the_rival_is_blocked(session: AsyncSession) -> None:
+            real_commit = session.commit
+
+            async def commit() -> None:
+                holding.set()
+                await _until_a_backend_waits_on_a_lock(session_maker)
+                await real_commit()
+
+            session.commit = commit  # type: ignore[method-assign]
+
+        async def redeem() -> bool:
+            async with session_maker() as session:
+                if first == "redeem":
+                    hold_commit_until_the_rival_is_blocked(session)
+                else:
+                    await asyncio.wait_for(holding.wait(), _SYNC_TIMEOUT)
+                return await _gate(session, sub=sub, token=token) is None
+
+        async def revoke() -> bool:
+            async with session_maker() as session:
+                if first == "revoke":
+                    hold_commit_until_the_rival_is_blocked(session)
+                else:
+                    await asyncio.wait_for(holding.wait(), _SYNC_TIMEOUT)
+                try:
+                    await BetaInviteService(session).revoke(
+                        user_id=inviter, invite_id=invite_id, user_email="x@y.invalid"
+                    )
+                except BetaInviteAlreadyRedeemedError:
+                    return False
+                return True
+
+        admitted, revoked = await asyncio.gather(redeem(), revoke())
+
+        # The side that held the lock won, and each side was told the truth.
+        assert (admitted, revoked) == ((True, False) if first == "redeem" else (False, True))
+        db_session.expire_all()
+        invite = await db_session.get(BetaInvite, invite_id)
+        assert invite is not None
+        assert not (invite.redeemed_at and invite.revoked_at), "invite is redeemed AND revoked"
+        assert invite.status == ("redeemed" if first == "redeem" else "revoked")
+        # The allowlist row exists exactly when the redeem won: the losing
+        # redeemer's INSERT went away with its failed claim.
+        rows = await db_session.scalar(
+            select(func.count(SignupAllowlistEntry.id)).where(
+                SignupAllowlistEntry.subject_id == sub
+            )
+        )
+        assert rows == (1 if first == "redeem" else 0)
