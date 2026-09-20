@@ -4,6 +4,20 @@ Release notes are published on [GitHub Releases](https://github.com/kagura-ai/me
 which is the canonical source for the complete release history. This file highlights the current
 release train and preserves selected historical development notes.
 
+## [v0.71.0](https://github.com/kagura-ai/memory-cloud/releases/tag/v0.71.0) — 2026-09-20
+
+Operational hygiene for the single-server template: bounded container logs, and proxy logs that never hold an invite token.
+
+### Fixed
+- **Container logs are bounded** ([#1591](https://github.com/kagura-ai/memory-cloud/issues/1591)): every service in `terraform/single-server/docker-compose.app.yml`, `docker-compose.prod.yml`, `docker-compose.data.yml` and `docker-compose.ollama.yml` declares `logging: json-file` with `max-size: 50m` / `max-file: 3` through a per-file `x-logging` anchor. A host that was not provisioned with a Docker `daemon.json` no longer lets the proxy's JSON access log grow until the disk fills. The options take effect when a container is (re)created.
+- **The Caddy template scrubs invite tokens from its logs** ([#1591](https://github.com/kagura-ai/memory-cloud/issues/1591)): `Caddyfile.tpl` logs through a `filter` encoder that replaces the token slot of `/join/<token>`, `/beta-invites/<token>/preview` and `invite=<token>` with `REDACTED` in `request>uri` and in the `Location` / `Refresh` response headers (a trailing-slash redirect echoes the path), and drops the `Referer`, `Cookie`, `Next-Url` and `Next-Router-State-Tree` request headers. The same scrub is applied to Caddy's **default logger**: when an upstream is down, Caddy writes a second `http.log.error` line about the request to stderr with the full URI and headers, so filtering the access log alone left a copy of the token in the same container log. Ordinary URIs are logged unchanged.
+
+### Notes
+- **Applying to a running stack:** re-render the Caddyfile and reload Caddy for the log format (no recreate needed). For rotation, run `docker compose … up -d --force-recreate caddy web` once — the API colours are recreated by every `deploy.sh` run; recreating a container also discards its old oversized log file; `postgres` / `qdrant` / `redis` restart when recreated, so do that in a maintenance window. A host-level `daemon.json` with the same limits remains a good default.
+- **Caddy 2.6.2+** is required for the response-header redaction (an older 2.x image silently skips it; the URI rewrite and the header deletes still work) — `docker compose pull caddy`.
+- No application code, API, migration or environment-variable change. With this template the proxy-log precondition for `ENABLE_BETA_INVITES` (see v0.70.0) is met out of the box; if you run a different proxy, replicate the scrub for both its access log and its error log. See Deployment → *Container log rotation* and *Closed-beta invite links*.
+- Two new bats suites (static pins, and a live suite against `caddy:2-alpine` including the 502 path) run in the CI `shell` job.
+
 ## [v0.70.0](https://github.com/kagura-ai/memory-cloud/releases/tag/v0.70.0) — 2026-09-19
 
 Closed-beta invite links, an admin environment console that tells the truth, and a sharing gate that no longer blocks unrelated context edits.
