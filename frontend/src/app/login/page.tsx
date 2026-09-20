@@ -8,6 +8,8 @@
  * Issue #223: i18n support.
  * Issue #315: GitHub OAuth2.
  * Issue #360: Provider discovery.
+ * Issue #1594: a visitor who already holds a session is forwarded, not shown
+ * the form.
  */
 
 import { useEffect, useRef, useState, Suspense } from "react";
@@ -28,15 +30,58 @@ import {
 } from "@/lib/auth/auth";
 import { safeReturnTo } from "@/lib/auth/safeReturnTo";
 import { buildOAuthRedirect } from "@/lib/auth/buildOAuthRedirect";
+import { useAuth } from "@/contexts/AuthContext";
 import { ArrowRight, Info, Sparkles, Shield, Zap } from "lucide-react";
 import { ErrorBanner } from "@/components/common/ErrorBanner";
 import { KaguraLogo } from "@/components/icons/KaguraLogo";
 import { LanguageSelector } from "@/components/LanguageSelector";
 
+// #1594: how long the form waits for the session check before rendering
+// anyway. A slow or broken /auth/me must never lock anyone out of /login.
+const SESSION_CHECK_TIMEOUT_MS = 3_000;
+
+const DEFAULT_FORWARD_TARGET = "/workspace/dashboard";
+
+/**
+ * #1594: where a live session is forwarded to.
+ *
+ * The forward is the one place the frontend navigates to `return_to` by
+ * itself — everywhere else the value goes to the backend, or through
+ * buildOAuthRedirect, and both re-validate it. So the already-sanitized value
+ * is not trusted as a string here: it is resolved the way the router will
+ * resolve it, must land on this origin, and is handed over as a path.
+ *
+ * The second resolve is not redundant. A same-origin URL can carry a `//host`
+ * pathname (`https://app.example//evil.example`), which reads as
+ * protocol-relative once reduced to a path.
+ *
+ * Browser only (reads `window`) — call it from an effect, not during render.
+ */
+function resolveForwardTarget(returnTo: string | undefined): string {
+  if (!returnTo) return DEFAULT_FORWARD_TARGET;
+  try {
+    const { origin } = window.location;
+    const url = new URL(returnTo, origin);
+    if (url.origin !== origin) return DEFAULT_FORWARD_TARGET;
+    const path = `${url.pathname}${url.search}${url.hash}`;
+    if (new URL(path, origin).origin !== origin) return DEFAULT_FORWARD_TARGET;
+    return path;
+  } catch {
+    return DEFAULT_FORWARD_TARGET;
+  }
+}
+
 function LoginContent() {
   const t = useTranslations("login");
   const router = useRouter();
   const searchParams = useSearchParams();
+  // #1594: the session comes from the AuthProvider (root layout — one
+  // GET /auth/me per page load), NOT from a second probe of our own. The
+  // (authenticated) layout guard trusts this same state, so the two can never
+  // disagree; an independent check here could answer "signed in" while the
+  // guard still holds `user === null` (failed sign-out, transient error on the
+  // provider's first fetch) and the two would bounce the visitor forever.
+  const { user, isLoading: authLoading } = useAuth();
 
   const [loadingAction, setLoadingAction] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -69,6 +114,38 @@ function LoginContent() {
   const isMockAuth =
     process.env.NODE_ENV === "development" &&
     process.env.NEXT_PUBLIC_ENABLE_MOCK_AUTH === "true";
+
+  // #1594: forward a live session instead of offering a second sign-in, which
+  // would invalidate the session the visitor already holds (#114).
+  //
+  // Skipped exactly when the mount effect below has a banner to show — the
+  // same two conditions it tests. An `email_in_use` error can arrive while
+  // ANOTHER account's session is live, and the banner must win. Mock auth keeps
+  // its own redirect.
+  const hasBanner =
+    Boolean(searchParams.get("error")) || searchParams.get("cancelled") === "1";
+  const skipForward = hasBanner || isMockAuth;
+  const shouldForward = !skipForward && !authLoading && user !== null;
+  const [sessionCheckTimedOut, setSessionCheckTimedOut] = useState(false);
+
+  useEffect(() => {
+    if (!shouldForward) return;
+    // The sanitized value only — never the raw parameter — and re-resolved
+    // same-origin on top of that. replace, not push: Back must not land on a
+    // page that bounces forward again.
+    router.replace(resolveForwardTarget(returnTo));
+  }, [shouldForward, returnTo, router]);
+
+  useEffect(() => {
+    if (skipForward || !authLoading) return;
+    // Fail open. Cleared when the check settles and on unmount, so it never
+    // sets state on an unmounted page.
+    const timer = setTimeout(
+      () => setSessionCheckTimedOut(true),
+      SESSION_CHECK_TIMEOUT_MS,
+    );
+    return () => clearTimeout(timer);
+  }, [skipForward, authLoading]);
 
   useEffect(() => {
     const errorParam = searchParams.get("error");
@@ -247,6 +324,16 @@ function LoginContent() {
         </div>
       </div>
     );
+  }
+
+  // #1594: nothing but the neutral placeholder until the session check settles
+  // (or times out), and from then on while a forward is in flight — a
+  // signed-in visitor never sees the form.
+  if (
+    !skipForward &&
+    (shouldForward || (authLoading && !sessionCheckTimedOut))
+  ) {
+    return <SessionCheckPlaceholder />;
   }
 
   return (
@@ -621,18 +708,38 @@ function LoginContent() {
   );
 }
 
+/**
+ * #1594: the neutral full-page placeholder. Used twice — as the Suspense
+ * fallback (what a full page load paints first: the page is prerendered and
+ * useSearchParams() suspends until hydration) and by LoginContent while the
+ * session check is pending or a forward is in flight. One component, so both
+ * announce themselves (`role="status"` + translated label) and swapping one
+ * for the other is not a visual step.
+ *
+ * Fixed-light colours like the rest of /login, which is why this is not the
+ * theme-aware SpinnerLoading. Deliberately no h1 / form / main: the e2e
+ * `gotoAndWaitStable` helper waits on those landmarks and must keep waiting
+ * for the real form, not settle on this.
+ */
+function SessionCheckPlaceholder() {
+  const t = useTranslations("login");
+  return (
+    <div
+      role="status"
+      className="flex min-h-screen items-center justify-center bg-white"
+    >
+      <div className="relative">
+        <div className="h-16 w-16 animate-spin rounded-full border-4 border-[#e6f0ec] border-t-kagura-accent" />
+        <div className="absolute inset-0 h-16 w-16 animate-ping rounded-full border-4 border-kagura-accent opacity-20" />
+      </div>
+      <span className="sr-only">{t("checkingSession")}</span>
+    </div>
+  );
+}
+
 export default function LoginPage() {
   return (
-    <Suspense
-      fallback={
-        <div className="flex min-h-screen items-center justify-center bg-white">
-          <div className="relative">
-            <div className="h-16 w-16 animate-spin rounded-full border-4 border-[#e6f0ec] border-t-kagura-accent" />
-            <div className="absolute inset-0 h-16 w-16 animate-ping rounded-full border-4 border-kagura-accent opacity-20" />
-          </div>
-        </div>
-      }
-    >
+    <Suspense fallback={<SessionCheckPlaceholder />}>
       <LoginContent />
     </Suspense>
   );

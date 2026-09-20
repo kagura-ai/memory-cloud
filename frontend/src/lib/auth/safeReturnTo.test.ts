@@ -92,6 +92,50 @@ describe("safeReturnTo", () => {
   });
 
   // -------------------------------------------------------------------------
+  // Reject cases — backslash and control characters (#1594)
+  //
+  // Every input below starts with a single `/`, so the prefix checks alone
+  // accept it — yet a WHATWG URL parser reads `\` as `/` and drops TAB/LF/CR,
+  // so each one resolves to another origin once something navigates to it.
+  // -------------------------------------------------------------------------
+
+  describe("reject — backslash and control characters", () => {
+    const CROSS_ORIGIN_AFTER_PARSING: [string, string][] = [
+      ["backslash", "/\\evil.example"],
+      ["backslash-slash", "/\\/evil.example"],
+      ["embedded TAB", "/\t/evil.example"],
+      ["embedded LF", "/\n/evil.example"],
+      ["embedded CR", "/\r/evil.example"],
+    ];
+
+    it.each(CROSS_ORIGIN_AFTER_PARSING)("rejects %s", (_label, value) => {
+      // The premise: a URL parser really does take this off-origin.
+      expect(new URL(value, ORIGIN).origin).not.toBe(ORIGIN);
+      expect(safeReturnTo(value, ORIGIN)).toBeUndefined();
+    });
+
+    it("rejects an embedded NUL", () => {
+      const value = `/device${String.fromCharCode(0)}/x`;
+      expect(safeReturnTo(value, ORIGIN)).toBeUndefined();
+    });
+
+    it("rejects a backslash deeper in the path", () => {
+      expect(safeReturnTo("/device\\..\\x", ORIGIN)).toBeUndefined();
+    });
+
+    it("rejects a backslash in a same-origin absolute URL", () => {
+      expect(
+        safeReturnTo(`${ORIGIN}\\@evil.example/x`, ORIGIN),
+      ).toBeUndefined();
+    });
+
+    it("still trims surrounding whitespace before the check", () => {
+      // Leading/trailing TAB/LF are trimmed away, not treated as embedded.
+      expect(safeReturnTo("\t/dashboard\n", ORIGIN)).toBe("/dashboard");
+    });
+  });
+
+  // -------------------------------------------------------------------------
   // Reject cases — dangerous schemes
   // -------------------------------------------------------------------------
 

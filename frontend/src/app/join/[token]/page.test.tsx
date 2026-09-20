@@ -182,9 +182,12 @@ describe("/join/[token] — valid", () => {
       fireEvent.click(await screen.findByRole("button", { name: label }));
 
       await waitFor(() => expect(hrefAssignments).toHaveLength(1));
+      // #1594: the invitee comes back to the dashboard, not to "/" — the site
+      // root only redirects to /login, which showed a signed-in person the
+      // login form again.
       expect(hrefAssignments[0]).toBe(
         `https://api.example.com/api/v1/auth/${provider}/login` +
-          `?return_to=${encodeURIComponent(`${FRONTEND_ORIGIN}/`)}` +
+          `?return_to=${encodeURIComponent(`${FRONTEND_ORIGIN}/workspace/dashboard`)}` +
           `&invite=${encodeURIComponent(TOKEN)}`,
       );
     },

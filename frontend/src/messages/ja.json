@@ -235,6 +235,7 @@
     "backToHome": "← ホームに戻る",
     "mockAuthEnabled": "モック認証が有効",
     "redirectingToDashboard": "ダッシュボードにリダイレクト中...",
+    "checkingSession": "セッションを確認中...",
     "failedToLogin": "ログインの開始に失敗しました",
     "agreeToTerms": "次に同意します：",
     "termsAndPrivacy": "および",

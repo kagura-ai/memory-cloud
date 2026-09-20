@@ -9,6 +9,7 @@
 
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
+  act,
   cleanup,
   fireEvent,
   render,
@@ -16,6 +17,9 @@ import {
   waitFor,
 } from "@testing-library/react";
 
+import { AuthProvider } from "@/contexts/AuthContext";
+import en from "@/messages/en.json";
+import ja from "@/messages/ja.json";
 import LoginPage from "./page";
 
 // ---------- Mocks ------------------------------------------------------------
@@ -25,6 +29,9 @@ const mockLoginWithPassword = vi.fn();
 const mockVerifyMfa = vi.fn();
 const mockGetAuthUrl = vi.fn();
 const mockGetGitHubAuthUrl = vi.fn();
+// #1594: the session check. The real AuthProvider (mounted in the root layout,
+// so it wraps /login in the app) calls this once on mount — GET /auth/me.
+const mockGetCurrentUser = vi.fn();
 
 vi.mock("@/lib/auth/auth", () => ({
   getAuthUrl: (...args: unknown[]) => mockGetAuthUrl(...args),
@@ -32,20 +39,48 @@ vi.mock("@/lib/auth/auth", () => ({
   getAuthConfig: (...args: unknown[]) => mockGetAuthConfig(...args),
   loginWithPassword: (...args: unknown[]) => mockLoginWithPassword(...args),
   verifyMfa: (...args: unknown[]) => mockVerifyMfa(...args),
+  getCurrentUser: (...args: unknown[]) => mockGetCurrentUser(...args),
+  logout: vi.fn(),
 }));
+
+// #1594: the real guard, unless a test flips `enabled` to simulate a guard that
+// lets a hostile value through — that is how the forward's own same-origin
+// resolution gets exercised. Reset in beforeEach.
+const safeReturnToBypass = { enabled: false };
+vi.mock("@/lib/auth/safeReturnTo", async (importOriginal) => {
+  const actual =
+    await importOriginal<typeof import("@/lib/auth/safeReturnTo")>();
+  return {
+    safeReturnTo: (value: string | null | undefined, origin: string) =>
+      safeReturnToBypass.enabled
+        ? (value ?? undefined)
+        : actual.safeReturnTo(value, origin),
+  };
+});
 
 vi.mock("next-intl", () => ({
   useTranslations: () => (k: string) => k,
 }));
 
 const mockPush = vi.fn();
+const mockReplace = vi.fn();
+// Stable router object, like the real useRouter(): the #1594 forward effect
+// lists `router` in its dependency array, so a fresh object per render would
+// re-run it and make the replace() call counts below meaningless.
+const mockRouter = { push: mockPush, replace: mockReplace };
 // Stable URLSearchParams instance — LoginPage's useEffect lists `searchParams`
 // in its dependency array, so a fresh instance per render would re-run the
 // effect (and getAuthConfig() / state updates) unnecessarily during tests.
 const mockSearchParams = new URLSearchParams();
+// #1594: lets a test hold useSearchParams() suspended — as it is while the
+// prerendered page hydrates — so the Suspense fallback stays on screen.
+const searchParamsSuspense = { pending: null as Promise<never> | null };
 vi.mock("next/navigation", () => ({
-  useRouter: () => ({ push: mockPush }),
-  useSearchParams: () => mockSearchParams,
+  useRouter: () => mockRouter,
+  useSearchParams: () => {
+    if (searchParamsSuspense.pending) throw searchParamsSuspense.pending;
+    return mockSearchParams;
+  },
 }));
 
 vi.mock("@/components/LanguageSelector", () => ({
@@ -56,17 +91,46 @@ vi.mock("@/components/LanguageSelector", () => ({
 
 const SESSION_TOKEN = "mfa-session-token-stub";
 
+const SIGNED_IN_USER = {
+  id: "user-1",
+  email: "user@example.com",
+  name: "Signed-in User",
+};
+
+/**
+ * Render /login the way the app does: inside the real AuthProvider, which the
+ * root layout mounts around every page. The page reads the session from that
+ * provider (#1594), so every test goes through this helper.
+ */
+function renderLogin() {
+  return render(
+    <AuthProvider>
+      <LoginPage />
+    </AuthProvider>,
+  );
+}
+
 beforeEach(() => {
   mockGetAuthConfig.mockReset();
   mockLoginWithPassword.mockReset();
   mockVerifyMfa.mockReset();
   mockGetAuthUrl.mockReset();
   mockGetGitHubAuthUrl.mockReset();
+  mockGetCurrentUser.mockReset();
   mockPush.mockReset();
+  mockReplace.mockReset();
+  safeReturnToBypass.enabled = false;
+  searchParamsSuspense.pending = null;
   // Clear URL params between tests so return_to from one test doesn't bleed
   for (const key of [...mockSearchParams.keys()]) {
     mockSearchParams.delete(key);
   }
+
+  // Signed out by default (#1594): GET /auth/me answers 401, which
+  // getCurrentUser() reports as null — the ordinary /login visitor. Shared
+  // here so the pre-#1594 tests below reach the form without each one
+  // restating it; the "live session" block overrides it per test.
+  mockGetCurrentUser.mockResolvedValue(null);
 
   mockGetAuthConfig.mockResolvedValue({
     password_login_enabled: true,
@@ -81,12 +145,14 @@ beforeEach(() => {
 
 afterEach(() => {
   cleanup();
+  // The session-check timeout test (#1594) installs fake timers.
+  vi.useRealTimers();
   vi.restoreAllMocks();
 });
 
 /** Drive password → MFA-required transition and return the totp Input. */
 async function reachMfaForm(): Promise<HTMLInputElement> {
-  render(<LoginPage />);
+  renderLogin();
 
   // Wait for auth config to resolve and admin password form to render.
   const loginIdInput = (await screen.findByLabelText(
@@ -178,7 +244,7 @@ describe("LoginPage MFA form — Enter key submit (#484)", () => {
  * mockSearchParams and mockLoginWithPassword before calling this helper.
  */
 async function submitPasswordLogin(): Promise<unknown[]> {
-  render(<LoginPage />);
+  renderLogin();
 
   const loginIdInput = (await screen.findByLabelText(
     "loginId",
@@ -261,7 +327,7 @@ async function clickOAuthButton(provider: "google" | "github"): Promise<void> {
     github_oauth_enabled: provider === "github",
   });
 
-  render(<LoginPage />);
+  renderLogin();
 
   const buttonName =
     provider === "google" ? /continueWithGoogle/i : /continueWithGitHub/i;
@@ -281,7 +347,7 @@ describe("LoginPage OAuth failure banners (#1381)", () => {
   // never render the raw token, and keep the cancel notice separate.
   it("shows the failed banner for ?error=oauth_failed", async () => {
     mockSearchParams.set("error", "oauth_failed");
-    render(<LoginPage />);
+    renderLogin();
 
     expect(await screen.findByText("oauthFailed")).toBeTruthy();
     // The raw token itself is not rendered as banner text.
@@ -290,7 +356,7 @@ describe("LoginPage OAuth failure banners (#1381)", () => {
 
   it("shows the expired banner for ?error=oauth_expired", async () => {
     mockSearchParams.set("error", "oauth_expired");
-    render(<LoginPage />);
+    renderLogin();
 
     expect(await screen.findByText("oauthExpired")).toBeTruthy();
     expect(screen.queryByText("oauth_expired")).toBeNull();
@@ -298,7 +364,7 @@ describe("LoginPage OAuth failure banners (#1381)", () => {
 
   it("keeps the cancelled notice separate from the failure banner", async () => {
     mockSearchParams.set("cancelled", "1");
-    render(<LoginPage />);
+    renderLogin();
 
     expect(await screen.findByText("signinCancelled")).toBeTruthy();
     expect(screen.queryByText("oauthFailed")).toBeNull();
@@ -431,5 +497,326 @@ describe("LoginPage OAuth return_to forwarding (#774)", () => {
       expect(mockGetAuthUrl).toHaveBeenCalledTimes(1);
     });
     expect(mockGetAuthUrl).toHaveBeenCalledWith();
+  });
+});
+
+// ---------- A live session is forwarded away from /login (#1594) -------------
+
+/**
+ * A signed-in visitor must never see the login form: signing in a second time
+ * invalidates the session they already hold (#114). The session comes from the
+ * AuthProvider — the same source the (authenticated) layout guard trusts — so
+ * /login and that guard cannot disagree and bounce a visitor between them.
+ */
+describe("LoginPage forwards a live session (#1594)", () => {
+  /** True once the login form (not the session-check placeholder) is on screen. */
+  const formIsRendered = () =>
+    screen.queryByRole("heading", { name: "signInToAccount" }) !== null;
+
+  it("replaces to the dashboard without ever rendering the form", async () => {
+    mockGetCurrentUser.mockResolvedValue(SIGNED_IN_USER);
+    const sawForm: boolean[] = [];
+    const observer = new MutationObserver(() => sawForm.push(formIsRendered()));
+    observer.observe(document.body, { childList: true, subtree: true });
+
+    renderLogin();
+    sawForm.push(formIsRendered());
+
+    await waitFor(() => {
+      expect(mockReplace).toHaveBeenCalledWith("/workspace/dashboard");
+    });
+    observer.disconnect();
+
+    expect(mockReplace).toHaveBeenCalledTimes(1);
+    // replace, not push: Back must not return to a page that bounces forward.
+    expect(mockPush).not.toHaveBeenCalled();
+    // Not before the check settled, not while the navigation is in flight.
+    expect(sawForm).not.toContain(true);
+    expect(formIsRendered()).toBe(false);
+    expect(screen.getByRole("status")).toHaveTextContent("checkingSession");
+  });
+
+  it("replaces to a safe return_to instead of the default", async () => {
+    mockGetCurrentUser.mockResolvedValue(SIGNED_IN_USER);
+    mockSearchParams.set("return_to", "/device?user_code=ABC");
+    renderLogin();
+
+    await waitFor(() => {
+      expect(mockReplace).toHaveBeenCalledWith("/device?user_code=ABC");
+    });
+    expect(mockReplace).toHaveBeenCalledTimes(1);
+  });
+
+  /**
+   * The property that matters at the sink: whatever reached replace() stays on
+   * this origin once a URL parser has had its way with it. Next's router
+   * resolves the href exactly like this and hard-navigates when it is external.
+   */
+  const expectSameOriginForward = () => {
+    const target = mockReplace.mock.calls[0][0] as string;
+    expect(new URL(target, window.location.href).origin).toBe(
+      window.location.origin,
+    );
+  };
+
+  it.each([
+    ["protocol-relative", "//evil.example"],
+    ["cross-origin absolute", "https://evil.example/x"],
+    ["javascript: scheme", "javascript:alert(1)"],
+    // Single leading `/`, so a prefix check alone lets these through — but a
+    // URL parser reads `\` as `/` and drops TAB/LF/CR: all four are //evil.
+    ["backslash", "/\\evil.example"],
+    ["backslash-slash", "/\\/evil.example"],
+    ["embedded TAB", "/\t/evil.example"],
+    ["embedded LF", "/\n/evil.example"],
+    ["embedded CR", "/\r/evil.example"],
+  ])(
+    "falls back to the dashboard for a hostile return_to (%s)",
+    async (_label, hostile) => {
+      mockGetCurrentUser.mockResolvedValue(SIGNED_IN_USER);
+      mockSearchParams.set("return_to", hostile);
+      renderLogin();
+
+      await waitFor(() => {
+        expect(mockReplace).toHaveBeenCalledTimes(1);
+      });
+      // Only ever the sanitized value — the raw parameter never reaches replace().
+      expect(mockReplace).toHaveBeenCalledWith("/workspace/dashboard");
+      expectSameOriginForward();
+    },
+  );
+
+  it("forwards a same-origin absolute return_to as a path", async () => {
+    mockGetCurrentUser.mockResolvedValue(SIGNED_IN_USER);
+    mockSearchParams.set(
+      "return_to",
+      `${window.location.origin}/device?user_code=ABC#step`,
+    );
+    renderLogin();
+
+    await waitFor(() => {
+      expect(mockReplace).toHaveBeenCalledWith("/device?user_code=ABC#step");
+    });
+    expect(mockReplace).toHaveBeenCalledTimes(1);
+    expectSameOriginForward();
+  });
+
+  it("falls back when a same-origin URL carries a //host pathname", async () => {
+    // safeReturnTo accepts this one — its origin really is ours — but reduced
+    // to a path it reads "//evil.example", i.e. protocol-relative.
+    mockGetCurrentUser.mockResolvedValue(SIGNED_IN_USER);
+    mockSearchParams.set(
+      "return_to",
+      `${window.location.origin}//evil.example/x`,
+    );
+    renderLogin();
+
+    await waitFor(() => {
+      expect(mockReplace).toHaveBeenCalledTimes(1);
+    });
+    expect(mockReplace).toHaveBeenCalledWith("/workspace/dashboard");
+    expectSameOriginForward();
+  });
+
+  it.each([
+    ["backslash", "/\\evil.example"],
+    ["embedded TAB", "/\t/evil.example"],
+    ["protocol-relative", "//evil.example"],
+    ["cross-origin absolute", "https://evil.example/x"],
+  ])(
+    "resolves the target same-origin even if safeReturnTo lets %s through",
+    async (_label, hostile) => {
+      // Defence in depth: the forward is the one place the frontend navigates
+      // to return_to by itself, so it must not rest on the guard alone.
+      safeReturnToBypass.enabled = true;
+      mockGetCurrentUser.mockResolvedValue(SIGNED_IN_USER);
+      mockSearchParams.set("return_to", hostile);
+      renderLogin();
+
+      await waitFor(() => {
+        expect(mockReplace).toHaveBeenCalledTimes(1);
+      });
+      expect(mockReplace).toHaveBeenCalledWith("/workspace/dashboard");
+      expectSameOriginForward();
+    },
+  );
+
+  it.each([
+    ["error=email_in_use", { error: "email_in_use" }, "emailInUse"],
+    ["error=oauth_failed", { error: "oauth_failed" }, "oauthFailed"],
+    ["an unknown error value", { error: "something_new" }, "something_new"],
+    ["cancelled=1", { cancelled: "1" }, "signinCancelled"],
+  ])(
+    "with %s the banner wins: no forward, form rendered at once",
+    async (_label, params, bannerText) => {
+      // e.g. email_in_use arrives while ANOTHER account's session is live.
+      mockGetCurrentUser.mockResolvedValue(SIGNED_IN_USER);
+      for (const [key, value] of Object.entries(params)) {
+        mockSearchParams.set(key, value);
+      }
+      renderLogin();
+
+      // Rendered on the first pass — not held back behind the session check.
+      expect(formIsRendered()).toBe(true);
+      expect(screen.queryByRole("status")).toBeNull();
+      expect(await screen.findByText(bannerText)).toBeTruthy();
+
+      // Let the session check settle as signed-in: still no navigation.
+      await waitFor(() => expect(mockGetCurrentUser).toHaveBeenCalled());
+      await act(async () => {});
+      expect(mockReplace).not.toHaveBeenCalled();
+      expect(mockPush).not.toHaveBeenCalled();
+      expect(formIsRendered()).toBe(true);
+    },
+  );
+
+  it("shows an accessible placeholder, then the form, for a signed-out visitor (401)", async () => {
+    // beforeEach default: getCurrentUser() → null, i.e. /auth/me said 401.
+    renderLogin();
+
+    const status = screen.getByRole("status");
+    expect(status).toHaveTextContent("checkingSession");
+    expect(formIsRendered()).toBe(false);
+    // frontend/e2e/fixtures.ts gotoAndWaitStable() waits on "h1, form, main
+    // button, main" before running axe. If the placeholder matched that, the
+    // hermetic /login contrast spec would audit a spinner and pass vacuously.
+    expect(document.querySelector("h1, form, main")).toBeNull();
+
+    expect(
+      await screen.findByRole("heading", { name: "signInToAccount" }),
+    ).toBeTruthy();
+    expect(screen.queryByRole("status")).toBeNull();
+    expect(mockReplace).not.toHaveBeenCalled();
+    // One /auth/me per page view — the AuthProvider's. No second probe.
+    expect(mockGetCurrentUser).toHaveBeenCalledTimes(1);
+  });
+
+  it("labels the Suspense fallback exactly like the placeholder", async () => {
+    // /login is prerendered and useSearchParams() suspends, so the fallback
+    // is what a full page load paints first — before LoginContent can show
+    // its own placeholder. It has to announce itself too, and swapping one for
+    // the other must not be a visual step.
+    searchParamsSuspense.pending = new Promise<never>(() => {});
+    const suspended = renderLogin();
+
+    const fallback = screen.getByRole("status");
+    expect(fallback).toHaveTextContent("checkingSession");
+    expect(document.querySelector("h1, form, main")).toBeNull();
+    expect(formIsRendered()).toBe(false);
+    const fallbackMarkup = fallback.outerHTML;
+    suspended.unmount();
+
+    // Not suspended, session check still pending: LoginContent's placeholder.
+    searchParamsSuspense.pending = null;
+    mockGetCurrentUser.mockReturnValue(new Promise(() => {}));
+    renderLogin();
+    expect(screen.getByRole("status").outerHTML).toBe(fallbackMarkup);
+  });
+
+  it("fails open to the form when the session check rejects (5xx / network)", async () => {
+    vi.spyOn(console, "error").mockImplementation(() => {});
+    mockGetCurrentUser.mockRejectedValue(
+      Object.assign(new Error("Service Unavailable"), { status: 503 }),
+    );
+    renderLogin();
+
+    expect(
+      await screen.findByRole("heading", { name: "signInToAccount" }),
+    ).toBeTruthy();
+    expect(mockReplace).not.toHaveBeenCalled();
+  });
+
+  it("fails open to the form when the session check never settles", async () => {
+    vi.useFakeTimers();
+    let settleCheck!: (user: typeof SIGNED_IN_USER | null) => void;
+    mockGetCurrentUser.mockImplementation(
+      () =>
+        new Promise((resolve) => {
+          settleCheck = resolve;
+        }),
+    );
+    renderLogin();
+
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(2_900);
+    });
+    expect(formIsRendered()).toBe(false);
+    expect(screen.getByRole("status")).toBeTruthy();
+
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(200);
+    });
+    // A broken /auth/me must never lock anyone out of the login page.
+    expect(formIsRendered()).toBe(true);
+    expect(screen.queryByRole("status")).toBeNull();
+    expect(mockReplace).not.toHaveBeenCalled();
+
+    // The slow answer finally says "signed in": forward after all — leaving
+    // the form up would let them sign in again and lose that session.
+    await act(async () => {
+      settleCheck(SIGNED_IN_USER);
+    });
+    expect(mockReplace).toHaveBeenCalledTimes(1);
+    expect(mockReplace).toHaveBeenCalledWith("/workspace/dashboard");
+    expect(formIsRendered()).toBe(false);
+  });
+
+  it("clears the timeout when the check settles, and on unmount", async () => {
+    vi.useFakeTimers();
+
+    // Settled (signed out): nothing left ticking behind the form.
+    const settled = renderLogin();
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(0);
+    });
+    expect(formIsRendered()).toBe(true);
+    expect(vi.getTimerCount()).toBe(0);
+    settled.unmount();
+
+    // Unmounted mid-check: the pending timer goes with the page.
+    mockGetCurrentUser.mockImplementation(() => new Promise(() => {}));
+    const pending = renderLogin();
+    expect(vi.getTimerCount()).toBe(1);
+    pending.unmount();
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it("leaves the password path's own post-login navigation alone", async () => {
+    // Signed out → form → password login succeeds with no redirect_url. The
+    // page's existing router.push owns this hop; the forward effect must not
+    // also fire (the AuthProvider is not refetched by a password login).
+    mockLoginWithPassword.mockResolvedValue({ mfa_required: false });
+    await submitPasswordLogin();
+
+    await waitFor(() => {
+      expect(mockPush).toHaveBeenCalledWith("/workspace/dashboard");
+    });
+    expect(mockReplace).not.toHaveBeenCalled();
+  });
+
+  it("keeps the dev mock-auth redirect as it was", async () => {
+    // In mock mode the AuthProvider hands out a mock user. Unguarded, the
+    // forward would replace() to the dashboard on top of the existing push.
+    vi.spyOn(console, "warn").mockImplementation(() => {});
+    vi.stubEnv("NODE_ENV", "development");
+    vi.stubEnv("NEXT_PUBLIC_ENABLE_MOCK_AUTH", "true");
+    try {
+      renderLogin();
+
+      await waitFor(() => {
+        expect(mockPush).toHaveBeenCalledWith("/workspace/contexts");
+      });
+      await act(async () => {});
+      expect(mockReplace).not.toHaveBeenCalled();
+      expect(screen.getByText("mockAuthEnabled")).toBeTruthy();
+    } finally {
+      vi.unstubAllEnvs();
+    }
+  });
+
+  it("has the placeholder label in both catalogs", () => {
+    // Component tests mock useTranslations, so a missing key would not show.
+    expect(en.login.checkingSession).toBeTruthy();
+    expect(ja.login.checkingSession).toBeTruthy();
   });
 });

@@ -235,6 +235,7 @@
     "backToHome": "← Back to home",
     "mockAuthEnabled": "Mock Authentication Enabled",
     "redirectingToDashboard": "Redirecting to dashboard...",
+    "checkingSession": "Checking your session...",
     "failedToLogin": "Failed to initiate login",
     "agreeToTerms": "I agree to the",
     "termsAndPrivacy": "and",
