@@ -173,7 +173,7 @@ CADDYEOF
     # of every request whose upstream failed.
     for _ in $(seq 1 20); do
         [ "$(docker logs "$NAME" 2> /dev/null | grep -c '"scrub-case-')" -ge "$EXPECTED_CASES" ] \
-            && [ "$(docker logs "$NAME" 2>&1 > /dev/null | grep -c '"http\.log\.error')" -ge "$EXPECTED_ERRORS" ] \
+            && [ "$(docker logs "$NAME" 2>&1 > /dev/null | grep '"http\.log\.error' | grep -c '"scrub-case-')" -ge "$EXPECTED_ERRORS" ] \
             && break
         sleep 0.25
     done
@@ -400,7 +400,10 @@ log0 writes to: stdout'
         run err_logged "$c" status
         expect "$output" "502"
     done
-    run grep -c '"http\.log\.error' "$WORK/runtime.log"
+    # Only this suite's own lines are counted (as for the access log): a
+    # readiness probe that lands while Caddy is still binding its listeners
+    # may leave an error line of its own.
+    run bash -c 'grep "\"http\.log\.error" "$1" | grep -c "\"scrub-case-"' _ "$WORK/runtime.log"
     [ "$output" -eq "$EXPECTED_ERRORS" ]
     # ...and none of them went to stdout, where the site's filter would apply.
     run grep -c '"http\.log\.error' "$WORK/access.log"
