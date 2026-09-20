@@ -19,11 +19,25 @@
 # bump machine_type in terraform.tfvars before switching.
 # =============================================================================
 
+# Container log rotation (#1591) — json-file capped at 50m x 3 on every service
+# this file defines, so the disk is bounded without relying on the host's
+# daemon.json. Rationale, and how to apply it to a running stack (`logging` is
+# fixed at container creation), are in docker-compose.app.yml / README.md "Logs".
+# YAML anchors are per-file, hence the repeat; log_hygiene_static.bats pins it.
+# Only `ollama` needs it here: the api-blue / api-green entries below merely
+# patch the base services and inherit their logging through the compose merge.
+x-logging: &default-logging
+  driver: json-file
+  options:
+    max-size: "50m"
+    max-file: "3"
+
 services:
   ollama:
     image: ollama/ollama:latest
     container_name: kagura-ollama
     restart: always
+    logging: *default-logging
     volumes:
       - ollama_data:/root/.ollama
     healthcheck:
