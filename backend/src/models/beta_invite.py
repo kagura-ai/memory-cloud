@@ -1,4 +1,4 @@
-"""Closed-beta invite link model (Issue #1581).
+"""Closed-beta invite link model (Issues #1581, #1595).
 
 A beta invite is a one-time pass through the **platform signup gate**
 (``models/signup_gate.py``). It is deliberately separate from
@@ -11,6 +11,10 @@ The plaintext exists in exactly one place: the ``POST /beta-invites`` response.
 
 Status is **derived**, never stored, so it cannot disagree with the timestamps
 that the atomic redeem ``UPDATE`` and the quota ``COUNT`` filter on.
+
+``label`` (#1595) is the inviter's own note about who a link went to. It is free
+text that may hold a name or an address, so it lives on this row and in the
+inviter's own API responses only — never in a log line, an audit row or an error.
 """
 
 from __future__ import annotations
@@ -50,8 +54,14 @@ class BetaInvite(Base):
         redeemed_at: Set once, by the signup gate's atomic redeem ``UPDATE``.
         redeemed_allowlist_entry_id: The ``signup_allowlist`` row written at
             redemption. ``ON DELETE SET NULL`` — an admin pruning that row does
-            not un-redeem the invite. Never exposed to the inviter.
-        revoked_at: Set when the inviter revokes an unused link.
+            not un-redeem the invite. The id itself is never exposed; since
+            #1595 it is the join path to the admitted account's **live** e-mail
+            (``BetaInviteService.get_summary``), which the inviter — the person
+            who vouched for them — does see while that account exists.
+        revoked_at: Set when the inviter revokes (or reissues) an unused link.
+        label: Optional inviter-private note, at most 100 characters (#1595).
+            Copied to the replacement row on reissue; goes away with the
+            inviter (``inviter_user_id`` cascade). Never logged or audited.
     """
 
     __tablename__ = "beta_invites"
@@ -79,6 +89,7 @@ class BetaInvite(Base):
         nullable=True,
     )
     revoked_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    label: Mapped[str | None] = mapped_column(String(100), nullable=True)
 
     __table_args__ = (UniqueConstraint("token_hash", name="uq_beta_invites_token_hash"),)
 
