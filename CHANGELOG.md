@@ -4,7 +4,7 @@ Release notes are published on [GitHub Releases](https://github.com/kagura-ai/me
 which is the canonical source for the complete release history. This file highlights the current
 release train and preserves selected historical development notes.
 
-## [v0.72.0](https://github.com/kagura-ai/memory-cloud/releases/tag/v0.72.0) — 2026-09-21
+## [v0.72.0](https://github.com/kagura-ai/memory-cloud/releases/tag/v0.72.0) — 2026-09-20
 
 Closed-beta invites after first real use: the invitee lands in the app instead of back on the login form, and the inviter can tell links apart, resend one, and read an honest count.
 
