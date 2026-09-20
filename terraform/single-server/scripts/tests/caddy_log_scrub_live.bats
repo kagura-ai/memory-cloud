@@ -1,10 +1,11 @@
 #!/usr/bin/env bats
 # =============================================================================
-# Behavioural proof for the access-log scrub in Caddyfile.tpl (#1591).
+# Behavioural proof for the proxy-log scrub in Caddyfile.tpl (#1591).
 #
 # A closed-beta invite link (#1581) is a credential that travels in URLs. The
 # API scrubs it from its own logs, but the proxy in front records the request
-# on its own — so the template's `log` block has to keep the token out of
+# on its own — so the template's two `log` blocks (the site's access logger
+# and the default logger in the global options) have to keep the token out of
 # every field Caddy would write it to. Filter syntax is easy to get subtly
 # wrong (a regexp that validates but never matches, a `${1}` eaten by a
 # renderer), so this suite does not reason about the syntax: it renders the
@@ -16,9 +17,17 @@
 # test pins that nothing else differs. The two upstreams are stood in for
 # through the template's own extension point: a *.caddy file mounted at
 # /opt/kagura-caddy-extra answers on :8080 / :3000, and `api-blue` / `web`
-# are pointed at the container itself. The web stand-in reproduces the one
-# upstream behaviour that matters here: a trailing-slash 308 whose `Location`
-# and `Refresh` headers repeat the path, as the Next.js server does.
+# are pointed at the container itself. The stand-ins reproduce the two
+# upstream behaviours that matter here:
+#   - a trailing-slash 308 whose `Location` and `Refresh` headers repeat the
+#     path, as the Next.js server does;
+#   - an upstream that FAILS (the request header `X-Stub-Down: 1` makes the
+#     stand-in drop the connection). The proxy then answers 502 and writes a
+#     SECOND line about the same request — logger http.log.error.*, through
+#     Caddy's default logger on stderr instead of the site's access logger.
+#     Same container log file, same URI and headers, a different encoder. An
+#     invitee who opens the link while the frontend is being recreated
+#     (`deploy.sh --web`) is all it takes to produce one.
 #
 # Skips cleanly (never fails) without docker / curl / python3 / envsubst or
 # when the image cannot be pulled. Publishes on a Docker-assigned free
@@ -32,7 +41,8 @@ PROJECT_DIR="$BATS_TEST_DIRNAME/../.."
 # plain grep over everything the container printed is a complete leak check.
 TOKEN="k1591ScrubLiveTokenAbCdEfGhIjKlMnOpQrStUv_-9"
 
-EXPECTED_CASES=11
+EXPECTED_CASES=15   # access-log lines: one per fire() below
+EXPECTED_ERRORS=4   # error-log lines: one per *-down case
 
 setup_file() {
     export SCRUB_SKIP=""
@@ -88,12 +98,18 @@ setup_file() {
 
     # 3. Upstream stand-ins, delivered through the extension point. No `log`
     #    directive here: only the site under test writes access-log lines.
+    #    `abort` drops the connection without answering, which the proxy in
+    #    front reports exactly as it does a dead or restarting upstream: 502.
     cat > "$WORK/extra/upstreams.caddy" <<'CADDYEOF'
 http://:8080 {
+	@down header X-Stub-Down 1
+	abort @down
 	respond "stub api" 200
 }
 
 http://:3000 {
+	@down header X-Stub-Down 1
+	abort @down
 	@slash path_regexp slash ^(.+)/$
 	header @slash Refresh "0;url={re.slash.1}"
 	redir @slash {re.slash.1} 308
@@ -123,8 +139,8 @@ CADDYEOF
 
     # Every request carries the token in the four request headers a browser on
     # the /join/<token> page sends it in, so each line doubles as a header test.
-    fire() {   # $1 case id, $2 path + query
-        curl -s -o /dev/null --max-time 5 \
+    fire() {   # $1 case id, $2 path + query, $3... extra curl arguments
+        curl -s -o /dev/null --max-time 5 "${@:3}" \
             -A "scrub-case-$1" \
             -H "Referer: http://memory.example.test/join/$TOKEN" \
             -H "Cookie: session=$TOKEN" \
@@ -143,12 +159,22 @@ CADDYEOF
     fire plain-mcp     "/mcp"
     fire plain-root    "/"
     fire plain-invites "/api/v1/beta-invites/me"
+    # The three invite shapes again, and an ordinary request, against a
+    # failing upstream (the first one reaches `web`, the others the API).
+    local down=(-H "X-Stub-Down: 1")
+    fire join-down     "/join/$TOKEN"                                        "${down[@]}"
+    fire preview-down  "/api/v1/beta-invites/$TOKEN/preview"                 "${down[@]}"
+    fire login-down    "/api/v1/auth/google/login?return_to=x&invite=$TOKEN" "${down[@]}"
+    fire plain-down    "/api/v1/memories?limit=5&q=join"                     "${down[@]}"
 
     # The access-log line is written after the response completes; give the
     # last one a moment to land. stdout = access log (`output stdout`),
-    # stderr = Caddy's own runtime log.
+    # stderr = Caddy's default logger: its own runtime log AND the error line
+    # of every request whose upstream failed.
     for _ in $(seq 1 20); do
-        [ "$(docker logs "$NAME" 2> /dev/null | grep -c '"scrub-case-')" -ge "$EXPECTED_CASES" ] && break
+        [ "$(docker logs "$NAME" 2> /dev/null | grep -c '"scrub-case-')" -ge "$EXPECTED_CASES" ] \
+            && [ "$(docker logs "$NAME" 2>&1 > /dev/null | grep -c '"http\.log\.error')" -ge "$EXPECTED_ERRORS" ] \
+            && break
         sleep 0.25
     done
     docker logs "$NAME" > "$WORK/access.log" 2> "$WORK/runtime.log"
@@ -164,17 +190,25 @@ require_live() {
     [ -z "${SCRUB_SKIP:-}" ] || skip "$SCRUB_SKIP"
 }
 
-# Print one value from the access-log line of a case:
+# Print one value from the line a logger wrote about a case:
 #   uri | status | req_headers (sorted names) | resp:<Header>
-logged() {   # $1 case id, $2 what
-    python3 - "$WORK/access.log" "scrub-case-$1" "$2" <<'PYEOF'
+log_line() {   # $1 file, $2 logger-name prefix, $3 case id, $4 what
+    python3 - "$1" "$2" "scrub-case-$3" "$4" <<'PYEOF'
 import json, sys
 
-path, agent, what = sys.argv[1:4]
-lines = [json.loads(raw) for raw in open(path) if raw.strip()]
-hits = [d for d in lines if d["request"]["headers"].get("User-Agent") == [agent]]
+path, logger, agent, what = sys.argv[1:5]
+lines = []
+for raw in open(path):
+    try:
+        lines.append(json.loads(raw))
+    except ValueError:
+        pass  # a non-JSON line on stderr cannot be one of the lines under test
+hits = [d for d in lines
+        if isinstance(d, dict)
+        and str(d.get("logger", "")).startswith(logger)
+        and d.get("request", {}).get("headers", {}).get("User-Agent") == [agent]]
 if len(hits) != 1:
-    sys.exit(f"{agent}: {len(hits)} access-log lines, want exactly 1")
+    sys.exit(f"{agent}: {len(hits)} {logger}* lines, want exactly 1")
 d = hits[0]
 if what == "uri":
     print(d["request"]["uri"])
@@ -187,6 +221,29 @@ elif what.startswith("resp:"):
 else:
     sys.exit(f"unknown selector {what}")
 PYEOF
+}
+
+# The access-log line of a case — stdout, the site's `log` block.
+logged() {   # $1 case id, $2 what
+    log_line "$WORK/access.log" http.log.access "$1" "$2"
+}
+
+# The error-log line of a case — stderr, the default logger. Written only when
+# the handler chain failed, i.e. for the *-down cases.
+err_logged() {   # $1 case id, $2 what
+    log_line "$WORK/runtime.log" http.log.error "$1" "$2"
+}
+
+# Caddy's own reading of the config under test (its JSON form), for the
+# structural assertions. Written once; each test that needs it asks for it, so
+# none depends on another having run first.
+adapted_config() {
+    [ -s "$WORK/adapted.json" ] && return 0
+    docker run --rm \
+        -v "$WORK/Caddyfile:/etc/caddy/Caddyfile:ro" \
+        -v "$WORK/extra:/opt/kagura-caddy-extra:ro" \
+        "$IMAGE" caddy adapt --config /etc/caddy/Caddyfile --adapter caddyfile \
+        > "$WORK/adapted.json" 2> /dev/null
 }
 
 # Equality with a readable failure (bats prints only the failing line).
@@ -219,23 +276,47 @@ expect() {   # $1 actual, $2 wanted
 
 @test "live: the capture references reach Caddy's JSON config intact (not read as placeholders)" {
     require_live
-    docker run --rm \
-        -v "$WORK/Caddyfile:/etc/caddy/Caddyfile:ro" \
-        -v "$WORK/extra:/opt/kagura-caddy-extra:ro" \
-        "$IMAGE" caddy adapt --config /etc/caddy/Caddyfile --adapter caddyfile \
-        > "$WORK/adapted.json" 2> /dev/null
+    adapted_config
     run python3 - "$WORK/adapted.json" <<'PYEOF'
 import json, sys
 
 logs = json.load(open(sys.argv[1]))["logging"]["logs"]
-fields = next(log["encoder"]["fields"] for log in logs.values()
-              if log.get("encoder", {}).get("format") == "filter")
-uri = fields["request>uri"]
-print(uri["filter"], uri["value"])
+for name in sorted(logs):
+    encoder = logs[name].get("encoder", {})
+    if encoder.get("format") == "filter":
+        uri = encoder["fields"]["request>uri"]
+        print(name, uri["filter"], uri["value"])
 PYEOF
     [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+    # Both encoders: the default logger (error lines) and the site's access
+    # logger (log0).
     # shellcheck disable=SC2016  # literal ${N}: the regexp's capture references
-    [ "$output" = 'regexp ${1}${2}${4}REDACTED${3}' ]
+    expect "$output" 'default regexp ${1}${2}${4}REDACTED${3}
+log0 regexp ${1}${2}${4}REDACTED${3}'
+}
+
+@test "live: customising the default logger does not copy the access log onto stderr" {
+    require_live
+    # Caddy keeps access lines out of the default logger through an `exclude`
+    # entry. A `log default` block must not cost us that: every request would
+    # be written twice and use up the rotation budget twice as fast.
+    adapted_config
+    run python3 - "$WORK/adapted.json" <<'PYEOF'
+import json, sys
+
+logs = json.load(open(sys.argv[1]))["logging"]["logs"]
+print("default excludes:", " ".join(logs["default"].get("exclude", [])))
+print("default writes to:", logs["default"].get("writer", {}).get("output", "stderr"))
+print("log0 includes:", " ".join(logs["log0"].get("include", [])))
+print("log0 writes to:", logs["log0"]["writer"]["output"])
+PYEOF
+    [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+    expect "$output" 'default excludes: http.log.access.log0
+default writes to: stderr
+log0 includes: http.log.access.log0
+log0 writes to: stdout'
+    run grep -c '"http\.log\.access' "$WORK/runtime.log"
+    [ "$output" -eq 0 ]
 }
 
 @test "live: the stack came up and logged every request once (guard not vacuous)" {
@@ -304,6 +385,57 @@ PYEOF
         # What is left is exactly what curl sent besides the four.
         [ "$output" = "Accept User-Agent" ] || { echo "$c: $output"; return 1; }
     done
+}
+
+# ---------------------------------------------------------------------------
+# A failing upstream: the same request is logged a second time, on stderr
+# ---------------------------------------------------------------------------
+
+@test "live: a failing upstream is a 502 plus an http.log.error line on stderr (guard not vacuous)" {
+    require_live
+    for c in join-down preview-down login-down plain-down; do
+        run logged "$c" status
+        expect "$output" "502"
+        # The second line exists, is about this request, and names the 502.
+        run err_logged "$c" status
+        expect "$output" "502"
+    done
+    run grep -c '"http\.log\.error' "$WORK/runtime.log"
+    [ "$output" -eq "$EXPECTED_ERRORS" ]
+    # ...and none of them went to stdout, where the site's filter would apply.
+    run grep -c '"http\.log\.error' "$WORK/access.log"
+    [ "$output" -eq 0 ]
+}
+
+@test "live: the access-log line of a 502 is redacted like any other" {
+    require_live
+    run logged join-down uri
+    expect "$output" "/join/REDACTED"
+    run logged preview-down uri
+    expect "$output" "/api/v1/beta-invites/REDACTED/preview"
+    run logged login-down uri
+    expect "$output" "/api/v1/auth/google/login?return_to=x&invite=REDACTED"
+    for c in join-down preview-down login-down plain-down; do
+        run logged "$c" req_headers
+        expect "$output" "Accept User-Agent X-Stub-Down"
+    done
+}
+
+@test "live: the ERROR-log line of a 502 is redacted too (default logger, global options)" {
+    require_live
+    run err_logged join-down uri
+    expect "$output" "/join/REDACTED"
+    run err_logged preview-down uri
+    expect "$output" "/api/v1/beta-invites/REDACTED/preview"
+    run err_logged login-down uri
+    expect "$output" "/api/v1/auth/google/login?return_to=x&invite=REDACTED"
+    for c in join-down preview-down login-down plain-down; do
+        run err_logged "$c" req_headers
+        expect "$output" "Accept User-Agent X-Stub-Down"
+    done
+    # An ordinary failure keeps the URI an operator needs to debug it.
+    run err_logged plain-down uri
+    expect "$output" "/api/v1/memories?limit=5&q=join"
 }
 
 @test "live: the token appears NOWHERE in what the container printed (stdout + stderr)" {

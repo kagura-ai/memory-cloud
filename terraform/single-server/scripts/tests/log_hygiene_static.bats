@@ -9,10 +9,13 @@
 #      provisioned by startup.sh (which writes a daemon.json) an access log
 #      grows until the disk is full. The compose files must not depend on host
 #      provisioning for this.
-#   2. SCRUB — the site `log` block in Caddyfile.tpl wraps the json encoder in
-#      a `filter` that redacts the closed-beta invite token (#1581) wherever
-#      the proxy would record it, and the capture-group reference in the
-#      replacement survives deploy.sh's envsubst render byte-for-byte.
+#   2. SCRUB — BOTH `log` blocks in Caddyfile.tpl wrap the json encoder in a
+#      `filter` that redacts the closed-beta invite token (#1581) wherever the
+#      proxy would record it: the site's access logger, and the default logger
+#      in the global options, which carries the http.log.error.* line Caddy
+#      writes about a request whose upstream failed. The capture-group
+#      reference in the replacement survives deploy.sh's envsubst render
+#      byte-for-byte.
 #
 # What the filter actually DOES to a log line is proven against a real Caddy in
 # caddy_log_scrub_live.bats; this suite is the cheap half that needs no image
@@ -84,9 +87,17 @@ service_logging_report() {   # $1 file
     ' "$1"
 }
 
-# The site `log { ... }` block of the template (tab-indented, one level deep).
+# The site `log { ... }` block of the template (tab-indented, one level deep):
+# the ACCESS logger.
 log_block() {   # $1 file
     awk '/^\tlog \{/ { inside = 1 } inside { print } inside && /^\t\}/ { exit }' "$1"
+}
+
+# The `log default { ... }` block of the global options (same indentation): the
+# DEFAULT logger, which writes the error line of a request whose upstream
+# failed.
+default_log_block() {   # $1 file
+    awk '/^\tlog default \{/ { inside = 1 } inside { print } inside && /^\t\}/ { exit }' "$1"
 }
 
 # ---------------------------------------------------------------------------
@@ -213,59 +224,85 @@ PYEOF
     [ "$output" -eq 0 ]
 }
 
-@test "scrub: request>uri is rewritten by ONE regexp covering the three invite URL shapes" {
-    block="$(log_block "$TPL")"
-    run grep -cE '^[[:space:]]*request>uri[[:space:]]' <<< "$block"
-    [ "$output" -eq 1 ]
-    line="$(grep -E '^[[:space:]]*request>uri[[:space:]]' <<< "$block")"
-    [[ "$line" == *"request>uri regexp "* ]]
-    [[ "$line" == *"(/join/)"* ]]
-    [[ "$line" == *"(/beta-invites/)"*"(/preview)"* ]]
-    [[ "$line" == *"([?&]invite=)"* ]]
-    # Plain `regexp` only: multi_regexp needs a newer Caddy than a long-lived
-    # host is guaranteed to run under the floating caddy:2-alpine tag.
-    run grep -c 'multi_regexp' <<< "$block"
-    [ "$output" -eq 0 ]
+@test "scrub: the default logger (upstream-error lines) gets a filter encoder too" {
+    block="$(default_log_block "$TPL")"
+    [ -n "$block" ]
+    [[ "$block" == *"format filter {"* ]]
+    [[ "$block" == *"wrap json"* ]]
+    # It is a GLOBAL option: it has to sit in the options block, above the
+    # first site address (the line deploy.sh reads the domain from).
+    log_at="$(grep -nE '^	log default \{' "$TPL" | cut -d: -f1)"
+    site_at="$(grep -nE '^[a-zA-Z]' "$TPL" | head -n 1 | cut -d: -f1)"
+    [ "$log_at" -lt "$site_at" ]
 }
 
-@test "scrub: the headers that carry the token (or session material) are dropped from the log" {
-    block="$(log_block "$TPL")"
-    for header in Referer Cookie Next-Router-State-Tree Next-Url; do
-        grep -qE "^[[:space:]]*request>headers>${header} delete[[:space:]]*\$" <<< "$block" \
-            || { echo "no 'request>headers>${header} delete'"; return 1; }
+@test "scrub: request>uri is rewritten by ONE regexp covering the three invite URL shapes" {
+    for block in "$(log_block "$TPL")" "$(default_log_block "$TPL")"; do
+        run grep -cE '^[[:space:]]*request>uri[[:space:]]' <<< "$block"
+        [ "$output" -eq 1 ]
+        line="$(grep -E '^[[:space:]]*request>uri[[:space:]]' <<< "$block")"
+        [[ "$line" == *"request>uri regexp "* ]]
+        [[ "$line" == *"(/join/)"* ]]
+        [[ "$line" == *"(/beta-invites/)"*"(/preview)"* ]]
+        [[ "$line" == *"([?&]invite=)"* ]]
+        # Plain `regexp` only: multi_regexp needs a newer Caddy than a
+        # long-lived host is guaranteed to run under the floating
+        # caddy:2-alpine tag.
+        run grep -c 'multi_regexp' <<< "$block"
+        [ "$output" -eq 0 ]
     done
 }
 
-@test "scrub: redirect response headers get the SAME regexp as the URI (no drift between copies)" {
-    # The Caddyfile has no variables, so the pattern is written once per field.
-    # Pin that the copies are identical — a fix applied to one and forgotten in
-    # another would leave a field leaking.
+@test "scrub: the headers that carry the token (or session material) are dropped from both logs" {
+    for block in "$(log_block "$TPL")" "$(default_log_block "$TPL")"; do
+        for header in Referer Cookie Next-Router-State-Tree Next-Url; do
+            grep -qE "^[[:space:]]*request>headers>${header} delete[[:space:]]*\$" <<< "$block" \
+                || { echo "no 'request>headers>${header} delete' in: ${block%%$'\n'*}"; return 1; }
+        done
+    done
+    # No drift: a header added to one block and forgotten in the other would
+    # leave it in the other logger's lines.
+    diff <(log_block "$TPL" | grep -E ' delete[[:space:]]*$' | sed -E 's/^[[:space:]]+//' | sort) \
+         <(default_log_block "$TPL" | grep -E ' delete[[:space:]]*$' | sed -E 's/^[[:space:]]+//' | sort)
+}
+
+@test "scrub: every copy of the regexp is the SAME — redirect headers and the default logger (no drift)" {
+    # The Caddyfile has no variables, so the pattern is written once per field
+    # and once more for the default logger. Pin that the copies are identical
+    # — a fix applied to one and forgotten in another would leave a field, or
+    # a whole logger, leaking.
     block="$(log_block "$TPL")"
     for field in 'resp_headers>Location' 'resp_headers>Refresh'; do
         grep -qE "^[[:space:]]*${field} regexp " <<< "$block" \
             || { echo "no '${field} regexp'"; return 1; }
     done
+    both="$block"$'\n'"$(default_log_block "$TPL")"
+    # Four copies (guard not vacuous) ...
+    run grep -cE ' regexp ' <<< "$both"
+    [ "$output" -eq 4 ]
+    # ... one distinct "<pattern> <replacement>".
     run bash -o pipefail -c \
-        'grep -E " regexp " | sed -E "s/^[[:space:]]*[^[:space:]]+ regexp //" | sort -u | wc -l' <<< "$block"
+        'grep -E " regexp " | sed -E "s/^[[:space:]]*[^[:space:]]+ regexp //" | sort -u | wc -l' <<< "$both"
     [ "$status" -eq 0 ]
     [ "$output" -eq 1 ]
 }
 
 @test "scrub: the replacement holds no Caddy placeholder, only \${N} capture references" {
-    block="$(log_block "$TPL")"
-    # Second backtick-quoted token of the request>uri line = the replacement.
-    replacement="$(grep -E '^[[:space:]]*request>uri regexp ' <<< "$block" | awk -F'`' '{ print $4 }')"
-    [ -n "$replacement" ]
-    [[ "$replacement" == *REDACTED* ]]
-    # Strip the capture references; what is left must be brace-free, or Caddy
-    # could read it as a {placeholder}.
-    rest="$(sed -E 's/\$\{[0-9]+\}//g' <<< "$replacement")"
-    [[ "$rest" != *"{"* ]]
-    [[ "$rest" != *"}"* ]]
-    [[ "$rest" != *'$'* ]]
+    for block in "$(log_block "$TPL")" "$(default_log_block "$TPL")"; do
+        # Second backtick-quoted token of the request>uri line = the replacement.
+        replacement="$(grep -E '^[[:space:]]*request>uri regexp ' <<< "$block" | awk -F'`' '{ print $4 }')"
+        [ -n "$replacement" ]
+        [[ "$replacement" == *REDACTED* ]]
+        # Strip the capture references; what is left must be brace-free, or
+        # Caddy could read it as a {placeholder}.
+        rest="$(sed -E 's/\$\{[0-9]+\}//g' <<< "$replacement")"
+        [[ "$rest" != *"{"* ]]
+        [[ "$rest" != *"}"* ]]
+        [[ "$rest" != *'$'* ]]
+    done
 }
 
-@test "scrub: deploy.sh's envsubst render leaves the log block byte-identical" {
+@test "scrub: deploy.sh's envsubst render leaves both log blocks byte-identical" {
     command -v envsubst > /dev/null 2>&1 || skip "envsubst not available"
 
     # Drive the real generate_caddyfile (not a copy of its envsubst line) so
@@ -283,9 +320,12 @@ PYEOF
     [ -s "$rendered" ]
 
     diff <(log_block "$TPL") <(log_block "$rendered")
+    diff <(default_log_block "$TPL") <(default_log_block "$rendered")
     # ...and the thing being guarded is really there (guard not vacuous).
     # shellcheck disable=SC2016  # literal ${1}: the regexp's capture reference
     log_block "$rendered" | grep -qF '${1}'
+    # shellcheck disable=SC2016  # literal ${1}: the regexp's capture reference
+    default_log_block "$rendered" | grep -qF '${1}'
 
     # Whole-file view of the same property: the render may differ from the
     # template ONLY on lines that carried the ${API_UPSTREAM} placeholder.
