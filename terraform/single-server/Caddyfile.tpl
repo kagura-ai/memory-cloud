@@ -29,6 +29,38 @@
 	servers {
 		max_header_size 16KB
 	}
+
+	# Default logger — the OTHER place a request is written down (#1591).
+	# The site's `log` block below only configures its ACCESS logger. When a
+	# handler fails — an upstream that is down or restarting, i.e. every 502 —
+	# Caddy writes a second line about the same request, logger
+	# http.log.error.*, and that one goes through this default logger: stderr,
+	# so the same container log file, with the full request URI and headers. An
+	# invitee who opens a /join/<token> link while the frontend is being
+	# recreated (`deploy.sh --web`) is all it takes. So the default logger gets
+	# the same scrub: the request>uri rewrite and the four header deletes, kept
+	# identical to the site block — the full explanation is there. Error lines
+	# carry no response headers, hence no Location / Refresh rule here.
+	#
+	# What this does NOT change: the output stays stderr, the level stays INFO,
+	# and the lines stay JSON (without a TTY — any compose service — JSON
+	# already is Caddy's default encoding, so `wrap json` only states it).
+	# Access lines are still kept out of this logger by Caddy itself, so nothing
+	# is written twice. The default logger is instance-wide: error lines of
+	# sibling vhosts from the extension point get the same invite-shape scrub
+	# and are otherwise untouched.
+	log default {
+		format filter {
+			wrap json
+			fields {
+				request>uri regexp `(/join/)[^/?#\s]+|(/beta-invites/)[^/?#\s]+(/preview)|([?&]invite=)[^&#\s]+` `${1}${2}${4}REDACTED${3}`
+				request>headers>Referer delete
+				request>headers>Cookie delete
+				request>headers>Next-Router-State-Tree delete
+				request>headers>Next-Url delete
+			}
+		}
+	}
 }
 
 # Replace memory.kagura-ai.com with your domain in this template file.
@@ -139,23 +171,35 @@ memory.kagura-ai.com {
 	#
 	# Syntax notes — each is pinned by scripts/tests/log_hygiene_static.bats and
 	# proven against the real image by scripts/tests/caddy_log_scrub_live.bats:
-	#   - A field takes ONE filter and a Caddyfile has no variables, so the three
-	#     `regexp` lines repeat the same pattern. Change all three together.
+	#   - A field takes ONE filter and a Caddyfile has no variables, so the same
+	#     pattern is written FOUR times: the three `regexp` lines here and the
+	#     request>uri line of `log default` in the global options at the top of
+	#     this file. Change all four together — and the header deletes in both
+	#     blocks.
 	#   - ${N} is the regexp's capture-group reference, not a placeholder. Only
 	#     the alternative that matched has non-empty groups, so ${1}${2}${4} is
 	#     "whichever prefix matched" and ${3} the /preview suffix. It survives
 	#     deploy.sh's envsubst because that runs with an explicit allow-list
 	#     (the API upstream variable, nothing else). Keep the marker free of
 	#     braces so Caddy can never read it as a {placeholder}.
-	#   - regexp over header VALUES needs Caddy 2.6+ (the request>uri rewrite and
-	#     the deletes already work on 2.5). Run `docker compose pull caddy` if
-	#     the local caddy:2-alpine image predates that.
+	#   - regexp over header VALUES needs Caddy 2.6.2+. On an older 2.6 image it
+	#     is a SILENT no-op (measured on 2.6.1): the config still validates, the
+	#     request>uri rewrite and the header deletes work in both loggers, but
+	#     Location / Refresh are logged as-is. Run `docker compose pull caddy`
+	#     if the local caddy:2-alpine image predates 2.6.2 (`caddy version`).
 	#
-	# Applying an edit to this block needs NO container recreate: the next
+	# This block covers the ACCESS logger only. A request whose upstream fails
+	# (502) is written a second time, as an http.log.error.* line through the
+	# default logger on stderr — `log default` in the global options at the top
+	# of this file applies the same scrub there.
+	#
+	# Applying an edit to either block needs NO container recreate: the next
 	# deploy.sh run re-renders ./Caddyfile and restarts caddy, which is enough.
 	# Lines written before the change stay as they are until rotated out — see
 	# README.md "Logs". Sibling vhosts imported at the bottom of this file
-	# configure their own logging and are not touched by this block.
+	# configure their own access logging and are not touched by this block; the
+	# default logger is instance-wide, so their error lines get the same
+	# invite-shape scrub and nothing else.
 	log {
 		output stdout
 		format filter {
