@@ -204,16 +204,23 @@ The 7-day lifetime is fixed in code. Notes for operators:
   and `…/login?invite={token}`). The API scrubs it from its own output — structured
   logs, the uvicorn access log and the `usage_stats` table all record the literal
   `{token}` instead. **A reverse proxy in front of the API or the frontend is
-  outside that reach** and has to scrub its own access log. The single-server
-  Terraform template already does (#1591): the `log` block of `Caddyfile.tpl`
-  wraps the JSON encoder in a `filter` that writes `REDACTED` into the token slot
-  of those three URL shapes — in the request URI and in the `Location` / `Refresh`
-  response headers, which repeat the path when the frontend answers
-  `/join/{token}/` with its trailing-slash redirect — and drops the `Referer`,
-  `Next-Router-State-Tree`, `Next-Url` and `Cookie` request headers from the log.
-  Ordinary requests keep their full URI. **If you run a different proxy,
-  replicate that before enabling the feature** (or restrict who can read its
-  logs). The copies to cover: the request URI; the `Referer` header a browser on
+  outside that reach** and has to scrub its own logs. The single-server
+  Terraform template already does (#1591), in both places Caddy writes a request
+  down: the site's `log` block in `Caddyfile.tpl` (the access log, stdout) and
+  `log default` in its global options (Caddy's default logger, stderr — it
+  carries the `http.log.error` line written about every request whose upstream
+  failed, e.g. a `502` while the frontend is being restarted). Each wraps the
+  JSON encoder in a `filter` that writes `REDACTED` into the token slot of those
+  three URL shapes — in the request URI and, for the access log, in the
+  `Location` / `Refresh` response headers, which repeat the path when the
+  frontend answers `/join/{token}/` with its trailing-slash redirect — and drops
+  the `Referer`, `Next-Router-State-Tree`, `Next-Url` and `Cookie` request
+  headers from the log. Ordinary requests keep their full URI. The
+  response-header rewrite needs Caddy 2.6.2 or newer (an older 2.6 image skips
+  it silently); `docker compose pull caddy` refreshes the floating
+  `caddy:2-alpine` tag. **If you run a different proxy, replicate that before
+  enabling the feature** (or restrict who can read its logs). The copies to
+  cover: the request URI; the `Referer` header a browser on
   the `/join/{token}` page would attach to the preview call, the
   `/auth/{provider}/login` navigation and every asset the page loads — the
   frontend serves `/join/*` with `Referrer-Policy: no-referrer` (response header
@@ -222,9 +229,11 @@ The 7-day lifetime is fixed in code. Notes for operators:
   overwrites response headers or you cannot vouch for the clients; the
   router-state headers (`Next-Router-State-Tree`, `Next-Url`) the Next.js client
   sends on data and prefetch requests, which carry the current route including
-  the token segment; and redirect response headers. Filtering only the URI
-  leaves the other copies in place. Lines written before the scrub was deployed
-  are not rewritten — they age out with
+  the token segment; redirect response headers; and the proxy's **error log** —
+  an upstream failure (`502`) records the same request URI and headers there,
+  usually through a different logger than the access log. Filtering only the
+  URI, or only the access log, leaves the other copies in place. Lines written
+  before the scrub was deployed are not rewritten — they age out with
   [log rotation](#container-log-rotation), or go at once when the proxy container
   is recreated.
 - The invite is only consumed when the gate would otherwise have blocked the

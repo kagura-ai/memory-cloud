@@ -482,11 +482,15 @@ those in a maintenance window. Full procedure, including the split-host files:
 invite tokens (#1581) from the access log — `REDACTED` in the token slot of
 `/join/…`, `/api/v1/beta-invites/…/preview` and `invite=…`, and no `Referer` /
 `Cookie` / Next.js router-state headers — while every other request is logged
-in full. A template change is applied by the normal `deploy.sh` run (it
-re-renders `./Caddyfile` and restarts Caddy); no recreate is needed for the log
-format. Lines written before that stay until they are rotated out or the
-container is recreated. Sibling vhosts dropped into `/opt/kagura-caddy-extra/`
-configure their own logging. See
+in full. `log default` in the template's global options applies the same scrub
+to Caddy's default logger (stderr), which writes a second, `http.log.error`
+line about every request whose upstream failed — a `502` during a
+`deploy.sh --web` restart, for instance. A template change is applied by the
+normal `deploy.sh` run (it re-renders `./Caddyfile` and restarts Caddy); no
+recreate is needed for the log format. Lines written before that stay until
+they are rotated out or the container is recreated. Sibling vhosts dropped into
+`/opt/kagura-caddy-extra/` configure their own access logging; their error
+lines pass through the same default logger. See
 [`docs/deployment.md` → Closed-beta invite links](../../docs/deployment.md#closed-beta-invite-links-issue-1581).
 
 ### Manual snapshot
