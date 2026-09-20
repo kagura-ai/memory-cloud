@@ -457,6 +457,38 @@ docker compose -f docker-compose.prod.yml logs -f caddy
 docker compose -f docker-compose.prod.yml logs -f api
 ```
 
+**Rotation (#1591).** Every service in the compose files declares the
+`json-file` driver with `max-size: 50m` / `max-file: 3`, so container logs are
+bounded on any host — `startup.sh` writes the same default into
+`/etc/docker/daemon.json`, but a VM that was not provisioned by it has none.
+`logging` is fixed when a container is **created**: `deploy.sh` recreates the
+API colors (and `--web` the frontend), but it only ever *restarts* Caddy — the
+one service whose log actually grows. After updating to a release that carries
+the block, and after that release's `deploy.sh` run, recreate it once
+(`:80`/`:443` drop for a few seconds; add `--no-build` in registry mode):
+
+```bash
+docker compose -f docker-compose.prod.yml --env-file .env.prod \
+  up -d --no-deps --force-recreate caddy web
+docker inspect -f '{{json .HostConfig.LogConfig}}' kagura-caddy   # max-size 50m, max-file 3
+```
+
+Recreating a container also discards its old, possibly oversized, log file.
+The data services (`postgres` / `qdrant` / `redis`) restart when recreated — do
+those in a maintenance window. Full procedure, including the split-host files:
+[`docs/deployment.md` → Container log rotation](../../docs/deployment.md#container-log-rotation).
+
+**Invite tokens (#1591).** The `log` block in `Caddyfile.tpl` scrubs closed-beta
+invite tokens (#1581) from the access log — `REDACTED` in the token slot of
+`/join/…`, `/api/v1/beta-invites/…/preview` and `invite=…`, and no `Referer` /
+`Cookie` / Next.js router-state headers — while every other request is logged
+in full. A template change is applied by the normal `deploy.sh` run (it
+re-renders `./Caddyfile` and restarts Caddy); no recreate is needed for the log
+format. Lines written before that stay until they are rotated out or the
+container is recreated. Sibling vhosts dropped into `/opt/kagura-caddy-extra/`
+configure their own logging. See
+[`docs/deployment.md` → Closed-beta invite links](../../docs/deployment.md#closed-beta-invite-links-issue-1581).
+
 ### Manual snapshot
 
 ```bash

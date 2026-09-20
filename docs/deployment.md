@@ -50,6 +50,11 @@ your-domain.example.com {
 - **`.well-known`** endpoints are needed for OAuth2 discovery (RFC 8414)
 - The **frontend** acts as a catch-all for all other routes (Next.js App Router)
 - Caddy automatically provisions TLS certificates via Let's Encrypt
+- Caddy writes **no access log** unless the site has a `log` directive. If you add
+  one, bound the container's log file ([Container log rotation](#container-log-rotation))
+  and keep invite tokens out of it (see
+  [Closed-beta invite links](#closed-beta-invite-links-issue-1581)) — the
+  single-server template's `Caddyfile.tpl` does both
 
 ### Docker Compose Integration
 
@@ -67,6 +72,12 @@ services:
       - ./Caddyfile:/etc/caddy/Caddyfile
       - caddy_data:/data
       - caddy_config:/config
+    # Bound the container log — see "Container log rotation" below.
+    logging:
+      driver: json-file
+      options:
+        max-size: "50m"
+        max-file: "3"
     depends_on:
       - kagura-api
       - kagura-web-dev
@@ -74,6 +85,81 @@ services:
 volumes:
   caddy_data:
   caddy_config:
+```
+
+### Container log rotation
+
+Docker's default `json-file` log driver keeps one **unbounded** file per
+container. A proxy that logs every request — and MCP clients poll — can grow
+that file to several GB within weeks and fill the disk; the usual first symptom
+is an image build that fails for lack of space.
+
+Every service in the single-server compose files
+(`terraform/single-server/docker-compose.{prod,app,data,ollama}.yml`) therefore
+declares the following, so the stack is bounded on any host — not only on one
+whose Docker daemon was configured for it:
+
+```yaml
+logging:
+  driver: json-file
+  options:
+    max-size: "50m"   # rotate at 50 MB ...
+    max-file: "3"     # ... keep 3 files: at most ~150 MB per container
+```
+
+For Caddy that is still enough access log for incident triage; ship the logs
+elsewhere if you need longer retention.
+
+**Applying it to a running stack.** `logging` options are fixed when a container
+is *created* — `docker compose restart` does not apply them. After updating to a
+release that carries the block:
+
+| Service | How it picks the option up |
+|---|---|
+| `api-blue` / `api-green` | `deploy.sh` recreates the color it deploys to on every run — nothing to do (the other color follows with the next deploy). |
+| `web` | Recreated by `deploy.sh --web`, or once by hand (below). |
+| `caddy` | **Never recreated by `deploy.sh`** (it only restarts Caddy) — recreate it once by hand (below). |
+| `postgres` / `qdrant` / `redis` (and `ollama`) | Recreating them **restarts the database**, so do it in a maintenance window. Their logs are small; it can wait for the next planned one. |
+
+```bash
+cd /opt/kagura-memory/src/terraform/single-server
+
+# caddy + web, once. :80/:443 drop for a few seconds while caddy is replaced.
+# Do it AFTER the release's deploy.sh run (or `./scripts/deploy.sh
+# --generate-caddyfile`), so the new container starts on the re-rendered
+# ./Caddyfile. On a registry-mode host (KAGURA_IMAGE_SOURCE=registry) add
+# --no-build.
+docker compose -f docker-compose.prod.yml --env-file .env.prod \
+  up -d --no-deps --force-recreate caddy web
+
+# Verify
+docker inspect -f '{{json .HostConfig.LogConfig}}' kagura-caddy
+# {"Type":"json-file","Config":{"max-file":"3","max-size":"50m"}}
+
+# Data tier — maintenance window only (volumes are kept, the services restart):
+# docker compose -f docker-compose.prod.yml --env-file .env.prod \
+#   up -d --no-deps --force-recreate postgres qdrant redis
+```
+
+On a split-host layout use `docker-compose.app.yml` on the app VM and
+`docker-compose.data.yml` (plus the `data-expose` overlay) on the data VM.
+
+Recreating a container also **discards its old log file**, so the recreate is
+what frees the space taken by an already oversized log — and what removes
+access-log lines written before the
+[invite-token scrub](#closed-beta-invite-links-issue-1581) was in place.
+
+A host-level default remains a good belt-and-braces measure, because it also
+covers containers that are not part of this compose project.
+`terraform/single-server/startup.sh` already writes it on the VM it provisions;
+on any other host add it to `/etc/docker/daemon.json` and restart Docker (like
+the compose option, it only applies to containers created afterwards):
+
+```json
+{
+  "log-driver": "json-file",
+  "log-opts": { "max-size": "50m", "max-file": "3" }
+}
 ```
 
 ## Frontend Environment Variables
@@ -118,21 +204,29 @@ The 7-day lifetime is fixed in code. Notes for operators:
   and `…/login?invite={token}`). The API scrubs it from its own output — structured
   logs, the uvicorn access log and the `usage_stats` table all record the literal
   `{token}` instead. **A reverse proxy in front of the API or the frontend is
-  outside that reach:** if yours writes access logs — the single-server Terraform
-  template's `Caddyfile.tpl` does (`log { output stdout, format json }`, which
-  records the full request URI **and the request headers**) — those lines contain
-  live invite URLs until the link is used or expires. The token shows up in two
-  fields: the request URI, and — when the frontend and the API share an origin —
-  the `Referer` header the browser sends from the `/join/{token}` page (on the
-  preview call, the `/auth/{provider}/login` navigation and every asset the page
-  loads). Filtering only the URI leaves the second copy in place. The frontend
-  serves `/join/*` with `Referrer-Policy: no-referrer` (response header plus a
-  `<meta name="referrer">` backstop, #1588), so current browsers send no
-  `Referer` from that page; keep the proxy-side `Referer` filter anyway if your
-  proxy overwrites response headers or you cannot vouch for the clients. Before enabling
-  the feature, restrict who can read those logs, or scrub both fields for
-  `/join/`, `/beta-invites/` and `invite=` (Caddy: a `filter` log encoder on
-  `request>uri` and `request>headers>Referer`, or drop that header from the log).
+  outside that reach** and has to scrub its own access log. The single-server
+  Terraform template already does (#1591): the `log` block of `Caddyfile.tpl`
+  wraps the JSON encoder in a `filter` that writes `REDACTED` into the token slot
+  of those three URL shapes — in the request URI and in the `Location` / `Refresh`
+  response headers, which repeat the path when the frontend answers
+  `/join/{token}/` with its trailing-slash redirect — and drops the `Referer`,
+  `Next-Router-State-Tree`, `Next-Url` and `Cookie` request headers from the log.
+  Ordinary requests keep their full URI. **If you run a different proxy,
+  replicate that before enabling the feature** (or restrict who can read its
+  logs). The copies to cover: the request URI; the `Referer` header a browser on
+  the `/join/{token}` page would attach to the preview call, the
+  `/auth/{provider}/login` navigation and every asset the page loads — the
+  frontend serves `/join/*` with `Referrer-Policy: no-referrer` (response header
+  plus a `<meta name="referrer">` backstop, #1588), so current browsers send no
+  `Referer` from that page, but keep the proxy-side filter anyway if your proxy
+  overwrites response headers or you cannot vouch for the clients; the
+  router-state headers (`Next-Router-State-Tree`, `Next-Url`) the Next.js client
+  sends on data and prefetch requests, which carry the current route including
+  the token segment; and redirect response headers. Filtering only the URI
+  leaves the other copies in place. Lines written before the scrub was deployed
+  are not rewritten — they age out with
+  [log rotation](#container-log-rotation), or go at once when the proxy container
+  is recreated.
 - The invite is only consumed when the gate would otherwise have blocked the
   sign-in. Existing users, the first user, identities already on the allowlist,
   and any deployment with the gate disabled (where `ALLOW_REGISTRATION` decides)
