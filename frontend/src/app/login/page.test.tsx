@@ -72,9 +72,15 @@ const mockRouter = { push: mockPush, replace: mockReplace };
 // in its dependency array, so a fresh instance per render would re-run the
 // effect (and getAuthConfig() / state updates) unnecessarily during tests.
 const mockSearchParams = new URLSearchParams();
+// #1594: lets a test hold useSearchParams() suspended — as it is while the
+// prerendered page hydrates — so the Suspense fallback stays on screen.
+const searchParamsSuspense = { pending: null as Promise<never> | null };
 vi.mock("next/navigation", () => ({
   useRouter: () => mockRouter,
-  useSearchParams: () => mockSearchParams,
+  useSearchParams: () => {
+    if (searchParamsSuspense.pending) throw searchParamsSuspense.pending;
+    return mockSearchParams;
+  },
 }));
 
 vi.mock("@/components/LanguageSelector", () => ({
@@ -114,6 +120,7 @@ beforeEach(() => {
   mockPush.mockReset();
   mockReplace.mockReset();
   safeReturnToBypass.enabled = false;
+  searchParamsSuspense.pending = null;
   // Clear URL params between tests so return_to from one test doesn't bleed
   for (const key of [...mockSearchParams.keys()]) {
     mockSearchParams.delete(key);
@@ -682,6 +689,28 @@ describe("LoginPage forwards a live session (#1594)", () => {
     expect(mockReplace).not.toHaveBeenCalled();
     // One /auth/me per page view — the AuthProvider's. No second probe.
     expect(mockGetCurrentUser).toHaveBeenCalledTimes(1);
+  });
+
+  it("labels the Suspense fallback exactly like the placeholder", async () => {
+    // /login is prerendered and useSearchParams() suspends, so the fallback
+    // is what a full page load paints first — before LoginContent can show
+    // its own placeholder. It has to announce itself too, and swapping one for
+    // the other must not be a visual step.
+    searchParamsSuspense.pending = new Promise<never>(() => {});
+    const suspended = renderLogin();
+
+    const fallback = screen.getByRole("status");
+    expect(fallback).toHaveTextContent("checkingSession");
+    expect(document.querySelector("h1, form, main")).toBeNull();
+    expect(formIsRendered()).toBe(false);
+    const fallbackMarkup = fallback.outerHTML;
+    suspended.unmount();
+
+    // Not suspended, session check still pending: LoginContent's placeholder.
+    searchParamsSuspense.pending = null;
+    mockGetCurrentUser.mockReturnValue(new Promise(() => {}));
+    renderLogin();
+    expect(screen.getByRole("status").outerHTML).toBe(fallbackMarkup);
   });
 
   it("fails open to the form when the session check rejects (5xx / network)", async () => {

@@ -326,25 +326,14 @@ function LoginContent() {
     );
   }
 
-  // #1594: nothing but a neutral spinner until the session check settles (or
-  // times out), and from then on while a forward is in flight — a signed-in
-  // visitor never sees the form. Same always-light spinner as the Suspense
-  // fallback below, so there is no visual step between the two. Deliberately
-  // no h1 / form / main: the e2e `gotoAndWaitStable` helper waits on those
-  // landmarks and must keep waiting for the real form, not settle on this.
+  // #1594: nothing but the neutral placeholder until the session check settles
+  // (or times out), and from then on while a forward is in flight — a
+  // signed-in visitor never sees the form.
   if (
     !skipForward &&
     (shouldForward || (authLoading && !sessionCheckTimedOut))
   ) {
-    return (
-      <div
-        role="status"
-        className="flex min-h-screen items-center justify-center bg-white"
-      >
-        <div className="h-16 w-16 animate-spin rounded-full border-4 border-[#e6f0ec] border-t-kagura-accent" />
-        <span className="sr-only">{t("checkingSession")}</span>
-      </div>
-    );
+    return <SessionCheckPlaceholder />;
   }
 
   return (
@@ -719,18 +708,38 @@ function LoginContent() {
   );
 }
 
+/**
+ * #1594: the neutral full-page placeholder. Used twice — as the Suspense
+ * fallback (what a full page load paints first: the page is prerendered and
+ * useSearchParams() suspends until hydration) and by LoginContent while the
+ * session check is pending or a forward is in flight. One component, so both
+ * announce themselves (`role="status"` + translated label) and swapping one
+ * for the other is not a visual step.
+ *
+ * Fixed-light colours like the rest of /login, which is why this is not the
+ * theme-aware SpinnerLoading. Deliberately no h1 / form / main: the e2e
+ * `gotoAndWaitStable` helper waits on those landmarks and must keep waiting
+ * for the real form, not settle on this.
+ */
+function SessionCheckPlaceholder() {
+  const t = useTranslations("login");
+  return (
+    <div
+      role="status"
+      className="flex min-h-screen items-center justify-center bg-white"
+    >
+      <div className="relative">
+        <div className="h-16 w-16 animate-spin rounded-full border-4 border-[#e6f0ec] border-t-kagura-accent" />
+        <div className="absolute inset-0 h-16 w-16 animate-ping rounded-full border-4 border-kagura-accent opacity-20" />
+      </div>
+      <span className="sr-only">{t("checkingSession")}</span>
+    </div>
+  );
+}
+
 export default function LoginPage() {
   return (
-    <Suspense
-      fallback={
-        <div className="flex min-h-screen items-center justify-center bg-white">
-          <div className="relative">
-            <div className="h-16 w-16 animate-spin rounded-full border-4 border-[#e6f0ec] border-t-kagura-accent" />
-            <div className="absolute inset-0 h-16 w-16 animate-ping rounded-full border-4 border-kagura-accent opacity-20" />
-          </div>
-        </div>
-      }
-    >
+    <Suspense fallback={<SessionCheckPlaceholder />}>
       <LoginContent />
     </Suspense>
   );
