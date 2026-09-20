@@ -3810,8 +3810,13 @@
     "dialog": {
       "title": "友達を招待",
       "description": "新しい 1 人がクローズドベータにサインアップできる、一度限りのリンクを作成します。",
-      "usage": "使用済み {used} / {quota}",
-      "usageUnlimited": "使用済み {used} · 上限なし",
+      "usage": "有効 {active} · 使用済み {redeemed} · 上限 {quota}",
+      "usageUnlimited": "有効 {active} · 使用済み {redeemed} · 上限なし",
+      "labelField": {
+        "label": "メモ (任意)",
+        "placeholder": "例: 名前やメールアドレス",
+        "help": "あなただけに表示されます。どのリンクを誰に送ったかの目印になります。"
+      },
       "create": "招待リンクを作成",
       "capReached": "招待枠 {quota} 件をすべて使用しました。未使用のリンクを取り消すと枠が空きます。",
       "quotaExceeded": "招待の上限に達しました。",
@@ -3823,7 +3828,8 @@
         "copy": "コピー",
         "copied": "コピーしました",
         "copyFailed": "自動でコピーできませんでした。リンクは上に表示されたままです。選択して手動でコピーしてください。",
-        "done": "完了"
+        "done": "完了",
+        "reissuedNote": "以前のリンクは使えなくなりました。"
       },
       "list": {
         "heading": "あなたの招待",
@@ -3833,7 +3839,9 @@
         "expiredAt": "期限切れ {date}",
         "redeemedAt": "使用日時 {date}",
         "revokedAt": "取り消し日時 {date}",
-        "revoke": "取り消す"
+        "redeemedBy": "登録アカウント: {email}",
+        "revoke": "取り消す",
+        "reissue": "再発行"
       },
       "status": {
         "active": "有効",
@@ -3847,6 +3855,10 @@
         "confirm": "取り消す",
         "alreadyRedeemed": "この招待はすでに使用されているため、取り消せません。",
         "failed": "招待を取り消せませんでした。もう一度お試しください。"
+      },
+      "reissue": {
+        "alreadyRedeemed": "この招待はすでに使用されているため、再発行できません。",
+        "failed": "招待を再発行できませんでした。もう一度お試しください。"
       }
     },
     "join": {

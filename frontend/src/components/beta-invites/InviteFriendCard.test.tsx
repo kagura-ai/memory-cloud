@@ -23,6 +23,8 @@ import {
 const summary = (over: Partial<BetaInviteSummary> = {}): BetaInviteSummary => ({
   quota: 4,
   used: 1,
+  active: 1,
+  redeemed: 0,
   remaining: 3,
   invites: [],
   ...over,

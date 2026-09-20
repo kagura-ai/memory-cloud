@@ -1269,6 +1269,7 @@ export function Sidebar() {
           error={betaInvites.error}
           create={betaInvites.create}
           revoke={betaInvites.revoke}
+          reissue={betaInvites.reissue}
         />
       )}
     </>
