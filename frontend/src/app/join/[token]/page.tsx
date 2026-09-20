@@ -192,7 +192,15 @@ export default function JoinPage({
           : probe.kind;
 
   const startSignUp = (provider: OAuthProvider) => {
-    window.location.href = buildOAuthRedirect(provider, "/", { invite: token });
+    // #1594: come back to the dashboard — "/" only redirects to /login, which
+    // greeted the freshly signed-in invitee with the login form.
+    window.location.href = buildOAuthRedirect(
+      provider,
+      "/workspace/dashboard",
+      {
+        invite: token,
+      },
+    );
   };
 
   const backToLogin = (
