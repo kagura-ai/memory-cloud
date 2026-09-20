@@ -94,8 +94,9 @@ def normalize_beta_invite_label(raw: str | None) -> str | None:
 
     Raises:
         ValueError: Longer than :data:`BETA_INVITE_LABEL_MAX_LENGTH` after the
-            trim, or containing a control character. The message never contains
-            the label — it ends up in the 422 body.
+            trim, containing a control character, or not encodable as UTF-8 (a
+            lone surrogate). The message never contains the label — it ends up
+            in the 422 body.
     """
     if raw is None:
         return None
@@ -106,6 +107,14 @@ def normalize_beta_invite_label(raw: str | None) -> str | None:
         raise ValueError(f"label must be at most {BETA_INVITE_LABEL_MAX_LENGTH} characters")
     if _LABEL_CONTROL_CHARS.search(label):
         raise ValueError("label must not contain control characters")
+    # ``"\ud800"`` is a legal JSON escape and a legal ``str``, but the database
+    # driver cannot encode it — and its error quotes the whole value, which the
+    # database-error handler would then log. Refuse it here, as a 422.
+    try:
+        label.encode("utf-8")
+    except UnicodeEncodeError:
+        # ``from None``: the encode error holds the label as ``.object``.
+        raise ValueError("label must be valid Unicode text") from None
     return label
 
 
@@ -441,9 +450,10 @@ class BetaInviteService:
         1. row-lock the inviter (the lock :meth:`create` takes), which also
            serializes two reissues of the same invite;
         2. the guarded revoke (:func:`build_revoke_update`) must hit one row;
-        3. the quota check. Reissuing an ``active`` invite always passes — its
-           slot was freed one statement ago. An ``expired`` invite held no slot,
-           so for it the check is real;
+        3. the quota check. Reissuing an ``active`` invite normally passes — its
+           slot was freed one statement ago (it is refused only when the quota
+           was lowered below what the inviter already uses). An ``expired``
+           invite held no slot, so for it the check is real;
         4. mint the replacement, carrying the label over;
         5. two audit rows cross-referencing the two invites by ``id`` only;
         6. a single commit.

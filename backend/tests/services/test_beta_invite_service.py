@@ -104,6 +104,10 @@ class TestLabelNormalisation:
             "Ali\x1bce",
             "Ali\x1fce",
             "Ali\x7fce",
+            # A lone UTF-16 surrogate is a legal JSON escape and a legal Python
+            # ``str``, but it cannot be encoded for the database driver.
+            "Ali\ud800ce",
+            "\udc00",
         ],
     )
     def test_rejected_values_never_echo_the_label(self, raw: str) -> None:
@@ -112,6 +116,9 @@ class TestLabelNormalisation:
         # The message reaches the 422 body (``msg``) — it must not carry the text.
         assert raw not in str(excinfo.value)
         assert raw.strip()[:10] not in str(excinfo.value)
+        # Nor may a chained exception carry it into a rendered traceback (a
+        # ``UnicodeEncodeError`` holds the whole string as ``.object``).
+        assert excinfo.value.__context__ is None or excinfo.value.__suppress_context__
 
 
 class TestUrl:

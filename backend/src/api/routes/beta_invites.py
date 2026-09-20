@@ -88,8 +88,9 @@ class BetaInviteCreateRequest(BaseModel):
     @field_validator("label")
     @classmethod
     def _normalize_label(cls, value: str | None) -> str | None:
-        # Trim; blank -> None; > 100 chars or a control character -> 422. The
-        # ``ValueError`` text reaches the 422 body, so it never quotes the label.
+        # Trim; blank -> None; > 100 chars, a control character or a lone
+        # surrogate -> 422. The ``ValueError`` text reaches the 422 body, so it
+        # never quotes the label.
         return normalize_beta_invite_label(value)
 
 

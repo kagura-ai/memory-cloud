@@ -1031,7 +1031,7 @@ Closed-beta invite links (Issues #1581, #1595): a signed-in user mints a one-tim
 { "label": "Alice (university)" }
 ```
 
-`label` is free text for the inviter's own bookkeeping (a name, an address): surrounding whitespace is trimmed, an empty value means no label, and more than 100 characters or any control character (`U+0000`–`U+001F`, `U+007F`) is a `422` (`VAL-001`; the rejected value is never echoed). There is no endpoint to edit a label afterwards.
+`label` is free text for the inviter's own bookkeeping (a name, an address): surrounding whitespace is trimmed, an empty value means no label, and more than 100 characters, any control character (`U+0000`–`U+001F`, `U+007F`) or text that is not valid Unicode (a lone surrogate such as the JSON escape `"\ud800"`) is a `422` (`VAL-001`; the rejected value is never echoed). There is no endpoint to edit a label afterwards.
 
 ```json
 {
@@ -1055,7 +1055,7 @@ The link is valid for 7 days and works once. Only a hash of the token is stored,
 | `409` | `BETA-INVITE-001` | Mint, or reissue of an `expired` invite: the caller already holds `quota` invites (`details.reason` = `"quota_exceeded"`, `details.quota`). A refused reissue leaves the invite as it was |
 | `409` | `BETA-INVITE-002` | Revoke / reissue: the invite was already used (`details.reason` = `"already_redeemed"`) |
 | `409` | `BETA-INVITE-003` | Reissue: the invite was already revoked (`details.reason` = `"already_revoked"`). Revoke stays idempotent instead |
-| `422` | `VAL-001` | Mint: `label` too long, contains a control character, or is not a string |
+| `422` | `VAL-001` | Mint: `label` too long, contains a control character, is not a string, or is not valid Unicode |
 | `410` | `RES-003` | Preview: expired or already redeemed |
 | `429` | `RATE-001` | Preview: per-IP limit exceeded |
 

@@ -356,6 +356,32 @@ class TestCreate:
             assert label not in response.text
             assert label[:8] not in response.json()["details"]["errors"][0]["msg"]
 
+    @pytest.mark.parametrize(
+        "body",
+        [
+            pytest.param(rb'{"label": "Alice \ud800"}', id="lone-high-surrogate"),
+            pytest.param(rb'{"label": "\udc00"}', id="lone-low-surrogate"),
+        ],
+    )
+    def test_unencodable_label_is_a_422_not_a_database_error(
+        self, client, enabled, monkeypatch, body
+    ) -> None:
+        # ``"\ud800"`` is a legal JSON escape and ``json.loads`` yields a legal
+        # Python ``str`` — but one the database driver cannot encode, and its
+        # error message quotes the whole value. Sent as raw bytes: ``json=``
+        # cannot serialise a lone surrogate.
+        create = AsyncMock()
+        monkeypatch.setattr(f"{SERVICE}.create", create)
+
+        response = client.post(
+            "/api/v1/beta-invites", content=body, headers={"Content-Type": "application/json"}
+        )
+
+        assert response.status_code == 422
+        assert response.json()["error"] == "VAL-001"
+        create.assert_not_awaited()
+        assert "Alice" not in response.text
+
     def test_quota_exceeded_is_a_409_with_the_contract_code(
         self, client, enabled, monkeypatch
     ) -> None:
@@ -511,10 +537,18 @@ class TestNothingPrivateIsLogged:
         with structlog.testing.capture_logs() as logs:
             created = client.post("/api/v1/beta-invites", json={"label": self.LABEL})
             rejected = client.post("/api/v1/beta-invites", json={"label": self.LABEL + "\x00"})
+            # A lone surrogate must be refused HERE: past validation it fails in
+            # the database driver, whose error text quotes the label.
+            unencodable = client.post(
+                "/api/v1/beta-invites",
+                content=b'{"label": "' + self.LABEL.encode() + rb' \ud800"}',
+                headers={"Content-Type": "application/json"},
+            )
             reissued = client.post(f"/api/v1/beta-invites/{INVITE_ID}/reissue")
             listed = client.get("/api/v1/beta-invites/me")
 
         assert (created.status_code, rejected.status_code) == (201, 422)
+        assert unencodable.status_code == 422
         assert (reissued.status_code, listed.status_code) == (201, 200)
         assert listed.json()["invites"][0]["redeemed_email"] == self.EMAIL
         rendered = repr(logs)
