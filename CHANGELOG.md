@@ -4,6 +4,28 @@ Release notes are published on [GitHub Releases](https://github.com/kagura-ai/me
 which is the canonical source for the complete release history. This file highlights the current
 release train and preserves selected historical development notes.
 
+## [v0.72.0](https://github.com/kagura-ai/memory-cloud/releases/tag/v0.72.0) — 2026-09-20
+
+Closed-beta invites after first real use: the invitee lands in the app instead of back on the login form, and the inviter can tell links apart, resend one, and read an honest count.
+
+### Added
+- **A label per invite** ([#1595](https://github.com/kagura-ai/memory-cloud/issues/1595)): `POST /api/v1/beta-invites` takes an optional JSON body `{"label": string | null}` (free text, up to 100 characters after trimming; control characters and text that is not valid Unicode are a `422`). A request with no body behaves exactly as before. The label is stored on the invite, returned on every list item and on the created payload, and rendered on the row. It is inviter-private: it never reaches a log line, an audit row or an error message, and it is deleted with the inviter's account.
+- **One-click reissue** ([#1595](https://github.com/kagura-ai/memory-cloud/issues/1595)): `POST /api/v1/beta-invites/{id}/reissue` (session only, no body, `201`, same payload as create) revokes an `active` or `expired` invite and mints a replacement with the same label in one transaction — for a recipient who lost the link, since only the token's hash is stored and the URL cannot be shown again. Errors: `404` (unknown id or someone else's invite), `409 BETA-INVITE-002` (already used), new `409 BETA-INVITE-003` (`details.reason = "already_revoked"` — a double-click cannot mint a second link), `409 BETA-INVITE-001` when an expired invite is reissued at the cap (the revoke is rolled back). The audit log records one `beta_invite.revoked` and one `beta_invite.created` row that cross-reference the two invites by id. The dialog shows a Reissue button on active and expired rows and presents the new URL in the same one-time panel.
+- **The inviter sees who an invite admitted** ([#1595](https://github.com/kagura-ai/memory-cloud/issues/1595)): a `redeemed` item in `GET /api/v1/beta-invites/me` carries `redeemed_email`, the admitted account's current e-mail. It is read from the live account only — never from the allowlist snapshot — so it becomes `null` when that account is erased. This deliberately replaces the v0.70.0 "status only" contract: the inviter is the person who vouched for the invitee.
+
+### Changed
+- **The invite header is a breakdown, not a bare "Used N"** ([#1595](https://github.com/kagura-ai/memory-cloud/issues/1595)): `GET /api/v1/beta-invites/me` gains `active` and `redeemed` (`active + redeemed == used` by construction; `used` / `remaining` / `quota` are unchanged), and the dialog reads `Active 2 · Used 1 · Limit 4` / `有効 2 · 使用済み 1 · 上限 4` (`No limit` / `上限なし` for a system admin). The old figure counted slots in use, so one redemption plus two unused links read as "3".
+
+### Fixed
+- **An invitee no longer lands on the login form after signing up** ([#1594](https://github.com/kagura-ai/memory-cloud/issues/1594)): `/join/[token]` now returns to `/workspace/dashboard` after the OAuth round trip. Before, it returned to `/`, which redirects to `/login`, which ignored the session that had just been created — and a second sign-in from there invalidated it.
+- **`/login` forwards a visitor who is already signed in** ([#1594](https://github.com/kagura-ai/memory-cloud/issues/1594)): to the sanitized `return_to`, default `/workspace/dashboard`, without rendering the form. `?error=…` and `?cancelled=1` still render their banners (an `email_in_use` error can arrive while another account's session is live). The page shows a labelled spinner until the session check settles and renders the form after 3 seconds regardless, so a slow or failing `/auth/me` cannot lock anyone out.
+- **`return_to` hardening** ([#1594](https://github.com/kagura-ai/memory-cloud/issues/1594)): the client-side `safeReturnTo` guard now rejects a backslash or any C0 control character (a URL parser reads `\` as `/` and drops TAB / LF / CR, so `/\host` resolves cross-origin), matching and exceeding the backend's redirect validator; the new `/login` forward additionally resolves its target same-origin before navigating. Found in pre-merge review of the forward, before it shipped.
+
+### Notes
+- **Migration:** `alembic upgrade head` — `e83_1595_beta_invite_label` (adds the nullable `beta_invites.label` column; no backfill). Downgrade drops the column and keeps the invites.
+- No new environment variables. `ENABLE_BETA_INVITES=false` 404s the reissue route like the others, before authentication.
+- API clients: all `beta-invites` payload changes are additive.
+
 ## [v0.71.0](https://github.com/kagura-ai/memory-cloud/releases/tag/v0.71.0) — 2026-09-20
 
 Operational hygiene for the single-server template: bounded container logs, and proxy logs that never hold an invite token.
