@@ -1,4 +1,4 @@
-"""Closed-beta invite link endpoints (Issue #1581).
+"""Closed-beta invite link endpoints (Issues #1581, #1595).
 
 Routes under ``/api/v1/beta-invites``. A signed-in user mints a one-time
 ``/join/{token}`` URL that lets one new person through the admin-configured
@@ -15,8 +15,13 @@ Every route 404s when ``settings.enable_beta_invites`` is false (the referrals
 ``GET /api/v1/system/info`` ``features.beta_invites`` so the web UI hides its
 entry points.
 
-The plaintext URL appears in exactly one response — ``POST /beta-invites`` — and
-is never logged. Every other payload and every error names an invite by ``id``.
+The plaintext URL appears in the response that mints it — ``POST /beta-invites``
+or ``POST /beta-invites/{id}/reissue`` — exactly once, and is never logged. Every
+other payload and every error names an invite by ``id``.
+
+#1595: an invite's ``label`` (the inviter's free-text note) and ``redeemed_email``
+(the admitted account's address) are returned to the inviter and appear nowhere
+else — nothing in this module logs either, and no error message carries them.
 """
 
 from __future__ import annotations
@@ -26,6 +31,7 @@ from datetime import datetime
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException, Request, Response, status
+from pydantic import BaseModel, field_validator
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from auth.dependencies import SessionUser
@@ -34,7 +40,12 @@ from db.base import get_db
 from db.redis import incrby_counter
 from models.api_base import TZAwareBaseModel
 from models.beta_invite import BetaInviteStatus
-from services.beta_invite_service import BETA_INVITE_TOKEN_PATTERN, BetaInviteService
+from services.beta_invite_service import (
+    BETA_INVITE_TOKEN_PATTERN,
+    BetaInviteService,
+    MintedBetaInvite,
+    normalize_beta_invite_label,
+)
 from utils.exceptions import NotFoundException, RateLimitError
 from utils.logger import get_logger
 
@@ -69,32 +80,67 @@ router = APIRouter(
 )
 
 
+class BetaInviteCreateRequest(BaseModel):
+    """Optional body of ``POST /beta-invites`` (#1595). No body at all is valid."""
+
+    label: str | None = None
+
+    @field_validator("label")
+    @classmethod
+    def _normalize_label(cls, value: str | None) -> str | None:
+        # Trim; blank -> None; > 100 chars, a control character or a lone
+        # surrogate -> 422. The ``ValueError`` text reaches the 422 body, so it
+        # never quotes the label.
+        return normalize_beta_invite_label(value)
+
+
 class BetaInviteItem(TZAwareBaseModel):
-    """One invite as its inviter sees it: lifecycle only, never who redeemed it."""
+    """One invite as its inviter sees it.
+
+    Lifecycle, the inviter's own ``label``, and — for a ``redeemed`` invite whose
+    admitted account still exists — that account's current e-mail. #1581 showed
+    status only; #1595 reverses that on purpose: the inviter is the person who
+    vouched for the invitee, so this is not a new disclosure. ``redeemed_email``
+    is ``null`` for every other status, and turns ``null`` again once the account
+    is erased. Never the token, its hash or the URL.
+    """
 
     id: str
     status: BetaInviteStatus
+    label: str | None
     created_at: datetime
     expires_at: datetime
     redeemed_at: datetime | None
     revoked_at: datetime | None
+    redeemed_email: str | None
 
 
 class BetaInviteSummaryResponse(TZAwareBaseModel):
-    """The caller's quota standing. ``null`` quota / remaining = unlimited (admin)."""
+    """The caller's quota standing. ``null`` quota / remaining = unlimited (admin).
+
+    ``used`` counts the invites occupying a slot; ``active`` and ``redeemed`` are
+    its two parts (``active + redeemed == used``), so a client never re-derives
+    them from the list.
+    """
 
     quota: int | None
     used: int
+    active: int
+    redeemed: int
     remaining: int | None
     invites: list[BetaInviteItem]
 
 
 class BetaInviteCreatedResponse(TZAwareBaseModel):
-    """A freshly minted invite — the only payload that ever carries the URL."""
+    """A freshly minted invite — the only payload that ever carries the URL.
+
+    Returned by both create and reissue.
+    """
 
     id: str
     url: str
     expires_at: datetime
+    label: str | None
 
 
 class BetaInvitePreviewResponse(TZAwareBaseModel):
@@ -106,6 +152,15 @@ class BetaInvitePreviewResponse(TZAwareBaseModel):
 
 def _client_ip(request: Request) -> str:
     return request.client.host if request.client else "unknown"
+
+
+def _created_response(minted: MintedBetaInvite) -> BetaInviteCreatedResponse:
+    return BetaInviteCreatedResponse(
+        id=str(minted.invite.id),
+        url=minted.url,
+        expires_at=minted.invite.expires_at,
+        label=minted.invite.label,
+    )
 
 
 async def _check_preview_rate_limit(client_ip: str) -> None:
@@ -144,24 +199,35 @@ async def get_my_beta_invites(
         db: Database session.
 
     Returns:
-        ``quota`` / ``used`` / ``remaining`` and the per-invite lifecycle.
+        ``quota`` / ``used`` (= ``active`` + ``redeemed``) / ``remaining`` and the
+        per-invite lifecycle, label and — for redeemed invites — admitted e-mail.
     """
     summary = await BetaInviteService(db).get_summary(user["user_id"])
-    return BetaInviteSummaryResponse(
-        quota=summary.quota,
-        used=summary.used,
-        remaining=summary.remaining,
-        invites=[
+    items = []
+    for invite in summary.invites:
+        invite_status = invite.status
+        items.append(
             BetaInviteItem(
                 id=str(invite.id),
-                status=invite.status,
+                status=invite_status,
+                label=invite.label,
                 created_at=invite.created_at,
                 expires_at=invite.expires_at,
                 redeemed_at=invite.redeemed_at,
                 revoked_at=invite.revoked_at,
+                # Only ever on a ``redeemed`` row, whatever the mapping holds.
+                redeemed_email=(
+                    summary.redeemed_emails.get(invite.id) if invite_status == "redeemed" else None
+                ),
             )
-            for invite in summary.invites
-        ],
+        )
+    return BetaInviteSummaryResponse(
+        quota=summary.quota,
+        used=summary.used,
+        active=summary.active,
+        redeemed=summary.redeemed,
+        remaining=summary.remaining,
+        invites=items,
     )
 
 
@@ -169,6 +235,7 @@ async def get_my_beta_invites(
 async def create_beta_invite(
     request: Request,
     user: SessionUser,
+    body: BetaInviteCreateRequest | None = None,
     db: AsyncSession = Depends(get_db),
 ) -> BetaInviteCreatedResponse:
     """Mint a one-time invite link. The URL is returned here and never again.
@@ -176,10 +243,12 @@ async def create_beta_invite(
     Args:
         request: FastAPI request (IP / User-Agent for the audit row).
         user: Authenticated session user (the inviter).
+        body: Optional ``{"label": ...}`` (#1595). Clients that predate it send
+            no body at all, which keeps working.
         db: Database session.
 
     Returns:
-        The invite id, its plaintext URL, and its expiry.
+        The invite id, its plaintext URL, its expiry and its label.
 
     Raises:
         BetaInviteQuotaExceededError: 409 ``BETA-INVITE-001`` at the cap.
@@ -187,14 +256,57 @@ async def create_beta_invite(
     minted = await BetaInviteService(db).create(
         user_id=user["user_id"],
         user_email=user.get("email", user["user_id"]),
+        label=body.label if body is not None else None,
         ip_address=_client_ip(request),
         user_agent=request.headers.get("user-agent"),
     )
-    return BetaInviteCreatedResponse(
-        id=str(minted.invite.id),
-        url=minted.url,
-        expires_at=minted.invite.expires_at,
+    return _created_response(minted)
+
+
+@router.post(
+    "/{invite_id}/reissue",
+    response_model=BetaInviteCreatedResponse,
+    status_code=status.HTTP_201_CREATED,
+)
+async def reissue_beta_invite(
+    invite_id: UUID,
+    request: Request,
+    user: SessionUser,
+    db: AsyncSession = Depends(get_db),
+) -> BetaInviteCreatedResponse:
+    """Replace an own ``active`` or ``expired`` invite with a fresh link (#1595).
+
+    For a recipient who lost the link: only the hash is stored, so the URL cannot
+    be shown again. The old invite is revoked and a new one carrying the same
+    label is minted in one transaction; the quota standing of an ``active``
+    invite is unchanged. Takes no body.
+
+    Args:
+        invite_id: The invite to replace.
+        request: FastAPI request (IP / User-Agent for the audit rows).
+        user: Authenticated session user.
+        db: Database session.
+
+    Returns:
+        Exactly the create payload — the new invite and its plaintext URL, once.
+
+    Raises:
+        NotFoundException: 404 — unknown id, or someone else's invite.
+        BetaInviteAlreadyRedeemedError: 409 ``BETA-INVITE-002``.
+        BetaInviteAlreadyRevokedError: 409 ``BETA-INVITE-003`` — also what the
+            second request of a double-click gets; it mints nothing.
+        BetaInviteQuotaExceededError: 409 ``BETA-INVITE-001`` — an ``expired``
+            invite holds no slot, so reissuing one at the cap is refused (and the
+            invite is left as it was).
+    """
+    minted = await BetaInviteService(db).reissue(
+        user_id=user["user_id"],
+        invite_id=invite_id,
+        user_email=user.get("email", user["user_id"]),
+        ip_address=_client_ip(request),
+        user_agent=request.headers.get("user-agent"),
     )
+    return _created_response(minted)
 
 
 @router.delete("/{invite_id}", status_code=status.HTTP_204_NO_CONTENT)

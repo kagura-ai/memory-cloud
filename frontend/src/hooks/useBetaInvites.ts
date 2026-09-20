@@ -1,11 +1,13 @@
 "use client";
 
 /**
- * useBetaInvites (#1582)
+ * useBetaInvites (#1582, #1595)
  *
  * The caller's beta-invite quota and invites — ONE instance (owned by the
  * sidebar) feeds the "Invite a friend" card, the account-menu entry and the
- * dialog, so creating or revoking an invite updates all three at once.
+ * dialog, so creating, revoking or reissuing an invite updates all three at
+ * once. The one-time URL a mutation returns is handed to the caller and never
+ * kept here.
  *
  * Makes no request unless `features.beta_invites === true`: every
  * `/beta-invites` route 404s while the feature is off, and an older backend
@@ -19,6 +21,7 @@ import { ApiError } from "@/lib/api/base";
 import {
   createBetaInvite,
   getMyBetaInvites,
+  reissueBetaInvite,
   revokeBetaInvite,
   type BetaInviteCreated,
   type BetaInviteSummary,
@@ -33,8 +36,10 @@ export interface UseBetaInvites {
   error: unknown;
   refresh: () => Promise<void>;
   /** Mints an invite. The returned URL is a credential, shown once. */
-  create: () => Promise<BetaInviteCreated>;
+  create: (label?: string) => Promise<BetaInviteCreated>;
   revoke: (id: string) => Promise<void>;
+  /** Revokes `id` and mints its replacement. Same one-time URL rules. */
+  reissue: (id: string) => Promise<BetaInviteCreated>;
 }
 
 export function useBetaInvites(): UseBetaInvites {
@@ -79,16 +84,19 @@ export function useBetaInvites(): UseBetaInvites {
   // A 409 means the numbers on screen are stale (the cap was reached from
   // another tab, or the invite was redeemed meanwhile) — re-read before the
   // caller shows its message.
-  const create = useCallback(async () => {
-    try {
-      const created = await createBetaInvite();
-      await refresh();
-      return created;
-    } catch (e) {
-      if (e instanceof ApiError && e.status === 409) await refresh();
-      throw e;
-    }
-  }, [refresh]);
+  const create = useCallback(
+    async (label?: string) => {
+      try {
+        const created = await createBetaInvite(label);
+        await refresh();
+        return created;
+      } catch (e) {
+        if (e instanceof ApiError && e.status === 409) await refresh();
+        throw e;
+      }
+    },
+    [refresh],
+  );
 
   const revoke = useCallback(
     async (id: string) => {
@@ -103,5 +111,21 @@ export function useBetaInvites(): UseBetaInvites {
     [refresh],
   );
 
-  return { summary, isLoading, error, refresh, create, revoke };
+  // Same 409 rule: already used, already revoked (a double-click — the first
+  // request won) or at the cap all mean the list on screen is out of date.
+  const reissue = useCallback(
+    async (id: string) => {
+      try {
+        const created = await reissueBetaInvite(id);
+        await refresh();
+        return created;
+      } catch (e) {
+        if (e instanceof ApiError && e.status === 409) await refresh();
+        throw e;
+      }
+    },
+    [refresh],
+  );
+
+  return { summary, isLoading, error, refresh, create, revoke, reissue };
 }

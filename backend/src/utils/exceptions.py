@@ -546,6 +546,7 @@ class ReferralCapReachedError(ReferralError):
 # multi-word like ``WORKER-APP-``). The snake_case names the #1581 issue uses for
 # the two 409s (``quota_exceeded`` / ``already_redeemed``) stay on the wire as
 # ``details.reason`` — a stable discriminator that does not depend on the number.
+# #1595 adds the third (``already_revoked``), emitted by reissue only.
 
 
 class BetaInviteQuotaExceededError(MemoryCloudException):
@@ -562,14 +563,32 @@ class BetaInviteQuotaExceededError(MemoryCloudException):
 
 
 class BetaInviteAlreadyRedeemedError(MemoryCloudException):
-    """A redeemed invite link cannot be revoked (409)."""
+    """A redeemed invite link cannot be revoked or reissued (409)."""
 
-    def __init__(self) -> None:
+    def __init__(
+        self, message: str = "This invite has already been used and cannot be revoked."
+    ) -> None:
         super().__init__(
-            "This invite has already been used and cannot be revoked.",
+            message,
             status_code=409,
             error_code="BETA-INVITE-002",
             reason="already_redeemed",
+        )
+
+
+class BetaInviteAlreadyRevokedError(MemoryCloudException):
+    """A revoked invite link cannot be reissued (409, #1595).
+
+    ``DELETE`` stays idempotent on a revoked invite; reissue must not be — a
+    double-click that answered 201 twice would mint two links for one intent.
+    """
+
+    def __init__(self) -> None:
+        super().__init__(
+            "This invite has already been revoked and cannot be reissued.",
+            status_code=409,
+            error_code="BETA-INVITE-003",
+            reason="already_revoked",
         )
 
 

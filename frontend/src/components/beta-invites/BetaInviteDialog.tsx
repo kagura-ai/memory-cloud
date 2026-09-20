@@ -1,16 +1,23 @@
 "use client";
 
 /**
- * Beta invite dialog (#1582) — quota, the caller's invites, create and revoke.
+ * Beta invite dialog (#1582, #1595) — quota, the caller's invites, create,
+ * revoke and reissue.
  *
  * Pattern: `components/api-keys/CreateAPIKeyDialog.tsx` (one-time secret +
  * Copy). The invite URL is a credential: it exists only in this component's
- * state, from the create response until the dialog closes (or Done). It is
- * never logged and never persisted; the list below never carries a URL.
+ * state, from the create / reissue response until the dialog closes (or Done).
+ * It is never logged and never persisted; the list below never carries a URL.
  *
- * The summary and both mutations come from the sidebar's single
- * `useBetaInvites` instance, so a create / revoke here also updates the card
- * and the account-menu counter.
+ * #1595: a link can carry an inviter-private label, a redeemed row names the
+ * account it admitted, and "Reissue" replaces a lost link in one click — the
+ * stored hash cannot be shown again, so the old link is revoked and the new URL
+ * lands in the same one-time panel. Labels and addresses are rendered, never
+ * logged.
+ *
+ * The summary and the mutations come from the sidebar's single
+ * `useBetaInvites` instance, so a create / revoke / reissue here also updates
+ * the card and the account-menu counter.
  */
 
 import { useEffect, useRef, useState } from "react";
@@ -59,8 +66,9 @@ interface BetaInviteDialogProps {
   /** `null` while the first load is pending (or failed — see `error`). */
   summary: BetaInviteSummary | null;
   error: unknown;
-  create: () => Promise<BetaInviteCreated>;
+  create: (label?: string) => Promise<BetaInviteCreated>;
   revoke: (id: string) => Promise<void>;
+  reissue: (id: string) => Promise<BetaInviteCreated>;
 }
 
 // The label carries the status; the tint only reinforces it.
@@ -73,6 +81,10 @@ const STATUS_TINT: Record<BetaInviteStatus, string> = {
 
 const CAP_REASON_ID = "beta-invite-cap-reason";
 const URL_FIELD_ID = "beta-invite-url";
+const LABEL_FIELD_ID = "beta-invite-label";
+const LABEL_HELP_ID = "beta-invite-label-help";
+// Longest label the API accepts — mirrors `beta_invites.label` VARCHAR(100).
+const LABEL_MAX_LENGTH = 100;
 
 export function BetaInviteDialog({
   open,
@@ -81,6 +93,7 @@ export function BetaInviteDialog({
   error,
   create,
   revoke,
+  reissue,
 }: BetaInviteDialogProps) {
   const t = useTranslations("betaInvites");
   const tCommon = useTranslations("common");
@@ -89,6 +102,9 @@ export function BetaInviteDialog({
 
   // One-time display state — cleared on close, see the effect below.
   const [created, setCreated] = useState<BetaInviteCreated | null>(null);
+  // The URL on screen replaces a link that just stopped working.
+  const [createdByReissue, setCreatedByReissue] = useState(false);
+  const [label, setLabel] = useState("");
   const [copied, setCopied] = useState(false);
   const [copyFailed, setCopyFailed] = useState(false);
   const [creating, setCreating] = useState(false);
@@ -96,22 +112,31 @@ export function BetaInviteDialog({
   const [revokeTarget, setRevokeTarget] = useState<BetaInvite | null>(null);
   const [revoking, setRevoking] = useState(false);
   const [revokeError, setRevokeError] = useState<string | null>(null);
-  // What `open` is right now, for a create that resolves after a close.
+  const [reissuingId, setReissuingId] = useState<string | null>(null);
+  const [reissueError, setReissueError] = useState<string | null>(null);
+  // What `open` is right now, for a create / reissue that resolves after a close.
   const openRef = useRef(open);
 
   useEffect(() => {
     openRef.current = open;
     if (open) return;
     setCreated(null);
+    setCreatedByReissue(false);
+    setLabel("");
     setCopied(false);
     setCopyFailed(false);
     setCreateError(null);
     setRevokeTarget(null);
     setRevokeError(null);
+    setReissueError(null);
   }, [open]);
 
   const atCap =
     summary !== null && summary.remaining !== null && summary.remaining <= 0;
+  // There is ONE URL panel, so mints never overlap: a second response would
+  // replace a URL the user has not copied yet. (Reissue additionally waits for
+  // Done while a URL is on screen — see the row buttons.)
+  const minting = creating || reissuingId !== null;
 
   const formatWhen = (iso: string) =>
     formatDateTime(iso, user?.timezone, locale);
@@ -120,11 +145,15 @@ export function BetaInviteDialog({
     setCreating(true);
     setCreateError(null);
     try {
-      const next = await create();
+      const next = await create(label);
       // Closed meanwhile (the owner can drop `open` whatever the guard on the
       // Dialog below says): the clear-on-close effect has already run, so a
       // URL stored now would survive into the next open. Drop it instead.
-      if (openRef.current) setCreated(next);
+      if (openRef.current) {
+        setCreated(next);
+        setCreatedByReissue(false);
+        setLabel("");
+      }
     } catch (err) {
       // 409 quota_exceeded: the hook has already re-read the summary, so the
       // counter and the disabled button now agree with this message.
@@ -135,6 +164,37 @@ export function BetaInviteDialog({
       );
     } finally {
       setCreating(false);
+    }
+  };
+
+  const handleReissue = async (invite: BetaInvite) => {
+    setReissuingId(invite.id);
+    setReissueError(null);
+    try {
+      const next = await reissue(invite.id);
+      // Same late-arrival rule as `handleCreate`.
+      if (openRef.current) {
+        setCreated(next);
+        setCreatedByReissue(true);
+        setCopied(false);
+        setCopyFailed(false);
+      }
+    } catch (err) {
+      // Every 409 has already made the hook re-read the list.
+      const code =
+        err instanceof ApiError && err.status === 409 ? err.error : null;
+      if (code === "BETA-INVITE-003") {
+        // Already revoked — a double-click whose first request won. The fresh
+        // list shows the outcome; there is nothing to tell the user.
+      } else if (code === "BETA-INVITE-002") {
+        setReissueError(t("dialog.reissue.alreadyRedeemed"));
+      } else if (code === "BETA-INVITE-001") {
+        setReissueError(t("dialog.quotaExceeded"));
+      } else {
+        setReissueError(t("dialog.reissue.failed"));
+      }
+    } finally {
+      setReissuingId(null);
     }
   };
 
@@ -154,6 +214,7 @@ export function BetaInviteDialog({
 
   const handleDone = () => {
     setCreated(null);
+    setCreatedByReissue(false);
     setCopied(false);
     setCopyFailed(false);
   };
@@ -200,10 +261,10 @@ export function BetaInviteDialog({
       <Dialog
         open={open}
         onOpenChange={(next) => {
-          // Block close while a create is in flight: the URL is shown once,
-          // and a response landing in a closed dialog would be lost to the
-          // user (the invite is minted and counted either way).
-          if (!next && creating) return;
+          // Block close while a create / reissue is in flight: the URL is
+          // shown once, and a response landing in a closed dialog would be
+          // lost to the user (the invite is minted and counted either way).
+          if (!next && minting) return;
           onOpenChange(next);
         }}
       >
@@ -217,9 +278,13 @@ export function BetaInviteDialog({
             {summary !== null && (
               <p className={cn(typography.label)}>
                 {summary.quota === null
-                  ? t("dialog.usageUnlimited", { used: summary.used })
+                  ? t("dialog.usageUnlimited", {
+                      active: summary.active,
+                      redeemed: summary.redeemed,
+                    })
                   : t("dialog.usage", {
-                      used: summary.used,
+                      active: summary.active,
+                      redeemed: summary.redeemed,
                       quota: summary.quota,
                     })}
               </p>
@@ -231,6 +296,11 @@ export function BetaInviteDialog({
                   <Link2 className="h-4 w-4" />
                   <AlertDescription>
                     {t("dialog.created.onceNote")}
+                    {createdByReissue && (
+                      <span className="mt-1 block">
+                        {t("dialog.created.reissuedNote")}
+                      </span>
+                    )}
                   </AlertDescription>
                 </Alert>
                 <div className="space-y-2">
@@ -282,9 +352,27 @@ export function BetaInviteDialog({
                     <AlertDescription>{createError}</AlertDescription>
                   </Alert>
                 )}
+                <div className="space-y-1">
+                  <Label htmlFor={LABEL_FIELD_ID}>
+                    {t("dialog.labelField.label")}
+                  </Label>
+                  <Input
+                    id={LABEL_FIELD_ID}
+                    value={label}
+                    onChange={(e) => setLabel(e.target.value)}
+                    maxLength={LABEL_MAX_LENGTH}
+                    placeholder={t("dialog.labelField.placeholder")}
+                    aria-describedby={LABEL_HELP_ID}
+                    autoComplete="off"
+                    disabled={creating}
+                  />
+                  <p id={LABEL_HELP_ID} className={typography.caption}>
+                    {t("dialog.labelField.help")}
+                  </p>
+                </div>
                 <Button
                   onClick={handleCreate}
-                  disabled={summary === null || atCap || creating}
+                  disabled={summary === null || atCap || minting}
                   aria-describedby={atCap ? CAP_REASON_ID : undefined}
                 >
                   {creating ? (
@@ -323,43 +411,94 @@ export function BetaInviteDialog({
             ) : (
               <div className="space-y-2">
                 <h3 className={typography.label}>{t("dialog.list.heading")}</h3>
+                {reissueError && (
+                  <Alert variant="destructive">
+                    <AlertCircle className="h-4 w-4" />
+                    <AlertDescription>{reissueError}</AlertDescription>
+                  </Alert>
+                )}
                 <ul
                   className={cn(
                     "max-h-64 divide-y overflow-y-auto rounded-md border",
                     colors.border.default,
                   )}
                 >
-                  {summary.invites.map((invite) => (
-                    <li
-                      key={invite.id}
-                      className="flex items-center justify-between gap-3 px-3 py-2"
-                    >
-                      <div className="min-w-0 space-y-1">
-                        <Badge
-                          variant="outline"
-                          className={cn(
-                            "border-transparent",
-                            STATUS_TINT[invite.status],
+                  {summary.invites.map((invite) => {
+                    const reissuable =
+                      invite.status === "active" || invite.status === "expired";
+                    const rowBusy = reissuingId === invite.id;
+                    return (
+                      // Wraps instead of squeezing: on a 320 px screen the
+                      // buttons drop below the text rather than crushing it.
+                      <li
+                        key={invite.id}
+                        data-testid={`beta-invite-row-${invite.id}`}
+                        className="flex flex-wrap items-center justify-between gap-x-3 gap-y-2 px-3 py-2"
+                      >
+                        <div className="min-w-0 flex-1 basis-40 space-y-1">
+                          <Badge
+                            variant="outline"
+                            className={cn(
+                              "border-transparent",
+                              STATUS_TINT[invite.status],
+                            )}
+                          >
+                            {t(`dialog.status.${invite.status}`)}
+                          </Badge>
+                          {invite.label && (
+                            <p
+                              data-testid="beta-invite-label"
+                              className={cn(typography.label, "truncate")}
+                              title={invite.label}
+                            >
+                              {invite.label}
+                            </p>
                           )}
-                        >
-                          {t(`dialog.status.${invite.status}`)}
-                        </Badge>
-                        <p className={typography.caption}>{whenLine(invite)}</p>
-                      </div>
-                      {invite.status === "active" && (
-                        <Button
-                          variant="outline"
-                          size="sm"
-                          onClick={() => {
-                            setRevokeError(null);
-                            setRevokeTarget(invite);
-                          }}
-                        >
-                          {t("dialog.list.revoke")}
-                        </Button>
-                      )}
-                    </li>
-                  ))}
+                          {invite.status === "redeemed" &&
+                            invite.redeemed_email && (
+                              <p
+                                data-testid="beta-invite-redeemed-email"
+                                className={cn(typography.caption, "truncate")}
+                                title={invite.redeemed_email}
+                              >
+                                {t("dialog.list.redeemedBy", {
+                                  email: invite.redeemed_email,
+                                })}
+                              </p>
+                            )}
+                          <p className={typography.caption}>
+                            {whenLine(invite)}
+                          </p>
+                        </div>
+                        {reissuable && (
+                          <div className="flex shrink-0 gap-2">
+                            <Button
+                              variant="outline"
+                              size="sm"
+                              onClick={() => void handleReissue(invite)}
+                              disabled={minting || created !== null}
+                            >
+                              {rowBusy && <InlineSpinner className="mr-2" />}
+                              {t("dialog.list.reissue")}
+                            </Button>
+                            {invite.status === "active" && (
+                              <Button
+                                variant="outline"
+                                size="sm"
+                                disabled={rowBusy}
+                                onClick={() => {
+                                  setRevokeError(null);
+                                  setRevokeTarget(invite);
+                                }}
+                              >
+                                {t("dialog.list.revoke")}
+                              </Button>
+                            )}
+                          </div>
+                        )}
+                      </li>
+                    );
+                  })}
                 </ul>
               </div>
             )}

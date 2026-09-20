@@ -44,9 +44,10 @@ describe("betaInvites messages", () => {
       });
 
       expect(t("menuEntryWithCount", { used: 4, quota: 4 })).toContain("4/4");
-      expect(t("dialog.usage", { used: 1, quota: 4 })).toMatch(/1.*4/);
-      expect(t("dialog.usageUnlimited", { used: 9 })).toContain("9");
       expect(t("dialog.capReached", { quota: 4 })).toContain("4");
+      expect(
+        t("dialog.list.redeemedBy", { email: "bob@invitee.example" }),
+      ).toContain("bob@invitee.example");
       for (const key of [
         "dialog.list.expiresAt",
         "dialog.list.expiredAt",
@@ -70,5 +71,61 @@ describe("betaInvites messages", () => {
     });
     expect(t("card.remaining", { remaining: 1 })).toBe("1 invite left");
     expect(t("card.remaining", { remaining: 3 })).toBe("3 invites left");
+  });
+
+  // #1595: "Used 3" read as "3 people signed up" while it meant active +
+  // redeemed. The header now names the parts; pin the exact copy per locale.
+  it.each([
+    ["en", en, "Active 2 · Used 1 · Limit 4", "Active 7 · Used 2 · No limit"],
+    [
+      "ja",
+      ja,
+      "有効 2 · 使用済み 1 · 上限 4",
+      "有効 7 · 使用済み 2 · 上限なし",
+    ],
+  ] as const)(
+    "%s header is the three-part breakdown",
+    (locale, messages, capped, unlimited) => {
+      const t = createTranslator({
+        locale,
+        messages,
+        namespace: "betaInvites",
+        onError: (error) => {
+          throw error;
+        },
+      });
+      expect(t("dialog.usage", { active: 2, redeemed: 1, quota: 4 })).toBe(
+        capped,
+      );
+      expect(t("dialog.usageUnlimited", { active: 7, redeemed: 2 })).toBe(
+        unlimited,
+      );
+    },
+  );
+
+  it.each([
+    ["en", en],
+    ["ja", ja],
+  ] as const)(
+    "%s has every string the #1595 dialog renders",
+    (_l, messages) => {
+      const dialog = messages.betaInvites.dialog;
+      for (const value of [
+        dialog.labelField.label,
+        dialog.labelField.placeholder,
+        dialog.labelField.help,
+        dialog.list.reissue,
+        dialog.created.reissuedNote,
+        dialog.reissue.alreadyRedeemed,
+        dialog.reissue.failed,
+      ]) {
+        expect(value).toBeTruthy();
+      }
+    },
+  );
+
+  it("uses the agreed Japanese word for reissue", () => {
+    expect(ja.betaInvites.dialog.list.reissue).toBe("再発行");
+    expect(en.betaInvites.dialog.list.reissue).toBe("Reissue");
   });
 });

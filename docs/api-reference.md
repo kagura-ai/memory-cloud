@@ -975,12 +975,13 @@ Revoke an API key (soft delete, preserves audit trail).
 
 ## Beta Invite APIs
 
-Closed-beta invite links (Issue #1581): a signed-in user mints a one-time link that lets one new person through the admin-configured signup gate. Off by default — every route below answers a plain `404` (before authentication) unless the deployment sets `ENABLE_BETA_INVITES=true`; `GET /api/v1/system/info` → `features.beta_invites` reports availability. Inviter routes accept a session cookie only (no API keys). See [Closed-beta invite links](deployment.md#closed-beta-invite-links-issue-1581) for the operator view.
+Closed-beta invite links (Issues #1581, #1595): a signed-in user mints a one-time link that lets one new person through the admin-configured signup gate. Off by default — every route below answers a plain `404` (before authentication) unless the deployment sets `ENABLE_BETA_INVITES=true`; `GET /api/v1/system/info` → `features.beta_invites` reports availability. Inviter routes accept a session cookie only (no API keys). See [Closed-beta invite links](deployment.md#closed-beta-invite-links-issue-1581) for the operator view.
 
 | Endpoint | Auth | Purpose |
 |---|---|---|
 | `GET /api/v1/beta-invites/me` | session | The caller's quota standing and their invites, newest first |
-| `POST /api/v1/beta-invites` | session | Mint a link (`201`) — the only response that carries the URL |
+| `POST /api/v1/beta-invites` | session | Mint a link (`201`), optionally labelled — the response carries the URL, once |
+| `POST /api/v1/beta-invites/{id}/reissue` | session | Replace an own `active` / `expired` invite with a fresh link carrying the same label (`201`, same payload as mint) |
 | `DELETE /api/v1/beta-invites/{id}` | session | Revoke an own, unused invite (`204`; idempotent) |
 | `GET /api/v1/beta-invites/{token}/preview` | none | Landing-page check: is this link still usable? Read-only, per-IP rate-limited (30/min) |
 
@@ -990,44 +991,71 @@ Closed-beta invite links (Issue #1581): a signed-in user mints a one-time link t
 {
   "quota": 4,
   "used": 2,
+  "active": 1,
+  "redeemed": 1,
   "remaining": 2,
   "invites": [
     {
       "id": "0b9f6c1e-5d0a-4a3e-9d57-2f4f3f6f8a11",
       "status": "active",
+      "label": "Alice (university)",
       "created_at": "2026-09-01T12:00:00Z",
       "expires_at": "2026-09-08T12:00:00Z",
       "redeemed_at": null,
-      "revoked_at": null
+      "revoked_at": null,
+      "redeemed_email": null
+    },
+    {
+      "id": "5a0e2f0c-3c55-4f0e-8a55-0d6c1c0b7e42",
+      "status": "redeemed",
+      "label": null,
+      "created_at": "2026-08-30T09:00:00Z",
+      "expires_at": "2026-09-06T09:00:00Z",
+      "redeemed_at": "2026-08-31T18:20:00Z",
+      "revoked_at": null,
+      "redeemed_email": "bob@example.com"
     }
   ]
 }
 ```
 
-- `status` is derived: `revoked` > `redeemed` > `expired` > `active`. The inviter never learns who redeemed a link.
-- `used` counts active + redeemed invites; expired and revoked ones free their slot.
+- `status` is derived: `revoked` > `redeemed` > `expired` > `active`.
+- `used` counts the invites occupying a quota slot; `active` (unused, still valid) and `redeemed` are its two parts — `active + redeemed == used` always. Expired and revoked invites free their slot.
 - `quota` and `remaining` are `null` for a system admin (unlimited).
+- `label` (since #1595) is the inviter's own note, or `null`. Only the inviter ever sees it.
+- `redeemed_email` (since #1595) is the **current** e-mail of the account a `redeemed` invite admitted — the inviter vouched for that person, so they may see who it was. It is `null` for every other status, and `null` for a redeemed invite whose account no longer exists (erased) or whose allowlist entry an admin removed: it is read from the live account, never from a stored copy. #1581 exposed the lifecycle only; this field reverses that on purpose.
 
-`POST /api/v1/beta-invites` → `201`:
+`POST /api/v1/beta-invites` → `201`. The JSON body is optional — sending no body at all (what clients written before #1595 do) mints an unlabelled invite:
+
+```json
+{ "label": "Alice (university)" }
+```
+
+`label` is free text for the inviter's own bookkeeping (a name, an address): surrounding whitespace is trimmed, an empty value means no label, and more than 100 characters, any control character (`U+0000`–`U+001F`, `U+007F`) or text that is not valid Unicode (a lone surrogate such as the JSON escape `"\ud800"`) is a `422` (`VAL-001`; the rejected value is never echoed). There is no endpoint to edit a label afterwards.
 
 ```json
 {
   "id": "0b9f6c1e-5d0a-4a3e-9d57-2f4f3f6f8a11",
   "url": "https://your-domain.com/join/<token>",
-  "expires_at": "2026-09-08T12:00:00Z"
+  "expires_at": "2026-09-08T12:00:00Z",
+  "label": "Alice (university)"
 }
 ```
 
-The link is valid for 7 days and works once. Only a hash of the token is stored, so the URL cannot be shown again — revoke and mint a new one if it is lost.
+The link is valid for 7 days and works once. Only a hash of the token is stored, so the URL cannot be shown again — reissue the invite if the link is lost.
+
+`POST /api/v1/beta-invites/{id}/reissue` → `201`, no request body, the same payload as mint. In one transaction it revokes `{id}` and mints a replacement with the same label; the old link stops working immediately. Allowed for the caller's own `active` and `expired` invites. Reissuing an `active` invite never changes the quota standing (the revoked link frees the slot the new one takes); an `expired` invite held no slot, so reissuing one needs a free slot like any mint. A second request for the same `{id}` — a double-click — is a `409` and mints nothing.
 
 `GET /api/v1/beta-invites/{token}/preview` → `200 {"valid": true, "expires_at": "…"}`.
 
 | Status | `error` | When |
 |---|---|---|
 | `404` | `HTTP-404` | Feature disabled (every route) |
-| `404` | `RES-001` | Preview: unknown, revoked or malformed token · Revoke: unknown id or someone else's invite |
-| `409` | `BETA-INVITE-001` | Mint: the caller already holds `quota` invites (`details.reason` = `"quota_exceeded"`, `details.quota`) |
-| `409` | `BETA-INVITE-002` | Revoke: the invite was already used (`details.reason` = `"already_redeemed"`) |
+| `404` | `RES-001` | Preview: unknown, revoked or malformed token · Revoke / reissue: unknown id or someone else's invite |
+| `409` | `BETA-INVITE-001` | Mint, or reissue of an `expired` invite: the caller already holds `quota` invites (`details.reason` = `"quota_exceeded"`, `details.quota`). A refused reissue leaves the invite as it was |
+| `409` | `BETA-INVITE-002` | Revoke / reissue: the invite was already used (`details.reason` = `"already_redeemed"`) |
+| `409` | `BETA-INVITE-003` | Reissue: the invite was already revoked (`details.reason` = `"already_revoked"`). Revoke stays idempotent instead |
+| `422` | `VAL-001` | Mint: `label` too long, contains a control character, is not a string, or is not valid Unicode |
 | `410` | `RES-003` | Preview: expired or already redeemed |
 | `429` | `RATE-001` | Preview: per-IP limit exceeded |
 

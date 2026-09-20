@@ -140,7 +140,7 @@ Auth failure before dispatch (`transport.py:531-580`): HTTP 401, body `{"error":
 
 ## Error code catalogue
 
-**Total: 59 distinct error code values** (54 distinct values matched by the `error_code` grep + `RES-004`, which is emitted inline as an `"error"` literal with no exception class — reserved per the comment at `exceptions.py:177-181` + `-32601` / `-32600`, emitted inline in the transport dispatch, #1541 + `BETA-INVITE-001` / `BETA-INVITE-002`, #1581). **59 of 59 enumerated** below. JSON-RPC numeric codes are counted (6 values); `invalid_token` is one value with three emitting classes plus the RFC 6750 path.
+**Total: 60 distinct error code values** (54 distinct values matched by the `error_code` grep + `RES-004`, which is emitted inline as an `"error"` literal with no exception class — reserved per the comment at `exceptions.py:177-181` + `-32601` / `-32600`, emitted inline in the transport dispatch, #1541 + `BETA-INVITE-001` / `BETA-INVITE-002`, #1581 + `BETA-INVITE-003`, #1595). **60 of 60 enumerated** below. JSON-RPC numeric codes are counted (6 values); `invalid_token` is one value with three emitting classes plus the RFC 6750 path.
 
 ### A. `MemoryCloudException` hierarchy (REST canonical shape) — `backend/src/utils/exceptions.py`
 
@@ -156,7 +156,7 @@ Auth failure before dispatch (`transport.py:531-580`): HTTP 401, body `{"error":
 | `ADMIN-001` | `AdminProtectionError` — exceptions.py:117 | 403 | System-admin invariant blocks operation (initial/last admin); `details` always stripped. |
 | `RES-001` | `NotFoundException` — exceptions.py:159 | 404 | Resource not found. |
 | `RES-002` | `ConflictError` — exceptions.py:188 | 409 | Resource conflict. |
-| `RES-003` | `MemoryGoneError` — exceptions.py:174; `BetaInviteGoneError` — exceptions.py:567 | 410 | Resource soft-deleted (distinct from 404 so clients stop retrying). Since #1581 also a closed-beta invite link that existed but is expired or already redeemed (`GET /beta-invites/{token}/preview`) — one message for both reasons. |
+| `RES-003` | `MemoryGoneError` — exceptions.py:174; `BetaInviteGoneError` — exceptions.py:595 | 410 | Resource soft-deleted (distinct from 404 so clients stop retrying). Since #1581 also a closed-beta invite link that existed but is expired or already redeemed (`GET /beta-invites/{token}/preview`) — one message for both reasons. |
 | `RES-004` | *(no class — inline `JSONResponse`)* — api/routes/attachments.py:30 | 410 | Deprecated `/api/v1/attachments/*` retired; carries Sunset/Deprecation/Link headers. |
 | `VAL-001` | `ValidationError` — exceptions.py:195 | 422 | Service-layer validation error (shape/format). ⚠ Coexists with the non-conforming FastAPI 422. |
 | `REQ-001` | `BadRequestError` (default) — exceptions.py:217 | 400 | State-precondition failure (call sites may override the code, e.g. `REQ-101`/`REQ-102`). |
@@ -186,8 +186,9 @@ Auth failure before dispatch (`transport.py:531-580`): HTTP 401, body `{"error":
 | `ERASURE-004` | `InitialAdminCannotBeErasedError` — exceptions.py:598 | 403 | Initial system admin is a protected account. |
 | `ERASURE-005` | `WorkspaceTransferRequiredError` — exceptions.py:617 | 409 | Must transfer workspace ownership before erasure. |
 | `ERASURE-006` | `ErasureAlreadyInProgressError` — exceptions.py:630 | 409 | Erasure request already pending/in progress. |
-| `BETA-INVITE-001` | `BetaInviteQuotaExceededError` — exceptions.py:538 | 409 | #1581: `POST /beta-invites` at the per-user cap. `details.reason` = `"quota_exceeded"` (stable discriminator), `details.quota` = the cap. |
-| `BETA-INVITE-002` | `BetaInviteAlreadyRedeemedError` — exceptions.py:551 | 409 | #1581: `DELETE /beta-invites/{id}` on an invite that was already used. `details.reason` = `"already_redeemed"`. |
+| `BETA-INVITE-001` | `BetaInviteQuotaExceededError` — exceptions.py:552 | 409 | #1581: `POST /beta-invites` at the per-user cap. Since #1595 also `POST /beta-invites/{id}/reissue` of an `expired` invite at the cap (the invite is left untouched). `details.reason` = `"quota_exceeded"` (stable discriminator), `details.quota` = the cap. |
+| `BETA-INVITE-002` | `BetaInviteAlreadyRedeemedError` — exceptions.py:565 | 409 | #1581: `DELETE /beta-invites/{id}` — and since #1595 `POST /beta-invites/{id}/reissue` — on an invite that was already used. `details.reason` = `"already_redeemed"`. |
+| `BETA-INVITE-003` | `BetaInviteAlreadyRevokedError` — exceptions.py:579 | 409 | #1595: `POST /beta-invites/{id}/reissue` on an invite that was already revoked (including the second request of a double-click — nothing is minted). `DELETE` stays idempotent and never emits it. `details.reason` = `"already_revoked"`. |
 
 ### B. Service/route-level codes (raised as `MemoryCloudException`/subclass with overridden code)
 

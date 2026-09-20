@@ -199,7 +199,16 @@ The 7-day lifetime is fixed in code. Notes for operators:
 
 - A link is a credential. Only its SHA-256 hash is stored (database and the
   short-lived OAuth-state key in Redis); the URL is shown once, at creation. A
-  lost link cannot be recovered — revoke it and mint another.
+  lost link cannot be recovered — the inviter **reissues** it (#1595), which
+  revokes the old link and mints a replacement in one step.
+- An inviter can attach a **label** to a link (#1595) — free text of up to 100
+  characters, typically the recipient's name or address. It is inviter-private:
+  stored on the `beta_invites` row, returned only to that inviter, never written
+  to a log line or an audit row, and deleted with the inviter's account. On a
+  redeemed link the inviter also sees the admitted account's **current e-mail**,
+  for as long as that account exists — it is read from the live `users` row, so
+  erasing the account (or pruning its allowlist entry) removes it from the
+  inviter's view as well.
 - The token travels in URLs (`/join/{token}`, `/api/v1/beta-invites/{token}/preview`,
   and `…/login?invite={token}`). The API scrubs it from its own output — structured
   logs, the uvicorn access log and the `usage_stats` table all record the literal
@@ -244,7 +253,9 @@ The 7-day lifetime is fixed in code. Notes for operators:
   `ENABLE_BETA_INVITES=false` stops the chain immediately.
 - Minting, redemption and revocation are written to the audit log as
   `beta_invite.created` / `beta_invite.redeemed` / `beta_invite.revoked`, naming
-  the invite by id only.
+  the invite by id only. A reissue writes one `revoked` and one `created` row
+  whose `user_metadata` cross-reference the two invites (`reissued_from` /
+  `reissued_to`, ids only — never the label).
 
 ## Hosted-mode UI gates (Issue #1571)
 

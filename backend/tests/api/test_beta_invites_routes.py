@@ -1,9 +1,12 @@
-"""HTTP wiring for ``/api/v1/beta-invites`` (Issue #1581).
+"""HTTP wiring for ``/api/v1/beta-invites`` (Issues #1581, #1595).
 
 The service is patched; these pin what the web UI (#1582) consumes: the kill
 switch (every route a plain 404 *before* auth), the response shapes, the 409
 machine codes, the public preview's 404 / 410 split and its per-IP limiter, and
-that the plaintext URL appears in the ``POST`` response and nowhere else.
+that the plaintext URL appears in the ``POST`` / reissue responses and nowhere
+else. #1595 adds the optional ``label`` body (a body-less ``POST`` must keep
+working), ``label`` / ``redeemed_email`` / ``active`` / ``redeemed`` on the
+summary, and ``POST /{id}/reissue``.
 """
 
 from __future__ import annotations
@@ -13,6 +16,7 @@ from unittest.mock import AsyncMock, MagicMock
 from uuid import uuid4
 
 import pytest
+import structlog
 from fastapi.testclient import TestClient
 
 from api.main import app
@@ -23,6 +27,7 @@ from models.beta_invite import BetaInvite
 from services.beta_invite_service import BetaInviteSummary, MintedBetaInvite
 from utils.exceptions import (
     BetaInviteAlreadyRedeemedError,
+    BetaInviteAlreadyRevokedError,
     BetaInviteGoneError,
     BetaInviteQuotaExceededError,
     NotFoundException,
@@ -32,12 +37,13 @@ SERVICE = "api.routes.beta_invites.BetaInviteService"
 TOKEN = "t" * 43
 INVITE_ID = uuid4()
 
-ROUTES = [
+INVITER_ROUTES = [
     ("GET", "/api/v1/beta-invites/me"),
     ("POST", "/api/v1/beta-invites"),
     ("DELETE", f"/api/v1/beta-invites/{INVITE_ID}"),
-    ("GET", f"/api/v1/beta-invites/{TOKEN}/preview"),
+    ("POST", f"/api/v1/beta-invites/{INVITE_ID}/reissue"),
 ]
+ROUTES = [*INVITER_ROUTES, ("GET", f"/api/v1/beta-invites/{TOKEN}/preview")]
 
 
 def _invite(**overrides) -> BetaInvite:
@@ -50,9 +56,24 @@ def _invite(**overrides) -> BetaInvite:
         "redeemed_at": None,
         "redeemed_allowlist_entry_id": uuid4(),
         "revoked_at": None,
+        "label": None,
     }
     fields.update(overrides)
     return BetaInvite(**fields)
+
+
+def _summary(**overrides) -> BetaInviteSummary:
+    fields = {
+        "quota": 4,
+        "used": 1,
+        "active": 1,
+        "redeemed": 0,
+        "remaining": 3,
+        "invites": [_invite()],
+        "redeemed_emails": {},
+    }
+    fields.update(overrides)
+    return BetaInviteSummary(**fields)
 
 
 async def _mock_db():
@@ -113,21 +134,47 @@ class TestKillSwitch:
     def test_default_is_disabled(self) -> None:
         assert type(get_settings()).model_fields["enable_beta_invites"].default is False
 
-    @pytest.mark.parametrize(("method", "path"), ROUTES[:3])
+    @pytest.mark.parametrize(("method", "path"), INVITER_ROUTES)
     def test_enabled_inviter_routes_require_a_session(
         self, anonymous_client, enabled, method, path
     ) -> None:
         assert anonymous_client.request(method, path).status_code == 401
 
+    @pytest.mark.parametrize(("method", "path"), INVITER_ROUTES)
+    def test_inviter_routes_reject_an_api_key(
+        self, anonymous_client, enabled, monkeypatch, method, path
+    ) -> None:
+        """Session-only: a Bearer credential is refused outright (#252), and the
+        service is never reached — a key that could mint or reissue links would
+        be a scriptable account-creation endpoint."""
+        called = AsyncMock()
+        for name in ("get_summary", "create", "revoke", "reissue"):
+            monkeypatch.setattr(f"{SERVICE}.{name}", called)
+
+        response = anonymous_client.request(
+            method, path, headers={"Authorization": "Bearer kagura_not_a_real_key"}
+        )
+
+        assert response.status_code == 403
+        called.assert_not_awaited()
+
 
 class TestSummary:
     def test_shape_for_a_capped_user(self, client, enabled, monkeypatch) -> None:
-        redeemed = _invite(id=uuid4(), redeemed_at=datetime(2026, 9, 2, 8, 30, 0))
+        redeemed_id = uuid4()
+        redeemed = _invite(
+            id=redeemed_id, redeemed_at=datetime(2026, 9, 2, 8, 30, 0), label="Bob from work"
+        )
         monkeypatch.setattr(
             f"{SERVICE}.get_summary",
             AsyncMock(
-                return_value=BetaInviteSummary(
-                    quota=4, used=2, remaining=2, invites=[_invite(), redeemed]
+                return_value=_summary(
+                    used=2,
+                    active=1,
+                    redeemed=1,
+                    remaining=2,
+                    invites=[_invite(), redeemed],
+                    redeemed_emails={redeemed_id: "bob@invitee.example"},
                 )
             ),
         )
@@ -137,49 +184,92 @@ class TestSummary:
         assert response.status_code == 200
         body = response.json()
         assert (body["quota"], body["used"], body["remaining"]) == (4, 2, 2)
+        # #1595: the breakdown the quota is made of.
+        assert (body["active"], body["redeemed"]) == (1, 1)
         assert body["invites"][0] == {
             "id": str(INVITE_ID),
             "status": "active",
+            "label": None,
             "created_at": "2026-09-01T12:00:00Z",
             "expires_at": "2099-09-08T12:00:00Z",
             "redeemed_at": None,
             "revoked_at": None,
+            "redeemed_email": None,
         }
         assert body["invites"][1]["status"] == "redeemed"
         assert body["invites"][1]["redeemed_at"] == "2026-09-02T08:30:00Z"
+        assert body["invites"][1]["label"] == "Bob from work"
+        assert body["invites"][1]["redeemed_email"] == "bob@invitee.example"
 
-    def test_inviter_never_sees_who_redeemed_or_the_token(
+    def test_item_fields_are_the_contract_and_never_the_token(
         self, client, enabled, monkeypatch
     ) -> None:
+        """Was ``test_inviter_never_sees_who_redeemed_or_the_token`` (#1581). #1595
+        reverses the "status only" stance on purpose — the inviter vouched for the
+        person — so ``label`` and ``redeemed_email`` join the item. Still no token,
+        no hash, no URL, no allowlist id."""
+        monkeypatch.setattr(f"{SERVICE}.get_summary", AsyncMock(return_value=_summary()))
+
+        response = client.get("/api/v1/beta-invites/me")
+        invite = response.json()["invites"][0]
+
+        assert set(invite) == {
+            "id",
+            "status",
+            "label",
+            "created_at",
+            "expires_at",
+            "redeemed_at",
+            "revoked_at",
+            "redeemed_email",
+        }
+        assert "a" * 64 not in response.text  # the token hash
+
+    def test_redeemed_email_is_only_ever_attached_to_a_redeemed_row(
+        self, client, enabled, monkeypatch
+    ) -> None:
+        """Defence in depth at the serialisation edge: whatever the service maps,
+        a row that is not ``redeemed`` renders ``null``."""
+        revoked_id = uuid4()
+        revoked = _invite(
+            id=revoked_id,
+            redeemed_at=datetime(2026, 9, 2, 8, 30, 0),
+            revoked_at=datetime(2026, 9, 3, 8, 30, 0),
+        )
         monkeypatch.setattr(
             f"{SERVICE}.get_summary",
             AsyncMock(
-                return_value=BetaInviteSummary(quota=4, used=1, remaining=3, invites=[_invite()])
+                return_value=_summary(
+                    invites=[revoked], redeemed_emails={revoked_id: "x@invitee.example"}
+                )
             ),
         )
 
         invite = client.get("/api/v1/beta-invites/me").json()["invites"][0]
 
-        assert set(invite) == {
-            "id",
-            "status",
-            "created_at",
-            "expires_at",
-            "redeemed_at",
-            "revoked_at",
-        }
+        assert invite["status"] == "revoked"
+        assert invite["redeemed_email"] is None
 
     def test_admin_is_unlimited_as_nulls(self, client, enabled, monkeypatch) -> None:
         monkeypatch.setattr(
             f"{SERVICE}.get_summary",
             AsyncMock(
-                return_value=BetaInviteSummary(quota=None, used=9, remaining=None, invites=[])
+                return_value=_summary(
+                    quota=None, used=9, active=7, redeemed=2, remaining=None, invites=[]
+                )
             ),
         )
 
         body = client.get("/api/v1/beta-invites/me").json()
 
-        assert body == {"quota": None, "used": 9, "remaining": None, "invites": []}
+        assert body == {
+            "quota": None,
+            "used": 9,
+            "active": 7,
+            "redeemed": 2,
+            "remaining": None,
+            "invites": [],
+        }
 
 
 class TestCreate:
@@ -191,6 +281,7 @@ class TestCreate:
         )
         monkeypatch.setattr(f"{SERVICE}.create", create)
 
+        # No body at all — what every pre-#1595 client sends.
         response = client.post("/api/v1/beta-invites")
 
         assert response.status_code == 201
@@ -198,9 +289,98 @@ class TestCreate:
             "id": str(INVITE_ID),
             "url": f"https://app.example.test/join/{TOKEN}",
             "expires_at": "2099-09-08T12:00:00Z",
+            "label": None,
         }
         assert create.await_args.kwargs["user_id"] == "user_1"
         assert create.await_args.kwargs["user_email"] == "user@test.example"
+        assert create.await_args.kwargs["label"] is None
+
+    @pytest.mark.parametrize(
+        "kwargs",
+        [
+            pytest.param({}, id="no-body-no-content-type"),
+            # The web client always sends the JSON content type, body or not.
+            pytest.param(
+                {"headers": {"Content-Type": "application/json"}}, id="json-content-type-empty"
+            ),
+            pytest.param({"json": {}}, id="empty-object"),
+            pytest.param({"json": {"label": None}}, id="null-label"),
+            pytest.param({"json": {"label": "   "}}, id="blank-label"),
+        ],
+    )
+    def test_label_is_optional_in_every_spelling(
+        self, client, enabled, monkeypatch, kwargs
+    ) -> None:
+        create = AsyncMock(
+            return_value=MintedBetaInvite(
+                invite=_invite(), url=f"https://app.example.test/join/{TOKEN}"
+            )
+        )
+        monkeypatch.setattr(f"{SERVICE}.create", create)
+
+        response = client.post("/api/v1/beta-invites", **kwargs)
+
+        assert response.status_code == 201
+        assert create.await_args.kwargs["label"] is None
+
+    def test_label_is_trimmed_and_returned(self, client, enabled, monkeypatch) -> None:
+        create = AsyncMock(
+            return_value=MintedBetaInvite(
+                invite=_invite(label="Alice"), url=f"https://app.example.test/join/{TOKEN}"
+            )
+        )
+        monkeypatch.setattr(f"{SERVICE}.create", create)
+
+        response = client.post("/api/v1/beta-invites", json={"label": "  Alice \n"})
+
+        assert response.status_code == 201
+        assert create.await_args.kwargs["label"] == "Alice"
+        assert response.json()["label"] == "Alice"
+
+    @pytest.mark.parametrize(
+        "label",
+        ["x" * 101, "Ali\x00ce", "two\nlines", "tab\there", "del\x7f", 123, ["Alice"]],
+    )
+    def test_bad_label_is_a_422_that_never_echoes_it(
+        self, client, enabled, monkeypatch, label
+    ) -> None:
+        create = AsyncMock()
+        monkeypatch.setattr(f"{SERVICE}.create", create)
+
+        response = client.post("/api/v1/beta-invites", json={"label": label})
+
+        assert response.status_code == 422
+        assert response.json()["error"] == "VAL-001"
+        create.assert_not_awaited()
+        if isinstance(label, str):
+            assert label not in response.text
+            assert label[:8] not in response.json()["details"]["errors"][0]["msg"]
+
+    @pytest.mark.parametrize(
+        "body",
+        [
+            pytest.param(rb'{"label": "Alice \ud800"}', id="lone-high-surrogate"),
+            pytest.param(rb'{"label": "\udc00"}', id="lone-low-surrogate"),
+        ],
+    )
+    def test_unencodable_label_is_a_422_not_a_database_error(
+        self, client, enabled, monkeypatch, body
+    ) -> None:
+        # ``"\ud800"`` is a legal JSON escape and ``json.loads`` yields a legal
+        # Python ``str`` — but one the database driver cannot encode, and its
+        # error message quotes the whole value. Sent as raw bytes: ``json=``
+        # cannot serialise a lone surrogate.
+        create = AsyncMock()
+        monkeypatch.setattr(f"{SERVICE}.create", create)
+
+        response = client.post(
+            "/api/v1/beta-invites", content=body, headers={"Content-Type": "application/json"}
+        )
+
+        assert response.status_code == 422
+        assert response.json()["error"] == "VAL-001"
+        create.assert_not_awaited()
+        assert "Alice" not in response.text
 
     def test_quota_exceeded_is_a_409_with_the_contract_code(
         self, client, enabled, monkeypatch
@@ -258,6 +438,122 @@ class TestRevoke:
 
         assert response.status_code == 422
         revoke.assert_not_awaited()
+
+
+class TestReissue:
+    PATH = f"/api/v1/beta-invites/{INVITE_ID}/reissue"
+
+    def test_returns_exactly_the_create_payload(self, client, enabled, monkeypatch) -> None:
+        new_id = uuid4()
+        reissue = AsyncMock(
+            return_value=MintedBetaInvite(
+                invite=_invite(id=new_id, label="Alice"),
+                url=f"https://app.example.test/join/{TOKEN}",
+            )
+        )
+        monkeypatch.setattr(f"{SERVICE}.reissue", reissue)
+
+        response = client.post(self.PATH)
+
+        assert response.status_code == 201
+        assert response.json() == {
+            "id": str(new_id),
+            "url": f"https://app.example.test/join/{TOKEN}",
+            "expires_at": "2099-09-08T12:00:00Z",
+            "label": "Alice",
+        }
+        assert reissue.await_args.kwargs["user_id"] == "user_1"
+        assert reissue.await_args.kwargs["invite_id"] == INVITE_ID
+        assert reissue.await_args.kwargs["user_email"] == "user@test.example"
+
+    def test_unknown_or_someone_elses_is_404(self, client, enabled, monkeypatch) -> None:
+        monkeypatch.setattr(
+            f"{SERVICE}.reissue", AsyncMock(side_effect=NotFoundException("Beta invite"))
+        )
+
+        assert client.post(self.PATH).status_code == 404
+
+    @pytest.mark.parametrize(
+        ("error", "code", "details"),
+        [
+            (BetaInviteAlreadyRedeemedError(), "BETA-INVITE-002", {"reason": "already_redeemed"}),
+            (BetaInviteAlreadyRevokedError(), "BETA-INVITE-003", {"reason": "already_revoked"}),
+            (
+                BetaInviteQuotaExceededError(quota=4),
+                "BETA-INVITE-001",
+                {"reason": "quota_exceeded", "quota": 4},
+            ),
+        ],
+    )
+    def test_conflicts_are_409s_with_the_contract_codes(
+        self, client, enabled, monkeypatch, error, code, details
+    ) -> None:
+        monkeypatch.setattr(f"{SERVICE}.reissue", AsyncMock(side_effect=error))
+
+        response = client.post(self.PATH)
+
+        assert response.status_code == 409
+        assert response.json()["error"] == code
+        assert response.json()["details"] == details
+
+    def test_non_uuid_id_is_rejected_before_the_service(self, client, enabled, monkeypatch) -> None:
+        reissue = AsyncMock()
+        monkeypatch.setattr(f"{SERVICE}.reissue", reissue)
+
+        assert client.post("/api/v1/beta-invites/not-a-uuid/reissue").status_code == 422
+        reissue.assert_not_awaited()
+
+
+class TestNothingPrivateIsLogged:
+    """#1595: the label and the admitted e-mail are response-only. No route on
+    this surface may put either into a log line."""
+
+    LABEL = "Carol <carol@friend.example>"
+    EMAIL = "carol@invitee.example"
+
+    def test_create_reissue_and_list_log_neither(self, client, enabled, monkeypatch) -> None:
+        redeemed_id = uuid4()
+        minted = MintedBetaInvite(
+            invite=_invite(label=self.LABEL), url=f"https://app.example.test/join/{TOKEN}"
+        )
+        monkeypatch.setattr(f"{SERVICE}.create", AsyncMock(return_value=minted))
+        monkeypatch.setattr(f"{SERVICE}.reissue", AsyncMock(return_value=minted))
+        monkeypatch.setattr(
+            f"{SERVICE}.get_summary",
+            AsyncMock(
+                return_value=_summary(
+                    invites=[
+                        _invite(
+                            id=redeemed_id,
+                            label=self.LABEL,
+                            redeemed_at=datetime(2026, 9, 2, 8, 30, 0),
+                        )
+                    ],
+                    redeemed_emails={redeemed_id: self.EMAIL},
+                )
+            ),
+        )
+
+        with structlog.testing.capture_logs() as logs:
+            created = client.post("/api/v1/beta-invites", json={"label": self.LABEL})
+            rejected = client.post("/api/v1/beta-invites", json={"label": self.LABEL + "\x00"})
+            # A lone surrogate must be refused HERE: past validation it fails in
+            # the database driver, whose error text quotes the label.
+            unencodable = client.post(
+                "/api/v1/beta-invites",
+                content=b'{"label": "' + self.LABEL.encode() + rb' \ud800"}',
+                headers={"Content-Type": "application/json"},
+            )
+            reissued = client.post(f"/api/v1/beta-invites/{INVITE_ID}/reissue")
+            listed = client.get("/api/v1/beta-invites/me")
+
+        assert (created.status_code, rejected.status_code) == (201, 422)
+        assert unencodable.status_code == 422
+        assert (reissued.status_code, listed.status_code) == (201, 200)
+        assert listed.json()["invites"][0]["redeemed_email"] == self.EMAIL
+        rendered = repr(logs)
+        for private in (self.LABEL, "Carol", "friend.example", self.EMAIL, TOKEN):
+            assert private not in rendered
 
 
 class TestPreview:

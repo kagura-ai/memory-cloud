@@ -115,8 +115,10 @@ OPERATIONAL_TABLES: frozenset[str] = frozenset(
         "signup_allowlist",
         "signup_gate_config",
         # Closed-beta invite links (#1581) — signup-gate plumbing like the two
-        # tables above: a token hash + lifecycle timestamps, no user-authored
-        # content and no learned structure. Cascades with the inviter on erasure.
+        # tables above: a token hash + lifecycle timestamps and no learned
+        # structure. The optional ``label`` (#1595) is a short inviter-private
+        # bookkeeping note (like an API key's name), not knowledge content.
+        # Cascades with the inviter on erasure.
         "beta_invites",
         "config_overrides",
         "llm_call_log",
