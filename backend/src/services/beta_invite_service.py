@@ -1,4 +1,4 @@
-"""Closed-beta invite link service (Issue #1581).
+"""Closed-beta invite link service (Issues #1581, #1595).
 
 A signed-in user mints a one-time ``/join/{token}`` URL; whoever opens it may
 pass the admin-configured signup gate once, within :data:`BETA_INVITE_TTL`.
@@ -12,30 +12,39 @@ one place.
 Security contract, in one paragraph: the token is ``secrets.token_urlsafe(32)``
 and only ``sha256_hex(token)`` is ever stored (the API-key pattern,
 ``auth/api_keys.py``). The plaintext leaves this module exactly once, inside the
-URL returned by :meth:`BetaInviteService.create`. Nothing here logs or audits
-the token, its hash, or the URL — the invite ``id`` is the only identifier that
-may appear in a log line.
+URL returned by :meth:`BetaInviteService.create` (or
+:meth:`BetaInviteService.reissue`). Nothing here logs or audits the token, its
+hash, or the URL — the invite ``id`` is the only identifier that may appear in a
+log line.
+
+Privacy contract (#1595): an invite's ``label`` is the inviter's free-text note
+and may hold a name or an address; ``redeemed_email`` is the admitted account's
+address. Both go to the inviter's own responses and nowhere else — never a log
+line, an audit row or an exception message.
 """
 
 from __future__ import annotations
 
 import os
+import re
 import secrets
 import uuid
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from typing import Any, cast
 
-from sqlalchemy import CursorResult, Update, func, or_, select, update
+from sqlalchemy import CursorResult, Select, Update, and_, func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from auth.roles import Role
 from config.settings import get_settings
-from models.auth import AuditLog, User
+from models.auth import AuditLog, User, UserOAuthProvider
 from models.beta_invite import BetaInvite
+from models.signup_gate import SignupAllowlistEntry
 from utils.datetime import to_utc_iso, utcnow
 from utils.exceptions import (
     BetaInviteAlreadyRedeemedError,
+    BetaInviteAlreadyRevokedError,
     BetaInviteGoneError,
     BetaInviteQuotaExceededError,
     NotFoundException,
@@ -60,6 +69,44 @@ _TOKEN_BYTES = 32
 # preview route. Deliberately looser than "exactly 43" so a future change to
 # ``_TOKEN_BYTES`` does not strand links already in people's inboxes.
 BETA_INVITE_TOKEN_PATTERN = r"^[A-Za-z0-9_-]{20,128}$"
+
+# #1595: mirrors ``beta_invites.label`` (``VARCHAR(100)``). Python ``len`` and
+# Postgres ``varchar(n)`` both count characters, so the two bounds agree.
+BETA_INVITE_LABEL_MAX_LENGTH = 100
+
+# C0 controls + DEL. A label is one line of text for a list row; a newline, a
+# NUL or an escape sequence in it is never something a person typed on purpose.
+_LABEL_CONTROL_CHARS = re.compile(r"[\x00-\x1f\x7f]")
+
+
+def normalize_beta_invite_label(raw: str | None) -> str | None:
+    """Normalise an inviter-supplied label, or refuse it (#1595).
+
+    Surrounding whitespace is trimmed first, so only what would be stored is
+    validated (a pasted trailing newline is forgiven); an empty result means
+    "no label".
+
+    Args:
+        raw: The label as sent by the client, or ``None``.
+
+    Returns:
+        The trimmed label, or ``None`` when absent / blank.
+
+    Raises:
+        ValueError: Longer than :data:`BETA_INVITE_LABEL_MAX_LENGTH` after the
+            trim, or containing a control character. The message never contains
+            the label — it ends up in the 422 body.
+    """
+    if raw is None:
+        return None
+    label = raw.strip()
+    if not label:
+        return None
+    if len(label) > BETA_INVITE_LABEL_MAX_LENGTH:
+        raise ValueError(f"label must be at most {BETA_INVITE_LABEL_MAX_LENGTH} characters")
+    if _LABEL_CONTROL_CHARS.search(label):
+        raise ValueError("label must not contain control characters")
+    return label
 
 
 def build_beta_invite_url(token: str) -> str:
@@ -109,14 +156,79 @@ def build_redeem_update(*, token_hash: str, allowlist_entry_id: uuid.UUID, now: 
     )
 
 
+def build_revoke_update(*, invite_id: uuid.UUID, user_id: str, now: datetime) -> Update:
+    """Build the guarded revoke ``UPDATE`` shared by ``DELETE`` and reissue (#1595).
+
+    The mirror image of :func:`build_redeem_update` (``redeemed_at IS NULL`` here,
+    ``revoked_at IS NULL`` there): whichever of a concurrent revoke / redeem
+    commits first wins and the other matches no row. No expiry bound — an
+    expired link is still revocable and reissuable. ``inviter_user_id`` is part
+    of the predicate, so someone else's invite is indistinguishable from an
+    unknown id.
+
+    Args:
+        invite_id: The invite to revoke.
+        user_id: The caller — must be the inviter.
+        now: Naive UTC instant; the revocation stamp.
+
+    Returns:
+        The ``UPDATE … RETURNING label`` statement. The caller must require
+        exactly one returned row.
+    """
+    return (
+        update(BetaInvite)
+        .where(
+            BetaInvite.id == invite_id,
+            BetaInvite.inviter_user_id == user_id,
+            BetaInvite.redeemed_at.is_(None),
+            BetaInvite.revoked_at.is_(None),
+        )
+        .values(revoked_at=now)
+        .returning(BetaInvite.label)
+    )
+
+
+def build_slot_counts_select(*, user_id: str, now: datetime) -> Select[tuple[int, int]]:
+    """Build the one-statement ``(active, redeemed)`` aggregate (#1595).
+
+    THE definition of "occupies a quota slot": an unrevoked invite that is either
+    still redeemable (``active``) or already redeemed. Expired-unused and revoked
+    invites free their slot. :meth:`BetaInviteService._count_used` is the sum of
+    these two, so the header breakdown and the quota gate cannot drift apart.
+    The buckets follow :meth:`BetaInvite.status_at` exactly.
+
+    Args:
+        user_id: The inviter.
+        now: Naive UTC instant to evaluate expiry against.
+
+    Returns:
+        A ``SELECT`` yielding one ``(active, redeemed)`` row.
+    """
+    return select(
+        func.count(BetaInvite.id)
+        .filter(BetaInvite.redeemed_at.is_(None), BetaInvite.expires_at > now)
+        .label("active"),
+        func.count(BetaInvite.id).filter(BetaInvite.redeemed_at.is_not(None)).label("redeemed"),
+    ).where(BetaInvite.inviter_user_id == user_id, BetaInvite.revoked_at.is_(None))
+
+
 @dataclass(frozen=True)
 class BetaInviteSummary:
-    """What a user sees about their own invites. ``None`` quota = unlimited."""
+    """What a user sees about their own invites. ``None`` quota = unlimited.
+
+    ``used == active + redeemed`` always (one aggregate, see
+    :func:`build_slot_counts_select`). ``redeemed_emails`` maps the id of each
+    ``redeemed`` invite whose admitted account still exists to that account's
+    current e-mail; every other invite is absent from it.
+    """
 
     quota: int | None
     used: int
+    active: int
+    redeemed: int
     remaining: int | None
     invites: list[BetaInvite]
+    redeemed_emails: dict[uuid.UUID, str]
 
 
 @dataclass(frozen=True)
@@ -157,20 +269,53 @@ class BetaInviteService:
         """
         role = await self._inviter_role(user_id, lock=False)
         now = utcnow()
-        used = await self._count_used(user_id, now)
-        invites = list(
-            await self.db.scalars(
-                select(BetaInvite)
+        active, redeemed = await self._count_slots(user_id, now)
+        used = active + redeemed
+
+        # One statement for the whole list, e-mails included (#1595). The
+        # admitted identity is the allowlist row's ``(provider, subject_id)``;
+        # the account it became is whatever ``user_oauth_providers`` maps that
+        # identity to — the key ``RoleManager.ensure_user`` resolves a login by
+        # (#517/#938). Both link columns are unique, so the joins cannot fan out.
+        # The e-mail is read from the LIVE ``users`` row and deliberately never
+        # from the allowlist ``subject_label`` snapshot: once the account is
+        # erased (or the allowlist row pruned) the joins come up empty and the
+        # address is gone from the inviter's view too.
+        rows = (
+            await self.db.execute(
+                select(BetaInvite, User.email)
+                .outerjoin(
+                    SignupAllowlistEntry,
+                    SignupAllowlistEntry.id == BetaInvite.redeemed_allowlist_entry_id,
+                )
+                .outerjoin(
+                    UserOAuthProvider,
+                    and_(
+                        UserOAuthProvider.provider == SignupAllowlistEntry.provider,
+                        UserOAuthProvider.oauth_sub == SignupAllowlistEntry.subject_id,
+                    ),
+                )
+                .outerjoin(User, User.user_id == UserOAuthProvider.user_id)
                 .where(BetaInvite.inviter_user_id == user_id)
                 .order_by(BetaInvite.created_at.desc())
             )
-        )
+        ).all()
+        invites = [invite for invite, _email in rows]
+        redeemed_emails = {
+            invite.id: email
+            for invite, email in rows
+            if email is not None and invite.status_at(now) == "redeemed"
+        }
+
         quota = self._quota_for(role)
         return BetaInviteSummary(
             quota=quota,
             used=used,
+            active=active,
+            redeemed=redeemed,
             remaining=None if quota is None else max(0, quota - used),
             invites=invites,
+            redeemed_emails=redeemed_emails,
         )
 
     async def create(
@@ -178,6 +323,7 @@ class BetaInviteService:
         *,
         user_id: str,
         user_email: str,
+        label: str | None = None,
         ip_address: str | None = None,
         user_agent: str | None = None,
     ) -> MintedBetaInvite:
@@ -191,6 +337,9 @@ class BetaInviteService:
         Args:
             user_id: The inviter's OAuth ``sub``.
             user_email: The inviter's e-mail, for the audit row's actor column.
+            label: Optional inviter-private note, already normalised
+                (:func:`normalize_beta_invite_label`). Stored on the invite row
+                only — never logged or audited.
             ip_address: Caller IP for the audit row.
             user_agent: Caller User-Agent for the audit row.
 
@@ -203,23 +352,9 @@ class BetaInviteService:
         """
         role = await self._lock_inviter_role(user_id)
         now = utcnow()
-        quota = self._quota_for(role)
-        if quota is not None:
-            used = await self._count_used(user_id, now)
-            if used >= quota:
-                logger.info("beta_invite_quota_exceeded", inviter_user_id=user_id, used=used)
-                raise BetaInviteQuotaExceededError(quota=quota)
+        await self._require_free_slot(role=role, user_id=user_id, now=now)
 
-        token = secrets.token_urlsafe(_TOKEN_BYTES)
-        invite = BetaInvite(
-            # Client-side id so the audit row can name the invite before flush.
-            id=uuid.uuid4(),
-            token_hash=sha256_hex(token),
-            inviter_user_id=user_id,
-            created_at=now,
-            expires_at=now + BETA_INVITE_TTL,
-        )
-        self.db.add(invite)
+        invite, token = self._mint(user_id=user_id, label=label, now=now)
         self.db.add(
             self._audit(
                 action="beta_invite.created",
@@ -264,19 +399,10 @@ class BetaInviteService:
                 the same answer, so ids cannot be probed.
             BetaInviteAlreadyRedeemedError: The invite was already used.
         """
-        result = await self.db.execute(
-            update(BetaInvite)
-            .where(
-                BetaInvite.id == invite_id,
-                BetaInvite.inviter_user_id == user_id,
-                BetaInvite.redeemed_at.is_(None),
-                BetaInvite.revoked_at.is_(None),
-            )
-            .values(revoked_at=utcnow())
+        revoked, _label = await self._revoke_unused(
+            user_id=user_id, invite_id=invite_id, now=utcnow()
         )
-        # ``AsyncSession.execute`` is typed as returning ``Result``; a DML
-        # statement always yields a ``CursorResult`` at runtime.
-        if cast(CursorResult[Any], result).rowcount == 1:
+        if revoked:
             self.db.add(
                 self._audit(
                     action="beta_invite.revoked",
@@ -293,16 +419,108 @@ class BetaInviteService:
             return
 
         # Nothing updated — work out why, for the caller's status code.
-        invite = await self.db.scalar(
-            select(BetaInvite).where(
-                BetaInvite.id == invite_id, BetaInvite.inviter_user_id == user_id
-            )
-        )
-        if invite is None:
-            raise NotFoundException("Beta invite")
-        if invite.redeemed_at is not None:
+        if await self._why_not_revoked(user_id=user_id, invite_id=invite_id) == "redeemed":
             raise BetaInviteAlreadyRedeemedError()
         # Already revoked: a retry or a double-click. Nothing to do, no new audit row.
+
+    async def reissue(
+        self,
+        *,
+        user_id: str,
+        invite_id: uuid.UUID,
+        user_email: str,
+        ip_address: str | None = None,
+        user_agent: str | None = None,
+    ) -> MintedBetaInvite:
+        """Replace one of the caller's unused invites with a fresh link (#1595).
+
+        For a recipient who lost the link: the stored hash cannot be turned back
+        into a URL, so the old invite is revoked and a new one minted with the
+        same label — in ONE transaction, in this order:
+
+        1. row-lock the inviter (the lock :meth:`create` takes), which also
+           serializes two reissues of the same invite;
+        2. the guarded revoke (:func:`build_revoke_update`) must hit one row;
+        3. the quota check. Reissuing an ``active`` invite always passes — its
+           slot was freed one statement ago. An ``expired`` invite held no slot,
+           so for it the check is real;
+        4. mint the replacement, carrying the label over;
+        5. two audit rows cross-referencing the two invites by ``id`` only;
+        6. a single commit.
+
+        Anything raised after the lock rolls the transaction back, so a refused
+        reissue never leaves the old invite revoked.
+
+        Args:
+            user_id: The caller's OAuth ``sub``.
+            invite_id: The ``active`` or ``expired`` invite to replace.
+            user_email: The caller's e-mail, for the audit rows' actor column.
+            ip_address: Caller IP for the audit rows.
+            user_agent: Caller User-Agent for the audit rows.
+
+        Returns:
+            The new invite and its plaintext URL — the only time the URL exists.
+
+        Raises:
+            NotFoundException: No such invite, or it belongs to someone else (the
+                same answer, so ids cannot be probed); or the caller's ``users``
+                row is missing.
+            BetaInviteAlreadyRedeemedError: The invite was already used.
+            BetaInviteAlreadyRevokedError: The invite was already revoked — a
+                double-click must not mint a second link.
+            BetaInviteQuotaExceededError: An expired invite, and the caller is at
+                the cap.
+        """
+        try:
+            role = await self._lock_inviter_role(user_id)
+            now = utcnow()
+            revoked, label = await self._revoke_unused(
+                user_id=user_id, invite_id=invite_id, now=now
+            )
+            if not revoked:
+                if await self._why_not_revoked(user_id=user_id, invite_id=invite_id) == "redeemed":
+                    raise BetaInviteAlreadyRedeemedError(
+                        "This invite has already been used and cannot be reissued."
+                    )
+                raise BetaInviteAlreadyRevokedError()
+            await self._require_free_slot(role=role, user_id=user_id, now=now)
+
+            invite, token = self._mint(user_id=user_id, label=label, now=now)
+            cross_refs = {"reissued_from": str(invite_id), "reissued_to": str(invite.id)}
+            self.db.add(
+                self._audit(
+                    action="beta_invite.revoked",
+                    invite_id=invite_id,
+                    user_email=user_email,
+                    user_id=user_id,
+                    user_metadata=dict(cross_refs),
+                    ip_address=ip_address,
+                    user_agent=user_agent,
+                )
+            )
+            self.db.add(
+                self._audit(
+                    action="beta_invite.created",
+                    invite_id=invite.id,
+                    user_email=user_email,
+                    user_id=user_id,
+                    user_metadata={"expires_at": to_utc_iso(invite.expires_at), **cross_refs},
+                    ip_address=ip_address,
+                    user_agent=user_agent,
+                )
+            )
+            await self.db.commit()
+        except Exception:
+            await self.db.rollback()
+            raise
+
+        logger.info(
+            "beta_invite_reissued",
+            invite_id=str(invite.id),
+            reissued_from=str(invite_id),
+            inviter_user_id=user_id,
+        )
+        return MintedBetaInvite(invite=invite, url=build_beta_invite_url(token))
 
     # ------------------------------------------------------------------
     # Public preview
@@ -407,21 +625,84 @@ class BetaInviteService:
         """Row-lock the inviter for the rest of the transaction; return their role."""
         return await self._inviter_role(user_id, lock=True)
 
+    async def _count_slots(self, user_id: str, now: datetime) -> tuple[int, int]:
+        """Return ``(active, redeemed)`` — see :func:`build_slot_counts_select`."""
+        row = (await self.db.execute(build_slot_counts_select(user_id=user_id, now=now))).one()
+        return int(row.active), int(row.redeemed)
+
     async def _count_used(self, user_id: str, now: datetime) -> int:
         """Count the invites occupying a quota slot: active + redeemed.
 
         Expired-unused and revoked invites free their slot.
         """
-        return (
-            await self.db.scalar(
-                select(func.count(BetaInvite.id)).where(
-                    BetaInvite.inviter_user_id == user_id,
-                    BetaInvite.revoked_at.is_(None),
-                    or_(BetaInvite.redeemed_at.is_not(None), BetaInvite.expires_at > now),
-                )
-            )
-            or 0
+        active, redeemed = await self._count_slots(user_id, now)
+        return active + redeemed
+
+    async def _require_free_slot(self, *, role: str, user_id: str, now: datetime) -> None:
+        """Raise ``BETA-INVITE-001`` when a capped inviter has no slot left.
+
+        Call with the inviter row lock held, or two transactions can both see
+        "one slot left".
+        """
+        quota = self._quota_for(role)
+        if quota is None:
+            return
+        used = await self._count_used(user_id, now)
+        if used >= quota:
+            logger.info("beta_invite_quota_exceeded", inviter_user_id=user_id, used=used)
+            raise BetaInviteQuotaExceededError(quota=quota)
+
+    def _mint(self, *, user_id: str, label: str | None, now: datetime) -> tuple[BetaInvite, str]:
+        """Add a fresh invite to the session; return it with its plaintext token.
+
+        No quota check, no audit row, no commit — the caller owns all three.
+        """
+        token = secrets.token_urlsafe(_TOKEN_BYTES)
+        invite = BetaInvite(
+            # Client-side id so the audit row can name the invite before flush.
+            id=uuid.uuid4(),
+            token_hash=sha256_hex(token),
+            inviter_user_id=user_id,
+            created_at=now,
+            expires_at=now + BETA_INVITE_TTL,
+            label=label,
         )
+        self.db.add(invite)
+        return invite, token
+
+    async def _revoke_unused(
+        self, *, user_id: str, invite_id: uuid.UUID, now: datetime
+    ) -> tuple[bool, str | None]:
+        """Run the guarded revoke. Does not commit — the caller owns the tx.
+
+        Returns:
+            ``(True, label)`` iff exactly one row was revoked (``label`` may be
+            ``None``); ``(False, None)`` when the guard matched nothing.
+        """
+        rows = (
+            await self.db.execute(
+                build_revoke_update(invite_id=invite_id, user_id=user_id, now=now)
+            )
+        ).all()
+        if len(rows) != 1:
+            return False, None
+        return True, rows[0].label
+
+    async def _why_not_revoked(self, *, user_id: str, invite_id: uuid.UUID) -> str:
+        """Explain a guarded revoke that matched nothing: ``redeemed`` or ``revoked``.
+
+        Raises:
+            NotFoundException: No such invite, or it belongs to someone else —
+                the same answer, so ids cannot be probed.
+        """
+        invite = await self.db.scalar(
+            select(BetaInvite).where(
+                BetaInvite.id == invite_id, BetaInvite.inviter_user_id == user_id
+            )
+        )
+        if invite is None:
+            raise NotFoundException("Beta invite")
+        return "redeemed" if invite.redeemed_at is not None else "revoked"
 
     @staticmethod
     def _audit(
