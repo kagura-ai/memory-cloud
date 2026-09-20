@@ -19,6 +19,17 @@
 # `scp -r` the source, and point build.context at the right path.
 # =============================================================================
 
+# Container log rotation (#1591) — json-file capped at 50m x 3 on every service
+# this file defines, so the disk is bounded without relying on the host's
+# daemon.json. Rationale, and how to apply it to a running stack (`logging` is
+# fixed at container creation), are in docker-compose.app.yml / README.md "Logs".
+# YAML anchors are per-file, hence the repeat; log_hygiene_static.bats pins it.
+x-logging: &default-logging
+  driver: json-file
+  options:
+    max-size: "50m"
+    max-file: "3"
+
 # Shared API environment (#1482). api-blue / api-green each merge this map
 # with their own DEPLOY_COLOR, so it is anchored on its own and NOT attached
 # to x-api-common: a YAML merge key is shallow, so a service-level
@@ -40,6 +51,7 @@ x-api-common: &api-common
     context: ../../backend
     dockerfile: Dockerfile
   restart: always
+  logging: *default-logging
   env_file:
     - .env.prod
   # #1482: the blue-green marker deploy.sh publishes. Mounted as the single
@@ -80,6 +92,7 @@ services:
     image: postgres:18.4-alpine@sha256:9a8afca54e7861fd90fab5fdf4c42477a6b1cb7d293595148e674e0a3181de15
     container_name: kagura-postgres
     restart: always
+    logging: *default-logging
     environment:
       POSTGRES_DB: kagura
       POSTGRES_USER: kagura
@@ -101,6 +114,7 @@ services:
     image: qdrant/qdrant:v1.15.0
     container_name: kagura-qdrant
     restart: always
+    logging: *default-logging
     environment:
       QDRANT__SERVICE__API_KEY: ${QDRANT_API_KEY}
     volumes:
@@ -116,6 +130,7 @@ services:
     image: redis:7-alpine
     container_name: kagura-redis
     restart: always
+    logging: *default-logging
     command: ["redis-server", "--appendonly", "yes"]
     volumes:
       - redis_data:/data
@@ -161,6 +176,7 @@ services:
         NEXT_PUBLIC_PLAN_DISPLAY_NAMES: ${NEXT_PUBLIC_PLAN_DISPLAY_NAMES:-}
     container_name: kagura-web
     restart: always
+    logging: *default-logging
     environment:
       NODE_ENV: production
       NEXT_TELEMETRY_DISABLED: "1"
@@ -175,6 +191,7 @@ services:
     image: caddy:2-alpine
     container_name: kagura-caddy
     restart: always
+    logging: *default-logging
     ports:
       - "80:80"
       - "443:443"
