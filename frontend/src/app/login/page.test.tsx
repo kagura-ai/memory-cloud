@@ -43,6 +43,21 @@ vi.mock("@/lib/auth/auth", () => ({
   logout: vi.fn(),
 }));
 
+// #1594: the real guard, unless a test flips `enabled` to simulate a guard that
+// lets a hostile value through — that is how the forward's own same-origin
+// resolution gets exercised. Reset in beforeEach.
+const safeReturnToBypass = { enabled: false };
+vi.mock("@/lib/auth/safeReturnTo", async (importOriginal) => {
+  const actual =
+    await importOriginal<typeof import("@/lib/auth/safeReturnTo")>();
+  return {
+    safeReturnTo: (value: string | null | undefined, origin: string) =>
+      safeReturnToBypass.enabled
+        ? (value ?? undefined)
+        : actual.safeReturnTo(value, origin),
+  };
+});
+
 vi.mock("next-intl", () => ({
   useTranslations: () => (k: string) => k,
 }));
@@ -98,6 +113,7 @@ beforeEach(() => {
   mockGetCurrentUser.mockReset();
   mockPush.mockReset();
   mockReplace.mockReset();
+  safeReturnToBypass.enabled = false;
   // Clear URL params between tests so return_to from one test doesn't bleed
   for (const key of [...mockSearchParams.keys()]) {
     mockSearchParams.delete(key);
@@ -524,10 +540,29 @@ describe("LoginPage forwards a live session (#1594)", () => {
     expect(mockReplace).toHaveBeenCalledTimes(1);
   });
 
+  /**
+   * The property that matters at the sink: whatever reached replace() stays on
+   * this origin once a URL parser has had its way with it. Next's router
+   * resolves the href exactly like this and hard-navigates when it is external.
+   */
+  const expectSameOriginForward = () => {
+    const target = mockReplace.mock.calls[0][0] as string;
+    expect(new URL(target, window.location.href).origin).toBe(
+      window.location.origin,
+    );
+  };
+
   it.each([
     ["protocol-relative", "//evil.example"],
     ["cross-origin absolute", "https://evil.example/x"],
     ["javascript: scheme", "javascript:alert(1)"],
+    // Single leading `/`, so a prefix check alone lets these through — but a
+    // URL parser reads `\` as `/` and drops TAB/LF/CR: all four are //evil.
+    ["backslash", "/\\evil.example"],
+    ["backslash-slash", "/\\/evil.example"],
+    ["embedded TAB", "/\t/evil.example"],
+    ["embedded LF", "/\n/evil.example"],
+    ["embedded CR", "/\r/evil.example"],
   ])(
     "falls back to the dashboard for a hostile return_to (%s)",
     async (_label, hostile) => {
@@ -540,6 +575,62 @@ describe("LoginPage forwards a live session (#1594)", () => {
       });
       // Only ever the sanitized value — the raw parameter never reaches replace().
       expect(mockReplace).toHaveBeenCalledWith("/workspace/dashboard");
+      expectSameOriginForward();
+    },
+  );
+
+  it("forwards a same-origin absolute return_to as a path", async () => {
+    mockGetCurrentUser.mockResolvedValue(SIGNED_IN_USER);
+    mockSearchParams.set(
+      "return_to",
+      `${window.location.origin}/device?user_code=ABC#step`,
+    );
+    renderLogin();
+
+    await waitFor(() => {
+      expect(mockReplace).toHaveBeenCalledWith("/device?user_code=ABC#step");
+    });
+    expect(mockReplace).toHaveBeenCalledTimes(1);
+    expectSameOriginForward();
+  });
+
+  it("falls back when a same-origin URL carries a //host pathname", async () => {
+    // safeReturnTo accepts this one — its origin really is ours — but reduced
+    // to a path it reads "//evil.example", i.e. protocol-relative.
+    mockGetCurrentUser.mockResolvedValue(SIGNED_IN_USER);
+    mockSearchParams.set(
+      "return_to",
+      `${window.location.origin}//evil.example/x`,
+    );
+    renderLogin();
+
+    await waitFor(() => {
+      expect(mockReplace).toHaveBeenCalledTimes(1);
+    });
+    expect(mockReplace).toHaveBeenCalledWith("/workspace/dashboard");
+    expectSameOriginForward();
+  });
+
+  it.each([
+    ["backslash", "/\\evil.example"],
+    ["embedded TAB", "/\t/evil.example"],
+    ["protocol-relative", "//evil.example"],
+    ["cross-origin absolute", "https://evil.example/x"],
+  ])(
+    "resolves the target same-origin even if safeReturnTo lets %s through",
+    async (_label, hostile) => {
+      // Defence in depth: the forward is the one place the frontend navigates
+      // to return_to by itself, so it must not rest on the guard alone.
+      safeReturnToBypass.enabled = true;
+      mockGetCurrentUser.mockResolvedValue(SIGNED_IN_USER);
+      mockSearchParams.set("return_to", hostile);
+      renderLogin();
+
+      await waitFor(() => {
+        expect(mockReplace).toHaveBeenCalledTimes(1);
+      });
+      expect(mockReplace).toHaveBeenCalledWith("/workspace/dashboard");
+      expectSameOriginForward();
     },
   );
 

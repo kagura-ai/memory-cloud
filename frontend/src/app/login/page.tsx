@@ -40,6 +40,37 @@ import { LanguageSelector } from "@/components/LanguageSelector";
 // anyway. A slow or broken /auth/me must never lock anyone out of /login.
 const SESSION_CHECK_TIMEOUT_MS = 3_000;
 
+const DEFAULT_FORWARD_TARGET = "/workspace/dashboard";
+
+/**
+ * #1594: where a live session is forwarded to.
+ *
+ * The forward is the one place the frontend navigates to `return_to` by
+ * itself — everywhere else the value goes to the backend, or through
+ * buildOAuthRedirect, and both re-validate it. So the already-sanitized value
+ * is not trusted as a string here: it is resolved the way the router will
+ * resolve it, must land on this origin, and is handed over as a path.
+ *
+ * The second resolve is not redundant. A same-origin URL can carry a `//host`
+ * pathname (`https://app.example//evil.example`), which reads as
+ * protocol-relative once reduced to a path.
+ *
+ * Browser only (reads `window`) — call it from an effect, not during render.
+ */
+function resolveForwardTarget(returnTo: string | undefined): string {
+  if (!returnTo) return DEFAULT_FORWARD_TARGET;
+  try {
+    const { origin } = window.location;
+    const url = new URL(returnTo, origin);
+    if (url.origin !== origin) return DEFAULT_FORWARD_TARGET;
+    const path = `${url.pathname}${url.search}${url.hash}`;
+    if (new URL(path, origin).origin !== origin) return DEFAULT_FORWARD_TARGET;
+    return path;
+  } catch {
+    return DEFAULT_FORWARD_TARGET;
+  }
+}
+
 function LoginContent() {
   const t = useTranslations("login");
   const router = useRouter();
@@ -99,9 +130,10 @@ function LoginContent() {
 
   useEffect(() => {
     if (!shouldForward) return;
-    // The sanitized value only — never the raw parameter. replace, not push:
-    // Back must not land on a page that bounces forward again.
-    router.replace(returnTo ?? "/workspace/dashboard");
+    // The sanitized value only — never the raw parameter — and re-resolved
+    // same-origin on top of that. replace, not push: Back must not land on a
+    // page that bounces forward again.
+    router.replace(resolveForwardTarget(returnTo));
   }, [shouldForward, returnTo, router]);
 
   useEffect(() => {
