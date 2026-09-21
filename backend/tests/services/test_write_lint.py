@@ -174,6 +174,34 @@ class TestTagRules:
         hints = await _lint(tags=["Dev_Environment"], vocabulary={"dev-environment": 7})
         assert "tag_near_duplicate" in _codes(hints)
 
+    @pytest.mark.asyncio
+    async def test_numbered_tags_are_not_flagged_against_their_own_series(self):
+        """#1608: a new issue / PR / version / date tag is not a misspelling.
+
+        The real near-duplicate in the same write still fires, so the silence is
+        the rule and not an accident of the vocabulary.
+        """
+        hints = await _lint(
+            tags=["issue:#1599", "pr:#1607", "v0.73.0", "session-2026-09-21", "dev-env"],
+            vocabulary={
+                "issue:#179": 4,
+                "pr:#601": 2,
+                "v0.69.0": 9,
+                "session-2026-05-20": 3,
+                "dev-environment": 12,
+            },
+        )
+        flagged = [h.subject for h in hints if h.code == "tag_near_duplicate"]
+        assert flagged == ["dev-env"]
+
+    @pytest.mark.asyncio
+    async def test_a_misspelled_numbered_tag_is_still_flagged(self):
+        """Digits AND letters differ: that is a typo, not the next issue number."""
+        hints = await _lint(tags=["isue:#1599"], vocabulary={"issue:#1599": 5, "issue:#179": 4})
+        hint = next(h for h in hints if h.code == "tag_near_duplicate")
+        assert hint.subject == "isue:#1599"
+        assert "'issue:#1599'" in hint.hint
+
 
 class TestItCanNeverBreakAWrite:
     @pytest.mark.asyncio

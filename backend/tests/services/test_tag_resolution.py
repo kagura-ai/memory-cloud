@@ -177,6 +177,38 @@ class TestSuggestTags:
         )
 
     @pytest.mark.asyncio
+    async def test_numbered_tags_do_not_suggest_their_own_series(self):
+        """#1608: filtering on an issue / PR / version / date that is not stored
+        must not offer a DIFFERENT issue / PR / version / date as the spelling.
+
+        The abbreviation in the same call is still suggested, so the silence is
+        the rule and not an accident of the vocabulary.
+        """
+        db = _db_with_vocabulary(
+            {
+                "issue:#179": 4,
+                "pr:#601": 2,
+                "v0.69.0": 9,
+                "session-2026-05-20": 3,
+                "dev-env": 3,
+            }
+        )
+        assert await suggest_tags(
+            db,
+            workspace_id=WS,
+            context_id=CTX,
+            user_id=USER,
+            tags=["issue:#1599", "pr:#1607", "v0.73.0", "session-2026-09-21", "dev-environment"],
+        ) == {"dev-environment": ["dev-env (3)"]}
+
+    @pytest.mark.asyncio
+    async def test_a_misspelled_numbered_tag_is_still_suggested(self):
+        db = _db_with_vocabulary({"issue:#1599": 5, "issue:#179": 4})
+        assert await suggest_tags(
+            db, workspace_id=WS, context_id=CTX, user_id=USER, tags=["isue:#1599"]
+        ) == {"isue:#1599": ["issue:#1599 (5)"]}
+
+    @pytest.mark.asyncio
     async def test_suggestions_are_bounded_per_tag(self):
         vocabulary = {f"troubleshooting{i}": i for i in range(MAX_SUGGESTIONS_PER_TAG + 10)}
         db = _db_with_vocabulary(vocabulary)
