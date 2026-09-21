@@ -18,7 +18,10 @@ logger = get_logger(__name__)
 
 # Constants
 UNLIMITED_CONTEXTS = 999999  # Effectively unlimited
-PROTECTED_KEYS = frozenset(["OPENAI_API_KEY"])  # Keys that cannot be deleted
+# Issue #1613: CANDIDATES for delete/disable protection, not the rule itself. A
+# candidate is protected only while something reads it — see
+# services/external_key_protection.is_key_protected.
+PROTECTED_KEYS = frozenset(["OPENAI_API_KEY"])
 
 
 class PlanName(StrEnum):

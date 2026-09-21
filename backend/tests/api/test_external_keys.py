@@ -4,7 +4,8 @@ Tests:
 - CRUD operations
 - Toggle enabled/disabled state
 - Exclusive reranker validation (Cohere/Voyage)
-- OpenAI cannot be disabled
+- A protected key cannot be disabled (Issue #1613: conditional, was "OpenAI
+  cannot be disabled")
 - Context scoping
 """
 
@@ -14,10 +15,11 @@ import pytest
 from fastapi import HTTPException
 
 from api.routes.external_keys import (
-    EMBEDDING_PROVIDERS,
     RERANKER_PROVIDERS,
+    refuse_disabling_protected_key,
     validate_reranker_exclusivity,
 )
+from services.external_key_protection import KeyProtection
 
 
 class TestRerankerExclusivity:
@@ -36,18 +38,19 @@ class TestRerankerExclusivity:
         return UUID("00000000-0000-0000-0000-000000000001")
 
     @pytest.mark.asyncio
-    async def test_openai_cannot_be_disabled(self, mock_db, workspace_id):
-        """Test that OpenAI keys cannot be disabled."""
-        with pytest.raises(HTTPException) as exc_info:
-            await validate_reranker_exclusivity(
-                db=mock_db,
-                workspace_id=workspace_id,
-                provider="openai",
-                enabled=False,  # Trying to disable
-            )
+    async def test_openai_disable_is_not_a_reranker_rule(self, mock_db, workspace_id):
+        """Issue #1613: the OpenAI guard moved out of this function.
 
-        assert exc_info.value.status_code == 400
-        assert exc_info.value.detail["error"] == "cannot_disable_embeddings"
+        Whether an OpenAI key may be disabled depends on the key and the
+        deployment (``refuse_disabling_protected_key``), not on the provider.
+        """
+        await validate_reranker_exclusivity(
+            db=mock_db,
+            workspace_id=workspace_id,
+            provider="openai",
+            enabled=False,
+        )
+        mock_db.execute.assert_not_called()
 
     @pytest.mark.asyncio
     async def test_openai_enable_always_allowed(self, mock_db, workspace_id):
@@ -172,6 +175,26 @@ class TestRerankerExclusivity:
         mock_db.execute.assert_called_once()
 
 
+class TestRefuseDisablingProtectedKey:
+    """Issue #1613: the disable guard follows the protection predicate."""
+
+    def test_protected_key_keeps_the_400_shape(self):
+        protection = KeyProtection(
+            protected=True, reason="OpenAI embeddings are in use by this deployment."
+        )
+        with pytest.raises(HTTPException) as exc_info:
+            refuse_disabling_protected_key("OPENAI_API_KEY", protection)
+
+        assert exc_info.value.status_code == 400
+        assert exc_info.value.detail["error"] == "cannot_disable_embeddings"
+        assert exc_info.value.detail["message"] == (
+            "Cannot disable OPENAI_API_KEY: OpenAI embeddings are in use by this deployment."
+        )
+
+    def test_unprotected_key_may_be_disabled(self):
+        refuse_disabling_protected_key("OPENAI_API_KEY", KeyProtection(protected=False))
+
+
 class TestProviderConstants:
     """Test provider constant definitions."""
 
@@ -180,9 +203,3 @@ class TestProviderConstants:
         assert "cohere" in RERANKER_PROVIDERS
         assert "voyage" in RERANKER_PROVIDERS
         assert "openai" not in RERANKER_PROVIDERS
-
-    def test_embedding_providers(self):
-        """Test EMBEDDING_PROVIDERS contains expected values."""
-        assert "openai" in EMBEDDING_PROVIDERS
-        assert "cohere" not in EMBEDDING_PROVIDERS
-        assert "voyage" not in EMBEDDING_PROVIDERS
