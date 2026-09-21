@@ -1,0 +1,2001 @@
+[
+  {
+    "name": "list_my_bindings",
+    "readOnly": true,
+    "inputSchema": {
+      "type": "object",
+      "properties": {},
+      "additionalProperties": false
+    }
+  },
+  {
+    "name": "describe_binding",
+    "readOnly": true,
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "key_id": {
+          "type": "integer"
+        },
+        "context_id": {
+          "type": "string",
+          "format": "uuid"
+        }
+      },
+      "additionalProperties": false
+    }
+  },
+  {
+    "name": "remember",
+    "inputSchema": {
+      "type": "object",
+      "required": [
+        "summary",
+        "content",
+        "type",
+        "context_id"
+      ],
+      "properties": {
+        "summary": {
+          "type": "string"
+        },
+        "content": {
+          "type": "string"
+        },
+        "type": {
+          "type": "string"
+        },
+        "context_summary": {
+          "type": "string"
+        },
+        "details": {
+          "type": "object"
+        },
+        "importance": {
+          "type": "number"
+        },
+        "tags": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "context": {
+          "type": "object"
+        },
+        "delivery_mode": {
+          "type": "string",
+          "enum": [
+            "always",
+            "on_recall",
+            "on_trigger"
+          ]
+        },
+        "context_id": {
+          "type": "string",
+          "format": "uuid"
+        },
+        "source_uri": {
+          "type": "string"
+        },
+        "source_type": {
+          "type": "string",
+          "enum": [
+            "file",
+            "url",
+            "vault",
+            "api",
+            "manual"
+          ]
+        },
+        "linked_memory_ids": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "format": "uuid"
+          }
+        },
+        "linked_source_uris": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "supersedes": {
+          "type": "string",
+          "format": "uuid"
+        }
+      },
+      "additionalProperties": false
+    }
+  },
+  {
+    "name": "update_memory",
+    "inputSchema": {
+      "type": "object",
+      "required": [
+        "context_id"
+      ],
+      "properties": {
+        "memory_id": {
+          "type": "string",
+          "format": "uuid"
+        },
+        "external_id": {
+          "type": "string"
+        },
+        "dismiss_supersede_candidate": {
+          "type": "boolean"
+        },
+        "summary": {
+          "type": "string"
+        },
+        "content": {
+          "type": "string"
+        },
+        "type": {
+          "type": "string"
+        },
+        "context_summary": {
+          "type": "string"
+        },
+        "details": {
+          "type": "object"
+        },
+        "importance": {
+          "type": "number"
+        },
+        "tags": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "context": {
+          "type": "object"
+        },
+        "delivery_mode": {
+          "type": "string",
+          "enum": [
+            "always",
+            "on_recall",
+            "on_trigger"
+          ]
+        },
+        "context_id": {
+          "type": "string",
+          "format": "uuid"
+        }
+      },
+      "additionalProperties": false
+    }
+  },
+  {
+    "name": "recall",
+    "readOnly": true,
+    "inputSchema": {
+      "type": "object",
+      "required": [
+        "query"
+      ],
+      "properties": {
+        "query": {
+          "type": "string"
+        },
+        "k": {
+          "type": "integer"
+        },
+        "use_rerank": {
+          "type": "boolean"
+        },
+        "filters": {
+          "type": "object"
+        },
+        "context_id": {
+          "type": "string",
+          "format": "uuid"
+        },
+        "context_ids": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "minItems": 2,
+          "maxItems": 20
+        },
+        "search_mode": {
+          "type": "string",
+          "enum": [
+            "hybrid",
+            "semantic",
+            "keyword"
+          ]
+        },
+        "include_explore_hints": {
+          "type": "boolean"
+        },
+        "include_superseded": {
+          "type": "boolean"
+        }
+      },
+      "additionalProperties": false
+    }
+  },
+  {
+    "name": "reference",
+    "readOnly": true,
+    "inputSchema": {
+      "type": "object",
+      "required": [
+        "memory_id",
+        "context_id"
+      ],
+      "properties": {
+        "memory_id": {
+          "type": "string",
+          "format": "uuid"
+        },
+        "context_id": {
+          "type": "string",
+          "format": "uuid"
+        }
+      },
+      "additionalProperties": false
+    }
+  },
+  {
+    "name": "recall_upcoming",
+    "readOnly": true,
+    "inputSchema": {
+      "type": "object",
+      "required": [
+        "context_id"
+      ],
+      "properties": {
+        "context_id": {
+          "type": "string",
+          "format": "uuid"
+        },
+        "from": {
+          "type": "string"
+        },
+        "until": {
+          "type": "string"
+        },
+        "k": {
+          "type": "integer"
+        },
+        "include_details": {
+          "type": "boolean"
+        }
+      },
+      "additionalProperties": false
+    }
+  },
+  {
+    "name": "recall_nearby",
+    "readOnly": true,
+    "inputSchema": {
+      "type": "object",
+      "required": [
+        "context_id",
+        "lat",
+        "lon"
+      ],
+      "properties": {
+        "context_id": {
+          "type": "string",
+          "format": "uuid"
+        },
+        "lat": {
+          "type": "number"
+        },
+        "lon": {
+          "type": "number"
+        },
+        "radius_m": {
+          "type": "number"
+        },
+        "k": {
+          "type": "integer"
+        }
+      },
+      "additionalProperties": false
+    }
+  },
+  {
+    "name": "load_pinned",
+    "readOnly": true,
+    "inputSchema": {
+      "type": "object",
+      "required": [
+        "context_id"
+      ],
+      "properties": {
+        "context_id": {
+          "type": "string",
+          "format": "uuid"
+        },
+        "cap": {
+          "type": "integer"
+        }
+      },
+      "additionalProperties": false
+    }
+  },
+  {
+    "name": "forget",
+    "inputSchema": {
+      "type": "object",
+      "required": [
+        "context_id"
+      ],
+      "properties": {
+        "memory_id": {
+          "type": "string",
+          "format": "uuid"
+        },
+        "query": {
+          "type": "string"
+        },
+        "k": {
+          "type": "integer"
+        },
+        "context_id": {
+          "type": "string",
+          "format": "uuid"
+        }
+      },
+      "additionalProperties": false
+    }
+  },
+  {
+    "name": "explore",
+    "readOnly": true,
+    "inputSchema": {
+      "type": "object",
+      "required": [
+        "memory_id",
+        "context_id"
+      ],
+      "properties": {
+        "memory_id": {
+          "type": "string",
+          "format": "uuid"
+        },
+        "depth": {
+          "type": "integer"
+        },
+        "min_weight": {
+          "type": "number",
+          "default": 0.05
+        },
+        "relation_types": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "context_id": {
+          "type": "string",
+          "format": "uuid"
+        }
+      },
+      "additionalProperties": false
+    }
+  },
+  {
+    "name": "list_edges",
+    "readOnly": true,
+    "inputSchema": {
+      "type": "object",
+      "required": [
+        "memory_id",
+        "context_id"
+      ],
+      "properties": {
+        "memory_id": {
+          "type": "string",
+          "format": "uuid"
+        },
+        "min_weight": {
+          "type": "number",
+          "default": 0.0
+        },
+        "edge_types": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "limit": {
+          "type": "integer"
+        },
+        "context_id": {
+          "type": "string",
+          "format": "uuid"
+        }
+      },
+      "additionalProperties": false
+    }
+  },
+  {
+    "name": "create_edge",
+    "inputSchema": {
+      "type": "object",
+      "required": [
+        "source_id",
+        "target_id",
+        "context_id"
+      ],
+      "properties": {
+        "source_id": {
+          "type": "string",
+          "format": "uuid"
+        },
+        "target_id": {
+          "type": "string",
+          "format": "uuid"
+        },
+        "edge_type": {
+          "type": "string",
+          "enum": [
+            "neural_association",
+            "related_to",
+            "depends_on",
+            "learned_from",
+            "continues_from",
+            "references_file",
+            "supersedes",
+            "contradicts"
+          ],
+          "default": "related_to"
+        },
+        "weight": {
+          "type": "number",
+          "default": 1.0
+        },
+        "confidence": {
+          "type": "number",
+          "default": 1.0
+        },
+        "overwrite": {
+          "type": "boolean",
+          "default": false
+        },
+        "context_id": {
+          "type": "string",
+          "format": "uuid"
+        }
+      },
+      "additionalProperties": false
+    }
+  },
+  {
+    "name": "update_edge",
+    "inputSchema": {
+      "type": "object",
+      "required": [
+        "source_id",
+        "target_id",
+        "context_id"
+      ],
+      "properties": {
+        "source_id": {
+          "type": "string",
+          "format": "uuid"
+        },
+        "target_id": {
+          "type": "string",
+          "format": "uuid"
+        },
+        "weight": {
+          "type": "number"
+        },
+        "edge_type": {
+          "type": "string",
+          "enum": [
+            "neural_association",
+            "related_to",
+            "depends_on",
+            "learned_from",
+            "continues_from",
+            "references_file",
+            "supersedes",
+            "contradicts"
+          ]
+        },
+        "context_id": {
+          "type": "string",
+          "format": "uuid"
+        }
+      },
+      "additionalProperties": false
+    }
+  },
+  {
+    "name": "delete_edge",
+    "inputSchema": {
+      "type": "object",
+      "required": [
+        "source_id",
+        "target_id",
+        "context_id"
+      ],
+      "properties": {
+        "source_id": {
+          "type": "string",
+          "format": "uuid"
+        },
+        "target_id": {
+          "type": "string",
+          "format": "uuid"
+        },
+        "context_id": {
+          "type": "string",
+          "format": "uuid"
+        }
+      },
+      "additionalProperties": false
+    }
+  },
+  {
+    "name": "get_context_info",
+    "readOnly": true,
+    "inputSchema": {
+      "type": "object",
+      "required": [
+        "context_id"
+      ],
+      "properties": {
+        "include_details": {
+          "type": "boolean"
+        },
+        "context_id": {
+          "type": "string",
+          "format": "uuid"
+        }
+      },
+      "additionalProperties": false
+    }
+  },
+  {
+    "name": "list_contexts",
+    "readOnly": true,
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "include_stats": {
+          "type": "boolean"
+        },
+        "name_contains": {
+          "type": "string",
+          "maxLength": 100
+        },
+        "include_summary": {
+          "type": "boolean"
+        },
+        "include_details": {
+          "type": "boolean"
+        }
+      },
+      "additionalProperties": false
+    }
+  },
+  {
+    "name": "list_tags",
+    "readOnly": true,
+    "inputSchema": {
+      "type": "object",
+      "required": [
+        "context_id"
+      ],
+      "properties": {
+        "context_id": {
+          "type": "string",
+          "format": "uuid"
+        },
+        "limit": {
+          "type": "integer"
+        },
+        "min_count": {
+          "type": "integer"
+        },
+        "sort": {
+          "type": "string",
+          "enum": [
+            "count",
+            "recent",
+            "alpha"
+          ]
+        },
+        "prefix": {
+          "type": "string"
+        }
+      },
+      "additionalProperties": false
+    }
+  },
+  {
+    "name": "create_context",
+    "inputSchema": {
+      "type": "object",
+      "required": [
+        "name"
+      ],
+      "properties": {
+        "name": {
+          "type": "string"
+        },
+        "display_name": {
+          "type": "string"
+        },
+        "description": {
+          "type": "string",
+          "maxLength": 500
+        },
+        "summary": {
+          "type": "string",
+          "maxLength": 2000
+        },
+        "usage_guide": {
+          "type": "string",
+          "maxLength": 2000
+        },
+        "is_private": {
+          "type": "boolean"
+        },
+        "embedding_model": {
+          "type": "string"
+        }
+      },
+      "additionalProperties": false
+    }
+  },
+  {
+    "name": "update_context",
+    "inputSchema": {
+      "type": "object",
+      "required": [
+        "context_id"
+      ],
+      "properties": {
+        "context_id": {
+          "type": "string",
+          "format": "uuid"
+        },
+        "display_name": {
+          "type": "string"
+        },
+        "description": {
+          "type": "string",
+          "maxLength": 500
+        },
+        "summary": {
+          "type": "string",
+          "maxLength": 2000
+        },
+        "usage_guide": {
+          "type": "string",
+          "maxLength": 2000
+        },
+        "resource_id": {
+          "type": "string"
+        },
+        "is_public": {
+          "type": "boolean"
+        },
+        "is_locked": {
+          "type": "boolean"
+        }
+      },
+      "additionalProperties": false
+    }
+  },
+  {
+    "name": "delete_context",
+    "inputSchema": {
+      "type": "object",
+      "required": [
+        "context_id"
+      ],
+      "properties": {
+        "context_id": {
+          "type": "string",
+          "format": "uuid"
+        }
+      },
+      "additionalProperties": false
+    }
+  },
+  {
+    "name": "merge_contexts",
+    "inputSchema": {
+      "type": "object",
+      "required": [
+        "source_context_id",
+        "target_context_id"
+      ],
+      "properties": {
+        "source_context_id": {
+          "type": "string",
+          "format": "uuid"
+        },
+        "target_context_id": {
+          "type": "string",
+          "format": "uuid"
+        },
+        "delete_source": {
+          "type": "boolean"
+        }
+      },
+      "additionalProperties": false
+    }
+  },
+  {
+    "name": "update_search_config",
+    "inputSchema": {
+      "type": "object",
+      "required": [
+        "context_id"
+      ],
+      "properties": {
+        "context_id": {
+          "type": "string",
+          "format": "uuid"
+        },
+        "semantic_weight": {
+          "type": "number"
+        },
+        "bm25_weight": {
+          "type": "number"
+        },
+        "fetch_factor": {
+          "type": "integer"
+        },
+        "use_rerank": {
+          "type": "boolean"
+        },
+        "reranker_provider": {
+          "type": "string",
+          "enum": [
+            "voyage",
+            "cohere",
+            "self_hosted"
+          ]
+        },
+        "reranker_model": {
+          "type": "string"
+        },
+        "reinforce_enabled": {
+          "type": "boolean"
+        },
+        "reinforce_max_boost": {
+          "type": "number"
+        },
+        "reinforce_require_host_arbitration": {
+          "type": "boolean"
+        },
+        "routing_mode": {
+          "type": "string",
+          "enum": [
+            "off",
+            "log_only",
+            "active"
+          ]
+        }
+      },
+      "additionalProperties": false
+    }
+  },
+  {
+    "name": "get_usage",
+    "readOnly": true,
+    "inputSchema": {
+      "type": "object",
+      "properties": {},
+      "additionalProperties": false
+    }
+  },
+  {
+    "name": "get_sleep_history",
+    "readOnly": true,
+    "inputSchema": {
+      "type": "object",
+      "required": [
+        "context_id"
+      ],
+      "properties": {
+        "context_id": {
+          "type": "string",
+          "format": "uuid"
+        },
+        "limit": {
+          "type": "integer",
+          "default": 10
+        }
+      },
+      "additionalProperties": false
+    }
+  },
+  {
+    "name": "get_sleep_report",
+    "readOnly": true,
+    "inputSchema": {
+      "type": "object",
+      "required": [
+        "report_id"
+      ],
+      "properties": {
+        "report_id": {
+          "type": "string",
+          "format": "uuid"
+        }
+      },
+      "additionalProperties": false
+    }
+  },
+  {
+    "name": "rollback_sleep_run",
+    "inputSchema": {
+      "type": "object",
+      "required": [
+        "report_id"
+      ],
+      "properties": {
+        "report_id": {
+          "type": "string",
+          "format": "uuid"
+        }
+      },
+      "additionalProperties": false
+    }
+  },
+  {
+    "name": "setup_resource",
+    "inputSchema": {
+      "type": "object",
+      "required": [
+        "name",
+        "resource_id"
+      ],
+      "properties": {
+        "name": {
+          "type": "string"
+        },
+        "resource_id": {
+          "type": "string"
+        },
+        "display_name": {
+          "type": "string"
+        },
+        "description": {
+          "type": "string"
+        },
+        "quota_events_per_hour": {
+          "type": "integer"
+        }
+      },
+      "additionalProperties": false
+    }
+  },
+  {
+    "name": "setup_connector",
+    "inputSchema": {
+      "type": "object",
+      "required": [
+        "connector_type",
+        "resource_id"
+      ],
+      "properties": {
+        "connector_type": {
+          "type": "string",
+          "enum": [
+            "slack",
+            "discord",
+            "teams"
+          ]
+        },
+        "resource_id": {
+          "type": "string"
+        },
+        "display_name": {
+          "type": "string"
+        },
+        "oauth_tokens": {
+          "type": "object"
+        },
+        "pii_guardrail_config": {
+          "type": "object"
+        },
+        "litellm_virtual_key_id": {
+          "type": "string"
+        },
+        "virtual_key_valid_until": {
+          "type": "string"
+        },
+        "quota_events_per_hour": {
+          "type": "integer"
+        },
+        "context_id": {
+          "type": "string",
+          "format": "uuid"
+        },
+        "auto_create_context_name": {
+          "type": "string"
+        },
+        "llm_config": {
+          "type": "object"
+        },
+        "channel_ids": {
+          "type": "array"
+        },
+        "locale": {
+          "type": "string"
+        },
+        "external_team_id": {
+          "type": "string"
+        },
+        "runtime": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "buffer": {
+              "type": "object",
+              "additionalProperties": false,
+              "properties": {
+                "ttl_seconds": {
+                  "type": "integer",
+                  "minimum": 1,
+                  "maximum": 86400
+                },
+                "max_len": {
+                  "type": "integer",
+                  "minimum": 1
+                }
+              }
+            },
+            "flush": {
+              "type": "object",
+              "additionalProperties": false,
+              "properties": {
+                "silence_seconds": {
+                  "type": "integer",
+                  "minimum": 0
+                },
+                "volume_tokens": {
+                  "type": "integer",
+                  "minimum": 1
+                },
+                "max_tracked_topics": {
+                  "type": "integer",
+                  "minimum": 1
+                }
+              }
+            },
+            "supervisor": {
+              "type": "object",
+              "additionalProperties": false,
+              "properties": {
+                "tick_seconds": {
+                  "type": "number",
+                  "exclusiveMinimum": 0
+                },
+                "shutdown_flush_timeout_seconds": {
+                  "type": "number",
+                  "exclusiveMinimum": 0
+                }
+              }
+            },
+            "lifecycle": {
+              "type": "object",
+              "additionalProperties": false,
+              "properties": {
+                "deletion_mode": {
+                  "type": "string",
+                  "enum": [
+                    "forget",
+                    "redact"
+                  ]
+                },
+                "redacted_summary": {
+                  "type": "string",
+                  "minLength": 1
+                },
+                "dormant_summary": {
+                  "type": "string",
+                  "minLength": 1
+                }
+              }
+            },
+            "continuity": {
+              "type": "object",
+              "additionalProperties": false,
+              "properties": {
+                "time_window_minutes": {
+                  "type": "integer",
+                  "minimum": 0
+                },
+                "semantic_threshold": {
+                  "type": "number",
+                  "minimum": 0,
+                  "maximum": 1
+                },
+                "semantic_check_enabled": {
+                  "type": "boolean"
+                }
+              }
+            },
+            "vision_enabled": {
+              "type": "boolean"
+            },
+            "mention_answer_enabled": {
+              "type": "boolean"
+            },
+            "answer_relevance_threshold": {
+              "type": "number",
+              "minimum": 0,
+              "maximum": 1
+            },
+            "answer_timeout_sec": {
+              "type": "number",
+              "exclusiveMinimum": 0
+            },
+            "memory_link_template": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "entity_extraction_enabled": {
+              "type": "boolean"
+            },
+            "entity_max": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 50
+            }
+          }
+        }
+      },
+      "additionalProperties": false
+    }
+  },
+  {
+    "name": "ingest_events",
+    "inputSchema": {
+      "type": "object",
+      "required": [
+        "resource_id",
+        "events"
+      ],
+      "properties": {
+        "resource_id": {
+          "type": "string"
+        },
+        "events": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": [
+              "op",
+              "doc_id"
+            ],
+            "properties": {
+              "op": {
+                "type": "string",
+                "enum": [
+                  "upsert",
+                  "delete"
+                ]
+              },
+              "doc_id": {
+                "type": "string"
+              },
+              "version": {
+                "type": "integer"
+              },
+              "payload": {
+                "type": "object"
+              },
+              "idempotency_key": {
+                "type": "string"
+              },
+              "importance": {
+                "type": "number"
+              },
+              "event_metadata": {
+                "type": "object"
+              }
+            }
+          }
+        }
+      },
+      "additionalProperties": false
+    }
+  },
+  {
+    "name": "get_resource_impact",
+    "readOnly": true,
+    "inputSchema": {
+      "type": "object",
+      "required": [
+        "resource_id"
+      ],
+      "properties": {
+        "resource_id": {
+          "type": "string"
+        }
+      },
+      "additionalProperties": false
+    }
+  },
+  {
+    "name": "get_resource_schema",
+    "readOnly": true,
+    "inputSchema": {
+      "type": "object",
+      "required": [
+        "resource_id"
+      ],
+      "properties": {
+        "resource_id": {
+          "type": "string"
+        },
+        "schema_version": {
+          "type": "integer"
+        }
+      },
+      "additionalProperties": false
+    }
+  },
+  {
+    "name": "list_resource_tokens",
+    "readOnly": true,
+    "inputSchema": {
+      "type": "object",
+      "required": [],
+      "properties": {
+        "resource_id": {
+          "type": "string"
+        },
+        "limit": {
+          "type": "integer"
+        },
+        "offset": {
+          "type": "integer"
+        },
+        "include_revoked": {
+          "type": "boolean"
+        }
+      },
+      "additionalProperties": false
+    }
+  },
+  {
+    "name": "analyze_context",
+    "inputSchema": {
+      "type": "object",
+      "required": [
+        "context_id"
+      ],
+      "properties": {
+        "context_id": {
+          "type": "string",
+          "format": "uuid"
+        },
+        "from": {
+          "type": "string"
+        },
+        "to": {
+          "type": "string"
+        },
+        "types": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "tags": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "min_importance": {
+          "type": "number"
+        },
+        "dry_run": {
+          "type": "boolean"
+        }
+      },
+      "additionalProperties": false
+    }
+  },
+  {
+    "name": "get_analysis",
+    "readOnly": true,
+    "inputSchema": {
+      "type": "object",
+      "required": [
+        "run_id"
+      ],
+      "properties": {
+        "run_id": {
+          "type": "string",
+          "format": "uuid"
+        }
+      },
+      "additionalProperties": false
+    }
+  },
+  {
+    "name": "list_analyses",
+    "readOnly": true,
+    "inputSchema": {
+      "type": "object",
+      "required": [
+        "context_id"
+      ],
+      "properties": {
+        "context_id": {
+          "type": "string",
+          "format": "uuid"
+        },
+        "limit": {
+          "type": "integer"
+        },
+        "cursor": {
+          "type": "string"
+        }
+      },
+      "additionalProperties": false
+    }
+  },
+  {
+    "name": "get_active_analysis",
+    "readOnly": true,
+    "inputSchema": {
+      "type": "object",
+      "required": [
+        "context_id"
+      ],
+      "properties": {
+        "context_id": {
+          "type": "string",
+          "format": "uuid"
+        }
+      },
+      "additionalProperties": false
+    }
+  },
+  {
+    "name": "get_cluster",
+    "readOnly": true,
+    "inputSchema": {
+      "type": "object",
+      "required": [
+        "run_id",
+        "cluster_index"
+      ],
+      "properties": {
+        "run_id": {
+          "type": "string",
+          "format": "uuid"
+        },
+        "cluster_index": {
+          "type": "integer"
+        },
+        "limit": {
+          "type": "integer"
+        },
+        "cursor": {
+          "type": "string"
+        }
+      },
+      "additionalProperties": false
+    }
+  },
+  {
+    "name": "init_file_upload",
+    "inputSchema": {
+      "type": "object",
+      "required": [
+        "filename",
+        "content_type",
+        "size_bytes",
+        "sha256"
+      ],
+      "properties": {
+        "filename": {
+          "type": "string"
+        },
+        "content_type": {
+          "type": "string"
+        },
+        "size_bytes": {
+          "type": "integer"
+        },
+        "sha256": {
+          "type": "string"
+        },
+        "context_id": {
+          "type": "string"
+        },
+        "workspace_id": {
+          "type": "string"
+        }
+      },
+      "additionalProperties": false
+    }
+  },
+  {
+    "name": "complete_file_upload",
+    "inputSchema": {
+      "type": "object",
+      "required": [
+        "file_id",
+        "sha256"
+      ],
+      "properties": {
+        "file_id": {
+          "type": "string"
+        },
+        "sha256": {
+          "type": "string"
+        },
+        "workspace_id": {
+          "type": "string"
+        }
+      },
+      "additionalProperties": false
+    }
+  },
+  {
+    "name": "get_file_download_url",
+    "inputSchema": {
+      "type": "object",
+      "required": [
+        "file_id"
+      ],
+      "properties": {
+        "file_id": {
+          "type": "string"
+        },
+        "workspace_id": {
+          "type": "string"
+        }
+      },
+      "additionalProperties": false
+    },
+    "readOnly": true
+  },
+  {
+    "name": "delete_file",
+    "inputSchema": {
+      "type": "object",
+      "required": [
+        "file_id"
+      ],
+      "properties": {
+        "file_id": {
+          "type": "string"
+        },
+        "workspace_id": {
+          "type": "string"
+        }
+      },
+      "additionalProperties": false
+    }
+  },
+  {
+    "name": "list_files",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "limit": {
+          "type": "integer"
+        },
+        "workspace_id": {
+          "type": "string"
+        }
+      },
+      "additionalProperties": false
+    },
+    "readOnly": true
+  },
+  {
+    "name": "feedback",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "context_id": {
+          "type": "string",
+          "format": "uuid"
+        },
+        "memory_id": {
+          "type": "string"
+        },
+        "helpful": {
+          "type": "boolean"
+        },
+        "query": {
+          "type": "string"
+        },
+        "note": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "context_id",
+        "memory_id",
+        "helpful"
+      ],
+      "additionalProperties": false
+    }
+  },
+  {
+    "name": "set_state",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "context_id": {
+          "type": "string",
+          "format": "uuid"
+        },
+        "key": {
+          "type": "string"
+        },
+        "value": {},
+        "ttl_seconds": {
+          "type": "integer"
+        }
+      },
+      "required": [
+        "context_id",
+        "key",
+        "value"
+      ],
+      "additionalProperties": false
+    }
+  },
+  {
+    "name": "get_state",
+    "readOnly": true,
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "context_id": {
+          "type": "string",
+          "format": "uuid"
+        },
+        "key": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "context_id"
+      ],
+      "additionalProperties": false
+    }
+  },
+  {
+    "name": "record_measurement",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "context_id": {
+          "type": "string",
+          "format": "uuid"
+        },
+        "metric": {
+          "type": "string"
+        },
+        "value": {
+          "anyOf": [
+            {
+              "type": "number"
+            },
+            {
+              "type": "string"
+            }
+          ]
+        },
+        "measured_at": {
+          "type": "string"
+        },
+        "unit": {
+          "type": "string"
+        },
+        "details": {
+          "type": "object"
+        }
+      },
+      "required": [
+        "context_id",
+        "metric",
+        "value"
+      ],
+      "additionalProperties": false
+    }
+  },
+  {
+    "name": "recall_series",
+    "readOnly": true,
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "context_id": {
+          "type": "string",
+          "format": "uuid"
+        },
+        "metric": {
+          "type": "string"
+        },
+        "period": {
+          "type": "string",
+          "enum": [
+            "day",
+            "week",
+            "month"
+          ]
+        },
+        "agg": {
+          "type": "string",
+          "enum": [
+            "avg",
+            "min",
+            "max",
+            "sum",
+            "count",
+            "last"
+          ]
+        },
+        "start": {
+          "type": "string"
+        },
+        "end": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "context_id",
+        "metric"
+      ],
+      "additionalProperties": false
+    }
+  },
+  {
+    "name": "register_agent",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "name": {
+          "type": "string"
+        },
+        "description": {
+          "type": "string"
+        },
+        "framework": {
+          "type": "string"
+        },
+        "environment": {
+          "type": "string"
+        },
+        "version": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "name"
+      ],
+      "additionalProperties": false
+    }
+  },
+  {
+    "name": "list_agents",
+    "readOnly": true,
+    "inputSchema": {
+      "type": "object",
+      "properties": {},
+      "additionalProperties": false
+    }
+  },
+  {
+    "name": "get_agent",
+    "readOnly": true,
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "agent_id": {
+          "type": "string",
+          "format": "uuid"
+        }
+      },
+      "required": [
+        "agent_id"
+      ],
+      "additionalProperties": false
+    }
+  },
+  {
+    "name": "update_agent",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "agent_id": {
+          "type": "string",
+          "format": "uuid"
+        },
+        "name": {
+          "type": "string"
+        },
+        "description": {
+          "type": "string"
+        },
+        "framework": {
+          "type": "string"
+        },
+        "environment": {
+          "type": "string"
+        },
+        "version": {
+          "type": "string"
+        },
+        "status": {
+          "type": "string",
+          "enum": [
+            "active",
+            "suspended",
+            "retired"
+          ]
+        },
+        "enforcement_mode": {
+          "type": "string",
+          "enum": [
+            "shadow",
+            "enforce"
+          ]
+        }
+      },
+      "required": [
+        "agent_id"
+      ],
+      "additionalProperties": false
+    }
+  },
+  {
+    "name": "delete_agent",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "agent_id": {
+          "type": "string",
+          "format": "uuid"
+        }
+      },
+      "required": [
+        "agent_id"
+      ],
+      "additionalProperties": false
+    }
+  },
+  {
+    "name": "bind_agent_context",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "agent_id": {
+          "type": "string",
+          "format": "uuid"
+        },
+        "context_id": {
+          "type": "string",
+          "format": "uuid"
+        },
+        "can_read": {
+          "type": "boolean"
+        },
+        "write_policy": {
+          "type": "string",
+          "enum": [
+            "deny",
+            "direct"
+          ]
+        },
+        "is_default": {
+          "type": "boolean"
+        },
+        "allowed_memory_types": {
+          "type": [
+            "array",
+            "null"
+          ],
+          "items": {
+            "type": "string"
+          }
+        },
+        "allowed_source_types": {
+          "type": [
+            "array",
+            "null"
+          ],
+          "items": {
+            "type": "string"
+          }
+        }
+      },
+      "required": [
+        "agent_id",
+        "context_id"
+      ],
+      "additionalProperties": false
+    }
+  },
+  {
+    "name": "list_agent_bindings",
+    "readOnly": true,
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "agent_id": {
+          "type": "string",
+          "format": "uuid"
+        }
+      },
+      "required": [
+        "agent_id"
+      ],
+      "additionalProperties": false
+    }
+  },
+  {
+    "name": "update_agent_binding",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "agent_id": {
+          "type": "string",
+          "format": "uuid"
+        },
+        "binding_id": {
+          "type": "string",
+          "format": "uuid"
+        },
+        "can_read": {
+          "type": "boolean"
+        },
+        "write_policy": {
+          "type": "string",
+          "enum": [
+            "deny",
+            "direct"
+          ]
+        },
+        "is_default": {
+          "type": "boolean"
+        },
+        "allowed_memory_types": {
+          "type": [
+            "array",
+            "null"
+          ],
+          "items": {
+            "type": "string"
+          }
+        },
+        "allowed_source_types": {
+          "type": [
+            "array",
+            "null"
+          ],
+          "items": {
+            "type": "string"
+          }
+        }
+      },
+      "required": [
+        "agent_id",
+        "binding_id"
+      ],
+      "additionalProperties": false
+    }
+  },
+  {
+    "name": "unbind_agent_context",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "agent_id": {
+          "type": "string",
+          "format": "uuid"
+        },
+        "binding_id": {
+          "type": "string",
+          "format": "uuid"
+        }
+      },
+      "required": [
+        "agent_id",
+        "binding_id"
+      ],
+      "additionalProperties": false
+    }
+  },
+  {
+    "name": "get_agent_bootstrap",
+    "readOnly": true,
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "agent_id": {
+          "type": "string",
+          "format": "uuid"
+        },
+        "context_id": {
+          "type": "string",
+          "format": "uuid"
+        },
+        "session_id": {
+          "type": "string"
+        },
+        "query": {
+          "type": "string"
+        },
+        "recall_k": {
+          "type": "integer"
+        },
+        "pinned_cap": {
+          "type": "integer"
+        },
+        "upcoming_until": {
+          "type": "string"
+        },
+        "include": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "enum": [
+              "pinned",
+              "recall",
+              "upcoming",
+              "state",
+              "policy"
+            ]
+          }
+        },
+        "recall_evaluation": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "seed": {
+              "type": "integer"
+            },
+            "exploration_floor": {
+              "type": "number",
+              "minimum": 0,
+              "maximum": 1
+            },
+            "candidate_pool_k": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 100
+            }
+          },
+          "required": [
+            "seed",
+            "exploration_floor",
+            "candidate_pool_k"
+          ]
+        }
+      },
+      "required": [
+        "agent_id"
+      ],
+      "additionalProperties": false
+    }
+  },
+  {
+    "name": "secret_register_pubkey",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "pubkey": {
+          "type": "string"
+        },
+        "label": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "pubkey"
+      ],
+      "additionalProperties": false
+    }
+  },
+  {
+    "name": "secret_put",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "name": {
+          "type": "string"
+        },
+        "ciphertext": {
+          "type": "string"
+        },
+        "recipients_snapshot": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "grant_pubkey_ids": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "format": "uuid"
+          }
+        }
+      },
+      "required": [
+        "name",
+        "ciphertext",
+        "recipients_snapshot",
+        "grant_pubkey_ids"
+      ],
+      "additionalProperties": false
+    }
+  },
+  {
+    "name": "secret_get",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "name": {
+          "type": "string"
+        },
+        "version_number": {
+          "type": "integer"
+        }
+      },
+      "required": [
+        "name"
+      ],
+      "additionalProperties": false
+    }
+  },
+  {
+    "name": "secret_list",
+    "inputSchema": {
+      "type": "object",
+      "properties": {},
+      "additionalProperties": false
+    }
+  },
+  {
+    "name": "secret_revoke_grant",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "name": {
+          "type": "string"
+        },
+        "recipient_pubkey_id": {
+          "type": "string",
+          "format": "uuid"
+        }
+      },
+      "required": [
+        "name",
+        "recipient_pubkey_id"
+      ],
+      "additionalProperties": false
+    }
+  }
+]

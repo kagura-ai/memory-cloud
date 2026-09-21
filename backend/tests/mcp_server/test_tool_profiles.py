@@ -25,12 +25,13 @@ from mcp_server.tools._profiles import (
     select_tool_definitions,
 )
 
-# Measured after #1599 / #1600 landed: the ``core`` list serializes to 46,141 characters
-# (``json.dumps``, the encoding both transports put on the wire) against
-# 114,674 for the full list. The budget is that figure plus 10% headroom: a
-# description can grow a little, but a tool quietly joining ``CORE_TOOLS``
-# cannot.
-CORE_CHAR_BUDGET = 50_800
+# Measured after #1602 trimmed the descriptions: the ``core`` list serializes to
+# 29,112 characters (``json.dumps``, the encoding both transports put on the
+# wire) against 85,001 for the full list — 46,141 and 114,674 before the trim.
+# The budget is that figure plus 10% headroom: a description can grow a little,
+# but a tool quietly joining ``CORE_TOOLS`` cannot. The per-tool and full-list
+# budgets live in ``test_tool_definition_budget``.
+CORE_CHAR_BUDGET = 32_000
 
 REGISTRY = [tool["name"] for tool in get_tool_definitions()]
 

@@ -189,11 +189,11 @@ Add to `.gemini/settings.json` (project root or `~/.gemini/settings.json`):
 
 ## List fewer tools
 
-By default `tools/list` returns all 63 tool definitions (≈ 111k characters of JSON). A client that puts every schema into the model's context when a session starts pays for that in each session. To list only what you use, add a query parameter to the endpoint URL your client already stores:
+By default `tools/list` returns all 63 tool definitions (≈ 82k characters of JSON). A client that puts every schema into the model's context when a session starts pays for that in each session. To list only what you use, add a query parameter to the endpoint URL your client already stores:
 
 | URL suffix | `tools/list` returns |
 |---|---|
-| `?profile=core` | The 12 core memory tools — ≈ 45k characters, about 60% smaller |
+| `?profile=core` | The 12 core memory tools — ≈ 28k characters, about 65% smaller |
 | `?tools=remember,recall,reference` | Exactly the named tools (an allowlist; wins over `profile`) |
 | *(none)* or `?profile=full` | Everything — the default |
 

@@ -31,6 +31,13 @@ If only one context exists, use it. If multiple, pick the one whose name best ma
 - Set importance based on impact (default: 0.8, design decisions: 0.9, core principles: 1.0)
 - Generate relevant tags (technology, domain, feature area). **Call `list_tags(context_id=...)` first** to discover existing tag spellings so you reuse them instead of inventing drift (e.g. `troubleshoot` vs `troubleshooting`).
 
+**Write for recall.** The summary is what search matches, so write the reusable conclusion, not the process, with the terms a later search would use — best at 100-250 characters.
+
+- Good: "JWT expiry caused 401. Fixed with refresh token rotation and clock skew handling."
+- Bad: "Discussed auth errors in today's meeting." / "JSONB index optimization" (too narrow — it will not match "database performance")
+
+Split long material (over ~2,000 characters) into one memory per topic — "OAuth2 login implementation", "JWT token validation logic" — never "part 1/3", and link the pieces with shared tags. If the new memory replaces an earlier one, pass `supersedes=<old_memory_id>` instead of storing a near-duplicate. Never store secrets, credentials or PII; coordinates go in `details.location` only.
+
 ### 3. Save
 
 Use `remember` with the resolved context_id, parsed summary, content with details, and appropriate type/importance/tags.
@@ -89,4 +96,4 @@ remember(
 
 ### 4. Confirm
 
-Show what was saved: summary, type, importance, tags.
+Show what was saved: summary, type, importance, tags. If the response carries a `lint` key, the write will recall badly (short / long / narrative summary, no tags, or a tag that near-duplicates an existing one) — apply the hint with `update_memory`. The memory is saved either way: `scope="working"` names its consolidation lifecycle, not whether the write landed.
