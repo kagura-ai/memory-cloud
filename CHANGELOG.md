@@ -4,6 +4,21 @@ Release notes are published on [GitHub Releases](https://github.com/kagura-ai/me
 which is the canonical source for the complete release history. This file highlights the current
 release train and preserves selected historical development notes.
 
+## [v0.73.1](https://github.com/kagura-ai/memory-cloud/releases/tag/v0.73.1) — 2026-09-21
+
+Follow-ups to the token-economy release, plus a credential that could not be withdrawn.
+
+### Changed
+- **The core tool profile is offered wherever the endpoint URL is shown** ([#1609](https://github.com/kagura-ai/memory-cloud/issues/1609)): the web UI's MCP config block has a switch, "Core tools only (smaller tool list)" (default off) — when on, every rendered and copied URL carries `?profile=core`. README, `docs/getting-started.md` and the per-client sections of `docs/mcp-clients.md` show both URLs with one wording; `docs/troubleshooting.md` gains "A tool I expect is missing from my client". The server default is unchanged (all tools).
+- **`GET /api/v1/external-keys` items carry `is_protected`** ([#1613](https://github.com/kagura-ai/memory-cloud/issues/1613)) (also on the create / update / toggle responses; additive). The External Keys page shows the Required badge and locks delete / disable only when it is true.
+
+### Fixed
+- **`OPENAI_API_KEY` could never be deleted or disabled** ([#1613](https://github.com/kagura-ai/memory-cloud/issues/1613)), even on a deployment whose embeddings do not use OpenAI or that no longer reads stored keys, so an owner could not withdraw their own credential. It is now protected only while `ENABLE_BYOK` and `RESOLVE_STORED_BYOK_KEYS` are on **and** OpenAI embeddings are in use — `EMBEDDING_PROVIDER=openai`, or a live context of the workspace routes to an OpenAI embedding model. Delete and disable share the rule (the disable guard also follows the row's provider, since the embedding service picks the stored key by provider). Refusals keep status `400` and their shape; the message states the actual reason. With `ENABLE_BYOK=false` the owner's list / toggle / delete paths were already reachable — stored keys can now be withdrawn through them.
+- **The tag near-duplicate hint fired on numbered tags** ([#1608](https://github.com/kagura-ai/memory-cloud/issues/1608)): `issue:#1599` "resembled" `issue:#179`, `v0.73.0` resembled `v0.69.0`, `session-2026-09-21` resembled `session-2026-05-20` — false hints on almost every write in a workspace that tags by issue, version or date, and the same noise in `tag_suggestions` on an empty tag-filtered `recall`. Two tags of the same shape whose numbers differ in value are no longer related; the same number written two ways (`sprint-07` / `sprint-7`, full-width digits) still is, and so are abbreviations and typos (`dev-env` / `dev-environment`, `kuberentes` / `kubernetes`).
+
+### Notes
+- No migration, no new environment variables, no operator action.
+
 ## [v0.73.0](https://github.com/kagura-ai/memory-cloud/releases/tag/v0.73.0) — 2026-09-21
 
 Token economy of the MCP surface. Everything a tool returns — and the tool list itself — is paid for in the calling model's context window; this release removes the avoidable part. Several response shapes change: read **Changed** before upgrading a client that parses tool results.
