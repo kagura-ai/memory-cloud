@@ -162,15 +162,21 @@ class TestResultItems:
         item = _envelope(RecallResponse(results=[_memory(score=None)]))["results"][0]
         assert item["score"] is None
 
-    def test_falsy_values_are_kept(self):
-        # Omit-when-empty is keyed on None / no annotation, never on
-        # truthiness: a 0.0 score or an empty context_summary is a value.
-        memory = _memory(score=0.0, importance=0.0, tags=[], context_summary="")
+    def test_falsy_values_of_unconditional_fields_are_kept(self):
+        # Only the ? keys are omit-when-empty. A 0.0 score is a real ranking
+        # value, not a missing one, and must not be nulled by a truthiness check.
+        memory = _memory(score=0.0, importance=0.0, tags=[])
         item = _envelope(RecallResponse(results=[memory]))["results"][0]
         assert item["score"] == 0.0
         assert item["importance"] == 0.0
         assert item["tags"] == []
-        assert item["context_summary"] == ""
+
+    def test_empty_string_context_summary_is_omitted(self):
+        # remember() accepts context_summary="" (no min_length) and stores it
+        # as-is. It says nothing, so it follows the same empty -> absent rule as
+        # contradicts=[] instead of shipping `"context_summary":""`.
+        item = _envelope(RecallResponse(results=[_memory(context_summary="")]))["results"][0]
+        assert "context_summary" not in item
 
     def test_rounding_does_not_reorder_results(self):
         results = [_memory(score=0.91234), _memory(score=0.91231), _memory(score=0.5)]

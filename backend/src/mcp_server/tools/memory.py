@@ -574,7 +574,9 @@ def _recall_result_item(r: Any) -> dict[str, Any]:
         The result item, Layers 1-2 only.
     """
     item: dict[str, Any] = {"memory_id": str(r.memory_id), "summary": r.summary}
-    if r.context_summary is not None:
+    # Truthiness, like the annotations below: a stored "" (remember() has no
+    # min_length) says as little as None, so it is absent too.
+    if r.context_summary:
         item["context_summary"] = r.context_summary
     item.update(
         {
