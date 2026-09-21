@@ -35,6 +35,7 @@ from typing import Any
 import pytest
 
 from mcp_server.tools import get_tool_definitions
+from mcp_server.tools._profiles import CORE_TOOLS
 
 SKELETON_PATH = Path(__file__).parent / "fixtures" / "tool_schema_skeleton.json"
 
@@ -55,25 +56,9 @@ PER_TOOL_BUDGET = 6_500
 # A ceiling more than this far above the measured size is a stale constant.
 MAX_SLACK = 0.15
 
-# The ``core`` profile of #1601 (``mcp_server.tools._profiles.CORE_TOOLS``).
-# Spelled out here so this guard does not depend on that module's merge order;
-# ``test_tool_profiles`` pins the profile's own membership.
-CORE_TOOL_NAMES = frozenset(
-    {
-        "remember",
-        "update_memory",
-        "recall",
-        "reference",
-        "recall_upcoming",
-        "load_pinned",
-        "forget",
-        "explore",
-        "get_context_info",
-        "list_contexts",
-        "list_tags",
-        "feedback",
-    }
-)
+# The ``core`` profile (#1601); ``test_tool_profiles`` pins its membership and
+# its size on the wire (``json.dumps``), this file its size as an agent reads it.
+CORE_TOOL_NAMES = frozenset(CORE_TOOLS)
 
 
 def _size(obj: Any) -> int:
