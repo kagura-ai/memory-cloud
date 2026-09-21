@@ -187,6 +187,33 @@ Add to `.gemini/settings.json` (project root or `~/.gemini/settings.json`):
 }
 ```
 
+## List fewer tools
+
+By default `tools/list` returns all 63 tool definitions (≈ 109k characters of JSON). A client that puts every schema into the model's context when a session starts pays for that in each session. To list only what you use, add a query parameter to the endpoint URL your client already stores:
+
+| URL suffix | `tools/list` returns |
+|---|---|
+| `?profile=core` | The 12 core memory tools — ≈ 43k characters, about 60% smaller |
+| `?tools=remember,recall,reference` | Exactly the named tools (an allowlist; wins over `profile`) |
+| *(none)* or `?profile=full` | Everything — the default |
+
+Only the URL changes; the `Authorization` header stays as it is:
+
+| Client | Where the URL goes |
+|---|---|
+| Claude Code | `"url"` in `.mcp.json` — `"http://localhost:8080/mcp/w/{workspace_id}?profile=core"` |
+| Claude Desktop / Claude Chat | `"url"` in the same `.mcp.json` shape / the endpoint URL of the custom MCP server — `https://your-domain.com/mcp/w/{workspace_id}?profile=core` |
+| ChatGPT | Server URL — `https://your-domain.com/mcp/w/{workspace_id}?profile=core` |
+| Gemini CLI | `"url"` in `.gemini/settings.json` — `"http://localhost:8080/mcp/w/{workspace_id}?profile=core"` |
+| Cursor | `"url"` of the `mcpServers` entry (same shape as Claude Code) |
+| Codex CLI | `url = "http://localhost:8080/mcp/w/{workspace_id}?profile=core"` in `~/.codex/config.toml` |
+
+Restart or reconnect the client afterwards so it lists tools again. A typo in `profile`, or a `tools` list that matches nothing, makes `tools/list` fail with an error naming the valid values rather than silently falling back to the full list.
+
+> This changes what is **listed**, not what can be **called** — it is not an access control. See [MCP Tools Reference › Tool Profiles](mcp-tools.md#tool-profiles) for the exact rules and the core tool set.
+>
+> Clients that defer tool loading — fetching a tool's schema only when it is about to be used, as Claude Code's tool search does — gain little: they never paid for the whole list in the first place.
+
 ## Other MCP Clients / REST API
 
 Any MCP-compatible client can connect via Streamable HTTP. For clients without MCP support, use the REST API directly:
