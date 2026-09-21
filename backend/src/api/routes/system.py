@@ -105,7 +105,7 @@ async def system_info():
         System info with version, environment, features
 
     Example:
-        GET /api/v1/info
+        GET /api/v1/system/info
         -> {
             "name": "Kagura Memory Cloud",
             "version": "0.1.0",

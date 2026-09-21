@@ -1130,24 +1130,39 @@ Health check endpoint.
 
 ---
 
-### GET /api/v1/info
+### GET /api/v1/system/info
 
-System information. The `version` reflects the running server (current stable: see [GitHub Releases](https://github.com/kagura-ai/memory-cloud/releases)).
+System information. Public (no authentication): the version plus non-sensitive deployment feature flags that the web UI reads before a workspace context exists. The `version` reflects the running server (current stable: see [GitHub Releases](https://github.com/kagura-ai/memory-cloud/releases)).
 
 **Response:**
 
 ```json
 {
+  "name": "Kagura Memory Cloud",
   "version": "<server_version>",
+  "description": "Remote MCP Server + Web Management",
   "environment": "production",
+  "search_defaults": {
+    "use_rerank": false,
+    "reranker_provider": "voyage",
+    "reranker_model": "rerank-2"
+  },
   "features": {
     "neural_memory": true,
-    "hybrid_search": true,
-    "oauth2": true,
-    "sleep_maintenance": true
+    "research_tools": false,
+    "plan_page": false,
+    "byok": true,
+    "cost_display": true,
+    "managed_connectors": false,
+    "managed_llm": false,
+    "referrals": false,
+    "beta_invites": false,
+    "reranking": true
   }
 }
 ```
+
+`search_defaults` are the reranker values new contexts are created with (provider and model names only). Each `features` flag mirrors a deployment setting (`ENABLE_*`, `MANAGED_LLM_PROVIDER`); the values above are illustrative, not the defaults of every deployment.
 
 ---
 

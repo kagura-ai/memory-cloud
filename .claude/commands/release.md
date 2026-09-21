@@ -38,7 +38,7 @@ Apply SemVer bump:
 The canonical runtime version is `APP_VERSION` in `backend/src/config/constants.py`. Both `backend/src/api/main.py` and `backend/src/mcp_server/transport.py` `import APP_VERSION from config.constants`, so they pick up the bump automatically — do NOT edit them directly (it would break the single-source-of-truth pattern).
 
 - `backend/pyproject.toml` — `version = "X.Y.Z"` (Python package metadata)
-- `backend/src/config/constants.py` — `APP_VERSION = "X.Y.Z"` (canonical runtime source — drives `/api/v1/info`, `/api/v1/system/telemetry`, MCP `serverInfo.version`, FastAPI OpenAPI `version`)
+- `backend/src/config/constants.py` — `APP_VERSION = "X.Y.Z"` (canonical runtime source — drives `/api/v1/system/info`, `/api/v1/system/telemetry`, MCP `serverInfo.version`, FastAPI OpenAPI `version`)
 - `backend/src/__init__.py` — `__version__ = "X.Y.Z"` (compat alias; must stay in sync with `APP_VERSION`)
 - `frontend/package.json` — `"version": "X.Y.Z"`
 - `frontend/package-lock.json` — run `cd frontend && npm install` to sync lock file
