@@ -466,8 +466,12 @@ Returns: {status, memory: {memory_id, summary, context_summary, content, details
                 "and calling remember(type='time', details={'trigger': {'year': "
                 "2026, 'month': 7}}). Partial dates are allowed: omit month/day for "
                 'fuzzy timing ("2026年7月ごろ").'
-                "\n\nReturns: {status, results: [{memory_id, summary, type, details}], context_id, "
-                "context_name, context_display_name, context_is_private, context_is_locked}."
+                "\n\nReturns: {status, results: [{memory_id, summary, type, trigger}], context_id, "
+                "context_name, context_display_name, context_is_private, context_is_locked}. "
+                "trigger is the memory's details.trigger (when it fires). With "
+                "include_details=true each item carries the full details object "
+                "instead of trigger (details.trigger is inside it); otherwise call "
+                "reference(memory_id) for one memory's full content."
             ),
             "inputSchema": {
                 "type": "object",
@@ -490,6 +494,12 @@ Returns: {status, memory: {memory_id, summary, context_summary, content, details
                     "k": {
                         "type": "integer",
                         "description": "Max results (default 20, max 100).",
+                    },
+                    "include_details": {
+                        "type": "boolean",
+                        "description": "Return each item's full details object instead "
+                        "of just its trigger (default: false). Leave off for a "
+                        "what's-coming-up listing; details can be large.",
                     },
                 },
             },

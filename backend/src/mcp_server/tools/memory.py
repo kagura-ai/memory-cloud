@@ -353,6 +353,11 @@ async def handle_recall_upcoming(
     except TriggerValidationError as e:
         return _error_response("validation_error", str(e))
 
+    # #1599: items carry `trigger` by default; the full `details` is opt-in.
+    # Strictly True (string booleans are coerced at dispatch) so anything
+    # unrecognized falls back to the lean shape.
+    include_details = args.get("include_details") is True
+
     start_time = time.time()
     async for db in get_db():
         current_context_id: UUID | None = None
@@ -363,7 +368,12 @@ async def handle_recall_upcoming(
             current_context = await _resolve_context_for_read(db, user_id, current_context_id)
 
             results = await query_upcoming_time_memories(
-                db, current_context_id, q_from=q_from, q_until=q_until, k=k
+                db,
+                current_context_id,
+                q_from=q_from,
+                q_until=q_until,
+                k=k,
+                include_details=include_details,
             )
             await _log_tool_usage(
                 db, user_id, "recall_upcoming", start_time, 200, current_context_id, workspace_id

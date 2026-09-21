@@ -42,6 +42,7 @@ async def query_upcoming_time_memories(
     q_until: str | None,
     k: int,
     trusted_only: bool = False,
+    include_details: bool = False,
 ) -> list[dict[str, Any]]:
     """Return the context's Time Memories whose window overlaps ``[q_from, q_until]``.
 
@@ -49,8 +50,14 @@ async def query_upcoming_time_memories(
     already normalized by ``utils.time_trigger.parse_query_bound``; the
     ``trigger_from`` / ``trigger_until`` columns are TEXT fixed-width ISO so the
     lexical comparison equals a chronological one. Soonest-first, capped at
-    ``k``. Result rows are byte-compatible with the ``recall_upcoming`` handler
-    (``memory_id`` / ``summary`` / ``type`` / ``details``).
+    ``k``. Result rows are byte-compatible with the ``recall_upcoming`` handler.
+
+    #1599: a row is ``memory_id`` / ``summary`` / ``type`` / ``trigger`` — the
+    trigger is what an upcoming list is read for, while ``details`` is the
+    memory's whole Layer-3 blob (``reference()`` territory) and used to make
+    this the largest routine read. ``include_details=True`` returns the full
+    ``details`` in place of ``trigger`` (it already contains it). The bootstrap
+    upcoming component always takes the default.
 
     When ``trusted_only`` is set (the bootstrap upcoming lane, #1293), apply the
     same trusted-tier gate the recall lane uses so an external/connector-origin
@@ -97,7 +104,13 @@ async def query_upcoming_time_memories(
             "memory_id": str(m.id),
             "summary": m.summary,
             "type": m.type,
-            "details": m.details,
+            **(
+                {"details": m.details}
+                if include_details
+                # Rows match on the generated trigger columns, so details is a
+                # dict with a trigger here; anything else degrades to null.
+                else {"trigger": m.details.get("trigger") if isinstance(m.details, dict) else None}
+            ),
         }
         for m in kept_rows
     ]
