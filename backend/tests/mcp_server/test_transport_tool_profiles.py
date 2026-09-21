@@ -285,7 +285,7 @@ def asgi(monkeypatch):
 
     monkeypatch.setattr(transport, "authenticate_mcp_request", fake_auth)
     monkeypatch.setattr(transport, "_get_user_workspace_id", fake_workspace)
-    monkeypatch.setattr(transport, "get_session_manager", lambda: _Sessions())
+    monkeypatch.setattr(transport, "get_session_manager", _Sessions)
 
     async def call(body: dict, headers: dict[bytes, bytes], query: bytes) -> _Recorder:
         send = _Recorder()
@@ -324,6 +324,25 @@ async def test_session_id_in_the_query_still_resolves_next_to_a_profile(asgi):
     send = await asgi(_legacy_request(), {}, b"session_id=sess-1&profile=core")
 
     assert _listed(send) == list(CORE_TOOLS)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("era", ["session", "session-header", "stateless"])
+async def test_undecodable_query_bytes_reach_the_selector_on_both_eras(asgi, era):
+    """The selector tolerates bytes that are not UTF-8, so nothing on the way to
+    it may be stricter: without a session header the session era first reads
+    the query string for ``session_id``, and used to raise there."""
+    body = _modern_request() if era == "stateless" else _legacy_request()
+    headers = {
+        "session": {},
+        "session-header": {b"mcp-session-id": b"sess-1"},
+        "stateless": _modern_headers(body),
+    }[era]
+
+    send = await asgi(body, headers, b"tools=recall&junk=\xff\xfe")
+
+    assert send.status == 200
+    assert _listed(send) == ["recall"]
 
 
 @pytest.mark.asyncio
