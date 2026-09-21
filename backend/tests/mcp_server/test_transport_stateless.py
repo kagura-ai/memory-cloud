@@ -162,10 +162,11 @@ async def test_ping_returns_a_complete_empty_result():
 
 @pytest.mark.asyncio
 async def test_tools_list_is_complete_cacheable_and_sessionless(monkeypatch):
-    import mcp_server.tools as tools_mod
+    # #1601: tools/list reads the registry through the tool-profile selector.
+    import mcp_server.tools._profiles as profiles_mod
 
     monkeypatch.setattr(
-        tools_mod, "get_tool_definitions", lambda: [{"name": "recall", "inputSchema": {}}]
+        profiles_mod, "get_tool_definitions", lambda: [{"name": "recall", "inputSchema": {}}]
     )
     send = await _post(_request("tools/list", request_id=4))
 
