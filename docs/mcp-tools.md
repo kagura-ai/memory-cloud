@@ -4,6 +4,24 @@ See [MCP Client Setup](mcp-clients.md) for connecting a client, and [Core Concep
 
 63 tools across 13 categories. Workspace roles: **Owner** > Admin > Member > **Viewer** (read-only). Context roles: **Owner** > Editor > Viewer. Private contexts are visible only to the creator. Members may be restricted to specific contexts via allowlist.
 
+## Tool Profiles
+
+`tools/list` returns all 63 definitions by default. A client that loads every tool schema eagerly pays for the whole list in each session, so the endpoint URL — which the client's local MCP configuration already stores — can ask for fewer:
+
+| Endpoint URL | `tools/list` returns | Approx. size |
+|--------------|----------------------|--------------|
+| `/mcp/w/{workspace_id}` (or `?profile=full`) | All 63 tools — the default, unchanged | ≈ 111k chars |
+| `/mcp/w/{workspace_id}?profile=core` | The 12 core tools: `remember`, `update_memory`, `recall`, `reference`, `recall_upcoming`, `load_pinned`, `forget`, `explore`, `get_context_info`, `list_contexts`, `list_tags`, `feedback` | ≈ 45k chars (about 60% smaller) |
+| `/mcp/w/{workspace_id}?tools=remember,recall,reference` | Exactly the named tools — an explicit allowlist, wins over `profile` | ≈ 23k chars for these three |
+
+Sizes are the compact JSON of the `tools` array, measured at v0.72.0. Per-client instructions: [MCP Client Setup › List fewer tools](mcp-clients.md#list-fewer-tools).
+
+- Tool names are comma-separated and case-sensitive; surrounding whitespace is trimmed, duplicates collapse, and at most 100 names are read. The result is always in registry order, whatever order the URL uses.
+- Unknown names are ignored (and logged by the server), so a URL keeps working if a tool is later renamed or removed. If **no** name matches, or `profile` is anything other than `full` / `core`, `tools/list` fails with JSON-RPC `-32602` (invalid params) and a message naming the valid values.
+- Both transports honour the parameters — session-based Streamable HTTP and stateless MCP 2026-07-28 — on `/mcp` as well as `/mcp/w/{workspace_id}`.
+
+> **A profile is a view, not an authorization boundary.** It filters `tools/list` and nothing else. `tools/call` never reads it: a tool left out of the list stays callable by anyone whose role allows it. To restrict what a key can do, use workspace and context roles.
+
 ## Memory (7)
 
 | Tool | Description | Required Role |

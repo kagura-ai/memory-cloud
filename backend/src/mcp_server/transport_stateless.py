@@ -281,6 +281,7 @@ async def handle_stateless_post(
     *,
     user_id: str,
     workspace_id: "UUID | None",
+    query_string: bytes = b"",
 ) -> None:
     """Serve one modern (MCP 2026-07-28) ``POST /mcp`` request, statelessly.
 
@@ -294,6 +295,8 @@ async def handle_stateless_post(
         headers: Request headers (lower-cased byte names, as ASGI delivers).
         user_id: The authenticated user.
         workspace_id: The workspace the credentials resolve to, if any.
+        query_string: The raw ASGI query string; only ``tools/list`` reads it,
+            for the tool profile (#1601).
     """
     request_id = body.get("id")
     method = body.get("method")
@@ -363,17 +366,30 @@ async def handle_stateless_post(
         await _send_result(send, request_id, _complete({}))
 
     elif method == "tools/list":
-        from mcp_server.tools import get_tool_definitions
+        from mcp_server.tools._profiles import ToolProfileError, select_tool_definitions
 
-        # Caching hints are MUST on a complete tools/list result. "public" is
-        # correct only while the list is identical for every caller — switch
-        # to "private" if it ever varies by plan, role or workspace.
+        # #1601: the endpoint URL (``?profile=`` / ``?tools=``) picks what is
+        # listed. A view, not an authorization boundary: ``tools/call`` below
+        # never reads it.
+        try:
+            tools = select_tool_definitions(query_string)
+        except ToolProfileError as e:
+            logger.warning(
+                f"MCP tools/list rejected (stateless): reason={e.message!r}, user={user_id}"
+            )
+            await _send_error(send, 400, request_id, -32602, e.message)
+            return
+
+        # Caching hints are MUST on a complete tools/list result. The list
+        # varies by URL (the tool profile) and never by caller identity, so it
+        # is still shareable between callers of the same URL: "public" holds.
+        # Switch to "private" if it ever varies by plan, role or workspace.
         await _send_result(
             send,
             request_id,
             _complete(
                 {
-                    "tools": get_tool_definitions(),
+                    "tools": tools,
                     "ttlMs": TOOLS_LIST_TTL_MS,
                     "cacheScope": "public",
                 }
