@@ -2,6 +2,16 @@
 
 How to connect MCP clients (Claude Code, Claude Desktop/Chat, ChatGPT, Gemini CLI, and any Streamable-HTTP client) to a self-hosted Kagura Memory Cloud. Start from the [README Quick Start](../README.md#quick-start) if your server isn't running yet; the full tool list is in the [MCP Tools Reference](mcp-tools.md).
 
+## Which URL?
+
+Every client below takes one of two endpoint URLs — same server, same API key:
+
+| | Endpoint URL |
+|---|---|
+| **All tools (default)** | `…/mcp/w/{workspace_id}` |
+| **Core tools only — smaller tool list** | `…/mcp/w/{workspace_id}?profile=core` |
+
+Pick core when your client loads every tool schema at session start (it is about 65% smaller). It lists the 12 memory and context tools and leaves out Sleep, analyses, files, edges, secrets, resources and the agent control plane — those stay callable, they are just not listed; switch back to the default URL to see them. The exact tool set and sizes are in [Tool Profiles](mcp-tools.md#tool-profiles); a narrower allowlist (`?tools=…`) is under [List fewer tools](#list-fewer-tools). The Web UI's MCP Setup Guide has a **Core tools only** switch that writes the query into its snippets for you.
 
 ## Claude Code (Recommended)
 
@@ -26,6 +36,11 @@ Claude Code + Kagura Memory Cloud gives your AI assistant **persistent, searchab
 cp .mcp.json.example .mcp.json
 # Edit .mcp.json — set workspace_id (from URL bar) and API key
 ```
+
+`.mcp.json.example` ships with the all-tools URL (JSON has no comments, so the choice is spelled out here). Set `"url"` to one of — see [Which URL?](#which-url):
+
+- **All tools (default):** `http://localhost:8080/mcp/w/{workspace_id}`
+- **Core tools only — smaller tool list:** `http://localhost:8080/mcp/w/{workspace_id}?profile=core`
 
 3. Restart Claude Code and verify:
 ```
@@ -157,7 +172,9 @@ See [Troubleshooting → WSL2 + Claude Code](troubleshooting.md#wsl2--claude-cod
 
 **Claude Chat (claude.ai)**: Add as a remote MCP server in Settings > Integrations:
 1. Click "Add Integration" → "Custom MCP Server"
-2. Enter the MCP endpoint URL: `https://your-domain.com/mcp/w/{workspace_id}`
+2. Enter the MCP endpoint URL ([which one?](#which-url)):
+   - **All tools (default):** `https://your-domain.com/mcp/w/{workspace_id}`
+   - **Core tools only — smaller tool list:** `https://your-domain.com/mcp/w/{workspace_id}?profile=core`
 3. Add the `Authorization: Bearer kagura_{your_api_key}` header
 
 > Claude Chat requires a publicly accessible URL (not `localhost`). Use a production deployment or tunnel (e.g., ngrok, Cloudflare Tunnel).
@@ -165,7 +182,9 @@ See [Troubleshooting → WSL2 + Claude Code](troubleshooting.md#wsl2--claude-cod
 ## ChatGPT Desktop
 
 ChatGPT desktop app supports MCP servers. Add via Settings > MCP Servers:
-1. Server URL: `https://your-domain.com/mcp/w/{workspace_id}`
+1. Server URL ([which one?](#which-url)):
+   - **All tools (default):** `https://your-domain.com/mcp/w/{workspace_id}`
+   - **Core tools only — smaller tool list:** `https://your-domain.com/mcp/w/{workspace_id}?profile=core`
 2. Authentication: Bearer token `kagura_{your_api_key}`
 
 > Like Claude Chat, ChatGPT requires a public URL. For local development, use a tunnel or the REST API directly.
@@ -187,6 +206,8 @@ Add to `.gemini/settings.json` (project root or `~/.gemini/settings.json`):
 }
 ```
 
+That `"url"` is the **all tools (default)** one. For **core tools only — smaller tool list**, use `"http://localhost:8080/mcp/w/{workspace_id}?profile=core"` ([which one?](#which-url)).
+
 ## List fewer tools
 
 By default `tools/list` returns all 63 tool definitions (≈ 82k characters of JSON). A client that puts every schema into the model's context when a session starts pays for that in each session. To list only what you use, add a query parameter to the endpoint URL your client already stores:
@@ -197,14 +218,14 @@ By default `tools/list` returns all 63 tool definitions (≈ 82k characters of J
 | `?tools=remember,recall,reference` | Exactly the named tools (an allowlist; wins over `profile`) |
 | *(none)* or `?profile=full` | Everything — the default |
 
-Only the URL changes; the `Authorization` header stays as it is:
+Only the URL changes; the `Authorization` header stays as it is. The client sections above show the core URL in full; this is where the URL lives in each client's configuration:
 
 | Client | Where the URL goes |
 |---|---|
-| Claude Code | `"url"` in `.mcp.json` — `"http://localhost:8080/mcp/w/{workspace_id}?profile=core"` |
-| Claude Desktop / Claude Chat | `"url"` in the same `.mcp.json` shape / the endpoint URL of the custom MCP server — `https://your-domain.com/mcp/w/{workspace_id}?profile=core` |
-| ChatGPT | Server URL — `https://your-domain.com/mcp/w/{workspace_id}?profile=core` |
-| Gemini CLI | `"url"` in `.gemini/settings.json` — `"http://localhost:8080/mcp/w/{workspace_id}?profile=core"` |
+| Claude Code | `"url"` in `.mcp.json` |
+| Claude Desktop / Claude Chat | `"url"` in the same `.mcp.json` shape / the endpoint URL of the custom MCP server |
+| ChatGPT | Server URL |
+| Gemini CLI | `"url"` in `.gemini/settings.json` |
 | Cursor | `"url"` of the `mcpServers` entry (same shape as Claude Code) |
 | Codex CLI | `url = "http://localhost:8080/mcp/w/{workspace_id}?profile=core"` in `~/.codex/config.toml` |
 

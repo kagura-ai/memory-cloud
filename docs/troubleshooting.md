@@ -1,6 +1,20 @@
 # Troubleshooting
 
-Solutions to environment-specific setup problems. If your issue is not listed here, check the [Getting Started](getting-started.md) guide or open an issue.
+Solutions to client-configuration and environment-specific setup problems. If your issue is not listed here, check the [Getting Started](getting-started.md) guide or open an issue.
+
+## A tool I expect is missing from my client
+
+**You are probably on `?profile=core`.** The client lists `remember`, `recall` and the other core tools, but not, say, `create_edge`, `list_files`, `get_sleep_report` or `secret_get`.
+
+Look at the endpoint URL your client stores — `"url"` in `.mcp.json` / `.gemini/settings.json`, `url` in `~/.codex/config.toml`, or the URL field of the connector form:
+
+| URL ends with | The client lists |
+|---|---|
+| `/mcp/w/{workspace_id}` | All tools (default) |
+| `?profile=core` | Core tools only — the 12 memory and context tools. Sleep, analyses, files, edges, secrets, resources and the agent control plane are left out |
+| `?tools=…` | Exactly the names in the list |
+
+The missing tool is still **callable** — a profile filters the list, not access — but most clients only offer what they list. To see it, switch back to the default URL (or add its name to `?tools=`), then restart or reconnect the client so it lists tools again. Background: [Tool Profiles](mcp-tools.md#tool-profiles).
 
 ## WSL2 + Claude Code — MCP OAuth callback fails (default NAT networking)
 
