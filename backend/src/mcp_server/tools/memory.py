@@ -549,6 +549,103 @@ async def handle_load_pinned(
     return _error_response("internal_error", "Database session unavailable")
 
 
+def _recall_result_item(r: Any) -> dict[str, Any]:
+    """Project one recall result onto the MCP envelope.
+
+    #1599: the annotations that are empty on almost every result are omitted
+    rather than serialized as ``null`` / ``[]`` — absence is the signal, as for
+    ``persistence`` / ``lint`` on the write tools. A present value is rendered
+    exactly as before.
+
+    Args:
+        r: A ``MemoryResponse`` from ``RecallResponse.results``.
+
+    Returns:
+        The result item, Layers 1-2 only.
+    """
+    item: dict[str, Any] = {"memory_id": str(r.memory_id), "summary": r.summary}
+    if r.context_summary is not None:
+        item["context_summary"] = r.context_summary
+    item.update(
+        {
+            "type": r.type,
+            "importance": r.importance,
+            "scope": r.scope,
+            # 4 decimals keep the ranking readable; the full float is 16+
+            # digits of noise per result.
+            "score": round(r.score, 4) if r.score is not None else None,
+            "tags": r.tags,
+            # Issue #1047: recency/staleness cues for the agent. created_at
+            # is the always-present floor; updated_at is the last real change
+            # (null if never edited) — an old value means the fact may be stale.
+            "created_at": to_utc_iso(r.created_at),
+            "updated_at": to_utc_iso(r.updated_at),
+        }
+    )
+    # #1208: fact-succession annotations. superseded_by is only set under
+    # include_superseded=true; contradicts lists opposing memories (never
+    # hidden, both sides annotated).
+    if r.superseded_by:
+        item["superseded_by"] = str(r.superseded_by)
+    if r.contradicts:
+        item["contradicts"] = [str(c) for c in r.contradicts]
+    # #1403: liveness-guarded near-duplicate this memory may supersede — a
+    # client can offer confirm→create_edge.
+    if r.supersede_candidate:
+        item["supersede_candidate"] = r.supersede_candidate.model_dump(mode="json")
+    return item
+
+
+def _recall_envelope(result: Any, context: Any) -> dict[str, Any]:
+    """Build the recall MCP envelope from a ``RecallResponse``.
+
+    Kept out of the handler so the response-size guard
+    (``tests/mcp_server/test_recall_envelope.py``) measures the text clients
+    actually receive rather than a copy of this projection.
+
+    Args:
+        result: The ``RecallResponse`` from ``MemoryService.recall``.
+        context: The resolved primary context.
+
+    Returns:
+        The envelope ``handle_recall`` serializes.
+    """
+    results_data = [_recall_result_item(r) for r in result.results]
+    response_data: dict[str, Any] = {
+        "status": "success",
+        "results": results_data,
+        "count": len(results_data),
+        # #1599: tag + count only. ``RelatedTagItem.sample_summary`` (still
+        # served over REST) repeats, in full, a summary that is already in
+        # ``results`` — up to 10 times per response on this surface.
+        "related_tags": [{"tag": tag.tag, "count": tag.count} for tag in result.related_tags],
+        **_context_response_fields(context),
+    }
+
+    if result.explore_hints is not None:
+        response_data["explore_hints"] = [
+            {"memory_id": str(h.memory_id), "reason": h.reason} for h in result.explore_hints
+        ]
+
+    # Issue #1047: top-level relevance confidence (level=none → the agent
+    # can stop probing early / go external instead of hallucinating).
+    if result.confidence is not None:
+        response_data["confidence"] = result.confidence.model_dump()
+
+    # #1503: only present on an empty tag-filtered recall — it tells the
+    # agent whether the topic is absent or just spelled differently.
+    if result.tag_suggestions:
+        response_data["tag_suggestions"] = result.tag_suggestions
+
+    # #1515: this envelope is hand-built, so a new RecallResponse field
+    # does NOT reach MCP clients on its own — it has to be copied.
+    # The agent needs it: served without the semantic arm, ``confidence``
+    # rests on a different basis, so a low level here means "the search
+    # was impaired", not "nothing relevant is stored".
+    response_data.update(_degraded_response_fields(result))
+    return response_data
+
+
 async def handle_recall(
     args: dict[str, Any], user_id: str, workspace_id: UUID | None
 ) -> list[TextContent]:
@@ -693,41 +790,9 @@ async def handle_recall(
                 operation_name="recall",
             )
 
-            results_data = [
-                {
-                    "memory_id": str(r.memory_id),
-                    "summary": r.summary,
-                    "context_summary": r.context_summary,
-                    "type": r.type,
-                    "importance": r.importance,
-                    "scope": r.scope,
-                    "score": r.score,
-                    "tags": r.tags,
-                    # Issue #1047: recency/staleness cues for the agent. created_at
-                    # is the always-present floor; updated_at is the last real change
-                    # (null if never edited) — an old value means the fact may be stale.
-                    "created_at": to_utc_iso(r.created_at),
-                    "updated_at": to_utc_iso(r.updated_at),
-                    # #1208: fact-succession annotations. superseded_by is only
-                    # non-null under include_superseded=true; contradicts lists
-                    # opposing memories (never hidden, both sides annotated).
-                    "superseded_by": str(r.superseded_by) if r.superseded_by else None,
-                    "contradicts": [str(c) for c in r.contradicts],
-                    # #1403: liveness-guarded near-duplicate this memory may
-                    # supersede — a client can offer confirm→create_edge.
-                    "supersede_candidate": (
-                        r.supersede_candidate.model_dump(mode="json")
-                        if r.supersede_candidate
-                        else None
-                    ),
-                }
-                for r in result.results
-            ]
-
-            related_tags_data = [
-                {"tag": tag.tag, "count": tag.count, "sample_summary": tag.sample_summary}
-                for tag in result.related_tags
-            ]
+            # Built before the usage row / commit, as the item projection always
+            # was: a result that cannot be rendered fails the call as a whole.
+            response_data = _recall_envelope(result, current_context)
 
             await _log_tool_usage(
                 db,
@@ -750,37 +815,6 @@ async def handle_recall(
             ):
                 await _touch_context_last_used(db, touch_ctx)
             await db.commit()
-
-            response_data: dict[str, Any] = {
-                "status": "success",
-                "results": results_data,
-                "count": len(results_data),
-                "related_tags": related_tags_data,
-                **_context_response_fields(current_context),
-            }
-
-            if result.explore_hints is not None:
-                response_data["explore_hints"] = [
-                    {"memory_id": str(h.memory_id), "reason": h.reason}
-                    for h in result.explore_hints
-                ]
-
-            # Issue #1047: top-level relevance confidence (level=none → the agent
-            # can stop probing early / go external instead of hallucinating).
-            if result.confidence is not None:
-                response_data["confidence"] = result.confidence.model_dump()
-
-            # #1503: only present on an empty tag-filtered recall — it tells the
-            # agent whether the topic is absent or just spelled differently.
-            if result.tag_suggestions:
-                response_data["tag_suggestions"] = result.tag_suggestions
-
-            # #1515: this envelope is hand-built, so a new RecallResponse field
-            # does NOT reach MCP clients on its own — it has to be copied.
-            # The agent needs it: served without the semantic arm, ``confidence``
-            # rests on a different basis, so a low level here means "the search
-            # was impaired", not "nothing relevant is stored".
-            response_data.update(_degraded_response_fields(result))
 
             return [
                 TextContent(
