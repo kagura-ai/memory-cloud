@@ -209,6 +209,14 @@ class TestSuggestTags:
         ) == {"isue:#1599": ["issue:#1599 (5)"]}
 
     @pytest.mark.asyncio
+    async def test_the_same_number_padded_differently_is_still_suggested(self):
+        """``sprint-7`` for a stored ``sprint-07`` is drift, not the next sprint."""
+        db = _db_with_vocabulary({"sprint-07": 5, "sprint-06": 9})
+        assert await suggest_tags(
+            db, workspace_id=WS, context_id=CTX, user_id=USER, tags=["sprint-7"]
+        ) == {"sprint-7": ["sprint-07 (5)"]}
+
+    @pytest.mark.asyncio
     async def test_suggestions_are_bounded_per_tag(self):
         vocabulary = {f"troubleshooting{i}": i for i in range(MAX_SUGGESTIONS_PER_TAG + 10)}
         db = _db_with_vocabulary(vocabulary)

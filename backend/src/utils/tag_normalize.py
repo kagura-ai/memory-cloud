@@ -136,10 +136,20 @@ def _digit_skeleton(tag: str) -> str:
     The mask runs BEFORE :func:`normalize_tag` drops separators, so the number
     of numeric fields survives: ``v0.73.0`` is ``v000`` and ``v0.7`` is ``v00``.
     Masking the folded form instead would merge ``0.73.0`` into one run and call
-    those two the same series. NFKC comes first so full-width and superscript
-    digits are masked like ASCII ones.
+    those two the same series. NFKC comes first so superscript and circled
+    digits, which the regex digit class does not match, are masked like ASCII
+    ones (full-width digits match it either way).
     """
     return normalize_tag(_DIGIT_RUN.sub("0", unicodedata.normalize("NFKC", tag)))
+
+
+def _digit_runs(tag: str) -> list[str]:
+    """The tag's numbers with zero padding dropped, so ``07`` and ``7`` compare equal.
+
+    Compared as strings rather than ``int``: a tag is caller-controlled and
+    ``int()`` refuses a run longer than the interpreter's digit limit.
+    """
+    return [run.lstrip("0") for run in _DIGIT_RUN.findall(unicodedata.normalize("NFKC", tag))]
 
 
 def is_near_duplicate(requested: str, candidate: str) -> bool:
@@ -158,14 +168,17 @@ def is_near_duplicate(requested: str, candidate: str) -> bool:
 
     Never fires for two members of the same NUMBERED SERIES (#1608): folded
     forms that differ while their digit skeletons (:func:`_digit_skeleton`) are
-    equal, i.e. the tags differ only in their numbers. ``issue:#1599`` is not a
-    misspelling of ``issue:#179``, nor ``v0.73.0`` of ``v0.69.0``, nor one
-    ``session-<date>`` of another — yet all sit within 2 edits or share a
-    prefix, so workspaces that tag by issue, version or date would get a hint
-    on almost every write. A pair whose letters or number of numeric fields
-    differ is not a series and goes through the rules above unchanged
-    (``isue:#1599`` / ``issue:#1599``, ``oauth`` / ``oauth2``, ``v0.73`` /
-    ``v0.73.0``).
+    equal, i.e. the tags differ only in the values of their numbers.
+    ``issue:#1599`` is not a misspelling of ``issue:#179``, nor ``v0.73.0`` of
+    ``v0.69.0``, nor one ``session-<date>`` of another — yet all sit within 2
+    edits or share a prefix, so workspaces that tag by issue, version or date
+    would get a hint on almost every write. A pair whose letters or number of
+    numeric fields differ is not a series and goes through the rules above
+    unchanged (``isue:#1599`` / ``issue:#1599``, ``oauth`` / ``oauth2``,
+    ``v0.73`` / ``v0.73.0``). Neither is a pair whose numbers are equal in value
+    and differ only in zero padding (``sprint-07`` / ``sprint-7``,
+    :func:`_digit_runs`): that is one identifier written two ways, which the
+    fold does not unify, so it stays a suggestion.
 
     Args:
         requested: The tag the caller filtered on.
@@ -183,6 +196,7 @@ def is_near_duplicate(requested: str, candidate: str) -> bool:
         _DIGIT_RUN.search(a)
         and _DIGIT_RUN.search(b)
         and _digit_skeleton(requested) == _digit_skeleton(candidate)
+        and _digit_runs(requested) != _digit_runs(candidate)
     ):
         return False
     if len(a) >= _MIN_AFFIX_LEN and len(b) >= _MIN_AFFIX_LEN:

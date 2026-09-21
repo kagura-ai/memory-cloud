@@ -156,6 +156,7 @@ class TestNumberedSeriesAreNotNearDuplicates:
             ("gpt-4o", "gpt-5o"),
             # Full-width digits fold to half-width before the comparison.
             ("ｖ０．７３．０", "v0.69.0"),
+            ("sprint¹²", "sprint³⁴"),  # superscripts are not \d until NFKC folds them
             # Separator and case drift does not hide the series.
             ("Session_2026_09_21", "session-2026-05-20"),
         ],
@@ -179,6 +180,28 @@ class TestNumberedSeriesAreNotNearDuplicates:
     @pytest.mark.parametrize(
         ("a", "b"),
         [
+            # Same VALUE, different zero padding: the folds differ, but it is one
+            # identifier written two ways — the drift the lint exists for — so
+            # the series rule steps aside and the typo rule still relates them.
+            ("sprint-07", "sprint-7"),
+            ("2026-9-5", "2026-09-05"),
+            ("issue:#0179", "issue:#179"),
+            ("ｓｐｒｉｎｔ－０７", "sprint-7"),
+        ],
+    )
+    def test_the_same_number_padded_differently_is_left_to_the_other_rules(self, a, b):
+        assert is_near_duplicate(a, b)
+        assert is_near_duplicate(b, a)
+
+    def test_padding_is_compared_per_number_not_per_tag(self):
+        """One padded field does not excuse a different value in another field."""
+        assert not is_near_duplicate("2026-09-05", "2026-9-06")
+        # Only LEADING zeros are padding: 1.10 is not 1.1.
+        assert not is_near_duplicate("release-1.10", "release-1.1")
+
+    @pytest.mark.parametrize(
+        ("a", "b"),
+        [
             # Letters differ as well as (or instead of) digits: a real typo or
             # abbreviation, so the prefix and edit-distance rules still decide.
             ("isue:#1599", "issue:#1599"),
@@ -198,6 +221,7 @@ class TestNumberedSeriesAreNotNearDuplicates:
             # these are left to the prefix and edit-distance rules unchanged.
             ("v0.73", "v0.73.0", True),  # prefix: plausibly the same release
             ("oauth2", "oauth-2.0", True),  # prefix: the same thing, two ways
+            ("session-2026-09", "session-2026-09-21", True),  # prefix: month vs day tag
             ("v0.7", "v0.73.0", False),  # folds to 'v07' — too short for either
         ],
     )

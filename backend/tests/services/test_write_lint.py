@@ -202,6 +202,15 @@ class TestTagRules:
         assert hint.subject == "isue:#1599"
         assert "'issue:#1599'" in hint.hint
 
+    @pytest.mark.asyncio
+    async def test_the_same_number_padded_differently_is_still_flagged(self):
+        """``sprint-7`` for a stored ``sprint-07`` is drift, not the next sprint."""
+        hints = await _lint(tags=["sprint-7"], vocabulary={"sprint-07": 5, "sprint-06": 9})
+        hint = next(h for h in hints if h.code == "tag_near_duplicate")
+        assert hint.subject == "sprint-7"
+        assert "'sprint-07'" in hint.hint
+        assert "sprint-06" not in hint.hint
+
 
 class TestItCanNeverBreakAWrite:
     @pytest.mark.asyncio
