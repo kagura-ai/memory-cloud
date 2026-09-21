@@ -93,7 +93,7 @@ Query technique:
 - A question often matches better as a hypothetical answer (HyDE): for "how to fix auth errors?" search `"Auth errors are caused by expired JWT tokens. Use the refresh token to re-authenticate..."`. Typically 3-10% better, up to 25%.
 - Expand with related terms and combine searches when you need coverage; on few or no results shorten the query, drop filters, or switch `search_mode`.
 - Read `confidence.level` first: `none` / `low` means the topic is probably not stored here — prefer an external source over forcing an answer. `high` / `moderate` means read the summaries and judge by content (`use_rerank=true` separates a near-miss from an exact match). With `degraded: true` the semantic half was unavailable, so an empty result means "search impaired" — retry later.
-- A result carrying `supersede_candidate` likely replaces that older memory: accept with `create_edge(source_id=<result>, target_id=<candidate>, edge_type="supersedes")`, or reject a deliberate pair with `update_memory(memory_id=<result>, dismiss_supersede_candidate=true)`.
+- A result carrying `supersede_candidate` likely replaces that older memory: accept with `create_edge(source_id=<result>, target_id=<candidate>, edge_type="supersedes", context_id=...)`, or reject a deliberate pair with `update_memory(memory_id=<result>, dismiss_supersede_candidate=true, context_id=...)`.
 
 Show result summaries with `memory_id`, type, importance, and tags when the user needs to choose what to inspect.
 

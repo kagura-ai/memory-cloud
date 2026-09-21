@@ -92,7 +92,7 @@ The tool descriptions your client lists are deliberately short. This is the dept
 - Best summary length is 100-250 characters. Split long material (over ~2,000 characters) into one memory per topic — "OAuth2 login implementation", "JWT token validation logic" — never "part 1/3"; link the pieces with shared tags.
 - Call `list_tags` first and reuse stored spellings; add category tags (`category:auth`) and, for Japanese, script variants (`["鯖", "サバ", "さば"]`).
 - Importance: critical 0.9-1.0, useful 0.6-0.8, reference 0.3-0.5.
-- Replacing a fact: `remember(..., supersedes=<old_memory_id>)` instead of a near-duplicate. If a later `recall` / `reference` shows a `supersede_candidate`, accept it with `create_edge(edge_type="supersedes")` or reject it with `update_memory(dismiss_supersede_candidate=true)`.
+- Replacing a fact: `remember(..., supersedes=<old_memory_id>)` instead of a near-duplicate. If a later `recall` / `reference` shows a `supersede_candidate`, accept it with `create_edge(source_id=<result>, target_id=<candidate>, edge_type="supersedes", context_id=...)` or reject it with `update_memory(memory_id=<result>, dismiss_supersede_candidate=true, context_id=...)`.
 - A `lint` key in the response means the write will recall badly (short / long / narrative summary, no tags, near-duplicate tag) — fix it with `update_memory`. The memory is already saved either way: `scope="working"` describes the consolidation lifecycle, not whether the write landed.
 - Never store secrets, credentials or PII. Coordinates go in `details.location` only.
 
