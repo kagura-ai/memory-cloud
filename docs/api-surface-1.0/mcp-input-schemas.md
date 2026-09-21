@@ -204,7 +204,7 @@ List the accessible contexts as a slim name→id directory, most recently used f
   - `name_contains` — string, maxLength 100 (case-insensitive substring match on name / display name; trimmed; blank = no filter)
   - `include_summary` — boolean (default false; adds `summary` truncated to 300 characters + `summary_truncated: true` on cut items)
   - `include_details` — boolean (default false; adds the full `summary` + `embedding_model`; wins over `include_summary`) ⚠ same name as get_context_info's `include_details`, where it toggles the stats breakdown — here it toggles per-item free text
-- Non-boolean flags and an over-long / non-string `name_contains` return a structured `validation_error`.
+- Non-boolean flags and an over-long / non-string `name_contains` return a structured `validation_error`. An explicit `null` for any parameter is treated as omitted.
 
 ### list_tags
 

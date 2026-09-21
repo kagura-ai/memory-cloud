@@ -649,6 +649,10 @@ def _validate_list_contexts_args(args: dict[str, Any]) -> list[TextContent] | No
     coerced string forms ("true") from the declared schema type, so anything
     still non-boolean is a caller mistake — and a silently truthy
     ``include_details="no"`` would return the expensive shape.
+
+    An explicit ``None`` (JSON ``null``) is an omitted argument, not a mistake:
+    some clients serialise every unset optional that way, and this tool is the
+    first call of every skill.
     """
     for flag in _LIST_CONTEXTS_FLAGS:
         value = args.get(flag)
