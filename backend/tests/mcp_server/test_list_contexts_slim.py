@@ -150,13 +150,49 @@ async def test_default_skips_the_search_config_query():
 
 
 @pytest.mark.asyncio
-async def test_include_stats_still_adds_memory_count():
-    harness = _Harness([_context("a")])
+@pytest.mark.parametrize(
+    ("extra", "expected_keys"),
+    [
+        ({}, SLIM_KEYS | {"memory_count"}),
+        (
+            {"include_summary": True},
+            SLIM_KEYS | {"summary", "summary_truncated", "memory_count"},
+        ),
+        ({"include_details": True}, DETAIL_KEYS | {"memory_count"}),
+        (
+            {"include_summary": True, "include_details": True},
+            DETAIL_KEYS | {"memory_count"},
+        ),
+    ],
+)
+async def test_include_stats_adds_memory_count_to_every_item_shape(extra, expected_keys):
+    """``include_stats`` is orthogonal to the shape flags: ``memory_count`` rides
+    on the slim, preview and detailed items alike."""
+    harness = _Harness([_context("a", summary="s" * 301)])
 
-    payload = await _payload(harness, {"include_stats": True})
+    payload = await _payload(harness, {"include_stats": True, **extra})
 
-    assert set(payload["contexts"][0]) == SLIM_KEYS | {"memory_count"}
-    assert payload["contexts"][0]["memory_count"] == 7
+    item = payload["contexts"][0]
+    assert set(item) == expected_keys
+    assert item["memory_count"] == 7
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("flag", ["include_stats", "include_summary", "include_details"])
+async def test_explicit_null_flag_means_omitted(flag):
+    """Clients that serialise unset optionals as JSON ``null`` keep working: a
+    null flag is the default (slim) shape, not a ``validation_error`` — the same
+    rule ``name_contains=null`` follows, and what ``include_stats=null`` did
+    before #1600."""
+    harness = _Harness([_context("a", summary="s" * 2000)])
+
+    # Through the dispatcher's coercion, which must leave ``null`` alone.
+    payload = await _payload(harness, coerce_mcp_arguments("list_contexts", {flag: None}))
+
+    assert payload["status"] == "success"
+    assert set(payload["contexts"][0]) == SLIM_KEYS
+    assert harness.config_queries == []
+    harness.service.get_context_stats.assert_not_awaited()
 
 
 # ============================================================================
@@ -193,6 +229,7 @@ async def test_include_summary_truncates_at_300_characters_and_flags_it():
             _context("exact", summary="b" * 300, age_days=1),
             _context("short", summary="short summary", age_days=2),
             _context("none", summary=None, age_days=3),
+            _context("over", summary="c" * 301, age_days=4),
         ]
     )
 
@@ -203,12 +240,31 @@ async def test_include_summary_truncates_at_300_characters_and_flags_it():
     assert by_name["long"]["summary_truncated"] is True
     assert set(by_name["long"]) == SLIM_KEYS | {"summary", "summary_truncated"}
 
+    # The boundary is 300, not 301: one character over is cut and flagged.
+    assert by_name["over"]["summary"] == "c" * 300 + "…"
+    assert by_name["over"]["summary_truncated"] is True
+    assert set(by_name["over"]) == SLIM_KEYS | {"summary", "summary_truncated"}
+
     # Only items that were actually cut carry the flag.
     assert by_name["exact"]["summary"] == "b" * 300
     assert by_name["short"]["summary"] == "short summary"
     assert by_name["none"]["summary"] is None
     for name in ("exact", "short", "none"):
         assert set(by_name[name]) == SLIM_KEYS | {"summary"}
+
+
+@pytest.mark.asyncio
+async def test_include_summary_cuts_on_code_points_not_bytes():
+    """The 300th character is an astral emoji (4 UTF-8 bytes, a UTF-16 surrogate
+    pair): a byte- or UTF-16-based cut would drop it or leave half of it."""
+    harness = _Harness([_context("astral", summary="a" * 299 + "\U0001f600" + "b" * 50)])
+
+    text = await harness.call({"include_summary": True})
+    item = json.loads(text)["contexts"][0]
+
+    assert item["summary"] == "a" * 299 + "\U0001f600" + "…"
+    assert item["summary_truncated"] is True
+    item["summary"].encode("utf-8")  # no lone surrogate survives the round trip
 
 
 @pytest.mark.asyncio
