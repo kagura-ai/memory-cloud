@@ -143,7 +143,12 @@ def test_names_are_percent_decoded_and_trimmed(query):
 
 
 def test_names_are_case_sensitive():
-    assert _names(b"tools=Recall,recall") == ["recall"]
+    # ``Recall`` must not fold into ``recall``: a lower-casing parser would
+    # list both tools here, and would serve the second query instead of
+    # rejecting it.
+    assert _names(b"tools=Recall,remember") == ["remember"]
+    with pytest.raises(ToolProfileError):
+        select_tool_definitions(b"tools=Recall")
 
 
 def test_first_value_wins_when_a_parameter_repeats():
@@ -246,6 +251,16 @@ def test_only_the_first_names_of_an_over_long_allowlist_are_read():
 
 def test_max_tool_names_is_one_hundred():
     assert MAX_TOOL_NAMES == 100
+
+
+def test_a_query_with_thousands_of_parameters_is_still_served():
+    """``parse_qsl`` has no field limit unless ``max_num_fields`` is passed, so
+    a long query is parsed, not turned into an unhandled ``ValueError``."""
+    padding = "&".join(f"p{i}=1" for i in range(5000))
+    assert _names(f"{padding}&tools=recall") == ["recall"]
+    assert _names(f"{padding}&profile=core") == list(CORE_TOOLS)
+    with pytest.raises(ToolProfileError):
+        select_tool_definitions(f"{padding}&profile=minimal")
 
 
 def test_undecodable_query_bytes_do_not_raise():
