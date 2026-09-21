@@ -130,3 +130,78 @@ class TestIsNearDuplicate:
     def test_empty_fold_never_matches(self):
         assert not is_near_duplicate("---", "python")
         assert not is_near_duplicate("---", "===")
+
+
+class TestNumberedSeriesAreNotNearDuplicates:
+    """#1608: tags that differ only in their numbers are distinct identifiers.
+
+    ``issue:#1599`` is not a misspelling of ``issue:#179``. Workspaces that tag
+    by issue, PR, version or date otherwise get a hint on almost every write,
+    which is how an agent learns to ignore the lint.
+    """
+
+    @pytest.mark.parametrize(
+        ("a", "b"),
+        [
+            # The four pairs from the issue.
+            ("issue:#1599", "issue:#179"),
+            ("v0.73.0", "v0.69.0"),
+            ("session-2026-09-21", "session-2026-05-20"),
+            ("pr:#1607", "pr:#601"),
+            # One series member being a prefix of another is still a series.
+            ("issue:#15", "issue:#1599"),
+            # Bare dates, and names that carry a version.
+            ("2026-09", "2026-08"),
+            ("python3", "python2"),
+            ("gpt-4o", "gpt-5o"),
+            # Full-width digits fold to half-width before the comparison.
+            ("ｖ０．７３．０", "v0.69.0"),
+            # Separator and case drift does not hide the series.
+            ("Session_2026_09_21", "session-2026-05-20"),
+        ],
+    )
+    def test_same_series_different_numbers_is_not_suggested(self, a, b):
+        assert not is_near_duplicate(a, b)
+        assert not is_near_duplicate(b, a)
+
+    @pytest.mark.parametrize(
+        ("a", "b"),
+        [
+            # Same number written two ways: equal after folding, still related.
+            ("ｖ１．２", "v1.2"),
+            ("Issue:#1599", "issue:#1599"),
+            ("session-2026-09-21", "session_2026_09_21"),
+        ],
+    )
+    def test_the_same_number_spelled_differently_is_still_suggested(self, a, b):
+        assert is_near_duplicate(a, b)
+
+    @pytest.mark.parametrize(
+        ("a", "b"),
+        [
+            # Letters differ as well as (or instead of) digits: a real typo or
+            # abbreviation, so the prefix and edit-distance rules still decide.
+            ("isue:#1599", "issue:#1599"),
+            ("oauth", "oauth2"),
+            ("gpt-4o", "gpt-4"),
+            ("kuberentes", "kubernetes"),
+        ],
+    )
+    def test_a_difference_in_letters_still_goes_through_the_other_rules(self, a, b):
+        assert is_near_duplicate(a, b)
+        assert is_near_duplicate(b, a)
+
+    @pytest.mark.parametrize(
+        ("a", "b", "expected"),
+        [
+            # A different NUMBER of numeric fields is not the same series, so
+            # these are left to the prefix and edit-distance rules unchanged.
+            ("v0.73", "v0.73.0", True),  # prefix: plausibly the same release
+            ("oauth2", "oauth-2.0", True),  # prefix: the same thing, two ways
+            ("v0.7", "v0.73.0", False),  # folds to 'v07' — too short for either
+        ],
+    )
+    def test_a_different_field_count_is_left_to_the_other_rules(self, a, b, expected):
+        """The mask runs before separators are dropped, so '0.73.0' stays 3 fields."""
+        assert is_near_duplicate(a, b) is expected
+        assert is_near_duplicate(b, a) is expected

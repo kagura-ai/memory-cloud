@@ -35,6 +35,10 @@ _MIN_AFFIX_LEN = 4
 _MAX_EDIT_DISTANCE = 2
 _MIN_EDIT_LEN = 5
 
+# A maximal run of digits, masked to one placeholder to compare two tags as
+# members of a numbered series (#1608).
+_DIGIT_RUN = re.compile(r"\d+")
+
 
 def normalize_tag(tag: str) -> str:
     """Fold a tag to its mechanical-variant-insensitive form.
@@ -126,6 +130,18 @@ def _edit_distance_within(a: str, b: str, limit: int) -> bool:
     return previous[-1] <= limit
 
 
+def _digit_skeleton(tag: str) -> str:
+    """Fold a tag with every run of digits masked to a single placeholder.
+
+    The mask runs BEFORE :func:`normalize_tag` drops separators, so the number
+    of numeric fields survives: ``v0.73.0`` is ``v000`` and ``v0.7`` is ``v00``.
+    Masking the folded form instead would merge ``0.73.0`` into one run and call
+    those two the same series. NFKC comes first so full-width and superscript
+    digits are masked like ASCII ones.
+    """
+    return normalize_tag(_DIGIT_RUN.sub("0", unicodedata.normalize("NFKC", tag)))
+
+
 def is_near_duplicate(requested: str, candidate: str) -> bool:
     """Whether ``candidate`` is worth SUGGESTING for a ``requested`` tag.
 
@@ -140,6 +156,17 @@ def is_near_duplicate(requested: str, candidate: str) -> bool:
       threshold reaches;
     * within 2 edits, both at least 5 chars — catches typos.
 
+    Never fires for two members of the same NUMBERED SERIES (#1608): folded
+    forms that differ while their digit skeletons (:func:`_digit_skeleton`) are
+    equal, i.e. the tags differ only in their numbers. ``issue:#1599`` is not a
+    misspelling of ``issue:#179``, nor ``v0.73.0`` of ``v0.69.0``, nor one
+    ``session-<date>`` of another — yet all sit within 2 edits or share a
+    prefix, so workspaces that tag by issue, version or date would get a hint
+    on almost every write. A pair whose letters or number of numeric fields
+    differ is not a series and goes through the rules above unchanged
+    (``isue:#1599`` / ``issue:#1599``, ``oauth`` / ``oauth2``, ``v0.73`` /
+    ``v0.73.0``).
+
     Args:
         requested: The tag the caller filtered on.
         candidate: A tag that exists in the context's vocabulary.
@@ -150,6 +177,14 @@ def is_near_duplicate(requested: str, candidate: str) -> bool:
     a, b = normalize_tag(requested), normalize_tag(candidate)
     if not a or not b or a == b:
         return bool(a) and a == b
+    # Equal skeletons need a digit on both sides, so the search is only a fast
+    # path that keeps the extra fold off the (far more common) unnumbered pairs.
+    if (
+        _DIGIT_RUN.search(a)
+        and _DIGIT_RUN.search(b)
+        and _digit_skeleton(requested) == _digit_skeleton(candidate)
+    ):
+        return False
     if len(a) >= _MIN_AFFIX_LEN and len(b) >= _MIN_AFFIX_LEN:
         # Prefix only. A shared SUFFIX is far weaker evidence of abbreviation and
         # relates plainly unrelated tags (test/latest, prod/reprod, auth/oauth),
