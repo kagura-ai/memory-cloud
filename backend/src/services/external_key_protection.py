@@ -1,0 +1,195 @@
+"""When a stored external API key may not be deleted or disabled (#1613).
+
+``PROTECTED_KEYS`` (#149) used to be the whole rule: ``OPENAI_API_KEY`` was
+undeletable and OpenAI keys could not be disabled, because embeddings always
+ran on that key. That stopped being true with ``self_hosted`` embeddings, the
+managed LLM lane (#1569) and ``ENABLE_BYOK=false`` /
+``RESOLVE_STORED_BYOK_KEYS=false`` (#1167, #1569): on such a deployment the
+stored key is never read, yet its owner could not remove their own credential.
+
+``PROTECTED_KEYS`` is now only the *candidate* set. A candidate is protected
+while something would break without it — all of:
+
+1. BYOK provisioning is on (``ENABLE_BYOK``) and the services still resolve
+   stored keys (``RESOLVE_STORED_BYOK_KEYS``). With either off the owner can
+   no longer replace the key, so withdrawing it must stay possible.
+2. OpenAI embeddings are in use: the deployment's ``EMBEDDING_PROVIDER`` is
+   ``openai``, or the workspace routes at least one live context to an OpenAI
+   embedding model — including a legacy context without a
+   ``ContextSearchConfig`` row, whose next recall writes one with an OpenAI
+   model.
+
+One predicate serves ``DELETE /external-keys/{key_name}``, the disable guard
+and the ``is_protected`` flag of ``GET /external-keys``, so the UI's "Required"
+badge and the refusals cannot drift apart.
+
+The disable guard alone also passes the row's ``provider``: ``EmbeddingService``
+picks the stored key by ``provider == "openai"``, not by name, so an OpenAI key
+stored under another name (raw API only) stays undisableable while the rule
+holds, as it was before #1613. Deleting such a key was never refused (#149 is
+name-based) and still is not, so it reports ``is_protected=false``.
+"""
+
+from __future__ import annotations
+
+from dataclasses import dataclass
+from uuid import UUID
+
+from sqlalchemy import ColumnDefault, func, inspect, select
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from config.constants import EMBEDDING_MODEL_REGISTRY
+from config.plan_tiers import PROTECTED_KEYS
+from config.settings import Settings
+from models.auth import Context
+from models.config import ContextSearchConfig
+
+# The embedding provider whose credential the candidate keys hold.
+_OPENAI = "openai"
+
+
+@dataclass(frozen=True)
+class KeyProtection:
+    """Whether a key is protected, and why — the text a refusal shows."""
+
+    protected: bool
+    reason: str | None = None
+
+
+_UNPROTECTED = KeyProtection(protected=False)
+
+
+def embedding_provider_of(model: str, settings: Settings) -> str:
+    """The provider that serves ``model``.
+
+    Same rule as ``EmbeddingService.__init__``: the registry decides, and a
+    model it does not know falls back to the deployment's
+    ``EMBEDDING_PROVIDER``.
+    """
+    entry = EMBEDDING_MODEL_REGISTRY.get(model)
+    return entry[1] if entry else settings.embedding_provider
+
+
+def is_protection_candidate(
+    key_name: str, settings: Settings, *, provider: str | None = None
+) -> bool:
+    """The half of the rule that needs no database.
+
+    False means :func:`is_key_protected` is False whatever the workspace
+    routes to, so callers can skip the context query.
+    """
+    holds_the_credential = key_name in PROTECTED_KEYS or provider == _OPENAI
+    return holds_the_credential and settings.enable_byok and settings.resolve_stored_byok_keys
+
+
+def is_key_protected(
+    key_name: str,
+    settings: Settings,
+    *,
+    workspace_routes_to_openai_embeddings: bool,
+    provider: str | None = None,
+) -> bool:
+    """Whether ``key_name`` must not be deleted or disabled right now.
+
+    Args:
+        key_name: The stored key's name (``ExternalAPIKey.key_name``).
+        settings: The deployment settings.
+        workspace_routes_to_openai_embeddings: Whether the key's workspace has
+            a live context on an OpenAI embedding model
+            (:func:`count_openai_routed_contexts` ``> 0``).
+        provider: The stored key's provider — passed by the disable guard
+            only, which then also covers an ``openai`` key under another name
+            (see the module docstring). Delete and ``is_protected`` omit it.
+
+    Returns:
+        True only for a candidate (a ``PROTECTED_KEYS`` name or, for the
+        disable guard, an ``openai`` provider) on a deployment that still
+        resolves stored keys and has OpenAI embeddings in use.
+    """
+    if not is_protection_candidate(key_name, settings, provider=provider):
+        return False
+    return settings.embedding_provider == _OPENAI or workspace_routes_to_openai_embeddings
+
+
+def _models_of_a_context_without_config(settings: Settings) -> tuple[str, ...]:
+    """Every model a context without a ``ContextSearchConfig`` row may embed with.
+
+    Today it embeds with the deployment default (``settings.embedding_model``,
+    ``resolve_context_routing``'s fallback to the caller's default
+    ``EmbeddingService``). Its next recall materialises the row
+    (``ContextSearchConfigRepository.create_or_get``) without naming a model,
+    so the column default is written and the context routes to that model from
+    then on. Read from the column so the two cannot drift.
+    """
+    column_default = inspect(ContextSearchConfig).columns["embedding_model"].default
+    if isinstance(column_default, ColumnDefault) and column_default.is_scalar:
+        return settings.embedding_model, column_default.arg
+    return (settings.embedding_model,)
+
+
+async def count_openai_routed_contexts(
+    db: AsyncSession,
+    workspace_id: UUID,
+    settings: Settings,
+) -> int:
+    """How many live contexts of the workspace embed with an OpenAI model.
+
+    Soft-deleted contexts do not count. A context without a
+    ``ContextSearchConfig`` row counts when *either* model it may embed with is
+    an OpenAI model (:func:`_models_of_a_context_without_config`): a verdict
+    that a recall could flip from deletable to needed would let the owner
+    delete a key the workspace is about to read, so this over-protects instead.
+    """
+    result = await db.execute(
+        select(ContextSearchConfig.embedding_model, func.count(Context.id))
+        .select_from(Context)
+        .outerjoin(ContextSearchConfig, ContextSearchConfig.context_id == Context.id)
+        .where(Context.workspace_id == workspace_id, Context.deleted_at.is_(None))
+        .group_by(ContextSearchConfig.embedding_model)
+    )
+    without_config = _models_of_a_context_without_config(settings)
+    return sum(
+        count
+        for model, count in result.all()
+        if any(
+            embedding_provider_of(candidate, settings) == _OPENAI
+            for candidate in ((model,) if model else without_config)
+        )
+    )
+
+
+async def evaluate_key_protection(
+    db: AsyncSession,
+    *,
+    key_name: str,
+    workspace_id: UUID,
+    settings: Settings,
+    provider: str | None = None,
+) -> KeyProtection:
+    """Resolve :func:`is_key_protected` for one stored key, with its reason.
+
+    Queries the workspace's contexts only when the answer depends on them: not
+    for a non-candidate key, not with BYOK off, and not when the deployment
+    itself embeds with OpenAI. ``provider`` is the disable guard's, as in
+    :func:`is_key_protected`.
+    """
+    if not is_protection_candidate(key_name, settings, provider=provider):
+        return _UNPROTECTED
+    deployment_uses_openai = settings.embedding_provider == _OPENAI
+    count = (
+        0
+        if deployment_uses_openai
+        else await count_openai_routed_contexts(db, workspace_id, settings)
+    )
+    if not is_key_protected(
+        key_name,
+        settings,
+        workspace_routes_to_openai_embeddings=count > 0,
+        provider=provider,
+    ):
+        return _UNPROTECTED
+    if deployment_uses_openai:
+        in_use_by = "this deployment (EMBEDDING_PROVIDER=openai)"
+    else:
+        in_use_by = f"{count} context{'' if count == 1 else 's'} of this workspace"
+    return KeyProtection(protected=True, reason=f"OpenAI embeddings are in use by {in_use_by}.")

@@ -18,6 +18,7 @@ from auth.dependencies import (
     require_byok_enabled,
     require_workspace_owner,
 )
+from config.settings import get_settings
 from db.base import get_db
 from db.constraint_names import (
     EXTERNAL_API_KEYS_WORKSPACE_KEY_NAME_UNIQUE,
@@ -25,6 +26,7 @@ from db.constraint_names import (
     integrity_error_constraint_name,
 )
 from models.auth import ExternalAPIKey
+from services.external_key_protection import KeyProtection, evaluate_key_protection
 from utils import db_transaction, get_user_email, mask_secret
 from utils.datetime import to_utc_iso
 from utils.logger import get_logger
@@ -42,6 +44,10 @@ logger = get_logger(__name__)
 # off, a customer would have no way to disable or delete a key that is still
 # being billed. Keeping list/toggle/delete reachable preserves that control
 # without re-enabling provisioning.
+# Issue #1613: reachable was not enough — DELETE still refused OPENAI_API_KEY
+# unconditionally (PROTECTED_KEYS, #149). Protection is now conditional (see
+# services/external_key_protection.py) and never applies with BYOK off, so
+# that control covers every stored key.
 #
 # Dependencies are declared PER-ROUTE (not router-wide) so ordering is explicit:
 # on the write paths ``require_byok_enabled`` is listed BEFORE
@@ -92,6 +98,10 @@ class ExternalKeyResponse(BaseModel):
     masked_value: str
     user_id: str
     enabled: bool  # Issue #105
+    # Issue #1613: true while the key can be neither deleted nor disabled
+    # (services/external_key_protection.py). The web UI renders its "Required"
+    # badge from this instead of hard-coding the provider.
+    is_protected: bool
     created_at: str
     updated_at: str
 
@@ -127,7 +137,6 @@ def decrypt_value(encrypted: str) -> str:
 # ============================================================================
 
 RERANKER_PROVIDERS = {"cohere", "voyage"}
-EMBEDDING_PROVIDERS = {"openai"}
 
 
 async def validate_reranker_exclusivity(
@@ -150,9 +159,12 @@ async def validate_reranker_exclusivity(
         details.
 
     Rules:
-    - OpenAI cannot be disabled (embeddings required)
     - Only ONE of Cohere/Voyage enabled per workspace
     - Disabling rerankers is always allowed
+
+    Issue #1613: the "OpenAI cannot be disabled" rule that used to live here is
+    now ``refuse_disabling_protected_key`` — it depends on the key and the
+    deployment, not on the provider alone.
 
     Args:
         db: Database session
@@ -162,18 +174,8 @@ async def validate_reranker_exclusivity(
         exclude_key_id: Key ID to exclude from conflict check (for updates)
 
     Raises:
-        HTTPException: 400 if trying to disable OpenAI, 409 if reranker conflict
+        HTTPException: 409 if reranker conflict
     """
-    # Prevent disabling OpenAI (embeddings required)
-    if provider in EMBEDDING_PROVIDERS and not enabled:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail={
-                "error": "cannot_disable_embeddings",
-                "message": "OpenAI embedding keys cannot be disabled. They are required for core functionality.",
-            },
-        )
-
     # Only validate reranker providers (Cohere/Voyage)
     if not enabled or provider not in RERANKER_PROVIDERS:
         return
@@ -205,6 +207,55 @@ async def validate_reranker_exclusivity(
                 f"Only ONE reranker (Cohere OR Voyage) can be active at a time.",
                 "conflicting_provider": conflicting_key.provider,
                 "conflicting_key_name": conflicting_key.key_name,
+            },
+        )
+
+
+# ============================================================================
+# Conditional protection (Issue #1613)
+# ============================================================================
+
+
+async def _key_protection(
+    db: AsyncSession,
+    key_name: str,
+    workspace_id: UUID,
+    *,
+    disabling_provider: str | None = None,
+) -> KeyProtection:
+    """``evaluate_key_protection`` for this deployment's settings.
+
+    ``disabling_provider`` is the key's provider when the request stores it
+    disabled, else None. EmbeddingService picks the stored key by provider, so
+    the disable guard keeps covering an OpenAI key under another name, as it
+    did before #1613. A disable that passes the guard is unprotected under the
+    name-based rule too, so the same verdict serves ``is_protected``.
+    """
+    return await evaluate_key_protection(
+        db,
+        key_name=key_name,
+        workspace_id=workspace_id,
+        settings=get_settings(),
+        provider=disabling_provider,
+    )
+
+
+def refuse_disabling_protected_key(key_name: str, protection: KeyProtection) -> None:
+    """Refuse to store ``key_name`` as disabled while it is protected.
+
+    Issue #1613: replaces the unconditional "OpenAI cannot be disabled" guard.
+    Status code and detail shape are unchanged; the message now names what is
+    actually using the key.
+
+    Raises:
+        HTTPException: 400 ``cannot_disable_embeddings`` when protected.
+    """
+    if protection.protected:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail={
+                "error": "cannot_disable_embeddings",
+                "message": f"Cannot disable {key_name}: {protection.reason}",
             },
         )
 
@@ -251,6 +302,11 @@ async def list_external_keys(
             except Exception:
                 masked = "***ERROR***"
 
+            # Issue #1613: at most one row per workspace is a protection
+            # candidate (key_name is unique per workspace), so this costs at
+            # most one extra query per list — none on most deployments.
+            protection = await _key_protection(db, key.key_name, current_workspace_id)
+
             key_responses.append(
                 ExternalKeyResponse(
                     id=key.id,
@@ -259,6 +315,7 @@ async def list_external_keys(
                     masked_value=masked,
                     user_id=key.user_id,
                     enabled=key.enabled,  # Issue #105
+                    is_protected=protection.protected,
                     created_at=to_utc_iso(key.created_at) or "",
                     updated_at=to_utc_iso(key.updated_at) or "",
                 )
@@ -342,6 +399,16 @@ async def create_external_key(
                     ),
                 )
 
+        # Issue #1613: a protected key cannot be stored disabled either.
+        protection = await _key_protection(
+            db,
+            request.key_name,
+            current_workspace_id,
+            disabling_provider=None if request.enabled else request.provider,
+        )
+        if not request.enabled:
+            refuse_disabling_protected_key(request.key_name, protection)
+
         # Validate reranker exclusivity per workspace (Issue #105 / #385).
         await validate_reranker_exclusivity(
             db=db,
@@ -410,6 +477,7 @@ async def create_external_key(
             masked_value=mask_secret(request.value),
             user_id=new_key.user_id,
             enabled=new_key.enabled,  # Issue #105
+            is_protected=protection.protected,
             created_at=to_utc_iso(new_key.created_at) or "",
             updated_at=to_utc_iso(new_key.updated_at) or "",
         )
@@ -454,6 +522,10 @@ async def update_external_key(
                 detail=f"External key '{key_name}' not found",
             )
 
+        # Issue #1613: read-only, reported back as ``is_protected``. Resolved
+        # before the write so a failure here cannot follow a committed update.
+        protection = await _key_protection(db, key.key_name, current_workspace_id)
+
         # Encrypt and update
         key.encrypted_value = encrypt_value(request.value)
         key.updated_by = user_email
@@ -470,6 +542,7 @@ async def update_external_key(
             masked_value=mask_secret(request.value),
             user_id=key.user_id,
             enabled=key.enabled,  # Issue #105
+            is_protected=protection.protected,
             created_at=to_utc_iso(key.created_at) or "",
             updated_at=to_utc_iso(key.updated_at) or "",
         )
@@ -488,7 +561,9 @@ async def toggle_external_key(
     Issue #246: current_context_id removed - use None
 
     Rules:
-    - OpenAI keys cannot be disabled
+    - A protected key cannot be disabled (Issue #1613: OPENAI_API_KEY, or any
+      key whose provider is openai, while OpenAI embeddings are in use — see
+      services/external_key_protection.py)
     - Only ONE reranker (Cohere/Voyage) can be enabled at a time
 
     Issue #381: Owner-only (router-level dependency).
@@ -548,6 +623,16 @@ async def toggle_external_key(
                     ),
                 )
 
+        # Issue #1613: disabling is refused only while the key is protected.
+        protection = await _key_protection(
+            db,
+            key.key_name,
+            current_workspace_id,
+            disabling_provider=None if request.enabled else key.provider,
+        )
+        if not request.enabled:
+            refuse_disabling_protected_key(key.key_name, protection)
+
         # Validate reranker exclusivity per workspace (Issue #105 / #385).
         await validate_reranker_exclusivity(
             db=db,
@@ -595,6 +680,7 @@ async def toggle_external_key(
             masked_value=mask_secret(decrypt_value(key.encrypted_value)),
             user_id=key.user_id,
             enabled=key.enabled,
+            is_protected=protection.protected,
             created_at=to_utc_iso(key.created_at) or "",
             updated_at=to_utc_iso(key.updated_at) or "",
         )
@@ -611,7 +697,9 @@ async def delete_external_key(
     Issue #381: owner-only (router-level dependency).
     Issue #385: workspace-scoped lookup by (key_name, workspace_id); any owner
     can delete any key registered in the workspace.
-    Issue #149: protected keys (in PROTECTED_KEYS) are refused with 400.
+    Issue #149 / #1613: a protected key is refused with 400. Membership in
+    PROTECTED_KEYS alone no longer protects a key — see
+    services/external_key_protection.py.
     """
     user_id = user.get("user_id")
     current_workspace_id = user.get("current_workspace_id")
@@ -634,13 +722,14 @@ async def delete_external_key(
                 detail=f"External key '{key_name}' not found",
             )
 
-        # Issue #149: Prevent deletion of protected keys (required for system operations)
-        from config.plan_tiers import PROTECTED_KEYS
-
-        if key.key_name in PROTECTED_KEYS:
+        # Issue #149 / #1613: refuse only while something would break without
+        # the key. Never the case with BYOK off, so an owner can always
+        # withdraw a credential they can no longer replace.
+        protection = await _key_protection(db, key.key_name, current_workspace_id)
+        if protection.protected:
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
-                detail=f"Cannot delete {key.key_name}. This key is required for embedding generation and memory operations.",
+                detail=f"Cannot delete {key.key_name}: {protection.reason}",
             )
 
         await db.delete(key)

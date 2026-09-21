@@ -266,7 +266,7 @@ The three toggles that shape a hosted deployment:
 | Variable | Default | When `false` |
 |----------|---------|--------------|
 | `ENABLE_COST_DISPLAY` | `true` | Hides money from workspace users. The workspace cost dashboard disappears (`/workspace/cost` nav entry hidden, the page shows a "not enabled" notice, `GET /workspaces/{id}/cost-aggregation` answers 404). The Memory Analysis "Run cost" KPI, history "Cost" column and pre-flight "Estimated cost" are not rendered, and the analysis payloads carry no cost: REST `cost_estimated_cents` / `cost_actual_cents` / `estimated_cost_cents` are `null` (shape kept), the MCP `get_analysis` / `list_analyses` / `get_active_analysis` / `analyze_context` dry-run dicts omit the keys. `GET /admin/cost-aggregation` and the `/admin/cost` page are **unaffected** — operators still see what the platform spends. |
-| `ENABLE_BYOK` (#1167) | `true` | Closes the external-keys console and the key-status probe; also hides the workspace cost dashboard. Both `ENABLE_BYOK` and `ENABLE_COST_DISPLAY` must be `true` for that dashboard to show. |
+| `ENABLE_BYOK` (#1167) | `true` | Closes external-key provisioning (create / update answer 404, the nav entry is hidden) and the key-status probe; also hides the workspace cost dashboard. Both `ENABLE_BYOK` and `ENABLE_COST_DISPLAY` must be `true` for that dashboard to show. Keys stored earlier stay listable and deletable by the workspace owner — including `OPENAI_API_KEY`, which is never "Required" with BYOK off (#1613). |
 | `ENABLE_PLAN_PAGE` (#1145) | `false` | Keeps the owner Plan page + nav entry hidden (no billing to hand off to on a self-hosted deployment). |
 
 A flat-price hosted deployment typically runs `ENABLE_COST_DISPLAY=false`
@@ -863,7 +863,14 @@ credential comes from is decided per feature:
   them. It does **not** stop the LLM / embedding / reranker services from
   *resolving* keys that were stored before the flip — the owner deletes those
   through the still-open management paths, or the operator sets
-  `RESOLVE_STORED_BYOK_KEYS=false` (below).
+  `RESOLVE_STORED_BYOK_KEYS=false` (below). Stored keys stay deletable either
+  way: `OPENAI_API_KEY` is only protected ("Required") while `ENABLE_BYOK` and
+  `RESOLVE_STORED_BYOK_KEYS` are both on *and* OpenAI embeddings are in use
+  (`EMBEDDING_PROVIDER=openai`, or a live context of the workspace on an OpenAI
+  embedding model) — see
+  [Protected keys](api-reference.md#protected-keys-is_protected-issue-1613).
+  With BYOK off the External Keys page has no nav entry; an owner reaches it
+  at `/workspace/integrations/external-keys`.
 - **Memory Analysis** was strict-BYOK: an enabled workspace OpenAI key had to
   exist, and the labelling calls refused the platform credential. Since
   #1569 the run resolves a *lane* instead (table below).
@@ -946,7 +953,9 @@ rather than slipping through on an ignored key. Logged once per process as
 `ENABLE_BYOK=false` (refused at boot otherwise: users must not be able to
 store keys the services ignore). Default `true` keeps the #1167 behaviour.
 With it set, Sleep's judge calls on the managed lane also pass
-`platform_only`; without it Sleep keeps BYOK-then-env.
+`platform_only`; without it Sleep keeps BYOK-then-env. The ignored rows are
+not deleted for you: each workspace owner can still list and delete their own
+stored keys (#1613).
 
 ## Redis Connection Pool (rate limits and daily quotas) — Issue #1556
 

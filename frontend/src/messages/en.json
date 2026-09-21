@@ -2268,7 +2268,7 @@
     "actions": "Actions",
     "activeReranker": "(Active Reranker)",
     "toggleEnabled": "Toggle enabled/disabled",
-    "openAICannotDisable": "OpenAI cannot be disabled",
+    "protectedHint": "In use for OpenAI embeddings — cannot be disabled or deleted",
     "required": "Required",
     "addExternalKey": "Add External API Key",
     "addNewKey": "Add a new API key for external services",

@@ -5,6 +5,9 @@
  * #1145): skeleton while flags load, "not available" notice when off, and the
  * key list only fetches when the flag resolves enabled (the API 404s when
  * BYOK is disabled).
+ *
+ * #1613: the "Required" badge follows the API's `is_protected`, not the
+ * provider — an OpenAI key nothing reads keeps its delete and disable controls.
  */
 
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
@@ -36,6 +39,11 @@ vi.mock("@/contexts/WorkspaceContext", () => ({
 let mockFeatures: Record<string, boolean> | null = { byok: true };
 vi.mock("@/hooks/useSystemFeatures", () => ({
   useSystemFeatures: () => mockFeatures,
+}));
+
+// The embedding-status probe is not under test; keep it off the network.
+vi.mock("@/lib/api/workspaces", () => ({
+  checkOpenAIKeyStatus: vi.fn().mockResolvedValue({}),
 }));
 
 const mockListKeys = vi.fn();
@@ -91,5 +99,77 @@ describe("ExternalKeysPage BYOK gate (#1167)", () => {
     render(<ExternalKeysPage />);
     expect(screen.queryByText("featureDisabled")).toBeNull();
     expect(screen.queryByText("provisioningDisabled")).toBeNull();
+  });
+});
+
+describe("ExternalKeysPage protection (#1613)", () => {
+  const storedKey = (overrides: Record<string, unknown> = {}) => ({
+    id: 1,
+    key_name: "OPENAI_API_KEY",
+    provider: "openai",
+    masked_value: "sk-...abcd",
+    enabled: true,
+    is_protected: false,
+    created_at: "2026-01-01T00:00:00Z",
+    updated_at: "2026-01-01T00:00:00Z",
+    updated_by: null,
+    ...overrides,
+  });
+
+  it("shows the Required badge and locks the controls only when is_protected", async () => {
+    mockListKeys.mockResolvedValue([storedKey({ is_protected: true })]);
+    render(<ExternalKeysPage />);
+
+    expect(await screen.findByText("required")).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "deleteApiKey" })).toBeNull();
+    expect(screen.getByRole("switch")).toBeDisabled();
+  });
+
+  it("offers delete and disable for an OpenAI key that is not protected", async () => {
+    mockListKeys.mockResolvedValue([storedKey()]);
+    render(<ExternalKeysPage />);
+
+    expect(
+      await screen.findByRole("button", { name: "deleteApiKey" }),
+    ).toBeInTheDocument();
+    expect(screen.queryByText("required")).toBeNull();
+    expect(screen.getByRole("switch")).not.toBeDisabled();
+  });
+
+  it("does not decide from the provider: a protected flag on any key is honoured", async () => {
+    mockListKeys.mockResolvedValue([
+      storedKey({
+        id: 2,
+        key_name: "COHERE_API_KEY",
+        provider: "cohere",
+        is_protected: true,
+      }),
+    ]);
+    render(<ExternalKeysPage />);
+
+    expect(await screen.findByText("required")).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "deleteApiKey" })).toBeNull();
+  });
+
+  it("keeps the delete control when byok is off (nothing is protected then)", async () => {
+    mockFeatures = { byok: false };
+    mockListKeys.mockResolvedValue([storedKey()]);
+    render(<ExternalKeysPage />);
+
+    expect(
+      await screen.findByRole("button", { name: "deleteApiKey" }),
+    ).toBeInTheDocument();
+    expect(screen.queryByText("required")).toBeNull();
+    expect(screen.getByText("provisioningDisabled")).toBeInTheDocument();
+  });
+
+  it("lets a protected key that is currently disabled be re-enabled", async () => {
+    mockListKeys.mockResolvedValue([
+      storedKey({ is_protected: true, enabled: false }),
+    ]);
+    render(<ExternalKeysPage />);
+
+    expect(await screen.findByText("required")).toBeInTheDocument();
+    expect(screen.getByRole("switch")).not.toBeDisabled();
   });
 });

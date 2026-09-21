@@ -717,6 +717,7 @@ Notes:
 - `masked_value: str` — required
 - `user_id: str` — required
 - `enabled: bool` — required
+- `is_protected: bool` — required (#1613, additive: `true` while the key can be neither deleted nor disabled — `OPENAI_API_KEY` while BYOK resolution is on and OpenAI embeddings are in use by the deployment or a live context of the workspace; always `false` with `ENABLE_BYOK=false`)
 - `created_at: str` — required
 - `updated_at: str` — required
 

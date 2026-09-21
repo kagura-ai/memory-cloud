@@ -22,12 +22,16 @@ the flag is off, the usual 401 for management and when the flag is on.
 
 from __future__ import annotations
 
+from datetime import UTC, datetime
+from unittest.mock import AsyncMock, MagicMock
 from uuid import uuid4
 
 import pytest
 from fastapi.testclient import TestClient
 
 from api.main import app
+from auth.dependencies import get_user_from_api_key_or_session, require_workspace_owner
+from db.base import get_db
 
 _WORKSPACE_ID = uuid4()
 
@@ -86,6 +90,85 @@ class TestExternalKeysGate:
         # the normal auth rejection — not 404.
         response = client.get("/api/v1/external-keys")
         assert response.status_code == 401
+
+
+class TestOwnerWithdrawsStoredKeyWhenDisabled:
+    """#1613: BYOK off must not strand a credential in the database.
+
+    The management routes were already reachable (above), but ``DELETE`` still
+    answered 400 for ``OPENAI_API_KEY`` — the one key an owner is most likely
+    to have stored. With provisioning off the key can be neither replaced nor
+    re-registered, so it is never protected: the owner lists it, sees
+    ``is_protected=false`` and deletes it, while create/update stay 404.
+    """
+
+    @pytest.fixture
+    def stored_key(self):
+        now = datetime.now(UTC)
+        key = MagicMock()
+        key.id = 1
+        key.key_name = "OPENAI_API_KEY"
+        key.provider = "openai"
+        key.encrypted_value = "not-decryptable"
+        key.user_id = "owner_1"
+        key.enabled = True
+        key.created_at = now
+        key.updated_at = now
+        return key
+
+    @pytest.fixture
+    def owner_client(self, byok_disabled, stored_key):
+        user = {
+            "user_id": "owner_1",
+            "email": "owner@test.invalid",
+            "role": "user",
+            "current_workspace_id": _WORKSPACE_ID,
+            "workspace_role": "owner",
+        }
+        result = MagicMock()
+        result.scalar_one_or_none.return_value = stored_key
+        result.scalars.return_value.all.return_value = [stored_key]
+        db = AsyncMock()
+        db.execute.return_value = result
+
+        async def _user():
+            return user
+
+        async def _owner():
+            return (user["user_id"], _WORKSPACE_ID)
+
+        async def _db():
+            yield db
+
+        app.dependency_overrides[get_user_from_api_key_or_session] = _user
+        app.dependency_overrides[require_workspace_owner] = _owner
+        app.dependency_overrides[get_db] = _db
+        client = TestClient(app, raise_server_exceptions=False)
+        client.db = db  # type: ignore[attr-defined]
+        yield client
+        app.dependency_overrides.clear()
+
+    def test_owner_lists_the_key_as_unprotected(self, owner_client):
+        response = owner_client.get("/api/v1/external-keys")
+        assert response.status_code == 200
+        (key,) = response.json()["keys"]
+        assert key["key_name"] == "OPENAI_API_KEY"
+        assert key["is_protected"] is False
+
+    def test_owner_deletes_the_openai_key(self, owner_client, stored_key):
+        response = owner_client.delete("/api/v1/external-keys/OPENAI_API_KEY")
+        assert response.status_code == 200, response.text
+        owner_client.db.delete.assert_awaited_once_with(stored_key)
+        owner_client.db.commit.assert_awaited()
+
+    def test_create_and_update_stay_closed_for_the_owner(self, owner_client):
+        created = owner_client.post(
+            "/api/v1/external-keys",
+            json={"key_name": "OPENAI_API_KEY", "provider": "openai", "value": "sk-x"},
+        )
+        updated = owner_client.put("/api/v1/external-keys/OPENAI_API_KEY", json={"value": "sk-y"})
+        assert (created.status_code, updated.status_code) == (404, 404)
+        owner_client.db.commit.assert_not_awaited()
 
 
 class TestOpenAIKeyStatusGate:
