@@ -1009,15 +1009,16 @@ A key object:
 
 - `ENABLE_BYOK=true` and `RESOLVE_STORED_BYOK_KEYS=true` (the defaults). With either off, no key is protected.
 - OpenAI embeddings are in use: the deployment runs `EMBEDDING_PROVIDER=openai`, **or** the workspace has at least one live (not deleted) context whose embedding model is an OpenAI model.
+  A legacy context that has no search-config row yet counts too: its next recall creates the row with the default OpenAI model, so the key would be needed right after it was deleted.
 
 So on a deployment whose embeddings do not use OpenAI, a stored `OPENAI_API_KEY` is an ordinary key: deletable, and it can be disabled.
 
 While a key is protected:
 
-- `DELETE` answers `400` with a string `detail`, e.g. `Cannot delete OPENAI_API_KEY: OpenAI embeddings are in use by 2 contexts of this workspace.`
-- `PATCH …/toggle` with `{"enabled": false}` (and `POST` with `"enabled": false`) answers `400` with `detail = {"error": "cannot_disable_embeddings", "message": "Cannot disable OPENAI_API_KEY: OpenAI embeddings are in use by this deployment (EMBEDDING_PROVIDER=openai)."}`.
+- `DELETE` answers `400`; the envelope's `message` is the reason, e.g. `{"error": "HTTP-400", "message": "Cannot delete OPENAI_API_KEY: OpenAI embeddings are in use by 2 contexts of this workspace.", "details": {}}`.
+- `PATCH …/toggle` with `{"enabled": false}` (and `POST` with `"enabled": false`) answers `400` with a generic `message` (`Request failed`) and the structured reason under `details.detail`: `{"error": "cannot_disable_embeddings", "message": "Cannot disable OPENAI_API_KEY: OpenAI embeddings are in use by this deployment (EMBEDDING_PROVIDER=openai)."}`. Branch on `details.detail.error`, not on the top-level `error` (`HTTP-400`).
 
-Status codes and detail shapes are the same as before #1613; only the messages changed, and the refusals no longer fire when nothing reads the key. Re-enabling a disabled key is never refused by this rule.
+Status codes and body shapes are the same as before #1613; only the messages changed, and the refusals no longer fire when nothing reads the key. Re-enabling a disabled key is never refused by this rule.
 
 ---
 
