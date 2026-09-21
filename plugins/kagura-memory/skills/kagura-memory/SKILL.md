@@ -34,7 +34,7 @@ If the MCP tools are not available:
 
 1. Run `codex mcp list` to check whether `kagura-memory` is configured.
 2. If missing, configure the HTTP MCP server in `~/.codex/config.toml` with `[mcp_servers.kagura-memory]`.
-3. Set `url` to your Memory Cloud endpoint: a self-hosted deployment uses `https://<your-domain>/mcp/w/<workspace-id>` (or `http://localhost:8080/mcp/w/<workspace-id>` for local development).
+3. Set `url` to your Memory Cloud endpoint: a self-hosted deployment uses `https://<your-domain>/mcp/w/<workspace-id>` (or `http://localhost:8080/mcp/w/<workspace-id>` for local development). That URL lists all tools (the default); end it with `?profile=core` to list the core tools only — a smaller tool list; everything else stays callable, it is just not listed.
 4. Pass auth via `bearer_token_env_var` or an `[mcp_servers.kagura-memory.http_headers]` table with `Authorization = "Bearer <api-key>"`.
 5. Restart Codex so the tools are loaded.
 

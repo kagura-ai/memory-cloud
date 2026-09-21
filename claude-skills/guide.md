@@ -45,6 +45,8 @@ Create or update `.mcp.json`:
 }
 ```
 
+That URL lists all tools (the default). For the core tools only — a smaller tool list; everything else stays callable, it is just not listed — use `{server_url}/mcp/w/{workspace_id}?profile=core` instead.
+
 If `.mcp.json` already exists with other servers, merge the kagura-memory entry.
 
 Add to `.gitignore` (contains API key):
