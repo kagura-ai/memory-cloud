@@ -3,7 +3,6 @@
 Extracted from tools.py for modularity (Issue #7).
 """
 
-import json
 import logging
 import time
 from typing import Any
@@ -16,6 +15,7 @@ from mcp_server.tools._helpers import (
     _context_response_fields,
     _ContextNotFoundError,
     _degraded_response_fields,
+    _dumps,
     _error_response,
     _format_validation_error,
     _lint_response_field,
@@ -107,7 +107,7 @@ async def handle_remember(
             return [
                 TextContent(
                     type="text",
-                    text=json.dumps(
+                    text=_dumps(
                         {
                             "status": "success",
                             "memory_id": str(result.memory_id),
@@ -240,7 +240,7 @@ async def handle_update_memory(
             return [
                 TextContent(
                     type="text",
-                    text=json.dumps(
+                    text=_dumps(
                         {
                             "status": "success",
                             "memory_id": str(result.memory_id),
@@ -371,7 +371,7 @@ async def handle_recall_upcoming(
             return [
                 TextContent(
                     type="text",
-                    text=json.dumps(
+                    text=_dumps(
                         {
                             "status": "success",
                             "results": results,
@@ -452,7 +452,7 @@ async def handle_recall_nearby(
             return [
                 TextContent(
                     type="text",
-                    text=json.dumps(
+                    text=_dumps(
                         {
                             "status": "success",
                             "results": results,
@@ -516,7 +516,7 @@ async def handle_load_pinned(
             return [
                 TextContent(
                     type="text",
-                    text=json.dumps(
+                    text=_dumps(
                         {
                             "status": "success",
                             "memories": [
@@ -785,7 +785,7 @@ async def handle_recall(
             return [
                 TextContent(
                     type="text",
-                    text=json.dumps(response_data),
+                    text=_dumps(response_data),
                 )
             ]
         except _ContextNotFoundError as e:
@@ -889,7 +889,7 @@ async def handle_forget(
             return [
                 TextContent(
                     type="text",
-                    text=json.dumps(
+                    text=_dumps(
                         {
                             "status": "success",
                             "deleted_count": result.deleted_count,
@@ -1002,7 +1002,7 @@ async def handle_reference(
             return [
                 TextContent(
                     type="text",
-                    text=json.dumps({"status": "success", "memory": reference_data}),
+                    text=_dumps({"status": "success", "memory": reference_data}),
                 )
             ]
         except _ContextNotFoundError as e:

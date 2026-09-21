@@ -89,6 +89,33 @@ async def execute_with_timeout(
 # ============================================================================
 
 
+def _dumps(obj: Any) -> str:
+    """Serialize a tool result for ``TextContent.text`` (Issue #1599).
+
+    The text is read by the calling MODEL and paid for in its context window,
+    so it carries no avoidable characters: non-ASCII is emitted as-is (the
+    stdlib default turns every Japanese character into a 6-character
+    ``\\uXXXX`` escape) and separators are compact. Every handler in this
+    package serializes through here; ``test_response_serialization.py`` fails
+    on a raw ``json.dumps`` call.
+
+    The transport layer (``transport.py`` / ``transport_stateless.py``)
+    deliberately keeps the ASCII default. Its JSON-RPC body is decoded by the
+    client's JSON parser before the model sees anything, so escaping there
+    costs the model nothing — and it means a lone surrogate inside a tool text
+    (which this function passes through, and which is not encodable on its
+    own) is re-escaped on the wire and can never make ``.encode("utf-8")``
+    raise.
+
+    Args:
+        obj: JSON-serializable tool result.
+
+    Returns:
+        Compact UTF-8 JSON text.
+    """
+    return json.dumps(obj, ensure_ascii=False, separators=(",", ":"))
+
+
 def _success_response(**data: Any) -> list[TextContent]:
     """Create a standardized success response.
 
@@ -101,7 +128,7 @@ def _success_response(**data: Any) -> list[TextContent]:
     return [
         TextContent(
             type="text",
-            text=json.dumps({"status": "success", **data}),
+            text=_dumps({"status": "success", **data}),
         )
     ]
 
@@ -142,7 +169,7 @@ def _error_response(error: str, message: str, **extra: Any) -> list[TextContent]
     return [
         TextContent(
             type="text",
-            text=json.dumps({"status": "error", "error": error, "message": message, **extra}),
+            text=_dumps({"status": "error", "error": error, "message": message, **extra}),
         )
     ]
 

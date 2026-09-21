@@ -4,7 +4,6 @@ Handles get_context_info, create_context, update_context, delete_context, list_c
 Extracted from tools.py for modularity (Issue #7).
 """
 
-import json
 import logging
 import time
 from typing import Any
@@ -16,6 +15,7 @@ from mcp_server.tools._constants import KAGURA_MEMORY_INSTRUCTIONS
 from mcp_server.tools._helpers import (
     _context_response_fields,
     _ContextNotFoundError,
+    _dumps,
     _error_response,
     _get_workspace_member_role,
     _log_tool_usage,
@@ -168,7 +168,7 @@ async def handle_get_context_info(
             return [
                 TextContent(
                     type="text",
-                    text=json.dumps(
+                    text=_dumps(
                         {
                             "status": "success",
                             "context": context_data,
@@ -210,7 +210,7 @@ async def handle_get_context_info(
             return [
                 TextContent(
                     type="text",
-                    text=json.dumps(
+                    text=_dumps(
                         {
                             "status": "error",
                             "error": str(e),
@@ -354,7 +354,7 @@ async def handle_create_context(
             return [
                 TextContent(
                     type="text",
-                    text=json.dumps(
+                    text=_dumps(
                         {
                             "status": "success",
                             "message": f"Context '{args['name']}' created successfully.",
@@ -609,7 +609,7 @@ async def handle_update_context(
             return [
                 TextContent(
                     type="text",
-                    text=json.dumps(
+                    text=_dumps(
                         {
                             "status": "success",
                             "message": f"Context '{context.name}' updated successfully.",
@@ -742,7 +742,7 @@ async def handle_list_contexts(
             return [
                 TextContent(
                     type="text",
-                    text=json.dumps(
+                    text=_dumps(
                         {
                             "status": "success",
                             "contexts": context_list,
@@ -757,7 +757,7 @@ async def handle_list_contexts(
             return [
                 TextContent(
                     type="text",
-                    text=json.dumps({"status": "error", "error": str(e)}),
+                    text=_dumps({"status": "error", "error": str(e)}),
                 )
             ]
 
@@ -806,7 +806,7 @@ async def handle_delete_context(
             return [
                 TextContent(
                     type="text",
-                    text=json.dumps(
+                    text=_dumps(
                         {
                             "status": "success",
                             "message": f"Context '{context.name}' has been soft-deleted.",
@@ -919,7 +919,7 @@ async def handle_merge_contexts(
             return [
                 TextContent(
                     type="text",
-                    text=json.dumps(
+                    text=_dumps(
                         {
                             "status": "success",
                             "message": f"Merged {result['merged']} memories from source to target.",
@@ -1054,7 +1054,7 @@ async def handle_list_tags(
             return [
                 TextContent(
                     type="text",
-                    text=json.dumps(
+                    text=_dumps(
                         {
                             "status": "success",
                             "context_id": str(context_id),
