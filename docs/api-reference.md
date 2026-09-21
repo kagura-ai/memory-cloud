@@ -1286,6 +1286,8 @@ List forward-looking Time Memories (`type="time"`, `delivery_mode="on_trigger"`)
 }
 ```
 
+Each item is `{memory_id, summary, type, trigger}`, where `trigger` is the memory's `details.trigger`. Pass `"include_details": true` to get the full `details` object per item instead (it contains the trigger); for a single memory, `reference(memory_id)` is the cheaper way to read it in full.
+
 #### 10. recall_nearby
 
 List memories near a geographic point (`details.location`), nearest first with `distance_m`. A deterministic spatial query over stored coordinates — the WHERE-axis twin of `recall_upcoming`, not semantic search. Store a location with `remember(details={"location": {"lat": 35.68, "lon": 139.76, "label": "optional"}})` — `lat`/`lon` must be JSON numbers (validated server-side), and any memory type can carry one.

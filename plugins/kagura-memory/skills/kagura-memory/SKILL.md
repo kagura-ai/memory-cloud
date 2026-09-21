@@ -42,9 +42,9 @@ Never print API keys or bearer tokens. When showing config, redact secrets.
 
 ## Resolve Context
 
-Start by calling `list_contexts(include_stats=true)` when the context is unknown.
+Start by calling `list_contexts()` when the context is unknown. It returns a slim name→id directory (`id`, `name`, `is_private`, `is_locked`, `last_used_at` — no summaries), most recently used first. If you already know the context name, narrow it with `list_contexts(name_contains="...")`; if you already resolved the id earlier in this session, reuse it instead of listing again.
 
-Pick the context whose `name`, `summary`, or recent usage matches the current repository or task. If several contexts are plausible and the choice affects writes, ask the user.
+Pick the context whose `name` or recent usage matches the current repository or task. When names alone don't settle it, add `include_summary=true` to a narrowed list for 300-character previews. If several contexts are plausible and the choice affects writes, ask the user.
 
 After choosing a context, call `get_context_info(context_id=..., include_details=true)` once per session or after switching contexts. Follow the context-specific `usage_guide` over generic defaults.
 

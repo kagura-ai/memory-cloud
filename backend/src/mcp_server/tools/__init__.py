@@ -10,7 +10,6 @@ Handler re-exports (used by test_mcp_server_e2e.py):
 - handle_remember, handle_recall, handle_forget, handle_reference, handle_explore
 """
 
-import json
 import logging
 import time
 from typing import Any
@@ -22,6 +21,7 @@ from pydantic import ValidationError
 from mcp_server.tools._arg_coercion import coerce_mcp_arguments
 from mcp_server.tools._definitions import get_tool_definitions  # noqa: F401
 from mcp_server.tools._helpers import (
+    _dumps,
     _error_response,
     _format_validation_error,
     _resolve_context_id,
@@ -441,7 +441,7 @@ async def execute_tool_call(
         return [
             TextContent(
                 type="text",
-                text=json.dumps({"status": "error", "error": str(e)}),
+                text=_dumps({"status": "error", "error": str(e)}),
             )
         ]
     except Exception as e:
@@ -449,7 +449,7 @@ async def execute_tool_call(
         return [
             TextContent(
                 type="text",
-                text=json.dumps({"status": "error", "error": str(e)}),
+                text=_dumps({"status": "error", "error": str(e)}),
             )
         ]
 

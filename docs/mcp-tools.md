@@ -27,12 +27,14 @@ Sizes are the compact JSON of the `tools` array, measured at v0.72.0. Per-client
 | Tool | Description | Required Role |
 |------|------------|---------------|
 | `remember` | Store a new memory (summary + content + type; optional `delivery_mode`) | Member+ |
-| `recall` | Search memories with Hybrid Search (supports `trust_tier` filter) | Viewer+ |
+| `recall` | Search memories with Hybrid Search (supports `trust_tier` filter). Results are Layers 1-2; `related_tags` is `[{tag, count}]` | Viewer+ |
 | `recall_nearby` | Deterministic WHERE-axis query — memories with `details.location` within `radius_m` of a point, nearest first | Viewer+ |
 | `reference` | Get full 3-layer details of a memory | Viewer+ |
 | `update_memory` | Update an existing memory in-place or upsert by external ID | Member+ |
 | `forget` | Soft-delete a memory (retention bounded by the deployment's cleanup window, default 30 days) | Member+ |
 | `explore` | Discover related memories via Neural Memory graph | Viewer+ |
+
+> **Response format.** Every tool returns one JSON text block, serialized as compact UTF-8 — non-ASCII text (e.g. Japanese) arrives as-is, never as `\uXXXX` escapes, because the calling model pays for every character. Fields that are empty on most results are omitted rather than sent as `null` / `[]`: a `recall` result carries `context_summary`, `superseded_by`, `contradicts` and `supersede_candidate` only when they have a value, and `score` is rounded to 4 decimals. Treat an absent key as "none". The authoritative per-tool shape is the `Returns:` line of each tool description (`tools/list`).
 
 ## Agent Substrate (7)
 
@@ -41,7 +43,7 @@ The primitives an autonomous agent loop needs beyond a knowledge store — see [
 | Tool | Description | Required Role |
 |------|------------|---------------|
 | `load_pinned` | Deterministically load always-load memories (`delivery_mode="always"`) — Goal / Guardrail / policy | Viewer+ |
-| `recall_upcoming` | List upcoming Time Memories (`type="time"`, `delivery_mode="on_trigger"`) | Viewer+ |
+| `recall_upcoming` | List upcoming Time Memories (`type="time"`, `delivery_mode="on_trigger"`). Items are `{memory_id, summary, type, trigger}`; `include_details=true` returns the full `details` instead of `trigger` | Viewer+ |
 | `set_state` | Upsert agent scratch state (key→value, optional TTL; excluded from recall) | Editor+ |
 | `get_state` | Read one state key, or list all live state for a context | Viewer+ |
 | `record_measurement` | Append one numeric observation to a metric's series (HOW-MUCH lane; excluded from recall, untouched by Sleep) | Editor+ |
@@ -81,12 +83,25 @@ The v0.49.0 control plane builds on existing workspace RBAC: agents are registry
 | Tool | Description | Required Role |
 |------|------------|---------------|
 | `get_context_info` | Get context metadata and guidelines | Viewer+ |
-| `list_contexts` | List available contexts in workspace | Viewer+ |
+| `list_contexts` | Slim name→id directory of the contexts you can access, most recently used first (details are opt-in — see below) | Viewer+ |
 | `create_context` | Create a new context | Owner/Admin |
 | `update_context` | Update context settings (summary, usage guide, resource_id, is_public) | Editor+ |
 | `delete_context` | Delete a context and all its memories | Owner/Admin |
 | `merge_contexts` | Merge memories from source context into target context | Owner/Admin |
 | `update_search_config` | Tune hybrid search weights, reranker settings, and query-intent routing (`routing_mode`) per context | Editor+ |
+
+### `list_contexts` response shape
+
+`list_contexts()` exists to turn a context **name** into an **id**, so by default each item is just `{id, name, is_private, is_locked, last_used_at}` — no `summary`, no `embedding_model`. A workspace with dozens of contexts stays a few thousand characters instead of overflowing an MCP client's tool-result limit. For one context's full summary, usage guide and search config call `get_context_info(context_id)`.
+
+| Parameter | Effect |
+|-----------|--------|
+| `name_contains` | Case-insensitive substring match on the context name or display name (trimmed, ≤100 characters; blank = no filter). No match is a success with an empty list. |
+| `include_stats` | Adds `memory_count` per item. |
+| `include_summary` | Adds `summary` truncated to 300 characters; items that were cut also carry `summary_truncated: true` (a null summary stays null). |
+| `include_details` | Adds the full `summary` (up to 2,000 characters each) and `embedding_model` — the previous default item shape ([#1600](https://github.com/kagura-ai/memory-cloud/issues/1600)). Wins over `include_summary`; combine it with `name_contains`. |
+
+Envelope: `{status, contexts, count, total, limit, can_create}`. `count` is the number of contexts in the workspace (quota usage against `limit`; it can exceed what you are allowed to see and is not affected by `name_contains`), `total` is the number of contexts in this response. A non-boolean flag or an over-long `name_contains` returns a `validation_error`; an explicit `null` for any parameter is treated as omitted.
 
 ## Tags (1)
 

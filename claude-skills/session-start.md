@@ -33,7 +33,9 @@ command -v gh >/dev/null 2>&1 && gh issue list --state open --limit 10 --json nu
 list_contexts()
 ```
 
-If multiple contexts exist, pick the one most relevant to the current project. If unclear, ask the user.
+`list_contexts()` returns a slim name→id directory (`id`, `name`, `is_private`, `is_locked`, `last_used_at` — no summaries), most recently used first. If you already know the context name, narrow it with `list_contexts(name_contains="...")`; if you already resolved the id earlier in this session, reuse it instead of listing again.
+
+If multiple contexts exist, pick the one whose name best matches the current project. When names alone don't settle it, call `get_context_info(context_id=...)` for the candidate only — do not load details for every context. If still unclear, ask the user.
 
 Then recall recent memories (last 7 days). The 7-day window balances recency with coverage — long enough to span a typical work week including weekends, short enough to avoid stale context drowning out current work.
 

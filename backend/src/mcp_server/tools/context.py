@@ -4,7 +4,6 @@ Handles get_context_info, create_context, update_context, delete_context, list_c
 Extracted from tools.py for modularity (Issue #7).
 """
 
-import json
 import logging
 import time
 from typing import Any
@@ -16,6 +15,7 @@ from mcp_server.tools._constants import KAGURA_MEMORY_INSTRUCTIONS
 from mcp_server.tools._helpers import (
     _context_response_fields,
     _ContextNotFoundError,
+    _dumps,
     _error_response,
     _get_workspace_member_role,
     _log_tool_usage,
@@ -168,7 +168,7 @@ async def handle_get_context_info(
             return [
                 TextContent(
                     type="text",
-                    text=json.dumps(
+                    text=_dumps(
                         {
                             "status": "success",
                             "context": context_data,
@@ -210,7 +210,7 @@ async def handle_get_context_info(
             return [
                 TextContent(
                     type="text",
-                    text=json.dumps(
+                    text=_dumps(
                         {
                             "status": "error",
                             "error": str(e),
@@ -354,7 +354,7 @@ async def handle_create_context(
             return [
                 TextContent(
                     type="text",
-                    text=json.dumps(
+                    text=_dumps(
                         {
                             "status": "success",
                             "message": f"Context '{args['name']}' created successfully.",
@@ -609,7 +609,7 @@ async def handle_update_context(
             return [
                 TextContent(
                     type="text",
-                    text=json.dumps(
+                    text=_dumps(
                         {
                             "status": "success",
                             "message": f"Context '{context.name}' updated successfully.",
@@ -634,11 +634,75 @@ async def handle_update_context(
     return _error_response("internal_error", "Database session unavailable")
 
 
+# list_contexts (#1600): a name→id directory by default. Free text is opt-in and
+# previews are capped, so a many-context workspace stays inside MCP clients'
+# tool-result limits.
+_LIST_CONTEXTS_FLAGS = ("include_stats", "include_summary", "include_details")
+_LIST_CONTEXTS_NAME_FILTER_MAX_LENGTH = 100
+_LIST_CONTEXTS_SUMMARY_PREVIEW_LENGTH = 300
+
+
+def _validate_list_contexts_args(args: dict[str, Any]) -> list[TextContent] | None:
+    """Validate list_contexts arguments (#1600).
+
+    ``type(x) is bool`` rather than truthiness: the dispatcher has already
+    coerced string forms ("true") from the declared schema type, so anything
+    still non-boolean is a caller mistake — and a silently truthy
+    ``include_details="no"`` would return the expensive shape.
+
+    An explicit ``None`` (JSON ``null``) is an omitted argument, not a mistake:
+    some clients serialise every unset optional that way, and this tool is the
+    first call of every skill.
+    """
+    for flag in _LIST_CONTEXTS_FLAGS:
+        value = args.get(flag)
+        if value is not None and type(value) is not bool:
+            return _error_response("validation_error", f"'{flag}' must be a boolean.")
+
+    name_contains = args.get("name_contains")
+    if name_contains is None:
+        return None
+    if type(name_contains) is not str:
+        return _error_response("validation_error", "'name_contains' must be a string.")
+    if len(name_contains.strip()) > _LIST_CONTEXTS_NAME_FILTER_MAX_LENGTH:
+        return _error_response(
+            "validation_error",
+            f"'name_contains' must be at most {_LIST_CONTEXTS_NAME_FILTER_MAX_LENGTH} characters.",
+        )
+    return None
+
+
+def _summary_preview(summary: str | None) -> dict[str, Any]:
+    """Build the ``include_summary`` fields: a capped summary preview (#1600).
+
+    Slices by code point, so a multi-byte character is never split.
+    ``summary_truncated`` is only present on items that were actually cut.
+    """
+    if summary is None or len(summary) <= _LIST_CONTEXTS_SUMMARY_PREVIEW_LENGTH:
+        return {"summary": summary}
+    preview = summary[:_LIST_CONTEXTS_SUMMARY_PREVIEW_LENGTH].rstrip()
+    return {"summary": preview + "…", "summary_truncated": True}
+
+
 async def handle_list_contexts(
     args: dict[str, Any], user_id: str, workspace_id: UUID | None
 ) -> list[TextContent]:
-    """List all contexts accessible to the user."""
+    """List the contexts accessible to the user as a slim name→id directory.
+
+    #1600: items carry ``id`` / ``name`` / ``is_private`` / ``is_locked`` /
+    ``last_used_at`` only. ``include_summary`` adds a capped preview and
+    ``include_details`` the full ``summary`` + ``embedding_model`` (it wins over
+    ``include_summary``); ``name_contains`` narrows the list. One context's full
+    details live in ``get_context_info``.
+    """
+    arg_error = _validate_list_contexts_args(args)
+    if arg_error:
+        return arg_error
+
     include_stats = args.get("include_stats", False)
+    include_details = args.get("include_details", False)
+    include_summary = args.get("include_summary", False)
+    name_filter = (args.get("name_contains") or "").strip().casefold()
 
     from db.base import get_db
 
@@ -669,35 +733,57 @@ async def handle_list_contexts(
                 reverse=True,
             )
 
-            # Batch-fetch embedding configs to avoid N+1
-            from sqlalchemy import select as _select
+            # #1600: narrow AFTER the permission-scoped listing above — the filter
+            # only ever removes rows the caller could already see.
+            visible_count = len(contexts_sorted)
+            if name_filter:
+                contexts_sorted = [
+                    ctx
+                    for ctx in contexts_sorted
+                    if name_filter in ctx.name.casefold()
+                    or name_filter in (ctx.display_name or "").casefold()
+                ]
 
-            from config.settings import get_settings as _get_settings2
-            from models.config import ContextSearchConfig
+            # Batch-fetch embedding configs to avoid N+1 — only the
+            # include_details shape reports embedding_model (#1600).
+            config_by_ctx: dict[Any, Any] = {}
+            default_embedding_model = None
+            if include_details and contexts_sorted:
+                from sqlalchemy import select as _select
 
-            _settings2 = _get_settings2()
+                from config.settings import get_settings as _get_settings2
+                from models.config import ContextSearchConfig
 
-            context_ids = [ctx.id for ctx in contexts_sorted]
-            config_results = await db.execute(
-                _select(ContextSearchConfig).where(ContextSearchConfig.context_id.in_(context_ids))
-            )
-            config_by_ctx = {c.context_id: c for c in config_results.scalars().all()}
+                default_embedding_model = _get_settings2().embedding_model
+
+                context_ids = [ctx.id for ctx in contexts_sorted]
+                config_results = await db.execute(
+                    _select(ContextSearchConfig).where(
+                        ContextSearchConfig.context_id.in_(context_ids)
+                    )
+                )
+                config_by_ctx = {c.context_id: c for c in config_results.scalars().all()}
 
             context_list = []
             for ctx in contexts_sorted:
-                cfg = config_by_ctx.get(ctx.id)
                 ctx_data: dict[str, Any] = {
                     "id": str(ctx.id),
                     "name": ctx.name,
-                    "summary": ctx.summary,
                     "is_private": ctx.is_private,
                     "is_locked": ctx.is_locked,
                     # #1257 made this live data; Z-suffix per backend.md (raw
                     # .isoformat() rendered '+00:00', unlike every other
                     # timestamp on the MCP surface, e.g. tags[].last_used_at).
                     "last_used_at": to_utc_iso(ctx.last_used_at),
-                    "embedding_model": cfg.embedding_model if cfg else _settings2.embedding_model,
                 }
+                if include_details:
+                    cfg = config_by_ctx.get(ctx.id)
+                    ctx_data["summary"] = ctx.summary
+                    ctx_data["embedding_model"] = (
+                        cfg.embedding_model if cfg else default_embedding_model
+                    )
+                elif include_summary:
+                    ctx_data.update(_summary_preview(ctx.summary))
                 if include_stats:
                     try:
                         stats = await context_service.get_context_stats(user_id, ctx.id)
@@ -706,8 +792,10 @@ async def handle_list_contexts(
                         ctx_data["memory_count"] = 0
                 context_list.append(ctx_data)
 
-            # Get context quota (workspace-wide count, not just user-visible)
-            quota_info: dict[str, Any] = {"count": len(context_list)}
+            # Get context quota (workspace-wide count, not just user-visible).
+            # ``count`` is quota usage, so it never tracks name_contains; the
+            # number of items actually returned is ``total`` (#1600).
+            quota_info: dict[str, Any] = {"count": visible_count, "total": len(context_list)}
             if workspace_id:
                 try:
                     from sqlalchemy import func as sql_func
@@ -742,7 +830,7 @@ async def handle_list_contexts(
             return [
                 TextContent(
                     type="text",
-                    text=json.dumps(
+                    text=_dumps(
                         {
                             "status": "success",
                             "contexts": context_list,
@@ -757,7 +845,7 @@ async def handle_list_contexts(
             return [
                 TextContent(
                     type="text",
-                    text=json.dumps({"status": "error", "error": str(e)}),
+                    text=_dumps({"status": "error", "error": str(e)}),
                 )
             ]
 
@@ -806,7 +894,7 @@ async def handle_delete_context(
             return [
                 TextContent(
                     type="text",
-                    text=json.dumps(
+                    text=_dumps(
                         {
                             "status": "success",
                             "message": f"Context '{context.name}' has been soft-deleted.",
@@ -919,7 +1007,7 @@ async def handle_merge_contexts(
             return [
                 TextContent(
                     type="text",
-                    text=json.dumps(
+                    text=_dumps(
                         {
                             "status": "success",
                             "message": f"Merged {result['merged']} memories from source to target.",
@@ -1054,7 +1142,7 @@ async def handle_list_tags(
             return [
                 TextContent(
                     type="text",
-                    text=json.dumps(
+                    text=_dumps(
                         {
                             "status": "success",
                             "context_id": str(context_id),
