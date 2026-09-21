@@ -16,7 +16,7 @@ import json
 import pytest
 import structlog
 
-from mcp_server.tools import get_tool_definitions
+from mcp_server.tools import _profiles, get_tool_definitions
 from mcp_server.tools._profiles import (
     CORE_TOOLS,
     MAX_TOOL_NAMES,
@@ -37,6 +37,20 @@ REGISTRY = [tool["name"] for tool in get_tool_definitions()]
 
 def _names(query: bytes | str | None) -> list[str]:
     return [tool["name"] for tool in select_tool_definitions(query)]
+
+
+@pytest.fixture
+def logs(monkeypatch):
+    """The selector's log events, whatever ran earlier in the process.
+
+    ``capture_logs`` reaches the current structlog configuration only. The
+    module's logger caches itself on first use, and ``setup_logger()`` runs
+    again when ``api.main`` is imported, so a logger cached in between would
+    keep writing past the capture. A fresh proxy per test cannot be stale.
+    """
+    monkeypatch.setattr(_profiles, "logger", structlog.get_logger(_profiles.__name__))
+    with structlog.testing.capture_logs() as captured:
+        yield captured
 
 
 # ---------------------------------------------------------------- the core set
@@ -163,11 +177,9 @@ def test_other_query_parameters_are_left_alone():
 # --------------------------------------------------------------- unknown names
 
 
-def test_unknown_names_are_ignored_and_logged_once():
-    with structlog.testing.capture_logs() as logs:
-        names = _names(b"tools=recall,no_such_tool,also_missing")
+def test_unknown_names_are_ignored_and_logged_once(logs):
+    assert _names(b"tools=recall,no_such_tool,also_missing") == ["recall"]
 
-    assert names == ["recall"]
     events = [e for e in logs if e["event"] == "mcp_tool_profile_names_ignored"]
     assert len(events) == 1
     assert events[0]["log_level"] == "info"
@@ -175,28 +187,29 @@ def test_unknown_names_are_ignored_and_logged_once():
     assert events[0]["unknown_count"] == 2
 
 
-def test_known_names_alone_log_nothing():
-    with structlog.testing.capture_logs() as logs:
-        _names(b"tools=recall,remember")
-        _names(b"profile=core")
-        _names(None)
+def test_known_names_alone_log_nothing(logs):
+    _names(b"tools=recall,remember")
+    _names(b"profile=core")
+    _names(None)
     assert logs == []
 
+    # Not vacuous: the same capture does see an event when there is one.
+    _names(b"tools=recall,no_such_tool")
+    assert [e["event"] for e in logs] == ["mcp_tool_profile_names_ignored"]
 
-def test_logged_unknown_names_are_capped():
+
+def test_logged_unknown_names_are_capped(logs):
     query = "tools=recall," + ",".join(f"bogus_{i}" for i in range(60))
-    with structlog.testing.capture_logs() as logs:
-        assert _names(query) == ["recall"]
+    assert _names(query) == ["recall"]
 
     (event,) = [e for e in logs if e["event"] == "mcp_tool_profile_names_ignored"]
     assert len(event["unknown"]) == 20
     assert event["unknown_count"] == 60
 
 
-def test_a_long_unknown_name_is_truncated_where_it_is_shown():
-    with structlog.testing.capture_logs() as logs:
-        with pytest.raises(ToolProfileError) as excinfo:
-            select_tool_definitions("tools=" + "x" * 5000)
+def test_a_long_unknown_name_is_truncated_where_it_is_shown(logs):
+    with pytest.raises(ToolProfileError) as excinfo:
+        select_tool_definitions("tools=" + "x" * 5000)
 
     assert len(excinfo.value.message) < 400
     (event,) = [e for e in logs if e["event"] == "mcp_tool_profile_names_ignored"]
@@ -238,11 +251,10 @@ def test_unknown_profile_echo_is_length_capped():
 # ------------------------------------------------------------- over-long input
 
 
-def test_only_the_first_names_of_an_over_long_allowlist_are_read():
+def test_only_the_first_names_of_an_over_long_allowlist_are_read(logs):
     padding = ",".join(f"bogus_{i}" for i in range(MAX_TOOL_NAMES))
-    with structlog.testing.capture_logs() as logs:
-        # ``recall`` sits past the cap, so it is never read.
-        assert _names(f"tools=remember,{padding},recall") == ["remember"]
+    # ``recall`` sits past the cap, so it is never read.
+    assert _names(f"tools=remember,{padding},recall") == ["remember"]
 
     (event,) = [e for e in logs if e["event"] == "mcp_tool_profile_names_ignored"]
     assert event["unknown_count"] == MAX_TOOL_NAMES - 1
