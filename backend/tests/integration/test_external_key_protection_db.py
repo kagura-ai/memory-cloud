@@ -593,5 +593,6 @@ async def test_http_owner_gate_is_the_real_one(db_session, workspace, owner_http
 
     app.dependency_overrides[get_user_from_api_key_or_session] = _member
 
-    assert (await owner_http.delete(_KEY_URL)).status_code == 403
+    refused = await owner_http.delete(_KEY_URL)
+    assert refused.status_code == 403, refused.text
     assert "OPENAI_API_KEY" in await _key_names(db_session, workspace["workspace_id"])
