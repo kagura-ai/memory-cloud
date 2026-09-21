@@ -953,30 +953,30 @@ IMPORTANT: Specify context_id to get info for a specific context. Use list_conte
         {
             "name": "list_contexts",
             "readOnly": True,
-            "description": """List all available contexts in the current workspace.
+            "description": """List the contexts you can access as a slim name→id directory, most recently used first. All other tools require context_id: call this first to turn a context name into its id.
 
-Returns contexts sorted by recent usage (most recently used first).
+The default carries no summaries, so it stays small on large workspaces. Narrow with name_contains; add include_summary=true to choose between a few contexts. For one context's full summary, usage guide and search config call get_context_info(context_id).
 
-Use this to discover context IDs for other tool calls:
-- User asks what contexts are available
-- You need to show context options
-- User asks about their memory workspaces
-
-All other tools require context_id. Use this tool first to discover available context IDs.
-
-Response includes:
-- contexts: Array of {id, name, summary, is_private, last_used_at}
-- count: Total number of contexts
-- limit: Maximum contexts allowed by plan
-- can_create: Whether new contexts can be created
-
-Returns: {status, contexts: [{id, name, summary, is_private, is_locked, last_used_at, embedding_model, memory_count}], count, limit, can_create}.""",
+Returns: {status, contexts: [{id, name, is_private, is_locked, last_used_at}], count, total, limit, can_create}. count = contexts in the workspace (quota usage, unaffected by name_contains); total = contexts in this response (0 on no match is still a success); limit = maximum allowed by plan.""",
             "inputSchema": {
                 "type": "object",
                 "properties": {
                     "include_stats": {
                         "type": "boolean",
                         "description": "Include memory count per context (default: false). Set true if user asks about usage.",
+                    },
+                    "name_contains": {
+                        "type": "string",
+                        "maxLength": 100,
+                        "description": "Only return contexts whose name or display name contains this text (case-insensitive; blank = no filter).",
+                    },
+                    "include_summary": {
+                        "type": "boolean",
+                        "description": "Add summary, truncated to 300 characters (summary_truncated=true when cut). Default: false.",
+                    },
+                    "include_details": {
+                        "type": "boolean",
+                        "description": "Add the FULL summary (up to 2,000 characters each) and embedding_model. Large: combine with name_contains. Wins over include_summary. Default: false.",
                     },
                 },
             },
