@@ -6,6 +6,10 @@ export interface ExternalAPIKey {
   provider: string;
   masked_value: string;
   enabled: boolean; // Issue #105
+  // Issue #1613: the server's verdict that the key can be neither deleted nor
+  // disabled right now. Optional so a backend older than the UI reads as
+  // "not protected" — the server still refuses, and the dialog shows why.
+  is_protected?: boolean;
   created_at: string;
   updated_at: string;
   updated_by: string | null;

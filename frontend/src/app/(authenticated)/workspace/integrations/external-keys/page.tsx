@@ -7,6 +7,7 @@
  * Issue #45 - External Keys UI for per-user configuration
  * Issue #115 - Added OpenAI required alert
  * Issue #223 - i18n support
+ * Issue #1613 - "Required" follows the API's is_protected, not the provider
  * Fix: Added permission check and redirect on workspace change
  */
 
@@ -587,13 +588,16 @@ export default function ExternalKeysPage() {
                     </TableCell>
                     <TableCell className="text-right">
                       <div className="flex justify-end gap-2">
+                        {/* #1613: the server decides what is protected (an
+                            OpenAI key is only while OpenAI embeddings are in
+                            use). Re-enabling a protected key stays possible. */}
                         <Switch
                           checked={key.enabled}
                           onCheckedChange={() => handleToggle(key)}
-                          disabled={key.provider === "openai"}
+                          disabled={key.is_protected === true && key.enabled}
                           title={
-                            key.provider === "openai"
-                              ? t("openAICannotDisable")
+                            key.is_protected === true
+                              ? t("protectedHint")
                               : t("toggleEnabled")
                           }
                         />
@@ -608,18 +612,22 @@ export default function ExternalKeysPage() {
                             <Edit className="h-4 w-4" />
                           </Button>
                         )}
-                        {key.key_name !== "OPENAI_API_KEY" ? (
+                        {key.is_protected === true ? (
+                          <div
+                            className="text-xs text-muted-foreground px-2"
+                            title={t("protectedHint")}
+                          >
+                            {t("required")}
+                          </div>
+                        ) : (
                           <Button
                             variant="ghost"
                             size="sm"
+                            aria-label={t("deleteApiKey")}
                             onClick={() => openDeleteDialog(key.key_name)}
                           >
                             <Trash2 className="h-4 w-4 text-red-600" />
                           </Button>
-                        ) : (
-                          <div className="text-xs text-muted-foreground px-2">
-                            {t("required")}
-                          </div>
                         )}
                       </div>
                     </TableCell>

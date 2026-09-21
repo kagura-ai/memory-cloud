@@ -2268,7 +2268,7 @@
     "actions": "操作",
     "activeReranker": "（アクティブなリランカー）",
     "toggleEnabled": "有効/無効を切り替え",
-    "openAICannotDisable": "OpenAIは無効化できません",
+    "protectedHint": "OpenAI埋め込みで使用中のため、無効化・削除できません",
     "required": "必須",
     "addExternalKey": "外部APIキーを追加",
     "addNewKey": "外部サービス用の新しいAPIキーを追加",
