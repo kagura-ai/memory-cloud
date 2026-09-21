@@ -80,17 +80,37 @@ class TestMcpEnvelope:
 
     def test_the_handler_uses_the_shared_projection(self):
         # Pins the wiring itself: the handler must call the helper these tests
-        # exercise, or they would be testing an unused function.
+        # exercise, or they would be testing an unused function. #1599 moved
+        # the envelope assembly out of the handler into _recall_envelope, so
+        # the chain is handler -> _recall_envelope -> _degraded_response_fields.
         import inspect
 
         from mcp_server.tools import memory as mcp_memory
 
-        src = inspect.getsource(mcp_memory.handle_recall)
+        assert "_recall_envelope(result, current_context)" in inspect.getsource(
+            mcp_memory.handle_recall
+        )
+        src = inspect.getsource(mcp_memory._recall_envelope)
         assert "_degraded_response_fields(result)" in src, (
-            "handle_recall must render the degraded flag through "
+            "the recall envelope must render the degraded flag through "
             "_degraded_response_fields — MCP clients do not inherit new "
             "response fields automatically (#1515)."
         )
+
+    def test_a_degraded_recall_reaches_the_built_envelope(self):
+        # Behavioural twin of the source check above: the real envelope builder
+        # carries the flag, and a healthy recall adds no keys.
+        from unittest.mock import MagicMock
+
+        from mcp_server.tools.memory import _recall_envelope
+
+        degraded = _recall_envelope(
+            RecallResponse(results=[], degraded=True, degraded_reason="embedding_unavailable"),
+            MagicMock(),
+        )
+        assert degraded["degraded"] is True
+        assert degraded["degraded_reason"] == "embedding_unavailable"
+        assert "degraded" not in _recall_envelope(RecallResponse(results=[]), MagicMock())
 
 
 @pytest.mark.asyncio

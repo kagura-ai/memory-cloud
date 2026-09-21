@@ -361,7 +361,7 @@ Search modes: Use search_mode to control the search strategy.
 • semantic: Vector similarity only — best when you know the exact concept but not the exact words.
 • keyword: BM25 only — best for hiragana queries, exact term matching, or when semantic search returns noise. Particularly effective for Japanese hiragana-only queries where embedding models struggle.
 
-Returns: {status, degraded, degraded_reason, results: [{memory_id, summary, context_summary, type, importance, scope, score, tags, created_at, updated_at, superseded_by, contradicts, supersede_candidate (see Agent-facing signals above; null unless a still-actionable near-duplicate suggestion exists)}], count, related_tags, context_id, context_name, context_display_name, context_is_private, context_is_locked, confidence (see above), explore_hints (only when include_explore_hints=true), tag_suggestions (only when a tag filter returned zero results and similar tags exist in the context: {requested_tag: ["stored-tag (count)", ...]} — advisory, the filter itself was not widened)}. results carry Layers 1-2 only — call reference(memory_id) for full Layer-3 content.""",
+Returns: {status, degraded, degraded_reason, results: [{memory_id, summary, context_summary?, type, importance, scope, score (rounded to 4 decimals), tags, created_at, updated_at, superseded_by?, contradicts?, supersede_candidate? (see Agent-facing signals above)}], count, related_tags: [{tag, count}] (the up-to-10 most frequent tags among these results; count = how many results carry the tag — candidates for a follow-up tag filter), context_id, context_name, context_display_name, context_is_private, context_is_locked, confidence (see above), explore_hints (only when include_explore_hints=true), tag_suggestions (only when a tag filter returned zero results and similar tags exist in the context: {requested_tag: ["stored-tag (count)", ...]} — advisory, the filter itself was not widened)}. Result keys marked ? are omitted when empty (absent, never null): context_summary when none was written, superseded_by unless the memory is shadowed (only under include_superseded=true), contradicts when no memory opposes it, supersede_candidate unless a still-actionable near-duplicate suggestion exists. results carry Layers 1-2 only — call reference(memory_id) for full Layer-3 content.""",
             "inputSchema": {
                 "type": "object",
                 # ``query`` is the only unconditional requirement. The handler
@@ -466,8 +466,12 @@ Returns: {status, memory: {memory_id, summary, context_summary, content, details
                 "and calling remember(type='time', details={'trigger': {'year': "
                 "2026, 'month': 7}}). Partial dates are allowed: omit month/day for "
                 'fuzzy timing ("2026年7月ごろ").'
-                "\n\nReturns: {status, results: [{memory_id, summary, type, details}], context_id, "
-                "context_name, context_display_name, context_is_private, context_is_locked}."
+                "\n\nReturns: {status, results: [{memory_id, summary, type, trigger}], context_id, "
+                "context_name, context_display_name, context_is_private, context_is_locked}. "
+                "trigger is the memory's details.trigger (when it fires). With "
+                "include_details=true each item carries the full details object "
+                "instead of trigger (details.trigger is inside it); otherwise call "
+                "reference(memory_id) for one memory's full content."
             ),
             "inputSchema": {
                 "type": "object",
@@ -490,6 +494,12 @@ Returns: {status, memory: {memory_id, summary, context_summary, content, details
                     "k": {
                         "type": "integer",
                         "description": "Max results (default 20, max 100).",
+                    },
+                    "include_details": {
+                        "type": "boolean",
+                        "description": "Return each item's full details object instead "
+                        "of just its trigger (default: false). Leave off for a "
+                        "what's-coming-up listing; details can be large.",
                     },
                 },
             },

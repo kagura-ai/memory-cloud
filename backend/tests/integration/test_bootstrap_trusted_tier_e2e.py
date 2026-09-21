@@ -253,3 +253,31 @@ async def test_upcoming_default_is_unfiltered(env, db_session):
     ids = {r["memory_id"] for r in rows}
     assert str(env["t_manual"]) in ids
     assert str(env["t_conn"]) in ids
+
+
+@pytest.mark.asyncio(loop_scope="session")
+async def test_upcoming_rows_carry_trigger_by_default_details_on_request(env, db_session):
+    """#1599: against real JSONB — the default row is the trigger alone (what the
+    bootstrap component and recall_upcoming ship); include_details=True is the
+    full blob in its place."""
+    trigger = {"from": "2026-01-01T00:00:00", "until": "2099-12-31T23:59:59"}
+
+    lean = await query_upcoming_time_memories(
+        db_session, env["ctx_trusted"], q_from=None, q_until=None, k=20, trusted_only=True
+    )
+    (row,) = [r for r in lean if r["memory_id"] == str(env["t_manual"])]
+    assert set(row) == {"memory_id", "summary", "type", "trigger"}
+    assert row["trigger"] == trigger
+
+    full = await query_upcoming_time_memories(
+        db_session,
+        env["ctx_trusted"],
+        q_from=None,
+        q_until=None,
+        k=20,
+        trusted_only=True,
+        include_details=True,
+    )
+    (row,) = [r for r in full if r["memory_id"] == str(env["t_manual"])]
+    assert set(row) == {"memory_id", "summary", "type", "details"}
+    assert row["details"] == {"trigger": trigger}

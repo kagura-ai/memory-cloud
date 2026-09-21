@@ -97,6 +97,7 @@ Deterministic time-window query over Time Memories (type='time'), soonest first.
   - `from` — string (naive ISO lower bound) ⚠ range params are `from`/`until` here but `from`/`to` in analyze_context — upper-bound name differs across the surface
   - `until` — string (naive ISO upper bound)
   - `k` — integer (default 20, max 100) ⚠ same `k` name as recall but a different default (20 vs 5)
+  - `include_details` — boolean (default false) — return each item's full `details` instead of just its `trigger`
 
 ### recall_nearby
 

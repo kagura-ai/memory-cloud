@@ -3,7 +3,6 @@
 Extracted from tools.py for modularity (Issue #7).
 """
 
-import json
 import logging
 import time
 from typing import Any
@@ -12,6 +11,7 @@ from uuid import UUID
 from mcp.types import TextContent
 
 from mcp_server.tools._helpers import (
+    _dumps,
     _error_response,
     _format_validation_error,
     _log_tool_usage,
@@ -126,7 +126,7 @@ async def handle_update_search_config(
             return [
                 TextContent(
                     type="text",
-                    text=json.dumps(
+                    text=_dumps(
                         {
                             "status": "success",
                             "message": "Search configuration updated.",
