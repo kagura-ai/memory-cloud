@@ -323,6 +323,59 @@ async def test_disable_succeeds_when_unprotected(db_session, workspace, deployme
     assert response.is_protected is False
 
 
+@pytest_asyncio.fixture
+async def renamed_key_workspace(db_session: AsyncSession) -> dict:
+    """A workspace whose OpenAI key is stored under another name (raw API only)."""
+    return await _new_workspace(db_session, keys=(("MY_OPENAI_KEY", "openai"),))
+
+
+@pytest.mark.asyncio
+async def test_disable_is_refused_for_an_openai_key_under_another_name(
+    db_session, renamed_key_workspace, deployment
+):
+    """EmbeddingService picks the key by provider, so this is the live credential."""
+    deployment()
+    with pytest.raises(HTTPException) as exc_info:
+        await toggle_external_key(
+            "MY_OPENAI_KEY",
+            ExternalKeyToggle(enabled=False),
+            user=renamed_key_workspace["user"],
+            db=db_session,
+        )
+
+    assert exc_info.value.status_code == 400
+    assert exc_info.value.detail["error"] == "cannot_disable_embeddings"
+    assert "MY_OPENAI_KEY" in exc_info.value.detail["message"]
+
+
+@pytest.mark.asyncio
+async def test_openai_key_under_another_name_follows_the_same_conditions(
+    db_session, renamed_key_workspace, deployment
+):
+    deployment(**_SELF_HOSTED)
+
+    response = await toggle_external_key(
+        "MY_OPENAI_KEY",
+        ExternalKeyToggle(enabled=False),
+        user=renamed_key_workspace["user"],
+        db=db_session,
+    )
+
+    assert (response.enabled, response.is_protected) == (False, False)
+
+
+@pytest.mark.asyncio
+async def test_openai_key_under_another_name_stays_deletable(
+    db_session, renamed_key_workspace, deployment
+):
+    """Unchanged: delete and ``is_protected`` are name-based (#149)."""
+    deployment()
+    assert await _listed_protection(db_session, renamed_key_workspace) == {"MY_OPENAI_KEY": False}
+
+    await delete_external_key("MY_OPENAI_KEY", user=renamed_key_workspace["user"], db=db_session)
+    assert await _key_names(db_session, renamed_key_workspace["workspace_id"]) == set()
+
+
 # ---------------------------------------------------------------------------
 # POST /external-keys with enabled=false (the same disable guard)
 # ---------------------------------------------------------------------------
@@ -339,6 +392,20 @@ async def test_create_refuses_a_disabled_key_while_protected(
     deployment()
     with pytest.raises(HTTPException) as exc_info:
         await create_external_key(_DISABLED_OPENAI_KEY, user=empty_workspace["user"], db=db_session)
+
+    assert exc_info.value.status_code == 400
+    assert exc_info.value.detail["error"] == "cannot_disable_embeddings"
+    assert await _key_names(db_session, empty_workspace["workspace_id"]) == set()
+
+
+@pytest.mark.asyncio
+async def test_create_refuses_a_disabled_openai_key_under_another_name(
+    db_session, empty_workspace, deployment
+):
+    deployment()
+    request = _DISABLED_OPENAI_KEY.model_copy(update={"key_name": "MY_OPENAI_KEY"})
+    with pytest.raises(HTTPException) as exc_info:
+        await create_external_key(request, user=empty_workspace["user"], db=db_session)
 
     assert exc_info.value.status_code == 400
     assert exc_info.value.detail["error"] == "cannot_disable_embeddings"

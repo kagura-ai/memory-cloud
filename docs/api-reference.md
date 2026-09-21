@@ -1017,6 +1017,7 @@ While a key is protected:
 
 - `DELETE` answers `400`; the envelope's `message` is the reason, e.g. `{"error": "HTTP-400", "message": "Cannot delete OPENAI_API_KEY: OpenAI embeddings are in use by 2 contexts of this workspace.", "details": {}}`.
 - `PATCH …/toggle` with `{"enabled": false}` (and `POST` with `"enabled": false`) answers `400` with a generic `message` (`Request failed`) and the structured reason under `details.detail`: `{"error": "cannot_disable_embeddings", "message": "Cannot disable OPENAI_API_KEY: OpenAI embeddings are in use by this deployment (EMBEDDING_PROVIDER=openai)."}`. Branch on `details.detail.error`, not on the top-level `error` (`HTTP-400`).
+  This refusal alone also covers a key stored under another name whose `provider` is `openai` (possible through the API only): the embedding service selects the stored key by provider, so disabling it would break embeddings just the same. Such a key was never refused on `DELETE` and still is not, so it reports `is_protected: false`.
 
 Status codes and body shapes are the same as before #1613; only the messages changed, and the refusals no longer fire when nothing reads the key. Re-enabling a disabled key is never refused by this rule.
 

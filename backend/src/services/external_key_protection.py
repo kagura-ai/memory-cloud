@@ -22,6 +22,12 @@ while something would break without it — all of:
 One predicate serves ``DELETE /external-keys/{key_name}``, the disable guard
 and the ``is_protected`` flag of ``GET /external-keys``, so the UI's "Required"
 badge and the refusals cannot drift apart.
+
+The disable guard alone also passes the row's ``provider``: ``EmbeddingService``
+picks the stored key by ``provider == "openai"``, not by name, so an OpenAI key
+stored under another name (raw API only) stays undisableable while the rule
+holds, as it was before #1613. Deleting such a key was never refused (#149 is
+name-based) and still is not, so it reports ``is_protected=false``.
 """
 
 from __future__ import annotations
@@ -64,13 +70,16 @@ def embedding_provider_of(model: str, settings: Settings) -> str:
     return entry[1] if entry else settings.embedding_provider
 
 
-def is_protection_candidate(key_name: str, settings: Settings) -> bool:
+def is_protection_candidate(
+    key_name: str, settings: Settings, *, provider: str | None = None
+) -> bool:
     """The half of the rule that needs no database.
 
     False means :func:`is_key_protected` is False whatever the workspace
     routes to, so callers can skip the context query.
     """
-    return key_name in PROTECTED_KEYS and settings.enable_byok and settings.resolve_stored_byok_keys
+    holds_the_credential = key_name in PROTECTED_KEYS or provider == _OPENAI
+    return holds_the_credential and settings.enable_byok and settings.resolve_stored_byok_keys
 
 
 def is_key_protected(
@@ -78,6 +87,7 @@ def is_key_protected(
     settings: Settings,
     *,
     workspace_routes_to_openai_embeddings: bool,
+    provider: str | None = None,
 ) -> bool:
     """Whether ``key_name`` must not be deleted or disabled right now.
 
@@ -87,12 +97,16 @@ def is_key_protected(
         workspace_routes_to_openai_embeddings: Whether the key's workspace has
             a live context on an OpenAI embedding model
             (:func:`count_openai_routed_contexts` ``> 0``).
+        provider: The stored key's provider — passed by the disable guard
+            only, which then also covers an ``openai`` key under another name
+            (see the module docstring). Delete and ``is_protected`` omit it.
 
     Returns:
-        True only for a ``PROTECTED_KEYS`` candidate on a deployment that
-        still resolves stored keys and has OpenAI embeddings in use.
+        True only for a candidate (a ``PROTECTED_KEYS`` name or, for the
+        disable guard, an ``openai`` provider) on a deployment that still
+        resolves stored keys and has OpenAI embeddings in use.
     """
-    if not is_protection_candidate(key_name, settings):
+    if not is_protection_candidate(key_name, settings, provider=provider):
         return False
     return settings.embedding_provider == _OPENAI or workspace_routes_to_openai_embeddings
 
@@ -150,14 +164,16 @@ async def evaluate_key_protection(
     key_name: str,
     workspace_id: UUID,
     settings: Settings,
+    provider: str | None = None,
 ) -> KeyProtection:
     """Resolve :func:`is_key_protected` for one stored key, with its reason.
 
     Queries the workspace's contexts only when the answer depends on them: not
     for a non-candidate key, not with BYOK off, and not when the deployment
-    itself embeds with OpenAI.
+    itself embeds with OpenAI. ``provider`` is the disable guard's, as in
+    :func:`is_key_protected`.
     """
-    if not is_protection_candidate(key_name, settings):
+    if not is_protection_candidate(key_name, settings, provider=provider):
         return _UNPROTECTED
     deployment_uses_openai = settings.embedding_provider == _OPENAI
     count = (
@@ -165,7 +181,12 @@ async def evaluate_key_protection(
         if deployment_uses_openai
         else await count_openai_routed_contexts(db, workspace_id, settings)
     )
-    if not is_key_protected(key_name, settings, workspace_routes_to_openai_embeddings=count > 0):
+    if not is_key_protected(
+        key_name,
+        settings,
+        workspace_routes_to_openai_embeddings=count > 0,
+        provider=provider,
+    ):
         return _UNPROTECTED
     if deployment_uses_openai:
         in_use_by = "this deployment (EMBEDDING_PROVIDER=openai)"

@@ -112,6 +112,56 @@ class TestIsKeyProtected:
         assert not is_protection_candidate("COHERE_API_KEY", _settings())
 
 
+class TestDisableGuardFollowsTheProvider:
+    """``EmbeddingService`` picks the stored key by ``provider == "openai"``.
+
+    So the disable guard — which passes the row's provider — keeps covering an
+    OpenAI key stored under another name (raw API only), as it did before
+    #1613. Delete and ``is_protected`` pass no provider and stay name-based.
+    """
+
+    def test_openai_provider_key_under_another_name_cannot_be_disabled(self):
+        assert is_key_protected(
+            "MY_OPENAI_KEY",
+            _settings(),
+            workspace_routes_to_openai_embeddings=False,
+            provider="openai",
+        )
+        assert is_protection_candidate("MY_OPENAI_KEY", _settings(), provider="openai")
+
+    def test_the_same_key_without_a_provider_is_not_protected(self):
+        assert not is_key_protected(
+            "MY_OPENAI_KEY", _settings(), workspace_routes_to_openai_embeddings=False
+        )
+
+    def test_other_providers_are_never_covered(self):
+        assert not is_key_protected(
+            "COHERE_API_KEY",
+            _settings(),
+            workspace_routes_to_openai_embeddings=True,
+            provider="cohere",
+        )
+
+    @pytest.mark.parametrize(
+        ("overrides", "routed", "expected"),
+        [
+            (_SELF_HOSTED, False, False),
+            (_SELF_HOSTED, True, True),
+            ({"enable_byok": False}, True, False),
+        ],
+    )
+    def test_the_rest_of_the_rule_still_applies(self, overrides, routed, expected):
+        assert (
+            is_key_protected(
+                "MY_OPENAI_KEY",
+                _settings(**overrides),
+                workspace_routes_to_openai_embeddings=routed,
+                provider="openai",
+            )
+            is expected
+        )
+
+
 class TestEmbeddingProviderOf:
     def test_registry_models_resolve_like_the_embedding_service(self):
         """Drift guard: the predicate and ``EmbeddingService`` must agree on

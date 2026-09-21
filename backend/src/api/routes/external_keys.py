@@ -216,10 +216,27 @@ async def validate_reranker_exclusivity(
 # ============================================================================
 
 
-async def _key_protection(db: AsyncSession, key_name: str, workspace_id: UUID) -> KeyProtection:
-    """``evaluate_key_protection`` for this deployment's settings."""
+async def _key_protection(
+    db: AsyncSession,
+    key_name: str,
+    workspace_id: UUID,
+    *,
+    disabling_provider: str | None = None,
+) -> KeyProtection:
+    """``evaluate_key_protection`` for this deployment's settings.
+
+    ``disabling_provider`` is the key's provider when the request stores it
+    disabled, else None. EmbeddingService picks the stored key by provider, so
+    the disable guard keeps covering an OpenAI key under another name, as it
+    did before #1613. A disable that passes the guard is unprotected under the
+    name-based rule too, so the same verdict serves ``is_protected``.
+    """
     return await evaluate_key_protection(
-        db, key_name=key_name, workspace_id=workspace_id, settings=get_settings()
+        db,
+        key_name=key_name,
+        workspace_id=workspace_id,
+        settings=get_settings(),
+        provider=disabling_provider,
     )
 
 
@@ -383,7 +400,12 @@ async def create_external_key(
                 )
 
         # Issue #1613: a protected key cannot be stored disabled either.
-        protection = await _key_protection(db, request.key_name, current_workspace_id)
+        protection = await _key_protection(
+            db,
+            request.key_name,
+            current_workspace_id,
+            disabling_provider=None if request.enabled else request.provider,
+        )
         if not request.enabled:
             refuse_disabling_protected_key(request.key_name, protection)
 
@@ -539,8 +561,9 @@ async def toggle_external_key(
     Issue #246: current_context_id removed - use None
 
     Rules:
-    - A protected key cannot be disabled (Issue #1613: OPENAI_API_KEY while
-      OpenAI embeddings are in use — see services/external_key_protection.py)
+    - A protected key cannot be disabled (Issue #1613: OPENAI_API_KEY, or any
+      key whose provider is openai, while OpenAI embeddings are in use — see
+      services/external_key_protection.py)
     - Only ONE reranker (Cohere/Voyage) can be enabled at a time
 
     Issue #381: Owner-only (router-level dependency).
@@ -601,7 +624,12 @@ async def toggle_external_key(
                 )
 
         # Issue #1613: disabling is refused only while the key is protected.
-        protection = await _key_protection(db, key.key_name, current_workspace_id)
+        protection = await _key_protection(
+            db,
+            key.key_name,
+            current_workspace_id,
+            disabling_provider=None if request.enabled else key.provider,
+        )
         if not request.enabled:
             refuse_disabling_protected_key(key.key_name, protection)
 
