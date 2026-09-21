@@ -91,7 +91,9 @@ def _extract_session_id(
         logger.info(f"MCP session_id from header: {session_id}")
         return session_id
 
-    query = query_string.decode("utf-8")
+    # "replace", not strict: bytes that are not UTF-8 name no session, and must
+    # not fail a request whose query only carries a tool profile (#1601).
+    query = query_string.decode("utf-8", "replace")
     if "session_id=" in query:
         for param in query.split("&"):
             if param.startswith("session_id="):
