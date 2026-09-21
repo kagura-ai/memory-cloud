@@ -15,7 +15,9 @@ while something would break without it — all of:
    no longer replace the key, so withdrawing it must stay possible.
 2. OpenAI embeddings are in use: the deployment's ``EMBEDDING_PROVIDER`` is
    ``openai``, or the workspace routes at least one live context to an OpenAI
-   embedding model.
+   embedding model — including a legacy context without a
+   ``ContextSearchConfig`` row, whose next recall writes one with an OpenAI
+   model.
 
 One predicate serves ``DELETE /external-keys/{key_name}``, the disable guard
 and the ``is_protected`` flag of ``GET /external-keys``, so the UI's "Required"
@@ -27,7 +29,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from uuid import UUID
 
-from sqlalchemy import func, select
+from sqlalchemy import ColumnDefault, func, inspect, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from config.constants import EMBEDDING_MODEL_REGISTRY
@@ -95,6 +97,22 @@ def is_key_protected(
     return settings.embedding_provider == _OPENAI or workspace_routes_to_openai_embeddings
 
 
+def _models_of_a_context_without_config(settings: Settings) -> tuple[str, ...]:
+    """Every model a context without a ``ContextSearchConfig`` row may embed with.
+
+    Today it embeds with the deployment default (``settings.embedding_model``,
+    ``resolve_context_routing``'s fallback to the caller's default
+    ``EmbeddingService``). Its next recall materialises the row
+    (``ContextSearchConfigRepository.create_or_get``) without naming a model,
+    so the column default is written and the context routes to that model from
+    then on. Read from the column so the two cannot drift.
+    """
+    column_default = inspect(ContextSearchConfig).columns["embedding_model"].default
+    if isinstance(column_default, ColumnDefault) and column_default.is_scalar:
+        return settings.embedding_model, column_default.arg
+    return (settings.embedding_model,)
+
+
 async def count_openai_routed_contexts(
     db: AsyncSession,
     workspace_id: UUID,
@@ -103,9 +121,10 @@ async def count_openai_routed_contexts(
     """How many live contexts of the workspace embed with an OpenAI model.
 
     Soft-deleted contexts do not count. A context without a
-    ``ContextSearchConfig`` row embeds with the deployment default
-    (``settings.embedding_model``), like ``resolve_context_routing``'s
-    fallback to the caller's default ``EmbeddingService``.
+    ``ContextSearchConfig`` row counts when *either* model it may embed with is
+    an OpenAI model (:func:`_models_of_a_context_without_config`): a verdict
+    that a recall could flip from deletable to needed would let the owner
+    delete a key the workspace is about to read, so this over-protects instead.
     """
     result = await db.execute(
         select(ContextSearchConfig.embedding_model, func.count(Context.id))
@@ -114,10 +133,14 @@ async def count_openai_routed_contexts(
         .where(Context.workspace_id == workspace_id, Context.deleted_at.is_(None))
         .group_by(ContextSearchConfig.embedding_model)
     )
+    without_config = _models_of_a_context_without_config(settings)
     return sum(
         count
         for model, count in result.all()
-        if embedding_provider_of(model or settings.embedding_model, settings) == _OPENAI
+        if any(
+            embedding_provider_of(candidate, settings) == _OPENAI
+            for candidate in ((model,) if model else without_config)
+        )
     )
 
 

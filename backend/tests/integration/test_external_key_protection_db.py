@@ -11,6 +11,10 @@ invoked directly against the same session:
   only while the key is protected;
 - ``GET /external-keys`` reports the same answer as ``is_protected``;
 - with ``ENABLE_BYOK=false`` the owner can still list and delete.
+
+The last section sends the same requests through the ASGI app, because the
+bodies a client parses are shaped by the global exception handler, not by the
+handlers above.
 """
 
 from __future__ import annotations
@@ -20,9 +24,11 @@ from uuid import UUID
 import pytest
 import pytest_asyncio
 from fastapi import HTTPException
+from httpx import ASGITransport, AsyncClient
 from sqlalchemy import func, select
-from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
+from api.main import app
 from api.routes.external_keys import (
     ExternalKeyCreate,
     ExternalKeyToggle,
@@ -32,10 +38,14 @@ from api.routes.external_keys import (
     list_external_keys,
     toggle_external_key,
 )
+from auth.dependencies import get_user_from_api_key_or_session
+from auth.workspace_roles import WorkspaceRole
 from config.settings import Settings
-from models.auth import Context, ExternalAPIKey
+from db.base import get_db
+from models.auth import Context, ExternalAPIKey, WorkspaceMember
 from models.config import ContextSearchConfig
-from services.external_key_protection import count_openai_routed_contexts
+from repositories.config_repository import ContextSearchConfigRepository
+from services.external_key_protection import count_openai_routed_contexts, embedding_provider_of
 
 from ._admin_helpers import make_context, make_user, make_workspace
 
@@ -187,7 +197,13 @@ async def test_other_workspaces_contexts_are_not_counted(db_session, workspace):
 
 
 @pytest.mark.asyncio
-async def test_context_without_config_row_inherits_the_deployment_model(db_session, workspace):
+async def test_context_without_config_row_counts_as_openai_routed(db_session, workspace):
+    """A row-less legacy context is one recall away from an OpenAI model.
+
+    ``ContextSearchConfigRepository.create_or_get`` writes the row with the
+    column default, so the context counts on every deployment — not only where
+    ``EMBEDDING_MODEL`` is an OpenAI model.
+    """
     await _add_context(db_session, workspace, embedding_model=None)
 
     on_self_hosted = await count_openai_routed_contexts(
@@ -196,7 +212,23 @@ async def test_context_without_config_row_inherits_the_deployment_model(db_sessi
     on_openai = await count_openai_routed_contexts(
         db_session, workspace["workspace_id"], _settings()
     )
-    assert (on_self_hosted, on_openai) == (0, 1)
+    assert (on_self_hosted, on_openai) == (1, 1)
+
+
+@pytest.mark.asyncio
+async def test_materialising_the_config_row_does_not_change_the_verdict(
+    db_session, workspace, deployment
+):
+    """Deletable-then-needed must not happen: the lazy row cannot flip the answer."""
+    settings = deployment(**_SELF_HOSTED)
+    context = await _add_context(db_session, workspace, embedding_model=None)
+    before = await _listed_protection(db_session, workspace)
+
+    config = await ContextSearchConfigRepository(db_session).create_or_get(context.id)
+
+    assert embedding_provider_of(config.embedding_model, settings) == "openai"
+    assert before["OPENAI_API_KEY"] is True
+    assert await _listed_protection(db_session, workspace) == before
 
 
 # ---------------------------------------------------------------------------
@@ -387,3 +419,112 @@ async def test_stored_key_resolution_off_owner_deletes_the_openai_key(
 
     await delete_external_key("OPENAI_API_KEY", user=workspace["user"], db=db_session)
     assert "OPENAI_API_KEY" not in await _key_names(db_session, workspace["workspace_id"])
+
+
+# ---------------------------------------------------------------------------
+# Over HTTP: the refusals as a client receives them
+# ---------------------------------------------------------------------------
+
+_KEY_URL = "/api/v1/external-keys/OPENAI_API_KEY"
+
+
+@pytest_asyncio.fixture
+async def owner_http(async_engine, db_session, workspace):
+    """An HTTP client signed in as the workspace owner.
+
+    Only authentication and the session factory are overridden.
+    ``require_workspace_owner`` runs for real against the membership row, and
+    the global exception handler shapes the bodies — the envelope the External
+    Keys page parses (``details.detail.error``).
+    """
+    db_session.add(
+        WorkspaceMember(
+            workspace_id=workspace["workspace_id"],
+            user_id=workspace["user"]["user_id"],
+            role=WorkspaceRole.OWNER,
+        )
+    )
+    await db_session.commit()
+
+    # A fresh session per request, like test_resource_cross_workspace.
+    session_maker = async_sessionmaker(async_engine, class_=AsyncSession, expire_on_commit=False)
+
+    async def _db():
+        async with session_maker() as session:
+            try:
+                yield session
+            finally:
+                await session.rollback()
+
+    async def _user() -> dict:
+        return workspace["user"]
+
+    app.dependency_overrides[get_user_from_api_key_or_session] = _user
+    app.dependency_overrides[get_db] = _db
+    try:
+        async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+            yield client
+    finally:
+        app.dependency_overrides.pop(get_user_from_api_key_or_session, None)
+        app.dependency_overrides.pop(get_db, None)
+
+
+@pytest.mark.asyncio
+async def test_http_refusals_keep_their_wire_shape(owner_http, db_session, workspace, deployment):
+    deployment()  # EMBEDDING_PROVIDER=openai, BYOK on
+
+    deleted = await owner_http.delete(_KEY_URL)
+    assert deleted.status_code == 400, deleted.text
+    assert deleted.json()["message"].startswith("Cannot delete OPENAI_API_KEY:")
+
+    disabled = await owner_http.patch(f"{_KEY_URL}/toggle", json={"enabled": False})
+    assert disabled.status_code == 400, disabled.text
+    detail = disabled.json()["details"]["detail"]
+    assert detail["error"] == "cannot_disable_embeddings"
+    assert detail["message"].startswith("Cannot disable OPENAI_API_KEY:")
+
+    assert "OPENAI_API_KEY" in await _key_names(db_session, workspace["workspace_id"])
+
+
+@pytest.mark.asyncio
+async def test_http_disable_and_delete_succeed_when_unprotected(
+    owner_http, db_session, workspace, deployment
+):
+    deployment(**_SELF_HOSTED)
+
+    disabled = await owner_http.patch(f"{_KEY_URL}/toggle", json={"enabled": False})
+    assert disabled.status_code == 200, disabled.text
+    assert (disabled.json()["enabled"], disabled.json()["is_protected"]) == (False, False)
+
+    deleted = await owner_http.delete(_KEY_URL)
+    assert deleted.status_code == 200, deleted.text
+    assert "OPENAI_API_KEY" not in await _key_names(db_session, workspace["workspace_id"])
+
+
+@pytest.mark.asyncio
+async def test_http_owner_gate_is_the_real_one(db_session, workspace, owner_http, deployment):
+    """The 200s above are not a bypass: the same client as a member gets 403."""
+    deployment(**_SELF_HOSTED)
+    member = make_user()
+    db_session.add(member)
+    await db_session.flush()
+    db_session.add(
+        WorkspaceMember(
+            workspace_id=workspace["workspace_id"],
+            user_id=member.user_id,
+            role=WorkspaceRole.MEMBER,
+        )
+    )
+    await db_session.commit()
+
+    async def _member() -> dict:
+        return {
+            "user_id": member.user_id,
+            "email": member.email,
+            "current_workspace_id": workspace["workspace_id"],
+        }
+
+    app.dependency_overrides[get_user_from_api_key_or_session] = _member
+
+    assert (await owner_http.delete(_KEY_URL)).status_code == 403
+    assert "OPENAI_API_KEY" in await _key_names(db_session, workspace["workspace_id"])

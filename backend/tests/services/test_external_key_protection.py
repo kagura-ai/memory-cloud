@@ -15,7 +15,7 @@ row) runs against a real database in
 
 from __future__ import annotations
 
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, MagicMock
 from uuid import uuid4
 
 import pytest
@@ -23,8 +23,11 @@ import pytest
 from config.constants import EMBEDDING_MODEL_REGISTRY
 from config.plan_tiers import PROTECTED_KEYS
 from config.settings import Settings
+from services.context_routing import _LEGACY_MODEL
 from services.embedding_service import EmbeddingService
 from services.external_key_protection import (
+    _models_of_a_context_without_config,
+    count_openai_routed_contexts,
     embedding_provider_of,
     evaluate_key_protection,
     is_key_protected,
@@ -124,6 +127,40 @@ class TestEmbeddingProviderOf:
         assert embedding_provider_of("not-in-registry", _settings()) == "openai"
         assert embedding_provider_of("not-in-registry", _settings(**_SELF_HOSTED)) == (
             "self_hosted"
+        )
+
+
+class TestContextWithoutConfigRow:
+    """A legacy context with no ``ContextSearchConfig`` row.
+
+    Its next recall materialises the row with the column default, an OpenAI
+    model, so it counts whatever the deployment embeds with — otherwise the key
+    would be deletable right up to the recall that starts needing it.
+    """
+
+    @staticmethod
+    def _db(*groups: tuple[str | None, int]) -> AsyncMock:
+        """A session whose grouped query answers ``(embedding_model, count)`` rows."""
+        db = AsyncMock()
+        db.execute.return_value = MagicMock(all=MagicMock(return_value=list(groups)))
+        return db
+
+    @pytest.mark.asyncio
+    async def test_counts_on_a_self_hosted_deployment(self):
+        db = self._db((None, 2), ("qwen3-embedding:0.6b", 5))
+        assert await count_openai_routed_contexts(db, uuid4(), _settings(**_SELF_HOSTED)) == 2
+
+    @pytest.mark.asyncio
+    async def test_counts_once_on_an_openai_deployment(self):
+        db = self._db((None, 2))
+        assert await count_openai_routed_contexts(db, uuid4(), _settings()) == 2
+
+    def test_lazy_row_model_is_the_legacy_routing_model(self):
+        """Drift guard: the column default read here is the model
+        ``resolve_context_embedding`` already reports for such a context."""
+        assert _models_of_a_context_without_config(_settings(**_SELF_HOSTED)) == (
+            _SELF_HOSTED["embedding_model"],
+            _LEGACY_MODEL,
         )
 
 
