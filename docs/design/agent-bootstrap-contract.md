@@ -46,7 +46,7 @@ one envelope with embedded instructions.
 | `context` + `instructions` | `_resolve_context_for_read` + context row + search-config fallback, as in `tools/context.py`; instructions from the static constant in `tools/_constants.py` plus the context `usage_guide` | uniform `context_not_found` on any deny (CWE-639); API-key workspace confinement via contextvar |
 | `pinned` | `MemoryService.load_pinned` | `pinned_load_cap` default 100, clamp [1, 1000]; deterministic `importance DESC, created_at ASC, id ASC`; `truncated` + `total_available` never silent; partial columns (no `content`/`details`) |
 | `recall` | `MemoryService` recall with `filters={"trust_tier": "trusted"}` | trusted-context subquery + `source_type != 'connector'` defence-in-depth; normal recall semantics incl. reinforcement re-rank and access counters — unchanged by design |
-| `upcoming` | the `recall_upcoming` window-overlap query | `k` default 20, clamp [1, 100]; `from` is always `"now"` |
+| `upcoming` | the `recall_upcoming` window-overlap query | `k` default 20, clamp [1, 100]; `from` is always `"now"`; rows are `recall_upcoming`'s default shape `{memory_id, summary, type, trigger}` — never the full `details` (bootstrap has no `include_details`; fetch one memory with `reference`) |
 | `state` | `AgentStateService.list_state` | bounded structurally by one row per `(context_id, key)` upsert; expired rows reaped before return |
 | `policy` | P1 pointer only | `null`/skipped in P0; reserved shape `{bundle_id, revision_id, revision, content_sha256}` |
 
@@ -132,7 +132,7 @@ one exists. If the agent has multiple bindings and no default, the call fails wi
                     "candidate_pool_k": 100, "minimum_selection_probability": 0.05,
                     "ranking_policy": { "name": "production_hybrid_recall_v1",
                       "reinforce_enabled": true, "trust_filter": "trusted" } } },
-    "upcoming": { "status": "ok", "results": [ /* recall_upcoming rows */ ], "from": "…", "until": "…" },
+    "upcoming": { "status": "ok", "results": [ /* recall_upcoming default rows: {memory_id, summary, type, trigger} */ ], "from": "…", "until": "…" },
     "state":    { "status": "ok", "states": { "…": {} }, "count": 3 },
     "policy":   { "status": "skipped", "reason": "no_policy_bundle" }
   },
@@ -144,7 +144,8 @@ one exists. If the agent has multiple bindings and no default, the call fails wi
 **Component sub-envelopes are byte-compatible with the standalone primitives' response
 shapes, plus additive bootstrap metadata.** The primitive's response fields appear unchanged
 inside the sub-envelope (`load_pinned` → `{memories, total_available, truncated, cap}`;
-`recall_upcoming` → its handler's response fields including `results`; keyless `get_state` →
+`recall_upcoming` → its handler's response fields including `results`, in the tool's default
+item shape (`trigger`, not `details`); keyless `get_state` →
 `{states, count}`), so clients reuse one parser per primitive whether they call it directly
 or via bootstrap. Bootstrap-only fields (`status`, `query_hash`, `k`, `trust_filter`, `from`,
 `until`, `selection_probabilities`, `selection_policy`) are additive metadata alongside the
