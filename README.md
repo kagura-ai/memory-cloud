@@ -253,7 +253,7 @@ Full setup guide — every client, the memory-sync hook, the ready-to-use `.clau
 
 Tool-by-tool reference with required roles: **[MCP Tools Reference](docs/mcp-tools.md)**
 
-A client does not have to list all 63: add `?profile=core` (12 tools, about 60% smaller) or `?tools=remember,recall` to the endpoint URL — see [Tool Profiles](docs/mcp-tools.md#tool-profiles).
+A client does not have to list all 63: add `?profile=core` (12 tools, about 65% smaller) or `?tools=remember,recall` to the endpoint URL — see [Tool Profiles](docs/mcp-tools.md#tool-profiles).
 
 ## REST API
 

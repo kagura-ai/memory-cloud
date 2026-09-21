@@ -26,6 +26,8 @@ Use `recall` with the resolved context_id:
 recall(context_id=..., query="$ARGUMENTS", k=10)
 ```
 
+**Query technique** — a question often matches better as a hypothetical answer (HyDE): for "how to fix auth errors?" search `"Auth errors are caused by expired JWT tokens. Use the refresh token to re-authenticate..."` (typically 3-10% better, up to 25%). Expand with related terms ("認証エラー" → also `OAuth2`, `JWT`, `401 error`) and combine the searches when you need coverage.
+
 **Search modes** — choose based on the query type:
 - `hybrid` (default): Best for most queries — combines semantic understanding with keyword matching
 - `semantic`: Use when you know the concept but not the exact words (e.g., "how we handled auth token expiry")
@@ -83,11 +85,19 @@ recall(context_id=..., query="...", k=10, filters={"type": "bug-fix", "tags": ["
 recall(context_id=..., query="...", k=10, filters={"source_uri_prefix": "vault://", "source_type": "vault", "importance": {"gte": 0.7}})
 ```
 
-### 3. Display results
+### 3. Read the response signals
+
+- `confidence.level`: `none` / `low` (or zero results) means the topic is probably not stored in this context — say so and prefer an external source over forcing an answer. `high` / `moderate` means read the summaries and judge by content; an adjacent topic can score high too, and `use_rerank=true` separates a near-miss from an exact match.
+- `degraded: true`: the semantic half of the search was unavailable, so an empty or weak result means "search impaired", not "nothing stored" — retry later.
+- `updated_at`: an old value may mean the fact is stale.
+- `supersede_candidate` on a result: that result likely replaces the older candidate. Offer to accept (`create_edge(source_id=<result>, target_id=<candidate>, edge_type="supersedes", context_id=...)`) or, for a deliberately separate pair, to dismiss (`update_memory(memory_id=<result>, dismiss_supersede_candidate=true, context_id=...)`).
+- `tag_suggestions`: a tag filter matched nothing but similar stored tags exist — retry with the suggested spelling.
+
+### 4. Display results
 
 Show results in a table: memory_id, summary, type, importance, tags.
 
-### 4. Follow up
+### 5. Follow up
 
 - **Results found** — suggest using `reference` for detailed content on the most relevant match:
   ```

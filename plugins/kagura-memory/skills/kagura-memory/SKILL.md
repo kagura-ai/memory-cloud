@@ -86,6 +86,15 @@ When the user asks what is remembered, asks for prior decisions, or needs simila
 5. For important hits, call `reference(context_id=..., memory_id=...)` to load full details.
 6. For broad context-building, call `explore(context_id=..., memory_id=..., depth=2, min_weight=0.0)` on the strongest seed memory.
 
+<!-- SYNC: keep the query technique + response-reading notes in step with claude-skills/guide.md ("Using the memory tools well") and docs/mcp-tools.md ("Usage notes"). The MCP tool descriptions are deliberately short; this is where the depth lives. -->
+
+Query technique:
+
+- A question often matches better as a hypothetical answer (HyDE): for "how to fix auth errors?" search `"Auth errors are caused by expired JWT tokens. Use the refresh token to re-authenticate..."`. Typically 3-10% better, up to 25%.
+- Expand with related terms and combine searches when you need coverage; on few or no results shorten the query, drop filters, or switch `search_mode`.
+- Read `confidence.level` first: `none` / `low` means the topic is probably not stored here — prefer an external source over forcing an answer. `high` / `moderate` means read the summaries and judge by content (`use_rerank=true` separates a near-miss from an exact match). With `degraded: true` the semantic half was unavailable, so an empty result means "search impaired" — retry later.
+- A result carrying `supersede_candidate` likely replaces that older memory: accept with `create_edge(source_id=<result>, target_id=<candidate>, edge_type="supersedes")`, or reject a deliberate pair with `update_memory(memory_id=<result>, dismiss_supersede_candidate=true)`.
+
 Show result summaries with `memory_id`, type, importance, and tags when the user needs to choose what to inspect.
 
 ## Remember
@@ -93,7 +102,7 @@ Show result summaries with `memory_id`, type, importance, and tags when the user
 When saving new knowledge, decisions, bug fixes, troubleshooting notes, or session lessons:
 
 1. Resolve the context. Ask before writing if the context is ambiguous.
-2. Store reusable conclusions, not process narration.
+2. Store reusable conclusions, not process narration. Write the summary (best 100-250 characters) with the terms a later search would use — good: "JWT expiry caused 401. Fixed with refresh token rotation and clock skew handling."; bad: "Discussed auth errors in today's meeting." Split long material (over ~2,000 characters) into one memory per topic linked by shared tags, never "part 1/3". Call `list_tags` first and reuse stored tag spellings.
 <!-- SYNC: keep the type vocabulary + pin guidance in step with claude-skills/session-summary.md (type="time", delivery_mode="always" budget ≤7/prune-at-10, supersede=unpin+pin). When one changes, change both. -->
 3. Use this type vocabulary unless the context guide says otherwise:
    - `decision`: architecture choices, rejected alternatives, rationale.
@@ -114,7 +123,9 @@ When saving new knowledge, decisions, bug fixes, troubleshooting notes, or sessi
 
 Use `remember(context_id=..., summary=..., content=..., type=..., importance=..., tags=..., context_summary=..., source_uri=..., source_type=..., linked_source_uris=..., delivery_mode=...)`.
 
-Never store passwords, API keys, bearer tokens, private customer data, or unnecessary PII.
+When a memory replaces an earlier one, pass `supersedes=<old_memory_id>` instead of storing a near-duplicate. A `lint` key in the response means the write will recall badly (short / long / narrative summary, no tags, near-duplicate tag) — fix it with `update_memory`; the memory is already saved either way (`scope="working"` is a consolidation lifecycle, not "not saved yet").
+
+Never store passwords, API keys, bearer tokens, private customer data, or unnecessary PII. Coordinates belong in `details.location` only.
 
 ## Session Summary
 
