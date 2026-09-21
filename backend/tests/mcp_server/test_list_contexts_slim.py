@@ -122,12 +122,12 @@ async def _payload(harness, args, **kwargs):
 
 @pytest.mark.asyncio
 async def test_default_items_are_slim():
-    harness = _Harness([_context("kagura-dev", summary="s" * 2000), _context("notes", age_days=1)])
+    harness = _Harness([_context("acme-web", summary="s" * 2000), _context("notes", age_days=1)])
 
     payload = await _payload(harness, {})
 
     assert payload["status"] == "success"
-    assert [c["name"] for c in payload["contexts"]] == ["kagura-dev", "notes"]
+    assert [c["name"] for c in payload["contexts"]] == ["acme-web", "notes"]
     for item in payload["contexts"]:
         assert set(item) == SLIM_KEYS
     assert payload["contexts"][0]["last_used_at"].endswith("Z")
@@ -232,16 +232,16 @@ async def test_include_details_wins_over_include_summary():
 async def test_name_contains_is_a_case_insensitive_trimmed_substring_match():
     harness = _Harness(
         [
-            _context("kagura-dev", age_days=2),
-            _context("Kagura-Agent-Dev", age_days=0),
+            _context("acme-web", age_days=2),
+            _context("Acme-Mobile", age_days=0),
             _context("cooking", age_days=1),
         ]
     )
 
-    payload = await _payload(harness, {"name_contains": "  KAGURA "})
+    payload = await _payload(harness, {"name_contains": "  ACME "})
 
     # Recency order is preserved within the filtered list.
-    assert [c["name"] for c in payload["contexts"]] == ["Kagura-Agent-Dev", "kagura-dev"]
+    assert [c["name"] for c in payload["contexts"]] == ["Acme-Mobile", "acme-web"]
     assert payload["total"] == 2
 
 
@@ -249,14 +249,14 @@ async def test_name_contains_is_a_case_insensitive_trimmed_substring_match():
 async def test_name_contains_also_matches_the_display_name():
     harness = _Harness(
         [
-            _context("kmc", display_name="Memory Cloud Development"),
+            _context("handbook", display_name="Alpha Team Handbook"),
             _context("other", display_name=None, age_days=1),
         ]
     )
 
-    payload = await _payload(harness, {"name_contains": "cloud dev"})
+    payload = await _payload(harness, {"name_contains": "team hand"})
 
-    assert [c["name"] for c in payload["contexts"]] == ["kmc"]
+    assert [c["name"] for c in payload["contexts"]] == ["handbook"]
 
 
 @pytest.mark.asyncio
