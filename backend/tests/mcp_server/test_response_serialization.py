@@ -215,7 +215,17 @@ async def test_recall_returns_japanese_as_is():
 
     text = result[0].text
     _assert_raw_utf8(text, JA_SUMMARY, JA_CONTEXT, "認証")
-    assert json.loads(text)["results"][0]["summary"] == JA_SUMMARY
+    payload = json.loads(text)
+    assert payload["results"][0]["summary"] == JA_SUMMARY
+    # The #1599 shape, asserted on the text the handler returns — the builder
+    # tests in test_recall_envelope.py cannot see a field the handler re-adds
+    # after calling it.
+    assert "sample_summary" not in text
+    assert text.count(JA_SUMMARY) == 1
+    assert payload["related_tags"] == [{"tag": "認証", "count": 3}]
+    for key in ("superseded_by", "contradicts", "supersede_candidate"):
+        assert key not in payload["results"][0]
+    assert payload["results"][0]["score"] == 0.87
 
 
 @pytest.mark.asyncio
