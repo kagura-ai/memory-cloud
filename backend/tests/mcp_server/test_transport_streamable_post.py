@@ -298,10 +298,11 @@ async def test_request_without_a_string_method_is_an_invalid_request(method):
 
 @pytest.mark.asyncio
 async def test_tools_list_returns_the_tool_definitions(monkeypatch):
-    import mcp_server.tools as tools_mod
+    # #1601: tools/list reads the registry through the tool-profile selector.
+    import mcp_server.tools._profiles as profiles_mod
 
     monkeypatch.setattr(
-        tools_mod, "get_tool_definitions", lambda: [{"name": "recall", "inputSchema": {}}]
+        profiles_mod, "get_tool_definitions", lambda: [{"name": "recall", "inputSchema": {}}]
     )
     send = await _post({"jsonrpc": "2.0", "id": 4, "method": "tools/list"})
 

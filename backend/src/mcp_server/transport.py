@@ -91,7 +91,9 @@ def _extract_session_id(
         logger.info(f"MCP session_id from header: {session_id}")
         return session_id
 
-    query = query_string.decode("utf-8")
+    # "replace", not strict: bytes that are not UTF-8 name no session, and must
+    # not fail a request whose query only carries a tool profile (#1601).
+    query = query_string.decode("utf-8", "replace")
     if "session_id=" in query:
         for param in query.split("&"):
             if param.startswith("session_id="):
@@ -419,9 +421,32 @@ async def handle_streamable_http_post(
     elif method == "tools/list":
         logger.info(f"MCP tools/list (Streamable HTTP): session={session.session_id}")
 
-        from mcp_server.tools import get_tool_definitions
+        from mcp_server.tools._profiles import ToolProfileError, select_tool_definitions
 
-        tools = get_tool_definitions()
+        # #1601: the endpoint URL (``?profile=`` / ``?tools=``) picks what is
+        # listed; without either this is the whole registry, as before. It is
+        # a view, not an authorization boundary — ``tools/call`` below never
+        # reads it, so an unlisted tool stays callable under the usual role
+        # checks.
+        try:
+            tools = select_tool_definitions(scope.get("query_string"))
+        except ToolProfileError as e:
+            logger.warning(
+                f"MCP tools/list rejected (Streamable HTTP): reason={e.message!r}, "
+                f"session={session.session_id}"
+            )
+            # HTTP 200 + JSON-RPC error, like the other errors of this handler.
+            await _send_json_error(
+                send,
+                200,
+                {
+                    "jsonrpc": "2.0",
+                    "id": request_id,
+                    "error": {"code": -32602, "message": e.message},
+                },
+                [[b"mcp-session-id", session.session_id.encode()]],
+            )
+            return
         await _send_jsonrpc_result(send, session, request_id, {"tools": tools})
         return
 
@@ -842,7 +867,12 @@ async def mcp_asgi_app(scope: Scope, receive: Receive, send: Send) -> None:
 
             try:
                 await handle_stateless_post(
-                    send, parsed_body, headers, user_id=user_id, workspace_id=workspace_id
+                    send,
+                    parsed_body,
+                    headers,
+                    user_id=user_id,
+                    workspace_id=workspace_id,
+                    query_string=scope.get("query_string", b""),  # #1601 tool profile
                 )
             except Exception as e:
                 logger.error(f"MCP stateless handler exception: {e}", exc_info=True)
