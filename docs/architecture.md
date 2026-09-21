@@ -536,7 +536,7 @@ The admin-configurable signup gate (`backend/src/services/signup_gate_service.py
 
 ### Health Checks
 - `/health` - Basic health check
-- `/api/v1/info` - Detailed system info
+- `/api/v1/system/info` - Version and deployment feature flags (public)
 - Database connection status
 - Qdrant connection status
 - Redis connection status
