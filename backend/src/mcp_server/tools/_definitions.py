@@ -1355,7 +1355,7 @@ Returns: {status, resource_id, token_count, memory_count, current_schema_version
         {
             "name": "get_resource_schema",
             "readOnly": True,
-            "description": """Get a resource's field schema: names, types, descriptions and classification. Omit schema_version for the latest. Error to branch on: schema_not_found.
+            "description": """Get a resource's field schema: names, types, descriptions and classification. Omit schema_version for the latest. Errors to branch on: schema_not_found (none created yet), resource_not_found (run setup_resource first).
 
 Returns: {status, resource_id, schema_version, field_definitions: [...], created_at}. field_definitions is the stored list of field-definition objects.""",
             "inputSchema": {

@@ -40,10 +40,10 @@ from mcp_server.tools._profiles import CORE_TOOLS
 SKELETON_PATH = Path(__file__).parent / "fixtures" / "tool_schema_skeleton.json"
 
 # Ceilings, in characters of compact UTF-8 JSON. Measured after the trim: full
-# list 81,705 (was 110,608), core list 28,254 (was 44,513), recall 6,362 (was
+# list 81,772 (was 110,608), core list 28,254 (was 44,513), recall 6,362 (was
 # 11,298), remember 5,904 (was 10,361).
 #
-# The full list was aimed at 78,000 and stops at 81,705: what is left is the
+# The full list was aimed at 78,000 and stops at 81,772: what is left is the
 # schema skeleton (21,391), the "Returns:" contracts, one line of meaning per
 # parameter and the rules an agent must not lose (SECURITY, supersedes, trust
 # tier, error codes). Going lower means cutting those, not prose.
