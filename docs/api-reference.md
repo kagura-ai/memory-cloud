@@ -973,6 +973,54 @@ Revoke an API key (soft delete, preserves audit trail).
 
 ---
 
+## External API Keys (BYOK)
+
+Workspace-level provider credentials (OpenAI, Anthropic, Cohere, Voyage, …), stored encrypted and returned masked. Every route requires the workspace `Owner` role (Issue #381) and acts on the caller's current workspace.
+
+| Endpoint | With `ENABLE_BYOK=false` | Purpose |
+|---|---|---|
+| `GET /api/v1/external-keys` | open | List the stored keys (`{"keys": [...], "total": n}`) |
+| `POST /api/v1/external-keys` | `404` | Store a key (`key_name`, `provider`, `value`, optional `enabled`) |
+| `PUT /api/v1/external-keys/{key_name}` | `404` | Replace a key's value |
+| `PATCH /api/v1/external-keys/{key_name}/toggle` | open | Enable / disable a key (`{"enabled": bool}`) |
+| `DELETE /api/v1/external-keys/{key_name}` | open | Remove a key |
+
+The `404` on the two write routes is answered before authentication, so every caller sees the same response. List, toggle and delete stay open so an owner can always see and withdraw a credential that was stored before provisioning was turned off.
+
+A key object:
+
+```json
+{
+  "id": 12,
+  "key_name": "OPENAI_API_KEY",
+  "provider": "openai",
+  "masked_value": "sk-p****9f2a",
+  "user_id": "user_abc",
+  "enabled": true,
+  "is_protected": false,
+  "created_at": "2026-01-10T09:00:00Z",
+  "updated_at": "2026-01-10T09:00:00Z"
+}
+```
+
+### Protected keys (`is_protected`, Issue #1613)
+
+`is_protected` is `true` while the key can be neither deleted nor disabled; the web UI shows such a row as "Required". Only `OPENAI_API_KEY` can be protected, and only while something would break without it — all of:
+
+- `ENABLE_BYOK=true` and `RESOLVE_STORED_BYOK_KEYS=true` (the defaults). With either off, no key is protected.
+- OpenAI embeddings are in use: the deployment runs `EMBEDDING_PROVIDER=openai`, **or** the workspace has at least one live (not deleted) context whose embedding model is an OpenAI model.
+
+So on a deployment whose embeddings do not use OpenAI, a stored `OPENAI_API_KEY` is an ordinary key: deletable, and it can be disabled.
+
+While a key is protected:
+
+- `DELETE` answers `400` with a string `detail`, e.g. `Cannot delete OPENAI_API_KEY: OpenAI embeddings are in use by 2 contexts of this workspace.`
+- `PATCH …/toggle` with `{"enabled": false}` (and `POST` with `"enabled": false`) answers `400` with `detail = {"error": "cannot_disable_embeddings", "message": "Cannot disable OPENAI_API_KEY: OpenAI embeddings are in use by this deployment (EMBEDDING_PROVIDER=openai)."}`.
+
+Status codes and detail shapes are the same as before #1613; only the messages changed, and the refusals no longer fire when nothing reads the key. Re-enabling a disabled key is never refused by this rule.
+
+---
+
 ## Beta Invite APIs
 
 Closed-beta invite links (Issues #1581, #1595): a signed-in user mints a one-time link that lets one new person through the admin-configured signup gate. Off by default — every route below answers a plain `404` (before authentication) unless the deployment sets `ENABLE_BETA_INVITES=true`; `GET /api/v1/system/info` → `features.beta_invites` reports availability. Inviter routes accept a session cookie only (no API keys). See [Closed-beta invite links](deployment.md#closed-beta-invite-links-issue-1581) for the operator view.
