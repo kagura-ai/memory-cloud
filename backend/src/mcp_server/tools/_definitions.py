@@ -814,7 +814,7 @@ Returns: {status, message, updated_fields, context_id, context_name, context_dis
                     "context_id": {
                         "type": "string",
                         "format": "uuid",
-                        "description": "Context UUID from list_contexts().",
+                        "description": "Context UUID from list_contexts(). Do NOT guess or fabricate IDs.",
                     },
                     "display_name": {
                         "type": "string",
@@ -933,7 +933,7 @@ Returns: {status, message, context_id, config: {semantic_weight, bm25_weight, fe
                     "context_id": {
                         "type": "string",
                         "format": "uuid",
-                        "description": "Context UUID from list_contexts().",
+                        "description": "Context UUID from list_contexts(). Do NOT guess or fabricate IDs.",
                     },
                     "semantic_weight": {
                         "type": "number",

@@ -40,10 +40,10 @@ from mcp_server.tools._profiles import CORE_TOOLS
 SKELETON_PATH = Path(__file__).parent / "fixtures" / "tool_schema_skeleton.json"
 
 # Ceilings, in characters of compact UTF-8 JSON. Measured after the trim: full
-# list 81,772 (was 110,608), core list 28,254 (was 44,513), recall 6,362 (was
+# list 81,834 (was 110,608), core list 28,254 (was 44,513), recall 6,362 (was
 # 11,298), remember 5,904 (was 10,361).
 #
-# The full list was aimed at 78,000 and stops at 81,772: what is left is the
+# The full list was aimed at 78,000 and stops at 81,834: what is left is the
 # schema skeleton (21,391), the "Returns:" contracts, one line of meaning per
 # parameter and the rules an agent must not lose (SECURITY, supersedes, trust
 # tier, error codes). Going lower means cutting those, not prose.
@@ -219,6 +219,36 @@ def test_tool_selection_guidance_names_the_neighbours():
         assert neighbour in recall
     assert "update_memory" in _tool("remember")["description"]
     assert "remember" in _tool("update_memory")["description"]
+
+
+# ID parameters that told the agent not to invent a UUID before the trim. The
+# example UUID went; the warning stays — a fabricated ID is a wasted call on a
+# read and the wrong thing to guess at on a write.
+ANTI_FABRICATION_PARAMS = [
+    ("remember", "context_id"),
+    ("update_memory", "memory_id"),
+    ("update_memory", "context_id"),
+    ("recall", "context_id"),
+    ("reference", "memory_id"),
+    ("reference", "context_id"),
+    ("recall_upcoming", "context_id"),
+    ("recall_nearby", "context_id"),
+    ("load_pinned", "context_id"),
+    ("forget", "memory_id"),
+    ("forget", "context_id"),
+    ("explore", "memory_id"),
+    ("explore", "context_id"),
+    ("get_context_info", "context_id"),
+    ("update_context", "context_id"),
+    ("delete_context", "context_id"),
+    ("update_search_config", "context_id"),
+]
+
+
+@pytest.mark.parametrize(("name", "param"), ANTI_FABRICATION_PARAMS)
+def test_id_parameters_keep_the_anti_fabrication_warning(name, param):
+    description = _tool(name)["inputSchema"]["properties"][param]["description"]
+    assert "Do NOT guess or fabricate" in description, f"{name}.{param} lost the warning"
 
 
 def test_descriptions_carry_no_issue_numbers():
