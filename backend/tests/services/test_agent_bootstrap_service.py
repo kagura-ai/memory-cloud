@@ -526,6 +526,33 @@ class TestEnvelope:
         assert upcoming.await_args.kwargs["trusted_only"] is True
 
     @pytest.mark.asyncio
+    async def test_upcoming_rows_carry_trigger_not_details(self):
+        # #1599: the component ships recall_upcoming's DEFAULT row — the
+        # trigger, not the whole details blob — through the real shared query.
+        row = MagicMock()
+        row.id = uuid.uuid4()
+        row.summary = "リリース判定会議"
+        row.type = "time"
+        row.details = {"trigger": {"year": 2026, "month": 10}, "notes": "長いメモ " * 50}
+        db = AsyncMock()
+        exec_result = MagicMock()
+        exec_result.scalars.return_value.all.return_value = [row]
+        db.execute = AsyncMock(return_value=exec_result)
+
+        component = await AgentBootstrapService(db)._upcoming(
+            _context(), BootstrapParams(agent_id=AGENT_ID)
+        )
+
+        assert component["results"] == [
+            {
+                "memory_id": str(row.id),
+                "summary": "リリース判定会議",
+                "type": "time",
+                "trigger": {"year": 2026, "month": 10},
+            }
+        ]
+
+    @pytest.mark.asyncio
     async def test_recall_evaluation_forwards_policy_and_exposes_only_evidence(self):
         memory_id = uuid.uuid4()
         selection_config = parse_recall_evaluation(

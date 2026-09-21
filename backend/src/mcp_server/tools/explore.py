@@ -3,7 +3,6 @@
 Extracted from tools.py for modularity (Issue #7).
 """
 
-import json
 import logging
 import time
 from typing import Any
@@ -13,6 +12,7 @@ from mcp.types import TextContent
 
 from mcp_server.tools._helpers import (
     _ContextNotFoundError,
+    _dumps,
     _error_response,
     _log_tool_usage,
     _resolve_context_for_read,
@@ -96,7 +96,7 @@ async def handle_explore(
             return [
                 TextContent(
                     type="text",
-                    text=json.dumps({"status": "success", "exploration": explore_data}),
+                    text=_dumps({"status": "success", "exploration": explore_data}),
                 )
             ]
         except _ContextNotFoundError as e:

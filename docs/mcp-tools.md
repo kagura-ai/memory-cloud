@@ -9,12 +9,14 @@ See [MCP Client Setup](mcp-clients.md) for connecting a client, and [Core Concep
 | Tool | Description | Required Role |
 |------|------------|---------------|
 | `remember` | Store a new memory (summary + content + type; optional `delivery_mode`) | Member+ |
-| `recall` | Search memories with Hybrid Search (supports `trust_tier` filter) | Viewer+ |
+| `recall` | Search memories with Hybrid Search (supports `trust_tier` filter). Results are Layers 1-2; `related_tags` is `[{tag, count}]` | Viewer+ |
 | `recall_nearby` | Deterministic WHERE-axis query — memories with `details.location` within `radius_m` of a point, nearest first | Viewer+ |
 | `reference` | Get full 3-layer details of a memory | Viewer+ |
 | `update_memory` | Update an existing memory in-place or upsert by external ID | Member+ |
 | `forget` | Soft-delete a memory (retention bounded by the deployment's cleanup window, default 30 days) | Member+ |
 | `explore` | Discover related memories via Neural Memory graph | Viewer+ |
+
+> **Response format.** Every tool returns one JSON text block, serialized as compact UTF-8 — non-ASCII text (e.g. Japanese) arrives as-is, never as `\uXXXX` escapes, because the calling model pays for every character. Fields that are empty on most results are omitted rather than sent as `null` / `[]`: a `recall` result carries `context_summary`, `superseded_by`, `contradicts` and `supersede_candidate` only when they have a value, and `score` is rounded to 4 decimals. Treat an absent key as "none". The authoritative per-tool shape is the `Returns:` line of each tool description (`tools/list`).
 
 ## Agent Substrate (7)
 
@@ -23,7 +25,7 @@ The primitives an autonomous agent loop needs beyond a knowledge store — see [
 | Tool | Description | Required Role |
 |------|------------|---------------|
 | `load_pinned` | Deterministically load always-load memories (`delivery_mode="always"`) — Goal / Guardrail / policy | Viewer+ |
-| `recall_upcoming` | List upcoming Time Memories (`type="time"`, `delivery_mode="on_trigger"`) | Viewer+ |
+| `recall_upcoming` | List upcoming Time Memories (`type="time"`, `delivery_mode="on_trigger"`). Items are `{memory_id, summary, type, trigger}`; `include_details=true` returns the full `details` instead of `trigger` | Viewer+ |
 | `set_state` | Upsert agent scratch state (key→value, optional TTL; excluded from recall) | Editor+ |
 | `get_state` | Read one state key, or list all live state for a context | Viewer+ |
 | `record_measurement` | Append one numeric observation to a metric's series (HOW-MUCH lane; excluded from recall, untouched by Sleep) | Editor+ |
