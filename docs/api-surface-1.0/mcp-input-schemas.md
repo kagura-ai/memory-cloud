@@ -196,10 +196,15 @@ Get a context's metadata, usage guidelines, and memory-tool instructions (sessio
 
 ### list_contexts
 
-List available contexts in the workspace, most recently used first.
+List the accessible contexts as a slim name→id directory, most recently used first (#1600: items are `{id, name, is_private, is_locked, last_used_at}` by default; summaries and `embedding_model` are opt-in).
 
 - **Required**: none
-- **Optional**: `include_stats` — boolean (default false) ⚠ `include_stats` here vs `include_details` in get_context_info vs `include_revoked` in list_resource_tokens — the include_* family is fine, but stats/details naming for "memory-count breakdown" differs between these two sibling tools
+- **Optional**:
+  - `include_stats` — boolean (default false) ⚠ `include_stats` here vs `include_details` in get_context_info vs `include_revoked` in list_resource_tokens — the include_* family is fine, but stats/details naming for "memory-count breakdown" differs between these two sibling tools
+  - `name_contains` — string, maxLength 100 (case-insensitive substring match on name / display name; trimmed; blank = no filter)
+  - `include_summary` — boolean (default false; adds `summary` truncated to 300 characters + `summary_truncated: true` on cut items)
+  - `include_details` — boolean (default false; adds the full `summary` + `embedding_model`; wins over `include_summary`) ⚠ same name as get_context_info's `include_details`, where it toggles the stats breakdown — here it toggles per-item free text
+- Non-boolean flags and an over-long / non-string `name_contains` return a structured `validation_error`.
 
 ### list_tags
 

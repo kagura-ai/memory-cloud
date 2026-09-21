@@ -37,14 +37,16 @@ Create a temporary test context for isolation:
 ```
 list_contexts()
 -> Verify: returns a list with count >= 0
--> Note: on a workspace with many contexts (~40) the response is ~50 KB and can exceed an MCP
-   client's tool-output cap. If the client truncates or spills the payload to a file, read `count`
-   from that file (e.g. with jq) instead of marking the row FAIL — the size is not an error, and
-   `include_stats` is already false by default
+-> Verify: items carry only id, name, is_private, is_locked, last_used_at — no `summary` /
+   `embedding_model` (opt-in via include_summary / include_details), so the response stays small
+   even on a workspace with many contexts
 
 create_context(name="smoke-test-{unix_timestamp}", description="Temporary context for MCP smoke test. Safe to delete.")
 -> Verify: returns context with id (UUID format)
 -> Save returned context_id for all subsequent steps
+
+list_contexts(name_contains="smoke-test-{unix_timestamp}", include_summary=true)
+-> Verify: total == 1 and contexts[0].id is the context created above; the item has a `summary` key
 ```
 
 ### 2. Context tools

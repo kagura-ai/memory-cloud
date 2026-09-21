@@ -34,7 +34,9 @@ Review the conversation and categorize knowledge into one of the canonical types
 list_contexts()
 ```
 
-Ask the user which context to save to if unclear. Default: the project's development context.
+`list_contexts()` returns a slim name→id directory (`id`, `name`, `is_private`, `is_locked`, `last_used_at` — no summaries), most recently used first. If you already know the context name, narrow it with `list_contexts(name_contains="...")`; if you already resolved the id earlier in this session, reuse it instead of listing again.
+
+Default: the project's development context. When names alone don't settle it, call `get_context_info(context_id=...)` for the candidate only — do not load details for every context. Ask the user which context to save to if still unclear.
 
 ### 4. Save each knowledge item
 

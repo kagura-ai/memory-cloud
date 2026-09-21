@@ -63,12 +63,25 @@ The v0.49.0 control plane builds on existing workspace RBAC: agents are registry
 | Tool | Description | Required Role |
 |------|------------|---------------|
 | `get_context_info` | Get context metadata and guidelines | Viewer+ |
-| `list_contexts` | List available contexts in workspace | Viewer+ |
+| `list_contexts` | Slim name→id directory of the contexts you can access, most recently used first (details are opt-in — see below) | Viewer+ |
 | `create_context` | Create a new context | Owner/Admin |
 | `update_context` | Update context settings (summary, usage guide, resource_id, is_public) | Editor+ |
 | `delete_context` | Delete a context and all its memories | Owner/Admin |
 | `merge_contexts` | Merge memories from source context into target context | Owner/Admin |
 | `update_search_config` | Tune hybrid search weights, reranker settings, and query-intent routing (`routing_mode`) per context | Editor+ |
+
+### `list_contexts` response shape
+
+`list_contexts()` exists to turn a context **name** into an **id**, so by default each item is just `{id, name, is_private, is_locked, last_used_at}` — no `summary`, no `embedding_model`. A workspace with dozens of contexts stays a few thousand characters instead of overflowing an MCP client's tool-result limit. For one context's full summary, usage guide and search config call `get_context_info(context_id)`.
+
+| Parameter | Effect |
+|-----------|--------|
+| `name_contains` | Case-insensitive substring match on the context name or display name (trimmed, ≤100 characters; blank = no filter). No match is a success with an empty list. |
+| `include_stats` | Adds `memory_count` per item. |
+| `include_summary` | Adds `summary` truncated to 300 characters; items that were cut also carry `summary_truncated: true` (a null summary stays null). |
+| `include_details` | Adds the full `summary` (up to 2,000 characters each) and `embedding_model` — the previous default item shape ([#1600](https://github.com/kagura-ai/memory-cloud/issues/1600)). Wins over `include_summary`; combine it with `name_contains`. |
+
+Envelope: `{status, contexts, count, total, limit, can_create}`. `count` is the number of contexts in the workspace (quota usage against `limit`; it can exceed what you are allowed to see and is not affected by `name_contains`), `total` is the number of contexts in this response. A non-boolean flag or an over-long `name_contains` returns a `validation_error`.
 
 ## Tags (1)
 
