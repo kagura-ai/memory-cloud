@@ -1760,6 +1760,8 @@
     "copyClaudeOAuthCommand": "コマンドをコピー",
     "claudeOAuthCopied": "コマンドをコピーしました",
     "claudeManualConfigLabel": "または .mcp.json で手動設定 (API キー):",
+    "coreProfileLabel": "コアツールのみ (ツール一覧を小さく)",
+    "coreProfileHelp": "下の URL に ?profile=core を付けます。セッション開始時にすべてのツールスキーマを読み込むクライアントで選んでください — ツール一覧が約 65% 小さくなります。メモリーとコンテキストの 12 ツールだけを一覧に出し、Sleep・分析・ファイル・エッジ・シークレット・リソース・エージェントコントロールプレーンは一覧から外れます。外れたツールも呼び出しは可能で、一覧に出ないだけです。表示するにはデフォルトの URL に戻してください。",
     "clients": {
       "claudeCode": "Claude Code",
       "chatgpt": "ChatGPT",
