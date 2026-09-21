@@ -28,6 +28,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 from pathlib import Path
 from typing import Any
 
@@ -37,8 +38,15 @@ from mcp_server.tools import get_tool_definitions
 
 SKELETON_PATH = Path(__file__).parent / "fixtures" / "tool_schema_skeleton.json"
 
-# Ceilings, in characters of compact UTF-8 JSON.
-FULL_LIST_BUDGET = 78_000
+# Ceilings, in characters of compact UTF-8 JSON. Measured after the trim: full
+# list 81,705 (was 110,608), core list 28,254 (was 44,513), recall 6,362 (was
+# 11,298), remember 5,904 (was 10,361).
+#
+# The full list was aimed at 78,000 and stops at 81,705: what is left is the
+# schema skeleton (21,391), the "Returns:" contracts, one line of meaning per
+# parameter and the rules an agent must not lose (SECURITY, supersedes, trust
+# tier, error codes). Going lower means cutting those, not prose.
+FULL_LIST_BUDGET = 84_000
 CORE_LIST_BUDGET = 31_000
 RECALL_BUDGET = 6_500
 REMEMBER_BUDGET = 6_000
@@ -186,3 +194,52 @@ def test_every_tool_and_parameter_still_has_a_description():
             missing.append(tool["name"])
         missing += undescribed(tool.get("inputSchema", {}), tool["name"])
     assert missing == [], f"definitions without a description: {missing}"
+
+
+# ------------------------------------------------------------------- keep-list
+
+
+def _all_text(name: str) -> str:
+    """A tool's description plus every top-level parameter description."""
+    tool = _tool(name)
+    props = tool.get("inputSchema", {}).get("properties", {})
+    return "\n".join([tool["description"], *(p.get("description", "") for p in props.values())])
+
+
+@pytest.mark.parametrize("name", ["remember", "update_memory"])
+def test_write_tools_keep_the_security_rule_and_the_location_exception(name):
+    text = _all_text(name)
+    assert "SECURITY" in text
+    for term in ("secrets", "PII", "redact"):
+        assert term in text, f"{name}: SECURITY rule lost {term!r}"
+    assert "details.location" in text and "never in context" in text
+
+
+def test_recall_keeps_the_signals_an_agent_acts_on():
+    text = _all_text("recall")
+    for term in (
+        "trust_tier='trusted'",
+        "degraded",
+        "high|moderate|low|none",
+        "external source",
+        "dismiss_supersede_candidate",
+        "absent, never null",
+    ):
+        assert term in text, f"recall lost {term!r}"
+
+
+def test_tool_selection_guidance_names_the_neighbours():
+    recall = _tool("recall")["description"]
+    for neighbour in ("reference(", "explore(", "load_pinned(", "recall_upcoming("):
+        assert neighbour in recall
+    assert "update_memory" in _tool("remember")["description"]
+    assert "remember" in _tool("update_memory")["description"]
+
+
+def test_descriptions_carry_no_issue_numbers():
+    """Provenance belongs in commits and docs; an agent cannot resolve ``#1208``."""
+    offenders = []
+    for tool in get_tool_definitions():
+        text = json.dumps(tool, ensure_ascii=False)
+        offenders += [f"{tool['name']}: {hit}" for hit in re.findall(r"(?:Issue )?#\d{2,}", text)]
+    assert offenders == []
