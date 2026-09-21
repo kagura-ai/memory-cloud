@@ -11,6 +11,12 @@
  * ChatGPT (custom-connector instructions), and Codex CLI (install one-liner
  * + manual TOML). The user's last choice is persisted to localStorage.
  *
+ * A "Core tools only" switch (#1609) above the tabs puts `?profile=core` on
+ * every endpoint URL the block renders and copies, so the client lists the
+ * 12 core tools instead of all of them (docs/mcp-tools.md › Tool Profiles).
+ * It is a view of the same endpoint, not a different credential: OFF by
+ * default, plain component state, never persisted.
+ *
  * Security model (from CSO + CDO + DX-Lead pre-review consensus):
  * - The plaintext key is the SAME secret already rendered in the single-key
  *   display block during the visibility window. This component does not add
@@ -28,10 +34,12 @@
  *   DOM after the window closes (regression net flagged Critical by CSO).
  */
 
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useId, useMemo, useState } from "react";
 import { useTranslations } from "next-intl";
 import { Copy, Check, Eye, EyeOff, ChevronDown } from "lucide-react";
 import { Button } from "@/components/ui/button";
+import { Label } from "@/components/ui/label";
+import { Switch } from "@/components/ui/switch";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import {
   Collapsible,
@@ -82,6 +90,43 @@ export const CODEX_INSTALL_COMMAND =
  */
 export function toBareMcpUrl(mcpUrl: string): string {
   return mcpUrl.replace(/\/w\/[^/]+$/, "");
+}
+
+// The query the server reads to list the 12 core tools only (#1601). Both
+// `/mcp` and `/mcp/w/<workspaceId>` honour it; `tools/call` never does.
+const CORE_PROFILE_QUERY = "profile=core";
+
+/**
+ * Put `profile=core` on an MCP endpoint URL (#1609).
+ *
+ * Plain string handling rather than `new URL()`: the snippet must show the
+ * URL exactly as issued (no normalization), and a placeholder URL must not
+ * throw. An existing query is kept and joined with `&`; an existing `profile`
+ * parameter is replaced rather than repeated, which also makes the helper
+ * idempotent; a fragment stays last.
+ */
+export function withCoreProfile(mcpUrl: string): string {
+  const hashAt = mcpUrl.indexOf("#");
+  const beforeHash = hashAt === -1 ? mcpUrl : mcpUrl.slice(0, hashAt);
+  const hash = hashAt === -1 ? "" : mcpUrl.slice(hashAt);
+  const queryAt = beforeHash.indexOf("?");
+  if (queryAt === -1) return `${beforeHash}?${CORE_PROFILE_QUERY}${hash}`;
+  const params = beforeHash
+    .slice(queryAt + 1)
+    .split("&")
+    .filter((p) => p !== "" && p !== "profile" && !p.startsWith("profile="));
+  const query = [...params, CORE_PROFILE_QUERY].join("&");
+  return `${beforeHash.slice(0, queryAt)}?${query}${hash}`;
+}
+
+/**
+ * Render a URL as one shell argument. `?` is a glob character (zsh aborts the
+ * command with "no matches found") and `&` ends the command, so a URL with a
+ * query is wrapped in double quotes — understood by sh, zsh, PowerShell and
+ * cmd alike. A URL without one is left bare, as the one-liner always was.
+ */
+function shellUrlArg(url: string): string {
+  return /[?&]/.test(url) ? `"${url}"` : url;
 }
 
 export interface MCPConfigBlockProps {
@@ -285,6 +330,18 @@ export function MCPConfigBlock({
     }
   }, [client]);
 
+  // "Core tools only" (#1609). Deliberately NOT persisted, unlike the client
+  // tab: the full list is the safe default (a tool missing from a client is
+  // hard to diagnose), so every visit starts from it. One derived URL feeds
+  // every display AND copy builder below — they cannot drift apart.
+  const [coreOnly, setCoreOnly] = useState(false);
+  const coreSwitchId = useId();
+  const coreHelpId = useId();
+  const endpointUrl = useMemo(
+    () => (coreOnly ? withCoreProfile(mcpUrl) : mcpUrl),
+    [coreOnly, mcpUrl],
+  );
+
   const liveKey =
     apiKey?.is_visible && apiKey.plaintext_key ? apiKey.plaintext_key : null;
   const disabled = liveKey === null;
@@ -321,8 +378,8 @@ export function MCPConfigBlock({
 
   // The displayed JSON snippet (what the user sees on screen).
   const displayJson = useMemo(
-    () => buildJsonConfig(client, mcpUrl, visibleAuthValue),
-    [client, mcpUrl, visibleAuthValue],
+    () => buildJsonConfig(client, endpointUrl, visibleAuthValue),
+    [client, endpointUrl, visibleAuthValue],
   );
 
   // The JSON snippet copied to clipboard — always uses the live key when
@@ -330,32 +387,34 @@ export function MCPConfigBlock({
   // because handleCopy short-circuits.
   const copyJson = useMemo(() => {
     if (liveKey === null) return null;
-    return buildJsonConfig(client, mcpUrl, liveKey);
-  }, [client, mcpUrl, liveKey]);
+    return buildJsonConfig(client, endpointUrl, liveKey);
+  }, [client, endpointUrl, liveKey]);
 
   // Codex tab — TOML snippet variants. Mirror the JSON pair: displayToml
   // uses visibleAuthValue (mask / placeholder / live), copyToml always
   // uses the live key. Same disabled-when-null contract.
   const displayToml = useMemo(
-    () => buildTomlConfig(mcpUrl, visibleAuthValue),
-    [mcpUrl, visibleAuthValue],
+    () => buildTomlConfig(endpointUrl, visibleAuthValue),
+    [endpointUrl, visibleAuthValue],
   );
   const copyToml = useMemo(() => {
     if (liveKey === null) return null;
-    return buildTomlConfig(mcpUrl, liveKey);
-  }, [mcpUrl, liveKey]);
+    return buildTomlConfig(endpointUrl, liveKey);
+  }, [endpointUrl, liveKey]);
 
   // Claude Code OAuth one-liner (#988). Targets the BARE /mcp endpoint —
   // OAuth resolves the workspace at login, so the workspace-scoped
   // `/w/<workspaceId>` suffix is stripped (if mcpUrl is already bare, the
   // regex is a no-op). The command is env-aware via mcpUrl (localhost in dev,
   // the production host in prod) and needs no API key, so it renders and
-  // copies even when the key window is closed.
-  const claudeOAuthCommand = useMemo(
-    () =>
-      `claude mcp add --transport http kagura-memory ${mcpBaseUrl ?? toBareMcpUrl(mcpUrl)}`,
-    [mcpBaseUrl, mcpUrl],
-  );
+  // copies even when the key window is closed. With "Core tools only" ON the
+  // bare endpoint takes the same query (it honours it too), and shellUrlArg
+  // quotes the URL so the `?` survives the shell.
+  const claudeOAuthCommand = useMemo(() => {
+    const bareUrl = mcpBaseUrl ?? toBareMcpUrl(mcpUrl);
+    const url = coreOnly ? withCoreProfile(bareUrl) : bareUrl;
+    return `claude mcp add --transport http kagura-memory ${shellUrlArg(url)}`;
+  }, [mcpBaseUrl, mcpUrl, coreOnly]);
 
   // Track which Copy button the user pressed last, so the Check icon only
   // flashes on the button they actually clicked. Without this, the shared
@@ -404,6 +463,24 @@ export function MCPConfigBlock({
 
   return (
     <div className="space-y-3" suppressHydrationWarning>
+      {/* Issue #1609: one switch for the whole block — it applies to every
+          tab, so it sits above them. Label via htmlFor, help text via
+          aria-describedby (the project's Label + Switch convention). */}
+      <div className="space-y-1">
+        <div className="flex items-center gap-2">
+          <Switch
+            id={coreSwitchId}
+            checked={coreOnly}
+            onCheckedChange={setCoreOnly}
+            aria-describedby={coreHelpId}
+          />
+          <Label htmlFor={coreSwitchId}>{t("coreProfileLabel")}</Label>
+        </div>
+        <p id={coreHelpId} className="text-xs text-gray-600 dark:text-gray-400">
+          {t("coreProfileHelp")}
+        </p>
+      </div>
+
       <Tabs value={client} onValueChange={(v) => setClient(v as MCPClient)}>
         <TabsList>
           <TabsTrigger value="claude-code">

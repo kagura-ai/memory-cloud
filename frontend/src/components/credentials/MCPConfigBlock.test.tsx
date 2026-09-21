@@ -12,6 +12,9 @@
  * - visible→hidden transition force-hides revealed state and removes
  *   the live key from the DOM (regression test from CSO pre-review)
  * - 60s clipboard auto-clear (fake timers)
+ * - "Core tools only" switch (#1609): default OFF leaves every snippet
+ *   without a query; ON puts `?profile=core` on every rendered URL and on
+ *   what each Copy button writes; OFF removes it again; nothing is persisted
  */
 
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
@@ -22,6 +25,7 @@ import {
   CODEX_INSTALL_COMMAND,
   buildTomlConfig,
   toBareMcpUrl,
+  withCoreProfile,
 } from "./MCPConfigBlock";
 
 // Stable references defined OUTSIDE beforeEach so React's useCallback /
@@ -563,6 +567,216 @@ describe("MCPConfigBlock", () => {
       });
       expect(disabledCopies).toHaveLength(1);
       expect(disabledCopies[0]).toBeDisabled();
+    });
+  });
+
+  // "Core tools only" switch (#1609). The server lists the 12 core tools
+  // instead of all of them when the endpoint URL carries `?profile=core`; the
+  // block only has to put that query on every URL it renders and copies.
+  // As above, the non-default tabs are reached by pre-populating localStorage.
+  describe("core tool profile switch (#1609)", () => {
+    const CORE_URL = `${MCP_URL}?profile=core`;
+    // The query makes the URL a glob pattern in zsh (`?`), so the one-liner
+    // quotes it — see withCoreProfile's caller in the component.
+    const BARE_URL = toBareMcpUrl(MCP_URL);
+    const CORE_OAUTH_CMD = `claude mcp add --transport http kagura-memory "${BARE_URL}?profile=core"`;
+
+    /** Text of every rendered snippet (<pre>) that embeds an endpoint URL. */
+    const urlSnippets = (container: HTMLElement): string[] =>
+      Array.from(container.querySelectorAll("pre"))
+        .map((pre) => pre.textContent ?? "")
+        .filter((text) => text.includes("/mcp"));
+
+    const coreSwitch = () =>
+      screen.getByRole("switch", { name: "coreProfileLabel" });
+
+    const flushCopy = async () => {
+      await act(async () => {
+        await Promise.resolve();
+      });
+    };
+
+    it("renders a labelled switch, OFF by default, described by the help text", () => {
+      render(<MCPConfigBlock apiKey={VISIBLE_KEY} mcpUrl={MCP_URL} />);
+      expect(coreSwitch()).toHaveAttribute("aria-checked", "false");
+      expect(coreSwitch()).toHaveAccessibleDescription("coreProfileHelp");
+      expect(screen.getByText("coreProfileHelp")).toBeInTheDocument();
+    });
+
+    it("stays usable when the API-key window is closed (the URL needs no key)", () => {
+      render(<MCPConfigBlock apiKey={HIDDEN_KEY} mcpUrl={MCP_URL} />);
+      expect(coreSwitch()).toBeEnabled();
+    });
+
+    it("default: no rendered snippet and no copied text carries a query", async () => {
+      const { container } = render(
+        <MCPConfigBlock apiKey={VISIBLE_KEY} mcpUrl={MCP_URL} />,
+      );
+      const snippets = urlSnippets(container);
+      expect(snippets).toHaveLength(2); // OAuth one-liner + .mcp.json
+      for (const text of snippets) expect(text).not.toContain("?");
+
+      fireEvent.click(screen.getByRole("button", { name: "copyConfig" }));
+      await flushCopy();
+      expect(mockWriteText.mock.calls[0][0]).not.toContain("?");
+    });
+
+    it("ON: the claude-code tab's OAuth one-liner and .mcp.json both carry ?profile=core", () => {
+      const { container } = render(
+        <MCPConfigBlock apiKey={VISIBLE_KEY} mcpUrl={MCP_URL} />,
+      );
+      fireEvent.click(coreSwitch());
+
+      expect(coreSwitch()).toHaveAttribute("aria-checked", "true");
+      const snippets = urlSnippets(container);
+      expect(snippets).toHaveLength(2);
+      for (const text of snippets) expect(text).toContain("?profile=core");
+      expect(snippets).toContain(CORE_OAUTH_CMD);
+      expect(snippets.join("\n")).toContain(`"url": "${CORE_URL}"`);
+    });
+
+    it("ON: Copy config writes the .mcp.json with the core URL and the live key", async () => {
+      render(<MCPConfigBlock apiKey={VISIBLE_KEY} mcpUrl={MCP_URL} />);
+      fireEvent.click(coreSwitch());
+      fireEvent.click(screen.getByRole("button", { name: "copyConfig" }));
+      await flushCopy();
+
+      const written = mockWriteText.mock.calls[0][0] as string;
+      expect(JSON.parse(written).mcpServers["kagura-memory"].url).toBe(
+        CORE_URL,
+      );
+      expect(written).toContain("kag_real_secret_xyz");
+    });
+
+    it("ON: Copy command writes the quoted OAuth one-liner with the core URL", async () => {
+      render(<MCPConfigBlock apiKey={VISIBLE_KEY} mcpUrl={MCP_URL} />);
+      fireEvent.click(coreSwitch());
+      fireEvent.click(
+        screen.getByRole("button", { name: "copyClaudeOAuthCommand" }),
+      );
+      await flushCopy();
+      expect(mockWriteText).toHaveBeenCalledWith(CORE_OAUTH_CMD);
+    });
+
+    it("ON: an explicit mcpBaseUrl prop gets the query too", () => {
+      const { container } = render(
+        <MCPConfigBlock
+          apiKey={VISIBLE_KEY}
+          mcpUrl={MCP_URL}
+          mcpBaseUrl="http://localhost:8080/mcp"
+        />,
+      );
+      fireEvent.click(coreSwitch());
+      // The prop wins over stripping mcpUrl, so the host differs from MCP_URL's.
+      expect(urlSnippets(container)).toContain(
+        'claude mcp add --transport http kagura-memory "http://localhost:8080/mcp?profile=core"',
+      );
+    });
+
+    it("ON: the chatgpt connector instructions and their copy carry the core URL", async () => {
+      localStorageStore["kagura_last_mcp_client"] = "chatgpt";
+      const { container } = render(
+        <MCPConfigBlock apiKey={VISIBLE_KEY} mcpUrl={MCP_URL} />,
+      );
+      fireEvent.click(coreSwitch());
+
+      const snippets = urlSnippets(container);
+      expect(snippets).toHaveLength(1);
+      expect(snippets[0]).toContain(`//   URL: ${CORE_URL}\n`);
+
+      fireEvent.click(screen.getByRole("button", { name: "copyConfig" }));
+      await flushCopy();
+      expect(mockWriteText.mock.calls[0][0]).toContain(
+        `//   URL: ${CORE_URL}\n`,
+      );
+    });
+
+    it("ON: the codex manual TOML and its copy carry the core URL; the install command is untouched", async () => {
+      localStorageStore["kagura_last_mcp_client"] = "codex";
+      const { container } = render(
+        <MCPConfigBlock apiKey={VISIBLE_KEY} mcpUrl={MCP_URL} />,
+      );
+      fireEvent.click(coreSwitch());
+      fireEvent.click(
+        screen.getByRole("button", { name: "codexManualConfigToggle" }),
+      );
+
+      const snippets = urlSnippets(container);
+      expect(snippets).toHaveLength(1);
+      expect(snippets[0]).toContain(`url = "${CORE_URL}"`);
+      expect(screen.getByText(CODEX_INSTALL_COMMAND)).toBeInTheDocument();
+
+      fireEvent.click(screen.getByRole("button", { name: "copyManualConfig" }));
+      await flushCopy();
+      expect(mockWriteText.mock.calls[0][0]).toContain(`url = "${CORE_URL}"`);
+    });
+
+    it("OFF again: the query disappears from every snippet and from the copied text", async () => {
+      const { container } = render(
+        <MCPConfigBlock apiKey={VISIBLE_KEY} mcpUrl={MCP_URL} />,
+      );
+      fireEvent.click(coreSwitch());
+      fireEvent.click(coreSwitch());
+
+      expect(coreSwitch()).toHaveAttribute("aria-checked", "false");
+      for (const text of urlSnippets(container)) {
+        expect(text).not.toContain("?");
+      }
+
+      fireEvent.click(screen.getByRole("button", { name: "copyConfig" }));
+      await flushCopy();
+      expect(mockWriteText.mock.calls[0][0]).not.toContain("?");
+    });
+
+    it("is local state only — nothing but the client tab is persisted, and a remount starts OFF", () => {
+      const { unmount } = render(
+        <MCPConfigBlock apiKey={VISIBLE_KEY} mcpUrl={MCP_URL} />,
+      );
+      fireEvent.click(coreSwitch());
+      for (const [key] of localStorageMock.setItem.mock.calls) {
+        expect(key).toBe("kagura_last_mcp_client");
+      }
+      unmount();
+
+      render(<MCPConfigBlock apiKey={VISIBLE_KEY} mcpUrl={MCP_URL} />);
+      expect(coreSwitch()).toHaveAttribute("aria-checked", "false");
+    });
+  });
+
+  describe("withCoreProfile", () => {
+    it("adds ?profile=core to a URL without a query", () => {
+      expect(withCoreProfile("http://localhost:8080/mcp/w/ws-1")).toBe(
+        "http://localhost:8080/mcp/w/ws-1?profile=core",
+      );
+    });
+
+    it("appends with & when the URL already has a query string", () => {
+      expect(withCoreProfile("http://localhost:8080/mcp?foo=1&bar=2")).toBe(
+        "http://localhost:8080/mcp?foo=1&bar=2&profile=core",
+      );
+    });
+
+    it("does not double the separator after a dangling ? or &", () => {
+      expect(withCoreProfile("http://localhost:8080/mcp?")).toBe(
+        "http://localhost:8080/mcp?profile=core",
+      );
+      expect(withCoreProfile("http://localhost:8080/mcp?foo=1&")).toBe(
+        "http://localhost:8080/mcp?foo=1&profile=core",
+      );
+    });
+
+    it("replaces an existing profile parameter instead of repeating it (idempotent)", () => {
+      expect(withCoreProfile("http://localhost:8080/mcp?profile=full")).toBe(
+        "http://localhost:8080/mcp?profile=core",
+      );
+      const once = withCoreProfile("http://localhost:8080/mcp?foo=1");
+      expect(withCoreProfile(once)).toBe(once);
+    });
+
+    it("keeps a fragment after the query", () => {
+      expect(withCoreProfile("http://localhost:8080/mcp#top")).toBe(
+        "http://localhost:8080/mcp?profile=core#top",
+      );
     });
   });
 

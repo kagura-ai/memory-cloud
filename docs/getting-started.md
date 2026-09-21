@@ -93,6 +93,15 @@ Kagura Memory Cloud supports multiple authentication methods:
 
 The Web UI MCP Setup Guide at `/workspace/integrations/credentials?tab=api-keys` renders ready-to-paste snippets for each client below. The manual snippets in this section are the source of truth — keep them in sync if you change the supported transport shape.
 
+### Which URL?
+
+Every snippet below takes one of two endpoint URLs — same server, same API key:
+
+- **All tools (default):** `http://localhost:8080/mcp/w/YOUR_WORKSPACE_ID`
+- **Core tools only — smaller tool list:** `http://localhost:8080/mcp/w/YOUR_WORKSPACE_ID?profile=core`
+
+Pick core when your client loads every tool schema at session start (it is about 65% smaller). It lists the 12 memory and context tools and leaves out Sleep, analyses, files, edges, secrets, resources and the agent control plane — those stay callable, they are just not listed; switch back to the default URL to see them. See [Tool Profiles](mcp-tools.md#tool-profiles) for the exact tool set. The snippets show the default URL; in the Web UI, the **Core tools only** switch above them writes `?profile=core` into every snippet.
+
 ### Claude Code / Claude Desktop
 
 The `create_admin` CLI automatically generates `.mcp.json`. If you need to create it manually:
@@ -111,6 +120,8 @@ The `create_admin` CLI automatically generates `.mcp.json`. If you need to creat
 }
 ```
 
+Core tools only: set `"url"` to `"http://localhost:8080/mcp/w/YOUR_WORKSPACE_ID?profile=core"` instead ([which one?](#which-url)). The generated `.mcp.json` and `.mcp.json.example` both carry the default URL.
+
 Restart Claude Code to pick up the config, then test with `remember` and `recall` tools.
 
 ### Cursor
@@ -126,6 +137,8 @@ ChatGPT → Settings → Custom Connectors → New connector
   URL: http://localhost:8080/mcp/w/YOUR_WORKSPACE_ID
   Authorization: Bearer YOUR_API_KEY
 ```
+
+Core tools only: use `http://localhost:8080/mcp/w/YOUR_WORKSPACE_ID?profile=core` as the URL instead ([which one?](#which-url)).
 
 ### Codex CLI
 
@@ -147,6 +160,8 @@ type = "http"
 url = "http://localhost:8080/mcp/w/YOUR_WORKSPACE_ID"
 bearer_token = "YOUR_API_KEY"
 ```
+
+Core tools only: set `url = "http://localhost:8080/mcp/w/YOUR_WORKSPACE_ID?profile=core"` instead ([which one?](#which-url)).
 
 Restart Codex CLI to pick up the config.
 

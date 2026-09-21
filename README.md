@@ -233,6 +233,13 @@ cp .mcp.json.example .mcp.json
 # Edit .mcp.json — set workspace_id (from URL bar) and API key
 ```
 
+`.mcp.json.example` ships with the all-tools URL. Set `"url"` to one of:
+
+- **All tools (default):** `http://localhost:8080/mcp/w/{workspace_id}`
+- **Core tools only — smaller tool list:** `http://localhost:8080/mcp/w/{workspace_id}?profile=core`
+
+Pick core when your client loads every tool schema at session start (it is about 65% smaller). It lists the 12 memory and context tools and leaves out Sleep, analyses, files, edges, secrets, resources and the agent control plane — those stay callable, they are just not listed; switch back to the default URL to see them. See [Tool Profiles](docs/mcp-tools.md#tool-profiles).
+
 3. Restart Claude Code and verify:
 
 ```
@@ -253,7 +260,7 @@ Full setup guide — every client, the memory-sync hook, the ready-to-use `.clau
 
 Tool-by-tool reference with required roles: **[MCP Tools Reference](docs/mcp-tools.md)**
 
-A client does not have to list all 63: add `?profile=core` (12 tools, about 65% smaller) or `?tools=remember,recall` to the endpoint URL — see [Tool Profiles](docs/mcp-tools.md#tool-profiles).
+A client does not have to list all 63: the core URL [above](#connect-an-mcp-client) (`?profile=core`) lists 12, and `?tools=remember,recall` lists exactly the tools you name — see [Tool Profiles](docs/mcp-tools.md#tool-profiles).
 
 ## REST API
 
