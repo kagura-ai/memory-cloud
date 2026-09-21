@@ -4,6 +4,30 @@ Release notes are published on [GitHub Releases](https://github.com/kagura-ai/me
 which is the canonical source for the complete release history. This file highlights the current
 release train and preserves selected historical development notes.
 
+## [v0.73.0](https://github.com/kagura-ai/memory-cloud/releases/tag/v0.73.0) — 2026-09-21
+
+Token economy of the MCP surface. Everything a tool returns — and the tool list itself — is paid for in the calling model's context window; this release removes the avoidable part. Several response shapes change: read **Changed** before upgrading a client that parses tool results.
+
+### Added
+- **Tool profiles** ([#1601](https://github.com/kagura-ai/memory-cloud/issues/1601)): the endpoint URL in a client's local MCP config can select which tools `tools/list` returns — `…/mcp/w/{workspace_id}?profile=core` (the 12 memory / context tools) or `?tools=remember,recall,reference` (explicit allowlist, wins over `profile`). No parameter, or `profile=full`, is byte-for-byte the previous list, on both the session-based and the stateless (2026-07-28) transports. An unknown profile, or an allowlist that matches no known tool, is a JSON-RPC `-32602` naming the valid values; unknown names inside an allowlist are ignored. The profile is a **view, not an authorization boundary**: `tools/call` never reads it and keeps its role checks. See [Tool Profiles](docs/mcp-tools.md#tool-profiles) and the per-client examples in `docs/mcp-clients.md`.
+- **`list_contexts(name_contains=…)`** ([#1600](https://github.com/kagura-ai/memory-cloud/issues/1600)): case-insensitive substring filter, applied after the permission-scoped list; plus `include_summary` (summary truncated to 300 characters, `summary_truncated` flags a cut) and `include_details` (the previous per-item shape). The envelope gains `total` (contexts in the response).
+- **`recall_upcoming(include_details=true)`** ([#1599](https://github.com/kagura-ai/memory-cloud/issues/1599)) returns the full `details` per item, as before this release.
+
+### Changed
+- **Tool results are compact UTF-8 JSON** ([#1599](https://github.com/kagura-ai/memory-cloud/issues/1599)): non-ASCII text (Japanese, for instance) arrives as-is instead of as 6-character `\uXXXX` escapes, and separators carry no spaces. Any JSON parser reads both forms identically; only a client matching raw substrings such as `"status": "success"` would notice. The JSON-RPC transport body is unchanged.
+- **`recall`** ([#1599](https://github.com/kagura-ai/memory-cloud/issues/1599)): `related_tags[]` entries are `{tag, count}` — `sample_summary` repeated, in full, a summary already present in `results[]`. Result items **omit** `context_summary`, `superseded_by`, `contradicts` and `supersede_candidate` when empty (treat an absent key as "none"), and `score` is rounded to 4 decimals. MCP surface only: REST `/memory/recall` and the web UI are unchanged.
+- **`recall_upcoming`** ([#1599](https://github.com/kagura-ai/memory-cloud/issues/1599)): default items are `{memory_id, summary, type, trigger}` (`trigger` = `details.trigger`). `get_agent_bootstrap`'s upcoming component — MCP tool and REST companion — ships the same lean row.
+- **`list_contexts` is a slim name → id directory by default** ([#1600](https://github.com/kagura-ai/memory-cloud/issues/1600)): items are `{id, name, is_private, is_locked, last_used_at}` (+ `memory_count` with `include_stats`). `summary` and `embedding_model` moved behind `include_summary` / `include_details`; for one context's full details call `get_context_info(context_id)`. Plugin skills use the new default.
+- **Tool descriptions are trimmed to a token budget** ([#1602](https://github.com/kagura-ai/memory-cloud/issues/1602)): descriptions and parameter descriptions keep what an agent needs to call a tool correctly (purpose, when to use it instead of a neighbour, parameter semantics, response keys, the security rule on writes, the supersede workflow, trusted-tier guidance); tutorials and rationale moved to the new **Usage notes** section of `docs/mcp-tools.md` and to the `guide` / `recall` / `remember` skills. Schema structure is unchanged and pinned by a skeleton snapshot test; budgets are pinned by tests.
+
+### Fixed
+- **`list_contexts` could be rejected by the client** ([#1600](https://github.com/kagura-ai/memory-cloud/issues/1600)): with a few dozen contexts the response (every summary, escaped) grew large enough for an MCP client with a tool-result limit to refuse it, which broke the first step of every plugin skill.
+- **A non-UTF-8 query string can no longer raise in the legacy session-id lookup** ([#1601](https://github.com/kagura-ai/memory-cloud/issues/1601)).
+
+### Notes
+- Measured on the fixtures pinned by the new size-guard tests: a k=5 `recall` 22,779 → 4,553 characters; `list_contexts` with 40 contexts 488,842 → 6,455; `tools/list` for all 63 tools 110,608 → 81,834 characters, and 28,254 with `?profile=core`. The `recall` fixture is mostly Japanese; for ASCII-only content the encoding change is neutral and the saving comes from the removed duplication.
+- No migration, no new environment variables, no operator action. The Claude Code / Codex plugin manifests are bumped in lockstep; update the plugin to pick up the skills written for the slim `list_contexts`.
+
 ## [v0.72.0](https://github.com/kagura-ai/memory-cloud/releases/tag/v0.72.0) — 2026-09-20
 
 Closed-beta invites after first real use: the invitee lands in the app instead of back on the login form, and the inviter can tell links apart, resend one, and read an honest count.
