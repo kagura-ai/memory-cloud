@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import json
 from types import SimpleNamespace
+from uuid import uuid4
 
 import pytest
 
@@ -338,6 +339,8 @@ async def test_tools_call_formats_the_tool_result_and_passes_session_identity(mo
 
     assert send.status == 200
     assert send.headers[b"mcp-session-id"] == b"sess-1"
+    # #1622: a success result carries no ``isError`` key at all ("if not set,
+    # this is assumed to be false").
     assert send.body == {
         "jsonrpc": "2.0",
         "id": 5,
@@ -348,6 +351,84 @@ async def test_tools_call_formats_the_tool_result_and_passes_session_identity(mo
         "arguments": {"query": "x"},
         "user_id": "user-1",
         "workspace_id": None,
+    }
+
+
+# ------------------------------------------------------ isError (#1622)
+# Tool *execution* errors are results, not JSON-RPC errors, and MCP marks
+# them with ``CallToolResult.isError``. These drive the real
+# ``execute_tool_call``: the pre-dispatch checks fail before any DB access.
+
+
+@pytest.mark.asyncio
+async def test_tools_call_error_envelope_sets_is_error_and_keeps_content():
+    from mcp_server.tools._helpers import _error_response
+
+    send = await _post(
+        {
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "tools/call",
+            "params": {"name": "recall", "arguments": {"context_id": "not-a-uuid", "query": "x"}},
+        }
+    )
+
+    assert send.status == 200
+    body = send.body
+    assert "error" not in body  # still a result, not a protocol error
+    result = body["result"]
+    assert result["isError"] is True
+    # ``content`` is byte-identical to what the helper produced before #1622:
+    # clients that only parse the envelope keep working.
+    envelope = json.loads(result["content"][0]["text"])
+    assert envelope["status"] == "error"
+    assert envelope["error"] == "invalid_context_id_format"
+    expected = _error_response("invalid_context_id_format", envelope["message"])[0].text
+    assert result["content"] == [{"type": "text", "text": expected}]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("params", "code"),
+    [
+        ({"name": "no_such_tool", "arguments": {}}, "unknown_tool"),
+        ({"name": "recall", "arguments": {"query": "x"}}, "context_id_required"),
+    ],
+)
+async def test_every_dispatch_level_envelope_is_flagged(params, code):
+    send = await _post({"jsonrpc": "2.0", "id": 2, "method": "tools/call", "params": params})
+
+    result = send.body["result"]
+    assert result["isError"] is True
+    assert json.loads(result["content"][0]["text"])["error"] == code
+
+
+@pytest.mark.asyncio
+async def test_handler_exception_caught_by_dispatch_is_flagged(monkeypatch):
+    """``execute_tool_call``'s catch-all turns a raising handler into a result;
+    that result must be flagged too, not only the ``_error_response`` ones."""
+    import mcp_server.tools as tools_mod
+
+    async def broken(args, user_id, workspace_id):
+        raise PermissionError("no access to context")
+
+    monkeypatch.setattr(
+        tools_mod, "_TOOL_REGISTRY", {**tools_mod._build_registry(), "recall": broken}
+    )
+    send = await _post(
+        {
+            "jsonrpc": "2.0",
+            "id": 3,
+            "method": "tools/call",
+            "params": {"name": "recall", "arguments": {"context_id": str(uuid4()), "query": "x"}},
+        }
+    )
+
+    result = send.body["result"]
+    assert result["isError"] is True
+    assert json.loads(result["content"][0]["text"]) == {
+        "status": "error",
+        "error": "no access to context",
     }
 
 

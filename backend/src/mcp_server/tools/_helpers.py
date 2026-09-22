@@ -155,23 +155,39 @@ def _format_validation_error(exc: Any) -> str:
     return "; ".join(parts) if parts else str(exc)
 
 
-def _error_response(error: str, message: str, **extra: Any) -> list[TextContent]:
+class ToolErrorContent(list[TextContent]):
+    """A tool result that reports a tool *execution* error (#1622).
+
+    Behaves exactly like the ``list[TextContent]`` every handler returns —
+    same items, same equality, same iteration — but carries ``is_error`` so the
+    transports can set ``CallToolResult.isError`` without parsing the envelope.
+    Handlers return the helper's list unchanged (directly, in a tuple, or via a
+    thin wrapper), so the marker survives to the transport; the envelope-guard
+    test in ``test_error_envelopes.py`` keeps hand-built envelopes out.
+    """
+
+    is_error: bool = True
+
+
+def _error_response(error: str, message: str | None = None, **extra: Any) -> ToolErrorContent:
     """Create a standardized error response.
 
     Args:
         error: Error code
-        message: Human-readable error message
+        message: Human-readable error message. Only the dispatch catch-alls
+            omit it (their ``{"status": "error", "error": str(e)}`` shape
+            predates the helper and is frozen); new callers always pass one.
         **extra: Additional fields to include in response
 
     Returns:
-        List with single TextContent error response
+        List with single TextContent error response, marked ``is_error``
+        so the transport flags the ``tools/call`` result with ``isError``.
     """
-    return [
-        TextContent(
-            type="text",
-            text=_dumps({"status": "error", "error": error, "message": message, **extra}),
-        )
-    ]
+    payload: dict[str, Any] = {"status": "error", "error": error}
+    if message is not None:
+        payload["message"] = message
+    payload.update(extra)
+    return ToolErrorContent([TextContent(type="text", text=_dumps(payload))])
 
 
 def _context_response_fields(context: Any) -> dict[str, Any]:
