@@ -81,24 +81,19 @@ def _index_is_invalid(name: str) -> bool:
     return row is not None
 
 
-def _swap_mae_check(check: str) -> None:
-    """Replace ``valid_mae_operation`` atomically, then validate it separately.
-
-    DROP + ADD are one ALTER so there is no window without an operation CHECK;
-    VALIDATE runs under SHARE UPDATE EXCLUSIVE so audit writes continue.
-    """
+def upgrade() -> None:
+    # CHECK swap first (transactional). DROP + ADD are one ALTER so there is no
+    # window without an operation CHECK; VALIDATE runs under SHARE UPDATE
+    # EXCLUSIVE so audit writes continue. Written inline (the e74 form) so the
+    # schema-drift test can read the literal out of the f-string.
     op.execute(
         sa.text(
             "ALTER TABLE memory_access_events "
             "DROP CONSTRAINT IF EXISTS valid_mae_operation, "
-            f"ADD CONSTRAINT valid_mae_operation CHECK ({check}) NOT VALID"
+            f"ADD CONSTRAINT valid_mae_operation CHECK ({_NEW_CHECK}) NOT VALID"
         )
     )
     op.execute(sa.text("ALTER TABLE memory_access_events VALIDATE CONSTRAINT valid_mae_operation"))
-
-
-def upgrade() -> None:
-    _swap_mae_check(_NEW_CHECK)
     # Index must be built CONCURRENTLY (no table lock) → outside the transaction.
     invalid = _index_is_invalid(_INDEX_NAME)
     with op.get_context().autocommit_block():
@@ -116,4 +111,11 @@ def downgrade() -> None:
     """
     with op.get_context().autocommit_block():
         op.execute(sa.text(f"DROP INDEX CONCURRENTLY IF EXISTS {_INDEX_NAME}"))
-    _swap_mae_check(_OLD_CHECK)
+    op.execute(
+        sa.text(
+            "ALTER TABLE memory_access_events "
+            "DROP CONSTRAINT IF EXISTS valid_mae_operation, "
+            f"ADD CONSTRAINT valid_mae_operation CHECK ({_OLD_CHECK}) NOT VALID"
+        )
+    )
+    op.execute(sa.text("ALTER TABLE memory_access_events VALIDATE CONSTRAINT valid_mae_operation"))

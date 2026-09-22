@@ -1667,7 +1667,9 @@ class MemoryService:
         # than letting the inner forget() skip the old row silently and report
         # "replaced" with two live rows. The inner remember() gates a NEW
         # marking on its own.
-        if existing is not None and existing.is_tool_triggered:
+        if existing is not None and self._touches_tool_trigger(
+            existing.details, None, details_supplied=False
+        ):
             await self._require_guardrail_author(user_id, existing.context_id)
 
         # #1519: forward the caller's pin — without it a pinned external_id row
