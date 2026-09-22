@@ -62,6 +62,23 @@ _TRIGGERING_PAYLOADS: dict[str, str] = {
 }
 
 
+# Command shapes the PR reminder must fire on. The heredoc form is the usual
+# one: encoded, its newlines are ``\\n`` escapes, which dash's ``echo`` (``sh``
+# on Debian-family hosts) turns back into raw newlines, corrupting the payload
+# before jq reads it. The hook therefore reads stdin directly, never via echo.
+_REMINDER_PAYLOADS: dict[str, str] = {
+    "gh pr create": _TRIGGERING_PAYLOADS["gh pr create"],
+    "gh pr create heredoc": _payload(
+        "Bash",
+        command=(
+            "git push -u origin HEAD\n"
+            'gh pr create --title "x" --body "$(cat <<\'EOF\'\n'
+            "## Summary\n\t- one\n\\ two\nEOF\n)"
+        ),
+    ),
+}
+
+
 def _pre_tool_use_hooks() -> list[tuple[str, str]]:
     """Return ``(matcher, command)`` for every command hook under ``hooks.PreToolUse``."""
     settings = json.loads(_SETTINGS.read_text(encoding="utf-8"))
@@ -124,9 +141,10 @@ def _channel_violation(result: subprocess.CompletedProcess[str]) -> str | None:
 # ---------------------------------------------------------------------------
 
 
-def test_pr_reminder_emits_additional_context_json(tmp_path: Path) -> None:
+@pytest.mark.parametrize("sample", sorted(_REMINDER_PAYLOADS))
+def test_pr_reminder_emits_additional_context_json(sample: str, tmp_path: Path) -> None:
     """``gh pr create`` yields exit 0, silent stderr and one PreToolUse JSON object."""
-    result = _run_hook(_bash_hook_command(), _TRIGGERING_PAYLOADS["gh pr create"], tmp_path)
+    result = _run_hook(_bash_hook_command(), _REMINDER_PAYLOADS[sample], tmp_path)
 
     assert result.returncode == 0
     assert result.stderr == "", f"reminder leaked to stderr: {result.stderr!r}"
