@@ -120,8 +120,10 @@ export function SearchSettingsSection({
   const [selfHostedAvailable, setSelfHostedAvailable] = useState(false);
   const { toast } = useToast();
   const { currentWorkspace } = useWorkspace();
-  // Issue #1167: the /external-keys API 404s when BYOK is off, and the
-  // "configure reranker keys" CTA would point at a disabled page — gate both.
+  // Issue #1167: with BYOK off no new key can be added, so the "configure
+  // reranker keys" CTA would point at a page without an Add button — skip the
+  // key probe and the CTA. (The list route itself still answers for the owner;
+  // this component simply has no use for the answer then.)
   const systemFeatures = useSystemFeatures();
   const byokEnabled = systemFeatures?.byok === true;
   // #1572: the deployment default new contexts get, and whether the deployment
@@ -150,7 +152,7 @@ export function SearchSettingsSection({
       setExternalKeys(keys.filter((k) => k.enabled));
       setExternalKeysLoaded(true);
     } catch {
-      // 403 (non-owner) / 404 (BYOK off) / network — key presence stays unknown.
+      // 403 (non-owner) / network — key presence stays unknown.
       setExternalKeys([]);
       setExternalKeysLoaded(false);
     }
@@ -308,8 +310,8 @@ export function SearchSettingsSection({
   );
   // Issue #1167 / v0.42 review #0: we can only assert a voyage/cohere provider
   // is "unavailable" when the external-keys list actually loaded. It does NOT
-  // load when BYOK is off (API 404s) OR for a non-owner editing this config
-  // (GET /external-keys is owner-only → 403) — in both cases the backend may
+  // load when BYOK is off (we skip the probe) OR for a non-owner editing this
+  // config (GET /external-keys is owner-only → 403) — in both cases the backend may
   // still resolve a stored key, so treating the provider as unavailable would
   // wrongly disable Save (and the "turn rerank off" control). self_hosted
   // availability is independent (telemetry-derived).
@@ -542,8 +544,8 @@ export function SearchSettingsSection({
               )}
 
               {/* #1167: only offer the configure-keys CTA when BYOK is on —
-                  with BYOK off the external-keys page is disabled, so show the
-                  headline without a dangling link. */}
+                  with BYOK off the external-keys page cannot add a key, so
+                  show the headline without a dangling link. */}
               {!isFree && !hasAnyRerankerAvailable && (
                 <Alert>
                   <AlertCircle className="h-4 w-4" />

@@ -1,17 +1,20 @@
 "use client";
 
 /**
- * useWorkspaceObjectPresence (#1571)
+ * useWorkspaceObjectPresence (#1571, #1616)
  *
- * "Does the current workspace already own at least one resource / connector?"
- * — the fallback the sidebar needs for a plan-gated nav entry. Since #1551 a
- * plan without `resources` / `connectors` refuses NEW ones, but objects
- * created before a downgrade keep working, so their entry must stay reachable.
+ * "Does the current workspace already own at least one resource / connector /
+ * external key?" — the fallback the sidebar needs for a gated nav entry.
+ * Since #1551 a plan without `resources` / `connectors` refuses NEW ones, but
+ * objects created before a downgrade keep working, so their entry must stay
+ * reachable. #1616: the same for external keys stored before ENABLE_BYOK was
+ * turned off — the page stays the owner's management console for them.
  *
- * Probes only while `enabled` (the caller passes "the plan says no AND my role
- * may list") — an included plan never pays the extra request. Answers are
- * module-cached per workspace + kind for the session: the count cannot grow
- * while the plan refuses creation, and a plan upgrade flips the gate itself.
+ * Probes only while `enabled` (the caller passes "the gate says no AND my role
+ * may list") — an included plan or a BYOK-on deployment never pays the extra
+ * request. Answers are module-cached per workspace + kind for the session:
+ * the count cannot grow while creation is refused, and flipping the gate
+ * itself (plan upgrade, flag on) bypasses the fallback.
  *
  * Tri-state like `usePlanFeature`: `true` / `false` once known, `null` while
  * resolving or disabled. A failed probe also reads `null` (the entry stays
@@ -22,13 +25,16 @@
 import { useEffect, useState } from "react";
 import { listResources } from "@/lib/api/resources";
 import { listConnectors } from "@/lib/api/workspace-connectors";
+import { listExternalAPIKeys } from "@/lib/api/external-keys";
 
-/** The plan-gated object kinds the sidebar has a nav entry for. */
-export type WorkspaceObjectKind = "resources" | "connectors";
+/** The gated object kinds the sidebar has a nav entry for. */
+export type WorkspaceObjectKind = "resources" | "connectors" | "externalKeys";
 
 const PROBES: Record<WorkspaceObjectKind, () => Promise<boolean>> = {
   resources: async () => (await listResources()).total > 0,
   connectors: async () => (await listConnectors()).length > 0,
+  // Owner-only route (#381); the caller gates `enabled` on the role.
+  externalKeys: async () => (await listExternalAPIKeys()).length > 0,
 };
 
 const cache = new Map<string, boolean>();

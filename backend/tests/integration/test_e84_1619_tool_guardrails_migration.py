@@ -10,7 +10,18 @@ index) and the e74 CHECK-swap precedent:
    ``'load_guardrails'``;
 2. downgrade drops the index and restores the previous CHECK;
 3. re-running the upgrade is a no-op (``IF NOT EXISTS`` + the invalid-leftover
-   guard), so a mid-build failure is recoverable by re-running.
+   guard), so a mid-build failure is recoverable by re-running;
+4. a downgrade with ``operation='load_guardrails'`` audit rows present keeps
+   the rows (append-only table) and leaves the restored CHECK ``NOT VALID``;
+   the next upgrade validates it again.
+
+The audit row written for step 4 is left in place: deleting it is exactly what
+the e66 append-only trigger forbids, and the ``DISABLE TRIGGER USER`` bypass the
+``db_session`` e2e tests use is not needed here — every migration test starts
+from ``_reset_alembic_state()`` (``DROP SCHEMA public CASCADE``), so the row is
+gone before the next run reaches the rows-absent path (asserted explicitly
+below), its ``user_id`` is unique per run, and no other test reads the table
+unfiltered.
 
 Not executed in the local unit run — needs the DB container.
 """
@@ -18,6 +29,7 @@ Not executed in the local unit run — needs the DB container.
 from __future__ import annotations
 
 import importlib.util
+import uuid
 from pathlib import Path
 from types import ModuleType
 
@@ -81,9 +93,42 @@ def _mae_check(conn: Connection) -> str:
     ).scalar_one()
 
 
+def _mae_check_validated(conn: Connection) -> bool:
+    return conn.execute(
+        text("SELECT convalidated FROM pg_constraint WHERE conname = 'valid_mae_operation'")
+    ).scalar_one()
+
+
+def _insert_load_guardrails_audit_row(conn: Connection, user_id: str) -> None:
+    """One minimal ``memory_access_events`` row for the new operation — every
+    NOT NULL column and every CHECK vocabulary satisfied, nothing else."""
+    conn.execute(
+        text(
+            "INSERT INTO memory_access_events "
+            "(workspace_id, user_id, principal_type, surface, operation, outcome) "
+            "VALUES (:ws, :uid, 'oauth', 'mcp', 'load_guardrails', 'success')"
+        ),
+        {"ws": str(uuid.uuid4()), "uid": user_id},
+    )
+    conn.commit()
+
+
+def _count_audit_rows(conn: Connection, user_id: str) -> int:
+    return conn.execute(
+        text("SELECT count(*) FROM memory_access_events WHERE user_id = :uid"), {"uid": user_id}
+    ).scalar_one()
+
+
+def _count_load_guardrails_rows(conn: Connection) -> int:
+    return conn.execute(
+        text("SELECT count(*) FROM memory_access_events WHERE operation = 'load_guardrails'")
+    ).scalar_one()
+
+
 def test_e84_round_trip_index_and_check() -> None:
     _reset_alembic_state()
     engine = _sync_engine()
+    audit_user = f"e84-migration-test-{uuid.uuid4().hex[:8]}"
     try:
         with _alembic_at_test_db():
             command.upgrade(_get_alembic_config(), PRIOR_HEAD)
@@ -118,12 +163,18 @@ def test_e84_round_trip_index_and_check() -> None:
         # Re-running the upgrade path is a no-op (IF NOT EXISTS + the
         # invalid-leftover guard): simulate by downgrading only the alembic
         # pointer is not possible, so downgrade + upgrade twice instead.
+        with engine.connect() as conn:
+            # Precondition for the rows-absent path: the schema was rebuilt by
+            # _reset_alembic_state(), so a previous run's audit row is gone.
+            assert _count_load_guardrails_rows(conn) == 0, "stale load_guardrails audit rows"
         with _alembic_at_test_db():
             command.downgrade(_get_alembic_config(), PRIOR_HEAD)
         with engine.connect() as conn:
             assert _index_def(conn) is None, "index should be dropped on downgrade"
             assert "load_guardrails" not in _mae_check(conn)
             assert "'explore'" in _mae_check(conn)
+            # No load_guardrails rows: the restored CHECK is fully validated.
+            assert _mae_check_validated(conn) is True
 
         with _alembic_at_test_db():
             command.upgrade(_get_alembic_config(), E84_REVISION)
@@ -131,9 +182,33 @@ def test_e84_round_trip_index_and_check() -> None:
             assert _index_def(conn) is not None
             assert _index_is_valid(conn) is True
             assert "'load_guardrails'" in _mae_check(conn)
+            assert _mae_check_validated(conn) is True
+
+        # Audit rows for the new operation survive a downgrade: the table is
+        # append-only, so the restored CHECK is left NOT VALID instead of the
+        # operator being told to delete them. New writes are still checked.
+        with engine.connect() as conn:
+            _insert_load_guardrails_audit_row(conn, audit_user)
+        with _alembic_at_test_db():
+            command.downgrade(_get_alembic_config(), PRIOR_HEAD)
+        with engine.connect() as conn:
+            assert _count_audit_rows(conn, audit_user) == 1, "downgrade must keep audit rows"
+            assert "load_guardrails" not in _mae_check(conn)
+            assert _mae_check_validated(conn) is False
+
+        with _alembic_at_test_db():
+            command.upgrade(_get_alembic_config(), E84_REVISION)
+        with engine.connect() as conn:
+            assert _count_audit_rows(conn, audit_user) == 1
+            assert "'load_guardrails'" in _mae_check(conn)
+            assert _mae_check_validated(conn) is True  # the wider CHECK validates again
     finally:
-        engine.dispose()
-        _leave_db_at_head()
+        # The audit row stays (append-only — see the module docstring); the
+        # next run's _reset_alembic_state() drops the schema with it.
+        try:
+            _leave_db_at_head()
+        finally:
+            engine.dispose()
 
 
 def test_e84_index_predicate_matches_the_orm_declaration() -> None:

@@ -170,6 +170,42 @@ def test_pinned_no_pass_still_mentions_exemption(no_pass):
     assert "stays pinned" in info.detail
 
 
+@pytest.mark.parametrize("scope", ["persistent", "working"])
+def test_guardrail_write_reports_the_maintenance_exemption(sleep_pass, scope):
+    """A tool guardrail (details.tool_trigger) is excluded from dedup,
+    consolidation archive and importance re-evaluation like a pinned row, so the
+    generic "merge still applies" caveat would be false for it."""
+    info = persistence_info(scope, tool_triggered=True)
+    assert info is not None
+    assert "details.tool_trigger" in info.detail
+    assert "near-duplicate merge" in info.detail
+    assert "leaves its importance alone" in info.detail
+    assert "still apply" not in info.detail
+    assert "only an explicit" not in info.detail
+    assert "pinned" not in info.detail  # it is not pinned; do not claim so
+    assert "demotes" not in info.detail  # rollback may still demote a promoted guardrail
+
+
+def test_pinned_guardrail_names_both_holds(sleep_pass):
+    info = persistence_info("persistent", pinned=True, tool_triggered=True)
+    assert info is not None
+    assert "stays pinned" in info.detail
+    assert "details.tool_trigger" in info.detail
+    assert "never demotes it" in info.detail
+
+
+def test_guardrail_no_pass_still_mentions_exemption(no_pass):
+    info = persistence_info("working", tool_triggered=True)
+    assert info is not None
+    assert "details.tool_trigger" in info.detail
+
+
+def test_unmarked_write_does_not_mention_guardrails(sleep_pass):
+    info = persistence_info("working")
+    assert info is not None
+    assert "tool_trigger" not in info.detail
+
+
 def test_unknown_scope_is_omitted_rather_than_raised():
     """Advisory field: an unexpected scope must not fail an already-committed write."""
     assert persistence_info("archived") is None
@@ -290,27 +326,27 @@ def test_dedup_merge_still_has_no_age_or_adoption_gate():
     assert _calls_not_pinned_predicate(fn)
 
 
-def _is_not_pinned_call(node: ast.AST) -> bool:
-    return (
-        isinstance(node, ast.Call)
-        and isinstance(node.func, ast.Name)
-        and node.func.id == "not_pinned_predicate"
-    )
+def _is_predicate_call(node: ast.AST, name: str) -> bool:
+    return isinstance(node, ast.Call) and isinstance(node.func, ast.Name) and node.func.id == name
 
 
-def _calls_not_pinned_predicate(fn: ast.AST) -> bool:
-    """True when ``not_pinned_predicate()`` is an ARGUMENT of some call in ``fn`` —
-    a ``.where(...)`` clause or an ``only_if=`` keyword — never a stray statement
+def _calls_predicate(fn: ast.AST, name: str) -> bool:
+    """True when ``<name>()`` is an ARGUMENT of some call in ``fn`` — a
+    ``.where(...)`` clause or an ``only_if=`` keyword — never a stray statement
     or an unused local, which would leave the query unguarded while the name is
     still present in the body."""
     for node in ast.walk(fn):
         if not isinstance(node, ast.Call):
             continue
-        if any(_is_not_pinned_call(arg) for arg in node.args):
+        if any(_is_predicate_call(arg, name) for arg in node.args):
             return True
-        if any(_is_not_pinned_call(kw.value) for kw in node.keywords):
+        if any(_is_predicate_call(kw.value, name) for kw in node.keywords):
             return True
     return False
+
+
+def _calls_not_pinned_predicate(fn: ast.AST) -> bool:
+    return _calls_predicate(fn, "not_pinned_predicate")
 
 
 def _async_fn(module, name: str) -> ast.AsyncFunctionDef:
@@ -350,6 +386,38 @@ def test_every_automated_deleter_uses_the_shared_pinned_exemption(module_name, f
         f"{module_name}.{fn_name} no longer passes not_pinned_predicate() into its "
         "query; either the pinned promise in services/persistence.py is now false, or "
         "the exemption was re-spelled inline — use the shared predicate"
+    )
+
+
+@pytest.mark.parametrize(
+    ("module_name", "fn_name"),
+    [
+        # candidate fetches (read side)
+        ("services.sleep.dedup_merge", "_fetch_active_memories"),
+        ("services.sleep.consolidation", "_fetch_working_memories"),
+        ("services.sleep.importance_reeval", "_fetch_candidates"),
+        # writes that follow an unlocked fetch (a marking can land in between)
+        ("services.sleep.consolidation", "_archive_tombstone"),
+        ("services.sleep.importance_reeval", "execute"),
+        # rollback write — a guardrail keeps the importance its author set.
+        # (_undo_promote is deliberately absent: a guardrail is not scope-bound
+        # and consolidation's archive already excludes it, so a demote is
+        # harmless to the lane.)
+        ("mcp_server.tools.sleep", "_undo_update_importance"),
+    ],
+)
+def test_every_automated_deleter_uses_the_shared_tool_trigger_exemption(module_name, fn_name):
+    """``persistence_info(tool_triggered=True)`` promises that Sleep maintenance
+    does not select, archive or re-score a tool guardrail, and that rollback
+    leaves its importance alone. Pin the set of queries carrying
+    ``not_tool_triggered_predicate()`` exactly as the pinned twin above does."""
+    import importlib
+
+    module = importlib.import_module(module_name)
+    assert _calls_predicate(_async_fn(module, fn_name), "not_tool_triggered_predicate"), (
+        f"{module_name}.{fn_name} no longer passes not_tool_triggered_predicate() into "
+        "its query; either the guardrail promise in services/persistence.py is now "
+        "false, or the exemption was re-spelled inline — use the shared predicate"
     )
 
 
