@@ -30,10 +30,13 @@ compose_files() {
 }
 
 # Print "file<TAB>line<TAB>entry" for every item of every `ports:` block.
-# An item may sit deeper than the key or, as YAML allows, at the same indent;
-# a flow-style `ports: ["a:b", "c:d"]` is split on commas. Each entry is
-# normalised so the classifier sees the bare value: leading indent and the
-# `- ` bullet, a trailing ` # comment`, and either quote style are removed.
+# An item may sit deeper than the key or, as YAML allows, at the same indent.
+# A flow-style `ports: [...]` is followed from the opening bracket to the first
+# unquoted `]` — on the same line or any number of lines later — and split on
+# unquoted commas, so a `]` inside a quoted "[::]:P:P" does not end the list.
+# Each entry is normalised so the classifier sees the bare value: leading
+# indent and the `- ` bullet, a trailing ` # comment`, and either quote style
+# are removed.
 ports_entries() {
     awk '
         function indent(s) { match(s, /^[ ]*/); return RLENGTH }
@@ -42,13 +45,29 @@ ports_entries() {
             sub(/[ ]*$/, "", s); gsub(/["\x27]/, "", s)
             if (s != "") printf "%s\t%d\t%s\n", FILENAME, FNR, s
         }
-        FNR == 1 { inports = 0 }
+        # Emit the items of one line of a flow list; 1 when its `]` was seen.
+        function flow(s,    i, c, q, buf) {
+            q = ""; buf = ""
+            for (i = 1; i <= length(s); i++) {
+                c = substr(s, i, 1)
+                if (q != "")             { buf = buf c; if (c == q) q = ""; continue }
+                if (c == "\"" || c == "\x27") { buf = buf c; q = c; continue }
+                if (c == "#")            break
+                if (c == ",")            { emit(buf); buf = ""; continue }
+                if (c == "]")            { emit(buf); return 1 }
+                buf = buf c
+            }
+            emit(buf)
+            return 0
+        }
+        FNR == 1 { inports = 0; inflow = 0 }
         /^[ ]*#/ || /^[ ]*$/ { next }
+        inflow { if (flow($0)) inflow = 0; next }
         inports && (indent($0) < pindent || (indent($0) == pindent && $0 !~ /^[ ]*-/)) { inports = 0 }
         inports { emit($0); next }
         /^[ ]*ports:[ ]*\[/ {
-            flow = $0; sub(/^[ ]*ports:[ ]*\[/, "", flow); sub(/\][ ]*(#.*)?$/, "", flow)
-            n = split(flow, items, ","); for (i = 1; i <= n; i++) emit(items[i])
+            rest = $0; sub(/^[ ]*ports:[ ]*\[/, "", rest)
+            inflow = !flow(rest)
             next
         }
         /^[ ]*ports:[ ]*$/ { inports = 1; pindent = indent($0) }
@@ -148,13 +167,20 @@ services:
       - '5432:5432'
   qdrant:
     ports: ["6333:6333", "0.0.0.0:6334:6334"]
+  redis:
+    ports: [
+      "0.0.0.0:6379:6379"
+    ]
+  minio:
+    ports: [ "[::]:9000:9000",   # the quoted `]` must not end the list
+      "9001:9001", ]
   api:
     ports:
       - "8080:8080"
 YAML
     run scan "$fixture"
     [ "$status" -ne 0 ]
-    [ "$(printf '%s\n' "$output" | grep -c '^BAD')" -eq 12 ]
+    [ "$(printf '%s\n' "$output" | grep -c '^BAD')" -eq 15 ]
     [ "$(printf '%s\n' "$output" | grep -c '^OK')" -eq 0 ]
     [[ "$output" != *"8080"* ]]                           # non-data ports are not the guard's business
 }
@@ -170,10 +196,18 @@ services:
     - "${COMPOSE_BIND_HOST:-127.0.0.1}:6379:6379"
     - "${DATA_BIND_ADDR:?DATA_BIND_ADDR must be set to the data VM private IP}:6333:6333"
     - "192.168.10.20:9000:9000/tcp"
+  qdrant:
+    ports: [
+      "127.0.0.1:6334:6334",
+      "[::1]:9001:9001"
+    ]
+  api:
+    ports: ["8080:8080"]
 YAML
     run scan "$fixture"
     [ "$status" -eq 0 ]
-    [ "$(printf '%s\n' "$output" | grep -c '^OK')" -eq 5 ]
+    [ "$(printf '%s\n' "$output" | grep -c '^OK')" -eq 7 ]
+    [[ "$output" != *"8080"* ]]
 }
 
 # ---------------------------------------------------------------------------
