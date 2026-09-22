@@ -7,7 +7,7 @@
 - [Getting Started](getting-started.md) — Installation, setup, and first steps
 - [Core Concepts](concepts.md) — Workspace, Context, Memory, Neural Memory, MCP Tools
 - [MCP Client Setup](mcp-clients.md) — Claude Code / Desktop / Chat, ChatGPT, Gemini CLI, plugin & templates, WSL2 note
-- [MCP Tools Reference](mcp-tools.md) — All 63 tools with required roles
+- [MCP Tools Reference](mcp-tools.md) — All 64 tools with required roles
 
 ## Architecture & API
 

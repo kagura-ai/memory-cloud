@@ -275,10 +275,12 @@ Kagura is a **knowledge store** for humans *and* an **agent memory substrate** f
 |---|---|---|---|
 | `on_recall` (default) | Probabilistically, via Hybrid Search | `recall()` | Ordinary knowledge |
 | `always` | **Deterministically, every turn** | `load_pinned()` | An agent's Goal / Guardrail / critical policy |
-| `on_trigger` | Inside a scheduled time window | `recall_upcoming()` | Deadlines, dated follow-ups (Time Memories, `type="time"`) |
+| `on_trigger` | Reserved. Time Memories are keyed on `type="time"`, not on this value — the write path never sets it | `recall_upcoming()` (by type) | Deadlines, dated follow-ups (Time Memories, `type="time"`) |
+| *(any)* + `details.tool_trigger` | **At the matching tool call**, by a client-side hook | `load_guardrails()` (hooks cache it) | Tool guardrails — the lesson about one specific tool call |
 
 - **`always` (pinned)** — `load_pinned()` returns the *complete, unranked* always-load set every call — the deterministic counterpart to probabilistic `recall()`. Pin with `remember(delivery_mode="always")` (or `update_memory(...)`); pinning also forces `scope="persistent"` so there is no sleep-consolidation wait. Unpin with `update_memory(delivery_mode="on_recall")`.
-- **`on_trigger` (time)** — a Time Memory (`type="time"`, `details.trigger={year, month, day?}`) surfaces via `recall_upcoming()` when its window is upcoming. This is a deterministic time query, not semantic search.
+- **Time Memories** — a Time Memory (`type="time"`, `details.trigger={year, month, day?}`) surfaces via `recall_upcoming()` when its window is upcoming. This is a deterministic time query keyed on the type, not semantic search; `delivery_mode="on_trigger"` is accepted by the schema but nothing reads it.
+- **Tool guardrails** — orthogonal to `type` and `delivery_mode`: any memory can carry `details.tool_trigger = {tool, on?, match?, action?}` (server-validated: a safe regex subset, patterns compiled once and never run on the server). `load_guardrails(context_id)` returns the trusted-tier pinned set plus every marked memory, each lane deterministic and capped on its own; client hooks cache that result and inject the matching summary at the tool call. Authoring needs context editor or above. Contract and cache format: [MCP Tools › Tool guardrails](mcp-tools.md#tool-guardrails).
 - **WHERE axis (location)** — orthogonal to both `type` and `delivery_mode`: any memory can carry `details.location = {lat, lon, label?, text?}` (server-validated; `lat`/`lon` must be JSON numbers, not strings). `recall_nearby(context_id, lat, lon, radius_m=1000)` lists memories near a point, nearest first with `distance_m` — the deterministic spatial twin of `recall_upcoming()`. Coordinates belong ONLY in `details.location` (never in `context`, which is replicated into the search-index payload store), and `details` is replaced wholesale on update — resend `location` when updating details or it is dropped.
 
 ### 2. Trust tier — provenance & behaviour-influencing reads
@@ -289,7 +291,7 @@ Not all memories are equally trustworthy as *instructions*. Connector-ingested c
 - **`Context.trust_tier`** — `trusted` (default) or `external`. Connector-fed contexts are marked `external`.
 - **Trust filter** — pass `recall(filters={"trust_tier": "trusted"})` for any **behaviour-influencing read** (one whose results are fed back to the model as context/instructions). It excludes memories from `external`-tier contexts **and** any `source_type="connector"` memory (defence-in-depth). Default recall returns everything; the filter is opt-in and protective on connector-mixed workspaces, a no-op on manual-only ones.
 
-The session-start bootstrap recalls use `trust_tier: "trusted"` for exactly this reason.
+The session-start bootstrap recalls use `trust_tier: "trusted"` for exactly this reason. `load_guardrails` applies the same gate unconditionally — there is no parameter to turn it off.
 
 ### 3. Agent state lane — scratchpad, never recalled
 
@@ -323,12 +325,12 @@ The v0.49.0 milestone shipped the registry, context-level bindings, agent-bound 
 
 ## MCP Tools
 
-Kagura Memory Cloud exposes 63 tools via the [Model Context Protocol (MCP)](https://modelcontextprotocol.io/), grouped into 13 categories:
+Kagura Memory Cloud exposes 64 tools via the [Model Context Protocol (MCP)](https://modelcontextprotocol.io/), grouped into 13 categories:
 
 | Category | Tools | Purpose |
 |----------|-------|---------|
 | Memory | 7 | `remember`, `recall`, `recall_nearby`, `reference`, `update_memory`, `forget`, `explore` — store / search / discover memories |
-| Agent Substrate | 7 | `load_pinned`, `recall_upcoming`, `set_state`, `get_state`, `record_measurement`, `recall_series`, `feedback` — delivery-mode-aware retrieval, agent state lane, measurement series, feedback signal (see [Agent Memory Substrate](#agent-memory-substrate)) |
+| Agent Substrate | 8 | `load_pinned`, `load_guardrails`, `recall_upcoming`, `set_state`, `get_state`, `record_measurement`, `recall_series`, `feedback` — delivery-mode-aware retrieval, agent state lane, measurement series, feedback signal (see [Agent Memory Substrate](#agent-memory-substrate)) |
 | Agent Control Plane (preview) | 10 | `register_agent`, `list_agents`, `get_agent`, `update_agent`, `delete_agent`, `bind_agent_context`, `list_agent_bindings`, `update_agent_binding`, `unbind_agent_context`, `get_agent_bootstrap` — registry, subtractive scoping, and session bootstrap |
 | Neural Edges | 4 | `list_edges`, `create_edge`, `update_edge`, `delete_edge` — manage the Hebbian graph manually |
 | Contexts | 7 | `get_context_info`, `list_contexts`, `create_context`, `update_context`, `delete_context`, `merge_contexts`, `update_search_config` |

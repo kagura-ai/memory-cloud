@@ -62,7 +62,7 @@ Most AI memory tools are just vector databases with a chat wrapper. Kagura is di
 | **Neural Memory Graph** | Hebbian learning builds a knowledge graph in the background. `explore()` traverses it for serendipitous discovery. |
 | **Agent Memory Substrate** | Beyond a knowledge store: delivery modes (pinned / time-triggered), a server-stamped trust boundary, an agent state lane, and a retrieval-feedback signal — the primitives an autonomous agent loop needs. |
 | **Agent Control Plane (preview)** | Workspace-scoped Agent Registry, subtractive context bindings, agent-bound member keys, lifecycle kill switches, and one-call session bootstrap. Introduced in v0.49.0. |
-| **63 MCP Tools** | Memory, Agent Substrate, Agent Control Plane, Neural edges, Contexts, Tags, Files (R2), Analyses (Memory Analysis), Resources, Secrets, Sleep Maintenance, Usage, API-Key Bindings |
+| **64 MCP Tools** | Memory, Agent Substrate, Agent Control Plane, Neural edges, Contexts, Tags, Files (R2), Analyses (Memory Analysis), Resources, Secrets, Sleep Maintenance, Usage, API-Key Bindings |
 | **Multi-Provider** | OpenAI or self-hosted (Ollama, vLLM — local, private, zero cost) for embeddings |
 | **Team Ready** | Workspaces, RBAC, context isolation, shared memory |
 | **Web UI** | Next.js dashboard — contexts, search settings, member management |
@@ -256,11 +256,11 @@ Full setup guide — every client, the memory-sync hook, the ready-to-use `.clau
 
 ## MCP Tools
 
-**63 tools across 13 categories**: Memory (`remember` / `recall` / `explore` …), Agent Substrate (pinned + time-triggered delivery, state, measurements, feedback), Agent Control Plane (preview), Neural Edges, Contexts, Tags, Files (R2), Analyses (Memory Analysis), Resources, Secrets (zero-knowledge), Sleep Maintenance, Usage, and API-Key Bindings — each with per-role access control.
+**64 tools across 13 categories**: Memory (`remember` / `recall` / `explore` …), Agent Substrate (pinned + time-triggered delivery, state, measurements, feedback), Agent Control Plane (preview), Neural Edges, Contexts, Tags, Files (R2), Analyses (Memory Analysis), Resources, Secrets (zero-knowledge), Sleep Maintenance, Usage, and API-Key Bindings — each with per-role access control.
 
 Tool-by-tool reference with required roles: **[MCP Tools Reference](docs/mcp-tools.md)**
 
-A client does not have to list all 63: the core URL [above](#connect-an-mcp-client) (`?profile=core`) lists 12, and `?tools=remember,recall` lists exactly the tools you name — see [Tool Profiles](docs/mcp-tools.md#tool-profiles).
+A client does not have to list all 64: the core URL [above](#connect-an-mcp-client) (`?profile=core`) lists 12, and `?tools=remember,recall` lists exactly the tools you name — see [Tool Profiles](docs/mcp-tools.md#tool-profiles).
 
 ## REST API
 
@@ -306,7 +306,7 @@ This project is designed to be developed **with** Claude Code and Kagura Memory 
 
 - [Core Concepts](docs/concepts.md) — Workspace, Context, Memory, Neural Memory, MCP Tools
 - [MCP Client Setup](docs/mcp-clients.md) — Claude Code / Desktop / Chat, ChatGPT, Gemini CLI, plugin & templates
-- [MCP Tools Reference](docs/mcp-tools.md) — All 63 tools with required roles
+- [MCP Tools Reference](docs/mcp-tools.md) — All 64 tools with required roles
 - [Architecture](docs/architecture.md) — System design and data flow
 - [Getting Started](docs/getting-started.md) — Detailed setup guide
 - [Chunking Guide](docs/chunking-guide.md) — Best practices for memory storage

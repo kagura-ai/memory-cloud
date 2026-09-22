@@ -62,7 +62,7 @@
 | **Neural Memory Graph** | Hebbian 学習がバックグラウンドで知識グラフを構築。`explore()` がそれを辿り偶発的発見を提供 |
 | **Agent Memory Substrate** | 単なる知識ストアを超えて — delivery mode (pin / 時刻トリガ)、サーバー署名の trust boundary、agent state レーン、retrieval feedback シグナル。自律エージェントのループに必要なプリミティブ群 |
 | **Agent Control Plane (preview)** | Workspace スコープの Agent Registry、減算的な context binding、agent-bound member key、ライフサイクル kill switch、1 呼出の session bootstrap。v0.49.0 で導入 |
-| **63 の MCP ツール** | Memory、Agent Substrate、Agent Control Plane、Neural edges、Contexts、Tags、Files (R2)、Analyses (メモリー分析)、Resources、Secrets、Sleep Maintenance、Usage、API-Key Bindings |
+| **64 の MCP ツール** | Memory、Agent Substrate、Agent Control Plane、Neural edges、Contexts、Tags、Files (R2)、Analyses (メモリー分析)、Resources、Secrets、Sleep Maintenance、Usage、API-Key Bindings |
 | **マルチプロバイダ** | 埋め込みに OpenAI かセルフホスト (Ollama、vLLM — ローカル・非公開・コストゼロ) |
 | **チーム対応** | Workspace、RBAC、context 分離、共有メモリ |
 | **Web UI** | Next.js ダッシュボード — context、検索設定、メンバー管理 |
@@ -225,7 +225,7 @@ cp .mcp.json.example .mcp.json
 
 ## MCP ツール
 
-**13 カテゴリ 63 ツール**: Memory(`remember` / `recall` / `explore` …)、Agent Substrate、Agent Control Plane(preview)、Neural Edges、Contexts、Tags、Files (R2)、Analyses(メモリー分析)、Resources、Secrets(ゼロ知識)、Sleep Maintenance、Usage、API-Key Bindings — 各ツールにロール別アクセス制御。
+**13 カテゴリ 64 ツール**: Memory(`remember` / `recall` / `explore` …)、Agent Substrate、Agent Control Plane(preview)、Neural Edges、Contexts、Tags、Files (R2)、Analyses(メモリー分析)、Resources、Secrets(ゼロ知識)、Sleep Maintenance、Usage、API-Key Bindings — 各ツールにロール別アクセス制御。
 
 ツールごとの詳細と必要ロール: **[MCP Tools Reference](docs/mcp-tools.md)**(英語)
 
@@ -306,7 +306,7 @@ MCP ツールに加えてフル REST API を提供:
 **コンセプトとガイド:**
 
 - [MCP Client Setup](docs/mcp-clients.md) — 各クライアントの接続設定(英語)
-- [MCP Tools Reference](docs/mcp-tools.md) — 全 63 ツールと必要ロール(英語)
+- [MCP Tools Reference](docs/mcp-tools.md) — 全 64 ツールと必要ロール(英語)
 
 - [Core Concepts](docs/concepts.md) — Workspace、Context、Memory、Neural Memory、MCP ツール
 - [Architecture](docs/architecture.md) — システム設計とデータフロー
