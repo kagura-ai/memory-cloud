@@ -13,6 +13,11 @@ The ``test_update_memory_geo.py`` pattern against the real DB + MemoryService:
   marking a row and when editing an existing guardrail's summary, and a
   ``forget`` by that member is the silent ``deleted_count=0``.
 
+The context is **shared** (``is_private=False``) on purpose: a private
+context is creator-only at the RBAC chokepoint (``can_access_memory``), so a
+member would get the uniform 404 before the guardrail gate is ever reached
+and the gate tests would prove nothing about it.
+
 Not executed in the local unit run — needs the DB container.
 """
 
@@ -71,7 +76,15 @@ async def guard_env(db_session):
         ]
     )
     await db_session.flush()
-    ctx = Context(id=uuid.uuid4(), workspace_id=ws_id, name="guard-upd", created_by=owner)
+    ctx = Context(
+        id=uuid.uuid4(),
+        workspace_id=ws_id,
+        name="guard-upd",
+        created_by=owner,
+        # Shared: workspace members reach the owner's rows; the guardrail gate
+        # (context EDITOR) is then the only thing standing between them.
+        is_private=False,
+    )
     db_session.add(ctx)
     await db_session.flush()
 

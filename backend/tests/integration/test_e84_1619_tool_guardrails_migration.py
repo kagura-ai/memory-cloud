@@ -17,6 +17,10 @@ Not executed in the local unit run — needs the DB container.
 
 from __future__ import annotations
 
+import importlib.util
+from pathlib import Path
+from types import ModuleType
+
 from sqlalchemy import text
 from sqlalchemy.engine import Connection
 
@@ -31,6 +35,20 @@ from tests.integration.test_alembic_migrations import (
 E84_REVISION = "e84_1619_tool_guardrails"
 PRIOR_HEAD = "e83_1595_beta_invite_label"
 INDEX_NAME = "idx_memories_tool_trigger"
+_MIGRATION_FILE = (
+    Path(__file__).resolve().parents[2] / "alembic" / "versions" / f"{E84_REVISION}.py"
+)
+
+
+def _load_migration_module() -> ModuleType:
+    """Import the revision file by path — ``backend/alembic/versions`` is not a
+    package (no ``__init__.py``), and ``alembic`` resolves to the installed
+    library, so ``from alembic.versions import ...`` cannot find it."""
+    spec = importlib.util.spec_from_file_location(f"_mig_{E84_REVISION}", _MIGRATION_FILE)
+    assert spec is not None and spec.loader is not None, _MIGRATION_FILE
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
 
 
 def _leave_db_at_head() -> None:
@@ -130,6 +148,5 @@ def test_e84_index_predicate_matches_the_orm_declaration() -> None:
         str(orm_index.dialect_options["postgresql"]["where"])
         == "(details->'tool_trigger') IS NOT NULL AND deleted_at IS NULL"
     )
-    from alembic.versions import e84_1619_tool_guardrails as mig  # type: ignore[import-not-found]
-
+    mig = _load_migration_module()
     assert "WHERE (details->'tool_trigger') IS NOT NULL AND deleted_at IS NULL" in mig._INDEX_DDL
