@@ -155,10 +155,19 @@ gh api -X POST repos/{owner}/{repo}/pulls/<N>/requested_reviewers -f 'reviewers[
 
 ```bash
 gh pr merge <N> --squash --delete-branch
-git switch main && git pull --ff-only origin main
+gh pr view <N> --json state,mergeCommit               # MERGED + the squash commit's oid
 ```
 
-If the checkout is a worktree, `gh`'s post-merge branch switch may fail locally; the merge itself has landed — verify with `gh pr view <N> --json state,mergeCommit`.
+`gh pr merge` also switches the local checkout to `main` and deletes the local
+branch. In a linked worktree (where `main` is checked out elsewhere) that local
+step exits 1 **after** the merge has landed, so check the PR state rather than the
+exit code, then move to the checkout that has `main` — the first line of
+`git worktree list` — before continuing. Steps 10–13 run there, on `main`:
+
+```bash
+git fetch origin && git merge --ff-only origin/main   # not `git pull`: it can fail with "multiple branches"
+[ "$(git rev-parse HEAD)" = "$(gh pr view <N> --json mergeCommit --jq .mergeCommit.oid)" ] || echo "HEAD is not the squash-merge commit — stop"
+```
 
 ### 10. Tag the merge commit
 
@@ -197,14 +206,22 @@ gh api -X PATCH repos/{owner}/{repo}/milestones/<number> -f state=closed
 make coverage-upload
 ```
 
-Runs the unit tests with coverage on the merge commit and uploads to Codecov with `--sha $(git rev-parse HEAD)`.
-Requires `CODECOV_TOKEN` (read from `.env.local`, or export it). Run it from `main` at the release commit so the report is attached to the tagged SHA.
+Runs the unit tests with coverage and uploads to Codecov with `--sha $(git rev-parse HEAD)`,
+so the checkout must be at the tagged commit or the report attaches to the wrong SHA. Check first:
+
+```bash
+[ "$(git rev-parse HEAD)" = "$(git rev-parse 'vX.Y.Z^{commit}')" ] || echo "HEAD is not vX.Y.Z — stop"
+```
+
+Requires `CODECOV_TOKEN` (read from `.env.local`, or export it).
 
 ### 14. Report
 
 Print:
 - the new version and the GitHub Release URL,
-- the tag-triggered CI run and its conclusion: `gh run list --event push --branch vX.Y.Z --limit 1`,
+- the tag-triggered CI run and its conclusion, matched by the tagged commit's SHA:
+  `gh run list --workflow ci.yml --event push --commit "$(git rev-parse 'vX.Y.Z^{commit}')" --limit 1`
+  (`--branch vX.Y.Z` also finds it — a tag push is recorded with the tag name as `head_branch` — but the SHA match cannot pick up a branch that happens to share the name),
 - the Codecov status on the merge commit: `gh api repos/{owner}/{repo}/commits/$(git rev-parse HEAD)/status --jq '.statuses[] | select(.context == "codecov/patch") | .state'`.
 
 ## Recovery

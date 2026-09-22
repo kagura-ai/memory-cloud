@@ -15,8 +15,11 @@ fails in CI instead of shipping a mixed version:
    ``__version__``, ``frontend/package.json``, both version fields of
    ``frontend/package-lock.json`` and both plugin manifests equal
    ``APP_VERSION`` (the canonical runtime source in ``config.constants``).
-2. The first ``## [vX.Y.Z]`` heading in ``CHANGELOG.md`` names ``v{APP_VERSION}``
-   and carries an ISO ``YYYY-MM-DD`` date.
+2. The first ``## `` heading in ``CHANGELOG.md`` is a well-formed release heading
+   that names ``v{APP_VERSION}`` and carries an ISO ``YYYY-MM-DD`` date. The first
+   heading is taken literally (not the first one that happens to match), so a
+   malformed new entry fails here instead of being skipped in favour of the
+   previous release.
 """
 
 import json
@@ -35,9 +38,26 @@ _REPO_ROOT = Path(__file__).resolve().parents[2]
 
 # ``## [vX.Y.Z](<release URL>) — YYYY-MM-DD`` — the heading shape of every entry.
 _CHANGELOG_HEADING = re.compile(
-    r"^## \[(?P<tag>v\d+\.\d+\.\d+)\]\([^)]*\) — (?P<date>\d{4}-\d{2}-\d{2})$",
-    re.MULTILINE,
+    r"^## \[(?P<tag>v\d+\.\d+\.\d+)\]\([^)]*\) — (?P<date>\d{4}-\d{2}-\d{2})$"
 )
+_ANY_H2 = re.compile(r"^## .*$", re.MULTILINE)
+
+
+def _top_changelog_release(changelog: str) -> tuple[str, date]:
+    """Return ``(tag, date)`` of the first ``## `` heading, or raise ``AssertionError``.
+
+    The first level-2 heading is the newest entry. It has to be a release heading
+    of the exact shape above; nothing before it is a heading a release could hide
+    behind (the file preamble has none).
+    """
+    top = _ANY_H2.search(changelog)
+    assert top, "CHANGELOG.md has no '## ' heading"
+    match = _CHANGELOG_HEADING.fullmatch(top.group(0))
+    assert match, (
+        f"CHANGELOG.md top heading is not '## [vX.Y.Z](url) — YYYY-MM-DD': {top.group(0)!r}"
+    )
+    # ``fromisoformat`` rejects a well-shaped but impossible date such as 2026-13-40.
+    return match.group("tag"), date.fromisoformat(match.group("date"))
 
 
 def _read(rel: str) -> str:
@@ -96,10 +116,44 @@ def test_version_file_matches_app_version(label: str, read_version: Callable[[],
 
 def test_changelog_top_entry_is_current_release() -> None:
     """The newest ``CHANGELOG.md`` heading names ``v{APP_VERSION}`` with a ``YYYY-MM-DD`` date."""
-    match = _CHANGELOG_HEADING.search(_read("CHANGELOG.md"))
-    assert match, "CHANGELOG.md has no '## [vX.Y.Z](url) — YYYY-MM-DD' heading"
-    assert match.group("tag") == f"v{APP_VERSION}", (
-        f"CHANGELOG.md top entry is {match.group('tag')}, APP_VERSION is {APP_VERSION}"
+    tag, _ = _top_changelog_release(_read("CHANGELOG.md"))
+    assert tag == f"v{APP_VERSION}", (
+        f"CHANGELOG.md top entry is {tag}, APP_VERSION is {APP_VERSION}"
     )
-    # ``fromisoformat`` rejects a well-shaped but impossible date such as 2026-13-40.
-    date.fromisoformat(match.group("date"))
+
+
+_PREVIOUS = "## [v0.1.0](https://example.invalid/v0.1.0) — 2026-01-01\n"
+
+
+def test_top_changelog_release_reads_the_first_heading() -> None:
+    """A well-formed newest entry wins over the release below it."""
+    text = (
+        "# Changelog\n\nintro\n\n## [v0.2.0](https://example.invalid/v0.2.0) — 2026-02-02\n\n"
+        + _PREVIOUS
+    )
+    assert _top_changelog_release(text) == ("v0.2.0", date(2026, 2, 2))
+
+
+@pytest.mark.parametrize(
+    "top",
+    [
+        pytest.param(
+            "## [v0.2.0](https://example.invalid/v0.2.0) - 2026-02-02", id="hyphen-not-em-dash"
+        ),
+        pytest.param("## [v0.2.0](https://example.invalid/v0.2.0)", id="missing-date"),
+        pytest.param("## [Unreleased]", id="unreleased-placeholder"),
+        pytest.param("## v0.2.0 — 2026-02-02", id="no-release-link"),
+    ],
+)
+def test_top_changelog_release_rejects_malformed_newest_heading(top: str) -> None:
+    """A malformed newest heading fails instead of falling through to the previous release."""
+    with pytest.raises(AssertionError, match="top heading is not"):
+        _top_changelog_release(f"# Changelog\n\n{top}\n\n{_PREVIOUS}")
+
+
+def test_top_changelog_release_rejects_impossible_date() -> None:
+    """A date that matches the shape but cannot exist is rejected."""
+    with pytest.raises(ValueError):
+        _top_changelog_release(
+            "## [v0.2.0](https://example.invalid/v0.2.0) — 2026-13-40\n" + _PREVIOUS
+        )
