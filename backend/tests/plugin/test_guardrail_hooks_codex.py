@@ -586,15 +586,30 @@ def test_hook_event_name_echoes_input(codex_env: CodexEnv, run_codex: RunCodex, 
 def test_twenty_live_blocks_stay_under_the_codex_token_budget(
     codex_env: CodexEnv, run_codex: RunCodex, hook_module: ModuleType
 ) -> None:
+    """The core fits every block line to the Codex token budget before taking its marker:
+    the blocks that do not fit stay unmarked and deny the re-issued call, until all 20 are
+    delivered; nothing is marked without being printed and nothing printed is unmarked."""
     blocks = [item(n, "b" * 480, "Bash", match="danger", action="block") for n in range(1, 21)]
     codex_env.write_cache(blocks)
-    result = run_codex(bash("danger"))
-    reason = result.specific["permissionDecisionReason"]
-    assert hook_module.approx_tokens(reason) <= 2000
-    lines = reason.split("\n")
-    assert lines[0] == hook_module.FRAMING_LINE and lines[-1] == hook_module.DENY_TRAILER
-    assert 0 < len(lines) - 2 < 20
-    assert len(codex_env.markers("block")) == 20, "every live block is marked even when trimmed"
+    rendered_per_call: list[int] = []
+    for _call in range(20):
+        result = run_codex(bash("danger"))
+        _assert_contract(result, "PreToolUse")
+        if result.stdout == "":
+            break
+        reason = result.specific["permissionDecisionReason"]
+        assert hook_module.approx_tokens(reason) <= 2000
+        lines = reason.split("\n")
+        assert lines[0] == hook_module.FRAMING_LINE and lines[-1] == hook_module.DENY_TRAILER
+        body = lines[1:-1]
+        assert 0 < len(body) < 20
+        rendered_per_call.append(len(body))
+        assert len(codex_env.markers("block")) == sum(rendered_per_call), (
+            "marker count == rendered block lines"
+        )
+    assert len(rendered_per_call) >= 2 and rendered_per_call[0] > 1, rendered_per_call
+    assert sum(rendered_per_call) == 20 and len(codex_env.markers("block")) == 20
+    _silent(run_codex(bash("danger")))
 
 
 def test_every_fixture_exits_zero_with_one_json_object_or_nothing(
@@ -1084,17 +1099,25 @@ def test_missing_tomllib_prints_one_message_and_tool_events_keep_working(
 def test_refresh_with_bad_credentials_is_silent_and_releases_the_lock(
     hook_module: ModuleType, codex_env: CodexEnv, stub_server: StubServer
 ) -> None:
+    """The lazily raised credential error inside ``--refresh`` leaves nothing behind: exit 0,
+    empty stdout, zero requests, and the advisory ``refresh.lock`` (an flock held by the fd,
+    the file itself stays) is released, so the next refresh with a usable table fetches."""
     codex_env.write_cache(
         [item(1, "s", "Bash")], fetched_at=datetime.now(UTC) - timedelta(minutes=5)
     )
-    stub_server.set_guardrails([])
+    stub_server.set_guardrails([item(9, "new one", "Bash", match="x")], version="after-fix")
     codex_env.write_config_toml(
         toml_table(stub_server.url, extra='http_headers = { Authorization = "Bearer x" }')
     )
     result = call_codex_main(hook_module, bash("x"), codex_env.env, refresh=True)
     assert result.returncode == 0 and result.stdout == ""
     assert stub_server.requests == []
-    assert not (codex_env.state_dir / "refresh.lock").exists()
+    assert json.loads(codex_env.cache_path.read_text(encoding="utf-8"))["version"] != "after-fix"
+    codex_env.write_config_toml(toml_table(stub_server.url))
+    again = call_codex_main(hook_module, bash("x"), codex_env.env, refresh=True)
+    assert again.returncode == 0 and again.stdout == ""
+    assert len(stub_server.requests) == 1, "the lock from the failed refresh was released"
+    assert json.loads(codex_env.cache_path.read_text(encoding="utf-8"))["version"] == "after-fix"
 
 
 # ---------------------------------------------------------------------------
