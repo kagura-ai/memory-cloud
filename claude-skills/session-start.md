@@ -98,7 +98,7 @@ Display a concise summary:
 {relevant memories from last 7 days, if any}
 
 ### 📌 Standing guardrails
-{ONLY if load_pinned returned ≥1 item — omit this whole section when empty.
+{ONLY if load_pinned or get_context_info(...).guardrails returned ≥1 item — omit this whole section when both are empty.
  List each pinned invariant with its memory_id, e.g. "- active prod color = green  (mem: abc1234)".
  End with: "Stale? unpin via update_memory(memory_id=..., context_id=..., delivery_mode="on_recall")".
  If the pinned set is large (>7), add "⚠ N pinned — review for stale invariants to unpin".
