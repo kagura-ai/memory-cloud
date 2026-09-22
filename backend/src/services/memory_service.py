@@ -45,7 +45,9 @@ from models.schemas import (
     ExploreResponse,
     ForgetRequest,
     ForgetResponse,
+    GuardrailItem,
     LinkedMemoryRef,
+    LoadGuardrailsResponse,
     LoadPinnedResponse,
     MemoryResponse,
     MemoryStatsResponse,
@@ -4452,6 +4454,178 @@ class MemoryService:
             total_available=total,
             truncated=truncated,
             cap=effective_cap,
+        )
+
+    @staticmethod
+    def _guardrail_item(row: Any, user_id: str, *, tool_trigger: Any, l2: bool) -> GuardrailItem:
+        """Project one partial row onto the shared ``GuardrailItem`` shape.
+
+        ``tool_trigger`` arrives as the projected ``details->'tool_trigger'``
+        JSON element for the tool-triggered lane (``None`` for pinned rows);
+        a driver that hands the ``json`` element back as text is decoded here
+        so the item always carries an object. ``l2`` keeps ``context_summary``
+        on pinned items only.
+        """
+        import json
+
+        if isinstance(tool_trigger, str):
+            tool_trigger = json.loads(tool_trigger)
+        return GuardrailItem(
+            memory_id=row.id,
+            summary=row.summary,
+            context_summary=row.context_summary if l2 else None,
+            type=row.type,
+            importance=row.importance,
+            delivery_mode=row.delivery_mode,
+            tool_trigger=tool_trigger if isinstance(tool_trigger, dict) else None,
+            source_type=row.source_type,
+            authored_by_caller=row.user_id == user_id,
+            created_at=row.created_at,
+            updated_at=row.updated_at or row.created_at,
+        )
+
+    async def load_guardrails(
+        self,
+        user_id: str,
+        current_context_id: UUID | None = None,
+        current_workspace_id: UUID | None = None,
+        cap: int | str | None = None,
+        key_workspace_id: UUID | None = None,  # Issue #963/#1281: pure key scope
+    ) -> LoadGuardrailsResponse:
+        """Deterministically load a context's guardrail set for a client-side hook.
+
+        ``load_pinned``'s twin (same isolation gate, cap clamp, binding row
+        filter and audit emission), serving two independently capped lanes:
+
+        * ``pinned`` — ``list_pinned(trusted_only=True)`` verbatim, bounded by
+          ``settings.pinned_load_cap``, so the pinned half is byte-identical to
+          the agent-bootstrap pinned lane;
+        * ``tool_triggered`` — ``list_tool_triggered`` (rows carrying
+          ``details.tool_trigger``), bounded by ``cap`` (default
+          ``settings.guardrail_load_cap``).
+
+        Two lanes, two caps: one union query with one cap would let a large
+        pinned set evict every guardrail from a capped response (and let a
+        member evict them on purpose with high-importance pins). ``cap``
+        therefore applies to the tool-triggered list only. The top-level
+        ``total_available`` / ``truncated`` / ``cap`` keep one unambiguous
+        meaning (sum / either lane / the tool-triggered cap) and the per-lane
+        fields say which protection is incomplete. A row that is both pinned
+        and tool-triggered appears in both lists.
+
+        The trust gate is unconditional on both lanes — there is no parameter
+        to turn it off from any surface. The server never compiles or runs a
+        stored pattern here; ``tool_trigger`` is returned as data. Plain SQL:
+        no embedding, no vector search, no Hebbian write.
+
+        ``total_available`` counts are the repo (pre-binding) counts, as in
+        ``load_pinned``: the context's set size, while the binding filter
+        narrows what THIS credential receives. ``version`` is computed AFTER
+        the filter, so it is per-credential.
+
+        Args:
+            user_id: Caller user ID.
+            current_context_id: Bound context (the guardrail set is per-context).
+            current_workspace_id: Bound workspace (isolation scope).
+            cap: Optional override for the tool-triggered cap (defaults to settings).
+            key_workspace_id: Pure API-key workspace scope, or ``None``.
+
+        Returns:
+            LoadGuardrailsResponse with both ordered lists, caps and flags.
+        """
+        from config.settings import get_settings
+        from utils.tool_trigger import GUARDRAIL_FORMAT, guardrail_version
+
+        context, workspace_id_str, context_id_str = await self._get_context_isolation_params(
+            user_id,
+            current_context_id,
+            key_workspace_id=key_workspace_id,
+            operation="load_guardrails",
+        )
+        if not workspace_id_str or not context_id_str:
+            raise ValueError("load_guardrails() requires current_context_id")
+
+        settings = get_settings()
+        pinned_cap = self._clamp_pinned_cap(None, settings.pinned_load_cap)
+        guardrail_cap = self._clamp_pinned_cap(cap, settings.guardrail_load_cap)
+        ws_uuid, ctx_uuid = UUID(workspace_id_str), UUID(context_id_str)
+
+        pinned_rows, pinned_total = await self.memory_repo.list_pinned(
+            ws_uuid, ctx_uuid, pinned_cap, trusted_only=True
+        )
+        tool_rows, tool_total = await self.memory_repo.list_tool_triggered(
+            ws_uuid, ctx_uuid, guardrail_cap
+        )
+        pinned_truncated = pinned_total > pinned_cap
+        tool_truncated = tool_total > guardrail_cap
+
+        from services.agent_binding_service import filter_memory_rows_by_binding
+
+        pinned_rows, pinned_filtered = await filter_memory_rows_by_binding(
+            self.db, list(pinned_rows), operation="load_guardrails", user_id=user_id
+        )
+        tool_rows, tool_filtered = await filter_memory_rows_by_binding(
+            self.db, list(tool_rows), operation="load_guardrails", user_id=user_id
+        )
+        if pinned_truncated or tool_truncated:
+            # Never a silent truncation: a client hook fails open on it.
+            logger.warning(
+                "guardrail_load_capped",
+                context_id=context_id_str,
+                workspace_id=workspace_id_str,
+                pinned_total_available=pinned_total,
+                pinned_cap=pinned_cap,
+                tool_triggered_total_available=tool_total,
+                cap=guardrail_cap,
+            )
+
+        pinned_items = [
+            self._guardrail_item(m, user_id, tool_trigger=None, l2=True) for m in pinned_rows
+        ]
+        tool_items = [
+            self._guardrail_item(m, user_id, tool_trigger=m.tool_trigger, l2=False)
+            for m in tool_rows
+        ]
+        version = guardrail_version(
+            [
+                [str(i.memory_id), i.summary, i.importance, i.delivery_mode, i.tool_trigger]
+                for i in (*pinned_items, *tool_items)
+            ]
+        )
+
+        # Append-only audit (no-op unless verified agent identity); the
+        # enforce-mode row-filter counts ride the success row.
+        from services.agent_binding_service import ROW_FILTER_KIND
+        from services.memory_access_event_writer import emit_memory_access_event
+
+        filtered = pinned_filtered + tool_filtered
+        await emit_memory_access_event(
+            operation="load_guardrails",
+            outcome="success",
+            workspace_id=ws_uuid,
+            user_id=user_id,
+            context_id=ctx_uuid,
+            result_count=len(pinned_items) + len(tool_items),
+            extra_metadata=(
+                {"filter_kind": ROW_FILTER_KIND, "binding_row_filtered_count": filtered}
+                if filtered
+                else None
+            ),
+        )
+
+        return LoadGuardrailsResponse(
+            format=GUARDRAIL_FORMAT,
+            version=version,
+            pinned=pinned_items,
+            tool_triggered=tool_items,
+            total_available=pinned_total + tool_total,
+            truncated=pinned_truncated or tool_truncated,
+            cap=guardrail_cap,
+            pinned_cap=pinned_cap,
+            pinned_total_available=pinned_total,
+            pinned_truncated=pinned_truncated,
+            tool_triggered_total_available=tool_total,
+            tool_triggered_truncated=tool_truncated,
         )
 
     async def forget(

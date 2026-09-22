@@ -11,7 +11,12 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.sql.elements import ColumnElement
 
 from models.auth import CONTEXT_TRUST_TIER_TRUSTED, Context
-from models.memory import SOURCE_TYPE_CONNECTOR, Memory, pinned_predicate
+from models.memory import (
+    SOURCE_TYPE_CONNECTOR,
+    Memory,
+    pinned_predicate,
+    tool_triggered_predicate,
+)
 from repositories.base import BaseRepository
 from utils.datetime import utcnow
 from utils.exceptions import NotFoundException
@@ -365,7 +370,87 @@ class MemoryRepository(BaseRepository[Memory]):
         # context/type/source — cheap identifier columns, still no L3 load.
         Memory.context_id,
         Memory.source_type,
+        # Tool guardrails: provenance for the load_guardrails payload
+        # (authored_by_caller, updated_at) — identifier columns, still no L3.
+        Memory.user_id,
+        Memory.updated_at,
     )
+
+    # Tool guardrails: the tool-triggered lane is L1 only (summary) — the
+    # client hook injects the summary and never the L2 context_summary — plus
+    # the projected ``details->'tool_trigger'`` object. Selecting the JSON path
+    # keeps the rest of ``details`` and L3 ``content`` off the wire.
+    _TOOL_TRIGGERED_COLUMNS = (
+        Memory.id,
+        Memory.summary,
+        Memory.type,
+        Memory.importance,
+        Memory.delivery_mode,
+        Memory.created_at,
+        Memory.updated_at,
+        Memory.context_id,
+        Memory.source_type,
+        Memory.user_id,
+        Memory.details["tool_trigger"].label("tool_trigger"),
+    )
+
+    async def list_tool_triggered(
+        self, workspace_id: UUID, context_id: UUID, limit: int
+    ) -> tuple[list, int]:
+        """Deterministic tool-guardrail set for a context (the ``load_guardrails`` lane).
+
+        ``list_pinned``'s sibling: rows carrying ``details.tool_trigger``
+        (``tool_triggered_predicate()``, backed by the partial index
+        ``idx_memories_tool_trigger``), ordered ``importance DESC, created_at
+        ASC, id ASC`` with the same ``limit + 1`` probe and exact-total
+        contract. Two differences are deliberate:
+
+        * the trust gate is UNCONDITIONAL — there is no ``trusted_only`` flag.
+          A guardrail is injected into the model's context by a client hook
+          without appearing in the chat (OWASP LLM01), so external-tier
+          contexts and connector-ingested rows are never served from this
+          lane, from any surface;
+        * rows are L1 only (``_TOOL_TRIGGERED_COLUMNS``): no ``context_summary``,
+          no ``content``, no ``details`` beyond the projected ``tool_trigger``.
+
+        Never compiles or evaluates a stored pattern — the pattern is returned
+        as data (``tests/utils/test_tool_trigger_regex.py`` pins this module
+        against ``re.compile``).
+
+        Args:
+            workspace_id: Workspace isolation scope.
+            context_id: Context whose guardrail set to load.
+            limit: Hard cap on returned rows (bound; total may exceed it).
+
+        Returns:
+            ``(rows, total)`` — the bounded ordered partial rows and full count.
+        """
+        conditions = [
+            Memory.workspace_id == workspace_id,
+            Memory.context_id == context_id,
+            tool_triggered_predicate(),
+            Memory.deleted_at.is_(None),
+            # The two-part trust gate of list_pinned(trusted_only=True),
+            # hard-wired: context-level trust signal + row-level provenance.
+            Memory.context_id.in_(
+                select(Context.id).where(Context.trust_tier == CONTEXT_TRUST_TIER_TRUSTED)
+            ),
+            Memory.source_type != SOURCE_TYPE_CONNECTOR,
+        ]
+        result = await self.db.execute(
+            select(*self._TOOL_TRIGGERED_COLUMNS)
+            .where(*conditions)
+            .order_by(desc(Memory.importance), Memory.created_at.asc(), Memory.id.asc())
+            .limit(limit + 1)
+        )
+        rows = list(result.all())
+        if len(rows) <= limit:
+            return rows, len(rows)
+
+        total = (
+            await self.db.execute(select(func.count(Memory.id)).where(*conditions))
+        ).scalar_one()
+        return rows[:limit], total
 
     async def list_pinned(
         self, workspace_id: UUID, context_id: UUID, limit: int, *, trusted_only: bool = False
