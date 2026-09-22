@@ -106,6 +106,9 @@ _RATE_LIMIT_EXEMPT_TOOLS = frozenset(
         "recall_upcoming",  # Issue #877: deterministic read-only Time Memory window query (no Hebbian write)
         "recall_nearby",  # Issue #1331: deterministic read-only WHERE-axis nearby query (no Hebbian write)
         "load_pinned",  # Issue #886: deterministic always-load read (must run every turn; no Hebbian write)
+        # Tool guardrails: the session-start hook read — plain SQL, no
+        # embedding, no Hebbian write; a rate-limited hook would fail open.
+        "load_guardrails",
         # Issue #1128: secret-store tools carry NO embedding/LLM cost (the memory
         # quota's cost driver) and must stay callable on EVERY plan — an agent has
         # to be able to fetch its deploy key even after heavy recall use. Available
@@ -219,6 +222,7 @@ def _build_registry() -> dict[str, Any]:
         "recall_upcoming": handle_recall_upcoming,
         "recall_nearby": handle_recall_nearby,
         "load_pinned": handle_load_pinned,
+        "load_guardrails": handle_load_guardrails,
         "forget": handle_forget,
         "reference": handle_reference,
         "explore": handle_explore,
@@ -449,6 +453,7 @@ async def execute_tool_call(
 from mcp_server.tools.explore import handle_explore  # noqa: E402, F401
 from mcp_server.tools.memory import (  # noqa: E402, F401
     handle_forget,
+    handle_load_guardrails,
     handle_load_pinned,
     handle_recall,
     handle_recall_nearby,

@@ -325,6 +325,26 @@
     }
   },
   {
+    "name": "load_guardrails",
+    "readOnly": true,
+    "inputSchema": {
+      "type": "object",
+      "required": [
+        "context_id"
+      ],
+      "properties": {
+        "context_id": {
+          "type": "string",
+          "format": "uuid"
+        },
+        "cap": {
+          "type": "integer"
+        }
+      },
+      "additionalProperties": false
+    }
+  },
+  {
     "name": "forget",
     "inputSchema": {
       "type": "object",
