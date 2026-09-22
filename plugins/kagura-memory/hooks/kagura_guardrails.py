@@ -105,7 +105,7 @@ def _debug(stage: str) -> None:
     try:
         sys.stderr.write(SYSTEM_MESSAGE_PREFIX + stage + "\n")
     except Exception:  # noqa: BLE001 - stderr may be closed
-        pass
+        pass  # a debug line that cannot be written is dropped; never fail the hook over it
 
 
 # ---------------------------------------------------------------------------
@@ -128,7 +128,7 @@ def parse_fetched_at(value: Any) -> datetime | None:
         try:
             return datetime.strptime(value, fmt).replace(tzinfo=timezone.utc)
         except ValueError:
-            pass
+            pass  # not this format; try the next accepted one
     return None
 
 
@@ -974,7 +974,7 @@ def append_delivery_log(
         finally:
             os.close(fd)
     except OSError:
-        pass
+        pass  # the log is diagnostic only; a failed append must not fail the delivery
 
 
 def prune_state(guardrails_dir: str, now_ts: float) -> None:
@@ -991,7 +991,7 @@ def prune_state(guardrails_dir: str, now_ts: float) -> None:
             if os.path.isdir(path) and now_ts - os.stat(path).st_mtime > PRUNE_AGE_S:
                 shutil.rmtree(path, ignore_errors=True)
         except OSError:
-            pass
+            pass  # best-effort maintenance: an entry that vanished or cannot be read is skipped
     try:
         for name in os.listdir(guardrails_dir):
             if name.endswith(".stale"):
@@ -999,7 +999,7 @@ def prune_state(guardrails_dir: str, now_ts: float) -> None:
                 if now_ts - os.stat(path).st_mtime > PRUNE_AGE_S:
                     os.unlink(path)
     except OSError:
-        pass
+        pass  # best-effort maintenance: pruning .stale files must not fail SessionStart
 
 
 # ---------------------------------------------------------------------------
@@ -1083,8 +1083,8 @@ def fetch_guardrails(
     finally:
         try:
             conn.close()
-        except Exception:  # noqa: BLE001
-            pass
+        except Exception:  # noqa: BLE001 - closing a half-open socket may raise anything
+            pass  # the outcome was decided above; a close failure changes nothing
     return parse_tools_call_envelope(raw)
 
 
@@ -1141,7 +1141,7 @@ def _emit(stdout: Any, obj: dict[str, Any]) -> None:
     try:
         stdout.flush()
     except (OSError, ValueError):
-        pass
+        pass  # the reader closed the pipe or the stream is detached; the write already happened
 
 
 def _diff_messages(old: LoadedCache | None, new: dict[str, Any]) -> list[str]:
@@ -1189,7 +1189,7 @@ def _touch(path: str) -> None:
         os.close(fd)
         os.utime(path, None)
     except OSError:
-        pass
+        pass  # the negative-cache marker is an optimisation; without it we simply retry sooner
 
 
 def _file_age(path: str, now_ts: float) -> float | None:
@@ -1248,7 +1248,7 @@ def handle_session_start(adapter: Any, event: dict[str, Any], env: Any, stdout: 
                 try:
                     os.unlink(fail_marker)
                 except OSError:
-                    pass
+                    pass  # usually absent; a marker that stays expires on its own after 60 s
             cache = LoadedCache(new, now, 0.0)
             source_desc = "fetched"
         else:
@@ -1305,7 +1305,7 @@ def _fallback_cache(
         try:
             os.replace(config.cache_path, config.cache_path + ".stale")
         except OSError:
-            pass
+            pass  # the rename is bookkeeping; the too-old cache is not used either way
     messages.append("server unreachable and no usable cache")
     return None, ""
 
@@ -1519,9 +1519,16 @@ if __name__ == "__main__":
         try:
             _stream.reconfigure(encoding="utf-8", errors="replace")  # type: ignore[union-attr]
         except (AttributeError, ValueError):
-            pass
+            pass  # a replaced or detached stream keeps its own encoding
+    # Fail open: exit 0 whatever happens. ``main`` already turns every Exception
+    # into one stderr line; this is the last resort for anything it re-raises,
+    # and a Ctrl-C mid-hook is treated the same way (exit 0, no traceback).
+    # SystemExit is left alone - nothing after the interpreter-floor guard
+    # raises it, and it would carry its own code.
     try:
-        _code = main(sys.argv, sys.stdin, sys.stdout, os.environ)
-    except BaseException:  # noqa: BLE001 - never a non-zero exit
-        _code = 0
-    sys.exit(0 if _code is None else 0)
+        main(sys.argv, sys.stdin, sys.stdout, os.environ)
+    except KeyboardInterrupt:
+        pass  # interrupted mid-hook: still exit 0 and print no traceback
+    except Exception:  # noqa: BLE001 - never a non-zero exit
+        pass  # main() already named the stage on stderr where it could
+    sys.exit(0)

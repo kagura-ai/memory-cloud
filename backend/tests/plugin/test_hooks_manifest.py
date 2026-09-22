@@ -33,6 +33,10 @@ GUARD_COMMAND = (
     "--client claude"
 )
 REFRESH_MATCHER = "^mcp__.*__(remember|update_memory|forget)$"
+# Claude Code hooks reference, "Matcher patterns" table: `"*"`, `""`, or omitted is
+# evaluated as "Match all - fires on every occurrence of the event". It is a documented
+# literal, not a regular expression, so `*` is the form the reference itself uses.
+MATCH_ALL = "*"
 
 ENV_ALLOWLIST = {
     "CLAUDE_PLUGIN_ROOT",
@@ -144,11 +148,11 @@ def test_timeouts_and_matchers() -> None:
     for event in ("PreToolUse", "PostToolUseFailure"):
         assert len(handlers[event]) == 1
         assert handlers[event][0]["timeout"] == 2
-        assert handlers[event][0]["matcher"] == "*"
+        assert handlers[event][0]["matcher"] == MATCH_ALL
     post = handlers["PostToolUse"]
     assert len(post) == 2
     sync = [h for h in post if not h.get("async")]
-    assert sync[0]["timeout"] == 2 and sync[0]["matcher"] == "*"
+    assert sync[0]["timeout"] == 2 and sync[0]["matcher"] == MATCH_ALL
     for event, entries in handlers.items():
         for handler in entries:
             if "timeout" in handler:
