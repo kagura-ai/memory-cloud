@@ -232,6 +232,11 @@ A checkout left with a local `chore(release)` commit and a lightweight tag on `m
 ```bash
 git tag -d vX.Y.Z
 git reset --hard origin/main
+git ls-remote --tags origin refs/tags/vX.Y.Z   # non-empty: the dangling tag reached the remote
 ```
 
-Then start again from step 4.
+If the tag did reach the remote it points at a commit that is not on `main`; delete
+it there too (`git push --delete origin vX.Y.Z`, and `gh release delete vX.Y.Z` if a
+release was created from it) so the step-1 tag check passes. Then start again from
+step 1 — the preconditions, not step 4, so the tag-absence and `origin/main` checks
+run before a new branch is cut.
