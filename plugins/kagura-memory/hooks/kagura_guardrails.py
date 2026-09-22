@@ -34,6 +34,7 @@ import json
 import os
 import re
 import signal
+import stat
 import time
 import unicodedata
 import uuid
@@ -520,17 +521,60 @@ def load_cache(
     return LoadedCache(data, fetched_at, age)
 
 
-def ensure_dir(path: str) -> bool:
-    """Create ``path`` (and missing parents) with mode 0700; ``False`` when impossible."""
-    if os.path.isdir(path):
+def _private_dir(path: str) -> bool:
+    """``path`` is a directory this user owns, reached without a symlink, with mode 0700.
+
+    A looser mode on a directory we own is tightened through a directory file
+    descriptor (``O_NOFOLLOW`` + ``fchmod``), so the chmod cannot be redirected
+    by swapping the entry for a symlink in between. Anything else - a symlink, a
+    regular file, another owner, a chmod that fails - is refused and the caller
+    fails open. Mode and owner checks are POSIX only.
+    """
+    try:
+        st = os.lstat(path)
+    except OSError:
+        return False
+    if not stat.S_ISDIR(st.st_mode):
+        return False
+    if os.name != "posix":
         return True
+    if st.st_uid != os.getuid():
+        return False
+    if not (st.st_mode & 0o077):
+        return True
+    flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0)
+    try:
+        fd = os.open(path, flags)
+    except OSError:
+        return False
+    try:
+        current = os.fstat(fd)
+        if not stat.S_ISDIR(current.st_mode) or current.st_uid != os.getuid():
+            return False
+        os.fchmod(fd, 0o700)
+        return not (os.fstat(fd).st_mode & 0o077)
+    except OSError:
+        return False
+    finally:
+        os.close(fd)
+
+
+def ensure_dir(path: str) -> bool:
+    """Create ``path`` (and missing parents) with mode 0700.
+
+    ``True`` only when ``path`` is, or has just become, a private directory as
+    ``_private_dir`` defines it; a pre-existing entry that cannot be brought to
+    that state is refused (``False``) and the caller fails open.
+    """
+    if os.path.lexists(path):
+        return _private_dir(path)
     parent = os.path.dirname(path)
-    if parent and parent != path and not os.path.isdir(parent) and not ensure_dir(parent):
+    if parent and parent != path and not os.path.lexists(parent) and not ensure_dir(parent):
         return False
     try:
         os.mkdir(path, 0o700)
     except FileExistsError:
-        return os.path.isdir(path)
+        return _private_dir(path)
     except OSError:
         return False
     return True
@@ -550,7 +594,7 @@ def write_private_file(path: str, payload: bytes) -> bool:
         try:
             os.unlink(tmp)
         except OSError:
-            pass
+            pass  # best-effort cleanup of the temp file; the write already failed
         return False
     return True
 
@@ -681,6 +725,7 @@ class State:
     def __init__(self, guardrails_dir: str, session_id: str, agent_id: str | None) -> None:
         self.sid16 = sha16(session_id)
         self.key = sha16(agent_id) if isinstance(agent_id, str) and agent_id else "main"
+        self.guardrails_dir = guardrails_dir
         self.state_dir = os.path.join(guardrails_dir, "state")
         self.session_dir = os.path.join(self.state_dir, self.sid16)
         self.key_dir = os.path.join(self.session_dir, self.key)
@@ -694,9 +739,21 @@ class State:
             self.marker_path("inform", memory_id)
         )
 
+    def _ensure_chain(self, *leaves: str) -> bool:
+        """Every directory we own on the way down is private, not only the leaf.
+
+        Tool events never pass ``guardrails/`` or ``state/`` to ``ensure_dir`` on
+        their own, and a loose or symlinked directory above the markers would
+        expose (or redirect) everything below it.
+        """
+        for directory in (self.guardrails_dir, self.state_dir, self.session_dir) + leaves:
+            if not ensure_dir(directory):
+                return False
+        return True
+
     def take(self, lane: str, memory_id: str) -> bool:
         lane_dir = os.path.join(self.key_dir, lane)
-        if not ensure_dir(lane_dir):
+        if not self._ensure_chain(self.key_dir, lane_dir):
             return False
         return _create_exclusive(os.path.join(lane_dir, memory_id))
 
@@ -710,7 +767,7 @@ class State:
         return os.path.exists(os.path.join(self.slow_dir, memory_id))
 
     def record_slow(self, memory_id: str) -> None:
-        if not ensure_dir(self.slow_dir):
+        if not self._ensure_chain(self.slow_dir):
             return
         first = os.path.join(self.slow_dir, memory_id + ".1")
         if os.path.exists(first):
@@ -1112,6 +1169,7 @@ def handle_session_start(adapter: Any, event: dict[str, Any], env: Any, stdout: 
             _emit(stdout, {"systemMessage": _system_message(messages)})
         return 0
     if not ensure_dir(config.guardrails_dir):
+        _debug("guardrails dir")
         return 0
     now = now_utc()
     now_ts = time.time()
@@ -1223,7 +1281,10 @@ def _system_message(messages: list[str]) -> str:
 def handle_refresh(adapter: Any, env: Any) -> int:
     resolution = adapter.resolve(env)
     config = resolution.config
-    if config is None or not ensure_dir(config.guardrails_dir):
+    if config is None:
+        return 0
+    if not ensure_dir(config.guardrails_dir):
+        _debug("guardrails dir")
         return 0
     now = now_utc()
     old = load_cache(config.cache_path, config.context_id, now, None)
@@ -1231,6 +1292,7 @@ def handle_refresh(adapter: Any, env: Any) -> int:
         return 0
     state_dir = os.path.join(config.guardrails_dir, "state")
     if not ensure_dir(state_dir):
+        _debug("state dir")
         return 0
     lock = os.path.join(state_dir, "refresh.lock")
     if not _create_exclusive(lock):

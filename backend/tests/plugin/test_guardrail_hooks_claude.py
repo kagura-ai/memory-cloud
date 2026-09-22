@@ -505,3 +505,47 @@ def test_trojan_outside_project_with_unset_project_dir_is_still_caught_by_pwd(
     result = run_hook(bash_pre("ps"), env=env, cwd=plugin_env.project_dir)
     assert result.returncode == 0 and "pwned" not in result.stdout
     assert not (plugin_env.project_dir / ".tools" / "captured.txt").exists()
+
+
+# ---------------------------------------------------------------------------
+# Directory hygiene: loose modes are tightened, symlinks are refused
+# ---------------------------------------------------------------------------
+
+
+def test_loose_guardrails_and_state_dirs_are_tightened_before_markers(
+    plugin_env: PluginEnv, run_hook: RunHook
+) -> None:
+    _standard_cache(plugin_env)
+    plugin_env.state_dir.mkdir()
+    for path in (plugin_env.guardrails_dir, plugin_env.state_dir):
+        os.chmod(path, 0o755)
+    result = run_hook(bash_pre("ps"))
+    assert result.specific["permissionDecision"] == "deny"
+    tree = [plugin_env.guardrails_dir, plugin_env.state_dir, *plugin_env.state_dir.rglob("*")]
+    for path in tree:
+        mode = path.stat().st_mode & 0o777
+        assert mode in (0o700, 0o600), (path, oct(mode))
+
+
+def test_symlinked_state_dir_means_no_output_and_no_marker(
+    plugin_env: PluginEnv, run_hook: RunHook
+) -> None:
+    _standard_cache(plugin_env)
+    elsewhere = plugin_env.root / "elsewhere"
+    elsewhere.mkdir(mode=0o700)
+    plugin_env.state_dir.symlink_to(elsewhere)
+    _silent(run_hook(bash_pre("ps")))
+    assert list(elsewhere.rglob("*")) == []
+    assert not (plugin_env.guardrails_dir / "deliveries.log").exists()
+
+
+def test_symlinked_guardrails_dir_is_refused_at_session_start(
+    plugin_env: PluginEnv, run_hook: RunHook
+) -> None:
+    elsewhere = plugin_env.root / "elsewhere"
+    elsewhere.mkdir(mode=0o700)
+    plugin_env.guardrails_dir.symlink_to(elsewhere)
+    result = run_hook(payload("SessionStart", source="startup"))
+    assert result.returncode == 0 and result.stdout == ""
+    assert "guardrails dir" in result.stderr
+    assert list(elsewhere.iterdir()) == [], "nothing is written through the link"

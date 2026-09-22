@@ -750,3 +750,50 @@ def test_state_dirs_are_private(plugin_env: PluginEnv, call_main: Any) -> None:
         mode = path.stat().st_mode & 0o777
         assert mode in (0o700, 0o600), (path, oct(mode))
     assert Path(plugin_env.guardrails_dir / "deliveries.log").stat().st_mode & 0o077 == 0
+
+
+# ---------------------------------------------------------------------------
+# Private directories (ensure_dir)
+# ---------------------------------------------------------------------------
+
+
+def test_ensure_dir_tightens_a_loose_directory_we_own(
+    hook_module: ModuleType, tmp_path: Path
+) -> None:
+    loose = tmp_path / "loose"
+    loose.mkdir()
+    os.chmod(loose, 0o755)
+    assert hook_module.ensure_dir(str(loose)) is True
+    assert loose.stat().st_mode & 0o777 == 0o700
+    assert hook_module.ensure_dir(str(loose)) is True, "an already private directory is accepted"
+    deep = tmp_path / "a" / "b" / "c"
+    assert hook_module.ensure_dir(str(deep)) is True
+    for path in (deep, deep.parent, deep.parent.parent):
+        assert path.stat().st_mode & 0o777 == 0o700, path
+
+
+def test_ensure_dir_refuses_symlinks_and_files(hook_module: ModuleType, tmp_path: Path) -> None:
+    target = tmp_path / "elsewhere"
+    target.mkdir()
+    os.chmod(target, 0o755)
+    link = tmp_path / "link"
+    link.symlink_to(target)
+    assert hook_module.ensure_dir(str(link)) is False
+    assert target.stat().st_mode & 0o777 == 0o755, "never chmod'ed through the link"
+    plain = tmp_path / "plain"
+    plain.write_text("")
+    assert hook_module.ensure_dir(str(plain)) is False
+
+
+def test_ensure_dir_refuses_a_directory_owned_by_someone_else(
+    hook_module: ModuleType, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Ownership is compared with ``os.getuid``; pretend to be another user."""
+    foreign = tmp_path / "foreign"
+    foreign.mkdir(mode=0o700)
+    real_uid = os.getuid()
+    monkeypatch.setattr(os, "getuid", lambda: real_uid + 1)
+    assert hook_module.ensure_dir(str(foreign)) is False
+    os.chmod(foreign, 0o755)
+    assert hook_module.ensure_dir(str(foreign)) is False
+    assert foreign.stat().st_mode & 0o777 == 0o755, "a foreign directory is never chmod'ed"
