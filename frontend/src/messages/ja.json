@@ -2182,7 +2182,7 @@
     "rerankerConfigDesc": "検索品質向上のためのリランキングモデルを設定（デプロイメントのデフォルト: {provider} / {model}）",
     "rerankerConfigDescPlain": "検索品質向上のためのリランキングモデルを設定",
     "rerankerNotAvailableFree": "無料プランではリランキングは利用できません",
-    "upgradeToBasic": "Basicプランにアップグレードして、AI搭載リランキングで検索品質を向上させましょう。",
+    "upgradeToBasic": "<link>Basicプラン</link>にアップグレードして、AI搭載リランキングで検索品質を向上させましょう。",
     "noRerankerKeys": "リランカーAPIキーが設定されていません",
     "configureRerankerKeys": "リランキングを有効にするには、<link>外部APIキー</link>でVoyage AIまたはCohere APIキーを設定してください。",
     "enableReranking": "リランキングを有効化",
