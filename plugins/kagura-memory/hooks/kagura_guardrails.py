@@ -852,13 +852,37 @@ def match_items(
     return matched
 
 
+def render_text(lines: list[str], deny: bool) -> str:
+    """The model-visible text: framing line, guardrail lines, deny trailer when denying."""
+    return "\n".join([FRAMING_LINE] + lines + ([DENY_TRAILER] if deny else []))
+
+
+def within_budget(text: str, budget_chars: int | None, budget_tokens: int | None) -> bool:
+    if budget_chars is not None and len(text) > budget_chars:
+        return False
+    return budget_tokens is None or approx_tokens(text) <= budget_tokens
+
+
 def select_candidates(
     matched: list[dict[str, Any]],
     on: str,
     max_action: str,
     state: State,
+    budget_chars: int | None = None,
+    budget_tokens: int | None = None,
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
-    """Take markers: every live block, then inform lines up to the per-call and per-key caps."""
+    """Decide what this call delivers, then take the markers - in that order.
+
+    Live blocks first (cache order), then informs up to the per-call and per-key
+    caps. The client's render budget is applied while selecting, before any
+    marker is taken: a candidate whose line would push the output over the
+    budget is not marked and stays live for a later matching call (a block cut
+    this way denies the re-issued call once more). The alternative - marking
+    it and letting the renderer drop the line - would lose a guardrail the
+    model never saw for the whole session. A candidate whose ``O_EXCL`` marker
+    fails (race lost) is dropped and the next one is tried, so nothing is
+    printed without a marker and nothing is marked without being printed.
+    """
     blocks: list[dict[str, Any]] = []
     informs: list[dict[str, Any]] = []
     for raw in matched:
@@ -873,14 +897,27 @@ def select_candidates(
         else:
             informs.append(item)
     inform_count = state.inform_count()
-    taken_blocks = [b for b in blocks if state.take("block", str(b["memory_id"]))]
+    lines: list[str] = []
+    taken_blocks: list[dict[str, Any]] = []
+    for item in blocks:
+        candidate = lines + [render_line(item)]
+        if not within_budget(render_text(candidate, True), budget_chars, budget_tokens):
+            break
+        if state.take("block", str(item["memory_id"])):
+            taken_blocks.append(item)
+            lines = candidate
+    deny = bool(taken_blocks)
     room = min(LINES_PER_CALL - len(taken_blocks), INFORM_CAP_PER_KEY - inform_count)
     taken_informs: list[dict[str, Any]] = []
     for item in informs:
         if len(taken_informs) >= room:
             break
+        candidate = lines + [render_line(item)]
+        if not within_budget(render_text(candidate, deny), budget_chars, budget_tokens):
+            break
         if state.take("inform", str(item["memory_id"])):
             taken_informs.append(item)
+            lines = candidate
     return taken_blocks, taken_informs
 
 
@@ -893,18 +930,12 @@ def build_hook_output(
 ) -> dict[str, Any]:
     lines = [render_line(i) for i in blocks] + [render_line(i) for i in informs]
     deny = bool(blocks)
-
-    def assemble(body: list[str]) -> str:
-        parts = [FRAMING_LINE] + body + ([DENY_TRAILER] if deny else [])
-        return "\n".join(parts)
-
-    text = assemble(lines)
-    while lines and (
-        (budget_chars is not None and len(text) > budget_chars)
-        or (budget_tokens is not None and approx_tokens(text) > budget_tokens)
-    ):
+    # ``select_candidates`` already fitted the taken candidates to the budget; this
+    # trim is the last line of defence only and drops nothing in normal operation.
+    text = render_text(lines, deny)
+    while lines and not within_budget(text, budget_chars, budget_tokens):
         lines.pop()
-        text = assemble(lines)
+        text = render_text(lines, deny)
     specific: dict[str, Any] = {"hookEventName": event_name}
     if deny:
         specific["permissionDecision"] = "deny"
@@ -1360,7 +1391,14 @@ def handle_tool_event(
     matched = match_items(items, on, tool_name, aliases, subjects, state, started + CALL_BUDGET_S)
     if not matched:
         return 0
-    blocks, informs = select_candidates(matched, on, config.max_action, state)
+    blocks, informs = select_candidates(
+        matched,
+        on,
+        config.max_action,
+        state,
+        adapter.render_budget_chars,
+        adapter.render_budget_tokens,
+    )
     if not blocks and not informs:
         return 0
     for lane, taken in (("block", blocks), ("inform", informs)):
