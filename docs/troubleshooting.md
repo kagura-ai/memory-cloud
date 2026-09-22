@@ -22,7 +22,6 @@ Codex fails to start, or `codex mcp list` fails, with:
 
 ```
 bearer_token is not supported for streamable_http
-   in `mcp_servers.kagura-memory`
 ```
 
 **You copied a pre-fix snippet.** Earlier versions of this documentation and of the web UI's Codex tab wrote the API key into `~/.codex/config.toml` as `bearer_token = "…"`, next to a `type = "http"` line. Codex (checked against `rust-v0.155.1`) does not accept an inline token on an HTTP server, and because it validates `mcp_servers` as one map, the **whole `config.toml` fails to load** — every other server in the file is gone too — until the key is removed. `type` is not a Codex key either: it is ignored by default and an "unknown configuration field" error under `codex --strict-config`.
