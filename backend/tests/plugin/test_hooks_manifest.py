@@ -201,7 +201,7 @@ def test_future_import_then_sys_then_version_guard() -> None:
     assert isinstance(third, ast.If)
     src = ast.get_source_segment(_source(), third.test)
     assert src == "sys.version_info < (3, 9)", src
-    assert "sys.exit(0)" in ast.get_source_segment(_source(), third.body[0])
+    assert "sys.exit(0)" in (ast.get_source_segment(_source(), third.body[0]) or "")
 
 
 def _walk_with_parents(tree: ast.AST):

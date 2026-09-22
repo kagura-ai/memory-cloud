@@ -26,8 +26,8 @@ from tests.plugin.conftest import (
     PluginEnv,
     bash_pre,
     command_for,
-    item,
     iso_z,
+    item,
     memory_id,
     payload,
 )
