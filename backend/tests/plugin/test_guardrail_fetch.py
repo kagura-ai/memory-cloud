@@ -302,7 +302,7 @@ def test_guardrails_param_warning(
     result = _start(plugin_env, run_hook, stub_server.url + "?guardrails=" + CONTEXT_ID)
     assert len(stub_server.requests) == 1
     assert (
-        "this URL also requests the server digest (?guardrails=); use ?guardrails=off"
+        "this URL also requests the server digest (guardrails=<context>); set guardrails=off"
         in result.json["systemMessage"]
     )
     assert "3 tool guardrails active" in result.specific["additionalContext"]
