@@ -8,7 +8,7 @@ forms of two tags an author meant differently must NOT collide.
 
 import pytest
 
-from utils.tag_normalize import is_near_duplicate, normalize_tag
+from utils.tag_normalize import is_near_duplicate, is_specialisation, normalize_tag
 
 
 class TestNormalizeTag:
@@ -229,3 +229,122 @@ class TestNumberedSeriesAreNotNearDuplicates:
         """The mask runs before separators are dropped, so '0.73.0' stays 3 fields."""
         assert is_near_duplicate(a, b) is expected
         assert is_near_duplicate(b, a) is expected
+
+
+class TestIsSpecialisation:
+    """#1617: a compound tag and its own leading segment(s) are a topic and a
+    sub-topic, not two spellings of one tag. The predicate is pure, symmetric and
+    reads no vocabulary; the write lint uses it to drop such matches, the read
+    path deliberately does not.
+    """
+
+    @pytest.mark.parametrize(
+        ("a", "b"),
+        [
+            # Class A from the issue: compound vs its generic leading segment(s).
+            ("session-cookie", "session"),
+            ("deploy-checklist", "deploy"),
+            ("cache-layer-redis", "cache-layer"),
+            ("post-deploy-check", "post-deploy"),
+            ("search-response-size", "search"),
+            ("changelog-date-utc", "changelog"),
+            # Separator and case drift between the two sides.
+            ("NEXT_PUBLIC_PLAN_DISPLAY_NAMES", "next-public"),
+            ("Session Cookie", "session"),
+            # Class B: a dated / numbered member vs the bare series name.
+            ("session-2026-09-11", "session"),
+            ("s3-bucket-2", "s3-bucket"),
+            # ':' and '#' are segment boundaries too.
+            ("category:auth", "category"),
+            ("some-repo#62", "some-repo"),
+            ("issue:#1599", "issue"),
+            # Plural is folded per segment: 'sessions' is the generic of 'session-cookie'.
+            ("sessions", "session-cookie"),
+            # Full-width separators split after NFKC; non-Latin segments work too.
+            ("ｓｅｓｓｉｏｎ－ｃｏｏｋｉｅ", "session"),
+            ("セッション-クッキー", "セッション"),
+            # A punctuation-only segment carries no signal and is dropped.
+            ("session-.-cookie", "session"),
+        ],
+    )
+    def test_a_compound_and_its_leading_segments_are_a_specialisation(self, a, b):
+        assert is_specialisation(a, b)
+        assert is_specialisation(b, a)
+
+    @pytest.mark.parametrize(
+        ("a", "b"),
+        [
+            # Equal whole folds are mechanical variants, never a specialisation —
+            # even when one side has an extra separator-delimited segment.
+            ("deploy", "deploy-s"),
+            ("session", "session-"),
+            ("Dev_Environment", "dev-environment"),
+            ("category:auth", "category-auth"),
+            ("auth-n", "authn"),
+            ("plan-tier", "plan-tiers"),
+            # A partial last segment is an abbreviation, which the prefix rule
+            # exists for: the boundary has to be a WHOLE-segment boundary.
+            ("dev-env", "dev-environment"),
+            ("deploy-check", "deploy-checklist"),
+            ("category:auth", "category:authn"),
+            # Single-segment pairs have no boundary to speak of.
+            ("oauth", "oauth2"),
+            ("kube", "kubernetes"),
+            ("auth", "authn"),
+            # '.' is NOT a boundary: a dotted name is one identifier.
+            ("node", "node.js"),
+            ("next", "next.js"),
+            ("socket", "socket.io"),
+            ("v0.73", "v0.73.0"),
+            # Same number of segments, different content.
+            ("isue:#1599", "issue:#1599"),
+            ("sprint-07", "sprint-7"),
+            ("python", "javascript"),
+            # Numeric-precision exception: the shorter tag ends in a digit and
+            # every extra segment is a number — one identifier at two precisions.
+            ("session-2026-09", "session-2026-09-21"),
+            ("2026-09", "2026-09-21"),
+            ("release-1", "release-1-2"),
+        ],
+    )
+    def test_not_a_specialisation(self, a, b):
+        assert not is_specialisation(a, b)
+        assert not is_specialisation(b, a)
+
+    def test_numeric_exception_looks_only_at_the_last_segment(self):
+        """A digit elsewhere in the shorter tag does not make the extra number a
+        precision step: ``s3-bucket-2`` is a member of the ``s3-bucket`` series."""
+        assert is_specialisation("s3-bucket", "s3-bucket-2")
+        # A non-numeric extra segment is never a precision step, whatever the
+        # shorter tag ends in.
+        assert is_specialisation("s3", "s3-bucket")
+        assert is_specialisation("2026-09", "2026-09-retro")
+
+    @pytest.mark.parametrize(
+        ("a", "b"),
+        [
+            ("auth", "auth-n"),
+            ("front", "front-end"),
+            ("mongo", "mongo-db"),
+            ("python", "python-3"),
+            ("oauth", "oauth-2.0"),
+        ],
+    )
+    def test_a_respelling_that_ends_on_a_segment_boundary_is_an_accepted_trade_off(self, a, b):
+        """Structurally identical to ``java`` / ``java-script``, which must be a
+        specialisation; the boundary is the only mechanical signal available.
+        The unseparated spellings (``authn``, ``frontend``, ...) are unaffected.
+        """
+        assert is_specialisation(a, b)
+        assert not is_specialisation(a, b.replace("-", ""))
+
+    def test_empty_fold_is_never_a_specialisation(self):
+        assert not is_specialisation("---", "python")
+        assert not is_specialisation("###", "python-3")
+        assert not is_specialisation("---", "===")
+
+    def test_the_predicate_is_independent_of_is_near_duplicate(self):
+        """Both relations hold for a class A pair: the write lint subtracts one
+        from the other, the read path keeps the near-duplicate as is."""
+        assert is_near_duplicate("session-cookie", "session")
+        assert is_specialisation("session-cookie", "session")
