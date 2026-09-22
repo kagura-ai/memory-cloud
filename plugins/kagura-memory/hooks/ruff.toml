@@ -1,0 +1,5 @@
+# Lint config for the plugin hook scripts. They live outside backend/, so the
+# backend pyproject does not reach them on its own; they run under the user's
+# system python3 with a 3.9 floor, so the target is pinned below the backend's.
+extend = "../../../backend/pyproject.toml"
+target-version = "py39"
