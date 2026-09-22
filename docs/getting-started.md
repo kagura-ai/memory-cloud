@@ -142,28 +142,41 @@ Core tools only: use `http://localhost:8080/mcp/w/YOUR_WORKSPACE_ID?profile=core
 
 ### Codex CLI
 
-**Recommended — plugin install (handles sign-in):**
+Checked against Codex `rust-v0.155.1`. Codex reads the API key from an environment variable that its config names — the key itself never goes into `~/.codex/config.toml`.
+
+**Recommended — `codex mcp add`:**
 
 ```bash
-codex plugin install kagura-memory@kagura-memory-cloud
+export KAGURA_API_KEY="kagura_xxxxxxxxxxxx"
+codex mcp add kagura-memory --url "http://localhost:8080/mcp/w/YOUR_WORKSPACE_ID" --bearer-token-env-var KAGURA_API_KEY
 ```
 
-The plugin adds `/recall`, `/remember`, and `/session-start` slash skills to Codex CLI.
+`codex mcp list` now shows `kagura-memory` with `KAGURA_API_KEY` as its bearer token env var. Export `KAGURA_API_KEY` in every shell you start Codex from (or in your shell profile).
 
-**Manual fallback — `~/.codex/config.toml`:**
+**Manual equivalent — `~/.codex/config.toml`:**
 
-If the plugin install does not auto-configure the MCP server endpoint, add the snippet manually:
+The command writes this entry; paste it yourself if you prefer editing the file:
 
 ```toml
 [mcp_servers.kagura-memory]
-type = "http"
 url = "http://localhost:8080/mcp/w/YOUR_WORKSPACE_ID"
-bearer_token = "YOUR_API_KEY"
+bearer_token_env_var = "KAGURA_API_KEY"
 ```
+
+These two keys only. Codex rejects an inline `bearer_token` on an HTTP server, and the whole `config.toml` then fails to load ([Troubleshooting](troubleshooting.md#codex-cli--bearer_token-is-not-supported-for-streamable_http)); `type` is not a Codex key.
 
 Core tools only: set `url = "http://localhost:8080/mcp/w/YOUR_WORKSPACE_ID?profile=core"` instead ([which one?](#which-url)).
 
 Restart Codex CLI to pick up the config.
+
+**Optional — the Kagura Memory skill:**
+
+The `kagura-memory` plugin adds the Kagura Memory skill (session restore, recall and remember as natural-language requests) on top of the server configured above; it does not configure or sign in to the server. Register this repository's marketplace, then install the plugin:
+
+```bash
+codex plugin marketplace add https://github.com/kagura-ai/memory-cloud
+codex plugin add kagura-memory@kagura-memory-cloud
+```
 
 ## Quick API Test
 

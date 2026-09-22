@@ -16,6 +16,30 @@ Look at the endpoint URL your client stores — `"url"` in `.mcp.json` / `.gemin
 
 The missing tool is still **callable** — a profile filters the list, not access — but most clients only offer what they list. To see it, switch back to the default URL (or add its name to `?tools=`), then restart or reconnect the client so it lists tools again. Background: [Tool Profiles](mcp-tools.md#tool-profiles).
 
+## Codex CLI — `bearer_token is not supported for streamable_http`
+
+Codex fails to start, or `codex mcp list` fails, with:
+
+```
+bearer_token is not supported for streamable_http
+```
+
+**You copied a pre-fix snippet.** Earlier versions of this documentation and of the web UI's Codex tab wrote the API key into `~/.codex/config.toml` as `bearer_token = "…"`, next to a `type = "http"` line. Codex (checked against `rust-v0.155.1`) does not accept an inline token on an HTTP server, and because it validates `mcp_servers` as one map, the **whole `config.toml` fails to load** — every other server in the file is gone too — until the key is removed. `type` is not a Codex key either: it is ignored by default and an "unknown configuration field" error under `codex --strict-config`.
+
+Replace the entry with the two keys Codex reads, and put the key itself in the environment Codex starts from:
+
+```toml
+[mcp_servers.kagura-memory]
+url = "http://localhost:8080/mcp/w/{workspace_id}"
+bearer_token_env_var = "KAGURA_API_KEY"
+```
+
+```bash
+export KAGURA_API_KEY="kagura_{your_api_key}"
+```
+
+`codex mcp add kagura-memory --url "…" --bearer-token-env-var KAGURA_API_KEY` writes the same entry; see [Getting Started → Codex CLI](getting-started.md#codex-cli). Keep the key out of `config.toml`: `bearer_token_env_var` (or `env_http_headers`) is how Codex takes it from the environment.
+
 ## WSL2 + Claude Code — MCP OAuth callback fails (default NAT networking)
 
 **This is a WSL networking issue, not a Kagura Memory Cloud server bug.** The server-side OAuth path is healthy — the resolved server-side cousin of this report was [#689 / PR #692](https://github.com/kagura-ai/memory-cloud/pull/692) (DCR no longer issues a `client_secret` for public `auth_method="none"` clients), deployed 2026-05-17. The remaining problem is purely the WSL2 NAT network isolation between the WSL listener and the Windows browser.
