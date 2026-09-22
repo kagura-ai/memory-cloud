@@ -2119,6 +2119,9 @@ class TestAccessEventEmission:
         memory.context_summary = None
         memory.content = "c"
         memory.details = None
+        # A bare MagicMock attribute would read as a tool guardrail (the #1523
+        # is_pinned trap) and route forget() through the editor gate.
+        memory.is_tool_triggered = False
         memory.type = "note"
         memory.scope = "working"
         memory.importance = 0.5

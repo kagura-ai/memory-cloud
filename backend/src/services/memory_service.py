@@ -412,6 +412,89 @@ class MemoryService:
             raise ValueError(f"invalid details.location: {exc}") from exc
 
     @staticmethod
+    def _apply_tool_trigger(details: dict | None) -> dict | None:
+        """Validate + normalize ``details.tool_trigger`` (tool guardrail marking).
+
+        ``_apply_location``'s sibling: an orthogonal gate that fires on the
+        ``tool_trigger`` key's presence for any memory type, applied only to
+        caller-supplied details so an untouched legacy row never 422s. The
+        grammar and structural rules live in ``utils.tool_trigger``; the server
+        compiles the patterns once and never runs them. An explicit
+        ``"tool_trigger": null`` REMOVES the key (the unmark path) — ``details``
+        is a PostgreSQL ``json`` column, so a stored JSON ``null`` would still
+        satisfy the ``idx_memories_tool_trigger`` predicate.
+
+        Raises:
+            ValueError: ``invalid details.tool_trigger: <code>: <sentence>`` —
+                the established "bad request" signal inside MemoryService; the
+                ``<code>`` token is stable (``TOOL_TRIGGER_ERROR_CODES``).
+        """
+        from utils.tool_trigger import ToolTriggerValidationError, normalize_tool_trigger
+
+        try:
+            return normalize_tool_trigger(details)
+        except ToolTriggerValidationError as exc:
+            raise ValueError(f"invalid details.tool_trigger: {exc}") from exc
+
+    @staticmethod
+    def _touches_tool_trigger(
+        existing_details: Any, new_details: Any, *, details_supplied: bool
+    ) -> bool:
+        """Does this write add, change or remove a guardrail marking?
+
+        True when the stored row already carries ``details.tool_trigger`` (any
+        edit or delete of a guardrail is a protection change — including a
+        summary rewrite, or a wholesale ``details`` replace that drops the
+        key) or when caller-supplied details name the key (adding, changing,
+        or an explicit ``null`` to unmark). A stored ``tool_trigger: null`` or
+        non-object legacy shape is "not a guardrail", matching
+        ``Memory.is_tool_triggered`` and the SQL predicate.
+        """
+        if isinstance(existing_details, dict) and existing_details.get("tool_trigger") is not None:
+            return True
+        return details_supplied and isinstance(new_details, dict) and "tool_trigger" in new_details
+
+    async def _require_guardrail_author(self, user_id: str, context_id: UUID | str | None) -> None:
+        """Authorize a guardrail write: context EDITOR or above, user credential only.
+
+        Memory writes otherwise authorize on workspace *membership*, which lets
+        a workspace VIEWER edit ``details`` in a shared context. A tool guardrail
+        is injected into every member's agent session by client hooks (with a
+        deny capability for ``action="block"``), so marking, changing, removing
+        or deleting one is held to the role-aware chokepoint
+        ``PermissionService.check_context_write`` (workspace owner/admin, a
+        ContextMember editor/owner, or the creator of a private context).
+
+        An agent credential (``get_agent_scope()`` set) can never author a
+        guardrail: the row records no agent identity, so a guardrail written by
+        an automated agent that ingested untrusted content would be
+        indistinguishable from a human one.
+
+        Raises:
+            ValueError: ``invalid details.tool_trigger:
+                tool_trigger_requires_user_credential`` for an agent credential.
+            AuthorizationError: the caller is below context EDITOR.
+        """
+        from auth.agent_scope import get_agent_scope
+        from services.permission_service import PermissionService
+        from utils.tool_trigger import ToolTriggerValidationError
+
+        if get_agent_scope() is not None:
+            raise ValueError(
+                "invalid details.tool_trigger: "
+                + str(
+                    ToolTriggerValidationError(
+                        "tool_trigger_requires_user_credential",
+                        "tool guardrails are authored with a user credential; an agent "
+                        "credential cannot add, change or remove details.tool_trigger",
+                    )
+                )
+            )
+        if context_id is None:
+            raise ValueError("a tool guardrail write requires a context")
+        await PermissionService(self.db).check_context_write(user_id, UUID(str(context_id)))
+
+    @staticmethod
     def _reject_context_location(context: dict | None) -> None:
         """Enforce the "coordinates never in ``context``" rule (#1331, spec §4).
 
@@ -585,6 +668,13 @@ class MemoryService:
         # gate — fires on key presence for any type); coordinates must never
         # ride the Qdrant-replicated context JSONB.
         request.details = self._apply_location(request.details)
+        # Tool guardrails: validate/normalize details.tool_trigger (orthogonal
+        # gate, any type). Marking a memory as a guardrail is a protection
+        # change every member's client hook acts on, so it also needs context
+        # EDITOR or above and a user credential.
+        request.details = self._apply_tool_trigger(request.details)
+        if self._touches_tool_trigger(None, request.details, details_supplied=True):
+            await self._require_guardrail_author(user_id, context_id_str)
         self._reject_context_location(request.context)
 
         # Create memory entity first with pending status
@@ -735,6 +825,15 @@ class MemoryService:
         from utils.text import normalize_for_search
 
         memory = await self._update_load_authorized(request.memory_id, user_id)
+
+        # Tool guardrails: any edit of a guardrail row, or a details write that
+        # adds / changes / removes tool_trigger, needs context EDITOR or above
+        # (membership alone is what can_access_memory checked). Before any
+        # field is applied, so a deny leaves the row untouched.
+        if self._touches_tool_trigger(
+            memory.details, request.details, details_supplied=request.details is not None
+        ):
+            await self._require_guardrail_author(user_id, memory.context_id)
 
         # Pre-compute normalized values (avoid double normalization)
         normalized_summary = (
@@ -1021,6 +1120,9 @@ class MemoryService:
         # location predates the contract (its generated columns are NULL).
         if request.details is not None:
             effective_details = self._apply_location(effective_details)
+            # Tool guardrails: same caller-supplied-only rule (the role gate
+            # ran in _update_in_place before any field was touched).
+            effective_details = self._apply_tool_trigger(effective_details)
         self._reject_context_location(request.context)
         if request.details is not None or effective_type == MEMORY_TYPE_TIME:
             memory.details = effective_details
@@ -1225,6 +1327,9 @@ class MemoryService:
         # No context guard here: PatchMemoryRequest has no context field.
         if "details" in provided_fields:
             effective_details = self._apply_location(effective_details)
+            # Tool guardrails: same caller-supplied-only rule (the role gate
+            # ran in patch_memory before any field was touched).
+            effective_details = self._apply_tool_trigger(effective_details)
         if "details" in provided_fields or effective_type == MEMORY_TYPE_TIME:
             # Explicit null clears the column; non-null replaces it. A
             # type="time" patch always (re)writes the normalized details.
@@ -1462,6 +1567,14 @@ class MemoryService:
         # `details` payloads — no deep serialization, just a name set.
         provided_fields = request.model_fields_set
 
+        # Tool guardrails: mirrors _update_in_place — any patch of a guardrail
+        # row (including ``{"details": null}``, which drops the marking) or a
+        # details patch naming tool_trigger needs context EDITOR or above.
+        if self._touches_tool_trigger(
+            memory.details, request.details, details_supplied="details" in provided_fields
+        ):
+            await self._require_guardrail_author(user_id, memory.context_id)
+
         normalized_summary = (
             normalize_for_search(request.summary) if "summary" in provided_fields else None
         )
@@ -1546,6 +1659,14 @@ class MemoryService:
 
         # Build details with resource_id preserved (copy to avoid mutating request)
         details = {**(request.details or {}), "resource_id": request.external_id}
+
+        # Tool guardrails: replacing a guardrail row is a protection change
+        # (the replacement may drop the marking). Gate it here, loudly, rather
+        # than letting the inner forget() skip the old row silently and report
+        # "replaced" with two live rows. The inner remember() gates a NEW
+        # marking on its own.
+        if existing is not None and existing.is_tool_triggered:
+            await self._require_guardrail_author(user_id, existing.context_id)
 
         # #1519: forward the caller's pin — without it a pinned external_id row
         # was replaced by an unpinned one and left load_pinned() silently.
@@ -4419,6 +4540,23 @@ class MemoryService:
                     )
                     # Return empty response instead of error for security
                     return ForgetResponse(deleted_count=0, memory_ids=[])
+                # Tool guardrails: deleting a guardrail silently stops it firing
+                # in every member's client hook, so it takes context EDITOR or
+                # above (and a user credential) — membership is not enough.
+                # forget keeps its contract: a target the caller may not delete
+                # is skipped (deleted_count=0), never a 403.
+                if memory.is_tool_triggered:
+                    from utils.exceptions import AuthorizationError
+
+                    try:
+                        await self._require_guardrail_author(user_id, memory.context_id)
+                    except (AuthorizationError, ValueError):
+                        logger.warning(
+                            "forget_guardrail_author_denied",
+                            memory_id=str(request.memory_id),
+                            user_id=user_id,
+                        )
+                        return ForgetResponse(deleted_count=0, memory_ids=[])
                 # Migration 063: Get workspace_id/context_id from memory directly
                 # CRITICAL: Validate workspace_id/context_id are not NULL (data integrity)
                 if not memory.workspace_id or not memory.context_id:
