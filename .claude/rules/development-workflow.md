@@ -30,8 +30,13 @@ local `.claude/commands/` now only hold project-specific utilities (`/quality`,
 
 Whole-milestone automation: `/gh-issue-driven:goal <milestone>` runs the loop
 above for every open issue; `/gh-issue-driven:status` shows the current branch's
-phase. Release tagging: `/gh-issue-driven:tag` (milestone notes) + `/release`
-(project version-file bump).
+phase. Releases: `/release patch|minor|major` is the whole ceremony for this repo
+(release branch → seven version files + CHANGELOG → PR + one Copilot round →
+squash merge → annotated tag on the merge commit → GitHub Release → milestone
+close → coverage upload). `/gh-issue-driven:tag` is not run here end-to-end: it
+commits and pushes on the protected `main`, bumps only the plugin manifests and
+aborts on the `version` field `.claude-plugin/marketplace.json` does not have —
+use it at most in `dry-run` to draft release notes.
 
 ## Commit Discipline
 
