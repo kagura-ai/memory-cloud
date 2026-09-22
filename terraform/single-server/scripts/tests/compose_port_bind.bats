@@ -30,17 +30,25 @@ compose_files() {
 }
 
 # Print "file<TAB>line<TAB>entry" for every item of every `ports:` block.
-# An item may sit deeper than the key or, as YAML allows, at the same indent.
+# An item may sit deeper than the key or, as YAML allows, at the same indent;
+# a flow-style `ports: ["a:b", "c:d"]` is split on commas. Each entry is
+# normalised so the classifier sees the bare value: leading indent and the
+# `- ` bullet, a trailing ` # comment`, and either quote style are removed.
 ports_entries() {
     awk '
         function indent(s) { match(s, /^[ ]*/); return RLENGTH }
+        function emit(s) {
+            sub(/^[ ]*(-[ ]*)?/, "", s); sub(/[ ]+#.*$/, "", s)
+            sub(/[ ]*$/, "", s); gsub(/["\x27]/, "", s)
+            if (s != "") printf "%s\t%d\t%s\n", FILENAME, FNR, s
+        }
         FNR == 1 { inports = 0 }
         /^[ ]*#/ || /^[ ]*$/ { next }
         inports && (indent($0) < pindent || (indent($0) == pindent && $0 !~ /^[ ]*-/)) { inports = 0 }
-        inports {
-            line = $0
-            sub(/^[ ]*-[ ]*/, "", line); sub(/[ ]*$/, "", line); gsub(/"/, "", line)
-            printf "%s\t%d\t%s\n", FILENAME, FNR, line
+        inports { emit($0); next }
+        /^[ ]*ports:[ ]*\[/ {
+            flow = $0; sub(/^[ ]*ports:[ ]*\[/, "", flow); sub(/\][ ]*(#.*)?$/, "", flow)
+            n = split(flow, items, ","); for (i = 1; i <= n; i++) emit(items[i])
             next
         }
         /^[ ]*ports:[ ]*$/ { inports = 1; pindent = indent($0) }
@@ -134,13 +142,19 @@ services:
       - "${X}:5432:5432"
       - target: 5432
         published: 5432
+      - published: 5432
+        target: 5432
+      - "5432:5432"   # a trailing comment must not hide the entry
+      - '5432:5432'
+  qdrant:
+    ports: ["6333:6333", "0.0.0.0:6334:6334"]
   api:
     ports:
       - "8080:8080"
 YAML
     run scan "$fixture"
     [ "$status" -ne 0 ]
-    [ "$(printf '%s\n' "$output" | grep -c '^BAD')" -eq 7 ]
+    [ "$(printf '%s\n' "$output" | grep -c '^BAD')" -eq 12 ]
     [ "$(printf '%s\n' "$output" | grep -c '^OK')" -eq 0 ]
     [[ "$output" != *"8080"* ]]                           # non-data ports are not the guard's business
 }
