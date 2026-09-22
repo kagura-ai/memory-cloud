@@ -531,8 +531,9 @@ export function SearchSettingsSection({
                     </p>
                     <p className="text-sm">
                       {/* t.rich with a <link> tag in the message — splitting on
-                          the English "Basic plan" dropped both the link text
-                          and the sentence tail in every other locale (#1642). */}
+                          the English "Basic plan" left the link label
+                          untranslated and dropped the sentence tail in every
+                          other locale (#1642). */}
                       {t.rich("upgradeToBasic", {
                         link: (chunks) => (
                           <Link
