@@ -1980,7 +1980,7 @@
   },
   "quotaWarning": {
     "titleExceeded": "クォータ超過",
-    "titleCritical": "重要: 上限に近づいています",
+    "titleCritical": "危険: 上限に近づいています",
     "titleWarning": "警告: クォータ使用量が高い状態です",
     "bodyExceeded": "{resource}の上限を超えました。不要なデータを削除するか、プランをアップグレードしてください。",
     "bodyCritical": "{resource}の上限に近づいています。サービスの中断を避けるため、アップグレードを検討してください。",
