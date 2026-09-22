@@ -32,6 +32,7 @@ from tests.plugin.conftest import (
 )
 
 pytestmark = pytest.mark.skipif(os.name != "posix", reason="POSIX-only hook")
+fcntl = pytest.importorskip("fcntl")
 
 
 def _env(plugin_env: PluginEnv, url: str) -> dict[str, str]:
@@ -40,6 +41,17 @@ def _env(plugin_env: PluginEnv, url: str) -> dict[str, str]:
 
 def _start(plugin_env: PluginEnv, run_hook: RunHook, url: str, source: str = "startup") -> Any:
     return run_hook(payload("SessionStart", source=source), env=_env(plugin_env, url))
+
+
+def _lock_is_free(lock: Any) -> bool:
+    fd = os.open(lock, os.O_RDWR)
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        return True
+    except OSError:
+        return False
+    finally:
+        os.close(fd)
 
 
 STANDARD = [
@@ -457,7 +469,9 @@ def test_refresh_writes_cache_and_prints_nothing(
     assert result.returncode == 0 and result.stdout == "" and result.stderr == ""
     assert len(stub_server.requests) == 1
     assert json.loads(plugin_env.cache_path.read_text())["version"] == "3f9c1a7b2d4e6f80"
-    assert not (plugin_env.state_dir / "refresh.lock").exists()
+    lock = plugin_env.state_dir / "refresh.lock"
+    assert lock.exists() and lock.stat().st_mode & 0o077 == 0, "the lock file stays, 0600"
+    assert _lock_is_free(lock), "released when the hook exits"
 
 
 def test_refresh_skips_a_cache_younger_than_5s(
@@ -480,6 +494,12 @@ def test_concurrent_refreshes_make_one_request(
     command = command_for("PostToolUse", refresh=True)
     env = _env(plugin_env, stub_server.url)
     plugin_env.state_dir.mkdir(mode=0o700, parents=True, exist_ok=True)
+    # An old lock file nobody holds (a crashed holder) is what the six contenders
+    # find: with a path-based takeover two of them could both "win" it.
+    lock = plugin_env.state_dir / "refresh.lock"
+    lock.write_text("")
+    old = time.time() - 60
+    os.utime(lock, (old, old))
     body = json.dumps(
         payload(
             "PostToolUse", tool_name="mcp__kagura-memory__remember", tool_input={}, tool_response={}
@@ -499,28 +519,44 @@ def test_concurrent_refreshes_make_one_request(
     with ThreadPoolExecutor(max_workers=6) as pool:
         codes = list(pool.map(run, range(6)))
     assert codes == [0] * 6
-    # refresh.lock coalesces the burst: the holder fetches, the others exit without a request.
+    # The flock coalesces the burst: the holder fetches, the others exit without a request.
     assert len(stub_server.requests) == 1
+    assert os.stat(lock).st_ino == lock.stat().st_ino and _lock_is_free(lock)
     assert json.loads(plugin_env.cache_path.read_text())["version"] == "3f9c1a7b2d4e6f80"
 
 
-def test_stale_refresh_lock_is_replaced(
+def test_refresh_lock_is_a_live_flock_not_a_file_age(
     plugin_env: PluginEnv, run_hook: RunHook, stub_server: StubServer
 ) -> None:
+    """An old unheld file is no lock; a held file is one however old it is; the hook
+    never unlinks or replaces the file, so a holder's lock cannot be removed under it."""
     stub_server.set_guardrails(STANDARD)
     plugin_env.state_dir.mkdir(mode=0o700, parents=True, exist_ok=True)
     lock = plugin_env.state_dir / "refresh.lock"
-    lock.write_text("")
     body = payload(
         "PostToolUse", tool_name="mcp__kagura-memory__remember", tool_input={}, tool_response={}
     )
-    run_hook(body, env=_env(plugin_env, stub_server.url), refresh=True)
-    assert stub_server.requests == [], "a live lock is honoured"
+    env = _env(plugin_env, stub_server.url)
     old = time.time() - 60
+    lock.write_text("")
     os.utime(lock, (old, old))
-    run_hook(body, env=_env(plugin_env, stub_server.url), refresh=True)
-    assert len(stub_server.requests) == 1
-    assert not lock.exists()
+    run_hook(body, env=env, refresh=True)
+    assert len(stub_server.requests) == 1, "an aged file nobody holds does not block"
+    # Hold the lock from here, with the mtime the previous protocol called stale.
+    plugin_env.write_cache(STANDARD)  # older than the 5 s minimum age again
+    fd = os.open(lock, os.O_RDWR)
+    fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    os.utime(lock, (old, old))
+    try:
+        result = run_hook(body, env=env, refresh=True)
+        assert result.returncode == 0 and result.stdout == ""
+        assert len(stub_server.requests) == 1, "a held lock is honoured however old the file"
+        assert os.fstat(fd).st_ino == os.stat(lock).st_ino, "neither unlinked nor replaced"
+    finally:
+        os.close(fd)
+    plugin_env.write_cache(STANDARD)
+    run_hook(body, env=env, refresh=True)
+    assert len(stub_server.requests) == 2, "released: the next refresh goes through"
 
 
 # ---------------------------------------------------------------------------

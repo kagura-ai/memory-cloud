@@ -896,3 +896,131 @@ def test_state_dirs_are_private(plugin_env: PluginEnv, call_main: Any) -> None:
         mode = path.stat().st_mode & 0o777
         assert mode in (0o700, 0o600), (path, oct(mode))
     assert Path(plugin_env.guardrails_dir / "deliveries.log").stat().st_mode & 0o077 == 0
+
+
+# ---------------------------------------------------------------------------
+# Private directories (ensure_dir)
+# ---------------------------------------------------------------------------
+
+
+def test_ensure_dir_tightens_a_loose_directory_we_own(
+    hook_module: ModuleType, tmp_path: Path
+) -> None:
+    loose = tmp_path / "loose"
+    loose.mkdir()
+    os.chmod(loose, 0o755)
+    assert hook_module.ensure_dir(str(loose)) is True
+    assert loose.stat().st_mode & 0o777 == 0o700
+    assert hook_module.ensure_dir(str(loose)) is True, "an already private directory is accepted"
+    deep = tmp_path / "a" / "b" / "c"
+    assert hook_module.ensure_dir(str(deep)) is True
+    for path in (deep, deep.parent, deep.parent.parent):
+        assert path.stat().st_mode & 0o777 == 0o700, path
+
+
+def test_ensure_dir_refuses_symlinks_and_files(hook_module: ModuleType, tmp_path: Path) -> None:
+    target = tmp_path / "elsewhere"
+    target.mkdir()
+    os.chmod(target, 0o755)
+    link = tmp_path / "link"
+    link.symlink_to(target)
+    assert hook_module.ensure_dir(str(link)) is False
+    assert target.stat().st_mode & 0o777 == 0o755, "never chmod'ed through the link"
+    plain = tmp_path / "plain"
+    plain.write_text("")
+    assert hook_module.ensure_dir(str(plain)) is False
+
+
+def test_ensure_dir_refuses_a_directory_owned_by_someone_else(
+    hook_module: ModuleType, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Ownership is compared with ``os.getuid``; pretend to be another user."""
+    foreign = tmp_path / "foreign"
+    foreign.mkdir(mode=0o700)
+    real_uid = os.getuid()
+    monkeypatch.setattr(os, "getuid", lambda: real_uid + 1)
+    assert hook_module.ensure_dir(str(foreign)) is False
+    os.chmod(foreign, 0o755)
+    assert hook_module.ensure_dir(str(foreign)) is False
+    assert foreign.stat().st_mode & 0o777 == 0o755, "a foreign directory is never chmod'ed"
+
+
+# ---------------------------------------------------------------------------
+# Render budget is applied before markers are taken
+# ---------------------------------------------------------------------------
+
+
+def _long_summary(n: int) -> str:
+    """Flattens to the 500-character cap plus the ellipsis."""
+    return " ".join(f"guardrail{n}word{i}" for i in range(60))
+
+
+def test_render_budget_is_applied_before_markers_are_taken(
+    hook_module: ModuleType, plugin_env: PluginEnv, call_main: Any
+) -> None:
+    """Twenty long block lines overflow 9,000 characters: only rendered lines are marked."""
+    blocks = [
+        item(n, _long_summary(n), "Bash", match="danger", action="block") for n in range(1, 21)
+    ]
+    plugin_env.write_cache(blocks)
+    first = call_main(bash_pre("danger"))
+    reason = first.specific["permissionDecisionReason"]
+    assert len(reason) <= hook_module.CLAUDE_RENDER_BUDGET_CHARS
+    rendered = reason.count("Kagura Memory guardrail (")
+    assert 0 < rendered < 20, rendered
+    assert len(plugin_env.markers("block")) == rendered, "no marker without a rendered line"
+    log = (plugin_env.guardrails_dir / "deliveries.log").read_text().splitlines()
+    assert len(log) == rendered
+    # The lines that did not fit were never marked: the re-issued call delivers them.
+    second = call_main(bash_pre("danger"))
+    assert second.specific["permissionDecision"] == "deny"
+    rest = second.specific["permissionDecisionReason"].count("Kagura Memory guardrail (")
+    assert rendered + rest == 20
+    assert len(plugin_env.markers("block")) == 20
+    assert call_main(bash_pre("danger")).stdout == ""
+
+
+def test_token_budget_selects_before_marking(
+    hook_module: ModuleType, plugin_env: PluginEnv
+) -> None:
+    """The Codex-style token budget goes through the same pre-marker selection."""
+    plugin_env.guardrails_dir.mkdir(mode=0o700, exist_ok=True)
+    state = hook_module.State(str(plugin_env.guardrails_dir), SESSION_ID, None)
+    blocks = [
+        item(n, "危険な操作です。安全な代替手段を使ってください " * 12, "Bash", action="block")
+        for n in range(1, 4)
+    ]
+    informs = [item(n, "inform " * 20, "Bash") for n in range(10, 13)]
+    one_block = hook_module.render_text([hook_module.render_line(blocks[0])], True)
+    tight = hook_module.approx_tokens(one_block)
+    assert len(one_block) < hook_module.CLAUDE_RENDER_BUDGET_CHARS, "chars alone would not cut"
+    taken_blocks, taken_informs = hook_module.select_candidates(
+        blocks + informs, "pre", "block", state, hook_module.CLAUDE_RENDER_BUDGET_CHARS, tight
+    )
+    assert [b["memory_id"] for b in taken_blocks] == [memory_id(1)]
+    assert taken_informs == []
+    assert [p.name for p in plugin_env.markers("block")] == [memory_id(1)]
+    assert plugin_env.markers("inform") == []
+    # With room, the untaken candidates are still live: two blocks, then one inform fills to 3.
+    taken_blocks, taken_informs = hook_module.select_candidates(
+        blocks + informs, "pre", "block", state, None, None
+    )
+    assert [b["memory_id"] for b in taken_blocks] == [memory_id(2), memory_id(3)]
+    assert [i["memory_id"] for i in taken_informs] == [memory_id(10)]
+    assert len(plugin_env.markers("block")) == 3 and len(plugin_env.markers("inform")) == 1
+
+
+def test_informs_cut_by_the_budget_are_delivered_at_the_next_call(
+    hook_module: ModuleType, plugin_env: PluginEnv, call_main: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    informs = [item(n, _long_summary(n), "Bash", match="danger") for n in range(1, 4)]
+    plugin_env.write_cache(informs)
+    two_lines = hook_module.render_text([hook_module.render_line(i) for i in informs[:2]], False)
+    monkeypatch.setattr(hook_module.ClaudeAdapter, "render_budget_chars", len(two_lines))
+    first = call_main(bash_pre("danger"))
+    assert first.specific["additionalContext"].count("Kagura Memory guardrail (") == 2
+    assert [p.name for p in plugin_env.markers("inform")] == [memory_id(1), memory_id(2)]
+    second = call_main(bash_pre("danger"))
+    assert second.specific["additionalContext"].count("Kagura Memory guardrail (") == 1
+    assert f"({memory_id(3)[:8]})" in second.specific["additionalContext"]
+    assert call_main(bash_pre("danger")).stdout == ""

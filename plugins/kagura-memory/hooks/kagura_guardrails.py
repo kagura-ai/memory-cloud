@@ -34,6 +34,7 @@ import json
 import os
 import re
 import signal
+import stat
 import time
 import unicodedata
 import uuid
@@ -58,7 +59,6 @@ CONNECT_TIMEOUT_S = 1.5
 CACHE_FRESH_S = 60.0
 FAIL_MARKER_S = 60.0
 REFRESH_MIN_AGE_S = 5.0
-REFRESH_LOCK_STALE_S = 15.0
 TOOL_EVENT_MAX_AGE_S = 7 * 86400.0
 FALLBACK_MAX_AGE_S = 24 * 3600.0
 FUTURE_SKEW_S = 300.0
@@ -105,7 +105,7 @@ def _debug(stage: str) -> None:
     try:
         sys.stderr.write(SYSTEM_MESSAGE_PREFIX + stage + "\n")
     except Exception:  # noqa: BLE001 - stderr may be closed
-        pass
+        pass  # a debug line that cannot be written is dropped; never fail the hook over it
 
 
 # ---------------------------------------------------------------------------
@@ -128,7 +128,7 @@ def parse_fetched_at(value: Any) -> datetime | None:
         try:
             return datetime.strptime(value, fmt).replace(tzinfo=timezone.utc)
         except ValueError:
-            pass
+            pass  # not this format; try the next accepted one
     return None
 
 
@@ -520,17 +520,60 @@ def load_cache(
     return LoadedCache(data, fetched_at, age)
 
 
-def ensure_dir(path: str) -> bool:
-    """Create ``path`` (and missing parents) with mode 0700; ``False`` when impossible."""
-    if os.path.isdir(path):
+def _private_dir(path: str) -> bool:
+    """``path`` is a directory this user owns, reached without a symlink, with mode 0700.
+
+    A looser mode on a directory we own is tightened through a directory file
+    descriptor (``O_NOFOLLOW`` + ``fchmod``), so the chmod cannot be redirected
+    by swapping the entry for a symlink in between. Anything else - a symlink, a
+    regular file, another owner, a chmod that fails - is refused and the caller
+    fails open. Mode and owner checks are POSIX only.
+    """
+    try:
+        st = os.lstat(path)
+    except OSError:
+        return False
+    if not stat.S_ISDIR(st.st_mode):
+        return False
+    if os.name != "posix":
         return True
+    if st.st_uid != os.getuid():
+        return False
+    if not (st.st_mode & 0o077):
+        return True
+    flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0)
+    try:
+        fd = os.open(path, flags)
+    except OSError:
+        return False
+    try:
+        current = os.fstat(fd)
+        if not stat.S_ISDIR(current.st_mode) or current.st_uid != os.getuid():
+            return False
+        os.fchmod(fd, 0o700)
+        return not (os.fstat(fd).st_mode & 0o077)
+    except OSError:
+        return False
+    finally:
+        os.close(fd)
+
+
+def ensure_dir(path: str) -> bool:
+    """Create ``path`` (and missing parents) with mode 0700.
+
+    ``True`` only when ``path`` is, or has just become, a private directory as
+    ``_private_dir`` defines it; a pre-existing entry that cannot be brought to
+    that state is refused (``False``) and the caller fails open.
+    """
+    if os.path.lexists(path):
+        return _private_dir(path)
     parent = os.path.dirname(path)
-    if parent and parent != path and not os.path.isdir(parent) and not ensure_dir(parent):
+    if parent and parent != path and not os.path.lexists(parent) and not ensure_dir(parent):
         return False
     try:
         os.mkdir(path, 0o700)
     except FileExistsError:
-        return os.path.isdir(path)
+        return _private_dir(path)
     except OSError:
         return False
     return True
@@ -550,7 +593,7 @@ def write_private_file(path: str, payload: bytes) -> bool:
         try:
             os.unlink(tmp)
         except OSError:
-            pass
+            pass  # best-effort cleanup of the temp file; the write already failed
         return False
     return True
 
@@ -681,6 +724,7 @@ class State:
     def __init__(self, guardrails_dir: str, session_id: str, agent_id: str | None) -> None:
         self.sid16 = sha16(session_id)
         self.key = sha16(agent_id) if isinstance(agent_id, str) and agent_id else "main"
+        self.guardrails_dir = guardrails_dir
         self.state_dir = os.path.join(guardrails_dir, "state")
         self.session_dir = os.path.join(self.state_dir, self.sid16)
         self.key_dir = os.path.join(self.session_dir, self.key)
@@ -694,9 +738,21 @@ class State:
             self.marker_path("inform", memory_id)
         )
 
+    def _ensure_chain(self, *leaves: str) -> bool:
+        """Every directory we own on the way down is private, not only the leaf.
+
+        Tool events never pass ``guardrails/`` or ``state/`` to ``ensure_dir`` on
+        their own, and a loose or symlinked directory above the markers would
+        expose (or redirect) everything below it.
+        """
+        for directory in (self.guardrails_dir, self.state_dir, self.session_dir) + leaves:
+            if not ensure_dir(directory):
+                return False
+        return True
+
     def take(self, lane: str, memory_id: str) -> bool:
         lane_dir = os.path.join(self.key_dir, lane)
-        if not ensure_dir(lane_dir):
+        if not self._ensure_chain(self.key_dir, lane_dir):
             return False
         return _create_exclusive(os.path.join(lane_dir, memory_id))
 
@@ -710,7 +766,7 @@ class State:
         return os.path.exists(os.path.join(self.slow_dir, memory_id))
 
     def record_slow(self, memory_id: str) -> None:
-        if not ensure_dir(self.slow_dir):
+        if not self._ensure_chain(self.slow_dir):
             return
         first = os.path.join(self.slow_dir, memory_id + ".1")
         if os.path.exists(first):
@@ -737,6 +793,19 @@ def _create_exclusive(path: str) -> bool:
     except OSError:
         return False
     os.close(fd)
+    return True
+
+
+def _try_lock(fd: int) -> bool:
+    """Exclusive non-blocking advisory lock on ``fd``; ``False`` when held elsewhere or unsupported."""
+    try:
+        import fcntl
+    except ImportError:  # no flock on this platform (win32)
+        return False
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except OSError:
+        return False
     return True
 
 
@@ -795,13 +864,37 @@ def match_items(
     return matched
 
 
+def render_text(lines: list[str], deny: bool) -> str:
+    """The model-visible text: framing line, guardrail lines, deny trailer when denying."""
+    return "\n".join([FRAMING_LINE] + lines + ([DENY_TRAILER] if deny else []))
+
+
+def within_budget(text: str, budget_chars: int | None, budget_tokens: int | None) -> bool:
+    if budget_chars is not None and len(text) > budget_chars:
+        return False
+    return budget_tokens is None or approx_tokens(text) <= budget_tokens
+
+
 def select_candidates(
     matched: list[dict[str, Any]],
     on: str,
     max_action: str,
     state: State,
+    budget_chars: int | None = None,
+    budget_tokens: int | None = None,
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
-    """Take markers: every live block, then inform lines up to the per-call and per-key caps."""
+    """Decide what this call delivers, then take the markers - in that order.
+
+    Live blocks first (cache order), then informs up to the per-call and per-key
+    caps. The client's render budget is applied while selecting, before any
+    marker is taken: a candidate whose line would push the output over the
+    budget is not marked and stays live for a later matching call (a block cut
+    this way denies the re-issued call once more). The alternative - marking
+    it and letting the renderer drop the line - would lose a guardrail the
+    model never saw for the whole session. A candidate whose ``O_EXCL`` marker
+    fails (race lost) is dropped and the next one is tried, so nothing is
+    printed without a marker and nothing is marked without being printed.
+    """
     blocks: list[dict[str, Any]] = []
     informs: list[dict[str, Any]] = []
     for raw in matched:
@@ -816,14 +909,27 @@ def select_candidates(
         else:
             informs.append(item)
     inform_count = state.inform_count()
-    taken_blocks = [b for b in blocks if state.take("block", str(b["memory_id"]))]
+    lines: list[str] = []
+    taken_blocks: list[dict[str, Any]] = []
+    for item in blocks:
+        candidate = lines + [render_line(item)]
+        if not within_budget(render_text(candidate, True), budget_chars, budget_tokens):
+            break
+        if state.take("block", str(item["memory_id"])):
+            taken_blocks.append(item)
+            lines = candidate
+    deny = bool(taken_blocks)
     room = min(LINES_PER_CALL - len(taken_blocks), INFORM_CAP_PER_KEY - inform_count)
     taken_informs: list[dict[str, Any]] = []
     for item in informs:
         if len(taken_informs) >= room:
             break
+        candidate = lines + [render_line(item)]
+        if not within_budget(render_text(candidate, deny), budget_chars, budget_tokens):
+            break
         if state.take("inform", str(item["memory_id"])):
             taken_informs.append(item)
+            lines = candidate
     return taken_blocks, taken_informs
 
 
@@ -836,18 +942,12 @@ def build_hook_output(
 ) -> dict[str, Any]:
     lines = [render_line(i) for i in blocks] + [render_line(i) for i in informs]
     deny = bool(blocks)
-
-    def assemble(body: list[str]) -> str:
-        parts = [FRAMING_LINE] + body + ([DENY_TRAILER] if deny else [])
-        return "\n".join(parts)
-
-    text = assemble(lines)
-    while lines and (
-        (budget_chars is not None and len(text) > budget_chars)
-        or (budget_tokens is not None and approx_tokens(text) > budget_tokens)
-    ):
+    # ``select_candidates`` already fitted the taken candidates to the budget; this
+    # trim is the last line of defence only and drops nothing in normal operation.
+    text = render_text(lines, deny)
+    while lines and not within_budget(text, budget_chars, budget_tokens):
         lines.pop()
-        text = assemble(lines)
+        text = render_text(lines, deny)
     specific: dict[str, Any] = {"hookEventName": event_name}
     if deny:
         specific["permissionDecision"] = "deny"
@@ -874,7 +974,7 @@ def append_delivery_log(
         finally:
             os.close(fd)
     except OSError:
-        pass
+        pass  # the log is diagnostic only; a failed append must not fail the delivery
 
 
 def prune_state(guardrails_dir: str, now_ts: float) -> None:
@@ -891,7 +991,7 @@ def prune_state(guardrails_dir: str, now_ts: float) -> None:
             if os.path.isdir(path) and now_ts - os.stat(path).st_mtime > PRUNE_AGE_S:
                 shutil.rmtree(path, ignore_errors=True)
         except OSError:
-            pass
+            pass  # best-effort maintenance: an entry that vanished or cannot be read is skipped
     try:
         for name in os.listdir(guardrails_dir):
             if name.endswith(".stale"):
@@ -899,7 +999,7 @@ def prune_state(guardrails_dir: str, now_ts: float) -> None:
                 if now_ts - os.stat(path).st_mtime > PRUNE_AGE_S:
                     os.unlink(path)
     except OSError:
-        pass
+        pass  # best-effort maintenance: pruning .stale files must not fail SessionStart
 
 
 # ---------------------------------------------------------------------------
@@ -983,8 +1083,8 @@ def fetch_guardrails(
     finally:
         try:
             conn.close()
-        except Exception:  # noqa: BLE001
-            pass
+        except Exception:  # noqa: BLE001 - closing a half-open socket may raise anything
+            pass  # the outcome was decided above; a close failure changes nothing
     return parse_tools_call_envelope(raw)
 
 
@@ -1041,7 +1141,7 @@ def _emit(stdout: Any, obj: dict[str, Any]) -> None:
     try:
         stdout.flush()
     except (OSError, ValueError):
-        pass
+        pass  # the reader closed the pipe or the stream is detached; the write already happened
 
 
 def _diff_messages(old: LoadedCache | None, new: dict[str, Any]) -> list[str]:
@@ -1089,7 +1189,7 @@ def _touch(path: str) -> None:
         os.close(fd)
         os.utime(path, None)
     except OSError:
-        pass
+        pass  # the negative-cache marker is an optimisation; without it we simply retry sooner
 
 
 def _file_age(path: str, now_ts: float) -> float | None:
@@ -1112,6 +1212,7 @@ def handle_session_start(adapter: Any, event: dict[str, Any], env: Any, stdout: 
             _emit(stdout, {"systemMessage": _system_message(messages)})
         return 0
     if not ensure_dir(config.guardrails_dir):
+        _debug("guardrails dir")
         return 0
     now = now_utc()
     now_ts = time.time()
@@ -1147,7 +1248,7 @@ def handle_session_start(adapter: Any, event: dict[str, Any], env: Any, stdout: 
                 try:
                     os.unlink(fail_marker)
                 except OSError:
-                    pass
+                    pass  # usually absent; a marker that stays expires on its own after 60 s
             cache = LoadedCache(new, now, 0.0)
             source_desc = "fetched"
         else:
@@ -1204,7 +1305,7 @@ def _fallback_cache(
         try:
             os.replace(config.cache_path, config.cache_path + ".stale")
         except OSError:
-            pass
+            pass  # the rename is bookkeeping; the too-old cache is not used either way
     messages.append("server unreachable and no usable cache")
     return None, ""
 
@@ -1223,7 +1324,10 @@ def _system_message(messages: list[str]) -> str:
 def handle_refresh(adapter: Any, env: Any) -> int:
     resolution = adapter.resolve(env)
     config = resolution.config
-    if config is None or not ensure_dir(config.guardrails_dir):
+    if config is None:
+        return 0
+    if not ensure_dir(config.guardrails_dir):
+        _debug("guardrails dir")
         return 0
     now = now_utc()
     old = load_cache(config.cache_path, config.context_id, now, None)
@@ -1231,20 +1335,22 @@ def handle_refresh(adapter: Any, env: Any) -> int:
         return 0
     state_dir = os.path.join(config.guardrails_dir, "state")
     if not ensure_dir(state_dir):
+        _debug("state dir")
         return 0
+    # One refresh in flight per data directory: an advisory flock on a lock file
+    # that is never removed. The kernel drops the lock when this process exits,
+    # so a crashed holder leaves nothing stale and no takeover is needed - a
+    # path-based takeover cannot be made atomic (two contenders can both replace
+    # a stale lock, and one then unlinks the other's live lock). Without flock
+    # (win32) there is no in-session refresh; SessionStart still fetches.
     lock = os.path.join(state_dir, "refresh.lock")
-    if not _create_exclusive(lock):
-        age = _file_age(lock, time.time())
-        if age is None or age < REFRESH_LOCK_STALE_S:
-            return 0
-        tmp = f"{lock}.tmp-{os.getpid()}"
-        if not _create_exclusive(tmp):
-            return 0
-        try:
-            os.replace(tmp, lock)
-        except OSError:
-            return 0
     try:
+        lock_fd = os.open(lock, os.O_RDWR | os.O_CREAT | getattr(os, "O_NOFOLLOW", 0), 0o600)
+    except OSError:
+        return 0
+    try:
+        if not _try_lock(lock_fd):
+            return 0
         result, stage = fetch_guardrails(
             config.url,
             config.authorization,
@@ -1259,10 +1365,7 @@ def handle_refresh(adapter: Any, env: Any) -> int:
             config.cache_path, cache_bytes(project_response(result, config.context_id, now_utc()))
         )
     finally:
-        try:
-            os.unlink(lock)
-        except OSError:
-            pass
+        os.close(lock_fd)  # releases the flock
     return 0
 
 
@@ -1298,7 +1401,14 @@ def handle_tool_event(
     matched = match_items(items, on, tool_name, aliases, subjects, state, started + CALL_BUDGET_S)
     if not matched:
         return 0
-    blocks, informs = select_candidates(matched, on, config.max_action, state)
+    blocks, informs = select_candidates(
+        matched,
+        on,
+        config.max_action,
+        state,
+        adapter.render_budget_chars,
+        adapter.render_budget_tokens,
+    )
     if not blocks and not informs:
         return 0
     for lane, taken in (("block", blocks), ("inform", informs)):
@@ -1409,9 +1519,16 @@ if __name__ == "__main__":
         try:
             _stream.reconfigure(encoding="utf-8", errors="replace")  # type: ignore[union-attr]
         except (AttributeError, ValueError):
-            pass
+            pass  # a replaced or detached stream keeps its own encoding
+    # Fail open: exit 0 whatever happens. ``main`` already turns every Exception
+    # into one stderr line; this is the last resort for anything it re-raises,
+    # and a Ctrl-C mid-hook is treated the same way (exit 0, no traceback).
+    # SystemExit is left alone - nothing after the interpreter-floor guard
+    # raises it, and it would carry its own code.
     try:
-        _code = main(sys.argv, sys.stdin, sys.stdout, os.environ)
-    except BaseException:  # noqa: BLE001 - never a non-zero exit
-        _code = 0
-    sys.exit(0 if _code is None else 0)
+        main(sys.argv, sys.stdin, sys.stdout, os.environ)
+    except KeyboardInterrupt:
+        pass  # interrupted mid-hook: still exit 0 and print no traceback
+    except Exception:  # noqa: BLE001 - never a non-zero exit
+        pass  # main() already named the stage on stderr where it could
+    sys.exit(0)
