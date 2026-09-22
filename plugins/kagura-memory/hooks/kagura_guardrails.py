@@ -59,7 +59,6 @@ CONNECT_TIMEOUT_S = 1.5
 CACHE_FRESH_S = 60.0
 FAIL_MARKER_S = 60.0
 REFRESH_MIN_AGE_S = 5.0
-REFRESH_LOCK_STALE_S = 15.0
 TOOL_EVENT_MAX_AGE_S = 7 * 86400.0
 FALLBACK_MAX_AGE_S = 24 * 3600.0
 FUTURE_SKEW_S = 300.0
@@ -797,6 +796,19 @@ def _create_exclusive(path: str) -> bool:
     return True
 
 
+def _try_lock(fd: int) -> bool:
+    """Exclusive non-blocking advisory lock on ``fd``; ``False`` when held elsewhere or unsupported."""
+    try:
+        import fcntl
+    except ImportError:  # no flock on this platform (win32)
+        return False
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except OSError:
+        return False
+    return True
+
+
 def match_items(
     items: list[dict[str, Any]],
     on: str,
@@ -1325,19 +1337,20 @@ def handle_refresh(adapter: Any, env: Any) -> int:
     if not ensure_dir(state_dir):
         _debug("state dir")
         return 0
+    # One refresh in flight per data directory: an advisory flock on a lock file
+    # that is never removed. The kernel drops the lock when this process exits,
+    # so a crashed holder leaves nothing stale and no takeover is needed - a
+    # path-based takeover cannot be made atomic (two contenders can both replace
+    # a stale lock, and one then unlinks the other's live lock). Without flock
+    # (win32) there is no in-session refresh; SessionStart still fetches.
     lock = os.path.join(state_dir, "refresh.lock")
-    if not _create_exclusive(lock):
-        age = _file_age(lock, time.time())
-        if age is None or age < REFRESH_LOCK_STALE_S:
-            return 0
-        tmp = f"{lock}.tmp-{os.getpid()}"
-        if not _create_exclusive(tmp):
-            return 0
-        try:
-            os.replace(tmp, lock)
-        except OSError:
-            return 0
     try:
+        lock_fd = os.open(lock, os.O_RDWR | os.O_CREAT | getattr(os, "O_NOFOLLOW", 0), 0o600)
+    except OSError:
+        return 0
+    try:
+        if not _try_lock(lock_fd):
+            return 0
         result, stage = fetch_guardrails(
             config.url,
             config.authorization,
@@ -1352,10 +1365,7 @@ def handle_refresh(adapter: Any, env: Any) -> int:
             config.cache_path, cache_bytes(project_response(result, config.context_id, now_utc()))
         )
     finally:
-        try:
-            os.unlink(lock)
-        except OSError:
-            pass
+        os.close(lock_fd)  # releases the flock
     return 0
 
 
