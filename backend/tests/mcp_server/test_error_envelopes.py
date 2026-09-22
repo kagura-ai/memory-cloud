@@ -362,11 +362,12 @@ def test_no_hand_built_error_envelope_in_tools_package():
     literal is the one inside ``_helpers._error_response`` itself.
     """
     offenders = []
-    for path in sorted(TOOLS_DIR.glob("*.py")):
+    # ``rglob`` so a future ``tools/`` subpackage is guarded too.
+    for path in sorted(TOOLS_DIR.rglob("*.py")):
         for func, lineno in _hand_built_error_envelopes(path):
             if path.name == "_helpers.py" and func == "_error_response":
                 continue
-            offenders.append(f"{path.name}:{lineno} (in {func})")
+            offenders.append(f"{path.relative_to(TOOLS_DIR)}:{lineno} (in {func})")
     assert not offenders, (
         "hand-built error envelope in mcp_server/tools — return _error_response(...) "
         "so the transport can set isError (#1622): " + ", ".join(offenders)
