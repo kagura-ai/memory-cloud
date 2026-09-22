@@ -99,9 +99,11 @@ merge timestamp GitHub shows, and reviewers flag it as a future date.
 
 ### 7. Run the lockstep guards
 
+Run from the repo root (the subshells keep the cwd there for the `git add` paths in step 8):
+
 ```bash
-cd backend && pytest tests/test_release_version_lockstep.py tests/test_codex_plugin_manifest.py -q
-cd frontend && npx vitest run src/lib/version.test.ts
+(cd backend && pytest tests/test_release_version_lockstep.py tests/test_codex_plugin_manifest.py -q)
+(cd frontend && npx vitest run src/lib/version.test.ts)
 ```
 
 Fix any drift before committing — a missed file fails CI on the PR anyway.
