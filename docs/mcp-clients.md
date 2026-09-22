@@ -10,6 +10,7 @@ Every client below takes one of two endpoint URLs — same server, same API key:
 |---|---|
 | **All tools (default)** | `…/mcp/w/{workspace_id}` |
 | **Core tools only — smaller tool list** | `…/mcp/w/{workspace_id}?profile=core` |
+| **Guardrail digest** (clients without tool hooks) | `…/mcp/w/{workspace_id}?guardrails=<context_id>` (off: `?guardrails=off`) |
 
 Pick core when your client loads every tool schema at session start (it is about 65% smaller). It lists the 12 memory and context tools and leaves out Sleep, analyses, files, edges, secrets, resources and the agent control plane — those stay callable, they are just not listed; switch back to the default URL to see them. The exact tool set and sizes are in [Tool Profiles](mcp-tools.md#tool-profiles); a narrower allowlist (`?tools=…`) is under [List fewer tools](#list-fewer-tools). The Web UI's MCP Setup Guide has a **Core tools only** switch that writes the query into its snippets for you.
 
@@ -179,6 +180,8 @@ See [Troubleshooting → WSL2 + Claude Code](troubleshooting.md#wsl2--claude-cod
 
 > Claude Chat requires a publicly accessible URL (not `localhost`). Use a production deployment or tunnel (e.g., ngrok, Cloudflare Tunnel).
 
+Neither client runs tool hooks, so the server sends its `instructions` on `initialize` — the base text plus, with `?guardrails=<context_id>` on the URL (or an agent-bound key with a default binding), a digest of that context's tool guardrails; whether the client surfaces them to the model is the client's choice, and the `get_context_info.guardrails` block at session start does not depend on it ([MCP Tools › Server instructions](mcp-tools.md#server-instructions)).
+
 ## ChatGPT Desktop
 
 ChatGPT desktop app supports MCP servers. Add via Settings > MCP Servers:
@@ -188,6 +191,15 @@ ChatGPT desktop app supports MCP servers. Add via Settings > MCP Servers:
 2. Authentication: Bearer token `kagura_{your_api_key}`
 
 > Like Claude Chat, ChatGPT requires a public URL. For local development, use a tunnel or the REST API directly.
+
+### ChatGPT web (developer mode)
+
+ChatGPT web (and ChatGPT Work on the web) runs no client-side hooks, so [tool guardrails](mcp-tools.md#tool-guardrails) reach the model through the server instead:
+
+- **Server instructions** — add `?guardrails=<context_id>` to the connector's Server URL, in the same query as `?profile=` (`https://your-domain.com/mcp/w/{workspace_id}?profile=core&guardrails=<context_id>`). `server/discover` then returns the base instructions plus a digest of that context's tool guardrails: up to 5 entries, one line each, at most 1,200 characters in total. ChatGPT reads the instructions at connect time and on **Refresh** in developer mode — the digest is a snapshot until the next refresh. `?guardrails=off` switches both server lanes off.
+- **`get_context_info.guardrails`** — on by default for every URL: the session-start call returns the context's guardrails per call, nothing to configure.
+
+Who writes what you see: a context editor or above, with a user credential (an agent-bound key cannot author a guardrail). The digest reaches **every** conversation of the connector, and a connector configured with one shared API key serves that key's digest to every user of the connector. Use `?guardrails=<context_id>` only for a context whose editor list you control; for a shared workspace context prefer the per-session `get_context_info.guardrails` lane. Preview exactly what a credential receives with `GET /api/v1/memory/guardrails/digest?context_id=<uuid>&target=instructions` ([API Reference](api-reference.md#get-apiv1memoryguardrailsdigest)); the full rules are in [MCP Tools › Server instructions](mcp-tools.md#server-instructions).
 
 ## Gemini CLI
 
@@ -207,6 +219,63 @@ Add to `.gemini/settings.json` (project root or `~/.gemini/settings.json`):
 ```
 
 That `"url"` is the **all tools (default)** one. For **core tools only — smaller tool list**, use `"http://localhost:8080/mcp/w/{workspace_id}?profile=core"` ([which one?](#which-url)).
+
+## Codex cloud
+
+Codex cloud tasks run no MCP client hooks and read the repository's `AGENTS.md` before doing any work, so the lane for [tool guardrails](mcp-tools.md#tool-guardrails) there is an export block written into `AGENTS.md` by the environment's **setup script**. The server renders the block (`GET /api/v1/memory/guardrails/digest`, `text/markdown` — [API Reference](api-reference.md#get-apiv1memoryguardrailsdigest)); the recipe below writes it between two marker lines and keeps it out of the task's diff.
+
+**Environment.** `KAGURA_API_KEY` as a Codex cloud **secret** — secrets are available to setup scripts only and removed before the agent phase; `KAGURA_API_BASE` and `KAGURA_CONTEXT_ID` as plain environment variables. `KAGURA_API_BASE` is the scheme and host (and port) of your deployment, `https://<your-domain>` — **not** the MCP URL: the recipe refuses a value that contains `/mcp` or does not start with `https://`. Use the narrowest key you have: an agent-bound key whose only binding is that context, read access only; never your personal key, and never a key as an environment variable (those reach the agent phase). The default cloud image has `bash`, `curl`, `python3` and `git`; each is checked, and a missing one is a single `stderr` line.
+
+```bash
+# Kagura Memory guardrails → AGENTS.md (setup script; never fails the setup, says why on stderr)
+set -u
+say() { echo "kagura guardrails: $*" >&2; }
+case "${KAGURA_API_BASE:-}" in
+  https://*) ;;
+  *) say "KAGURA_API_BASE must be https://<host> (scheme and host only); AGENTS.md unchanged"; exit 0 ;;
+esac
+case "$KAGURA_API_BASE" in *"/mcp"*) say "KAGURA_API_BASE must not contain /mcp; AGENTS.md unchanged"; exit 0 ;; esac
+for t in curl python3 git; do command -v "$t" >/dev/null 2>&1 || { say "$t not found; AGENTS.md unchanged"; exit 0; }; done
+ROOT="$(git rev-parse --show-toplevel 2>/dev/null || pwd)"
+BLOCK="$(curl --fail --silent --show-error --max-time 10 \
+  -H "Authorization: Bearer ${KAGURA_API_KEY}" \
+  "${KAGURA_API_BASE%/}/api/v1/memory/guardrails/digest?context_id=${KAGURA_CONTEXT_ID}")" \
+  || { say "fetch failed (curl exit $?); AGENTS.md unchanged"; exit 0; }
+[ -n "$BLOCK" ] || { say "no guardrails in context; AGENTS.md unchanged"; exit 0; }
+KAGURA_BLOCK="$BLOCK" KAGURA_AGENTS_MD="$ROOT/AGENTS.md" python3 - <<'PY' || { say "write failed; AGENTS.md unchanged"; exit 0; }
+import os, re, sys, tempfile
+path = os.environ["KAGURA_AGENTS_MD"]
+block = os.environ["KAGURA_BLOCK"].rstrip("\n") + "\n"
+begin_re = re.compile(r"^<!-- kagura-memory:guardrails begin[^\n]*$", re.M)
+end_re = re.compile(r"^<!-- kagura-memory:guardrails end -->$", re.M)
+if len(begin_re.findall(block)) != 1 or len(end_re.findall(block)) != 1:
+    sys.exit("fetched block does not have exactly one begin and one end marker line")
+text = open(path, encoding="utf-8").read() if os.path.exists(path) else ""
+span = re.compile(begin_re.pattern + r".*?" + end_re.pattern + r"\n?", re.M | re.S)
+if len(begin_re.findall(text)) > 1 or len(end_re.findall(text)) > 1:
+    sys.exit("AGENTS.md has more than one guardrail block; fix it by hand")
+new = span.sub(lambda _m: block, text, count=1) if span.search(text) else (
+    text + ("" if not text or text.endswith("\n") else "\n") + "\n" + block)
+if new != text:
+    fd, tmp = tempfile.mkstemp(dir=os.path.dirname(path) or ".", prefix=".AGENTS.md.")
+    with os.fdopen(fd, "w", encoding="utf-8") as f:
+        f.write(new)
+    os.replace(tmp, path)
+PY
+# Keep the block out of the task's diff: it is workspace memory, not repository content.
+( cd "$ROOT" && git rev-parse --is-inside-work-tree >/dev/null 2>&1 \
+  && git ls-files --error-unmatch AGENTS.md >/dev/null 2>&1 \
+  && git update-index --skip-worktree AGENTS.md ) || true
+```
+
+- `https` only and no `-L`: `curl` never follows a redirect, so the key cannot travel to another host.
+- Every failure prints one `kagura guardrails: …` line to the setup log and exits 0 — the setup never fails because of the block, and a misconfiguration stays visible.
+- The block never leaves the container: `git update-index --skip-worktree AGENTS.md` keeps the modified tracked file out of `git status` and out of the task's diff. If you see the block in a task diff, the skip-worktree step did not run. A later legitimate edit of `AGENTS.md` in that container needs `git update-index --no-skip-worktree AGENTS.md` first.
+- Re-running the script replaces the block in place. The markers are matched at line start; a fetched block with more or fewer than one begin or one end line is refused and the file is left unchanged. A guardrail removed on the server disappears from the block on the next run.
+- The safer variant for a public repository: point `KAGURA_AGENTS_MD` at an untracked file and keep a one-line pointer to it in the tracked `AGENTS.md`. The same block works in any always-loaded file (`CLAUDE.md`, `GEMINI.md`, `.cursor/rules`) by changing `KAGURA_AGENTS_MD`.
+- The cloud documentation implies the order checkout → setup script → agent but does not state that `AGENTS.md` is read after the setup script; confirm with one task before relying on it.
+
+The recipe is extracted from this page and exercised by `backend/tests/api/test_guardrail_export_snippet.py`.
 
 ## List fewer tools
 
@@ -230,6 +299,8 @@ Only the URL changes; the `Authorization` header stays as it is. The client sect
 | Codex CLI | `url = "http://localhost:8080/mcp/w/{workspace_id}?profile=core"` in `~/.codex/config.toml` |
 
 Restart or reconnect the client afterwards so it lists tools again. A typo in `profile`, or a `tools` list that matches nothing, makes `tools/list` fail with an error naming the valid values rather than silently falling back to the full list.
+
+`?guardrails=` lives in the same URL. `?guardrails=<context_id>` adds a digest of that context's tool guardrails to the server instructions; `?guardrails=off` switches both server-side guardrail lanes off — the instructions digest and the `get_context_info.guardrails` block — which is the setting for a client whose plugin hooks already deliver guardrails at the tool call. A value that is neither `off` nor a context id is ignored: the instructions stay at the base text and `get_context_info.guardrails` stays on. Rules and caps: [MCP Tools › Server instructions](mcp-tools.md#server-instructions).
 
 > This changes what is **listed**, not what can be **called** — it is not an access control. See [MCP Tools Reference › Tool Profiles](mcp-tools.md#tool-profiles) for the exact rules and the core tool set.
 >

@@ -51,6 +51,40 @@ The primitives an autonomous agent loop needs beyond a knowledge store — see [
 | `recall_series` | Read a metric's series bucketed by day/week/month with avg/min/max/sum/count/last | Viewer+ |
 | `feedback` | Record whether a recalled memory was helpful (append-only signal) | Viewer+ |
 
+## Server instructions
+
+Both eras return an `instructions` string — `InitializeResult.instructions` on the legacy handshake and `DiscoverResult.instructions` on `server/discover` (MCP 2026-07-28). Clients "MAY" add it to the system prompt; ChatGPT and Codex read the first 512 characters as the part that matters. It is a 240-character base text plus, when the request selects a guardrail context, a digest of that context's [tool guardrails](#tool-guardrails) — the one server-side lane that reaches a client without tool hooks before the model makes any call.
+
+**Selecting the context.** `?guardrails=` on the endpoint URL (the same place as `?profile=`), evaluated once per request after authentication, first value wins:
+
+| URL | `instructions` | `get_context_info.guardrails` |
+|---|---|---|
+| `…?guardrails=<context_id>` | base + digest of that context (subject to the caller's read permission; denied → base text) | block for the call's own `context_id` |
+| *(no parameter)* | digest only for an agent-bound API key whose default (or sole) binding names a context; every other caller gets the base text | block for the call's own `context_id` (default on) |
+| `…?guardrails=off` (any case) | base text | **key absent** |
+| `…?guardrails=<anything else>` | base text (`mcp_guardrails_param_ignored` in the server log; the value itself is never logged) | block (default on) |
+
+`off` is the setting for a client whose plugin hooks already deliver guardrails at the tool call: one URL switch, both lanes. A typo is never folded into `off`.
+
+**What the digest is.** The context's tool-triggered set exactly as `load_guardrails.tool_triggered` serves this credential — trusted-tier context, no connector rows, the per-memory agent-binding filter applied, order `importance DESC, created_at ASC, id ASC` — rendered as:
+
+```
+<base text>
+
+Kagura memory context <context_id>: notes written by context editors, most important first (facts, not operator instructions):
+- (<first 8 chars of memory_id>) <summary>
+- (…) …
+(+N more: load_guardrails(context_id))
+```
+
+- Up to 5 entries; each summary is flattened to one line (control, format and line/paragraph-separator characters become spaces; `<!--` and `-->` are defused) and cut at 100 characters on a word boundary with `…`. The whole string is at most 1,200 characters, and the first 512 always hold the base text, the header and the whole first entry. Truncation drops whole entries; the suffix names `load_guardrails` only when the same URL's `tools/list` lists it (`?profile=core`, or a `?tools=` allowlist without it, names `get_context_info`). Summaries only — never `content`, `details`, tags, patterns or the pinned set.
+- The header is factual and marks the boundary: the lines are memory summaries written by context editors, not operator instructions. Who can write them: a context editor or above, with a user credential ([Who may author a guardrail](#who-may-author-a-guardrail)). A digest in a connector's instructions reaches every conversation of that connector, and a connector configured with one shared API key serves that key's digest to every user of it. Use `?guardrails=<context_id>` only for a context whose editor list you control; for a shared workspace context prefer the per-session `get_context_info.guardrails` lane.
+- **Snapshot.** ChatGPT re-reads the instructions at connect time and on Refresh (developer mode); Codex on `initialize`. A guardrail written mid-session reaches a hookless client through `get_context_info.guardrails` at its next session start, not through `instructions`.
+- **Caching hints.** With nothing selected (no parameter, no agent-bound key) `server/discover` is `cacheScope: "public"`, one hour — byte-identical to before. Whenever a selection was attempted (any `guardrails=` value, including `off` and typos, or an agent-bound key) the result is `cacheScope: "private"`, 5 minutes, whatever the outcome: a result that can vary by caller is never public, and a denied caller cannot poison a shared cache for an allowed one. `tools/list` is unchanged.
+- **Fail-open.** A denied, unknown, other-workspace or external-tier context and an empty set all serve exactly the no-selection bytes — no error and no signal about whether the context exists. A database error, or the digest budget (`MCP_GUARDRAIL_DIGEST_TIMEOUT_MS`, default 500 ms) expiring, serves the base text and never fails the handshake (`mcp_guardrail_digest_failed` warning). `MCP_GUARDRAIL_DIGEST_ENABLED=false` turns the `instructions` lane off deployment-wide; the `get_context_info` block and the export route stay served. With nothing selected the handshake opens no database session.
+- **Audit.** A resolver deny for an agent credential writes the `memory_access_events` deny row (`operation: "load_guardrails"`), bounded by the client's 5-minute private cache; a served digest writes nothing — `mcp_guardrail_digest_served context_id=… entries=… era=… selection=explicit|binding` in the server log is the diagnostic.
+- **Which lane is always visible.** `instructions` and the export block ([`GET /api/v1/memory/guardrails/digest`](api-reference.md#get-apiv1memoryguardrailsdigest), the Codex cloud lane) are read before the model acts. `get_context_info.guardrails` is visible only when the model follows the skill's session-start step, and only for that session — a client on `?profile=core` without `?guardrails=` has that lane alone. Preview what a credential receives with `GET /api/v1/memory/guardrails/digest?context_id=<uuid>&target=instructions`.
+
 ## Tool guardrails
 
 A **tool guardrail** is a memory that a client-side hook injects into the model's context at the moment a matching tool call happens — before the call as a deny reason, or next to its result. The server owns two things: the `details.tool_trigger` marking, validated on every write, and the deterministic `load_guardrails` read whose result every client caches. **Matching happens only in the client.** The server compiles each pattern once to validate it and never runs it against any input; the read lane returns the pattern as data. This section is the client-neutral contract every adapter (Claude Code hooks, Codex hooks, hookless digests) implements verbatim.
@@ -212,7 +246,7 @@ Every adapter writes and reads this one file in its own data directory (for exam
 - Additive top-level or item fields never bump `format`. Consumers ignore unknown keys at every level (response, item, `tool_trigger`).
 - A consumer **skips** (never fails on) an item whose `on` or `action` is a value it does not know, whose `tool_trigger` is not an object, or whose pattern its engine cannot compile. That is how a future `on` value ships without breaking installed hooks.
 - `format` bumps only when an existing field changes meaning or is removed. A consumer that sees `format` greater than it knows treats the cache as absent (fail-open).
-- `version` is opaque: equal means the served set is unchanged; compare `memory_id` sets and summaries to name what changed. For the record, the server computes it as `sha256(json.dumps(entries, sort_keys=True, separators=(",", ":"), ensure_ascii=False)).hexdigest()[:16]` over `[memory_id, summary, importance, delivery_mode, tool_trigger]` per served item, pinned list first, after the binding filter.
+- `version` is opaque: equal means the served set is unchanged; compare `memory_id` sets and summaries to name what changed. For the record, the server computes it as `sha256(json.dumps(entries, sort_keys=True, separators=(",", ":"), ensure_ascii=False)).hexdigest()[:16]` over `[memory_id, summary, importance, delivery_mode, tool_trigger]` per served item, pinned list first, after the binding filter. The hookless digest surfaces — `get_context_info.guardrails.tool_triggered_version`, the export block's begin marker and the `X-Kagura-Guardrails-Tool-Triggered-Version` header of `GET /api/v1/memory/guardrails/digest` — carry **`tool_triggered_version`** instead: the same function over the tool-triggered items only, after the binding filter, in server order — the value a client computes over `load_guardrails.tool_triggered` alone. It differs from `version` whenever the context has a trusted pinned memory, and the bare name `version` never appears in a digest; an empty set hashes to `4f53cda18c2baa0c`.
 
 **Matching (normative, client-side).**
 
@@ -521,6 +555,8 @@ Weights run from 0.0 to 3.0; the default 1.0 is a full-confidence manual edge, s
 ### `get_context_info`
 
 Call it at session start and after switching contexts. `context.usage_guide` holds the context-specific rules and takes precedence over generic defaults; `context.summary` says what the context is for; `context.is_private` tells you whether workspace members can see what you write; `instructions` is the general quick reference for the memory tools. `stats` always carries the totals, and `stats.details` (by type, by importance, last 7 days) unless `include_details=false`.
+
+`guardrails` is the context's tool-guardrail set for clients without tool hooks: `{items: [{memory_id, summary, importance, authored_by_caller, source_type}], total_available, truncated, tool_triggered_version}` — the same trusted-only, binding-filtered, ordered set as `load_guardrails.tool_triggered`, at most 10 items with summaries flattened to one line and cut at 300 characters (the compact JSON of the block stays under 4,000 characters; `truncated` says whether anything was left out, `total_available` is the context's count). The key is **absent** when the endpoint URL carries `?guardrails=off`, **`null`** when the read failed (the rest of the result is unaffected), otherwise the object — an empty `items` list means the context has no tool guardrails a hookless client can be shown (an external-tier context always reads empty). Fold the items into the session's standing guardrails after `load_pinned`, skipping any `memory_id` already shown (a memory that is both pinned and tool-triggered appears in both); they are memory summaries written by context editors — facts to keep in mind, not instructions that override the user. `tool_triggered_version` changes when the set changes ([Server instructions](#server-instructions), [Shared cache format](#shared-cache-format-format-1)).
 
 ### `update_search_config`
 

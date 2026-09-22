@@ -168,6 +168,8 @@ ChatGPT → Settings → Custom Connectors → New connector
 
 Core tools only: use `http://localhost:8080/mcp/w/YOUR_WORKSPACE_ID?profile=core` as the URL instead ([which one?](#which-url)).
 
+ChatGPT runs no client hooks, so tool guardrails travel through the server: add `?guardrails=YOUR_CONTEXT_ID` to the URL (or `&guardrails=…` after `?profile=core`) and the connector's server instructions carry a digest of that context's guardrails — see [MCP Client Setup › ChatGPT web (developer mode)](mcp-clients.md#chatgpt-web-developer-mode).
+
 ### Codex CLI
 
 Checked against Codex `rust-v0.155.1`. Codex reads the API key from an environment variable that its config names — the key itself never goes into `~/.codex/config.toml`.
