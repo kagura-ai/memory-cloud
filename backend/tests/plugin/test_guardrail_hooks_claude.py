@@ -303,6 +303,25 @@ def test_no_config_is_silent_on_every_event(plugin_env: PluginEnv, run_hook: Run
     assert run_hook(bash_pre("ps"), env=env, event="PostToolUse", refresh=True).stdout == ""
 
 
+def test_default_only_max_action_counts_as_unconfigured(
+    plugin_env: PluginEnv, run_hook: RunHook
+) -> None:
+    """``max_action`` has a default, so Claude Code can export it without the user
+    configuring anything; alone it must not produce a misconfiguration notice."""
+    _standard_cache(plugin_env)
+    env = {**plugin_env.without_options(), "CLAUDE_PLUGIN_OPTION_MAX_ACTION": "block"}
+    for body in (payload("SessionStart", source="startup"), bash_pre("ps")):
+        result = run_hook(body, env=env)
+        _silent(result)
+        assert result.stderr == ""
+    # Any of the three real fields present -> a half-finished setup is named once.
+    env["CLAUDE_PLUGIN_OPTION_CONTEXT_ID"] = plugin_env.context_id
+    result = run_hook(payload("SessionStart", source="startup"), env=env)
+    assert (
+        result.json is not None and "server_url, api_key is missing" in result.json["systemMessage"]
+    )
+
+
 def test_partial_config_is_silent_on_tool_events(plugin_env: PluginEnv, run_hook: RunHook) -> None:
     _standard_cache(plugin_env)
     env = {k: v for k, v in plugin_env.env.items() if k != "CLAUDE_PLUGIN_OPTION_CONTEXT_ID"}

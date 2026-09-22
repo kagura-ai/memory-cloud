@@ -368,7 +368,10 @@ class ClaudeAdapter:
         max_action_raw = env.get("CLAUDE_PLUGIN_OPTION_MAX_ACTION")
         data_dir = env.get("CLAUDE_PLUGIN_DATA")
 
-        present = [v for v in (server_url, api_key, context_raw, max_action_raw) if v]
+        # "Configured" means the user supplied at least one of the three fields
+        # without a default; max_action has one, so Claude Code may export it on
+        # its own and it must not turn an untouched plugin into a misconfigured one.
+        present = [v for v in (server_url, api_key, context_raw) if v]
         if not present:
             return Resolution(None, False, [], [])
         if not data_dir:
@@ -801,10 +804,13 @@ def select_candidates(
     """Take markers: every live block, then inform lines up to the per-call and per-key caps."""
     blocks: list[dict[str, Any]] = []
     informs: list[dict[str, Any]] = []
-    for item in matched:
-        trigger = valid_trigger(item)
+    for raw in matched:
+        trigger = valid_trigger(raw)
         if trigger is None or state.delivered(trigger.memory_id):
             continue
+        # Markers, the log and the rendered id8 all use the canonical (lower-case)
+        # UUID, so a differently cased id in the cache cannot bypass once-per-key.
+        item = dict(raw, memory_id=trigger.memory_id)
         if on == "pre" and trigger.action == "block" and max_action == "block":
             blocks.append(item)
         else:

@@ -406,6 +406,18 @@ def test_markers_never_contain_raw_ids_and_missing_session_yields_nothing(
     assert len(plugin_env2.markers()) == before
 
 
+def test_marker_key_uses_the_canonical_memory_id(plugin_env: PluginEnv, call_main: Any) -> None:
+    """An upper-case UUID in the cache is delivered once and marked under its lower-case form."""
+    upper = item(7, "s", "Bash", match="ls")
+    upper["memory_id"] = upper["memory_id"].upper()
+    plugin_env.write_cache([upper])
+    first = call_main(bash_pre("ls"))
+    assert f"Kagura Memory guardrail ({memory_id(7)[:8]}): s" in first.specific["additionalContext"]
+    assert [p.name for p in plugin_env.markers("inform")] == [memory_id(7)]
+    assert call_main(bash_pre("ls")).stdout == ""
+    assert len(plugin_env.markers()) == 1
+
+
 def test_marker_race_delivers_exactly_once(plugin_env: PluginEnv) -> None:
     plugin_env.write_cache([item(1, "s", "Bash", match="ls"), item(2, "t", "Bash", match="ls")])
     command = command_for("PreToolUse")
