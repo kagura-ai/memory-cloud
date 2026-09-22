@@ -16,6 +16,15 @@ The split matters. The issue's motivating example is ``dev-env`` vs
 no edit-distance-2 threshold will ever unify (they differ by 7 edits). Silently
 matching it would mean guessing at authorial intent. So abbreviations surface as
 a suggestion, and only mechanical variants actually widen the filter.
+
+A third predicate, :func:`is_specialisation`, is used by the WRITE lint only
+(#1617). ``session-cookie`` is a near-duplicate of ``session`` by the prefix
+rule, and on the read path that is useful — for a zero-result filter on
+``session`` the stored sub-topic is the actionable answer. On the write path
+the same relation is a false claim: the hint says the new tag is a misspelling,
+and replacing ``session-cookie`` with ``session`` discards information. So the
+lint subtracts specialisations from the near-duplicate matches; the read path
+does not.
 """
 
 from __future__ import annotations
@@ -38,6 +47,16 @@ _MIN_EDIT_LEN = 5
 # A maximal run of digits, masked to one placeholder to compare two tags as
 # members of a numbered series (#1608).
 _DIGIT_RUN = re.compile(r"\d+")
+
+# Characters that end one segment of a compound tag and start the next
+# (#1617). This is NOT ``_SEPARATORS``: ``:`` and ``#`` are added, because
+# ``category:auth`` and ``some-repo#62`` are compounds too, and ``.`` is left
+# out, because a dotted name is one identifier written with a dot — ``node`` /
+# ``node.js``, ``next`` / ``next.js``, ``socket`` / ``socket.io`` are the same
+# thing written two ways and must keep hinting, and ``v0.73`` / ``v0.73.0``
+# stays related with no special case. Splitting on ``.`` would silence all
+# four.
+_SEGMENT_BOUNDARY = re.compile(r"[\s_\-/:#]+")
 
 
 def normalize_tag(tag: str) -> str:
@@ -209,3 +228,75 @@ def is_near_duplicate(requested: str, candidate: str) -> bool:
     if len(a) >= _MIN_EDIT_LEN and len(b) >= _MIN_EDIT_LEN:
         return _edit_distance_within(a, b, _MAX_EDIT_DISTANCE)
     return False
+
+
+def _segments(tag: str) -> list[str]:
+    """The tag's segments, each folded with :func:`normalize_tag`.
+
+    NFKC runs first so full-width separators (``－``, ``：``) split like ASCII
+    ones. Folding per segment (rather than splitting the folded whole, which
+    has no separators left) is what makes ``sessions`` the generic of
+    ``session-cookie`` and ``NEXT_PUBLIC`` the generic of ``next-public-plan``.
+    A segment whose fold is empty (``session-.-cookie``) carries no signal and
+    is dropped, so it can neither match nor break a match.
+    """
+    pieces = _SEGMENT_BOUNDARY.split(unicodedata.normalize("NFKC", tag))
+    return [folded for folded in map(normalize_tag, pieces) if folded]
+
+
+def is_specialisation(a: str, b: str) -> bool:
+    """Whether one tag is a sub-topic of the other, i.e. a compound built on it.
+
+    True when the segments of one tag are a PROPER whole-segment prefix of the
+    other's: ``session-cookie`` / ``session``, ``cache-layer-redis`` /
+    ``cache-layer``, ``some-repo#62`` / ``some-repo``. Such a pair is a topic
+    and a sub-topic, which an author means differently — not two spellings of
+    one tag — so the write lint must not call it a near-duplicate. Symmetric,
+    pure, and reads no vocabulary.
+
+    The boundary is the whole signal. :func:`is_near_duplicate` compares FOLDED
+    forms, from which :func:`normalize_tag` has already removed the separators,
+    so ``sessioncookie.startswith("session")`` is indistinguishable from
+    ``devenvironment.startswith("devenv")``. Splitting before folding restores
+    it: ``dev-env`` / ``dev-environment`` (``env`` != ``environment``),
+    ``deploy-check`` / ``deploy-checklist`` and every single-segment pair
+    (``oauth`` / ``oauth2``, ``kube`` / ``kubernetes``) are NOT specialisations,
+    so the abbreviation case the prefix rule exists for survives. The accepted
+    price is that a respelling which happens to end on a boundary — ``auth`` /
+    ``auth-n``, ``front`` / ``front-end``, ``python`` / ``python-3`` — goes
+    silent too: it is structurally identical to ``java`` / ``java-script``,
+    which must be. The unseparated spellings (``authn``, ``frontend``,
+    ``python3``) still hint.
+
+    Never true when the whole folds are equal: ``deploy`` / ``deploy-s`` and
+    ``session`` / ``session-`` are mechanical variants and stay flagged, even
+    though the second has an extra segment. Checked first, before segmenting.
+
+    Never true for two PRECISIONS of one numeric identifier: when the shorter
+    tag's LAST segment ends in a digit and every extra segment is all digits
+    (``session-2026-09`` / ``session-2026-09-21``, ``2026-09`` / ``2026-09-21``)
+    the pair stays a near-duplicate, as the docs promise. The test is on the
+    last segment only, not on any digit in the shorter tag: a bare series name
+    does not end in a digit, so ``session`` / ``session-2026-09-11`` IS a
+    specialisation, and so is ``s3-bucket`` / ``s3-bucket-2`` despite the ``3``.
+
+    Args:
+        a: One tag, as written.
+        b: The other tag, as written.
+
+    Returns:
+        True if the pair is a topic and a sub-topic of it.
+    """
+    whole_a, whole_b = normalize_tag(a), normalize_tag(b)
+    if not whole_a or not whole_b or whole_a == whole_b:
+        return False
+    segments_a, segments_b = _segments(a), _segments(b)
+    if len(segments_a) == len(segments_b):
+        return False  # a proper prefix needs one side to be longer
+    shorter, longer = sorted((segments_a, segments_b), key=len)
+    if not shorter or longer[: len(shorter)] != shorter:
+        return False
+    extra = longer[len(shorter) :]
+    if shorter[-1][-1].isdigit() and all(segment.isdigit() for segment in extra):
+        return False  # one numeric identifier at two precisions, not a sub-topic
+    return True

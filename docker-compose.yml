@@ -7,6 +7,16 @@
 #   API:      http://localhost:8080
 #   Frontend: http://localhost:3000 (run separately: cd frontend && npm run dev)
 #   MCP:      http://localhost:8080/mcp
+#
+# Data-store ports (postgres 5432, qdrant 6333/6334, redis 6379, minio
+# 9000/9001) are published on 127.0.0.1 only (#1626): Redis and Qdrant run
+# without auth here, Postgres uses the .env.example default password, and a
+# port Docker publishes bypasses host firewalls such as ufw. The localhost URLs
+# in .env.example are unaffected. To let another machine reach them, prefer an
+# SSH port-forward to this host's loopback; otherwise set COMPOSE_BIND_HOST
+# (shell or the project `.env` — Compose interpolation does not read
+# .env.local): COMPOSE_BIND_HOST=0.0.0.0 docker compose up -d
+# Guarded by terraform/single-server/scripts/tests/compose_port_bind.bats.
 
 services:
   # ==========================================================================
@@ -29,7 +39,7 @@ services:
       TZ: UTC
       PGTZ: UTC
     ports:
-      - "5432:5432"
+      - "${COMPOSE_BIND_HOST:-127.0.0.1}:5432:5432"
     volumes:
       # PG18+ mounts the parent dir, not .../data. Fresh volume: local data
       # from the old postgres_data (PG15) volume is not carried over — after
@@ -57,8 +67,8 @@ services:
         soft: 65536
         hard: 65536
     ports:
-      - "6333:6333"
-      - "6334:6334"
+      - "${COMPOSE_BIND_HOST:-127.0.0.1}:6333:6333"
+      - "${COMPOSE_BIND_HOST:-127.0.0.1}:6334:6334"
     volumes:
       - qdrant_data:/qdrant/storage
     healthcheck:
@@ -73,7 +83,7 @@ services:
     image: redis:7-alpine
     container_name: kagura-redis
     ports:
-      - "6379:6379"
+      - "${COMPOSE_BIND_HOST:-127.0.0.1}:6379:6379"
     volumes:
       - redis_data:/data
     healthcheck:
@@ -158,12 +168,13 @@ services:
   # STORAGE_BUCKET=kagura-files-dev. The legacy R2_* names still work as aliases.
   #
   # ⚠ SECURITY — DEV DEFAULTS ONLY. The minioadmin/minioadmin credentials and the
-  # published 9000/9001 ports below are for LOCAL development only. For a real
-  # self-host deployment you MUST: (1) set strong unique MINIO_ROOT_USER /
+  # loopback-published 9000/9001 ports below are for LOCAL development only. For
+  # a real self-host deployment you MUST: (1) set strong unique MINIO_ROOT_USER /
   # MINIO_ROOT_PASSWORD (or, better, per-app access keys with bucket-scoped
   # policy), and (2) NOT expose these ports publicly — front MinIO with TLS and
   # keep it on the private network. Copying this block to production unchanged
-  # leaves an open, default-credentialed object store (OWASP A05).
+  # (or with COMPOSE_BIND_HOST=0.0.0.0) leaves an open, default-credentialed
+  # object store (OWASP A05).
   minio:
     image: quay.io/minio/minio:RELEASE.2025-09-07T16-13-09Z
     container_name: kagura-minio
@@ -173,8 +184,8 @@ services:
       MINIO_ROOT_USER: minioadmin
       MINIO_ROOT_PASSWORD: minioadmin
     ports:
-      - "9000:9000"
-      - "9001:9001"
+      - "${COMPOSE_BIND_HOST:-127.0.0.1}:9000:9000"
+      - "${COMPOSE_BIND_HOST:-127.0.0.1}:9001:9001"
     volumes:
       - minio_data:/data
     healthcheck:
