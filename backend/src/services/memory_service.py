@@ -455,9 +455,20 @@ class MemoryService:
         non-object legacy shape is "not a guardrail", matching
         ``Memory.is_tool_triggered`` and the SQL predicate.
         """
-        if isinstance(existing_details, dict) and existing_details.get("tool_trigger") is not None:
+        if MemoryService._carries_tool_trigger(existing_details):
             return True
         return details_supplied and isinstance(new_details, dict) and "tool_trigger" in new_details
+
+    @staticmethod
+    def _carries_tool_trigger(details: Any) -> bool:
+        """``Memory.is_tool_triggered`` spelled on the raw ``details`` value.
+
+        For callers that hold the column value rather than a mapped row — and
+        for the write-response paths, where unit tests build the row as a bare
+        ``MagicMock`` (the #1523 trap: a mocked property is truthy, a mocked
+        ``details`` is not a dict).
+        """
+        return isinstance(details, dict) and details.get("tool_trigger") is not None
 
     async def _require_guardrail_author(self, user_id: str, context_id: UUID | str | None) -> None:
         """Authorize a guardrail write: context EDITOR or above, user credential only.
@@ -788,7 +799,11 @@ class MemoryService:
                 scope=memory.scope,
                 # #1505: say what 'working' means for durability instead of
                 # leaving the caller to guess.
-                persistence=persistence_info(memory.scope, pinned=memory.is_pinned),
+                persistence=persistence_info(
+                    memory.scope,
+                    pinned=memory.is_pinned,
+                    tool_triggered=self._carries_tool_trigger(memory.details),
+                ),
                 lint=await self._lint_write(
                     workspace_id=UUID(workspace_id_str),
                     context_id=UUID(context_id_str),
@@ -949,7 +964,9 @@ class MemoryService:
             re_embedded=needs_reembed,
             scope=memory.scope,
             persistence=persistence_info(  # #1505
-                memory.scope, pinned=memory.is_pinned
+                memory.scope,
+                pinned=memory.is_pinned,
+                tool_triggered=self._carries_tool_trigger(memory.details),
             ),
             supersede_candidate_dismissed=dismissed_target,  # #1504
             # #1502: lint the memory's CURRENT state, not the patch — a partial

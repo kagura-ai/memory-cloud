@@ -409,8 +409,11 @@ async def _undo_update_importance(
     # #1523: a row pinned since the run keeps the importance its owner set
     # (load_pinned() orders by it); a forgotten row is left alone. The refusal
     # is the UPDATE's own predicate, and a skip is not an error — the run's
-    # other actions still reverse and the report stays rolled back.
-    from models.memory import not_pinned_predicate
+    # other actions still reverse and the report stays rolled back. A row
+    # marked as a tool guardrail since the run is kept for the same reason:
+    # load_guardrails orders by the importance its author set, and the
+    # re-evaluation write it would undo never touches a guardrail either.
+    from models.memory import not_pinned_predicate, not_tool_triggered_predicate
 
     restored = await db.execute(
         sa_update(Memory)
@@ -419,6 +422,7 @@ async def _undo_update_importance(
             Memory.user_id == ctx.user_id,
             Memory.deleted_at.is_(None),
             not_pinned_predicate(),
+            not_tool_triggered_predicate(),
         )
         .values(importance=old_importance, updated_at=utcnow())
     )
