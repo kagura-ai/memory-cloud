@@ -15,6 +15,14 @@ index) and the e74 CHECK-swap precedent:
    the rows (append-only table) and leaves the restored CHECK ``NOT VALID``;
    the next upgrade validates it again.
 
+The audit row written for step 4 is left in place: deleting it is exactly what
+the e66 append-only trigger forbids, and the ``DISABLE TRIGGER USER`` bypass the
+``db_session`` e2e tests use is not needed here — every migration test starts
+from ``_reset_alembic_state()`` (``DROP SCHEMA public CASCADE``), so the row is
+gone before the next run reaches the rows-absent path (asserted explicitly
+below), its ``user_id`` is unique per run, and no other test reads the table
+unfiltered.
+
 Not executed in the local unit run — needs the DB container.
 """
 
@@ -111,10 +119,16 @@ def _count_audit_rows(conn: Connection, user_id: str) -> int:
     ).scalar_one()
 
 
+def _count_load_guardrails_rows(conn: Connection) -> int:
+    return conn.execute(
+        text("SELECT count(*) FROM memory_access_events WHERE operation = 'load_guardrails'")
+    ).scalar_one()
+
+
 def test_e84_round_trip_index_and_check() -> None:
     _reset_alembic_state()
     engine = _sync_engine()
-    audit_user = f"e84-audit-{uuid.uuid4().hex[:8]}"
+    audit_user = f"e84-migration-test-{uuid.uuid4().hex[:8]}"
     try:
         with _alembic_at_test_db():
             command.upgrade(_get_alembic_config(), PRIOR_HEAD)
@@ -149,6 +163,10 @@ def test_e84_round_trip_index_and_check() -> None:
         # Re-running the upgrade path is a no-op (IF NOT EXISTS + the
         # invalid-leftover guard): simulate by downgrading only the alembic
         # pointer is not possible, so downgrade + upgrade twice instead.
+        with engine.connect() as conn:
+            # Precondition for the rows-absent path: the schema was rebuilt by
+            # _reset_alembic_state(), so a previous run's audit row is gone.
+            assert _count_load_guardrails_rows(conn) == 0, "stale load_guardrails audit rows"
         with _alembic_at_test_db():
             command.downgrade(_get_alembic_config(), PRIOR_HEAD)
         with engine.connect() as conn:
@@ -185,14 +203,10 @@ def test_e84_round_trip_index_and_check() -> None:
             assert "'load_guardrails'" in _mae_check(conn)
             assert _mae_check_validated(conn) is True  # the wider CHECK validates again
     finally:
+        # The audit row stays (append-only — see the module docstring); the
+        # next run's _reset_alembic_state() drops the schema with it.
         try:
             _leave_db_at_head()
-            with engine.connect() as conn:
-                conn.execute(
-                    text("DELETE FROM memory_access_events WHERE user_id = :uid"),
-                    {"uid": audit_user},
-                )
-                conn.commit()
         finally:
             engine.dispose()
 
