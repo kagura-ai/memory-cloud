@@ -252,7 +252,7 @@ You: "What do we know about auth?"
 
 > `.mcp.json` is in `.gitignore` — never commit it (contains API keys).
 
-Full setup guide — every client, the memory-sync hook, the ready-to-use `.claude/` templates, the **kagura-memory** Claude Code plugin, and the WSL2 networking note: **[MCP Client Setup](docs/mcp-clients.md)**
+Full setup guide — every client, the memory-sync hook, the ready-to-use `.claude/` templates, the **kagura-memory** Claude Code plugin (skills + tool-guardrail hooks), and the WSL2 networking note: **[MCP Client Setup](docs/mcp-clients.md)**
 
 ## MCP Tools
 

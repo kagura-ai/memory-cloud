@@ -94,6 +94,26 @@ remember(
 - `linked_memory_ids`: Creates `declared_link` edges (weight 1.0) to existing memories by ID. Use for known relationships like resolved `[[wikilinks]]`.
 - `linked_source_uris`: Links by source_uri — resolved to memory_id at remember time. Unresolved URIs are silently skipped (the plugin can retry later when the target memory exists).
 
+**Tool guardrails** — when a troubleshooting memory is about one specific tool call, mark it with `details.tool_trigger` so a client hook or the server digest can deliver it at the matching call (full contract: `docs/mcp-tools.md#tool-guardrails`):
+
+```
+remember(
+  context_id=...,
+  summary="Remove the worktree before `gh pr merge --delete-branch`; the merge succeeds but the command exits 1 when the branch is checked out in a worktree.",
+  type="troubleshooting",
+  importance=0.8,
+  tags=["git", "worktree"],
+  details={"tool_trigger": {"tool": "Bash|PowerShell", "match": "gh pr merge\\b.*--delete-branch", "action": "inform"}}
+)
+```
+
+- One specific tool call per guardrail: `Bash|PowerShell` for shell traps, `mcp__.*__remember` for a write-tool trap, `Edit|Write` for a file trap. `tool` is a full match on the tool name; `match` is an unanchored regex over the command, the file path, or the compact JSON of the arguments (`on: "result"` matches the tool's output or error instead).
+- Write the `summary` as the safe alternative, stated as a fact — it is the text the model reads.
+- Use `action: "block"` only when the call itself does the damage (it hangs, destroys, or is irreversible); it needs `on: "pre"` and a `match` naming at least one literal character. Otherwise `inform`.
+- Test the pattern against the command that actually failed before storing it; the server accepts a safe regex subset only and reports the offending construct as `invalid details.tool_trigger: <code>`.
+- `details` is replaced wholesale on `update_memory` — resend `tool_trigger` when you update details. Marking, changing or deleting a guardrail needs the context editor role and a user API key.
+- Keep a context at 20 or fewer tool guardrails.
+
 ### 4. Confirm
 
 Show what was saved: summary, type, importance, tags. If the response carries a `lint` key, the write will recall badly (short / long / narrative summary, no tags, or a tag that near-duplicates an existing one) — apply the hint with `update_memory`. The memory is saved either way: `scope="working"` names its consolidation lifecycle, not whether the write landed.

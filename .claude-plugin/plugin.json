@@ -1,7 +1,7 @@
 {
   "name": "kagura-memory",
   "version": "0.73.1",
-  "description": "Kagura Memory Cloud plugin — restore session context, recall & save durable project knowledge, setup help, and an MCP smoke test",
+  "description": "Kagura Memory Cloud plugin — restore session context, recall & save durable project knowledge, setup help, an MCP smoke test, and tool-guardrail hooks",
   "author": {
     "name": "Kagura AI, Inc.",
     "url": "https://github.com/kagura-ai"
@@ -16,5 +16,31 @@
     "session-management",
     "knowledge-base"
   ],
-  "commands": ["./claude-skills/"]
+  "commands": ["./claude-skills/"],
+  "hooks": "./claude-hooks/hooks.json",
+  "userConfig": {
+    "server_url": {
+      "type": "string",
+      "title": "Kagura Memory MCP URL",
+      "description": "The MCP endpoint from .mcp.json, e.g. https://<your-domain>/mcp/w/<workspace-id>. The hooks call load_guardrails here. Add ?guardrails=off to the .mcp.json URL itself so the server does not also send a guardrail digest."
+    },
+    "api_key": {
+      "type": "string",
+      "title": "Kagura API key",
+      "sensitive": true,
+      "description": "A user API key (kagura_...). Agent-bound keys can read guardrails but not author them."
+    },
+    "context_id": {
+      "type": "string",
+      "title": "Guardrail context id",
+      "description": "UUID of the context whose guardrails apply (list_contexts). One context for all projects in v1."
+    },
+    "max_action": {
+      "type": "string",
+      "title": "Strongest hook action",
+      "default": "block",
+      "options": ["block", "inform"],
+      "description": "block: a block guardrail denies the matching call once, with the memory as the reason. inform: never deny, only add context."
+    }
+  }
 }

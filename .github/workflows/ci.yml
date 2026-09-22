@@ -28,6 +28,11 @@ jobs:
       - name: Format check
         run: cd backend && ruff format --check src/ tests/
 
+      # The plugin hook scripts live outside backend/ and carry their own
+      # ruff.toml (py39 target); mirrors the `lint` target in the Makefile.
+      - name: Lint plugin hooks
+        run: ruff check plugins/kagura-memory/hooks/ && ruff format --check plugins/kagura-memory/hooks/
+
       - name: Models no-Column guard
         run: make lint-models-no-column
 
@@ -110,7 +115,7 @@ jobs:
         run: cd backend && pip install -e ".[dev,llm_providers,neural,lite]"
 
       - name: Type check
-        run: cd backend && pyright src/
+        run: cd backend && pyright src/ ../plugins/kagura-memory/hooks/
 
   # Shell-script quality gate for the blue-green deploy script. shellcheck
   # catches the `set -e` / quoting bug class behind #986 (a bare

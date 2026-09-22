@@ -66,6 +66,24 @@ Pin only when the knowledge must be seen *every* session, not merely recalled wh
 
 To pin at save time: `remember(..., delivery_mode="always")`.
 
+### 4b. Tool guardrails (`details.tool_trigger`)
+
+A pin is read every session; a **tool guardrail** is delivered at the one tool call it is about — by a client hook or the server digest — so it costs nothing until that call happens. When a troubleshooting lesson from this session names a specific command, file or MCP tool, save it with `details.tool_trigger` instead of (or as well as) recording it as a plain memory:
+
+```
+remember(..., type="troubleshooting",
+         summary="<the safe alternative, stated as a fact>",
+         details={"tool_trigger": {"tool": "Bash|PowerShell", "match": "<regex of the command that failed>", "action": "inform"}})
+```
+
+- One specific tool call per guardrail (`Bash|PowerShell` for shell traps, `mcp__.*__remember` for a write-tool trap, `Edit|Write` for a file trap); `on: "result"` matches the tool's output or error instead of its input.
+- The `summary` is the text the model reads — write the safe alternative as a fact.
+- `action: "block"` only when the call itself does the damage (hangs, destroys, irreversible); it needs `on: "pre"` and a `match` with at least one literal character. Otherwise `inform`.
+- Test the pattern against the command that actually failed; the server accepts a safe regex subset and names the rejected construct.
+- `details` is replaced wholesale on update — resend `tool_trigger` with any later `update_memory(details=...)`. Authoring needs the context editor role and a user API key. Keep a context at 20 or fewer guardrails.
+
+Full contract: `docs/mcp-tools.md#tool-guardrails`.
+
 ### 5. Guidelines
 
 - **Write conclusions, not narratives** — "P2 failed because tags inflate BM25 scores" not "We tried P2 and it didn't work"

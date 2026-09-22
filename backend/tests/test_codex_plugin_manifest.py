@@ -116,6 +116,32 @@ def test_codex_manifest_referenced_paths_exist() -> None:
         assert plugin_root in asset.parents or asset.parent == plugin_root
 
 
+def test_claude_plugin_hooks_path_resolves_and_names_the_shared_script() -> None:
+    """The Claude manifest's ``hooks`` file exists inside its plugin root (the repo root)
+    and every hook command runs the script shared with the Codex plugin (#1619)."""
+    hooks_rel = _load(_CLAUDE_PLUGIN)["hooks"]
+    hooks_file = (_REPO_ROOT / hooks_rel).resolve()
+    assert hooks_file.is_file(), f"Claude hooks path does not resolve: {hooks_rel}"
+    assert _REPO_ROOT.resolve() in hooks_file.parents
+    commands = [
+        hook["command"]
+        for groups in _load(hooks_file)["hooks"].values()
+        for group in groups
+        for hook in group["hooks"]
+    ]
+    assert commands
+    script = "${CLAUDE_PLUGIN_ROOT}/plugins/kagura-memory/hooks/kagura_guardrails.py"
+    for command in commands:
+        assert script in command, command
+    assert (_plugin_root() / "hooks" / "kagura_guardrails.py").is_file()
+
+
+def test_codex_hooks_file_not_shipped_yet() -> None:
+    """#1620 adds ``plugins/kagura-memory/hooks/hooks.json`` and the ``hooks`` manifest key."""
+    assert not (_plugin_root() / "hooks" / "hooks.json").exists()
+    assert "hooks" not in _codex_manifest()
+
+
 def test_every_skill_has_required_frontmatter() -> None:
     """Every SKILL.md declares the ``name`` + ``description`` Codex needs to register it."""
     skills_dir = (_plugin_root() / _codex_manifest()["skills"]).resolve()
