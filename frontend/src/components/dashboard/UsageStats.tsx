@@ -252,7 +252,7 @@ export const UsageStats = forwardRef<UsageStatsRef, UsageStatsProps>(
         <QuotaWarning
           current={currentUsage.usage.memory_count}
           limit={currentUsage.plan.memory_limit}
-          label={t("memories")}
+          resourceLabel={t("memories")}
           onUpgrade={() => router.push("/workspace/settings/plan")}
         />
 
