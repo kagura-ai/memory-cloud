@@ -13,6 +13,7 @@ import json
 import re
 import shutil
 import subprocess
+import sys
 from pathlib import Path
 
 import pytest
@@ -314,18 +315,27 @@ def test_only_deny_decision_in_source() -> None:
 # ---------------------------------------------------------------------------
 
 
-@pytest.mark.skipif(shutil.which("ruff") is None, reason="ruff not on PATH")
+def _ruff_binary() -> str | None:
+    found = shutil.which("ruff")
+    if found:
+        return found
+    sibling = Path(sys.executable).with_name("ruff")
+    return str(sibling) if sibling.exists() else None
+
+
+@pytest.mark.skipif(_ruff_binary() is None, reason="ruff not available")
 def test_ruff_settings_for_the_hook_dir() -> None:
+    """The dir's ruff.toml is picked up: py39 target, pyupgrade rules enabled."""
     proc = subprocess.run(
-        ["ruff", "check", "--show-settings", str(HOOK_SCRIPT)],
+        [str(_ruff_binary()), "check", "--show-settings", str(HOOK_SCRIPT)],
         capture_output=True,
         text=True,
         cwd=REPO_ROOT,
         check=False,
     )
     assert proc.returncode == 0, proc.stderr
-    assert "target_version = py39" in proc.stdout.replace("-", "_") or "py39" in proc.stdout
-    assert "UP" in proc.stdout, "pyupgrade rules must reach the hook script"
+    assert re.search(r"target_version = (3\.9|py39)", proc.stdout), "target version not py39"
+    assert re.search(r"\(UP\d{3}\)", proc.stdout), "pyupgrade rules must reach the hook script"
 
 
 def test_makefile_lints_the_hook_dir() -> None:
@@ -346,9 +356,11 @@ def test_ruff_toml_extends_backend_config() -> None:
 @pytest.mark.parametrize("relpath", DOCS_TOUCHED)
 def test_touched_docs_carry_no_hosted_host(relpath: str) -> None:
     text = (REPO_ROOT / relpath).read_text(encoding="utf-8")
-    # Only github.com/kagura-ai is a permitted host under that organisation name.
-    pattern = re.compile(r"://[a-z0-9.-]*" + "kagura" + "-ai" + r"\.com")
-    assert not pattern.search(text), f"{relpath} names a hosted host"
+    # The public project site (www.) is the only host allowed under that domain;
+    # the hosted service host never appears in public docs.
+    pattern = re.compile(r"://([a-z0-9.-]*" + "kagura" + "-ai" + r"\.com)")
+    hosts = {m.group(1) for m in pattern.finditer(text)}
+    assert hosts <= {"www." + "kagura" + "-ai.com"}, f"{relpath} names a hosted host: {hosts}"
 
 
 def test_hook_script_exists_and_is_not_executable_dependent() -> None:

@@ -344,6 +344,7 @@ class StubServer:
     raw_body: bytes | None = None
     extra_headers: dict[str, str] = field(default_factory=dict)
     hang: bool = False
+    delay: float = 0.0
     _server: http.server.ThreadingHTTPServer | None = None
     _thread: threading.Thread | None = None
 
@@ -386,6 +387,8 @@ class StubServer:
                 if stub.hang:
                     threading.Event().wait(10)
                     return
+                if stub.delay:
+                    threading.Event().wait(stub.delay)
                 if stub.raw_body is not None:
                     payload_bytes = stub.raw_body
                 else:
