@@ -25,7 +25,10 @@ import { useWorkspace } from "@/contexts/WorkspaceContext";
 import { checkOpenAIKeyStatus } from "@/lib/api/workspaces";
 import { useSystemFeatures } from "@/hooks/useSystemFeatures";
 import { usePlanFeatures, type PlanFeature } from "@/hooks/usePlanFeatures";
-import { useWorkspaceObjectPresence } from "@/hooks/useWorkspaceObjectPresence";
+import {
+  useWorkspaceObjectPresence,
+  type WorkspaceObjectKind,
+} from "@/hooks/useWorkspaceObjectPresence";
 import { useBetaInvites } from "@/hooks/useBetaInvites";
 import {
   hasRole,
@@ -93,6 +96,7 @@ interface NavItem {
   requiredRole?: Role; // System admin role
   requiredWorkspaceRole?: Exclude<WorkspaceRole, WorkspaceRole.Viewer>; // Workspace role (minimum required)
   requiredFeature?: string | string[]; // Issue #1145: gate on GET /system/info features flag(s); every listed flag must be true (#1571)
+  existingObjectsFallback?: WorkspaceObjectKind; // Issue #1616: a requiredFeature miss is overridden while the workspace already owns such objects
   requiredPlanFeature?: PlanFeature; // Issue #1571: gate on the plan's create gate, with an existing-objects fallback
   disabled?: boolean; // Issue #115: Support for "Coming Soon" items
   showMemberCount?: boolean; // Issue #223: Show dynamic member count
@@ -242,9 +246,14 @@ const navigationGroups: NavGroup[] = [
         href: "/workspace/integrations/external-keys",
         icon: KeyRound,
         requiredWorkspaceRole: WorkspaceRole.Owner, // Issue #381: Owner-only (workspace-level secrets)
-        // Issue #1167: the BYOK console itself — hidden when ENABLE_BYOK is
-        // off (its API returns 404).
+        // Issue #1167: the BYOK console. With ENABLE_BYOK off only
+        // provisioning (create / update) 404s; list, toggle and delete stay
+        // open to the owner as a management console for keys stored earlier
+        // (#1613). Issue #1616: so the entry stays for a workspace that
+        // already stores a key, and is hidden only where it would be a
+        // dead end (no keys, no Add) — see the nav filter.
         requiredFeature: "byok",
+        existingObjectsFallback: "externalKeys",
       },
     ],
   },
@@ -411,8 +420,10 @@ export function Sidebar() {
     setCanEmbed(null);
     if (!currentWorkspaceId) return;
     if (currentWorkspaceRole !== "owner") return;
-    // Issue #1167: with BYOK off the external-keys API 404s and the nav entry
-    // is hidden anyway — skip the probe (also while features are loading).
+    // Issue #1167: the key-status route is behind `require_byok_enabled` and
+    // 404s with BYOK off — skip the probe (also while features are loading).
+    // #1616: the nav entry may still show then (stored keys), without the
+    // warning icon: this probe stays off, so `canEmbed` stays null.
     if (!byokEnabled) return;
 
     let cancelled = false;
@@ -453,9 +464,24 @@ export function Sidebar() {
     planFeatures?.connectors === false &&
       hasWorkspaceRole(currentWorkspaceRole, WorkspaceRole.Admin),
   );
-  const existingObjects: Partial<Record<PlanFeature, boolean | null>> = {
+  // Issue #1616: with ENABLE_BYOK off the External Keys page is still the
+  // owner's console for keys stored earlier (list / disable / delete), so the
+  // entry stays for a workspace that has some. Probe the owner-only list
+  // route only on an explicit `false` (never while flags load, never on a
+  // BYOK-on deployment) and only for the owner — any other role is a
+  // guaranteed 403, and the page redirects them anyway.
+  const hasExternalKeys = useWorkspaceObjectPresence(
+    "externalKeys",
+    currentWorkspaceId,
+    systemFeatures?.byok === false &&
+      hasWorkspaceRole(currentWorkspaceRole, WorkspaceRole.Owner),
+  );
+  const existingObjects: Partial<
+    Record<PlanFeature | WorkspaceObjectKind, boolean | null>
+  > = {
     resources: hasResources,
     connectors: hasConnectors,
+    externalKeys: hasExternalKeys,
   };
 
   // Issue #1582: beta invites. Off (or an older backend without the flag) →
@@ -624,12 +650,22 @@ export function Sidebar() {
             // Issue #1145: gate behind backend feature flag(s). Default-off:
             // hidden while features load (null) and unless EVERY listed flag
             // is true (#1571: the workspace cost entry needs byok AND
-            // cost_display).
+            // cost_display). Issue #1616: an entry that declares an
+            // existing-objects fallback survives the miss while the
+            // workspace already owns such objects (External Keys: keys
+            // stored before BYOK was turned off). The fallback is pending
+            // (null) while flags load, so there is no flash-then-hide.
             const requiredFeatures =
               typeof item.requiredFeature === "string"
                 ? [item.requiredFeature]
                 : (item.requiredFeature ?? []);
-            if (requiredFeatures.some((flag) => !systemFeatures?.[flag])) {
+            if (
+              requiredFeatures.some((flag) => !systemFeatures?.[flag]) &&
+              !(
+                item.existingObjectsFallback &&
+                existingObjects[item.existingObjectsFallback] === true
+              )
+            ) {
               return false;
             }
             // Issue #1571: plan-gated entries (resources / connectors). Shown
@@ -900,7 +936,8 @@ export function Sidebar() {
                       >
                         <Icon className="h-5 w-5 flex-shrink-0" />
                         <span className="flex-1">{itemName}</span>
-                        {item.nameKey === "externalKeys" && canEmbed === false && (
+                        {item.nameKey === "externalKeys" &&
+                          canEmbed === false && (
                             <span
                               title={t("noExternalKeys", {
                                 default: "No API keys configured",

@@ -146,9 +146,11 @@ export default function ExternalKeysPage() {
 
   const { contextId } = useMemoryContext(); // For context-scoped keys
   const { currentWorkspaceId, currentWorkspace } = useWorkspace(); // For workspace-scoped keys
-  // Issue #1167: gated behind the backend ENABLE_BYOK flag (like the plan
-  // page #1145). null while loading → hold fetches; false → not-available
-  // notice (the /external-keys API returns 404 in that deployment).
+  // Issue #1167: the backend ENABLE_BYOK flag gates PROVISIONING only. null
+  // while loading → skeleton; false → the Add / Edit affordances go and the
+  // provisioning-disabled notice renders, while list / toggle / delete stay
+  // (their routes answer with BYOK off — the page is the owner's console for
+  // keys stored earlier, #1613; the nav entry follows the same rule, #1616).
   const systemFeatures = useSystemFeatures();
   const byokEnabled = systemFeatures?.byok === true;
   const [keys, setKeys] = useState<ExternalAPIKey[]>([]);

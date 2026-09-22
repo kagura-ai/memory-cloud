@@ -1,10 +1,11 @@
 /**
  * External API keys page — ENABLE_BYOK gate (#1167).
  *
- * The page is gated behind the backend byok feature flag (plan-page pattern
- * #1145): skeleton while flags load, "not available" notice when off, and the
- * key list only fetches when the flag resolves enabled (the API 404s when
- * BYOK is disabled).
+ * The backend byok feature flag gates provisioning only: skeleton while flags
+ * load, and with the flag off the page stays a management console for keys
+ * stored earlier (list / disable / delete) with a provisioning-disabled notice
+ * in place of the Add / Edit affordances. The key list fetches regardless of
+ * the flag — the list route answers with BYOK off.
  *
  * #1613: the "Required" badge follows the API's `is_protected`, not the
  * provider — an OpenAI key nothing reads keeps its delete and disable controls.
@@ -73,7 +74,7 @@ describe("ExternalKeysPage BYOK gate (#1167)", () => {
   it("fetches and renders the page when byok is enabled", async () => {
     render(<ExternalKeysPage />);
     await waitFor(() => expect(mockListKeys).toHaveBeenCalled());
-    expect(screen.queryByText("featureDisabled")).toBeNull();
+    expect(screen.queryByText("provisioningDisabled")).toBeNull();
   });
 
   it("keeps a management console (fetches + no full block) when byok is off", async () => {
@@ -86,7 +87,6 @@ describe("ExternalKeysPage BYOK gate (#1167)", () => {
     await waitFor(() =>
       expect(screen.getByText("provisioningDisabled")).toBeInTheDocument(),
     );
-    expect(screen.queryByText("featureDisabled")).toBeNull();
     // The create affordance is hidden; the empty-state "add first key" is gone.
     expect(screen.queryByText("addApiKey")).toBeNull();
   });
@@ -94,10 +94,9 @@ describe("ExternalKeysPage BYOK gate (#1167)", () => {
   it("shows a loading skeleton (no notice) while feature flags load", () => {
     // v0.42 review #32: the key list (GET) is byok-independent, so it may fetch
     // during the flag-loading window; while systemFeatures is null the page
-    // renders the skeleton and shows neither the disabled nor provisioning notice.
+    // renders the skeleton and no provisioning notice.
     mockFeatures = null;
     render(<ExternalKeysPage />);
-    expect(screen.queryByText("featureDisabled")).toBeNull();
     expect(screen.queryByText("provisioningDisabled")).toBeNull();
   });
 });
