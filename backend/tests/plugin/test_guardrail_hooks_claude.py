@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
 import stat
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -20,11 +21,14 @@ import pytest
 from tests.plugin.conftest import (
     AGENT_ID,
     CANARY_KEY,
+    HOOK_SCRIPT,
     OTHER_CONTEXT_ID,
     PluginEnv,
     RunHook,
     StubServer,
     bash_pre,
+    claude_command,
+    hook_commands,
     item,
     memory_id,
     payload,
@@ -505,6 +509,34 @@ def test_trojan_outside_project_with_unset_project_dir_is_still_caught_by_pwd(
     result = run_hook(bash_pre("ps"), env=env, cwd=plugin_env.project_dir)
     assert result.returncode == 0 and "pwned" not in result.stdout
     assert not (plugin_env.project_dir / ".tools" / "captured.txt").exists()
+
+
+def test_plugin_root_with_shell_metacharacters_is_a_literal_path(
+    plugin_env: PluginEnv, run_hook: RunHook
+) -> None:
+    """Claude Code substitutes ``${CLAUDE_PLUGIN_ROOT}`` textually into a shell-form hook
+    command when it loads the plugin (plugins reference, "Environment variables": in hook
+    commands the placeholder resolves "anywhere the placeholder appears") and exports the
+    same variable to the hook process. The command names ``$CLAUDE_PLUGIN_ROOT`` without
+    braces, so the textual pass finds nothing and ``sh`` expands the exported value inside
+    double quotes: a plugin path carrying ``$(…)``, backticks, ``"`` or a space is one
+    literal path, never shell syntax."""
+    canary = plugin_env.root / "pwned"
+    hostile = plugin_env.root / f'plugin $(touch "{canary}") `touch "{canary}"` "x'
+    script_dir = hostile / "plugins" / "kagura-memory" / "hooks"
+    script_dir.mkdir(parents=True)
+    shutil.copy(HOOK_SCRIPT, script_dir / "kagura_guardrails.py")
+    _standard_cache(plugin_env)
+    env = {**plugin_env.env, "CLAUDE_PLUGIN_ROOT": str(hostile)}
+    for event, handlers in hook_commands().items():
+        for handler in handlers:
+            command = claude_command(event, refresh=bool(handler.get("async")), env=env)
+            assert str(hostile) not in command, (event, command)
+            assert "${CLAUDE_PLUGIN_ROOT}" not in command, event
+    result = run_hook(bash_pre("ps"), env=env)
+    assert result.returncode == 0, result.stderr
+    assert result.specific["permissionDecision"] == "deny", result.stdout
+    assert not canary.exists()
 
 
 # ---------------------------------------------------------------------------

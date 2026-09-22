@@ -20,18 +20,29 @@ import pytest
 
 from tests.plugin.conftest import (
     CLAUDE_HOOKS_JSON,
+    CLAUDE_PATH_VARIABLES,
     CLAUDE_PLUGIN_JSON,
     HOOK_SCRIPT,
     REPO_ROOT,
     hook_commands,
 )
 
+# The sh guard: absolute interpreter outside the project and ``$PWD``, ``-I -S``, the
+# script under ``$CLAUDE_PLUGIN_ROOT`` — the variable Claude Code exports to the hook
+# process, expanded by the shell inside double quotes. Never the braced
+# ``${CLAUDE_PLUGIN_ROOT}``: Claude Code substitutes that placeholder textually into a
+# shell-form hook command when it loads the plugin (plugins reference, "Environment
+# variables": hook commands resolve it "anywhere the placeholder appears"), so a plugin
+# path with ``$(``, backticks or ``"`` would become shell syntax before the guard runs.
+# ``${CLAUDE_PROJECT_DIR:-/nonexistent}`` is a parameter expansion, not the placeholder.
 GUARD_COMMAND = (
     'p=$(command -v python3) || exit 0; case "$p" in /*) ;; *) exit 0;; esac; '
     'case "$p" in "${CLAUDE_PROJECT_DIR:-/nonexistent}"/*|"$PWD"/*) exit 0;; esac; '
-    'exec "$p" -I -S "${CLAUDE_PLUGIN_ROOT}/plugins/kagura-memory/hooks/kagura_guardrails.py" '
+    'exec "$p" -I -S "$CLAUDE_PLUGIN_ROOT/plugins/kagura-memory/hooks/kagura_guardrails.py" '
     "--client claude"
 )
+SCRIPT_ARG = '"$CLAUDE_PLUGIN_ROOT/plugins/kagura-memory/hooks/kagura_guardrails.py"'
+PATH_PLACEHOLDERS = ["${" + key + "}" for key in CLAUDE_PATH_VARIABLES]
 REFRESH_MATCHER = "^mcp__.*__(remember|update_memory|forget)$"
 # Claude Code hooks reference, "Matcher patterns" table: `"*"`, `""`, or omitted is
 # evaluated as "Match all - fires on every occurrence of the event". It is a documented
@@ -117,7 +128,10 @@ def test_user_config_shape() -> None:
     assert cfg["max_action"]["default"] == "block"
     assert cfg["max_action"]["options"] == ["block", "inform"]
     assert "inject_pinned" not in cfg
-    assert "?guardrails=off" in cfg["server_url"]["description"]
+    assert (
+        "Add ?guardrails=off to the .mcp.json URL itself (&guardrails=off when the URL "
+        "already has a query, such as ?profile=core)" in cfg["server_url"]["description"]
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -137,6 +151,11 @@ def test_every_command_is_the_guarded_string() -> None:
             assert handler["type"] == "command", event
             expected = GUARD_COMMAND + (" --refresh" if handler.get("async") else "")
             assert handler["command"] == expected, event
+            assert SCRIPT_ARG in handler["command"], event
+            for placeholder in PATH_PLACEHOLDERS:
+                assert placeholder not in handler["command"], (
+                    f"{event}: Claude Code would substitute {placeholder} textually"
+                )
             assert "${user_config" not in handler["command"]
             assert "args" not in handler
 

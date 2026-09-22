@@ -844,12 +844,12 @@ def test_guardrails_param_on_the_url_warns_but_still_fetches(
     codex_env.write_config_toml(toml_table(stub_server.url + f"?guardrails={CONTEXT_ID}"))
     result = run_codex(session_start())
     assert len(stub_server.requests) == 1
-    assert "?guardrails=off" in (result.json or {})["systemMessage"]
+    assert "set guardrails=off" in (result.json or {})["systemMessage"]
     assert "additionalContext" in result.specific
     codex_env.write_config_toml(toml_table(stub_server.url + "?guardrails=off"))
     codex_env.cache_path.unlink()
     result = run_codex(session_start())
-    assert "?guardrails=off" not in (result.json or {}).get("systemMessage", "")
+    assert "set guardrails=off" not in (result.json or {}).get("systemMessage", "")
 
 
 def test_server_down_uses_a_recent_cache_and_the_tool_event_still_works(
