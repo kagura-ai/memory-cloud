@@ -64,7 +64,7 @@ load_pinned(context_id=...)
 ```
 
 - This returns the COMPLETE pinned set (`delivery_mode="always"` memories — standing guardrails/goals), deterministically and unranked. It is the counterpart to `recall`: the must-load-every-session layer.
-- **If it returns zero pinned memories, OMIT the "📌 Standing guardrails" section entirely** — do not print the heading, and do not print "none"/"no pinned memories".
+- **If it returns zero pinned memories and `get_context_info` returned no `guardrails.items`, OMIT the "📌 Standing guardrails" section entirely** — do not print the heading, and do not print "none"/"no pinned memories". Tool guardrails alone keep the section.
 - Otherwise render each item with its `memory_id`, and append the unpin affordance line (see step 3 template). If `load_pinned` reports more than ~7 items, also append: `⚠ pinned set is large (N) — review for stale invariants to unpin.`
 
 ```
@@ -100,8 +100,8 @@ Display a concise summary:
 {relevant memories from last 7 days, if any}
 
 ### 📌 Standing guardrails
-{ONLY if load_pinned returned ≥1 item — omit this whole section when empty.
- List each pinned invariant with its memory_id, e.g. "- active prod color = green  (mem: abc1234)".
+{ONLY if load_pinned returned ≥1 item or get_context_info returned ≥1 guardrails.items — omit this whole section when both are empty.
+ List each pinned invariant with its memory_id, e.g. "- active prod color = green  (mem: abc1234)", then the guardrails.items not already shown, in the order returned.
  End with: "Stale? unpin via update_memory(memory_id=..., context_id=..., delivery_mode="on_recall")".
  If the pinned set is large (>7), add "⚠ N pinned — review for stale invariants to unpin".}
 

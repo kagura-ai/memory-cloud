@@ -72,7 +72,7 @@ When the user asks to start, restore, or resume a Kagura Memory session:
    - `recall(context_id=..., query="blocker issue TODO pending", k=5, filters={"created_after": "<7 days ago>", "trust_tier": "trusted"})`
    - `recall(context_id=..., query="dev environment troubleshooting workaround", k=3, filters={"type": "troubleshooting", "tags": ["dev-environment"], "trust_tier": "trusted"})`
 4. Load the deterministic always-on layer (not probabilistic — run regardless of the 7-day window):
-   - `load_pinned(context_id=...)` → the complete pinned `delivery_mode="always"` set (standing guardrails/goals). **If empty, omit the "📌 Standing guardrails" section entirely** (no placeholder). Otherwise show each with its `memory_id` + an unpin hint (`update_memory(memory_id=..., delivery_mode="on_recall")`); if >7 pinned, warn to prune.
+   - `load_pinned(context_id=...)` → the complete pinned `delivery_mode="always"` set (standing guardrails/goals). **If it is empty and `get_context_info` returned no `guardrails.items`, omit the "📌 Standing guardrails" section entirely** (no placeholder). Otherwise show each with its `memory_id` + an unpin hint (`update_memory(memory_id=..., delivery_mode="on_recall")`); if >7 pinned, warn to prune.
    - `recall_upcoming(context_id=..., from="now")` → forward-looking Time Memories (`type="time"`). **If empty, omit the "⏰ Upcoming" section entirely.**
 5. If the branch, commits, or memories mention issue numbers and `gh` is available, inspect relevant issues.
 6. Report concise restored context: branch, uncommitted changes, chosen memory context, recent work, memory highlights, standing guardrails (if any), upcoming (if any), open issues, and suggested next steps.

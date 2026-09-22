@@ -392,4 +392,7 @@ def test_skill_text_dedupes_guardrails_against_load_pinned_by_memory_id(relative
     assert "skipping any `memory_id` already shown" in text_
     assert "guardrails.items" in text_
     assert "if it is `null` the read failed" in text_
+    # The omit rule counts both lanes: a context with tool guardrails and no
+    # pinned items keeps the section.
+    assert "returned no `guardrails.items`" in text_
     assert "hook is installed" not in text_  # the URL switch decides, not the model
