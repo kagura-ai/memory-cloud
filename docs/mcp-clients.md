@@ -149,9 +149,20 @@ The **kagura-memory** plugin adds session management and memory workflow skills 
 
 Skills wrap the raw MCP tools (`recall`, `remember`, etc.) with workflow logic — context selection, git state analysis, and structured prompts. Use skills for session management and guided workflows; use MCP tools directly for fine-grained operations.
 
-Run `/kagura-memory:guide` for setup help and an optional SessionStart hook you can add to your project.
+Run `/kagura-memory:guide` for setup help; its section 5 covers the plugin's tool-guardrail hooks below.
 
 > **Prerequisite:** MCP connection must be configured (`.mcp.json` with API key). Run `/kagura-memory:guide` in your project to set it up.
+
+**Tool guardrails (hooks)**
+
+The plugin also declares Claude Code hooks (`claude-hooks/hooks.json`, one Python 3.9+ stdlib script under `plugins/kagura-memory/hooks/`) that deliver [tool guardrails](mcp-tools.md#tool-guardrails) — memories marked with `details.tool_trigger` — at the matching tool call, in the main thread and in subagents. They do nothing until configured.
+
+- **Setup:** Claude Code prompts for `server_url` (the MCP endpoint from `.mcp.json`), `api_key` (a user API key, stored as a sensitive value), `context_id` (the UUID of the context whose guardrails apply) and `max_action` (`block`, the default, or `inform`) when the plugin is enabled. The values live in user settings and the keychain only — a project's `.claude/settings.json`, `.mcp.json`, `~/.claude.json` and any `KAGURA_*` variable are never read. Scriptable: `claude plugin install kagura-memory@kagura-memory-cloud --config server_url=https://<your-domain>/mcp/w/<workspace-id> --config api_key=<your API key> --config context_id=<context uuid>`.
+- **One guardrail lane per client.** With the plugin hooks on, put `?guardrails=off` on the MCP URL in `.mcp.json` (`https://<your-domain>/mcp/w/<workspace-id>?guardrails=off`); the hooks are the guardrail lane for this client, and the server then sends no digest of the same memories. The plugin's `server_url` stays the plain endpoint.
+- **What is sent where:** `SessionStart` makes one `tools/call load_guardrails` to `server_url` with `{"context_id"}` as the only argument (https, or http on localhost; redirects are refused) and caches the result at `~/.claude/plugins/data/kagura-memory-*/guardrails/<context_id>.json` (mode 0600). `PreToolUse`, `PostToolUse` and `PostToolUseFailure` read that cache only — tool inputs never leave the machine. A `remember` / `update_memory` / `forget` call refreshes the cache in the background.
+- **What Claude sees:** an `inform` guardrail as context next to the tool result (`Kagura Memory guardrail (<id8>): <summary>`, `, by another member` when someone else wrote it); a `block` guardrail as a one-time deny with the memory as the reason — the re-issued call proceeds. Once per guardrail per session and agent, at most 3 lines per call and 10 `inform` lines per session-agent; `/clear` and `/compact` reset the main thread's markers. `block` is a speed bump, not enforcement: permission deny rules remain the enforcement tool.
+- **What you see:** one notice at session start naming new, changed or removed guardrails, or a missing configuration field; nothing when nothing changed.
+- **Off switch:** `max_action: inform` stops denies; disabling the plugin or `claude --settings '{"disableAllHooks": true}'` stops the hooks. Fail-open everywhere: a missing `python3`, an unreachable server (a cache up to 24 h old is used at session start; tool events accept 7 days), a corrupt cache or an unsupported pattern never blocks a call. Windows is unsupported for these hooks (install Git Bash or disable them).
 
 </details>
 

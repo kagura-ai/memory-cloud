@@ -99,29 +99,39 @@ The tool descriptions your client lists are deliberately short. This is the dept
 - A `lint` key in the response means the write will recall badly (short / long / narrative summary, no tags, near-duplicate tag) — fix it with `update_memory`. The memory is already saved either way: `scope="working"` describes the consolidation lifecycle, not whether the write landed.
 - Never store secrets, credentials or PII. Coordinates go in `details.location` only.
 
-### 5. Optional: SessionStart hook
+### 5. Tool guardrails (plugin hooks)
 
-To automatically remind yourself to restore session context, add this hook to your project's `.claude/settings.json`. Substitute `{server_url}` with the same URL you put in `.mcp.json` (e.g. `https://memory.kagura-ai.com` for the hosted service or `http://localhost:8080` for a local instance):
+The plugin ships Claude Code hooks that deliver **tool guardrails** — memories marked with `details.tool_trigger` (see `docs/mcp-tools.md#tool-guardrails` in the repository) — at the moment a matching tool call happens, in the main thread and in subagents alike. Nothing runs until the plugin is configured.
 
-```json
-{
-  "hooks": {
-    "SessionStart": [
-      {
-        "matcher": "",
-        "hooks": [
-          {
-            "type": "command",
-            "command": "curl -sf {server_url}/health >/dev/null 2>&1 && echo 'Kagura Memory Cloud is connected. Run /kagura-memory:session-start to restore previous session context.' || true"
-          }
-        ]
-      }
-    ]
-  }
-}
+**What the hooks do**
+
+- `SessionStart` fetches the context's guardrail set once (`load_guardrails` over your MCP URL, `{"context_id"}` is the only argument), caches it under the plugin's data directory, and adds one line to Claude's context: how many tool guardrails are active.
+- `PreToolUse` matches every tool call locally against the cache — no network, tool inputs never leave the machine. An `inform` guardrail is added as context next to the tool result; a `block` guardrail denies the matching call **once**, with the memory as the reason, and the re-issued call proceeds.
+- `PostToolUse` / `PostToolUseFailure` deliver `on: "result"` guardrails next to a tool's output or error. A `remember` / `update_memory` / `forget` call refreshes the cache in the background, so a guardrail written mid-session takes effect in the same session.
+- Each guardrail is delivered once per session and agent, at most 3 lines per call and 10 `inform` lines per session-agent. A `block` is a one-time speed bump, not enforcement: Claude Code permission deny rules remain the enforcement tool.
+
+**Setup** — Claude Code asks for these when the plugin is enabled (`/plugin` → kagura-memory → configure later); the values live in your user settings and keychain, never in the repository:
+
+| Option | Value |
+|---|---|
+| `server_url` | the MCP endpoint from `.mcp.json`, e.g. `https://<your-domain>/mcp/w/<workspace-id>` |
+| `api_key` | a user API key (`kagura_...`); stored as a sensitive value |
+| `context_id` | the UUID of the context whose guardrails apply (`list_contexts`); one context for all projects in v1 |
+| `max_action` | `block` (default) or `inform` — `inform` never denies, it only adds context |
+
+Scriptable form, with placeholders:
+
+```
+claude plugin install kagura-memory@kagura-memory-cloud --config server_url=https://<your-domain>/mcp/w/<workspace-id> --config api_key=<your API key> --config context_id=<context uuid>
 ```
 
-Merge this into your existing `hooks` object if you already have other hooks defined.
+With the hooks on, the hooks are the guardrail lane for this client: put `?guardrails=off` on the **`.mcp.json` URL** (`https://<your-domain>/mcp/w/<workspace-id>?guardrails=off`) so the server does not also send a guardrail digest; the plugin's `server_url` stays the plain endpoint. The hook only sees `server_url`, so it warns once at session start if that URL carries a different `guardrails=` value.
+
+**Checking it works** — after the first session, `ls "$HOME/.claude/plugins/data/"kagura-memory-*/guardrails/` shows `<context_id>.json`. New, changed or removed guardrails are shown to you (not to Claude) as a one-line notice at session start, tagged `(by another member)` when someone else wrote them. A half-finished configuration prints one notice naming the missing field; with nothing configured the hooks are silent. `claude -p` sessions run the hooks too; a deny costs one model turn, so leave headroom in `--max-turns`.
+
+**Turning it off** — `max_action: inform` stops denies; disabling the plugin or `claude --settings '{"disableAllHooks": true}'` (useful for an untrusted checkout) stops the hooks entirely.
+
+**Requirements** — a `python3` (3.9+) on `PATH` that is not inside the project. On macOS install the Command Line Tools or Homebrew Python (the stub `python3` opens a dialog). Windows is unsupported for these hooks: install Git Bash or disable the plugin's hooks.
 
 ### 6. Show available plugin skills
 

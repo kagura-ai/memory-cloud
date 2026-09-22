@@ -152,6 +152,8 @@ Core tools only: set `"url"` to `"http://localhost:8080/mcp/w/YOUR_WORKSPACE_ID?
 
 Restart Claude Code to pick up the config, then test with `remember` and `recall` tools.
 
+The **kagura-memory** Claude Code plugin adds session skills and tool-guardrail hooks that deliver `details.tool_trigger` memories at the matching tool call — setup and the `?guardrails=off` URL rule are under "Claude Code Plugin › Tool guardrails (hooks)" in [MCP Client Setup](mcp-clients.md).
+
 ### Cursor
 
 Cursor reads the same `mcpServers` shape as Claude Code. Add the snippet above to your Cursor settings file (Settings → MCP), then restart Cursor.

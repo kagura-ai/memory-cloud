@@ -1,0 +1,61 @@
+{
+  "hooks": {
+    "SessionStart": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "timeout": 5,
+            "command": "p=$(command -v python3) || exit 0; case \"$p\" in /*) ;; *) exit 0;; esac; case \"$p\" in \"${CLAUDE_PROJECT_DIR:-/nonexistent}\"/*|\"$PWD\"/*) exit 0;; esac; exec \"$p\" -I -S \"${CLAUDE_PLUGIN_ROOT}/plugins/kagura-memory/hooks/kagura_guardrails.py\" --client claude"
+          }
+        ]
+      }
+    ],
+    "PreToolUse": [
+      {
+        "matcher": "*",
+        "hooks": [
+          {
+            "type": "command",
+            "timeout": 2,
+            "command": "p=$(command -v python3) || exit 0; case \"$p\" in /*) ;; *) exit 0;; esac; case \"$p\" in \"${CLAUDE_PROJECT_DIR:-/nonexistent}\"/*|\"$PWD\"/*) exit 0;; esac; exec \"$p\" -I -S \"${CLAUDE_PLUGIN_ROOT}/plugins/kagura-memory/hooks/kagura_guardrails.py\" --client claude"
+          }
+        ]
+      }
+    ],
+    "PostToolUse": [
+      {
+        "matcher": "*",
+        "hooks": [
+          {
+            "type": "command",
+            "timeout": 2,
+            "command": "p=$(command -v python3) || exit 0; case \"$p\" in /*) ;; *) exit 0;; esac; case \"$p\" in \"${CLAUDE_PROJECT_DIR:-/nonexistent}\"/*|\"$PWD\"/*) exit 0;; esac; exec \"$p\" -I -S \"${CLAUDE_PLUGIN_ROOT}/plugins/kagura-memory/hooks/kagura_guardrails.py\" --client claude"
+          }
+        ]
+      },
+      {
+        "matcher": "^mcp__.*__(remember|update_memory|forget)$",
+        "hooks": [
+          {
+            "type": "command",
+            "async": true,
+            "command": "p=$(command -v python3) || exit 0; case \"$p\" in /*) ;; *) exit 0;; esac; case \"$p\" in \"${CLAUDE_PROJECT_DIR:-/nonexistent}\"/*|\"$PWD\"/*) exit 0;; esac; exec \"$p\" -I -S \"${CLAUDE_PLUGIN_ROOT}/plugins/kagura-memory/hooks/kagura_guardrails.py\" --client claude --refresh"
+          }
+        ]
+      }
+    ],
+    "PostToolUseFailure": [
+      {
+        "matcher": "*",
+        "hooks": [
+          {
+            "type": "command",
+            "timeout": 2,
+            "command": "p=$(command -v python3) || exit 0; case \"$p\" in /*) ;; *) exit 0;; esac; case \"$p\" in \"${CLAUDE_PROJECT_DIR:-/nonexistent}\"/*|\"$PWD\"/*) exit 0;; esac; exec \"$p\" -I -S \"${CLAUDE_PLUGIN_ROOT}/plugins/kagura-memory/hooks/kagura_guardrails.py\" --client claude"
+          }
+        ]
+      }
+    ]
+  }
+}
