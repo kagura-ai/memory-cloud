@@ -222,7 +222,9 @@ def _discover_result(
     Issue #1621: ``instructions`` may carry a per-caller guardrail digest.
     ``private`` marks a result whose bytes may vary by caller: "private —
     caches MUST NOT be shared across authorization contexts", with the shorter
-    ``tools/list`` TTL. The defaults keep every existing call byte-identical.
+    ``tools/list`` TTL. The defaults keep the no-selection result static per
+    deployment — identical for every caller, ``public`` for one hour as
+    before; only the base text itself was reworded in #1621.
     """
     return {
         "resultType": "complete",
@@ -312,7 +314,9 @@ async def build_instructions(
     scope. ``private`` is ``True`` whenever a selection was *attempted* (any
     ``guardrails=`` value, or an agent scope) whatever the outcome — a result
     that may vary by caller is never ``public`` — and ``False`` only for the
-    param-absent, non-agent case, whose bytes are identical to before #1621.
+    param-absent, non-agent case, whose bytes are static per deployment and
+    identical for every caller (the base text was reworded in #1621, so this
+    result differs from the pre-#1621 one in ``instructions`` only).
 
     Fails open: a deny, an unknown context, a DB error or the
     ``mcp_guardrail_digest_timeout_ms`` budget expiring all serve the base text
