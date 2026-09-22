@@ -5,6 +5,7 @@ Issue #1 - Core Memory APIs
 """
 
 from typing import Annotated, Any
+from urllib.parse import urlencode
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
@@ -449,9 +450,10 @@ async def guardrail_digest(
         body = render_export_block(entries)
         media_type = "text/markdown"
     else:
-        query = "&".join(
-            f"{key}={value}" for key, value in (("profile", profile), ("tools", tools)) if value
-        )
+        # Rebuild the MCP URL's query the way a URL carries it (percent-
+        # encoded) so a ``&`` or ``=`` inside a value stays inside that value
+        # and cannot smuggle a second parameter into the tool view.
+        query = urlencode({k: v for k, v in (("profile", profile), ("tools", tools)) if v})
         body = render_instructions(
             SERVER_INSTRUCTIONS_BASE, entries, tool_names=tool_view_names(query)
         )

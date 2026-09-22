@@ -126,6 +126,35 @@ async def test_instructions_target_previews_exactly_what_lane_a_serves(source):
 
 
 @pytest.mark.asyncio
+async def test_instructions_preview_percent_encodes_the_rebuilt_tool_view_query(
+    source, monkeypatch
+):
+    """``profile`` / ``tools`` are re-joined into a query string for the tool
+    view. A ``&`` or ``=`` inside a value must stay inside that value — it
+    cannot become a second parameter that widens the view (and with it the
+    suffix) beyond what the caller passed."""
+    seen: list[str] = []
+
+    def spy(query_string):
+        seen.append(query_string)
+        return frozenset({"get_context_info"})
+
+    monkeypatch.setattr(digest_mod, "tool_view_names", spy)
+    ctx = uuid4()
+    source.result = _entries(ctx, "a", total=3)
+
+    await _call(context_id=str(ctx), target="instructions", tools="load_guardrails&profile=full")
+    await _call(context_id=str(ctx), target="instructions", profile="core", tools="recall,remember")
+    await _call(context_id=str(ctx), target="instructions")
+
+    assert seen == [
+        "tools=load_guardrails%26profile%3Dfull",
+        "profile=core&tools=recall%2Cremember",
+        "",
+    ]
+
+
+@pytest.mark.asyncio
 async def test_instructions_target_of_an_empty_context_is_the_base_text(source):
     ctx = uuid4()
     source.result = _entries(ctx)
