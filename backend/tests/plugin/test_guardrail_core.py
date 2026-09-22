@@ -213,6 +213,152 @@ def test_claude_result_events_use_response_and_error(hook_module: ModuleType) ->
     assert adapter.subjects(failure) == ("mcp__kagura-memory__remember", [], ['{"status":"error"}'])
 
 
+@pytest.fixture(scope="module")
+def codex_adapter(hook_module: ModuleType) -> Any:
+    """The Codex adapter (#1620) as the entry script loads it: by file path."""
+    adapter = hook_module._load_codex_adapter()
+    assert adapter is not None, "plugins/kagura-memory/hooks/_codex_adapter.py is missing"
+    return adapter
+
+
+def _patch(*headers: str) -> str:
+    return "*** Begin Patch\n" + "\n".join(headers) + "\n@@\n-a\n+b\n*** End Patch\n"
+
+
+@pytest.mark.parametrize(
+    ("event", "aliases", "expected"),
+    [
+        (bash_pre("gh pr merge 1 --delete-branch"), [], ["gh pr merge 1 --delete-branch"]),
+        (payload("PreToolUse", tool_name="Bash", tool_input={"command": ["ps"]}), [], []),
+        (payload("PreToolUse", tool_name="Bash", tool_input="ps"), [], []),
+        (
+            payload(
+                "PreToolUse",
+                tool_name="apply_patch",
+                tool_input={"command": _patch("*** Update File: src/a.py")},
+            ),
+            ["Edit", "Write"],
+            ["src/a.py"],
+        ),
+        (
+            payload(
+                "PreToolUse",
+                tool_name="apply_patch",
+                tool_input={
+                    "command": _patch(
+                        "*** Add File: docs/new.md",
+                        "*** Update File: src/old.py",
+                        "*** Move to: src/new.py",
+                        "*** Delete File: src/gone.py",
+                        "*** Update File: src/old.py",
+                    )
+                },
+            ),
+            ["Edit", "Write"],
+            ["docs/new.md", "src/old.py", "src/new.py", "src/gone.py", "src/old.py"],
+        ),
+        (
+            payload(
+                "PreToolUse",
+                tool_name="apply_patch",
+                tool_input={"command": _patch("*** Update File: src\\pkg\\a.py  ")},
+            ),
+            ["Edit", "Write"],
+            ["src/pkg/a.py"],
+        ),
+        (
+            payload(
+                "PreToolUse",
+                tool_name="apply_patch",
+                tool_input={"command": "*** Begin Patch\r\n*** Update File: a.py\r\n*** End Patch"},
+            ),
+            ["Edit", "Write"],
+            ["a.py"],
+        ),
+        (
+            payload(
+                "PreToolUse",
+                tool_name="apply_patch",
+                tool_input={
+                    "command": "*** Begin Patch\n *** Update File: indented.py\n*** End Patch"
+                },
+            ),
+            ["Edit", "Write"],
+            [],
+        ),
+        (
+            payload("PreToolUse", tool_name="apply_patch", tool_input={"command": 7}),
+            ["Edit", "Write"],
+            [],
+        ),
+        (
+            payload(
+                "PreToolUse",
+                tool_name="mcp__kagura-memory__remember",
+                tool_input={"summary": "s", "context_id": "c", "importance": 1},
+            ),
+            [],
+            ['{"context_id":"c","importance":1,"summary":"s"}'],
+        ),
+        (
+            payload("PreToolUse", tool_name="view_image", tool_input={"path": "x.png"}),
+            [],
+            ['{"path":"x.png"}'],
+        ),
+        (
+            payload("PreToolUse", tool_name="Write", tool_input={"file_path": "/x"}),
+            [],
+            ['{"file_path":"/x"}'],
+        ),
+    ],
+)
+def test_codex_pre_subjects(
+    codex_adapter: Any, event: dict[str, Any], aliases: list[str], expected: list[str]
+) -> None:
+    """Codex rows of the contract's subject table (``apply_patch`` header paths, aliases)."""
+    name, got_aliases, subjects = codex_adapter.subjects(event)
+    assert name == event["tool_name"]
+    assert got_aliases == aliases
+    assert subjects == expected
+
+
+def test_codex_result_event_uses_tool_response_and_keeps_aliases(codex_adapter: Any) -> None:
+    post = payload(
+        "PostToolUse",
+        tool_name="apply_patch",
+        tool_input={"command": "x"},
+        tool_response={
+            "output": "Success. Updated the following files:\nM a.py",
+            "metadata": {"exit_code": 0},
+        },
+    )
+    assert codex_adapter.subjects(post) == (
+        "apply_patch",
+        ["Edit", "Write"],
+        ["Success. Updated the following files:\nM a.py"],
+    )
+    mcp = payload(
+        "PostToolUse",
+        tool_name="mcp__kagura-memory__remember",
+        tool_input={},
+        tool_response={
+            "content": [{"type": "text", "text": '{"status": "error"}'}],
+            "isError": True,
+        },
+    )
+    assert codex_adapter.subjects(mcp) == (
+        "mcp__kagura-memory__remember",
+        [],
+        ['{"status": "error"}\ntext\nisError=true'],
+    )
+    assert codex_adapter.subjects(payload("SessionStart", source="startup")) == (None, [], [])
+    assert codex_adapter.subjects({"hook_event_name": "PreToolUse", "tool_name": 5}) == (
+        None,
+        [],
+        [],
+    )
+
+
 # ---------------------------------------------------------------------------
 # Skip rules and cache validation
 # ---------------------------------------------------------------------------
