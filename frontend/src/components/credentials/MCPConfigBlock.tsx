@@ -8,8 +8,10 @@
  * window, masked by default. Three tabs cover the distinct config shapes:
  * Claude Code (standard `mcpServers` JSON — also what Cursor and other
  * mcpServers-based clients consume, so they no longer get a separate tab),
- * ChatGPT (custom-connector instructions), and Codex CLI (install one-liner
- * + manual TOML). The user's last choice is persisted to localStorage.
+ * ChatGPT (custom-connector instructions), and Codex CLI (`codex mcp add`
+ * one-liner + manual TOML — both name the env var Codex reads the key from
+ * and never carry the key, #1624). The user's last choice is persisted to
+ * localStorage.
  *
  * A "Core tools only" switch (#1609) above the tabs puts `?profile=core` on
  * every endpoint URL the block renders and copies, so the client lists the
@@ -67,14 +69,12 @@ const FALLBACK_KEY_PREFIX = "kag_";
 const MASK_BODY = "•••••••••••";
 const PLACEHOLDER_KEY = "YOUR_API_KEY";
 
-// Codex CLI plugin install one-liner. The handle `kagura-memory@kagura-memory-cloud`
-// is derived from `.agents/plugins/marketplace.json` as `<plugin.name>@<marketplace.name>`
-// — i.e. plugins[0].name (`kagura-memory`) joined to the top-level marketplace
-// `name` (`kagura-memory-cloud`). If either name in that manifest changes, this
-// string must move in lockstep (the marketplace guard test in backend/tests/ pins
-// the shape, but the install command itself is rendered text and not covered).
-export const CODEX_INSTALL_COMMAND =
-  "codex plugin install kagura-memory@kagura-memory-cloud";
+// The environment variable Codex reads the API key from (#1624). Codex takes
+// a bearer token for a streamable-HTTP server ONLY by env var name
+// (`bearer_token_env_var`); an inline `bearer_token` is rejected and stops the
+// whole config.toml from loading. Same name as docs/getting-started.md exports
+// in its Quick API Test, so one `export` serves both.
+export const CODEX_BEARER_TOKEN_ENV_VAR = "KAGURA_API_KEY";
 
 /**
  * Strip the workspace-scoped `/w/<workspaceId>` suffix from an MCP URL,
@@ -127,6 +127,18 @@ export function withCoreProfile(mcpUrl: string): string {
  */
 function shellUrlArg(url: string): string {
   return /[?&]/.test(url) ? `"${url}"` : url;
+}
+
+/**
+ * Build the Codex CLI one-liner that registers the server (#1624):
+ * `codex mcp add kagura-memory --url <url> --bearer-token-env-var KAGURA_API_KEY`.
+ * It writes exactly the entry {@link buildTomlConfig} renders. Like the
+ * Claude Code OAuth one-liner it is env-aware via the URL, quotes the URL
+ * when it carries a query, and needs no key — so it renders and copies in
+ * every key-visibility state.
+ */
+export function buildCodexAddCommand(mcpUrl: string): string {
+  return `codex mcp add kagura-memory --url ${shellUrlArg(mcpUrl)} --bearer-token-env-var ${CODEX_BEARER_TOKEN_ENV_VAR}`;
 }
 
 export interface MCPConfigBlockProps {
@@ -234,11 +246,15 @@ function buildJsonConfig(
 }
 
 /**
- * Build the Codex CLI `~/.codex/config.toml` snippet for the manual config
- * block. The snippet declares an HTTP-transport MCP server using the same
- * URL + Bearer pair as the JSON variants.
+ * Build the Codex CLI `~/.codex/config.toml` entry for the manual config
+ * block — the same entry {@link buildCodexAddCommand} writes. It uses the
+ * two keys Codex reads on a streamable-HTTP server, `url` and
+ * `bearer_token_env_var`, and nothing else: Codex rejects an inline
+ * `bearer_token` (and the whole config.toml then fails to load), and `type`
+ * is not a Codex key (#1624). The key itself never enters the snippet, so
+ * there is nothing to mask, reveal or gate on the visibility window.
  *
- * TOML escape contract: values are emitted as TOML basic strings (`"..."`).
+ * TOML escape contract: the URL is emitted as a TOML basic string (`"..."`).
  * TOML basic strings forbid raw `\` and `"`, and also forbid raw control
  * characters (U+0000–U+001F except tab) and ``. We escape in a fixed
  * order:
@@ -249,20 +265,20 @@ function buildJsonConfig(
  *
  * The dev-mode warn below is a tripwire that surfaces in development when a
  * caller passes risky input — it complements (does not replace) the runtime
- * escape, which is now the actual safety net. Real API keys are base64-ish
- * (none of these characters), so the escape is defense in depth against a
- * future refactor that lets user-controllable content reach this helper.
+ * escape, which is the actual safety net. The URL is server-issued (none of
+ * these characters), so the escape is defense in depth against a future
+ * refactor that lets user-controllable content reach this helper.
  */
-export function buildTomlConfig(mcpUrl: string, authValue: string): string {
+export function buildTomlConfig(mcpUrl: string): string {
   if (process.env.NODE_ENV === "development") {
     const unsafeRe = /[ -]/;
-    if (unsafeRe.test(mcpUrl) || unsafeRe.test(authValue)) {
+    if (unsafeRe.test(mcpUrl)) {
       // eslint-disable-next-line no-console
       console.warn(
-        "[MCPConfigBlock.buildTomlConfig] mcpUrl or authValue contains " +
-          "control characters. They will be escaped (TOML basic strings " +
-          "forbid raw control chars), but these inputs are expected to be " +
-          "server-issued — investigate why a refactor introduced them.",
+        "[MCPConfigBlock.buildTomlConfig] mcpUrl contains control " +
+          "characters. They will be escaped (TOML basic strings forbid raw " +
+          "control chars), but this input is expected to be server-issued " +
+          "— investigate why a refactor introduced them.",
       );
     }
   }
@@ -279,9 +295,8 @@ export function buildTomlConfig(mcpUrl: string, authValue: string): string {
       });
   return [
     "[mcp_servers.kagura-memory]",
-    'type = "http"',
     `url = "${escape(mcpUrl)}"`,
-    `bearer_token = "${escape(authValue)}"`,
+    `bearer_token_env_var = "${CODEX_BEARER_TOKEN_ENV_VAR}"`,
   ].join("\n");
 }
 
@@ -390,17 +405,14 @@ export function MCPConfigBlock({
     return buildJsonConfig(client, endpointUrl, liveKey);
   }, [client, endpointUrl, liveKey]);
 
-  // Codex tab — TOML snippet variants. Mirror the JSON pair: displayToml
-  // uses visibleAuthValue (mask / placeholder / live), copyToml always
-  // uses the live key. Same disabled-when-null contract.
-  const displayToml = useMemo(
-    () => buildTomlConfig(endpointUrl, visibleAuthValue),
-    [endpointUrl, visibleAuthValue],
+  // Codex tab (#1624). Neither snippet carries the key — Codex reads it from
+  // the env var both of them name — so there is one value per snippet (no
+  // display / copy pair, no mask, no disabled-when-null gate).
+  const codexAddCommand = useMemo(
+    () => buildCodexAddCommand(endpointUrl),
+    [endpointUrl],
   );
-  const copyToml = useMemo(() => {
-    if (liveKey === null) return null;
-    return buildTomlConfig(endpointUrl, liveKey);
-  }, [endpointUrl, liveKey]);
+  const codexToml = useMemo(() => buildTomlConfig(endpointUrl), [endpointUrl]);
 
   // Claude Code OAuth one-liner (#988). Targets the BARE /mcp endpoint —
   // OAuth resolves the workspace at login, so the workspace-scoped
@@ -418,12 +430,12 @@ export function MCPConfigBlock({
 
   // Track which Copy button the user pressed last, so the Check icon only
   // flashes on the button they actually clicked. Without this, the shared
-  // `copied` flag from useRevealableSecret causes the Codex tab's install
+  // `copied` flag from useRevealableSecret causes the Codex tab's command
   // and manual-TOML buttons to BOTH flash Check when either is pressed
   // (Copilot review flagged this on PR #817). The hook still owns the 2s
   // timer; this just disambiguates the visual target.
   const [lastCopied, setLastCopied] = useState<
-    "json" | "toml" | "install" | "oauth" | null
+    "json" | "toml" | "codex-add" | "oauth" | null
   >(null);
 
   // Single copy path for all four buttons. They differ only in the value
@@ -437,7 +449,7 @@ export function MCPConfigBlock({
   // copy) rather than leaking the raw DOM exception string.
   const runCopy = async (
     value: string | null,
-    target: "json" | "toml" | "install" | "oauth",
+    target: "json" | "toml" | "codex-add" | "oauth",
     successTitle: string,
   ) => {
     if (value === null) return;
@@ -455,9 +467,9 @@ export function MCPConfigBlock({
   };
 
   const handleCopy = () => runCopy(copyJson, "json", t("mcpConfigCopied"));
-  const handleTomlCopy = () => runCopy(copyToml, "toml", t("mcpConfigCopied"));
-  const handleInstallCopy = () =>
-    runCopy(CODEX_INSTALL_COMMAND, "install", t("codexInstallCopied"));
+  const handleTomlCopy = () => runCopy(codexToml, "toml", t("mcpConfigCopied"));
+  const handleCodexAddCopy = () =>
+    runCopy(codexAddCommand, "codex-add", t("codexAddCopied"));
   const handleOAuthCopy = () =>
     runCopy(claudeOAuthCommand, "oauth", t("claudeOAuthCopied"));
 
@@ -591,30 +603,29 @@ export function MCPConfigBlock({
           </TabsContent>
         ))}
 
-        {/* Codex CLI tab: install one-liner (recommended) + collapsible
-            manual TOML fallback. The install path handles plugin sign-in;
-            the manual TOML covers fallback when the plugin install does
-            not auto-configure the MCP server endpoint. */}
+        {/* Codex CLI tab (#1624): `codex mcp add` one-liner (recommended) +
+            collapsible manual config.toml, the entry that command writes.
+            Both name the env var Codex reads the key from and never embed
+            the key, so neither has a mask / reveal toggle or a key-window
+            gate; the hint tells the user to export the variable. */}
         <TabsContent value="codex" className="mt-3 space-y-3">
           <div>
-            <h4 className="text-sm font-medium mb-2">
-              {t("codexInstallHeading")}
-            </h4>
+            <h4 className="text-sm font-medium mb-2">{t("codexAddHeading")}</h4>
             <div className="relative">
               <pre className="bg-gray-900 text-gray-100 p-3 pr-12 rounded overflow-x-auto text-xs whitespace-pre-wrap break-all">
-                {CODEX_INSTALL_COMMAND}
+                {codexAddCommand}
               </pre>
               <div className="absolute top-2 right-2">
                 <Button
                   type="button"
                   variant="ghost"
                   size="icon"
-                  onClick={handleInstallCopy}
-                  title={t("copyInstallCommand")}
-                  aria-label={t("copyInstallCommand")}
+                  onClick={handleCodexAddCopy}
+                  title={t("copyCodexAddCommand")}
+                  aria-label={t("copyCodexAddCommand")}
                   className="text-gray-300 hover:text-white hover:bg-gray-700/50"
                 >
-                  {copied && lastCopied === "install" ? (
+                  {copied && lastCopied === "codex-add" ? (
                     <Check className="w-4 h-4 text-green-400" />
                   ) : (
                     <Copy className="w-4 h-4" />
@@ -623,7 +634,7 @@ export function MCPConfigBlock({
               </div>
             </div>
             <p className="text-xs text-blue-700 dark:text-blue-300 mt-2">
-              💡 {t("codexInstallHint")}
+              💡 {t("codexAddHint")}
             </p>
           </div>
 
@@ -641,43 +652,17 @@ export function MCPConfigBlock({
             </CollapsibleTrigger>
             <CollapsibleContent className="mt-2">
               <div className="relative">
-                <pre className="bg-gray-900 text-gray-100 p-3 pr-20 rounded overflow-x-auto text-xs whitespace-pre-wrap break-all">
-                  {displayToml}
+                <pre className="bg-gray-900 text-gray-100 p-3 pr-12 rounded overflow-x-auto text-xs whitespace-pre-wrap break-all">
+                  {codexToml}
                 </pre>
-                <div className="absolute top-2 right-2 flex gap-1">
-                  <Button
-                    type="button"
-                    variant="ghost"
-                    size="icon"
-                    onClick={toggle}
-                    disabled={disabled}
-                    title={revealed ? t("hideKey") : t("showKey")}
-                    aria-label={revealed ? t("hideKey") : t("showKey")}
-                    aria-pressed={revealed}
-                    className="text-gray-300 hover:text-white hover:bg-gray-700/50"
-                  >
-                    {revealed ? (
-                      <EyeOff className="w-4 h-4" />
-                    ) : (
-                      <Eye className="w-4 h-4" />
-                    )}
-                  </Button>
+                <div className="absolute top-2 right-2">
                   <Button
                     type="button"
                     variant="ghost"
                     size="icon"
                     onClick={handleTomlCopy}
-                    disabled={disabled}
-                    title={
-                      disabled
-                        ? t("mcpConfigHiddenCopyDisabled")
-                        : t("copyManualConfig")
-                    }
-                    aria-label={
-                      disabled
-                        ? t("mcpConfigHiddenCopyDisabled")
-                        : t("copyManualConfig")
-                    }
+                    title={t("copyManualConfig")}
+                    aria-label={t("copyManualConfig")}
                     className="text-gray-300 hover:text-white hover:bg-gray-700/50"
                   >
                     {copied && lastCopied === "toml" ? (
@@ -689,7 +674,7 @@ export function MCPConfigBlock({
                 </div>
               </div>
               <p className="text-xs text-blue-700 dark:text-blue-300 mt-2">
-                💡 {t("mcpConfigHint")}
+                💡 {t("codexManualConfigHint")}
               </p>
             </CollapsibleContent>
           </Collapsible>

@@ -33,9 +33,16 @@ Use the available Kagura Memory MCP namespace, typically exposed as tools such a
 If the MCP tools are not available:
 
 1. Run `codex mcp list` to check whether `kagura-memory` is configured.
-2. If missing, configure the HTTP MCP server in `~/.codex/config.toml` with `[mcp_servers.kagura-memory]`.
+2. If missing, add it (checked against Codex `rust-v0.155.1`): `codex mcp add kagura-memory --url "<endpoint>" --bearer-token-env-var KAGURA_API_KEY`, which writes this `~/.codex/config.toml` entry:
+
+   ```toml
+   [mcp_servers.kagura-memory]
+   url = "https://<your-domain>/mcp/w/<workspace-id>"
+   bearer_token_env_var = "KAGURA_API_KEY"
+   ```
+
 3. Set `url` to your Memory Cloud endpoint: a self-hosted deployment uses `https://<your-domain>/mcp/w/<workspace-id>` (or `http://localhost:8080/mcp/w/<workspace-id>` for local development). That URL lists all tools (the default); end it with `?profile=core` to list the core tools only — a smaller tool list; everything else stays callable, it is just not listed.
-4. Pass auth via `bearer_token_env_var` or an `[mcp_servers.kagura-memory.http_headers]` table with `Authorization = "Bearer <api-key>"`.
+4. Pass auth through the environment: `bearer_token_env_var` names the variable holding the API key (`env_http_headers` is the equivalent for a custom header). Codex rejects an inline `bearer_token` on an HTTP server and the whole `config.toml` then fails to load; `type` is not a Codex key. Never put the key itself in the file.
 5. Restart Codex so the tools are loaded.
 
 Never print API keys or bearer tokens. When showing config, redact secrets.
