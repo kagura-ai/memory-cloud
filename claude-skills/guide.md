@@ -125,7 +125,7 @@ Scriptable form, with placeholders:
 claude plugin install kagura-memory@kagura-memory-cloud --config server_url=https://<your-domain>/mcp/w/<workspace-id> --config api_key=<your API key> --config context_id=<context uuid>
 ```
 
-With the hooks on, the hooks are the guardrail lane for this client: put `?guardrails=off` on the **`.mcp.json` URL** (`https://<your-domain>/mcp/w/<workspace-id>?guardrails=off`) so the server does not also send a guardrail digest; the plugin's `server_url` stays the plain endpoint. The hook only sees `server_url`, so it warns once at session start if that URL carries a different `guardrails=` value.
+With the hooks on, the hooks are the guardrail lane for this client: put `?guardrails=off` on the **`.mcp.json` URL** (`https://<your-domain>/mcp/w/<workspace-id>?guardrails=off`, or `&guardrails=off` when the URL already has a query, such as `?profile=core`) so the server does not also send a guardrail digest; the plugin's `server_url` stays the plain endpoint. The hook only sees `server_url`, so it warns once at session start if that URL carries a different `guardrails=` value.
 
 **Checking it works** — after the first session, `ls "$HOME/.claude/plugins/data/"kagura-memory-*/guardrails/` shows `<context_id>.json`. New, changed or removed guardrails are shown to you (not to Claude) as a one-line notice at session start, tagged `(by another member)` when someone else wrote them. A half-finished configuration prints one notice naming the missing field; with nothing configured the hooks are silent. `claude -p` sessions run the hooks too; a deny costs one model turn, so leave headroom in `--max-turns`.
 

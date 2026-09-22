@@ -128,7 +128,10 @@ def test_user_config_shape() -> None:
     assert cfg["max_action"]["default"] == "block"
     assert cfg["max_action"]["options"] == ["block", "inform"]
     assert "inject_pinned" not in cfg
-    assert "?guardrails=off" in cfg["server_url"]["description"]
+    assert (
+        "Add ?guardrails=off to the .mcp.json URL itself (&guardrails=off when the URL "
+        "already has a query, such as ?profile=core)" in cfg["server_url"]["description"]
+    )
 
 
 # ---------------------------------------------------------------------------
