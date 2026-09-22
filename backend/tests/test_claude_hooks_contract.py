@@ -92,9 +92,31 @@ def _run_hook(command: str, payload: str, tmp_path: Path) -> subprocess.Complete
     )
 
 
-def _reports_on_stderr_alone(result: subprocess.CompletedProcess[str]) -> bool:
-    """The one combination Claude Code never shows the model."""
-    return result.returncode == 0 and not result.stdout.strip() and bool(result.stderr.strip())
+def _channel_violation(result: subprocess.CompletedProcess[str]) -> str | None:
+    """Return why ``result`` breaks the PreToolUse output contract, or ``None``.
+
+    The contract, from the hooks reference ("Exit code output"): a hook exits 0
+    or 2 and nothing else, since any other code is a non-blocking error whose
+    stderr the model never sees; exit 2 carries its reason on stderr; exit 0
+    with text only on stderr goes to the debug log; and anything on stdout, on
+    either status, must be one ``PreToolUse`` JSON object, because Claude Code
+    parses stdout on every exit code and reports garbage as a hook error.
+    """
+    stdout, stderr = result.stdout.strip(), result.stderr.strip()
+    if result.returncode not in (0, 2):
+        return f"exit {result.returncode} is a non-blocking error the model never sees"
+    if result.returncode == 2 and not stderr:
+        return "exit 2 without a stderr reason blocks silently"
+    if result.returncode == 0 and stderr and not stdout:
+        return f"exit 0 with stderr only goes to the debug log: {stderr!r}"
+    if stdout:
+        try:
+            event_name = json.loads(stdout)["hookSpecificOutput"]["hookEventName"]
+        except (ValueError, KeyError, TypeError) as exc:
+            return f"stdout is not PreToolUse JSON ({type(exc).__name__}): {stdout!r}"
+        if event_name != "PreToolUse":
+            return f"stdout JSON names hookEventName={event_name!r}, expected 'PreToolUse'"
+    return None
 
 
 # ---------------------------------------------------------------------------
@@ -149,20 +171,60 @@ def test_every_pre_tool_use_hook_has_a_triggering_payload(tmp_path: Path) -> Non
 
 
 @pytest.mark.parametrize("sample", sorted(_TRIGGERING_PAYLOADS))
-def test_no_pre_tool_use_hook_reports_on_stderr_alone(sample: str, tmp_path: Path) -> None:
+def test_every_pre_tool_use_hook_uses_a_model_visible_channel(sample: str, tmp_path: Path) -> None:
     """A PreToolUse hook either blocks (exit 2, stderr reason) or prints JSON on stdout.
 
-    Exit 0 with text only on stderr lands in the debug log and never reaches
-    the model. ``PostToolUse`` hooks are excluded: they shell out to formatters
-    and the memory sync script.
+    Any other exit code, exit 0 with text only on stderr, or non-JSON stdout
+    on either status never reaches the model. ``PostToolUse`` hooks are
+    excluded: they shell out to formatters and the memory sync script.
     """
     for matcher, command in _pre_tool_use_hooks():
         result = _run_hook(command, _TRIGGERING_PAYLOADS[sample], tmp_path)
-        assert not _reports_on_stderr_alone(result), (
-            f"PreToolUse hook (matcher={matcher!r}) exits 0 with stderr only on "
-            f"{sample!r}: {result.stderr!r}"
+        violation = _channel_violation(result)
+        assert violation is None, (
+            f"PreToolUse hook (matcher={matcher!r}) on {sample!r}: {violation}"
         )
-        if result.returncode == 2:
-            assert result.stderr.strip(), f"blocking hook (matcher={matcher!r}) gave no reason"
-        elif result.stdout.strip():
-            assert json.loads(result.stdout)["hookSpecificOutput"]["hookEventName"] == "PreToolUse"
+
+
+# ---------------------------------------------------------------------------
+# The channel guard itself, on synthetic hooks
+# ---------------------------------------------------------------------------
+
+_PRE_TOOL_USE_JSON = json.dumps(
+    {"hookSpecificOutput": {"hookEventName": "PreToolUse", "additionalContext": "x"}}
+)
+_OTHER_EVENT_JSON = json.dumps({"hookSpecificOutput": {"hookEventName": "PostToolUse"}})
+
+_ACCEPTED_HOOKS: dict[str, str] = {
+    "silent exit 0": "exit 0",
+    "PreToolUse JSON on exit 0": f"echo '{_PRE_TOOL_USE_JSON}'; exit 0",
+    "stderr reason on exit 2": "echo reason >&2; exit 2",
+    "stderr reason plus PreToolUse JSON on exit 2": (
+        f"echo '{_PRE_TOOL_USE_JSON}'; echo reason >&2; exit 2"
+    ),
+}
+
+_REJECTED_HOOKS: dict[str, str] = {
+    "exit 1 with stderr": "echo oops >&2; exit 1",
+    "exit 1 silent": "exit 1",
+    "exit 1 with PreToolUse JSON": f"echo '{_PRE_TOOL_USE_JSON}'; exit 1",
+    "exit 0 with stderr only": "echo reminder >&2; exit 0",
+    "exit 0 with plain-text stdout": "echo reminder; exit 0",
+    "exit 0 with JSON for another event": f"echo '{_OTHER_EVENT_JSON}'; exit 0",
+    "exit 0 with JSON missing hookSpecificOutput": "echo '{\"continue\": true}'; exit 0",
+    "exit 2 without a reason": "exit 2",
+    "exit 2 with malformed stdout": "echo '{not json'; echo reason >&2; exit 2",
+    "exit 2 with plain-text stdout": "echo reminder; echo reason >&2; exit 2",
+}
+
+
+@pytest.mark.parametrize("command", list(_ACCEPTED_HOOKS.values()), ids=list(_ACCEPTED_HOOKS))
+def test_channel_guard_accepts_model_visible_hooks(command: str, tmp_path: Path) -> None:
+    result = _run_hook(command, _TRIGGERING_PAYLOADS["gh pr create"], tmp_path)
+    assert _channel_violation(result) is None
+
+
+@pytest.mark.parametrize("command", list(_REJECTED_HOOKS.values()), ids=list(_REJECTED_HOOKS))
+def test_channel_guard_rejects_hooks_the_model_cannot_see(command: str, tmp_path: Path) -> None:
+    result = _run_hook(command, _TRIGGERING_PAYLOADS["gh pr create"], tmp_path)
+    assert _channel_violation(result) is not None
