@@ -27,10 +27,16 @@ if TYPE_CHECKING:
     from neural.config import NeuralMemoryConfig
     from services.sleep.reporter import SleepReporter
 
+from sqlalchemy import and_
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from db.qdrant import delete_memory_from_qdrant
-from models.memory import DELETED_BY_SLEEP_ARCHIVE, Memory, not_pinned_predicate
+from models.memory import (
+    DELETED_BY_SLEEP_ARCHIVE,
+    Memory,
+    not_pinned_predicate,
+    not_tool_triggered_predicate,
+)
 from repositories.memory import MemoryRepository
 from services.graph_service import GraphService
 from services.llm_service import LLMService
@@ -484,7 +490,11 @@ class ConsolidationPhase:
         # exemption rides on the UPDATE itself (0 rows → skipped, like any
         # other state change since the fetch).
         stamped = await self.memory_repo.soft_delete(
-            memory_id, deleted_by=DELETED_BY_SLEEP_ARCHIVE, only_if=not_pinned_predicate()
+            memory_id,
+            deleted_by=DELETED_BY_SLEEP_ARCHIVE,
+            # Tool guardrails share the exemption: an archived guardrail would
+            # silently stop firing in every client hook.
+            only_if=and_(not_pinned_predicate(), not_tool_triggered_predicate()),
         )
         if stamped == 0:
             logger.warning("consolidation_archive_stamp_missed", memory_id=str(memory_id))
@@ -554,6 +564,8 @@ class ConsolidationPhase:
             # it before this rule, or a pin set on a working row). It must never
             # reach the archive branch — same exemption dedup applies.
             not_pinned_predicate(),
+            # Tool guardrails: same exemption, the guardrail lane.
+            not_tool_triggered_predicate(),
         )
         if workspace_id:
             stmt = stmt.where(Memory.workspace_id == UUID(workspace_id))

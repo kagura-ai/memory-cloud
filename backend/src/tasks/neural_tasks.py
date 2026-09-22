@@ -199,6 +199,14 @@ async def consolidation_task():
                     elif memory.is_pinned:
                         logger.info("legacy_consolidation_skipped_pinned", memory_id=str(memory.id))
 
+                    # Tool guardrails share the exemption: a physically deleted
+                    # guardrail would silently stop firing in every client hook.
+                    elif memory.is_tool_triggered:
+                        logger.info(
+                            "legacy_consolidation_skipped_tool_triggered",
+                            memory_id=str(memory.id),
+                        )
+
                     # Deletion criteria
                     elif age_days >= LEGACY_ARCHIVE_MIN_AGE_DAYS and memory.access_count == 0:
                         # ================================================================

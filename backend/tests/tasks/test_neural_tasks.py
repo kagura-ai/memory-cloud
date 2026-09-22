@@ -47,6 +47,7 @@ def _make_memory(
     mem.importance = importance
     mem.created_at = utcnow() - timedelta(days=age_days)
     mem.is_pinned = False  # #1523: a bare MagicMock attribute would read as pinned
+    mem.is_tool_triggered = False  # same trap for the tool-guardrail exemption
     return mem
 
 

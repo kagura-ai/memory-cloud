@@ -499,6 +499,15 @@ class Settings(BaseSettings):
         description="Max memories returned by the deterministic always-load path (#886)",
     )
 
+    # Tool guardrails: cap on the tool-triggered lane of load_guardrails. Kept
+    # separate from pinned_load_cap so a large pinned set can never crowd the
+    # guardrail list out of a capped response; the client hook keeps every
+    # served pattern in its cache and evaluates all of them per tool call.
+    guardrail_load_cap: int = Field(
+        default=50,
+        description="Max tool-triggered memories returned by load_guardrails",
+    )
+
     # Self-hosted inference configuration (Issue #44, renamed #1160)
     # Any OpenAI-compatible backend (Ollama default port 11434, vLLM default 8000).
     self_hosted_base_url: str = Field(

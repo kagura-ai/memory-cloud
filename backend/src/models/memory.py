@@ -464,6 +464,22 @@ class Memory(Base):
             "context_id",
             postgresql_where=text("delivery_mode = 'always' AND deleted_at IS NULL"),
         ),
+        # Tool guardrails: partial B-tree backing the deterministic
+        # load_guardrails read (MemoryRepository.list_tool_triggered). Scoped
+        # to context_id and partial on the presence of details.tool_trigger.
+        # ``details`` is PostgreSQL ``json`` (not jsonb) and ``->`` is
+        # immutable, so the json-path predicate is index-safe; a stored JSON
+        # ``null`` would still count as present, which is why the write path
+        # removes the key instead of storing null. The complement predicate
+        # (Sleep exclusions) re-parses ``details`` per candidate row; a
+        # ``Computed`` boolean (the trigger_from / location_lat precedent) is
+        # the upgrade path if Sleep timings ever regress. Created in migration
+        # e84_1619_tool_guardrails; the predicate text must stay byte-identical.
+        Index(
+            "idx_memories_tool_trigger",
+            "context_id",
+            postgresql_where=text("(details->'tool_trigger') IS NOT NULL AND deleted_at IS NULL"),
+        ),
         # Time Memory (type="time") partial btree on the generated lower bound,
         # supporting the window-overlap query + ORDER BY trigger_from on
         # GET /memory/list (migration e30_877_time_trigger_cols). Partial so
@@ -520,6 +536,13 @@ class Memory(Base):
         twin is ``pinned_predicate()`` below; both read ``DELIVERY_MODE_ALWAYS``."""
         return self.delivery_mode == DELIVERY_MODE_ALWAYS
 
+    @property
+    def is_tool_triggered(self) -> bool:
+        """The one Python-side definition of "tool guardrail": the row carries a
+        ``details.tool_trigger`` object and belongs to the deterministic
+        ``load_guardrails()`` lane. The SQL twin is ``tool_triggered_predicate()``."""
+        return isinstance(self.details, dict) and self.details.get("tool_trigger") is not None
+
 
 def pinned_predicate() -> ColumnElement[bool]:
     """The one SQL definition of "pinned" (#1523): ``delivery_mode='always'``.
@@ -538,6 +561,26 @@ def not_pinned_predicate() -> ColumnElement[bool]:
     inequality is the exact complement — no NULL branch to keep.
     """
     return Memory.delivery_mode != DELIVERY_MODE_ALWAYS
+
+
+def tool_triggered_predicate() -> ColumnElement[bool]:
+    """The one SQL definition of "tool guardrail": ``details->'tool_trigger'``
+    is present. Inclusion side — ``list_tool_triggered()`` selects with it and
+    it matches the ``idx_memories_tool_trigger`` partial-index predicate.
+    Sibling of ``pinned_predicate()``; the two lanes are independent (a row may
+    be both) and neither redefines the other.
+    """
+    return Memory.details["tool_trigger"].is_not(None)
+
+
+def not_tool_triggered_predicate() -> ColumnElement[bool]:
+    """Exclusion side of ``tool_triggered_predicate()`` for the automated
+    deleters (dedup, consolidation, importance re-evaluation).
+
+    ``details`` is nullable: ``NULL -> 'tool_trigger'`` is NULL, so ``IS NULL``
+    is the exact complement — a row without details is safely "not a guardrail".
+    """
+    return Memory.details["tool_trigger"].is_(None)
 
 
 # The ``idx_memories_summary_trgm`` GIN index (#818) uses the ``gin_trgm_ops``
