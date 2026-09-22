@@ -725,6 +725,44 @@ class TestPinRecheckAtExecution:
         assert prior is None
         phase.edge_repo.create_or_update_edge.assert_not_called()
 
+    async def test_loser_marked_guardrail_after_fetch_is_refused(self, db_session):
+        """update_memory can add ``details.tool_trigger`` between the fetch and
+        the merge; the locked re-check must refuse (reason ``loser_tool_triggered``),
+        or the guardrail would vanish from every client hook."""
+        winner = await _make_db_memory(db_session, summary="w", tags=["a"])
+        loser = await _make_db_memory(db_session, summary="l", tags=["b"])
+        phase = await self._phase_for_db(db_session)
+        await db_session.execute(
+            update(Memory)
+            .where(Memory.id == loser.id)
+            .values(
+                details={
+                    "tool_trigger": {
+                        "tool": "Bash",
+                        "on": "pre",
+                        "match": "gh pr merge",
+                        "action": "inform",
+                    }
+                }
+            )
+        )
+
+        with patch(
+            "services.sleep.dedup_merge.delete_memory_from_qdrant", new_callable=AsyncMock
+        ) as del_qdrant:
+            executed = await phase._execute_merge(winner, loser, "dedup-user", None, None)
+
+        assert executed is False
+        loser_row = (
+            await db_session.execute(
+                select(Memory.deleted_at, Memory.details).where(Memory.id == loser.id)
+            )
+        ).one()
+        assert loser_row.deleted_at is None
+        assert loser_row.details["tool_trigger"]["tool"] == "Bash"
+        del_qdrant.assert_not_called()
+        phase.edge_repo.transfer_edges.assert_not_called()
+
     async def test_loser_forgotten_after_fetch_is_refused(self, db_session):
         """The same window covers a concurrent forget(): merging into a
         soft-deleted loser would still union its tags and transfer edges."""
@@ -1153,6 +1191,49 @@ class TestFetchActiveMemoriesRealDB:
         assert plain.id in ids
         assert pinned.id not in ids  # pinned excluded
 
+    async def test_excludes_tool_triggered_rows(self, db_session):
+        """Tool guardrails (``details.tool_trigger``) never enter dedup candidacy:
+        merge folds only tags, so a guardrail loser would silently stop firing
+        in every client hook. A stored non-null value marks the lane; a plain
+        details object does not."""
+        user = f"fetch-user-{uuid4()}"
+        plain = Memory(
+            id=uuid4(),
+            user_id=user,
+            summary="plain",
+            content="c",
+            type="note",
+            client="pytest",
+            scope="working",
+            details={"other": 1},
+        )
+        guardrail = Memory(
+            id=uuid4(),
+            user_id=user,
+            summary="guardrail",
+            content="c",
+            type="troubleshooting",
+            client="pytest",
+            scope="working",
+            details={
+                "tool_trigger": {
+                    "tool": "Bash",
+                    "on": "pre",
+                    "match": "gh pr merge",
+                    "action": "inform",
+                }
+            },
+        )
+        db_session.add_all([plain, guardrail])
+        await db_session.flush()
+
+        phase = await self._phase_for_db(db_session)
+        rows = await phase._fetch_active_memories(user, None, None, limit=500)
+
+        ids = {m.id for m in rows}
+        assert plain.id in ids
+        assert guardrail.id not in ids
+
     async def test_excludes_time_memories(self, db_session):
         """#1524: type='time' rows (the recall_upcoming lane) never enter dedup
         candidacy, even when a same-summary note would."""
@@ -1257,6 +1338,74 @@ class TestFetchActiveMemoriesRealDB:
 
         phase = await self._phase_for_db(db_session)
         assert await phase._count_pinned(user, None, None) == 2
+
+    async def test_count_pinned_also_counts_tool_triggered_rows(self, db_session):
+        """Tool guardrails leave the candidate set the same way pinned rows do
+        (the fetch above) but still answer the vector search, so the neighbour
+        widening counts them too — a row that is both counts once."""
+        user = f"fetch-user-{uuid4()}"
+        rows = [
+            Memory(
+                id=uuid4(),
+                user_id=user,
+                summary="pinned",
+                content="c",
+                type="note",
+                client="pytest",
+                scope="persistent",
+                delivery_mode="always",
+            ),
+            Memory(
+                id=uuid4(),
+                user_id=user,
+                summary="guardrail",
+                content="c",
+                type="note",
+                client="pytest",
+                scope="working",
+                details={
+                    "tool_trigger": {
+                        "tool": "Bash",
+                        "on": "pre",
+                        "match": "gh pr merge",
+                        "action": "inform",
+                    }
+                },
+            ),
+            Memory(
+                id=uuid4(),
+                user_id=user,
+                summary="both",
+                content="c",
+                type="note",
+                client="pytest",
+                scope="persistent",
+                delivery_mode="always",
+                details={
+                    "tool_trigger": {
+                        "tool": "Bash",
+                        "on": "pre",
+                        "match": "gh pr merge",
+                        "action": "inform",
+                    }
+                },
+            ),
+            Memory(
+                id=uuid4(),
+                user_id=user,
+                summary="plain",
+                content="c",
+                type="note",
+                client="pytest",
+                scope="working",
+                details={"other": 1},
+            ),
+        ]
+        db_session.add_all(rows)
+        await db_session.flush()
+
+        phase = await self._phase_for_db(db_session)
+        assert await phase._count_pinned(user, None, None) == 3
 
 
 class TestSoftDeleteRealDB:

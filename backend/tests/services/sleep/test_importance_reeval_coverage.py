@@ -155,6 +155,33 @@ class TestFetchCandidates:
 
         assert [c.id for c in candidates] == [plain["id"]]
 
+    async def test_excludes_tool_triggered_memory(self, db_session):
+        """Tool guardrails keep the importance their author set — load_guardrails()
+        orders by it — so the shared exemption keeps them out of re-evaluation."""
+        user_id = f"u-{uuid4()}"
+        plain = _mem_kwargs(user_id=user_id, importance=0.5)
+        guardrail = _mem_kwargs(user_id=user_id, importance=0.5)
+        db_session.add(Memory(**plain))
+        db_session.add(
+            Memory(
+                **guardrail,
+                details={
+                    "tool_trigger": {
+                        "tool": "Bash",
+                        "on": "pre",
+                        "match": "gh pr merge",
+                        "action": "inform",
+                    }
+                },
+            )
+        )
+        await db_session.flush()
+
+        phase = ImportanceReevalPhase(db_session, AsyncMock())
+        candidates = await phase._fetch_candidates(user_id, None, None)
+
+        assert [c.id for c in candidates] == [plain["id"]]
+
     async def test_row_pinned_since_fetch_is_not_rescored(self, db_session):
         """#1523: the write carries not_pinned_predicate(), so a row pinned while
         the LLM batch ran keeps its owner-set importance: no Qdrant patch, no
