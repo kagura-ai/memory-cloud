@@ -339,18 +339,21 @@ class MemoryService:
 
         The REST path validates ``cap`` via Pydantic (int, 1..1000), but the MCP
         path forwards the raw tool arg, so the service is the shared chokepoint
-        that must defend the LIMIT: ``None`` → default; otherwise coerce to int
-        and clamp to [1, _PINNED_LOAD_CAP_MAX]. Clamping the lower bound to 1 is
-        load-bearing — a 0 would emit ``LIMIT 0`` (empty set + a false
+        that must defend the LIMIT: ``None`` → the settings default; otherwise
+        coerce to int. Either value is then clamped to [1, _PINNED_LOAD_CAP_MAX]
+        — the settings default too, so a misconfigured ``pinned_load_cap`` /
+        ``guardrail_load_cap`` cannot reach the query. Clamping the lower bound
+        to 1 is load-bearing — a 0 would emit ``LIMIT 0`` (empty set + a false
         truncated=true) and a negative would emit ``LIMIT -1`` (no cap at all,
         defeating the safety valve).
         """
         if cap is None:
-            return default
-        try:
-            cap_int = int(cap)
-        except (TypeError, ValueError) as exc:
-            raise ValueError(f"cap must be an integer, got {cap!r}") from exc
+            cap_int = default
+        else:
+            try:
+                cap_int = int(cap)
+            except (TypeError, ValueError) as exc:
+                raise ValueError(f"cap must be an integer, got {cap!r}") from exc
         return max(1, min(cap_int, _PINNED_LOAD_CAP_MAX))
 
     @staticmethod
@@ -4488,13 +4491,20 @@ class MemoryService:
         ``tool_trigger`` arrives as the projected ``details->'tool_trigger'``
         JSON element for the tool-triggered lane (``None`` for pinned rows);
         a driver that hands the ``json`` element back as text is decoded here
-        so the item always carries an object. ``l2`` keeps ``context_summary``
-        on pinned items only.
+        so the item always carries an object. The SQL predicate selects any
+        non-NULL element, so a legacy non-object value is possible too — a bare
+        JSON string such as ``"Bash"`` reaches this code as the ``str`` ``Bash``
+        and does not decode. That is "not a trigger" (``tool_trigger: null``,
+        which the contract tells consumers to skip), never an aborted read.
+        ``l2`` keeps ``context_summary`` on pinned items only.
         """
         import json
 
         if isinstance(tool_trigger, str):
-            tool_trigger = json.loads(tool_trigger)
+            try:
+                tool_trigger = json.loads(tool_trigger)
+            except ValueError:  # json.JSONDecodeError
+                tool_trigger = None
         return GuardrailItem(
             memory_id=row.id,
             summary=row.summary,
