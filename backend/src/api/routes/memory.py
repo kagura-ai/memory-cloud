@@ -401,7 +401,9 @@ async def guardrail_digest(
     Same trusted-only read and binding filter as ``load_guardrails``, same
     uniform ``404`` on a denied, unknown or other-workspace context; an
     external-tier or unmarked context is a ``200`` with an empty body
-    (``export``) or the base text (``instructions``). Never cached
+    (``export``) or the base text (``instructions``). With
+    ``mcp_guardrail_digest_enabled`` off the preview is the base text for
+    every context — exactly what lane (a) serves then. Never cached
     (``private, no-store``); the body is editor-authored text, so it is served
     with ``nosniff``. Contract: MCP Tools › Server instructions.
 
@@ -409,6 +411,7 @@ async def guardrail_digest(
         GET /api/v1/memory/guardrails/digest?context_id=<uuid>
         Authorization: Bearer <api_key>
     """
+    from config.settings import get_settings
     from mcp_server.transport import SERVER_INSTRUCTIONS_BASE
     from services.guardrail_digest import (
         EXPORT_CAPS,
@@ -449,6 +452,12 @@ async def guardrail_digest(
     if target == "export":
         body = render_export_block(entries)
         media_type = "text/markdown"
+    elif not get_settings().mcp_guardrail_digest_enabled:
+        # Lane (a) is switched off: ``build_instructions`` serves the base
+        # text to every caller, so the preview is that text — the read above
+        # still decides the uniform 404 and the version header.
+        body = SERVER_INSTRUCTIONS_BASE
+        media_type = "text/plain"
     else:
         # Rebuild the MCP URL's query the way a URL carries it (percent-
         # encoded) so a ``&`` or ``=`` inside a value stays inside that value

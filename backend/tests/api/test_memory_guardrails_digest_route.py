@@ -226,3 +226,32 @@ def test_route_is_declared_as_text_not_json():
     assert route.methods == {"GET"}
     assert route.response_class.__name__ == "PlainTextResponse"
     assert "text/markdown" in route.responses[200]["content"]
+
+
+@pytest.mark.asyncio
+async def test_instructions_preview_is_the_base_text_when_the_lane_is_switched_off(
+    source, monkeypatch
+):
+    """``mcp_guardrail_digest_enabled=False`` makes ``build_instructions`` serve
+    the base text to every caller; the preview returns exactly that, while the
+    read still decides the 404 and the version header and ``export`` is
+    unaffected (the flag covers lane (a) only)."""
+    from config.settings import get_settings
+
+    ctx = uuid4()
+    source.result = _entries(ctx, "one", "two")
+    monkeypatch.setattr(get_settings(), "mcp_guardrail_digest_enabled", False)
+
+    preview = await _call(context_id=str(ctx), target="instructions")
+
+    assert preview.status_code == 200
+    assert preview.body.decode("utf-8") == SERVER_INSTRUCTIONS_BASE
+    assert preview.headers["content-type"] == "text/plain; charset=utf-8"
+    assert preview.headers[GUARDRAIL_DIGEST_VERSION_HEADER.lower()] == "0123456789abcdef"
+
+    export = await _call(context_id=str(ctx))
+    assert export.body.decode("utf-8") == render_export_block(source.result)
+
+    source.result = None
+    with pytest.raises(NotFoundException):
+        await _call(context_id=str(uuid4()), target="instructions")
