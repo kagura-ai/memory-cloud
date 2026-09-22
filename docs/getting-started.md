@@ -210,6 +210,18 @@ codex plugin marketplace add https://github.com/kagura-ai/memory-cloud
 codex plugin add kagura-memory@kagura-memory-cloud
 ```
 
+The Codex marketplace file is `.agents/plugins/marketplace.json` (it points at `plugins/kagura-memory/`); the `.claude-plugin/marketplace.json` beside it is the Claude Code marketplace and, loaded into Codex, only registers idle hooks.
+
+**Optional — tool guardrails:**
+
+The plugin also bundles hooks (`hooks/hooks.json`) that deliver tool guardrails — memories marked with `details.tool_trigger` — at the matching tool call: `inform` adds the memory as context, `block` denies the call once with the memory as the reason ([contract](mcp-tools.md#tool-guardrails)). Nothing runs until you set them up:
+
+1. Ask the skill to "turn on Kagura guardrails". It shows the `{"context_id": …, "max_action": "block"}` it will write to `config.json` in the plugin's data directory (`~/.codex/plugins/data/kagura-memory-*/`) and writes it after you confirm.
+2. Add `?guardrails=off` to the `url` above (`&guardrails=off` when the URL already has a query, such as `?profile=core`) so the server does not also send a guardrail digest.
+3. Open `/hooks` in Codex and trust the kagura-memory hooks. Codex skips plugin-bundled hooks until each user trusts them, and asks again only when `hooks.json` changes.
+
+The hooks read the `[mcp_servers.kagura-memory]` entry above (`bearer_token_env_var`, `env_http_headers` or `http_headers` — exactly one; never a project-level `.codex/config.toml`) and need `python3` 3.11+ on `PATH`. Windows, web and cloud tasks are not supported. If nothing happens, see [Troubleshooting](troubleshooting.md#codex-cli--kagura-memory-hooks-never-run).
+
 ## Quick API Test
 
 ```bash

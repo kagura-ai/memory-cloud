@@ -199,12 +199,6 @@ def test_refresh_matcher_is_a_regex_and_compiles() -> None:
     assert not re.compile(matcher).search("mcp__kagura-memory__recall")
 
 
-def test_codex_hooks_file_does_not_exist_yet() -> None:
-    """PR-B (#1620) adds ``plugins/kagura-memory/hooks/hooks.json`` and replaces this test."""
-    assert not (REPO_ROOT / "plugins" / "kagura-memory" / "hooks" / "hooks.json").exists()
-    assert not (REPO_ROOT / "plugins" / "kagura-memory" / "hooks" / "_codex_adapter.py").exists()
-
-
 # ---------------------------------------------------------------------------
 # Script shape (AST pins)
 # ---------------------------------------------------------------------------

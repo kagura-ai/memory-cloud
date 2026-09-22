@@ -26,8 +26,12 @@ kagura-memory@kagura-memory-cloud`` depends on (the release process in
    Codex requires to register the skill.
 """
 
+import hashlib
 import json
+import re
 from pathlib import Path
+
+import pytest
 
 from config.constants import APP_VERSION
 
@@ -141,10 +145,149 @@ def test_claude_plugin_hooks_path_resolves_and_names_the_shared_script() -> None
     assert (_plugin_root() / "hooks" / "kagura_guardrails.py").is_file()
 
 
-def test_codex_hooks_file_not_shipped_yet() -> None:
-    """#1620 adds ``plugins/kagura-memory/hooks/hooks.json`` and the ``hooks`` manifest key."""
-    assert not (_plugin_root() / "hooks" / "hooks.json").exists()
-    assert "hooks" not in _codex_manifest()
+# ---------------------------------------------------------------------------
+# Codex hooks (#1620): ``plugins/kagura-memory/hooks/hooks.json`` + the manifest ``hooks`` key
+# ---------------------------------------------------------------------------
+
+# Changing hooks.json changes the trust hash of every hook entry in it (Codex hashes the
+# event, the matcher and the handler config), which sends every user back through
+# ``/hooks`` before the hooks run again. Bump this constant only on purpose; the failing
+# assertion prints the new hash.
+HOOKS_JSON_SHA256 = "f64dde5a8224e34ee4e88bf62627a34896e7893a47d124776bd20e757da4cd32"
+
+# The Codex form of the sh guard (decisions §2.2): absolute interpreter outside ``$PWD``,
+# ``-I -S``, the script under ``$PLUGIN_ROOT`` — the variable Codex exports to the hook
+# process, expanded by the shell inside double quotes. Never the braced ``${PLUGIN_ROOT}``:
+# Codex substitutes that form textually into the command before ``$SHELL -lc`` runs
+# (``hooks/src/engine/discovery.rs``), so a path with ``$(``, backticks or ``"`` would
+# become shell syntax.
+CODEX_GUARD_COMMAND = (
+    'p=$(command -v python3) || exit 0; case "$p" in /*) ;; *) exit 0;; esac; '
+    'case "$p" in "$PWD"/*) exit 0;; esac; '
+    'exec "$p" -I -S "$PLUGIN_ROOT/hooks/kagura_guardrails.py" --client codex'
+)
+REFRESH_MATCHER = "^mcp__.*__(remember|update_memory|forget)$"
+
+
+def _codex_hooks_path() -> Path:
+    return _plugin_root() / "hooks" / "hooks.json"
+
+
+def _codex_hooks() -> dict:
+    return _load(_codex_hooks_path())
+
+
+def _codex_handlers() -> list[tuple[str, str | None, dict]]:
+    """``(event, matcher, handler)`` for every handler in the Codex hooks file."""
+    return [
+        (event, group.get("matcher"), handler)
+        for event, groups in _codex_hooks()["hooks"].items()
+        for group in groups
+        for handler in group["hooks"]
+    ]
+
+
+def test_codex_manifest_hooks_path_resolves_inside_plugin_root() -> None:
+    """``hooks`` starts with ``./``, resolves to a file inside the plugin root (Codex rejects
+    ``..`` and paths outside the root) and names the default location too, so both discovery
+    routes yield one trust key."""
+    hooks_rel = _codex_manifest()["hooks"]
+    assert hooks_rel == "./hooks/hooks.json"
+    assert hooks_rel.startswith("./") and ".." not in hooks_rel
+    resolved = (_plugin_root() / hooks_rel).resolve()
+    assert resolved.is_file(), f"Codex hooks path does not resolve: {hooks_rel}"
+    assert _plugin_root().resolve() in resolved.parents
+    assert resolved == _codex_hooks_path().resolve()
+
+
+def test_codex_hooks_file_sha256_is_pinned() -> None:
+    """Every byte of hooks.json is deliberate: see the comment on ``HOOKS_JSON_SHA256``."""
+    raw = _codex_hooks_path().read_bytes()
+    digest = hashlib.sha256(raw).hexdigest()
+    assert digest == HOOKS_JSON_SHA256, (
+        "plugins/kagura-memory/hooks/hooks.json changed. A changed matcher or handler sends every "
+        "Codex user back through /hooks; if the change is intended, set HOOKS_JSON_SHA256 = "
+        f"{digest!r}"
+    )
+    assert raw.endswith(b"\n") and b"\r" not in raw
+    assert json.loads(raw) == json.loads(json.dumps(json.loads(raw), indent=2)), "two-space indent"
+
+
+def test_codex_hooks_file_shape() -> None:
+    data = _codex_hooks()
+    assert set(data) <= {"description", "hooks"}
+    assert set(data["hooks"]) == {"SessionStart", "PreToolUse", "PostToolUse"}
+    assert "trust hash" in data["description"] and "SHA-256" in data["description"]
+    for event, matcher, handler in _codex_handlers():
+        assert handler["type"] == "command", event
+        assert handler["commandWindows"] == "exit 0", event
+        assert isinstance(handler["timeout"], int) and 0 < handler["timeout"] <= 10, event
+        assert "additionalContextLimit" not in handler, event
+        assert "args" not in handler and "${user_config" not in handler["command"]
+        expected = CODEX_GUARD_COMMAND + (" --refresh" if handler.get("async") else "")
+        assert handler["command"] == expected, (event, matcher)
+        assert '"$PLUGIN_ROOT/hooks/kagura_guardrails.py"' in handler["command"]
+        assert "${" not in handler["command"], "Codex would substitute it textually"
+        if "async" in handler:
+            assert isinstance(handler["async"], bool), event
+        if event == "SessionStart":
+            assert matcher is None
+            assert handler["statusMessage"] == "Loading Kagura Memory guardrails"
+        else:
+            assert "statusMessage" not in handler, event
+    assert (_plugin_root() / "hooks" / "kagura_guardrails.py").is_file()
+
+
+def test_codex_hooks_timeouts_and_matchers() -> None:
+    handlers = _codex_handlers()
+    by_event: dict[str, list[tuple[str | None, dict]]] = {}
+    for event, matcher, handler in handlers:
+        by_event.setdefault(event, []).append((matcher, handler))
+    assert [h["timeout"] for _, h in by_event["SessionStart"]] == [5]
+    assert [(m, h["timeout"]) for m, h in by_event["PreToolUse"]] == [("*", 5)]
+    post = by_event["PostToolUse"]
+    assert len(post) == 2
+    assert post[0][0] == "*" and post[0][1]["timeout"] == 5 and not post[0][1].get("async")
+    assert post[1][0] == REFRESH_MATCHER
+    assert post[1][1]["async"] is True and post[1][1]["timeout"] == 10
+    async_handlers = [h for _, _, h in handlers if h.get("async") is True]
+    assert len(async_handlers) == 1 and async_handlers[0]["command"].endswith(" --refresh")
+
+
+def test_refresh_matcher_is_a_regex_for_codex_and_compiles() -> None:
+    """Codex treats a matcher made only of ``[A-Za-z0-9_|]`` as an exact name list; the refresh
+    matcher must carry another character so it is compiled as a regex."""
+    assert re.search(r"[^A-Za-z0-9_|]", REFRESH_MATCHER)
+    compiled = re.compile(REFRESH_MATCHER)
+    assert compiled.search("mcp__kagura-memory__remember")
+    assert compiled.search("mcp__kagura-memory__update_memory")
+    assert not compiled.search("mcp__kagura-memory__recall")
+
+
+@pytest.mark.parametrize(
+    "hooks_file",
+    [
+        _REPO_ROOT / "claude-hooks" / "hooks.json",
+        _REPO_ROOT / "plugins" / "kagura-memory" / "hooks" / "hooks.json",
+    ],
+    ids=["claude", "codex"],
+)
+def test_both_hooks_files_parse_under_codex_rules(hooks_file: Path) -> None:
+    """Codex's ``HooksFile`` is ``deny_unknown_fields`` (top level: ``description``, ``hooks``)
+    while its event map is not, so the Claude file (with ``PostToolUseFailure``) loads under
+    Codex on the legacy-marketplace path; every handler must still be a well-typed command."""
+    data = _load(hooks_file)
+    assert set(data) <= {"description", "hooks"}, hooks_file
+    for event, groups in data["hooks"].items():
+        for group in groups:
+            assert set(group) <= {"matcher", "hooks"}, event
+            for handler in group["hooks"]:
+                assert handler["type"] == "command", event
+                if "timeout" in handler:
+                    assert isinstance(handler["timeout"], int), event
+                if "async" in handler:
+                    assert isinstance(handler["async"], bool), event
+                assert isinstance(handler["command"], str) and handler["command"], event
 
 
 def test_every_skill_has_required_frontmatter() -> None:
