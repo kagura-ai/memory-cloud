@@ -73,7 +73,7 @@ A **tool guardrail** is a memory that a client-side hook injects into the model'
 | `tool` | yes | Regex, **full match** against the tool name the client reports (or one of its documented aliases). ≤ 128 characters. Examples: `Bash|PowerShell`, `mcp__.*__remember`, `Edit|Write`. |
 | `on` | no (default `pre`) | `pre` — before the call; `result` — after it, against the tool's error text or serialized result. |
 | `match` | no | Regex, **unanchored search** over the match subject (below). ≤ 200 characters. An empty string is rejected (it would match everything). |
-| `action` | no (default `inform`) | `inform` — the summary reaches the model next to the tool result; `block` — the call is denied with the summary as the reason. `block` requires `on: "pre"` **and** a `match` that names at least one literal character (a block always names a specific input, never a whole tool). |
+| `action` | no (default `inform`) | `inform` — the summary reaches the model next to the tool result; `block` — the call is denied with the summary as the reason. `block` requires `on: "pre"` **and** a `match` that names at least one literal character and cannot match the empty string (a block always names a specific input, never a whole tool — `a*` or `rm?` would deny every call). |
 
 - The key is **orthogonal** to `type` and `delivery_mode` (like `details.location`): any type may carry it, and a guardrail may also be pinned — it then appears in both lists of `load_guardrails`.
 - The server **normalizes** what it stores: defaults are written back, keys are ordered `tool, on, match?, action`, `match` is omitted when not supplied (never stored as `null`). Every consumer therefore sees explicit values and never re-implements defaults.
@@ -104,7 +104,7 @@ Bad input is a `validation_error` on MCP and a `422` on REST. The message is `in
 | `match_not_string`, `match_empty` | `match`, when present, is a non-empty string |
 | `pattern_too_long` | `tool` ≤ 128 characters, `match` ≤ 200 |
 | `on_invalid`, `action_invalid` | `on` ∈ `{pre, result}`, `action` ∈ `{inform, block}` |
-| `block_requires_pre`, `block_requires_match`, `block_match_not_specific` | `block` needs `on: "pre"` and a `match` with at least one literal character |
+| `block_requires_pre`, `block_requires_match`, `block_match_not_specific`, `block_match_nullable` | `block` needs `on: "pre"` and a `match` with at least one literal character that cannot match the empty string (`a*`, `a?`, `a{0,100}`, `(?:x\|y*)` are rejected; `a+`, `a*b` pass) |
 | `pattern_control_char` | no U+0000–U+001F in a pattern, raw or escaped (`\x00`–`\x1f`, `\u0000`) |
 | `tool_trigger_requires_user_credential` | see "Who may author" |
 | `regex_*` | the safe-regex subset below |

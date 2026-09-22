@@ -94,6 +94,7 @@ TOOL_TRIGGER_ERROR_CODES: dict[str, str] = {
     "block_requires_pre": "action='block' is only allowed with on='pre'",
     "block_requires_match": "action='block' requires a match pattern",
     "block_match_not_specific": "action='block' requires a match with at least one literal",
+    "block_match_nullable": ("action='block' requires a match that cannot match the empty string"),
     "tool_trigger_requires_user_credential": (
         "tool_trigger can only be written with a user credential, not an agent credential"
     ),
@@ -223,6 +224,8 @@ class _Atom:
     ends_unbounded: bool = False
     end_set: frozenset[str] = frozenset()
     mandatory: bool = False
+    # group-only: the body can match the empty string (see _Seq.nullable)
+    nullable: bool = False
     ambiguous: bool = False
     has_quantifier: bool = False
     has_unbounded: bool = False
@@ -237,7 +240,13 @@ class _Seq:
     ``ends_unbounded`` — an unbounded run is still open at the end; ``end_set``
     is that run's first-set.
     ``mandatory`` — at least one atom must consume input (so the sequence can
-    separate two unbounded runs around it).
+    separate two unbounded runs around it). Not the complement of
+    ``nullable``: an unbounded run (``a+``) is never a separator, yet ``a+``
+    cannot match the empty string.
+    ``nullable`` — the sequence can match the empty string: every consuming
+    atom is optional (``*``, ``?``, ``{0,m}``, ``{0,}``, a nullable group) or
+    zero-width. An unanchored search with a nullable pattern matches every
+    subject, so ``action='block'`` rejects it (``block_match_nullable``).
     ``first_set`` — every character the sequence can consume first.
     ``ambiguous`` — an unbounded run was closed by an atom it could itself
     match, so the run's end position is not forced (``\\w+a``); a later
@@ -248,6 +257,7 @@ class _Seq:
     ends_unbounded: bool = False
     end_set: frozenset[str] = frozenset()
     mandatory: bool = False
+    nullable: bool = False
     first_set: frozenset[str] = frozenset()
     ambiguous: bool = False
     has_quantifier: bool = False
@@ -322,6 +332,7 @@ class _Parser:
             ends_unbounded=any(b.ends_unbounded for b in branches),
             end_set=frozenset().union(*(b.end_set for b in branches)),
             mandatory=all(b.mandatory for b in branches),
+            nullable=any(b.nullable for b in branches),
             first_set=frozenset().union(*(b.first_set for b in branches)),
             ambiguous=any(b.ambiguous for b in branches),
             has_quantifier=any(b.has_quantifier for b in branches),
@@ -352,6 +363,7 @@ class _Parser:
         run_set: frozenset[str] = frozenset()
         ambiguous = False
         seen_mandatory = False
+        nullable = True  # until an atom that must consume input is seen
         first_open = True
         count = 0
         adjacent = "two unbounded quantifiers need a mandatory atom between them"
@@ -368,7 +380,9 @@ class _Parser:
                 )
             atom = self._atom(depth)
             count += 1
-            quant = self._quantifier()  # None | ("unbounded"|"nullable"|"mandatory")
+            quantifier = self._quantifier()  # None | (kind, min_zero)
+            quant = quantifier[0] if quantifier else None  # unbounded|nullable|mandatory
+            quant_min_zero = quantifier[1] if quantifier else False
             if atom.kind == "group":
                 seq.has_quantifier = seq.has_quantifier or atom.has_quantifier
                 seq.has_alternation = seq.has_alternation or atom.has_alternation
@@ -386,6 +400,10 @@ class _Parser:
                     )
             if atom.literal:
                 seq.literals += 1
+            if atom.kind != "zero_width" and not (
+                quant_min_zero or (atom.kind == "group" and atom.nullable)
+            ):
+                nullable = False
 
             if atom.kind == "zero_width":
                 continue
@@ -446,6 +464,7 @@ class _Parser:
         seq.ends_unbounded = pending_unbounded
         seq.end_set = run_set if pending_unbounded else frozenset()
         seq.mandatory = seen_mandatory
+        seq.nullable = nullable
         seq.ambiguous = ambiguous
         return seq
 
@@ -512,6 +531,7 @@ class _Parser:
             ends_unbounded=body.ends_unbounded,
             end_set=body.end_set,
             mandatory=body.mandatory,
+            nullable=body.nullable,
             ambiguous=body.ambiguous,
             has_quantifier=body.has_quantifier,
             has_unbounded=self.unbounded_count > unbounded_before,
@@ -639,7 +659,14 @@ class _Parser:
         close = self.p.find("}", self.i)
         return None if close == -1 else self.p[self.i + 1 : close]
 
-    def _quantifier(self) -> str | None:
+    def _quantifier(self) -> tuple[str, bool] | None:
+        """Consume a quantifier; return ``(kind, min_zero)`` or ``None``.
+
+        ``kind`` is ``"unbounded"`` (``* + {n,}``), ``"nullable"`` (``? {0,m}``)
+        or ``"mandatory"`` (``{n,m}``, n >= 1) — the separator classes of the
+        adjacency rule. ``min_zero`` is the nullability fact the ``block`` rule
+        needs: ``*``, ``?``, ``{0,m}`` and ``{0,}`` may repeat zero times.
+        """
         c = self._peek()
         if c not in _QUANTIFIER_STARTS:
             return None
@@ -665,9 +692,11 @@ class _Parser:
                 kind = "unbounded"
             else:
                 kind = "mandatory" if lo >= 1 else "nullable"
+            min_zero = lo == 0
         else:
             self.i += 1
             kind = "nullable" if c == "?" else "unbounded"
+            min_zero = c != "+"
         if self._peek() == "?":  # lazy suffix
             self.i += 1
         nxt = self._peek()
@@ -675,7 +704,7 @@ class _Parser:
             raise self._fail("regex_possessive_or_atomic", "possessive quantifiers are not allowed")
         if nxt in _QUANTIFIER_STARTS:
             raise self._fail("regex_stacked_quantifier", "a quantifier may not follow another")
-        return kind
+        return kind, min_zero
 
 
 def validate_safe_regex(pattern: str, *, field: str, max_chars: int) -> None:
@@ -700,7 +729,8 @@ def validate_safe_regex(pattern: str, *, field: str, max_chars: int) -> None:
 
 
 def _parse_summary(pattern: str, field: str) -> _Seq:
-    """Grammar pass only (no compile) — used to count literals for ``block``."""
+    """Grammar pass only (no compile) — the ``block`` rules read ``literals``
+    and ``nullable`` off the top-level summary."""
     return _Parser(pattern, field).parse()
 
 
@@ -801,12 +831,25 @@ def normalize_tool_trigger(details: dict[str, Any] | None) -> dict[str, Any] | N
     validate_safe_regex(tool, field="tool", max_chars=TOOL_PATTERN_MAX_CHARS)
     if match is not None:
         validate_safe_regex(match, field="match", max_chars=MATCH_PATTERN_MAX_CHARS)
-        if action == "block" and _parse_summary(match, "match").literals == 0:
-            raise ToolTriggerValidationError(
-                "block_match_not_specific",
-                "action='block' requires a match that names at least one literal character "
-                "(a pattern made only of wildcards, classes or anchors would block every call)",
-            )
+        if action == "block":
+            summary = _parse_summary(match, "match")
+            if summary.literals == 0:
+                raise ToolTriggerValidationError(
+                    "block_match_not_specific",
+                    "action='block' requires a match that names at least one literal "
+                    "character (a pattern made only of wildcards, classes or anchors would "
+                    "block every call)",
+                )
+            if summary.nullable:
+                # A literal alone is not enough: the client search is unanchored,
+                # and a pattern that can match the empty string (a*, a?, a{0,100},
+                # (?:x|y*)) matches every subject — every pre call would be denied.
+                raise ToolTriggerValidationError(
+                    "block_match_nullable",
+                    "action='block' requires a match that cannot match the empty string "
+                    "(every consuming atom is optional: *, ?, {0,m} — it would block "
+                    "every call)",
+                )
 
     normalized: dict[str, Any] = {"tool": tool, "on": on}
     if match is not None:
