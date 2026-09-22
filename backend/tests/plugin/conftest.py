@@ -228,6 +228,25 @@ def command_for(event: str, *, refresh: bool = False) -> str:
     return wanted[0]["command"]
 
 
+# The three path placeholders Claude Code substitutes textually into plugin content when
+# it loads the plugin (plugins reference, "Environment variables": in hook commands they
+# resolve "anywhere the placeholder appears") and also exports to the hook process.
+CLAUDE_PATH_VARIABLES = ("CLAUDE_PLUGIN_ROOT", "CLAUDE_PLUGIN_DATA", "CLAUDE_PROJECT_DIR")
+
+
+def claude_command(event: str, *, refresh: bool = False, env: dict[str, str] | None = None) -> str:
+    """The handler command as Claude Code hands it to ``sh -c``: ``${KEY}`` replaced
+    textually for every path variable present in ``env``. The command names
+    ``$CLAUDE_PLUGIN_ROOT`` without braces, so this pass changes nothing and the shell
+    expands the exported variable instead."""
+    command = command_for(event, refresh=refresh)
+    for key in CLAUDE_PATH_VARIABLES:
+        value = (env or {}).get(key)
+        if value is not None:
+            command = command.replace("${" + key + "}", value)
+    return command
+
+
 @dataclass
 class HookResult:
     returncode: int
@@ -273,13 +292,14 @@ def run_hook(plugin_env: PluginEnv) -> RunHook:
         else:
             data = body
         assert event is not None
-        command = command_for(event, refresh=refresh)
+        run_env = env if env is not None else plugin_env.env
+        command = claude_command(event, refresh=refresh, env=run_env)
         proc = subprocess.run(
             ["sh", "-c", command],
             input=data,
             capture_output=True,
             cwd=cwd or plugin_env.project_dir,
-            env=env if env is not None else plugin_env.env,
+            env=run_env,
             check=False,
             timeout=timeout,
         )
