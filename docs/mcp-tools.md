@@ -205,7 +205,7 @@ Every adapter writes and reads this one file in its own data directory (for exam
 }
 ```
 
-**Shape.** Top-level keys are exactly `format`, `context_id`, `fetched_at`, `version`, `pinned`, `tool_triggered`. Item keys are exactly `memory_id`, `summary`, `importance`, plus `tool_trigger` on tool-triggered items. No `content`, no `context_summary`, no tags. A pinned entry never carries `tool_trigger`; a memory in both lists is stored in both. `fetched_at` is the client clock in UTC (`Z`); the server does not supply it. Items are stored in the server's order.
+**Shape.** Top-level keys are exactly `format`, `context_id`, `fetched_at`, `version`, `pinned`, `tool_triggered`. Item keys are exactly `memory_id`, `summary`, `importance`, plus `tool_trigger` on tool-triggered items. One optional additive item key is allowed on either list: `authored_by_caller` (boolean, copied from the response so a hook can label a foreign-authored guardrail); a consumer that does not know it ignores it, and its absence means "unknown", not `false`. No `content`, no `context_summary`, no tags. A pinned entry never carries `tool_trigger`; a memory in both lists is stored in both. `fetched_at` is the client clock in UTC (`Z`); the server does not supply it. Items are stored in the server's order.
 
 **Forward compatibility.**
 
