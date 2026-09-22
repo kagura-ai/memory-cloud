@@ -134,9 +134,14 @@ def test_claude_plugin_hooks_path_resolves_and_names_the_shared_script() -> None
         for hook in group["hooks"]
     ]
     assert commands
-    script = "${CLAUDE_PLUGIN_ROOT}/plugins/kagura-memory/hooks/kagura_guardrails.py"
+    # Braceless on purpose: Claude Code substitutes ``${CLAUDE_PLUGIN_ROOT}`` textually
+    # into a shell-form hook command when it loads the plugin, so a path with ``$(``,
+    # backticks or ``"`` would become shell syntax; ``$CLAUDE_PLUGIN_ROOT`` is left for
+    # sh to expand from the exported variable inside double quotes.
+    script = '"$CLAUDE_PLUGIN_ROOT/plugins/kagura-memory/hooks/kagura_guardrails.py"'
     for command in commands:
         assert script in command, command
+        assert "${CLAUDE_PLUGIN_ROOT}" not in command, command
     assert (_plugin_root() / "hooks" / "kagura_guardrails.py").is_file()
 
 

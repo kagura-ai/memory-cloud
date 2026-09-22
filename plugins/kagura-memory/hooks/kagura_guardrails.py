@@ -83,8 +83,8 @@ DENY_TRAILER = (
 )
 SYSTEM_MESSAGE_PREFIX = "kagura-memory guardrails: "
 GUARDRAILS_PARAM_WARNING = (
-    "this URL also requests the server digest (?guardrails=); "
-    "use ?guardrails=off with the plugin hooks"
+    "this URL also requests the server digest (guardrails=<context>); "
+    "set guardrails=off in that query with the plugin hooks"
 )
 
 TOOL_EVENTS = {"PreToolUse": "pre", "PostToolUse": "result", "PostToolUseFailure": "result"}

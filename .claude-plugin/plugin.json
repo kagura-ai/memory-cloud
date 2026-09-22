@@ -22,7 +22,7 @@
     "server_url": {
       "type": "string",
       "title": "Kagura Memory MCP URL",
-      "description": "The MCP endpoint from .mcp.json, e.g. https://<your-domain>/mcp/w/<workspace-id>. The hooks call load_guardrails here. Add ?guardrails=off to the .mcp.json URL itself so the server does not also send a guardrail digest."
+      "description": "The MCP endpoint from .mcp.json, e.g. https://<your-domain>/mcp/w/<workspace-id>. The hooks call load_guardrails here. Add ?guardrails=off to the .mcp.json URL itself (&guardrails=off when the URL already has a query, such as ?profile=core) so the server does not also send a guardrail digest."
     },
     "api_key": {
       "type": "string",
