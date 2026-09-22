@@ -6,7 +6,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "p=$(command -v python3) || exit 0; case \"$p\" in /*) ;; *) exit 0;; esac; case \"$p\" in \"$PWD\"/*) exit 0;; esac; exec \"$p\" -I -S \"${PLUGIN_ROOT}/hooks/kagura_guardrails.py\" --client codex",
+            "command": "p=$(command -v python3) || exit 0; case \"$p\" in /*) ;; *) exit 0;; esac; case \"$p\" in \"$PWD\"/*) exit 0;; esac; exec \"$p\" -I -S \"$PLUGIN_ROOT/hooks/kagura_guardrails.py\" --client codex",
             "commandWindows": "exit 0",
             "timeout": 5,
             "statusMessage": "Loading Kagura Memory guardrails"
@@ -20,7 +20,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "p=$(command -v python3) || exit 0; case \"$p\" in /*) ;; *) exit 0;; esac; case \"$p\" in \"$PWD\"/*) exit 0;; esac; exec \"$p\" -I -S \"${PLUGIN_ROOT}/hooks/kagura_guardrails.py\" --client codex",
+            "command": "p=$(command -v python3) || exit 0; case \"$p\" in /*) ;; *) exit 0;; esac; case \"$p\" in \"$PWD\"/*) exit 0;; esac; exec \"$p\" -I -S \"$PLUGIN_ROOT/hooks/kagura_guardrails.py\" --client codex",
             "commandWindows": "exit 0",
             "timeout": 5
           }
@@ -33,7 +33,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "p=$(command -v python3) || exit 0; case \"$p\" in /*) ;; *) exit 0;; esac; case \"$p\" in \"$PWD\"/*) exit 0;; esac; exec \"$p\" -I -S \"${PLUGIN_ROOT}/hooks/kagura_guardrails.py\" --client codex",
+            "command": "p=$(command -v python3) || exit 0; case \"$p\" in /*) ;; *) exit 0;; esac; case \"$p\" in \"$PWD\"/*) exit 0;; esac; exec \"$p\" -I -S \"$PLUGIN_ROOT/hooks/kagura_guardrails.py\" --client codex",
             "commandWindows": "exit 0",
             "timeout": 5
           }
@@ -44,7 +44,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "p=$(command -v python3) || exit 0; case \"$p\" in /*) ;; *) exit 0;; esac; case \"$p\" in \"$PWD\"/*) exit 0;; esac; exec \"$p\" -I -S \"${PLUGIN_ROOT}/hooks/kagura_guardrails.py\" --client codex --refresh",
+            "command": "p=$(command -v python3) || exit 0; case \"$p\" in /*) ;; *) exit 0;; esac; case \"$p\" in \"$PWD\"/*) exit 0;; esac; exec \"$p\" -I -S \"$PLUGIN_ROOT/hooks/kagura_guardrails.py\" --client codex --refresh",
             "commandWindows": "exit 0",
             "async": true,
             "timeout": 10

@@ -148,14 +148,18 @@ def test_claude_plugin_hooks_path_resolves_and_names_the_shared_script() -> None
 # event, the matcher and the handler config), which sends every user back through
 # ``/hooks`` before the hooks run again. Bump this constant only on purpose; the failing
 # assertion prints the new hash.
-HOOKS_JSON_SHA256 = "1b4530643d16ed67bc851d034621b4a3b7e37a1fd506b480a7b0893073ebabee"
+HOOKS_JSON_SHA256 = "f64dde5a8224e34ee4e88bf62627a34896e7893a47d124776bd20e757da4cd32"
 
 # The Codex form of the sh guard (decisions §2.2): absolute interpreter outside ``$PWD``,
-# ``-I -S``, ``${PLUGIN_ROOT}`` substituted by Codex itself before ``$SHELL -lc`` runs.
+# ``-I -S``, the script under ``$PLUGIN_ROOT`` — the variable Codex exports to the hook
+# process, expanded by the shell inside double quotes. Never the braced ``${PLUGIN_ROOT}``:
+# Codex substitutes that form textually into the command before ``$SHELL -lc`` runs
+# (``hooks/src/engine/discovery.rs``), so a path with ``$(``, backticks or ``"`` would
+# become shell syntax.
 CODEX_GUARD_COMMAND = (
     'p=$(command -v python3) || exit 0; case "$p" in /*) ;; *) exit 0;; esac; '
     'case "$p" in "$PWD"/*) exit 0;; esac; '
-    'exec "$p" -I -S "${PLUGIN_ROOT}/hooks/kagura_guardrails.py" --client codex'
+    'exec "$p" -I -S "$PLUGIN_ROOT/hooks/kagura_guardrails.py" --client codex'
 )
 REFRESH_MATCHER = "^mcp__.*__(remember|update_memory|forget)$"
 
@@ -217,7 +221,8 @@ def test_codex_hooks_file_shape() -> None:
         assert "args" not in handler and "${user_config" not in handler["command"]
         expected = CODEX_GUARD_COMMAND + (" --refresh" if handler.get("async") else "")
         assert handler["command"] == expected, (event, matcher)
-        assert "${PLUGIN_ROOT}/hooks/" in handler["command"]
+        assert '"$PLUGIN_ROOT/hooks/kagura_guardrails.py"' in handler["command"]
+        assert "${" not in handler["command"], "Codex would substitute it textually"
         if "async" in handler:
             assert isinstance(handler["async"], bool), event
         if event == "SessionStart":

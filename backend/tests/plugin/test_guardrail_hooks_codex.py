@@ -1,11 +1,12 @@
 """Codex adapter tests over the real ``plugins/kagura-memory/hooks/hooks.json`` command (#1620).
 
-Every subprocess test runs the exact command string under ``sh -c`` with
-``${PLUGIN_ROOT}`` substituted textually beforehand — the way Codex does it
-(``hooks/src/engine/discovery.rs`` replaces ``${KEY}`` for every plugin
-variable before ``$SHELL -lc`` runs) — with a synthetic Codex payload on stdin,
-a fixture ``PLUGIN_DATA`` and a fixture ``CODEX_HOME``. Network only through the
-loopback stub; nothing is written outside ``tmp_path``.
+Every subprocess test runs the exact command string under ``sh -c`` the way Codex
+does it: ``hooks/src/engine/discovery.rs`` replaces ``${KEY}`` textually for every
+plugin variable before ``$SHELL -lc`` runs and ``engine/command_runner.rs`` exports
+the same variables to the process — the command names ``$PLUGIN_ROOT`` without
+braces, so only the exported variable carries the path. Synthetic Codex payload on
+stdin, a fixture ``PLUGIN_DATA`` and a fixture ``CODEX_HOME``. Network only through
+the loopback stub; nothing is written outside ``tmp_path``.
 """
 
 from __future__ import annotations
@@ -15,6 +16,7 @@ import io
 import json
 import os
 import re
+import shutil
 import socket
 import stat
 import subprocess
@@ -73,6 +75,8 @@ FORBIDDEN_OUTPUT_TOKENS = [
     '"' + "reason" + '"',
 ]
 CODEX_ENV_ALLOWLIST = {"PLUGIN_ROOT", "PLUGIN_DATA", "CLAUDE_PLUGIN_DATA", "CODEX_HOME", "HOME"}
+# The variables Codex both substitutes textually (``${KEY}``) and exports (discovery.rs:262-270).
+CODEX_PLUGIN_VARIABLES = ("PLUGIN_ROOT", "CLAUDE_PLUGIN_ROOT", "PLUGIN_DATA", "CLAUDE_PLUGIN_DATA")
 
 
 # ---------------------------------------------------------------------------
@@ -138,11 +142,19 @@ def codex_handlers() -> list[tuple[str, str | None, dict[str, Any]]]:
     ]
 
 
-def codex_command(event: str, *, refresh: bool = False) -> str:
+def codex_command(event: str, *, refresh: bool = False, env: dict[str, str] | None = None) -> str:
+    """The handler command as Codex hands it to ``$SHELL -lc``: ``${KEY}`` replaced
+    textually for every plugin variable in ``env`` (``discovery.rs``). The command
+    names ``$PLUGIN_ROOT`` without braces, so this pass changes nothing and the shell
+    expands the exported variable instead."""
     wanted = [h for e, _m, h in codex_handlers() if e == event and bool(h.get("async")) is refresh]
     assert len(wanted) == 1, (event, refresh)
-    # Codex substitutes ${PLUGIN_ROOT} textually before the shell runs (discovery.rs).
-    return wanted[0]["command"].replace("${PLUGIN_ROOT}", str(CODEX_PLUGIN_ROOT))
+    command = wanted[0]["command"]
+    for key in CODEX_PLUGIN_VARIABLES:
+        value = (env or {}).get(key)
+        if value is not None:
+            command = command.replace("${" + key + "}", value)
+    return command
 
 
 def toml_table(
@@ -230,12 +242,13 @@ def run_codex(codex_env: CodexEnv) -> RunCodex:
         else:
             data = body
         assert event is not None
+        run_env = env if env is not None else codex_env.env
         proc = subprocess.run(
-            ["sh", "-c", codex_command(event, refresh=refresh)],
+            ["sh", "-c", codex_command(event, refresh=refresh, env=run_env)],
             input=data,
             capture_output=True,
             cwd=cwd or codex_env.project_dir,
-            env=env if env is not None else codex_env.env,
+            env=run_env,
             check=False,
             timeout=timeout,
         )
@@ -1010,6 +1023,29 @@ def test_interpreter_trojan_in_the_session_cwd_never_runs(
     for path in codex_env.root.rglob("*"):
         if path.is_file() and path.name != "config.toml":
             assert CANARY_KEY.encode() not in path.read_bytes(), path
+
+
+def test_plugin_root_with_shell_metacharacters_is_a_literal_path(
+    codex_env: CodexEnv, run_codex: RunCodex
+) -> None:
+    """Codex substitutes ``${KEY}`` textually into the command (``discovery.rs``) and
+    exports the same variables to the hook process (``command_runner.rs``). The command
+    names ``$PLUGIN_ROOT`` without braces, so the textual pass finds nothing and ``sh``
+    expands the exported value inside double quotes: a plugin path carrying ``$(…)``,
+    backticks, ``"`` or a space is one literal path, never shell syntax."""
+    canary = codex_env.root / "pwned"
+    hostile = codex_env.root / f'plugin $(touch "{canary}") `touch "{canary}"` "x'
+    (hostile / "hooks").mkdir(parents=True)
+    for name in ("kagura_guardrails.py", "_codex_adapter.py"):
+        shutil.copy(CODEX_PLUGIN_ROOT / "hooks" / name, hostile / "hooks" / name)
+    _standard_cache(codex_env)
+    env = {**codex_env.env, "PLUGIN_ROOT": str(hostile), "CLAUDE_PLUGIN_ROOT": str(hostile)}
+    for event in ("PreToolUse", "PostToolUse", "SessionStart"):
+        assert "${" not in codex_command(event, env=env), event
+    result = run_codex(bash("ps"), env=env)
+    assert result.returncode == 0, result.stderr
+    assert result.specific["permissionDecision"] == "deny", result.stdout
+    assert not canary.exists()
 
 
 # ---------------------------------------------------------------------------
