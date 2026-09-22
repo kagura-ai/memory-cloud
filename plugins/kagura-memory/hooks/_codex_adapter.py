@@ -18,7 +18,8 @@ and the fetch. This module supplies only what is Codex-specific:
   or ``http_headers.Authorization``. Project ``.codex/config.toml`` layers,
   profiles, ``-c`` overrides, ``hooks.state`` and every fixed variable name are
   never read. ``tomllib`` (3.11+) is imported only here; without it SessionStart
-  prints one notice and tool events keep running from an existing cache.
+  and ``--refresh`` skip the fetch (SessionStart prints one notice saying so) and
+  tool events keep running from an existing cache.
 * **Events** — Codex stdin fields ``session_id`` / ``turn_id`` / ``agent_id`` /
   ``tool_name`` / ``tool_input`` / ``tool_response`` / ``source``; the subject
   rules of the contract's Codex rows (``Bash`` → the command; ``apply_patch`` →
@@ -61,7 +62,10 @@ AUTH_SOURCES = (
     "http_headers.Authorization",
 )
 UNSUPPORTED_AUTH = ("oauth", "chatgpt")
-TOMLLIB_MESSAGE = "Codex credentials need Python 3.11+; hooks stay idle"
+TOMLLIB_MESSAGE = (
+    "Codex credentials need Python 3.11+; no fetch at session start or refresh, "
+    "tool events use the existing cache only"
+)
 
 
 def make_adapter(core: Any) -> CodexAdapter:

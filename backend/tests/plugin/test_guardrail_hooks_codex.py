@@ -1121,7 +1121,10 @@ def test_missing_tomllib_prints_one_message_and_tool_events_keep_working(
     monkeypatch.setitem(sys.modules, "tomllib", None)
     start = call_codex_main(hook_module, session_start(), codex_env.env)
     assert start.json == {
-        "systemMessage": "kagura-memory guardrails: Codex credentials need Python 3.11+; hooks stay idle"
+        "systemMessage": (
+            "kagura-memory guardrails: Codex credentials need Python 3.11+; "
+            "no fetch at session start or refresh, tool events use the existing cache only"
+        )
     }
     assert stub_server.requests == []
     refresh = call_codex_main(hook_module, bash("x"), codex_env.env, refresh=True)
