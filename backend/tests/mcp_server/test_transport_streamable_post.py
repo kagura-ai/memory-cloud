@@ -62,10 +62,10 @@ def _session() -> SimpleNamespace:
     return SimpleNamespace(session_id="sess-1", user_id="user-1", workspace_id=None)
 
 
-async def _post(payload: dict) -> _Recorder:
+async def _post(payload: dict, *, query_string: bytes = b"") -> _Recorder:
     send = _Recorder()
     await handle_streamable_http_post(
-        {"type": "http", "method": "POST", "path": "/mcp"},
+        {"type": "http", "method": "POST", "path": "/mcp", "query_string": query_string},
         _receive_for(payload),
         send,
         _session(),
@@ -488,3 +488,134 @@ async def test_valid_notification_still_gets_202_with_no_body(method):
     send = await _post({"jsonrpc": "2.0", "method": method})
     assert send.status == 202
     assert send.messages[1]["body"] == b""
+
+
+# ------------------------------------------------ guardrail digest (#1621)
+# ``initialize`` now carries ``InitializeResult.instructions`` (Codex reads it
+# from the handshake). With nothing selected it is exactly the base text and
+# the handshake opens no database session — these tests run with a
+# ``SimpleNamespace`` session and no DB, so any ``get_db`` here would hang or
+# trip the fail-open path instead of passing.
+
+
+@pytest.fixture(autouse=True)
+def _no_ambient_agent_scope():
+    from auth.agent_scope import set_agent_scope
+
+    set_agent_scope(None)
+    yield
+    set_agent_scope(None)
+
+
+@pytest.fixture
+def get_db_spy(monkeypatch):
+    from unittest.mock import AsyncMock
+
+    import db.base as db_base
+
+    calls: list[int] = []
+
+    async def fake_get_db():
+        calls.append(1)
+        yield AsyncMock()
+
+    monkeypatch.setattr(db_base, "get_db", fake_get_db)
+    return calls
+
+
+@pytest.mark.asyncio
+async def test_initialize_returns_the_base_instructions_without_touching_the_db(
+    get_db_spy,
+):
+    from mcp_server.transport import SERVER_INSTRUCTIONS_BASE
+
+    send = await _post({"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {}})
+
+    assert send.status == 200
+    assert send.body["result"]["instructions"] == SERVER_INSTRUCTIONS_BASE
+    assert get_db_spy == []
+
+
+@pytest.mark.asyncio
+async def test_server_discover_without_selection_is_db_free_on_the_legacy_path(
+    get_db_spy,
+):
+    from mcp_server.transport import DISCOVER_TTL_MS, SERVER_INSTRUCTIONS_BASE
+
+    send = await _post({"jsonrpc": "2.0", "id": 2, "method": "server/discover"})
+
+    result = send.body["result"]
+    assert result["instructions"] == SERVER_INSTRUCTIONS_BASE
+    assert result["cacheScope"] == "public"
+    assert result["ttlMs"] == DISCOVER_TTL_MS
+    assert get_db_spy == []
+
+
+@pytest.mark.asyncio
+async def test_server_discover_instructions_match_initialize():
+    """Extends ``test_server_discover_matches_initialize_identity``: the two
+    surfaces describe the same server, including its instructions."""
+    init = await _post({"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {}})
+    disc = await _post({"jsonrpc": "2.0", "id": 2, "method": "server/discover"})
+
+    assert disc.body["result"]["instructions"] == init.body["result"]["instructions"]
+
+
+@pytest.mark.asyncio
+async def test_initialize_and_discover_carry_the_same_digest_for_a_selected_context(
+    monkeypatch, get_db_spy
+):
+    import services.guardrail_digest as digest_mod
+    from mcp_server.transport import SERVER_INSTRUCTIONS_BASE, TOOLS_LIST_TTL_MS
+    from services.guardrail_digest import DigestEntries, DigestEntry, digest_header
+
+    ctx = uuid4()
+    entries = DigestEntries(
+        context_id=ctx,
+        entries=[
+            DigestEntry(
+                memory_id=str(uuid4()),
+                summary="squash-merge only after headRefOid matches the pushed SHA",
+                importance=0.9,
+                authored_by_caller=True,
+                source_type="manual",
+            )
+        ],
+        total_available=1,
+        truncated=False,
+        tool_triggered_version="0123456789abcdef",
+    )
+
+    async def fake_fetch_entries(db, **kwargs):
+        assert kwargs["context_id"] == ctx
+        return entries
+
+    monkeypatch.setattr(digest_mod, "fetch_entries", fake_fetch_entries)
+    qs = f"guardrails={ctx}".encode()
+
+    init = await _post(
+        {"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {}},
+        query_string=qs,
+    )
+    disc = await _post({"jsonrpc": "2.0", "id": 2, "method": "server/discover"}, query_string=qs)
+
+    text = init.body["result"]["instructions"]
+    assert text.startswith(SERVER_INSTRUCTIONS_BASE + "\n\n" + digest_header(ctx) + "\n- (")
+    assert "headRefOid" in text
+    assert disc.body["result"]["instructions"] == text
+    assert disc.body["result"]["cacheScope"] == "private"
+    assert disc.body["result"]["ttlMs"] == TOOLS_LIST_TTL_MS
+    assert len(get_db_spy) == 2  # one session per handshake / discover
+
+
+@pytest.mark.asyncio
+async def test_initialize_with_guardrails_off_is_the_base_text_and_db_free(get_db_spy):
+    from mcp_server.transport import SERVER_INSTRUCTIONS_BASE
+
+    send = await _post(
+        {"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {}},
+        query_string=b"guardrails=off",
+    )
+
+    assert send.body["result"]["instructions"] == SERVER_INSTRUCTIONS_BASE
+    assert get_db_spy == []

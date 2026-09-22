@@ -154,6 +154,8 @@ async def handle_get_context_info(
                     "recent_7days": result.recent_activity,
                 }
 
+            guardrails_field = await _guardrails_field(db, user_id, current_context)
+
             await _log_tool_usage(
                 db,
                 user_id,
@@ -174,6 +176,7 @@ async def handle_get_context_info(
                             "context": context_data,
                             "workspace": workspace_data,
                             "stats": stats_data,
+                            **guardrails_field,
                             "instructions": KAGURA_MEMORY_INSTRUCTIONS,
                         }
                     ),
@@ -211,6 +214,55 @@ async def handle_get_context_info(
 
     # Safety: should never reach here (get_db always yields)
     return _error_response("internal_error", "Database session unavailable")
+
+
+async def _guardrails_field(db: Any, user_id: str, context: Any) -> dict[str, Any]:
+    """The ``guardrails`` block of ``get_context_info`` (#1621) — the session-start
+    guardrail lane for MCP clients without tool hooks.
+
+    Three states, told apart by the skill text: the key is **absent** when the
+    endpoint URL carries ``?guardrails=off`` (a hook client that already gets
+    guardrails at the call); it is **``null``** when no context resolved or the
+    read failed (``get_context_info_guardrails_failed`` warning); otherwise it
+    is the object ``{items, total_available, truncated, tool_triggered_version}``
+    — the context's trusted-only, binding-filtered tool-triggered set, 10
+    entries × 300 characters, ≤ 4,000 characters of compact JSON. The block is
+    per call (the ``context_id`` argument), never per URL.
+
+    Reuses the resolved ``Context`` (no second permission read) and one
+    indexed SQL read; never the embedding client or the vector store. Fails
+    open: the shared session is rolled back so the rest of the result — which
+    is already assembled — still goes out.
+    """
+    from mcp_server.tools._helpers import get_mcp_guardrails_selection
+
+    selection = get_mcp_guardrails_selection()
+    if selection is not None and selection.mode == "off":
+        return {}
+    if context is None:
+        return {"guardrails": None}
+    try:
+        from services.guardrail_digest import (
+            CONTEXT_INFO_CAPS,
+            fetch_entries_for_context,
+            render_context_info_block,
+        )
+
+        entries = await fetch_entries_for_context(
+            db, user_id=user_id, context=context, limit=CONTEXT_INFO_CAPS.entries
+        )
+        return {"guardrails": render_context_info_block(entries)}
+    except Exception as e:
+        logger.warning(
+            "get_context_info_guardrails_failed: context_id=%s reason=%s",
+            str(context.id),
+            type(e).__name__,
+        )
+        try:
+            await db.rollback()
+        except Exception:  # pragma: no cover - the session is already unusable
+            logger.debug("get_context_info_guardrails_rollback_failed", exc_info=True)
+        return {"guardrails": None}
 
 
 def _validate_context_field_lengths(args: dict[str, Any]) -> list[TextContent] | None:

@@ -500,3 +500,290 @@ class TestHandleUpdateContextErrorSurface:
         assert payload["status"] == "error"
         assert payload["error"] == "context_not_found"
         mock_db.rollback.assert_awaited()
+
+
+def _get_db_yielding(db):
+    async def _get_db():
+        yield db
+
+    return _get_db
+
+
+class TestHandleGetContextInfoGuardrails:
+    """#1621: the ``guardrails`` block — the session-start guardrail lane for
+    MCP clients without tool hooks. Absent on ``?guardrails=off``, ``null``
+    when the read fails, otherwise the trusted-only tool-triggered set capped
+    at 10 × 300 / 4,000 characters of compact JSON. The block reuses the
+    resolved context and one repo read: never the embedding client or the
+    vector store, never a second permission read."""
+
+    @pytest.fixture(autouse=True)
+    def _clear_selection(self):
+        from mcp_server.tools._helpers import set_mcp_guardrails_selection
+
+        set_mcp_guardrails_selection(None)
+        yield
+        set_mcp_guardrails_selection(None)
+
+    @staticmethod
+    def _context(ctx_id):
+        from types import SimpleNamespace
+
+        return SimpleNamespace(
+            id=ctx_id,
+            name="dev",
+            display_name="Dev",
+            summary="s",
+            usage_guide="g",
+            is_private=False,
+            is_locked=False,
+            workspace_id=uuid4(),
+        )
+
+    @staticmethod
+    def _db():
+        db = AsyncMock()
+        exec_result = MagicMock()
+        exec_result.scalar_one_or_none.return_value = None
+        db.execute = AsyncMock(return_value=exec_result)
+        return db
+
+    @staticmethod
+    def _stats_service():
+        from types import SimpleNamespace
+
+        stats = SimpleNamespace(
+            total_count=1,
+            working_count=0,
+            persistent_count=1,
+            by_type={},
+            by_importance={},
+            recent_activity={},
+        )
+        service = MagicMock()
+        service.get_stats = AsyncMock(return_value=stats)
+        return service
+
+    @staticmethod
+    def _entries(ctx_id, *summaries, total=None, authored=True):
+        from services.guardrail_digest import DigestEntries, DigestEntry
+
+        items = [
+            DigestEntry(
+                memory_id=str(uuid4()),
+                summary=s,
+                importance=0.7,
+                authored_by_caller=authored,
+                source_type="manual",
+            )
+            for s in summaries
+        ]
+        total = len(items) if total is None else total
+        return DigestEntries(
+            context_id=ctx_id,
+            entries=items,
+            total_available=total,
+            truncated=total > len(items),
+            tool_triggered_version="0123456789abcdef",
+        )
+
+    async def _call(self, ctx, db, fetch):
+        with (
+            patch("db.base.get_db", new=_get_db_yielding(db)),
+            patch(
+                "mcp_server.tools.context._resolve_context_for_read",
+                new=AsyncMock(return_value=ctx),
+            ),
+            patch("mcp_server.tools.context._log_tool_usage", new=AsyncMock()),
+            patch(
+                "services.memory_service.MemoryService",
+                new=MagicMock(return_value=self._stats_service()),
+            ),
+            patch("services.guardrail_digest.fetch_entries_for_context", new=fetch),
+        ):
+            from mcp_server.tools.context import handle_get_context_info
+
+            result = await handle_get_context_info(
+                {"context_id": str(ctx.id)}, user_id="u1", workspace_id=None
+            )
+        return json.loads(result[0].text)
+
+    @pytest.mark.asyncio
+    async def test_block_holds_the_entry_source_rows_with_the_documented_shape(self):
+        ctx = self._context(uuid4())
+        entries = self._entries(ctx.id, "one", "two", total=2)
+        fetch = AsyncMock(return_value=entries)
+
+        payload = await self._call(ctx, self._db(), fetch)
+
+        assert payload["status"] == "success"
+        block = payload["guardrails"]
+        assert set(block) == {
+            "items",
+            "total_available",
+            "truncated",
+            "tool_triggered_version",
+        }
+        assert "version" not in block
+        assert block["tool_triggered_version"] == "0123456789abcdef"
+        assert block["total_available"] == 2 and block["truncated"] is False
+        assert [i["summary"] for i in block["items"]] == ["one", "two"]
+        assert set(block["items"][0]) == {
+            "memory_id",
+            "summary",
+            "importance",
+            "authored_by_caller",
+            "source_type",
+        }
+        # The resolved Context is reused — no second permission read, cap 10.
+        kwargs = fetch.await_args.kwargs
+        assert kwargs["context"] is ctx and kwargs["limit"] == 10 and kwargs["user_id"] == "u1"
+        # The rest of the result is untouched.
+        assert payload["context"]["id"] == str(ctx.id)
+        assert payload["stats"]["total_memories"] == 1
+        assert list(payload) == [
+            "status",
+            "context",
+            "workspace",
+            "stats",
+            "guardrails",
+            "instructions",
+        ]
+
+    @pytest.mark.asyncio
+    async def test_block_is_capped_at_ten_items_and_flags_truncation(self):
+        from mcp_server.tools._helpers import _dumps
+
+        ctx = self._context(uuid4())
+        entries = self._entries(ctx.id, *[f"lesson {i} " + "x" * 400 for i in range(12)], total=12)
+
+        payload = await self._call(ctx, self._db(), AsyncMock(return_value=entries))
+
+        block = payload["guardrails"]
+        assert len(block["items"]) <= 10
+        assert all(len(i["summary"]) <= 300 for i in block["items"])
+        assert block["truncated"] is True and block["total_available"] == 12
+        assert len(_dumps(block)) <= 4_000
+
+    @pytest.mark.asyncio
+    async def test_external_tier_or_unmarked_context_is_an_empty_block(self):
+        ctx = self._context(uuid4())
+        entries = self._entries(ctx.id)
+
+        payload = await self._call(ctx, self._db(), AsyncMock(return_value=entries))
+
+        assert payload["guardrails"] == {
+            "items": [],
+            "total_available": 0,
+            "truncated": False,
+            "tool_triggered_version": "0123456789abcdef",
+        }
+
+    @pytest.mark.asyncio
+    async def test_entry_source_failure_is_null_and_the_result_still_succeeds(self, caplog):
+        ctx = self._context(uuid4())
+        db = self._db()
+        fetch = AsyncMock(side_effect=RuntimeError("statement timeout"))
+
+        with caplog.at_level("WARNING", logger="mcp_server.tools.context"):
+            payload = await self._call(ctx, db, fetch)
+
+        assert payload["status"] == "success"
+        assert payload["guardrails"] is None  # unknown, distinguishable from "none"
+        assert payload["context"]["id"] == str(ctx.id)
+        assert payload["stats"]["total_memories"] == 1
+        # The shared session is rolled back so the assembled result goes out.
+        db.rollback.assert_awaited()
+        assert "get_context_info_guardrails_failed" in caplog.text
+        assert "reason=RuntimeError" in caplog.text
+
+    @pytest.mark.asyncio
+    async def test_guardrails_off_on_the_url_removes_the_key(self):
+        from mcp_server.tools._helpers import set_mcp_guardrails_selection
+        from services.guardrail_digest import select_guardrail_context
+
+        set_mcp_guardrails_selection(select_guardrail_context(b"guardrails=off"))
+        ctx = self._context(uuid4())
+        fetch = AsyncMock(return_value=self._entries(ctx.id, "hidden"))
+
+        payload = await self._call(ctx, self._db(), fetch)
+
+        assert "guardrails" not in payload
+        fetch.assert_not_awaited()
+        assert payload["status"] == "success"
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "query",
+        [
+            b"",
+            b"guardrails=not-a-uuid",
+            b"guardrails=550e8400-e29b-41d4-a716-446655440000",
+        ],
+    )
+    async def test_every_other_selection_keeps_the_block_on_for_the_calls_own_context(self, query):
+        """``ignored`` (a typo) must never behave like ``off``; ``explicit``
+        selects the ``instructions`` digest but the block stays per call."""
+        from mcp_server.tools._helpers import set_mcp_guardrails_selection
+        from services.guardrail_digest import select_guardrail_context
+
+        set_mcp_guardrails_selection(select_guardrail_context(query))
+        ctx = self._context(uuid4())
+        fetch = AsyncMock(return_value=self._entries(ctx.id, "shown"))
+
+        payload = await self._call(ctx, self._db(), fetch)
+
+        assert payload["guardrails"]["items"][0]["summary"] == "shown"
+        assert fetch.await_args.kwargs["context"] is ctx  # the call's context, not the URL's
+
+    @pytest.mark.asyncio
+    async def test_block_never_calls_the_embedding_client_or_the_vector_store(self, monkeypatch):
+        """The real entry source runs over a fake repo: ``get_context_info`` is
+        rate-limit exempt, so the extra read must stay one indexed SQL query."""
+        from types import SimpleNamespace
+
+        from repositories.memory import MemoryRepository
+
+        ctx = self._context(uuid4())
+        rows = [
+            SimpleNamespace(
+                id=uuid4(),
+                summary="from the repo gate",
+                importance=0.9,
+                delivery_mode="on_recall",
+                tool_trigger={"tool": "Bash", "on": "pre", "action": "inform"},
+                user_id="u1",
+                source_type="manual",
+                type="note",
+                context_id=ctx.id,
+            )
+        ]
+        seen: dict = {}
+
+        async def fake_list(self, workspace_id, context_id, limit):
+            seen.update(workspace_id=workspace_id, context_id=context_id, limit=limit)
+            return rows, 1
+
+        monkeypatch.setattr(MemoryRepository, "list_tool_triggered", fake_list)
+        boom = AsyncMock(side_effect=AssertionError("must not be called on the guardrail lane"))
+
+        from services.guardrail_digest import fetch_entries_for_context
+
+        with (
+            patch("db.qdrant.search_memories_qdrant", new=boom),
+            patch("services.embedding_service.EmbeddingService.embed", new=boom),
+            patch("services.embedding_service.EmbeddingService.embed_with_usage", new=boom),
+        ):
+            payload = await self._call(ctx, self._db(), fetch_entries_for_context)
+
+        from config.settings import get_settings
+
+        assert payload["guardrails"]["items"][0]["summary"] == "from the repo gate"
+        # One read, bounded by the larger of the lane cap (10) and the clamped
+        # ``guardrail_load_cap`` so ``tool_triggered_version`` covers the set.
+        assert seen == {
+            "workspace_id": ctx.workspace_id,
+            "context_id": ctx.id,
+            "limit": max(10, get_settings().guardrail_load_cap),
+        }
+        boom.assert_not_awaited()

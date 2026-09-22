@@ -21,6 +21,8 @@ from mcp_server.tools._constants import T, get_tool_timeout
 if TYPE_CHECKING:
     from sqlalchemy.ext.asyncio import AsyncSession
 
+    from services.guardrail_digest import GuardrailSelection
+
 logger = logging.getLogger(__name__)
 
 
@@ -46,6 +48,39 @@ def set_mcp_key_workspace_scope(workspace_id: "UUID | None") -> None:
     authenticated with a workspace-scoped API key). Called by the MCP transport
     after authentication; read by ``_resolve_context_for_read`` / ``_resolve_context``."""
     _mcp_key_workspace_scope.set(workspace_id)
+
+
+def get_mcp_key_workspace_scope() -> "UUID | None":
+    """Read the per-request PURE API-key workspace scope (``None`` unless the
+    request used a workspace-scoped API key). The public twin of the setter,
+    for the transports' ``instructions`` digest (#1621) and the read resolver."""
+    return _mcp_key_workspace_scope.get()
+
+
+# ============================================================================
+# #1621: per-request guardrail-lane selection (``?guardrails=`` on the URL)
+# ============================================================================
+# One URL switch controls both server-side guardrail lanes — the
+# ``instructions`` digest and the ``get_context_info.guardrails`` block — so a
+# client whose hooks already deliver guardrails (Claude Code / Codex with the
+# plugin hooks) can put ``?guardrails=off`` on its MCP URL and receive neither.
+# The transport parses the query once per request after auth (same seam as
+# the key-workspace scope above) and stores the pure selection here; the
+# ``get_context_info`` handler reads it. ``None`` (never set — e.g. a direct
+# handler call in tests) behaves like the parameter being absent.
+_mcp_guardrails_selection: ContextVar["GuardrailSelection | None"] = ContextVar(
+    "mcp_guardrails_selection", default=None
+)
+
+
+def set_mcp_guardrails_selection(selection: "GuardrailSelection | None") -> None:
+    """Store the request's ``?guardrails=`` selection (see ``services.guardrail_digest``)."""
+    _mcp_guardrails_selection.set(selection)
+
+
+def get_mcp_guardrails_selection() -> "GuardrailSelection | None":
+    """Read the request's ``?guardrails=`` selection; ``None`` = not evaluated."""
+    return _mcp_guardrails_selection.get()
 
 
 # ============================================================================
@@ -431,7 +466,7 @@ async def _resolve_context_for_read(
             user_id=user_id,
             context_id=context_id,
             required_role=required_role,
-            key_workspace_id=_mcp_key_workspace_scope.get(),
+            key_workspace_id=get_mcp_key_workspace_scope(),
             operation=operation,
         )
     except NotFoundException as exc:

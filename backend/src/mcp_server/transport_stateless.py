@@ -33,6 +33,7 @@ from mcp_server.transport import (
     _send_json_error,
     _send_jsonrpc_result,
     _tool_call_result,
+    build_instructions,
 )
 
 logger = logging.getLogger(__name__)
@@ -292,8 +293,9 @@ async def handle_stateless_post(
         headers: Request headers (lower-cased byte names, as ASGI delivers).
         user_id: The authenticated user.
         workspace_id: The workspace the credentials resolve to, if any.
-        query_string: The raw ASGI query string; only ``tools/list`` reads it,
-            for the tool profile (#1601).
+        query_string: The raw ASGI query string: ``tools/list`` reads the tool
+            profile from it (#1601), ``server/discover`` the ``?guardrails=``
+            selection (#1621).
     """
     request_id = body.get("id")
     method = body.get("method")
@@ -357,7 +359,19 @@ async def handle_stateless_post(
         )
 
     if method == "server/discover":
-        await _send_result(send, request_id, _discover_result())
+        # #1621: the only carrier of ``instructions`` on this era (no
+        # ``initialize``). Recomputed per discover — there is no session to
+        # remember it in — bounded by the digest budget, one SQL read, and the
+        # client's own private cache. ChatGPT sends it at connect and refresh.
+        from mcp_server.tools._helpers import get_mcp_key_workspace_scope
+
+        instructions, private = await build_instructions(
+            user_id=user_id,
+            query_string=query_string,
+            key_workspace_id=get_mcp_key_workspace_scope(),
+            era="stateless",
+        )
+        await _send_result(send, request_id, _discover_result(instructions, private=private))
 
     elif method == "ping":
         await _send_result(send, request_id, _complete({}))

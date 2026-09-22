@@ -483,6 +483,37 @@ Writes that add, change or remove `details.tool_trigger` (and any edit or delete
 
 ---
 
+### GET /api/v1/memory/guardrails/digest
+
+Render a context's tool guardrails for MCP clients without tool hooks — the export block a Codex cloud setup script writes into `AGENTS.md`, or a preview of the MCP server `instructions` this credential would receive. Same trusted-only read and agent-binding filter as `/guardrails`; summaries only, never `content`, `details` or patterns. Lane description: [MCP Tools › Server instructions](mcp-tools.md#server-instructions).
+
+**Query parameters:**
+
+| Parameter | Meaning |
+|---|---|
+| `context_id` (required) | Context UUID; malformed → `422` `context_id must be a valid UUID: …` |
+| `target` | `export` (default) → `text/markdown`, the whole block; `instructions` → `text/plain`, exactly the `instructions` string the MCP endpoint serves this credential for this context. Anything else → `422` |
+| `profile`, `tools` | `target=instructions` only: the MCP URL's values, so the truncation suffix names the same tool the URL's `tools/list` shows |
+
+**Response (`target=export`):**
+
+```
+<!-- kagura-memory:guardrails begin context=550e8400-e29b-41d4-a716-446655440000 tool_triggered_version=3f9c1a7b2d4e6f80 -->
+- (3f9c1a7b) Squash-merge only after gh pr view --json headRefOid equals the pushed SHA.
+- (a1b2c3d4) gh pr merge --delete-branch on a stacked parent closes the child PR; retarget the child first.
+<!-- kagura-memory:guardrails end -->
+```
+
+Up to 20 entries, each summary flattened to one line and cut at 500 characters on a word boundary with `…`; the block is at most 12,000 characters including the markers, LF line endings, a trailing newline, exactly one begin and one end line (a summary containing `<!--` or `-->` is written as `<!- -` / `- ->`, so it can never forge a marker). When entries are left out the last content line is `(+N more: get_context_info(context_id))`. A context with no tool guardrails — or an external-tier context — is a `200` with an empty body: nothing to write (the Codex cloud recipe removes an earlier block on it).
+
+Headers: `Content-Type: text/markdown; charset=utf-8` (`text/plain; charset=utf-8` for `instructions`), `Cache-Control: private, no-store`, `X-Content-Type-Options: nosniff`, `X-Kagura-Guardrails-Tool-Triggered-Version: <hash>` — `guardrail_version` over the tool-triggered items only, after the binding filter, over the whole set up to `guardrail_load_cap` rather than the rendered entries ([Shared cache format](mcp-tools.md#shared-cache-format-format-1)); never the bare `version`, which also covers the pinned list.
+
+Errors: `422` for a malformed `context_id` or an unknown `target`; a context the caller may not read (unknown, other workspace, private non-creator, not a member) is the uniform `404` `Context not found`. Auth: API key or session, like `/guardrails`; a workspace-scoped key is confined to its workspace and an agent-bound key to its bindings.
+
+The Codex cloud setup-script recipe that consumes this endpoint is in [MCP Client Setup › Codex cloud](mcp-clients.md#codex-cloud).
+
+---
+
 ## Context APIs
 
 ### GET /api/v1/contexts
