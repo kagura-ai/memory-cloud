@@ -776,10 +776,14 @@ class TestHandleGetContextInfoGuardrails:
         ):
             payload = await self._call(ctx, self._db(), fetch_entries_for_context)
 
+        from config.settings import get_settings
+
         assert payload["guardrails"]["items"][0]["summary"] == "from the repo gate"
+        # One read, bounded by the larger of the lane cap (10) and the clamped
+        # ``guardrail_load_cap`` so ``tool_triggered_version`` covers the set.
         assert seen == {
             "workspace_id": ctx.workspace_id,
             "context_id": ctx.id,
-            "limit": 10,
+            "limit": max(10, get_settings().guardrail_load_cap),
         }
         boom.assert_not_awaited()

@@ -225,36 +225,50 @@ def _suffix(remaining: int, tool: str) -> str:
     return f"(+{remaining} more: {tool}(context_id))"
 
 
+def _version_tuple(row: Any) -> list[Any]:
+    """``load_guardrails``' per-item tuple, a non-object ``tool_trigger`` → ``None``."""
+    trigger = row.tool_trigger if isinstance(row.tool_trigger, dict) else None
+    return [str(row.id), row.summary, row.importance, row.delivery_mode, trigger]
+
+
 def entries_from_rows(
-    context_id: UUID, rows: list[Any], *, total: int, limit: int, user_id: str
+    context_id: UUID,
+    rows: list[Any],
+    *,
+    total: int,
+    limit: int,
+    user_id: str,
+    version_rows: list[Any] | None = None,
 ) -> DigestEntries:
     """Build the value from ``list_tool_triggered`` rows (after the binding filter).
 
-    The version tuple is exactly ``load_guardrails``' per-item tuple —
-    ``[memory_id, summary, importance, delivery_mode, tool_trigger]`` with a
+    ``rows`` is the rendered prefix (at most ``limit``); ``version_rows``
+    (default ``rows``) is the set the hash covers. The readers pass the whole
+    binding-filtered tool-triggered set up to ``guardrail_load_cap`` — what
+    ``load_guardrails.tool_triggered`` holds — so a digest that shows five of
+    twelve guardrails carries the version of all twelve and changes whenever
+    any of them does. The tuple is exactly ``load_guardrails``' per-item tuple
+    — ``[memory_id, summary, importance, delivery_mode, tool_trigger]`` with a
     non-object ``tool_trigger`` normalized to ``None`` the same way — so the
     hash equals the one a client computes over ``load_guardrails.tool_triggered``.
     """
-    entries: list[DigestEntry] = []
-    version_rows: list[list[Any]] = []
-    for row in rows:
-        trigger = row.tool_trigger if isinstance(row.tool_trigger, dict) else None
-        entries.append(
-            DigestEntry(
-                memory_id=str(row.id),
-                summary=row.summary,
-                importance=row.importance,
-                authored_by_caller=row.user_id == user_id,
-                source_type=row.source_type,
-            )
+    entries = [
+        DigestEntry(
+            memory_id=str(row.id),
+            summary=row.summary,
+            importance=row.importance,
+            authored_by_caller=row.user_id == user_id,
+            source_type=row.source_type,
         )
-        version_rows.append([str(row.id), row.summary, row.importance, row.delivery_mode, trigger])
+        for row in rows
+    ]
+    hashed = rows if version_rows is None else version_rows
     return DigestEntries(
         context_id=context_id,
         entries=entries,
         total_available=total,
         truncated=total > limit,
-        tool_triggered_version=guardrail_version(version_rows),
+        tool_triggered_version=guardrail_version([_version_tuple(row) for row in hashed]),
     )
 
 
@@ -400,19 +414,37 @@ async def fetch_entries_for_context(
     ``list_tool_triggered`` holds the unconditional trust gate (trusted-tier
     context AND ``source_type != connector``); ``filter_memory_rows_by_binding``
     is the per-memory agent-binding filter ``load_guardrails`` applies. One
-    indexed SQL read (``LIMIT limit + 1``), no embedding, no vector store, no
-    Hebbian write, no audit row on success.
+    indexed SQL read (``LIMIT max(limit, guardrail_load_cap) + 1``), no
+    embedding, no vector store, no Hebbian write, no audit row on success.
+
+    The read is bounded by the larger of the lane's cap and the clamped
+    ``guardrail_load_cap`` because ``tool_triggered_version`` must cover what
+    ``load_guardrails.tool_triggered`` holds, not the rendered prefix: the
+    per-row filter runs once over the ordered rows and the two slices —
+    ``rows[:limit]`` to render, ``rows[:guardrail_load_cap]`` to hash — are
+    taken from the same result, so both equal "list with that cap, then
+    filter" exactly as ``load_guardrails`` does it.
     """
+    from config.settings import get_settings
     from repositories.memory import MemoryRepository
     from services.agent_binding_service import filter_memory_rows_by_binding
+    from services.memory_service import _PINNED_LOAD_CAP_MAX
 
+    # Same clamp as ``MemoryService._clamp_pinned_cap(None, guardrail_load_cap)``
+    # (the field is already an int): a misconfigured cap never reaches LIMIT.
+    version_cap = max(1, min(get_settings().guardrail_load_cap, _PINNED_LOAD_CAP_MAX))
     rows, total = await MemoryRepository(db).list_tool_triggered(
-        context.workspace_id, context.id, limit
+        context.workspace_id, context.id, max(limit, version_cap)
     )
-    rows, _denied = await filter_memory_rows_by_binding(
+    kept, _denied = await filter_memory_rows_by_binding(
         db, list(rows), operation=DIGEST_OPERATION, user_id=user_id
     )
-    return entries_from_rows(context.id, rows, total=total, limit=limit, user_id=user_id)
+    kept_ids = {row.id for row in kept}
+    shown = [row for row in rows[:limit] if row.id in kept_ids]
+    hashed = [row for row in rows[:version_cap] if row.id in kept_ids]
+    return entries_from_rows(
+        context.id, shown, total=total, limit=limit, user_id=user_id, version_rows=hashed
+    )
 
 
 async def fetch_entries(

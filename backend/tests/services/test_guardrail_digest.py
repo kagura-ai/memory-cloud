@@ -564,3 +564,58 @@ def test_entries_from_rows_keeps_what_the_gate_returned_and_flags_foreign_author
     assert [e.authored_by_caller for e in entries.entries] == [False, True]
     assert entries.entries[0].source_type == "connector"
     assert entries.truncated is True and entries.total_available == 7
+
+
+@pytest.mark.asyncio
+async def test_fetch_entries_for_context_hashes_the_whole_set_not_the_rendered_prefix(monkeypatch):
+    """Seven guardrails, a lane cap of five: five are rendered, ``truncated`` is
+    set, and ``tool_triggered_version`` equals ``guardrail_version`` over all
+    seven — the value a client computes over ``load_guardrails.tool_triggered``
+    — not over the five shown. The one read is bounded by the larger of the
+    lane cap and ``guardrail_load_cap``."""
+    from types import SimpleNamespace
+    from uuid import uuid4
+
+    from config.settings import get_settings
+    from repositories.memory import MemoryRepository
+    from services.guardrail_digest import fetch_entries_for_context
+    from utils.tool_trigger import guardrail_version
+
+    ctx = SimpleNamespace(id=CTX, workspace_id=uuid4())
+    rows = [
+        SimpleNamespace(
+            id=uuid4(),
+            summary=f"guardrail {i}",
+            importance=0.5,
+            delivery_mode="on_recall",
+            tool_trigger={"tool": "Bash", "on": "pre", "match": "x", "action": "inform"},
+            user_id="u1",
+            source_type="manual",
+            type="note",
+            context_id=CTX,
+        )
+        for i in range(7)
+    ]
+    seen: dict = {}
+
+    async def fake_list(self, workspace_id, context_id, limit):
+        seen["limit"] = limit
+        return rows[:limit], len(rows)
+
+    monkeypatch.setattr(MemoryRepository, "list_tool_triggered", fake_list)
+
+    entries = await fetch_entries_for_context(object(), user_id="u1", context=ctx, limit=5)
+
+    assert seen["limit"] == max(5, get_settings().guardrail_load_cap)
+    assert [e.summary for e in entries.entries] == [f"guardrail {i}" for i in range(5)]
+    assert entries.total_available == 7 and entries.truncated is True
+    tuples = [[str(r.id), r.summary, r.importance, r.delivery_mode, r.tool_trigger] for r in rows]
+    assert entries.tool_triggered_version == guardrail_version(tuples)
+    assert entries.tool_triggered_version != guardrail_version(tuples[:5])
+
+
+def test_entries_from_rows_version_rows_default_to_the_rendered_rows():
+    row = _Row(uuid4(), "s", 0.9, "on_recall", {"tool": "Bash", "on": "pre", "action": "inform"})
+    default = entries_from_rows(CTX, [row], total=1, limit=10, user_id="u1")
+    explicit = entries_from_rows(CTX, [row], total=1, limit=10, user_id="u1", version_rows=[row])
+    assert default.tool_triggered_version == explicit.tool_triggered_version
