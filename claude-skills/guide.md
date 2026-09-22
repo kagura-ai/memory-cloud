@@ -133,6 +133,8 @@ With the hooks on, the hooks are the guardrail lane for this client: put `?guard
 
 **Requirements** — a `python3` (3.9+) on `PATH` that is not inside the project. On macOS install the Command Line Tools or Homebrew Python (the stub `python3` opens a dialog). Windows is unsupported for these hooks: install Git Bash or disable the plugin's hooks.
 
+**Codex CLI / ChatGPT desktop** — the same hooks ship in the Codex plugin (`plugins/kagura-memory/hooks/hooks.json`, running the shared script with `--client codex`); the setup (`config.json` in the plugin's data directory, `?guardrails=off` on the `url`) and the `/hooks` trust step are in the kagura-memory skill's "Tool guardrails (hooks)" section.
+
 ### 6. Show available plugin skills
 
 | Skill | Description |

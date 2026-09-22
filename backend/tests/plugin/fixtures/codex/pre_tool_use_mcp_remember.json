@@ -1,0 +1,17 @@
+{
+  "session_id": "019a2b3c-4d5e-7f80-9a1b-2c3d4e5f6071",
+  "turn_id": "019a2b3c-4d5e-7f80-9a1b-2c3d4e5f6072",
+  "transcript_path": "/home/user/.codex/sessions/2026/09/22/rollout-019a2b3c.jsonl",
+  "cwd": "/home/user/project",
+  "model": "gpt-5-codex",
+  "permission_mode": "default",
+  "hook_event_name": "PreToolUse",
+  "tool_name": "mcp__kagura-memory__remember",
+  "tool_input": {
+    "summary": "Fixed the flaky test",
+    "context_id": "550e8400-e29b-41d4-a716-446655440000",
+    "importance": 1,
+    "type": "bug-fix"
+  },
+  "tool_use_id": "call_mcp_kagura-m"
+}

@@ -1,0 +1,56 @@
+{
+  "description": "Kagura Memory tool guardrails. Changing any matcher or handler below changes that hook's trust hash and Codex skips it until each user trusts it again in /hooks; the repo pins this file's SHA-256 so no change is accidental.",
+  "hooks": {
+    "SessionStart": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "p=$(command -v python3) || exit 0; case \"$p\" in /*) ;; *) exit 0;; esac; case \"$p\" in \"$PWD\"/*) exit 0;; esac; exec \"$p\" -I -S \"$PLUGIN_ROOT/hooks/kagura_guardrails.py\" --client codex",
+            "commandWindows": "exit 0",
+            "timeout": 5,
+            "statusMessage": "Loading Kagura Memory guardrails"
+          }
+        ]
+      }
+    ],
+    "PreToolUse": [
+      {
+        "matcher": "*",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "p=$(command -v python3) || exit 0; case \"$p\" in /*) ;; *) exit 0;; esac; case \"$p\" in \"$PWD\"/*) exit 0;; esac; exec \"$p\" -I -S \"$PLUGIN_ROOT/hooks/kagura_guardrails.py\" --client codex",
+            "commandWindows": "exit 0",
+            "timeout": 5
+          }
+        ]
+      }
+    ],
+    "PostToolUse": [
+      {
+        "matcher": "*",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "p=$(command -v python3) || exit 0; case \"$p\" in /*) ;; *) exit 0;; esac; case \"$p\" in \"$PWD\"/*) exit 0;; esac; exec \"$p\" -I -S \"$PLUGIN_ROOT/hooks/kagura_guardrails.py\" --client codex",
+            "commandWindows": "exit 0",
+            "timeout": 5
+          }
+        ]
+      },
+      {
+        "matcher": "^mcp__.*__(remember|update_memory|forget)$",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "p=$(command -v python3) || exit 0; case \"$p\" in /*) ;; *) exit 0;; esac; case \"$p\" in \"$PWD\"/*) exit 0;; esac; exec \"$p\" -I -S \"$PLUGIN_ROOT/hooks/kagura_guardrails.py\" --client codex --refresh",
+            "commandWindows": "exit 0",
+            "async": true,
+            "timeout": 10
+          }
+        ]
+      }
+    ]
+  }
+}

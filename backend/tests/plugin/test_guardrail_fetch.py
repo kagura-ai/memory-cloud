@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import subprocess
 import time
 from concurrent.futures import ThreadPoolExecutor
@@ -418,8 +419,14 @@ def test_fresh_cache_means_zero_requests_for_every_source(
     plugin_env.write_cache(STANDARD, fetched_at=datetime.now(UTC) - timedelta(seconds=10))
     result = _start(plugin_env, run_hook, stub_server.url, source=source)
     assert stub_server.requests == []
-    assert "3 tool guardrails active" in result.specific["additionalContext"]
-    assert "(cached 10s)" in result.specific["additionalContext"]
+    context = result.specific["additionalContext"]
+    assert "3 tool guardrails active" in context
+    # The cache was written 10 s ago to whole-second precision; the hook adds the dropped
+    # fraction and its own start-up, so the printed age is 10 s or a little more. It is
+    # never 60 s: that would have meant a refetch, and the request list above is empty.
+    age = re.search(r"\(cached (\d+)s\)", context)
+    assert age is not None, context
+    assert 10 <= int(age.group(1)) < 60, context
 
 
 def test_cache_older_than_60s_is_refetched(

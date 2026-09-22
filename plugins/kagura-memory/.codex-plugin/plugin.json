@@ -17,6 +17,7 @@
     "knowledge-base"
   ],
   "skills": "./skills/",
+  "hooks": "./hooks/hooks.json",
   "interface": {
     "displayName": "Kagura Memory",
     "shortDescription": "Restore context and save durable project knowledge from Codex.",

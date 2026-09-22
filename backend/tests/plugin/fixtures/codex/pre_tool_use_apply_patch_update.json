@@ -1,0 +1,14 @@
+{
+  "session_id": "019a2b3c-4d5e-7f80-9a1b-2c3d4e5f6071",
+  "turn_id": "019a2b3c-4d5e-7f80-9a1b-2c3d4e5f6072",
+  "transcript_path": "/home/user/.codex/sessions/2026/09/22/rollout-019a2b3c.jsonl",
+  "cwd": "/home/user/project",
+  "model": "gpt-5-codex",
+  "permission_mode": "default",
+  "hook_event_name": "PreToolUse",
+  "tool_name": "apply_patch",
+  "tool_input": {
+    "command": "*** Begin Patch\n*** Update File: src/a.py\n@@\n-x = 1\n+x = 2\n*** End Patch\n"
+  },
+  "tool_use_id": "call_apply_patch"
+}
