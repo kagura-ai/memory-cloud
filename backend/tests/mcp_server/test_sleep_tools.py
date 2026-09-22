@@ -898,6 +898,68 @@ class TestRollbackActionDispatch:
         qdrant.assert_not_awaited()
 
     @pytest.mark.asyncio
+    async def test_importance_rollback_refuses_a_row_marked_as_a_guardrail(
+        self, user_id, workspace_id
+    ):
+        """A row marked with details.tool_trigger after the run keeps the
+        importance its author set (load_guardrails orders by it): the refusal is
+        the UPDATE's own predicate — the same one the re-evaluation write uses —
+        so a marking that lands between read and write still wins. Kept, not an
+        error, exactly like the pinned case."""
+        action = self._action("update_importance", id=1, details={"old_importance": 0.4})
+        report_id = uuid4()
+        report = MagicMock()
+        report.id = report_id
+        report.user_id = user_id
+        report.status = "completed"
+        report.context_id = uuid4()
+        report.workspace_id = uuid4()
+        cfg = MagicMock()
+        cfg.scalar_one_or_none.return_value = None
+        restore = MagicMock()
+        restore.rowcount = 0  # WHERE ... AND details->'tool_trigger' IS NULL matched nothing
+        db = self._db(report, [action], [cfg, restore])
+        captured: list[str] = []
+        original = db.execute.side_effect
+
+        async def _capture(*args, **kwargs):
+            if args:
+                captured.append(str(args[0]))
+            return await original(*args, **kwargs)
+
+        db.execute.side_effect = _capture
+
+        async def mock_get_db():
+            yield db
+
+        qdrant = AsyncMock()
+        with (
+            patch("db.base.get_db", new=mock_get_db),
+            patch(
+                "mcp_server.tools.sleep._check_viewer_permission",
+                new_callable=AsyncMock,
+                return_value=None,
+            ),
+            patch("db.qdrant.update_memory_payload_in_qdrant", qdrant),
+        ):
+            result = await handle_rollback_sleep_run(
+                {"report_id": str(report_id)}, user_id, workspace_id
+            )
+        data = json.loads(result[0].text)
+
+        restore_sql = [s for s in captured if s.startswith("UPDATE memories") and "importance" in s]
+        assert restore_sql, f"no importance restore issued; saw: {captured}"
+        assert "memories.delivery_mode !=" in restore_sql[0]
+        assert "memories.details[" in restore_sql[0] and "IS NULL" in restore_sql[0], (
+            f"importance rollback is not guarded by the tool-trigger predicate: {restore_sql[0]}"
+        )
+        summary = data["rollback_summary"]
+        assert summary["importance_restored"] == 0
+        assert summary["importance_kept"] == 1
+        assert summary["errors"] == []
+        qdrant.assert_not_awaited()
+
+    @pytest.mark.asyncio
     async def test_one_failing_action_does_not_abandon_the_rest(self, user_id, workspace_id):
         """Per-action isolation: the loop keeps going and records the failure."""
         boom = self._action("create_edge", id=1)

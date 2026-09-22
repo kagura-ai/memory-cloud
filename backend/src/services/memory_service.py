@@ -339,18 +339,21 @@ class MemoryService:
 
         The REST path validates ``cap`` via Pydantic (int, 1..1000), but the MCP
         path forwards the raw tool arg, so the service is the shared chokepoint
-        that must defend the LIMIT: ``None`` → default; otherwise coerce to int
-        and clamp to [1, _PINNED_LOAD_CAP_MAX]. Clamping the lower bound to 1 is
-        load-bearing — a 0 would emit ``LIMIT 0`` (empty set + a false
+        that must defend the LIMIT: ``None`` → the settings default; otherwise
+        coerce to int. Either value is then clamped to [1, _PINNED_LOAD_CAP_MAX]
+        — the settings default too, so a misconfigured ``pinned_load_cap`` /
+        ``guardrail_load_cap`` cannot reach the query. Clamping the lower bound
+        to 1 is load-bearing — a 0 would emit ``LIMIT 0`` (empty set + a false
         truncated=true) and a negative would emit ``LIMIT -1`` (no cap at all,
         defeating the safety valve).
         """
         if cap is None:
-            return default
-        try:
-            cap_int = int(cap)
-        except (TypeError, ValueError) as exc:
-            raise ValueError(f"cap must be an integer, got {cap!r}") from exc
+            cap_int = default
+        else:
+            try:
+                cap_int = int(cap)
+            except (TypeError, ValueError) as exc:
+                raise ValueError(f"cap must be an integer, got {cap!r}") from exc
         return max(1, min(cap_int, _PINNED_LOAD_CAP_MAX))
 
     @staticmethod
@@ -452,9 +455,20 @@ class MemoryService:
         non-object legacy shape is "not a guardrail", matching
         ``Memory.is_tool_triggered`` and the SQL predicate.
         """
-        if isinstance(existing_details, dict) and existing_details.get("tool_trigger") is not None:
+        if MemoryService._carries_tool_trigger(existing_details):
             return True
         return details_supplied and isinstance(new_details, dict) and "tool_trigger" in new_details
+
+    @staticmethod
+    def _carries_tool_trigger(details: Any) -> bool:
+        """``Memory.is_tool_triggered`` spelled on the raw ``details`` value.
+
+        For callers that hold the column value rather than a mapped row — and
+        for the write-response paths, where unit tests build the row as a bare
+        ``MagicMock`` (the #1523 trap: a mocked property is truthy, a mocked
+        ``details`` is not a dict).
+        """
+        return isinstance(details, dict) and details.get("tool_trigger") is not None
 
     async def _require_guardrail_author(self, user_id: str, context_id: UUID | str | None) -> None:
         """Authorize a guardrail write: context EDITOR or above, user credential only.
@@ -785,7 +799,11 @@ class MemoryService:
                 scope=memory.scope,
                 # #1505: say what 'working' means for durability instead of
                 # leaving the caller to guess.
-                persistence=persistence_info(memory.scope, pinned=memory.is_pinned),
+                persistence=persistence_info(
+                    memory.scope,
+                    pinned=memory.is_pinned,
+                    tool_triggered=self._carries_tool_trigger(memory.details),
+                ),
                 lint=await self._lint_write(
                     workspace_id=UUID(workspace_id_str),
                     context_id=UUID(context_id_str),
@@ -946,7 +964,9 @@ class MemoryService:
             re_embedded=needs_reembed,
             scope=memory.scope,
             persistence=persistence_info(  # #1505
-                memory.scope, pinned=memory.is_pinned
+                memory.scope,
+                pinned=memory.is_pinned,
+                tool_triggered=self._carries_tool_trigger(memory.details),
             ),
             supersede_candidate_dismissed=dismissed_target,  # #1504
             # #1502: lint the memory's CURRENT state, not the patch — a partial
@@ -4488,13 +4508,20 @@ class MemoryService:
         ``tool_trigger`` arrives as the projected ``details->'tool_trigger'``
         JSON element for the tool-triggered lane (``None`` for pinned rows);
         a driver that hands the ``json`` element back as text is decoded here
-        so the item always carries an object. ``l2`` keeps ``context_summary``
-        on pinned items only.
+        so the item always carries an object. The SQL predicate selects any
+        non-NULL element, so a legacy non-object value is possible too — a bare
+        JSON string such as ``"Bash"`` reaches this code as the ``str`` ``Bash``
+        and does not decode. That is "not a trigger" (``tool_trigger: null``,
+        which the contract tells consumers to skip), never an aborted read.
+        ``l2`` keeps ``context_summary`` on pinned items only.
         """
         import json
 
         if isinstance(tool_trigger, str):
-            tool_trigger = json.loads(tool_trigger)
+            try:
+                tool_trigger = json.loads(tool_trigger)
+            except ValueError:  # json.JSONDecodeError
+                tool_trigger = None
         return GuardrailItem(
             memory_id=row.id,
             summary=row.summary,

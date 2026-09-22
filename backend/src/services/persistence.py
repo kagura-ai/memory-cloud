@@ -122,7 +122,9 @@ _PROMOTION_CRITERIA = {
 }
 
 
-def persistence_info(scope: str, *, pinned: bool = False) -> PersistenceInfo | None:
+def persistence_info(
+    scope: str, *, pinned: bool = False, tool_triggered: bool = False
+) -> PersistenceInfo | None:
     """Build the durability block for a just-written memory.
 
     Args:
@@ -130,6 +132,10 @@ def persistence_info(scope: str, *, pinned: bool = False) -> PersistenceInfo | N
         pinned: True when the memory is ``delivery_mode='always'`` (#1519).
             Pinned rows never enter near-duplicate merge candidacy, so the
             merge caveat is replaced by that promise instead of repeated.
+        tool_triggered: True when the memory carries ``details.tool_trigger``
+            (a tool guardrail). Sleep maintenance excludes it the same way it
+            excludes a pinned row, so the block says so — the generic merge
+            caveat would be false for it.
 
     Returns:
         PersistenceInfo describing what that scope implies for durability, or
@@ -146,31 +152,42 @@ def persistence_info(scope: str, *, pinned: bool = False) -> PersistenceInfo | N
         already stored, prompting the caller to retry and duplicate it.
     """
     try:
-        return _persistence_info(scope, pinned=pinned)
+        return _persistence_info(scope, pinned=pinned, tool_triggered=tool_triggered)
     except Exception as e:  # noqa: BLE001 — advisory; never fail a committed write
         logger.warning("persistence_info_failed", scope=scope, error=str(e))
         return None
 
 
-def _merge_caveat(pinned: bool, *, floor: bool) -> str:
+def _merge_caveat(pinned: bool, *, floor: bool, tool_triggered: bool = False) -> str:
     """The sentence about maintenance that is NOT consolidation.
 
     ``floor`` selects the working-scope phrasing ("not bound by that floor")
     over the persistent one ("not scope-gated"). Pinned memories (#1519, #1523)
-    are excluded from every automated deleter at its candidate fetch (one shared
-    predicate), so for them the merge caveat becomes a promise and only
-    forget() remains.
+    and tool guardrails (``details.tool_trigger``) are excluded from every
+    automated deleter at its candidate fetch (one shared predicate each), so
+    for them the merge caveat becomes a promise and only forget() remains.
     """
-    if pinned:
-        # Hedged on purpose: the exemption holds only while the pin holds (an
-        # unpin re-enters candidacy), and forget() is not the only removal path
-        # (deleting the context removes it too) — so no "never", no "only".
+    if pinned or tool_triggered:
+        # Hedged on purpose: the exemption holds only while the pin / the
+        # marking holds (an unpin or unmark re-enters candidacy), and forget()
+        # is not the only removal path (deleting the context removes it too) —
+        # so no "never", no "only".
+        if pinned and tool_triggered:
+            hold = (
+                "While it stays pinned (delivery_mode='always') or keeps its details.tool_trigger"
+            )
+        elif pinned:
+            hold = "While it stays pinned (delivery_mode='always')"
+        else:
+            hold = "While it keeps its details.tool_trigger (a tool guardrail)"
+        # Rollback: a pin also refuses the demote of a promotion (#1523); a
+        # guardrail is not scope-bound, so only its importance is protected.
+        rollback = "never demotes it" if pinned else "leaves its importance alone"
         return (
-            "While it stays pinned (delivery_mode='always'), Sleep maintenance "
-            "does not select it — near-duplicate merge, consolidation archive "
-            "and importance re-evaluation all exclude it, and rollback never "
-            "demotes it; an explicit forget() still removes it"
-            + (" and is not bound by that floor." if floor else ".")
+            f"{hold}, Sleep maintenance does not select it — near-duplicate "
+            "merge, consolidation archive and importance re-evaluation all "
+            f"exclude it, and rollback {rollback}; an explicit forget() still "
+            "removes it" + (" and is not bound by that floor." if floor else ".")
         )
     if floor:
         return (
@@ -183,8 +200,11 @@ def _merge_caveat(pinned: bool, *, floor: bool) -> str:
     )
 
 
-def _persistence_info(scope: str, pinned: bool = False) -> PersistenceInfo | None:
+def _persistence_info(
+    scope: str, pinned: bool = False, tool_triggered: bool = False
+) -> PersistenceInfo | None:
     """Build the block, or None for an unrecognized scope. May raise."""
+    protected = pinned or tool_triggered
     if scope == "persistent":
         return PersistenceInfo(
             scope="persistent",
@@ -194,7 +214,7 @@ def _persistence_info(scope: str, pinned: bool = False) -> PersistenceInfo | Non
             detail=(
                 "Committed and persistent. Consolidation acts only on "
                 "working-scope memories, so it will not archive this one. "
-                + _merge_caveat(pinned, floor=False)
+                + _merge_caveat(pinned, floor=False, tool_triggered=tool_triggered)
             ),
         )
     if scope != "working":
@@ -212,7 +232,12 @@ def _persistence_info(scope: str, pinned: bool = False) -> PersistenceInfo | Non
                 "Committed and durable now — 'working' is a lifecycle label, "
                 "not a staging buffer. No consolidation pass is enabled on this "
                 "deployment, so it will stay working-scope and consolidation "
-                "will not archive it." + (" " + _merge_caveat(True, floor=False) if pinned else "")
+                "will not archive it."
+                + (
+                    " " + _merge_caveat(pinned, floor=False, tool_triggered=tool_triggered)
+                    if protected
+                    else ""
+                )
             ),
         )
 
@@ -227,6 +252,6 @@ def _persistence_info(scope: str, pinned: bool = False) -> PersistenceInfo | Non
             f"staging buffer. Promotes to persistent via {pass_name} "
             f"({_PROMOTION_CRITERIA[pass_name]}). That pass will not archive it "
             f"before {days} days old, and only with zero adoption. "
-            + _merge_caveat(pinned, floor=True)
+            + _merge_caveat(pinned, floor=True, tool_triggered=tool_triggered)
         ),
     )

@@ -143,6 +143,19 @@ async def test_non_integer_cap_is_rejected(service, emit):
 
 
 @pytest.mark.asyncio
+async def test_settings_defaults_are_clamped_like_a_caller_cap(service, emit):
+    """An omitted cap falls back to the settings value — which is operator
+    input too. 0 must not become ``LIMIT 0`` and 5000 must not exceed the
+    hard maximum; both lanes go through the same clamp."""
+    settings = MagicMock(pinned_load_cap=0, guardrail_load_cap=5000)
+    with patch("config.settings.get_settings", return_value=settings):
+        result = await _call(service)
+    assert service.memory_repo.list_pinned.await_args.args[2] == 1
+    assert service.memory_repo.list_tool_triggered.await_args.args[2] == 1000
+    assert (result.pinned_cap, result.cap) == (1, 1000)
+
+
+@pytest.mark.asyncio
 async def test_a_row_in_both_lanes_appears_in_both_lists(service, emit):
     shared = uuid4()
     service.memory_repo.list_pinned = AsyncMock(return_value=([_pinned_row(id=shared)], 1))
@@ -201,6 +214,29 @@ async def test_tool_trigger_json_text_from_the_driver_is_decoded(service, emit):
         "on": "pre",
         "action": "inform",
     }
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "stored",
+    [
+        "Bash",  # legacy: details.tool_trigger was a bare JSON string -> str
+        '"Bash"',  # the same element handed back as JSON text
+        "[1, 2]",  # a JSON array: decodes, but is not an object
+        "not json {",
+    ],
+)
+async def test_legacy_non_object_tool_trigger_is_served_as_null_not_an_error(service, emit, stored):
+    """The SQL predicate selects any non-NULL ``details->'tool_trigger'``, so a
+    row written before the contract can carry a non-object. The read must not
+    abort on it: the item is served with ``tool_trigger: null`` (consumers skip
+    it) and the rest of the lane is unaffected."""
+    good = _tool_row(importance=0.9)
+    legacy = _tool_row(importance=0.5, tool_trigger=stored)
+    service.memory_repo.list_tool_triggered = AsyncMock(return_value=([good, legacy], 2))
+    result = await _call(service)
+    assert [i.tool_trigger for i in result.tool_triggered] == [dict(TT), None]
+    assert result.tool_triggered_total_available == 2
 
 
 @pytest.mark.asyncio

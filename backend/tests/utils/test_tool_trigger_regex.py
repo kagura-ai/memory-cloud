@@ -287,6 +287,7 @@ def test_every_documented_code_is_exercised_or_structural():
         "block_requires_pre",
         "block_requires_match",
         "block_match_not_specific",
+        "block_match_nullable",
         "tool_trigger_requires_user_credential",
     }
     assert set(TOOL_TRIGGER_ERROR_CODES) == exercised | structural
@@ -373,6 +374,18 @@ def test_normalize_does_not_mutate_input():
         (_tt(tool="Bash", action="block", match=r"[^x]*"), "block_match_not_specific"),
         (_tt(tool="Bash", action="block", match="^$"), "block_match_not_specific"),
         (_tt(tool="Bash", action="block", match=r"\d+"), "block_match_not_specific"),
+        # A literal alone is not enough: an unanchored search with a pattern
+        # that can match the empty string matches every subject.
+        (_tt(tool="Bash", action="block", match="a*"), "block_match_nullable"),
+        (_tt(tool="Bash", action="block", match="a?"), "block_match_nullable"),
+        (_tt(tool="Bash", action="block", match="a{0,100}"), "block_match_nullable"),
+        (_tt(tool="Bash", action="block", match="a{0,}"), "block_match_nullable"),
+        (_tt(tool="Bash", action="block", match="(?:rm)?"), "block_match_nullable"),
+        (_tt(tool="Bash", action="block", match="(?:rm|x*)"), "block_match_nullable"),
+        (_tt(tool="Bash", action="block", match="^a*$"), "block_match_nullable"),
+        (_tt(tool="Bash", action="block", match=r"\ba*\b"), "block_match_nullable"),
+        (_tt(tool="Bash", action="block", match="(?i)a*"), "block_match_nullable"),
+        (_tt(tool="Bash", action="block", match="(?:(?:a?)*)"), "regex_nested_quantifier"),
         (_tt(tool="(a+)+"), "regex_nested_quantifier"),
         (_tt(tool="Bash", match="(a+)+"), "regex_nested_quantifier"),
         (_tt(tool="Bash\n"), "pattern_control_char"),
@@ -388,6 +401,31 @@ def test_block_with_a_literal_is_specific_enough():
     # An escaped literal or a class with literals alongside counts too.
     normalize_tool_trigger(_tt(tool="Bash", action="block", match=r"\.env"))
     normalize_tool_trigger(_tt(tool="Bash", action="block", match=r"[Rr]m -rf"))
+
+
+@pytest.mark.parametrize(
+    "match",
+    [
+        "a+",  # an unbounded run is not a separator, but it is not nullable either
+        "a{1,3}",
+        "a{2,}",
+        "(?:ab)+",
+        "a*b",  # one mandatory atom is enough
+        "(?:rm|del)",
+        "(?:rm)?-rf",
+        r"gh pr merge\b.*--delete",
+    ],
+)
+def test_block_accepts_a_pattern_that_must_consume_input(match):
+    out = normalize_tool_trigger(_tt(tool="Bash", action="block", match=match))
+    assert out["tool_trigger"]["match"] == match
+
+
+def test_nullable_match_is_fine_for_inform():
+    """Only ``block`` rejects a nullable pattern — an ``inform`` that fires on
+    every call is noisy, not a denial of service on the tool."""
+    out = normalize_tool_trigger(_tt(tool="Bash", match="a*"))
+    assert out["tool_trigger"] == {"tool": "Bash", "on": "pre", "match": "a*", "action": "inform"}
 
 
 def test_structural_error_message_names_the_field():
@@ -411,7 +449,9 @@ class _RaisingPattern:
         self.flags = 0
 
     def __getattr__(self, name: str):
-        raise AssertionError(f"pattern executed via .{name}()")
+        # AttributeError is the contract for a lookup hook; the message still
+        # names the unexpected execution path so a failure reads the same.
+        raise AttributeError(f"pattern executed via .{name}()")
 
 
 def test_compile_is_the_only_re_call(monkeypatch):
