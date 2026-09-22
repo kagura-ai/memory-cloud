@@ -508,6 +508,28 @@ class Settings(BaseSettings):
         description="Max tool-triggered memories returned by load_guardrails",
     )
 
+    # #1621: hookless clients (ChatGPT web, Claude Desktop / Chat, Codex cloud)
+    # receive a digest of the tool-triggered lane in the MCP server
+    # ``instructions`` when the endpoint URL (``?guardrails=<context_id>``) or
+    # an agent-bound key's default binding selects a context. The flag covers
+    # the ``instructions`` lane only; ``get_context_info.guardrails`` and the
+    # export route stay served. The budget bounds the one DB read on
+    # ``initialize`` / ``server/discover``; on expiry the base text is served.
+    mcp_guardrail_digest_enabled: bool = Field(
+        default=True,
+        description=(
+            "Serve a guardrail digest in MCP server instructions "
+            "(?guardrails=<context_id> or an agent default binding)"
+        ),
+    )
+    mcp_guardrail_digest_timeout_ms: int = Field(
+        default=500,
+        description=(
+            "Budget for the digest read on initialize / server/discover; "
+            "on expiry the base instructions are served"
+        ),
+    )
+
     # Self-hosted inference configuration (Issue #44, renamed #1160)
     # Any OpenAI-compatible backend (Ollama default port 11434, vLLM default 8000).
     self_hosted_base_url: str = Field(

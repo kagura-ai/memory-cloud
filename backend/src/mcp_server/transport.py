@@ -7,9 +7,10 @@ are handed to ``mcp_server.transport_stateless`` before any session handling.
 """
 
 import asyncio
+import contextlib
 import json
 import logging
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Literal
 from uuid import UUID
 
 from starlette.responses import Response
@@ -24,6 +25,7 @@ if TYPE_CHECKING:
     from collections.abc import Sequence
 
     from mcp_server.session import MCPSession
+    from services.guardrail_digest import DigestEntries, GuardrailSelection
 
 logger = logging.getLogger(__name__)
 
@@ -175,8 +177,10 @@ PROTOCOL_VERSION_META_KEY = "io.modelcontextprotocol/protocolVersion"
 # ``result._meta`` key under which a modern result identifies the server.
 SERVER_INFO_META_KEY = "io.modelcontextprotocol/serverInfo"
 
-# ``server/discover`` caching hint (MCP 2026-07-28 caching utility): the result
-# is static per deployment, identical for every user → public, one hour.
+# ``server/discover`` caching hint (MCP 2026-07-28 caching utility): without a
+# guardrail selection the result is static per deployment, identical for every
+# user → public, one hour. With one (#1621) it varies by caller → private,
+# ``TOOLS_LIST_TTL_MS`` (see ``build_instructions``).
 DISCOVER_TTL_MS = 60 * 60 * 1000
 
 # ``tools/list`` caching hint (modern path only). Much shorter than discover:
@@ -186,14 +190,25 @@ TOOLS_LIST_TTL_MS = 5 * 60 * 1000
 
 SERVER_INFO = {"name": "kagura-memory-cloud", "version": APP_VERSION}
 SERVER_CAPABILITIES: dict[str, dict] = {"tools": {}}
-SERVER_INSTRUCTIONS = (
+
+# The static half of the server ``instructions`` (#1621): 240 characters,
+# pinned by ``tests/mcp_server/test_instructions_budget.py``. ChatGPT / Codex
+# read the first 512 characters as the part that matters, and a per-caller
+# guardrail digest (``build_instructions``) is appended after it, so the base
+# must leave room for the digest header and its first entry.
+SERVER_INSTRUCTIONS_BASE = (
     "Kagura Memory Cloud: persistent memory for AI agents. Call list_contexts "
-    "first to discover context IDs, then remember / recall / explore within a "
-    "context. All tools take context_id explicitly."
+    "to discover context IDs, then get_context_info(context_id) for a context's "
+    "rules and guardrails, then remember / recall / explore within it. All "
+    "tools take context_id."
 )
+# Kept as a module attribute for imports that still read the old name.
+SERVER_INSTRUCTIONS = SERVER_INSTRUCTIONS_BASE
 
 
-def _discover_result() -> dict:
+def _discover_result(
+    instructions: str = SERVER_INSTRUCTIONS_BASE, *, private: bool = False
+) -> dict:
     """Build the ``server/discover`` result (MCP 2026-07-28 DiscoverResult).
 
     Issue #1541: ChatGPT sends this before anything else. The result carries the
@@ -203,16 +218,162 @@ def _discover_result() -> dict:
     Issue #1544: ``supportedVersions`` lists both eras — the modern revision a
     per-request client continues with, and the legacy ones an ``initialize``
     client negotiates.
+
+    Issue #1621: ``instructions`` may carry a per-caller guardrail digest.
+    ``private`` marks a result whose bytes may vary by caller: "private —
+    caches MUST NOT be shared across authorization contexts", with the shorter
+    ``tools/list`` TTL. The defaults keep every existing call byte-identical.
     """
     return {
         "resultType": "complete",
         "supportedVersions": list(SUPPORTED_PROTOCOL_VERSIONS),
         "capabilities": SERVER_CAPABILITIES,
         "_meta": {SERVER_INFO_META_KEY: SERVER_INFO},
-        "instructions": SERVER_INSTRUCTIONS,
-        "ttlMs": DISCOVER_TTL_MS,
-        "cacheScope": "public",
+        "instructions": instructions,
+        "ttlMs": TOOLS_LIST_TTL_MS if private else DISCOVER_TTL_MS,
+        "cacheScope": "private" if private else "public",
     }
+
+
+async def _read_digest(
+    *,
+    user_id: str,
+    selection: "GuardrailSelection",
+    agent_id: "UUID | None",
+    key_workspace_id: "UUID | None",
+    timeout_ms: int,
+) -> "DigestEntries | None":
+    """Open ONE session and read the selected context's tool-triggered set.
+
+    Owns the session lifecycle: ``contextlib.aclosing`` closes the ``get_db``
+    generator (and its session) even when the caller's ``asyncio.timeout``
+    cancels this coroutine mid-query, and the statement timeout bounds the one
+    query on the server side so a cancelled read cannot leave a long-running
+    statement behind. Only called when a selection exists — never for the
+    param-absent, non-agent case (``initialize`` / ``server/discover`` must be
+    provably DB-free there).
+    """
+    from sqlalchemy import text
+
+    from db.base import get_db
+    from services.guardrail_digest import INSTRUCTIONS_CAPS, fetch_entries
+
+    async with contextlib.aclosing(get_db()) as sessions:
+        async for db in sessions:
+            # Per-statement server-side bound, local to this transaction.
+            # ``set_config`` takes a bound parameter where ``SET LOCAL`` cannot.
+            await db.execute(
+                text("SELECT set_config('statement_timeout', :ms, true)"),
+                {"ms": str(timeout_ms)},
+            )
+            context_id = selection.context_id
+            if selection.mode == "binding":
+                if agent_id is None:  # pragma: no cover - guarded by the caller
+                    return None
+                from services.agent_binding_service import AgentBindingService
+
+                binding, outcome = await AgentBindingService(db).resolve_default_binding(agent_id)
+                if binding is None or outcome not in ("default", "sole"):
+                    # F2: no existence oracle — nothing above debug.
+                    logger.debug("mcp_guardrail_digest_no_default_binding: outcome=%s", outcome)
+                    return None
+                context_id = binding.context_id
+            if context_id is None:  # pragma: no cover - explicit always carries one
+                return None
+            return await fetch_entries(
+                db,
+                user_id=user_id,
+                context_id=context_id,
+                key_workspace_id=key_workspace_id,
+                limit=INSTRUCTIONS_CAPS.entries,
+            )
+    return None  # pragma: no cover - get_db always yields
+
+
+async def build_instructions(
+    *,
+    user_id: str,
+    query_string: bytes,
+    key_workspace_id: "UUID | None",
+    era: Literal["legacy", "stateless"],
+) -> tuple[str, bool]:
+    """Return ``(instructions, private)`` for ``initialize`` / ``server/discover`` (#1621).
+
+    The digest of ONE context's tool guardrails is appended to the base text
+    when the endpoint URL selects it (``?guardrails=<context_id>``) or, with
+    the parameter absent, when the request's credential is an agent-bound key
+    whose default (or sole) binding names one. ``?guardrails=off`` and a value
+    that is neither ``off`` nor a UUID (``ignored``, logged without its bytes)
+    yield the base text.
+
+    Order, so the no-selection path is provably DB-free: the flag, the pure
+    query parse and the ``get_agent_scope()`` contextvar read run first with no
+    I/O; ``get_db()`` is opened only for ``explicit``, or ``binding`` with a
+    scope. ``private`` is ``True`` whenever a selection was *attempted* (any
+    ``guardrails=`` value, or an agent scope) whatever the outcome — a result
+    that may vary by caller is never ``public`` — and ``False`` only for the
+    param-absent, non-agent case, whose bytes are identical to before #1621.
+
+    Fails open: a deny, an unknown context, a DB error or the
+    ``mcp_guardrail_digest_timeout_ms`` budget expiring all serve the base text
+    and never fail the handshake. Denies produce no signal beyond debug level;
+    a resolver deny for an agent credential still writes its
+    ``memory_access_events`` row (successes write nothing).
+    """
+    from auth.agent_scope import get_agent_scope
+    from services.guardrail_digest import (
+        render_instructions,
+        select_guardrail_context,
+        tool_view_names,
+    )
+
+    selection = select_guardrail_context(query_string)
+    scope = get_agent_scope()
+    attempted = selection.mode != "binding" or scope is not None
+
+    settings = get_settings()
+    if not settings.mcp_guardrail_digest_enabled:
+        return SERVER_INSTRUCTIONS_BASE, attempted
+    if selection.mode == "ignored":
+        logger.info(
+            "mcp_guardrails_param_ignored: len=%d parsed=False era=%s",
+            selection.raw_length,
+            era,
+        )
+        return SERVER_INSTRUCTIONS_BASE, True
+    if selection.mode == "off":
+        return SERVER_INSTRUCTIONS_BASE, True
+    if selection.mode == "binding" and scope is None:
+        return SERVER_INSTRUCTIONS_BASE, False
+
+    try:
+        async with asyncio.timeout(settings.mcp_guardrail_digest_timeout_ms / 1000):
+            entries = await _read_digest(
+                user_id=user_id,
+                selection=selection,
+                agent_id=scope.agent_id if scope is not None else None,
+                key_workspace_id=key_workspace_id,
+                timeout_ms=settings.mcp_guardrail_digest_timeout_ms,
+            )
+    except Exception as e:  # noqa: BLE001 - fail open to the base text
+        logger.warning("mcp_guardrail_digest_failed: reason=%s era=%s", type(e).__name__, era)
+        return SERVER_INSTRUCTIONS_BASE, True
+
+    if entries is None or not entries.entries:
+        return SERVER_INSTRUCTIONS_BASE, True
+
+    instructions = render_instructions(
+        SERVER_INSTRUCTIONS_BASE, entries, tool_names=tool_view_names(query_string)
+    )
+    logger.info(
+        "mcp_guardrail_digest_served: context_id=%s entries=%d truncated=%s era=%s selection=%s",
+        str(entries.context_id),
+        len(entries.entries),
+        entries.truncated,
+        era,
+        selection.mode,
+    )
+    return instructions, True
 
 
 def _is_modern_request(body: Any) -> bool:
@@ -426,6 +587,20 @@ async def handle_streamable_http_post(
             requested if requested in LEGACY_PROTOCOL_VERSIONS else DEFAULT_PROTOCOL_VERSION
         )
 
+        # #1621: ``InitializeResult.instructions`` ("MAY be added to the system
+        # prompt"). Codex reads it from initialization; ChatGPT-class clients
+        # read the same string from ``server/discover``. Computed once per
+        # session here; DB-free unless the URL or an agent binding selects a
+        # guardrail context.
+        from mcp_server.tools._helpers import get_mcp_key_workspace_scope
+
+        instructions, _private = await build_instructions(
+            user_id=session.user_id,
+            query_string=scope.get("query_string", b""),
+            key_workspace_id=get_mcp_key_workspace_scope(),
+            era="legacy",
+        )
+
         # Session ID is returned in the mcp-session-id header
         await _send_jsonrpc_result(
             send,
@@ -435,6 +610,7 @@ async def handle_streamable_http_post(
                 "protocolVersion": protocol_version,
                 "capabilities": SERVER_CAPABILITIES,
                 "serverInfo": SERVER_INFO,
+                "instructions": instructions,
             },
         )
         return
@@ -564,7 +740,17 @@ async def handle_streamable_http_post(
     # callers.
     elif method == "server/discover":
         logger.info(f"MCP server/discover (Streamable HTTP): session={session.session_id}")
-        await _send_jsonrpc_result(send, session, request_id, _discover_result())
+        from mcp_server.tools._helpers import get_mcp_key_workspace_scope
+
+        instructions, private = await build_instructions(
+            user_id=session.user_id,
+            query_string=scope.get("query_string", b""),
+            key_workspace_id=get_mcp_key_workspace_scope(),
+            era="legacy",
+        )
+        await _send_jsonrpc_result(
+            send, session, request_id, _discover_result(instructions, private=private)
+        )
         return
 
     # Unknown / unimplemented request method → -32601 Method not found.
@@ -703,9 +889,20 @@ async def mcp_asgi_app(scope: Scope, receive: Receive, send: Send) -> None:
         # Must use api_key_workspace_id, NOT the conflated workspace_id below —
         # the latter becomes the user's *current* workspace for OAuth2/session/
         # global-key auth and would over-confine those (non-key-scoped) callers.
-        from mcp_server.tools._helpers import set_mcp_key_workspace_scope
+        from mcp_server.tools._helpers import (
+            set_mcp_guardrails_selection,
+            set_mcp_key_workspace_scope,
+        )
 
         set_mcp_key_workspace_scope(api_key_workspace_id)
+
+        # #1621: the URL's ``?guardrails=`` switch, parsed once per request
+        # (pure, no I/O) at the same seam so the ``get_context_info`` handler
+        # can honour ``?guardrails=off`` without threading a parameter through
+        # the tool dispatch. ``build_instructions`` re-parses the same bytes.
+        from services.guardrail_digest import select_guardrail_context
+
+        set_mcp_guardrails_selection(select_guardrail_context(scope.get("query_string", b"")))
 
         # RFC-0002 P0-4 (#1277): parse W3C traceparent + baggage into the
         # per-request correlation contextvar at the same auth seam (sibling of

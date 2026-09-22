@@ -91,7 +91,9 @@ def _headers(body: dict, **overrides: str | None) -> dict[bytes, bytes]:
     return {k.encode(): v.encode() for k, v in values.items() if isinstance(v, str)}
 
 
-async def _post(body: dict, headers: dict[bytes, bytes] | None = None) -> _Recorder:
+async def _post(
+    body: dict, headers: dict[bytes, bytes] | None = None, *, query_string: bytes = b""
+) -> _Recorder:
     send = _Recorder()
     await handle_stateless_post(
         send,
@@ -99,6 +101,7 @@ async def _post(body: dict, headers: dict[bytes, bytes] | None = None) -> _Recor
         _headers(body) if headers is None else headers,
         user_id="user-1",
         workspace_id=None,
+        query_string=query_string,
     )
     return send
 
@@ -942,3 +945,440 @@ async def test_explicit_null_arguments_is_treated_as_omitted(monkeypatch):
 
     assert send.status == 200
     assert seen["arguments"] == {}
+
+
+# ------------------------------------------------ guardrail digest (#1621)
+# ``server/discover`` is the only ``instructions`` carrier on this era. The
+# digest of one context's tool guardrails is appended when the URL selects it
+# (``?guardrails=<uuid>``) or an agent-bound key's default binding does; every
+# other case is the base text — and, with nothing selected, byte-identical
+# public / 1 h bytes with zero database access.
+
+
+def _digest_entries(context_id, *summaries: str, total: int | None = None):
+    from uuid import uuid4
+
+    from services.guardrail_digest import DigestEntries, DigestEntry
+
+    items = [
+        DigestEntry(
+            memory_id=str(uuid4()),
+            summary=s,
+            importance=0.8,
+            authored_by_caller=True,
+            source_type="manual",
+        )
+        for s in summaries
+    ]
+    return DigestEntries(
+        context_id=context_id,
+        entries=items,
+        total_available=len(items) if total is None else total,
+        truncated=(total or len(items)) > len(items),
+        tool_triggered_version="0123456789abcdef",
+    )
+
+
+@pytest.fixture
+def digest_source(monkeypatch):
+    """Fake the DB session and the entry source behind ``build_instructions``.
+
+    ``get_db`` yields an ``AsyncMock`` session (so the statement-timeout
+    ``execute`` is a no-op) and ``fetch_entries`` returns whatever the test
+    installs; the spy records every ``get_db`` call.
+    """
+    from unittest.mock import AsyncMock
+
+    import db.base as db_base
+    import services.guardrail_digest as digest_mod
+
+    state = SimpleNamespace(entries=None, db_calls=0, fetch_kwargs=[], raise_with=None, sleep=0.0)
+
+    async def fake_get_db():
+        state.db_calls += 1
+        yield AsyncMock()
+
+    async def fake_fetch_entries(db, **kwargs):
+        import asyncio
+
+        state.fetch_kwargs.append(kwargs)
+        if state.sleep:
+            await asyncio.sleep(state.sleep)
+        if state.raise_with is not None:
+            raise state.raise_with
+        return state.entries
+
+    monkeypatch.setattr(db_base, "get_db", fake_get_db)
+    monkeypatch.setattr(digest_mod, "fetch_entries", fake_fetch_entries)
+    return state
+
+
+@pytest.fixture
+def agent_scope():
+    from uuid import uuid4
+
+    from auth.agent_scope import AgentScope, set_agent_scope
+
+    set_agent_scope(None)
+
+    def _set(*, workspace_id=None):
+        scope = AgentScope(agent_id=uuid4(), enforcement_mode="enforce", workspace_id=workspace_id)
+        set_agent_scope(scope)
+        return scope
+
+    yield _set
+    set_agent_scope(None)
+
+
+@pytest.fixture(autouse=True)
+def _no_ambient_agent_scope():
+    from auth.agent_scope import set_agent_scope
+
+    set_agent_scope(None)
+    yield
+    set_agent_scope(None)
+
+
+@pytest.mark.asyncio
+async def test_discover_without_selection_is_the_base_text_public_one_hour_and_db_free(
+    digest_source,
+):
+    from mcp_server.transport import DISCOVER_TTL_MS, SERVER_INSTRUCTIONS_BASE
+
+    send = await _post(_request("server/discover"))
+
+    result = send.body["result"]
+    assert result["instructions"] == SERVER_INSTRUCTIONS_BASE
+    assert result["cacheScope"] == "public"
+    assert result["ttlMs"] == DISCOVER_TTL_MS
+    assert digest_source.db_calls == 0
+    assert digest_source.fetch_kwargs == []
+
+
+@pytest.mark.asyncio
+async def test_discover_with_a_selected_context_carries_a_private_digest(digest_source):
+    from uuid import uuid4
+
+    from mcp_server.transport import SERVER_INSTRUCTIONS_BASE, TOOLS_LIST_TTL_MS
+    from services.guardrail_digest import digest_header
+
+    ctx = uuid4()
+    digest_source.entries = _digest_entries(ctx, "never force-push a shared branch")
+    qs = f"guardrails={ctx}".encode()
+
+    first = await _post(_request("server/discover"), query_string=qs)
+    second = await _post(_request("server/discover"), query_string=qs)
+
+    result = first.body["result"]
+    assert result["instructions"].startswith(SERVER_INSTRUCTIONS_BASE + "\n\n" + digest_header(ctx))
+    assert "never force-push a shared branch" in result["instructions"]
+    assert result["cacheScope"] == "private"
+    assert result["ttlMs"] == TOOLS_LIST_TTL_MS <= 300_000
+    # Same caller, same URL → byte-identical.
+    assert second.body["result"] == result
+    # The URL's context reached the entry source with the pure key scope.
+    assert digest_source.fetch_kwargs[0]["context_id"] == ctx
+    assert digest_source.fetch_kwargs[0]["key_workspace_id"] is None
+    assert digest_source.db_calls == 2
+
+
+@pytest.mark.asyncio
+async def test_digest_suffix_follows_the_urls_tool_profile(digest_source):
+    from uuid import uuid4
+
+    ctx = uuid4()
+    digest_source.entries = _digest_entries(ctx, "a", total=4)
+
+    full = await _post(_request("server/discover"), query_string=f"guardrails={ctx}".encode())
+    core = await _post(
+        _request("server/discover"),
+        query_string=f"guardrails={ctx}&profile=core".encode(),
+    )
+
+    assert full.body["result"]["instructions"].endswith("(+3 more: load_guardrails(context_id))")
+    assert core.body["result"]["instructions"].endswith("(+3 more: get_context_info(context_id))")
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("value", ["off", "OFF", "%20off"])
+async def test_guardrails_off_is_the_base_text_with_private_hints_and_no_db(digest_source, value):
+    from mcp_server.transport import SERVER_INSTRUCTIONS_BASE, TOOLS_LIST_TTL_MS
+
+    send = await _post(_request("server/discover"), query_string=f"guardrails={value}".encode())
+
+    result = send.body["result"]
+    assert result["instructions"] == SERVER_INSTRUCTIONS_BASE
+    # A selection was attempted: the result may vary by URL → never public.
+    assert result["cacheScope"] == "private"
+    assert result["ttlMs"] == TOOLS_LIST_TTL_MS
+    assert digest_source.db_calls == 0
+
+
+@pytest.mark.asyncio
+async def test_guardrails_typo_is_ignored_logged_without_its_bytes_and_private(
+    digest_source, caplog
+):
+    from mcp_server.transport import SERVER_INSTRUCTIONS_BASE
+
+    with caplog.at_level("INFO", logger="mcp_server.transport"):
+        send = await _post(
+            _request("server/discover"),
+            query_string=b"guardrails=kagura_not_a_uuid_value",
+        )
+
+    result = send.body["result"]
+    assert result["instructions"] == SERVER_INSTRUCTIONS_BASE
+    assert result["cacheScope"] == "private"
+    assert digest_source.db_calls == 0
+    assert "mcp_guardrails_param_ignored" in caplog.text
+    assert "parsed=False" in caplog.text
+    assert "kagura_not_a_uuid_value" not in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_denied_or_unknown_context_gives_the_same_bytes_as_no_selection(
+    digest_source,
+):
+    """``fetch_entries`` returns ``None`` on every deny (unknown, other
+    workspace, private non-creator, not a member) and an empty set for an
+    external-tier context: both serve exactly the no-selection ``instructions``
+    — no error, no signal — but the hints stay private (attempted)."""
+    from uuid import uuid4
+
+    from mcp_server.transport import SERVER_INSTRUCTIONS_BASE
+
+    ctx = uuid4()
+    plain = await _post(_request("server/discover"))
+
+    digest_source.entries = None
+    denied = await _post(_request("server/discover"), query_string=f"guardrails={ctx}".encode())
+    digest_source.entries = _digest_entries(ctx)  # external tier / nothing marked
+    empty = await _post(_request("server/discover"), query_string=f"guardrails={ctx}".encode())
+
+    for send in (denied, empty):
+        assert send.status == 200
+        assert send.body["result"]["instructions"] == plain.body["result"]["instructions"]
+        assert send.body["result"]["instructions"] == SERVER_INSTRUCTIONS_BASE
+        assert send.body["result"]["cacheScope"] == "private"
+
+
+@pytest.mark.asyncio
+async def test_agent_default_binding_selects_the_digest_without_the_parameter(
+    digest_source, agent_scope, monkeypatch
+):
+    from uuid import uuid4
+
+    from mcp_server.transport import SERVER_INSTRUCTIONS_BASE
+    from services.agent_binding_service import AgentBindingService
+
+    ctx = uuid4()
+    scope = agent_scope()
+    seen: dict = {}
+
+    async def fake_resolve(self, agent_id):
+        seen["agent_id"] = agent_id
+        return SimpleNamespace(context_id=ctx), "default"
+
+    monkeypatch.setattr(AgentBindingService, "resolve_default_binding", fake_resolve)
+    digest_source.entries = _digest_entries(ctx, "bound lesson")
+
+    send = await _post(_request("server/discover"))
+
+    result = send.body["result"]
+    assert "bound lesson" in result["instructions"]
+    assert result["cacheScope"] == "private"
+    assert seen["agent_id"] == scope.agent_id
+    assert digest_source.fetch_kwargs[0]["context_id"] == ctx
+
+    # ... and the same key with ``?guardrails=off`` gets the base text, no DB.
+    digest_source.db_calls = 0
+    off = await _post(_request("server/discover"), query_string=b"guardrails=off")
+    assert off.body["result"]["instructions"] == SERVER_INSTRUCTIONS_BASE
+    assert off.body["result"]["cacheScope"] == "private"
+    assert digest_source.db_calls == 0
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("outcome", ["none", "ambiguous"])
+async def test_agent_without_a_default_binding_gets_the_base_text_privately(
+    digest_source, agent_scope, monkeypatch, outcome
+):
+    from mcp_server.transport import SERVER_INSTRUCTIONS_BASE
+    from services.agent_binding_service import AgentBindingService
+
+    agent_scope()
+
+    async def fake_resolve(self, agent_id):
+        return None, outcome
+
+    monkeypatch.setattr(AgentBindingService, "resolve_default_binding", fake_resolve)
+    digest_source.entries = _digest_entries(None, "must not appear")
+
+    send = await _post(_request("server/discover"))
+
+    assert send.body["result"]["instructions"] == SERVER_INSTRUCTIONS_BASE
+    assert send.body["result"]["cacheScope"] == "private"
+    assert digest_source.fetch_kwargs == []  # no context → no read, no oracle
+
+
+@pytest.mark.asyncio
+async def test_resolver_deny_for_an_agent_credential_is_fail_open_and_audited_by_operation(
+    agent_scope, monkeypatch
+):
+    """The real entry source runs here (only the DB session and the resolver
+    are faked): a deny is ``None`` → base text, request 200, private hints.
+    The resolver is called with ``operation="load_guardrails"`` — the MAE
+    vocabulary value under which ``PermissionService`` persists the deny row
+    for agent credentials (the row itself is asserted against the DB in
+    ``tests/integration/test_guardrail_digest_repo.py``)."""
+    from unittest.mock import AsyncMock
+    from uuid import uuid4
+
+    import db.base as db_base
+    from mcp_server.transport import SERVER_INSTRUCTIONS_BASE
+    from services.permission_service import PermissionService
+    from utils.exceptions import NotFoundException
+
+    agent_scope(workspace_id=uuid4())
+    ctx = uuid4()
+    seen: dict = {}
+
+    async def fake_get_db():
+        yield AsyncMock()
+
+    async def deny(self, **kwargs):
+        seen.update(kwargs)
+        raise NotFoundException("Context", str(kwargs["context_id"]))
+
+    monkeypatch.setattr(db_base, "get_db", fake_get_db)
+    monkeypatch.setattr(PermissionService, "resolve_context_for_workspace_read", deny)
+
+    send = await _post(_request("server/discover"), query_string=f"guardrails={ctx}".encode())
+
+    assert send.status == 200
+    assert send.body["result"]["instructions"] == SERVER_INSTRUCTIONS_BASE
+    assert send.body["result"]["cacheScope"] == "private"
+    assert seen["operation"] == "load_guardrails"
+    assert seen["context_id"] == ctx
+    assert seen["required_role"] == "viewer"
+
+
+@pytest.mark.asyncio
+async def test_entry_source_failure_serves_the_base_text_and_succeeds(digest_source, caplog):
+    from uuid import uuid4
+
+    from mcp_server.transport import SERVER_INSTRUCTIONS_BASE
+
+    digest_source.raise_with = RuntimeError("postgresql://user:hunter2@db/prod")
+
+    with caplog.at_level("WARNING", logger="mcp_server.transport"):
+        send = await _post(
+            _request("server/discover"), query_string=f"guardrails={uuid4()}".encode()
+        )
+
+    assert send.status == 200
+    assert send.body["result"]["instructions"] == SERVER_INSTRUCTIONS_BASE
+    assert "mcp_guardrail_digest_failed" in caplog.text
+    assert "reason=RuntimeError" in caplog.text
+    assert "hunter2" not in caplog.text and "hunter2" not in json.dumps(send.body)
+
+
+@pytest.mark.asyncio
+async def test_entry_source_past_the_budget_serves_the_base_text(
+    digest_source, monkeypatch, caplog
+):
+    from uuid import uuid4
+
+    from config.settings import get_settings
+    from mcp_server.transport import SERVER_INSTRUCTIONS_BASE
+
+    monkeypatch.setattr(get_settings(), "mcp_guardrail_digest_timeout_ms", 10)
+    digest_source.sleep = 0.5
+    digest_source.entries = _digest_entries(uuid4(), "too late")
+
+    with caplog.at_level("WARNING", logger="mcp_server.transport"):
+        send = await _post(
+            _request("server/discover"), query_string=f"guardrails={uuid4()}".encode()
+        )
+
+    assert send.status == 200
+    assert send.body["result"]["instructions"] == SERVER_INSTRUCTIONS_BASE
+    assert "reason=TimeoutError" in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_feature_flag_off_serves_the_base_text_without_touching_the_db(
+    digest_source, monkeypatch
+):
+    from uuid import uuid4
+
+    from config.settings import get_settings
+    from mcp_server.transport import SERVER_INSTRUCTIONS_BASE
+
+    monkeypatch.setattr(get_settings(), "mcp_guardrail_digest_enabled", False)
+    digest_source.entries = _digest_entries(uuid4(), "flag is off")
+
+    send = await _post(_request("server/discover"), query_string=f"guardrails={uuid4()}".encode())
+
+    assert send.body["result"]["instructions"] == SERVER_INSTRUCTIONS_BASE
+    assert send.body["result"]["cacheScope"] == "private"  # still attempted
+    assert digest_source.db_calls == 0
+
+
+@pytest.mark.asyncio
+async def test_client_info_never_changes_the_instructions_bytes(digest_source):
+    from uuid import uuid4
+
+    ctx = uuid4()
+    digest_source.entries = _digest_entries(ctx, "same for everyone")
+    qs = f"guardrails={ctx}".encode()
+
+    a = _request("server/discover")
+    b = _request("server/discover")
+    b["params"]["_meta"][INFO_KEY] = {"name": "openai-mcp", "version": "9.9"}
+    bare = {"jsonrpc": "2.0", "id": 1, "method": "server/discover"}
+
+    sends = [
+        await _post(a, query_string=qs),
+        await _post(b, query_string=qs),
+        await _post(bare, {}, query_string=qs),
+    ]
+    texts = {s.body["result"]["instructions"] for s in sends}
+    assert len(texts) == 1
+
+
+@pytest.mark.asyncio
+async def test_asgi_app_stores_the_selection_and_passes_the_query_string(asgi, monkeypatch):
+    """The era split hands the raw query string to the stateless handler and
+    the ``?guardrails=`` selection is parsed once per request into the
+    contextvar the ``get_context_info`` handler reads."""
+    from mcp_server.tools import _helpers
+
+    seen: dict = {}
+    original = _helpers.set_mcp_guardrails_selection
+
+    def spy(selection):
+        seen["selection"] = selection
+        original(selection)
+
+    monkeypatch.setattr(_helpers, "set_mcp_guardrails_selection", spy)
+
+    body = _request("server/discover")
+    raw = json.dumps(body).encode()
+
+    async def receive():
+        return {"type": "http.request", "body": raw, "more_body": False}
+
+    send = _Recorder()
+    scope = {
+        "type": "http",
+        "method": "POST",
+        "path": "/mcp/",
+        "query_string": b"guardrails=off",
+        "headers": list(_headers(body).items()),
+    }
+    await mcp_asgi_app(scope, receive, send)
+
+    assert send.status == 200
+    assert seen["selection"].mode == "off"
+    assert send.body["result"]["cacheScope"] == "private"
