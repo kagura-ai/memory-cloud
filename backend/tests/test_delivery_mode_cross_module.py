@@ -60,3 +60,14 @@ def test_mcp_load_pinned_tool_is_registered_and_read_only():
     assert load_pinned.get("readOnly") is True
     # Read-only + deterministic-every-turn ⇒ must be rate-limit exempt.
     assert "load_pinned" in _RATE_LIMIT_EXEMPT_TOOLS
+
+
+def test_mcp_load_guardrails_tool_is_registered_and_read_only():
+    """The guardrail-set read is load_pinned's twin: read-only, deterministic,
+    called by a session-start hook — so it must be rate-limit exempt too."""
+    from mcp_server.tools import _RATE_LIMIT_EXEMPT_TOOLS
+    from mcp_server.tools._definitions import get_tool_definitions
+
+    load_guardrails = _tool(get_tool_definitions(), "load_guardrails")
+    assert load_guardrails.get("readOnly") is True
+    assert "load_guardrails" in _RATE_LIMIT_EXEMPT_TOOLS

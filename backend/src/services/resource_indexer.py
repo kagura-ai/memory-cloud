@@ -543,7 +543,10 @@ class ResourceIndexer:
     # #896 rule: details keys that drive generated columns / platform lanes
     # must never be worker-supplied. 'location' (#1331) drives
     # location_lat/lon — connector-ingested coordinates are stripped.
-    _LINEAGE_RESERVED_KEYS = frozenset({"external_blob", "trigger", "location"})
+    # 'tool_trigger' marks a tool guardrail that client hooks inject into the
+    # model's context: connector-ingested content must never become one, even
+    # if the trusted-tier read gate were ever bypassed.
+    _LINEAGE_RESERVED_KEYS = frozenset({"external_blob", "trigger", "location", "tool_trigger"})
 
     def _extract_worker_lineage(self, event: ResourceEvent) -> tuple[dict[str, Any], str | None]:
         """Extract ai-worker lineage (#896) from event_metadata.

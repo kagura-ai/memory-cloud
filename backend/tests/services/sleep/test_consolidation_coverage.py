@@ -732,6 +732,74 @@ class TestFetchWorkingMemories:
         assert pinned.id not in ids
 
     @pytest.mark.asyncio
+    async def test_excludes_tool_triggered_working_rows(self, db_session):
+        """Tool guardrails share the pinned exemption: an archived guardrail would
+        silently stop firing in every client hook, so the fetch drops them."""
+        user = f"u-{uuid4()}"
+        plain = _persist_memory(user_id=user, scope="working", details={"other": 1})
+        guardrail = _persist_memory(
+            user_id=user,
+            scope="working",
+            details={
+                "tool_trigger": {
+                    "tool": "Bash",
+                    "on": "pre",
+                    "match": "gh pr merge",
+                    "action": "inform",
+                }
+            },
+        )
+        db_session.add_all([plain, guardrail])
+        await db_session.flush()
+
+        with patch("services.sleep.consolidation.MemoryRepository"):
+            phase = ConsolidationPhase(db_session, AsyncMock())
+        rows = await phase._fetch_working_memories(user, None, None)
+
+        ids = {r.id for r in rows}
+        assert plain.id in ids
+        assert guardrail.id not in ids
+
+    @pytest.mark.asyncio
+    async def test_archive_stamp_refuses_a_row_marked_guardrail_since_the_fetch(self, db_session):
+        """The archive UPDATE carries ``not_tool_triggered_predicate()`` beside
+        the pinned one, so a row marked between the fetch and the stamp is left
+        alone (0 rows stamped)."""
+        from sqlalchemy import and_
+
+        from models.memory import not_pinned_predicate, not_tool_triggered_predicate
+        from repositories.memory import MemoryRepository
+
+        user = f"u-{uuid4()}"
+        guardrail = _persist_memory(
+            user_id=user,
+            scope="working",
+            details={
+                "tool_trigger": {
+                    "tool": "Bash",
+                    "on": "pre",
+                    "match": "gh pr merge",
+                    "action": "inform",
+                }
+            },
+        )
+        plain = _persist_memory(user_id=user, scope="working")
+        db_session.add_all([guardrail, plain])
+        await db_session.flush()
+
+        repo = MemoryRepository(db_session)
+        only_if = and_(not_pinned_predicate(), not_tool_triggered_predicate())
+        assert (
+            await repo.soft_delete(guardrail.id, deleted_by="sleep_consolidation", only_if=only_if)
+            == 0
+        )
+        assert (
+            await repo.soft_delete(plain.id, deleted_by="sleep_consolidation", only_if=only_if) == 1
+        )
+        await db_session.refresh(guardrail)
+        assert guardrail.deleted_at is None
+
+    @pytest.mark.asyncio
     async def test_workspace_filter_applied(self, db_session):
         # workspace_id has no FK → safe to set directly. Covers the workspace
         # ``stmt.where`` branch.

@@ -2,15 +2,15 @@
 
 See [MCP Client Setup](mcp-clients.md) for connecting a client, and [Core Concepts](concepts.md) for the memory model behind these tools.
 
-63 tools across 13 categories. Workspace roles: **Owner** > Admin > Member > **Viewer** (read-only). Context roles: **Owner** > Editor > Viewer. Private contexts are visible only to the creator. Members may be restricted to specific contexts via allowlist.
+64 tools across 13 categories. Workspace roles: **Owner** > Admin > Member > **Viewer** (read-only). Context roles: **Owner** > Editor > Viewer. Private contexts are visible only to the creator. Members may be restricted to specific contexts via allowlist.
 
 ## Tool Profiles
 
-`tools/list` returns all 63 definitions by default. A client that loads every tool schema eagerly pays for the whole list in each session, so the endpoint URL — which the client's local MCP configuration already stores — can ask for fewer:
+`tools/list` returns all 64 definitions by default. A client that loads every tool schema eagerly pays for the whole list in each session, so the endpoint URL — which the client's local MCP configuration already stores — can ask for fewer:
 
 | Endpoint URL | `tools/list` returns | Approx. size |
 |--------------|----------------------|--------------|
-| `/mcp/w/{workspace_id}` (or `?profile=full`) | All 63 tools — the default, unchanged | ≈ 82k chars |
+| `/mcp/w/{workspace_id}` (or `?profile=full`) | All 64 tools — the default, unchanged | ≈ 84k chars |
 | `/mcp/w/{workspace_id}?profile=core` | The 12 core tools: `remember`, `update_memory`, `recall`, `reference`, `recall_upcoming`, `load_pinned`, `forget`, `explore`, `get_context_info`, `list_contexts`, `list_tags`, `feedback` | ≈ 28k chars (about 65% smaller) |
 | `/mcp/w/{workspace_id}?tools=remember,recall,reference` | Exactly the named tools — an explicit allowlist, wins over `profile` | ≈ 14k chars for these three |
 
@@ -36,19 +36,199 @@ Sizes are the compact JSON of the `tools` array, measured at v0.73.0 (the descri
 
 > **Response format.** Every tool returns one JSON text block, serialized as compact UTF-8 — non-ASCII text (e.g. Japanese) arrives as-is, never as `\uXXXX` escapes, because the calling model pays for every character. Fields that are empty on most results are omitted rather than sent as `null` / `[]`: a `recall` result carries `context_summary`, `superseded_by`, `contradicts` and `supersede_candidate` only when they have a value, and `score` is rounded to 4 decimals. Treat an absent key as "none". The authoritative per-tool shape is the `Returns:` line of each tool description (`tools/list`).
 
-## Agent Substrate (7)
+## Agent Substrate (8)
 
 The primitives an autonomous agent loop needs beyond a knowledge store — see [Concepts › Agent Memory Substrate](concepts.md#agent-memory-substrate).
 
 | Tool | Description | Required Role |
 |------|------------|---------------|
 | `load_pinned` | Deterministically load always-load memories (`delivery_mode="always"`) — Goal / Guardrail / policy | Viewer+ |
-| `recall_upcoming` | List upcoming Time Memories (`type="time"`, `delivery_mode="on_trigger"`). Items are `{memory_id, summary, type, trigger}`; `include_details=true` returns the full `details` instead of `trigger` | Viewer+ |
+| `load_guardrails` | Deterministically load a context's guardrail set for a client-side hook — the trusted-tier pinned set plus memories marked with `details.tool_trigger`, each lane capped on its own. See [Tool guardrails](#tool-guardrails) | Viewer+ |
+| `recall_upcoming` | List upcoming Time Memories (`type="time"` — the lane is keyed on the type; the write path never sets `delivery_mode="on_trigger"`). Items are `{memory_id, summary, type, trigger}`; `include_details=true` returns the full `details` instead of `trigger` | Viewer+ |
 | `set_state` | Upsert agent scratch state (key→value, optional TTL; excluded from recall) | Editor+ |
 | `get_state` | Read one state key, or list all live state for a context | Viewer+ |
 | `record_measurement` | Append one numeric observation to a metric's series (HOW-MUCH lane; excluded from recall, untouched by Sleep) | Editor+ |
 | `recall_series` | Read a metric's series bucketed by day/week/month with avg/min/max/sum/count/last | Viewer+ |
 | `feedback` | Record whether a recalled memory was helpful (append-only signal) | Viewer+ |
+
+## Tool guardrails
+
+A **tool guardrail** is a memory that a client-side hook injects into the model's context at the moment a matching tool call happens — before the call as a deny reason, or next to its result. The server owns two things: the `details.tool_trigger` marking, validated on every write, and the deterministic `load_guardrails` read whose result every client caches. **Matching happens only in the client.** The server compiles each pattern once to validate it and never runs it against any input; the read lane returns the pattern as data. This section is the client-neutral contract every adapter (Claude Code hooks, Codex hooks, hookless digests) implements verbatim.
+
+### Marking a memory — `details.tool_trigger`
+
+```json
+"details": {
+  "tool_trigger": {
+    "tool":   "Bash|PowerShell",
+    "on":     "pre",
+    "match":  "gh pr merge\\b.*--delete-branch",
+    "action": "inform"
+  }
+}
+```
+
+| Field | Required | Meaning |
+|---|---|---|
+| `tool` | yes | Regex, **full match** against the tool name the client reports (or one of its documented aliases). ≤ 128 characters. Examples: `Bash|PowerShell`, `mcp__.*__remember`, `Edit|Write`. |
+| `on` | no (default `pre`) | `pre` — before the call; `result` — after it, against the tool's error text or serialized result. |
+| `match` | no | Regex, **unanchored search** over the match subject (below). ≤ 200 characters. An empty string is rejected (it would match everything). |
+| `action` | no (default `inform`) | `inform` — the summary reaches the model next to the tool result; `block` — the call is denied with the summary as the reason. `block` requires `on: "pre"` **and** a `match` that names at least one literal character and cannot match the empty string (a block always names a specific input, never a whole tool — `a*` or `rm?` would deny every call). |
+
+- The key is **orthogonal** to `type` and `delivery_mode` (like `details.location`): any type may carry it, and a guardrail may also be pinned — it then appears in both lists of `load_guardrails`.
+- The server **normalizes** what it stores: defaults are written back, keys are ordered `tool, on, match?, action`, `match` is omitted when not supplied (never stored as `null`). Every consumer therefore sees explicit values and never re-implements defaults.
+- **Unmark** with `"tool_trigger": null` (the key is removed) or by resending `details` without the key. `details` is replaced wholesale on `update_memory` / `PATCH` — resend `tool_trigger` when you update details, or it is dropped.
+- Connector-ingested content can never become a guardrail: the ingest path strips `tool_trigger`, and the read lane below excludes connector rows anyway.
+- Sleep maintenance never merges, archives or re-scores a guardrail; `load_guardrails` orders by the importance the author set.
+
+### Who may author a guardrail
+
+A guardrail is injected into every member's agent session without appearing in the chat, so it is held to a stricter rule than an ordinary memory write:
+
+- **Context editor or above** — a workspace owner/admin, a context member with the editor or owner role, or the creator of a private context. The rule applies to adding, changing or removing `tool_trigger`, and to **any** edit or delete of a memory that already carries one (a summary rewrite changes what gets injected). MCP returns `permission_denied` (`required_role: "editor"`), REST returns `403`; `forget` keeps its silent contract — a guardrail the caller may not delete is skipped, whether named by `memory_id` (`deleted_count: 0`) or matched inside a `forget(query=…)` sweep (the sweep deletes its other matches and does not count the guardrail).
+- **A user credential** — an agent-bound API key can never write `tool_trigger` (`tool_trigger_requires_user_credential`, a `validation_error` / `422`): the row records no agent identity, so a guardrail written by an automation that ingested untrusted content would be indistinguishable from a human one.
+- A `tool_trigger` written into a context whose `trust_tier` is not `trusted` is accepted (the memory is valid) but **never served** by `load_guardrails`.
+- `context_is_locked` protects the context from deletion only; it does not freeze its guardrail set.
+- A `supersedes` edge shadows a memory out of `recall` but does **not** affect guardrail delivery — `forget` it or remove `tool_trigger`.
+- `merge_contexts` (owner-only, same workspace) copies `details` verbatim, so guardrails written into an external-tier context become servable once merged into a trusted one.
+
+### Validation — error codes
+
+Bad input is a `validation_error` on MCP and a `422` on REST. The message is `invalid details.tool_trigger: <code>: <sentence>`; the `<code>` token is stable, the sentence may change.
+
+| Code | Rule |
+|---|---|
+| `tool_trigger_not_object` | `details.tool_trigger` must be a JSON object |
+| `tool_trigger_unknown_key` | keys ⊆ `{tool, on, match, action}` |
+| `tool_required`, `tool_not_string` | `tool` is a required non-empty string |
+| `match_not_string`, `match_empty` | `match`, when present, is a non-empty string |
+| `pattern_too_long` | `tool` ≤ 128 characters, `match` ≤ 200 |
+| `on_invalid`, `action_invalid` | `on` ∈ `{pre, result}`, `action` ∈ `{inform, block}` |
+| `block_requires_pre`, `block_requires_match`, `block_match_not_specific`, `block_match_nullable` | `block` needs `on: "pre"` and a `match` with at least one literal character that cannot match the empty string (`a*`, `a?`, `a{0,100}`, `(?:x\|y*)` are rejected; `a+`, `a*b` pass) |
+| `pattern_control_char` | no U+0000–U+001F in a pattern, raw or escaped (`\x00`–`\x1f`, `\u0000`) |
+| `tool_trigger_requires_user_credential` | see "Who may author" |
+| `regex_*` | the safe-regex subset below |
+
+### Safe-regex subset — what the server accepts
+
+`tool` and `match` share one grammar: the subset that compiles and behaves the same in Python `re` and JavaScript `RegExp`, with no nested quantifiers and no ambiguous split between two unbounded runs — the two sources of super-linear backtracking. Everything not listed is rejected. The grammar does not make a backtracking engine linear in every case (a search still retries each start position), which is why the client's 8 KB subject cap and per-pattern budget below stay normative.
+
+```
+pattern     := [ "(?i)" ] alternation          ; the only inline flag, only at offset 0
+alternation := sequence ( "|" sequence )*
+sequence    := ( atom quantifier? )+
+atom        := literal | "." | "^" | "$" | escape | class | group
+group       := "(" alternation ")" | "(?:" alternation ")"
+class       := "[" "^"? class_item+ "]"        ; literals, ranges, \d \D \w \W \s \S and escaped metacharacters
+quantifier  := ( "*" | "+" | "?" | "{n}" | "{n,}" | "{n,m}" ) "?"?    ; lazy suffix allowed
+escape      := "\" ( metachar | d D w W s S b B n t r f v | "x" HH | "u" HHHH )
+metachar    := one of  \ . * + ? ( ) [ ] { } | ^ $ / -
+```
+
+| Rejected | Code |
+|---|---|
+| backreferences `\1`–`\9`, `\k<…>` | `regex_backreference` |
+| lookaround `(?=` `(?!` `(?<=` `(?<!` | `regex_lookaround` |
+| named groups `(?P<n>…)`, `(?<n>…)`, `(?P=n)` | `regex_named_group` |
+| atomic groups `(?>…)`, possessive quantifiers `*+` `++` `?+` `{n,m}+` | `regex_possessive_or_atomic` |
+| inline flags other than one leading `(?i)` — `(?s)`, `(?m)`, `(?x)`, `(?i:…)`, `(?-i)`, a second `(?i)`, `(?#comment)` | `regex_inline_flag` |
+| escapes outside the table — `\A` `\Z` `\z` `\G` `\p{…}` `\0` octal `\Q`, malformed `\x` / `\u`, a lone surrogate `\uD800`–`\uDFFF`, `\b` inside `[…]` | `regex_unknown_escape` |
+| a repetition bound above 100 (`{101}`, `{2,101}`, `{101,}`), or `n > m` | `regex_bound_too_large`, `regex_bound_inverted` |
+| a quantifier on a group whose body contains a quantifier or `|` — `(a+)+`, `(a|ab)*`, `(x(y*))?`, even `(a|b)?` | `regex_nested_quantifier` |
+| stacked quantifiers `a**`, `a+*`, `a{2}{3}`; a quantifier with nothing to repeat `*abc`, `(*)`, `^*`, `\b+` | `regex_stacked_quantifier`, `regex_dangling_quantifier` |
+| two **unbounded** quantifiers (`*`, `+`, `{n,}`) with no mandatory atom between them — `.*.*`, `\w+\s*\w+`, `a+b+`, `(?:a+)b*`; zero-width atoms (`^ $ \b \B`) and nullable atoms (`?`, `{0,m}`) do not count as separators | `regex_adjacent_unbounded` |
+| an unbounded quantifier that is followed by another one must be closed by an atom it cannot match itself — `\w+-\w+=` and `git\s+push\s+--force` are fine (`-` ∉ `\w`, `p` ∉ `\s`), `\w+a\w+=`, `.*a.*b` and `.*-.*=` are not (the first run's end is not forced: > 20 s on an 8 KB subject in Python and JavaScript alike). Groups count by their first characters; `(?i)` folds case | `regex_ambiguous_separator` |
+| more than 4 unbounded quantifiers in one pattern; groups nested more than 8 deep | `regex_too_many_unbounded`, `regex_nesting_too_deep` |
+| set operations or nesting inside `[…]` (`[[a]]`, `[a&&b]`, `[a--b]`, `[a~~b]`, `[a||b]`); an empty class `[]` / `[^]`; an empty group `()` / `(?:)` | `regex_class_unsupported`, `regex_class_empty`, `regex_empty_group` |
+| anything else that is not in the grammar — unbalanced brackets, `a{`, `a{,5}`, a trailing `\`, an empty alternative `a|` | `regex_syntax` |
+
+Accepted, for calibration: `Bash|PowerShell`, `mcp__.*__remember`, `Edit|Write`, `gh pr merge\b.*--delete-branch`, `(?i)git\s+push`, `git (?:pull|merge) --ff-only`, `a{2,100}`, `[^\s]+\.py$`, `git\s+push\s+--force` (a mandatory literal the first `\s+` cannot match separates the two `\s+`), `a+-b+`, `\w+-\w+`, `\d{4}-\d{2}`. Bounded repeats (`{n,m}`, m ≤ 100) are exempt from the adjacency rule — measured harmless even when adjacent and overlapping. `{n,}` is allowed with n ≤ 100 (it is `a{n}a*`). When a second unbounded quantifier is needed, put a character the first one cannot consume right after it (`-`, `/`, `=`, a space after `\S+`); `.*` can be followed by another `.*` only across a literal newline.
+
+### Python / JavaScript matching deltas
+
+The grammar guarantees that a pattern *compiles* on both sides; it does not make every construct *match* identically. Clients match with the JavaScript-equivalent semantics: **ASCII** `\d` `\w` `\s`, `$` only at the very end of the subject, and `.` excluding line terminators. A Python client compiles with `re.ASCII` and matches against the subject with trailing newlines stripped.
+
+| Construct | Python `re` (str) | JavaScript `RegExp` (no `u`) |
+|---|---|---|
+| `abc$` against `"abc\n"` | matches (also before a trailing newline) | does not match |
+| `\d` `\w` `\s` | Unicode-aware (`٣` is a digit) | ASCII only |
+| `.` | everything but `\n` | everything but `\n` `\r` U+2028 U+2029 |
+
+### `load_guardrails` — the deterministic read
+
+MCP `load_guardrails(context_id, cap?)` and the REST twin `POST /api/v1/memory/guardrails` with body `{"context_id": "<uuid>", "cap"?: 1..1000}`. Read-only, rate-limit exempt, plain SQL — no search, no ranking, no embedding, no vector-store call, no Hebbian write.
+
+```json
+{
+  "status": "success",
+  "format": 1,
+  "version": "3f9c1a7b2d4e6f80",
+  "pinned":         [ <item>, ... ],
+  "tool_triggered": [ <item>, ... ],
+  "total_available": 7, "truncated": false, "cap": 50,
+  "pinned_cap": 100, "pinned_total_available": 4, "pinned_truncated": false,
+  "tool_triggered_total_available": 3, "tool_triggered_truncated": false,
+  "context_id": "550e8400-e29b-41d4-a716-446655440000", "context_name": "...",
+  "context_display_name": "...", "context_is_private": false, "context_is_locked": false
+}
+```
+
+`item = {memory_id, summary, context_summary, type, importance, delivery_mode, tool_trigger, source_type, authored_by_caller, created_at, updated_at}` — one shape for both lists.
+
+- **Two lanes, two caps.** `pinned` is the trusted-tier pinned set (`delivery_mode="always"`), bounded by the server's `pinned_load_cap` (default 100) — byte-identical to the agent-bootstrap pinned lane. `tool_triggered` is every memory carrying `details.tool_trigger`, bounded by `cap` (default `guardrail_load_cap`, 50; hard maximum 1000). The request `cap` applies to `tool_triggered` only, so a large pinned set can never crowd guardrails out of a capped response.
+- **Order** inside each list: `importance DESC, created_at ASC, id ASC` — deterministic down to the id, so the cap and every consumer cut the same entries. Consumers keep this order and must not re-sort.
+- **Both lists.** A memory that is both pinned and tool-triggered appears in both lists; its `pinned` entry has `tool_trigger: null`, its `tool_triggered` entry carries the object. Clients dedupe by `memory_id` and inject once.
+- `total_available` = `pinned_total_available + tool_triggered_total_available`; `truncated` = either lane truncated; `cap` = the tool-triggered cap. The per-lane fields say which protection is incomplete. Totals are the context's set sizes before the binding filter.
+- **Trusted only, unconditionally.** Both lanes apply `Context.trust_tier == "trusted"` AND `source_type != "connector"`. There is no parameter to turn this off from any surface.
+- **Layers.** Pinned items carry L1 + L2 (`summary`, `context_summary`); tool-triggered items are L1 only (`context_summary` is `null`). Never `content`, never `details` beyond `tool_trigger`, never tags or scores.
+- **Provenance.** `source_type` and `authored_by_caller` (the caller wrote this row) let a client label a foreign-authored guardrail; `updated_at` falls back to `created_at`.
+- **Guards.** Uniform `context_not_found` on any deny; the per-memory agent-binding filter narrows what an agent credential receives (`version` is computed after it, so it is per-credential). `memory_access_events` rows (`operation: "load_guardrails"`) are written for agent credentials only; human and API-key calls appear in tool-usage logging.
+- **Profiles.** The tool is not in the `core` profile. Hooks call it through `tools/call`, which ignores the profile; a client on `?profile=core` cannot have the *model* call it, so a hookless digest for such clients has to travel through `get_context_info` or the server `instructions`, not through the skill calling the tool.
+
+### Shared cache format (`format: 1`)
+
+Every adapter writes and reads this one file in its own data directory (for example `<data>/guardrails/<context_id>.json`, written through a temporary file and a rename, mode `0600`, after validating `<context_id>` as a UUID):
+
+```json
+{
+  "format": 1,
+  "context_id": "550e8400-e29b-41d4-a716-446655440000",
+  "fetched_at": "2026-09-22T09:00:00Z",
+  "version": "3f9c1a7b2d4e6f80",
+  "pinned": [
+    {"memory_id": "…", "summary": "…", "importance": 0.9}
+  ],
+  "tool_triggered": [
+    {"memory_id": "…", "summary": "…", "importance": 0.8,
+     "tool_trigger": {"tool": "Bash|PowerShell", "on": "pre", "match": "gh pr merge\\b.*--delete-branch", "action": "inform"}}
+  ]
+}
+```
+
+**Shape.** Top-level keys are exactly `format`, `context_id`, `fetched_at`, `version`, `pinned`, `tool_triggered`. Item keys are exactly `memory_id`, `summary`, `importance`, plus `tool_trigger` on tool-triggered items. One optional additive item key is allowed on either list: `authored_by_caller` (boolean, copied from the response so a hook can label a foreign-authored guardrail); a consumer that does not know it ignores it, and its absence means "unknown", not `false`. No `content`, no `context_summary`, no tags. A pinned entry never carries `tool_trigger`; a memory in both lists is stored in both. `fetched_at` is the client clock in UTC (`Z`); the server does not supply it. Items are stored in the server's order.
+
+**Forward compatibility.**
+
+- Additive top-level or item fields never bump `format`. Consumers ignore unknown keys at every level (response, item, `tool_trigger`).
+- A consumer **skips** (never fails on) an item whose `on` or `action` is a value it does not know, whose `tool_trigger` is not an object, or whose pattern its engine cannot compile. That is how a future `on` value ships without breaking installed hooks.
+- `format` bumps only when an existing field changes meaning or is removed. A consumer that sees `format` greater than it knows treats the cache as absent (fail-open).
+- `version` is opaque: equal means the served set is unchanged; compare `memory_id` sets and summaries to name what changed. For the record, the server computes it as `sha256(json.dumps(entries, sort_keys=True, separators=(",", ":"), ensure_ascii=False)).hexdigest()[:16]` over `[memory_id, summary, importance, delivery_mode, tool_trigger]` per served item, pinned list first, after the binding filter.
+
+**Matching (normative, client-side).**
+
+- `tool` is a full match against the reported tool name or a documented alias (Claude Code and Codex report shell calls as `Bash` and MCP tools as `mcp__<server>__<tool>`; Codex's `apply_patch` also matches `Edit` and `Write`).
+- `match` is an unanchored search over the **first 8 KB** of the subject. `pre`: the command for a shell tool, the file path with `\` turned into `/` for a file tool, the compact JSON of the arguments for any other tool. `result`: the tool's error text or serialized result. A call can yield several subjects; a trigger matches when any of them matches.
+- A leading `(?i)` is stripped and mapped to the engine's case-insensitive flag.
+- The 8 KB subject cap and a per-pattern time budget are **normative**: the server bounds the patterns, but only the client bounds the engine. A pattern that exceeds the budget is skipped, and the hook as a whole fails open.
+- Recommended injected form: `Kagura Memory guardrail (<first 8 chars of memory_id>): <summary>`, ≤ 500 characters per memory — a factual statement with provenance, never an imperative.
+
+### Authoring guidance
+
+- One specific tool call per guardrail. Use `Bash|PowerShell` for shell traps; `mcp__.*__remember` for a write-tool trap.
+- Write the `summary` as the safe alternative, stated as a fact — it is the text the model reads.
+- Use `block` only when the call itself does the damage (hangs, destroys, is irreversible). Otherwise `inform`.
+- Test the pattern against the command that actually failed before storing it.
+- Keep a context at 20 or fewer tool guardrails; `load_guardrails` caps the lane at 50 by default.
 
 ## Agent Control Plane (10, preview)
 
@@ -270,7 +450,7 @@ Good: remember(summary="OAuth2 login implementation",  content=<login function>,
 - `working` (the default for a normal write) — a nightly consolidation pass can promote it to `persistent`; `persistence.promotes_via` names the pass this server actually runs (null if none is enabled). That pass will not archive a working memory younger than `persistence.consolidation_archive_min_age_days`, and only one that has never been adopted.
 - `persistent` — outside consolidation's reach. `delivery_mode="always"` pins straight here on write; that is a delivery guarantee, not a stronger durability guarantee than a working-scope write already has.
 
-The age floor is scoped to consolidation and is not a retention SLA: separate near-duplicate merge maintenance can retire an unpinned memory at any age (its tags and edges move to the memory it merged into; `delivery_mode="always"` memories never enter that pass), and `forget()` removes one on demand. The response carries a `persistence` block for the scope you actually got.
+The age floor is scoped to consolidation and is not a retention SLA: separate near-duplicate merge maintenance can retire an unpinned memory at any age (its tags and edges move to the memory it merged into; `delivery_mode="always"` memories and tool guardrails (`details.tool_trigger`) never enter that pass), and `forget()` removes one on demand. The response carries a `persistence` block for the scope you actually got.
 
 **Write lint.** `lint: [{code, hint, subject?}]` appears only when something about the write will hurt future recall — `summary_short`, `summary_long`, `summary_narrative`, `no_tags`, `tag_near_duplicate` (a tag that near-duplicates one already in the context). A near-duplicate is a mechanical variant, a prefix abbreviation (`dev-env` / `dev-environment`) or a typo within two edits — never two tags of the same shape that differ only in the values of their numbers, so a new `issue:#1599`, `v0.73.0` or `session-2026-09-21` is not flagged against other issue, version or date tags written the same way (a different count of numbers — `v0.73` / `v0.73.0`, `session-2026-09` / `session-2026-09-21` — or the same number padded differently — `sprint-07` / `sprint-7` — still goes through the prefix and typo rules). Nor is a compound tag flagged against its own leading segment(s), in either direction: `session-cookie` next to a stored `session`, `cache-layer-redis` next to `cache-layer`, `some-repo#62` or `session-2026-09-11` next to `some-repo` / `session` are a topic and a sub-topic, not two spellings of one tag (segments are split on whitespace, `_`, `-`, `/`, `:` and `#` — not `.`, so `node` / `node.js` still hints — and a partial segment such as `dev-env` / `dev-environment` or `deploy-check` / `deploy-checklist` is still an abbreviation). When several stored tags match, one that folds to exactly the written tag (`session_cookie` for `session-cookie`) is reported ahead of the most-used one. `tag_suggestions` on `recall` uses the same near-duplicate relation but does not skip the compound case — there, a narrower or broader stored tag is the useful answer. A clean write has no `lint` key. It is advisory: the memory is already stored, and acting on a hint means calling `update_memory()`.
 
@@ -278,11 +458,13 @@ The age floor is scoped to consolidation and is not a retention SLA: separate ne
 
 The embedding is generated asynchronously after `remember` returns, so a new memory is not findable via `recall()` for a brief moment.
 
+**Tool guardrails.** When a troubleshooting memory is about one specific tool call, mark it with `details.tool_trigger = {tool, on?, match?, action?}` so client hooks deliver it at that call; the server validates the patterns (a safe regex subset) and the write needs context editor or above. Contract, error codes and the shared cache format: [Tool guardrails](#tool-guardrails).
+
 ### `update_memory`
 
 - **In place (`memory_id`)** keeps the memory ID, graph edges and creation timestamp, and re-embeds only when `summary`, `context_summary` or `content` changed (`re_embedded`). Use it when you hold a `memory_id` from `recall()`.
 - **Upsert (`external_id`)** looks the memory up by `details.resource_id` within the context, for sync workflows with stable external identifiers. Not found → `operation: "created"`. Found → a new memory is written first and the old one soft-deleted, so the response carries a new `memory_id` and `operation: "replaced"`. Requires `summary`, `content` and `type`.
-- `details` is replaced wholesale: resend `location` when you update `details`, or it is dropped.
+- `details` is replaced wholesale: resend `location` and `tool_trigger` when you update `details`, or they are dropped. Adding, changing or removing `tool_trigger` — and any edit of a memory that already carries one — needs context editor or above ([Tool guardrails](#tool-guardrails)).
 - `delivery_mode="always"` pins, `"on_recall"` unpins (the memory stays persistent).
 
 ### `reference`

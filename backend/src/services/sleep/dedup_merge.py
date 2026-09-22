@@ -35,7 +35,7 @@ if TYPE_CHECKING:
     from neural.config import NeuralMemoryConfig
     from services.sleep.reporter import SleepReporter
 
-from sqlalchemy import func, select, update
+from sqlalchemy import func, or_, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from db.qdrant import delete_memory_from_qdrant, search_memories_qdrant
@@ -44,7 +44,9 @@ from models.memory import (
     MEMORY_TYPE_TIME,
     Memory,
     not_pinned_predicate,
+    not_tool_triggered_predicate,
     pinned_predicate,
+    tool_triggered_predicate,
 )
 from repositories.neural_edge import NeuralEdgeRepository
 from services.embedding_service import EmbeddingService
@@ -774,6 +776,10 @@ class DedupMergePhase:
         (``recall_upcoming``, keyed on ``details.trigger``). Two occurrences of a
         recurring window share a summary and embed identically, and merge folds
         only tags — the loser's trigger window would vanish from that lane.
+
+        Tool guardrails (``details.tool_trigger``) are the third deterministic
+        lane (``load_guardrails``): merge folds only tags, so a guardrail loser
+        would silently stop firing in every client hook.
         """
         stmt = (
             select(Memory)
@@ -782,6 +788,8 @@ class DedupMergePhase:
                 Memory.deleted_at.is_(None),
                 # #1523: the shared exemption every automated deleter uses.
                 not_pinned_predicate(),
+                # Tool guardrails: same exemption, the guardrail lane.
+                not_tool_triggered_predicate(),
                 # #1524: time memories are served by their trigger window, not
                 # their summary — a same-summary occurrence is not a duplicate.
                 Memory.type != MEMORY_TYPE_TIME,
@@ -803,16 +811,19 @@ class DedupMergePhase:
         workspace_id: str | None,
         context_id: str | None,
     ) -> int:
-        """Live pinned rows in the run's scope (#1523).
+        """Live pinned or tool-triggered rows in the run's scope (#1523).
 
         Pinned rows are out of the candidate set but still in Qdrant, so they
         compete for the per-memory neighbour slots in ``_find_similar_pairs``.
         The count widens that search by exactly the rows that can crowd it.
+        Tool guardrails leave the candidate set the same way (the fetch above),
+        so they are counted here too; the method keeps its name because the
+        rows it counts are "the exempt rows that still answer Qdrant".
         """
         stmt = select(func.count()).where(
             Memory.user_id == user_id,
             Memory.deleted_at.is_(None),
-            pinned_predicate(),
+            or_(pinned_predicate(), tool_triggered_predicate()),
         )
         if workspace_id:
             stmt = stmt.where(Memory.workspace_id == UUID(workspace_id))
@@ -1478,7 +1489,11 @@ class DedupMergePhase:
         rows = (
             await self.db.execute(
                 select(
-                    Memory.id, pinned_predicate().label("pinned"), Memory.deleted_at, Memory.type
+                    Memory.id,
+                    pinned_predicate().label("pinned"),
+                    tool_triggered_predicate().label("tool_triggered"),
+                    Memory.deleted_at,
+                    Memory.type,
                 )
                 .where(Memory.id.in_([winner.id, loser.id]))
                 .with_for_update()
@@ -1494,6 +1509,8 @@ class DedupMergePhase:
                 reasons.append(f"{label}_deleted")
             elif row.pinned:
                 reasons.append(f"{label}_pinned")
+            elif row.tool_triggered:
+                reasons.append(f"{label}_tool_triggered")
             elif row.type == MEMORY_TYPE_TIME:
                 reasons.append(f"{label}_time")
         if not reasons:

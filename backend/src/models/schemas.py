@@ -411,6 +411,83 @@ class LoadPinnedResponse(BaseModel):
     cap: int
 
 
+class GuardrailItem(TZAwareBaseModel):
+    """One served guardrail-set entry (``load_guardrails``; docs/mcp-tools.md § Tool guardrails).
+
+    One shape for both lists. ``summary`` (L1) is the text a client hook
+    injects; ``context_summary`` (L2) is present on pinned items only and is
+    ``None`` on tool-triggered items — the hook never injects it, and a
+    rate-limit-exempt read with ``cap`` up to 1000 must not ship L2 text no
+    consumer reads. Never L3 ``content``, never ``details`` beyond the
+    normalized ``tool_trigger`` object (``None`` on pinned items). Provenance:
+    ``source_type`` and ``authored_by_caller`` (``row.user_id == caller``, no
+    id exposure) let a client label a foreign-authored guardrail.
+    ``updated_at`` falls back to ``created_at`` (nullable column).
+    """
+
+    memory_id: UUID
+    summary: str
+    context_summary: str | None = None
+    type: str
+    importance: float
+    delivery_mode: str
+    tool_trigger: dict[str, Any] | None = None
+    source_type: str
+    authored_by_caller: bool
+    created_at: datetime
+    updated_at: datetime
+
+
+class LoadGuardrailsRequest(BaseModel):
+    """Request for the deterministic guardrail-set read (``POST /memory/guardrails``).
+
+    ``cap`` bounds the tool-triggered list only (``settings.guardrail_load_cap``
+    default); the pinned list is bounded by ``settings.pinned_load_cap`` so a
+    large pinned set can never crowd guardrails out of a capped response.
+    """
+
+    context_id: str | None = Field(
+        default=None, description="Context UUID whose guardrail set to load"
+    )
+    cap: int | None = Field(
+        default=None,
+        ge=1,
+        le=1000,
+        description="Optional override for the max tool-triggered memories returned (bounded)",
+    )
+
+
+class LoadGuardrailsResponse(BaseModel):
+    """Response for the deterministic guardrail-set read (docs/mcp-tools.md § Tool guardrails).
+
+    Two independently capped lanes: ``pinned`` (``delivery_mode='always'``,
+    trusted tier, ``pinned_load_cap``) and ``tool_triggered``
+    (``details.tool_trigger`` present, trusted tier, ``cap``). A memory that is
+    both appears in both lists (clients dedupe by ``memory_id``). Each list is
+    in the canonical order ``importance DESC, created_at ASC, id ASC``.
+
+    ``total_available`` / ``truncated`` / ``cap`` keep the single top-level
+    meaning (sum / either-lane / the tool-triggered cap); the per-lane fields
+    say which protection is incomplete. ``format`` is the shared cache/payload
+    format version (additive fields never bump it); ``version`` is the
+    per-credential hash of the served entries, opaque to clients.
+    """
+
+    status: str = "success"
+    format: int
+    version: str
+    pinned: list[GuardrailItem]
+    tool_triggered: list[GuardrailItem]
+    total_available: int
+    truncated: bool
+    cap: int
+    pinned_cap: int
+    pinned_total_available: int
+    pinned_truncated: bool
+    tool_triggered_total_available: int
+    tool_triggered_truncated: bool
+
+
 class RelatedTagItem(TZAwareBaseModel):
     """Related tag with count, sample summary, and last-used timestamp.
 

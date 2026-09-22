@@ -1,6 +1,6 @@
 """Tool profiles: the endpoint URL picks which tools ``tools/list`` returns (#1601).
 
-``tools/list`` used to hand all 63 definitions to every client. A client that
+``tools/list`` used to hand all 64 definitions to every client. A client that
 loads schemas eagerly pays for the whole list on every session, so its local
 MCP configuration — the URL it already stores — can now ask for less:
 ``?profile=core`` or ``?tools=remember,recall``.
@@ -81,6 +81,14 @@ def test_core_tools_are_the_documented_set():
         "list_tags",
         "feedback",
     }
+
+
+def test_load_guardrails_stays_out_of_core():
+    """Client hooks call ``load_guardrails`` through ``tools/call`` (a profile
+    is a view and never gates a call); a core client's model has no reason to
+    call it, so it does not pay for the schema on every session."""
+    assert "load_guardrails" in REGISTRY
+    assert "load_guardrails" not in CORE_TOOLS
 
 
 def test_profiles_are_full_and_core():

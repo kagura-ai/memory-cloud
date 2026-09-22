@@ -33,13 +33,14 @@ def test_operation_tuple_is_the_audited_ops():
         "bootstrap",
         "feedback",
         "explore",  # #1401 (appended, never reordered)
+        "load_guardrails",  # tool guardrails (appended, never reordered)
     )
 
 
 def test_check_literals_byte_identical_to_migration():
     assert _check("valid_mae_operation") == (
         "operation IN ('recall', 'reference', 'remember', 'update', 'forget', "
-        "'load_pinned', 'bootstrap', 'feedback', 'explore')"
+        "'load_pinned', 'bootstrap', 'feedback', 'explore', 'load_guardrails')"
     )
     assert _check("valid_mae_outcome") == "outcome IN ('success', 'denied', 'error', 'partial')"
     assert _check("valid_mae_surface") == "surface IN ('mcp', 'rest')"

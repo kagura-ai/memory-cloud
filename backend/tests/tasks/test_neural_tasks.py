@@ -47,6 +47,7 @@ def _make_memory(
     mem.importance = importance
     mem.created_at = utcnow() - timedelta(days=age_days)
     mem.is_pinned = False  # #1523: a bare MagicMock attribute would read as pinned
+    mem.is_tool_triggered = False  # same trap for the tool-guardrail exemption
     return mem
 
 
@@ -280,6 +281,37 @@ class TestConsolidationTask:
         pinned.is_pinned = True
         mock_memory_repo = MagicMock()
         mock_memory_repo.list = AsyncMock(return_value=[pinned])
+        mock_memory_repo.promote_to_persistent = AsyncMock()
+        mock_memory_repo.delete = AsyncMock()
+
+        with (
+            patch("tasks.neural_tasks.get_db", mock_get_db_factory(mock_db)),
+            patch("tasks.neural_tasks.GraphRepository", return_value=mock_graph_repo),
+            patch("tasks.neural_tasks.MemoryRepository", return_value=mock_memory_repo),
+            patch("db.qdrant.delete_memory_from_qdrant", new=AsyncMock()) as mock_qdrant_delete,
+        ):
+            await consolidation_task()
+
+        mock_qdrant_delete.assert_not_called()
+        mock_memory_repo.delete.assert_not_called()
+        mock_memory_repo.promote_to_persistent.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_never_deletes_a_tool_triggered_memory(self):
+        """Tool guardrails share the pinned exemption on the legacy physical
+        delete: a working row carrying details.tool_trigger that otherwise
+        qualifies for deletion is skipped."""
+        mock_db = MagicMock()
+        mock_db.commit = AsyncMock()
+
+        graph = _make_graph()
+        mock_graph_repo = MagicMock()
+        mock_graph_repo.list = AsyncMock(return_value=[graph])
+
+        guardrail = _make_memory(access_count=0, importance=0.0, age_days=45)
+        guardrail.is_tool_triggered = True
+        mock_memory_repo = MagicMock()
+        mock_memory_repo.list = AsyncMock(return_value=[guardrail])
         mock_memory_repo.promote_to_persistent = AsyncMock()
         mock_memory_repo.delete = AsyncMock()
 

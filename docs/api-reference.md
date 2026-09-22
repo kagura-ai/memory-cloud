@@ -432,6 +432,57 @@ Discover related memories through Neural Memory graph traversal using activation
 
 ---
 
+### POST /api/v1/memory/guardrails
+
+Deterministically load a context's guardrail set — the REST twin of the MCP `load_guardrails` tool and `/pinned`'s sibling. The trusted-tier pinned set (`delivery_mode="always"`) plus the memories marked with `details.tool_trigger`, each list ordered `importance DESC, created_at ASC, id ASC` and capped on its own. Plain SQL: no ranking, no rerank. The stored patterns are returned as data and never run on the server. Contract and cache format: [MCP Tools › Tool guardrails](mcp-tools.md#tool-guardrails).
+
+**Request Body:**
+
+```json
+{
+  "context_id": "550e8400-e29b-41d4-a716-446655440000",
+  "cap": 50
+}
+```
+
+`cap` (1–1000, default 50) bounds `tool_triggered` only; the pinned list is bounded by the server's `pinned_load_cap`.
+
+**Response:**
+
+```json
+{
+  "status": "success",
+  "format": 1,
+  "version": "3f9c1a7b2d4e6f80",
+  "pinned": [
+    {
+      "memory_id": "…", "summary": "…", "context_summary": "…", "type": "note",
+      "importance": 0.9, "delivery_mode": "always", "tool_trigger": null,
+      "source_type": "manual", "authored_by_caller": true,
+      "created_at": "2026-09-01T00:00:00Z", "updated_at": "2026-09-01T00:00:00Z"
+    }
+  ],
+  "tool_triggered": [
+    {
+      "memory_id": "…", "summary": "…", "context_summary": null, "type": "troubleshooting",
+      "importance": 0.8, "delivery_mode": "on_recall",
+      "tool_trigger": {"tool": "Bash|PowerShell", "on": "pre", "match": "gh pr merge\\b.*--delete-branch", "action": "inform"},
+      "source_type": "manual", "authored_by_caller": true,
+      "created_at": "2026-09-02T00:00:00Z", "updated_at": "2026-09-02T00:00:00Z"
+    }
+  ],
+  "total_available": 2, "truncated": false, "cap": 50,
+  "pinned_cap": 100, "pinned_total_available": 1, "pinned_truncated": false,
+  "tool_triggered_total_available": 1, "tool_triggered_truncated": false
+}
+```
+
+Errors: `422` for a malformed `context_id` or an invalid `cap`; a context the caller may not read is the uniform `404` `Context not found`.
+
+Writes that add, change or remove `details.tool_trigger` (and any edit or delete of a memory that carries one) need context editor or above: `POST /remember`, `PATCH /{memory_id}` and the MCP write tools return `403` / `permission_denied` otherwise, and `DELETE /forget` skips the guardrail (`deleted_count: 0` by `memory_id`; a `query` sweep leaves it out of its count). Validation failures are `422` with `invalid details.tool_trigger: <code>: …`.
+
+---
+
 ## Context APIs
 
 ### GET /api/v1/contexts
@@ -1219,7 +1270,7 @@ System-admin (`role=admin`) lifecycle API for platform worker app identities (Sl
 
 ## MCP Tools
 
-Kagura Memory Cloud provides 63 MCP tools for AI assistants across 13 categories (Memory, Agent Substrate, Agent Control Plane, Neural Edges, Contexts, Tags, Files / R2, Analyses, Resources, Secrets, Sleep Maintenance, Usage, API-Key Bindings). See [README › MCP Tools](../README.md#mcp-tools) for the full table with required roles. The examples below illustrate the most commonly used tools; every other tool shares the same JSON-RPC call shape.
+Kagura Memory Cloud provides 64 MCP tools for AI assistants across 13 categories (Memory, Agent Substrate, Agent Control Plane, Neural Edges, Contexts, Tags, Files / R2, Analyses, Resources, Secrets, Sleep Maintenance, Usage, API-Key Bindings). See [README › MCP Tools](../README.md#mcp-tools) for the full table with required roles. The examples below illustrate the most commonly used tools; every other tool shares the same JSON-RPC call shape.
 
 ### 1. remember
 
@@ -1327,7 +1378,7 @@ Describe one of your bindings by **exactly one** of `key_id` (integer) or `conte
 
 ### Agent Substrate tools
 
-These tools back the [Agent Memory Substrate](concepts.md#agent-memory-substrate). `load_pinned` and `recall_upcoming` are delivery-mode-aware reads; `set_state` / `get_state` drive the agent state lane; `feedback` records the retrieval signal.
+These tools back the [Agent Memory Substrate](concepts.md#agent-memory-substrate). `load_pinned`, `load_guardrails` and `recall_upcoming` are deterministic delivery reads; `set_state` / `get_state` drive the agent state lane; `feedback` records the retrieval signal.
 
 #### 8. load_pinned
 
@@ -1340,9 +1391,22 @@ Deterministically load a context's always-load memories (`delivery_mode="always"
 }
 ```
 
-#### 9. recall_upcoming
+#### 9. load_guardrails
 
-List forward-looking Time Memories (`type="time"`, `delivery_mode="on_trigger"`) whose scheduled window is upcoming — deadlines, dated follow-ups. A deterministic time query, not semantic search.
+Deterministically load a context's **guardrail set** for a client-side hook: the trusted-tier pinned set plus the memories marked with `details.tool_trigger`, each lane ordered `importance DESC, created_at ASC, id ASC` and capped on its own (`cap` bounds `tool_triggered` only). Read-only, rate-limit exempt, plain SQL. The stored patterns are returned as data — the server validates them on write and never runs them. Full contract, error codes and the shared cache format: [MCP Tools › Tool guardrails](mcp-tools.md#tool-guardrails).
+
+```python
+{
+  "name": "load_guardrails",
+  "arguments": { "context_id": "550e8400-...", "cap": 50 }
+}
+```
+
+Returns `{status, format, version, pinned: [item], tool_triggered: [item], total_available, truncated, cap, pinned_cap, pinned_total_available, pinned_truncated, tool_triggered_total_available, tool_triggered_truncated, context_id, ...}`; `item = {memory_id, summary, context_summary, type, importance, delivery_mode, tool_trigger|null, source_type, authored_by_caller, created_at, updated_at}`.
+
+#### 10. recall_upcoming
+
+List forward-looking Time Memories (`type="time"` — the lane is keyed on the type; the write path never sets `delivery_mode="on_trigger"`) whose scheduled window is upcoming — deadlines, dated follow-ups. A deterministic time query, not semantic search.
 
 ```python
 {
@@ -1353,7 +1417,7 @@ List forward-looking Time Memories (`type="time"`, `delivery_mode="on_trigger"`)
 
 Each item is `{memory_id, summary, type, trigger}`, where `trigger` is the memory's `details.trigger`. Pass `"include_details": true` to get the full `details` object per item instead (it contains the trigger); for a single memory, `reference(memory_id)` is the cheaper way to read it in full.
 
-#### 10. recall_nearby
+#### 11. recall_nearby
 
 List memories near a geographic point (`details.location`), nearest first with `distance_m`. A deterministic spatial query over stored coordinates — the WHERE-axis twin of `recall_upcoming`, not semantic search. Store a location with `remember(details={"location": {"lat": 35.68, "lon": 139.76, "label": "optional"}})` — `lat`/`lon` must be JSON numbers (validated server-side), and any memory type can carry one.
 
@@ -1364,7 +1428,7 @@ List memories near a geographic point (`details.location`), nearest first with `
 }
 ```
 
-#### 11. set_state
+#### 12. set_state
 
 Upsert agent scratch state (excluded from `recall()`). Requires `Editor`.
 
@@ -1380,7 +1444,7 @@ Upsert agent scratch state (excluded from `recall()`). Requires `Editor`.
 }
 ```
 
-#### 12. get_state
+#### 13. get_state
 
 Read one key, or omit `key` to list all live state for the context.
 
@@ -1391,7 +1455,7 @@ Read one key, or omit `key` to list all live state for the context.
 }
 ```
 
-#### 13. feedback
+#### 14. feedback
 
 Record whether a recalled memory was helpful (read-adjacent; any `Viewer` may call). Append-only; **collected but not auto-acted-on** (see [eval gate](eval/retrieval-feedback-and-eval-gate.md)).
 

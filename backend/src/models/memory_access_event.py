@@ -60,6 +60,10 @@ MAE_OPERATIONS: tuple[str, ...] = (
     # #1401: explore is a read surface; appended (never reordered) so its
     # context-resolution deny rows are auditable. CHECK altered in e74_1401.
     "explore",
+    # Tool guardrails: the deterministic load_guardrails read is a behaviour-
+    # establishing surface, so its allows and denies must be auditable.
+    # CHECK altered in e84_1619_tool_guardrails.
+    "load_guardrails",
 )
 MAE_OUTCOMES: tuple[str, ...] = ("success", "denied", "error", "partial")
 MAE_SURFACES: tuple[str, ...] = ("mcp", "rest")

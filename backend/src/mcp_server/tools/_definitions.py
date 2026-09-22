@@ -91,7 +91,7 @@ Returns: {status, memory_id, scope, persistence?: {scope, committed, promotes_vi
                     },
                     "details": {
                         "type": "object",
-                        "description": "Structured details (JSON object): metadata, code locations, related data. Reserved keys: location (see SECURITY), trigger (type='time').",
+                        "description": "Structured details (JSON object): metadata, code locations, related data. Reserved keys: location (see SECURITY), trigger (type='time'), tool_trigger (guardrail; see docs).",
                     },
                     "importance": {
                         "type": "number",
@@ -399,6 +399,28 @@ Returns: {status, memories: [{memory_id, summary, context_summary, type, importa
                     "cap": {
                         "type": "integer",
                         "description": "Max memories returned (1-1000). Omit for the server default.",
+                    },
+                },
+            },
+        },
+        {
+            "name": "load_guardrails",
+            "readOnly": True,
+            "description": """Load a context's guardrail set for a client-side hook: pinned memories (delivery_mode='always') plus memories marked with details.tool_trigger = {tool, on, match?, action}. Deterministic and cheap — no search, no ranking — trusted-tier rows only (connector-ingested memories are never returned). Each list is ordered importance DESC, created_at ASC, id ASC and capped on its own; cap bounds tool_triggered only, so a large pinned set never crowds guardrails out. The server validates tool_trigger patterns on write and never runs them; matching happens in the client hook. Contract and cache format: the 'Tool guardrails' section of the MCP tools docs.
+
+Returns: {status, format, version, pinned: [item], tool_triggered: [item], total_available, truncated, cap, pinned_cap, pinned_total_available, pinned_truncated, tool_triggered_total_available, tool_triggered_truncated, context_id, context_name, context_display_name, context_is_private, context_is_locked}. item = {memory_id, summary, context_summary (pinned only), type, importance, delivery_mode, tool_trigger|null, source_type, authored_by_caller, created_at, updated_at}. A memory that is both pinned and tool-triggered appears in both lists.""",
+            "inputSchema": {
+                "type": "object",
+                "required": ["context_id"],
+                "properties": {
+                    "context_id": {
+                        "type": "string",
+                        "format": "uuid",
+                        "description": "Context UUID from list_contexts(). Do NOT guess or fabricate IDs.",
+                    },
+                    "cap": {
+                        "type": "integer",
+                        "description": "Max tool-triggered memories returned (1-1000). Omit for the server default (50).",
                     },
                 },
             },

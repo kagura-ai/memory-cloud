@@ -29,13 +29,32 @@ from mcp_server.tools._helpers import (
     execute_with_timeout,
 )
 from utils.datetime import to_utc_iso
-from utils.exceptions import NotFoundException, QuotaExceededError
+from utils.exceptions import AuthorizationError, NotFoundException, QuotaExceededError
 
 logger = logging.getLogger(__name__)
 
 # #1228: server-side cap for cross-context recall — MUST stay in sync with
 # the recall inputSchema's context_ids maxItems in _definitions.py.
 MAX_CROSS_CONTEXT_IDS = 20
+
+
+def _guardrail_author_denied(operation: str) -> list[TextContent]:
+    """``permission_denied`` for a tool-guardrail write below context EDITOR.
+
+    Same envelope shape as ``_check_viewer_permission``; the message is uniform
+    (no deny sub-reason — the caller already proved the context exists via the
+    resolution gate, so this adds no enumeration vector).
+    """
+    return _error_response(
+        "permission_denied",
+        f"Cannot {operation}: tool guardrails require context editor or above.",
+        required_role="editor",
+        help=(
+            "A memory carrying details.tool_trigger is injected into every member's "
+            "agent session by client hooks, so only a context editor/owner (or a "
+            "workspace owner/admin) may add, change, remove or delete one."
+        ),
+    )
 
 
 async def handle_remember(
@@ -150,6 +169,15 @@ async def handle_remember(
                 db, user_id, "remember", start_time, 422, args.get("context_id"), workspace_id
             )
             return _error_response("validation_error", str(e))
+        except AuthorizationError:
+            # Tool guardrails: details.tool_trigger needs context EDITOR or
+            # above — membership (already proven by the context resolution
+            # above) is not enough. Uniform message: no deny sub-reason.
+            await db.rollback()
+            await _log_tool_usage(
+                db, user_id, "remember", start_time, 403, args.get("context_id"), workspace_id
+            )
+            return _guardrail_author_denied("mark a memory as a tool guardrail")
         except Exception:
             await db.rollback()
             await _log_tool_usage(
@@ -301,6 +329,14 @@ async def handle_update_memory(
                 db, user_id, "update_memory", start_time, 422, args.get("context_id"), workspace_id
             )
             return _error_response("validation_error", str(e))
+        except AuthorizationError:
+            # Tool guardrails: editing a guardrail row, or adding / removing
+            # details.tool_trigger, needs context EDITOR or above.
+            await db.rollback()
+            await _log_tool_usage(
+                db, user_id, "update_memory", start_time, 403, args.get("context_id"), workspace_id
+            )
+            return _guardrail_author_denied("change a tool guardrail")
         except Exception:
             await db.rollback()
             await _log_tool_usage(
@@ -554,6 +590,112 @@ async def handle_load_pinned(
             )
             return e.to_response()
         except ValueError as e:
+            await _log_tool_usage(
+                db, user_id, "load_pinned", start_time, 422, current_context_id, workspace_id
+            )
+            return _error_response("validation_error", str(e))
+
+    return _error_response("internal_error", "Database session unavailable")
+
+
+def _guardrail_item_payload(item: Any) -> dict[str, Any]:
+    """Project one ``GuardrailItem`` onto the MCP envelope (timestamps as UTC ``Z``)."""
+    return {
+        "memory_id": str(item.memory_id),
+        "summary": item.summary,
+        "context_summary": item.context_summary,
+        "type": item.type,
+        "importance": item.importance,
+        "delivery_mode": item.delivery_mode,
+        "tool_trigger": item.tool_trigger,
+        "source_type": item.source_type,
+        "authored_by_caller": item.authored_by_caller,
+        "created_at": to_utc_iso(item.created_at),
+        "updated_at": to_utc_iso(item.updated_at),
+    }
+
+
+async def handle_load_guardrails(
+    args: dict[str, Any], user_id: str, workspace_id: UUID | None
+) -> list[TextContent]:
+    """Deterministically load a context's guardrail set for a client-side hook.
+
+    ``handle_load_pinned``'s twin: pinned memories (``delivery_mode='always'``)
+    plus memories marked with ``details.tool_trigger``, trusted tier only, each
+    lane ordered ``importance DESC, created_at ASC, id ASC`` and capped on its
+    own. No embeddings, no Hebbian write; the response carries the shared
+    payload ``format`` and the served-set ``version`` (docs/mcp-tools.md §
+    Tool guardrails). The stored patterns are returned as data — never
+    compiled or run here.
+    """
+    if "context_id" not in args:
+        return _error_response("missing_fields", "Missing required field: context_id")
+
+    from db.base import get_db
+    from services.memory_service import MemoryService
+
+    cap = args.get("cap")
+    start_time = time.time()
+    async for db in get_db():
+        current_context_id: UUID | None = None
+        try:
+            current_context_id = _resolve_context_id(args["context_id"])
+            # Read path: uniform context_not_found on any deny (CWE-639),
+            # mirroring handle_load_pinned.
+            current_context = await _resolve_context_for_read(
+                db, user_id, current_context_id, operation="load_guardrails"
+            )
+
+            service = MemoryService(db)
+            result = await execute_with_timeout(
+                service.load_guardrails(
+                    user_id=user_id,
+                    current_context_id=current_context_id,
+                    current_workspace_id=workspace_id,
+                    cap=cap,
+                ),
+                operation_name="load_guardrails",
+            )
+
+            await _log_tool_usage(
+                db, user_id, "load_guardrails", start_time, 200, current_context_id, workspace_id
+            )
+            return [
+                TextContent(
+                    type="text",
+                    text=_dumps(
+                        {
+                            "status": "success",
+                            "format": result.format,
+                            "version": result.version,
+                            "pinned": [_guardrail_item_payload(i) for i in result.pinned],
+                            "tool_triggered": [
+                                _guardrail_item_payload(i) for i in result.tool_triggered
+                            ],
+                            "total_available": result.total_available,
+                            "truncated": result.truncated,
+                            "cap": result.cap,
+                            "pinned_cap": result.pinned_cap,
+                            "pinned_total_available": result.pinned_total_available,
+                            "pinned_truncated": result.pinned_truncated,
+                            "tool_triggered_total_available": (
+                                result.tool_triggered_total_available
+                            ),
+                            "tool_triggered_truncated": result.tool_triggered_truncated,
+                            **_context_response_fields(current_context),
+                        }
+                    ),
+                )
+            ]
+        except _ContextNotFoundError as e:
+            await _log_tool_usage(
+                db, user_id, "load_guardrails", start_time, 404, current_context_id, workspace_id
+            )
+            return e.to_response()
+        except ValueError as e:
+            await _log_tool_usage(
+                db, user_id, "load_guardrails", start_time, 422, current_context_id, workspace_id
+            )
             return _error_response("validation_error", str(e))
 
     return _error_response("internal_error", "Database session unavailable")

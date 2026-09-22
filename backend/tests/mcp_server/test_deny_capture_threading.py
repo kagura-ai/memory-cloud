@@ -68,6 +68,13 @@ CASES = [
     ),
     (
         memory_tools,
+        "handle_load_guardrails",
+        {"context_id": _CTX},
+        "_resolve_context_for_read",
+        "load_guardrails",
+    ),
+    (
+        memory_tools,
         "handle_reference",
         {"memory_id": _MID, "context_id": _CTX},
         "_resolve_context_for_read",

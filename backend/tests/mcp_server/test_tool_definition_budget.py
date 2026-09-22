@@ -234,6 +234,7 @@ ANTI_FABRICATION_PARAMS = [
     ("recall_upcoming", "context_id"),
     ("recall_nearby", "context_id"),
     ("load_pinned", "context_id"),
+    ("load_guardrails", "context_id"),
     ("forget", "memory_id"),
     ("forget", "context_id"),
     ("explore", "memory_id"),

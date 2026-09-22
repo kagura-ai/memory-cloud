@@ -210,7 +210,7 @@ That `"url"` is the **all tools (default)** one. For **core tools only — small
 
 ## List fewer tools
 
-By default `tools/list` returns all 63 tool definitions (≈ 82k characters of JSON). A client that puts every schema into the model's context when a session starts pays for that in each session. To list only what you use, add a query parameter to the endpoint URL your client already stores:
+By default `tools/list` returns all 64 tool definitions (≈ 84k characters of JSON). A client that puts every schema into the model's context when a session starts pays for that in each session. To list only what you use, add a query parameter to the endpoint URL your client already stores:
 
 | URL suffix | `tools/list` returns |
 |---|---|

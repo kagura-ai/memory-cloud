@@ -30,7 +30,7 @@ from sqlalchemy.engine import CursorResult
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from db.qdrant import update_memory_payload_in_qdrant
-from models.memory import Memory, not_pinned_predicate
+from models.memory import Memory, not_pinned_predicate, not_tool_triggered_predicate
 from services.llm_service import LLMService
 from services.sleep.judge_lane import judge_platform_only
 from services.sleep.prompts import (
@@ -141,6 +141,9 @@ class ImportanceReevalPhase:
                         Memory.id == memory_id,
                         Memory.deleted_at.is_(None),
                         not_pinned_predicate(),
+                        # Tool guardrails: load_guardrails orders by the
+                        # importance the author set, so it is never rescored.
+                        not_tool_triggered_predicate(),
                     )
                     .values(importance=smoothed, updated_at=utcnow())
                 )
@@ -218,6 +221,8 @@ class ImportanceReevalPhase:
             # #1523: pinned rows keep the importance their owner set; the
             # deterministic load_pinned() lane orders by it.
             not_pinned_predicate(),
+            # Tool guardrails: same rule for the load_guardrails lane.
+            not_tool_triggered_predicate(),
         )
         if workspace_id:
             stmt = stmt.where(Memory.workspace_id == UUID(workspace_id))
