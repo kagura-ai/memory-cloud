@@ -743,6 +743,45 @@ startup (`plan_tier_features_effective`). Note that the web UI's create buttons
 currently unlock by tier rank (XL); the REST API and MCP tools honour the
 override.
 
+### What a feature entry does at runtime (enforcement modes)
+
+**A feature appearing in the registry is not by itself evidence of a runtime
+gate.** The tier mapping says which tier owns a feature; it does not say that
+anything refuses a tier without it. Each entry therefore also declares an
+*enforcement mode* (`config/plan_tiers.py`, `FEATURE_ENFORCEMENT`):
+
+| Mode | What happens on a tier WITHOUT the feature |
+| --- | --- |
+| `enforced` | A runtime check **refuses** the request (`FEAT-001` / `plan_required` / a raised error). |
+| `degrades` | A runtime check exists, but the request **still succeeds** with reduced behaviour. Nothing is refused. |
+| `advertised` | **No runtime check at all.** The entry exists so the plan pages can list the feature; every tier behaves the same. |
+
+Current modes:
+
+| Feature | Mode | Where |
+| --- | --- | --- |
+| `api_keys` | `advertised` | Nothing checks it — every tier may create API keys. |
+| `oauth` | `advertised` | Nothing checks it — OAuth login and clients work on every tier. |
+| `secret_store` | `advertised` | Nothing checks it, and every tier must keep it (invariant above), so the row can never be false. |
+| `reranking` | `degrades` | Recall still returns results, just unreranked (`reranking_disabled_by_plan_tier` at info). |
+| `team_invitations` | `enforced` | Creating an invitation is refused. |
+| `shared_contexts` | `enforced` | A non-private context visibility is refused. |
+| `public_contexts` | `enforced` | Publishing a context / minting a bound public key is refused. |
+| `memory_analysis` | `enforced` | The analysis run is refused (403). |
+| `managed_embeddings` | `enforced` | The platform-key embedding fallback is refused — **only** where `EMBEDDING_PLATFORM_FALLBACK_REQUIRES_MANAGED_PLAN` is on (default off). |
+| `managed_llm` | `enforced` | Memory Analysis with no BYOK key is refused (`VAL-001`). |
+| `resources` | `enforced` | `setup_resource` / new resource tokens are refused. |
+| `connectors` | `enforced` | `setup_connector` is refused. |
+
+The modes are a property of the **code**, not of a tier, so a
+`PLAN_<KEY>_FEATURES` override does not change them — it only moves which tiers
+carry which feature. `GET /api/v1/workspaces/plans/tiers` serves the map as
+`feature_enforcement` on every tier row, so a UI can hard-disable a control for
+an `enforced` feature and leave `degrades` / `advertised` ones alone rather than
+inventing a gate the backend does not have. `backend/tests/config/test_feature_enforcement.py`
+scans `backend/src` and fails when a declared mode and the real call sites drift
+apart, so adding or removing a gate must update the mode in the same change.
+
 The override changes *which* tiers may create; the numeric caps stay the
 second gate, and several of them are 0 on the lower tiers with no env override
 of their own:
