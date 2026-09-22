@@ -1194,7 +1194,9 @@ def test_adapter_environment_reads_are_allowlisted_with_one_dynamic_read() -> No
             key = node.args[0] if node.args else None
         else:
             continue
-        literal = key.value if isinstance(key, ast.Constant) else None
+        literal = (
+            key.value if isinstance(key, ast.Constant) and isinstance(key.value, str) else None
+        )
         reads.append((node.lineno, literal, _enclosing_function(node)))
     assert reads
     dynamic = [(line, fn) for line, literal, fn in reads if literal is None]
@@ -1238,3 +1240,55 @@ def test_docs_touched_by_this_pr_carry_no_hosted_host(relpath: str) -> None:
     pattern = re.compile(r"://([a-z0-9.-]*" + "kagura" + "-ai" + r"\.com)")
     hosts = {m.group(1) for m in pattern.finditer(text)}
     assert hosts <= {"www." + "kagura" + "-ai.com"}, f"{relpath} names a hosted host: {hosts}"
+
+
+def test_skill_section_sits_between_session_summary_and_smoke_test_and_stays_short() -> None:
+    text = (REPO_ROOT / "plugins/kagura-memory/skills/kagura-memory/SKILL.md").read_text(
+        encoding="utf-8"
+    )
+    heading = "\n## Tool guardrails (hooks)\n"
+    start = text.index(heading)
+    assert text.index("\n## Session Summary\n") < start < text.index("\n## Smoke Test\n")
+    end = text.index("\n## ", start + 1)
+    section = text[start + 1 : end]
+    assert len(section) <= 1500, len(section)
+    sync = text[: start + 1].rstrip().splitlines()[-1]
+    assert sync.startswith("<!-- SYNC:") and "Tool guardrails (plugin hooks)" in sync
+    for needle in (
+        "?guardrails=off",
+        "/hooks",
+        "speed bump, not enforcement",
+        "docs/mcp-tools.md#tool-guardrails",
+        "list_contexts",
+        "explicit yes",
+        "kagura-memory-kagura-memory-cloud",
+    ):
+        assert needle in section, needle
+    assert "```toml" not in section, "no TOML fence: test_codex_config_snippets scans the skill"
+
+
+def test_guide_section_5_points_codex_users_at_the_skill() -> None:
+    text = (REPO_ROOT / "claude-skills/guide.md").read_text(encoding="utf-8")
+    start = text.index("### 5. Tool guardrails (plugin hooks)")
+    section = text[start : text.index("### 6.", start)]
+    assert "Codex" in section and '"Tool guardrails (hooks)"' in section
+    assert "plugins/kagura-memory/hooks/hooks.json" in section
+
+
+def test_getting_started_and_troubleshooting_carry_the_codex_hook_paragraphs() -> None:
+    started = (REPO_ROOT / "docs/getting-started.md").read_text(encoding="utf-8")
+    codex = started[started.index("### Codex CLI") : started.index("## Quick API Test")]
+    for needle in (
+        "**Optional — tool guardrails:**",
+        ".agents/plugins/marketplace.json",
+        "?guardrails=off",
+        "/hooks",
+        "troubleshooting.md#codex-cli--kagura-memory-hooks-never-run",
+    ):
+        assert needle in codex, needle
+    trouble = (REPO_ROOT / "docs/troubleshooting.md").read_text(encoding="utf-8")
+    assert "\n## Codex CLI — kagura-memory hooks never run\n" in trouble
+    section = trouble[trouble.index("## Codex CLI — kagura-memory hooks never run") :]
+    section = section[: section.index("\n## ", 1)]
+    assert "hooks stay idle" in section and "/hooks" in section
+    assert "```toml" not in section

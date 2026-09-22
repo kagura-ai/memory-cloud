@@ -40,6 +40,17 @@ export KAGURA_API_KEY="kagura_{your_api_key}"
 
 `codex mcp add kagura-memory --url "…" --bearer-token-env-var KAGURA_API_KEY` writes the same entry; see [Getting Started → Codex CLI](getting-started.md#codex-cli). Keep the key out of `config.toml`: `bearer_token_env_var` (or `env_http_headers`) is how Codex takes it from the environment.
 
+## Codex CLI — kagura-memory hooks never run
+
+The plugin is installed, but no guardrail ever reaches the model and `/hooks` shows no activity. Each item below is one visible symptom; the session-start notice (a UI warning, not model context) names the one that applies.
+
+1. **Not trusted.** Codex skips plugin-bundled hooks until you review them: open `/hooks`, trust the `kagura-memory@kagura-memory-cloud` entries, restart. Codex prints a startup warning while a review is pending, and asks again after a release that changes `hooks/hooks.json` — the trust hash covers the hook definitions, not the script.
+2. **Python.** The hooks need `python3` on `PATH` outside the project directory: 3.9+ to match, 3.11+ to read the credentials (`tomllib`). Below 3.11 the notice reads `Codex credentials need Python 3.11+; hooks stay idle`.
+3. **No `config.json`.** Without `${CODEX_HOME:-~/.codex}/plugins/data/kagura-memory-*/config.json` every hook is a silent no-op — ask the skill to "turn on Kagura guardrails". A non-UUID `context_id` prints `config.json context_id is missing or invalid; hooks stay idle`.
+4. **Unsupported server entry.** The hooks read the user-level `[mcp_servers.kagura-memory]` only: `url` plus exactly one of `bearer_token_env_var`, `env_http_headers.Authorization`, `http_headers.Authorization`. An OAuth-only entry, an `http_headers_helper`, two Authorization sources, an unset variable or an `http://` URL that is not loopback each print one `mcp_servers.kagura-memory… is missing or invalid; hooks stay idle` notice, and the hooks make no request. A project `.codex/config.toml` is never read.
+5. **Legacy marketplace.** If `/hooks` lists idle hooks whose commands mention `${CLAUDE_PLUGIN_ROOT}`, Codex loaded the repository root through `.claude-plugin/marketplace.json`; install from `.agents/plugins/marketplace.json` instead.
+6. **`server unreachable` at session start.** A cache up to 24 hours old is still used; an older cache is renamed `.stale` and the hooks stay quiet until the server answers again.
+
 ## WSL2 + Claude Code — MCP OAuth callback fails (default NAT networking)
 
 **This is a WSL networking issue, not a Kagura Memory Cloud server bug.** The server-side OAuth path is healthy — the resolved server-side cousin of this report was [#689 / PR #692](https://github.com/kagura-ai/memory-cloud/pull/692) (DCR no longer issues a `client_secret` for public `auth_method="none"` clients), deployed 2026-05-17. The remaining problem is purely the WSL2 NAT network isolation between the WSL listener and the Windows browser.
