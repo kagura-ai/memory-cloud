@@ -28,6 +28,7 @@ from __future__ import annotations
 
 import json
 import uuid
+from datetime import datetime
 from pathlib import Path
 from unittest.mock import AsyncMock, patch
 
@@ -146,10 +147,12 @@ async def env(db_session):
     gone = _mem(uid, ws_a, ctx.id, summary="gone", deleted_at=utcnow())
     db_session.add_all([high, early, late, connector, external, both, gone])
     await db_session.flush()
-    for mem, day in ((early, "01"), (late, "02"), (both, "03")):
+    # ``created_at`` is a naive ``DateTime`` column; asyncpg binds a datetime,
+    # never an ISO string (a str raises DataError at fixture setup).
+    for mem, day in ((early, 1), (late, 2), (both, 3)):
         await db_session.execute(
             text("UPDATE memories SET created_at = :ts WHERE id = :id"),
-            {"ts": f"2026-06-{day}T00:00:00", "id": mem.id},
+            {"ts": datetime(2026, 6, day), "id": mem.id},
         )
 
     agent = Agent(workspace_id=ws_a, name=f"filtered-{uuid.uuid4().hex[:6]}", owner_user_id=uid)
