@@ -1940,7 +1940,6 @@
     "actions": "操作",
     "activeReranker": "（アクティブなリランカー）",
     "toggleEnabled": "有効/無効を切り替え",
-    "openAICannotDisable": "OpenAIは無効にできません",
     "required": "必須",
     "addExternalKey": "外部APIキーを追加",
     "addNewKey": "外部サービス用の新しいAPIキーを追加",
@@ -2239,7 +2238,6 @@
   "externalKeys": {
     "title": "外部APIキー",
     "description": "OpenAI、Anthropic、Google Gemini、セルフホスト、Cohere、Voyageなどのサービス用APIキーを管理",
-    "featureDisabled": "この環境では外部APIキー（BYOK）が有効化されていません。",
     "provisioningDisabled": "この環境では新しいAPIキーの追加が無効化されています。既存のキーの無効化・削除は引き続き可能です。",
     "featureGuide": {
       "title": "外部APIキーとは？",

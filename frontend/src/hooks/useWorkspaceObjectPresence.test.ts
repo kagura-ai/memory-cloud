@@ -1,5 +1,5 @@
 /**
- * Tests for useWorkspaceObjectPresence (#1571).
+ * Tests for useWorkspaceObjectPresence (#1571, externalKeys kind #1616).
  *
  * The Sidebar suite exercises the nav rule with the list APIs mocked; this
  * pins the hook's own contract — tri-state answer, per-workspace cache, no
@@ -36,9 +36,11 @@ const resources = (total: number): ResourceList => ({ resources: [], total });
 async function setup(
   listResources: ReturnType<typeof vi.fn>,
   listConnectors: ReturnType<typeof vi.fn> = vi.fn(),
+  listExternalAPIKeys: ReturnType<typeof vi.fn> = vi.fn(),
 ) {
   vi.doMock("@/lib/api/resources", () => ({ listResources }));
   vi.doMock("@/lib/api/workspace-connectors", () => ({ listConnectors }));
+  vi.doMock("@/lib/api/external-keys", () => ({ listExternalAPIKeys }));
   const { useWorkspaceObjectPresence } =
     await import("./useWorkspaceObjectPresence");
   return useWorkspaceObjectPresence;
@@ -122,6 +124,25 @@ describe("useWorkspaceObjectPresence (#1571)", () => {
     rerender({ workspaceId: "w1", enabled: true });
     expect(seen).toEqual([true]);
     expect(listResources).toHaveBeenCalledTimes(2);
+  });
+
+  it("externalKeys: answers from the owner-only key list (#1616)", async () => {
+    // The External Keys entry stays for a workspace that stored keys before
+    // ENABLE_BYOK was turned off; the list route stays open for the owner.
+    const listExternalAPIKeys = vi
+      .fn()
+      .mockResolvedValueOnce([{ key_name: "OPENAI_API_KEY" }])
+      .mockResolvedValueOnce([]);
+    const usePresence = await setup(vi.fn(), vi.fn(), listExternalAPIKeys);
+
+    const withKey = renderHook(() => usePresence("externalKeys", "w1", true));
+    await waitFor(() => expect(withKey.result.current).toBe(true));
+
+    const without = renderHook(() => usePresence("externalKeys", "w2", true));
+    await waitFor(() => expect(without.result.current).toBe(false));
+    expect(listExternalAPIKeys).toHaveBeenCalledTimes(2);
+    // The probe wants every key, not a provider subset.
+    expect(listExternalAPIKeys).toHaveBeenCalledWith();
   });
 
   it("a failed probe reads null, is not cached, and the next mount retries", async () => {

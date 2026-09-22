@@ -266,7 +266,7 @@ The three toggles that shape a hosted deployment:
 | Variable | Default | When `false` |
 |----------|---------|--------------|
 | `ENABLE_COST_DISPLAY` | `true` | Hides money from workspace users. The workspace cost dashboard disappears (`/workspace/cost` nav entry hidden, the page shows a "not enabled" notice, `GET /workspaces/{id}/cost-aggregation` answers 404). The Memory Analysis "Run cost" KPI, history "Cost" column and pre-flight "Estimated cost" are not rendered, and the analysis payloads carry no cost: REST `cost_estimated_cents` / `cost_actual_cents` / `estimated_cost_cents` are `null` (shape kept), the MCP `get_analysis` / `list_analyses` / `get_active_analysis` / `analyze_context` dry-run dicts omit the keys. `GET /admin/cost-aggregation` and the `/admin/cost` page are **unaffected** — operators still see what the platform spends. |
-| `ENABLE_BYOK` (#1167) | `true` | Closes external-key provisioning (create / update answer 404, the nav entry is hidden) and the key-status probe; also hides the workspace cost dashboard. Both `ENABLE_BYOK` and `ENABLE_COST_DISPLAY` must be `true` for that dashboard to show. Keys stored earlier stay listable and deletable by the workspace owner — including `OPENAI_API_KEY`, which is never "Required" with BYOK off (#1613). |
+| `ENABLE_BYOK` (#1167) | `true` | Closes external-key provisioning (create / update answer 404) and the key-status probe; also hides the workspace cost dashboard. Both `ENABLE_BYOK` and `ENABLE_COST_DISPLAY` must be `true` for that dashboard to show. Keys stored earlier stay listable, toggleable and deletable by the workspace owner — including `OPENAI_API_KEY`, which is never "Required" with BYOK off (#1613). The External Keys nav entry stays for the owner of a workspace that has such keys and is hidden otherwise (#1616). |
 | `ENABLE_PLAN_PAGE` (#1145) | `false` | Keeps the owner Plan page + nav entry hidden (no billing to hand off to on a self-hosted deployment). |
 
 A flat-price hosted deployment typically runs `ENABLE_COST_DISPLAY=false`
@@ -869,8 +869,9 @@ credential comes from is decided per feature:
   (`EMBEDDING_PROVIDER=openai`, or a live context of the workspace on an OpenAI
   embedding model) — see
   [Protected keys](api-reference.md#protected-keys-is_protected-issue-1613).
-  With BYOK off the External Keys page has no nav entry; an owner reaches it
-  at `/workspace/integrations/external-keys`.
+  With BYOK off the External Keys nav entry shows for the owner only while the
+  workspace still stores a key (#1616); the page itself is always reachable at
+  `/workspace/integrations/external-keys`.
 - **Memory Analysis** was strict-BYOK: an enabled workspace OpenAI key had to
   exist, and the labelling calls refused the platform credential. Since
   #1569 the run resolves a *lane* instead (table below).
@@ -921,7 +922,7 @@ must name the model the lane actually runs.
 ### Recipe: hosted deployment with no BYOK at all
 
 ```bash
-ENABLE_BYOK=false                        # no key console, no cost dashboard
+ENABLE_BYOK=false                        # no key provisioning, no cost dashboard
 RESOLVE_STORED_BYOK_KEYS=false           # optional hardening, see below
 MANAGED_LLM_PROVIDER=self_hosted         # or openai / anthropic / gemini + its key
 MANAGED_LLM_MODEL=qwen3:8b
