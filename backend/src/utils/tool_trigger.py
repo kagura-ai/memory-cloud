@@ -17,11 +17,20 @@ parser over an explicit ALLOWLIST grammar (the JS ∩ Python subset), and
 rejects everything the grammar does not enumerate — backreferences,
 lookaround, named/atomic groups, possessive quantifiers, inline flags other
 than a leading ``(?i)``, unknown escapes, bounds above ``QUANTIFIER_MAX``, a
-quantifier on a group that itself contains a quantifier or ``|``, and two
+quantifier on a group that itself contains a quantifier or ``|``, two
 unbounded quantifiers with nothing mandatory between them (``\\w+\\s*\\w+``
 is polynomial in every backtracking engine even though no quantifier is
-nested). ``sre_parse`` is deliberately not used: it accepts Python-only
-syntax we would have to walk and reject anyway, and it is private API.
+nested), and two unbounded quantifiers whose separator the first one can
+consume itself (``\\w+a\\w+=`` and ``.*a.*b`` take > 20 s on an 8 KB subject
+because the first run's end is not forced; ``\\w+-\\w+=`` takes 0.05 s).
+``sre_parse`` is deliberately not used: it accepts Python-only syntax we
+would have to walk and reject anyway, and it is private API.
+
+What the grammar guarantees is the absence of ambiguous splits between
+unbounded runs — the source of super-linear backtracking in a pattern without
+nested quantifiers. It does not make a backtracking engine linear in every
+case (``re.search`` still retries each start position), which is why the
+client's 8 KB subject cap and per-pattern time budget stay normative.
 
 After the grammar passes, ``re.compile(pattern)`` runs once as a belt-and-
 braces check. **No pattern is ever evaluated against an input on the
@@ -106,6 +115,10 @@ TOOL_TRIGGER_ERROR_CODES: dict[str, str] = {
     "regex_adjacent_unbounded": (
         "two unbounded quantifiers (*, +, {n,}) need a mandatory atom between them"
     ),
+    "regex_ambiguous_separator": (
+        "an unbounded quantifier followed by another must be closed by an atom it cannot "
+        "match itself"
+    ),
     "regex_too_many_unbounded": (
         f"at most {MAX_UNBOUNDED_QUANTIFIERS} unbounded quantifiers per pattern"
     ),
@@ -147,6 +160,53 @@ _HEX = frozenset("0123456789abcdefABCDEF")
 _QUANTIFIER_STARTS = frozenset("*+?{")
 _CLASS_SET_OPS = ("&&", "--", "~~", "||")
 
+# The sample alphabet the set-overlap rule (``regex_ambiguous_separator``)
+# reasons over: printable ASCII, the escapable whitespace, a few non-ASCII
+# representatives (a Latin letter, an Arabic-Indic digit, NBSP, LINE
+# SEPARATOR, a kana) — plus, per pattern, every code point the pattern itself
+# names (see ``_alphabet``), so a literal outside this base can still collide
+# with the class next to it. Class membership uses Python ``str`` semantics,
+# a superset of the ASCII-only JavaScript sets: more overlap, never less.
+_BASE_ALPHABET = (
+    frozenset(chr(c) for c in range(0x20, 0x7F)) | frozenset("\t\n\r\f\v") | frozenset("é٣  あ")
+)
+
+
+def _alphabet(pattern: str) -> frozenset[str]:
+    """``_BASE_ALPHABET`` plus the pattern's own literals (raw, ``\\xHH``,
+    ``\\uHHHH``) and their case partners, for ``(?i)``. Hand-scanned — this
+    module never runs a regex, not even on the pattern itself."""
+    chars = set(_BASE_ALPHABET)
+    i, n = 0, len(pattern)
+    while i < n:
+        c = pattern[i]
+        if c == "\\" and i + 1 < n and pattern[i + 1] in "xu":
+            width = 2 if pattern[i + 1] == "x" else 4
+            digits = pattern[i + 2 : i + 2 + width]
+            if len(digits) == width and all(d in _HEX for d in digits):
+                chars.add(chr(int(digits, 16)))
+            i += 2 + width
+            continue
+        chars.add(c)
+        i += 1
+    for c in list(chars):
+        swapped = c.swapcase()
+        if len(swapped) == 1:
+            chars.add(swapped)
+    return frozenset(chars)
+
+
+def _class_escape_set(letter: str, alphabet: frozenset[str]) -> frozenset[str]:
+    """Members of ``\\d \\w \\s`` (and the negated ``\\D \\W \\S``) in ``alphabet``."""
+    base = letter.lower()
+    if base == "d":
+        positive = frozenset(x for x in alphabet if x.isdigit())
+    elif base == "w":
+        positive = frozenset(x for x in alphabet if x.isalnum() or x == "_")
+    else:
+        positive = frozenset(x for x in alphabet if x.isspace())
+    return positive if letter.islower() else alphabet - positive
+
 
 @dataclass
 class _Atom:
@@ -154,11 +214,18 @@ class _Atom:
 
     kind: str  # "atom" | "zero_width" | "group"
     literal: bool = False
+    # The characters this atom can consume first (its first-set): the set of a
+    # literal / class / ``.``, or the union of a group's branch first-sets.
+    # Empty for zero-width atoms.
+    chars: frozenset[str] = frozenset()
     # group-only: how the body behaves at its edges (see _Seq)
     starts_unbounded: bool = False
     ends_unbounded: bool = False
+    end_set: frozenset[str] = frozenset()
     mandatory: bool = False
+    ambiguous: bool = False
     has_quantifier: bool = False
+    has_unbounded: bool = False
     has_alternation: bool = False
 
 
@@ -167,14 +234,22 @@ class _Seq:
     """Summary of one alternative (a ``sequence``) or a whole group body.
 
     ``starts_unbounded`` — before any mandatory atom, an unbounded one occurs.
-    ``ends_unbounded`` — an unbounded run is still open at the end.
+    ``ends_unbounded`` — an unbounded run is still open at the end; ``end_set``
+    is that run's first-set.
     ``mandatory`` — at least one atom must consume input (so the sequence can
     separate two unbounded runs around it).
+    ``first_set`` — every character the sequence can consume first.
+    ``ambiguous`` — an unbounded run was closed by an atom it could itself
+    match, so the run's end position is not forced (``\\w+a``); a later
+    unbounded quantifier in the same sequence is then polynomial.
     """
 
     starts_unbounded: bool = False
     ends_unbounded: bool = False
+    end_set: frozenset[str] = frozenset()
     mandatory: bool = False
+    first_set: frozenset[str] = frozenset()
+    ambiguous: bool = False
     has_quantifier: bool = False
     has_alternation: bool = False
     literals: int = 0
@@ -197,6 +272,8 @@ class _Parser:
         self.i = 0
         self.field = field
         self.unbounded_count = 0
+        self.ci = pattern.startswith("(?i)")
+        self.alphabet = _alphabet(pattern)
 
     # -- helpers ---------------------------------------------------------
 
@@ -207,10 +284,25 @@ class _Parser:
         j = self.i + k
         return self.p[j] if j < self.n else ""
 
+    def _literal_set(self, c: str) -> frozenset[str]:
+        if not self.ci:
+            return frozenset({c})
+        lc = c.lower()
+        return frozenset(x for x in self.alphabet if x.lower() == lc)
+
+    def _range_set(self, lo: str, hi: str) -> frozenset[str]:
+        if not self.ci:
+            return frozenset(x for x in self.alphabet if lo <= x <= hi)
+        return frozenset(
+            x
+            for x in self.alphabet
+            if lo <= x <= hi or lo <= x.lower() <= hi or lo <= x.upper() <= hi
+        )
+
     # -- entry -----------------------------------------------------------
 
     def parse(self) -> _Seq:
-        if self.p.startswith("(?i)"):
+        if self.ci:
             self.i = 4
         body = self._alternation(depth=0)
         if self.i < self.n:
@@ -228,7 +320,10 @@ class _Parser:
         merged = _Seq(
             starts_unbounded=any(b.starts_unbounded for b in branches),
             ends_unbounded=any(b.ends_unbounded for b in branches),
+            end_set=frozenset().union(*(b.end_set for b in branches)),
             mandatory=all(b.mandatory for b in branches),
+            first_set=frozenset().union(*(b.first_set for b in branches)),
+            ambiguous=any(b.ambiguous for b in branches),
             has_quantifier=any(b.has_quantifier for b in branches),
             has_alternation=len(branches) > 1 or any(b.has_alternation for b in branches),
             literals=sum(b.literals for b in branches),
@@ -236,10 +331,34 @@ class _Parser:
         return merged
 
     def _sequence(self, depth: int) -> _Seq:
+        """Walk one alternative, enforcing the backtracking rules.
+
+        Two runs of state ride along the atoms:
+
+        * ``pending_unbounded`` / ``run_set`` — an unbounded quantifier
+          (``*``, ``+``, ``{n,}``) is open and this is its first-set. The next
+          consuming atom closes it (``regex_adjacent_unbounded`` if that atom
+          is itself unbounded; nullable and zero-width atoms do not close).
+        * ``ambiguous`` — a run was closed by an atom the run could itself
+          consume (``\\w+a``, ``.*-``), so the engine has O(n) candidate end
+          positions for it. One such run is linear; a further unbounded
+          quantifier in the same sequence multiplies the candidates
+          (``\\w+a\\w+=`` > 20 s on 8 KB) → ``regex_ambiguous_separator``.
+          A closer disjoint from the run (``\\w+-``, ``\\s+p``) forces the
+          split, and the pair stays linear.
+        """
         seq = _Seq()
         pending_unbounded = False
+        run_set: frozenset[str] = frozenset()
+        ambiguous = False
         seen_mandatory = False
+        first_open = True
         count = 0
+        adjacent = "two unbounded quantifiers need a mandatory atom between them"
+        overlap = (
+            "an unbounded quantifier followed by another must be closed by an atom it "
+            "cannot match itself (\\w+-\\w+ is fine; \\w+a\\w+ and .*a.*b are not)"
+        )
         while self.i < self.n and self._peek() not in "|)":
             if self._peek() in _QUANTIFIER_STARTS:
                 if self._peek() == "{" and not self._looks_like_bounds():
@@ -270,30 +389,39 @@ class _Parser:
 
             if atom.kind == "zero_width":
                 continue
+            if first_open:
+                seq.first_set = seq.first_set | atom.chars
 
-            # A quantified group has a flat body (the nested rule above), so it
-            # behaves as one atom of its quantifier's class.
+            # An unquantified group is walked by its edges: it may open, close
+            # or carry an unbounded run of its own.
             if atom.kind == "group" and quant is None:
-                if atom.starts_unbounded and pending_unbounded:
-                    raise self._fail(
-                        "regex_adjacent_unbounded",
-                        "two unbounded quantifiers need a mandatory atom between them",
-                    )
+                if pending_unbounded and (
+                    atom.starts_unbounded or (not atom.mandatory and atom.has_unbounded)
+                ):
+                    raise self._fail("regex_adjacent_unbounded", adjacent)
+                if atom.mandatory and pending_unbounded and (atom.chars & run_set):
+                    ambiguous = True
+                if atom.has_unbounded and ambiguous:
+                    raise self._fail("regex_ambiguous_separator", overlap)
+                ambiguous = ambiguous or atom.ambiguous
                 if atom.starts_unbounded and not seen_mandatory:
                     seq.starts_unbounded = True
                 if atom.mandatory:
+                    pending_unbounded = False
                     seen_mandatory = True
-                    pending_unbounded = atom.ends_unbounded
-                elif atom.ends_unbounded:
+                    first_open = False
+                if atom.ends_unbounded:
                     pending_unbounded = True
+                    run_set = atom.end_set
                 continue
 
+            # A quantified group has a flat body (the nested rule above), so it
+            # behaves as one atom of its quantifier's class.
             if quant == "unbounded":
                 if pending_unbounded:
-                    raise self._fail(
-                        "regex_adjacent_unbounded",
-                        "two unbounded quantifiers need a mandatory atom between them",
-                    )
+                    raise self._fail("regex_adjacent_unbounded", adjacent)
+                if ambiguous:
+                    raise self._fail("regex_ambiguous_separator", overlap)
                 self.unbounded_count += 1
                 if self.unbounded_count > MAX_UNBOUNDED_QUANTIFIERS:
                     raise self._fail(
@@ -301,18 +429,24 @@ class _Parser:
                         f"at most {MAX_UNBOUNDED_QUANTIFIERS} unbounded quantifiers per pattern",
                     )
                 pending_unbounded = True
+                run_set = atom.chars
                 if not seen_mandatory:
                     seq.starts_unbounded = True
             elif quant == "nullable":
                 pass  # ?, {0,m}: consumes nothing for sure — does not separate
             else:  # None or "mandatory"
-                seen_mandatory = True
+                if pending_unbounded and (atom.chars & run_set):
+                    ambiguous = True
                 pending_unbounded = False
+                seen_mandatory = True
+                first_open = False
 
         if count == 0:
             raise self._fail("regex_syntax", "empty pattern or empty alternative")
         seq.ends_unbounded = pending_unbounded
+        seq.end_set = run_set if pending_unbounded else frozenset()
         seq.mandatory = seen_mandatory
+        seq.ambiguous = ambiguous
         return seq
 
     # -- atoms -----------------------------------------------------------
@@ -330,7 +464,9 @@ class _Parser:
             return _Atom(kind="zero_width")
         if c == ".":
             self.i += 1
-            return _Atom(kind="atom")
+            # Python's ``.`` (everything but ``\n``) is a superset of the
+            # JavaScript one — the conservative side for the overlap rule.
+            return _Atom(kind="atom", chars=self.alphabet - frozenset("\n"))
         if c == ")":
             raise self._fail("regex_syntax", "unbalanced ')'")
         if c == "]":
@@ -338,7 +474,7 @@ class _Parser:
         if c == "}":
             raise self._fail("regex_syntax", "unbalanced '}'")
         self.i += 1
-        return _Atom(kind="atom", literal=True)
+        return _Atom(kind="atom", literal=True, chars=self._literal_set(c))
 
     def _group(self, depth: int) -> _Atom:
         depth += 1
@@ -363,6 +499,7 @@ class _Parser:
                 )
         if self._peek() == ")":
             raise self._fail("regex_empty_group", "an empty group is not allowed")
+        unbounded_before = self.unbounded_count
         body = self._alternation(depth)
         if self._peek() != ")":
             raise self._fail("regex_syntax", "unbalanced '('")
@@ -370,10 +507,14 @@ class _Parser:
         return _Atom(
             kind="group",
             literal=body.literals > 0,
+            chars=body.first_set,
             starts_unbounded=body.starts_unbounded,
             ends_unbounded=body.ends_unbounded,
+            end_set=body.end_set,
             mandatory=body.mandatory,
+            ambiguous=body.ambiguous,
             has_quantifier=body.has_quantifier,
+            has_unbounded=self.unbounded_count > unbounded_before,
             has_alternation=body.has_alternation,
         )
 
@@ -387,6 +528,7 @@ class _Parser:
             raise self._fail("regex_class_empty", "an empty character class is not allowed")
         literal = False
         first = True
+        members: set[str] = set()
         while True:
             c = self._peek()
             if c == "":
@@ -402,7 +544,7 @@ class _Parser:
                 raise self._fail(
                     "regex_class_unsupported", "set operations (&& -- ~~ ||) are not allowed"
                 )
-            lo = self._class_item()
+            lo, lo_set = self._class_item()
             if lo is not None:
                 literal = True
             if self.p.startswith(_CLASS_SET_OPS, self.i):
@@ -414,24 +556,31 @@ class _Parser:
                 if lo is None or (first and c == "-"):
                     raise self._fail("regex_syntax", "a range needs a literal on both ends")
                 self.i += 1
-                hi = self._class_item()
+                hi, _ = self._class_item()
                 if hi is None:
                     raise self._fail("regex_syntax", "a range needs a literal on both ends")
                 if ord(lo) > ord(hi):
                     raise self._fail("regex_syntax", "inverted range in [...]")
+                members |= self._range_set(lo, hi)
+            else:
+                members |= lo_set
             first = False
+        chars = frozenset(members)
+        if negated:
+            chars = self.alphabet - chars
         # A negated class names what NOT to match; it does not make a block
         # pattern specific (``[^x]*`` matches almost everything).
-        return _Atom(kind="atom", literal=literal and not negated)
+        return _Atom(kind="atom", literal=literal and not negated, chars=chars)
 
-    def _class_item(self) -> str | None:
-        """One class member; returns the literal character or None for a class escape."""
+    def _class_item(self) -> tuple[str | None, frozenset[str]]:
+        """One class member → ``(literal_char | None, its character set)``;
+        the literal is None for a class escape such as ``\\d``."""
         c = self._peek()
         if c == "\\":
-            _, resolved = self._escape(in_class=True)
-            return resolved
+            atom, resolved = self._escape(in_class=True)
+            return resolved, atom.chars
         self.i += 1
-        return c
+        return c, self._literal_set(c)
 
     def _escape(self, *, in_class: bool) -> tuple[_Atom, str | None]:
         """Parse one escape → ``(atom, literal_char)``; ``literal_char`` is None
@@ -447,7 +596,7 @@ class _Parser:
             raise self._fail("regex_backreference", "backreferences are not allowed")
         self.i += 1
         if c in _CLASS_ESCAPES:
-            return _Atom(kind="atom"), None
+            return _Atom(kind="atom", chars=_class_escape_set(c, self.alphabet)), None
         if c in _ZERO_WIDTH_ESCAPES:
             if in_class:
                 self.i = start
@@ -455,7 +604,7 @@ class _Parser:
             return _Atom(kind="zero_width"), None
         if c in _LITERAL_ESCAPES:
             resolved = {"n": "\n", "t": "\t", "r": "\r", "f": "\f", "v": "\v"}.get(c, c)
-            return _Atom(kind="atom", literal=True), resolved
+            return _Atom(kind="atom", literal=True, chars=self._literal_set(resolved)), resolved
         if c in ("x", "u"):
             width = 2 if c == "x" else 4
             digits = self.p[self.i : self.i + width]
@@ -472,7 +621,8 @@ class _Parser:
             if 0xD800 <= point <= 0xDFFF:
                 self.i = start
                 raise self._fail("regex_unknown_escape", "lone surrogates are not allowed")
-            return _Atom(kind="atom", literal=True), chr(point)
+            resolved = chr(point)
+            return _Atom(kind="atom", literal=True, chars=self._literal_set(resolved)), resolved
         self.i = start
         raise self._fail("regex_unknown_escape", f"\\{c} is outside the allowed escapes")
 

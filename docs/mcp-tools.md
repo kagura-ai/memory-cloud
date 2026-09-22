@@ -111,7 +111,7 @@ Bad input is a `validation_error` on MCP and a `422` on REST. The message is `in
 
 ### Safe-regex subset — what the server accepts
 
-`tool` and `match` share one grammar: the subset that compiles and behaves the same in Python `re` and JavaScript `RegExp`, and that cannot backtrack super-linearly in either engine. Everything not listed is rejected.
+`tool` and `match` share one grammar: the subset that compiles and behaves the same in Python `re` and JavaScript `RegExp`, with no nested quantifiers and no ambiguous split between two unbounded runs — the two sources of super-linear backtracking. Everything not listed is rejected. The grammar does not make a backtracking engine linear in every case (a search still retries each start position), which is why the client's 8 KB subject cap and per-pattern budget below stay normative.
 
 ```
 pattern     := [ "(?i)" ] alternation          ; the only inline flag, only at offset 0
@@ -137,11 +137,12 @@ metachar    := one of  \ . * + ? ( ) [ ] { } | ^ $ / -
 | a quantifier on a group whose body contains a quantifier or `|` — `(a+)+`, `(a|ab)*`, `(x(y*))?`, even `(a|b)?` | `regex_nested_quantifier` |
 | stacked quantifiers `a**`, `a+*`, `a{2}{3}`; a quantifier with nothing to repeat `*abc`, `(*)`, `^*`, `\b+` | `regex_stacked_quantifier`, `regex_dangling_quantifier` |
 | two **unbounded** quantifiers (`*`, `+`, `{n,}`) with no mandatory atom between them — `.*.*`, `\w+\s*\w+`, `a+b+`, `(?:a+)b*`; zero-width atoms (`^ $ \b \B`) and nullable atoms (`?`, `{0,m}`) do not count as separators | `regex_adjacent_unbounded` |
+| an unbounded quantifier that is followed by another one must be closed by an atom it cannot match itself — `\w+-\w+=` and `git\s+push\s+--force` are fine (`-` ∉ `\w`, `p` ∉ `\s`), `\w+a\w+=`, `.*a.*b` and `.*-.*=` are not (the first run's end is not forced: > 20 s on an 8 KB subject in Python and JavaScript alike). Groups count by their first characters; `(?i)` folds case | `regex_ambiguous_separator` |
 | more than 4 unbounded quantifiers in one pattern; groups nested more than 8 deep | `regex_too_many_unbounded`, `regex_nesting_too_deep` |
 | set operations or nesting inside `[…]` (`[[a]]`, `[a&&b]`, `[a--b]`, `[a~~b]`, `[a||b]`); an empty class `[]` / `[^]`; an empty group `()` / `(?:)` | `regex_class_unsupported`, `regex_class_empty`, `regex_empty_group` |
 | anything else that is not in the grammar — unbalanced brackets, `a{`, `a{,5}`, a trailing `\`, an empty alternative `a|` | `regex_syntax` |
 
-Accepted, for calibration: `Bash|PowerShell`, `mcp__.*__remember`, `Edit|Write`, `gh pr merge\b.*--delete-branch`, `(?i)git\s+push`, `git (?:pull|merge) --ff-only`, `a{2,100}`, `[^\s]+\.py$`, `git\s+push\s+--force` (a mandatory literal separates the two `\s+`), `a+-b+`, `\d{4}-\d{2}`. Bounded repeats (`{n,m}`, m ≤ 100) are exempt from the adjacency rule — measured harmless even when adjacent and overlapping. `{n,}` is allowed with n ≤ 100 (it is `a{n}a*`).
+Accepted, for calibration: `Bash|PowerShell`, `mcp__.*__remember`, `Edit|Write`, `gh pr merge\b.*--delete-branch`, `(?i)git\s+push`, `git (?:pull|merge) --ff-only`, `a{2,100}`, `[^\s]+\.py$`, `git\s+push\s+--force` (a mandatory literal the first `\s+` cannot match separates the two `\s+`), `a+-b+`, `\w+-\w+`, `\d{4}-\d{2}`. Bounded repeats (`{n,m}`, m ≤ 100) are exempt from the adjacency rule — measured harmless even when adjacent and overlapping. `{n,}` is allowed with n ≤ 100 (it is `a{n}a*`). When a second unbounded quantifier is needed, put a character the first one cannot consume right after it (`-`, `/`, `=`, a space after `\S+`); `.*` can be followed by another `.*` only across a literal newline.
 
 ### Python / JavaScript matching deltas
 

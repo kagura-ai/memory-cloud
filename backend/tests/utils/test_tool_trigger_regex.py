@@ -72,6 +72,20 @@ ACCEPTED = [
     "a+b{1,20}c*",
     r"\d{4}-\d{2}",
     r"git\s+push\s+--force",
+    # Forced splits: the closer is disjoint from the run before it, so a second
+    # unbounded quantifier stays linear (see the ambiguous rows in REJECTED).
+    r"\w+-\w+=",
+    "[^-]+-[^-]+=",
+    "(?:ab)+c(?:ab)+d",
+    r"\w+ \w+ \w+ \w+=",
+    r"\w+(?:-\w+)",
+    r"(?:\w+-)\w+",
+    r"(?:\w+)-\w+",
+    r"a.*\nb.*c",  # '.' never matches a newline
+    r"(?i)git\s+push\s+--force",
+    r"(?:\w+a)",  # one ambiguous run alone is linear
+    r"(?:\w+a)b",
+    "[a-]+b[a-]+",
     "[a-]",
     "[-a]",
     "[a-z-]",
@@ -226,6 +240,26 @@ REJECTED = [
     ("(?:a+|x)b*", "regex_adjacent_unbounded"),  # one branch ends unbounded
     ("(?:ab)+(?:cd)*", "regex_adjacent_unbounded"),
     ("a*(?:b*c)", "regex_adjacent_unbounded"),  # group starts unbounded
+    # Ambiguous split: the atom that closes an unbounded run is one the run
+    # could consume itself, and another unbounded quantifier follows. Measured
+    # on an 8 KB subject: ``\w+a\w+=`` > 20 s, ``.*a.*b`` > 20 s, ``.*-.*=``
+    # 19.5 s on "a-a-a…", ``\w+a{1,100}-\w+=`` 2.2 s. The forced-split twins in
+    # ACCEPTED (``\w+-\w+=``, ``[^-]+-[^-]+=``) run in ≤ 0.05 s.
+    (r"\w+a\w+=", "regex_ambiguous_separator"),
+    (r"(\w+)a(\w+)=", "regex_ambiguous_separator"),
+    (".*a.*b", "regex_ambiguous_separator"),
+    (".*-.*=", "regex_ambiguous_separator"),
+    (r"\w+a{1,100}-\w+=", "regex_ambiguous_separator"),  # overlapping bounded closer
+    (r"(?:\w+a)\w+", "regex_ambiguous_separator"),  # ambiguity inside a group
+    (r"\w+(?:a\w+)", "regex_ambiguous_separator"),  # group closes the run, overlapping
+    (r"(?:x\w+)a\w+", "regex_ambiguous_separator"),  # run opened inside a group
+    (r"\w+(?:ab)\w+", "regex_ambiguous_separator"),  # group first-set overlaps
+    (r"\w+(?:-|x\w+)", "regex_ambiguous_separator"),  # one branch overlaps
+    ("[a-z]+b[a-z]+", "regex_ambiguous_separator"),  # range membership
+    ("[^-]+a[^-]+", "regex_ambiguous_separator"),  # negated class membership
+    (r"(?i)A+a\w+", "regex_ambiguous_separator"),  # (?i) folds the literal
+    (r".*a.*", "regex_ambiguous_separator"),  # \u escape resolves to 'a'
+    (r"\S+\.py\s+\S+", "regex_ambiguous_separator"),  # '.' is in \S
     # too many unbounded quantifiers / too deep
     ("a+-b+-c+-d+-e+", "regex_too_many_unbounded"),
     ("(((((((((a)))))))))", "regex_nesting_too_deep"),
