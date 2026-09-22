@@ -151,15 +151,15 @@ Skip saving ephemeral actions such as "ran tests" unless there is a reusable env
 
 ## Tool guardrails (hooks)
 
-The plugin's Codex hooks (`hooks/hooks.json`) deliver memories marked with `details.tool_trigger` at the matching tool call: `inform` adds the memory as context next to the result, `block` denies the call once with the memory as the reason. Matching is local; only session start and a refresh after `remember` / `update_memory` / `forget` call the server. A `block` is a one-time speed bump, not enforcement — Codex permission rules are. Contract: `docs/mcp-tools.md#tool-guardrails`.
+The plugin's Codex hooks (`hooks/hooks.json`) deliver memories marked with `details.tool_trigger` at the matching tool call: `inform` adds the memory as context, `block` denies the call once with the memory as the reason. Matching is local; only session start and a refresh after `remember`/`update_memory`/`forget` call the server. A `block` is a one-time speed bump, not enforcement — Codex permission rules are. Contract: `docs/mcp-tools.md#tool-guardrails`.
 
 When the user asks to turn the guardrails on:
 
 1. Needs the user-level `[mcp_servers.kagura-memory]` with `url` and exactly one of `bearer_token_env_var`, `env_http_headers.Authorization`, `http_headers.Authorization` (no OAuth), and `python3` 3.11+ on `PATH`.
 2. Resolve the context with `list_contexts`; never guess the id.
 3. `ls "${CODEX_HOME:-$HOME/.codex}/plugins/data/"` and pick `kagura-memory-*`; if none, `mkdir -p` `kagura-memory-kagura-memory-cloud` there. Show the exact JSON `{"context_id": "<uuid>", "max_action": "block"}`; write it to `config.json` there only after an explicit yes.
-4. Add `?guardrails=off` to the `url` so the server does not also send a digest.
-5. Tell the user to open `/hooks`, trust the kagura-memory hooks (trust covers the definitions, not the script; Codex asks again only when `hooks.json` changes) and restart Codex.
+4. Add `?guardrails=off` to the `url` (`&guardrails=off` if it already has a query, e.g. `?profile=core`) so the server does not also send a digest.
+5. Tell the user to open `/hooks`, trust the kagura-memory hooks (Codex asks again only when `hooks.json` changes) and restart Codex.
 
 Off: disable the hooks in `/hooks`, or set `"max_action": "inform"` to stop denies. Unsupported: Windows, web, cloud tasks.
 
