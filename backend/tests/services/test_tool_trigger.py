@@ -421,3 +421,75 @@ async def test_forget_of_a_plain_row_skips_the_gate(service, perm):
     result = await _forget(service, memory)
     assert result.deleted_count == 1
     perm.check_context_write.assert_not_awaited()
+
+
+# ------------------------------------------------ forget(query=...) sweep
+
+
+async def _forget_by_query(service, memories):
+    """Run the by-query branch over ``memories`` as the recall hits."""
+    by_id = {m.id: m for m in memories}
+    service.memory_repo.get = AsyncMock(side_effect=lambda mid: by_id.get(mid))
+    hits = []
+    for m in memories:
+        hit = MagicMock()
+        hit.memory_id = m.id
+        hits.append(hit)
+    search = MagicMock()
+    search.results = hits
+    search.degraded = False
+    service.recall = AsyncMock(return_value=search)
+    with (
+        patch("services.memory_service.delete_memory_from_qdrant", new=AsyncMock()),
+        patch("services.memory_service.resolve_collection_name", new=AsyncMock(return_value="c")),
+        patch("repositories.neural_edge.NeuralEdgeRepository") as edge_repo,
+        patch("services.memory_access_event_writer.emit_memory_access_event", new=AsyncMock()),
+    ):
+        edge_repo.return_value.delete_node_edges = AsyncMock(return_value=0)
+        return await service.forget(
+            ForgetRequest(query="gh pr merge", k=10),
+            user_id="test_user",
+            current_context_id=service._mock_context.id,
+        )
+
+
+@pytest.mark.asyncio
+async def test_forget_by_query_skips_guardrail_rows_for_non_editor(service, perm):
+    """A query sweep is held to the same gate as a by-id forget: a member who
+    cannot delete a guardrail one by one cannot sweep it away either. The
+    plain rows in the same sweep are still deleted, and nothing is a 403."""
+    perm.check_context_write.side_effect = AuthorizationError()
+    guardrail = _memory({"tool_trigger": TT})
+    plain = _memory({"x": 1})
+    result = await _forget_by_query(service, [guardrail, plain])
+    assert result.deleted_count == 1
+    assert result.memory_ids == [plain.id]
+    updated = [call.args[0] for call in service.memory_repo.update.await_args_list]
+    assert updated == [plain.id]
+    perm.check_context_write.assert_awaited_once_with("test_user", guardrail.context_id)
+
+
+@pytest.mark.asyncio
+async def test_forget_by_query_deletes_guardrail_rows_for_editor(service, perm):
+    guardrail = _memory({"tool_trigger": TT})
+    plain = _memory({"x": 1})
+    result = await _forget_by_query(service, [guardrail, plain])
+    assert result.deleted_count == 2
+    assert result.memory_ids == [guardrail.id, plain.id]
+    # One role check per guardrail row; plain rows never touch the gate.
+    perm.check_context_write.assert_awaited_once_with("test_user", guardrail.context_id)
+
+
+@pytest.mark.asyncio
+async def test_forget_by_query_rejects_guardrail_rows_for_an_agent_credential(service, perm):
+    set_agent_scope(
+        AgentScope(
+            agent_id=uuid4(),
+            enforcement_mode="enforce",
+            workspace_id=service._mock_context.workspace_id,
+        )
+    )
+    guardrail = _memory({"tool_trigger": TT})
+    result = await _forget_by_query(service, [guardrail])
+    assert result.deleted_count == 0
+    perm.check_context_write.assert_not_awaited()

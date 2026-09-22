@@ -496,6 +496,29 @@ class MemoryService:
             raise ValueError("a tool guardrail write requires a context")
         await PermissionService(self.db).check_context_write(user_id, UUID(str(context_id)))
 
+    async def _may_delete_guardrail(self, user_id: str, memory: Any) -> bool:
+        """``forget``'s guardrail gate, shared by the by-id and by-query branches.
+
+        Deleting a guardrail silently stops it firing in every member's client
+        hook, so it takes context EDITOR or above and a user credential —
+        membership (what ``can_access_memory`` checks) is not enough. Returns
+        False for a guardrail row the caller may not delete; the caller skips
+        that row so ``forget`` keeps its contract (a target the caller may not
+        delete is skipped, never a 403). Plain rows always pass.
+        """
+        if not memory.is_tool_triggered:
+            return True
+        from utils.exceptions import AuthorizationError
+
+        try:
+            await self._require_guardrail_author(user_id, memory.context_id)
+        except (AuthorizationError, ValueError):
+            logger.warning(
+                "forget_guardrail_author_denied", memory_id=str(memory.id), user_id=user_id
+            )
+            return False
+        return True
+
     @staticmethod
     def _reject_context_location(context: dict | None) -> None:
         """Enforce the "coordinates never in ``context``" rule (#1331, spec §4).
@@ -4716,23 +4739,10 @@ class MemoryService:
                     )
                     # Return empty response instead of error for security
                     return ForgetResponse(deleted_count=0, memory_ids=[])
-                # Tool guardrails: deleting a guardrail silently stops it firing
-                # in every member's client hook, so it takes context EDITOR or
-                # above (and a user credential) — membership is not enough.
-                # forget keeps its contract: a target the caller may not delete
-                # is skipped (deleted_count=0), never a 403.
-                if memory.is_tool_triggered:
-                    from utils.exceptions import AuthorizationError
-
-                    try:
-                        await self._require_guardrail_author(user_id, memory.context_id)
-                    except (AuthorizationError, ValueError):
-                        logger.warning(
-                            "forget_guardrail_author_denied",
-                            memory_id=str(request.memory_id),
-                            user_id=user_id,
-                        )
-                        return ForgetResponse(deleted_count=0, memory_ids=[])
+                # Tool guardrails: context EDITOR or above (see
+                # _may_delete_guardrail); a deny is the silent deleted_count=0.
+                if not await self._may_delete_guardrail(user_id, memory):
+                    return ForgetResponse(deleted_count=0, memory_ids=[])
                 # Migration 063: Get workspace_id/context_id from memory directly
                 # CRITICAL: Validate workspace_id/context_id are not NULL (data integrity)
                 if not memory.workspace_id or not memory.context_id:
@@ -4824,6 +4834,11 @@ class MemoryService:
             for memory_response in search_response.results:
                 memory = await self.memory_repo.get(memory_response.memory_id)
                 if memory:
+                    # Tool guardrails: the same author gate as the by-id branch
+                    # — a query sweep must not delete a guardrail a member may
+                    # not delete one by one. Skipped rows are simply not counted.
+                    if not await self._may_delete_guardrail(user_id, memory):
+                        continue
                     memory.deleted_at = utcnow()
                     memory.deleted_by = user_id
                     await self.memory_repo.update(memory.id, memory)

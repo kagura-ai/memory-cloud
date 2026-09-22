@@ -479,7 +479,7 @@ Deterministically load a context's guardrail set — the REST twin of the MCP `l
 
 Errors: `422` for a malformed `context_id` or an invalid `cap`; a context the caller may not read is the uniform `404` `Context not found`.
 
-Writes that add, change or remove `details.tool_trigger` (and any edit or delete of a memory that carries one) need context editor or above: `POST /remember`, `PATCH /{memory_id}` and the MCP write tools return `403` / `permission_denied` otherwise, and `DELETE /forget` reports `deleted_count: 0`. Validation failures are `422` with `invalid details.tool_trigger: <code>: …`.
+Writes that add, change or remove `details.tool_trigger` (and any edit or delete of a memory that carries one) need context editor or above: `POST /remember`, `PATCH /{memory_id}` and the MCP write tools return `403` / `permission_denied` otherwise, and `DELETE /forget` skips the guardrail (`deleted_count: 0` by `memory_id`; a `query` sweep leaves it out of its count). Validation failures are `422` with `invalid details.tool_trigger: <code>: …`.
 
 ---
 
