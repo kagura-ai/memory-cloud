@@ -103,11 +103,16 @@ def upgrade() -> None:
 
 
 def downgrade() -> None:
-    """Drop the index and restore the previous CHECK.
+    """Drop the index and restore the previous CHECK, keeping the audit rows.
 
-    Note: the CHECK swap fails at VALIDATE if any rows with
-    operation='load_guardrails' exist. Delete them first:
-        DELETE FROM memory_access_events WHERE operation = 'load_guardrails';
+    ``memory_access_events`` is append-only, so rows with
+    ``operation='load_guardrails'`` are never deleted here. The previous CHECK
+    is restored ``NOT VALID`` — PostgreSQL enforces a NOT VALID CHECK on every
+    new INSERT / UPDATE, and a downgraded server never writes that operation —
+    and is VALIDATEd only when no such row exists. With rows present the
+    constraint stays ``convalidated = false`` (the rows remain readable and
+    the schema-drift guard compares the *upgraded* schema); re-running the
+    upgrade validates it again.
     """
     with op.get_context().autocommit_block():
         op.execute(sa.text(f"DROP INDEX CONCURRENTLY IF EXISTS {_INDEX_NAME}"))
@@ -118,4 +123,16 @@ def downgrade() -> None:
             f"ADD CONSTRAINT valid_mae_operation CHECK ({_OLD_CHECK}) NOT VALID"
         )
     )
-    op.execute(sa.text("ALTER TABLE memory_access_events VALIDATE CONSTRAINT valid_mae_operation"))
+    leftover = (
+        op.get_bind()
+        .execute(
+            sa.text(
+                "SELECT 1 FROM memory_access_events WHERE operation = 'load_guardrails' LIMIT 1"
+            )
+        )
+        .first()
+    )
+    if leftover is None:
+        op.execute(
+            sa.text("ALTER TABLE memory_access_events VALIDATE CONSTRAINT valid_mae_operation")
+        )
