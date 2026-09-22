@@ -5,9 +5,11 @@ Issue #1 - Core Memory APIs
 """
 
 from typing import Annotated, Any
+from urllib.parse import urlencode
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
+from fastapi.responses import PlainTextResponse
 from pydantic import BaseModel
 from sqlalchemy import func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -37,7 +39,7 @@ from services.agent_binding_service import binding_memory_sql_predicate
 from services.memory_service import MemoryService
 from services.permission_service import PermissionService
 from utils.datetime import to_utc_iso, utcnow
-from utils.exceptions import MemoryCloudException
+from utils.exceptions import MemoryCloudException, NotFoundException
 from utils.logger import get_logger
 
 logger = get_logger(__name__)
@@ -355,6 +357,126 @@ async def load_guardrails(
         )
     except ValueError as e:
         raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=str(e)) from e
+
+
+GUARDRAIL_DIGEST_TARGETS = ("export", "instructions")
+GUARDRAIL_DIGEST_VERSION_HEADER = "X-Kagura-Guardrails-Tool-Triggered-Version"
+
+
+@router.get(
+    "/guardrails/digest",
+    response_class=PlainTextResponse,
+    responses={200: {"content": {"text/markdown": {}, "text/plain": {}}}},
+)
+async def guardrail_digest(
+    user: APIKeyOrSessionUser,
+    db: AsyncSession = Depends(get_db),
+    context_id: str = Query(..., description="Context UUID whose tool guardrails to render"),
+    target: str = Query(
+        "export",
+        description=(
+            "export (default): the AGENTS.md block as text/markdown; "
+            "instructions: the exact MCP server instructions this credential would receive"
+        ),
+    ),
+    profile: str | None = Query(
+        None, description="target=instructions only: the MCP URL's profile value (full | core)"
+    ),
+    tools: str | None = Query(
+        None, description="target=instructions only: the MCP URL's tools allowlist"
+    ),
+) -> PlainTextResponse:
+    """Render a context's tool guardrails for clients without tool hooks (#1621).
+
+    The export target is the block a Codex cloud setup script (or any
+    always-loaded-file recipe) writes into ``AGENTS.md``:
+
+        <!-- kagura-memory:guardrails begin context=<uuid> tool_triggered_version=<hash> -->
+        - (<id8>) <summary>
+        <!-- kagura-memory:guardrails end -->
+
+    The instructions target previews the MCP ``instructions`` string lane (a)
+    would serve this credential for this context — ``profile`` / ``tools``
+    reproduce the URL's tool view so the truncation suffix names the same tool.
+    Same trusted-only read and binding filter as ``load_guardrails``, same
+    uniform ``404`` on a denied, unknown or other-workspace context; an
+    external-tier or unmarked context is a ``200`` with an empty body
+    (``export``) or the base text (``instructions``). With
+    ``mcp_guardrail_digest_enabled`` off the preview is the base text for
+    every context — exactly what lane (a) serves then. Never cached
+    (``private, no-store``); the body is editor-authored text, so it is served
+    with ``nosniff``. Contract: MCP Tools › Server instructions.
+
+    Example:
+        GET /api/v1/memory/guardrails/digest?context_id=<uuid>
+        Authorization: Bearer <api_key>
+    """
+    from config.settings import get_settings
+    from mcp_server.transport import SERVER_INSTRUCTIONS_BASE
+    from services.guardrail_digest import (
+        EXPORT_CAPS,
+        INSTRUCTIONS_CAPS,
+        fetch_entries,
+        render_export_block,
+        render_instructions,
+        tool_view_names,
+    )
+
+    try:
+        context_uuid = UUID(context_id)
+    except (ValueError, AttributeError) as e:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail=f"context_id must be a valid UUID: {context_id!r}",
+        ) from e
+    if target not in GUARDRAIL_DIGEST_TARGETS:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail=f"target must be one of {', '.join(GUARDRAIL_DIGEST_TARGETS)}: {target!r}",
+        )
+
+    logger.info("guardrail_digest_request", user_id=user["user_id"], context_id=context_id)
+
+    limit = EXPORT_CAPS.entries if target == "export" else INSTRUCTIONS_CAPS.entries
+    entries = await fetch_entries(
+        db,
+        user_id=user["user_id"],
+        context_id=context_uuid,
+        # Issue #963/#1281 item 2: pure key scope (None unless workspace-scoped key).
+        key_workspace_id=user.get("api_key_workspace_id"),
+        limit=limit,
+    )
+    if entries is None:
+        raise NotFoundException("Context", str(context_uuid))
+
+    if target == "export":
+        body = render_export_block(entries)
+        media_type = "text/markdown"
+    elif not get_settings().mcp_guardrail_digest_enabled:
+        # Lane (a) is switched off: ``build_instructions`` serves the base
+        # text to every caller, so the preview is that text — the read above
+        # still decides the uniform 404 and the version header.
+        body = SERVER_INSTRUCTIONS_BASE
+        media_type = "text/plain"
+    else:
+        # Rebuild the MCP URL's query the way a URL carries it (percent-
+        # encoded) so a ``&`` or ``=`` inside a value stays inside that value
+        # and cannot smuggle a second parameter into the tool view.
+        query = urlencode({k: v for k, v in (("profile", profile), ("tools", tools)) if v})
+        body = render_instructions(
+            SERVER_INSTRUCTIONS_BASE, entries, tool_names=tool_view_names(query)
+        )
+        media_type = "text/plain"
+
+    return PlainTextResponse(
+        body,
+        media_type=media_type,
+        headers={
+            "Cache-Control": "private, no-store",
+            "X-Content-Type-Options": "nosniff",
+            GUARDRAIL_DIGEST_VERSION_HEADER: entries.tool_triggered_version,
+        },
+    )
 
 
 @router.patch("/{memory_id}", response_model=ReferenceResponse)
