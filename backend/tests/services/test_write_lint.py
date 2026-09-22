@@ -17,6 +17,7 @@ from uuid import uuid4
 import pytest
 
 from models.schemas import SUMMARY_LONG_THRESHOLD, SUMMARY_SHORT_THRESHOLD
+from services.tag_resolution import clear_vocabulary_cache
 from services.write_lint import MAX_HINTS, lint_write
 
 WS = uuid4()
@@ -210,6 +211,119 @@ class TestTagRules:
         assert hint.subject == "sprint-7"
         assert "'sprint-07'" in hint.hint
         assert "sprint-06" not in hint.hint
+
+
+class TestCompoundTagsAreNotNearDuplicatesOfTheirOwnSegments:
+    """#1617: ``session-cookie`` is a sub-topic of ``session``, not a spelling of
+    it. Acting on the hint would discard information, and once a context holds
+    the short generic tags almost every new compound tag would draw one.
+    """
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        ("new", "stored"),
+        [
+            ("session-cookie", "session"),
+            ("deploy-checklist", "deploy"),
+            ("cache-layer-redis", "cache-layer"),
+            ("benchmark-results", "benchmark"),
+            ("NEXT_PUBLIC_PLAN_DISPLAY_NAMES", "next-public"),
+            ("session-2026-09-11", "session"),
+            ("some-repo#62", "some-repo"),
+            ("issue:#1599", "issue"),
+            ("category:auth", "category"),
+            ("s3-bucket-2", "s3-bucket"),
+            ("sessions", "session-cookie"),
+            ("ｓｅｓｓｉｏｎ－ｃｏｏｋｉｅ", "session"),
+            ("セッション-クッキー", "セッション"),
+        ],
+    )
+    async def test_a_specialisation_is_silent_in_both_directions(self, new, stored):
+        assert await _lint(tags=[new], vocabulary={stored: 30}) == []
+        # The vocabulary is cached per context (#1512) and the first write went
+        # through to it, so the reverse direction needs a fresh vocabulary or the
+        # written tag would count as established and the test would pass for the
+        # wrong reason.
+        clear_vocabulary_cache()
+        assert await _lint(tags=[stored], vocabulary={new: 30}) == []
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        ("new", "stored"),
+        [
+            ("dev-env", "dev-environment"),
+            ("oauth", "oauth2"),
+            ("v0.73", "v0.73.0"),
+            ("session-2026-09", "session-2026-09-21"),
+            ("plan-tier", "plan-tiers"),
+            ("isue:#1599", "issue:#1599"),
+            ("sprint-07", "sprint-7"),
+            ("Dev_Environment", "dev-environment"),
+            ("deploy-check", "deploy-checklist"),
+            ("node", "node.js"),
+            ("next", "next.js"),
+            ("category:auth", "category:authn"),
+            ("category:auth", "category-auth"),
+            ("auth-n", "authn"),
+        ],
+    )
+    async def test_abbreviations_typos_and_variants_are_still_flagged(self, new, stored):
+        hints = await _lint(tags=[new], vocabulary={stored: 5})
+        assert [h.subject for h in hints if h.code == "tag_near_duplicate"] == [new]
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        ("new", "stored"),
+        [
+            ("auth", "auth-n"),
+            ("front", "front-end"),
+            ("mongo", "mongo-db"),
+            ("python", "python-3"),
+            ("oauth", "oauth-2.0"),
+        ],
+    )
+    async def test_a_respelling_on_a_segment_boundary_goes_silent_deliberately(self, new, stored):
+        """Accepted trade-off: indistinguishable from ``java`` / ``java-script``.
+        The unseparated spelling of the same pair still hints."""
+        assert await _lint(tags=[new], vocabulary={stored: 5}) == []
+        clear_vocabulary_cache()  # the first write went through to the cached vocabulary
+        hints = await _lint(tags=[new], vocabulary={stored.replace("-", ""): 5})
+        assert "tag_near_duplicate" in _codes(hints)
+
+    @pytest.mark.asyncio
+    async def test_the_generic_tag_no_longer_masks_the_real_variant(self):
+        """The highest-count match used to win outright, and the generic tag
+        almost always out-counts the mechanical variant it hides."""
+        hints = await _lint(
+            tags=["session-cookie"], vocabulary={"session": 30, "session_cookie": 2}
+        )
+        hint = next(h for h in hints if h.code == "tag_near_duplicate")
+        assert "'session_cookie'" in hint.hint
+        assert "'session'" not in hint.hint
+
+    @pytest.mark.asyncio
+    async def test_an_equal_fold_match_is_picked_ahead_of_a_prefix_match(self):
+        """Class C (``AuthContext`` / ``auth``) stays a match, so the filter alone
+        would still report ``auth``; the equal fold is the stronger claim."""
+        hints = await _lint(tags=["AuthContext"], vocabulary={"auth": 50, "auth_context": 2})
+        hint = next(h for h in hints if h.code == "tag_near_duplicate")
+        assert "'auth_context'" in hint.hint
+
+    @pytest.mark.asyncio
+    async def test_without_an_equal_fold_the_most_used_match_still_wins(self):
+        hints = await _lint(
+            tags=["troubleshootin"],
+            vocabulary={"troubleshooting": 40, "troubleshootng": 2},
+        )
+        assert "'troubleshooting'" in next(h.hint for h in hints if h.code == "tag_near_duplicate")
+
+    @pytest.mark.asyncio
+    async def test_the_real_near_duplicate_in_the_same_write_still_fires(self):
+        hints = await _lint(
+            tags=["session-cookie", "deploy-checklist", "dev-env"],
+            vocabulary={"session": 30, "deploy": 12, "dev-environment": 12},
+        )
+        assert [h.subject for h in hints if h.code == "tag_near_duplicate"] == ["dev-env"]
 
 
 class TestItCanNeverBreakAWrite:
