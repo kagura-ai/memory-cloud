@@ -110,7 +110,7 @@ When saving new knowledge, decisions, bug fixes, troubleshooting notes, or sessi
 
 1. Resolve the context. Ask before writing if the context is ambiguous.
 2. Store reusable conclusions, not process narration. Write the summary (best 100-250 characters) with the terms a later search would use — good: "JWT expiry caused 401. Fixed with refresh token rotation and clock skew handling."; bad: "Discussed auth errors in today's meeting." Split long material (over ~2,000 characters) into one memory per topic linked by shared tags, never "part 1/3". Call `list_tags` first and reuse stored tag spellings.
-<!-- SYNC: keep the type vocabulary + pin guidance in step with claude-skills/session-summary.md (type="time", delivery_mode="always" budget ≤7/prune-at-10, supersede=unpin+pin). When one changes, change both. -->
+<!-- SYNC: keep the type vocabulary + pin guidance + tool-guardrail authoring in step with claude-skills/session-summary.md (type="time", delivery_mode="always" budget ≤7/prune-at-10, supersede=unpin+pin, "4b. Tool guardrails") and claude-skills/remember.md ("Tool guardrails"). When one changes, change both. -->
 3. Use this type vocabulary unless the context guide says otherwise:
    - `decision`: architecture choices, rejected alternatives, rationale.
    - `pattern`: reusable implementation approaches.
@@ -119,6 +119,7 @@ When saving new knowledge, decisions, bug fixes, troubleshooting notes, or sessi
    - `learning`: benchmarks, tool limits, evaluation findings.
    - `note`: roadmap, status, milestone relationships.
    - `time`: forward-looking / dated follow-up (deadline, "re-check on date X"). Set `details={"trigger": {...}}` so `recall_upcoming` surfaces it on time.
+   - Any type may also be a **tool guardrail**: when the lesson is about one specific tool call, add `details={"tool_trigger": {"tool": "Bash|PowerShell", "match": "<regex of the command that failed>", "action": "inform"}}` so a client hook or the server digest delivers it at the matching call (`on: "result"` matches the tool's output or error instead). One call per guardrail; write the `summary` as the safe alternative, stated as a fact; `block` only when the call itself does the damage (needs `on: "pre"` and a `match` with a literal character); test the pattern against the command that failed; `details` is replaced wholesale on update, so resend `tool_trigger`; needs the context editor role and a user API key; keep a context at 20 or fewer guardrails. Contract: `docs/mcp-tools.md#tool-guardrails`.
 4. Set importance by reuse value:
    - `1.0`: core principle or critical decision.
    - `0.8-0.9`: reusable decision, bug fix, or pattern.

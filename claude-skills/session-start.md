@@ -101,7 +101,8 @@ Display a concise summary:
 {ONLY if load_pinned returned ≥1 item — omit this whole section when empty.
  List each pinned invariant with its memory_id, e.g. "- active prod color = green  (mem: abc1234)".
  End with: "Stale? unpin via update_memory(memory_id=..., context_id=..., delivery_mode="on_recall")".
- If the pinned set is large (>7), add "⚠ N pinned — review for stale invariants to unpin".}
+ If the pinned set is large (>7), add "⚠ N pinned — review for stale invariants to unpin".
+ Tool guardrails (`details.tool_trigger`) are not listed here; a client hook or the server digest delivers each at its matching call or at session start.}
 
 ### ⏰ Upcoming
 {ONLY if recall_upcoming returned ≥1 item — omit this whole section when empty.
