@@ -20,6 +20,8 @@ from models.schemas import (
     ExploreResponse,
     ForgetRequest,
     ForgetResponse,
+    LoadGuardrailsRequest,
+    LoadGuardrailsResponse,
     LoadPinnedRequest,
     LoadPinnedResponse,
     MemoryStatsResponse,
@@ -292,6 +294,58 @@ async def load_pinned(
 
     try:
         return await memory_service.load_pinned(
+            user_id=user["user_id"],
+            current_context_id=context_uuid,
+            current_workspace_id=user.get("current_workspace_id"),
+            cap=request.cap,
+            # Issue #963/#1281 item 2: pure key scope (None unless workspace-scoped key).
+            key_workspace_id=user.get("api_key_workspace_id"),
+        )
+    except ValueError as e:
+        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=str(e)) from e
+
+
+@router.post("/guardrails", response_model=LoadGuardrailsResponse)
+async def load_guardrails(
+    request: LoadGuardrailsRequest,
+    user: APIKeyOrSessionUser,
+    memory_service: MemoryServiceDep,
+):
+    """Deterministically load a context's guardrail set for a client-side hook.
+
+    The REST twin of the MCP ``load_guardrails`` tool and ``/pinned``'s
+    sibling: the trusted-tier pinned set (``delivery_mode='always'``) plus the
+    memories marked with ``details.tool_trigger``, each list ordered
+    ``importance DESC, created_at ASC, id ASC`` and capped on its own
+    (``cap`` bounds ``tool_triggered`` only; the pinned list uses
+    ``settings.pinned_load_cap``). Plain SQL — no ranking, no rerank. Items are
+    L1 (+ L2 on pinned items) and carry the normalized ``tool_trigger`` object
+    as data; the server never runs the patterns. The response's ``format`` and
+    ``version`` are the shared cache contract documented with the MCP tool.
+
+    Request:
+        {"context_id": "<context-uuid>", "cap": 50}
+
+    Example:
+        POST /api/v1/memory/guardrails
+        Authorization: Bearer <api_key>
+    """
+    logger.info("load_guardrails_request", user_id=user["user_id"], context_id=request.context_id)
+
+    # Same up-front UUID parse as /pinned: a non-UUID string must be a 422,
+    # not a DB DataError mapped to a misleading 503.
+    context_uuid: UUID | None = None
+    if request.context_id is not None:
+        try:
+            context_uuid = UUID(request.context_id)
+        except (ValueError, AttributeError) as e:
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                detail=f"context_id must be a valid UUID: {request.context_id!r}",
+            ) from e
+
+    try:
+        return await memory_service.load_guardrails(
             user_id=user["user_id"],
             current_context_id=context_uuid,
             current_workspace_id=user.get("current_workspace_id"),
