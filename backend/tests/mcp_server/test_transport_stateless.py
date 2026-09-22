@@ -204,6 +204,8 @@ async def test_tools_call_runs_with_the_authenticated_identity(monkeypatch):
     result = send.body["result"]
     assert result["resultType"] == "complete"
     assert result["content"] == [{"type": "text", "text": '{"status":"success"}'}]
+    # #1622: success carries no ``isError`` key ("if not set ... false").
+    assert set(result) == {"resultType", "content", "_meta"}
     # Identity comes from the request's own credentials, never from a session;
     # ``_meta`` is protocol metadata and must not leak into the tool arguments.
     assert seen == {
@@ -230,6 +232,43 @@ async def test_tools_call_without_arguments_defaults_to_an_empty_object(monkeypa
     assert send.status == 200
     assert seen["arguments"] == {}
     assert send.body["result"]["content"] == []
+
+
+@pytest.mark.asyncio
+async def test_tools_call_error_envelope_sets_is_error_and_keeps_content():
+    """#1622: a tool *execution* error is a result flagged ``isError: true``
+    (MCP 2026-07-28, Tools → Error Handling); the envelope text is unchanged.
+    Drives the real ``execute_tool_call``: the context-id check fails before
+    any DB access."""
+    from mcp_server.tools._helpers import _error_response
+
+    send = await _post(
+        _request(
+            "tools/call",
+            {"name": "recall", "arguments": {"context_id": "not-a-uuid", "query": "x"}},
+        )
+    )
+
+    assert send.status == 200
+    _assert_stateless(send)
+    assert "error" not in send.body  # a result, not a protocol error
+    result = send.body["result"]
+    assert result["resultType"] == "complete"
+    assert result["isError"] is True
+    assert result["_meta"][SERVER_INFO_KEY]["name"] == "kagura-memory-cloud"
+    envelope = json.loads(result["content"][0]["text"])
+    assert envelope["error"] == "invalid_context_id_format"
+    expected = _error_response("invalid_context_id_format", envelope["message"])[0].text
+    assert result["content"] == [{"type": "text", "text": expected}]
+
+
+@pytest.mark.asyncio
+async def test_unknown_tool_envelope_is_flagged():
+    send = await _post(_request("tools/call", {"name": "no_such_tool", "arguments": {}}))
+
+    result = send.body["result"]
+    assert result["isError"] is True
+    assert json.loads(result["content"][0]["text"])["error"] == "unknown_tool"
 
 
 @pytest.mark.asyncio

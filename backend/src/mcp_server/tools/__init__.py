@@ -21,7 +21,6 @@ from pydantic import ValidationError
 from mcp_server.tools._arg_coercion import coerce_mcp_arguments
 from mcp_server.tools._definitions import get_tool_definitions  # noqa: F401
 from mcp_server.tools._helpers import (
-    _dumps,
     _error_response,
     _format_validation_error,
     _resolve_context_id,
@@ -438,20 +437,12 @@ async def execute_tool_call(
             logger.warning(f"mcp_tool_{tool_name}_invalid_argument: {message}")
             return _error_response("invalid_argument", message)
         logger.error(f"mcp_tool_{tool_name}_failed: {e}", exc_info=True)
-        return [
-            TextContent(
-                type="text",
-                text=_dumps({"status": "error", "error": str(e)}),
-            )
-        ]
+        # #1622: through the helper so the transport flags it ``isError``;
+        # no ``message`` keeps the shape this arm has always shipped.
+        return _error_response(str(e))
     except Exception as e:
         logger.error(f"mcp_tool_{tool_name}_failed: {e}", exc_info=True)
-        return [
-            TextContent(
-                type="text",
-                text=_dumps({"status": "error", "error": str(e)}),
-            )
-        ]
+        return _error_response(str(e))
 
 
 # Backward-compat re-exports for test_mcp_server_e2e.py

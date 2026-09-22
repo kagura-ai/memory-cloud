@@ -32,6 +32,7 @@ from mcp_server.transport import (
     _discover_result,
     _send_json_error,
     _send_jsonrpc_result,
+    _tool_call_result,
 )
 
 logger = logging.getLogger(__name__)
@@ -267,11 +268,7 @@ async def _call_tool(
         await _send_error(send, 200, request_id, code, message, data)
         return
 
-    await _send_result(
-        send,
-        request_id,
-        _complete({"content": [{"type": item.type, "text": item.text} for item in result]}),
-    )
+    await _send_result(send, request_id, _complete(_tool_call_result(result)))
 
 
 async def handle_stateless_post(

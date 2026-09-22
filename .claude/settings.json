@@ -92,7 +92,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "INPUT=$(cat); CMD=$(echo \"$INPUT\" | jq -r '.tool_input.command // empty'); if echo \"$CMD\" | grep -qE 'gh pr (merge|create)'; then echo 'Reminder: Before PR, ensure /quality → /kagura-code-reviewer (or /code-review) have been run.' >&2; exit 0; fi; exit 0"
+            "command": "CMD=$(jq -r '.tool_input.command // empty'); if printf '%s' \"$CMD\" | grep -qE 'gh pr create'; then jq -nc '{hookSpecificOutput:{hookEventName:\"PreToolUse\",additionalContext:\"Project workflow: this repo runs /quality and /kagura-code-reviewer (or /code-review) on a branch before its PR is opened (.claude/rules/development-workflow.md, PR Rules). Fixes for findings can still be pushed to an open PR.\"}}'; fi; exit 0"
           }
         ]
       }

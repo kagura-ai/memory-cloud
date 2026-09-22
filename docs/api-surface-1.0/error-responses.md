@@ -70,17 +70,24 @@ A `RequestValidationError` handler is registered in `backend/src/api/main.py` (`
 
 ### 4. MCP tool errors (in-band, JSON-in-TextContent)
 
-`_error_response` (`backend/src/mcp_server/tools/_helpers.py:107`) — every MCP tool error is a JSON-RPC **success** carrying:
+`_error_response` (`backend/src/mcp_server/tools/_helpers.py`) — every MCP tool error is a JSON-RPC **success** whose `CallToolResult` carries `isError: true` (#1622) and a single text item holding:
 
 ```json
 { "status": "error", "error": "<code>", "message": "<message>", "...extra fields" }
 ```
 
+```json
+{ "jsonrpc": "2.0", "id": "<request id>",
+  "result": { "content": [{ "type": "text", "text": "{\"status\":\"error\",...}" }], "isError": true } }
+```
+
+This is the MCP *tool execution error* mechanism: the model gets the envelope and can self-correct, and clients (e.g. hook runners) see the failure without parsing the envelope. Success results carry no `isError` key. Both transports (legacy `initialize` sessions and stateless 2026-07-28) emit the same flag; the helper marks its return value and the transport reads it, so a hand-built `{"status": "error"}` payload in `mcp_server/tools/` fails `tests/mcp_server/test_error_envelopes.py`.
+
 `MemoryCloudException` is caught in tool handlers and its `error_code`/`message`/`details` pass through verbatim (e.g. `backend/src/mcp_server/tools/resource.py:1162-1175`), so REST codes like `CONNECTOR-001` appear unchanged on the MCP surface.
 
 ### 5. MCP transport — JSON-RPC protocol errors
 
-Unhandled exceptions in `tools/call` map to a JSON-RPC error object (`backend/src/mcp_server/transport.py:237-270`), HTTP 200:
+Exceptions that escape `execute_tool_call` in `tools/call` map to a JSON-RPC error object (`backend/src/mcp_server/transport.py`), HTTP 200. In practice `execute_tool_call` catches handler exceptions itself and returns them as the in-band envelope above (with `isError: true`), so this path is reached only by transport-level failures:
 
 ```json
 {

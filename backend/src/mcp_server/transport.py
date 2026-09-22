@@ -21,6 +21,8 @@ from mcp_server.auth import authenticate_mcp_request
 from mcp_server.session import get_session_manager
 
 if TYPE_CHECKING:
+    from collections.abc import Sequence
+
     from mcp_server.session import MCPSession
 
 logger = logging.getLogger(__name__)
@@ -301,6 +303,26 @@ async def _send_jsonrpc_result(
     await send({"type": "http.response.body", "body": json.dumps(response).encode()})
 
 
+def _tool_call_result(result: "Sequence[Any]") -> dict[str, Any]:
+    """Project a handler's ``list[TextContent]`` onto a ``CallToolResult`` (#1622).
+
+    Shared by both eras. A tool *execution* error — anything the handlers
+    report through ``_helpers._error_response`` — is still a result, not a
+    JSON-RPC error (MCP Tools → Error Handling: "reported in tool results with
+    ``isError: true``"), so the client can hand it to the model to self-correct.
+    The helper marks that list ``is_error``; here it becomes ``isError: true``
+    with ``content`` untouched, so clients that parse the envelope keep working.
+    Success results carry no key at all: "if not set, this is assumed to be
+    false".
+    """
+    payload: dict[str, Any] = {
+        "content": [{"type": item.type, "text": item.text} for item in result]
+    }
+    if getattr(result, "is_error", False) is True:
+        payload["isError"] = True
+    return payload
+
+
 async def handle_streamable_http_post(
     scope: Scope,
     receive: Receive,
@@ -473,12 +495,7 @@ async def handle_streamable_http_post(
                 workspace_id=session.workspace_id,  # Issue #204: Pass workspace_id for workspace info
             )
 
-            await _send_jsonrpc_result(
-                send,
-                session,
-                request_id,
-                {"content": [{"type": item.type, "text": item.text} for item in result]},
-            )
+            await _send_jsonrpc_result(send, session, request_id, _tool_call_result(result))
             return
 
         except Exception as e:

@@ -7,9 +7,9 @@ The Codex plugin ships three coupled artifacts at the repo root:
 * ``plugins/kagura-memory/skills/*/SKILL.md``            — Codex skill(s)
 
 These tests pin the invariants that ``codex plugin add
-kagura-memory@kagura-memory-cloud`` depends on, and that the release process
-(``.claude/commands/release.md``) currently keeps in lockstep only
-procedurally:
+kagura-memory@kagura-memory-cloud`` depends on (the release process in
+``.claude/commands/release.md`` bumps the manifests by hand;
+``tests/test_release_version_lockstep.py`` guards the other version files):
 
 1. The Codex plugin version equals the canonical ``APP_VERSION`` and the Claude
    plugin manifest version — a release that bumps one manifest but forgets the

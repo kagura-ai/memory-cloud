@@ -13,6 +13,7 @@ paths:
 - **Only `docker-compose.yml` exists** — there is no `docker-compose.dev.yml` or `docker-compose.override.yml`
 - All environments (dev, test, prod) use the same compose file with environment variables for differentiation
 - Container names: `kagura-api`, `kagura-web-dev`, `kagura-postgres`, `kagura-qdrant`, `kagura-redis`
+- Data-store ports (5432, 6333/6334, 6379, MinIO 9000/9001) are published as `${COMPOSE_BIND_HOST:-127.0.0.1}:PORT:PORT` — loopback only. Never write a two-part `"PORT:PORT"` entry for them (binds every interface); `terraform/single-server/scripts/tests/compose_port_bind.bats` fails on it. `COMPOSE_BIND_HOST` is read by Compose from the shell or a project `.env`, not `.env.local`
 
 ## Test Execution
 

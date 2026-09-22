@@ -217,6 +217,23 @@ class TestSuggestTags:
         ) == {"sprint-7": ["sprint-07 (5)"]}
 
     @pytest.mark.asyncio
+    async def test_a_specialisation_is_still_suggested_on_the_read_path(self):
+        """#1617 makes the WRITE lint skip ``session-cookie`` / ``session``. Here
+        the relation is useful rather than false: for a zero-result filter on
+        ``session`` the stored sub-topic is the actionable answer, and so is the
+        broader tag for a zero-result filter on ``session-cookie``. Suppressing
+        it would make an empty result claim that nothing close is stored.
+        """
+        db = _db_with_vocabulary({"session-cookie": 4, "python": 40})
+        assert await suggest_tags(
+            db, workspace_id=WS, context_id=CTX, user_id=USER, tags=["session"]
+        ) == {"session": ["session-cookie (4)"]}
+        db = _db_with_vocabulary({"session": 30, "python": 40})
+        assert await suggest_tags(
+            db, workspace_id=WS, context_id=CTX, user_id=USER, tags=["session-cookie"]
+        ) == {"session-cookie": ["session (30)"]}
+
+    @pytest.mark.asyncio
     async def test_suggestions_are_bounded_per_tag(self):
         vocabulary = {f"troubleshooting{i}": i for i in range(MAX_SUGGESTIONS_PER_TAG + 10)}
         db = _db_with_vocabulary(vocabulary)

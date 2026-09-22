@@ -207,18 +207,7 @@ async def handle_get_context_info(
                 workspace_id,
             )
             logger.error(f"get_context_info_failed: {e}", exc_info=True)
-            return [
-                TextContent(
-                    type="text",
-                    text=_dumps(
-                        {
-                            "status": "error",
-                            "error": str(e),
-                            "message": "Failed to retrieve context info. Please try again.",
-                        }
-                    ),
-                )
-            ]
+            return _error_response(str(e), "Failed to retrieve context info. Please try again.")
 
     # Safety: should never reach here (get_db always yields)
     return _error_response("internal_error", "Database session unavailable")
@@ -842,12 +831,7 @@ async def handle_list_contexts(
         except Exception as e:
             await db.rollback()
             logger.error(f"list_contexts_failed: {e}", exc_info=True)
-            return [
-                TextContent(
-                    type="text",
-                    text=_dumps({"status": "error", "error": str(e)}),
-                )
-            ]
+            return _error_response(str(e))
 
     # Safety: should never reach here (get_db always yields)
     return _error_response("internal_error", "Database session unavailable")

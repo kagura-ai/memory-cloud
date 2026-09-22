@@ -463,12 +463,14 @@ docker compose --profile minio up -d minio   # console at http://localhost:9001
 ```
 
 > ⚠ **Security — dev defaults only.** The compose `minio` service ships with the
-> well-known `minioadmin` / `minioadmin` credentials and published `9000`/`9001`
-> ports for local convenience. For a real deployment, set strong unique
-> `MINIO_ROOT_USER` / `MINIO_ROOT_PASSWORD` (or per-app bucket-scoped access
-> keys), keep MinIO on the private network behind TLS, and do **not** expose
-> those ports publicly. An internet-reachable MinIO with default credentials is
-> an open object store (OWASP A05: Security Misconfiguration).
+> well-known `minioadmin` / `minioadmin` credentials and publishes `9000`/`9001`
+> on `127.0.0.1` for local convenience (`COMPOSE_BIND_HOST` widens that; see
+> [Reaching the data stores](getting-started.md#reaching-the-data-stores)). For
+> a real deployment, set strong unique `MINIO_ROOT_USER` / `MINIO_ROOT_PASSWORD`
+> (or per-app bucket-scoped access keys), keep MinIO on the private network
+> behind TLS, and do **not** expose those ports publicly. An internet-reachable
+> MinIO with default credentials is an open object store (OWASP A05: Security
+> Misconfiguration).
 
 Then point the API at it (create the bucket once via the MinIO console or `mc`):
 

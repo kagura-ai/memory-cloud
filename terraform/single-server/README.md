@@ -790,5 +790,13 @@ you want `destroy` to remove it, or set
   <https://www.cloudflare.com/ips-v4>.
 - Cloudflare Origin CA cert + key live at `/var/lib/kagura/origin-ca/` with
   mode `0640` and are mounted read-only into the Caddy container.
+- PostgreSQL, Qdrant and Redis publish no host port in any of these compose
+  files (only the split-host `data-expose` overlay does, on `DATA_BIND_ADDR`),
+  so there is nothing to tunnel to: reach them from the VM with
+  `docker compose -f docker-compose.prod.yml exec postgres psql -U kagura -d kagura`
+  (likewise `exec redis redis-cli`), or from a one-off container on the compose
+  network as in `docs/ops/postgres-18-migration-runbook.md`. The static guard
+  `scripts/tests/compose_port_bind.bats` fails CI if a data-store port is ever
+  published without a bind address.
 - Secrets in `.env.prod` are VM-local. Moving them to GCP Secret Manager is
   a follow-up issue.

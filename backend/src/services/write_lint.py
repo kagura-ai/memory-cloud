@@ -33,7 +33,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from models.schemas import WriteLintHint
 from utils.logger import get_logger
-from utils.tag_normalize import is_near_duplicate, normalize_tag
+from utils.tag_normalize import is_near_duplicate, is_specialisation, normalize_tag
 
 logger = get_logger(__name__)
 
@@ -125,14 +125,24 @@ def _tag_hints(tags: list[str], vocabulary: dict[str, int]) -> list[WriteLintHin
         folded = normalize_tag(tag)
         if not folded or tag in vocabulary:
             continue  # already an established spelling — nothing to say
+        # #1617: a compound tag and its own leading segment(s) (session-cookie /
+        # session) ARE near-duplicates — the read path wants that — but here the
+        # hint would claim a spelling problem that is not one, and once a context
+        # holds the short generic tags almost every new compound tag would draw
+        # a hint. Dropped before the pick, so a generic tag cannot mask a real
+        # variant either.
         matches = [
             (stored, count)
             for stored, count in vocabulary.items()
-            if is_near_duplicate(tag, stored)
+            if is_near_duplicate(tag, stored) and not is_specialisation(tag, stored)
         ]
         if not matches:
             continue
-        stored, count = max(matches, key=lambda pair: pair[1])
+        # An equal fold is the strongest claim (the same tag written another
+        # way); among the rest, point at the dominant spelling. Without the
+        # first key, `auth` (50) would outrank `auth_context` (2) for a new
+        # `AuthContext`.
+        stored, count = max(matches, key=lambda pair: (normalize_tag(pair[0]) == folded, pair[1]))
         hints.append(
             WriteLintHint(
                 code="tag_near_duplicate",

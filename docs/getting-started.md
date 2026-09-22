@@ -34,9 +34,11 @@ docker compose up -d
 This will start:
 - Backend API (port 8080)
 - Frontend (port 3000)
-- PostgreSQL (port 5432)
-- Qdrant (port 6333)
-- Redis (port 6379)
+- PostgreSQL (port 5432, loopback only)
+- Qdrant (port 6333, loopback only)
+- Redis (port 6379, loopback only)
+
+The three data stores are published on `127.0.0.1` only — in this stack Redis and Qdrant run without authentication and PostgreSQL uses the default password from `.env.example`, so nothing off the machine should reach them. The `localhost` URLs in `.env.local` work unchanged. The API and frontend are the intended entry points and stay reachable from other hosts. See [Reaching the data stores](#reaching-the-data-stores) for the override.
 
 ### 4. Run Database Migrations
 
@@ -63,6 +65,32 @@ This interactive command will:
 - **Admin Login**: Click "Admin Login" link on the login page
 - **API Docs**: http://localhost:8080/docs
 - **Health Check**: http://localhost:8080/health
+
+### Reaching the data stores
+
+On the machine that runs the stack, the published loopback ports and the compose network both work:
+
+```bash
+docker compose exec postgres psql -U kagura -d kagura
+docker compose exec redis redis-cli
+curl http://127.0.0.1:6333/collections
+```
+
+From another machine, forward the port over SSH to the dev host's loopback instead of opening it on the network:
+
+```bash
+ssh -L 5432:127.0.0.1:5432 dev-host    # then connect to localhost:5432 locally
+```
+
+If a remote client genuinely has to connect directly, `COMPOSE_BIND_HOST` sets the address the data-store ports are published on. Compose reads it from the shell or from a project `.env` file — not from `.env.local`:
+
+```bash
+COMPOSE_BIND_HOST=0.0.0.0 docker compose up -d   # every interface — the binding before #1626
+```
+
+Use a specific private address rather than `0.0.0.0` where you can, and do not use this override on a host with a public address. If a tool on your machine resolves `localhost` to `::1` only and does not fall back to IPv4, point it at `127.0.0.1` explicitly. On WSL2 the ports are published inside the distro; if a Windows-side tool cannot reach `localhost:5432`, the override above restores the previous binding.
+
+**Upgrading from an earlier release:** setups that reached this stack's PostgreSQL, Qdrant or Redis from another machine must set `COMPOSE_BIND_HOST` or switch to the SSH forward. Anyone using `docker-compose.yml` as a deployment file with remote `psql` / Qdrant access has the same two options, or moves to the `terraform/single-server` layout, which publishes no data-store ports at all.
 
 ## Admin CLI Tools
 
@@ -142,28 +170,41 @@ Core tools only: use `http://localhost:8080/mcp/w/YOUR_WORKSPACE_ID?profile=core
 
 ### Codex CLI
 
-**Recommended — plugin install (handles sign-in):**
+Checked against Codex `rust-v0.155.1`. Codex reads the API key from an environment variable that its config names — the key itself never goes into `~/.codex/config.toml`.
+
+**Recommended — `codex mcp add`:**
 
 ```bash
-codex plugin install kagura-memory@kagura-memory-cloud
+export KAGURA_API_KEY="kagura_xxxxxxxxxxxx"
+codex mcp add kagura-memory --url "http://localhost:8080/mcp/w/YOUR_WORKSPACE_ID" --bearer-token-env-var KAGURA_API_KEY
 ```
 
-The plugin adds `/recall`, `/remember`, and `/session-start` slash skills to Codex CLI.
+`codex mcp list` now shows `kagura-memory` with `KAGURA_API_KEY` as its bearer token env var. Export `KAGURA_API_KEY` in every shell you start Codex from (or in your shell profile).
 
-**Manual fallback — `~/.codex/config.toml`:**
+**Manual equivalent — `~/.codex/config.toml`:**
 
-If the plugin install does not auto-configure the MCP server endpoint, add the snippet manually:
+The command writes this entry; paste it yourself if you prefer editing the file:
 
 ```toml
 [mcp_servers.kagura-memory]
-type = "http"
 url = "http://localhost:8080/mcp/w/YOUR_WORKSPACE_ID"
-bearer_token = "YOUR_API_KEY"
+bearer_token_env_var = "KAGURA_API_KEY"
 ```
+
+These two keys only. Codex rejects an inline `bearer_token` on an HTTP server, and the whole `config.toml` then fails to load ([Troubleshooting](troubleshooting.md#codex-cli--bearer_token-is-not-supported-for-streamable_http)); `type` is not a Codex key.
 
 Core tools only: set `url = "http://localhost:8080/mcp/w/YOUR_WORKSPACE_ID?profile=core"` instead ([which one?](#which-url)).
 
 Restart Codex CLI to pick up the config.
+
+**Optional — the Kagura Memory skill:**
+
+The `kagura-memory` plugin adds the Kagura Memory skill (session restore, recall and remember as natural-language requests) on top of the server configured above; it does not configure or sign in to the server. Register this repository's marketplace, then install the plugin:
+
+```bash
+codex plugin marketplace add https://github.com/kagura-ai/memory-cloud
+codex plugin add kagura-memory@kagura-memory-cloud
+```
 
 ## Quick API Test
 
