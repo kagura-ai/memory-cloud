@@ -415,6 +415,9 @@ describe("External Keys nav with BYOK off (#1616)", () => {
     mockWorkspaceId = "w-byok-off-empty";
     render(<Sidebar />);
     await waitFor(() => expect(mockListExternalKeys).toHaveBeenCalledTimes(1));
+    // Flush the resolved `[]` answer: the entry must stay hidden on a
+    // settled `false`, not only while the probe is pending.
+    await act(async () => {});
     expect(screen.queryByRole("link", { name: "externalKeys" })).toBeNull();
   });
 
