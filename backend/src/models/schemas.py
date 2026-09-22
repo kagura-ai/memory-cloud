@@ -1045,28 +1045,9 @@ class UpdateUserProfileRequest(BaseModel):
 # API-key request/response models are defined in api/routes/api_keys.py — and
 # their duplicate class names produced ambiguous OpenAPI component names. The
 # `MemberAPIKeyResponse` below is a distinct, live model and is unaffected.
-
-
-class ExternalAPIKeyCreate(BaseModel):
-    """Request schema for external API key creation."""
-
-    key_name: str = Field(..., min_length=1, max_length=100)
-    provider: str = Field(..., min_length=1, max_length=50)
-    api_key_value: str = Field(..., min_length=1, description="API key value (will be encrypted)")
-
-
-class ExternalAPIKeyResponse(TZAwareBaseModel):
-    """Response schema for external API key (masked)."""
-
-    id: int
-    key_name: str
-    provider: str
-    masked_value: str = Field(..., description="Masked API key (e.g., 'sk-proj-***')")
-    created_at: datetime
-    updated_at: datetime
-
-    class Config:
-        from_attributes = True
+# (#1616): the equally dead ExternalAPIKeyCreate / ExternalAPIKeyResponse went
+# the same way — the live models are ExternalKeyCreate / ExternalKeyResponse in
+# api/routes/external_keys.py.
 
 
 # ============================================================================

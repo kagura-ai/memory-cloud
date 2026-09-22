@@ -749,7 +749,9 @@ def get_config_schema() -> dict[str, ConfigKeySchema]:
             requires_restart=True,
             impact=(
                 "When false the external-keys write paths, the workspace cost dashboard and "
-                "the OpenAI key-status probe return 404 and the web UI hides their nav entries."
+                "the OpenAI key-status probe return 404; the web UI hides the cost dashboard "
+                "entry and keeps the External Keys entry only for a workspace that already "
+                "stores a key (list / toggle / delete stay open to the owner)."
             ),
             examples=["true", "false"],
         ),

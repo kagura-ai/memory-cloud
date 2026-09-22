@@ -55,12 +55,14 @@ vi.mock("@/contexts/AuthContext", () => ({
 // #1571: the existing-objects probe is module-cached per workspace id, so the
 // plan-gate tests below give each case its own id instead of sharing "w1".
 let mockWorkspaceId = "w1";
+// #1616: the External Keys fallback probe is owner-only; flip per test.
+let mockWorkspaceRole = "owner";
 vi.mock("@/contexts/WorkspaceContext", () => ({
   useWorkspace: () => ({
     currentWorkspace: {
       id: mockWorkspaceId,
       name: "Test WS",
-      current_user_role: "owner",
+      current_user_role: mockWorkspaceRole,
       member_count: 1,
     },
     currentWorkspaceId: mockWorkspaceId,
@@ -93,8 +95,11 @@ vi.mock("@/lib/api/contexts", () => ({
   getContexts: vi.fn().mockResolvedValue({ contexts: [] }),
 }));
 
+// #1616: with BYOK off the External Keys entry falls back to "does the
+// workspace already store a key?", probed through the owner-only list route.
+const mockListExternalKeys = vi.hoisted(() => vi.fn().mockResolvedValue([]));
 vi.mock("@/lib/api/external-keys", () => ({
-  listExternalAPIKeys: vi.fn().mockResolvedValue([]),
+  listExternalAPIKeys: (...args: unknown[]) => mockListExternalKeys(...args),
 }));
 
 vi.mock("@/lib/api/workspaces", () => ({
@@ -128,7 +133,6 @@ vi.mock("@/hooks/useSystemFeatures", () => ({
   useSystemFeatures: () => mockFeatures,
 }));
 
-import { listExternalAPIKeys } from "@/lib/api/external-keys";
 import { Sidebar } from "./Sidebar";
 
 describe("Sidebar", () => {
@@ -141,6 +145,7 @@ describe("Sidebar", () => {
       public_contexts: true,
     };
     mockWorkspaceId = "w1";
+    mockWorkspaceRole = "owner";
     mockUser.role = "user";
   });
 
@@ -224,10 +229,12 @@ describe("Sidebar", () => {
     ]);
   });
 
-  it("skips the owner external-keys warning fetch when byok is off (#1167)", () => {
+  it("skips the owner embedding-availability probe when byok is off (#1167)", () => {
+    // The key-status route is behind `require_byok_enabled` and 404s in that
+    // configuration (see byok-probe-guard.test.ts for the source-level guard).
     mockFeatures = { plan_page: true, byok: false };
     render(<Sidebar />);
-    expect(listExternalAPIKeys).not.toHaveBeenCalled();
+    expect(mockKeyStatus).not.toHaveBeenCalled();
   });
 
   it("still probes embedding availability for owners when byok is on (#1167)", () => {
@@ -356,6 +363,124 @@ describe("plan-gated Resources / Connectors nav (#1571)", () => {
     expect(screen.queryByRole("link", { name: "connectors" })).toBeNull();
     expect(mockListResources).not.toHaveBeenCalled();
     expect(mockListConnectors).not.toHaveBeenCalled();
+  });
+});
+
+describe("External Keys nav with BYOK off (#1616)", () => {
+  /**
+   * Rule: the entry shows iff the viewer is the workspace owner AND
+   * (features.byok is true OR the workspace already stores a key). With BYOK
+   * off the page is still the owner's management console for keys stored
+   * earlier (list / disable / delete, #1613), so it needs an entry point; a
+   * workspace that never stored one gets no dead-end link. The probe fires
+   * only on an explicit `byok: false` for an owner — never while flags load,
+   * never on a BYOK-on deployment, never for a role the list route 403s.
+   *
+   * The probe answer is module-cached per workspace, so every case gets its
+   * own workspace id.
+   */
+  beforeEach(() => {
+    vi.clearAllMocks();
+    // `clearAllMocks` keeps queued `mockResolvedValueOnce` answers; a case
+    // that (correctly) never probes must not hand its answer to the next.
+    mockListExternalKeys.mockReset().mockResolvedValue([]);
+    mockFeatures = { plan_page: true, byok: false, cost_display: true };
+    mockPlanFeatures = {
+      resources: true,
+      connectors: true,
+      public_contexts: true,
+    };
+    mockWorkspaceRole = "owner";
+    mockUser.role = "user";
+  });
+
+  it("shows the entry for an owner whose workspace already stores a key", async () => {
+    mockWorkspaceId = "w-byok-off-with-key";
+    mockListExternalKeys.mockResolvedValueOnce([
+      { key_name: "OPENAI_API_KEY", provider: "openai", enabled: true },
+    ]);
+    render(<Sidebar />);
+    const link = await screen.findByRole("link", { name: "externalKeys" });
+    expect(link).toHaveAttribute(
+      "href",
+      "/workspace/integrations/external-keys",
+    );
+    expect(mockListExternalKeys).toHaveBeenCalledTimes(1);
+    // The key-status route still 404s with BYOK off: no probe, no warning.
+    expect(mockKeyStatus).not.toHaveBeenCalled();
+    expect(within(link).queryByLabelText("noExternalKeys")).toBeNull();
+  });
+
+  it("keeps the entry hidden for an owner with no stored key", async () => {
+    mockWorkspaceId = "w-byok-off-empty";
+    render(<Sidebar />);
+    await waitFor(() => expect(mockListExternalKeys).toHaveBeenCalledTimes(1));
+    // Flush the resolved `[]` answer: the entry must stay hidden on a
+    // settled `false`, not only while the probe is pending.
+    await act(async () => {});
+    expect(screen.queryByRole("link", { name: "externalKeys" })).toBeNull();
+  });
+
+  it.each(["admin", "member", "viewer"])(
+    "hides the entry and does not probe for a %s",
+    async (role) => {
+      // GET /external-keys is owner-only; a probe here is a guaranteed 403,
+      // and the page redirects non-owners anyway.
+      mockWorkspaceId = `w-byok-off-${role}`;
+      mockWorkspaceRole = role;
+      render(<Sidebar />);
+      await act(async () => {});
+      expect(screen.queryByRole("link", { name: "externalKeys" })).toBeNull();
+      expect(mockListExternalKeys).not.toHaveBeenCalled();
+    },
+  );
+
+  it("hides the entry and does not probe while feature flags are loading", async () => {
+    mockWorkspaceId = "w-byok-pending";
+    mockFeatures = null;
+    render(<Sidebar />);
+    await act(async () => {});
+    expect(screen.queryByRole("link", { name: "externalKeys" })).toBeNull();
+    expect(mockListExternalKeys).not.toHaveBeenCalled();
+  });
+
+  it("shows the entry at once and never probes when byok is on (unchanged)", async () => {
+    mockWorkspaceId = "w-byok-on";
+    mockFeatures = { plan_page: true, byok: true, cost_display: true };
+    render(<Sidebar />);
+    expect(screen.getByRole("link", { name: "externalKeys" })).toHaveAttribute(
+      "href",
+      "/workspace/integrations/external-keys",
+    );
+    await act(async () => {});
+    expect(mockListExternalKeys).not.toHaveBeenCalled();
+  });
+
+  it("stays hidden on a failed probe and retries on the next mount", async () => {
+    mockWorkspaceId = "w-byok-off-flaky";
+    mockListExternalKeys
+      .mockRejectedValueOnce(new Error("down"))
+      .mockResolvedValueOnce([{ key_name: "K" }]);
+    const first = render(<Sidebar />);
+    await act(async () => {});
+    expect(screen.queryByRole("link", { name: "externalKeys" })).toBeNull();
+    expect(mockListExternalKeys).toHaveBeenCalledTimes(1);
+    first.unmount();
+
+    render(<Sidebar />);
+    expect(
+      await screen.findByRole("link", { name: "externalKeys" }),
+    ).toBeInTheDocument();
+    expect(mockListExternalKeys).toHaveBeenCalledTimes(2);
+  });
+
+  it("leaves the workspace cost entry gated on byok AND cost_display", async () => {
+    // Its API does 404 with BYOK off; a stored key changes nothing for it.
+    mockWorkspaceId = "w-byok-off-cost";
+    mockListExternalKeys.mockResolvedValueOnce([{ key_name: "K" }]);
+    render(<Sidebar />);
+    await screen.findByRole("link", { name: "externalKeys" });
+    expect(screen.queryByRole("link", { name: "cost" })).toBeNull();
   });
 });
 
