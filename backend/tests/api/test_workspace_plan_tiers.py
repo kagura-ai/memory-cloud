@@ -194,3 +194,69 @@ def test_promax_row_is_pro_or_better(client: TestClient) -> None:
             assert promax[key] or not value, key
         elif isinstance(value, int):
             assert promax[key] >= value, key
+
+
+def test_feature_enforcement_modes_ride_on_every_row(client: TestClient) -> None:
+    """#1648: the matrix says what each feature DOES at runtime, not just who has it.
+
+    A feature name in the plan registry is not by itself a gate — ``api_keys``,
+    ``oauth`` and ``secret_store`` are checked nowhere, and ``reranking`` only
+    degrades. The mode rides on every tier row (it is a property of the code,
+    not of the tier) so a client gating a control can look up a feature the
+    current tier does NOT have.
+    """
+    from config.plan_tiers import KNOWN_FEATURES
+
+    tiers = client.get(ENDPOINT).json()
+    modes = tiers[0]["feature_enforcement"]
+
+    assert set(modes) == set(KNOWN_FEATURES)
+    assert all(t["feature_enforcement"] == modes for t in tiers), (
+        "feature_enforcement is tier-independent and must be identical on every row"
+    )
+    assert modes["api_keys"] == "advertised"
+    assert modes["oauth"] == "advertised"
+    assert modes["secret_store"] == "advertised"
+    assert modes["reranking"] == "degrades"
+    for feature in ("team_invitations", "shared_contexts", "resources", "connectors"):
+        assert modes[feature] == "enforced", feature
+
+
+def test_feature_enforcement_is_additive_for_older_clients(client: TestClient) -> None:
+    """#1648 must not move an existing row: the field is new, everything else is untouched."""
+    free, basic, pro, promax = client.get(ENDPOINT).json()
+
+    # The booleans #1645 will gate on keep their pre-#1648 values.
+    assert (free["reranking"], basic["reranking"]) == (False, True)
+    assert (free["secret_store"], promax["secret_store"]) == (True, True)
+    assert (pro["team_invitations"], basic["team_invitations"]) == (True, False)
+    # A client that drops the unknown key sees exactly the pre-#1648 payload:
+    # nothing was renamed, removed or re-typed alongside the addition.
+    pre_1648_keys = {
+        "name",
+        "display_name",
+        "max_contexts",
+        "max_members",
+        "owned_workspaces",
+        "memory_limit",
+        "memories_per_day",
+        "storage_limit_bytes",
+        "mcp_calls_per_day",
+        "rest_calls_per_day",
+        "public_calls_per_day",
+        "max_resource_tokens",
+        "max_connectors",
+        "analysis_runs_per_day",
+        "sleep_enabled_contexts_limit",
+        "reranking",
+        "managed_embeddings",
+        "managed_llm",
+        "secret_store",
+        "shared_contexts",
+        "team_invitations",
+        "resources",
+        "connectors",
+        "public_contexts",
+    }
+    for tier in (free, basic, pro, promax):
+        assert set(tier) - {"feature_enforcement"} == pre_1648_keys, tier["name"]
