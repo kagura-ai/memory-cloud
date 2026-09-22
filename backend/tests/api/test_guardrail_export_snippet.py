@@ -7,8 +7,12 @@ extract it (anchored on its first comment line), run the bash half with a stub
 docs claim: idempotent, text outside the markers untouched, append when the
 markers are missing, regex-replacement escapes written literally, a summary
 containing the end-marker text cannot break the block, a malformed fetched
-block is refused, every failure is one stderr line + ``exit 0`` with the file
-unchanged, and in a git repository the write leaves ``git status`` clean.
+block is refused, an empty digest removes an earlier block and never creates
+one, an unset ``KAGURA_API_KEY`` / ``KAGURA_CONTEXT_ID`` or a path-bearing
+``KAGURA_API_BASE`` is refused before any fetch, every failure is exactly one
+stderr line + ``exit 0`` with the file unchanged, and in a git repository the
+write leaves ``git status`` clean — skip-worktree for a tracked ``AGENTS.md``,
+``.git/info/exclude`` for one the recipe created.
 """
 
 from __future__ import annotations
@@ -76,10 +80,13 @@ def run_python(python_half: str, path: Path, block: str) -> subprocess.Completed
 def test_docs_carry_exactly_one_recipe_with_the_documented_guards(recipe):
     assert "set -u" in recipe
     assert "--skip-worktree AGENTS.md" in recipe
+    assert "info/exclude" in recipe  # an untracked AGENTS.md is excluded locally
     assert "git rev-parse --show-toplevel" in recipe
-    assert "https://*)" in recipe
+    assert "https://?*)" in recipe and "https://*/*)" in recipe  # scheme + host, no path
     assert '*"/mcp"*)' in recipe
+    assert '"${KAGURA_API_KEY:-}"' in recipe and '"${KAGURA_CONTEXT_ID:-}"' in recipe
     assert " -L" not in recipe  # curl never follows a redirect
+    assert "--show-error" not in recipe and "--silent" in recipe  # one stderr line is ours
 
 
 def test_append_when_the_markers_are_missing_then_idempotent(python_half, tmp_path):
@@ -151,6 +158,48 @@ def test_summary_carrying_the_escaped_end_marker_keeps_exactly_one_block(python_
     assert path.read_text(encoding="utf-8") == "\n" + _block("- (a1b2c3d4) second")
 
 
+def test_empty_block_removes_an_earlier_block_and_leaves_the_rest_untouched(python_half, tmp_path):
+    """An empty digest (a ``200`` with no guardrails) drops the block and the
+    blank line the recipe put before it; text on both sides is untouched."""
+    path = tmp_path / "AGENTS.md"
+    before = "# Title\n\nintro text\n\n"
+    after = "\n## Later section\n\nkeep me\n"
+    path.write_text(before + BLOCK + after, encoding="utf-8")
+
+    assert run_python(python_half, path, "").returncode == 0
+
+    assert (
+        path.read_text(encoding="utf-8") == "# Title\n\nintro text\n\n## Later section\n\nkeep me\n"
+    )
+
+
+def test_empty_block_never_creates_a_block_or_a_file(python_half, tmp_path):
+    path = tmp_path / "AGENTS.md"
+    path.write_text("# Project\n", encoding="utf-8")
+    assert run_python(python_half, path, "").returncode == 0
+    assert path.read_text(encoding="utf-8") == "# Project\n"
+
+    missing = tmp_path / "none.md"
+    assert run_python(python_half, missing, "\n").returncode == 0
+    assert not missing.exists()
+
+
+def test_append_then_empty_block_round_trips_to_the_original_bytes(python_half, tmp_path):
+    path = tmp_path / "AGENTS.md"
+    original = "# Project\n\nRun `make test`.\n"
+    path.write_text(original, encoding="utf-8")
+
+    run_python(python_half, path, BLOCK)
+    run_python(python_half, path, "")
+    assert path.read_text(encoding="utf-8") == original
+
+    created = tmp_path / "created.md"  # a file the recipe made holds only the block
+    run_python(python_half, created, BLOCK)
+    assert created.read_text(encoding="utf-8") == "\n" + BLOCK
+    run_python(python_half, created, "")
+    assert created.read_text(encoding="utf-8") == ""
+
+
 @pytest.mark.parametrize(
     "bad",
     [
@@ -215,6 +264,7 @@ def run_bash(
     *,
     env: dict[str, str] | None = None,
     without: tuple[str, ...] = (),
+    unset: tuple[str, ...] = (),
 ) -> subprocess.CompletedProcess:
     for tool in without:
         (bin_dir / tool).unlink(missing_ok=True)
@@ -228,9 +278,15 @@ def run_bash(
         "KAGURA_TEST_CURL_BODY": str(bin_dir.parent / "curl_body"),
         **(env or {}),
     }
+    for name in unset:
+        full_env.pop(name, None)
     return subprocess.run(
         ["bash", "-c", recipe], cwd=cwd, env=full_env, text=True, capture_output=True
     )
+
+
+def _one_line(stderr: str) -> bool:
+    return stderr.startswith("kagura guardrails: ") and stderr.count("\n") == 1
 
 
 @pytest.fixture
@@ -307,18 +363,33 @@ def test_bash_half_curl_failure_leaves_the_file_unchanged(recipe, tmp_path, work
 
     assert result.returncode == 0
     assert "kagura guardrails: fetch failed (curl exit 22)" in result.stderr
+    assert _one_line(result.stderr)
     assert (workdir / "AGENTS.md").read_text(encoding="utf-8") == "# Project\n"
 
 
-def test_bash_half_empty_body_means_nothing_to_write(recipe, tmp_path, workdir):
+def test_bash_half_empty_body_removes_an_earlier_block_and_writes_nothing_new(
+    recipe, tmp_path, workdir
+):
+    """A guardrail set that emptied on the server must not survive in the
+    next task: the empty ``200`` removes the block written earlier. With no
+    block present the file is byte-identical and none is created."""
     bin_dir = _stub_bin(tmp_path, body="")
-    (workdir / "AGENTS.md").write_text("# Project\n", encoding="utf-8")
+    (workdir / "AGENTS.md").write_text("# Project\n\n" + BLOCK, encoding="utf-8")
 
     result = run_bash(recipe, workdir, bin_dir)
 
     assert result.returncode == 0
-    assert "no guardrails in context" in result.stderr
+    assert "no guardrails in context" in result.stderr and _one_line(result.stderr)
     assert (workdir / "AGENTS.md").read_text(encoding="utf-8") == "# Project\n"
+
+    result = run_bash(recipe, workdir, bin_dir)
+    assert result.returncode == 0
+    assert (workdir / "AGENTS.md").read_text(encoding="utf-8") == "# Project\n"
+
+    (workdir / "AGENTS.md").unlink()
+    result = run_bash(recipe, workdir, bin_dir)
+    assert result.returncode == 0
+    assert not (workdir / "AGENTS.md").exists()
 
 
 def test_bash_half_refuses_a_block_with_two_begin_lines(recipe, tmp_path, workdir):
@@ -328,7 +399,10 @@ def test_bash_half_refuses_a_block_with_two_begin_lines(recipe, tmp_path, workdi
     result = run_bash(recipe, workdir, bin_dir)
 
     assert result.returncode == 0
-    assert "write failed; AGENTS.md unchanged" in result.stderr
+    assert result.stderr == (
+        "kagura guardrails: write failed: fetched block does not have exactly one begin "
+        "and one end marker line; AGENTS.md unchanged\n"
+    )
     assert (workdir / "AGENTS.md").read_text(encoding="utf-8") == "# Project\n"
 
 
@@ -349,6 +423,8 @@ def test_bash_half_without_python3_is_one_stderr_line_and_exit_0(recipe, tmp_pat
     [
         ("http://example.test", "must be https://<host>"),
         ("https://example.test/mcp/w/ws", "must not contain /mcp"),
+        ("https://example.test/api/v1", "scheme and host only, no path"),
+        ("https://", "must be https://<host>"),
         ("", "must be https://<host>"),
     ],
 )
@@ -361,7 +437,90 @@ def test_bash_half_rejects_a_bad_api_base_before_any_fetch(
     result = run_bash(recipe, workdir, bin_dir, env={"KAGURA_API_BASE": base})
 
     assert result.returncode == 0
-    assert result.stderr.startswith("kagura guardrails: ")
+    assert _one_line(result.stderr)
     assert message in result.stderr
     assert (workdir / "AGENTS.md").read_text(encoding="utf-8") == "# Project\n"
     assert not (tmp_path / "curl_args").exists()
+
+
+def test_bash_half_accepts_a_trailing_slash_on_the_api_base(recipe, tmp_path, workdir):
+    bin_dir = _stub_bin(tmp_path, body=BLOCK)
+
+    result = run_bash(recipe, workdir, bin_dir, env={"KAGURA_API_BASE": "https://example.test/"})
+
+    assert result.returncode == 0 and result.stderr == ""
+    args = (tmp_path / "curl_args").read_text(encoding="utf-8").split("\n")
+    assert f"https://example.test/api/v1/memory/guardrails/digest?context_id={CTX}" in args
+
+
+@pytest.mark.parametrize("name", ["KAGURA_API_KEY", "KAGURA_CONTEXT_ID"])
+def test_bash_half_unset_variable_is_one_stderr_line_and_exit_0_not_a_set_u_abort(
+    recipe, tmp_path, workdir, name
+):
+    """``set -u`` would abort on ``${KAGURA_API_KEY}`` before any ``||``
+    handler ran — a bash error line and exit 1, i.e. a failed setup. The
+    recipe checks both variables with ``${…:-}`` first."""
+    bin_dir = _stub_bin(tmp_path, body=BLOCK)
+    (workdir / "AGENTS.md").write_text("# Project\n", encoding="utf-8")
+
+    result = run_bash(recipe, workdir, bin_dir, unset=(name,))
+
+    assert result.returncode == 0
+    assert _one_line(result.stderr) and name in result.stderr
+    assert "unbound variable" not in result.stderr
+    assert (workdir / "AGENTS.md").read_text(encoding="utf-8") == "# Project\n"
+    assert not (tmp_path / "curl_args").exists()
+
+
+def test_bash_half_rejects_a_context_id_that_is_not_uuid_shaped(recipe, tmp_path, workdir):
+    bin_dir = _stub_bin(tmp_path, body=BLOCK)
+
+    result = run_bash(recipe, workdir, bin_dir, env={"KAGURA_CONTEXT_ID": "abc&target=x"})
+
+    assert result.returncode == 0
+    assert _one_line(result.stderr) and "KAGURA_CONTEXT_ID" in result.stderr
+    assert not (tmp_path / "curl_args").exists()
+
+
+def test_bash_half_untracked_agents_md_is_excluded_locally(recipe, tmp_path, workdir):
+    """A repository without an ``AGENTS.md``: the recipe creates one, and
+    ``skip-worktree`` cannot apply to an untracked file, so it goes into
+    ``.git/info/exclude`` — ``git status`` stays clean and nothing is committed."""
+    bin_dir = _stub_bin(tmp_path, body=BLOCK)
+    git_env = {
+        "GIT_AUTHOR_NAME": "t",
+        "GIT_AUTHOR_EMAIL": "t@example.test",
+        "GIT_COMMITTER_NAME": "t",
+        "GIT_COMMITTER_EMAIL": "t@example.test",
+        "GIT_CONFIG_NOSYSTEM": "1",
+    }
+    env = {**os.environ, **git_env}
+    subprocess.run(["git", "init", "-q", str(workdir)], check=True, env=env)
+    (workdir / "README.md").write_text("# Project\n", encoding="utf-8")
+    subprocess.run(["git", "-C", str(workdir), "add", "README.md"], check=True, env=env)
+    subprocess.run(["git", "-C", str(workdir), "commit", "-q", "-m", "init"], check=True, env=env)
+
+    result = run_bash(recipe, workdir, bin_dir, env=git_env)
+
+    assert result.returncode == 0, result.stderr
+    assert result.stderr == ""
+    assert (workdir / "AGENTS.md").read_text(encoding="utf-8") == "\n" + BLOCK
+    status = subprocess.run(
+        ["git", "-C", str(workdir), "status", "--porcelain"],
+        capture_output=True,
+        text=True,
+        env=env,
+    )
+    assert status.stdout == ""
+    ignored = subprocess.run(
+        ["git", "-C", str(workdir), "check-ignore", "-q", "AGENTS.md"], env=env
+    )
+    assert ignored.returncode == 0
+    assert (workdir / ".git" / "info" / "exclude").read_text(encoding="utf-8").count(
+        "AGENTS.md"
+    ) == 1
+
+    run_bash(recipe, workdir, bin_dir, env=git_env)  # second run adds no second exclude line
+    assert (workdir / ".git" / "info" / "exclude").read_text(encoding="utf-8").count(
+        "AGENTS.md"
+    ) == 1

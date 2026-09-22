@@ -224,54 +224,65 @@ That `"url"` is the **all tools (default)** one. For **core tools only — small
 
 Codex cloud tasks run no MCP client hooks and read the repository's `AGENTS.md` before doing any work, so the lane for [tool guardrails](mcp-tools.md#tool-guardrails) there is an export block written into `AGENTS.md` by the environment's **setup script**. The server renders the block (`GET /api/v1/memory/guardrails/digest`, `text/markdown` — [API Reference](api-reference.md#get-apiv1memoryguardrailsdigest)); the recipe below writes it between two marker lines and keeps it out of the task's diff.
 
-**Environment.** `KAGURA_API_KEY` as a Codex cloud **secret** — secrets are available to setup scripts only and removed before the agent phase; `KAGURA_API_BASE` and `KAGURA_CONTEXT_ID` as plain environment variables. `KAGURA_API_BASE` is the scheme and host (and port) of your deployment, `https://<your-domain>` — **not** the MCP URL: the recipe refuses a value that contains `/mcp` or does not start with `https://`. Use the narrowest key you have: an agent-bound key whose only binding is that context, read access only; never your personal key, and never a key as an environment variable (those reach the agent phase). The default cloud image has `bash`, `curl`, `python3` and `git`; each is checked, and a missing one is a single `stderr` line.
+**Environment.** `KAGURA_API_KEY` as a Codex cloud **secret** — secrets are available to setup scripts only and removed before the agent phase; `KAGURA_API_BASE` and `KAGURA_CONTEXT_ID` as plain environment variables. `KAGURA_API_BASE` is the scheme and host (and port) of your deployment, `https://<your-domain>` — **not** the MCP URL: the recipe refuses a value that contains `/mcp`, carries a path, or does not start with `https://`. `KAGURA_API_KEY` and `KAGURA_CONTEXT_ID` are checked before use, so an unset variable is a reported skip, not a `set -u` abort. Use the narrowest key you have: an agent-bound key whose only binding is that context, read access only; never your personal key, and never a key as an environment variable (those reach the agent phase). The default cloud image has `bash`, `curl`, `python3` and `git`; each is checked, and a missing one is a single `stderr` line.
 
 ```bash
 # Kagura Memory guardrails → AGENTS.md (setup script; never fails the setup, says why on stderr)
 set -u
 say() { echo "kagura guardrails: $*" >&2; }
-case "${KAGURA_API_BASE:-}" in
-  https://*) ;;
+BASE="${KAGURA_API_BASE:-}"; BASE="${BASE%/}"
+case "$BASE" in
+  https://*"/mcp"*) say "KAGURA_API_BASE must not contain /mcp (it is not the MCP URL); AGENTS.md unchanged"; exit 0 ;;
+  https://*/*) say "KAGURA_API_BASE must be https://<host> (scheme and host only, no path); AGENTS.md unchanged"; exit 0 ;;
+  https://?*) ;;
   *) say "KAGURA_API_BASE must be https://<host> (scheme and host only); AGENTS.md unchanged"; exit 0 ;;
 esac
-case "$KAGURA_API_BASE" in *"/mcp"*) say "KAGURA_API_BASE must not contain /mcp; AGENTS.md unchanged"; exit 0 ;; esac
+[ -n "${KAGURA_API_KEY:-}" ] || { say "KAGURA_API_KEY is not set (add it as a secret); AGENTS.md unchanged"; exit 0; }
+case "${KAGURA_CONTEXT_ID:-}" in
+  "" | *[!0-9a-fA-F-]*) say "KAGURA_CONTEXT_ID must be the context UUID; AGENTS.md unchanged"; exit 0 ;;
+esac
 for t in curl python3 git; do command -v "$t" >/dev/null 2>&1 || { say "$t not found; AGENTS.md unchanged"; exit 0; }; done
 ROOT="$(git rev-parse --show-toplevel 2>/dev/null || pwd)"
-BLOCK="$(curl --fail --silent --show-error --max-time 10 \
+BLOCK="$(curl --fail --silent --max-time 10 \
   -H "Authorization: Bearer ${KAGURA_API_KEY}" \
-  "${KAGURA_API_BASE%/}/api/v1/memory/guardrails/digest?context_id=${KAGURA_CONTEXT_ID}")" \
+  "${BASE}/api/v1/memory/guardrails/digest?context_id=${KAGURA_CONTEXT_ID}")" \
   || { say "fetch failed (curl exit $?); AGENTS.md unchanged"; exit 0; }
-[ -n "$BLOCK" ] || { say "no guardrails in context; AGENTS.md unchanged"; exit 0; }
-KAGURA_BLOCK="$BLOCK" KAGURA_AGENTS_MD="$ROOT/AGENTS.md" python3 - <<'PY' || { say "write failed; AGENTS.md unchanged"; exit 0; }
+[ -n "$BLOCK" ] || say "no guardrails in context; an earlier block is removed, none is written"
+MSG="$(KAGURA_BLOCK="$BLOCK" KAGURA_AGENTS_MD="$ROOT/AGENTS.md" python3 - <<'PY' 2>&1
 import os, re, sys, tempfile
 path = os.environ["KAGURA_AGENTS_MD"]
-block = os.environ["KAGURA_BLOCK"].rstrip("\n") + "\n"
+block = os.environ["KAGURA_BLOCK"].strip()
 begin_re = re.compile(r"^<!-- kagura-memory:guardrails begin[^\n]*$", re.M)
 end_re = re.compile(r"^<!-- kagura-memory:guardrails end -->$", re.M)
-if len(begin_re.findall(block)) != 1 or len(end_re.findall(block)) != 1:
+if block and (len(begin_re.findall(block)) != 1 or len(end_re.findall(block)) != 1):
     sys.exit("fetched block does not have exactly one begin and one end marker line")
 text = open(path, encoding="utf-8").read() if os.path.exists(path) else ""
 span = re.compile(begin_re.pattern + r".*?" + end_re.pattern + r"\n?", re.M | re.S)
 if len(begin_re.findall(text)) > 1 or len(end_re.findall(text)) > 1:
     sys.exit("AGENTS.md has more than one guardrail block; fix it by hand")
-new = span.sub(lambda _m: block, text, count=1) if span.search(text) else (
-    text + ("" if not text or text.endswith("\n") else "\n") + "\n" + block)
+if not block:  # empty digest: drop an earlier block (and the blank line before it), never create one
+    new = re.sub(r"\n?" + span.pattern, "", text, count=1, flags=re.M | re.S)
+elif span.search(text):
+    new = span.sub(lambda _m: block + "\n", text, count=1)
+else:
+    new = text + ("" if not text or text.endswith("\n") else "\n") + "\n" + block + "\n"
 if new != text:
     fd, tmp = tempfile.mkstemp(dir=os.path.dirname(path) or ".", prefix=".AGENTS.md.")
     with os.fdopen(fd, "w", encoding="utf-8") as f:
         f.write(new)
     os.replace(tmp, path)
 PY
+)" || { say "write failed: ${MSG##*$'\n'}; AGENTS.md unchanged"; exit 0; }
 # Keep the block out of the task's diff: it is workspace memory, not repository content.
-( cd "$ROOT" && git rev-parse --is-inside-work-tree >/dev/null 2>&1 \
-  && git ls-files --error-unmatch AGENTS.md >/dev/null 2>&1 \
-  && git update-index --skip-worktree AGENTS.md ) || true
+( cd "$ROOT" && git rev-parse --is-inside-work-tree >/dev/null 2>&1 || exit 0
+  if git ls-files --error-unmatch AGENTS.md >/dev/null 2>&1; then git update-index --skip-worktree AGENTS.md
+  else git check-ignore -q AGENTS.md || echo AGENTS.md >>"$(git rev-parse --git-path info/exclude)"; fi ) 2>/dev/null || true
 ```
 
 - `https` only and no `-L`: `curl` never follows a redirect, so the key cannot travel to another host.
-- Every failure prints one `kagura guardrails: …` line to the setup log and exits 0 — the setup never fails because of the block, and a misconfiguration stays visible.
-- The block never leaves the container: `git update-index --skip-worktree AGENTS.md` keeps the modified tracked file out of `git status` and out of the task's diff. If you see the block in a task diff, the skip-worktree step did not run. A later legitimate edit of `AGENTS.md` in that container needs `git update-index --no-skip-worktree AGENTS.md` first.
-- Re-running the script replaces the block in place. The markers are matched at line start; a fetched block with more or fewer than one begin or one end line is refused and the file is left unchanged. A guardrail removed on the server disappears from the block on the next run.
+- Every failure prints exactly one `kagura guardrails: …` line to the setup log and exits 0 — the setup never fails because of the block, and a misconfiguration stays visible. `curl` runs silent (its exit code is in the line) and a refusal from the Python half is folded into the same line, so nothing else reaches `stderr`.
+- The block never leaves the container: `git update-index --skip-worktree AGENTS.md` keeps the modified tracked file out of `git status` and out of the task's diff; when `AGENTS.md` is not tracked (the recipe created it), it is listed in the repository's local `.git/info/exclude` instead, which is never committed. If you see the block in a task diff, that step did not run. A later legitimate edit of a tracked `AGENTS.md` in that container needs `git update-index --no-skip-worktree AGENTS.md` first.
+- Re-running the script replaces the block in place. The markers are matched at line start; a fetched block with more or fewer than one begin or one end line is refused and the file is left unchanged. A guardrail removed on the server disappears from the block on the next run, and when the context has no tool guardrails left (an empty `200`) an earlier block is removed and no block is written — the file never keeps a guardrail the server no longer serves.
 - The safer variant for a public repository: point `KAGURA_AGENTS_MD` at an untracked file and keep a one-line pointer to it in the tracked `AGENTS.md`. The same block works in any always-loaded file (`CLAUDE.md`, `GEMINI.md`, `.cursor/rules`) by changing `KAGURA_AGENTS_MD`.
 - The cloud documentation implies the order checkout → setup script → agent but does not state that `AGENTS.md` is read after the setup script; confirm with one task before relying on it.
 
