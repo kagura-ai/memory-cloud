@@ -352,10 +352,10 @@ KNOWN_FEATURES: frozenset[str] = frozenset(FEATURE_MIN_PLANS).union(
 class FeatureEnforcement(StrEnum):
     """How a ``FEATURE_MIN_PLANS`` entry behaves at RUNTIME (#1648).
 
-    The registry below says which tier a feature belongs to. It says nothing
-    about whether anything checks — three entries were display-only when this
-    enum was added. The mode makes that explicit so a reader (and the web UI,
-    which receives it on the tier matrix) can tell a real gate from a label.
+    ``FEATURE_MIN_PLANS`` above says which tier a feature belongs to. It says
+    nothing about whether anything checks — three entries were display-only
+    when this enum was added. The mode makes that explicit so a reader (and the
+    web UI, which receives it on the tier matrix) can tell a gate from a label.
 
     Members:
         ENFORCED: A runtime check REFUSES the request on a tier without the
