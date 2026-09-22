@@ -42,7 +42,7 @@ If the MCP tools are not available:
    ```
 
 3. Set `url` to your Memory Cloud endpoint: a self-hosted deployment uses `https://<your-domain>/mcp/w/<workspace-id>` (or `http://localhost:8080/mcp/w/<workspace-id>` for local development). That URL lists all tools (the default); end it with `?profile=core` to list the core tools only — a smaller tool list; everything else stays callable, it is just not listed.
-4. Pass auth through the environment: `bearer_token_env_var` names the variable holding the API key (`env_http_headers` is the equivalent for a custom header). Codex rejects an inline `bearer_token` on an HTTP server and the whole `config.toml` then fails to load; `type` is not a Codex key. Never put the key itself in the file.
+4. Export the key in the shell that starts Codex — `export KAGURA_API_KEY="<your API key>"` (add it to your shell profile to persist it). With the variable unset the server is registered but every call is unauthenticated. `bearer_token_env_var` names the variable holding the API key (`env_http_headers` is the equivalent for a custom header). Codex rejects an inline `bearer_token` on an HTTP server and the whole `config.toml` then fails to load; `type` is not a Codex key. Never put the key itself in the file.
 5. Restart Codex so the tools are loaded.
 
 Never print API keys or bearer tokens. When showing config, redact secrets.
