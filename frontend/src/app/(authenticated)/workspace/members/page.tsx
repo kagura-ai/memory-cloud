@@ -406,14 +406,15 @@ export default function WorkspaceMembersPage() {
         locale,
         tiers,
       });
+      // The notice has copy for every shape these take: a plan refusal that
+      // names no tier (`plan.*NoTier`), a role refusal (AUTH-101 carries no
+      // details at all) and a seat cap with no counts
+      // (`quota.descriptionNoNumbers`) — so tier and count presence are not
+      // conditions here.
       if (
-        (gate?.state === "plan" &&
-          gate.feature === "team_invitations" &&
-          gate.planLabel) ||
-        (gate?.state === "quota" &&
-          apiErr?.gate?.quotaType === "members" &&
-          gate.current !== undefined &&
-          gate.limit !== undefined)
+        (gate?.state === "plan" && gate.feature === "team_invitations") ||
+        gate?.state === "role" ||
+        (gate?.state === "quota" && apiErr?.gate?.quotaType === "members")
       ) {
         setInviteGate(gate);
       } else {

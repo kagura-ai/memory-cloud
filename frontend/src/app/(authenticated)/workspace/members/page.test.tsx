@@ -98,7 +98,12 @@ const OSS_TIERS = [
   { name: "free", display_name: "S", team_invitations: false, max_members: 1 },
   { name: "basic", display_name: "M", team_invitations: false, max_members: 3 },
   { name: "pro", display_name: "L", team_invitations: true, max_members: 5 },
-  { name: "promax", display_name: "XL", team_invitations: true, max_members: 20 },
+  {
+    name: "promax",
+    display_name: "XL",
+    team_invitations: true,
+    max_members: 20,
+  },
 ] as unknown as PlanTierFeature[];
 let mockTiers: PlanTierFeature[] | null = OSS_TIERS;
 vi.mock("@/hooks/usePlanFeatures", () => ({
@@ -535,7 +540,9 @@ describe("WorkspaceMembersPage seat cap notice (#1646 Q3/Q4)", () => {
       expect(line.textContent).not.toMatch(/[❌⚠ℹ]/u);
       expect(screen.queryByText("quota.title")).toBeNull();
       expect(screen.queryByRole("alert")).toBeNull();
-      expect(screen.getByPlaceholderText("emailPlaceholder")).toBeInTheDocument();
+      expect(
+        screen.getByPlaceholderText("emailPlaceholder"),
+      ).toBeInTheDocument();
     },
   );
 
@@ -663,12 +670,14 @@ describe("WorkspaceMembersPage invite refusal reads err.gate (#1644)", () => {
   });
   afterEach(() => quiet.mockRestore());
 
-  async function submitAdminInvite() {
+  async function submitAdminInvite(afterOpen?: () => void) {
     setupWithRole("owner", "pro");
     render(<WorkspaceMembersPage />);
     fireEvent.click(
       await screen.findByRole("button", { name: /inviteMember/ }),
     );
+    // Runs before the form's own re-renders, so the submit sees its effect.
+    afterOpen?.();
     fireEvent.change(await screen.findByPlaceholderText("emailPlaceholder"), {
       target: { value: "new@example.com" },
     });
@@ -749,6 +758,65 @@ describe("WorkspaceMembersPage invite refusal reads err.gate (#1644)", () => {
     expect(notice).toHaveTextContent('"feature":"features.members.singular"');
     expect(screen.queryByText(serverText)).toBeNull();
     expect(screen.queryByRole("button", { name: "quota.action" })).toBeNull();
+  });
+
+  it("a plan refusal no served tier lifts renders the no-tier notice, not the server's English", async () => {
+    const serverText = "Feature 'team_invitations' not available.";
+    vi.mocked(createInvitation).mockRejectedValue(
+      refusal(403, "FEAT-001", serverText, {
+        gate: "plan",
+        feature: "team_invitations",
+        required_plan: null,
+        required_plan_display: null,
+        current_plan: "basic",
+      }),
+    );
+    // The dialog opened on a matrix that allowed invitations; by the submit,
+    // an operator has withdrawn them from every tier, so neither the refusal
+    // nor the matrix names a tier.
+    await submitAdminInvite(() => {
+      mockTiers = OSS_TIERS.map((t) => ({
+        ...t,
+        team_invitations: false,
+      })) as unknown as PlanTierFeature[];
+    });
+
+    const notice = await screen.findByRole("alert");
+    expect(notice).toHaveTextContent("plan.titleNoTier");
+    expect(notice).toHaveTextContent("plan.descriptionNoTier");
+    expect(screen.queryByText(serverText)).toBeNull();
+    expect(screen.queryByRole("button", { name: "plan.action" })).toBeNull();
+  });
+
+  it("an AUTH-101 role refusal renders the role notice, not the server's English", async () => {
+    // The role refusal's details are stripped server-side: the code is all.
+    const serverText = "Insufficient permissions for this workspace.";
+    vi.mocked(createInvitation).mockRejectedValue(
+      refusal(403, "AUTH-101", serverText, { detail: serverText }),
+    );
+    await submitAdminInvite();
+
+    const notice = await screen.findByRole("alert");
+    // team_invitations is admin-minimum in GATE_SPECS.
+    expect(notice).toHaveTextContent("role.admin.title");
+    expect(screen.queryByText(serverText)).toBeNull();
+  });
+
+  it("a seat-cap refusal with no counts renders the count-free notice", async () => {
+    const serverText = "Member limit reached.";
+    vi.mocked(createInvitation).mockRejectedValue(
+      refusal(429, "QUOTA-001", serverText, {
+        gate: "quota",
+        quota_type: "members",
+        current_plan: "pro",
+      }),
+    );
+    await submitAdminInvite();
+
+    const notice = await screen.findByRole("alert");
+    expect(notice).toHaveTextContent("quota.title");
+    expect(notice).toHaveTextContent("quota.descriptionNoNumbers");
+    expect(screen.queryByText(serverText)).toBeNull();
   });
 
   it("does not render another quota with counts as the seat cap", async () => {
