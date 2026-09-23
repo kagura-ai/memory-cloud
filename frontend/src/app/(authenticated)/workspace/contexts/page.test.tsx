@@ -10,6 +10,7 @@
 
 import { describe, it, expect, beforeEach, vi, afterEach } from "vitest";
 import {
+  act,
   render,
   screen,
   waitFor,
@@ -18,6 +19,9 @@ import {
 } from "@testing-library/react";
 
 import ContextsPage from "./page";
+import { ApiError } from "@/lib/api/base";
+import { createContext } from "@/lib/api/contexts";
+import { normalizeGate } from "@/lib/gates/featureGates";
 
 // ---------- Mocks ------------------------------------------------------------
 
@@ -52,9 +56,12 @@ vi.mock("next/navigation", () => ({
 }));
 
 // Stable translator — passing `createFirstContextNonAdmin` through as-is so
-// assertions can match on the key.
+// assertions can match on the key. ICU params, when a call passes any, are
+// echoed after the key so their flow is assertable (#1644).
 vi.mock("next-intl", () => ({
-  useTranslations: (_ns?: string) => (k: string) => k,
+  useTranslations:
+    (_ns?: string) => (k: string, params?: Record<string, unknown>) =>
+      params ? `${k} ${JSON.stringify(params)}` : k,
   useLocale: () => "en",
 }));
 
@@ -647,5 +654,97 @@ describe("ContextsPage quota upsells behind the plan_page gate (#1643)", () => {
     expect(screen.queryByText("quotaDialogUpgradeHeading")).toBeNull();
     expect(screen.queryByRole("button", { name: "viewPlans" })).toBeNull();
     expect(screen.getByRole("button", { name: "close" })).toBeInTheDocument();
+  });
+});
+
+describe("ContextsPage create errors read the context cap from err.gate (#1644)", () => {
+  const SERVER_MESSAGE =
+    "Context limit reached. Your S plan allows 1 context(s) per workspace. Upgrade to M plan for more contexts.";
+
+  /** An ApiError exactly as lib/api/base.ts would build it from this body. */
+  function capRefusal(details: Record<string, unknown> | undefined): ApiError {
+    return new ApiError({
+      error: "QUOTA-001",
+      message: SERVER_MESSAGE,
+      status: 429,
+      details,
+      gate: normalizeGate(429, "QUOTA-001", details),
+    });
+  }
+
+  const CURRENT_SERVER_BODY = {
+    gate: "quota",
+    quota_type: "contexts",
+    current: 1,
+    limit: 1,
+    required_plan: "basic",
+    required_plan_display: "M",
+    current_plan: "free",
+    feature: null,
+    resets_at: null,
+    addon_bonus: 0,
+    requested: 1,
+  };
+
+  /** Owner, empty list: the empty-state Create opens the advanced dialog. */
+  async function submitAdvancedCreate() {
+    setupWithRole("owner");
+    render(<ContextsPage />);
+    fireEvent.click(await screen.findByRole("button", { name: /^create$/i }));
+    fireEvent.change(
+      await screen.findByPlaceholderText("contextNamePlaceholder"),
+      { target: { value: "my-context" } },
+    );
+    const dialog = await screen.findByRole("dialog");
+    const buttons = Array.from(dialog.querySelectorAll("button")).filter(
+      (b) => b.textContent === "create",
+    );
+    expect(buttons).toHaveLength(1);
+    // Inside act so the rejected create and its `finally` settle first.
+    await act(async () => {
+      fireEvent.click(buttons[0]);
+    });
+  }
+
+  it("localizes the cap with the CURRENT tier's label and the limit from err.gate", async () => {
+    vi.mocked(createContext).mockRejectedValueOnce(
+      capRefusal(CURRENT_SERVER_BODY),
+    );
+    await submitAdvancedCreate();
+
+    // `free` resolves to this deployment's label (S by default); the prose's
+    // own "Your S plan" is never parsed.
+    expect(
+      await screen.findByText('contextLimitReached {"plan":"S","limit":1}'),
+    ).toBeInTheDocument();
+    expect(screen.queryByText(SERVER_MESSAGE)).toBeNull();
+  });
+
+  it("does not parse the server prose: a refusal without gate details shows the server text", async () => {
+    // A server predating #1644 raised the context cap with no details at
+    // all. The old regex pair turned its prose into the localized sentence;
+    // nothing reads the prose now.
+    vi.mocked(createContext).mockRejectedValueOnce(capRefusal(undefined));
+    await submitAdvancedCreate();
+
+    expect(await screen.findByText(SERVER_MESSAGE)).toBeInTheDocument();
+    expect(screen.queryByText(/contextLimitReached/)).toBeNull();
+  });
+
+  it("does not render another quota as the context cap", async () => {
+    vi.mocked(createContext).mockRejectedValueOnce(
+      new ApiError({
+        error: "QUOTA-001",
+        message: "REST API daily quota exceeded",
+        status: 429,
+        gate: { state: "quota", quotaType: "api_rest_daily" },
+      }),
+    );
+    await submitAdvancedCreate();
+
+    expect(
+      await screen.findByText("REST API daily quota exceeded"),
+    ).toBeInTheDocument();
+    expect(screen.queryByText(/contextLimitReached/)).toBeNull();
   });
 });

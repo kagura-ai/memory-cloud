@@ -95,6 +95,7 @@ import { useSystemFeatures } from "@/hooks/useSystemFeatures";
 import { useCanUpgrade } from "@/hooks/useCanUpgrade";
 import { hasWorkspaceRole, WorkspaceRole } from "@/lib/auth/rbac";
 import { ApiError } from "@/lib/api/base";
+import { gateFromFacts } from "@/lib/gates/featureGates";
 import type { Context, ContextStats } from "@/lib/types/context";
 import { CONTEXT_TEMPLATES, getTemplate } from "@/lib/templates/usage-guide";
 import { createExternalAPIKey } from "@/lib/api/external-keys";
@@ -110,6 +111,30 @@ import {
 
 // Constants (must match backend validation)
 const CONTEXT_NAME_PATTERN = /^[a-z0-9_-]+$/;
+
+/**
+ * #1644: the context cap's tier label and limit, read from the gate
+ * normalised on the ApiError — no regex over the server's English prose.
+ * `plan` fills contextLimitReached's "Your {plan} plan allows {limit} …", so
+ * it is the workspace's CURRENT tier, not the one that would lift the cap.
+ * Null unless both are known: a server predating #1644 sent no details on
+ * this refusal, and its own message is shown instead.
+ */
+function contextLimitArgs(
+  err: unknown,
+  locale: string | undefined,
+): { plan: string; limit: number } | null {
+  const facts = err instanceof ApiError ? err.gate : undefined;
+  if (facts?.state !== "quota" || facts.quotaType !== "contexts") return null;
+  // An error message carries no CTA, so the raw upgrade answer is moot.
+  const gate = gateFromFacts(facts, {
+    fallbackKey: "contexts",
+    canUpgrade: false,
+    locale,
+  });
+  if (!gate?.currentPlanLabel || gate.limit === undefined) return null;
+  return { plan: gate.currentPlanLabel, limit: gate.limit };
+}
 
 export default function ContextsPage() {
   const t = useTranslations("contexts");
@@ -334,12 +359,9 @@ export default function ContextsPage() {
         (err instanceof Error ? err.message : t("failedToCreate"));
 
       // Translate common error messages
-      if (errorMessage.includes("Context limit reached")) {
-        const planMatch = errorMessage.match(/Your (\w+) plan/i);
-        const limitMatch = errorMessage.match(/allows (\d+) context/i);
-        const plan = planMatch ? planMatch[1] : "Free";
-        const limit = limitMatch ? limitMatch[1] : "1";
-        errorMessage = t("contextLimitReached", { plan, limit });
+      const limitArgs = contextLimitArgs(err, locale);
+      if (limitArgs) {
+        errorMessage = t("contextLimitReached", limitArgs);
       } else if (
         errorMessage.includes("already exists") ||
         errorMessage.includes("name taken")
@@ -396,15 +418,12 @@ export default function ContextsPage() {
         err instanceof Error ? err.message : t("failedToCreate");
 
       // Translate common error messages (but keep resource_id duplicates as-is)
+      const limitArgs = contextLimitArgs(err, locale);
       if (errorMessage.includes("already used")) {
         // Resource ID duplicate error - show API message as-is (includes context name)
         setCreateError(errorMessage);
-      } else if (errorMessage.includes("Context limit reached")) {
-        const planMatch = errorMessage.match(/Your (\w+) plan/i);
-        const limitMatch = errorMessage.match(/allows (\d+) context/i);
-        const plan = planMatch ? planMatch[1] : "Free";
-        const limit = limitMatch ? limitMatch[1] : "1";
-        setCreateError(t("contextLimitReached", { plan, limit }));
+      } else if (limitArgs) {
+        setCreateError(t("contextLimitReached", limitArgs));
       } else if (
         errorMessage.includes("already exists") ||
         errorMessage.includes("name taken")
