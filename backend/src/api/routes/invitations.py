@@ -21,7 +21,7 @@ from auth.programmatic_workspace_auth import (
     authorize_workspace_management,
 )
 from auth.workspace_roles import WorkspaceRole
-from config.plan_tiers import has_feature, required_plan_display_name
+from config.plan_tiers import has_feature
 from db.base import get_db
 from models.auth import Workspace, WorkspaceInvitation, WorkspaceMember
 from models.schemas import (
@@ -34,7 +34,7 @@ from models.schemas import (
 )
 from services.invitation_service import InvitationService, build_invitation_url
 from utils.datetime import to_utc_iso, utcnow
-from utils.exceptions import NotFoundException, ValidationError
+from utils.exceptions import FeatureNotAvailableError, NotFoundException, ValidationError
 from utils.logger import get_logger
 
 logger = get_logger(__name__)
@@ -98,29 +98,21 @@ async def create_invitation(
         workspace = result.scalar_one()
 
         # Feature-based (#1548): the tier registry decides; unknown tiers fail closed.
+        # #1644: raised as ``FeatureNotAvailableError`` so the refusal answers
+        # the documented ``FEAT-001`` envelope with ``details.gate`` instead of
+        # the non-semantic ``HTTP-403`` placeholder. Status is unchanged (403)
+        # and the wording is the one every other plan gate already uses.
         if not has_feature(workspace.plan_name, "team_invitations"):
-            raise HTTPException(
-                status_code=403,
-                detail=(
-                    f"Team invitations require the "
-                    f"{required_plan_display_name('team_invitations')} plan. "
-                    "Upgrade your plan to invite team members."
-                ),
-            )
+            raise FeatureNotAvailableError.for_feature(workspace.plan_name, "team_invitations")
 
         # Check member quota (Issue #229)
         from services.quota_service import QuotaService
 
         quota_service = QuotaService(db)
-        can_invite, quota_error = await quota_service.check_member_quota(
-            workspace_id, raise_on_exceeded=False
-        )
-
-        if not can_invite:
-            raise HTTPException(
-                status_code=429,  # Quota Exceeded
-                detail=quota_error,
-            )
+        # #1644: one step, not two. The service's own raise carries the
+        # ``QUOTA-001`` envelope with ``quota_type`` and the counts; the
+        # re-wrap into a bare ``HTTPException(429)`` threw all of that away.
+        await quota_service.check_member_quota(workspace_id, raise_on_exceeded=True)
 
         # Create invitation
         invitation_service = InvitationService(db)

@@ -1194,15 +1194,14 @@ async def handle_setup_connector(
             # (code + ``required_plan``), so MCP clients see one vocabulary for
             # "upgrade to create this".
             if isinstance(exc, FeatureNotAvailableError):
-                # Non-raising: a raise inside this handler would escape the
-                # tool entirely when an env override (#1559) dropped the
-                # feature from every tier.
-                from config.plan_tiers import required_plan_name
-
+                # #1644: ``required_plan`` (and its display label) now ride on
+                # ``exc.details``, built by the registry at the raise site, so
+                # re-deriving it here would be a duplicate keyword. Still
+                # non-raising: an env override (#1559) that dropped the
+                # feature from every tier yields ``None``, not an exception.
                 return _error_response(
                     "plan_required",
                     exc.message,
-                    required_plan=required_plan_name("connectors"),
                     **exc.details,
                 )
             return _error_response(
