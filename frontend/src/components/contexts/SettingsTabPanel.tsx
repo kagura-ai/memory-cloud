@@ -60,6 +60,7 @@ import { useAuth } from "@/contexts/AuthContext";
 import { useWorkspace } from "@/contexts/WorkspaceContext";
 import { CONTEXT_TEMPLATES, getTemplate } from "@/lib/templates/usage-guide";
 import { useFeatureGates } from "@/hooks/useFeatureGate";
+import { usePlanTierMatrix } from "@/hooks/usePlanFeatures";
 import { gateFromFacts, isGateKey } from "@/lib/gates/featureGates";
 
 // #1583: plan features this form can refuse on, with the notice that names the
@@ -110,6 +111,9 @@ export function SettingsTabPanel({
     "shared_contexts",
     "sleep_reports",
   ]);
+  // #1645: the same shared matrix (module cache — no extra fetch), so a save
+  // refusal that names no tier gets the pre-check's tier and labels.
+  const tiers = usePlanTierMatrix();
   // The notices name a tier, so they need one: when no served tier has the
   // feature there is none to name (that tier-less copy is #1646's).
   const publicPlanLabel =
@@ -275,8 +279,9 @@ export function SettingsTabPanel({
         // #1583: a plan refusal names the control ("Sharing requires the L
         // plan"), not the feature key; unknown features keep the server
         // text. #1644: the tier is the one the refusal names, resolved to
-        // this deployment's label — a refusal that names none (no tier has
-        // the feature, or a server predating #1644) keeps the server text.
+        // this deployment's label. #1645: a refusal that names none (a server
+        // predating #1644) takes the matrix's tier, as the pre-check does;
+        // when no served tier has the feature either, the server text stays.
         const facts = err.gate;
         const feature = facts?.state === "plan" ? facts.feature : undefined;
         const notice = feature ? FEATURE_NOTICES[feature] : undefined;
@@ -286,6 +291,7 @@ export function SettingsTabPanel({
             fallbackKey: feature,
             canUpgrade: false,
             locale,
+            tiers,
           });
           if (gate?.planLabel) {
             description = t(notice.key, { plan: gate.planLabel });

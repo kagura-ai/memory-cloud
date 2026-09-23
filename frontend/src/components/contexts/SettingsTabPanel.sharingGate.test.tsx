@@ -24,6 +24,7 @@ import { SettingsTabPanel } from "./SettingsTabPanel";
 import { ApiError } from "@/lib/api/base";
 import { normalizeGate } from "@/lib/gates/featureGates";
 import type { Context } from "@/lib/types/context";
+import type { PlanTierFeature } from "@/lib/api/workspaces";
 
 // ---------- Mocks ------------------------------------------------------------
 
@@ -108,6 +109,13 @@ vi.mock("@/hooks/useFeatureGate", () => ({
 
 vi.mock("@/contexts/AuthContext", () => ({
   useAuth: () => ({ user: { id: "user-1" } }),
+}));
+
+// #1645: save refusals are lifted with the shared tier matrix. `null` (still
+// resolving) by default, so a refusal is read from its own facts alone.
+let mockTiers: PlanTierFeature[] | null = null;
+vi.mock("@/hooks/usePlanFeatures", () => ({
+  usePlanTierMatrix: () => mockTiers,
 }));
 
 type SelectChildren = { children: React.ReactNode };
@@ -200,6 +208,7 @@ async function changeSleepModeAndSave(mode: "full" | "edges_only") {
 
 beforeEach(() => {
   vi.clearAllMocks();
+  mockTiers = null;
   mockUpdateContext.mockResolvedValue(undefined);
   mockGetWorkspaceUsageCurrent.mockResolvedValue({
     usage: {
@@ -404,6 +413,35 @@ describe("SettingsTabPanel — FEAT-001 refusal names the control (#1583)", () =
   });
 
   it("keeps the server text when the refusal names no tier (#1644)", async () => {
+    refuse("shared_contexts", null);
+    renderPanel(makeContext());
+
+    const toast = await saveARename();
+
+    expect(toast.description).toBe(
+      "Feature 'shared_contexts' not available on M plan.",
+    );
+  });
+
+  it("a refusal that names no tier takes the matrix's tier and display name (#1645)", async () => {
+    // A server predating #1644 names no tier; the operator's matrix does —
+    // the same scan the pre-check runs, labelled by the row's own name.
+    mockTiers = [
+      { name: "basic", display_name: "M", shared_contexts: false },
+      { name: "team", display_name: "Team", shared_contexts: true },
+    ] as unknown as PlanTierFeature[];
+    refuse("shared_contexts", null);
+    renderPanel(makeContext());
+
+    const toast = await saveARename();
+
+    expect(toast.description).toBe("sharedRequiresPlan:Team");
+  });
+
+  it("keeps the server text when no served tier has the feature either (#1645)", async () => {
+    mockTiers = [
+      { name: "basic", display_name: "M", shared_contexts: false },
+    ] as unknown as PlanTierFeature[];
     refuse("shared_contexts", null);
     renderPanel(makeContext());
 

@@ -790,6 +790,29 @@ describe("ContextsPage create errors read the context cap from err.gate (#1644)"
     expect(screen.queryByText(SERVER_MESSAGE)).toBeNull();
   });
 
+  it("labels an operator-defined current tier by the matrix's display name (#1645)", async () => {
+    // The wire ships no label for the current tier; the shared matrix does.
+    mockTiers = [
+      ...OSS_TIERS,
+      { name: "team_custom", display_name: "Team", max_contexts: 5 },
+    ] as unknown as PlanTierFeature[];
+    vi.mocked(createContext).mockRejectedValueOnce(
+      capRefusal({
+        ...CURRENT_SERVER_BODY,
+        current: 5,
+        limit: 5,
+        required_plan: "pro",
+        required_plan_display: "L",
+        current_plan: "team_custom",
+      }),
+    );
+    await submitAdvancedCreate();
+
+    expect(
+      await screen.findByText('contextLimitReached {"plan":"Team","limit":5}'),
+    ).toBeInTheDocument();
+  });
+
   it("does not parse the server prose: a refusal without gate details shows the server text", async () => {
     // A server predating #1644 raised the context cap with no details at
     // all. The old regex pair turned its prose into the localized sentence;

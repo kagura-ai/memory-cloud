@@ -89,7 +89,10 @@ import {
   getEmbeddingModels,
   type EmbeddingModel,
 } from "@/lib/api/contexts";
-import { checkOpenAIKeyStatus } from "@/lib/api/workspaces";
+import {
+  checkOpenAIKeyStatus,
+  type PlanTierFeature,
+} from "@/lib/api/workspaces";
 import { useSystemFeatures } from "@/hooks/useSystemFeatures";
 import { useCanUpgrade } from "@/hooks/useCanUpgrade";
 import { useFeatureGate } from "@/hooks/useFeatureGate";
@@ -119,11 +122,13 @@ const CONTEXT_NAME_PATTERN = /^[a-z0-9_-]+$/;
  * `plan` fills contextLimitReached's "Your {plan} plan allows {limit} …", so
  * it is the workspace's CURRENT tier, not the one that would lift the cap.
  * Null unless both are known: a server predating #1644 sent no details on
- * this refusal, and its own message is shown instead.
+ * this refusal, and its own message is shown instead. `tiers` is the shared
+ * matrix (#1645), so an operator-defined tier reads by its own display name.
  */
 function contextLimitArgs(
   err: unknown,
   locale: string | undefined,
+  tiers: readonly PlanTierFeature[] | null,
 ): { plan: string; limit: number } | null {
   const facts = err instanceof ApiError ? err.gate : undefined;
   if (facts?.state !== "quota" || facts.quotaType !== "contexts") return null;
@@ -132,6 +137,7 @@ function contextLimitArgs(
     fallbackKey: "contexts",
     canUpgrade: false,
     locale,
+    tiers,
   });
   if (!gate?.currentPlanLabel || gate.limit === undefined) return null;
   return { plan: gate.currentPlanLabel, limit: gate.limit };
@@ -387,7 +393,7 @@ export default function ContextsPage() {
         (err instanceof Error ? err.message : t("failedToCreate"));
 
       // Translate common error messages
-      const limitArgs = contextLimitArgs(err, locale);
+      const limitArgs = contextLimitArgs(err, locale, tiers);
       if (limitArgs) {
         errorMessage = t("contextLimitReached", limitArgs);
       } else if (
@@ -446,7 +452,7 @@ export default function ContextsPage() {
         err instanceof Error ? err.message : t("failedToCreate");
 
       // Translate common error messages (but keep resource_id duplicates as-is)
-      const limitArgs = contextLimitArgs(err, locale);
+      const limitArgs = contextLimitArgs(err, locale, tiers);
       if (errorMessage.includes("already used")) {
         // Resource ID duplicate error - show API message as-is (includes context name)
         setCreateError(errorMessage);
