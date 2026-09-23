@@ -189,8 +189,14 @@ describe("normalizeGate — older servers (semantic code only)", () => {
     ).toEqual({ state: "plan", feature: "memory_analysis" });
   });
 
-  it.each(["QUOTA-001", "QUOTA-002"])("maps %s to quota", (code) => {
-    expect(normalizeGate(429, code, {})).toEqual({ state: "quota" });
+  it("maps a typed QUOTA-001 to quota", () => {
+    expect(
+      normalizeGate(429, "QUOTA-001", { quota_type: "workspace_limit_reached" }),
+    ).toEqual({ state: "quota", quotaType: "workspace_limit_reached" });
+  });
+
+  it("maps QUOTA-002 to quota on the code alone (it names one cap)", () => {
+    expect(normalizeGate(429, "QUOTA-002", {})).toEqual({ state: "quota" });
   });
 
   it("maps AUTH-101 403 to role with no other fields (details are stripped server-side)", () => {
@@ -211,6 +217,56 @@ describe("normalizeGate — older servers (semantic code only)", () => {
       quotaType: "connectors",
       current: 3,
       limit: 3,
+    });
+  });
+});
+
+describe("normalizeGate — QUOTA-001 limits that are not gates", () => {
+  // The server raises QUOTA-001 for the 1 MB memory-size guard, the total
+  // memory cap and a missing workspace too. None of them is a plan quota,
+  // so none may normalise to a quota gate — an upgrade treatment on a
+  // request-size limit would promise something no tier provides.
+
+  it("yields no gate for the untyped body the server sends", () => {
+    // Byte-for-byte the details block backend/tests/api/
+    // test_gate_error_contract.py pins for every NOT_GATE_REFUSALS site.
+    expect(
+      normalizeGate(429, "QUOTA-001", { quota_type: null }),
+    ).toBeUndefined();
+  });
+
+  it("yields no gate for a QUOTA-001 with no details at all", () => {
+    expect(normalizeGate(429, "QUOTA-001", {})).toBeUndefined();
+    expect(normalizeGate(429, "QUOTA-001", undefined)).toBeUndefined();
+  });
+
+  it("does not accept counts in place of a quota_type", () => {
+    // No server ever sent a count pair without a type, and a pair with no
+    // type names no cap a client could render it against.
+    expect(
+      normalizeGate(429, "QUOTA-001", { current: 1, limit: 1 }),
+    ).toBeUndefined();
+  });
+
+  it("yields no gate for a quota_type outside the frozen vocabulary", () => {
+    // Mirrors the server, which stamps gate only for a QUOTA_TYPES member.
+    expect(
+      normalizeGate(429, "QUOTA-001", { quota_type: "not_a_frozen_type" }),
+    ).toBeUndefined();
+  });
+
+  it("yields no gate for a pre-#1644 daily API quota body", () => {
+    // The old rate-limit middleware replaced the details with retry_after.
+    expect(
+      normalizeGate(429, "QUOTA-001", { retry_after: 86400 }),
+    ).toBeUndefined();
+  });
+
+  it("still trusts an explicit gate over the code rule", () => {
+    // Rule 1: a server that says "quota" is believed; the type requirement
+    // only governs the fallback for a server that says nothing.
+    expect(normalizeGate(429, "QUOTA-001", { gate: "quota" })).toEqual({
+      state: "quota",
     });
   });
 });

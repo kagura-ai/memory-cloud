@@ -251,15 +251,33 @@ function asString(v: unknown): string | undefined {
  * The refusal kind an older server implies through its SEMANTIC error code.
  * Never the status alone: a 403 or 429 with no recognised code is not a gate.
  * Status 402 is not mapped — nothing on the server emits it (#1641 P-4).
+ *
+ * `QUOTA-001` alone is not enough: the server also raises it for limits no
+ * tier lifts (the 1 MB memory-size guard, the total memory cap, a missing
+ * workspace), and those carry no `quota_type`. Only a `quota_type` from the
+ * frozen vocabulary makes it a quota gate — the same rule the server applies
+ * before it stamps `gate: "quota"`. Counts alone do not qualify: they name
+ * no cap to render, and no server ever sent them without a type. Every
+ * pre-#1644 quota refusal that carried numbers was typed, so an older server
+ * still normalises identically; its untyped ones (the context cap, the daily
+ * API quota) now read as no gate and keep their server message, which is
+ * what their callers render when the gate carries no numbers anyway.
+ * `QUOTA-002` and `CONNECTOR-001` name exactly one cap each, so the code is
+ * enough for them.
  */
 function stateFromErrorCode(
   status: number,
   errorCode: string | undefined,
+  quotaType: string | undefined,
 ): RefusedGateState | undefined {
   switch (errorCode) {
     case "FEAT-001":
       return "plan";
     case "QUOTA-001":
+      return quotaType !== undefined &&
+        hasOwn(QUOTA_TYPE_TO_GATE_KEY, quotaType)
+        ? "quota"
+        : undefined;
     case "QUOTA-002":
     case "CONNECTOR-001":
       return "quota";
@@ -280,8 +298,8 @@ function stateFromErrorCode(
  * 1. `details.gate` wins when it is one of the five terminal states; an
  *    unknown value is ignored rather than trusted.
  * 2. Otherwise the semantic error code decides (an older server):
- *    FEAT-001 → plan; QUOTA-001 / QUOTA-002 / CONNECTOR-001 → quota;
- *    AUTH-101 at 403 → role.
+ *    FEAT-001 → plan; QUOTA-001 with a frozen `quota_type`, QUOTA-002 and
+ *    CONNECTOR-001 → quota; AUTH-101 at 403 → role.
  * 3. Legacy count names are aliased onto `current` / `limit`, and a
  *    CONNECTOR-001 with no `quota_type` reads as `connectors`.
  */
@@ -294,7 +312,7 @@ export function normalizeGate(
 
   const state: RefusedGateState | undefined = isRefusedGateState(d.gate)
     ? d.gate
-    : stateFromErrorCode(status, errorCode);
+    : stateFromErrorCode(status, errorCode, asString(d.quota_type));
   if (!state) return undefined;
 
   const facts: {

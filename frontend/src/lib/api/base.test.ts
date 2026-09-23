@@ -230,6 +230,22 @@ describe("ApiClient gate normalization (#1644)", () => {
     });
   });
 
+  it("attaches no gate to a QUOTA-001 that is not a plan quota", async () => {
+    // The 1 MB memory-size guard: QUOTA-001 on the wire, but untyped, so
+    // no tier lifts it and nothing may render it as an upgrade.
+    mockFetchOnce(429, {
+      error: "QUOTA-001",
+      message:
+        "Memory size 1,000,001 bytes exceeds limit 1,000,000 bytes (1MB).",
+      details: { quota_type: null },
+    });
+
+    const err = await caught();
+    expect(err.status).toBe(429);
+    expect(err.gate).toBeUndefined();
+    expect(err.message).toContain("exceeds limit");
+  });
+
   it("attaches a role gate for an AUTH-101 403 whose details were stripped", async () => {
     mockFetchOnce(403, {
       error: "AUTH-101",
