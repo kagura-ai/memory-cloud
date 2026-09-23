@@ -1535,9 +1535,7 @@ describe("no gate decision outside the descriptor (#1645)", () => {
       .filter((rel) => /\.(ts|tsx)$/.test(rel) && !/\.test\.tsx?$/.test(rel))
       .filter((rel) => !ALLOWED.has(rel))
       .filter((rel) => {
-        const src = stripComments(
-          readFileSync(join(FRONTEND, rel), "utf8"),
-        );
+        const src = stripComments(readFileSync(join(FRONTEND, rel), "utf8"));
         return DECISION.some((re) => re.test(src));
       });
     expect(offenders).toEqual([]);
