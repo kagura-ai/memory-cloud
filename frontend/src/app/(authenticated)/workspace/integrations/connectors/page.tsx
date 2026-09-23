@@ -25,6 +25,11 @@ import { PageContainer } from "@/components/common/PageContainer";
 import { PageHeader } from "@/components/common/PageHeader";
 import { ErrorBanner } from "@/components/common/ErrorBanner";
 import {
+  FeatureGateNotice,
+  featureGateText,
+  featureGateToast,
+} from "@/components/common/FeatureGateNotice";
+import {
   InlineSpinner,
   TableLoadingState,
 } from "@/components/common/LoadingState";
@@ -72,7 +77,6 @@ import { useToast } from "@/hooks/use-toast";
 import { useCopyFeedback } from "@/hooks/useCopyFeedback";
 import { useConsumeSearchParams } from "@/hooks/useConsumeSearchParams";
 import { useSystemFeatures } from "@/hooks/useSystemFeatures";
-import { useCanUpgrade } from "@/hooks/useCanUpgrade";
 import { useFeatureGate } from "@/hooks/useFeatureGate";
 import { usePlanTierMatrix } from "@/hooks/usePlanFeatures";
 import { ChannelPicker, parseChannelIds } from "./ChannelPicker";
@@ -192,6 +196,9 @@ function toResourceId(seed: string): string {
 export default function ConnectorsPage() {
   const t = useTranslations("connectors");
   const tCommon = useTranslations("common");
+  // #1646: the create gate's banner, toast and empty-state copy read the one
+  // gate.* namespace.
+  const tGate = useTranslations("gate");
   const locale = useLocale();
   const { toast } = useToast();
   const { isCopied, copyToTarget } = useCopyFeedback();
@@ -216,18 +223,14 @@ export default function ConnectorsPage() {
   // name. #1645: read through the gate descriptor, which also names the
   // required tier from the matrix. `canCreate` is its tri-state view for the
   // create controls below — `null` while resolving: controls stay disabled
-  // and the upsell is only rendered on an explicit `false`.
+  // and the upsell is only rendered on an explicit `false`. #1646: the
+  // notice, toast and empty-state copy render the descriptor itself, so a
+  // plan no tier lifts gets the tier-less copy rather than none.
   const gate = useFeatureGate("connectors");
   // #1645: the same shared matrix (module cache — no extra fetch), so a
   // refusal that names no tier gets the pre-check's tier and labels.
   const tiers = usePlanTierMatrix();
   const canCreate = gate.state === "pending" ? null : gate.state === "allowed";
-  // The plan-gate copy names a tier, so it renders only when there is one to
-  // name: no served tier having the feature is the tier-less copy #1646 adds.
-  const planLabel = gate.state === "plan" ? gate.planLabel : undefined;
-  // #1643: the plan-gate copy always renders; only the button needs a Plan
-  // page this member can actually reach.
-  const canUpgrade = useCanUpgrade();
 
   // #1426: managed (hosted SaaS) mode. When true the shared worker/bridge
   // provides the pre-compile LLM and only OAuth is offered, so hide the BYO
@@ -410,20 +413,17 @@ export default function ConnectorsPage() {
     if (!installHandle) return;
     if (!allowed) return;
     // #1560: hold the handle while the plan gate is still resolving (or the
-    // tier matrix is unavailable — the hook stays `null` on a persistent
+    // tier matrix is unavailable — the gate stays `pending` on a persistent
     // fetch failure) — neither open the form nor strip the one-time handle
     // until the answer is actually known.
-    if (canCreate === null) return;
+    if (gate.state === "pending") return;
     // #1551: below XL the create form must never open — a stale or crafted
     // callback would otherwise show an enabled form that only fails at the
     // backend 403. Surface the upsell and strip the one-time handle instead.
+    // #1646: the toast is the banner's own copy (featureGateToast).
     if (!canCreate) {
-      if (planLabel !== undefined) {
-        toast({
-          title: t("planGate.title", { plan: planLabel }),
-          description: t("planGate.description", { plan: planLabel }),
-        });
-      }
+      const toastArgs = featureGateToast(gate, tGate, "create");
+      if (toastArgs) toast(toastArgs);
       router.replace("/workspace/integrations/connectors");
       return;
     }
@@ -1065,27 +1065,9 @@ export default function ConnectorsPage() {
     <PageContainer>
       <PageHeader title={t("title")} description={t("description")} />
 
-      {planLabel !== undefined && (
-        <Alert className="mb-4">
-          <AlertDescription className="flex flex-wrap items-center justify-between gap-2">
-            <span>
-              <span className="font-medium">
-                {t("planGate.title", { plan: planLabel })}
-              </span>{" "}
-              {t("planGate.description", { plan: planLabel })}
-            </span>
-            {canUpgrade === true && (
-              <Button
-                size="sm"
-                variant="outline"
-                onClick={() => router.push("/workspace/settings/plan")}
-              >
-                {t("planGate.action", { plan: planLabel })}
-              </Button>
-            )}
-          </AlertDescription>
-        </Alert>
-      )}
+      {/* #1646: scope "create" — existing connectors keep ingesting (#1551).
+          Pending and allowed render nothing. */}
+      <FeatureGateNotice gate={gate} scope="create" />
 
       {/* #1389: provider picker rendered from the CONNECTOR_PROVIDERS
           descriptor — Slack live, Discord/Teams disabled coming-soon — so
@@ -1207,13 +1189,14 @@ export default function ConnectorsPage() {
       ) : connectors.length === 0 ? (
         // #1551: below XL the banner above already carries the upgrade CTA —
         // the empty state must not offer a Slack install that would 403.
+        // #1646: it is still the empty-list state, not a second notice; only
+        // its description borrows the gate copy.
         <EmptyState
           icon={Plug}
           title={t("emptyTitle")}
           description={
-            planLabel !== undefined
-              ? t("planGate.description", { plan: planLabel })
-              : t("emptyDesc")
+            featureGateText(gate, tGate, "create")?.description ??
+            t("emptyDesc")
           }
           actionLabel={
             canCreate ? t("connectProvider", { name: "Slack" }) : undefined
