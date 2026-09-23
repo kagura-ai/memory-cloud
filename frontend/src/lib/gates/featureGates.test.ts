@@ -9,7 +9,8 @@
  */
 
 import { readFileSync, readdirSync } from "node:fs";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
+import { fileURLToPath } from "node:url";
 import { afterEach, describe, expect, it } from "vitest";
 
 import { WorkspaceRole } from "@/lib/auth/rbac";
@@ -1524,15 +1525,18 @@ describe("no gate decision outside the descriptor (#1645)", () => {
   const stripComments = (src: string) =>
     src.replace(/\/\*[\s\S]*?\*\//g, "").replace(/(^|[^:"'`])\/\/.*$/gm, "$1");
 
+  // `frontend/`, from this file — not the cwd, which differs by runner.
+  const FRONTEND = join(dirname(fileURLToPath(import.meta.url)), "../../..");
+
   it("finds none in src outside the allowlist", () => {
-    const root = join(process.cwd(), "src");
+    const root = join(FRONTEND, "src");
     const offenders = (readdirSync(root, { recursive: true }) as string[])
       .map((rel) => `src/${rel.split("\\").join("/")}`)
       .filter((rel) => /\.(ts|tsx)$/.test(rel) && !/\.test\.tsx?$/.test(rel))
       .filter((rel) => !ALLOWED.has(rel))
       .filter((rel) => {
         const src = stripComments(
-          readFileSync(join(process.cwd(), rel), "utf8"),
+          readFileSync(join(FRONTEND, rel), "utf8"),
         );
         return DECISION.some((re) => re.test(src));
       });
