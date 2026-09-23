@@ -5,8 +5,9 @@
  *   - Sleep mode section gated by isOwner (workspace role === "owner")
  *   - Sleep quota fetched on mount only for owners
  *   - wouldExceedSleepQuota derivation across 4 branches, asserted via the
- *     visible error-message branch (sleepQuotaTierBlocked vs sleepQuotaExceeded)
- *     instead of opening the Radix Select. Radix interactive primitives do
+ *     visible message branch (the `sleep_reports` gate's control hint,
+ *     `plan.hint` since #1646, vs sleepQuotaExceeded) instead of opening the
+ *     Radix Select. Radix interactive primitives do
  *     not respond cleanly to fireEvent.click in happy-dom — see
  *     MCPConfigBlock.test.tsx for the canonical side-channel approach used in
  *     this codebase.
@@ -47,6 +48,12 @@ vi.mock("@/hooks/use-toast", () => ({
   useToast: () => ({ toast: mockToast }),
 }));
 
+// #1646: FeatureGateNotice's upgrade CTA navigates with the app router.
+const mockPush = vi.fn();
+vi.mock("next/navigation", () => ({
+  useRouter: () => ({ push: mockPush }),
+}));
+
 // Stable key-as-text translator. Vars are folded into the key so we can
 // distinguish e.g. sleepQuotaUsage rendered with different used/limit values.
 const stableT = (key: string, vars?: Record<string, unknown>) => {
@@ -77,6 +84,8 @@ let mockPlanFeature: boolean | null = true;
 // `sleep_reports` plan gate. Set with the usage fixture below, because the
 // tier limit and the usage payload's limit are one predicate (zero floor).
 let mockTierHasSleep: boolean | null = true;
+// #1646: the hook's `canUpgrade` on a plan gate (Plan page on + owner).
+let mockCanUpgrade = false;
 const gateCache = new Map<string, Record<string, unknown>>();
 function planGate(
   feature: string,
@@ -86,11 +95,17 @@ function planGate(
 ) {
   if (value === null) return { state: "pending", feature, canUpgrade: false };
   if (value) return { state: "allowed", feature, canUpgrade: false };
-  return { state: "plan", feature, requiredPlan, planLabel, canUpgrade: false };
+  return {
+    state: "plan",
+    feature,
+    requiredPlan,
+    planLabel,
+    canUpgrade: mockCanUpgrade,
+  };
 }
 function mockGates() {
   // Stable per answer, like the real hook's memo.
-  const cacheKey = `${mockPlanFeature}:${mockTierHasSleep}`;
+  const cacheKey = `${mockPlanFeature}:${mockTierHasSleep}:${mockCanUpgrade}`;
   if (!gateCache.has(cacheKey)) {
     gateCache.set(cacheKey, {
       public_contexts: planGate(
@@ -212,6 +227,7 @@ beforeEach(() => {
   setRole("owner");
   setQuotaResponse(0, 10);
   mockPlanFeature = true; // #1560: public_contexts included unless a test says otherwise
+  mockCanUpgrade = false;
 });
 
 // ---------- Public toggle is XL-only (#1551) ---------------------------------
@@ -228,8 +244,28 @@ describe("SettingsTabPanel — public toggle is XL-only (#1551)", () => {
       />,
     );
 
-    expect(screen.getByText("publicRequiresPlan")).toBeInTheDocument();
+    // #1646: the gate notice, "create" scope — already-public contexts keep
+    // serving. No CTA: this gate cannot be upgraded from here.
+    expect(screen.getByText("plan.newTitle")).toBeInTheDocument();
+    expect(screen.getByText("plan.newDescription")).toBeInTheDocument();
     expect(screen.queryByRole("button", { name: /makePublic/ })).toBeNull();
+    expect(screen.queryByRole("button", { name: "plan.action" })).toBeNull();
+  });
+
+  it("pro, owner on a Plan-page deployment: the public notice offers the upgrade (#1646)", () => {
+    setRole("owner", "pro");
+    mockPlanFeature = false;
+    mockCanUpgrade = true;
+    render(
+      <SettingsTabPanel
+        contextId={CTX_ID}
+        context={makeContext({ is_private: false, is_public: false })}
+        onContextUpdated={noop}
+      />,
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: "plan.action" }));
+    expect(mockPush).toHaveBeenCalledWith("/workspace/settings/plan");
   });
 
   it("pro: an already-public context keeps its Unpublish control (may serve)", () => {
@@ -250,7 +286,7 @@ describe("SettingsTabPanel — public toggle is XL-only (#1551)", () => {
     expect(
       screen.getByRole("button", { name: "unpublish" }),
     ).toBeInTheDocument();
-    expect(screen.queryByText("publicRequiresPlan")).toBeNull();
+    expect(screen.queryByText("plan.newTitle")).toBeNull();
   });
 
   it("promax: shows the Make Public control", () => {
@@ -266,7 +302,7 @@ describe("SettingsTabPanel — public toggle is XL-only (#1551)", () => {
     expect(
       screen.getByRole("button", { name: /makePublic/ }),
     ).toBeInTheDocument();
-    expect(screen.queryByText("publicRequiresPlan")).toBeNull();
+    expect(screen.queryByText("plan.newTitle")).toBeNull();
   });
 
   // #1560: the gate follows the API boolean, not the tier's name/rank.
@@ -284,7 +320,7 @@ describe("SettingsTabPanel — public toggle is XL-only (#1551)", () => {
     expect(
       screen.getByRole("button", { name: /makePublic/ }),
     ).toBeInTheDocument();
-    expect(screen.queryByText("publicRequiresPlan")).toBeNull();
+    expect(screen.queryByText("plan.newTitle")).toBeNull();
   });
 
   it("pending gate: neither the control nor the upsell while the matrix resolves (#1560)", () => {
@@ -299,7 +335,7 @@ describe("SettingsTabPanel — public toggle is XL-only (#1551)", () => {
     );
 
     expect(screen.queryByRole("button", { name: /makePublic/ })).toBeNull();
-    expect(screen.queryByText("publicRequiresPlan")).toBeNull();
+    expect(screen.queryByText("plan.newTitle")).toBeNull();
   });
 });
 
@@ -354,10 +390,10 @@ describe("SettingsTabPanel — wouldExceedSleepQuota derivation", () => {
 
     // The error message renders once the quota fetch resolves.
     await screen.findByText("sleepQuotaExceeded");
-    expect(screen.queryByText("sleepQuotaTierBlocked")).not.toBeInTheDocument();
+    expect(screen.queryByText("plan.hint")).not.toBeInTheDocument();
   });
 
-  it("shows sleepQuotaTierBlocked instead when limit === 0 (tier without sleep)", async () => {
+  it("shows the sleep_reports gate hint instead when limit === 0 (tier without sleep)", async () => {
     setQuotaResponse(0, 0);
     render(
       <SettingsTabPanel
@@ -367,8 +403,10 @@ describe("SettingsTabPanel — wouldExceedSleepQuota derivation", () => {
       />,
     );
 
-    await screen.findByText("sleepQuotaTierBlocked");
+    // #1646: the control variant's hint, with no badge (it would repeat it).
+    await screen.findByText("plan.hint");
     expect(screen.queryByText("sleepQuotaExceeded")).not.toBeInTheDocument();
+    expect(screen.queryByText("plan.badge")).not.toBeInTheDocument();
   });
 
   it("renders neither blocked nor exceeded message when there is headroom (used < limit)", async () => {
@@ -385,7 +423,7 @@ describe("SettingsTabPanel — wouldExceedSleepQuota derivation", () => {
     // blocked/exceeded text.
     await screen.findByText(/sleepQuotaUsage:1\/3/);
     expect(screen.queryByText("sleepQuotaExceeded")).not.toBeInTheDocument();
-    expect(screen.queryByText("sleepQuotaTierBlocked")).not.toBeInTheDocument();
+    expect(screen.queryByText("plan.hint")).not.toBeInTheDocument();
   });
 
   it("does NOT block lateral changes when current mode is not skip even with used >= limit", async () => {
@@ -403,7 +441,7 @@ describe("SettingsTabPanel — wouldExceedSleepQuota derivation", () => {
 
     await screen.findByText(/sleepQuotaUsage:3\/3/);
     expect(screen.queryByText("sleepQuotaExceeded")).not.toBeInTheDocument();
-    expect(screen.queryByText("sleepQuotaTierBlocked")).not.toBeInTheDocument();
+    expect(screen.queryByText("plan.hint")).not.toBeInTheDocument();
   });
 });
 
@@ -443,7 +481,7 @@ describe("SettingsTabPanel — sleep options while the sleep gate is pending (#1
     ).toHaveAttribute("aria-disabled", "true");
     // Pending names no tier: the tier copy waits for the matrix, and the
     // cap copy would be wrong (there is no cap to raise on this tier).
-    expect(screen.queryByText("sleepQuotaTierBlocked")).toBeNull();
+    expect(screen.queryByText(/^plan\.hint/)).toBeNull();
     expect(screen.queryByText("sleepQuotaExceeded")).toBeNull();
   });
 
@@ -459,7 +497,7 @@ describe("SettingsTabPanel — sleep options while the sleep gate is pending (#1
     );
 
     await screen.findByText("sleepQuotaExceeded");
-    expect(screen.queryByText("sleepQuotaTierBlocked")).toBeNull();
+    expect(screen.queryByText(/^plan\.hint/)).toBeNull();
   });
 
   it("headroom on an entitled tier: the options stay enabled while the gate is pending", async () => {
@@ -476,6 +514,70 @@ describe("SettingsTabPanel — sleep options while the sleep gate is pending (#1
     await screen.findByText(/sleepQuotaUsage:1\/3/);
     const full = await openSleepSelect();
     expect(full).not.toHaveAttribute("aria-disabled", "true");
+  });
+});
+
+// #1646 (P12): the tier half of the sleep select is the `sleep_reports` plan
+// gate's `control` hint — the Select points at it, it names the tier the gate
+// names, and it offers the upgrade only where the gate allows one.
+describe("SettingsTabPanel — the sleep tier gate's control hint (#1646)", () => {
+  function renderTierless() {
+    setQuotaResponse(0, 0);
+    render(
+      <SettingsTabPanel
+        contextId={CTX_ID}
+        context={makeContext({ sleep_mode: "skip" })}
+        onContextUpdated={noop}
+      />,
+    );
+  }
+
+  function sleepTrigger() {
+    const trigger = screen
+      .getAllByRole("combobox")
+      .find((el) => el.textContent?.includes("sleepModeSkip"));
+    if (!trigger) throw new Error("sleep mode select not found");
+    return trigger;
+  }
+
+  it("the sleep select is described by the hint", async () => {
+    renderTierless();
+
+    const hint = await screen.findByText("plan.hint");
+    expect(hint.id).toBe("context-sleep-gate-hint");
+    expect(sleepTrigger()).toHaveAttribute(
+      "aria-describedby",
+      "context-sleep-gate-hint",
+    );
+  });
+
+  it("the cap reached on an entitled tier points the select at nothing", async () => {
+    setQuotaResponse(3, 3);
+    render(
+      <SettingsTabPanel
+        contextId={CTX_ID}
+        context={makeContext({ sleep_mode: "skip" })}
+        onContextUpdated={noop}
+      />,
+    );
+
+    await screen.findByText("sleepQuotaExceeded");
+    expect(sleepTrigger()).not.toHaveAttribute("aria-describedby");
+  });
+
+  it("no upgrade CTA unless the gate allows one", async () => {
+    renderTierless();
+
+    await screen.findByText("plan.hint");
+    expect(screen.queryByRole("button", { name: "plan.action" })).toBeNull();
+  });
+
+  it("an owner on a Plan-page deployment gets the upgrade CTA", async () => {
+    mockCanUpgrade = true;
+    renderTierless();
+
+    fireEvent.click(await screen.findByRole("button", { name: "plan.action" }));
+    expect(mockPush).toHaveBeenCalledWith("/workspace/settings/plan");
   });
 });
 

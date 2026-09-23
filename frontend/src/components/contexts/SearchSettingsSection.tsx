@@ -37,7 +37,6 @@ import {
   AlertCircle,
   Info,
   Database,
-  Lock,
   Loader2,
   Sparkles,
 } from "lucide-react";
@@ -55,6 +54,7 @@ import { apiClient } from "@/lib/api/base";
 import { useToast } from "@/hooks/use-toast";
 import { useSystemFeatures, useSystemInfo } from "@/hooks/useSystemFeatures";
 import { useFeatureGate } from "@/hooks/useFeatureGate";
+import { FeatureGateNotice } from "@/components/common/FeatureGateNotice";
 import { cn } from "@/styles/design-tokens";
 
 interface TelemetryServiceStatus {
@@ -139,11 +139,6 @@ export function SearchSettingsSection({
   // unsaid until both the matrix and /system/info have answered.
   const rerank = useFeatureGate("reranking");
   const rerankingDisabledByDeployment = rerank.state === "deployment";
-  // #1643: the whole sentence renders either way; only its <link> chunk
-  // becomes a real link, and only where the Plan page is reachable. #1645:
-  // the gate's own `canUpgrade`, so a plan gate no served tier lifts (an
-  // operator withheld reranking everywhere) does not link to a dead end.
-  const canUpgrade = rerank.canUpgrade;
   const isDirty = Object.keys(editedConfig).length > 0;
 
   const providerLabel = (provider: string) =>
@@ -530,38 +525,11 @@ export function SearchSettingsSection({
               </CardDescription>
             </CardHeader>
             <CardContent className="space-y-6">
-              {rerank.state === "plan" && (
-                <Alert>
-                  <Lock className="h-4 w-4" />
-                  <AlertDescription>
-                    <p className="font-medium mb-1">
-                      {t("rerankerNotAvailableFree")}
-                    </p>
-                    <p className="text-sm">
-                      {/* t.rich with a <link> tag in the message — splitting on
-                          the English "Basic plan" left the link label
-                          untranslated and dropped the sentence tail in every
-                          other locale (#1642). */}
-                      {/* #1643: only the `link` renderer branches, so the
-                          sentence and its label stay translated when the Plan
-                          page is unreachable — it just is not a link. */}
-                      {t.rich("upgradeToBasic", {
-                        link: (chunks) =>
-                          canUpgrade ? (
-                            <Link
-                              href="/workspace/settings/plan"
-                              className="underline font-medium"
-                            >
-                              {chunks}
-                            </Link>
-                          ) : (
-                            <>{chunks}</>
-                          ),
-                      })}
-                    </p>
-                  </AlertDescription>
-                </Alert>
-              )}
+              {/* #1646: the tier without reranking gets the gate notice — the
+                  tier the matrix names, and the upgrade CTA only where the
+                  gate allows one (#1643). Pending renders nothing, and the
+                  deployment refusal hides the whole card above (#1580). */}
+              <FeatureGateNotice gate={rerank} className="mb-0" />
 
               {/* #1167: only offer the configure-keys CTA when BYOK is on —
                   with BYOK off the external-keys page cannot add a key, so

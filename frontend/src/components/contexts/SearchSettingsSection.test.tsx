@@ -17,6 +17,10 @@
  * #1643: the free-tier upgrade sentence keeps its <link> chunk only where the
  * Plan page is reachable. `plan_page` stays ABSENT from the beforeEach default
  * (the self-hosted truth), so the cases below opt in explicitly.
+ *
+ * #1646: that sentence is now the `reranking` gate's FeatureGateNotice; under
+ * the echo translator its copy reads `plan.title(plan=M,…)` and its CTA is
+ * the `plan.action(plan=M,…)` button, which pushes the Plan page.
  */
 
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
@@ -56,6 +60,16 @@ const mockToast = vi.fn();
 vi.mock("@/hooks/use-toast", () => ({
   useToast: () => ({ toast: mockToast }),
 }));
+
+// #1646: the gate notice's upgrade CTA navigates with the app router.
+const mockPush = vi.fn();
+vi.mock("next/navigation", () => ({
+  useRouter: () => ({ push: mockPush }),
+}));
+
+/** The reranking gate notice's title and CTA under the echo translator. */
+const NOTICE_TITLE = /^plan\.title\(/;
+const NOTICE_CTA = /^plan\.action\(/;
 
 const mockUseWorkspace = vi.fn();
 vi.mock("@/contexts/WorkspaceContext", () => ({
@@ -364,21 +378,24 @@ describe("SearchSettingsSection free-tier upgrade CTA (#1643)", () => {
     });
   }
 
-  it("free tier, plan_page off: the reranker notice renders as plain text with no plan link", async () => {
+  it("free tier, plan_page off: the reranker notice renders with no plan CTA", async () => {
     setFree("owner");
     render(<SearchSettingsSection contextId="ctx-1" />);
 
-    // The notice and the whole sentence survive — only the link does not.
+    // The notice and its whole explanation survive — only the CTA does not.
+    expect(await screen.findByText(NOTICE_TITLE)).toBeInTheDocument();
     expect(
-      await screen.findByText("rerankerNotAvailableFree"),
+      screen.getByText(/^plan\.description\(plan=M,/),
     ).toBeInTheDocument();
-    expect(screen.getByText("upgradeToBasic")).toBeInTheDocument();
     expect(
-      screen.queryByRole("link", { name: "upgradeToBasic" }),
+      screen.queryByRole("button", { name: NOTICE_CTA }),
     ).not.toBeInTheDocument();
+    expect(
+      document.querySelector('a[href="/workspace/settings/plan"]'),
+    ).toBeNull();
   });
 
-  it("free tier, plan_page on but not the owner: still no plan link", async () => {
+  it("free tier, plan_page on but not the owner: still no plan CTA", async () => {
     mockFeatures = { byok: true, plan_page: true };
     mockInfo = {
       features: { byok: true, plan_page: true },
@@ -387,13 +404,13 @@ describe("SearchSettingsSection free-tier upgrade CTA (#1643)", () => {
     setFree("admin");
     render(<SearchSettingsSection contextId="ctx-1" />);
 
-    expect(await screen.findByText("upgradeToBasic")).toBeInTheDocument();
+    expect(await screen.findByText(NOTICE_TITLE)).toBeInTheDocument();
     expect(
-      screen.queryByRole("link", { name: "upgradeToBasic" }),
+      screen.queryByRole("button", { name: NOTICE_CTA }),
     ).not.toBeInTheDocument();
   });
 
-  it("free tier, owner on a plan_page deployment: the notice links to the plan page", async () => {
+  it("free tier, owner on a plan_page deployment: the notice's CTA opens the plan page", async () => {
     mockFeatures = { byok: true, plan_page: true };
     mockInfo = {
       features: { byok: true, plan_page: true },
@@ -402,30 +419,33 @@ describe("SearchSettingsSection free-tier upgrade CTA (#1643)", () => {
     setFree("owner");
     render(<SearchSettingsSection contextId="ctx-1" />);
 
-    expect(
-      await screen.findByRole("link", { name: "upgradeToBasic" }),
-    ).toHaveAttribute("href", "/workspace/settings/plan");
+    // The CTA names the tier the matrix names (M), not a hardcoded one.
+    const cta = await screen.findByRole("button", {
+      name: /^plan\.action\(plan=M[,)]/,
+    });
+    fireEvent.click(cta);
+    expect(mockPush).toHaveBeenCalledWith("/workspace/settings/plan");
   });
 
-  it("free tier, /system/info still pending: no plan link", async () => {
+  it("free tier, /system/info still pending: no plan CTA", async () => {
     mockFeatures = null;
     setFree("owner");
     render(<SearchSettingsSection contextId="ctx-1" />);
 
     // #1645: the reranker gate also reads the deployment's `reranking` flag,
     // so while /system/info is in flight the gate is pending: the card stays
-    // (#1580), its controls wait, and nothing is upsold — link included.
+    // (#1580), its controls wait, and nothing is upsold — CTA included.
     expect(await screen.findByText("rerankerConfig")).toBeInTheDocument();
-    expect(screen.queryByText("rerankerNotAvailableFree")).toBeNull();
+    expect(screen.queryByText(/^plan\./)).toBeNull();
     expect(
-      screen.queryByRole("link", { name: "upgradeToBasic" }),
+      screen.queryByRole("button", { name: NOTICE_CTA }),
     ).not.toBeInTheDocument();
   });
 
-  it("free tier, owner on a plan_page deployment, no served tier has reranking: no plan link", async () => {
+  it("free tier, owner on a plan_page deployment, no served tier has reranking: no plan CTA", async () => {
     // #1645: an operator withheld reranking from every tier, so the gate
     // names no tier and the Plan page cannot lift it — the notice stays, the
-    // link does not.
+    // CTA does not. #1646: the notice says so without naming a tier.
     mockTiers = OSS_TIERS.map((tier) => ({
       ...tier,
       reranking: false,
@@ -439,12 +459,26 @@ describe("SearchSettingsSection free-tier upgrade CTA (#1643)", () => {
     render(<SearchSettingsSection contextId="ctx-1" />);
 
     expect(
-      await screen.findByText("rerankerNotAvailableFree"),
+      await screen.findByText(/^plan\.titleNoTier\(/),
     ).toBeInTheDocument();
-    expect(screen.getByText("upgradeToBasic")).toBeInTheDocument();
     expect(
-      screen.queryByRole("link", { name: "upgradeToBasic" }),
+      screen.getByText(/^plan\.descriptionNoTier\(/),
+    ).toBeInTheDocument();
+    // No tier is named anywhere in the notice.
+    expect(screen.queryByText(/[(,]plan=/)).toBeNull();
+    expect(
+      screen.queryByRole("button", { name: NOTICE_CTA }),
     ).not.toBeInTheDocument();
+  });
+
+  it("the notice is the upsell Alert, whole-feature scope (#1646)", async () => {
+    setFree("owner");
+    render(<SearchSettingsSection contextId="ctx-1" />);
+
+    // "all" scope: `plan.title`, never the create-only `plan.newTitle`.
+    const title = await screen.findByText(NOTICE_TITLE);
+    expect(screen.queryByText(/^plan\.newTitle/)).toBeNull();
+    expect(title.closest('[role="alert"]')).not.toBeNull();
   });
 });
 
@@ -462,7 +496,7 @@ describe("SearchSettingsSection reads the reranking gate (#1645)", () => {
 
     expect(await screen.findByRole("switch")).toBeDisabled();
     // Pending is not a refusal: no free-tier notice either.
-    expect(screen.queryByText("rerankerNotAvailableFree")).toBeNull();
+    expect(screen.queryByText(NOTICE_TITLE)).toBeNull();
   });
 
   it("the reranker controls work once the matrix says this tier has it", async () => {
@@ -478,7 +512,7 @@ describe("SearchSettingsSection reads the reranking gate (#1645)", () => {
     render(<SearchSettingsSection contextId="ctx-1" />);
 
     expect(await screen.findByRole("switch")).toBeDisabled();
-    expect(screen.getByText("rerankerNotAvailableFree")).toBeInTheDocument();
+    expect(screen.getByText(NOTICE_TITLE)).toBeInTheDocument();
   });
 
   it("follows the matrix, not the tier name: an operator gives free reranking", async () => {
@@ -491,7 +525,7 @@ describe("SearchSettingsSection reads the reranking gate (#1645)", () => {
     render(<SearchSettingsSection contextId="ctx-1" />);
 
     expect(await screen.findByRole("switch")).not.toBeDisabled();
-    expect(screen.queryByText("rerankerNotAvailableFree")).toBeNull();
+    expect(screen.queryByText(NOTICE_TITLE)).toBeNull();
   });
 
   it("an explicit reranking: false hides the card whatever the matrix says", async () => {
@@ -558,7 +592,7 @@ describe("SearchSettingsSection reranker — the whole gate truth table (#1645)"
       if (i === "reranking false") {
         // Only an explicit false hides the card — whatever the matrix says.
         expect(screen.queryByText("rerankerConfig")).toBeNull();
-        expect(screen.queryByText("rerankerNotAvailableFree")).toBeNull();
+        expect(screen.queryByText(NOTICE_TITLE)).toBeNull();
         return;
       }
 
@@ -570,12 +604,10 @@ describe("SearchSettingsSection reranker — the whole gate truth table (#1645)"
         !(known && plan === "basic"),
       );
       // The notice only once both inputs have answered and the tier lacks it.
-      expect(screen.queryByText("rerankerNotAvailableFree") !== null).toBe(
-        refused,
-      );
-      // Its link: the owner, on a deployment whose Plan page is known on.
+      expect(screen.queryByText(NOTICE_TITLE) !== null).toBe(refused);
+      // Its CTA: the owner, on a deployment whose Plan page is known on.
       expect(
-        screen.queryByRole("link", { name: "upgradeToBasic" }) !== null,
+        screen.queryByRole("button", { name: NOTICE_CTA }) !== null,
       ).toBe(refused && role === "owner" && i === "on, plan_page on");
     },
   );
