@@ -13,7 +13,6 @@ import { useRouter } from "next/navigation";
 import { useLocale, useTranslations } from "next-intl";
 import { hasWorkspaceRole, WorkspaceRole } from "@/lib/auth/rbac";
 import { copyText } from "@/lib/utils/clipboard";
-import { planAtLeast } from "@/lib/utils/planLabel";
 import { PageHeader } from "@/components/common/PageHeader";
 import { PageContainer } from "@/components/common/PageContainer";
 import { Section } from "@/components/common/Section";
@@ -25,6 +24,7 @@ import {
 } from "@/components/common/LoadingState";
 import { useWorkspace } from "@/contexts/WorkspaceContext";
 import { useCanUpgrade } from "@/hooks/useCanUpgrade";
+import { useFeatureGate } from "@/hooks/useFeatureGate";
 import { useAuth } from "@/contexts/AuthContext";
 import {
   listMembers,
@@ -150,8 +150,11 @@ export default function WorkspaceMembersPage() {
   // Role permissions section toggle
   const [showRolePermissions, setShowRolePermissions] = useState(false);
 
-  // Check if Pro plan or better (team invitations)
-  const isProPlan = planAtLeast(currentWorkspace?.plan_name, "pro");
+  // #1645: may this member invite on this tier? One gate for both halves —
+  // the tier matrix's `team_invitations` and the admin-minimum role — with
+  // role answered first (a member cannot buy their way to admin), and
+  // `pending` while the matrix resolves.
+  const invite = useFeatureGate("team_invitations");
 
   // #1643: may we point this member at /workspace/settings/plan at all? The
   // seat-limit copy stays either way; only the upgrade links are withheld.
@@ -569,11 +572,11 @@ export default function WorkspaceMembersPage() {
   };
 
   const handleInviteClick = () => {
-    // #1643: the `!isProPlan` redirect to /workspace/settings/plan that used
-    // to stand here was unreachable — the only caller is the ActionButton
-    // below, whose `disabled` already includes `!isProPlan` and which forwards
-    // `disabled` to a real <button>. The explanation stays: the button keeps
-    // its `proPlanRequired` suffix.
+    // #1643: the plan-gate redirect to /workspace/settings/plan that used to
+    // stand here was unreachable — the only caller is the ActionButton below,
+    // whose `disabled` already covers every non-allowed gate state (#1645) and
+    // which forwards `disabled` to a real <button>. The explanation stays: the
+    // button keeps its suffix.
     // Migration 042: Initialize with all shared contexts selected
     const sharedContextIds = contexts
       .filter((c) => !c.is_private)
@@ -606,18 +609,13 @@ export default function WorkspaceMembersPage() {
           <ActionButton
             onClick={handleInviteClick}
             icon={<UserPlus className="w-4 h-4" />}
-            disabled={
-              !isProPlan ||
-              currentWorkspace?.current_user_role === "member" ||
-              currentWorkspace?.current_user_role === "viewer"
-            }
+            disabled={invite.state !== "allowed"}
           >
             {t("inviteMember")}{" "}
-            {!isProPlan
-              ? t("proPlanRequired")
-              : currentWorkspace?.current_user_role === "member" ||
-                  currentWorkspace?.current_user_role === "viewer"
-                ? t("ownerAdminOnly")
+            {invite.state === "role"
+              ? t("ownerAdminOnly")
+              : invite.state === "plan"
+                ? t("proPlanRequired")
                 : ""}
           </ActionButton>
         }
