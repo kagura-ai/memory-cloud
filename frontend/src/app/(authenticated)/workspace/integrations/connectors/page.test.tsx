@@ -337,8 +337,11 @@ describe("ConnectorsPage XL-only create gate (#1551)", () => {
     render(<ConnectorsPage />);
 
     expect(await screen.findByText("plan.titleNoTier")).toBeInTheDocument();
-    // Banner and empty state both say so; neither offers an upgrade.
-    expect(screen.getAllByText("plan.descriptionNoTier")).toHaveLength(2);
+    // Banner and empty state both say so; neither offers an upgrade. The
+    // banner renders at once, the empty state only after the list loads.
+    await waitFor(() =>
+      expect(screen.getAllByText("plan.descriptionNoTier")).toHaveLength(2),
+    );
     expect(screen.queryByRole("button", { name: "plan.action" })).toBeNull();
     // The callback toast says the same (before #1646 it said nothing).
     await waitFor(() =>
@@ -348,7 +351,9 @@ describe("ConnectorsPage XL-only create gate (#1551)", () => {
       }),
     );
     expect(
-      gateCalls.filter(([, values]) => values !== undefined && "plan" in values),
+      gateCalls.filter(
+        ([, values]) => values !== undefined && "plan" in values,
+      ),
     ).toEqual([]);
   });
 
