@@ -8,6 +8,7 @@
  */
 
 import { Construction } from 'lucide-react';
+import { useTranslations } from 'next-intl';
 import { PageContainer } from '@/components/common/PageContainer';
 import { PageHeader } from '@/components/common/PageHeader';
 import { Card, CardContent } from '@/components/ui/card';
@@ -19,6 +20,8 @@ interface ComingSoonProps {
 }
 
 export function ComingSoon({ title, description, featureDescription }: ComingSoonProps) {
+  const t = useTranslations('common');
+
   return (
     <PageContainer>
       <PageHeader title={title} description={description} />
@@ -29,10 +32,10 @@ export function ComingSoon({ title, description, featureDescription }: ComingSoo
             <Construction className="h-12 w-12 text-slate-500 dark:text-slate-400" />
           </div>
           <h2 className="text-2xl font-bold text-slate-700 dark:text-slate-200 mb-2">
-            Coming Soon
+            {t('comingSoon.title')}
           </h2>
           <p className="text-slate-500 dark:text-slate-400 max-w-md mb-4">
-            This feature is currently under development and will be available in a future release.
+            {t('comingSoon.description')}
           </p>
           {featureDescription && (
             <p className="text-sm text-slate-400 dark:text-slate-500 max-w-lg">

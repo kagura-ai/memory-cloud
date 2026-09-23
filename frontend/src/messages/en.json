@@ -111,7 +111,11 @@
     "areYouSure": "Are you sure?",
     "thisActionCannotBeUndone": "This action cannot be undone.",
     "saving": "Saving...",
-    "done": "Done"
+    "done": "Done",
+    "comingSoon": {
+      "title": "Coming Soon",
+      "description": "This feature is currently under development and will be available in a future release."
+    }
   },
   "navigation": {
     "dashboard": "Dashboard",
@@ -173,7 +177,9 @@
     "addAnotherAccount": "Add another account",
     "addWithGoogle": "Add a Google account",
     "addWithGitHub": "Add a GitHub account",
-    "activeAccount": "Active account"
+    "activeAccount": "Active account",
+    "comingSoon": "Coming soon",
+    "soon": "Soon"
   },
   "storage": {
     "list": {

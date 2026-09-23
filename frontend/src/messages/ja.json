@@ -111,7 +111,11 @@
     "areYouSure": "本当によろしいですか？",
     "thisActionCannotBeUndone": "この操作は元に戻せません。",
     "saving": "保存中...",
-    "done": "完了"
+    "done": "完了",
+    "comingSoon": {
+      "title": "近日公開",
+      "description": "この機能は現在開発中で、今後のリリースで利用可能になります。"
+    }
   },
   "navigation": {
     "dashboard": "ダッシュボード",
@@ -173,7 +177,9 @@
     "addAnotherAccount": "別のアカウントを追加",
     "addWithGoogle": "Google アカウントを追加",
     "addWithGitHub": "GitHub アカウントを追加",
-    "activeAccount": "使用中のアカウント"
+    "activeAccount": "使用中のアカウント",
+    "comingSoon": "近日公開",
+    "soon": "近日"
   },
   "storage": {
     "list": {
