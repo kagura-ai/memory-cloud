@@ -4257,5 +4257,149 @@
     "confirmPageInvalidBody": "This confirmation link is no longer valid. If you still want to delete your account, start again from your profile.",
     "goToProfile": "Go to profile",
     "protectedAccount": "This is the protected initial administrator account and cannot be deleted."
+  },
+  "gate": {
+    "plan": {
+      "title": "{feature} is available on the {plan} plan",
+      "description": "Upgrade to the {plan} plan to use {feature}.",
+      "newTitle": "New {feature} require the {plan} plan",
+      "newDescription": "Existing {feature} keep working. Creating new {feature} is available on the {plan} plan.",
+      "titleNoTier": "{feature} is not available",
+      "descriptionNoTier": "{feature} is not available on any plan on this deployment.",
+      "action": "Upgrade to {plan}",
+      "badge": "{plan} plan",
+      "hint": "Requires the {plan} plan",
+      "hintNoTier": "Not available on any plan"
+    },
+    "quota": {
+      "title": "{feature} limit reached",
+      "description": "Your {currentPlan} plan includes {limit} {feature} in this workspace, and {current} are in use.",
+      "descriptionNoPlan": "This workspace includes {limit} {feature}, and {current} are in use.",
+      "descriptionNoNumbers": "This workspace has reached its {feature} limit.",
+      "upsell": "The {plan} plan raises this limit.",
+      "action": "View plans",
+      "badge": "Limit reached",
+      "hint": "Limit reached"
+    },
+    "deployment": {
+      "title": "{feature} is not available on this deployment",
+      "description": "This Kagura Memory Cloud deployment has {feature} turned off. Ask the administrator of this deployment if you need it.",
+      "badge": "Not available",
+      "hint": "Not available on this deployment"
+    },
+    "role": {
+      "owner": {
+        "title": "Only the workspace owner can do this",
+        "description": "Managing {feature} is limited to the workspace owner.",
+        "badge": "Owner only",
+        "hint": "Owner only"
+      },
+      "admin": {
+        "title": "Only a workspace owner or admin can do this",
+        "description": "Managing {feature} is limited to workspace owners and admins.",
+        "badge": "Owner or admin only",
+        "hint": "Owner or admin only"
+      }
+    },
+    "allowlist": {
+      "title": "{feature} is not yet enabled for this workspace",
+      "description": "{feature} is being rolled out gradually. Reach out if you would like access.",
+      "badge": "Not enabled",
+      "hint": "Not enabled for this workspace"
+    },
+    "features": {
+      "resources": {
+        "label": "Resources",
+        "plural": "resources"
+      },
+      "connectors": {
+        "label": "Connectors",
+        "plural": "connectors"
+      },
+      "public_contexts": {
+        "label": "Public contexts",
+        "plural": "public contexts"
+      },
+      "shared_contexts": {
+        "label": "Shared contexts",
+        "plural": "shared contexts"
+      },
+      "team_invitations": {
+        "label": "Team invitations",
+        "plural": "team invitations"
+      },
+      "reranking": {
+        "label": "Search reranking",
+        "plural": "search reranking"
+      },
+      "sleep_reports": {
+        "label": "Sleep Maintenance",
+        "plural": "Sleep Maintenance"
+      },
+      "memory_analysis": {
+        "label": "Memory Analysis",
+        "plural": "Memory Analysis"
+      },
+      "managed_llm": {
+        "label": "The managed LLM lane",
+        "plural": "the managed LLM lane"
+      },
+      "managed_embeddings": {
+        "label": "Managed embeddings",
+        "plural": "managed embeddings"
+      },
+      "secret_store": {
+        "label": "The secret store",
+        "plural": "the secret store"
+      },
+      "plan_page": {
+        "label": "The Plan page",
+        "plural": "the Plan page"
+      },
+      "byok": {
+        "label": "External API keys",
+        "plural": "external API keys"
+      },
+      "cost_dashboard": {
+        "label": "The cost dashboard",
+        "plural": "the cost dashboard"
+      },
+      "contexts": {
+        "label": "Contexts",
+        "plural": "contexts"
+      },
+      "members": {
+        "label": "Team members",
+        "plural": "team members"
+      },
+      "workspaces": {
+        "label": "Workspaces",
+        "plural": "workspaces"
+      },
+      "resource_tokens": {
+        "label": "Resource tokens",
+        "plural": "resource tokens"
+      },
+      "storage": {
+        "label": "Storage",
+        "plural": "storage"
+      },
+      "memories": {
+        "label": "Memories",
+        "plural": "memories"
+      },
+      "agents": {
+        "label": "Agents",
+        "plural": "agents"
+      },
+      "embedding_spend": {
+        "label": "Embedding spend",
+        "plural": "embedding spend"
+      },
+      "api_calls": {
+        "label": "API calls",
+        "plural": "API calls"
+      }
+    }
   }
 }

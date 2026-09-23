@@ -4257,5 +4257,149 @@
     "confirmPageInvalidBody": "この確認リンクは無効になりました。アカウントを削除したい場合は、プロフィールからもう一度開始してください。",
     "goToProfile": "プロフィールへ",
     "protectedAccount": "これは保護された初期管理者アカウントのため、削除できません。"
+  },
+  "gate": {
+    "plan": {
+      "title": "{feature} は {plan} プランで利用できます",
+      "description": "{feature} を利用するには {plan} プランにアップグレードしてください。",
+      "newTitle": "新規 {feature} には {plan} プランが必要です",
+      "newDescription": "既存の {feature} は引き続き利用できます。新規 {feature} の作成は {plan} プランで利用できます。",
+      "titleNoTier": "{feature} は利用できません",
+      "descriptionNoTier": "この環境では {feature} はどのプランでも利用できません。",
+      "action": "{plan} にアップグレード",
+      "badge": "{plan} プラン",
+      "hint": "{plan} プランが必要です",
+      "hintNoTier": "どのプランでも利用できません"
+    },
+    "quota": {
+      "title": "{feature} の上限に達しました",
+      "description": "{currentPlan} プランではこのワークスペースで {feature} は {limit} 件までです（現在 {current} 件）。",
+      "descriptionNoPlan": "このワークスペースで {feature} は {limit} 件までです（現在 {current} 件）。",
+      "descriptionNoNumbers": "このワークスペースは {feature} の上限に達しています。",
+      "upsell": "{plan} プランにすると上限が上がります。",
+      "action": "プランを見る",
+      "badge": "上限に達しました",
+      "hint": "上限に達しました"
+    },
+    "deployment": {
+      "title": "この環境では {feature} は利用できません",
+      "description": "この Kagura Memory Cloud 環境では {feature} が無効化されています。必要な場合は環境の管理者にお問い合わせください。",
+      "badge": "利用不可",
+      "hint": "この環境では利用できません"
+    },
+    "role": {
+      "owner": {
+        "title": "ワークスペースのオーナーのみが実行できます",
+        "description": "{feature} の管理はワークスペースのオーナーに限定されています。",
+        "badge": "オーナーのみ",
+        "hint": "オーナーのみ"
+      },
+      "admin": {
+        "title": "ワークスペースのオーナーまたは管理者のみが実行できます",
+        "description": "{feature} の管理はワークスペースのオーナーと管理者に限定されています。",
+        "badge": "オーナー/管理者のみ",
+        "hint": "オーナー/管理者のみ"
+      }
+    },
+    "allowlist": {
+      "title": "このワークスペースでは {feature} はまだ有効化されていません",
+      "description": "{feature} は段階的に提供を拡大しています。ご利用をご希望の場合はお問い合わせください。",
+      "badge": "未有効化",
+      "hint": "このワークスペースでは未有効化"
+    },
+    "features": {
+      "resources": {
+        "label": "リソース",
+        "plural": "リソース"
+      },
+      "connectors": {
+        "label": "コネクタ",
+        "plural": "コネクタ"
+      },
+      "public_contexts": {
+        "label": "公開コンテキスト",
+        "plural": "公開コンテキスト"
+      },
+      "shared_contexts": {
+        "label": "共有コンテキスト",
+        "plural": "共有コンテキスト"
+      },
+      "team_invitations": {
+        "label": "チーム招待",
+        "plural": "チーム招待"
+      },
+      "reranking": {
+        "label": "検索リランキング",
+        "plural": "検索リランキング"
+      },
+      "sleep_reports": {
+        "label": "Sleep Maintenance",
+        "plural": "Sleep Maintenance"
+      },
+      "memory_analysis": {
+        "label": "メモリー分析",
+        "plural": "メモリー分析"
+      },
+      "managed_llm": {
+        "label": "マネージド LLM レーン",
+        "plural": "マネージド LLM レーン"
+      },
+      "managed_embeddings": {
+        "label": "マネージド埋め込み",
+        "plural": "マネージド埋め込み"
+      },
+      "secret_store": {
+        "label": "シークレットストア",
+        "plural": "シークレットストア"
+      },
+      "plan_page": {
+        "label": "プランページ",
+        "plural": "プランページ"
+      },
+      "byok": {
+        "label": "外部 API キー",
+        "plural": "外部 API キー"
+      },
+      "cost_dashboard": {
+        "label": "コストダッシュボード",
+        "plural": "コストダッシュボード"
+      },
+      "contexts": {
+        "label": "コンテキスト",
+        "plural": "コンテキスト"
+      },
+      "members": {
+        "label": "チームメンバー",
+        "plural": "チームメンバー"
+      },
+      "workspaces": {
+        "label": "ワークスペース",
+        "plural": "ワークスペース"
+      },
+      "resource_tokens": {
+        "label": "Resource Token",
+        "plural": "Resource Token"
+      },
+      "storage": {
+        "label": "ストレージ",
+        "plural": "ストレージ"
+      },
+      "memories": {
+        "label": "メモリー",
+        "plural": "メモリー"
+      },
+      "agents": {
+        "label": "エージェント",
+        "plural": "エージェント"
+      },
+      "embedding_spend": {
+        "label": "埋め込みコスト",
+        "plural": "埋め込みコスト"
+      },
+      "api_calls": {
+        "label": "API 呼び出し",
+        "plural": "API 呼び出し"
+      }
+    }
   }
 }
