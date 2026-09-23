@@ -4,6 +4,28 @@ Release notes are published on [GitHub Releases](https://github.com/kagura-ai/me
 which is the canonical source for the complete release history. This file highlights the current
 release train and preserves selected historical development notes.
 
+## [v0.76.0](https://github.com/kagura-ai/memory-cloud/releases/tag/v0.76.0) — 2026-09-23
+
+Device and MCP sign-in for new users. A closed-beta invite now survives a CLI device login and an MCP client's sign-in, and the two unauthenticated device-flow endpoints get per-address request limits and a cleanup job for expired codes.
+
+### Added
+- **Invites through device and MCP sign-in** ([#1655](https://github.com/kagura-ai/memory-cloud/issues/1655)): `/join/<token>` accepts an optional `return_to`, validated like the one on `/login`. A link such as `https://<host>/join/<token>?return_to=%2Fdevice%3Fuser_code%3D<code>` signs the invitee up with the invite and lands them on `/device` with the code filled in. When the deployment has beta invites on, `/login` shows an "I have an invite link" entry that takes a pasted `/join/<token>` link or a bare token and continues to `/join` with the page's `return_to`, so an MCP client's authorize request resumes after sign-up (same-origin deployments). A signed-in visitor on `/join` with a usable `return_to` is sent there ("Continue"); the expired, invalid and disabled screens keep `return_to` on their link back to `/login`. The invite token only ever travels as the `/join` path segment.
+- **Hourly cleanup of expired device codes** ([#1656](https://github.com/kagura-ai/memory-cloud/issues/1656)): rows in `oauth_device_codes` whose `expires_at` is older than `OAUTH_DEVICE_CODE_RETENTION_SECONDS` (default 3600) are deleted; before, a code nobody approved stayed until its OAuth client was deleted.
+
+### Changed
+- **`/join/<token>` asks for terms acceptance** ([#1655](https://github.com/kagura-ai/memory-cloud/issues/1655)): the same checkbox as `/login`; both provider buttons stay disabled until it is ticked. Recording acceptance on the server is tracked in [#1665](https://github.com/kagura-ai/memory-cloud/issues/1665).
+- **Per-address limits on `POST /api/v1/oauth/device/authorize` and `POST /api/v1/oauth/device/verify`** ([#1656](https://github.com/kagura-ai/memory-cloud/issues/1656)): 10 and 30 requests per minute per client address by default (`OAUTH_DEVICE_AUTHORIZE_RATE_LIMIT_PER_MINUTE`, `OAUTH_DEVICE_VERIFY_RATE_LIMIT_PER_MINUTE`). Over the limit, `device/authorize` answers **429** in the RFC 6749 error shape (`invalid_request`, `Cache-Control: no-store`) and `device/verify` answers **429** `HTTP-429`, both with `Retry-After: 60`; no row is written and no lookup runs. `device/verify` counts every call, found or not. A Redis outage lets requests through. The `/device` page shows a "too many attempts" message on a 429 instead of "invalid code".
+- **Redis counters repair a missing expiry** ([#1656](https://github.com/kagura-ai/memory-cloud/issues/1656)): the shared request counter sets its TTL whenever the key has none, not only on the first increment, so a counter whose expiry was lost resets on the next call instead of never.
+
+### Fixed
+- **Device-flow paths in the API reference** ([#1656](https://github.com/kagura-ai/memory-cloud/issues/1656)): `docs/api-reference.md` named `/api/v1/oauth2/...` for the device authorize, token and revoke steps; they are `/api/v1/oauth/...`.
+
+### Notes
+- No migration. Three new optional settings with defaults: `OAUTH_DEVICE_AUTHORIZE_RATE_LIMIT_PER_MINUTE`, `OAUTH_DEVICE_VERIFY_RATE_LIMIT_PER_MINUTE`, `OAUTH_DEVICE_CODE_RETENTION_SECONDS`.
+- **Behind a reverse proxy** the limits key on the client address only when the server trusts the proxy's forwarded headers (uvicorn `--forwarded-allow-ips` / `FORWARDED_ALLOW_IPS`); otherwise every caller shares the proxy's budget.
+- **API clients:** a CLI that calls `device/authorize` should treat a 429 as retryable after `Retry-After`.
+- **Plugins:** the Claude Code and Codex plugin manifests are bumped in lockstep.
+
 ## [v0.75.0](https://github.com/kagura-ai/memory-cloud/releases/tag/v0.75.0) — 2026-09-23
 
 Plan, flag and quota gates. The server now says *why* it refused — `details.gate` on every plan and quota refusal, REST and MCP alike — and which plan features it actually enforces; the web UI decides every gate through one descriptor, offers an upgrade only where the Plan page exists for the viewer, and translates the gate copy it had left in English. Also: a `/kagura-memory:setup` plugin command. Five refusals answer a different `error` code and two of them a different status — read **Changed** before upgrading an API client that branches on them.
