@@ -20,7 +20,9 @@
  * ApiError, so the panel tells the three apart — owner-only copy, the
  * required plan, or the allowlist copy. The allowlist copy stays flat and
  * does not reveal the allowlist exists (CDO advice from gate1). A 403 that
- * carries no gate keeps that same allowlist copy, verbatim.
+ * carries no gate keeps that same allowlist copy, verbatim. #1646: all three
+ * render as the gate notice's `page` variant, bare inside the tab, with the
+ * `gate.*` copy; only the plan refusal can carry an upgrade CTA.
  */
 
 import { useCallback, useEffect, useMemo, useState } from "react";
@@ -29,6 +31,7 @@ import { usePathname, useRouter, useSearchParams } from "next/navigation";
 import { ApiError } from "@/lib/api/base";
 import {
   gateFromFacts,
+  type FeatureGate,
   type FeatureGateFacts,
   type RefusedGateState,
 } from "@/lib/gates/featureGates";
@@ -44,6 +47,8 @@ import {
   type ScatterPosition,
 } from "@/lib/api/analyses";
 import { ErrorBanner } from "@/components/common/ErrorBanner";
+import { FeatureGateNotice } from "@/components/common/FeatureGateNotice";
+import { useCanUpgrade } from "@/hooks/useCanUpgrade";
 import { useSystemFeatures } from "@/hooks/useSystemFeatures";
 import {
   CardLoadingState,
@@ -54,7 +59,6 @@ import { EmptyState } from "@/components/ui/empty-state";
 import { KpiCard } from "@/components/ui/kpi-card";
 import { Button } from "@/components/ui/button";
 import {
-  Lock,
   Plus,
   Sparkles,
   Activity,
@@ -132,6 +136,44 @@ function panelRefusal(err: unknown): PanelRefusal | null {
   return null;
 }
 
+/**
+ * #1646: the rollout refusal, plan-neutral and CTA-free (A4) — and the copy
+ * for every refusal the panel cannot tell apart from it.
+ */
+const ALLOWLIST_GATE: FeatureGate = {
+  state: "allowlist",
+  feature: "memory_analysis",
+  canUpgrade: false,
+};
+
+/**
+ * The descriptor a panel refusal renders (#1644 C-9 branch order): the
+ * normalised gate first, then a bare 403.
+ *
+ * `canUpgrade` is the raw `useCanUpgrade() === true`; `gateFromFacts`
+ * narrows it, so only a plan refusal naming a tier can carry a CTA. The tier
+ * matrix is deliberately NOT consulted: a plan refusal that names no tier is
+ * what an older server's allowlist refusal looks like (FEAT-001 with no
+ * `gate`), and a matrix scan would dress it up as an upgrade the backend
+ * will not honour. It falls to the allowlist copy instead.
+ */
+function panelGate(
+  refusal: PanelRefusal,
+  canUpgrade: boolean,
+  locale: string,
+): FeatureGate {
+  const gate = refusal.gate
+    ? gateFromFacts(refusal.gate, {
+        fallbackKey: "memory_analysis",
+        canUpgrade,
+        locale,
+      })
+    : null;
+  if (gate?.state === "role") return gate;
+  if (gate?.state === "plan" && gate.planLabel !== undefined) return gate;
+  return ALLOWLIST_GATE;
+}
+
 export function AnalysesTabPanel({
   contextId,
   contextName,
@@ -146,6 +188,8 @@ export function AnalysesTabPanel({
   // fail-closed while /system/info loads, like the sidebar's gates.
   const systemFeatures = useSystemFeatures();
   const showCost = systemFeatures?.cost_display === true;
+  // #1646: may a plan refusal offer the Plan page (Plan page on + owner)?
+  const canUpgrade = useCanUpgrade() === true;
 
   const [state, setState] = useState<BootstrapState>(EMPTY_BOOTSTRAP);
   const [activeRunId, setActiveRunId] = useState<string | null>(null);
@@ -473,47 +517,14 @@ export function AnalysesTabPanel({
     );
   }
 
-  // #1644 (C-9 branch order): the descriptor first, then a bare 403.
-  // No branch offers an upgrade here; the gate notice that can is #1646's.
-  if (state.gate) {
-    const gate = gateFromFacts(state.gate, {
-      fallbackKey: "memory_analysis",
-      canUpgrade: false,
-      locale,
-    });
-    if (gate?.state === "role") {
-      return (
-        <EmptyState
-          icon={Lock}
-          title={t("states.ownerOnly.title")}
-          description={t("states.ownerOnly.description")}
-        />
-      );
-    }
-    // A plan refusal that names no tier falls through to the flat copy
-    // below: it is what an older server's allowlist refusal looks like
-    // (FEAT-001 with no `gate`), and "requires the  plan" is not a sentence.
-    if (gate?.state === "plan" && gate.planLabel) {
-      return (
-        <EmptyState
-          icon={Lock}
-          title={t("states.planRequired.title", { plan: gate.planLabel })}
-          description={t("states.planRequired.description", {
-            plan: gate.planLabel,
-          })}
-        />
-      );
-    }
-  }
-
+  // #1646: the gate notice's page variant with no pageTitle — a bare
+  // EmptyState inside the tab. Allowlist (and every fallback to it) stays
+  // plan-neutral, CTA-free, and silent about the allowlist itself.
   if (state.gate || state.bare403) {
-    // Allowlist (and the fallbacks above): plan-neutral, CTA-free, and
-    // silent about the allowlist itself.
     return (
-      <EmptyState
-        icon={Lock}
-        title={t("states.notEnabled.title")}
-        description={t("states.notEnabled.description")}
+      <FeatureGateNotice
+        variant="page"
+        gate={panelGate(state, canUpgrade, locale)}
       />
     );
   }
