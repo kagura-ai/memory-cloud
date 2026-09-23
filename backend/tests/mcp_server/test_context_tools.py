@@ -21,13 +21,20 @@ from uuid import uuid4
 
 import pytest
 
+from config.constants import GATE_PLAN
 from mcp_server.tools._helpers import _ContextNotFoundError
 from mcp_server.tools.context import (
+    handle_create_context,
     handle_delete_context,
     handle_merge_contexts,
     handle_update_context,
 )
-from utils.exceptions import AuthorizationError, NotFoundException
+from utils.exceptions import (
+    AuthorizationError,
+    FeatureNotAvailableError,
+    NotFoundException,
+    ValidationError,
+)
 
 
 class TestHandleDeleteContextErrorSurface:
@@ -787,3 +794,105 @@ class TestHandleGetContextInfoGuardrails:
             "limit": max(10, get_settings().guardrail_load_cap),
         }
         boom.assert_not_awaited()
+
+
+class TestHandleCreateContextPlanRefusal:
+    """#1644 S11: a plan refusal from ``create_context`` is ``plan_required``.
+
+    The generic catch-all in ``handle_create_context`` classifies errors by
+    the exception class NAME (``"ValidationError" in type(e).__name__``). The
+    shared-context gate used to raise ``ValidationError``, so it landed in the
+    ``validation_error`` arm by accident of naming. S11 makes it raise
+    ``FeatureNotAvailableError``, which matches no name test — without the
+    explicit branch the refusal would be reported as ``create_context_error``,
+    a generic failure carrying no machine-readable reason.
+    """
+
+    @pytest.fixture
+    def user_id(self):
+        return "test_user_1644"
+
+    @pytest.fixture
+    def workspace_id(self):
+        return uuid4()
+
+    @staticmethod
+    async def _create_shared(user_id, workspace_id, side_effect):
+        """Drive ``handle_create_context`` to the point the service refuses.
+
+        Everything before the service call (role, quota, embedding model) is
+        stubbed green so the only thing under test is how the handler
+        classifies what ``create_context`` raised.
+        """
+        mock_db = AsyncMock()
+        mock_db.rollback = AsyncMock()
+        service = MagicMock()
+        service.create_context = AsyncMock(side_effect=side_effect)
+
+        async def mock_get_db():
+            yield mock_db
+
+        with (
+            patch("db.base.get_db", new=mock_get_db),
+            patch(
+                "mcp_server.tools.context._get_workspace_member_role",
+                new=AsyncMock(return_value="owner"),
+            ),
+            patch(
+                "services.quota_service.QuotaService.check_context_creation_allowed",
+                new=AsyncMock(return_value=(True, None)),
+            ),
+            patch("services.context_service.ContextService", return_value=service),
+            patch(
+                "mcp_server.tools.context._log_tool_usage",
+                new_callable=AsyncMock,
+            ),
+        ):
+            result = await handle_create_context(
+                args={"name": "team-ctx", "is_private": False},
+                user_id=user_id,
+                workspace_id=workspace_id,
+            )
+
+        assert len(result) == 1
+        return json.loads(result[0].text), mock_db
+
+    @pytest.mark.asyncio
+    async def test_feature_refusal_is_plan_required_not_a_generic_error(
+        self, user_id, workspace_id
+    ):
+        payload, mock_db = await self._create_shared(
+            user_id,
+            workspace_id,
+            FeatureNotAvailableError.for_feature("free", "shared_contexts"),
+        )
+
+        assert payload["status"] == "error"
+        assert payload["error"] == "plan_required"
+        assert payload["error"] != "create_context_error"
+        mock_db.rollback.assert_awaited()
+
+    @pytest.mark.asyncio
+    async def test_plan_required_carries_the_whole_details_block(self, user_id, workspace_id):
+        """Same ``**exc.details`` splat ``setup_connector`` uses, so an MCP
+        client reads one vocabulary for "upgrade to create this"."""
+        payload, _ = await self._create_shared(
+            user_id,
+            workspace_id,
+            FeatureNotAvailableError.for_feature("free", "shared_contexts"),
+        )
+
+        assert payload["gate"] == GATE_PLAN
+        assert payload["feature"] == "shared_contexts"
+        assert payload["required_plan"] == "pro"
+        assert payload["current_plan"] == "free"
+
+    @pytest.mark.asyncio
+    async def test_validation_errors_still_reach_the_validation_arm(self, user_id, workspace_id):
+        """Back-compat: the new branch must not swallow the old one."""
+        payload, _ = await self._create_shared(
+            user_id, workspace_id, ValidationError("Context name cannot be empty")
+        )
+
+        assert payload["error"] == "validation_error"
+        assert payload["help"] == "Check the context name and try again."

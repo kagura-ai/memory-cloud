@@ -23,7 +23,6 @@ from config.plan_tiers import (
     lowest_tier_with_limit,
     plan_display_name,
     quota_gate_details,
-    required_plan_display_name,
 )
 from config.settings import get_settings
 from models.auth import Context, ContextMember, User, Workspace, WorkspaceMember
@@ -142,7 +141,9 @@ class ContextService:
             Created Context instance
 
         Raises:
-            ValidationError: If name invalid, exists, role insufficient, or plan tier insufficient
+            ValidationError: If name invalid, exists, or role insufficient
+            FeatureNotAvailableError: If the workspace plan does not carry
+                ``shared_contexts`` and ``is_private`` is False (#1644 S11)
         """
         # Get workspace for validation
         from models.auth import Workspace, WorkspaceMember
@@ -178,12 +179,16 @@ class ContextService:
         if not is_private:
             # Feature-based (#1548): the tier registry decides, so a new tier
             # is never silently excluded and an unknown tier fails closed.
+            #
+            # #1644 S11: raised as ``FeatureNotAvailableError`` (403
+            # ``FEAT-001``), not ``ValidationError`` (422 ``VAL-001``). The
+            # REST route already answers 403 ``FEAT-001`` for this exact
+            # condition (``api/routes/contexts.py``), so one condition was
+            # producing two different refusals depending on which door the
+            # caller came through — MCP and ``workspace_service`` reach the
+            # service directly.
             if not has_feature(workspace.plan_name, "shared_contexts"):
-                raise ValidationError(
-                    f"Shared contexts require the "
-                    f"{required_plan_display_name('shared_contexts')} plan. "
-                    "Upgrade to share contexts with team members."
-                )
+                raise FeatureNotAvailableError.for_feature(workspace.plan_name, "shared_contexts")
 
         # Determine embedding model: parameter > global setting
         from config.constants import EMBEDDING_MODEL_REGISTRY

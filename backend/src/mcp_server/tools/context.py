@@ -23,6 +23,7 @@ from mcp_server.tools._helpers import (
     _resolve_context_id,
     execute_with_timeout,
 )
+from utils.exceptions import FeatureNotAvailableError
 
 logger = logging.getLogger(__name__)
 
@@ -407,6 +408,19 @@ async def handle_create_context(
         except _ContextNotFoundError as e:
             await db.rollback()
             return e.to_response()
+        except FeatureNotAvailableError as e:
+            # #1644 S11: the shared-context gate now raises
+            # ``FeatureNotAvailableError`` instead of ``ValidationError``. The
+            # catch-all below matches on the exception class NAME
+            # (``"ValidationError" in type(e).__name__``), so without this
+            # branch a plan refusal would be reported as
+            # ``create_context_error`` — a generic failure the caller cannot
+            # act on. Same ``plan_required`` envelope (and the same
+            # ``**exc.details`` splat) ``setup_resource`` / ``setup_connector``
+            # already use, so MCP clients see one vocabulary for "upgrade to
+            # create this".
+            await db.rollback()
+            return _error_response("plan_required", e.message, **e.details)
         except Exception as e:
             await db.rollback()
             error_str = str(e)
