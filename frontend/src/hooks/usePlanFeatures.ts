@@ -31,23 +31,54 @@ import { useWorkspace } from "@/contexts/WorkspaceContext";
 import { getPlanTierMatrix, type PlanTierFeature } from "@/lib/api/workspaces";
 
 /**
- * The #1551 "may create" gates exposed as booleans on each tier, plus
- * `shared_contexts` (#1583: "may make a context shared").
+ * Every boolean column of the served tier row (#1551 create gates, #1583
+ * `shared_contexts`, and — since #1645 — the rest: `team_invitations`,
+ * `reranking`, `managed_embeddings`, `managed_llm`, `secret_store`).
+ *
+ * Derived from `PlanTierFeature` at compile time, not hand-typed: the API
+ * type is the source of truth. `-?` + `NonNullable` keep the optional
+ * `managed_llm?` (absent on an API predating #1569) in the union.
  */
-export type PlanFeature =
-  "resources" | "connectors" | "public_contexts" | "shared_contexts";
+export type PlanFeature = {
+  [K in keyof PlanTierFeature]-?: NonNullable<PlanTierFeature[K]> extends boolean
+    ? K
+    : never;
+}[keyof PlanTierFeature];
 
 export type PlanFeatures = Readonly<Record<PlanFeature, boolean>>;
 
-const NO_FEATURES: PlanFeatures = {
-  resources: false,
-  connectors: false,
-  public_contexts: false,
-  shared_contexts: false,
-};
+/**
+ * The runtime list of `PlanFeature`. The assertion under it fails `tsc` when a
+ * boolean column is added to `PlanTierFeature` and not listed here, so the
+ * lookup below can never silently skip one.
+ */
+export const PLAN_FEATURE_KEYS = [
+  "resources",
+  "connectors",
+  "public_contexts",
+  "shared_contexts",
+  "team_invitations",
+  "reranking",
+  "managed_embeddings",
+  "managed_llm",
+  "secret_store",
+] as const satisfies readonly PlanFeature[];
+
+type AssertNever<T extends never> = T;
+type _EveryPlanFeatureListed = AssertNever<
+  Exclude<PlanFeature, (typeof PLAN_FEATURE_KEYS)[number]>
+>;
+
+function featuresFrom(read: (key: PlanFeature) => boolean): PlanFeatures {
+  return Object.fromEntries(
+    PLAN_FEATURE_KEYS.map((key) => [key, read(key)]),
+  ) as Record<PlanFeature, boolean>;
+}
+
+const NO_FEATURES: PlanFeatures = featuresFrom(() => false);
 
 /**
- * Pure lookup: the create gates for `planName` in `tiers`. Unknown plan →
+ * Pure lookup: the plan features for `planName` in `tiers`. Unknown plan →
  * every gate false. Exported for unit tests and for callers that already
  * hold the matrix (e.g. an admin view iterating every tier).
  */
@@ -57,13 +88,8 @@ export function planFeaturesFor(
 ): PlanFeatures {
   const tier = tiers.find((t) => t.name === planName);
   if (!tier) return NO_FEATURES;
-  // `=== true` so an API predating #1551 (field absent) fails closed.
-  return {
-    resources: tier.resources === true,
-    connectors: tier.connectors === true,
-    public_contexts: tier.public_contexts === true,
-    shared_contexts: tier.shared_contexts === true,
-  };
+  // `=== true` so an API predating a column (field absent) fails closed.
+  return featuresFrom((key) => tier[key] === true);
 }
 
 // Same retry shape as useSystemFeatures, but unlike that hook a persistent
@@ -93,17 +119,39 @@ async function fetchMatrixWithRetry(): Promise<PlanTierFeature[]> {
   throw lastError;
 }
 
+/** What `usePlanTierMatrixState` reports. */
+export interface PlanTierMatrixState {
+  /** The shared matrix, `null` until the first fetch resolves. */
+  readonly tiers: PlanTierFeature[] | null;
+  /**
+   * True once the retried fetch has definitively failed (and nothing is
+   * cached). Only a surface that OWNS an error UI reads this — the gate hooks
+   * deliberately ignore it, because a failure must read as pending there.
+   */
+  readonly failed: boolean;
+}
+
 /**
- * The cached tier matrix, `null` until the first fetch resolves. A persistent
- * failure also leaves it `null` (consumers stay pending, never upsell) and is
- * not cached, so a later mount retries.
+ * The shared tier matrix plus whether its retried fetch has failed, over the
+ * same module cache as `usePlanTierMatrix` (#1645). The Plan page's
+ * comparison table reads it so it can keep an error banner instead of a
+ * loader that never resolves; a later mount still retries, because the
+ * failure is not cached.
  */
-export function usePlanTierMatrix(): PlanTierFeature[] | null {
-  const [tiers, setTiers] = useState<PlanTierFeature[] | null>(cache);
+export function usePlanTierMatrixState(): PlanTierMatrixState {
+  const [state, setState] = useState<PlanTierMatrixState>(() => ({
+    tiers: cache,
+    failed: false,
+  }));
 
   useEffect(() => {
     if (cache) {
-      setTiers(cache);
+      const cached = cache;
+      setState((prev) =>
+        prev.tiers === cached && !prev.failed
+          ? prev
+          : { tiers: cached, failed: false },
+      );
       return;
     }
     if (!inflight) {
@@ -123,14 +171,23 @@ export function usePlanTierMatrix(): PlanTierFeature[] | null {
     }
     let alive = true;
     inflight.then((data) => {
-      if (alive) setTiers(data);
+      if (alive) setState({ tiers: data, failed: data === null });
     });
     return () => {
       alive = false;
     };
   }, []);
 
-  return tiers;
+  return state;
+}
+
+/**
+ * The cached tier matrix, `null` until the first fetch resolves. A persistent
+ * failure also leaves it `null` (consumers stay pending, never upsell) and is
+ * not cached, so a later mount retries.
+ */
+export function usePlanTierMatrix(): PlanTierFeature[] | null {
+  return usePlanTierMatrixState().tiers;
 }
 
 /**
