@@ -14,6 +14,11 @@
  *    - Authenticated + email mismatch → Logout prompt
  *    - Authenticated + email match → Auto-accept
  *
+ * Issue #1665: a workspace invitation can be someone's first sign-in, so when
+ * the deployment records terms acceptance (`system/info.terms_version`) the
+ * login prompt asks for it like /login does and sends it as `accepted_terms`.
+ * Without a version the prompt is unchanged.
+ *
  * Next.js 15: params is now a Promise and must be unwrapped with React.use()
  */
 
@@ -31,7 +36,9 @@ import {
   buildOAuthRedirect,
   type OAuthProvider,
 } from "@/lib/auth/buildOAuthRedirect";
+import { useSystemInfo } from "@/hooks/useSystemFeatures";
 import { Button } from "@/components/ui/button";
+import { TermsAgreement } from "@/components/auth/TermsAgreement";
 import { SpinnerLoading } from "@/components/common/LoadingState";
 import { LanguageSelector } from "@/components/LanguageSelector";
 import { Check, AlertCircle, Github, LogIn, Mail } from "lucide-react";
@@ -66,6 +73,10 @@ export default function AcceptInvitationPage({
   const [currentUser, setCurrentUser] = useState<CurrentUser | null>(null);
   const [result, setResult] = useState<AcceptInvitationResponse | null>(null);
   const [error, setError] = useState<string | null>(null);
+  // #1665: only asked when the deployment names a terms version.
+  const termsVersion = useSystemInfo()?.terms_version ?? undefined;
+  const [agreedToTerms, setAgreedToTerms] = useState(false);
+  const termsPending = termsVersion !== undefined && !agreedToTerms;
 
   useEffect(() => {
     initializeAcceptanceFlow();
@@ -171,8 +182,11 @@ export default function AcceptInvitationPage({
   };
 
   const startOAuthLogin = (provider: OAuthProvider) => {
+    if (termsPending) return;
     const returnTo = window.location.pathname + window.location.search;
-    window.location.href = buildOAuthRedirect(provider, returnTo);
+    window.location.href = buildOAuthRedirect(provider, returnTo, {
+      acceptedTerms: termsVersion,
+    });
   };
 
   const handleLogout = async () => {
@@ -264,8 +278,19 @@ export default function AcceptInvitationPage({
               )}
             </p>
 
+            {termsVersion !== undefined && (
+              <div className="mb-4">
+                <TermsAgreement
+                  checked={agreedToTerms}
+                  onCheckedChange={setAgreedToTerms}
+                  themed
+                />
+              </div>
+            )}
+
             <Button
               onClick={() => startOAuthLogin("google")}
+              disabled={termsPending}
               size="lg"
               className="w-full mb-3 text-base [&_svg]:size-5"
             >
@@ -275,6 +300,7 @@ export default function AcceptInvitationPage({
 
             <Button
               onClick={() => startOAuthLogin("github")}
+              disabled={termsPending}
               variant="outline"
               size="lg"
               className="w-full mb-4 text-base [&_svg]:size-5"

@@ -86,8 +86,14 @@ vi.mock("next/navigation", () => ({
 // #1655: the invite entry shows only when the deployment reports
 // `features.beta_invites`. Reset in beforeEach.
 let mockFeatures: Record<string, boolean> | null = null;
+// #1665: the terms version /system/info reports; null = not recorded.
+let mockTermsVersion: string | null = null;
 vi.mock("@/hooks/useSystemFeatures", () => ({
   useSystemFeatures: () => mockFeatures,
+  useSystemInfo: () => ({
+    features: mockFeatures ?? {},
+    terms_version: mockTermsVersion,
+  }),
 }));
 
 vi.mock("@/components/LanguageSelector", () => ({
@@ -128,6 +134,7 @@ beforeEach(() => {
   mockReplace.mockReset();
   safeReturnToBypass.enabled = false;
   mockFeatures = null;
+  mockTermsVersion = null;
   searchParamsSuspense.pending = null;
   // Clear URL params between tests so return_to from one test doesn't bleed
   for (const key of [...mockSearchParams.keys()]) {
@@ -968,5 +975,106 @@ describe("LoginPage invite entry (#1655)", () => {
         expect(value).toBeTruthy();
       }
     }
+  });
+});
+
+// ---------- Server-side terms acceptance (#1665) -----------------------------
+
+describe("LoginPage sends the accepted terms version (#1665)", () => {
+  let hrefAssignments: string[];
+  const originalLocation = window.location;
+  const originalOrigin = window.location.origin;
+
+  beforeEach(() => {
+    hrefAssignments = [];
+    Object.defineProperty(window, "location", {
+      configurable: true,
+      value: {
+        get origin() {
+          return originalOrigin;
+        },
+        get href() {
+          return hrefAssignments[hrefAssignments.length - 1] || "";
+        },
+        set href(val: string) {
+          hrefAssignments.push(val);
+        },
+      },
+    });
+  });
+
+  afterEach(() => {
+    Object.defineProperty(window, "location", {
+      configurable: true,
+      value: originalLocation,
+    });
+    vi.unstubAllEnvs();
+  });
+
+  it.each(["google", "github"] as const)(
+    "adds accepted_terms to the %s redirect URL when a version is set",
+    async (provider) => {
+      mockTermsVersion = "2026-09";
+      mockSearchParams.set("return_to", "/device?user_code=ABC");
+      await clickOAuthButton(provider);
+
+      await waitFor(() => expect(hrefAssignments.length).toBeGreaterThan(0));
+      const url = new URL(hrefAssignments[0]);
+      expect(url.pathname).toBe(`/api/v1/auth/${provider}/login`);
+      expect(url.searchParams.get("accepted_terms")).toBe("2026-09");
+      expect(url.searchParams.get("return_to")).toBe(
+        new URL("/device?user_code=ABC", originalOrigin).toString(),
+      );
+    },
+  );
+
+  it("passes the version to the JSON-mode Google login", async () => {
+    mockTermsVersion = "2026-09";
+    mockGetAuthUrl.mockResolvedValue("https://accounts.google.com/oauth/auth");
+    await clickOAuthButton("google");
+
+    await waitFor(() => expect(mockGetAuthUrl).toHaveBeenCalledTimes(1));
+    expect(mockGetAuthUrl).toHaveBeenCalledWith("2026-09");
+  });
+
+  it("passes the version to the JSON-mode GitHub login", async () => {
+    mockTermsVersion = "2026-09";
+    mockGetGitHubAuthUrl.mockResolvedValue("https://github.com/login/oauth");
+    await clickOAuthButton("github");
+
+    await waitFor(() => expect(mockGetGitHubAuthUrl).toHaveBeenCalledTimes(1));
+    expect(mockGetGitHubAuthUrl).toHaveBeenCalledWith("2026-09");
+  });
+
+  it("leaves the redirect URL unchanged when no version is set", async () => {
+    mockTermsVersion = null;
+    mockSearchParams.set("return_to", "/device?user_code=ABC");
+    await clickOAuthButton("google");
+
+    await waitFor(() => expect(hrefAssignments.length).toBeGreaterThan(0));
+    expect(hrefAssignments[0]).not.toContain("accepted_terms");
+  });
+
+  it("sends the version with the password login", async () => {
+    mockTermsVersion = "2026-09";
+    await reachMfaForm();
+
+    expect(mockLoginWithPassword).toHaveBeenCalledTimes(1);
+    expect(mockLoginWithPassword.mock.calls[0][3]).toBe("2026-09");
+  });
+
+  it("sends no version with the password login when none is set", async () => {
+    mockTermsVersion = null;
+    await reachMfaForm();
+
+    expect(mockLoginWithPassword.mock.calls[0][3]).toBeUndefined();
+  });
+
+  it("maps ?error=terms_required to its banner", async () => {
+    mockSearchParams.set("error", "terms_required");
+    renderLogin();
+
+    expect(await screen.findByText("termsRequired")).toBeTruthy();
+    expect(screen.queryByText("terms_required")).toBeNull();
   });
 });

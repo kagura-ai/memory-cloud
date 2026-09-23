@@ -133,6 +133,12 @@ export interface SystemInfo {
   features: SystemFeatures;
   /** Absent on backends older than #1572. */
   search_defaults?: SearchDefaults;
+  /**
+   * The current terms-of-service version (#1665), or null when the deployment
+   * does not record acceptance (`TERMS_VERSION` empty). Absent on older
+   * backends — treat absent like null.
+   */
+  terms_version?: string | null;
 }
 
 /**

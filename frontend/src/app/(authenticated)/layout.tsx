@@ -7,6 +7,7 @@
  * Includes sidebar navigation, header, and authentication guard.
  * Issue #651, #655 - Unified landing and dashboard handling
  * Issue #115 Phase B-5: Workspace requirement check
+ * Issue #1665: blocking terms re-acceptance step
  */
 
 import { Suspense, useEffect, useState } from "react";
@@ -17,6 +18,28 @@ import { WorkspaceProvider, useWorkspace } from "@/contexts/WorkspaceContext";
 import { MemoryContextProvider } from "@/contexts/MemoryContextContext";
 import { Sidebar } from "@/components/dashboard/Sidebar";
 import { WorkspaceSelectionScreen } from "@/components/workspaces/WorkspaceSelectionScreen";
+import { TermsReacceptanceDialog } from "@/components/auth/TermsReacceptanceDialog";
+import { useSystemInfo } from "@/hooks/useSystemFeatures";
+
+/**
+ * Issue #1665: shown INSTEAD of the app while `/auth/me` reports
+ * `terms_acceptance_required` — the deployment's terms version changed since
+ * this user last accepted. Nothing behind it mounts (no page fetches, no
+ * workspace guard) until they accept or sign out.
+ */
+function TermsReacceptanceGate() {
+  const { refetchUser, logout } = useAuth();
+  const termsVersion = useSystemInfo()?.terms_version ?? undefined;
+  return (
+    <div className="min-h-screen bg-slate-50 dark:bg-slate-900">
+      <TermsReacceptanceDialog
+        termsVersion={termsVersion}
+        onAccepted={refetchUser}
+        onSignOut={() => void logout()}
+      />
+    </div>
+  );
+}
 
 /**
  * Component to check workspace requirement and redirect if needed
@@ -186,6 +209,11 @@ function DashboardContent({ children }: { children: React.ReactNode }) {
   // For protected routes, don't render if not authenticated (redirecting to login)
   if (!user) {
     return null;
+  }
+
+  // Issue #1665: the updated terms must be accepted before anything else.
+  if (user.terms_acceptance_required) {
+    return <TermsReacceptanceGate />;
   }
 
   const isMockAuth =

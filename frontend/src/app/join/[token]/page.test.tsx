@@ -32,8 +32,14 @@ vi.mock("@/lib/auth/auth", () => ({
 }));
 
 let mockFeatures: Record<string, boolean> | null = { beta_invites: true };
+// #1665: the terms version /system/info reports; null = not recorded.
+let mockTermsVersion: string | null = null;
 vi.mock("@/hooks/useSystemFeatures", () => ({
   useSystemFeatures: () => mockFeatures,
+  useSystemInfo: () =>
+    mockFeatures === null
+      ? null
+      : { features: mockFeatures, terms_version: mockTermsVersion },
 }));
 
 vi.mock("next-intl", () => ({
@@ -98,6 +104,7 @@ beforeEach(() => {
   window.sessionStorage.clear();
   hrefAssignments = [];
   mockFeatures = { beta_invites: true };
+  mockTermsVersion = null;
   for (const key of [...mockSearchParams.keys()]) {
     mockSearchParams.delete(key);
   }
@@ -546,5 +553,30 @@ describe("/join/[token] — back to login keeps return_to (#1655)", () => {
     expect(
       screen.getByRole("link", { name: "join.backToLogin" }),
     ).toHaveAttribute("href", "/login");
+  });
+});
+
+describe("/join/[token] — server-side terms acceptance (#1665)", () => {
+  beforeEach(() => {
+    vi.stubEnv("NEXT_PUBLIC_API_URL", "https://api.example.com");
+  });
+
+  it.each(PROVIDERS)(
+    "%s sign-up carries the deployment's terms version",
+    async (provider, label) => {
+      mockTermsVersion = "2026-09";
+      expect(await signUpWith(label)).toBe(
+        `${loginUrl(provider, `${FRONTEND_ORIGIN}/workspace/dashboard`)}&accepted_terms=2026-09`,
+      );
+    },
+  );
+
+  it("sends no accepted_terms when the deployment records none", async () => {
+    mockTermsVersion = null;
+    const url = await signUpWith("join.valid.continueWithGoogle");
+    expect(url).toBe(
+      loginUrl("google", `${FRONTEND_ORIGIN}/workspace/dashboard`),
+    );
+    expect(url).not.toContain("accepted_terms");
   });
 });

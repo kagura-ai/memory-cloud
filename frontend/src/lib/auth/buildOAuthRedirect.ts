@@ -35,12 +35,20 @@
  * (`&invite=<encoded>`), where the backend binds it to the OAuth state. It is
  * appended only for a non-empty string, so the two-argument form is
  * byte-identical to before. The token is a credential — never log the result.
+ *
+ * `options.acceptedTerms` (#1665) is the terms version the person agreed to
+ * (`system/info.terms_version`), sent as `&accepted_terms=<encoded>`; the
+ * backend binds it to the OAuth state and records it. Same rule: appended only
+ * for a non-empty string, so a deployment without `TERMS_VERSION` sends
+ * exactly the URL it sent before.
  */
 export type OAuthProvider = "google" | "github";
 
 export interface BuildOAuthRedirectOptions {
   /** Beta invite token from `/join/{token}` (#1582). */
   invite?: string;
+  /** Terms version the checkbox referred to (#1665). */
+  acceptedTerms?: string;
 }
 
 export function buildOAuthRedirect(
@@ -67,5 +75,9 @@ export function buildOAuthRedirect(
     typeof options?.invite === "string" && options.invite !== ""
       ? `&invite=${encodeURIComponent(options.invite)}`
       : "";
-  return `${apiBaseUrl}/api/v1/auth/${provider}/login?return_to=${encodeURIComponent(absoluteReturnTo.toString())}${inviteParam}`;
+  const termsParam =
+    typeof options?.acceptedTerms === "string" && options.acceptedTerms !== ""
+      ? `&accepted_terms=${encodeURIComponent(options.acceptedTerms)}`
+      : "";
+  return `${apiBaseUrl}/api/v1/auth/${provider}/login?return_to=${encodeURIComponent(absoluteReturnTo.toString())}${inviteParam}${termsParam}`;
 }

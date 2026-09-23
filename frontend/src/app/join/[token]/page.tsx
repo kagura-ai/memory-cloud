@@ -26,6 +26,9 @@
  * comes from the path, never from `return_to`. The sign-up buttons wait for
  * the same terms acceptance as /login.
  *
+ * #1665: when the deployment reports a `terms_version`, the sign-up URL carries
+ * it as `accepted_terms`; the backend records it with the new account.
+ *
  * Next.js 15: params is a Promise and must be unwrapped with React.use()
  */
 
@@ -56,7 +59,7 @@ import {
 } from "@/lib/auth/resolveForwardTarget";
 import { safeReturnTo } from "@/lib/auth/safeReturnTo";
 import { formatDateTime } from "@/lib/utils/datetime";
-import { useSystemFeatures } from "@/hooks/useSystemFeatures";
+import { useSystemFeatures, useSystemInfo } from "@/hooks/useSystemFeatures";
 import { Button } from "@/components/ui/button";
 import { SpinnerLoading } from "@/components/common/LoadingState";
 import { LanguageSelector } from "@/components/LanguageSelector";
@@ -157,6 +160,8 @@ function JoinContent({ token }: { token: string }) {
   const t = useTranslations("betaInvites");
   const locale = useLocale();
   const features = useSystemFeatures();
+  // #1665: the terms version the checkbox refers to, when the deployment has one.
+  const termsVersion = useSystemInfo()?.terms_version ?? undefined;
   const searchParams = useSearchParams();
   const origin = typeof window !== "undefined" ? window.location.origin : "";
   // #1655: the validated destination, or undefined. Never parsed for a token.
@@ -227,6 +232,7 @@ function JoinContent({ token }: { token: string }) {
       returnTo ?? DEFAULT_FORWARD_TARGET,
       {
         invite: token,
+        acceptedTerms: termsVersion,
       },
     );
   };

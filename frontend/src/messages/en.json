@@ -253,6 +253,7 @@
     "linkHint": "An account with this email already exists. Sign in with your original provider, then link this one from your profile.",
     "oauthFailed": "Sign-in failed. Please try again.",
     "oauthExpired": "The sign-in link has expired. Please try again.",
+    "termsRequired": "No account was created: please agree to the Terms of Service and Privacy Policy below, then sign in again.",
     "loginId": "Login ID",
     "password": "Password",
     "signIn": "Sign In",
@@ -4192,6 +4193,16 @@
     "confirmPageInvalidBody": "This confirmation link is no longer valid. If you still want to delete your account, start again from your profile.",
     "goToProfile": "Go to profile",
     "protectedAccount": "This is the protected initial administrator account and cannot be deleted."
+  },
+  "termsReaccept": {
+    "title": "Updated terms",
+    "description": "Our Terms of Service or Privacy Policy have changed. Please review and accept them to continue.",
+    "accept": "Accept and continue",
+    "accepting": "Saving...",
+    "signOut": "Sign out",
+    "reload": "Reload",
+    "stale": "The terms changed again while this page was open. Reload to see the current version.",
+    "failed": "Your acceptance could not be saved. Please try again."
   },
   "gate": {
     "plan": {

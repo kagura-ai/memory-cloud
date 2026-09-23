@@ -1,11 +1,13 @@
 "use client";
 
 /**
- * The terms-of-service checkbox shared by /login and /join/[token] (#1655).
+ * The terms-of-service checkbox shared by /login, /join/[token] (#1655),
+ * /invite/[token] and the re-acceptance dialog (#1665).
  *
- * One component so both entry points ask for the same acceptance with the same
- * copy and links. Acceptance is checked on the client only; recording it on
- * the server is a separate change.
+ * One component so every entry point asks for the same acceptance with the
+ * same copy and links. The checkbox itself is client-side; when the deployment
+ * sets `TERMS_VERSION` the pages send that version with the sign-in and the
+ * backend records it (#1665).
  *
  * `/login` is always light (#1029); `/join` follows the theme, so it passes
  * `themed` to add the dark-mode text colours.

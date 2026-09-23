@@ -21,6 +21,12 @@ vi.mock("@/lib/api/base", async () => {
   };
 });
 
+// #1665: the terms version /system/info reports; null = not recorded.
+let mockTermsVersion: string | null = null;
+vi.mock("@/hooks/useSystemFeatures", () => ({
+  useSystemInfo: () => ({ features: {}, terms_version: mockTermsVersion }),
+}));
+
 vi.mock("next-intl", () => ({
   useTranslations: () => (k: string) => k,
 }));
@@ -63,6 +69,7 @@ beforeEach(() => {
   mockApiClientGet.mockReset();
   mockPush.mockReset();
   hrefAssignments = [];
+  mockTermsVersion = null;
 
   Object.defineProperty(window, "location", {
     configurable: true,
@@ -172,5 +179,36 @@ describe("AcceptInvitationPage OAuth login wiring", () => {
       /^https:\/\/api\.example\.com\/api\/v1\/auth\/google\/login\?return_to=/,
     );
     expect(hrefAssignments[0]).not.toMatch(/\/api\/v1\/api\/v1\//);
+  });
+});
+
+describe("AcceptInvitationPage terms acceptance (#1665)", () => {
+  it("shows no terms checkbox when the deployment records none", async () => {
+    await renderInLoginRequiredState();
+
+    expect(screen.queryByRole("checkbox")).toBeNull();
+    expect(
+      screen.getByRole("button", { name: /loginButton/i }),
+    ).not.toBeDisabled();
+  });
+
+  it("asks for the terms and sends the version once ticked", async () => {
+    mockTermsVersion = "2026-09";
+    vi.stubEnv("NEXT_PUBLIC_API_URL", "https://api.example.com");
+    await renderInLoginRequiredState();
+
+    const google = screen.getByRole("button", { name: /loginButton/i });
+    const github = screen.getByRole("button", { name: /continueWithGitHub/i });
+    expect(google).toBeDisabled();
+    expect(github).toBeDisabled();
+
+    fireEvent.click(screen.getByRole("checkbox", { name: /agreeToTerms/i }));
+    expect(google).not.toBeDisabled();
+    fireEvent.click(github);
+
+    await waitFor(() => expect(hrefAssignments).toHaveLength(1));
+    expect(hrefAssignments[0]).toBe(
+      `https://api.example.com/api/v1/auth/github/login?return_to=${encodeURIComponent(INVITE_URL)}&accepted_terms=2026-09`,
+    );
   });
 });
