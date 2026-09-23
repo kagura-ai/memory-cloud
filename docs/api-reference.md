@@ -926,13 +926,13 @@ pre-registered `kagura-cli` public OAuth2 client to drive RFC 8628
 device authorization grant — no client registration step is required
 from the end user. From the terminal, `kagura auth login` does roughly:
 
-1. SDK calls `POST /api/v1/oauth2/device/authorize` with
+1. SDK calls `POST /api/v1/oauth/device/authorize` with
    `client_id=kagura-cli`.
 2. The server returns a `verification_uri` plus a short `user_code`.
 3. The user opens `verification_uri` in a browser, signs in to Kagura
    Memory, picks the workspace they want to grant access to, and
    approves the consent screen.
-4. The SDK polls `POST /api/v1/oauth2/token` (with
+4. The SDK polls `POST /api/v1/oauth/token` (with
    `grant_type=urn:ietf:params:oauth:grant-type:device_code`) and
    receives an `access_token` plus a `refresh_token` scoped to the
    chosen (user × workspace).
@@ -940,8 +940,31 @@ from the end user. From the terminal, `kagura auth login` does roughly:
    (refresh-token rotation is enforced server-side per RFC 6819
    §5.2.2.3 — the old access/refresh pair is revoked when a new pair
    is issued).
-6. `kagura auth logout` calls `POST /api/v1/oauth2/revoke` to revoke
+6. `kagura auth logout` calls `POST /api/v1/oauth/revoke` to revoke
    the issued tokens.
+
+**Request limits.** The two unauthenticated device-flow steps are limited
+per client address, counted over a one-minute window:
+
+| Endpoint | Default limit | Setting | Over the limit |
+|---|---|---|---|
+| `POST /api/v1/oauth/device/authorize` (step 1) | 10 / min | `OAUTH_DEVICE_AUTHORIZE_RATE_LIMIT_PER_MINUTE` | `429` with the RFC 6749 §5.2 body `{"error": "invalid_request", "error_description": "..."}`, `Cache-Control: no-store` and `Retry-After: 60`. No device code is created. |
+| `POST /api/v1/oauth/device/verify` (the `/device` page looking up the `user_code` in step 3) | 30 / min | `OAUTH_DEVICE_VERIFY_RATE_LIMIT_PER_MINUTE` | `429` with the standard error envelope (`message` set) and `Retry-After: 60`. Every lookup counts, whether the code exists or not. |
+
+A client that gets a `429` should wait for `Retry-After` seconds before
+retrying. If the rate-limit store (Redis) is unavailable, requests are let
+through. Token polling (step 4) is not part of these limits; it is bounded
+per device code by the `interval` / `slow_down` rules of RFC 8628 §3.5.
+
+The limits key on the address the API server sees as the client
+(`request.client.host`). Behind a reverse proxy this is the caller's address
+only when uvicorn trusts the proxy's forwarded headers
+(`--forwarded-allow-ips` / `FORWARDED_ALLOW_IPS`); otherwise all callers
+share the proxy's budget.
+
+Expired device codes are deleted by an hourly background job once they are
+older than `OAUTH_DEVICE_CODE_RETENTION_SECONDS` past expiry (default
+`3600`).
 
 The `kagura-cli` row is seeded by alembic migration
 `e10_624_seed_kagura_cli_client` and has these capabilities:

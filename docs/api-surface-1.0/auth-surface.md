@@ -188,10 +188,17 @@ Device flow (RFC 8628):
 
 | Path | Method | Purpose |
 |---|---|---|
-| `/device/authorize` | POST | Device authorization request (device_code + user_code) |
-| `/device/verify` | POST | Verify a user_code (browser side) |
+| `/device/authorize` | POST | Device authorization request (device_code + user_code). Public, no auth. Per-IP limit `OAUTH_DEVICE_AUTHORIZE_RATE_LIMIT_PER_MINUTE` (default 10/min, #1656); over it: `429` RFC 6749 `{error: "invalid_request", error_description}` + `Cache-Control: no-store` + `Retry-After: 60`, no row written |
+| `/device/verify` | POST | Verify a user_code (browser side). Public, no auth. Per-IP limit `OAUTH_DEVICE_VERIFY_RATE_LIMIT_PER_MINUTE` (default 30/min, #1656), counted before the lookup whether the code exists or not; over it: `429` canonical `{error, message, details}` envelope + `Retry-After: 60` |
 | `/device/confirm` | POST | User confirms/denies the device grant |
 | `/device/audit-unauth` | POST | Internal frontend audit beacon (#779); `include_in_schema=False`. Classified **documented-internal** (#993) — intentionally excluded from the public 1.0 surface |
+
+The two device-flow limits count per `request.client.host` over a 60 s window
+in Redis and let requests through when Redis is unavailable. Behind a reverse
+proxy the key is the caller's address only when uvicorn trusts the proxy's
+forwarded headers (`--forwarded-allow-ips` / `FORWARDED_ALLOW_IPS`). Expired
+`oauth_device_codes` rows are deleted hourly once they are
+`OAUTH_DEVICE_CODE_RETENTION_SECONDS` (default 3600) past expiry.
 
 Client-management (session-authenticated dashboard surface, not part of the
 RFC-discovery contract but same router/prefix):
