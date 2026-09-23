@@ -18,6 +18,7 @@ import {
   TableLoadingState,
 } from "@/components/common/LoadingState";
 import { ErrorBanner } from "@/components/common/ErrorBanner";
+import { FeatureGateNotice } from "@/components/common/FeatureGateNotice";
 import { Button } from "@/components/ui/button";
 import { Checkbox } from "@/components/ui/checkbox";
 import {
@@ -36,7 +37,6 @@ import { getContexts } from "@/lib/api/contexts";
 import { getWorkspacePlan, type WorkspacePlanInfo } from "@/lib/api/workspaces";
 import { ApiError } from "@/lib/api/base";
 import { useFeatureGate } from "@/hooks/useFeatureGate";
-import { useCanUpgrade } from "@/hooks/useCanUpgrade";
 import { MAX_QUOTA_PER_TOKEN } from "@/config/resource-tokens";
 import { Plus, AlertTriangle, ChevronDown } from "lucide-react";
 import { useToast } from "@/hooks/use-toast";
@@ -81,15 +81,9 @@ export function ResourceTokensTabPanel({
   // disabled without an upsell, and the required tier comes from the matrix.
   const resourcesGate = useFeatureGate("resources");
   const canCreateTokens = resourcesGate.state === "allowed";
-  // The plan-gate copy names a tier, so it renders only when there is one to
-  // name: no served tier having the feature is the tier-less copy #1646 adds.
-  const planGateLabel =
-    resourcesGate.state === "plan" ? resourcesGate.planLabel : undefined;
-  // #1643: the plan-gate copy below always renders; only the link needs a
-  // Plan page this member can actually reach. The `isOwner` guard on that
-  // block is NOT the same rule — it also gates the notice itself and the
-  // sibling resource-id warning, so it stays.
-  const canUpgrade = useCanUpgrade();
+  // #1646: the plan notice below renders this descriptor itself — the
+  // tier-less copy when no tier lifts it, and the CTA only on the
+  // descriptor's own `canUpgrade` (#1643's rule, one place).
 
   // #1560: the SERVE caps ("used / max", quota capacity) come from
   // `GET /workspaces/{id}/plan` instead of a hand-mirrored table. That
@@ -371,29 +365,16 @@ export function ResourceTokensTabPanel({
         )}
 
         {/* Prerequisites Warning — plan gate (#1551) first, then resource-id.
-            Existing tokens stay listed below either way (block-new-only). */}
-        {isOwner && planGateLabel !== undefined && (
-          <div className="rounded-lg border-2 border-purple-200 bg-purple-50 p-4 mb-6">
-            <div className="flex items-start gap-3">
-              <AlertTriangle className="h-5 w-5 text-purple-600 flex-shrink-0 mt-0.5" />
-              <div className="flex-1">
-                <p className="text-sm font-medium text-purple-900">
-                  {t("planGateTitle", { plan: planGateLabel })}
-                </p>
-                <p className="text-xs text-purple-700 mt-1 mb-3">
-                  {t("planGateDesc", { plan: planGateLabel })}
-                </p>
-                {canUpgrade === true && (
-                  <a
-                    href="/workspace/settings/plan"
-                    className="text-xs text-purple-600 hover:text-purple-700 underline font-medium"
-                  >
-                    {t("upgradePlan")}
-                  </a>
-                )}
-              </div>
-            </div>
-          </div>
+            Existing tokens stay listed below either way (block-new-only).
+            #1646: the plan gate is FeatureGateNotice, scope "create" (its copy
+            says existing tokens keep working); pending/allowed render nothing.
+            The `isOwner` guard stays, as on the resource-id block below. */}
+        {isOwner && (
+          <FeatureGateNotice
+            gate={resourcesGate}
+            scope="create"
+            className="mb-6"
+          />
         )}
         {isOwner && canCreateTokens && !contexts.some((c) => c.resource_id) && (
           <div className="rounded-lg border-2 border-purple-200 bg-purple-50 p-4 mb-6">

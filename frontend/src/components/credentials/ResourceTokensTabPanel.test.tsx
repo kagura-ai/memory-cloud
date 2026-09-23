@@ -8,10 +8,17 @@
  *
  * #1643: the upsell's link to the Plan page is withheld wherever that page is
  * not reachable; the upsell copy itself always renders.
+ *
+ * #1646: the upsell is FeatureGateNotice (inline, scope "create") replacing
+ * the light-only purple div — under the key-echo mock its text is the
+ * relative gate key ("plan.newTitle"), and its CTA is a button that pushes
+ * the Plan page. The resource-id prerequisite block is unchanged.
  */
 
-import { render, screen, waitFor } from "@testing-library/react";
+import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
+
+import type { FeatureGate } from "@/lib/gates/featureGates";
 
 import { ResourceTokensTabPanel } from "./ResourceTokensTabPanel";
 
@@ -41,19 +48,26 @@ vi.mock("@/contexts/WorkspaceContext", () => ({
 // tier-name rank. #1645: read through useFeatureGate; the tri-state below maps
 // onto its descriptor (`null` = resolving = "pending").
 let mockPlanFeature: boolean | null = true;
-const MOCK_GATES = {
-  null: { state: "pending", feature: "resources", canUpgrade: false },
-  true: { state: "allowed", feature: "resources", canUpgrade: false },
-  false: {
-    state: "plan",
-    feature: "resources",
-    requiredPlan: "promax",
-    planLabel: "XL",
-    canUpgrade: false,
-  },
-} as const;
+const mockGateFor = (planFeature: boolean | null): FeatureGate =>
+  planFeature === null
+    ? { state: "pending", feature: "resources", canUpgrade: false }
+    : planFeature
+      ? { state: "allowed", feature: "resources", canUpgrade: false }
+      : {
+          state: "plan",
+          feature: "resources",
+          requiredPlan: "promax",
+          planLabel: "XL",
+          // #1646: the notice reads the descriptor's own canUpgrade. The real
+          // hook derives it from /system/info (pinned in
+          // useFeatureGate.test.tsx); this stands in for that derivation so
+          // the #1643 cases below keep driving it through `mockFeatures`.
+          canUpgrade: mockFeatures?.plan_page === true,
+        };
+// A test that needs a descriptor the tri-state cannot express sets this.
+let mockGate: FeatureGate | null = null;
 vi.mock("@/hooks/useFeatureGate", () => ({
-  useFeatureGate: () => MOCK_GATES[`${mockPlanFeature}`],
+  useFeatureGate: () => mockGate ?? mockGateFor(mockPlanFeature),
 }));
 
 // #1643: useCanUpgrade reads /system/info. Without this mock the real hook
@@ -75,8 +89,11 @@ vi.mock("next-intl", () => ({
   useTranslations: () => (key: string) => key,
   useLocale: () => "en",
 }));
+const mockPush = vi.fn();
 vi.mock("next/navigation", () => ({
   useSearchParams: () => new URLSearchParams(),
+  // #1646: FeatureGateNotice's CTA pushes the Plan page.
+  useRouter: () => ({ push: mockPush }),
 }));
 vi.mock("@/hooks/use-toast", () => ({
   useToast: () => ({ toast: vi.fn() }),
@@ -125,6 +142,8 @@ beforeEach(() => {
   mockCurrentWorkspace = { plan_name: "promax", current_user_role: "owner" };
   mockPlanFeature = true; // #1560: resources included unless a test says otherwise
   mockFeatures = { plan_page: true };
+  mockGate = null;
+  mockPush.mockReset();
 });
 
 const createButton = () => screen.getByRole("button", { name: /createToken/ });
@@ -146,7 +165,7 @@ describe("ResourceTokensTabPanel — XL-only create gate (#1551)", () => {
       expect(await screen.findByText("token#1")).toBeInTheDocument();
       expect(screen.getByText("token#2")).toBeInTheDocument();
       expect(createButton()).toBeDisabled();
-      expect(screen.getByText("planGateTitle")).toBeInTheDocument();
+      expect(screen.getByText("plan.newTitle")).toBeInTheDocument();
       // The resource-id hint is the OTHER prerequisite — not shown here.
       expect(screen.queryByText("noResourceIdWarning")).toBeNull();
     },
@@ -160,7 +179,7 @@ describe("ResourceTokensTabPanel — XL-only create gate (#1551)", () => {
 
     expect(await screen.findByText("token#1")).toBeInTheDocument();
     await waitFor(() => expect(createButton()).toBeEnabled());
-    expect(screen.queryByText("planGateTitle")).toBeNull();
+    expect(screen.queryByText("plan.newTitle")).toBeNull();
     expect(screen.queryByText("noResourceIdWarning")).toBeNull();
   });
 
@@ -174,7 +193,7 @@ describe("ResourceTokensTabPanel — XL-only create gate (#1551)", () => {
 
     expect(await screen.findByText("noResourceIdWarning")).toBeInTheDocument();
     expect(createButton()).toBeDisabled();
-    expect(screen.queryByText("planGateTitle")).toBeNull();
+    expect(screen.queryByText("plan.newTitle")).toBeNull();
   });
 
   // #1560: the gate follows the API boolean, not the tier's name/rank.
@@ -188,7 +207,7 @@ describe("ResourceTokensTabPanel — XL-only create gate (#1551)", () => {
 
     expect(await screen.findByText("token#1")).toBeInTheDocument();
     await waitFor(() => expect(createButton()).toBeEnabled());
-    expect(screen.queryByText("planGateTitle")).toBeNull();
+    expect(screen.queryByText("plan.newTitle")).toBeNull();
   });
 
   it("pending gate: Create disabled with no upsell while the matrix resolves (#1560)", async () => {
@@ -200,7 +219,7 @@ describe("ResourceTokensTabPanel — XL-only create gate (#1551)", () => {
 
     expect(await screen.findByText("token#1")).toBeInTheDocument();
     expect(createButton()).toBeDisabled();
-    expect(screen.queryByText("planGateTitle")).toBeNull();
+    expect(screen.queryByText("plan.newTitle")).toBeNull();
     expect(screen.queryByText("noResourceIdWarning")).toBeNull();
   });
 });
@@ -215,31 +234,67 @@ describe("ResourceTokensTabPanel — upgrade link gate (#1643)", () => {
     render(<ResourceTokensTabPanel />);
 
     // The plan-gate copy is the explanation — it renders in every case here.
-    expect(await screen.findByText("planGateTitle")).toBeInTheDocument();
-    expect(screen.getByText("planGateDesc")).toBeInTheDocument();
+    expect(await screen.findByText("plan.newTitle")).toBeInTheDocument();
+    expect(screen.getByText("plan.newDescription")).toBeInTheDocument();
   }
 
-  it("owner below XL, plan_page off: the plan-gate copy renders with no upgrade link", async () => {
+  it("owner below XL, plan_page off: the plan-gate copy renders with no upgrade CTA", async () => {
     mockFeatures = {};
     await renderGated();
 
+    expect(screen.queryByRole("button", { name: "plan.action" })).toBeNull();
     expect(screen.queryByRole("link", { name: "upgradePlan" })).toBeNull();
   });
 
-  it("owner below XL, /system/info pending: no upgrade link", async () => {
+  it("owner below XL, /system/info pending: no upgrade CTA", async () => {
     mockFeatures = null;
     await renderGated();
 
-    expect(screen.queryByRole("link", { name: "upgradePlan" })).toBeNull();
+    expect(screen.queryByRole("button", { name: "plan.action" })).toBeNull();
   });
 
-  it("owner below XL, plan_page on: the plan-gate copy renders with an upgrade link", async () => {
+  it("owner below XL, plan_page on: the CTA pushes the Plan page", async () => {
     await renderGated();
 
-    expect(screen.getByRole("link", { name: "upgradePlan" })).toHaveAttribute(
-      "href",
-      "/workspace/settings/plan",
-    );
+    fireEvent.click(screen.getByRole("button", { name: "plan.action" }));
+    expect(mockPush).toHaveBeenCalledWith("/workspace/settings/plan");
+    // The old bare <a> is gone.
+    expect(screen.queryByRole("link", { name: "upgradePlan" })).toBeNull();
+  });
+});
+
+describe("ResourceTokensTabPanel — FeatureGateNotice (#1646 P5)", () => {
+  it("the plan notice is the dark-safe Alert, not the light-only purple div", async () => {
+    mockPlanFeature = false;
+    mockListResourceTokens.mockResolvedValue({ tokens: [], total: 0 });
+    mockGetContexts.mockResolvedValue({ contexts: [resourceContext] });
+
+    render(<ResourceTokensTabPanel />);
+
+    const title = await screen.findByText("plan.newTitle");
+    const notice = title.closest('[role="alert"]');
+    expect(notice).not.toBeNull();
+    // The Alert `upsell` variant carries its own dark tokens; the old div
+    // (border-2 border-purple-200, no dark: classes) is gone.
+    expect(notice!.className).toMatch(/dark:bg-purple-950/);
+    expect(notice!.className).not.toMatch(/border-2/);
+    // scope "create": the create-scoped copy, not the whole-feature copy.
+    expect(screen.queryByText("plan.title")).toBeNull();
+    expect(screen.queryByText("planGateTitle")).toBeNull();
+  });
+
+  it("no served tier has resources: the tier-less copy, no CTA", async () => {
+    mockGate = { state: "plan", feature: "resources", canUpgrade: true };
+    mockListResourceTokens.mockResolvedValue({ tokens: [token(1)], total: 1 });
+    mockGetContexts.mockResolvedValue({ contexts: [resourceContext] });
+
+    render(<ResourceTokensTabPanel />);
+
+    expect(await screen.findByText("token#1")).toBeInTheDocument();
+    expect(screen.getByText("plan.titleNoTier")).toBeInTheDocument();
+    expect(screen.getByText("plan.descriptionNoTier")).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "plan.action" })).toBeNull();
+    expect(createButton()).toBeDisabled();
   });
 });
 
