@@ -12,7 +12,14 @@
  */
 
 import { describe, it, expect, beforeEach, vi, afterEach } from "vitest";
-import { render, screen, waitFor, cleanup } from "@testing-library/react";
+import type { PlanTierFeature } from "@/lib/api/workspaces";
+import {
+  render,
+  screen,
+  waitFor,
+  cleanup,
+  fireEvent,
+} from "@testing-library/react";
 
 import ContextsPage from "./page";
 
@@ -50,9 +57,7 @@ vi.mock("next/navigation", () => ({
 vi.mock("next-intl", () => ({
   useTranslations:
     (_ns?: string) => (k: string, vars?: Record<string, unknown>) =>
-      vars && Object.keys(vars).length > 0
-        ? `${k}:${JSON.stringify(vars)}`
-        : k,
+      vars && Object.keys(vars).length > 0 ? `${k}:${JSON.stringify(vars)}` : k,
   useLocale: () => "en",
 }));
 
@@ -78,6 +83,25 @@ vi.mock("@/hooks/use-toast", () => ({
 let mockFeatures: Record<string, boolean> | null = { byok: true };
 vi.mock("@/hooks/useSystemFeatures", () => ({
   useSystemFeatures: () => mockFeatures,
+}));
+
+// #1645: the shared-contexts gate and the context-cap descriptor read the
+// shared tier matrix (`null` = still resolving). Default: the OSS matrix, so
+// `plan_name` decides exactly as the tier's row does.
+const OSS_TIERS = [
+  { name: "free", display_name: "S", max_contexts: 1, shared_contexts: false },
+  { name: "basic", display_name: "M", max_contexts: 3, shared_contexts: false },
+  { name: "pro", display_name: "L", max_contexts: 20, shared_contexts: true },
+  {
+    name: "promax",
+    display_name: "XL",
+    max_contexts: 1000,
+    shared_contexts: true,
+  },
+] as unknown as PlanTierFeature[];
+let mockTiers: PlanTierFeature[] | null = OSS_TIERS;
+vi.mock("@/hooks/usePlanFeatures", () => ({
+  usePlanTierMatrix: () => mockTiers,
 }));
 
 const WORKSPACE_ID = "ws-1";
@@ -146,6 +170,7 @@ beforeEach(() => {
     refresh: vi.fn(),
   });
   mockFeatures = { byok: true };
+  mockTiers = OSS_TIERS;
 });
 
 afterEach(() => cleanup());
@@ -181,7 +206,13 @@ describe("New Context control", () => {
     // Here it was live in production — every workspace served by the platform
     // credential saw a red "OpenAI API key required" banner and a warning
     // triangle while embedding 100% successfully.
-    setup({ plan: "pro", maxContexts: 20, contextCount: 3, hasKey: false, canEmbed: true });
+    setup({
+      plan: "pro",
+      maxContexts: 20,
+      contextCount: 3,
+      hasKey: false,
+      canEmbed: true,
+    });
     render(<ContextsPage />);
     await waitFor(async () =>
       expect(await newContextButton()).not.toBeDisabled(),
@@ -242,6 +273,15 @@ describe("New Context control", () => {
     expect(await screen.findByText(/quotaReachedDetail/)).toBeInTheDocument();
   });
 
+  it("a cap of 0 (a tier that excludes contexts) still blocks, as before (#1645)", async () => {
+    // quotaGate reads limit 0 as "unknown, never block"; the page keeps the
+    // zero cap's own block so wrapping the rule in the descriptor changes
+    // nothing a user sees.
+    setup({ plan: "free", maxContexts: 0, contextCount: 0, hasKey: true });
+    render(<ContextsPage />);
+    expect(await screen.findByText(/quotaReachedDetail/)).toBeInTheDocument();
+  });
+
   it("does not block when the server did not send a cap", async () => {
     setup({ plan: "pro", maxContexts: undefined, contextCount: 99 });
     render(<ContextsPage />);
@@ -271,5 +311,67 @@ describe("New Context control", () => {
     const banner = await screen.findByText(/quotaReachedDetail/);
     expect(banner.textContent).toContain('"plan":"basic"');
     expect(banner.textContent).toContain('"limit":3');
+  });
+});
+
+// #1645: one gate — the tier matrix's `shared_contexts` — decides the shared
+// option in both create dialogs, instead of 12 literal / ordinal reads of the
+// plan name.
+describe("Shared option in the create dialog (#1645)", () => {
+  async function openAdvancedCreate() {
+    // An empty workspace offers the Advanced create dialog directly.
+    const create = await screen.findByRole("button", { name: "create" });
+    fireEvent.click(create);
+    await screen.findByText(/sharedOption/);
+    return document.querySelector(
+      'input[type="radio"][value="shared"]',
+    ) as HTMLInputElement;
+  }
+
+  it("the shared radio and its helper text agree while the plan is unresolved", async () => {
+    // Before: the literal compare left the radio ENABLED while
+    // planAtLeast(undefined, "pro") already printed the upsell.
+    mockTiers = null;
+    setup({ plan: "pro", maxContexts: 20, contextCount: 0 });
+    render(<ContextsPage />);
+
+    const radio = await openAdvancedCreate();
+    expect(radio).toBeDisabled();
+    expect(screen.queryByText("upgradeToPro")).toBeNull();
+    expect(screen.queryByText("teamMembersAccess")).toBeNull();
+    expect(screen.queryByText("proPlan")).toBeNull();
+  });
+
+  it("a tier without shared contexts: inert radio, badge and upsell copy", async () => {
+    setup({ plan: "basic", maxContexts: 3, contextCount: 0 });
+    render(<ContextsPage />);
+
+    const radio = await openAdvancedCreate();
+    expect(radio).toBeDisabled();
+    expect(screen.getByText("upgradeToPro")).toBeInTheDocument();
+    expect(screen.getByText("proPlan")).toBeInTheDocument();
+  });
+
+  it("a tier with shared contexts: the radio works", async () => {
+    setup({ plan: "pro", maxContexts: 20, contextCount: 0 });
+    render(<ContextsPage />);
+
+    const radio = await openAdvancedCreate();
+    expect(radio).not.toBeDisabled();
+    expect(screen.getByText("teamMembersAccess")).toBeInTheDocument();
+    fireEvent.click(radio);
+    expect(radio).toBeChecked();
+  });
+
+  it("follows the matrix, not the tier name: an operator gives basic shared contexts", async () => {
+    mockTiers = OSS_TIERS.map((t) =>
+      t.name === "basic" ? { ...t, shared_contexts: true } : t,
+    );
+    setup({ plan: "basic", maxContexts: 3, contextCount: 0 });
+    render(<ContextsPage />);
+
+    const radio = await openAdvancedCreate();
+    expect(radio).not.toBeDisabled();
+    expect(screen.queryByText("proPlan")).toBeNull();
   });
 });

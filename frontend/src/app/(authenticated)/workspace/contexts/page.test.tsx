@@ -9,6 +9,7 @@
  */
 
 import { describe, it, expect, beforeEach, vi, afterEach } from "vitest";
+import type { PlanTierFeature } from "@/lib/api/workspaces";
 import {
   act,
   render,
@@ -89,6 +90,24 @@ vi.mock("@/hooks/use-toast", () => ({
 let mockFeatures: Record<string, boolean> | null = { byok: true };
 vi.mock("@/hooks/useSystemFeatures", () => ({
   useSystemFeatures: () => mockFeatures,
+}));
+// #1645: the shared-contexts gate and the context-cap descriptor read the
+// shared tier matrix (`null` = still resolving). Default: the OSS matrix, so
+// `plan_name` decides exactly as the tier's row does.
+const OSS_TIERS = [
+  { name: "free", display_name: "S", max_contexts: 1, shared_contexts: false },
+  { name: "basic", display_name: "M", max_contexts: 3, shared_contexts: false },
+  { name: "pro", display_name: "L", max_contexts: 20, shared_contexts: true },
+  {
+    name: "promax",
+    display_name: "XL",
+    max_contexts: 1000,
+    shared_contexts: true,
+  },
+] as unknown as PlanTierFeature[];
+let mockTiers: PlanTierFeature[] | null = OSS_TIERS;
+vi.mock("@/hooks/usePlanFeatures", () => ({
+  usePlanTierMatrix: () => mockTiers,
 }));
 
 // ---------- Helpers ----------------------------------------------------------
