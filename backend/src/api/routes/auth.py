@@ -27,7 +27,7 @@ import httpx
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response
 from fastapi.responses import RedirectResponse
 from pydantic import BaseModel, Field
-from sqlalchemy import select
+from sqlalchemy import or_, select
 from sqlalchemy.exc import IntegrityError, SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -539,6 +539,12 @@ async def google_login(
     if not _oauth2_manager:
         raise HTTPException(status_code=500, detail="OAuth2 manager not initialized")
 
+    # #1665: an invite sign-up that would be refused goes back to /join now,
+    # while the token is still at hand.
+    invite_bounce = _invite_terms_bounce(invite, accepted_terms, return_to)
+    if invite_bounce is not None:
+        return invite_bounce
+
     # Generate CSRF state token
     state = secrets.token_urlsafe(32)
 
@@ -783,6 +789,7 @@ async def google_callback(
         terms_refusal = await _terms_refusal(
             provider="google",
             idp_sub=user_info["sub"],
+            email=user_info["email"],
             accepted_terms=accepted_terms,
             state=state,
         )
@@ -1291,16 +1298,25 @@ def _take_accepted_terms(state: str) -> str | None:
     return value
 
 
-async def _identity_exists(provider: str, idp_sub: str) -> bool:
-    """Whether this IdP identity already has an account (#1665).
+async def _identity_exists(provider: str, idp_sub: str, email: str) -> bool:
+    """Whether ``ensure_user`` would NOT create a new account here (#1665).
 
-    Mirrors how ``RoleManager.ensure_user`` resolves a returning user: the
-    ``(provider, oauth_sub)`` link row, or — for an identity that somehow lacks
-    one — a ``users`` row whose ``user_id`` is the sub (ensure_user's
-    IntegrityError retry path lands on that same row).
+    Mirrors every branch of ``RoleManager.ensure_user`` that ends without an
+    insert:
+
+    - the ``(provider, oauth_sub)`` link row — a returning user;
+    - a ``users`` row whose ``user_id`` is the sub — the identity that somehow
+      lacks a link row (ensure_user's IntegrityError retry lands on it);
+    - a ``users`` row holding ``email`` — ensure_user's insert trips the
+      ``users.email`` UNIQUE constraint and raises ``ConflictError``
+      (``/login?error=email_in_use``). Plain equality, like that constraint,
+      and regardless of ``email_verified``, like the insert. Treating it as
+      "not new" keeps that pre-#1665 answer instead of masking it with
+      ``terms_required``; no account is created either way.
     """
     from models.auth import UserOAuthProvider
 
+    exists = False
     async for db in get_db():
         link = await db.execute(
             select(UserOAuthProvider.user_id)
@@ -1308,10 +1324,53 @@ async def _identity_exists(provider: str, idp_sub: str) -> bool:
             .limit(1)
         )
         if link.scalar_one_or_none() is not None:
-            return True
-        legacy = await db.execute(select(User.user_id).where(User.user_id == idp_sub).limit(1))
-        return legacy.scalar_one_or_none() is not None
-    return False
+            exists = True
+        else:
+            existing = await db.execute(
+                select(User.user_id)
+                .where(or_(User.user_id == idp_sub, User.email == email))
+                .limit(1)
+            )
+            exists = existing.scalar_one_or_none() is not None
+        break
+    return exists
+
+
+def _invite_terms_bounce(
+    invite: str | None, accepted_terms: str | None, return_to: str | None
+) -> RedirectResponse | None:
+    """Send an invite sign-up without the current terms back to its /join page.
+
+    The callback only ever sees the invite's hash, so a sign-up it refuses can
+    only be sent to the generic ``/login`` — where the invite is gone. The
+    login endpoint still holds the token the browser sent (it is in this
+    request's own URL), so an invite flow that is going to be refused is
+    stopped here instead, before any state is written or the IdP is visited:
+    back to ``/join/{token}?error=terms_required``, which shows the banner and
+    the checkbox with the current version. Only for a browser flow
+    (``return_to`` present — /join always sends one), only with the invite
+    feature on and a well-formed token; ``return_to`` rides along when it
+    passes ``_safe_redirect_url`` unchanged. The token is never logged.
+
+    An existing user following a /join link with stale terms is bounced too —
+    harmless: the page they land on asks for the current version.
+    """
+    from urllib.parse import quote
+
+    from config.settings import get_settings
+
+    current = current_terms_version()
+    if current is None or accepted_terms == current:
+        return None
+    if not invite or not return_to or not get_settings().enable_beta_invites:
+        return None
+    if not _BETA_INVITE_TOKEN_RE.fullmatch(invite):
+        return None
+    frontend_url = os.getenv("FRONTEND_URL", "http://localhost:3000").rstrip("/")
+    url = f"{frontend_url}/join/{quote(invite, safe='')}?error=terms_required"
+    if _safe_redirect_url(return_to) == return_to:
+        url += f"&return_to={quote(return_to, safe='')}"
+    return RedirectResponse(url, status_code=303)
 
 
 def _terms_required_redirect(provider: str, return_to: str | None) -> RedirectResponse:
@@ -1333,7 +1392,7 @@ def _terms_required_redirect(provider: str, return_to: str | None) -> RedirectRe
 
 
 async def _terms_refusal(
-    *, provider: str, idp_sub: str, accepted_terms: str | None, state: str
+    *, provider: str, idp_sub: str, email: str, accepted_terms: str | None, state: str
 ) -> RedirectResponse | None:
     """Refuse to create an account for a sign-up without the current terms.
 
@@ -1347,7 +1406,7 @@ async def _terms_refusal(
     current = current_terms_version()
     if current is None or accepted_terms == current:
         return None
-    if await _identity_exists(provider, idp_sub):
+    if await _identity_exists(provider, idp_sub, email):
         return None
 
     logger.info(
@@ -1610,6 +1669,11 @@ async def github_login(
     if not client_id:
         raise HTTPException(status_code=500, detail="GITHUB_CLIENT_ID not configured")
 
+    # #1665: see google_login.
+    invite_bounce = _invite_terms_bounce(invite, accepted_terms, return_to)
+    if invite_bounce is not None:
+        return invite_bounce
+
     state = secrets.token_urlsafe(32)
     _session_manager._redis.setex(f"oauth2_state:{state}", 300, "pending")
 
@@ -1796,6 +1860,7 @@ async def github_callback(
         terms_refusal = await _terms_refusal(
             provider="github",
             idp_sub=user_info["sub"],
+            email=user_info["email"],
             accepted_terms=accepted_terms,
             state=state,
         )

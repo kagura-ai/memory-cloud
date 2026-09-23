@@ -590,3 +590,169 @@ class TestAuthMe:
 
         assert result["user"]["terms_acceptance_required"] is True
         required.assert_awaited_once_with("u1")
+
+
+class TestInviteFlowBouncesToJoin:
+    """An invite sign-up without the current terms goes back to /join/<token>
+    at login time — the callback only has the invite's hash and could only
+    send it to the generic /login."""
+
+    RETURN_TO = "http://localhost:3000/device?user_code=ABCD"
+
+    @pytest.fixture
+    def invites_on(self, monkeypatch) -> None:
+        monkeypatch.setattr(get_settings(), "enable_beta_invites", True)
+
+    @pytest.fixture
+    def google_manager(self, monkeypatch) -> MagicMock:
+        manager = MagicMock()
+        manager.get_authorization_url_web.return_value = "https://idp.example.test/auth"
+        monkeypatch.setattr(auth_routes, "_oauth2_manager", manager)
+        monkeypatch.setenv("GOOGLE_REDIRECT_URI", "http://localhost:8080/cb")
+        return manager
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("presented", [None, "2025-01"])
+    async def test_github_bounces_to_join_with_the_error(
+        self, redis, terms_on, invites_on, monkeypatch, presented
+    ) -> None:
+        monkeypatch.setenv("GITHUB_CLIENT_ID", "client-id")
+
+        response = await auth_routes.github_login(
+            FakeRequest(), return_to=self.RETURN_TO, invite=INVITE, accepted_terms=presented
+        )
+
+        location = urlparse(response.headers["location"])
+        assert response.status_code == 303
+        assert location.path == f"/join/{INVITE}"
+        query = parse_qs(location.query)
+        assert query["error"] == ["terms_required"]
+        assert query["return_to"] == [self.RETURN_TO]
+        # Stopped before the flow began: no state, no invite hash, no IdP.
+        assert redis.store == {}
+
+    @pytest.mark.asyncio
+    async def test_google_bounces_and_drops_an_unsafe_return_to(
+        self, redis, terms_on, invites_on, google_manager
+    ) -> None:
+        response = await auth_routes.google_login(
+            FakeRequest(), return_to="https://evil.example/x", invite=INVITE
+        )
+
+        location = urlparse(response.headers["location"])
+        assert location.path == f"/join/{INVITE}"
+        assert parse_qs(location.query) == {"error": ["terms_required"]}
+        google_manager.get_authorization_url_web.assert_not_called()
+        assert redis.store == {}
+
+    @pytest.mark.asyncio
+    async def test_current_version_proceeds_to_the_idp(
+        self, redis, terms_on, invites_on, google_manager
+    ) -> None:
+        response = await auth_routes.google_login(
+            FakeRequest(), return_to=self.RETURN_TO, invite=INVITE, accepted_terms=VERSION
+        )
+
+        assert response.headers["location"] == "https://idp.example.test/auth"
+        assert redis.store[KEY.format(state=next(iter(_states(redis))))] == VERSION
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "case", ["terms_off", "invites_off", "no_return_to", "malformed_invite"]
+    )
+    async def test_no_bounce_outside_a_browser_invite_flow(self, redis, monkeypatch, case) -> None:
+        monkeypatch.setenv("GITHUB_CLIENT_ID", "client-id")
+        monkeypatch.setattr(get_settings(), "terms_version", "" if case == "terms_off" else VERSION)
+        monkeypatch.setattr(get_settings(), "enable_beta_invites", case != "invites_off")
+        return_to = None if case == "no_return_to" else self.RETURN_TO
+        invite = "<bad>" if case == "malformed_invite" else INVITE
+
+        response = await auth_routes.github_login(FakeRequest(), return_to=return_to, invite=invite)
+
+        location = getattr(response, "headers", {}).get("location") or response.authorization_url
+        assert "/join/" not in location
+
+
+def _states(redis: FakeRedis) -> list[str]:
+    return [k.split(":", 1)[1] for k in redis.store if k.startswith("oauth2_state:")]
+
+
+class TestEmailCollisionIsNotMasked:
+    """A first-time provider sign-in whose e-mail already belongs to another
+    account keeps the pre-#1665 ``email_in_use`` answer."""
+
+    @pytest.mark.asyncio
+    async def test_identity_exists_checks_the_email_like_the_unique_constraint(
+        self, monkeypatch
+    ) -> None:
+        from sqlalchemy.dialects import postgresql
+
+        db = MagicMock()
+        db.execute = AsyncMock(
+            side_effect=[
+                MagicMock(scalar_one_or_none=MagicMock(return_value=None)),  # no link row
+                MagicMock(scalar_one_or_none=MagicMock(return_value="pw-user")),
+            ]
+        )
+
+        async def _fake_db():
+            yield db
+
+        monkeypatch.setattr(auth_routes, "get_db", _fake_db)
+
+        assert await auth_routes._identity_exists("google", "108", "taken@example.test") is True
+        sql = str(
+            db.execute.await_args_list[1]
+            .args[0]
+            .compile(dialect=postgresql.dialect(), compile_kwargs={"literal_binds": True})
+        )
+        assert "users.user_id = '108'" in sql
+        assert "users.email = 'taken@example.test'" in sql
+
+    @pytest.mark.asyncio
+    async def test_unknown_identity_and_email_is_new(self, monkeypatch) -> None:
+        db = MagicMock()
+        db.execute = AsyncMock(
+            return_value=MagicMock(scalar_one_or_none=MagicMock(return_value=None))
+        )
+
+        async def _fake_db():
+            yield db
+
+        monkeypatch.setattr(auth_routes, "get_db", _fake_db)
+
+        assert await auth_routes._identity_exists("google", "108", "new@example.test") is False
+
+    @pytest.mark.asyncio
+    async def test_callback_ends_on_email_in_use_not_terms_required(
+        self, redis, terms_on, google_idp, monkeypatch
+    ) -> None:
+        from utils.exceptions import ConflictError
+
+        db = MagicMock()
+        db.execute = AsyncMock(
+            side_effect=[
+                MagicMock(scalar_one_or_none=MagicMock(return_value=None)),
+                MagicMock(scalar_one_or_none=MagicMock(return_value="pw-user")),
+            ]
+        )
+
+        async def _fake_db():
+            yield db
+
+        monkeypatch.setattr(auth_routes, "get_db", _fake_db)
+        monkeypatch.setattr(auth_routes, "_maybe_link_redirect", AsyncMock(return_value=None))
+        monkeypatch.setattr(auth_routes, "check_signup_access", AsyncMock(return_value=None))
+        monkeypatch.setattr(
+            auth_routes,
+            "get_role_manager",
+            lambda: SimpleNamespace(
+                ensure_user=AsyncMock(side_effect=ConflictError("Email address is already in use"))
+            ),
+        )
+        _pending(redis, "st1", terms=None)
+
+        response = await _google_callback("st1")
+
+        query = parse_qs(urlparse(response.headers["location"]).query)
+        assert query["error"] == ["email_in_use"]
