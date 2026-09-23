@@ -13,6 +13,10 @@
  * #1580: when `features.reranking` is false the reranker card is not rendered
  * at all (hidden, not greyed out) and the external-keys probe is skipped;
  * `true` and unknown (still loading / older backend) keep the card.
+ *
+ * #1643: the free-tier upgrade sentence keeps its <link> chunk only where the
+ * Plan page is reachable. `plan_page` stays ABSENT from the beforeEach default
+ * (the self-hosted truth), so the cases below opt in explicitly.
  */
 
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
@@ -327,5 +331,75 @@ describe("SearchSettingsSection reranking off on this deployment (#1580)", () =>
       screen.queryByText("providerUnavailableCannotSave"),
     ).not.toBeInTheDocument();
     expect(screen.getByRole("button", { name: "saveChanges" })).toBeEnabled();
+  });
+});
+
+describe("SearchSettingsSection free-tier upgrade CTA (#1643)", () => {
+  function setFree(role: string) {
+    mockUseWorkspace.mockReturnValue({
+      currentWorkspace: {
+        id: "ws-1",
+        plan_name: "free",
+        current_user_role: role,
+      },
+      currentWorkspaceId: "ws-1",
+      loading: false,
+    });
+  }
+
+  it("free tier, plan_page off: the reranker notice renders as plain text with no plan link", async () => {
+    setFree("owner");
+    render(<SearchSettingsSection contextId="ctx-1" />);
+
+    // The notice and the whole sentence survive — only the link does not.
+    expect(
+      await screen.findByText("rerankerNotAvailableFree"),
+    ).toBeInTheDocument();
+    expect(screen.getByText("upgradeToBasic")).toBeInTheDocument();
+    expect(
+      screen.queryByRole("link", { name: "upgradeToBasic" }),
+    ).not.toBeInTheDocument();
+  });
+
+  it("free tier, plan_page on but not the owner: still no plan link", async () => {
+    mockFeatures = { byok: true, plan_page: true };
+    mockInfo = {
+      features: { byok: true, plan_page: true },
+      search_defaults: VOYAGE_DEFAULTS,
+    };
+    setFree("admin");
+    render(<SearchSettingsSection contextId="ctx-1" />);
+
+    expect(await screen.findByText("upgradeToBasic")).toBeInTheDocument();
+    expect(
+      screen.queryByRole("link", { name: "upgradeToBasic" }),
+    ).not.toBeInTheDocument();
+  });
+
+  it("free tier, owner on a plan_page deployment: the notice links to the plan page", async () => {
+    mockFeatures = { byok: true, plan_page: true };
+    mockInfo = {
+      features: { byok: true, plan_page: true },
+      search_defaults: VOYAGE_DEFAULTS,
+    };
+    setFree("owner");
+    render(<SearchSettingsSection contextId="ctx-1" />);
+
+    expect(
+      await screen.findByRole("link", { name: "upgradeToBasic" }),
+    ).toHaveAttribute("href", "/workspace/settings/plan");
+  });
+
+  it("free tier, /system/info still pending: no plan link", async () => {
+    mockFeatures = null;
+    setFree("owner");
+    render(<SearchSettingsSection contextId="ctx-1" />);
+
+    expect(
+      await screen.findByText("rerankerNotAvailableFree"),
+    ).toBeInTheDocument();
+    expect(
+      screen.queryByRole("link", { name: "upgradeToBasic" }),
+    ).not.toBeInTheDocument();
   });
 });

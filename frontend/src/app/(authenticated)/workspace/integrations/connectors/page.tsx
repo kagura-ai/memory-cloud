@@ -72,6 +72,7 @@ import { useToast } from "@/hooks/use-toast";
 import { useCopyFeedback } from "@/hooks/useCopyFeedback";
 import { useConsumeSearchParams } from "@/hooks/useConsumeSearchParams";
 import { useSystemFeatures } from "@/hooks/useSystemFeatures";
+import { useCanUpgrade } from "@/hooks/useCanUpgrade";
 import { usePlanFeature } from "@/hooks/usePlanFeatures";
 import { ChannelPicker, parseChannelIds } from "./ChannelPicker";
 import { useWorkspace } from "@/contexts/WorkspaceContext";
@@ -214,6 +215,9 @@ export default function ConnectorsPage() {
   // name. Tri-state — `null` while resolving: controls stay disabled and the
   // upsell is only rendered on an explicit `false`.
   const canCreate = usePlanFeature("connectors");
+  // #1643: the plan-gate copy always renders; only the button needs a Plan
+  // page this member can actually reach.
+  const canUpgrade = useCanUpgrade();
   const xlLabel = planLabelFromEnv("promax", locale);
 
   // #1426: managed (hosted SaaS) mode. When true the shared worker/bridge
@@ -1030,13 +1034,15 @@ export default function ConnectorsPage() {
               </span>{" "}
               {t("planGate.description", { plan: xlLabel })}
             </span>
-            <Button
-              size="sm"
-              variant="outline"
-              onClick={() => router.push("/workspace/settings/plan")}
-            >
-              {t("planGate.action", { plan: xlLabel })}
-            </Button>
+            {canUpgrade === true && (
+              <Button
+                size="sm"
+                variant="outline"
+                onClick={() => router.push("/workspace/settings/plan")}
+              >
+                {t("planGate.action", { plan: xlLabel })}
+              </Button>
+            )}
           </AlertDescription>
         </Alert>
       )}

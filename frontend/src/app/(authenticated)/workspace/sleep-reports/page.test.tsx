@@ -4,6 +4,9 @@
  * Sleep Maintenance is Pro-or-better: free/basic see the upgrade CTA routing
  * to the Plan page; pro AND promax render the report list. The gate must not
  * fire while WorkspaceContext is still loading.
+ *
+ * #1643: the CTA is withheld wherever the Plan page is unreachable — the
+ * gate's title and description are the explanation and always render.
  */
 
 import { describe, it, expect, beforeEach, vi, afterEach } from "vitest";
@@ -32,6 +35,14 @@ vi.mock("@/contexts/WorkspaceContext", () => ({
   useWorkspace: () => mockWorkspaceState,
 }));
 
+// #1643: useCanUpgrade reads /system/info. Without this mock the real hook
+// fires a jsdom fetch, retries three times and leaves a module-level cache
+// that leaks between cases in this file. `null` = still resolving.
+let mockFeatures: Record<string, boolean> | null = { plan_page: true };
+vi.mock("@/hooks/useSystemFeatures", () => ({
+  useSystemFeatures: () => mockFeatures,
+}));
+
 vi.mock("@/lib/api", () => ({
   fetchWorkspaceSleepReports: vi.fn(),
 }));
@@ -54,6 +65,7 @@ function setWorkspace(plan_name: string, current_user_role = "owner") {
 
 beforeEach(() => {
   mockPush.mockReset();
+  mockFeatures = { plan_page: true };
 });
 
 afterEach(() => {
@@ -88,6 +100,41 @@ describe("WorkspaceSleepReportsPage plan gate", () => {
       expect(mockPush).toHaveBeenCalledWith("/workspace/settings/plan");
     },
   );
+
+  it("free: shows the plan-gate copy with no action when plan_page is off", () => {
+    mockFeatures = {};
+    setWorkspace("free");
+    render(<WorkspaceSleepReportsPage />);
+
+    expect(screen.getByText("sleepReports.planGate.title")).toBeInTheDocument();
+    expect(
+      screen.getByText("sleepReports.planGate.description"),
+    ).toBeInTheDocument();
+    expect(
+      screen.queryByRole("button", { name: "sleepReports.planGate.action" }),
+    ).toBeNull();
+  });
+
+  it("free: shows the plan-gate copy with no action for an admin", () => {
+    setWorkspace("free", "admin");
+    render(<WorkspaceSleepReportsPage />);
+
+    expect(screen.getByText("sleepReports.planGate.title")).toBeInTheDocument();
+    expect(
+      screen.queryByRole("button", { name: "sleepReports.planGate.action" }),
+    ).toBeNull();
+  });
+
+  it("free: shows the plan-gate copy with no action while /system/info is pending", () => {
+    mockFeatures = null;
+    setWorkspace("free");
+    render(<WorkspaceSleepReportsPage />);
+
+    expect(screen.getByText("sleepReports.planGate.title")).toBeInTheDocument();
+    expect(
+      screen.queryByRole("button", { name: "sleepReports.planGate.action" }),
+    ).toBeNull();
+  });
 
   it("does not gate while WorkspaceContext is still loading", () => {
     mockWorkspaceState = {
