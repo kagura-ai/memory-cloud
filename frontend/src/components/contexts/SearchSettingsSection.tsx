@@ -530,14 +530,20 @@ export function SearchSettingsSection({
                       {t("rerankerNotAvailableFree")}
                     </p>
                     <p className="text-sm">
-                      {t("upgradeToBasic").split("Basic plan")[0]}
-                      <Link
-                        href="/workspace/settings/plan"
-                        className="underline font-medium"
-                      >
-                        Basic plan
-                      </Link>
-                      {t("upgradeToBasic").split("Basic plan")[1]}
+                      {/* t.rich with a <link> tag in the message — splitting on
+                          the English "Basic plan" left the link label
+                          untranslated and dropped the sentence tail in every
+                          other locale (#1642). */}
+                      {t.rich("upgradeToBasic", {
+                        link: (chunks) => (
+                          <Link
+                            href="/workspace/settings/plan"
+                            className="underline font-medium"
+                          >
+                            {chunks}
+                          </Link>
+                        ),
+                      })}
                     </p>
                   </AlertDescription>
                 </Alert>
