@@ -1295,6 +1295,8 @@
     "seatWarning": "⚠️ {used}/{limit} シート使用中（残り{available}）",
     "upgradeToAddMembers": "アップグレードしてメンバーを追加",
     "memberQuotaExceeded": "メンバー上限を超過",
+    "invitePlanRequired": "チームへの招待には {plan} プランが必要です。",
+    "memberSeatsFull": "メンバー上限に達しました（招待中を含め {limit} 席中 {current} 席を使用中）。",
     "inviteContextSelection": "Contextアクセス",
     "inviteContextSelectionDesc": "このメンバーがアクセスできるContextを選択",
     "noSharedContexts": "Shared Contextがありません",

@@ -1296,6 +1296,8 @@
     "seatWarning": "⚠️ {used}/{limit} seats used ({available} remaining)",
     "upgradeToAddMembers": "Upgrade to add more members",
     "memberQuotaExceeded": "Member quota exceeded",
+    "invitePlanRequired": "Team invitations require the {plan} plan.",
+    "memberSeatsFull": "Member limit reached: {current} of {limit} seats are in use, including pending invitations.",
     "inviteContextSelection": "Context Access",
     "inviteContextSelectionDesc": "Select which contexts this member can access",
     "noSharedContexts": "No shared contexts available",

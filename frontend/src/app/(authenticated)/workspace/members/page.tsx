@@ -10,7 +10,7 @@
 
 import { useEffect, useState } from "react";
 import { useRouter } from "next/navigation";
-import { useTranslations } from "next-intl";
+import { useLocale, useTranslations } from "next-intl";
 import { hasWorkspaceRole, WorkspaceRole } from "@/lib/auth/rbac";
 import { copyText } from "@/lib/utils/clipboard";
 import { planAtLeast } from "@/lib/utils/planLabel";
@@ -36,6 +36,7 @@ import {
 } from "@/lib/api/workspaces";
 import { getContexts, Context } from "@/lib/api/contexts";
 import { ApiError } from "@/lib/api/base";
+import { gateFromFacts } from "@/lib/gates/featureGates";
 import {
   listInvitations,
   createInvitation,
@@ -73,6 +74,7 @@ import { useToast } from "@/hooks/use-toast";
 export default function WorkspaceMembersPage() {
   const t = useTranslations("workspace");
   const tCommon = useTranslations("common");
+  const locale = useLocale();
   const router = useRouter();
   const {
     currentWorkspaceId,
@@ -213,8 +215,10 @@ export default function WorkspaceMembersPage() {
       const data = await listInvitations(currentWorkspaceId, false); // Only pending invitations
       setInvitations(data);
     } catch (error: unknown) {
-      // 403 = Not admin/owner, silently skip invitations feature
-      if (error instanceof ApiError && error.status === 403) {
+      // Role refusal = not admin/owner, silently skip invitations feature.
+      // #1644: keyed on the role gate (AUTH-101), not on any 403, so a
+      // different refusal is logged instead of vanishing.
+      if (error instanceof ApiError && error.gate?.state === "role") {
         setInvitations([]);
         return;
       }
@@ -231,8 +235,9 @@ export default function WorkspaceMembersPage() {
       const quota = await getMemberQuota(currentWorkspaceId);
       setMemberQuota(quota);
     } catch (error: unknown) {
-      // Silently fail if user doesn't have access
-      if (error instanceof ApiError && error.status === 403) {
+      // Silently fail if user doesn't have access (#1644: the role gate
+      // only — any other refusal is logged, not swallowed).
+      if (error instanceof ApiError && error.gate?.state === "role") {
         setMemberQuota(null);
         return;
       }
@@ -358,12 +363,37 @@ export default function WorkspaceMembersPage() {
     } catch (error: unknown) {
       console.error("Failed to create invitation:", error);
       const apiErr = error instanceof ApiError ? error : null;
-      const errorMsg =
-        apiErr?.details?.detail ||
-        (error instanceof Error
-          ? error.message
-          : "Failed to create invitation");
-      setInviteError(errorMsg);
+      // #1644: the plan and seat-cap refusals are read from the normalised
+      // gate and rendered in the reader's language; anything else keeps the
+      // server's own text. The dialog carries no CTA of its own here.
+      const gate = gateFromFacts(apiErr?.gate, {
+        fallbackKey: "team_invitations",
+        canUpgrade: false,
+        locale,
+      });
+      if (
+        gate?.state === "plan" &&
+        gate.feature === "team_invitations" &&
+        gate.planLabel
+      ) {
+        setInviteError(t("invitePlanRequired", { plan: gate.planLabel }));
+      } else if (
+        gate?.state === "quota" &&
+        apiErr?.gate?.quotaType === "members" &&
+        gate.current !== undefined &&
+        gate.limit !== undefined
+      ) {
+        setInviteError(
+          t("memberSeatsFull", { current: gate.current, limit: gate.limit }),
+        );
+      } else {
+        const errorMsg =
+          apiErr?.details?.detail ||
+          (error instanceof Error
+            ? error.message
+            : "Failed to create invitation");
+        setInviteError(errorMsg);
+      }
     } finally {
       setInviteLoading(false);
     }
@@ -512,7 +542,15 @@ export default function WorkspaceMembersPage() {
       let errorMessage =
         error instanceof Error ? error.message : "Failed to update role";
 
-      if (error instanceof ApiError && error.status === 403) {
+      // #1644: these two 403s are raw HTTPExceptions with no semantic code,
+      // so the prose is the only discriminator the wire offers (#1648 may
+      // give them codes). A normalised gate - a genuine AUTH-101 role
+      // refusal included - never enters the prose matcher.
+      if (
+        error instanceof ApiError &&
+        error.gate === undefined &&
+        error.status === 403
+      ) {
         if (error.message.includes("own role")) {
           errorMessage = t("cannotModifyOwnRoleDesc");
         } else if (error.message.includes("owner can change")) {
