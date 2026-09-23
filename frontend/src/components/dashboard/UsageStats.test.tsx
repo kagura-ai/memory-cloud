@@ -19,7 +19,7 @@
  */
 
 import { render, screen } from "@testing-library/react";
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { UsageStats } from "./UsageStats";
 import type {
@@ -345,6 +345,42 @@ describe("UsageStats — primary usage cards", () => {
     expect(
       screen.getByText((_c, node) => node?.textContent === "89 / 500"),
     ).toBeInTheDocument();
+  });
+});
+
+// ---------- Header plan label (#1646 X1) --------------------------------------
+
+describe("UsageStats — header plan label", () => {
+  afterEach(() => {
+    vi.unstubAllEnvs();
+  });
+
+  it("renders a canonical tier through the plan-label resolution, not upper-cased", async () => {
+    vi.stubEnv("NEXT_PUBLIC_PLAN_PRO_DISPLAY_NAME", "Team");
+    mockGetWorkspaceUsageCurrent.mockResolvedValue(
+      makeCurrentResponse({ plan: makePlan({ plan_name: "pro" }) }),
+    );
+    render(<UsageStats />);
+
+    const heading = await screen.findByRole("heading", {
+      level: 2,
+      name: /^usage/,
+    });
+    expect(heading).toHaveTextContent(/^usage - Team plan$/);
+    expect(heading).not.toHaveTextContent("PRO");
+  });
+
+  it("renders an operator-defined tier name verbatim", async () => {
+    mockGetWorkspaceUsageCurrent.mockResolvedValue(
+      makeCurrentResponse({ plan: makePlan({ plan_name: "enterprise" }) }),
+    );
+    render(<UsageStats />);
+
+    const heading = await screen.findByRole("heading", {
+      level: 2,
+      name: /^usage/,
+    });
+    expect(heading).toHaveTextContent(/^usage - enterprise plan$/);
   });
 });
 
