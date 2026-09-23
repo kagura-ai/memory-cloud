@@ -1192,13 +1192,42 @@ def _diff_messages(old: LoadedCache | None, new: dict[str, Any]) -> list[str]:
     return [", ".join(counts) + " — " + "; ".join(names)]
 
 
-def _touch(path: str) -> None:
+def _touch(path: str, stage: str = "") -> None:
+    """(Re)start the negative-cache marker; it carries the failure stage when that is one
+    the fallback words differently (``ENDPOINT_STAGES``), else nothing - the generic case."""
+    tag = stage.encode("ascii") if stage in ENDPOINT_STAGES else b""
     try:
         fd = os.open(path, os.O_WRONLY | os.O_CREAT, 0o600)
-        os.close(fd)
+        try:
+            os.ftruncate(fd, 0)
+            if tag:
+                os.write(fd, tag)
+        finally:
+            os.close(fd)
         os.utime(path, None)
     except OSError:
         pass  # the negative-cache marker is an optimisation; without it we simply retry sooner
+
+
+def _marker_stage(path: str) -> str:
+    """The stage a marker recorded, or ``""`` (generic) - also for a marker written by an
+    earlier version, which is empty. Only a value in ``ENDPOINT_STAGES`` is ever returned."""
+    # O_NONBLOCK: a FIFO in its place must not hang the hook; the fstat below then refuses it.
+    flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0)
+    try:
+        fd = os.open(path, flags)
+    except OSError:
+        return ""
+    try:
+        if not stat.S_ISREG(os.fstat(fd).st_mode):
+            return ""
+        raw = os.read(fd, 32)
+    except OSError:
+        return ""
+    finally:
+        os.close(fd)
+    stage = raw.decode("ascii", "replace").strip()
+    return stage if stage in ENDPOINT_STAGES else ""
 
 
 def _file_age(path: str, now_ts: float) -> float | None:
@@ -1262,10 +1291,11 @@ def handle_session_start(adapter: Any, event: dict[str, Any], env: Any, stdout: 
             source_desc = "fetched"
         else:
             _debug(stage)
-            _touch(fail_marker)
+            _touch(fail_marker, stage)
             cache, source_desc = _fallback_cache(config, old, messages, stage)
     elif need_fetch:
-        cache, source_desc = _fallback_cache(config, old, messages)
+        # Negative cache: no request, but the failure keeps the wording it had when recorded.
+        cache, source_desc = _fallback_cache(config, old, messages, _marker_stage(fail_marker))
     else:
         cache = old
         source_desc = f"cached {format_age(old.age_seconds if old else 0.0)}"
