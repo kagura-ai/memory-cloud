@@ -376,3 +376,56 @@ describe("Shared option in the create dialog (#1645)", () => {
     expect(screen.queryByText("proPlan")).toBeNull();
   });
 });
+
+// #1645: the shared option over every cell of {tier matrix} x {/system/info}
+// x {role, tier}. A failed matrix reads as `null`, like a pending one (the
+// hook suite pins that). The option's CTA is the gate's own `canUpgrade`:
+// owner only, and only where the Plan page is known to be on.
+describe("Shared option in the create dialog — the whole truth table (#1645)", () => {
+  const MATRIX: Record<string, PlanTierFeature[] | null> = {
+    "pending-or-failed": null,
+    resolved: OSS_TIERS,
+  };
+  const INFO: Record<string, Record<string, boolean> | null> = {
+    pending: null,
+    "plan_page on": { byok: true, plan_page: true },
+    "plan_page off": { byok: true, plan_page: false },
+    "failed ({})": {},
+  };
+  const CELLS = Object.keys(MATRIX).flatMap((m) =>
+    Object.keys(INFO).flatMap((i) =>
+      (["admin", "owner"] as const).flatMap((role) =>
+        (["basic", "pro"] as const).map((plan) => [m, i, role, plan] as const),
+      ),
+    ),
+  );
+
+  it.each(CELLS)(
+    "matrix %s, /system/info %s, %s on %s",
+    async (m, i, role, plan) => {
+      mockTiers = MATRIX[m];
+      mockFeatures = INFO[i];
+      setup({ plan, maxContexts: 20, contextCount: 0, role });
+      render(<ContextsPage />);
+      fireEvent.click(await screen.findByRole("button", { name: "create" }));
+      await screen.findByText(/sharedOption/);
+      const radio = document.querySelector(
+        'input[type="radio"][value="shared"]',
+      ) as HTMLInputElement;
+
+      const known = m === "resolved";
+      const entitled = known && plan === "pro";
+      const refused = known && plan === "basic";
+
+      expect(radio.disabled).toBe(!entitled);
+      // Helper text and badge agree with the radio; pending says nothing.
+      expect(screen.queryByText("teamMembersAccess") !== null).toBe(entitled);
+      expect(screen.queryByText("upgradeToPro") !== null).toBe(refused);
+      expect(screen.queryByText("proPlan") !== null).toBe(refused);
+      // The CTA: a refusal, the owner, and a Plan page known to be on.
+      expect(
+        screen.queryByRole("button", { name: "upgradeToProCta" }) !== null,
+      ).toBe(refused && role === "owner" && i === "plan_page on");
+    },
+  );
+});

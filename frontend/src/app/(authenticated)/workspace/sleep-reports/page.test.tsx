@@ -208,3 +208,105 @@ describe("WorkspaceSleepReportsPage plan gate", () => {
     expect(screen.queryByText("sleepReports.planGate.title")).toBeNull();
   });
 });
+
+// #1645: every cell of {tier matrix} x {/system/info} x {workspace, role,
+// tier} as the page renders it. A failed matrix reads exactly like a pending
+// one here (`usePlanTierMatrix` answers null for both; the hook suite pins
+// that), and a failed /system/info is the fail-closed `{}`.
+describe("WorkspaceSleepReportsPage — the whole gate truth table (#1645)", () => {
+  type Ws =
+    | { kind: "loading" }
+    | { kind: "none" }
+    | { kind: "resolved"; role: string; plan: string };
+  const WORKSPACES: Ws[] = [
+    { kind: "loading" },
+    { kind: "none" },
+    ...["viewer", "member", "admin", "owner"].flatMap((role) =>
+      ["free", "pro"].map((plan): Ws => ({ kind: "resolved", role, plan })),
+    ),
+  ];
+  const MATRIX: Record<string, PlanTierFeature[] | null> = {
+    "pending-or-failed": null,
+    resolved: OSS_TIERS,
+  };
+  const INFO: Record<string, Record<string, boolean> | null> = {
+    pending: null,
+    "plan_page on": { plan_page: true },
+    "plan_page off": { plan_page: false },
+    "failed ({})": {},
+  };
+  const CELLS = Object.keys(MATRIX).flatMap((m) =>
+    Object.keys(INFO).flatMap((i) =>
+      WORKSPACES.map((ws) => [m, i, ws] as const),
+    ),
+  );
+
+  const label = (ws: Ws) =>
+    ws.kind === "resolved" ? `${ws.role}@${ws.plan}` : ws.kind;
+
+  it.each(CELLS.map(([m, i, ws]) => [m, i, label(ws), ws] as const))(
+    "matrix %s, /system/info %s, workspace %s",
+    (m, i, _label, ws) => {
+      mockTiers = MATRIX[m];
+      mockFeatures = INFO[i];
+      mockWorkspaceState =
+        ws.kind === "resolved"
+          ? {
+              currentWorkspace: {
+                plan_name: ws.plan,
+                current_user_role: ws.role,
+              },
+              currentWorkspaceId: "ws-1",
+              loading: false,
+            }
+          : {
+              currentWorkspace: null,
+              currentWorkspaceId: null,
+              loading: ws.kind === "loading",
+            };
+      render(<WorkspaceSleepReportsPage />);
+
+      const upsell = screen.queryByText("sleepReports.planGate.title");
+      const cta = screen.queryByRole("button", {
+        name: "sleepReports.planGate.action",
+      });
+      const forbidden = screen.queryByText(
+        "sleepReports.errors.forbiddenWorkspace",
+      );
+      const list = screen.queryByTestId("sleep-reports-list");
+
+      const matrixKnown = m === "resolved";
+      const isAdmin =
+        ws.kind === "resolved" && ["admin", "owner"].includes(ws.role);
+      const lowTier = ws.kind === "resolved" && ws.plan === "free";
+
+      // The upsell: only once the matrix has answered, only to an admin or
+      // owner (role outranks plan), only on a tier without Sleep Maintenance.
+      expect(upsell !== null).toBe(matrixKnown && isAdmin && lowTier);
+      // Its button: only for the owner, and only where the Plan page is
+      // known to be on — never while /system/info is pending or failed.
+      expect(cta !== null).toBe(
+        upsell !== null &&
+          ws.kind === "resolved" &&
+          ws.role === "owner" &&
+          i === "plan_page on",
+      );
+      // A member or viewer is refused on the role, whatever the matrix says.
+      expect(forbidden !== null).toBe(ws.kind === "resolved" && !isAdmin);
+      // No workspace at all is its own answer, never an upsell.
+      if (ws.kind === "none") {
+        expect(
+          screen.getByText("sleepReports.errors.noWorkspaceSelected"),
+        ).toBeInTheDocument();
+      }
+      // The list loads only for an entitled admin once the gate answers; while
+      // anything is pending it holds its skeleton.
+      if (list !== null) {
+        expect(list.getAttribute("data-ready")).toBe(
+          String(matrixKnown && isAdmin && !lowTier),
+        );
+      }
+      if (matrixKnown && isAdmin && !lowTier) expect(list).not.toBeNull();
+    },
+  );
+});

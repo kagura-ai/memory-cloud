@@ -287,6 +287,59 @@ describe("WorkspaceMembersPage invite gate", () => {
   });
 });
 
+// #1645: the invite control over every cell of {tier matrix} x
+// {/system/info} x {role, tier}. A failed matrix reads as `null`, exactly like
+// a pending one (the hook suite pins that). The invite gate has no deployment
+// flag, so /system/info must change nothing here. Members and viewers never
+// reach the control (the page redirects them, #398); their role-before-plan
+// cells are pinned on the hook in useFeatureGate.test.tsx.
+describe("WorkspaceMembersPage invite gate — the whole truth table (#1645)", () => {
+  const MATRIX: Record<string, PlanTierFeature[] | null> = {
+    "pending-or-failed": null,
+    resolved: OSS_TIERS,
+  };
+  const INFO: Record<string, Record<string, boolean> | null> = {
+    pending: null,
+    "plan_page on": { plan_page: true },
+    "plan_page off": { plan_page: false },
+    "failed ({})": {},
+  };
+  const CELLS = Object.keys(MATRIX).flatMap((m) =>
+    Object.keys(INFO).flatMap((i) =>
+      (["admin", "owner"] as const).flatMap((role) =>
+        (["free", "pro"] as const).map((plan) => [m, i, role, plan] as const),
+      ),
+    ),
+  );
+
+  it.each(CELLS)(
+    "matrix %s, /system/info %s, %s on %s",
+    async (m, i, role, plan) => {
+      mockTiers = MATRIX[m];
+      mockFeatures = INFO[i];
+      setupWithRole(role, plan);
+      render(<WorkspaceMembersPage />);
+      const invite = await screen.findByRole("button", {
+        name: /inviteMember/,
+      });
+
+      const known = m === "resolved";
+      // Usable only once the matrix says this tier invites.
+      if (known && plan === "pro") {
+        expect(invite).not.toBeDisabled();
+      } else {
+        expect(invite).toBeDisabled();
+      }
+      // An admin passes the role half; the plan half speaks only once the
+      // matrix has answered — never a "(Pro Plan)" while it is pending.
+      expect(invite.textContent).not.toContain("ownerAdminOnly");
+      expect(invite.textContent?.includes("proPlanRequired")).toBe(
+        known && plan === "free",
+      );
+    },
+  );
+});
+
 /**
  * #1643 — the seat-limit surfaces inside the invite dialog.
  *
