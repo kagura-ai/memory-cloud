@@ -69,6 +69,9 @@ class _BoomRedis:
     expire = _raise
     ttl = _raise
 
+    def pipeline(self, *args, **kwargs):
+        raise self._exc
+
     def scan_iter(self, *args, **kwargs):
         async def _gen():
             raise self._exc
@@ -291,6 +294,13 @@ class TestIncrementCounter:
         await increment_counter(key, ttl=60)
         assert await increment_counter(key, ttl=60) == 2
         # still has the original TTL window
+        assert 0 < await fake_redis.ttl(key) <= 60
+
+    async def test_increment_repairs_a_counter_without_expiry(self, fake_redis):
+        """A counter whose first EXPIRE was lost gets its TTL on the next call."""
+        key = _k("cntheal")
+        await fake_redis.set(key, 5)  # no expiry, as after a lost EXPIRE
+        assert await increment_counter(key, ttl=60) == 6
         assert 0 < await fake_redis.ttl(key) <= 60
 
     async def test_increment_without_ttl_leaves_no_expiry(self, fake_redis):

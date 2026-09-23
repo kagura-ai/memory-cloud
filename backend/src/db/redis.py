@@ -145,10 +145,19 @@ async def increment_counter(key: str, ttl: int | None = None) -> int:
     """
     client = get_redis_client()
     try:
-        count = await client.incr(key)
+        # INCR and TTL in one round trip. The TTL is set whenever the key has
+        # none, not only on the first increment: if an EXPIRE was lost (a
+        # failure between INCR and EXPIRE), the next call repairs it instead
+        # of leaving a counter that never resets.
+        async with client.pipeline(transaction=True) as pipe:
+            pipe.incr(key)
+            if ttl:
+                pipe.ttl(key)
+            results = await pipe.execute()
+        count = int(results[0])
 
-        # Set TTL if this is the first increment
-        if count == 1 and ttl:
+        # ttl() returns -1 when the key has no expiry.
+        if ttl and results[1] < 0:
             await client.expire(key, ttl)
 
         return count
