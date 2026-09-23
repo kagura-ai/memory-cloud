@@ -13,8 +13,9 @@
  * SCOPE, honestly: the orphan half is a REFERENCE scan, not a resolver. It
  * cannot follow a dynamic key (`t(`states.${x}.title`)`), so its answer is
  * "definitely referenced" or "not obviously referenced", and the second
- * bucket needs an allowlist entry with an owner. What fails the build is a
- * NEWLY orphaned key: one neither referenced nor allowlisted.
+ * bucket is the baseline in orphans.allowlist.ts. What fails the build is a
+ * NEWLY orphaned key: one neither referenced nor allowlisted. The baseline
+ * is a ratchet — entries may only be removed, and a stale one fails too.
  */
 import { readdirSync, readFileSync, statSync } from "node:fs";
 import { join } from "node:path";
@@ -36,6 +37,7 @@ import { DEFAULT_PLAN_LABELS } from "@/lib/utils/planLabel";
 
 import en from "./en.json";
 import ja from "./ja.json";
+import { ORPHAN_ALLOWLIST } from "./orphans.allowlist";
 
 const CATALOGUES = [
   ["en", en],
@@ -64,16 +66,6 @@ function messageAt(messages: unknown, key: string): unknown {
 }
 
 // ── The orphan scan (assertions 2 and 3) ────────────────────────────────────
-
-/**
- * Keys no reference scan can see (reached only through a dynamic key), each
- * with the issue that owns it. Exact keys only — never a bare prefix.
- * #1646 stage 3 moves this list to `orphans.allowlist.ts`.
- */
-const KNOWN_ORPHANS: ReadonlyArray<{
-  readonly key: string;
-  readonly owner: string;
-}> = [];
 
 const SRC = join(__dirname, "..");
 
@@ -158,7 +150,6 @@ const SUPERSEDED_GATE_KEYS: readonly string[] = [
   "contexts.teamMembersCanAccessShort",
   "contexts.quotaReachedDetail",
   "contexts.quotaReachedPlansLink",
-  "contexts.contextLimitReached",
   "contexts.viewPlans",
   "contexts.quotaDialogTitle",
   "contexts.quotaDialogDescription",
@@ -194,6 +185,17 @@ const SUPERSEDED_GATE_KEYS: readonly string[] = [
   "workspace.memberSeatsFull",
   "connectors.connectorPlanRequired",
   "connectors.connectorSeatsFull",
+  // Dead tier-naming gate copy the first orphan scan turned up.
+  "contexts.quotaReached",
+  "contexts.upgradePrompt",
+  "contexts.upgradeToCreateMore",
+  "contexts.upgradeToProShare",
+  "workspace.proPlanBenefits",
+  "workspace.proPlanRequiredTitle",
+  "workspace.upgradeToPro",
+  "workspace.seatWarning",
+  "workspace.memberQuotaExceeded",
+  "workspace.workspaceLimitReached",
 ];
 
 // ── The gate.* contract ─────────────────────────────────────────────────────
@@ -305,33 +307,45 @@ describe("message catalogues", () => {
     expect(jaKeys).toEqual(enKeys);
   });
 
-  // 2 — enabled by #1646 stage 3
-  it.skip("every message key is referenced from src/, or allowlisted", () => {
+  // 2
+  it("every message key is referenced from src/, or allowlisted", () => {
     const literals = sourceLiterals();
-    const allowlisted = new Set(KNOWN_ORPHANS.map((entry) => entry.key));
+    const allowlisted = new Set(ORPHAN_ALLOWLIST);
     const orphans = leaves(en)
       .map(([key]) => key)
       .filter((key) => !isReferenced(key, literals) && !allowlisted.has(key));
-    // Delete the key, or allowlist it in orphans.allowlist.ts with the issue
-    // that owns it.
+    // Reference the key or delete it from both locales. Do not add it to
+    // orphans.allowlist.ts — that baseline only shrinks.
     expect(orphans).toEqual([]);
   });
 
-  // 3 — enabled by #1646 stage 3
-  it.skip("the orphan allowlist has no stale entries", () => {
+  // 3
+  it("the orphan allowlist has no stale entries", () => {
     const literals = sourceLiterals();
     const keys = new Set(leaves(en).map(([key]) => key));
-    for (const { key, owner } of KNOWN_ORPHANS) {
-      expect(owner, key).toMatch(/^#\d+$/);
-      expect(keys.has(key), `${key} no longer exists`).toBe(true);
-      expect(isReferenced(key, literals), `${key} is referenced now`).toBe(
-        false,
-      );
-    }
+    const stale = ORPHAN_ALLOWLIST.filter(
+      (key) => !keys.has(key) || isReferenced(key, literals),
+    );
+    // Gone from en.json, or referenced again: remove the entry.
+    expect(stale).toEqual([]);
+    // Sorted, no duplicates — so a diff to it is always a plain removal.
+    expect([...ORPHAN_ALLOWLIST]).toEqual(
+      [...new Set(ORPHAN_ALLOWLIST)].sort(),
+    );
   });
 
-  // 5, outside gate.* — enabled by #1646 stage 3
-  it.skip("no superseded gate key survives outside gate.* (each named a tier or duplicated gate copy)", () => {
+  // 3, narrowed: the baseline never shelters gate copy.
+  it("the orphan allowlist holds no gate.* key and no superseded gate key", () => {
+    const superseded = new Set(SUPERSEDED_GATE_KEYS);
+    expect(
+      ORPHAN_ALLOWLIST.filter(
+        (key) => key.startsWith("gate.") || superseded.has(key),
+      ),
+    ).toEqual([]);
+  });
+
+  // 5, outside gate.*
+  it("no superseded gate key survives outside gate.* (each named a tier or duplicated gate copy)", () => {
     for (const [locale, messages] of CATALOGUES) {
       const surviving = SUPERSEDED_GATE_KEYS.filter(
         (key) => messageAt(messages, key) !== undefined,
